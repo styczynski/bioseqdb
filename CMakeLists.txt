@@ -1,79 +1,165 @@
-cmake_minimum_required(VERSION 3.14 FATAL_ERROR)
+# Apache 2 Licensed
+# Code modified from:
+# TimescaleDB (https://www.timescale.com/)
 
-# ---- Project ----
+cmake_minimum_required(VERSION 3.4)
 
-# Note: update this to your new project's name and version
-project(
-  Greeter
-  VERSION 1.0
-  LANGUAGES CXX
-)
+set(PROJECT_NAME demopgextension)
+set(PROEJCT_VERSION "0.0.1")
+project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES C)
 
-# ---- Include guards ----
+if (NOT CMAKE_BUILD_TYPE)
+    # Default to Release builds
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel" FORCE)
+endif ()
 
-if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
-  message(
-    FATAL_ERROR
-      "In-source builds not allowed. Please make a new directory (called a build directory) and run CMake from there."
-  )
-endif()
+message(STATUS "Build type is ${CMAKE_BUILD_TYPE}")
 
-# ---- Add dependencies via CPM ----
-# see https://github.com/TheLartians/CPM.cmake for more info
+# Search paths for Postgres binaries
+if (WIN32)
+    find_path(PG_PATH
+            bin/postgres
+            HINTS
+            "C:/PostgreSQL"
+            "C:/Program Files/PostgreSQL"
+            PATH_SUFFIXES
+            bin
+            10/bin
+            96/bin
+            pg96/bin
+            DOC
+            "The path to a PostgreSQL installation")
+endif (WIN32)
 
-include(cmake/CPM.cmake)
+if (UNIX)
+    find_path(PG_PATH
+            bin/postgres
+            HINTS
+            $ENV{HOME}
+            /opt/local/pgsql
+            /usr/local/pgsql
+            /usr/lib/postgresql
+            PATH_SUFFIXES
+            bin
+            10/bin
+            9.6/bin
+            96/bin
+            pg96/bin
+            DOC
+            "The path to a PostgreSQL installation")
+endif (UNIX)
 
-# PackageProject.cmake will be used to make our target installable
-CPMAddPackage("gh:TheLartians/PackageProject.cmake@1.8.0")
+find_program(PG_CONFIG pg_config
+        HINTS
+        ${PG_PATH}
+        PATH_SUFFIXES
+        bin
+        DOC
+        "The path to the pg_config of the PostgreSQL version to compile against"
+        REQUIRED)
 
-CPMAddPackage(
-  NAME fmt
-  GIT_TAG 7.1.3
-  GITHUB_REPOSITORY fmtlib/fmt
-  OPTIONS "FMT_INSTALL YES" # create an installable target
-)
+if (NOT PG_CONFIG)
+    message(FATAL_ERROR "Unable to find 'pg_config'")
+endif ()
 
-# ---- Add source files ----
+find_package(Git)
 
-# Note: globbing sources is considered bad practice as CMake's generators may not detect new files
-# automatically. Keep that in mind when changing files, or explicitly mention them here.
-file(GLOB_RECURSE headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h")
-file(GLOB_RECURSE sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/source/*.cpp")
+message(STATUS "Using pg_config ${PG_CONFIG}")
 
-# ---- Create library ----
+# Check PostgreSQL version
+execute_process(
+        COMMAND ${PG_CONFIG} --version
+        OUTPUT_VARIABLE PG_VERSION_STRING
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-# Note: for header-only libraries change all PUBLIC flags to INTERFACE and create an interface
-# target: add_library(${PROJECT_NAME} INTERFACE)
-add_library(${PROJECT_NAME} ${headers} ${sources})
+if (NOT ${PG_VERSION_STRING} MATCHES "^PostgreSQL[ ]+([0-9]+)\\.([0-9]+)(\\.([0-9]+))*$")
+    message(FATAL_ERROR "Could not parse PostgreSQL version ${PG_VERSION}")
+endif ()
 
-set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 17)
+set(PG_VERSION_MAJOR ${CMAKE_MATCH_1})
+set(PG_VERSION_MINOR ${CMAKE_MATCH_2})
+set(PG_VERSION_PATCH ${CMAKE_MATCH_4})
 
-# being a cross-platform target, we enforce standards conformance on MSVC
-target_compile_options(${PROJECT_NAME} PUBLIC "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/permissive->")
+if (NOT ${PG_VERSION_PATCH} OR ${PG_VERSION_PATCH} EQUAL "")
+    set(PG_VERSION "${PG_VERSION_MAJOR}.${PG_VERSION_MINOR}")
+else ()
+    set(PG_VERSION "${PG_VERSION_MAJOR}.${PG_VERSION_MINOR}.${PG_VERSION_PATCH}")
+endif ()
 
-# Link dependencies
-target_link_libraries(${PROJECT_NAME} PRIVATE fmt::fmt)
+message(STATUS "Compiling against PostgreSQL version ${PG_VERSION}")
 
-target_include_directories(
-  ${PROJECT_NAME} PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-                         $<INSTALL_INTERFACE:include/${PROJECT_NAME}-${PROJECT_VERSION}>
-)
+if ((${PG_VERSION} VERSION_LESS "9.6")
+        OR (${PG_VERSION} VERSION_EQUAL "11")
+        OR (${PG_VERSION} VERSION_GREATER "11"))
+endif ()
 
-# ---- Create an installable target ----
-# this allows users to install and find the library via `find_package()`.
+# Get PostgreSQL configuration from pg_config
+execute_process(
+        COMMAND ${PG_CONFIG} --includedir
+        OUTPUT_VARIABLE PG_INCLUDEDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --includedir-server
+        OUTPUT_VARIABLE PG_INCLUDEDIR_SERVER
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --libdir
+        OUTPUT_VARIABLE PG_LIBDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --pkglibdir
+        OUTPUT_VARIABLE PG_PKGLIBDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --sharedir
+        OUTPUT_VARIABLE PG_SHAREDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --bindir
+        OUTPUT_VARIABLE PG_BINDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --cppflags
+        OUTPUT_VARIABLE PG_CPPFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --cflags
+        OUTPUT_VARIABLE PG_CFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --ldflags
+        OUTPUT_VARIABLE PG_LDFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(
+        COMMAND ${PG_CONFIG} --libs
+        OUTPUT_VARIABLE PG_LIBS
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-# the location where the project's version header will be placed should match the project's regular
-# header paths
-string(TOLOWER ${PROJECT_NAME}/version.h VERSION_HEADER_LOCATION)
+find_path(PG_SOURCE_DIR
+        src/include/pg_config.h.in
+        HINTS
+        $ENV{HOME}
+        $ENV{HOME}/projects
+        $ENV{HOME}/Projects
+        $ENV{HOME}/development
+        $ENV{HOME}/Development
+        PATH_SUFFIXES
+        postgres
+        postgresql
+        pgsql
+        DOC
+        "The path to the PostgreSQL source tree")
 
-packageProject(
-  NAME ${PROJECT_NAME}
-  VERSION ${PROJECT_VERSION}
-  NAMESPACE ${PROJECT_NAME}
-  BINARY_DIR ${PROJECT_BINARY_DIR}
-  INCLUDE_DIR ${PROJECT_SOURCE_DIR}/include
-  INCLUDE_DESTINATION include/${PROJECT_NAME}-${PROJECT_VERSION}
-  VERSION_HEADER "${VERSION_HEADER_LOCATION}"
-  COMPATIBILITY SameMajorVersion
-  DEPENDENCIES "fmt 7.1.3"
-)
+if (PG_SOURCE_DIR)
+    message(STATUS "Found PostgreSQL source in ${PG_SOURCE_DIR}")
+endif (PG_SOURCE_DIR)
+
+add_subdirectory(sql)
+add_subdirectory(bioseq_pg)
+
+set(EXT_CONTROL_FILE ${PROJECT_NAME}.control)
+configure_file(${EXT_CONTROL_FILE} ${EXT_CONTROL_FILE})
+
+install(
+        FILES ${CMAKE_CURRENT_BINARY_DIR}/${EXT_CONTROL_FILE}
+        DESTINATION "${PG_SHAREDIR}/extension")

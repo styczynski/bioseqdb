@@ -1,4 +1,7 @@
-/build*
-/.vscode
-/cpm_modules
-.DS_Store
+.idea
+cmake-build-debug
+CMakeCache.txt
+CMakeFiles
+cmake_install.cmake
+Makefile
+build
