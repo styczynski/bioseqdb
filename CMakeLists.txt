@@ -8,6 +8,8 @@ set(PROJECT_NAME demopgextension)
 set(PROEJCT_VERSION "0.0.1")
 project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES C)
 
+set( CMAKE_VERBOSE_MAKEFILE on )
+
 if (NOT CMAKE_BUILD_TYPE)
     # Default to Release builds
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel" FORCE)
@@ -72,7 +74,7 @@ execute_process(
         OUTPUT_VARIABLE PG_VERSION_STRING
         OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-if (NOT ${PG_VERSION_STRING} MATCHES "^PostgreSQL[ ]+([0-9]+)\\.([0-9]+)(\\.([0-9]+))*$")
+if (NOT ${PG_VERSION_STRING} MATCHES "^PostgreSQL[ ]+([0-9]+)\\.([0-9]+)(\\.([0-9]+))*( \\([^()]+\\))?$")
     message(FATAL_ERROR "Could not parse PostgreSQL version ${PG_VERSION}")
 endif ()
 
