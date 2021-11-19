@@ -1,0 +1,84 @@
+# Apache 2 Licensed
+# Code modified from:
+# TimescaleDB (https://www.timescale.com/)
+
+set(CMAKE_C_FLAGS_DEBUG "-DUSE_ASSERT_CHECKING=1")
+
+if (UNIX)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -L${PG_LIBDIR}")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -L${PG_LIBDIR}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${PG_CFLAGS}")
+    set(CMAKE_CPP_FLAGS "${CMAKE_CPP_FLAGS} ${PG_CPPFLAGS}")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
+endif (UNIX)
+
+if (APPLE)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -multiply_defined suppress")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -multiply_defined suppress -Wl,-undefined,dynamic_lookup -Wl,-dead_strip_dylibs -bundle_loader ${PG_BINDIR}/postgres")
+elseif (WIN32)
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} /MANIFEST:NO")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} /MANIFEST:NO")
+endif (APPLE)
+
+include_directories(${CMAKE_CURRENT_BINARY_DIR} ${PG_INCLUDEDIR} ${PG_INCLUDEDIR_SERVER})
+
+if (WIN32)
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${PG_LIBDIR}/postgres.lib ws2_32.lib")
+    set(CMAKE_C_FLAGS "-D_CRT_SECURE_NO_WARNINGS")
+    include_directories(${PG_INCLUDEDIR_SERVER}/port/win32)
+
+    if (MSVC)
+        include_directories(${PG_INCLUDEDIR_SERVER}/port/win32_msvc)
+    endif (MSVC)
+endif (WIN32)
+
+set(HEADERS
+        extension.h
+        guc.h
+        )
+
+set(SOURCES
+        extension.c
+        guc.c
+        )
+
+set(GITCOMMIT_H ${CMAKE_CURRENT_BINARY_DIR}/gitcommit.h)
+
+add_custom_command(
+        OUTPUT ${GITCOMMIT_H}
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        COMMAND ${CMAKE_COMMAND} -E echo_append "#define EXT_GIT_COMMIT " > ${GITCOMMIT_H}
+        COMMAND ${GIT_EXECUTABLE} describe --abbrev=4 --dirty --always --tags >> ${GITCOMMIT_H} || echo "nocommit" >> ${GITCOMMIT_H}
+        COMMENT "Generating gitcommit.h"
+        VERBATIM)
+
+find_program(PGINDENT pgindent
+        HINTS ${PG_SOURCE_DIR}
+        PATH_SUFFIXES src/tools/pgindent
+        DOC "Format C code according to PostgreSQL standards")
+
+if (PGINDENT)
+    message(STATUS "Using pgindent ${PGINDENT}")
+else ()
+    message(STATUS "Install pgindent to be able to format C code: https://github.com/postgres/postgres/tree/master/src/tools/pgindent")
+endif (PGINDENT)
+
+# Configuration for running pgindent
+if (OBJDUMP AND PGINDENT)
+    add_custom_command(OUTPUT typedefs.list
+            DEPENDS ${PROJECT_NAME}
+            COMMAND sh ${CMAKE_BINARY_DIR}/scripts/generate_typedefs.sh > typedefs.list)
+    add_custom_target(pgindent
+            COMMAND ${PGINDENT} -typedefs typedefs.list -code-base ${CMAKE_SOURCE_DIR}/src
+            DEPENDS typedefs.list)
+endif (OBJDUMP AND PGINDENT)
+
+add_library(${PROJECT_NAME} MODULE ${SOURCES} ${HEADERS} ${GITCOMMIT_H})
+
+set_target_properties(${PROJECT_NAME} PROPERTIES
+        OUTPUT_NAME ${PROJECT_NAME}
+        PREFIX "")
+
+install(
+        TARGETS ${PROJECT_NAME}
+        DESTINATION ${PG_PKGLIBDIR})

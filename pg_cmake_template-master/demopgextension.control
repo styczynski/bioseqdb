@@ -1,0 +1,10 @@
+# Apache 2 Licensed
+# Code modified from:
+# TimescaleDB (https://www.timescale.com/)
+
+comment = 'Sample Postgres Extension - pg_cmake'
+default_version = '0.0.1'
+module_pathname = '$libdir/demopgextension'
+#extension cannot be relocatable once installed because it uses multiple schemas and that is forbidden by PG.
+#(though this extension is relocatable during installation).
+relocatable = false

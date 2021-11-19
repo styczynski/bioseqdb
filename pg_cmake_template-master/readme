@@ -1,0 +1,3 @@
+This project provides a CMake template for developing postgres extensions, and is intended to replace PGXS.
+
+Most of this code was taken out of the TimescaleDB (https://github.com/timescale/timescaledb) source, and is licensed under Apache 2.
