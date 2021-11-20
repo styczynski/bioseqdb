@@ -5,14 +5,4 @@ void _guc_init(void) {
 
 	elog(DEBUG1, "loading GUCs....");
 	
-	DefineCustomStringVariable("demopgextension.message_txt",
-							   "message text to this sample guc",
-							   NULL,
-							   &pltcl_start_proc,
-							   "Hello there:",
-							   PGC_USERSET,
-							   0,
-							   NULL,
-							   NULL,
-							   NULL);
 }

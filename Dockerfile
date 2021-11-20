@@ -127,10 +127,8 @@ ADD ./bioseq_lib ./bioseq_lib
 ADD ./bioseq_pg ./bioseq_pg
 ADD ./sql ./sql
 ADD ./CMakeLists.txt ./CMakeLists.txt
-ADD ./demopgextension.control ./demopgextension.control
+ADD ./bioseq_pg/bioseq.control ./bioseq.control
 ADD ./scripts/pg_local_build.sh ./build.sh
-
-#RUN find / -name "postgres.h" -print && pg_config --includedir && ls /usr/include/postgresql && exit 69
 
 RUN rm -rfd build && ./build.sh -DBUILD_SHARED_LIBS=true
 

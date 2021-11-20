@@ -4,7 +4,7 @@
 
 cmake_minimum_required(VERSION 3.4)
 
-set(PROJECT_NAME demopgextension)
+set(PROJECT_NAME bioseq)
 set(PROEJCT_VERSION "0.0.1")
 project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES CXX)
 
@@ -160,7 +160,7 @@ add_subdirectory(sql)
 add_subdirectory(bioseq_pg)
 add_subdirectory(bioseq_lib)
 
-set(EXT_CONTROL_FILE ${PROJECT_NAME}.control)
+set(EXT_CONTROL_FILE ./bioseq_pg/${PROJECT_NAME}.control)
 configure_file(${EXT_CONTROL_FILE} ${EXT_CONTROL_FILE})
 
 install(

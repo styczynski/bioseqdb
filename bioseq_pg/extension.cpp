@@ -6,7 +6,7 @@ extern "C" {
 
 void
 _PG_init(void) {
-	elog(DEBUG1, "loading DemoPGExtension extension....");
+	elog(DEBUG1, "loading BioSeq extension....");
 	
 	_guc_init();
 }
@@ -30,12 +30,7 @@ get_welcome_message(PG_FUNCTION_ARGS) {
 				)
 		);
 
-	char *message_txt = GetConfigOptionByName("demopgextension.message_txt", NULL,
-											  true);
-
-	if (message_txt == NULL)
-		message_txt = "hello";
-
+	char *message_txt = "hello";
 	bioseq_lib_hello_world();
 
 	char *buffer = (char*) palloc0(sizeof(message_txt) + sizeof(arg) + 1);

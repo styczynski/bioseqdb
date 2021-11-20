@@ -1,3 +1,6 @@
+all: docker-build-dev
+	echo "DONE"
+
 build:
 	bash ./scripts/utils.sh build
 
@@ -7,4 +10,4 @@ docker-build-dev:
 docker-run-dev:
 	bash ./scripts/utils.sh docker-run-dev
 
-.PHONY: build docker-build
+.PHONY: build docker-build docker-run-dev
