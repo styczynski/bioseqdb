@@ -1,4 +1,5 @@
 .idea
+.venv
 cmake-build-debug
 CMakeCache.txt
 CMakeFiles
