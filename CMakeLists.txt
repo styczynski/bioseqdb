@@ -6,9 +6,9 @@ cmake_minimum_required(VERSION 3.4)
 
 set(PROJECT_NAME demopgextension)
 set(PROEJCT_VERSION "0.0.1")
-project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES C)
+project(${PROJECT_NAME} VERSION ${VERSION} LANGUAGES CXX)
 
-set( CMAKE_VERBOSE_MAKEFILE on )
+set(CMAKE_VERBOSE_MAKEFILE on)
 
 if (NOT CMAKE_BUILD_TYPE)
     # Default to Release builds

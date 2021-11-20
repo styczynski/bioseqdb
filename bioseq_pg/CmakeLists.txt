@@ -38,8 +38,8 @@ set(HEADERS
         )
 
 set(SOURCES
-        extension.c
-        guc.c
+        extension.cpp
+        guc.cpp
         )
 
 set(GITCOMMIT_H ${CMAKE_CURRENT_BINARY_DIR}/gitcommit.h)

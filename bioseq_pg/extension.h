@@ -1,3 +1,5 @@
+extern "C" {
+
 #include "postgres.h"
 #include "fmgr.h"
 #include "utils/builtins.h"
@@ -9,3 +11,5 @@ PG_MODULE_MAGIC;
 
 extern void _PG_init(void);
 Datum get_welcome_message(PG_FUNCTION_ARGS);
+
+}

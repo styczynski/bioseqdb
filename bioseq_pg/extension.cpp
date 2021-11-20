@@ -2,6 +2,8 @@
 
 #include "extension.h"
 
+extern "C" {
+
 void
 _PG_init(void) {
 	elog(DEBUG1, "loading DemoPGExtension extension....");
@@ -46,4 +48,5 @@ get_welcome_message(PG_FUNCTION_ARGS) {
 		);
 
 	PG_RETURN_TEXT_P(cstring_to_text(buffer));
+}
 }

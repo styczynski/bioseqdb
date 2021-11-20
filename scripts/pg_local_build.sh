@@ -2,6 +2,8 @@
 
 set -e
 
+rm -rfd ./build
+
 # Modified from TimescaleDB Source
 # (https://www.timescale.com)
 
