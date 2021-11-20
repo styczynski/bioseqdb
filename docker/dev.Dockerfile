@@ -57,7 +57,7 @@ ADD ./tests /source/tests
 RUN /source/pg_run_smoke_test.sh /source/tests/smoke_test.sql
 
 # Remove tests files
-RUN rm -f /source/pg_run_smoke_test.sh /source/tests
+RUN rm -rfd /source/pg_run_smoke_test.sh /source/tests
 
 USER postgres
 ENTRYPOINT ["/source/pg_start.sh"]
