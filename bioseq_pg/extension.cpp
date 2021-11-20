@@ -1,4 +1,5 @@
 #include <bioseq_lib/bioseq_lib.h>
+#include <string>
 
 #include "extension.h"
 
@@ -30,7 +31,7 @@ get_welcome_message(PG_FUNCTION_ARGS) {
 				)
 		);
 
-	char *message_txt = "hello";
+	const char *message_txt = std::string("hello").c_str();
 	bioseq_lib_hello_world();
 
 	char *buffer = (char*) palloc0(sizeof(message_txt) + sizeof(arg) + 1);
