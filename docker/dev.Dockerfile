@@ -50,14 +50,14 @@ ADD ./scripts/pg_start.sh /source/pg_start.sh
 RUN mkdir -p "$PGDATA" && chown -R postgres:postgres "$PGDATA" && chmod 777 "$PGDATA"
 RUN chown -R postgres:postgres /source/pg_start.sh && chmod u+x /source/pg_start.sh
 
-# Perform smoke test
+# Perform tests
 ARG RUN_SMOKE_TEST="false"
 ADD ./scripts/pg_run_smoke_test.sh /source/pg_run_smoke_test.sh
-ADD ./scripts/smoke_test.sql /source/smoke_test.sql
-RUN /source/pg_run_smoke_test.sh /source/smoke_test.sql
+ADD ./tests /source/tests
+RUN /source/pg_run_smoke_test.sh /source/tests/smoke_test.sql
 
-# Remove smoke test files
-RUN rm -f /source/pg_run_smoke_test.sh /source/smoke_test.sql
+# Remove tests files
+RUN rm -f /source/pg_run_smoke_test.sh /source/tests
 
 USER postgres
 ENTRYPOINT ["/source/pg_start.sh"]
