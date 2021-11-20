@@ -11,7 +11,7 @@ ADD ./CMakeLists.txt ./CMakeLists.txt
 ADD ./bioseq_pg/bioseq.control ./bioseq.control
 ADD ./scripts/pg_local_build.sh ./build.sh
 
-RUN echo "CUR_DIR:" && ls . && echo "bioseq_lib:" && ls bioseq_lib && "bioseq_pg:" && ls bioseq_pg
+RUN echo "CUR_DIR:" && ls . && echo "bioseq_lib:" && ls bioseq_lib && echo "bioseq_pg:" && ls bioseq_pg
 
 RUN rm -rfd build && ./build.sh -DBUILD_SHARED_LIBS=true
 
