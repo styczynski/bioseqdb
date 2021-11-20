@@ -13,8 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - name: Install Orca
-        run: npm install -g electron@6.1.4 orca
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
