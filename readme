@@ -1,3 +1,26 @@
-This project provides a CMake template for developing postgres extensions, and is intended to replace PGXS.
+# BioSeqDB
 
-Most of this code was taken out of the TimescaleDB (https://github.com/timescale/timescaledb) source, and is licensed under Apache 2.
+## Building
+
+### Requiements
+
+First please install the following tools:
+
+- [Poetry](https://python-poetry.org/docs/)
+- [CMake](https://cmake.org/download/)
+- [Docker](https://docs.docker.com/get-docker/)
+
+### Building and running
+
+Please execute the following commands:
+
+```bash
+    export GIT_TOKEN="your_pat_token" && \
+    export GIT_USER="your_git_username" && \
+    make docker-login && \
+    make docker-run-dev
+```
+
+You need to specify PAT (Personal Access Token) for github and github username.
+PAT [can be generated here](https://github.com/settings/tokens/new)
+Please write down your PAT somewhere.
