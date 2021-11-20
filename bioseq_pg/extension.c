@@ -1,3 +1,5 @@
+#include <bioseq_lib/bioseq_lib.h>
+
 #include "extension.h"
 
 void
@@ -32,7 +34,9 @@ get_welcome_message(PG_FUNCTION_ARGS) {
 	if (message_txt == NULL)
 		message_txt = "hello";
 
-	char *buffer = palloc0(sizeof(message_txt) + sizeof(arg) + 1);
+	bioseq_lib_hello_world();
+
+	char *buffer = (char*) palloc0(sizeof(message_txt) + sizeof(arg) + 1);
 	if ((sprintf_output_code = (sprintf(buffer, "%s: %i", message_txt, arg))) < 0)
 		ereport(ERROR,
 				(

@@ -158,6 +158,7 @@ endif (PG_SOURCE_DIR)
 
 add_subdirectory(sql)
 add_subdirectory(bioseq_pg)
+add_subdirectory(bioseq_lib)
 
 set(EXT_CONTROL_FILE ${PROJECT_NAME}.control)
 configure_file(${EXT_CONTROL_FILE} ${EXT_CONTROL_FILE})

@@ -132,7 +132,7 @@ ADD ./build.sh ./build.sh
 
 #RUN find / -name "postgres.h" -print && pg_config --includedir && ls /usr/include/postgresql && exit 69
 
-RUN rm -rfd build && ./build.sh
+RUN rm -rfd build && ./build.sh -DBUILD_SHARED_LIBS=true
 
 RUN cd / && rm -rf /tmp/* && apt-get purge -y --auto-remove gcc \
     make wget unzip curl libc6-dev apt-transport-https git \

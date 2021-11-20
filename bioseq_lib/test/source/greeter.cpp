@@ -1,21 +1,21 @@
 #include <doctest/doctest.h>
-#include <greeter/greeter.h>
-#include <greeter/version.h>
+#include <bioseq_lib/bioseq_lib.h>
+#include <bioseq_lib/version.h>
 
 #include <string>
 
-TEST_CASE("Greeter") {
-  using namespace greeter;
+TEST_CASE("BioSeqDBLib") {
+  using namespace bioseq_lib;
 
-  Greeter greeter("Tests");
+  BioSeqDBLib bioseq_lib("Tests");
 
-  CHECK(greeter.greet(LanguageCode::EN) == "Hello, Tests!");
-  CHECK(greeter.greet(LanguageCode::DE) == "Hallo Tests!");
-  CHECK(greeter.greet(LanguageCode::ES) == "¡Hola Tests!");
-  CHECK(greeter.greet(LanguageCode::FR) == "Bonjour Tests!");
+  CHECK(bioseq_lib.greet(LanguageCode::EN) == "Hello, Tests!");
+  CHECK(bioseq_lib.greet(LanguageCode::DE) == "Hallo Tests!");
+  CHECK(bioseq_lib.greet(LanguageCode::ES) == "¡Hola Tests!");
+  CHECK(bioseq_lib.greet(LanguageCode::FR) == "Bonjour Tests!");
 }
 
-TEST_CASE("Greeter version") {
+TEST_CASE("BioSeqDBLib version") {
   static_assert(std::string_view(GREETER_VERSION) == std::string_view("1.0"));
   CHECK(std::string(GREETER_VERSION) == std::string("1.0"));
 }
