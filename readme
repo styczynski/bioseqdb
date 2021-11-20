@@ -6,6 +6,7 @@
 
 First please install the following tools:
 
+- [Python (version 3.8)](https://www.python.org/downloads/release/python-382/)
 - [Poetry](https://python-poetry.org/docs/)
 - [CMake](https://cmake.org/download/)
 - [Docker](https://docs.docker.com/get-docker/)
