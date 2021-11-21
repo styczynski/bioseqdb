@@ -12,6 +12,16 @@ jobs:
   build_and_test:
     runs-on: ubuntu-latest
     steps:
+      - name: Notify slack about build
+        if: success()
+        id: slack
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_NOTIFICATIONS_BOT_TOKEN }}
+        uses: voxmedia/github-action-slack-notify-build@v1
+        with:
+          channel: build
+          status: STARTING
+          color: warning
       - uses: actions/checkout@v2
       - name: Set up Python
         uses: actions/setup-python@v2
@@ -39,3 +49,23 @@ jobs:
           password: ${{ secrets.GIT_TOKEN }}
       - name: Build (with tests)
         run: make docker-build-dev
+      - name: Notify slack about build success
+        if: success()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_NOTIFICATIONS_BOT_TOKEN }}
+        uses: voxmedia/github-action-slack-notify-build@v1
+        with:
+          message_id: ${{ steps.slack.outputs.message_id }}
+          channel: build
+          status: SUCCESS
+          color: good
+      - name: Notify slack about build fail
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_NOTIFICATIONS_BOT_TOKEN }}
+        uses: voxmedia/github-action-slack-notify-build@v1
+        with:
+          message_id: ${{ steps.slack.outputs.message_id }}
+          channel: build
+          status: FAILED
+          color: danger
