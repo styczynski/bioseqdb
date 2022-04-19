@@ -11,6 +11,9 @@ extern "C" {
 #include <miscadmin.h>
 }
 
+#include <SeqLib/BWAWrapper.h>
+#include <SeqLib/RefGenome.h>
+
 struct PgNucleotideSequence {
     char vl_len[4];
     char nucleotides[];
@@ -25,6 +28,18 @@ struct PgNucleotideSequence {
         return ptr;
     }
 };
+
+namespace {
+
+template <typename T> std::string show(const T& x) {
+    std::stringstream ss;
+    ss << x;
+    std::string s = ss.str();
+    s.c_str();
+    return std::move(s);
+}
+
+}
 
 extern "C" {
 
@@ -119,8 +134,8 @@ Datum yoyo_v1(PG_FUNCTION_ARGS) {
     }
 }
 
-PG_FUNCTION_INFO_V1(yoyo_v2);
-Datum yoyo_v2(PG_FUNCTION_ARGS) {
+PG_FUNCTION_INFO_V1(nuclseq_search_bwa);
+Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
     ReturnSetInfo* rsi = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
     if (rsi == NULL || !IsA(rsi, ReturnSetInfo)) {
         ereport(ERROR,
@@ -132,6 +147,16 @@ Datum yoyo_v2(PG_FUNCTION_ARGS) {
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                 errmsg("materialize mode required, but it is not allowed in this context")));
     }
+
+    std::string_view nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    std::string_view fasta_path = PG_GETARG_CSTRING(1);
+    std::string_view region_chr_name = PG_GETARG_CSTRING(2);
+    int32_t p1 = PG_GETARG_INT32(3);
+    int32_t p2 = PG_GETARG_INT32(4);
+    std::string_view usv_name = PG_GETARG_CSTRING(5);
+    bool hardclip = PG_GETARG_BOOL(6);
+    double kswfops = PG_GETARG_FLOAT8(7);
+    int max_secondary = PG_GETARG_INT32(8);
 
     MemoryContext per_query_ctx = rsi->econtext->ecxt_per_query_memory;
 
@@ -158,23 +183,41 @@ Datum yoyo_v2(PG_FUNCTION_ARGS) {
 
     AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(tupdesc);
 
-    std::minstd_rand rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    SeqLib::RefGenome ref;
+    SeqLib::BWAWrapper bwa;
+    SeqLib::UnalignedSequenceVector usv;
+    SeqLib::BamRecordVector results;
+    std::string error;
 
-    for (int i=0; i<6; ++i) {
-        std::string alpha = std::to_string(i + 1);
-        std::string beta = std::to_string((i + 1) * (i + 1));
-        std::string gamma;
-        for (int j=0; j<20; ++j) {
-            gamma += "ACGT"[std::uniform_int_distribution<int>(0, 3)(rng)];
-        }
-        alpha.c_str();
-        beta.c_str();
-        gamma.c_str();
+    try {
+        ref.LoadIndex(std::string{fasta_path});
+        std::string seq = ref.QueryRegion(region_chr_name.data(), p1, p2);
+        usv = {{usv_name.data(), seq}};
+        bwa.ConstructIndex(usv);
+        bwa.AlignSequence(std::string(nucls), "my_seq", results, hardclip, kswfops, max_secondary);
+    } catch (const std::exception& ex) {
+        error = ex.what();
+    }
+    error.c_str();
 
-        char* values[3];
-        values[0] = alpha.data();
-        values[1] = beta.data();
-        values[2] = gamma.data();
+    for (int i = 0; i < results.size(); ++i) {
+        SeqLib::BamRecord& row = results[i];
+
+        std::string id = show(i);
+        std::string target_start = show(row.Position());
+        std::string target_end = show(row.PositionEnd());
+        std::string target_len = show(row.Length());
+        std::string target_aligned = show(row.Sequence());
+        std::string result = show(row);
+
+        char* values[7];
+        values[0] = id.data();
+        values[1] = target_start.data();
+        values[2] = target_end.data();
+        values[3] = target_len.data();
+        values[4] = target_aligned.data();
+        values[5] = result.data();
+        values[6] = error.data();
 
         HeapTuple tuple = BuildTupleFromCStrings(attr_input_meta, values);
         tuplestore_puttuple(tupstore, tuple);

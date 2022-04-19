@@ -18,6 +18,25 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install Postgres
         run: sudo apt-get install -y postgresql postgresql-server-dev-all
+      - name: Install SeqLib (cache)
+        id: cache-install-seqlib
+        uses: actions/cache@v3
+        with:
+          path: cache-seqlib
+          key: install-seqlib-v3
+      - name: Install SeqLib (build)
+        if: steps.cache-install-seqlib.outputs.cache-hit != 'true'
+        run: >
+          git clone --recursive https://github.com/walaj/SeqLib.git &&
+          cd SeqLib &&
+          ./configure &&
+          make CFLAGS='-g -Wall -O2 -fPIC' CXXFLAGS='-g -Wall -O2 -fPIC' &&
+          make install &&
+          mkdir -p ../cache-seqlib/lib ../cache-seqlib/include &&
+          cp lib/* ../cache-seqlib/lib/ &&
+          find ./{bwa,fermi-lite,htslib,SeqLib} -name "*.h" | xargs cp --parents -t ../cache-seqlib/include/
+      - name: Install SeqLib (install)
+        run: sudo cp -r cache-seqlib/* /usr/local/
       - name: Build Postgres extension
         run: mkdir build && cd build && cmake .. && make
       - name: Notify slack about build success
