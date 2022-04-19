@@ -1,15 +1,8 @@
-name: Build and test
-
-on:
-  push:
-    branches:
-      - "**"
-  pull_request:
-    branches:
-      - "**"
-
+name: CI
+on: [push]
 jobs:
   build_and_test:
+    name: Build and test
     runs-on: ubuntu-latest
     steps:
       - name: Notify slack about build
@@ -23,32 +16,10 @@ jobs:
           status: STARTING
           color: warning
       - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: '3.9'
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-      - name: Load cached venv
-        id: cached-poetry-dependencies
-        uses: actions/cache@v2
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
-      - name: Install dependencies
-        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-        run: poetry install --no-interaction --no-root
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
-        with:
-          registry: ghcr.io
-          username: ${{ secrets.GIT_USER }}
-          password: ${{ secrets.GIT_TOKEN }}
-      - name: Build (with tests)
-        run: make docker-build-dev
+      - name: Install Postgres
+        run: sudo apt-get install -y postgresql postgresql-server-dev-all
+      - name: Build Postgres extension
+        run: mkdir build && cd build && cmake .. && make
       - name: Notify slack about build success
         if: success()
         env:
