@@ -9,10 +9,14 @@ extern "C" {
 #include <fmgr.h>
 #include <funcapi.h>
 #include <miscadmin.h>
+#include <executor/spi.h>
+#include <catalog/pg_type.h>
 }
 
 #include <SeqLib/BWAWrapper.h>
 #include <SeqLib/RefGenome.h>
+
+#define raise_pg_error(code, msg) ereport(ERROR, (errcode(code)), msg); 
 
 struct PgNucleotideSequence {
     char vl_len[4];
@@ -50,8 +54,7 @@ Datum nuclseq_in(PG_FUNCTION_ARGS) {
     std::string_view text = PG_GETARG_CSTRING(0);
     for (char chr : text) {
         if (chr != 'A' && chr != 'C' && chr != 'G' && chr != 'T') {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION)),
+            raise_pg_error(ERRCODE_INVALID_TEXT_REPRESENTATION,
                     errmsg("invalid nucleotide in nuclseq_in: '%c'", chr));
         }
     }
@@ -81,8 +84,7 @@ Datum nuclseq_content(PG_FUNCTION_ARGS) {
     auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
     std::string_view needle = PG_GETARG_CSTRING(1);
     if (needle != "A" && needle != "C" && needle != "G" && needle != "T") {
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE)),
+        raise_pg_error(ERRCODE_INVALID_PARAMETER_VALUE,
                 errmsg("invalid nucleotide in nuclseq_content: '%s'", needle.data()));
     }
 
@@ -116,8 +118,7 @@ Datum yoyo_v1(PG_FUNCTION_ARGS) {
 
         int num_tuples = PG_GETARG_INT32(0);
         if (num_tuples < 0) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE)),
+            raise_pg_error(ERRCODE_INVALID_PARAMETER_VALUE,
                     errmsg("number of rows cannot be negative"));
         }
         funcctx->max_calls = num_tuples;
@@ -134,76 +135,144 @@ Datum yoyo_v1(PG_FUNCTION_ARGS) {
     }
 }
 
-PG_FUNCTION_INFO_V1(nuclseq_search_bwa);
-Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
-    ReturnSetInfo* rsi = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
+}
+
+namespace {
+
+std::string build_fetch_query(std::string_view table_name, std::string_view id_col_name, std::string_view seq_col_name) {
+    std::stringstream sql_builder;
+    sql_builder << "SELECT " <<  id_col_name << ", " << seq_col_name << " FROM "  << table_name;
+    return sql_builder.str();
+}
+
+template<typename F>
+void iterate_nuclseq_table(const std::string &sql, Oid nuclseq_oid, F f) {
+    Portal portal = SPI_cursor_open_with_args("iterate", sql.c_str(), 0, nullptr, nullptr, nullptr, true, 0);
+    long batch_size = 1;
+
+    SPI_cursor_fetch(portal, true, batch_size);
+    while (SPI_processed > 0 && SPI_tuptable != NULL) {
+        int n = SPI_processed;
+        SPITupleTable* tuptable = SPI_tuptable;
+        TupleDesc tupdesc = tuptable->tupdesc;
+
+        switch(SPI_gettypeid(tupdesc, 1)) {
+            case INT2OID:
+            case INT4OID:
+            case INT8OID:
+                break;
+            default:
+            raise_pg_error(ERRCODE_DATATYPE_MISMATCH, errmsg("expected column of integer"));
+        }
+
+        if (SPI_gettypeid(tupdesc, 2) != nuclseq_oid)
+            raise_pg_error(ERRCODE_DATATYPE_MISMATCH, errmsg("expected column of nuclseqs"));
+
+
+        for(int i = 0 ; i < n; i++) {
+            HeapTuple tup = tuptable->vals[i];
+
+            char* id = SPI_getvalue(tup, tupdesc, 1);
+            char* seq = SPI_getvalue(tup, tupdesc, 2);
+            f(id, seq);
+        }
+
+        SPI_freetuptable(tuptable);
+        SPI_cursor_fetch(portal, true, batch_size);
+    }
+    SPI_cursor_close(portal);
+
+}
+
+
+SeqLib::BWAWrapper bwa_index_from_query(const std::string& sql, Oid nuclseq_oid) {
+    SeqLib::UnalignedSequenceVector usv;
+    SeqLib::BWAWrapper bwa;
+    iterate_nuclseq_table(sql, nuclseq_oid, [&](auto id, auto seq){
+        // TODO: useless copying
+        usv.push_back({id, seq});
+    });
+    bwa.ConstructIndex(usv);
+
+    return bwa;
+}
+
+void assert_can_return_set(ReturnSetInfo* rsi) {
     if (rsi == NULL || !IsA(rsi, ReturnSetInfo)) {
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("set-valued function called in context that cannot accept a set")));
+        raise_pg_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+                errmsg("set-valued function called in context that cannot accept a set"));
     }
     if (!(rsi->allowedModes & SFRM_Materialize)) {
-        ereport(ERROR,
-                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("materialize mode required, but it is not allowed in this context")));
+        raise_pg_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+                errmsg("materialize mode required, but it is not allowed in this context"));
     }
+}
 
-    std::string_view nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
-    std::string_view fasta_path = PG_GETARG_CSTRING(1);
-    std::string_view region_chr_name = PG_GETARG_CSTRING(2);
-    int32_t p1 = PG_GETARG_INT32(3);
-    int32_t p2 = PG_GETARG_INT32(4);
-    std::string_view usv_name = PG_GETARG_CSTRING(5);
-    bool hardclip = PG_GETARG_BOOL(6);
-    double kswfops = PG_GETARG_FLOAT8(7);
-    int max_secondary = PG_GETARG_INT32(8);
+TupleDesc get_retval_tupledesc(const FunctionCallInfo& fcinfo) {
+    TupleDesc tupledesc;
 
-    MemoryContext per_query_ctx = rsi->econtext->ecxt_per_query_memory;
-
-    TupleDesc tupdesc;
-    switch (get_call_result_type(fcinfo, nullptr, &tupdesc)) {
+    switch (get_call_result_type(fcinfo, nullptr, &tupledesc)) {
         case TYPEFUNC_COMPOSITE:
             break;
         case TYPEFUNC_RECORD:
-            ereport(ERROR,
-                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                    errmsg("function returning record called in context that cannot accept type record")));
+            raise_pg_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+                    errmsg("function returning record called in context that cannot accept type record"));
             break;
         default:
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATATYPE_MISMATCH),
-                    errmsg("return type must be a row type")));
+            raise_pg_error(ERRCODE_FEATURE_NOT_SUPPORTED,
+                    errmsg("return type must be a row type"));
             break;
     }
 
+    return tupledesc;
+}
+
+Tuplestorestate* create_tuplestore(ReturnSetInfo* rsi, TupleDesc& tupledesc) {
+    MemoryContext per_query_ctx = rsi->econtext->ecxt_per_query_memory;
     MemoryContext old_ctx = MemoryContextSwitchTo(per_query_ctx);
-    tupdesc = CreateTupleDescCopy(tupdesc);
-    Tuplestorestate* tupstore = tuplestore_begin_heap(rsi->allowedModes & SFRM_Materialize_Random, false, work_mem);
+    tupledesc = CreateTupleDescCopy(tupledesc);
+    Tuplestorestate* tupstore = tuplestore_begin_heap(SFRM_Materialize_Random, false, work_mem);
     MemoryContextSwitchTo(old_ctx);
 
-    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(tupdesc);
+    return tupstore;
+}
 
-    SeqLib::RefGenome ref;
-    SeqLib::BWAWrapper bwa;
-    SeqLib::UnalignedSequenceVector usv;
-    SeqLib::BamRecordVector results;
-    std::string error;
+}
 
-    try {
-        ref.LoadIndex(std::string{fasta_path});
-        std::string seq = ref.QueryRegion(region_chr_name.data(), p1, p2);
-        usv = {{usv_name.data(), seq}};
-        bwa.ConstructIndex(usv);
-        bwa.AlignSequence(std::string(nucls), "my_seq", results, hardclip, kswfops, max_secondary);
-    } catch (const std::exception& ex) {
-        error = ex.what();
-    }
-    error.c_str();
+extern "C" {
 
-    for (int i = 0; i < results.size(); ++i) {
-        SeqLib::BamRecord& row = results[i];
+PG_FUNCTION_INFO_V1(nuclseq_search_bwa);
+Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
+    ReturnSetInfo* rsi = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
+    assert_can_return_set(rsi);
 
-        std::string id = show(i);
+    std::string_view nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    std::string_view table_name = PG_GETARG_CSTRING(1);
+    std::string_view id_col_name = PG_GETARG_CSTRING(2);
+    std::string_view seq_col_name = PG_GETARG_CSTRING(3);
+    bool hardclip = PG_GETARG_BOOL(4);
+    double kswfops = PG_GETARG_FLOAT8(5);
+    int max_secondary = PG_GETARG_INT32(6);
+
+    if (int ret = SPI_connect(); ret < 0)
+        elog(ERROR, "connectby: SPI_connect returned %d", ret);
+
+
+    TupleDesc ret_tupdest = get_retval_tupledesc(fcinfo);
+    
+    std::string sql = build_fetch_query(table_name, id_col_name, seq_col_name);
+    Oid nuclseq_oid = TupleDescAttr(ret_tupdest, 4)->atttypid;
+    SeqLib::BWAWrapper bwa = bwa_index_from_query(sql, nuclseq_oid);
+    SPI_finish();
+
+    Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdest);
+    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdest);
+
+    SeqLib::BamRecordVector aligns;
+    bwa.AlignSequence(std::string(nucls), "1", aligns, hardclip, kswfops, max_secondary);
+
+    for (SeqLib::BamRecord& row : aligns) {
+        std::string target_name = bwa.ChrIDToName(row.ChrID());
         std::string target_start = show(row.Position());
         std::string target_end = show(row.PositionEnd());
         std::string target_len = show(row.Length());
@@ -211,22 +280,87 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
         std::string result = show(row);
 
         char* values[7];
-        values[0] = id.data();
+        values[0] = target_name.data();
         values[1] = target_start.data();
         values[2] = target_end.data();
         values[3] = target_len.data();
         values[4] = target_aligned.data();
         values[5] = result.data();
-        values[6] = error.data();
 
         HeapTuple tuple = BuildTupleFromCStrings(attr_input_meta, values);
-        tuplestore_puttuple(tupstore, tuple);
+        tuplestore_puttuple(ret_tupstore, tuple);
         heap_freetuple(tuple);
     }
 
     rsi->returnMode = SFRM_Materialize;
-    rsi->setResult = tupstore;
-    rsi->setDesc = tupdesc;
+    rsi->setResult = ret_tupstore;
+    rsi->setDesc = ret_tupdest;
+    return (Datum) nullptr;
+}
+
+PG_FUNCTION_INFO_V1(nuclseq_multi_search_bwa);
+Datum nuclseq_multi_search_bwa(PG_FUNCTION_ARGS) {
+    ReturnSetInfo* rsi = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
+    assert_can_return_set(rsi);
+
+    std::string_view query_table_name = PG_GETARG_CSTRING(0);
+    std::string_view id_query_col_name = PG_GETARG_CSTRING(1);
+    std::string_view seq_query_col_name = PG_GETARG_CSTRING(2);
+
+    std::string_view table_name = PG_GETARG_CSTRING(3);
+    std::string_view id_col_name = PG_GETARG_CSTRING(4);
+    std::string_view seq_col_name = PG_GETARG_CSTRING(5);
+
+    bool hardclip = PG_GETARG_BOOL(6);
+    double kswfops = PG_GETARG_FLOAT8(7);
+    int max_secondary = PG_GETARG_INT32(8);
+
+    if (int ret = SPI_connect(); ret < 0) 
+        elog(ERROR, "connectby: SPI_connect returned %d", ret);
+
+    TupleDesc ret_tupdest = get_retval_tupledesc(fcinfo);
+    std::string isql = build_fetch_query(table_name, id_col_name, seq_col_name);
+    Oid nuclseq_oid = TupleDescAttr(ret_tupdest, 5)->atttypid;
+    SeqLib::BWAWrapper bwa = bwa_index_from_query(isql, nuclseq_oid);
+    Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdest);
+    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdest);
+
+    std::string qsql = build_fetch_query(table_name, id_col_name, seq_col_name);
+    SeqLib::BamRecordVector aligns;
+    iterate_nuclseq_table(qsql, nuclseq_oid, [&](auto id, auto nuclseq){
+        bwa.AlignSequence(std::string(nuclseq), id, aligns, hardclip, kswfops, max_secondary);
+
+        for (SeqLib::BamRecord& row : aligns) {
+            std::string target_name = bwa.ChrIDToName(row.ChrID());
+            std::string target_start = show(row.Position());
+            std::string target_end = show(row.PositionEnd());
+            std::string target_len = show(row.Length());
+            std::string target_aligned = show(row.Sequence());
+            std::string result = show(row);
+
+            char* values[] = {
+                id,
+                target_name.data(),
+                target_start.data(),
+                target_end.data(),
+                target_len.data(),
+                target_aligned.data(),
+                result.data(),
+            };
+
+            HeapTuple tuple = BuildTupleFromCStrings(attr_input_meta, values);
+            tuplestore_puttuple(ret_tupstore, tuple);
+            heap_freetuple(tuple);
+        }
+
+        aligns.clear();
+    });
+
+    SPI_finish();
+
+    rsi->returnMode = SFRM_Materialize;
+    rsi->setResult = ret_tupstore;
+    rsi->setDesc = ret_tupdest;
     return (Datum) nullptr;
 }
 

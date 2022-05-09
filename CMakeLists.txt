@@ -23,7 +23,7 @@ add_library(bioseqdb_pg SHARED
 target_include_directories(bioseqdb_pg PRIVATE ${PostgreSQL_TYPE_INCLUDE_DIR})
 target_link_libraries(bioseqdb_pg PRIVATE ${PostgreSQL_LIBRARIES})
 target_link_libraries(bioseqdb_pg PRIVATE ${BZIP2_LIBRARIES})
-target_link_libraries(bioseqdb_pg PRIVATE ${FML_LIBRARIES} ${HTS_LIBRARIES} ${SEQLIB_LIBRARIES} ${BWA_LIBRARIES})
+target_link_libraries(bioseqdb_pg PRIVATE ${SEQLIB_LIBRARIES} ${FML_LIBRARIES} ${HTS_LIBRARIES} ${BWA_LIBRARIES})
 
 install(TARGETS bioseqdb_pg DESTINATION ${PG_CONFIG_PKGLIBDIR})
 install(FILES bioseqdb_pg/bioseqdb.control DESTINATION ${PG_CONFIG_SHAREDIR}/extension)
