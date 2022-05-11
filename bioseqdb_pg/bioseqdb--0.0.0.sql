@@ -12,6 +12,7 @@ CREATE FUNCTION nuclseq_out(NUCLSEQ)
 
 CREATE TYPE nuclseq (
     internallength = VARIABLE,
+    storage = EXTENDED,
     input = nuclseq_in,
     output = nuclseq_out
 );

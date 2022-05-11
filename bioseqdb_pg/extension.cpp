@@ -66,7 +66,7 @@ Datum nuclseq_in(PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(nuclseq_out);
 Datum nuclseq_out(PG_FUNCTION_ARGS) {
-    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
     auto text = static_cast<char*>(palloc(nucls.size() + 1));
     std::copy(nucls.begin(), nucls.end(), text);
     text[nucls.size()] = '\0';
@@ -75,13 +75,13 @@ Datum nuclseq_out(PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(nuclseq_len);
 Datum nuclseq_len(PG_FUNCTION_ARGS) {
-    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
     PG_RETURN_UINT64(nucls.size());
 }
 
 PG_FUNCTION_INFO_V1(nuclseq_content);
 Datum nuclseq_content(PG_FUNCTION_ARGS) {
-    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
     std::string_view needle = PG_GETARG_CSTRING(1);
     if (needle != "A" && needle != "C" && needle != "G" && needle != "T") {
         raise_pg_error(ERRCODE_INVALID_PARAMETER_VALUE,
@@ -94,7 +94,7 @@ Datum nuclseq_content(PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(nuclseq_complement);
 Datum nuclseq_complement(PG_FUNCTION_ARGS) {
-    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
     auto complement = PgNucleotideSequence::palloc(nucls.size());
     for (size_t i=0; i<nucls.size(); ++i) {
         if (nucls[i] == 'A') {
@@ -246,7 +246,7 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
     ReturnSetInfo* rsi = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
     assert_can_return_set(rsi);
 
-    std::string_view nucls = reinterpret_cast<PgNucleotideSequence*>(PG_GETARG_POINTER(0))->text();
+    std::string_view nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
     std::string_view table_name = PG_GETARG_CSTRING(1);
     std::string_view id_col_name = PG_GETARG_CSTRING(2);
     std::string_view seq_col_name = PG_GETARG_CSTRING(3);
