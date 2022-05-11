@@ -17,7 +17,7 @@ jobs:
           color: warning
       - uses: actions/checkout@v2
       - name: Install Postgres
-        run: sudo apt-get install -y postgresql postgresql-server-dev-all
+        run: sudo apt-get install -y postgresql postgresql-server-dev-all libpq-dev
       - name: Install SeqLib (cache)
         id: cache-install-seqlib
         uses: actions/cache@v3
