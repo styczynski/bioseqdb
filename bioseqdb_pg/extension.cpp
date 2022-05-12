@@ -27,6 +27,14 @@ struct PgNucleotideSequence {
         return {nucleotides, VARSIZE(this) - 4};
     }
 
+    char* begin() {
+        return nucleotides;
+    }
+
+    char* end() {
+        return nucleotides + VARSIZE(this) - 4;
+    }
+
     static PgNucleotideSequence* palloc(size_t len) {
         auto ptr = static_cast<PgNucleotideSequence*>(::palloc(4 + len));
         SET_VARSIZE(ptr, 4 + len);
@@ -116,6 +124,14 @@ Datum nuclseq_complement(PG_FUNCTION_ARGS) {
             complement->nucleotides[i] = 'N';
         }
     }
+    PG_RETURN_POINTER(complement);
+}
+
+PG_FUNCTION_INFO_V1(nuclseq_reverse);
+Datum nuclseq_reverse(PG_FUNCTION_ARGS) {
+    auto nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
+    auto complement = PgNucleotideSequence::palloc(nucls.size());
+    std::reverse_copy(nucls.begin(), nucls.end(), complement->begin());
     PG_RETURN_POINTER(complement);
 }
 
