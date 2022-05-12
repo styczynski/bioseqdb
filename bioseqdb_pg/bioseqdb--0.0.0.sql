@@ -33,30 +33,26 @@ CREATE FUNCTION nuclseq_complement(NUCLSEQ)
     LANGUAGE C IMMUTABLE STRICT;
 
 CREATE TYPE bwa_result AS (
-    id INTEGER,
-    target_start INTEGER,
-    target_end INTEGER,
-    target_len INTEGER,
-    target_aligned NUCLSEQ,
-    result TEXT
+    ref_id INTEGER,
+    ref_match_start INTEGER,
+    ref_match_end INTEGER,
+    query_id INTEGER,
+    query_subseq NUCLSEQ,
+    query_match_start INTEGER,
+    query_match_end INTEGER,
+    is_primary BOOLEAN,
+    is_secondary BOOLEAN,
+    is_reverse BOOLEAN,
+    cigar TEXT,
+    score INTEGER
 );
 
-CREATE FUNCTION nuclseq_search_bwa(NUCLSEQ, CSTRING, CSTRING, CSTRING, BOOLEAN, DOUBLE PRECISION, INTEGER)
+CREATE FUNCTION nuclseq_search_bwa(NUCLSEQ, CSTRING, CSTRING, CSTRING)
     RETURNS SETOF bwa_result
     AS 'MODULE_PATHNAME'
     LANGUAGE C STABLE STRICT;
 
-CREATE TYPE multi_bwa_result AS (
-    id_query INTEGER,
-    id_target INTEGER,
-    target_start INTEGER,
-    target_end INTEGER,
-    target_len INTEGER,
-    target_aligned NUCLSEQ,
-    result TEXT
-);
-
-CREATE FUNCTION nuclseq_multi_search_bwa(CSTRING,  CSTRING, CSTRING, CSTRING, CSTRING, CSTRING, BOOLEAN, DOUBLE PRECISION, INTEGER)
-    RETURNS SETOF multi_bwa_result
+CREATE FUNCTION nuclseq_multi_search_bwa(CSTRING,  CSTRING, CSTRING, CSTRING, CSTRING, CSTRING)
+    RETURNS SETOF bwa_result
     AS 'MODULE_PATHNAME'
     LANGUAGE C STABLE STRICT;

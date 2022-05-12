@@ -34,7 +34,7 @@ jobs:
           make install &&
           mkdir -p ../cache-seqlib/lib ../cache-seqlib/include &&
           cp lib/* ../cache-seqlib/lib/ &&
-          find ./{bwa,fermi-lite,htslib,SeqLib} -name "*.h" | xargs cp --parents -t ../cache-seqlib/include/
+          find bwa fermi-lite htslib -name "*.h" | xargs cp --parents -t ../cache-seqlib/include/
       - name: Install SeqLib (install)
         run: sudo cp -r cache-seqlib/* /usr/local/
       - name: Build Postgres extension
