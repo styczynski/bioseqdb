@@ -39,12 +39,15 @@ CREATE FUNCTION nuclseq_reverse(NUCLSEQ)
 
 CREATE TYPE bwa_result AS (
     ref_id INTEGER,
+    ref_subseq NUCLSEQ,
     ref_match_start INTEGER,
     ref_match_end INTEGER,
+    ref_match_len INTEGER,
     query_id INTEGER,
     query_subseq NUCLSEQ,
     query_match_start INTEGER,
     query_match_end INTEGER,
+    query_match_len INTEGER,
     is_primary BOOLEAN,
     is_secondary BOOLEAN,
     is_reverse BOOLEAN,
