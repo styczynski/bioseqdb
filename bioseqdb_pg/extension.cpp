@@ -135,31 +135,6 @@ Datum nuclseq_reverse(PG_FUNCTION_ARGS) {
     PG_RETURN_POINTER(complement);
 }
 
-PG_FUNCTION_INFO_V1(yoyo_v1);
-Datum yoyo_v1(PG_FUNCTION_ARGS) {
-    if (SRF_IS_FIRSTCALL()) {
-        FuncCallContext* funcctx = SRF_FIRSTCALL_INIT();
-        MemoryContext oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-        int num_tuples = PG_GETARG_INT32(0);
-        if (num_tuples < 0) {
-            raise_pg_error(ERRCODE_INVALID_PARAMETER_VALUE,
-                    errmsg("number of rows cannot be negative"));
-        }
-        funcctx->max_calls = num_tuples;
-
-        MemoryContextSwitchTo(oldcontext);
-    }
-
-    FuncCallContext* funcctx = SRF_PERCALL_SETUP();
-    uint64_t result = funcctx->call_cntr;
-    if (funcctx->call_cntr < funcctx->max_calls) {
-        SRF_RETURN_NEXT(funcctx, UInt64GetDatum(result));
-    } else {
-        SRF_RETURN_DONE(funcctx);
-    }
-}
-
 }
 
 namespace {
