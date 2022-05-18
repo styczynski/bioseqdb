@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -15,15 +16,21 @@ void check_pg(PGconn* connection, PGresult* result) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 6) {
+    if (argc != 5) {
         std::cerr << "\x1B[1;31merror:\x1B[0m invalid command-line arguments\n\x1B[1;34musage:\x1B[0m " << argv[0] << " <TABLE> <NAME COLUMN> <SEQUENCE COLUMN> <FASTA FILE> <POSTGRES URL>\n";
         return 1;
     }
+
+    if (std::getenv("DB_URI") == nullptr) {
+        std::cerr << "\x1B[1;31merror:\x1B[0m unset DB_URI environment variable\n\x1B[1;34musage:\x1B[0m\n";
+        return 1;
+    }
+
     std::string_view table = argv[1];
     std::string_view column_name = argv[2];
     std::string_view column_sequence = argv[3];
     std::string_view fasta_file_path = argv[4];
-    std::string_view postgres_url = argv[5];
+    std::string_view postgres_url = std::getenv("DB_URI");
 
     std::cout << "opening fasta file" << std::endl;
     std::ifstream fasta_file(fasta_file_path.data());
