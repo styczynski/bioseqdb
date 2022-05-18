@@ -12,7 +12,6 @@ execute_process(COMMAND ${PG_CONFIG} --sharedir OUTPUT_VARIABLE PG_CONFIG_SHARED
 find_package(BZip2 REQUIRED)
 
 find_library(BWA_LIBRARIES bwa REQUIRED)
-find_library(FML_LIBRARIES fml REQUIRED)
 find_library(HTS_LIBRARIES hts REQUIRED)
 
 add_library(bioseqdb_pg SHARED
@@ -26,7 +25,7 @@ add_executable(bioseqdb_import
 target_include_directories(bioseqdb_pg PRIVATE ${PostgreSQL_TYPE_INCLUDE_DIR})
 target_link_libraries(bioseqdb_pg PRIVATE ${PostgreSQL_LIBRARIES})
 target_link_libraries(bioseqdb_pg PRIVATE ${BZIP2_LIBRARIES})
-target_link_libraries(bioseqdb_pg PRIVATE ${FML_LIBRARIES} ${HTS_LIBRARIES} ${BWA_LIBRARIES})
+target_link_libraries(bioseqdb_pg PRIVATE ${HTS_LIBRARIES} ${BWA_LIBRARIES})
 target_include_directories(bioseqdb_import PRIVATE ${PostgreSQL_INCLUDE_DIRS})
 target_link_libraries(bioseqdb_import PRIVATE ${PostgreSQL_LIBRARIES})
 
