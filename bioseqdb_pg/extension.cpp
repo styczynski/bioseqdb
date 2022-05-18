@@ -1,13 +1,14 @@
 #include "bwa.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <charconv>
 #include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <optional>
-
 extern "C" {
 #include <postgres.h>
 #include <fmgr.h>
@@ -40,6 +41,12 @@ struct PgNucleotideSequence {
         SET_VARSIZE(ptr, 4 + len);
         return ptr;
     }
+
+    static PgNucleotideSequence* from_view(std::string_view seq) {
+        auto ptr = palloc(seq.size());
+        std::copy(seq.begin(), seq.end(), ptr->nucleotides);
+        return ptr;
+    }
 };
 
 namespace {
@@ -50,12 +57,13 @@ namespace {
 // importing is replacing them with uppercase ones, as their most common use is for repeating but valid nucleotides.
 const std::string_view allowedNucleotides = "ACGTN";
 
-template <typename T> std::string show(const T& x) {
-    std::stringstream ss;
-    ss << x;
-    std::string s = ss.str();
-    s.c_str();
-    return std::move(s);
+text *string_view_to_text(std::string_view s) {
+    text *result = (text *) palloc(s.size() + VARHDRSZ);
+
+    SET_VARSIZE(result, s.size() + VARHDRSZ);
+    memcpy(VARDATA(result), s.data(), s.size());
+
+    return result;
 }
 
 }
@@ -230,49 +238,46 @@ TupleDesc get_retval_tupledesc(const FunctionCallInfo& fcinfo) {
 Tuplestorestate* create_tuplestore(ReturnSetInfo* rsi, TupleDesc& tupledesc) {
     MemoryContext per_query_ctx = rsi->econtext->ecxt_per_query_memory;
     MemoryContext old_ctx = MemoryContextSwitchTo(per_query_ctx);
+
     tupledesc = CreateTupleDescCopy(tupledesc);
+    tupledesc = BlessTupleDesc(tupledesc);
+
     Tuplestorestate* tupstore = tuplestore_begin_heap(SFRM_Materialize_Random, false, work_mem);
     MemoryContextSwitchTo(old_ctx);
 
     return tupstore;
 }
 
-HeapTuple build_tuple_bwa(std::optional<std::string_view> query_id_view, const BwaMatch& match, AttInMetadata* att_meta) {
-    std::string ref_id = show(match.ref_id);
-    std::string ref_subseq = show(match.ref_subseq);
-    std::string ref_match_begin = show(match.ref_match_begin);
-    std::string ref_match_end = show(match.ref_match_end);
-    std::string ref_match_len = show(match.ref_match_len);
-    std::optional<std::string> query_id = query_id_view.has_value() ? std::optional(show(std::string(*query_id_view))) : std::nullopt;
-    std::string query_subseq = show(match.query_subseq);
-    std::string query_match_begin = show(match.query_match_begin);
-    std::string query_match_end = show(match.query_match_end);
-    std::string query_match_len = show(match.query_match_len);
-    std::string is_primary = show(match.is_primary);
-    std::string is_secondary = show(match.is_secondary);
-    std::string is_reverse = show(match.is_reverse);
-    std::string cigar = show(match.cigar);
-    std::string score = show(match.score);
+HeapTuple build_tuple_bwa(std::optional<std::string_view> query_id_view, const BwaMatch& match, TupleDesc& tupledesc) {
+    int ref_id = 0, query_id = 0;
+    std::from_chars(match.ref_id.cbegin(), match.ref_id.cend(), ref_id);
+    if (query_id_view.has_value()) {
+        std::from_chars(query_id_view->cbegin(), query_id_view->cend(), query_id);
+    }
 
-    char* values[] = {
-        ref_id.data(),
-        ref_subseq.data(),
-        ref_match_begin.data(),
-        ref_match_end.data(),
-        ref_match_len.data(),
-        query_id.has_value() ? query_id->data() : nullptr,
-        query_subseq.data(),
-        query_match_begin.data(),
-        query_match_end.data(),
-        query_match_len.data(),
-        is_primary.data(),
-        is_secondary.data(),
-        is_reverse.data(),
-        cigar.data(),
-        score.data(),
-    };
+    std::array<bool, 15> nulls;
+    std::array<Datum, 15> values { {
+        Int32GetDatum(ref_id),
+        PointerGetDatum(PgNucleotideSequence::from_view(match.ref_subseq)),
+        Int32GetDatum((int) match.ref_match_begin),
+        Int32GetDatum((int) match.ref_match_end),
+        Int32GetDatum((int) match.ref_match_len),
+        Int32GetDatum(query_id),
+        PointerGetDatum(PgNucleotideSequence::from_view(match.query_subseq)),
+        Int32GetDatum(match.query_match_begin),
+        Int32GetDatum(match.query_match_end),
+        Int32GetDatum(match.query_match_len),
+        BoolGetDatum(match.is_primary),
+        BoolGetDatum(match.is_secondary),
+        BoolGetDatum(match.is_reverse),
+        PointerGetDatum(string_view_to_text(match.cigar)),
+        Int32GetDatum(match.score),
+    } };
 
-    return BuildTupleFromCStrings(att_meta, values);
+    nulls.fill(false);
+    nulls[5] = !query_id_view.has_value();
+
+    return heap_form_tuple(tupledesc, values.data(), nulls.data());
 }
 
 }
@@ -293,27 +298,27 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
         elog(ERROR, "connectby: SPI_connect returned %d", ret);
 
 
-    TupleDesc ret_tupdest = get_retval_tupledesc(fcinfo);
-    
+    TupleDesc ret_tupdesc = get_retval_tupledesc(fcinfo);
+
     std::string sql = build_fetch_query(table_name, id_col_name, seq_col_name);
-    Oid nuclseq_oid = TupleDescAttr(ret_tupdest, 1)->atttypid;
+    Oid nuclseq_oid = TupleDescAttr(ret_tupdesc, 1)->atttypid;
     BwaIndex bwa = bwa_index_from_query(sql, nuclseq_oid);
     SPI_finish();
 
-    Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdest);
-    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdest);
+    Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdesc);
+    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdesc);
 
     std::vector<BwaMatch> aligns = bwa.align_sequence(nucls);
 
     for (BwaMatch& row : aligns) {
-        HeapTuple tuple = build_tuple_bwa(std::nullopt, row, attr_input_meta);
+        HeapTuple tuple = build_tuple_bwa(std::nullopt, row, ret_tupdesc);
         tuplestore_puttuple(ret_tupstore, tuple);
         heap_freetuple(tuple);
     }
 
     rsi->returnMode = SFRM_Materialize;
     rsi->setResult = ret_tupstore;
-    rsi->setDesc = ret_tupdest;
+    rsi->setDesc = ret_tupdesc;
     return (Datum) nullptr;
 }
 
@@ -333,19 +338,19 @@ Datum nuclseq_multi_search_bwa(PG_FUNCTION_ARGS) {
     if (int ret = SPI_connect(); ret < 0)
         elog(ERROR, "connectby: SPI_connect returned %d", ret);
 
-    TupleDesc ret_tupdest = get_retval_tupledesc(fcinfo);
+    TupleDesc ret_tupdesc = get_retval_tupledesc(fcinfo);
     std::string isql = build_fetch_query(table_name, id_col_name, seq_col_name);
-    Oid nuclseq_oid = TupleDescAttr(ret_tupdest, 1)->atttypid;
+    Oid nuclseq_oid = TupleDescAttr(ret_tupdesc, 1)->atttypid;
     BwaIndex bwa = bwa_index_from_query(isql, nuclseq_oid);
-    Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdest);
-    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdest);
+    Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdesc);
+    AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdesc);
 
     std::string qsql = build_fetch_query(query_table_name, id_query_col_name, seq_query_col_name);
     iterate_nuclseq_table(qsql, nuclseq_oid, [&](auto id, auto nuclseq){
         std::vector<BwaMatch> aligns = bwa.align_sequence(nuclseq);
 
         for (BwaMatch& row : aligns) {
-            HeapTuple tuple = build_tuple_bwa(id, row, attr_input_meta);
+            HeapTuple tuple = build_tuple_bwa(id, row, ret_tupdesc);
             tuplestore_puttuple(ret_tupstore, tuple);
             heap_freetuple(tuple);
         }
@@ -355,7 +360,7 @@ Datum nuclseq_multi_search_bwa(PG_FUNCTION_ARGS) {
 
     rsi->returnMode = SFRM_Materialize;
     rsi->setResult = ret_tupstore;
-    rsi->setDesc = ret_tupdest;
+    rsi->setDesc = ret_tupdesc;
     return (Datum) nullptr;
 }
 
