@@ -147,15 +147,9 @@ Datum nuclseq_reverse(PG_FUNCTION_ARGS) {
 
 namespace {
 
-std::string build_fetch_query(std::string_view table_name, std::string_view id_col_name, std::string_view seq_col_name) {
-    std::stringstream sql_builder;
-    sql_builder << "SELECT " <<  id_col_name << ", " << seq_col_name << " FROM "  << table_name;
-    return sql_builder.str();
-}
-
 template<typename F>
-Portal iterate_nuclseq_table(const std::string &sql, Oid nuclseq_oid, F f) {
-    Portal portal = SPI_cursor_open_with_args("iterate", sql.c_str(), 0, nullptr, nullptr, nullptr, true, 0);
+Portal iterate_nuclseq_table(const char* sql, Oid nuclseq_oid, F f) {
+    Portal portal = SPI_cursor_open_with_args("iterate", sql, 0, nullptr, nullptr, nullptr, true, 0);
     long batch_size = 1;
 
     SPI_cursor_fetch(portal, true, batch_size);
@@ -193,7 +187,7 @@ Portal iterate_nuclseq_table(const std::string &sql, Oid nuclseq_oid, F f) {
 }
 
 
-BwaIndex bwa_index_from_query(const std::string& sql, Oid nuclseq_oid) {
+BwaIndex bwa_index_from_query(const char* sql, Oid nuclseq_oid) {
     std::vector<BwaSequence> usv;
     Portal portal = iterate_nuclseq_table(sql, nuclseq_oid, [&](auto id, auto seq){
         // TODO: useless copying
@@ -290,9 +284,7 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
     assert_can_return_set(rsi);
 
     std::string_view nucls = reinterpret_cast<PgNucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)))->text();
-    std::string_view table_name = PG_GETARG_CSTRING(1);
-    std::string_view id_col_name = PG_GETARG_CSTRING(2);
-    std::string_view seq_col_name = PG_GETARG_CSTRING(3);
+    const char* reference_sql = PG_GETARG_CSTRING(1);
 
     if (int ret = SPI_connect(); ret < 0)
         elog(ERROR, "connectby: SPI_connect returned %d", ret);
@@ -300,9 +292,8 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
 
     TupleDesc ret_tupdesc = get_retval_tupledesc(fcinfo);
 
-    std::string sql = build_fetch_query(table_name, id_col_name, seq_col_name);
     Oid nuclseq_oid = TupleDescAttr(ret_tupdesc, 1)->atttypid;
-    BwaIndex bwa = bwa_index_from_query(sql, nuclseq_oid);
+    BwaIndex bwa = bwa_index_from_query(reference_sql, nuclseq_oid);
     SPI_finish();
 
     Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdesc);
@@ -327,26 +318,19 @@ Datum nuclseq_multi_search_bwa(PG_FUNCTION_ARGS) {
     ReturnSetInfo* rsi = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
     assert_can_return_set(rsi);
 
-    std::string_view query_table_name = PG_GETARG_CSTRING(0);
-    std::string_view id_query_col_name = PG_GETARG_CSTRING(1);
-    std::string_view seq_query_col_name = PG_GETARG_CSTRING(2);
-
-    std::string_view table_name = PG_GETARG_CSTRING(3);
-    std::string_view id_col_name = PG_GETARG_CSTRING(4);
-    std::string_view seq_col_name = PG_GETARG_CSTRING(5);
+    const char* query_sql = PG_GETARG_CSTRING(0);
+    const char* reference_sql = PG_GETARG_CSTRING(1);
 
     if (int ret = SPI_connect(); ret < 0)
         elog(ERROR, "connectby: SPI_connect returned %d", ret);
 
     TupleDesc ret_tupdesc = get_retval_tupledesc(fcinfo);
-    std::string isql = build_fetch_query(table_name, id_col_name, seq_col_name);
     Oid nuclseq_oid = TupleDescAttr(ret_tupdesc, 1)->atttypid;
-    BwaIndex bwa = bwa_index_from_query(isql, nuclseq_oid);
+    BwaIndex bwa = bwa_index_from_query(reference_sql, nuclseq_oid);
     Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdesc);
     AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdesc);
 
-    std::string qsql = build_fetch_query(query_table_name, id_query_col_name, seq_query_col_name);
-    iterate_nuclseq_table(qsql, nuclseq_oid, [&](auto id, auto nuclseq){
+    iterate_nuclseq_table(query_sql, nuclseq_oid, [&](auto id, auto nuclseq){
         std::vector<BwaMatch> aligns = bwa.align_sequence(nuclseq);
 
         for (BwaMatch& row : aligns) {

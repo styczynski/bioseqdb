@@ -55,12 +55,12 @@ CREATE TYPE bwa_result AS (
     score INTEGER
 );
 
-CREATE FUNCTION nuclseq_search_bwa(NUCLSEQ, CSTRING, CSTRING, CSTRING)
+CREATE FUNCTION nuclseq_search_bwa(query_sequence NUCLSEQ, reference_sql CSTRING)
     RETURNS SETOF bwa_result
     AS 'MODULE_PATHNAME'
     LANGUAGE C STABLE STRICT;
 
-CREATE FUNCTION nuclseq_multi_search_bwa(CSTRING,  CSTRING, CSTRING, CSTRING, CSTRING, CSTRING)
+CREATE FUNCTION nuclseq_multi_search_bwa(query_sql CSTRING, reference_sql CSTRING)
     RETURNS SETOF bwa_result
     AS 'MODULE_PATHNAME'
     LANGUAGE C STABLE STRICT;
