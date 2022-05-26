@@ -7,6 +7,56 @@ import re
 
 import psycopg2
 
+COUNTRY_CODES = {
+    # TODO: Or UK?
+    'United Kingdom': 'GB',
+    'USA': 'US',
+    'Australia': 'AU',
+    'Canada': 'CA',
+    'Switzerland': 'CH',
+    'Russia': 'RU',
+    'Netherlands': 'NL',
+    'Austria': 'AT',
+    'South Africa': 'ZA',
+    'India': 'IN',
+    'Ireland': 'IE',
+    'Spain': 'ES',
+    'Norway': 'NO',
+    'Japan': 'JP',
+    'Italy': 'IT',
+    'Germany': 'DE',
+    'Brazil': 'BR',
+    'Hong Kong': 'HK',
+    'France': 'FR',
+    'United Arab Emirates': 'AE',
+    'Singapore': 'SG',
+    'Sweden': 'SE',
+    'Iran': 'IR',
+    'Bangladesh': 'BD',
+    'Lithuania': 'LT',
+    'Indonesia': 'ID',
+    'Czech Republic': 'CZ',
+    'Mexico': 'MX',
+    'Slovakia': 'SK',
+    'Chile': 'CL',
+    'Sri Lanka': 'LK',
+    'China': 'CN',
+    'Israel': 'IL',
+    'Serbia': 'RS',
+    'Malta': 'MT',
+    'Portugal': 'PT',
+    'Ukraine': 'UA',
+    'Puerto Rico': 'PR',
+    'Democratic Republic of the Congo': 'CD',
+    'Egypt': 'EG',
+    'Ecuador': 'EC',
+    'Belgium': 'BE',
+    'Peru': 'PE',
+    # TODO: This is a temporary country code.
+    'Kosovo': 'XK',
+    'Georgia': 'GE',
+}
+
 def is_valid_date(date):
     # reject inexact dates (2020, 2020-07)
     return date is not None and re.search('^\d{4}-\d{2}-\d{2}$', date) is not None
@@ -50,6 +100,8 @@ def unify(row):
     if row['age'] is not None and ('-' in row['age'] or '<' in row['age'] or '>' in row['age']):
         row['age'] = None
 
+    row['country_code'] = COUNTRY_CODES[row['country']]
+
     return row
 
 def parse_metadata(file):
@@ -79,6 +131,7 @@ with psycopg2.connect(**credentials) as conn:
                     submitted_date = %(submitted_date)s,
                     region = %(region)s,
                     country = %(country)s,
+                    country_code = %(country_code)s,
                     division = %(division)s,
                     location = %(location)s,
                     age = %(age)s,

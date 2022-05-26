@@ -9,6 +9,7 @@ CREATE TABLE dataset (
     submitted_date date,
     region varchar (60),
 	country varchar (60),
+	country_code varchar (2),
     division varchar (60),
     location varchar (60),
     age interval,
