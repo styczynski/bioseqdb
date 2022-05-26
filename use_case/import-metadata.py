@@ -12,6 +12,24 @@ def is_valid_date(date):
     return date is not None and re.search('^\d{4}-\d{2}-\d{2}$', date) is not None
 
 def unify(row):
+    row['strain'] = row['strain']\
+        .replace('PuertoRico', 'Puerto Rico')\
+        .replace('NorthernIreland', 'Northern Ireland')\
+        .replace('CzechRepublic', 'Czech Republic')\
+        .replace('UnitedArabEmirates', 'United Arab Emirates')\
+        .replace('HongKong', 'Hong Kong')\
+        .replace('SriLanka', 'Sri_Lanka')\
+        .replace('SouthAfrica', 'South_Africa')\
+        .replace('MOH', '_MOH')\
+        .replace('USA/PR', 'Puerto Rico/PR')
+    if row['date_submitted'] == '2020-10-19':
+        row['strain'] = row['strain']\
+            .replace('Czech Republic', 'Czech_Republic')\
+            .replace('Northern Ireland', 'Northern_Ireland')
+    if row['date_submitted'] == '2020-10-29':
+        row['strain'] = row['strain']\
+            .replace('Hong Kong', 'Hong_Kong')\
+
     row['submitted_date'] = row['date_submitted']
 
     # undefined data => None <=> null in sql
@@ -68,5 +86,8 @@ with psycopg2.connect(**credentials) as conn:
                     lineage = %(lineage)s
                 WHERE strain = %(strain)s;
                 """, row)
+        if cur.rowcount != 1:
+            conn.rollback()
+            raise Exception(repr(row))
     conn.commit()
     cur.close()
