@@ -38,8 +38,9 @@ public:
 
     std::vector<BwaMatch> align_sequence(std::string_view query) const;
 
+    mem_opt_t* options;
+
 private:
     bwaidx_t* index;
-    mem_opt_t* options;
     bool is_empty;
 };

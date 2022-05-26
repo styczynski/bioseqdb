@@ -195,6 +195,7 @@ BwaIndex bwa_index_from_query(const char* sql, Oid nuclseq_oid) {
     });
     BwaIndex bwa(usv);
     SPI_cursor_close(portal);
+    bwa.options->max_occ = std::max<int>(500, 2 * usv.size());
 
     return bwa;
 }
