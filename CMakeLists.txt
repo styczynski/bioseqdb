@@ -17,6 +17,7 @@ find_library(HTS_LIBRARIES hts REQUIRED)
 add_library(bioseqdb_pg SHARED
         bioseqdb_pg/bwa.cpp
         bioseqdb_pg/extension.cpp
+        bioseqdb_pg/sequence.cpp
         )
 add_executable(bioseqdb_import
         bioseqdb_import/main.cpp
