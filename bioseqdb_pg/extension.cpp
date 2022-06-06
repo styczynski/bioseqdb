@@ -140,8 +140,21 @@ Portal iterate_nuclseq_table(const char* sql, Oid nuclseq_oid, F f) {
 
 }
 
+int32_t get_opt_or(HeapTupleHeader opts, const char *name, int32_t defval) {
+    bool null = false;
+    Datum val = GetAttributeByName(opts, name, &null);
+    if (null)
+        return defval;
 
-BwaIndex bwa_index_from_query(const char* sql, Oid nuclseq_oid) {
+    int32_t num = DatumGetInt32(val);
+
+    if(num < 0)
+        raise_pg_error(ERRCODE_INVALID_PARAMETER_VALUE, errmsg("bwa_opt %s must be nonnegative", name));
+
+    return num;
+}
+
+BwaIndex bwa_index_from_query(const char* sql, HeapTupleHeader opts, Oid nuclseq_oid) {
     BwaIndex bwa;
     size_t count = 0;
 
@@ -150,7 +163,19 @@ BwaIndex bwa_index_from_query(const char* sql, Oid nuclseq_oid) {
         count++;
     });
     SPI_cursor_close(portal);
-    bwa.options->max_occ = std::max<int>(500, count * 2);
+    bwa.options->max_occ = get_opt_or(opts, "max_occ", std::max<int>(500, count * 2));
+    bwa.options->min_seed_len = get_opt_or(opts, "min_seed_len", 19);
+    bwa.options->a = get_opt_or(opts, "match_score", 1);
+    bwa.options->b = get_opt_or(opts, "mismatch_penalty", 4);
+    bwa.options->pen_clip3 = get_opt_or(opts, "pen_clip3", 5);
+    bwa.options->pen_clip5 = get_opt_or(opts, "pen_clip5", 5);
+    bwa.options->zdrop = get_opt_or(opts, "zdrop", 100);
+    bwa.options->w = get_opt_or(opts, "bandwidth", 100);
+    bwa.options->o_del = get_opt_or(opts, "o_del", 6);
+    bwa.options->o_ins = get_opt_or(opts, "o_ins", 6);
+    bwa.options->e_del = get_opt_or(opts, "e_del", 1);
+    bwa.options->e_ins = get_opt_or(opts, "e_ins", 1);
+
     bwa.build();
 
     return bwa;
@@ -236,6 +261,7 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
 
     auto nucls = reinterpret_cast<const NucleotideSequence*>(PG_DETOAST_DATUM(PG_GETARG_POINTER(0)));
     const char* reference_sql = PG_GETARG_CSTRING(1);
+    HeapTupleHeader opts = PG_GETARG_HEAPTUPLEHEADER(2);
 
     if (int ret = SPI_connect(); ret < 0)
         elog(ERROR, "connectby: SPI_connect returned %d", ret);
@@ -243,7 +269,7 @@ Datum nuclseq_search_bwa(PG_FUNCTION_ARGS) {
     TupleDesc ret_tupdesc = get_retval_tupledesc(fcinfo);
 
     Oid nuclseq_oid = TupleDescAttr(ret_tupdesc, 1)->atttypid;
-    BwaIndex bwa = bwa_index_from_query(reference_sql, nuclseq_oid);
+    BwaIndex bwa = bwa_index_from_query(reference_sql, opts, nuclseq_oid);
     SPI_finish();
 
     Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdesc);
@@ -270,13 +296,14 @@ Datum nuclseq_multi_search_bwa(PG_FUNCTION_ARGS) {
 
     const char* query_sql = PG_GETARG_CSTRING(0);
     const char* reference_sql = PG_GETARG_CSTRING(1);
+    HeapTupleHeader opts = PG_GETARG_HEAPTUPLEHEADER(2);
 
     if (int ret = SPI_connect(); ret < 0)
         elog(ERROR, "connectby: SPI_connect returned %d", ret);
 
     TupleDesc ret_tupdesc = get_retval_tupledesc(fcinfo);
     Oid nuclseq_oid = TupleDescAttr(ret_tupdesc, 1)->atttypid;
-    BwaIndex bwa = bwa_index_from_query(reference_sql, nuclseq_oid);
+    BwaIndex bwa = bwa_index_from_query(reference_sql, opts, nuclseq_oid);
     Tuplestorestate* ret_tupstore = create_tuplestore(rsi, ret_tupdesc);
     AttInMetadata* attr_input_meta = TupleDescGetAttInMetadata(ret_tupdesc);
 

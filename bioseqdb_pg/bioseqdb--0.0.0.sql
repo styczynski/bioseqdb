@@ -38,6 +38,42 @@ CREATE FUNCTION nuclseq_reverse(NUCLSEQ)
     AS 'MODULE_PATHNAME'
     LANGUAGE C IMMUTABLE STRICT;
 
+CREATE TYPE bwa_options AS (
+	min_seed_len INTEGER,
+	max_occ INTEGER,
+	match_score INTEGER,
+	mismatch_penalty INTEGER,
+	pen_clip3 INTEGER,
+	pen_clip5 INTEGER,
+	zdrop INTEGER,
+	bandwidth INTEGER,
+	o_del INTEGER,
+	e_del INTEGER,
+	o_ins INTEGER,
+	e_ins INTEGER
+);
+
+CREATE FUNCTION bwa_opts(
+	min_seed_len INTEGER DEFAULT 19,
+	max_occ INTEGER DEFAULT NULL,
+	match_score INTEGER DEFAULT 1,
+	mismatch_penalty INTEGER DEFAULT 4,
+	pen_clip3 INTEGER DEFAULT 5,
+	pen_clip5 INTEGER DEFAULT 5,
+	zdrop INTEGER DEFAULT 100,
+	bandwidth INTEGER DEFAULT 100,
+	o_del INTEGER DEFAULT 6,
+	o_ins INTEGER DEFAULT 6,
+	e_del INTEGER DEFAULT 1,
+	e_ins INTEGER DEFAULT 1
+) RETURNS bwa_options AS $$ 
+	SELECT ROW(
+		min_seed_len, max_occ, match_score, mismatch_penalty,
+		pen_clip3, pen_clip5, zdrop, bandwidth,
+		o_del, o_ins, e_del, e_ins
+	) as opts
+$$ LANGUAGE SQL IMMUTABLE STRICT;
+
 CREATE TYPE bwa_result AS (
     ref_id BIGINT,
     ref_subseq NUCLSEQ,
@@ -56,12 +92,12 @@ CREATE TYPE bwa_result AS (
     score INTEGER
 );
 
-CREATE FUNCTION nuclseq_search_bwa(query_sequence NUCLSEQ, reference_sql CSTRING)
+CREATE FUNCTION nuclseq_search_bwa(query_sequence NUCLSEQ, reference_sql CSTRING, opts bwa_options DEFAULT bwa_opts())
     RETURNS SETOF bwa_result
     AS 'MODULE_PATHNAME'
     LANGUAGE C STABLE STRICT;
 
-CREATE FUNCTION nuclseq_multi_search_bwa(query_sql CSTRING, reference_sql CSTRING)
+CREATE FUNCTION nuclseq_multi_search_bwa(query_sql CSTRING, reference_sql CSTRING, opts bwa_options DEFAULT bwa_opts())
     RETURNS SETOF bwa_result
     AS 'MODULE_PATHNAME'
     LANGUAGE C STABLE STRICT;
