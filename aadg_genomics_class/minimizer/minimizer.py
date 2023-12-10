@@ -58,13 +58,17 @@ def get_minimizers(
     r_seq_arr = sequence_complement(seq_arr)
     mask = generate_mask(kmer_len)
 
+    # Function to compute kmer value based on the previous (on the left side) kmer value and new nucleotide
     uadd = np.frompyfunc(lambda x, y: ((x << 2) | y) & mask, 2, 1)
+
+    # This computes values for kmers
     kmers = uadd.accumulate(seq_arr, dtype=object).astype(int)
     kmers[:kmer_len-2] = 0
 
     r_kmers = uadd.accumulate(r_seq_arr, dtype=object).astype(int)
     r_kmers[:kmer_len-2] = 0
 
+    # Do sliding window and get min kmers positions
     kmers_min_pos, r_kmers_min_pos = _get_kmers_min_pos(
         sequence_len=sequence_len,
         mask=mask,
@@ -75,26 +79,32 @@ def get_minimizers(
         kmer_len=kmer_len,
     )
 
-    tt = np.argmin(np.column_stack((
+    # Select min from kmer and r_kmer
+    select_min_from_kmer_r_kmer = np.argmin(np.column_stack((
         r_kmers[r_kmers_min_pos],
         kmers[kmers_min_pos],
     )), axis=1).astype(dtype=bool)
 
-    u = np.column_stack((
-        np.where(tt, kmers[kmers_min_pos], r_kmers[r_kmers_min_pos]),
-        np.where(tt, kmers_min_pos, r_kmers_min_pos),
-        tt,
+    # Now collect all selected mimumum and kmers into single table
+    selected_kmers = np.column_stack((
+        np.where(select_min_from_kmer_r_kmer, kmers[kmers_min_pos], r_kmers[r_kmers_min_pos]),
+        np.where(select_min_from_kmer_r_kmer, kmers_min_pos, r_kmers_min_pos),
+        select_min_from_kmer_r_kmer,
     ))[kmer_len:]
 
-    u = u[u[:, 0].argsort()]
+    # Remove duplicates
+    selected_kmers = selected_kmers[selected_kmers[:, 0].argsort()]
 
-    a = np.unique(u, axis=0)
-    unique_idx = np.unique(a[:, 0], return_index=True)[1][1:]
-    zzz = np.split(a[:, 1:], unique_idx)
+    # This part performs group by using the kmer value
+    selected_kmers_unique = np.unique(selected_kmers, axis=0)
+    selected_kmers_unique_idx = np.unique(selected_kmers_unique[:, 0], return_index=True)[1][1:]
+    selected_kmers_entries_split = np.split(selected_kmers_unique[:, 1:], selected_kmers_unique_idx)
 
     if len(a) > 0:
-        result = dict(zip(chain([a[0, 0]], a[unique_idx, 0]), zzz))
+        # We zip all kmers into a dict
+        result = dict(zip(chain([selected_kmers_unique[0, 0]], selected_kmers_unique[selected_kmers_unique_idx, 0]), selected_kmers_entries_split))
     else:
+        # If we have no minimizers we return nothing, sorry
         result = dict()
 
     return MinimizerIndex(
