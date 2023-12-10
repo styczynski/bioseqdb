@@ -100,7 +100,7 @@ def get_minimizers(
     selected_kmers_unique_idx = np.unique(selected_kmers_unique[:, 0], return_index=True)[1][1:]
     selected_kmers_entries_split = np.split(selected_kmers_unique[:, 1:], selected_kmers_unique_idx)
 
-    if len(a) > 0:
+    if len(selected_kmers_unique) > 0:
         # We zip all kmers into a dict
         result = dict(zip(chain([selected_kmers_unique[0, 0]], selected_kmers_unique[selected_kmers_unique_idx, 0]), selected_kmers_entries_split))
     else:
