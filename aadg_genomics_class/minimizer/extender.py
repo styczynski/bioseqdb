@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Tuple
 from .minimizer import MinimizerIndex
+import numba as nb
 
 def cartesian_product(*arrays):
     la = len(arrays)
@@ -20,31 +21,15 @@ class RegionMatch:
     q_end: int
     lis_length: int
 
-# (t_begin, t_end, q_begin, q_end)
-
-def find_longest_increasing_subsequence(
+@nb.njit(cache=True)
+def _longest_increasing_subsequence_impl(
+    n,
     matches,
 ):
-    n = len(matches)
-
     if n == 0:
-        return RegionMatch(
-            t_begin=0,
-            t_end=0,
-            q_begin=0,
-            q_end=0,
-            lis_length=0,
-        )
-    
+        return 0, 0, 0, 0, 0
     if n == 1:
-        return RegionMatch(
-            t_begin=matches[0, 1],
-            t_end=matches[0, 1],
-            q_begin=matches[0, 0],
-            q_end=matches[0, 0],
-            lis_length=1,
-        )
-
+        return matches[0, 1], matches[0, 1], matches[0, 0], matches[0, 0], 1
     longest_seq_len = 0
     parent = [999999999]*(n+1)
     increasingSub = [999999999]*(n+1)
@@ -66,13 +51,22 @@ def find_longest_increasing_subsequence(
     current_node = increasingSub[longest_seq_len]
     for j in range(longest_seq_len-1, 0, -1):
         current_node = parent[current_node]
-    
+    return matches[current_node, 1], matches[increasingSub[longest_seq_len-1], 1], matches[current_node, 0], matches[increasingSub[longest_seq_len-1], 0], n,
+
+def find_longest_increasing_subsequence(
+    matches,
+):
+    n = len(matches)
+    t_begin, t_end, q_begin, q_end, lis_length = _longest_increasing_subsequence_impl(
+        n=n,
+        matches=matches,
+    )
     return RegionMatch(
-        t_begin=matches[current_node, 1],
-        t_end=matches[increasingSub[longest_seq_len-1], 1],
-        q_begin=matches[current_node, 0],
-        q_end=matches[increasingSub[longest_seq_len-1], 0],
-        lis_length=n,
+        t_begin=t_begin,
+        t_end=t_end,
+        q_begin=q_begin,
+        q_end=q_end,
+        lis_length=lis_length,
     )
 
 def extend(

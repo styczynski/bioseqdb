@@ -15,6 +15,7 @@ pydantic = "^2.5.2"
 asciitree = "^0.3.3"
 termcolor = "^2.4.0"
 click = "^8.1.7"
+numba = "^0.58.1"
 
 
 [build-system]

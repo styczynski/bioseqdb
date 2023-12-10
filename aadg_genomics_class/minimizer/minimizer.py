@@ -4,6 +4,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 from dataclasses import dataclass
 from typing import Dict, Any, Set, Optional
 from aadg_genomics_class.sequences import sequence_complement
+from numba import njit
 
 MASKS: Optional[Dict[int, int]] = None
 MAX_KMER_SIZE = 64
@@ -25,6 +26,21 @@ class MinimizerIndex:
     index: Dict[int, Any]
     kmers: Set[int]
 
+@njit(cache=True)
+def _get_kmers_min_pos(
+    sequence_len,
+    mask,
+    r_seq_arr,
+    kmers,
+    r_kmers,
+    window_len,
+    kmer_len,
+):
+    kmers_min_pos = np.add(np.argmin(sliding_window_view(kmers, window_shape=window_len), axis=1), np.arange(0, sequence_len - window_len + 1))
+    r_kmers_min_pos = np.add(np.argmin(sliding_window_view(r_kmers, window_shape=window_len), axis=1), np.arange(0, sequence_len - window_len + 1))
+    return kmers_min_pos, r_kmers_min_pos
+
+
 def get_minimizers(
     seq_arr,
     kmer_len,
@@ -33,19 +49,24 @@ def get_minimizers(
 
     sequence_len = len(seq_arr)
     r_seq_arr = sequence_complement(seq_arr)
-
     mask = generate_mask(kmer_len)
 
     uadd = np.frompyfunc(lambda x, y: ((x << 2) | y) & mask, 2, 1)
-    # We take into account only kmers[kmer_len-1:]
     kmers = uadd.accumulate(seq_arr, dtype=object).astype(int)
     kmers[:kmer_len-2] = 0
 
     r_kmers = uadd.accumulate(r_seq_arr, dtype=object).astype(int)
     r_kmers[:kmer_len-2] = 0
 
-    kmers_min_pos = np.add(np.argmin(sliding_window_view(kmers, window_shape=window_len), axis=1), range(sequence_len - window_len + 1))
-    r_kmers_min_pos = np.add(np.argmin(sliding_window_view(r_kmers, window_shape=window_len), axis=1), range(sequence_len - window_len + 1))
+    kmers_min_pos, r_kmers_min_pos = _get_kmers_min_pos(
+        sequence_len=sequence_len,
+        mask=mask,
+        r_seq_arr=r_seq_arr,
+        kmers=kmers,
+        r_kmers=r_kmers,
+        window_len=window_len,
+        kmer_len=kmer_len,
+    )
 
     tt = np.argmin(np.column_stack((
         r_kmers[r_kmers_min_pos],
@@ -63,6 +84,7 @@ def get_minimizers(
     a = np.unique(u, axis=0)
     unique_idx = np.unique(a[:, 0], return_index=True)[1][1:]
     zzz = np.split(a[:, 1:], unique_idx)
+
     if len(a) > 0:
         result = dict(zip(chain([a[0, 0]], a[unique_idx, 0]), zzz))
     else:

@@ -1,5 +1,7 @@
 import numpy as np
+from numba import njit
 
+@njit(cache=True, fastmath=True)
 def nw_align(x, y, match = 1, mismatch = 1, gap = 1):
     nx = len(x)
     ny = len(y)
