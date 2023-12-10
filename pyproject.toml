@@ -8,6 +8,10 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.11"
+tqdm = "^4.66.1"
+numpy = "^1.26.2"
+biopython = "^1.81"
+pydantic = "^2.5.2"
 
 
 [build-system]

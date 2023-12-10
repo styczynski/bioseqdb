@@ -1,2 +1,5 @@
 .DS_Store
 *.pyi
+SequenceAligner/
+__pycache__/**
+__pycache__/
