@@ -12,6 +12,8 @@ tqdm = "^4.66.1"
 numpy = "^1.26.2"
 biopython = "^1.81"
 pydantic = "^2.5.2"
+asciitree = "^0.3.3"
+termcolor = "^2.4.0"
 
 
 [build-system]

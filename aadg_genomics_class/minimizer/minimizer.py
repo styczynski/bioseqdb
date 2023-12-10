@@ -63,8 +63,10 @@ def get_minimizers(
     a = np.unique(u, axis=0)
     unique_idx = np.unique(a[:, 0], return_index=True)[1][1:]
     zzz = np.split(a[:, 1:], unique_idx)
-
-    result = dict(zip(chain([a[0, 0]], a[unique_idx, 0]), zzz))
+    if len(a) > 0:
+        result = dict(zip(chain([a[0, 0]], a[unique_idx, 0]), zzz))
+    else:
+        result = dict()
 
     return MinimizerIndex(
         index=result,
