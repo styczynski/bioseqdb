@@ -52,7 +52,6 @@ def run_aligner_pipeline(
                             )
 
                         with query_task.task('Align'):
-                            #LOGS.cli.info(f"Align: '{query_id}' {region_match.t_begin} -> {region_match.t_end} | {region_match.q_begin} -> {region_match.q_end}")
                             t_begin, t_end = align(
                                 region=region_match,
                                 target_seq=reference_records[reference_ids[0]],
