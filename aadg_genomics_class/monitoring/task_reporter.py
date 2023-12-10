@@ -1,3 +1,10 @@
+"""
+  Utilities to manage failure and time reporting for arbitrary structured operations.
+
+  @Piotr Styczyński 2023 <piotr@styczynski.in>
+  MIT LICENSE
+  Algorithms for genomic data analysis | AADG | MIM UW | Bioinformatyka
+"""
 from __future__ import annotations
 import time
 import math

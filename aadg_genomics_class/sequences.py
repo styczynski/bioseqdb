@@ -1,3 +1,10 @@
+"""
+  Generic sequence utilities
+
+  @Piotr Styczyński 2023 <piotr@styczynski.in>
+  MIT LICENSE
+  Algorithms for genomic data analysis | AADG | MIM UW | Bioinformatyka
+"""
 from Bio import SeqRecord, SeqIO
 import numpy as np
 from typing import Iterable

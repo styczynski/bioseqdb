@@ -1,3 +1,10 @@
+"""
+  Implementation of universal sequence aligner
+
+  @Piotr Styczyński 2023 <piotr@styczynski.in>
+  MIT LICENSE
+  Algorithms for genomic data analysis | AADG | MIM UW | Bioinformatyka
+"""
 from aadg_genomics_class.minimizer.extender import RegionMatch
 from .needleman_wunsch import nw_align
 
@@ -10,6 +17,9 @@ def align(
     query_seq,
     kmer_len,
     full_query_len,
+    score_match,
+    score_mismatch,
+    score_gap,
 ):
     relative_extension = kmer_len*3
 
@@ -20,8 +30,11 @@ def align(
     t_begin, t_end = normalize_pos(t_begin, len(target_seq)), normalize_pos(t_end, len(target_seq))
 
     t_pad_left, t_pad_right, q_pad_left, q_pad_right = nw_align(
-        target_seq[t_begin:t_end],
-        query_seq[q_begin:q_end],
+        target=target_seq[t_begin:t_end],
+        query=query_seq[q_begin:q_end],
+        score_match=score_match,
+        score_mismatch=score_mismatch,
+        score_gap=score_gap,
     )
 
     q_begin, q_end = q_begin + t_pad_left, q_end - t_pad_right

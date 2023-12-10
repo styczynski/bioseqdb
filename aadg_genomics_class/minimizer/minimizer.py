@@ -1,3 +1,10 @@
+"""
+  Utilities to operate on (k, w)-minimizers
+
+  @Piotr Styczyński 2023 <piotr@styczynski.in>
+  MIT LICENSE
+  Algorithms for genomic data analysis | AADG | MIM UW | Bioinformatyka
+"""
 import numpy as np
 from itertools import chain
 from numpy.lib.stride_tricks import sliding_window_view
