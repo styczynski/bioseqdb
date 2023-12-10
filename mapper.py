@@ -13,8 +13,13 @@ import sys
 import subprocess
 
 def install_poetry():
-    rc = subprocess.call(['poetry', '--version'])
-    if rc != 0:
+    missing = False
+    try:
+        rc = subprocess.call(['poetry', '--version'])
+        missing = (rc != 0)
+    except:
+        missing = True
+    if missing:
         print("Installing poetry (detected it's missing on the host system)")
         os.system("curl -sSL https://install.python-poetry.org | python3 -")
 
