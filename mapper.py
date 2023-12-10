@@ -22,10 +22,25 @@ def install_poetry():
     if missing:
         print("Installing poetry (detected it's missing on the host system)")
         os.system("curl -sSL https://install.python-poetry.org | python3 -")
+    missing = False
+    try:
+        rc = subprocess.call(['poetry', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        missing = (rc != 0)
+    except:
+        missing = True
+    return missing
 
 def call_poetry(*args):
     os.system(" ".join(["poetry", *args]))
 
-install_poetry()
+is_missing = install_poetry()
+if is_missing:
+    print(" -- OH NOES! --")
+    print("| There's a problem with the Poetry installation.")
+    print("| Please restart the command line or install Poetry manually")
+    print("| You can do it by going to: https://python-poetry.org/docs/#installing-with-pipx")
+    print("| Sorry for the inconvenience")
+    print("")
+    sys.exit(1)
 call_poetry("install")
 call_poetry("run", "python3", "aadg_genomics_class/cli.py", *sys.argv[1:])
