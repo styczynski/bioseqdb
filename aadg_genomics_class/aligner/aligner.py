@@ -9,11 +9,12 @@ def align(
     target_seq,
     query_seq,
     kmer_len,
+    full_query_len,
 ):
     relative_extension = kmer_len*3
 
     q_begin, q_end = region.q_begin-relative_extension, region.q_end+(kmer_len-1)+relative_extension
-    t_begin, t_end = region.t_begin-relative_extension, region.t_end+(kmer_len-1)+relative_extension
+    t_begin, t_end = region.t_begin-relative_extension, min(region.t_end, region.t_begin + full_query_len)+(kmer_len-1)+relative_extension
 
     q_begin, q_end = normalize_pos(q_begin, len(query_seq)), normalize_pos(q_end, len(query_seq))
     t_begin, t_end = normalize_pos(t_begin, len(target_seq)), normalize_pos(t_end, len(target_seq))
