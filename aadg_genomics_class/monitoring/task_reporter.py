@@ -13,6 +13,10 @@ import traceback
 from aadg_genomics_class.monitoring.logs import LOGS
 from termcolor import colored
 
+import linecache
+import os
+import tracemalloc
+
 from asciitree import LeftAligned
 from collections import OrderedDict as OD
 
@@ -31,6 +35,34 @@ def _format_time(start, end, max_time):
         elapsed_time_str = f"{math.floor(elapsed_time_ms / 100)/10} s"
     return colored(elapsed_time_str, color)
 
+def monitor_mem_snapshot(task_name, event='unknown', key_type='lineno', limit=8):
+    LOGS.reporter.info("Collecting memory snapshot...")
+    snapshot = tracemalloc.take_snapshot().filter_traces((
+        tracemalloc.Filter(False, "<frozen importlib._bootstrap>"),
+        tracemalloc.Filter(False, "<unknown>"),
+    ))
+    top_stats = snapshot.statistics(key_type)
+
+    print(f"==> Memory usage for task '{task_name}' (event: {event}): Top %s lines" % limit)
+    for index, stat in enumerate(top_stats[:limit], 1):
+        frame = stat.traceback[0]
+        # replace "/path/to/module/file.py" with "module/file.py"
+        filename = os.sep.join(frame.filename.split(os.sep)[-2:])
+        print("    | #%s: %s:%s: %.1f KiB"
+              % (index, filename, frame.lineno, stat.size / 1024))
+        line = linecache.getline(frame.filename, frame.lineno).strip()
+        if line:
+            print('    |     %s' % line)
+
+    other = top_stats[limit:]
+    if other:
+        size = sum(stat.size for stat in other)
+        print("    | %s other: %.1f KiB" % (len(other), size / 1024))
+    total = sum(stat.size for stat in top_stats)
+    print("    | Total allocated size: %.1f KiB" % (total / 1024))
+    LOGS.reporter.info("Memory collection done.")
+
+
 class Task:
     def __init__(self, reporter: TaskReporter, parent: Optional[Task], name: str, is_failure: bool = False, extra_details: str = ""):
         self.reporter = reporter
@@ -45,10 +77,12 @@ class Task:
     
     def __enter__(self):
         self.reporter._open_task(self)
+        # monitor_mem_snapshot(self.name, event='start')
         return self
     
     def __exit__(self, exception_type, exception_value, exception_traceback):
         self.reporter._close_task(self)
+        # monitor_mem_snapshot(self.name, event='finish')
 
     def task(self, name: str):
         return Task(reporter=self.reporter, parent=self, name=name)
