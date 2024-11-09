@@ -8,11 +8,13 @@ import copy
 from aadg_genomics_class.monitoring.logs import LOGS
 from aadg_genomics_class.monitoring.task_reporter import TaskReporter, monitor_mem_snapshot
 from aadg_genomics_class import click_utils as click
+from aadg_genomics_class.new_aligner2 import align_seq
 
 from typing import Dict, Any, Set, Optional
 from itertools import chain
 from numpy.lib.stride_tricks import sliding_window_view
 
+import csv
 import tracemalloc
 
 import math
@@ -470,6 +472,11 @@ def run_aligner_pipeline(
     np.set_printoptions(threshold=sys.maxsize)
     LOGS.cli.info(f"Invoked CLI with the following args: {' '.join(sys.argv)}")
     
+    expected_coords = {}
+    with open('./data_big/reads20Ma.txt', mode ='r')as file:
+        csvFile = csv.reader(file, delimiter='\t')
+        expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
+
     with TaskReporter("Sequence read alignnment") as reporter:
 
         with reporter.task("Load target sequence"):
@@ -498,8 +505,8 @@ def run_aligner_pipeline(
 
         with open(output_file_path, 'w') as output_file:
             for (query_id, query_seq) in iter_sequences(SeqIO.parse(reads_file_path, "fasta")):
-                if query_id != 'read_8':
-                   continue
+                # if query_id != 'read_1':
+                #    continue
                 with reporter.task(f"Load query '{query_id}'") as query_task:
                     try:
 
@@ -618,7 +625,14 @@ def run_aligner_pipeline(
                             #     score_mismatch=score_mismatch,
                             #     score_gap=score_gap,
                             # )
-                            relative_extension = (kmer_len+window_len+2)*2
+
+                            relative_extension = kmer_len // 2 + 1
+
+                            if abs(match_end_t - match_start_t) > max_diff + relative_extension:
+                               # FAILED MAPPING!
+                               output_file.write(f"{query_id} status=FAIL\n")
+                               continue
+
                             target_seq = reference_records[reference_ids[0]]
 
                             q_begin, q_end = 0, len(query_seq)
@@ -651,19 +665,39 @@ def run_aligner_pipeline(
                             # q_begin, q_end = q_begin + t_pad_left, q_end - t_pad_right
                             # t_begin, t_end = t_begin + q_pad_left, t_end - q_pad_right
 
-                            t_begin_pad = run_hirschberge(target_seq[t_begin:t_end], query_seq[q_begin:500])
-                            t_end_pad = run_hirschberge(target_seq[t_begin+t_begin_pad:t_end][::-1], query_seq[500:q_end][::-1])
+                            if False:
+                                t_begin_pad = run_hirschberge(target_seq[t_begin:t_end], query_seq[q_begin:])
+                                t_end_pad = run_hirschberge(target_seq[t_begin+t_begin_pad:t_end][::-1], query_seq[:q_end][::-1])
+                                t_begin += t_begin_pad
+                                t_end -= t_end_pad
 
-                            # t_begin_pad, _ = run_hirschberge(target_seq[t_begin:t_end], query_seq[q_begin:500])
-                            # t_end_pad, _ = run_hirschberge(target_seq[t_begin:t_end][::-1], query_seq[100:q_end][::-1])
+                            t_begin_pad, t_end_pad = align_seq(
+                               "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
+                               "".join([RR_MAPPING[i] for i in query_seq.tolist()])
+                            )
 
                             t_begin += t_begin_pad
                             t_end -= t_end_pad
 
-                            print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
-                            # sys.exit(1)
+                            # print("TARGET!!!!")
+                            # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
+                            # print("QUERY!!!")
+                            # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
 
-                        output_file.write(f"{query_id} {t_begin} {t_end}\n")
+
+                            print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
+
+                               
+                            # sys.exit(1)
+                        if query_id in expected_coords:
+                           diff_start = expected_coords[query_id][0]-t_begin
+                           diff_end = expected_coords[query_id][1]-t_end
+                           print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
+                           status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
+                           qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
+                           output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end}\n")
+                        else:
+                            output_file.write(f"{query_id} {t_begin} {t_end}\n")
                     except Exception as e:
                         query_task.fail(e)
             LOGS.cli.info(f"Wrote records to {output_file_path}")
@@ -677,7 +711,7 @@ def run_aligner_pipeline(
 # opt2 (15, 5)
 # opt3 (20, 15)
 @click.option('--kmer-len', default=15, show_default=True)
-@click.option('--window-len', default=5, show_default=True)
+@click.option('--window-len', default=15, show_default=True)
 @click.option('--f', default=0.001, show_default=True, help="Portion of top frequent kmers to be removed from the index (must be in range 0 to 1 inclusive)")
 @click.option('--score-match', default=1, show_default=True)
 @click.option('--score-mismatch', default=5, show_default=True)
