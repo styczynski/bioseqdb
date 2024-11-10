@@ -16,6 +16,7 @@ asciitree = "^0.3.3"
 termcolor = "^2.4.0"
 click = "^8.1.7"
 psutil = "^6.1.0"
+memray = "^1.14.0"
 
 
 [build-system]

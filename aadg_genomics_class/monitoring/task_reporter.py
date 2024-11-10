@@ -81,6 +81,18 @@ def monitor_mem_snapshot(task_name, event='unknown', key_type='lineno', limit=8)
     LOGS.reporter.info("Memory collection done.")
 
 
+class EmptyTask:
+    def __enter__(self):
+        return self
+    def __exit__(self, exception_type, exception_value, exception_traceback):
+        pass
+    def task(self, name: str):
+        return EmptyTask()
+    def describe_task(self):
+        return ""
+    def fail(self, e: Exception):
+        raise e
+
 class Task:
     def __init__(self, reporter: TaskReporter, parent: Optional[Task], name: str, is_failure: bool = False, extra_details: str = ""):
         self.reporter = reporter
@@ -156,7 +168,8 @@ class TaskReporter:
         LOGS.reporter.info("Operation completed.")
 
     def task(self, name: str):
-        return Task(reporter=self, parent=None, name=name)
+        return EmptyTask()
+        #return Task(reporter=self, parent=None, name=name)
 
     def _open_task(self, task: Task):
         self.tasks[task.id] = task

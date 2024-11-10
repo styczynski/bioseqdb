@@ -5,3 +5,8 @@ __pycache__/**
 __pycache__/
 output.txt
 data_big/
+*bin
+*output*.txt
+*_dbg.txt
+trace.txt
+*.html

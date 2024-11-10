@@ -10,6 +10,7 @@ from aadg_genomics_class.monitoring.task_reporter import TaskReporter, monitor_m
 from aadg_genomics_class import click_utils as click
 from aadg_genomics_class.new_aligner2 import align_seq
 from aadg_genomics_class.new_aligner2np import doit
+from aadg_genomics_class.edit_check import levenshtein
 
 from typing import Dict, Any, Set, Optional
 from itertools import chain
@@ -388,6 +389,7 @@ def _get_kmers_min_pos(
     return kmers_min_pos, r_kmers_min_pos
 
 
+
 def get_minimizers(
     seq_arr,
     kmer_len,
@@ -457,6 +459,18 @@ def cartesian_product(*arrays):
         arr[...,i] = a
     return arr.reshape(-1, la)
 
+def estimate_distance(
+      a_arr,
+      b_arr,
+):
+    a = get_minimizers(a_arr, 10, 2)
+    b = get_minimizers(b_arr, 10, 2)
+    result = 0
+    for key in a:
+        if key in b:
+            result += 1
+    return result
+
 def run_aligner_pipeline(
     reference_file_path: str,
     reads_file_path: str,
@@ -474,7 +488,7 @@ def run_aligner_pipeline(
     LOGS.cli.info(f"Invoked CLI with the following args: {' '.join(sys.argv)}")
     
     expected_coords = {}
-    with open('./data_big/reads20Ma.txt', mode ='r')as file:
+    with open('./data_big/reads20Mb.txt', mode ='r')as file:
         csvFile = csv.reader(file, delimiter='\t')
         expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
 
@@ -510,7 +524,7 @@ def run_aligner_pipeline(
                    gc_collect_cnt = 0
                    gc.collect()
                 gc_collect_cnt += 1
-                # if query_id != 'read_99':
+                # if query_id not in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
                 #    continue
                 with reporter.task(f"Load query '{query_id}'") as query_task:
                     try:
@@ -551,9 +565,9 @@ def run_aligner_pipeline(
                             
                             match_score, match_start_t, match_end_t, match_start_q, match_end_q = -max_diff, 0, 0, 0, 0
 
-                            #print("ALL MATCH:")
-                            #print(matches)
-                            #print("END")
+                            # print("ALL MATCH:")
+                            # print(matches)
+                            # print("END")
 
                             if n == 0:
                                 pass
@@ -598,13 +612,13 @@ def run_aligner_pipeline(
                                         else:
                                             end = middle - 1
                                     # Window is i till end
-                                    #print(f"Start from {i} (till {start} whcih has value") #[{lis[start, 0]}, {lis[start, 1]}])
+                                    # print(f"Start from {i} (till {start} whcih has value") #[{lis[start, 0]}, {lis[start, 1]}])
                                     estimated_matches_q = (lis[start, 1] if start < longest_seq_len else max_diff) - lis[i, 1]
                                     estimated_matches_t = (lis[start, 0] if start < longest_seq_len else lis[start-1, 0]) - lis[i, 0]
                                     score = min(estimated_matches_q, estimated_matches_t)*min(estimated_matches_q, estimated_matches_t) - np.sum(np.diff(lis[i:start, 0], axis=0))
-                                    #print(lis[i:start])
-                                    #print(f"LAST ELEMENT IS {lis[i:start][-1]} where start={start} and l-1={longest_seq_len-1}")
-                                    #print(f"score = {score}")
+                                    # print(lis[i:start])
+                                    # print(f"LAST ELEMENT IS {lis[i:start][-1]} where start={start} and l-1={longest_seq_len-1}")
+                                    # print(f"score = {score}")
                                     if score > match_score:
                                         match_end_index_pos = max(i, min(start-1, longest_seq_len-1))
                                         match_score, match_start_t, match_end_t, match_start_q, match_end_q = score, lis[i, 0], lis[match_end_index_pos, 0], lis[i, 1], lis[match_end_index_pos, 1]
@@ -614,7 +628,7 @@ def run_aligner_pipeline(
 
                             #print(f"SCORE: Match score is {match_score}")
                             #print(f"SCORE: Match around {match_start_t} - {match_end_t}")
-                            # sys.exit(1)
+                            #sys.exit(1)
 
                             # q_begin, q_end, t_begin, t_end, list_length
 
@@ -683,21 +697,34 @@ def run_aligner_pipeline(
                             #         "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
                             #         "".join([RR_MAPPING[i] for i in query_seq.tolist()])
                             #     )
+                            realign_mode = 0
                             with query_task.task('Align Method=BWT'):
                                 t_begin_pad, t_end_pad, should_realign_right = doit(
                                     "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
                                     "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
                                 )
                                 
-                            if abs(t_end-(t_end_pad or 0)-t_begin-(t_begin_pad or 0)) > len(query_seq)*1.15:
-                               should_realign_right = True
-
                             if should_realign_right:
-                               #print("HMM? SHOULD REALIGN!!!! :000")
+                               realign_mode = 1
+                            if abs(t_end-(t_end_pad or 0)-t_begin-(t_begin_pad or 0)) > len(query_seq)*1.05:
+                               realign_mode = 2
+                               if t_begin_pad is not None:
+                                 t_begin += t_begin_pad
+                               if t_end_pad is not None:
+                                 t_end -= t_end_pad
+
+                            if realign_mode > 0:
+                            #    print(f"HMM? SHOULD REALIGN!!!! :000 ALIGN_MODE={realign_mode}")
                                with query_task.task('Align Method=REF'):
-                                    _, t_end_pad = align_seq(
+                                    # print("TARGET!!!!")
+                                    # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
+                                    # print("QUERY!!!")
+                                    # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
+
+                                    t_begin_pad, t_end_pad = align_seq(
                                         "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
-                                        "".join([RR_MAPPING[i] for i in query_seq.tolist()])
+                                        "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
+                                        align_mode=realign_mode,
                                     )
 
                             if t_begin_pad is not None:
@@ -716,13 +743,29 @@ def run_aligner_pipeline(
 
                                
                             # sys.exit(1)
+
+                            # print("TARGET!!!!")
+                            # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
+                            # print("QUERY!!!")
+                            # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
+
+                            #est_edit_dist = estimate_distance(target_seq[t_begin:t_end], query_seq) #levenshtein("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]), "".join([RR_MAPPING[i] for i in query_seq.tolist()]))
+                            # est_edit_dist = levenshtein(
+                            #    "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
+                            #    "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
+                            #    177, 2, 2, 1
+                            # )
+                            est_edit_dist = 0
+                            if est_edit_dist is None:
+                               est_edit_dist = 178
+
                         if query_id in expected_coords:
                            diff_start = expected_coords[query_id][0]-t_begin
                            diff_end = expected_coords[query_id][1]-t_end
                            #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
                            status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
                            qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
-                           output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED' if should_realign_right else ''}\n")
+                           output_file.write(f"{'FUCK' if est_edit_dist >= 177999 else 'X'} | {est_edit_dist} | {query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
                         else:
                             output_file.write(f"{query_id} {t_begin} {t_end}\n")
                     except Exception as e:
@@ -737,9 +780,9 @@ def run_aligner_pipeline(
 # First attempt:
 # opt2 (15, 5)
 # opt3 (20, 15)
-# TU BYŁO (15, 15)
-@click.option('--kmer-len', default=20, show_default=True)
-@click.option('--window-len', default=15, show_default=True)
+# TU BYŁO (20, 15)
+@click.option('--kmer-len', default=18, show_default=True)
+@click.option('--window-len', default=8, show_default=True)
 @click.option('--f', default=0.001, show_default=True, help="Portion of top frequent kmers to be removed from the index (must be in range 0 to 1 inclusive)")
 @click.option('--score-match', default=1, show_default=True)
 @click.option('--score-mismatch', default=5, show_default=True)

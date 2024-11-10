@@ -4,9 +4,7 @@
 # Algorithms for genomic data analysis | AADG | MIM UW | Bioinformatyka
 #
 import numpy as np
-from numba import njit
 
-@njit(cache=True, fastmath=True)
 def nw_align(
     target,
     query,
