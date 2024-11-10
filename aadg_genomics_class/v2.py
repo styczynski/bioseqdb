@@ -9,6 +9,7 @@ from aadg_genomics_class.monitoring.logs import LOGS
 from aadg_genomics_class.monitoring.task_reporter import TaskReporter, monitor_mem_snapshot
 from aadg_genomics_class import click_utils as click
 from aadg_genomics_class.new_aligner2 import align_seq
+from aadg_genomics_class.new_aligner2np import doit
 
 from typing import Dict, Any, Set, Optional
 from itertools import chain
@@ -505,7 +506,7 @@ def run_aligner_pipeline(
 
         with open(output_file_path, 'w') as output_file:
             for (query_id, query_seq) in iter_sequences(SeqIO.parse(reads_file_path, "fasta")):
-                # if query_id != 'read_1':
+                # if query_id != 'read_4':
                 #    continue
                 with reporter.task(f"Load query '{query_id}'") as query_task:
                     try:
@@ -546,9 +547,9 @@ def run_aligner_pipeline(
                             
                             match_score, match_start_t, match_end_t, match_start_q, match_end_q = -max_diff, 0, 0, 0, 0
 
-                            # print("ALL MATCH:")
-                            # print(matches)
-                            # print("END")
+                            #print("ALL MATCH:")
+                            #print(matches)
+                            #print("END")
 
                             if n == 0:
                                 pass
@@ -593,20 +594,22 @@ def run_aligner_pipeline(
                                         else:
                                             end = middle - 1
                                     # Window is i till end
-                                    # print(f"Start from {i}")
+                                    #print(f"Start from {i} (till {start} whcih has value") #[{lis[start, 0]}, {lis[start, 1]}])
                                     estimated_matches_q = (lis[start, 1] if start < longest_seq_len else max_diff) - lis[i, 1]
                                     estimated_matches_t = (lis[start, 0] if start < longest_seq_len else lis[start-1, 0]) - lis[i, 0]
                                     score = min(estimated_matches_q, estimated_matches_t)*min(estimated_matches_q, estimated_matches_t) - np.sum(np.diff(lis[i:start, 0], axis=0))
-                                    # print(lis[i:start])
-                                    # print(f"score = {score}")
+                                    #print(lis[i:start])
+                                    #print(f"LAST ELEMENT IS {lis[i:start][-1]} where start={start} and l-1={longest_seq_len-1}")
+                                    #print(f"score = {score}")
                                     if score > match_score:
-                                        match_end_index_pos = min(start, longest_seq_len-1)
+                                        match_end_index_pos = max(i, min(start-1, longest_seq_len-1))
                                         match_score, match_start_t, match_end_t, match_start_q, match_end_q = score, lis[i, 0], lis[match_end_index_pos, 0], lis[i, 1], lis[match_end_index_pos, 1]
+                                        #print(f"ACCEPTED SCORE: {match_start_t} - {match_end_t}")
                                     if start == longest_seq_len:
                                         break
 
-                            # print(f"RESULT: max score is {max_score}")
-                            # print(f"RESULT: Match around {max_start} - {max_end}")
+                            print(f"SCORE: Match score is {match_score}")
+                            print(f"SCORE: Match around {match_start_t} - {match_end_t}")
                             # sys.exit(1)
 
                             # q_begin, q_end, t_begin, t_end, list_length
@@ -630,6 +633,7 @@ def run_aligner_pipeline(
 
                             if abs(match_end_t - match_start_t) > max_diff + relative_extension:
                                # FAILED MAPPING!
+                               print(f"Failed sequence, reason: {match_start_t} - {match_end_t} ({abs(match_end_t - match_start_t)})")
                                output_file.write(f"{query_id} status=FAIL\n")
                                continue
 
@@ -671,13 +675,33 @@ def run_aligner_pipeline(
                                 t_begin += t_begin_pad
                                 t_end -= t_end_pad
 
-                            t_begin_pad, t_end_pad = align_seq(
-                               "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
-                               "".join([RR_MAPPING[i] for i in query_seq.tolist()])
-                            )
+                            # with query_task.task('Align Method=REF'):
+                            #     t_begin_pad, t_end_pad = align_seq(
+                            #         "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
+                            #         "".join([RR_MAPPING[i] for i in query_seq.tolist()])
+                            #     )
+                            with query_task.task('Align Method=BWT'):
+                                t_begin_pad, t_end_pad, should_realign_right = doit(
+                                    "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
+                                    "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
+                                )
+                                
+                            if abs(t_end-(t_end_pad or 0)-t_begin-(t_begin_pad or 0)) > len(query_seq)*1.15:
+                               should_realign_right = True
 
-                            t_begin += t_begin_pad
-                            t_end -= t_end_pad
+                            if should_realign_right:
+                               print("HMM? SHOULD REALIGN!!!! :000")
+                               with query_task.task('Align Method=REF'):
+                                    t_begin_pad, t_end_pad = align_seq(
+                                        "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
+                                        "".join([RR_MAPPING[i] for i in query_seq.tolist()])
+                                    )
+
+                            if t_begin_pad is not None:
+                                t_begin += t_begin_pad
+                            if t_end_pad is not None:
+                                t_end -= t_end_pad
+
 
                             # print("TARGET!!!!")
                             # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
@@ -695,7 +719,7 @@ def run_aligner_pipeline(
                            print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
                            status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
                            qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
-                           output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end}\n")
+                           output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED' if should_realign_right else ''}\n")
                         else:
                             output_file.write(f"{query_id} {t_begin} {t_end}\n")
                     except Exception as e:

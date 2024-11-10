@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 import math
 import uuid
+import psutil
 import traceback
 from aadg_genomics_class.monitoring.logs import LOGS
 from termcolor import colored
@@ -19,6 +20,23 @@ import tracemalloc
 
 from asciitree import LeftAligned
 from collections import OrderedDict as OD
+
+def current_mem():
+    process = psutil.Process()
+    return (process.memory_info().rss)
+
+def _format_process_mem(entry_mem, exit_mem):
+    entry_kb = entry_mem // 1000
+    exit_kb = exit_mem // 1000
+    avg_kb = round((entry_kb + exit_kb) / 2)
+
+    color = 'light_green'
+    if avg_kb > 900000:
+        color = 'light_yellow'
+    elif avg_kb > 1000000:
+        color = 'light_red'
+
+    return colored(f"{round(avg_kb/100)/10} MB", color)
 
 def _format_time(start, end, max_time):
     time_diff = end - start
@@ -69,6 +87,8 @@ class Task:
         self.id = uuid.uuid1()
         self.start = None
         self.end = None
+        self.start_mem_process = 0
+        self.end_mem_process = 0
         self.parent = parent
         self.level = parent.level + 1 if parent else 0
         self.name = name
@@ -98,7 +118,7 @@ class Task:
     def describe_task(self):
         if self.is_failure:
             return f"{colored('Critical failure reported:', 'red')} {colored(self.name, 'red')}\n{colored(self.extra_details, 'light_red')}"
-        return f"{colored(self.name, 'light_grey')} ({_format_time(self.start, self.end, self.reporter.max_task_time)})"
+        return f"{colored(self.name, 'light_grey')} ({_format_time(self.start, self.end, self.reporter.max_task_time)}) [memory: {_format_process_mem(self.start_mem_process, self.end_mem_process)}]"
 
 class TaskReporter:
 
@@ -148,6 +168,7 @@ class TaskReporter:
             LOGS.reporter.info(f"Starting task: {task.name}")
             self.root_tasks.append(task.id)
         task.start = time.time()
+        task.start_mem_process = current_mem()
 
     def _close_task(self, task: Task):
         self.tasks[task.id] = task
@@ -156,6 +177,7 @@ class TaskReporter:
         if not task.start:
             task.start = time.time()
         task.end = time.time()
+        task.end_mem_process = current_mem()
 
     def _format_to_ordered_dict(self, node: uuid.UUID):
         return OD([(self.tasks[child_id].describe_task(), self._format_to_ordered_dict(child_id)) for child_id in self.children[node]])
