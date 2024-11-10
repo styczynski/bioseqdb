@@ -502,10 +502,14 @@ def run_aligner_pipeline(
             #     target_index_task.fail(e)
 
         #monitor_mem_snapshot('CHECKPOINT_0')
-        gc.collect()
 
+        gc_collect_cnt = 300
         with open(output_file_path, 'w') as output_file:
             for (query_id, query_seq) in iter_sequences(SeqIO.parse(reads_file_path, "fasta")):
+                if gc_collect_cnt > 299:
+                   gc_collect_cnt = 0
+                   gc.collect()
+                gc_collect_cnt += 1
                 # if query_id != 'read_99':
                 #    continue
                 with reporter.task(f"Load query '{query_id}'") as query_task:
@@ -615,7 +619,6 @@ def run_aligner_pipeline(
                             # q_begin, q_end, t_begin, t_end, list_length
 
                         with query_task.task('Align'):
-                            gc.collect()
                             #print(f"Alignment around: {match_start_t} - {match_end_t} (query: {match_start_q} - {match_end_q})")
                             #monitor_mem_snapshot('CHECKPOINT_1')
                             # t_begin, t_end = align(
@@ -647,7 +650,7 @@ def run_aligner_pipeline(
                             q_begin, q_end = normalize_pos(q_begin, len(query_seq)), normalize_pos(q_end, len(query_seq))
                             t_begin, t_end = normalize_pos(t_begin, len(target_seq)), normalize_pos(t_end, len(target_seq))
 
-                            print(f"PRE-ALIGNED: {t_begin} - {t_end} (query: {q_begin} - {q_end})")
+                            #print(f"PRE-ALIGNED: {t_begin} - {t_end} (query: {q_begin} - {q_end})")
                             # for record in SeqIO.parse(reference_file_path, "fasta"):
                             #     found_pos = str(record.seq).find("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
                             #     print(f"ACTUAL TARGET POS VALIDATED: {found_pos}")
@@ -690,9 +693,9 @@ def run_aligner_pipeline(
                                should_realign_right = True
 
                             if should_realign_right:
-                               print("HMM? SHOULD REALIGN!!!! :000")
+                               #print("HMM? SHOULD REALIGN!!!! :000")
                                with query_task.task('Align Method=REF'):
-                                    t_begin_pad, t_end_pad = align_seq(
+                                    _, t_end_pad = align_seq(
                                         "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
                                         "".join([RR_MAPPING[i] for i in query_seq.tolist()])
                                     )
@@ -709,14 +712,14 @@ def run_aligner_pipeline(
                             # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
 
 
-                            print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
+                            #print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
 
                                
                             # sys.exit(1)
                         if query_id in expected_coords:
                            diff_start = expected_coords[query_id][0]-t_begin
                            diff_end = expected_coords[query_id][1]-t_end
-                           print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
+                           #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
                            status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
                            qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
                            output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED' if should_realign_right else ''}\n")
@@ -736,7 +739,7 @@ def run_aligner_pipeline(
 # opt3 (20, 15)
 # TU BYŁO (15, 15)
 @click.option('--kmer-len', default=20, show_default=True)
-@click.option('--window-len', default=10, show_default=True)
+@click.option('--window-len', default=15, show_default=True)
 @click.option('--f', default=0.001, show_default=True, help="Portion of top frequent kmers to be removed from the index (must be in range 0 to 1 inclusive)")
 @click.option('--score-match', default=1, show_default=True)
 @click.option('--score-mismatch', default=5, show_default=True)

@@ -95,14 +95,15 @@ def run_align(target, query):
 #     return run_align(target, query)
 
 def align_seq(target, query):
-    pref_len_factor = 0.42
-    suff_len_factor = 0.42
+    pref_len_factor = 0.40
+    suff_len_factor = 0.40
     pad = 25
 
     pref_len = round(len(query) * pref_len_factor)
     suff_len = round(len(query) * suff_len_factor)
 
-    l, _ = run_align(target[:len(target)-pref_len+pad], query[:pref_len])
+    #l, _ = run_align(target[:len(target)-pref_len+pad], query[:pref_len])
+    l = 0
     _, r = run_align(target[suff_len+l-pad:], query[(len(query)-suff_len):])
     return l, r
 
