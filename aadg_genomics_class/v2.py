@@ -506,7 +506,7 @@ def run_aligner_pipeline(
 
         with open(output_file_path, 'w') as output_file:
             for (query_id, query_seq) in iter_sequences(SeqIO.parse(reads_file_path, "fasta")):
-                # if query_id != 'read_4':
+                # if query_id != 'read_99':
                 #    continue
                 with reporter.task(f"Load query '{query_id}'") as query_task:
                     try:
@@ -608,8 +608,8 @@ def run_aligner_pipeline(
                                     if start == longest_seq_len:
                                         break
 
-                            print(f"SCORE: Match score is {match_score}")
-                            print(f"SCORE: Match around {match_start_t} - {match_end_t}")
+                            #print(f"SCORE: Match score is {match_score}")
+                            #print(f"SCORE: Match around {match_start_t} - {match_end_t}")
                             # sys.exit(1)
 
                             # q_begin, q_end, t_begin, t_end, list_length
@@ -734,8 +734,9 @@ def run_aligner_pipeline(
 # First attempt:
 # opt2 (15, 5)
 # opt3 (20, 15)
-@click.option('--kmer-len', default=15, show_default=True)
-@click.option('--window-len', default=15, show_default=True)
+# TU BYŁO (15, 15)
+@click.option('--kmer-len', default=20, show_default=True)
+@click.option('--window-len', default=10, show_default=True)
 @click.option('--f', default=0.001, show_default=True, help="Portion of top frequent kmers to be removed from the index (must be in range 0 to 1 inclusive)")
 @click.option('--score-match', default=1, show_default=True)
 @click.option('--score-mismatch', default=5, show_default=True)
