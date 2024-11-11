@@ -3,6 +3,7 @@ import sys
 import gc
 import sys
 import copy
+import os
 from aadg_genomics_class.monitoring.logs import LOGS
 from aadg_genomics_class.monitoring.task_reporter import TaskReporter
 from aadg_genomics_class import click_utils as click
@@ -382,6 +383,7 @@ def run_aligner_pipeline(
                             continue
 
         gc_collect_cnt = 300
+        output_buf = []
         with open(output_file_path, 'w') as output_file:
             query_id = ""
             query_seq = ""
@@ -589,9 +591,9 @@ def run_aligner_pipeline(
                                    #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
                                    status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
                                    qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
-                                   output_file.write(f"{'FUCK' if est_edit_dist >= 177999 else 'X'} | {est_edit_dist} | {query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
+                                   output_buf.append(f"{'FUCK' if est_edit_dist >= 177999 else 'X'} | {est_edit_dist} | {query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
                                 else:
-                                    output_file.write(f"{query_id} {t_begin} {t_end}\n")
+                                    output_buf.append(f"{query_id} {t_begin} {t_end}\n")
                             except Exception as e:
                                 query_task.fail(e)
                     if line[0] == '>':
@@ -600,8 +602,10 @@ def run_aligner_pipeline(
                         query_id = line[1:].strip()
                     else:
                         query_seq += line.rstrip()
+            if len(output_buf) > 0:
+                output_file.writelines(output_buf)
             LOGS.cli.info(f"Wrote records to {output_file_path}")
-
+            os._exit(0) # Faster exit than normally
 
 @click.command()
 @click.argument('target-fasta', help="Target sequence FASTA file path")
