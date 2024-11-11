@@ -1,16 +1,13 @@
 import sys
-from Bio import SeqRecord, SeqIO
 
 import gc
-from dataclasses import dataclass
 import sys
 import copy
 from aadg_genomics_class.monitoring.logs import LOGS
-from aadg_genomics_class.monitoring.task_reporter import TaskReporter, monitor_mem_snapshot
+from aadg_genomics_class.monitoring.task_reporter import TaskReporter
 from aadg_genomics_class import click_utils as click
 from aadg_genomics_class.new_aligner2 import align_seq
 from aadg_genomics_class.new_aligner2np import doit
-from aadg_genomics_class.edit_check import levenshtein
 
 from typing import Dict, Any, Set, Optional
 from itertools import chain
@@ -19,9 +16,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 import csv
 import tracemalloc
 
-import math
 import numpy as np
-from typing import Iterable
 
 
 score_insertion    = -2
@@ -158,18 +153,6 @@ def run_hirschberge(x, y):
 
   return pad_left
 
-@dataclass
-class MinimizerIndex:
-    index: Dict[int, Any]
-    kmers: Set[int]
-
-@dataclass
-class RegionMatch:
-    t_begin: int
-    t_end: int
-    q_begin: int
-    q_end: int
-    lis_length: int
 
 MASKS: Optional[Dict[int, int]] = None
 MAX_KMER_SIZE = 64
@@ -197,171 +180,9 @@ COMPLEMENT_MAPPING = {
 MAPPING_FN = np.vectorize(MAPPING.get)
 COMPLEMENT_MAPPING_FN = np.vectorize(COMPLEMENT_MAPPING.get)
 
-def format_sequences(src: Iterable[SeqRecord]):
-    result = {record.id: MAPPING_FN(np.array(record.seq)) for record in src}
-    return result, list(result.keys())
-
-def iter_sequences(src: Iterable[SeqRecord]):
-    return ((record.id, MAPPING_FN(np.array(record.seq))) for record in src)
-
-def sequence_complement(seq):
-     return COMPLEMENT_MAPPING_FN(seq)
-
-def cleanup_kmer_index(
-    index: MinimizerIndex,
-    kmers_cutoff_f: float,
-):
-    keys = np.array(list(index.keys()))
-    counts = np.array([index[kmer].size for kmer in keys])
-    start_index = keys.size - math.floor(keys.size * kmers_cutoff_f)
-    kmers_to_remove = np.lexsort((keys, counts))[start_index:]
-    kmers_before = len(index)
-    for kmer_pos in kmers_to_remove:
-        index.pop(keys[kmer_pos], None)
-        #index.kmers.remove(keys[kmer_pos])
-    kmers_after = len(index)
-    LOGS.prefilter.info(f"Reduced target kmer count by prefiltering: {kmers_before} -> {kmers_after} (Eliminated {math.floor((kmers_before-kmers_after)/kmers_before*100000)/1000}% top kmers with f={kmers_cutoff_f})")
-
-
 def normalize_pos(pos, len):
     return min(max(pos, 0), len)
 
-
-def nw_align(
-    target,
-    query,
-    score_match,
-    score_mismatch,
-    score_gap,
-):
-    """
-        Implementation of Needleman-Wunsch algorithm for arbitrary Numpy array sequences.
-        The algorithm expects two numeric-like sequences and scores used to compute the best alignment.
-        The result is tuple of found elements:
-            - t_pad_left - Where first position of target was aligned to query
-            - t_pad_right - Where the last position of target was aligned to query
-            - q_pad_left - Where the first position of query was aligned to target
-            - q_pad_right - Where the last position of query was aligned to target
-        
-        For example for:
-
-            ACTA-GT-C-AAA-
-            ---CT-ACTGAA--
-
-            We could get (0, 1, 3, 2)
-
-            Target has 0 dashes on the left side
-            Target has 1 dash on the right side
-            Query has 3 dashes on the left side
-            Query has 2 dashes on the right side
-
-    @Piotr Styczyński 2023
-    """
-    target_len, query_len = len(target), len(query)
-
-    # Hold pointers to allow reconstruction of a sequence later
-    score_pointers = np.zeros((target_len + 1, query_len + 1))
-    score_pointers[:,0], score_pointers[0,:] = 3, 4
-
-    # Optimal scores
-    optimal_scores = np.zeros((target_len + 1, query_len + 1))
-    optimal_scores[:,0], optimal_scores[0,:] = np.linspace(0, -target_len * score_gap, target_len + 1), np.linspace(0, -query_len * score_gap, query_len + 1)
-
-    # Temporary score table
-    scores = np.zeros(3)
-
-    for target_pos in range(target_len):
-        for query_pos in range(query_len):
-            if target[target_pos] != query[query_pos]:
-                scores[0] = optimal_scores[target_pos, query_pos] - score_mismatch
-            else:
-                scores[0] = optimal_scores[target_pos, query_pos] + score_match
-            scores[1] = optimal_scores[target_pos, query_pos+1] - score_gap
-            scores[2] = optimal_scores[target_pos+1, query_pos] - score_gap
-            local_max = np.max(scores)
-            optimal_scores[target_pos+1, query_pos+1] = local_max
-            if scores[2] == local_max:
-                score_pointers[target_pos+1, query_pos+1] += 4
-            if scores[1] == local_max:
-                score_pointers[target_pos+1, query_pos+1] += 3
-            if scores[0] == local_max:
-                score_pointers[target_pos+1, query_pos+1] += 2
-
-    # Now we need to traverse the matrix and reconstruct the array
-    # We hold *_ending_space to see if our traverse sequence starts with sequence of dashes: '-'
-    # If it starts with dashes (the result sequence will be reversed), that means we have padding at the start of the sequence
-    # We also look for consecutive sequences of dashes using *_longest_space variable
-    # At the end we will read it to see what number of dashes occurr at the end of the sequence (remember everything is reversed) 
-    t_ending_space, t_ending_space_len = True, 0
-    q_ending_space, q_ending_space_len = True, 0
-    t_longest_space, q_longest_space = 0, 0
-    target_pos, query_pos = target_len, query_len
-
-    while target_pos > 0 or query_pos > 0:
-        if score_pointers[target_pos, query_pos] in [3, 5, 7, 9]:
-            t_ending_space = False
-            t_longest_space = 0
-            q_longest_space += 1
-            if q_ending_space:
-                q_ending_space_len += 1
-            target_pos -= 1
-        elif score_pointers[target_pos, query_pos] in [2, 5, 6, 9]:
-            t_ending_space = False
-            q_ending_space = False
-            t_longest_space = 0
-            q_longest_space = 0
-            target_pos -= 1
-            query_pos -= 1
-        elif score_pointers[target_pos, query_pos] in [4, 6, 7, 9]:
-            q_ending_space = False
-            t_longest_space == 1
-            q_longest_space = 0
-            if t_ending_space:
-                t_ending_space_len += 1
-            query_pos -= 1
-
-    # Return paddings of target and query sequence in the resulting alignment.
-    # For example for:
-    #  ACTA-GT-C-AAA-
-    #  ---CT-ACTGAA--
-    # We would get (0, 1, 3, 2)
-    #   Target has 0 dashes on the left side
-    #   Target has 1 dash on the right side
-    #   Query has 3 dashes on the left side
-    #   Query has 2 dashes on the right side
-    #
-    return (t_longest_space, t_ending_space_len, q_longest_space, q_ending_space_len)
-
-def align(
-    region: RegionMatch,
-    target_seq,
-    query_seq,
-    kmer_len,
-    full_query_len,
-    score_match,
-    score_mismatch,
-    score_gap,
-):
-    relative_extension = kmer_len*3
-
-    q_begin, q_end = region.q_begin-relative_extension, region.q_end+(kmer_len-1)+relative_extension
-    t_begin, t_end = region.t_begin-relative_extension, min(region.t_end, region.t_begin + full_query_len)+(kmer_len-1)+relative_extension
-
-    q_begin, q_end = normalize_pos(q_begin, len(query_seq)), normalize_pos(q_end, len(query_seq))
-    t_begin, t_end = normalize_pos(t_begin, len(target_seq)), normalize_pos(t_end, len(target_seq))
-
-    t_pad_left, t_pad_right, q_pad_left, q_pad_right = nw_align(
-        target=target_seq[t_begin:t_end],
-        query=query_seq[q_begin:q_end],
-        score_match=score_match,
-        score_mismatch=score_mismatch,
-        score_gap=score_gap,
-    )
-
-    q_begin, q_end = q_begin + t_pad_left, q_end - t_pad_right
-    t_begin, t_end = t_begin + q_pad_left, t_end - q_pad_right
-
-    return (t_begin, t_end)
 
 def generate_mask(
     kmer_len: int,
@@ -374,20 +195,6 @@ def generate_mask(
             ret = (ret << 2) | 3
             MASKS[i] = ret
     return MASKS[kmer_len]
-
-def _get_kmers_min_pos(
-    sequence_len,
-    mask,
-    r_seq_arr,
-    kmers,
-    r_kmers,
-    window_len,
-    kmer_len,
-):
-    kmers_min_pos = np.add(np.argmin(sliding_window_view(kmers, window_shape=window_len), axis=1), np.arange(0, sequence_len - window_len + 1))
-    #r_kmers_min_pos = np.add(np.argmin(sliding_window_view(r_kmers, window_shape=window_len), axis=1), np.arange(0, sequence_len - window_len + 1))
-    return kmers_min_pos#, r_kmers_min_pos
-
 
 
 def get_minimizers(
@@ -478,12 +285,10 @@ def run_aligner_pipeline(
 
     with TaskReporter("Sequence read alignnment") as reporter:
 
-        with reporter.task("Load target sequence"):
-            reference_records, reference_ids = format_sequences(SeqIO.parse(reference_file_path, "fasta"))
-
         if kmer_len > MAX_KMER_SIZE:
             kmer_len = MAX_KMER_SIZE
 
+        target_seq = None
         with reporter.task("Create minimizer target index") as target_index_task:
                 ref_loaded = False
                 all_seq = ""
@@ -504,6 +309,10 @@ def run_aligner_pipeline(
                             # all_seq = 0
 
                             seq_arr = MAPPING_FN(np.array(list(all_seq)))
+                            if target_seq is None:
+                               target_seq = seq_arr
+                            else:
+                               target_seq = np.concatenate((target_seq, seq_arr), axis=0)
                             del all_seq
 
                             # Target index building
@@ -548,9 +357,9 @@ def run_aligner_pipeline(
                                 for k, v in zip(chain([selected_kmers[0, 0]], selected_kmers[selected_kmers_unique_idx, 0]), selected_kmers_entries_split):
                                     i += 1
                                     # TODO: REMOVE SOME FROM INDEX
-                                    # if i >= 20 and len(v) == 1:
-                                    #     i = 0
-                                    #     continue
+                                    if i >= 20 and len(v) == 1:
+                                        i = 0
+                                        continue
                                     if k in ref_index:
                                         ref_index[k] = np.concatenate((ref_index[k], v), axis=0)
                                     else:
@@ -710,37 +519,12 @@ def run_aligner_pipeline(
                                        output_file.write(f"{query_id} status=FAIL\n")
                                        continue
 
-                                    target_seq = reference_records[reference_ids[0]]
-
                                     q_begin, q_end = 0, len(query_seq)
                                     t_begin, t_end = match_start_t - match_start_q - relative_extension, match_end_t + (len(query_seq)-match_end_q) + relative_extension
-                                    # q_begin, q_end = match_start_q-relative_extension, match_end_q+(kmer_len-1)+relative_extension
-                                    # t_begin, t_end = match_start_t-relative_extension, min(match_end_t, match_start_t + len(query_seq))+(kmer_len-1)+relative_extension
 
                                     q_begin, q_end = normalize_pos(q_begin, len(query_seq)), normalize_pos(q_end, len(query_seq))
                                     t_begin, t_end = normalize_pos(t_begin, len(target_seq)), normalize_pos(t_end, len(target_seq))
 
-                                    #print(f"PRE-ALIGNED: {t_begin} - {t_end} (query: {q_begin} - {q_end})")
-                                    # for record in SeqIO.parse(reference_file_path, "fasta"):
-                                    #     found_pos = str(record.seq).find("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
-                                    #     print(f"ACTUAL TARGET POS VALIDATED: {found_pos}")
-                                    #     break
-
-                                    # print("TARGET!!!!")
-                                    # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
-                                    # print("QUERY!!!")
-                                    # print("".join([RR_MAPPING[i] for i in query_seq[100:q_end].tolist()]))
-
-                                    # t_pad_left, t_pad_right, q_pad_left, q_pad_right = nw_align(
-                                    #     target=target_seq[t_begin:t_end],
-                                    #     query=query_seq[q_begin:q_end],
-                                    #     score_match=score_match,
-                                    #     score_mismatch=score_mismatch,
-                                    #     score_gap=score_gap,
-                                    # )
-
-                                    # q_begin, q_end = q_begin + t_pad_left, q_end - t_pad_right
-                                    # t_begin, t_end = t_begin + q_pad_left, t_end - q_pad_right
 
                                     if False:
                                         t_begin_pad = run_hirschberge(target_seq[t_begin:t_end], query_seq[q_begin:])
@@ -748,11 +532,6 @@ def run_aligner_pipeline(
                                         t_begin += t_begin_pad
                                         t_end -= t_end_pad
 
-                                    # with query_task.task('Align Method=REF'):
-                                    #     t_begin_pad, t_end_pad = align_seq(
-                                    #         "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
-                                    #         "".join([RR_MAPPING[i] for i in query_seq.tolist()])
-                                    #     )
                                     realign_mode = 0
                                     with query_task.task('Align Method=BWT'):
                                         t_begin_pad, t_end_pad, should_realign_right = doit(
@@ -770,13 +549,7 @@ def run_aligner_pipeline(
                                          t_end -= t_end_pad
 
                                     if realign_mode > 0:
-                                    #    print(f"HMM? SHOULD REALIGN!!!! :000 ALIGN_MODE={realign_mode}")
                                        with query_task.task('Align Method=REF'):
-                                            # print("TARGET!!!!")
-                                            # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
-                                            # print("QUERY!!!")
-                                            # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
-
                                             t_begin_pad, t_end_pad = align_seq(
                                                 "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
                                                 "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
@@ -788,16 +561,11 @@ def run_aligner_pipeline(
                                     if t_end_pad is not None:
                                         t_end -= t_end_pad
 
-
                                     # print("TARGET!!!!")
                                     # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
                                     # print("QUERY!!!")
                                     # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
-
-
                                     #print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
-
-                                       
                                     # sys.exit(1)
 
                                     # print("TARGET!!!!")
