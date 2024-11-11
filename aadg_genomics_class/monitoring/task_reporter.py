@@ -155,6 +155,7 @@ class TaskReporter:
         return self
     
     def __exit__(self, exception_type, exception_value, exception_traceback):
+        return
         self.end = time.time()
         
         self.max_task_time = max([task.end - task.start for task in self.tasks.values()])
