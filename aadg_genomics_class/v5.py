@@ -591,10 +591,10 @@ def run_aligner_pipeline(
     np.set_printoptions(threshold=sys.maxsize)
     print(f"Invoked CLI with the following args: {' '.join(sys.argv)}")
     
-    # expected_coords = {}
-    # with open('./data_big/reads20Mb.txt', mode ='r')as file:
-    #     csvFile = csv.reader(file, delimiter='\t')
-    #     expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
+    expected_coords = {}
+    with open('./data_big/reads20Mb.txt', mode ='r')as file:
+        csvFile = csv.reader(file, delimiter='\t')
+        expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
     if kmer_len > MAX_KMER_SIZE:
         kmer_len = MAX_KMER_SIZE
 
@@ -863,16 +863,16 @@ def run_aligner_pipeline(
                                 #    177, 2, 2, 1
                                 # )
 
-                                # if query_id in expected_coords:
-                                #    diff_start = expected_coords[query_id][0]-t_begin
-                                #    diff_end = expected_coords[query_id][1]-t_end
-                                #    #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
-                                #    status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
-                                #    qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
-                                #    #output_buf.append
-                                #    output_buf.append(f"{'FUCK' if est_edit_dist >= 177999 else 'X'} | {est_edit_dist} | {query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
-                                # else:
-                                output_buf.append(f"{query_id} {t_begin} {t_end}\n")
+                                if query_id in expected_coords:
+                                   diff_start = expected_coords[query_id][0]-t_begin
+                                   diff_end = expected_coords[query_id][1]-t_end
+                                   #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
+                                   status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
+                                   qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
+                                   #output_buf.append
+                                   output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
+                                else:
+                                    output_buf.append(f"{query_id} {t_begin} {t_end}\n")
                         except Exception as e:
                             # TODO?
                             print(e)
