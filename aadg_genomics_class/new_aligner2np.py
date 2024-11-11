@@ -423,4 +423,4 @@ def doit(q, t):
 
 if __name__ == "__main__":
     np.set_printoptions(threshold=sys.maxsize)
-    print(doit(None, None))
+    print(doit(Mquery, Mtarget))
