@@ -4,15 +4,14 @@ import gc
 import sys
 import copy
 import os
-from aadg_genomics_class.monitoring.logs import LOGS
 from aadg_genomics_class.monitoring.task_reporter import TaskReporter
 from aadg_genomics_class import click_utils as click
-from aadg_genomics_class.new_aligner2 import align_seq
 
 from typing import Dict, Any, Set, Optional, Tuple
 from itertools import chain
 from numpy.lib.stride_tricks import sliding_window_view
 from operator import itemgetter
+from collections import defaultdict
 
 import csv
 import tracemalloc
@@ -53,9 +52,102 @@ COMPLEMENT_MAPPING = {
     2: 1,
 }
 
-MAPPING_FN = np.vectorize(MAPPING.get)
+MAPPING_FN = np.vectorize(MAPPING.get, otypes=[np.uint8])
 COMPLEMENT_MAPPING_FN = np.vectorize(COMPLEMENT_MAPPING.get)
 
+# DP algorithm adapted from Langmead's notebooks
+def align_dp_trace(D, x, y):
+    ''' Backtrace edit-distance matrix D for strings x and y '''
+    i, j = len(x), len(y)
+    while i > 0:
+        diag, vert, horz = sys.maxsize, sys.maxsize, sys.maxsize
+        delt = None
+        if i > 0 and j > 0:
+            delt = 0 if x[i-1] == y[j-1] else 1
+            diag = D[i-1, j-1] + delt
+        if i > 0:
+            vert = D[i-1, j] + 1
+        if j > 0:
+            horz = D[i, j-1] + 1
+        if diag <= vert and diag <= horz:
+            # diagonal was best
+            i -= 1; j -= 1
+        elif vert <= horz:
+            # vertical was best; this is an insertion in x w/r/t y
+            i -= 1
+        else:
+            # horizontal was best
+            j -= 1
+    # j = offset of the first (leftmost) character of t involved in the
+    # alignment
+    return j
+
+def align_dp_k_edit(p, t):
+    ''' Find the alignment of p to a substring of t with the fewest edits.  
+        Return the edit distance and the coordinates of the substring. '''
+    D = np.zeros((len(p)+1, len(t)+1), dtype=int)
+    # Note: First row gets zeros.  First column initialized as usual.
+    D[1:, 0] = range(1, len(p)+1)
+    for i in range(1, len(p)+1):
+        for j in range(1, len(t)+1):
+            delt = 1 if p[i-1] != t[j-1] else 0
+            D[i, j] = min(D[i-1, j-1] + delt, D[i-1, j] + 1, D[i, j-1] + 1)
+    # Find minimum edit distance in last row
+    mnJ, mn = None, len(p) + len(t)
+    for j in range(len(t)+1):
+        if D[len(p), j] < mn:
+            mnJ, mn = j, D[len(p), j]
+    # Backtrace; note: stops as soon as it gets to first row
+    off = align_dp_trace(D, p, t[:mnJ])
+    # Return edit distance and t coordinates of aligned substring
+    return mn, off, mnJ
+
+
+def run_match_align_dp(target, query, align_mode=1):
+    for (k, step) in [(15, 11), (10, 11), (8, 5)]:
+        suff_len_factor = 0.4
+        suff_len_factor2 = 0.6
+
+        print(f"align_seq(): ALIGNER_MODE {align_mode}")
+        suff_len = round(len(query) * suff_len_factor)
+        suff_len2 = round(len(query) * suff_len_factor2)
+
+        target_suffix = target[suff_len-k:]
+        query_suffix = query[(len(query)-suff_len):]
+
+        edist = len(query)//9
+        kmers = defaultdict(list)
+
+        mask = generate_mask(k)
+
+        uadd = np.frompyfunc(lambda x, y: ((x << 2) | y) & mask, 2, 1)
+
+        # This computes values for kmers
+        kmers_target = uadd.accumulate(target_suffix, dtype=object).astype(int)
+        # for i in range(0, len(target)-k+1, step):
+        #         kmers[np.sum(target[i:i+k])].append(i)
+        for i in range(0, len(kmers_target), step):
+            kmers[kmers_target[i]].append(i)
+
+        hits = []
+        kmers_query = uadd.accumulate(query_suffix, dtype=object).astype(int)
+        #for i in range(0, len(query)-k+1, step+1):
+            #for j in kmers[np.sum(query[i:i+k])]:
+        for i in range(0, len(kmers_query), step+1):
+            for j in kmers[kmers_query[i]]:
+                lf = max(0, j-i-edist)
+                rt = min(len(target_suffix), j-i+len(query_suffix)+edist)
+                mn, soff, eoff = align_dp_k_edit(query_suffix, target_suffix[lf:rt])
+                soff += lf
+                eoff += lf
+                if mn <= edist:
+                    hits.append((mn, soff, eoff))
+        hits.sort()
+        if hits:
+            return 0, len(target_suffix)-hits[0][2]
+        if align_mode == 1:
+            return 0, 0
+    return 0, 0
 
 def merge(x: np.array, SA12: np.array, SA3: np.array) -> np.array:
     "Merge the suffixes in sorted SA12 and SA3."
@@ -394,8 +486,8 @@ def run_match_align_bwt(q, t):
     # q = Mquery
     # t = Mtarget
     # ???????????????????????????????????????????
-    dna_string = np.concatenate((t, [MAPPING_DOLLAR])) # t+'$'
-    dna_string_r = np.concatenate((t[::-1], [MAPPING_DOLLAR])) # reverse(t)+'$'
+    dna_string = np.concatenate((t, [MAPPING_DOLLAR]), dtype=np.uint8) # t+'$'
+    dna_string_r = np.concatenate((t[::-1], [MAPPING_DOLLAR]), dtype=np.uint8) # reverse(t)+'$'
     query_string = q[:100]
     query_string_r = q[len(q)-100:]
 
@@ -664,12 +756,12 @@ def run_aligner_pipeline(
     gc.disable()
     #tracemalloc.start()
     np.set_printoptions(threshold=sys.maxsize)
-    LOGS.cli.info(f"Invoked CLI with the following args: {' '.join(sys.argv)}")
+    print(f"Invoked CLI with the following args: {' '.join(sys.argv)}")
     
-    expected_coords = {}
-    with open('./data_big/reads20Mb.txt', mode ='r')as file:
-        csvFile = csv.reader(file, delimiter='\t')
-        expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
+    # expected_coords = {}
+    # with open('./data_big/reads20Mb.txt', mode ='r')as file:
+    #     csvFile = csv.reader(file, delimiter='\t')
+    #     expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
 
     with TaskReporter("Sequence read alignnment") as reporter:
 
@@ -700,7 +792,7 @@ def run_aligner_pipeline(
                             if target_seq is None:
                                target_seq = seq_arr
                             else:
-                               target_seq = np.concatenate((target_seq, seq_arr), axis=0)
+                               target_seq = np.concatenate((target_seq, seq_arr), axis=0, dtype=np.uint8)
                             del all_seq
 
                             # Target index building
@@ -785,129 +877,111 @@ def run_aligner_pipeline(
                         gc_collect_cnt += 1
                         # if query_id not in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
                         #    continue
-                        with reporter.task(f"Load query '{query_id}'") as query_task:
+                        if True: #query_id == 'read_0':
                             try:
                                 max_diff = round(len(query_seq)*1.3)
-                                
-                                with query_task.task('Get minimizers'):
-                                    min_index_query = get_minimizers(
-                                        query_seq,
-                                        kmer_len=kmer_len,
-                                        window_len=window_len,
+                                min_index_query = get_minimizers(
+                                    query_seq,
+                                    kmer_len=kmer_len,
+                                    window_len=window_len,
+                                )
+
+                                common_kmers = []
+                                for key in min_index_query:
+                                    if key in ref_index:
+                                        common_kmers.append(key)
+
+                                matches = np.array([[-1, -1]])
+                                for kmer in common_kmers:
+                                    kmer_entries_target, kmer_entries_query = ref_index[kmer], min_index_query[kmer]
+                                    matches = np.concatenate((
+                                        matches,
+                                        cartesian_product(
+                                            kmer_entries_target,
+                                            kmer_entries_query,
+                                        )),
+                                        axis=0,
                                     )
+                                matches = matches[matches[:, 0].argsort()]
+                                matches = matches[1:]
+                                n = len(matches)
+                                
+                                match_score, match_start_t, match_end_t, match_start_q, match_end_q = -max_diff, 0, 0, 0, 0
 
-                                with query_task.task('Extend'):
-                                    common_kmers = []
-                                    for key in min_index_query:
-                                        if key in ref_index:
-                                            common_kmers.append(key)
+                                # print("ALL MATCH:")
+                                # print(matches)
+                                # print("END")
 
-                                    matches = np.array([[-1, -1]])
-                                    for kmer in common_kmers:
-                                        kmer_entries_target, kmer_entries_query = ref_index[kmer], min_index_query[kmer]
-                                        matches = np.concatenate((
-                                            matches,
-                                            cartesian_product(
-                                                kmer_entries_target,
-                                                kmer_entries_query,
-                                            )),
-                                            axis=0,
-                                        )
-                                    matches = matches[matches[:, 0].argsort()]
-                                    matches = matches[1:]
-                                    n = len(matches)
-                                    
-                                    match_score, match_start_t, match_end_t, match_start_q, match_end_q = -max_diff, 0, 0, 0, 0
+                                if n == 0:
+                                    pass
+                                elif n == 1:
+                                    match_score, match_start_t, match_end_t, match_start_q, match_end_q = 0, matches[0, 0], matches[0, 0], matches[0, 1], matches[0, 1]
+                                else:
+                                    longest_seq_len = 0
+                                    parent = [999999999]*(n+1)
+                                    increasingSub = [999999999]*(n+1)
+                                    for i in range(n):
+                                        start = 1
+                                        end = longest_seq_len
+                                        while start <= end:
+                                            middle = (start + end) // 2
+                                            if matches[increasingSub[middle], 1] < matches[i, 1]:
+                                                start = middle + 1
+                                            else:
+                                                end = middle - 1
+                                        parent[i] = increasingSub[start-1]
+                                        increasingSub[start] = i
 
-                                    # print("ALL MATCH:")
-                                    # print(matches)
-                                    # print("END")
+                                        if start > longest_seq_len:
+                                            longest_seq_len = start
 
-                                    if n == 0:
-                                        pass
-                                    elif n == 1:
-                                        match_score, match_start_t, match_end_t, match_start_q, match_end_q = 0, matches[0, 0], matches[0, 0], matches[0, 1], matches[0, 1]
-                                    else:
-                                        longest_seq_len = 0
-                                        parent = [999999999]*(n+1)
-                                        increasingSub = [999999999]*(n+1)
-                                        for i in range(n):
-                                            start = 1
-                                            end = longest_seq_len
-                                            while start <= end:
-                                                middle = (start + end) // 2
-                                                if matches[increasingSub[middle], 1] < matches[i, 1]:
-                                                    start = middle + 1
-                                                else:
-                                                    end = middle - 1
-                                            parent[i] = increasingSub[start-1]
-                                            increasingSub[start] = i
+                                    current_node = increasingSub[longest_seq_len]
+                                    q = [current_node]*longest_seq_len 
+                                    for j in range(longest_seq_len-1, 0, -1):
+                                        current_node = parent[current_node]
+                                        q[j-1] = current_node
 
-                                            if start > longest_seq_len:
-                                                longest_seq_len = start
-
-                                        current_node = increasingSub[longest_seq_len]
-                                        q = [current_node]*longest_seq_len 
-                                        for j in range(longest_seq_len-1, 0, -1):
-                                            current_node = parent[current_node]
-                                            q[j-1] = current_node
-
-                                        lis = np.take(matches, q, axis=0)
-                                        for i in range(longest_seq_len):
-                                            start = i
-                                            end = longest_seq_len
-                                            while start <= end:
-                                                middle = (start + end) // 2
-                                                if middle == longest_seq_len:
-                                                    start = longest_seq_len
-                                                    break
-                                                if lis[middle, 0] < lis[i, 0] + max_diff - lis[i, 1]:
-                                                    start = middle + 1
-                                                else:
-                                                    end = middle - 1
-                                            # Window is i till end
-                                            # print(f"Start from {i} (till {start} whcih has value") #[{lis[start, 0]}, {lis[start, 1]}])
-                                            estimated_matches_q = (lis[start, 1] if start < longest_seq_len else max_diff) - lis[i, 1]
-                                            estimated_matches_t = (lis[start, 0] if start < longest_seq_len else lis[start-1, 0]) - lis[i, 0]
-                                            score = min(estimated_matches_q, estimated_matches_t)*min(estimated_matches_q, estimated_matches_t) - np.sum(np.diff(lis[i:start, 0], axis=0))
-                                            # print(lis[i:start])
-                                            # print(f"LAST ELEMENT IS {lis[i:start][-1]} where start={start} and l-1={longest_seq_len-1}")
-                                            # print(f"score = {score}")
-                                            if score > match_score:
-                                                match_end_index_pos = max(i, min(start-1, longest_seq_len-1))
-                                                match_score, match_start_t, match_end_t, match_start_q, match_end_q = score, lis[i, 0], lis[match_end_index_pos, 0], lis[i, 1], lis[match_end_index_pos, 1]
-                                                #print(f"ACCEPTED SCORE: {match_start_t} - {match_end_t}")
-                                            if start == longest_seq_len:
+                                    lis = np.take(matches, q, axis=0)
+                                    for i in range(longest_seq_len):
+                                        start = i
+                                        end = longest_seq_len
+                                        while start <= end:
+                                            middle = (start + end) // 2
+                                            if middle == longest_seq_len:
+                                                start = longest_seq_len
                                                 break
+                                            if lis[middle, 0] < lis[i, 0] + max_diff - lis[i, 1]:
+                                                start = middle + 1
+                                            else:
+                                                end = middle - 1
+                                        # Window is i till end
+                                        # print(f"Start from {i} (till {start} whcih has value") #[{lis[start, 0]}, {lis[start, 1]}])
+                                        estimated_matches_q = (lis[start, 1] if start < longest_seq_len else max_diff) - lis[i, 1]
+                                        estimated_matches_t = (lis[start, 0] if start < longest_seq_len else lis[start-1, 0]) - lis[i, 0]
+                                        score = min(estimated_matches_q, estimated_matches_t)*min(estimated_matches_q, estimated_matches_t) - np.sum(np.diff(lis[i:start, 0], axis=0))
+                                        # print(lis[i:start])
+                                        # print(f"LAST ELEMENT IS {lis[i:start][-1]} where start={start} and l-1={longest_seq_len-1}")
+                                        # print(f"score = {score}")
+                                        if score > match_score:
+                                            match_end_index_pos = max(i, min(start-1, longest_seq_len-1))
+                                            match_score, match_start_t, match_end_t, match_start_q, match_end_q = score, lis[i, 0], lis[match_end_index_pos, 0], lis[i, 1], lis[match_end_index_pos, 1]
+                                            #print(f"ACCEPTED SCORE: {match_start_t} - {match_end_t}")
+                                        if start == longest_seq_len:
+                                            break
 
-                                    #print(f"SCORE: Match score is {match_score}")
-                                    #print(f"SCORE: Match around {match_start_t} - {match_end_t}")
-                                    #sys.exit(1)
+                                #print(f"SCORE: Match score is {match_score}")
+                                #print(f"SCORE: Match around {match_start_t} - {match_end_t}")
+                                #sys.exit(1)
 
-                                    # q_begin, q_end, t_begin, t_end, list_length
+                                # q_begin, q_end, t_begin, t_end, list_length
 
-                                with query_task.task('Align'):
-                                    #print(f"Alignment around: {match_start_t} - {match_end_t} (query: {match_start_q} - {match_end_q})")
-                                    #monitor_mem_snapshot('CHECKPOINT_1')
-                                    # t_begin, t_end = align(
-                                    #     region=region_match,
-                                    #     target_seq=reference_records[reference_ids[0]],
-                                    #     query_seq=query_seq,
-                                    #     kmer_len=kmer_len,
-                                    #     full_query_len=len(query_seq),
-                                    #     score_match=score_match,
-                                    #     score_mismatch=score_mismatch,
-                                    #     score_gap=score_gap,
-                                    # )
+                                relative_extension = kmer_len // 2 + 1
 
-                                    relative_extension = kmer_len // 2 + 1
-
-                                    if abs(match_end_t - match_start_t) > max_diff + relative_extension:
-                                       # FAILED MAPPING!
-                                       print(f"Failed sequence, reason: {match_start_t} - {match_end_t} ({abs(match_end_t - match_start_t)})")
-                                       output_file.write(f"{query_id} status=FAIL\n")
-                                       continue
-
+                                if abs(match_end_t - match_start_t) > max_diff + relative_extension:
+                                    # FAILED MAPPING!
+                                    #print(f"Failed sequence, reason: {match_start_t} - {match_end_t} ({abs(match_end_t - match_start_t)})")
+                                    output_buf.append(f"{query_id} status=FAIL\n")
+                                else:
                                     q_begin, q_end = 0, len(query_seq)
                                     t_begin, t_end = match_start_t - match_start_q - relative_extension, match_end_t + (len(query_seq)-match_end_q) + relative_extension
 
@@ -922,28 +996,26 @@ def run_aligner_pipeline(
                                         t_end -= t_end_pad
 
                                     realign_mode = 0
-                                    with query_task.task('Align Method=BWT'):
-                                        t_begin_pad, t_end_pad, should_realign_right = run_match_align_bwt(
-                                            query_seq,
-                                            target_seq[t_begin:t_end],
-                                        )
+                                    t_begin_pad, t_end_pad, should_realign_right = run_match_align_bwt(
+                                        query_seq,
+                                        target_seq[t_begin:t_end],
+                                    )
                                         
                                     if should_realign_right:
-                                       realign_mode = 1
+                                        realign_mode = 1
                                     if abs(t_end-(t_end_pad or 0)-t_begin-(t_begin_pad or 0)) > len(query_seq)*1.05:
-                                       realign_mode = 2
-                                       if t_begin_pad is not None:
-                                         t_begin += t_begin_pad
-                                       if t_end_pad is not None:
-                                         t_end -= t_end_pad
+                                        realign_mode = 2
+                                        if t_begin_pad is not None:
+                                            t_begin += t_begin_pad
+                                        if t_end_pad is not None:
+                                            t_end -= t_end_pad
 
                                     if realign_mode > 0:
-                                       with query_task.task('Align Method=REF'):
-                                            t_begin_pad, t_end_pad = align_seq(
-                                                "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
-                                                "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
-                                                align_mode=realign_mode,
-                                            )
+                                        t_begin_pad, t_end_pad = run_match_align_dp(
+                                            target_seq[t_begin:t_end],
+                                            query_seq,
+                                            align_mode=realign_mode,
+                                        )
 
                                     if t_begin_pad is not None:
                                         t_begin += t_begin_pad
@@ -968,21 +1040,20 @@ def run_aligner_pipeline(
                                     #    "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
                                     #    177, 2, 2, 1
                                     # )
-                                    est_edit_dist = 0
-                                    if est_edit_dist is None:
-                                       est_edit_dist = 178
 
-                                if query_id in expected_coords:
-                                   diff_start = expected_coords[query_id][0]-t_begin
-                                   diff_end = expected_coords[query_id][1]-t_end
-                                   #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
-                                   status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
-                                   qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
-                                   output_buf.append(f"{'FUCK' if est_edit_dist >= 177999 else 'X'} | {est_edit_dist} | {query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
-                                else:
+                                    # if query_id in expected_coords:
+                                    #    diff_start = expected_coords[query_id][0]-t_begin
+                                    #    diff_end = expected_coords[query_id][1]-t_end
+                                    #    #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
+                                    #    status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
+                                    #    qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
+                                    #    #output_buf.append
+                                    #    output_buf.append(f"{'FUCK' if est_edit_dist >= 177999 else 'X'} | {est_edit_dist} | {query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
+                                    # else:
                                     output_buf.append(f"{query_id} {t_begin} {t_end}\n")
                             except Exception as e:
-                                query_task.fail(e)
+                                # TODO?
+                                print(e)
                     if line[0] == '>':
                         # Process end
                         query_seq = ""
@@ -991,8 +1062,8 @@ def run_aligner_pipeline(
                         query_seq += line.rstrip()
             if len(output_buf) > 0:
                 output_file.writelines(output_buf)
-            LOGS.cli.info(f"Wrote records to {output_file_path}")
-            os._exit(0) # Faster exit than normally
+            print(f"Wrote records to {output_file_path}")
+            #os._exit(0) # Faster exit than normally
 
 @click.command()
 @click.argument('target-fasta', help="Target sequence FASTA file path")
@@ -1023,6 +1094,4 @@ def run_alignment_cli(target_fasta, query_fasta, output, kmer_len, window_len, f
     
 
 if __name__ == '__main__':
-    #run_alignment_cli()
-    np.set_printoptions(threshold=sys.maxsize)
-    print(doit(MAPPING_FN(np.array(list(Mquery))), MAPPING_FN(np.array(list(Mtarget)))))
+    run_alignment_cli()
