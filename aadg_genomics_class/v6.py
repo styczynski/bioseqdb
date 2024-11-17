@@ -100,7 +100,7 @@ def run_match_align_dp(target, query, align_mode=1):
         suff_len_factor = 0.4
         suff_len_factor2 = 0.6
 
-        print(f"align_seq(): ALIGNER_MODE {align_mode}")
+        #print(f"align_seq(): ALIGNER_MODE {align_mode}")
         suff_len = round(len(query) * suff_len_factor)
         suff_len2 = round(len(query) * suff_len_factor2)
 
@@ -736,7 +736,7 @@ def run_aligner_pipeline(
                     
                     # if query_id not in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
                     #    continue
-                    if query_id == 'read_286': #int(query_id.split('_')[1]) < 100 or query_id in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
+                    if True: #query_id == 'read_286': #int(query_id.split('_')[1]) < 100 or query_id in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
                         try:
                             max_diff = round(len(query_seq)*1.3)
                             min_index_query = get_minimizers(
@@ -768,9 +768,9 @@ def run_aligner_pipeline(
                             
                             match_score, match_start_t, match_end_t, match_start_q, match_end_q = -max_diff, 0, 0, 0, 0
 
-                            print("ALL MATCH:")
-                            print(matches)
-                            print("END")
+                            #print("ALL MATCH:")
+                            #print(matches)
+                            #print("END")
 
                             if n == 0:
                                 pass

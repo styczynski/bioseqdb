@@ -734,7 +734,7 @@ def run_aligner_pipeline(
                 if line[0] == '>' and len(query_seq) > 0:
                     query_seq = MAPPING_FN(np.array(list(query_seq)))
                     # Process
-                    if gc_collect_cnt > 299:
+                    if gc_collect_cnt > 2:
                        gc_collect_cnt = 0
                        gc.collect()
                     gc_collect_cnt += 1
