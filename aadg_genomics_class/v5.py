@@ -336,57 +336,6 @@ def get_O(char, index):
         return O[char][index]
 
 
-def inexact_recursion(s, i, diff, k, l, prev_type):
-    """search bwt recursively and tolerate errors"""
-    
-    global num_prunes
-
-    # pruning based on estimated mistakes
-    if diff < get_D(i):
-        num_prunes += 1
-        return set()
-
-    # end of query condition
-    temp = set()
-    if i < 0:
-        for j in range(k, l+1):
-            temp.add((j, diff))
-        return temp
-
-    # search
-    sa_idx = set()  # set of suffix array indices at which a match starts
-    
-    # Insertion
-    if prev_type == 1:
-        sa_idx = sa_idx.union(inexact_recursion(s, i-1, diff-gap_ext, k, l, 1))
-    else:
-        sa_idx = sa_idx.union(inexact_recursion(s, i-1, diff-gap_ext-gap_open, k, l, 1))
-
-    for char in ALPHABET:
-        temp_k = C[char] + get_O(char, k-1) + 1
-        temp_l = C[char] + get_O(char, l)
-    
-        if temp_k <= temp_l:
-            # Deletion
-            if prev_type == 2:
-                sa_idx = sa_idx.union(inexact_recursion(s, i, diff-gap_ext, temp_k, temp_l, 2))
-            else:
-                sa_idx = sa_idx.union(inexact_recursion(s, i, diff-gap_ext-gap_open, temp_k, temp_l, 2))
-            if char == s[i]:
-                # Match!
-                sa_idx = sa_idx.union(inexact_recursion(s, i-1, diff+match, temp_k, temp_l, 0))
-                
-            else:
-                # Mismatch
-                if sub_mat:
-                    sa_idx = sa_idx.union(inexact_recursion(s, i-1, diff-mismatch*sub_mat[(s[i], char)],
-                                                            temp_k, temp_l, 3))
-                else:
-                    sa_idx = sa_idx.union(inexact_recursion(s, i-1, diff-mismatch, temp_k, temp_l, 3))
-
-    return sa_idx
-
-
 def estimate_substitution_mat(ref, r):
     """get likelihood of each substitution type over all possible alignments"""
     mismatches = {}
@@ -423,10 +372,75 @@ def rank(bw):
 
     return ranks, totals
 
+#### NEW BWA START
+
+
+def inexact_recursion(s, i, diff, k, l, prev_type):
+    """search bwt recursively and tolerate errors"""
+    
+    global num_prunes
+
+    # pruning based on estimated mistakes
+    if diff < get_D(i):
+        num_prunes += 1
+        return set(), False
+
+    # end of query condition
+    temp = set()
+    if i < 0:
+        for j in range(k, l+1):
+            temp.add((j, diff))
+        return temp, len(temp) > 0
+
+    # Insertion
+    if prev_type == 1:
+        sub_result, has_result = inexact_recursion(s, i-1, diff-gap_ext, k, l, 1)
+        if has_result:
+            return sub_result, True
+    else:
+        sub_result, has_result = inexact_recursion(s, i-1, diff-gap_ext-gap_open, k, l, 1)
+        if has_result:
+            return sub_result, True
+
+    for char in ALPHABET:
+        temp_k = C[char] + get_O(char, k-1) + 1
+        temp_l = C[char] + get_O(char, l)
+    
+        if temp_k <= temp_l:
+            # Deletion
+            if prev_type == 2:
+                sub_result, has_result = inexact_recursion(s, i, diff-gap_ext, temp_k, temp_l, 2)
+                if has_result:
+                    return sub_result, True
+            else:
+                sub_result, has_result = inexact_recursion(s, i, diff-gap_ext-gap_open, temp_k, temp_l, 2)
+                if has_result:
+                    return sub_result, True
+            if char == s[i]:
+                # Match!
+                sub_result, has_result = inexact_recursion(s, i-1, diff+match, temp_k, temp_l, 0)
+                if has_result:
+                    return sub_result, True
+            else:
+                # Mismatch
+                sub_result, has_result = inexact_recursion(s, i-1, diff-mismatch, temp_k, temp_l, 3)
+                if has_result:
+                    return sub_result, True
+    return set(), False
+    
+def best_match_position(bw, bwr, s, diff, sa):
+    sa_index_list = inexact_search(bw, bwr, s, diff)
+    if len(sa_index_list) != 0:
+        best_index, score = sa_index_list[0]
+        return sa[best_index]+1, score
+    else:
+        return -1, -1
+        
 def inexact_search(bw, bwr, s, diff):
     """find suffix array intervals with up to diff differences"""
 
     global C, O, D, num_prunes
+    num_prunes = 0
     # totals, ranks
     # O is a dictionary with keys $,A,C,G,T, and values are arrays of counts
     O, tot = rank(bw)
@@ -442,10 +456,11 @@ def inexact_search(bw, bwr, s, diff):
     D = compute_D(s, C, Oprime, bw)
 
     # call the recursive search function and return a list of SA-range tuples
-    sa_index_set = inexact_recursion(s, len(s)-1, diff, 0, len(bw)-1, 4)
+    sa_index_set, _ = inexact_recursion(s, len(s)-1, diff, 0, len(bw)-1, 4)
     index_dict = {}
 
     for (i, j) in sa_index_set:
+        # print(f"(i, j)=({i},{j})")
         # if index already exists, pick the higher diff value
         if i in index_dict:
             if index_dict[i] < j:
@@ -459,55 +474,74 @@ def inexact_search(bw, bwr, s, diff):
     return sorted(index_dict.items(), key=itemgetter(1), reverse=True) 
 
 
-def best_match_position(bw, bwr, s, diff, sa):
-    sa_index_list = inexact_search(bw, bwr, s, diff)
-    if len(sa_index_list) != 0:
-        best_index, score = sa_index_list[0]
-        return sa[best_index]+1, score
-    else:
-        return -1, -1
-
 def run_match_align_bwt(q, t):
-    # q = Mquery
-    # t = Mtarget
-    # ???????????????????????????????????????????
-    dna_string = np.concatenate((t, np.array([MAPPING_DOLLAR], dtype=np.uint8)), dtype=np.uint8) # t+'$'
-    dna_string_r = np.concatenate((t[::-1], np.array([MAPPING_DOLLAR], dtype=np.uint8)), dtype=np.uint8) # reverse(t)+'$'
-    query_string = q[:100]
-    query_string_r = q[len(q)-100:]
+    fragment_size = round(len(q) * 0.1)
+    max_offset = round(len(q) * 0.04)
+    fragment_offset = 0
+    fragment_offset2 = 50
 
-    threshold = 8
-    max_offset = 20
-
-    suffix_array = skew_rec(dna_string, 6)
-    bwt = np.zeros(len(dna_string))
-    for v_rank in range(len(dna_string)):
-        bwt[v_rank] = (dna_string[suffix_array[v_rank]-1])
-
-    suffix_array_r = skew_rec(dna_string_r, 6)
-    bwt_r = np.zeros(len(dna_string_r))
-    for v_rank in range(len(dna_string_r)):
-        bwt_r[v_rank] = (dna_string_r[suffix_array_r[v_rank]-1])
-
-    # We have SA and BWT
-    # print("NOW SEARCH!!!!!")
-    (off_l, _) = best_match_position(bwt, bwt_r, query_string, threshold, suffix_array)
-    (off_r, _) = best_match_position(bwt, bwt_r, query_string_r, threshold, suffix_array)
-
-    realign_right = False
-    off_l = None if off_l == -1 else off_l-1
-    if off_r == -1:
-        off_r = None
-    else:
-        possible_offset = len(t)-100-off_r
-        if abs(possible_offset) < max_offset:
-            off_r = possible_offset
-        else:
-            off_r = None
-            realign_right = True
-
-    return off_l, off_r, realign_right
+    # print(f"q={len(q)}, t={len(t)}")
     
+    off_r, off_l, realign_right = None, None, False
+    for (
+        is_right_offset,
+        dna_fragment_start,
+        dna_fragment_end,
+        query_fragment_start,
+        query_fragment_end,
+        offset_return_pad,
+        max_offset,
+        thresholds,
+    ) in [
+        (False, 0, fragment_size*2, fragment_offset, fragment_size+fragment_offset, -1-fragment_offset, max_offset, [8]),
+        (True, len(t)-fragment_size*2-fragment_offset, len(t)-fragment_offset, len(q)-fragment_size, len(q), -fragment_offset+1, max_offset, [8]),
+        (False, fragment_offset2, fragment_offset2+fragment_size*2, fragment_offset2, fragment_size+fragment_offset2, -1, max_offset, [15]),
+    ]:
+        if is_right_offset and off_r is not None:
+            continue
+        if not is_right_offset and (realign_right or off_l is not None):
+            continue
+
+        t_fragment = t[dna_fragment_start:dna_fragment_end]
+        dna_fragment = np.concatenate((t_fragment, np.array([MAPPING_DOLLAR], dtype=np.uint8)), dtype=np.uint8) # t+'$'
+        dna_fragment_rev = np.concatenate((t_fragment[::-1], np.array([MAPPING_DOLLAR], dtype=np.uint8)), dtype=np.uint8) # reverse(t)+'$'
+        
+        suffix_array = skew_rec(dna_fragment, 6)
+        bwt = np.zeros(len(dna_fragment))
+        for v_rank in range(len(dna_fragment)):
+            bwt[v_rank] = (dna_fragment[suffix_array[v_rank]-1])
+    
+        suffix_array_rev = skew_rec(dna_fragment_rev, 6)
+        bwt_rev = np.zeros(len(dna_fragment_rev))
+        for v_rank in range(len(dna_fragment_rev)):
+            bwt_rev[v_rank] = (dna_fragment_rev[suffix_array_rev[v_rank]-1])
+
+        query_string = q[query_fragment_start:query_fragment_end]
+        
+        for threshold_i in range(len(thresholds)):
+            threshold = thresholds[threshold_i]
+            off, _ = best_match_position(bwt, bwt_rev, query_string, threshold, suffix_array)
+            overflow_offset = False
+            # print(f"off = {off}")
+            
+            if off == -1:
+                off = None
+            elif off is not None:
+                off += offset_return_pad
+                if is_right_offset:
+                    off = (dna_fragment_end-dna_fragment_start)-(query_fragment_end-query_fragment_start)-off
+                if off > max_offset:
+                    off = None
+                    overflow_offset = True
+            if is_right_offset:
+                off_r = off
+                realign_right = realign_right or overflow_offset
+            else:
+                off_l = off
+    return off_l, off_r, realign_right
+
+
+#### NEW BWA END
 
 def normalize_pos(pos, len):
     return min(max(pos, 0), len)
@@ -592,7 +626,7 @@ def run_aligner_pipeline(
     print(f"Invoked CLI with the following args: {' '.join(sys.argv)}")
     
     expected_coords = {}
-    with open('./data_big/reads20Mb.txt', mode ='r')as file:
+    with open('./data_big/reads20Ma.txt', mode ='r')as file:
         csvFile = csv.reader(file, delimiter='\t')
         expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
     if kmer_len > MAX_KMER_SIZE:
@@ -704,9 +738,10 @@ def run_aligner_pipeline(
                        gc_collect_cnt = 0
                        gc.collect()
                     gc_collect_cnt += 1
+                    
                     # if query_id not in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
                     #    continue
-                    if True: #query_id == 'read_0':
+                    if True or query_id == 'read_832': #int(query_id.split('_')[1]) < 100 or query_id in ['read_937', 'read_961', 'read_972', 'read_96', 'read_126', 'read_394', 'read_561', 'read_693', 'read_771', 'read_794', 'read_817', 'read_903', 'read_910', 'read_937', 'read_972', 'read_961']:
                         try:
                             max_diff = round(len(query_seq)*1.3)
                             min_index_query = get_minimizers(
@@ -806,10 +841,12 @@ def run_aligner_pipeline(
 
                             relative_extension = kmer_len // 2 + 1
 
+                            can_submit = False
                             if abs(match_end_t - match_start_t) > max_diff + relative_extension:
                                 # FAILED MAPPING!
                                 #print(f"Failed sequence, reason: {match_start_t} - {match_end_t} ({abs(match_end_t - match_start_t)})")
-                                output_buf.append(f"{query_id} status=FAIL\n")
+                                #output_buf.append(f"{query_id} status=FAIL\n")
+                                pass
                             else:
                                 q_begin, q_end = 0, len(query_seq)
                                 t_begin, t_end = match_start_t - match_start_q - relative_extension, match_end_t + (len(query_seq)-match_end_q) + relative_extension
@@ -817,60 +854,78 @@ def run_aligner_pipeline(
                                 q_begin, q_end = normalize_pos(q_begin, len(query_seq)), normalize_pos(q_end, len(query_seq))
                                 t_begin, t_end = normalize_pos(t_begin, len(target_seq)), normalize_pos(t_end, len(target_seq))
 
-                                realign_mode = 0
-                                t_begin_pad, t_end_pad, should_realign_right = run_match_align_bwt(
-                                    query_seq,
-                                    target_seq[t_begin:t_end],
-                                )
-                                    
-                                if should_realign_right:
-                                    realign_mode = 1
-                                if abs(t_end-(t_end_pad or 0)-t_begin-(t_begin_pad or 0)) > len(query_seq)*1.05:
-                                    realign_mode = 2
+                                retry = ""
+                                for i in range(2):
+                                    realign_mode = 0
+                                    t_begin_pad, t_end_pad, should_realign_right = run_match_align_bwt(
+                                        query_seq,
+                                        target_seq[t_begin:t_end],
+                                    )
+                                        
+                                    if should_realign_right:
+                                        realign_mode = 1
+                                    if abs(t_end-(t_end_pad or 0)-t_begin-(t_begin_pad or 0)) > len(query_seq)*1.05:
+                                        realign_mode = 2
+                                        if t_begin_pad is not None:
+                                            t_begin += t_begin_pad
+                                        if t_end_pad is not None:
+                                            t_end -= t_end_pad
+
+                                    if realign_mode > 0:
+                                        t_begin_pad, t_end_pad = run_match_align_dp(
+                                            target_seq[t_begin:t_end],
+                                            query_seq,
+                                            align_mode=realign_mode,
+                                        )
+
+                                    if not should_realign_right and t_begin_pad is None:
+                                        t_begin_pad = relative_extension
+                                    if not should_realign_right and t_end_pad is None:
+                                        t_end_pad = relative_extension
+
                                     if t_begin_pad is not None:
                                         t_begin += t_begin_pad
                                     if t_end_pad is not None:
                                         t_end -= t_end_pad
 
-                                if realign_mode > 0:
-                                    t_begin_pad, t_end_pad = run_match_align_dp(
-                                        target_seq[t_begin:t_end],
-                                        query_seq,
-                                        align_mode=realign_mode,
-                                    )
+                                    # print("TARGET!!!!")
+                                    # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
+                                    # print("QUERY!!!")
+                                    # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
+                                    #print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
+                                    # sys.exit(1)
 
-                                if t_begin_pad is not None:
-                                    t_begin += t_begin_pad
-                                if t_end_pad is not None:
-                                    t_end -= t_end_pad
+                                    # print("TARGET!!!!")
+                                    # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
+                                    # print("QUERY!!!")
+                                    # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
 
-                                # print("TARGET!!!!")
-                                # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
-                                # print("QUERY!!!")
-                                # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
-                                #print(f"ALIGNED: {t_begin} - {t_end} (pd: {t_begin_pad}, {t_end_pad} query: {q_begin} - {q_end})")
-                                # sys.exit(1)
+                                    #est_edit_dist = estimate_distance(target_seq[t_begin:t_end], query_seq) #levenshtein("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]), "".join([RR_MAPPING[i] for i in query_seq.tolist()]))
+                                    # est_edit_dist = levenshtein(
+                                    #    "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
+                                    #    "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
+                                    #    177, 2, 2, 1
+                                    # )
 
-                                # print("TARGET!!!!")
-                                # print("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]))
-                                # print("QUERY!!!")
-                                # print("".join([RR_MAPPING[i] for i in query_seq.tolist()]))
+                                    if abs(t_end-t_begin) > len(query_seq)*1.05:
+                                        # Problem
+                                        t_begin = t_end - len(query_seq) - relative_extension
+                                        retry = "RETRIED"
+                                        continue
+                                    else:
+                                        can_submit = True
+                                        break
 
-                                #est_edit_dist = estimate_distance(target_seq[t_begin:t_end], query_seq) #levenshtein("".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]), "".join([RR_MAPPING[i] for i in query_seq.tolist()]))
-                                # est_edit_dist = levenshtein(
-                                #    "".join([RR_MAPPING[i] for i in target_seq[t_begin:t_end].tolist()]),
-                                #    "".join([RR_MAPPING[i] for i in query_seq.tolist()]),
-                                #    177, 2, 2, 1
-                                # )
-
-                                if query_id in expected_coords:
+                                if not can_submit:
+                                    output_buf.append(f"{query_id} status=FAIL\n")
+                                elif query_id in expected_coords:
                                    diff_start = expected_coords[query_id][0]-t_begin
                                    diff_end = expected_coords[query_id][1]-t_end
-                                   #print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
+                                   print(f"TOTAL DIFF: {max(abs(diff_start), abs(diff_end))}")
                                    status = "OK" if max(abs(diff_start), abs(diff_end)) < 20 else "BAD"
                                    qual = "AA" if abs(diff_start)+abs(diff_end) < 10 else ("AB" if abs(diff_start)+abs(diff_end) < 20 else ("C" if max(abs(diff_start), abs(diff_end)) < 20 else "D"))
                                    #output_buf.append
-                                   output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {'REALIGNED'+realign_mode if should_realign_right else ''} \n")
+                                   output_file.write(f"{query_id} status={status} qual={qual} diff=<{diff_start}, {diff_end}>  | {t_begin} {t_end} | pad: {t_begin_pad}, {t_end_pad} | {retry} {'REALIGNED'+str(realign_mode) if realign_mode != 0 else ''} \n")
                                 else:
                                     output_buf.append(f"{query_id} {t_begin} {t_end}\n")
                         except Exception as e:
@@ -893,8 +948,8 @@ def run_alignment_cli():
         reference_file_path=sys.argv[1],
         reads_file_path=sys.argv[2],
         output_file_path="output.txt",
-        kmer_len=18,
-        window_len=8,
+        kmer_len=16,
+        window_len=5,
     )
 
 if __name__ == '__main__':
