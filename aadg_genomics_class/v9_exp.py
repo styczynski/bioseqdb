@@ -1,14 +1,14 @@
 from gc import collect as gc_collect, disable as gc_disable
 from sys import maxsize, argv as sys_argv
 
-from time import time_ns
+from time import time_ns, sleep
 from typing import Dict, Any, Set, Optional, Tuple
 from itertools import chain
 from numpy.lib.stride_tricks import sliding_window_view
 from operator import itemgetter
 from collections import defaultdict
 
-from numpy import frompyfunc, vectorize, uint8, uint32, zeros, array, concatenate, add, argmin, arange, column_stack, unique, split, empty, ix_, take, sum, diff, result_type, searchsorted
+from numpy import frompyfunc, vectorize, uint8, uint32, array, concatenate, add, argmin, arange, column_stack, unique, split, empty, ix_, take
 
 # Used to create kmer binary masks
 MAX_KMER_SIZE = 64
@@ -35,14 +35,14 @@ ALPHABET_LT_PAIRS = [(a, b) for a in ALPHABET for b in ALPHABET if b < a]
 MAPPING_FN = vectorize(MAPPING.get, otypes=[uint8])
 
 # Remove every nth kmer from the reference index
-REFERENCE_NTH_KMER_REMOVAL = 35 # was: 20
+REFERENCE_NTH_KMER_REMOVAL = 15 # was: 20
 # Load reference in chunks of that size
-REFERENCE_INDEX_CHUNK_SIZE = 1000000
+REFERENCE_INDEX_CHUNK_SIZE = 800000
 
 # Length of k-mer used to generate (k,w)-minimizer indices
 KMER_LEN = 16 # was: 16
 # Length of window to generate (k,w)-minimizer indices
-WINDOW_LEN = 6 # was: 5
+WINDOW_LEN = 7 # was: 5
 
 # Match from k-mer index with be resized by kmer_len times this factor
 FACT_KMER_TO_RELATIVE_EXTENSION_LEN = 0.5
@@ -443,7 +443,6 @@ def run_aligner_pipeline(
 ):
     gc_disable()
     moment_start = time_ns()
-    moments_l = []
     print(f"Invoked CLI with the following args: {' '.join(sys_argv)}")
 
     target_seq_l = []
@@ -463,6 +462,9 @@ def run_aligner_pipeline(
                 # Transform loaded string chunk into a sequence
                 seq_arr = MAPPING_FN(array(list(all_seq)))
                 target_seq_l.append(seq_arr)
+                if len(target_seq_l) > 5:
+                    target_seq_l = [concatenate(target_seq_l, axis=0, dtype=uint8)]
+                    gc_collect()
                 del all_seq
 
                 # Target index building
@@ -526,6 +528,7 @@ def run_aligner_pipeline(
 
                 del selected_kmers_unique_idx
                 del selected_kmers_entries_split
+                del selected_kmers
                 gc_collect()
             if line[0] == '>':
                 if ref_loaded:
@@ -539,11 +542,13 @@ def run_aligner_pipeline(
     # print(f"REF_INDEX_TL = {tl}")
     # import sys
     # sys.exit(0)
-
-    target_seq = concatenate(tuple(target_seq_l), axis=0, dtype=uint8)
+    if len(target_seq_l) == 1:
+        target_seq = target_seq_l[0]
+    else:
+        target_seq = concatenate(target_seq_l, axis=0, dtype=uint8)
     del target_seq_l
-
-    total_dp = 0
+    for i in range(3):
+        gc_collect()
 
     output_buf = []
     with open(output_file_path, 'w') as output_file:
@@ -562,6 +567,7 @@ def run_aligner_pipeline(
                             min_index_query = get_minimizers(
                                 query_seq,
                             )
+                            gc_collect()
 
                             common_kmers = []
                             for key in min_index_query:
@@ -580,9 +586,12 @@ def run_aligner_pipeline(
                                     )),
                                     axis=0,
                                 )
+                            del common_kmers
                             matches = matches[matches[:, 0].argsort()]
                             matches = matches[1:].tolist()
                             n = len(matches)
+                            del min_index_query
+                            gc_collect()
                             #print("ALL_MATCHES")
                             #print(matches)
                             # for i in range(len(matches)):
@@ -694,7 +703,6 @@ def run_aligner_pipeline(
                                             # Local maximum
                                             if score_2 > MIN_LIS_EXTENSION_WINDOW_SCORE:
                                                 scores.append((score_2, window_src[0][0], window_src[len(window_src)-1][0], window_src[0][1], window_src[len(window_src)-1][1]))
-
                                         # if score > match_score:
                                         #     match_score, match_start_t, match_end_t, match_start_q, match_end_q = score, window[0][0], window[len(window)-1][0], window[0][1], window[len(window)-1][1]
                                         #     lis_accepted = True
@@ -734,6 +742,12 @@ def run_aligner_pipeline(
                                     _, match_start_t, match_end_t, match_start_q, match_end_q = scores[0]
                                     lis_accepted = True
                                 
+                                del scores
+                                del lis
+                            
+                            del matches
+                            gc_collect()
+
                             can_submit = False
                             if not lis_accepted or abs(match_end_t - match_start_t) > max_diff + relative_extension:
                                 #print(f"{query_id} -> UNMAPPED; diff_to_much?={abs(match_end_t - match_start_t)}>{max_diff + relative_extension}  and lis_accepted={lis_accepted}")
@@ -747,13 +761,11 @@ def run_aligner_pipeline(
 
                                 for i in range(2):
                                     realign_mode = 0
-                                    _bwt_start = time_ns()
                                     t_begin_pad, t_end_pad, should_realign_right = run_match_align_bwt(
                                         query_seq,
                                         target_seq[t_begin:t_end],
                                     )
-                                    moments_l.append((time_ns()-_bwt_start) // 1000000)
-                                    # output_buf.append(f"{query_id} BWT {t_begin_pad} {t_end_pad}\n")
+                                    gc_collect()
                                         
                                     if should_realign_right:
                                         realign_mode = 1
@@ -765,14 +777,13 @@ def run_aligner_pipeline(
                                             t_end -= t_end_pad
 
                                     if realign_mode > 0:
-                                        total_dp -= time_ns()
                                         _, _, t_end_pad = run_match_align_dp(
                                             target_seq[t_begin:t_end],
                                             query_seq,
                                             align_mode=realign_mode,
                                         )
                                         t_begin_pad = 0 # TODO: ?????
-                                        total_dp += time_ns()
+                                        gc_collect()
                                         # print(f"MATCH DP() run in {total_dp // 1000000} ms for query_id={query_id}")
                                         # print(f"result = {t_begin_pad} x {t_end_pad}")
                                         # import sys
@@ -801,6 +812,10 @@ def run_aligner_pipeline(
                                     pass
                                 else:
                                     output_buf.append(f"{query_id}\t{t_begin}\t{t_end}\n")
+                                    if len(output_buf) > 25:
+                                        output_file.writelines(output_buf)
+                                        output_buf = []
+                                        gc_collect()
                         except Exception as e:
                             # TODO?
                             print(e)
@@ -816,8 +831,6 @@ def run_aligner_pipeline(
         
         moment_end = time_ns()
         print(f"Wrote records to {output_file_path} in {((moment_end-moment_start) // 10000000)/100} sec.")
-        print(f"BWT AVERAGE RUNNING TIME = {sum(moments_l)/len(moments_l)} ms")
-        print(f"DP TOTAL TIME = {total_dp // 1000000} ms")
         #os._exit(0) # Faster exit than normally
 
 def run_alignment_cli():
