@@ -656,6 +656,13 @@ def run_aligner_pipeline(
                 ref_loaded = True
                 continue
 
+    # tl = 0
+    # for k in ref_index:
+    #     tl += len(ref_index[k])
+    # print(f"REF_INDEX_TL = {tl}")
+    # import sys
+    # sys.exit(0)
+
     output_buf = []
     with open(output_file_path, 'w') as output_file:
         query_id = ""

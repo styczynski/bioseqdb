@@ -45,8 +45,9 @@ def check(results_file_path):
     print(f"ok        = {ok_count} ({ok_count / len(expected_coords) * 100}%)")
     print(f"unmapped  = {unmapped_count} ({unmapped_count / len(expected_coords) * 100}%)")
     print("\n")
-    for (key, count) in qual_count.items():
-        print(f"ok[{key}]      = {count} ({count/ok_count*100}%)")
+    if ok_count > 0:
+        for (key, count) in qual_count.items():
+            print(f"ok[{key}]      = {count} ({count/ok_count*100}%)")
 
 if __name__ == '__main__':
     check(sys.argv[1])
