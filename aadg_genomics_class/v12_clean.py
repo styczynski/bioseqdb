@@ -1,3 +1,9 @@
+# Piotr Styczyński (ps386038)
+# Fast and accurate seed-and-extend aligner for references ~ 20M and queries ~ 1k bases
+# Usage: 
+#
+#    python3 mapper.py data_big/reference20M.fasta data_big/reads20Ma.fasta
+#
 from gc import collect as gc_collect, disable as gc_disable
 from sys import maxsize, argv as sys_argv
 
