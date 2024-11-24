@@ -92,6 +92,7 @@ def run_aligners():
                     metric_name = track_data_part["name"]
                     del track_data_part["name"]
                     track_data[program_label][case_name][metric_name] = track_data_part
+            track_data[program_label][case_name]["memory"] = dict() # TODO: FIX!!!
     track_data = {k : {k2 : {k3 : v3 for k3, v3 in v2.items()} for k2, v2 in v.items()} for k, v in track_data.items()}
     with open('./presentation/data1.json', 'w') as outf:
         json.dump(track_data, outf) 

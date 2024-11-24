@@ -9,8 +9,8 @@
 
 
 INPUT_FILE_T="a"
-TEST_SUFF="perfect9"
-PROG="v9_exp"
+TEST_SUFF="final"
+PROG="v12_clean"
 
 # rm -rfd profile${TEST_SUFF}${INPUT_FILE_T}.bin   2> /dev/null && \
 # rm -rfd memray-flamegraph-profile${TEST_SUFF}${INPUT_FILE_T}.html 2> /dev/null
@@ -26,3 +26,5 @@ rm -rfd procdata_${TEST_SUFF}${INPUT_FILE_T}.txt 2> /dev/null
 python3 aadg_genomics_class/${PROG}.py data_big/reference20M.fasta data_big/reads20M${INPUT_FILE_T}.fasta  &
 PID="$!"
 while sleep 0.1;do ps -p $PID -o rss= >> procdata_${TEST_SUFF}${INPUT_FILE_T}.txt;done
+
+#python3 aadg_genomics_class/xchecker.py ./data_big/reads20M${INPUT_FILE_T}.txt

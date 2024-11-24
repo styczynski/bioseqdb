@@ -8,7 +8,7 @@
         "font.serif": [],
         "text.usetex": True,
       })
-      with open('../data1.json') as f:
+      with open('../experiments_data.json') as f:
           stats = json.load(f)
       fig, ax = plt.subplots()
       fig.set_size_inches(__LINEWIDTH__, 0.7*__LINEWIDTH__, forward=True)

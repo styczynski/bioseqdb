@@ -5,13 +5,77 @@
 \usepackage{pdftexcmds}
 \usepackage{robust-externalize}
 \usepackage{relsize}
+\usepackage{algorithm}
+\PassOptionsToPackage{noend}{algpseudocode}
+\usepackage{algpseudocode}
+\usepackage{float}
+\usepackage{mathtools}
+\usepackage{caption}
+\usepackage[dvipsnames]{xcolor}
 \pgfmathsetseed{\number\pdfrandomseed}
-\usetikzlibrary{positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
+\usetikzlibrary{tikzmark, positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
 \robExtConfigure{enable fallback to manual mode} % prints command to run in PDF if shell-escape is not used/forgotten
 \def\mathdefault#1{#1} % Needed in matplotlib 3.8: https://github.com/matplotlib/matplotlib/issues/27907
 \setbeamertemplate{frametitle}[default][center]
 
+\renewcommand{\algorithmiccomment}[1]{\hfill$\triangleright$\textit{#1}}
+\newcommand{\CommentH}[1]{\Comment{\textbf{\textcolor{BlueViolet}{#1}}}}
+
 \tikzset{fontscale/.style = {font=\relsize{#1}}}
+
+\DeclarePairedDelimiter\ceil{\lceil}{\rceil}
+\DeclarePairedDelimiter\floor{\lfloor}{\rfloor}
+
+%% FIXES FOR ALGORITHMS
+
+\usepackage{etoolbox}
+
+\newcommand{\algruledefaultfactor}{.75}
+\newcommand{\algstrut}[1][\algruledefaultfactor]{\vrule width 0pt
+depth .25\baselineskip height #1\baselineskip\relax}
+\newcommand*{\algrule}[1][\algorithmicindent]{\hspace*{.5em}\vrule\algstrut
+\hspace*{\dimexpr#1-.5em}}
+
+\makeatletter
+\newcount\ALG@printindent@tempcnta
+\def\ALG@printindent{%
+    \ifnum \theALG@nested>0% is there anything to print
+    \ifx\ALG@text\ALG@x@notext% is this an end group without any text?
+    % do nothing
+    \else
+    \unskip
+    % draw a rule for each indent level
+    \ALG@printindent@tempcnta=1
+    \loop
+    \algrule[\csname ALG@ind@\the\ALG@printindent@tempcnta\endcsname]%
+    \advance \ALG@printindent@tempcnta 1
+    \ifnum \ALG@printindent@tempcnta<\numexpr\theALG@nested+1\relax% can't do <=, so add one to RHS and use < instead
+    \repeat
+    \fi
+    \fi
+}%
+
+\patchcmd{\ALG@doentity}{\noindent\hskip\ALG@tlm}{\ALG@printindent}{}{\errmessage{failed to patch}}
+
+\AtBeginEnvironment{algorithmic}{\lineskip0pt}
+
+\newcommand*\Let[2]{\State #1 $\gets$ #2}
+\newcommand*\Stateh{\State \algstrut[1]}
+
+
+%% END FIXES
+%% COLOURS FOR ALGORITHMS
+
+
+\makeatletter
+\newcommand{\algcolor}[2]{%
+  \hskip-\ALG@thistlm\colorbox{#1}{\parbox{\dimexpr\linewidth-2\fboxsep}{\hskip\ALG@thistlm\relax #2}}%
+}
+\newcommand{\algemph}[1]{\algcolor{GreenYellow}{#1}}
+\makeatother
+
+% END COLOURS
+
 
 \newcommand{\randeq}[1]{% 
 \pgfmathparse{(int(random(-40, 40))+100)/100 * #1}%
@@ -45,46 +109,137 @@
 
 \frame{\titlepage}
 
+\begin{frame}
+  \frametitle{Seed extension}
+  
+  \begin{algorithm}[H]
+      \captionsetup{font=scriptsize}
+      \caption{Standard LIS construction O(n log n)}\label{alg:cap}
+      \scriptsize
+      \begin{algorithmic}
+          \Require $n \geq 0$
+          %\Ensure $y = x^n$
+          \State $lis\_len \gets 0$ \Comment{Length of LIS}
+          \State $parent \gets \{\infty, \infty, \infty, ..., \infty\}_{n+1}$ \Comment{Mapping to reconstruct LIS}
+          \State $sub \gets \{\infty, \infty, \infty, ..., \infty\}_{n+1}$ \Comment{Array with indices for matches that form LIS}
+          \State $i \gets 0$
+          \While{$i < n$} \Comment{Iterate over all elements $i = 0, 1, 2..., n-1$}
+              \State $start \gets 1$
+              \State $end \gets lis\_len$
+              \While{$start \leq end$} \Comment{Binary search over existing longest sequence}
+                  \State $middle \gets \floor*{\frac{start + end}{2}}$
+                  \If{$matches_{q}[sub[middle]] < matches_{q}[i]$}
+                      \State{$start \gets middle + 1$}
+                  \Else
+                      \State{$start \gets middle - 1$}
+                  \EndIf
+              \EndWhile
+              \State{$parent[i] \gets sub[start-1]$} \Comment{We pin current value to the found parent}
+              \State{$sub[start] \gets i$}
+              \If{$start > lis\_len$}
+                  \State{$lis\_len = start$}
+              \EndIf
+              \State{$i \gets i+1$}
+          \EndWhile
+      \end{algorithmic}
+  \end{algorithm}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Seed extension}
+  \begin{algorithm}[H]
+    \caption{Reconstruct LIS by following parent array O(n)}\label{alg:cap}
+    \begin{algorithmic}
+        \State{$current\_node \gets sub[lis\_len]$}
+        \State{$result \gets \{0, 0, 0,..., 0\}_{lis\_len}$}
+        \State{$result[lis\_len-1] \gets current\_node$} \Comment{Will contain all indices from matches describing the output subsequence}
+        \State{$j \gets lis\_len-1 $}
+        \While{$1 \leq j$}
+            \State{$current\_node \gets parent[current\_node]$}
+            \State{$result[j-1] \gets current\_node$}
+            \State{$j \gets j-1$}
+        \EndWhile
+    \end{algorithmic}
+  \end{algorithm}
+\end{frame}
+
+\begin{frame}
+  \frametitle{Seed extension}
+  
+  \begin{algorithm}[H]
+      \captionsetup{font=scriptsize}
+      \caption{Segmented-LIS heuristic O(n log n)}\label{alg:cap}
+      \tiny
+      \begin{algorithmic}
+          \Require $n \geq 0$
+          %\Ensure $y = x^n$
+          \State $lis\_len \gets 0$ \Comment{Length of LIS}
+          \State $parent \gets \{\infty, \infty, \infty, ..., \infty\}_{n+1}$ \Comment{Mapping to reconstruct LIS}
+          \State $sub \gets \{\infty, \infty, \infty, ..., \infty\}_{n+1}$ \Comment{Array with indices for matches that form LIS}
+          \State $i \gets 0$
+          \While{$i < n$} \Comment{Iterate over all elements $i = 0, 1, 2..., n-1$}
+              \State $start \gets 1$
+              \State $end \gets lis\_len$
+              \While{$start \leq end$} \Comment{Binary search-like}
+                  \State $middle \gets \floor*{\frac{start + end}{2}}$
+                  \If{$matches_{T}[sub[middle]] > matches_{T}[i] - max\_diff$} \Comment{Encountered old entry}
+                      \State \algemph{$end \gets start - 1$} \Comment{Breaks loop}
+                  \ElsIf{$matches_{Q}[sub[middle]] < matches_{Q}[i]$}
+                      \State{$start \gets middle + 1$}
+                  \Else
+                      \State{$start \gets middle - 1$}
+                  \EndIf
+              \EndWhile
+              \State{$parent[i] \gets sub[start-1]$} \Comment{We pin current value to the found parent}
+              \State{$sub[start] \gets i$}
+              \If{$start > lis\_len$}
+                  \State{$lis\_len = start$}
+              \EndIf
+              \State{$i \gets i+1$}
+          \EndWhile
+      \end{algorithmic}
+  \end{algorithm}
+\end{frame}
+
 \begin{frame}[fragile]
-\frametitle{Seed and Extend approach}
+  \frametitle{Seed and Extend approach}
 
-{\centering
-\begin{tikzpicture}[scale=.8, transform shape, node distance=1cm, >=Latex]
-  \node(LT)[bigbox]{Load target};
-  \node(TI)[bigbox, right=2cm of LT]{Build target index};
-  \node(LQ)[bigbox, right=3cm of TI]{Build query index};
-  \node(S)[bigbox, below=of LQ]{Find seeds};
-  \node(E)[bigbox, left=of S]{Extend};
+  {\centering
+  \begin{tikzpicture}[scale=.8, transform shape, node distance=1cm, >=Latex]
+    \node(LT)[bigbox]{Load target};
+    \node(TI)[bigbox, right=2cm of LT]{Build target index};
+    \node(LQ)[bigbox, right=3cm of TI]{Build query index};
+    \node(S)[bigbox, below=of LQ]{Find seeds};
+    \node(E)[bigbox, left=of S]{Extend};
 
 
-  \node[place](X)[left=3cm of E]{};
-  \node(ABWT)[smallbox, above=2.5mm of X]{BWT};
-  \node(ADP)[smallbox, below=2.5mm of X]{Raw DP};
+    \node[place](X)[left=3cm of E]{};
+    \node(ABWT)[smallbox, above=2.5mm of X]{BWT};
+    \node(ADP)[smallbox, below=2.5mm of X]{Raw DP};
 
-  \node(QC)[bigbox, left=3cm of X]{Quality control};
-  \node(R)[bigbox, below=2cm of QC]{Report alignment};
+    \node(QC)[bigbox, left=3cm of X]{Quality control};
+    \node(R)[bigbox, below=2cm of QC]{Report alignment};
 
-  \draw[->](LT)--(TI);
-  \draw[->](TI)--(LQ);
-  \draw[->](LQ)--(S);
-  \draw[->](S)--(E);
-  \draw[->](QC)--(R);
+    \draw[->](LT)--(TI);
+    \draw[->](TI)--(LQ);
+    \draw[->](LQ)--(S);
+    \draw[->](S)--(E);
+    \draw[->](QC)--(R);
 
-  \draw[fork](E.west)--(ABWT.east);
-  \draw[fork](E.west)--(ADP.east);
+    \draw[fork](E.west)--(ABWT.east);
+    \draw[fork](E.west)--(ADP.east);
 
-  \draw[fork](ABWT.west)--(QC.east);
-  \draw[fork](ADP.west)--(QC.east);
+    \draw[fork](ABWT.west)--(QC.east);
+    \draw[fork](ADP.west)--(QC.east);
 
-  %\draw[fork](QC.south)--(ADP.south);
+    %\draw[fork](QC.south)--(ADP.south);
 
-  \path ($(R)!0.45!(ADP)$) -| (QC) coordinate [pos=0.2] (aux);
-  \draw (QC) |- (aux);
-  \draw[->] (aux) -| (ADP);
+    \path ($(R)!0.45!(ADP)$) -| (QC) coordinate [pos=0.2] (aux);
+    \draw (QC) |- (aux);
+    \draw[->] (aux) -| (ADP);
 
-\end{tikzpicture}
-\par}
-
+  \end{tikzpicture}
+  \par}
 \end{frame}
 
 \begin{frame}[fragile]
@@ -102,7 +257,7 @@
         "font.serif": [],
         "text.usetex": True,
       })
-      with open('../data1.json') as f:
+      with open('../experiments_data.json') as f:
           stats = json.load(f)
       fig, ax = plt.subplots()
       fig.set_size_inches(__LINEWIDTH__, 0.6*__LINEWIDTH__, forward=True)
@@ -181,7 +336,7 @@
         "font.serif": [],
         "text.usetex": True,
       })
-      with open('../data1.json') as f:
+      with open('../experiments_data.json') as f:
           stats = json.load(f)
       b = 2
       fig, ax = plt.subplots()
@@ -244,7 +399,7 @@
         "font.serif": [],
         "text.usetex": True,
       })
-      with open('../data1.json') as f:
+      with open('../experiments_data.json') as f:
           stats = json.load(f)
       fig, ax = plt.subplots()
       fig.set_size_inches(__LINEWIDTH__, 0.7*__LINEWIDTH__, forward=True)
@@ -294,7 +449,7 @@
         "font.serif": [],
         "text.usetex": True,
       })
-      with open('../data1.json') as f:
+      with open('../experiments_data.json') as f:
           stats = json.load(f)
       fig, ax = plt.subplots()
       fig.set_size_inches(__LINEWIDTH__, 0.7*__LINEWIDTH__, forward=True)
