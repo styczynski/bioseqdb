@@ -1,53 +1,102 @@
 import sys
 import csv
+import os
+import subprocess
+from threading import Thread
+import psutil
+import time
+import json
+from collections import defaultdict
 
-def check(results_file_path):
-    expected_coords = {}
-    with open(results_file_path, mode ='r')as file:
-        csvFile = csv.reader(file, delimiter='\t')
-        expected_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
-
-    with open("./output.txt", mode='r') as file:
-        csvFile = csv.reader(file, delimiter='\t')
-        actual_coords = {line[0]: (int(line[1]), int(line[2])) for line in csvFile}
-
-    bad_count = 0
-    unmapped_count = 0
-    ok_count = 0
-    qual_count = dict(AA=0, AB=0, CC=0, DD=0)
-
-    for (seq_id, (expected_s, expected_e)) in expected_coords.items():
-        status, message = "BAD", "UNKNOWN"
-        if seq_id not in actual_coords:
-            unmapped_count += 1
-            status, message = "BAD", "UNMAPPED"
-        else:
-            (actual_s, actual_e) = actual_coords[seq_id]
-            diff_start = expected_s - actual_s
-            diff_end = expected_e - actual_e
-
-            max_diff = max(abs(diff_start), abs(diff_end))
-            sum_diff = abs(diff_start)+abs(diff_end) 
-
-            status = "OK" if max_diff < 20 else "BAD"
-            qual = "AA" if sum_diff < 10 else ("AB" if sum_diff < 20 else ("CC" if max_diff < 20 else "DD"))
-            message = f"qual={qual} | max_diff={max_diff} sum_diff={sum_diff} | diff=<{diff_start}, {diff_end}>"       
-
-            if status != "OK":
-                bad_count += 1
+def process_watcher(pid, samples, samples_max_len):
+    retries = 0
+    i = 0
+    while True:
+        try:
+            while not psutil.pid_exists(pid):
+                time.sleep(0.2)
+                retries += 1
+                if retries > 5 and i > 0:
+                    return
+            process = psutil.Process(pid)
+            mem_usage = process.memory_info().rss
+            samples[i] = mem_usage
+            i += 1
+            if i >= samples_max_len:
+                return
             else:
-                ok_count += 1
-                qual_count[qual] += 1
-        print(f"{seq_id} | status={status} | {message}")
+                time.sleep(0.009)
+        except Exception:
+            return
 
-    print(f"\n\n\n=== SUMMARY ===")
-    print(f"bad       = {bad_count} ({bad_count / len(expected_coords) * 100}%)")
-    print(f"ok        = {ok_count} ({ok_count / len(expected_coords) * 100}%)")
-    print(f"unmapped  = {unmapped_count} ({unmapped_count / len(expected_coords) * 100}%)")
-    print("\n")
-    if ok_count > 0:
-        for (key, count) in qual_count.items():
-            print(f"ok[{key}]      = {count} ({count/ok_count*100}%)")
+def compute_stats():
+    stats = {'solution': {'small_reads2': {'name': 'read_lis', 't_samples_count': 100, 't_min': 1.18, 't_max': 14.0, 't_avg': 1.52, 't_total': 152.66}}}
+    print(stats)
+
+def run_aligners():
+    track_data = defaultdict()
+    for (program_label, program_name) in [
+        ("bwt-fragment-02p01", "v10_bwt_params_02p01"),
+        ("bwt-fragment-03p006", "v10_bwt_params_03p006"),
+        ("bwt-fragment-03p008", "v10_bwt_params_03p008"),
+        ("solution", "v10"),
+        ("bwt-dp-numpy", "v10_bwt_dp_numpy"),
+        ("bwt-dp-lists", "v10_bwt_lists"),
+    ]:
+        track_data[program_label] = defaultdict()
+        for (case_name, reference_path, reads_path, expected_output_path) in [
+            ("small_reads0", "./data2/reference.fasta", "data2/reads0.fasta", "data/reads0.txt"),
+            ("small_reads1", "./data2/reference.fasta", "data2/reads1.fasta", "data/reads1.txt"),
+            ("small_reads2", "./data2/reference.fasta", "data2/reads2.fasta", "data/reads2.txt"),
+            ("20Ma", "./data_big/reference20M.fasta", "data_big/reads20Ma.fasta", "data_big/reads20Ma.txt"),
+            ("20Mb", "./data_big/reference20M.fasta", "data_big/reads20Mb.fasta", "data_big/reads20Mb.txt"),
+        ]:
+            time.sleep(1)
+            lines = []
+            global_retry = 0
+            while True:
+                try:
+                    track_data[program_label][case_name] = defaultdict()
+                    #devnull = open(os.devnull, 'wb') # Use this in Python < 3.3
+                    # Python >= 3.3 has subprocess.DEVNULL
+                    print(f"{'' if global_retry == 0 else '[Retry='+str(global_retry)+'] '}Running [{program_label}] for case [{case_name}]")
+                    lines = []
+                    t = None
+                    samples = [-1] * 100000
+                    with subprocess.Popen(" ".join(["python3", f"aadg_genomics_class/{program_name}.py", reference_path, reads_path]), stdout=subprocess.PIPE, bufsize=1, universal_newlines=True, shell=True) as process:
+                        t = Thread(target=process_watcher, args=(process.pid, samples, len(samples)), daemon=True).start()
+                        while True:
+                            line_chunk = process.stdout.readline()
+                            if not line_chunk:
+                                break
+                            for line in line_chunk.split("\n"):
+                                l = line.replace("\n", "").replace("\r", "").strip()
+                                if len(l) > 0:
+                                    if l.startswith("TRACK"):
+                                        lines.append(l)
+                                    else:
+                                        print(f" |  {l}")
+                    if t:
+                        t.join()
+                    
+                    lines = [line.strip() for line in "\n".join(lines).split("\n") if len(line.strip()) > 0]
+                    break
+                except Exception as e:
+                    global_retry += 1
+                    if global_retry > 5:
+                        raise e
+                    continue
+            for line in lines:
+                if line.startswith("TRACK"):
+                    track_data_part = json.loads(line.replace("TRACK", "").strip())
+                    metric_name = track_data_part["name"]
+                    del track_data_part["name"]
+                    track_data[program_label][case_name][metric_name] = track_data_part
+    track_data = {k : {k2 : {k3 : v3 for k3, v3 in v2.items()} for k2, v2 in v.items()} for k, v in track_data.items()}
+    with open('./presentation/data1.json', 'w') as outf:
+        json.dump(track_data, outf) 
+        print(track_data)
 
 if __name__ == '__main__':
-    check(sys.argv[1])
+    #run_aligners()
+    run_aligners()

@@ -1,0 +1,77 @@
+\frametitle{Sample frame title}
+
+  \begin{tikzpicture}[
+    scale=5,
+    axis/.style={very thick, ->, >=stealth'},
+    important line/.style={thick},
+    dashed line/.style={dashed, thin},
+    pile/.style={thick, ->, >=stealth', shorten <=2pt, shorten
+    >=2pt},
+    every node/.style={color=black}
+    ]
+    % axis
+    \draw[axis] (-0.1,0)  -- (1.1,0) node(xline)[right]
+        {$Q = (q_1,q_2,...,q_n)$};
+    \draw[axis] (0,-0.1) -- (0,1.1) node(yline)[above] {$T = (t_1,t_2,...,t_m)$};
+    % Lines
+    % \newcommand\kmershift{.10}
+    % \foreach \x in {0,...,4}
+    %   {\draw[important line] (\x*\kmershift+\randeq{.15},\x*\kmershift+\randeq{.15}) coordinate (A) -- (\x*\kmershift+\randeq{.20},\x*\kmershift+\randeq{.20})
+    %       coordinate (B) node[right, text width=1cm] {$k_\x$};}
+
+    \newcommand\kmershift{.08}
+    \foreach \x in {0,...,6}
+      {
+        \pgfmathsetmacro{\offset}{0.03}
+        \pgfmathsetmacro{\loffset}{0.5}
+        \pgfmathsetmacro{\da}{.15+random(-100,100)/100*\offset};
+        \pgfmathsetmacro{\dy}{.15+random(-100,100)/100*\offset};
+        \pgfmathsetmacro{\xa}{\x*\kmershift+\da};
+        \pgfmathsetmacro{\ya}{\x*\kmershift+\dy};
+        \pgfmathsetmacro{\xb}{\xa+0.05};
+        \pgfmathsetmacro{\yb}{\ya+0.05};
+        \draw[important line] (\xa,\ya) coordinate (A) -- (\xb,\yb)
+          coordinate (B) node[right=\offset of A, font=\small] {$k_\x$};}
+    \foreach \x in {7,...,9}
+      {
+        \pgfmathsetmacro{\offset}{0.03}
+        \pgfmathsetmacro{\loffset}{0.5}
+        \pgfmathsetmacro{\da}{.52+random(-100,100)/100*\offset};
+        \pgfmathsetmacro{\dy}{.70+random(-100,100)/100*\offset};
+        \pgfmathsetmacro{\xa}{(\x-7)*\kmershift+\da};
+        \pgfmathsetmacro{\ya}{(\x-7)*\kmershift+\dy};
+        \pgfmathsetmacro{\xb}{\xa+0.05};
+        \pgfmathsetmacro{\yb}{\ya+0.05};
+        \draw[important line] (\xa,\ya) coordinate (A) -- (\xb,\yb)
+          coordinate (B) node[right=\offset of A, font=\small] {$k_\x$};}
+    \foreach \x in {10,...,15}
+    {
+      \pgfmathsetmacro{\offset}{0.03}
+      \pgfmathsetmacro{\xa}{(\x-10)*0.1+0.3+random(0,100)/100*0.03};
+      \pgfmathsetmacro{\ya}{\xa*random(20,60)/100};
+      \pgfmathsetmacro{\xb}{\xa+0.05};
+      \pgfmathsetmacro{\yb}{\ya+0.05};
+      \draw[important line] (\xa,\ya) coordinate (A) -- (\xb,\yb)
+        coordinate (B) node[right=\offset of A, font=\small] {$k_{\x}$};}
+
+    % \draw[important line] (.15,.85) coordinate (C) -- (.85,.15)
+    %     coordinate (D) node[right, text width=5em] {$\mathit{NX}=x$};
+    % Intersection of lines
+    % \fill[red] (intersection cs:
+    %    first line={(A) -- (B)},
+    %    second line={(C) -- (D)}) coordinate (E) circle (.4pt)
+    %    node[above,] {$A$};
+    % % The E point is placed more or less randomly
+    % \fill[red]  (E) +(-.075cm,-.2cm) coordinate (out) circle (.4pt)
+    %     node[below left] {$B$};
+    % % Line connecting out and ext balances
+    % \draw [pile] (out) -- (intersection of A--B and out--[shift={(0:1pt)}]out)
+    %     coordinate (extbal);
+    % \fill[red] (extbal) circle (.4pt) node[above] {$C$};
+    % % line connecting  out and int balances
+    % \draw [pile] (out) -- (intersection of C--D and out--[shift={(0:1pt)}]out)
+    %     coordinate (intbal);
+    % \fill[red] (intbal) circle (.4pt) node[above] {$D$};
+    % % line between out og all balanced out :)
+    % \draw[pile] (out) -- (E);
+  \end{tikzpicture}

@@ -1,0 +1,120 @@
+
+# This file will be loaded in latex. Useful to pass data to the main document
+f_out_write = open("robExt-8D2B0627A79A2C6A5A1C873BFD228C11-out.tex", "w")
+
+import os
+import sys
+
+def write_to_out(text):
+    """Write to the -out.tex file that is loaded by default"""
+    f_out_write.write(text)
+
+def parse_args():
+    args = {}
+    if len(sys.argv) % 2 == 0:
+        print("Error: the number of arguments must be even, as tuples of name and value")
+        exit(1)
+    for i in range(0,len(sys.argv)-1,2):
+        args[sys.argv[i+1]] = sys.argv[i+2]
+    return args
+
+def get_cache_folder():
+    '''
+    Path of the cache folder. Warning: this works only when the python script
+    is located in this cache folder (that should be true when it's called from LaTeX)
+    '''
+    return os.path.abspath(os.path.dirname(sys.argv[0]))
+
+def get_file_base():
+    '''
+    Outputs the base of the files (i.e. something like robExt-somehash, without any extension)
+    '''
+    return os.path.splitext(os.path.basename(sys.argv[0]))[0] # __file__ does not work as it refers to the library
+
+def get_current_script():
+    '''
+    Outputs the path of the current script
+    '''
+    return os.path.abspath(sys.argv[0]) # __file__ does not work as it refers to the library
+
+
+def get_filename_from_extension(extension):
+    '''
+    If you want to create a file with extension 'extension' (with the appropriate base name), this command
+    is for you. For instance get_filename_from_extension(".mp4") would return something like
+    robExt-somehash.mp4
+    the extension can also be like get_filename_from_extension("-out.tex") etc.
+    '''
+    return os.path.join(get_cache_folder(), get_file_base() + extension)
+
+def get_verbatim_output():
+    '''Returns the path to -out.txt that is read by verbatim output'''
+    return get_filename_from_extension("-out.txt")
+
+def get_pdf_output():
+    '''Returns the path to -out.txt that is read by verbatim output'''
+    return get_filename_from_extension(".pdf")
+
+
+def finished_with_no_error():
+    '''
+    Call this at the end of your script. This creates the path of the final pdf file that should be
+    created (otherwise robust-externalize will think that the compilation failed)
+    '''
+    if not os.path.exists(get_filename_from_extension(".pdf")):
+        # we create a nearly empty pdf (not empty or arxiv will remove it)
+        with open(get_filename_from_extension(".pdf"), 'w') as f:
+            f.write("ok")
+
+### Starting main content
+import matplotlib.pyplot as plt
+import matplotlib
+import numpy as np
+import json
+matplotlib.use("pgf")
+matplotlib.rcParams.update({
+  "font.family": "serif",
+  "font.serif": [],
+  "text.usetex": True,
+})
+with open('../data1.json') as f:
+    stats = json.load(f)
+b = 2
+fig, ax = plt.subplots()
+fig.set_size_inches(4.25197, 0.7*4.25197, forward=True)
+cases = sorted(list({case_name for program_label, program_stats in stats.items() for case_name in program_stats if "read_dp" in program_stats[case_name]}))
+program_label_mapping = {
+  "solution": "dp-lists",
+  "bwt-dp-numpy": "dp-numpy",
+}
+width = 0.25
+multiplier = 0
+x = np.arange(len(cases))
+for program_label, program_stats in stats.items():
+  if program_label in program_label_mapping:
+    offset = width * multiplier
+    rects = ax.bar(x + offset, [program_stats[case]["read_dp"]["t_total"] for case in cases], width, label=program_label_mapping[program_label])
+    ax.bar_label(rects, padding=3)
+    multiplier += 1
+
+ax.set_xticks(x + width/2)
+ax.set_xticklabels([case.replace('_', '-') for case in cases])
+ax.set_ylabel('Execution time (total) [ms]')
+ax.set_title("DP subroutine execution time")
+ax.legend(title='Program')
+
+print(get_filename_from_extension(".pgf"))
+plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+
+
+
+
+### Ending main content
+finished_with_no_error()
+
+
+f_out_write.close()
+
+
+
+

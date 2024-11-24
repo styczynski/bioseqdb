@@ -1,0 +1,2104 @@
+{
+    "bwt-fragment-02p01": {
+        "small_reads0": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1306.62,
+                "t_max": 1306.62,
+                "t_avg": 1306.62,
+                "t_total": 1306.62
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 187.06,
+                "t_max": 791.61,
+                "t_avg": 489.33,
+                "t_total": 978.67
+            },
+            "read_index_building": {
+                "t_samples_count": 10,
+                "t_min": 1.98,
+                "t_max": 2.87,
+                "t_avg": 2.35,
+                "t_total": 23.52
+            },
+            "read_lis": {
+                "t_samples_count": 10,
+                "t_min": 1.6,
+                "t_max": 2.57,
+                "t_avg": 1.9,
+                "t_total": 19.08
+            },
+            "extend_matches_count": {
+                "t_samples_count": 10,
+                "t_min": 46,
+                "t_max": 754,
+                "t_avg": 225.2,
+                "t_total": 2252
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 10,
+                "t_min": 0.03,
+                "t_max": 0.14,
+                "t_avg": 0.06,
+                "t_total": 0.63
+            },
+            "lis_length": {
+                "t_samples_count": 10,
+                "t_min": 42,
+                "t_max": 64,
+                "t_avg": 49.3,
+                "t_total": 493
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 10,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 10
+            },
+            "read_bwt": {
+                "t_samples_count": 10,
+                "t_min": 2.35,
+                "t_max": 74.48,
+                "t_avg": 21.79,
+                "t_total": 217.97
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 4,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 4
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 2,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 2
+            }
+        },
+        "small_reads1": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 19244.5,
+                "t_max": 19244.5,
+                "t_avg": 19244.5,
+                "t_total": 19244.5
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 186.68,
+                "t_max": 812.33,
+                "t_avg": 499.5,
+                "t_total": 999.01
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.97,
+                "t_max": 3.1,
+                "t_avg": 2.25,
+                "t_total": 225.5
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.88,
+                "t_max": 4.72,
+                "t_avg": 2.35,
+                "t_total": 235.53
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 89,
+                "t_max": 2163,
+                "t_avg": 296.33,
+                "t_total": 29633
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.05,
+                "t_max": 0.36,
+                "t_avg": 0.08,
+                "t_total": 8.92
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 81,
+                "t_max": 137,
+                "t_avg": 107.97,
+                "t_total": 10797
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 2.95,
+                "t_max": 2449.22,
+                "t_avg": 173.78,
+                "t_total": 17378.23
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 92,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 92
+            }
+        },
+        "small_reads2": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 6196.63,
+                "t_max": 6196.63,
+                "t_avg": 6196.63,
+                "t_total": 6196.63
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 184.49,
+                "t_max": 810.38,
+                "t_avg": 497.43,
+                "t_total": 994.87
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.98,
+                "t_max": 42.57,
+                "t_avg": 2.71,
+                "t_total": 271.45
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.58,
+                "t_max": 3.25,
+                "t_avg": 1.95,
+                "t_total": 195.09
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 34,
+                "t_max": 1441,
+                "t_avg": 139.77,
+                "t_total": 13977
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.03,
+                "t_max": 0.27,
+                "t_avg": 0.05,
+                "t_total": 5.78
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 29,
+                "t_max": 75,
+                "t_avg": 50.3,
+                "t_total": 5030
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 2.35,
+                "t_max": 620.45,
+                "t_avg": 43.4,
+                "t_total": 4340.11
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 51,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 51
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 25,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 25
+            }
+        },
+        "20Ma": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 208287.82,
+                "t_max": 208287.82,
+                "t_avg": 208287.82,
+                "t_total": 208287.82
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 754.44,
+                "t_max": 995.8,
+                "t_avg": 851.62,
+                "t_total": 21290.55
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 2.0,
+                "t_max": 42.18,
+                "t_avg": 2.43,
+                "t_total": 2433.1
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 2.35,
+                "t_max": 211.44,
+                "t_avg": 5.92,
+                "t_total": 5928.29
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 83,
+                "t_max": 67091,
+                "t_avg": 2316.735,
+                "t_total": 2316735
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.05,
+                "t_max": 517.56,
+                "t_avg": 1.99,
+                "t_total": 1992.14
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 76,
+                "t_max": 150,
+                "t_avg": 108.039,
+                "t_total": 108039
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 2,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1000,
+                "t_min": 2.9,
+                "t_max": 5773.29,
+                "t_avg": 170.36,
+                "t_total": 170361.99
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 998,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 998
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 907,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 907
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 156.26,
+                "t_max": 882.04,
+                "t_avg": 378.7,
+                "t_total": 1893.54
+            }
+        },
+        "20Mb": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 79450.47,
+                "t_max": 79450.47,
+                "t_avg": 79450.47,
+                "t_total": 79450.47
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 759.59,
+                "t_max": 1010.25,
+                "t_avg": 830.82,
+                "t_total": 20770.7
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.98,
+                "t_max": 35.48,
+                "t_avg": 2.46,
+                "t_total": 2469.22
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.68,
+                "t_max": 49.64,
+                "t_avg": 3.3,
+                "t_total": 3307.1
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 30,
+                "t_max": 39199,
+                "t_avg": 1126.041,
+                "t_total": 1126041
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.02,
+                "t_max": 324.34,
+                "t_avg": 1.24,
+                "t_total": 1244.6
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 23,
+                "t_max": 87,
+                "t_avg": 49.738,
+                "t_total": 49738
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 3,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1001,
+                "t_min": 2.31,
+                "t_max": 1549.93,
+                "t_avg": 46.35,
+                "t_total": 46403.36
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 454,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 454
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 237,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 237
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 78.38,
+                "t_max": 458.2,
+                "t_avg": 203.19,
+                "t_total": 1015.96
+            }
+        }
+    },
+    "bwt-fragment-03p006": {
+        "small_reads0": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1107.66,
+                "t_max": 1107.66,
+                "t_avg": 1107.66,
+                "t_total": 1107.66
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 185.42,
+                "t_max": 773.26,
+                "t_avg": 479.34,
+                "t_total": 958.69
+            },
+            "read_index_building": {
+                "t_samples_count": 10,
+                "t_min": 2.01,
+                "t_max": 2.84,
+                "t_avg": 2.4,
+                "t_total": 24.02
+            },
+            "read_lis": {
+                "t_samples_count": 10,
+                "t_min": 1.72,
+                "t_max": 2.66,
+                "t_avg": 2.12,
+                "t_total": 21.22
+            },
+            "extend_matches_count": {
+                "t_samples_count": 10,
+                "t_min": 46,
+                "t_max": 754,
+                "t_avg": 225.2,
+                "t_total": 2252
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 10,
+                "t_min": 0.03,
+                "t_max": 0.14,
+                "t_avg": 0.06,
+                "t_total": 0.67
+            },
+            "lis_length": {
+                "t_samples_count": 10,
+                "t_min": 42,
+                "t_max": 64,
+                "t_avg": 49.3,
+                "t_total": 493
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 10,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 10
+            },
+            "read_bwt": {
+                "t_samples_count": 10,
+                "t_min": 4.17,
+                "t_max": 4.59,
+                "t_avg": 4.38,
+                "t_total": 43.83
+            }
+        },
+        "small_reads1": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 8456.31,
+                "t_max": 8456.31,
+                "t_avg": 8456.31,
+                "t_total": 8456.31
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 181.51,
+                "t_max": 785.15,
+                "t_avg": 483.33,
+                "t_total": 966.66
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.96,
+                "t_max": 3.47,
+                "t_avg": 2.3,
+                "t_total": 230.16
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.87,
+                "t_max": 5.32,
+                "t_avg": 2.43,
+                "t_total": 243.35
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 89,
+                "t_max": 2163,
+                "t_avg": 296.33,
+                "t_total": 29633
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.05,
+                "t_max": 0.35,
+                "t_avg": 0.09,
+                "t_total": 9.06
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 81,
+                "t_max": 137,
+                "t_avg": 107.97,
+                "t_total": 10797
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 4.44,
+                "t_max": 1214.98,
+                "t_avg": 66.15,
+                "t_total": 6615.9
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 79,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 79
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 53,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 53
+            }
+        },
+        "small_reads2": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 2317.51,
+                "t_max": 2317.51,
+                "t_avg": 2317.51,
+                "t_total": 2317.51
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 187.8,
+                "t_max": 798.64,
+                "t_avg": 493.22,
+                "t_total": 986.45
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.93,
+                "t_max": 6.65,
+                "t_avg": 2.47,
+                "t_total": 247.84
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.5,
+                "t_max": 3.24,
+                "t_avg": 2.02,
+                "t_total": 202.6
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 34,
+                "t_max": 1441,
+                "t_avg": 139.77,
+                "t_total": 13977
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.03,
+                "t_max": 0.29,
+                "t_avg": 0.05,
+                "t_total": 5.96
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 29,
+                "t_max": 75,
+                "t_avg": 50.3,
+                "t_total": 5030
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 3.98,
+                "t_max": 40.45,
+                "t_avg": 4.8,
+                "t_total": 480.62
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 2,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 2
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 1,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 1
+            }
+        },
+        "20Ma": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 104196.7,
+                "t_max": 104196.7,
+                "t_avg": 104196.7,
+                "t_total": 104196.7
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 767.83,
+                "t_max": 954.76,
+                "t_avg": 816.66,
+                "t_total": 20416.73
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.94,
+                "t_max": 8.85,
+                "t_avg": 2.38,
+                "t_total": 2387.65
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.93,
+                "t_max": 77.86,
+                "t_avg": 5.24,
+                "t_total": 5249.98
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 83,
+                "t_max": 67091,
+                "t_avg": 2316.735,
+                "t_total": 2316735
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.05,
+                "t_max": 509.04,
+                "t_avg": 2.17,
+                "t_total": 2176.61
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 76,
+                "t_max": 150,
+                "t_avg": 108.039,
+                "t_total": 108039
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 2,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1000,
+                "t_min": 4.38,
+                "t_max": 3671.97,
+                "t_avg": 67.89,
+                "t_total": 67894.34
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 717,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 717
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 413,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 413
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 202.87,
+                "t_max": 788.08,
+                "t_avg": 349.16,
+                "t_total": 1745.82
+            }
+        },
+        "20Mb": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 37040.28,
+                "t_max": 37040.28,
+                "t_avg": 37040.28,
+                "t_total": 37040.28
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 757.15,
+                "t_max": 871.01,
+                "t_avg": 800.3,
+                "t_total": 20007.55
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.95,
+                "t_max": 37.33,
+                "t_avg": 2.58,
+                "t_total": 2585.4
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.63,
+                "t_max": 41.04,
+                "t_avg": 3.17,
+                "t_total": 3179.06
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 30,
+                "t_max": 39199,
+                "t_avg": 1126.041,
+                "t_total": 1126041
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.03,
+                "t_max": 321.85,
+                "t_avg": 1.23,
+                "t_total": 1237.82
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 23,
+                "t_max": 87,
+                "t_avg": 49.738,
+                "t_total": 49738
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 3,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1001,
+                "t_min": 3.98,
+                "t_max": 41.18,
+                "t_avg": 4.64,
+                "t_total": 4645.26
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 140.5,
+                "t_max": 449.44,
+                "t_avg": 212.93,
+                "t_total": 1064.66
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 2,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 2
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 2,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 2
+            }
+        }
+    },
+    "bwt-fragment-03p008": {
+        "small_reads0": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1116.74,
+                "t_max": 1116.74,
+                "t_avg": 1116.74,
+                "t_total": 1116.74
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 183.12,
+                "t_max": 769.79,
+                "t_avg": 476.45,
+                "t_total": 952.91
+            },
+            "read_index_building": {
+                "t_samples_count": 10,
+                "t_min": 2.01,
+                "t_max": 2.85,
+                "t_avg": 2.39,
+                "t_total": 23.9
+            },
+            "read_lis": {
+                "t_samples_count": 10,
+                "t_min": 1.73,
+                "t_max": 2.28,
+                "t_avg": 1.94,
+                "t_total": 19.41
+            },
+            "extend_matches_count": {
+                "t_samples_count": 10,
+                "t_min": 46,
+                "t_max": 754,
+                "t_avg": 225.2,
+                "t_total": 2252
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 10,
+                "t_min": 0.03,
+                "t_max": 0.13,
+                "t_avg": 0.06,
+                "t_total": 0.64
+            },
+            "lis_length": {
+                "t_samples_count": 10,
+                "t_min": 42,
+                "t_max": 64,
+                "t_avg": 49.3,
+                "t_total": 493
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 10,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 10
+            },
+            "read_bwt": {
+                "t_samples_count": 10,
+                "t_min": 4.34,
+                "t_max": 12.22,
+                "t_avg": 6.16,
+                "t_total": 61.67
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 2,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 2
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 1,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 1
+            }
+        },
+        "small_reads1": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 87664.45,
+                "t_max": 87664.45,
+                "t_avg": 87664.45,
+                "t_total": 87664.45
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 183.18,
+                "t_max": 801.41,
+                "t_avg": 492.29,
+                "t_total": 984.59
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 2.0,
+                "t_max": 2.98,
+                "t_avg": 2.2,
+                "t_total": 220.41
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.96,
+                "t_max": 4.58,
+                "t_avg": 2.33,
+                "t_total": 233.0
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 89,
+                "t_max": 2163,
+                "t_avg": 296.33,
+                "t_total": 29633
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.05,
+                "t_max": 0.35,
+                "t_avg": 0.08,
+                "t_total": 8.74
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 81,
+                "t_max": 137,
+                "t_avg": 107.97,
+                "t_total": 10797
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 5.31,
+                "t_max": 17616.0,
+                "t_avg": 858.3,
+                "t_total": 85830.33
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 87,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 87
+            }
+        },
+        "small_reads2": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 3525.21,
+                "t_max": 3525.21,
+                "t_avg": 3525.21,
+                "t_total": 3525.21
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 186.52,
+                "t_max": 804.58,
+                "t_avg": 495.55,
+                "t_total": 991.1
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.95,
+                "t_max": 3.52,
+                "t_avg": 2.38,
+                "t_total": 238.74
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.56,
+                "t_max": 3.59,
+                "t_avg": 2.0,
+                "t_total": 200.19
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 34,
+                "t_max": 1441,
+                "t_avg": 139.77,
+                "t_total": 13977
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.03,
+                "t_max": 0.26,
+                "t_avg": 0.05,
+                "t_total": 5.74
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 29,
+                "t_max": 75,
+                "t_avg": 50.3,
+                "t_total": 5030
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 4.04,
+                "t_max": 233.02,
+                "t_avg": 17.01,
+                "t_total": 1701.0
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 4,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 4
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 1,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 1
+            }
+        },
+        "20Ma": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 824782.25,
+                "t_max": 824782.25,
+                "t_avg": 824782.25,
+                "t_total": 824782.25
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 751.71,
+                "t_max": 882.2,
+                "t_avg": 795.98,
+                "t_total": 19899.66
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 2.0,
+                "t_max": 28.25,
+                "t_avg": 2.34,
+                "t_total": 2346.54
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 2.12,
+                "t_max": 85.69,
+                "t_avg": 6.18,
+                "t_total": 6188.29
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 83,
+                "t_max": 67091,
+                "t_avg": 2316.735,
+                "t_total": 2316735
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.04,
+                "t_max": 517.54,
+                "t_avg": 2.09,
+                "t_total": 2092.8
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 76,
+                "t_max": 150,
+                "t_avg": 108.039,
+                "t_total": 108039
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 2,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1000,
+                "t_min": 5.23,
+                "t_max": 23335.49,
+                "t_avg": 788.32,
+                "t_total": 788329.43
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 985,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 985
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 766,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 766
+            },
+            "read_dp": {
+                "t_samples_count": 4,
+                "t_min": 157.33,
+                "t_max": 804.4,
+                "t_avg": 400.95,
+                "t_total": 1603.83
+            }
+        },
+        "20Mb": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 62126.9,
+                "t_max": 62126.9,
+                "t_avg": 62126.9,
+                "t_total": 62126.9
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 752.08,
+                "t_max": 848.66,
+                "t_avg": 803.55,
+                "t_total": 20088.87
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.94,
+                "t_max": 37.23,
+                "t_avg": 2.5,
+                "t_total": 2506.34
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.59,
+                "t_max": 44.06,
+                "t_avg": 3.23,
+                "t_total": 3234.94
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 30,
+                "t_max": 39199,
+                "t_avg": 1126.041,
+                "t_total": 1126041
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.03,
+                "t_max": 333.21,
+                "t_avg": 1.27,
+                "t_total": 1276.0
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 23,
+                "t_max": 87,
+                "t_avg": 49.738,
+                "t_total": 49738
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 3,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1001,
+                "t_min": 4.0,
+                "t_max": 2137.67,
+                "t_avg": 29.12,
+                "t_total": 29149.15
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 88,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 88
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 45,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 45
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 142.45,
+                "t_max": 456.44,
+                "t_avg": 217.47,
+                "t_total": 1087.38
+            }
+        }
+    },
+    "solution": {
+        "small_reads0": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1089.38,
+                "t_max": 1089.38,
+                "t_avg": 1089.38,
+                "t_total": 1089.38
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 183.67,
+                "t_max": 788.3,
+                "t_avg": 485.98,
+                "t_total": 971.97
+            },
+            "read_index_building": {
+                "t_samples_count": 10,
+                "t_min": 1.92,
+                "t_max": 2.1,
+                "t_avg": 1.96,
+                "t_total": 19.65
+            },
+            "read_lis": {
+                "t_samples_count": 10,
+                "t_min": 1.63,
+                "t_max": 2.33,
+                "t_avg": 1.83,
+                "t_total": 18.37
+            },
+            "extend_matches_count": {
+                "t_samples_count": 10,
+                "t_min": 46,
+                "t_max": 754,
+                "t_avg": 225.2,
+                "t_total": 2252
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 10,
+                "t_min": 0.03,
+                "t_max": 0.12,
+                "t_avg": 0.05,
+                "t_total": 0.58
+            },
+            "lis_length": {
+                "t_samples_count": 10,
+                "t_min": 42,
+                "t_max": 64,
+                "t_avg": 49.3,
+                "t_total": 493
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 10,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 10
+            },
+            "read_bwt": {
+                "t_samples_count": 10,
+                "t_min": 0.91,
+                "t_max": 6.28,
+                "t_avg": 2.02,
+                "t_total": 20.2
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 4,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 4
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 2,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 2
+            }
+        },
+        "small_reads1": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 2161.72,
+                "t_max": 2161.72,
+                "t_avg": 2161.72,
+                "t_total": 2161.72
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 187.05,
+                "t_max": 819.36,
+                "t_avg": 503.21,
+                "t_total": 1006.42
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.9,
+                "t_max": 2.84,
+                "t_avg": 2.0,
+                "t_total": 200.85
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.87,
+                "t_max": 4.36,
+                "t_avg": 2.18,
+                "t_total": 218.16
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 89,
+                "t_max": 2163,
+                "t_avg": 296.33,
+                "t_total": 29633
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.04,
+                "t_max": 0.33,
+                "t_avg": 0.08,
+                "t_total": 8.14
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 81,
+                "t_max": 137,
+                "t_avg": 107.97,
+                "t_total": 10797
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 1.21,
+                "t_max": 19.94,
+                "t_avg": 4.25,
+                "t_total": 425.04
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 97,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 97
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 84,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 84
+            }
+        },
+        "small_reads2": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1896.72,
+                "t_max": 1896.72,
+                "t_avg": 1896.72,
+                "t_total": 1896.72
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 186.12,
+                "t_max": 752.93,
+                "t_avg": 469.52,
+                "t_total": 939.05
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.89,
+                "t_max": 2.72,
+                "t_avg": 1.96,
+                "t_total": 196.75
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.53,
+                "t_max": 3.07,
+                "t_avg": 1.74,
+                "t_total": 174.44
+            },
+            "extend_matches_count": {
+                "t_samples_count": 100,
+                "t_min": 34,
+                "t_max": 1441,
+                "t_avg": 139.77,
+                "t_total": 13977
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.02,
+                "t_max": 0.24,
+                "t_avg": 0.04,
+                "t_total": 4.66
+            },
+            "lis_length": {
+                "t_samples_count": 100,
+                "t_min": 29,
+                "t_max": 75,
+                "t_avg": 50.3,
+                "t_total": 5030
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 100,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 100
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 0.88,
+                "t_max": 18.21,
+                "t_avg": 2.85,
+                "t_total": 285.91
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 63,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 63
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 39,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 39
+            }
+        },
+        "20Ma": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 39627.78,
+                "t_max": 39627.78,
+                "t_avg": 39627.78,
+                "t_total": 39627.78
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 747.0,
+                "t_max": 941.47,
+                "t_avg": 822.01,
+                "t_total": 20550.38
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.88,
+                "t_max": 94.8,
+                "t_avg": 2.14,
+                "t_total": 2144.94
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.81,
+                "t_max": 75.95,
+                "t_avg": 4.37,
+                "t_total": 4377.81
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 83,
+                "t_max": 67091,
+                "t_avg": 2316.735,
+                "t_total": 2316735
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.04,
+                "t_max": 522.8,
+                "t_avg": 1.96,
+                "t_total": 1968.04
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 76,
+                "t_max": 150,
+                "t_avg": 108.039,
+                "t_total": 108039
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 2,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1000,
+                "t_min": 1.06,
+                "t_max": 82.45,
+                "t_avg": 5.52,
+                "t_total": 5524.15
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 984,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 984
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 849,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 849
+            },
+            "read_dp": {
+                "t_samples_count": 4,
+                "t_min": 159.0,
+                "t_max": 798.81,
+                "t_avg": 400.89,
+                "t_total": 1603.57
+            }
+        },
+        "20Mb": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 32766.49,
+                "t_max": 32766.49,
+                "t_avg": 32766.49,
+                "t_total": 32766.49
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 742.15,
+                "t_max": 871.93,
+                "t_avg": 794.5,
+                "t_total": 19862.56
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.88,
+                "t_max": 4.32,
+                "t_avg": 2.03,
+                "t_total": 2038.32
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.53,
+                "t_max": 38.83,
+                "t_avg": 2.72,
+                "t_total": 2725.13
+            },
+            "extend_matches_count": {
+                "t_samples_count": 1000,
+                "t_min": 30,
+                "t_max": 39199,
+                "t_avg": 1126.041,
+                "t_total": 1126041
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.02,
+                "t_max": 324.36,
+                "t_avg": 1.22,
+                "t_total": 1227.2
+            },
+            "lis_length": {
+                "t_samples_count": 1000,
+                "t_min": 23,
+                "t_max": 87,
+                "t_avg": 49.738,
+                "t_total": 49738
+            },
+            "lis_accepted_scores": {
+                "t_samples_count": 1000,
+                "t_min": 1,
+                "t_max": 3,
+                "t_avg": 1.005,
+                "t_total": 1005
+            },
+            "read_bwt": {
+                "t_samples_count": 1001,
+                "t_min": 0.85,
+                "t_max": 25.05,
+                "t_avg": 2.53,
+                "t_total": 2533.93
+            },
+            "read_bwt_pad_begin": {
+                "t_samples_count": 594,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 594
+            },
+            "read_bwt_pad_end": {
+                "t_samples_count": 351,
+                "t_min": 1,
+                "t_max": 1,
+                "t_avg": 1.0,
+                "t_total": 351
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 77.01,
+                "t_max": 445.22,
+                "t_avg": 201.5,
+                "t_total": 1007.54
+            }
+        }
+    },
+    "bwt-dp-numpy": {
+        "small_reads0": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1115.38,
+                "t_max": 1115.38,
+                "t_avg": 1115.38,
+                "t_total": 1115.38
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 182.6,
+                "t_max": 769.44,
+                "t_avg": 476.02,
+                "t_total": 952.04
+            },
+            "read_index_building": {
+                "t_samples_count": 10,
+                "t_min": 1.91,
+                "t_max": 2.17,
+                "t_avg": 1.96,
+                "t_total": 19.66
+            },
+            "read_lis": {
+                "t_samples_count": 10,
+                "t_min": 1.64,
+                "t_max": 2.3,
+                "t_avg": 1.82,
+                "t_total": 18.21
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 10,
+                "t_min": 0.03,
+                "t_max": 0.12,
+                "t_avg": 0.05,
+                "t_total": 0.56
+            },
+            "read_bwt": {
+                "t_samples_count": 10,
+                "t_min": 5.95,
+                "t_max": 12.06,
+                "t_avg": 7.46,
+                "t_total": 74.65
+            }
+        },
+        "small_reads1": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 2658.04,
+                "t_max": 2658.04,
+                "t_avg": 2658.04,
+                "t_total": 2658.04
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 180.55,
+                "t_max": 790.09,
+                "t_avg": 485.32,
+                "t_total": 970.64
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.9,
+                "t_max": 2.78,
+                "t_avg": 1.99,
+                "t_total": 199.59
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.84,
+                "t_max": 4.51,
+                "t_avg": 2.2,
+                "t_total": 220.33
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.04,
+                "t_max": 0.32,
+                "t_avg": 0.08,
+                "t_total": 8.06
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 6.15,
+                "t_max": 24.8,
+                "t_avg": 9.5,
+                "t_total": 950.48
+            }
+        },
+        "small_reads2": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 2423.72,
+                "t_max": 2423.72,
+                "t_avg": 2423.72,
+                "t_total": 2423.72
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 181.7,
+                "t_max": 760.68,
+                "t_avg": 471.19,
+                "t_total": 942.38
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.88,
+                "t_max": 2.57,
+                "t_avg": 1.95,
+                "t_total": 195.06
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.51,
+                "t_max": 3.06,
+                "t_avg": 1.73,
+                "t_total": 173.63
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.02,
+                "t_max": 0.22,
+                "t_avg": 0.04,
+                "t_total": 4.53
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 5.94,
+                "t_max": 22.99,
+                "t_avg": 8.11,
+                "t_total": 811.1
+            }
+        },
+        "20Ma": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 47946.43,
+                "t_max": 47946.43,
+                "t_avg": 47946.43,
+                "t_total": 47946.43
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 749.27,
+                "t_max": 919.02,
+                "t_avg": 805.81,
+                "t_total": 20145.34
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.9,
+                "t_max": 6.62,
+                "t_avg": 2.03,
+                "t_total": 2031.17
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.85,
+                "t_max": 83.44,
+                "t_avg": 4.36,
+                "t_total": 4368.66
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.04,
+                "t_max": 1089.22,
+                "t_avg": 3.69,
+                "t_total": 3695.9
+            },
+            "read_bwt": {
+                "t_samples_count": 1000,
+                "t_min": 5.95,
+                "t_max": 71.8,
+                "t_avg": 10.63,
+                "t_total": 10631.21
+            },
+            "read_dp": {
+                "t_samples_count": 4,
+                "t_min": 336.83,
+                "t_max": 1821.97,
+                "t_avg": 920.03,
+                "t_total": 3680.15
+            }
+        },
+        "20Mb": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 40623.87,
+                "t_max": 40623.87,
+                "t_avg": 40623.87,
+                "t_total": 40623.87
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 752.04,
+                "t_max": 915.88,
+                "t_avg": 805.23,
+                "t_total": 20130.9
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.91,
+                "t_max": 3.27,
+                "t_avg": 2.02,
+                "t_total": 2027.09
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.6,
+                "t_max": 39.79,
+                "t_avg": 2.76,
+                "t_total": 2762.3
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.02,
+                "t_max": 694.48,
+                "t_avg": 2.39,
+                "t_total": 2392.86
+            },
+            "read_bwt": {
+                "t_samples_count": 1001,
+                "t_min": 5.76,
+                "t_max": 29.14,
+                "t_avg": 7.71,
+                "t_total": 7717.73
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 165.49,
+                "t_max": 956.86,
+                "t_avg": 444.62,
+                "t_total": 2223.12
+            }
+        }
+    },
+    "bwt-dp-lists": {
+        "small_reads0": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 1090.55,
+                "t_max": 1090.55,
+                "t_avg": 1090.55,
+                "t_total": 1090.55
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 181.23,
+                "t_max": 779.11,
+                "t_avg": 480.17,
+                "t_total": 960.35
+            },
+            "read_index_building": {
+                "t_samples_count": 10,
+                "t_min": 1.89,
+                "t_max": 2.13,
+                "t_avg": 1.94,
+                "t_total": 19.4
+            },
+            "read_lis": {
+                "t_samples_count": 10,
+                "t_min": 1.61,
+                "t_max": 2.29,
+                "t_avg": 1.79,
+                "t_total": 17.99
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 10,
+                "t_min": 0.03,
+                "t_max": 0.12,
+                "t_avg": 0.05,
+                "t_total": 0.56
+            },
+            "read_bwt": {
+                "t_samples_count": 10,
+                "t_min": 2.95,
+                "t_max": 8.61,
+                "t_avg": 4.17,
+                "t_total": 41.71
+            }
+        },
+        "small_reads1": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 2348.35,
+                "t_max": 2348.35,
+                "t_avg": 2348.35,
+                "t_total": 2348.35
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 188.64,
+                "t_max": 791.57,
+                "t_avg": 490.11,
+                "t_total": 980.22
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.89,
+                "t_max": 2.98,
+                "t_avg": 2.0,
+                "t_total": 200.25
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.86,
+                "t_max": 4.35,
+                "t_avg": 2.25,
+                "t_total": 225.02
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.04,
+                "t_max": 0.33,
+                "t_avg": 0.08,
+                "t_total": 8.12
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 3.16,
+                "t_max": 21.45,
+                "t_avg": 6.27,
+                "t_total": 627.33
+            }
+        },
+        "small_reads2": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 2153.59,
+                "t_max": 2153.59,
+                "t_avg": 2153.59,
+                "t_total": 2153.59
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 2,
+                "t_min": 183.94,
+                "t_max": 787.79,
+                "t_avg": 485.87,
+                "t_total": 971.74
+            },
+            "read_index_building": {
+                "t_samples_count": 100,
+                "t_min": 1.91,
+                "t_max": 2.78,
+                "t_avg": 1.99,
+                "t_total": 199.03
+            },
+            "read_lis": {
+                "t_samples_count": 100,
+                "t_min": 1.55,
+                "t_max": 3.07,
+                "t_avg": 1.78,
+                "t_total": 178.1
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 100,
+                "t_min": 0.02,
+                "t_max": 0.27,
+                "t_avg": 0.04,
+                "t_total": 4.63
+            },
+            "read_bwt": {
+                "t_samples_count": 100,
+                "t_min": 2.92,
+                "t_max": 20.03,
+                "t_avg": 4.94,
+                "t_total": 494.67
+            }
+        },
+        "20Ma": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 40780.06,
+                "t_max": 40780.06,
+                "t_avg": 40780.06,
+                "t_total": 40780.06
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 761.21,
+                "t_max": 894.19,
+                "t_avg": 799.44,
+                "t_total": 19986.12
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.9,
+                "t_max": 22.19,
+                "t_avg": 2.05,
+                "t_total": 2053.73
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.84,
+                "t_max": 77.22,
+                "t_avg": 4.37,
+                "t_total": 4379.11
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.04,
+                "t_max": 507.69,
+                "t_avg": 1.92,
+                "t_total": 1923.87
+            },
+            "read_bwt": {
+                "t_samples_count": 1000,
+                "t_min": 3.0,
+                "t_max": 69.99,
+                "t_avg": 7.49,
+                "t_total": 7494.34
+            },
+            "read_dp": {
+                "t_samples_count": 4,
+                "t_min": 154.1,
+                "t_max": 775.81,
+                "t_avg": 389.02,
+                "t_total": 1556.1
+            }
+        },
+        "20Mb": {
+            "total_execution": {
+                "t_samples_count": 1,
+                "t_min": 34876.92,
+                "t_max": 34876.92,
+                "t_avg": 34876.92,
+                "t_total": 34876.92
+            },
+            "ref_chunk_building": {
+                "t_samples_count": 25,
+                "t_min": 742.43,
+                "t_max": 859.54,
+                "t_avg": 795.06,
+                "t_total": 19876.59
+            },
+            "read_index_building": {
+                "t_samples_count": 1000,
+                "t_min": 1.89,
+                "t_max": 7.88,
+                "t_avg": 2.02,
+                "t_total": 2022.71
+            },
+            "read_lis": {
+                "t_samples_count": 1000,
+                "t_min": 1.59,
+                "t_max": 39.72,
+                "t_avg": 2.85,
+                "t_total": 2856.54
+            },
+            "read_lis_cutoff": {
+                "t_samples_count": 1000,
+                "t_min": 0.02,
+                "t_max": 325.14,
+                "t_avg": 1.25,
+                "t_total": 1254.72
+            },
+            "read_bwt": {
+                "t_samples_count": 1001,
+                "t_min": 2.74,
+                "t_max": 26.48,
+                "t_avg": 4.54,
+                "t_total": 4551.53
+            },
+            "read_dp": {
+                "t_samples_count": 5,
+                "t_min": 77.94,
+                "t_max": 451.53,
+                "t_avg": 201.38,
+                "t_total": 1006.92
+            }
+        }
+    }
+}

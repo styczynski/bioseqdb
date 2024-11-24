@@ -1,0 +1,5 @@
+/Users/styczynski/Code/aadg-genomics-class/presentation/robustExternalize/robExt-E3BD28DCCA6ACC843428D0054AD6CEB9.tex:104: MatplotlibDeprecationWarning: hatch must consist of a string of "*+-./OX\ox|" or None, but found the following invalid values "0". Passing invalid values is deprecated since 3.4 and will become an error in 3.8.
+  rects = ax.bar(x + offset, vals, width, hatch="0", label=f"{program_label_mapping[program_label]} (start)", color=color_per_solution[program_label], edgecolor=color_per_solution[program_label])
+findfont: Font family ['serif'] not found. Falling back to DejaVu Sans.
+findfont: Generic family 'serif' not found because none of the following families were found: 
+/Users/styczynski/Code/aadg-genomics-class/presentation/robustExternalize/robExt-E3BD28DCCA6ACC843428D0054AD6CEB9.pgf
