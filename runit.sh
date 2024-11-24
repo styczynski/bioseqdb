@@ -8,9 +8,9 @@
 # poetry run python3 aadg_genomics_class/checker.py data_big/reads20M${INPUT_FILE_T}.txt
 
 
-INPUT_FILE_T="a"
+INPUT_FILE_T="b"
 TEST_SUFF="final"
-PROG="v12_clean"
+PROG="v13"
 
 # rm -rfd profile${TEST_SUFF}${INPUT_FILE_T}.bin   2> /dev/null && \
 # rm -rfd memray-flamegraph-profile${TEST_SUFF}${INPUT_FILE_T}.html 2> /dev/null

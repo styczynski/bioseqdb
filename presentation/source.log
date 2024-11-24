@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.11.20)  24 NOV 2024 15:22
+This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.11.20)  24 NOV 2024 20:18
 entering extended mode
  \write18 enabled.
  %&-line parsing enabled.
@@ -1194,48 +1194,6 @@ Package caption Info: End \AtBeginDocument code.
  (./source.nav) [1
 
 {/usr/local/texlive/2024/texmf-var/fonts/map/pdftex/updmap/pdftex.map}]
-LaTeX Font Info:    Trying to load font information for U+msa on input line 146
-.
-
-(/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsa.fd
-File: umsa.fd 2013/01/14 v3.01 AMS symbols A
-)
-LaTeX Font Info:    Trying to load font information for U+msb on input line 146
-.
-
-(/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsb.fd
-File: umsb.fd 2013/01/14 v3.01 AMS symbols B
-)
-LaTeX Font Info:    Trying to load font information for OT1+mathkerncmss on inp
-ut line 146.
-
-(/usr/local/texlive/2024/texmf-dist/tex/latex/sansmathaccent/ot1mathkerncmss.fd
-File: ot1mathkerncmss.fd 2020/01/31 Fontinst v1.933 font definitions for OT1/ma
-thkerncmss.
-) [2
-
-]
-pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
- been already used, duplicate ignored
-<to be read again> 
-                   \relax 
-l.164 \end{frame}
-                  [3
-
-]
-pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
- been already used, duplicate ignored
-<to be read again> 
-                   \relax 
-l.202 \end{frame}
-                 
-Overfull \hbox (1.19998pt too wide) in paragraph at lines 202--202
-[]| ||| | ||| | |||  [][][][][][]
- []
-
-[4
-
-]
 \openout4 = `source.vrb'.
 
  (./source.vrb
@@ -1243,7 +1201,43 @@ Overfull \hbox (9.7242pt too wide) in paragraph at lines 37--38
  [][] 
  []
 
-) [5
+) [2
+
+]
+LaTeX Font Info:    Trying to load font information for U+msa on input line 188
+.
+ (/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsa.fd
+File: umsa.fd 2013/01/14 v3.01 AMS symbols A
+)
+LaTeX Font Info:    Trying to load font information for U+msb on input line 188
+.
+
+(/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsb.fd
+File: umsb.fd 2013/01/14 v3.01 AMS symbols B
+)
+LaTeX Font Info:    Trying to load font information for OT1+mathkerncmss on inp
+ut line 188.
+
+(/usr/local/texlive/2024/texmf-dist/tex/latex/sansmathaccent/ot1mathkerncmss.fd
+File: ot1mathkerncmss.fd 2020/01/31 Fontinst v1.933 font definitions for OT1/ma
+thkerncmss.
+) [3
+
+]
+pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
+ been already used, duplicate ignored
+<to be read again> 
+                   \relax 
+l.206 \end{frame}
+                  [4
+
+]
+pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
+ been already used, duplicate ignored
+<to be read again> 
+                   \relax 
+l.244 \end{frame}
+                  [5
 
 ]
 \openout4 = `source.vrb'.
@@ -1296,11 +1290,7 @@ No need to recompile robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369.
 pdf
 (./robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369-out.tex)
 (./robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369.pgf)
-Finished to include the file.)
-Overfull \vbox (0.72446pt too high) detected at line 433
- []
-
-[8
+Finished to include the file.) [8
 
 ]
 \openout4 = `source.vrb'.
@@ -1316,101 +1306,7 @@ No need to recompile robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119.
 pdf
 (./robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119-out.tex)
 (./robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119.pgf)
-Finished to include the file.)
-Overfull \vbox (0.72446pt too high) detected at line 482
- []
-
-[9
-
-]
-\openout4 = `source.vrb'.
-
- (./source.vrb
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-Missing character: There is no ; in font nullfont!
-) [10
+Finished to include the file.) [9
 
 ]
 \tf@nav=\write9
@@ -1435,10 +1331,10 @@ Package rerunfilecheck Info: File `source.out' has not changed.
 (rerunfilecheck)             Checksum: D41D8CD98F00B204E9800998ECF8427E;0.
  ) 
 Here is how much of TeX's memory you used:
- 32016 strings out of 474116
- 676712 string characters out of 5743681
+ 31775 strings out of 474116
+ 672129 string characters out of 5743681
  1949187 words of memory out of 5000000
- 53708 multiletter control sequences out of 15000+600000
+ 53471 multiletter control sequences out of 15000+600000
  571451 words of font info for 83 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  128i,14n,123p,6310b,936s stack positions out of 10000i,1000n,20000p,200000b,200000s
@@ -1460,10 +1356,10 @@ l/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssi8.pfb></usr/local
 /texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/
 texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></usr/local/te
 xlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb>
-Output written on source.pdf (10 pages, 230230 bytes).
+Output written on source.pdf (9 pages, 226353 bytes).
 PDF statistics:
- 374 PDF objects out of 1000 (max. 8388607)
- 314 compressed objects within 4 object streams
- 22 named destinations out of 1000 (max. 500000)
+ 348 PDF objects out of 1000 (max. 8388607)
+ 290 compressed objects within 3 object streams
+ 20 named destinations out of 1000 (max. 500000)
  43 words of extra memory for PDF output out of 10000 (max. 10000000)
 
