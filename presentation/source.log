@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.11.20)  24 NOV 2024 20:18
+This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.11.20)  24 NOV 2024 23:54
 entering extended mode
  \write18 enabled.
  %&-line parsing enabled.
@@ -953,14 +953,34 @@ Package caption Info: Hyperref support is turned off
 (/usr/local/texlive/2024/texmf-dist/tex/latex/graphics/dvipsnam.def
 File: dvipsnam.def 2016/06/17 v3.0m Driver-dependent file (DPC,SPQR)
 )
+(/usr/local/texlive/2024/texmf-dist/tex/latex/xcolor/x11nam.def
+File: x11nam.def 2023/11/15 v3.01 Predefined colors according to Unix/X11 (UK)
+)
+(/usr/local/texlive/2024/texmf-dist/tex/latex/colortbl/colortbl.sty
+Package: colortbl 2024/02/20 v1.0g Color table columns (DPC)
+
+(/usr/local/texlive/2024/texmf-dist/tex/latex/tools/array.sty
+Package: array 2023/10/16 v2.5g Tabular extension package (FMi)
+\col@sep=\dimen325
+\ar@mcellbox=\box85
+\extrarowheight=\dimen326
+\NC@list=\toks54
+\extratabsurround=\skip72
+\backup@length=\skip73
+\ar@cellbox=\box86
+)
+\everycr=\toks55
+\minrowclearance=\skip74
+\rownum=\count368
+)
 (/usr/local/texlive/2024/texmf-dist/tex/latex/tikzmark/tikzlibrarytikzmark.code
 .tex
 File: tikzlibrarytikzmark.code.tex 2022/08/24 v1.15 TikZ library for marking po
 sitions in a document
-\l__sn_x_dim=\dimen325
-\l__sn_y_dim=\dimen326
-\l__sn_xa_dim=\dimen327
-\l__sn_ya_dim=\dimen328
+\l__sn_x_dim=\dimen327
+\l__sn_y_dim=\dimen328
+\l__sn_xa_dim=\dimen329
+\l__sn_ya_dim=\dimen330
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibrarypositioning.code.tex
@@ -972,16 +992,16 @@ s/tikzlibrarydecorations.pathreplacing.code.tex
 s/tikzlibrarydecorations.code.tex
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/modules/pgfmoduledecoration
 s.code.tex
-\pgfdecoratedcompleteddistance=\dimen329
-\pgfdecoratedremainingdistance=\dimen330
-\pgfdecoratedinputsegmentcompleteddistance=\dimen331
-\pgfdecoratedinputsegmentremainingdistance=\dimen332
-\pgf@decorate@distancetomove=\dimen333
-\pgf@decorate@repeatstate=\count368
-\pgfdecorationsegmentamplitude=\dimen334
-\pgfdecorationsegmentlength=\dimen335
+\pgfdecoratedcompleteddistance=\dimen331
+\pgfdecoratedremainingdistance=\dimen332
+\pgfdecoratedinputsegmentcompleteddistance=\dimen333
+\pgfdecoratedinputsegmentremainingdistance=\dimen334
+\pgf@decorate@distancetomove=\dimen335
+\pgf@decorate@repeatstate=\count369
+\pgfdecorationsegmentamplitude=\dimen336
+\pgfdecorationsegmentlength=\dimen337
 )
-\tikz@lib@dec@box=\box85
+\tikz@lib@dec@box=\box87
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/libraries/decorations/pgfli
 brarydecorations.pathreplacing.code.tex))
@@ -992,10 +1012,10 @@ File: tikzlibrarycalc.code.tex 2023-01-15 v3.1.10 (3.1.10)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/libraries/pgflibraryarrows.
 meta.code.tex
 File: pgflibraryarrows.meta.code.tex 2023-01-15 v3.1.10 (3.1.10)
-\pgfarrowinset=\dimen336
-\pgfarrowlength=\dimen337
-\pgfarrowwidth=\dimen338
-\pgfarrowlinewidth=\dimen339
+\pgfarrowinset=\dimen338
+\pgfarrowlength=\dimen339
+\pgfarrowwidth=\dimen340
+\pgfarrowlinewidth=\dimen341
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibraryshapes.geometric.code.tex
@@ -1008,8 +1028,8 @@ File: pgflibraryshapes.geometric.code.tex 2023-01-15 v3.1.10 (3.1.10)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibrarybackgrounds.code.tex
 File: tikzlibrarybackgrounds.code.tex 2023-01-15 v3.1.10 (3.1.10)
-\pgf@layerbox@background=\box86
-\pgf@layerboxsaved@background=\box87
+\pgf@layerbox@background=\box88
+\pgf@layerboxsaved@background=\box89
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibraryarrows.code.tex
@@ -1018,9 +1038,9 @@ File: tikzlibraryarrows.code.tex 2023-01-15 v3.1.10 (3.1.10)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/libraries/pgflibraryarrows.
 code.tex
 File: pgflibraryarrows.code.tex 2023-01-15 v3.1.10 (3.1.10)
-\arrowsize=\dimen340
+\arrowsize=\dimen342
 ))
-\ALG@printindent@tempcnta=\count369
+\ALG@printindent@tempcnta=\count370
  (./source.aux
 
 LaTeX Warning: Label `alg:cap' multiply defined.
@@ -1031,24 +1051,24 @@ LaTeX Warning: Label `alg:cap' multiply defined.
 )
 \openout1 = `source.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 108.
-LaTeX Font Info:    ... okay on input line 108.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 109.
+LaTeX Font Info:    ... okay on input line 109.
 
 *geometry* driver: auto-detecting
 *geometry* detected driver: pdftex
@@ -1086,17 +1106,17 @@ LaTeX Font Info:    ... okay on input line 108.
 
 (/usr/local/texlive/2024/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
 [Loading MPS to PDF converter (version 2006.09.02).]
-\scratchcounter=\count370
-\scratchdimen=\dimen341
-\scratchbox=\box88
-\nofMPsegments=\count371
-\nofMParguments=\count372
-\everyMPshowfont=\toks54
-\MPscratchCnt=\count373
-\MPscratchDim=\dimen342
-\MPnumerator=\count374
-\makeMPintoPDFobject=\count375
-\everyMPtoPDFconversion=\toks55
+\scratchcounter=\count371
+\scratchdimen=\dimen343
+\scratchbox=\box90
+\nofMPsegments=\count372
+\nofMParguments=\count373
+\everyMPshowfont=\toks56
+\MPscratchCnt=\count374
+\MPscratchDim=\dimen344
+\MPnumerator=\count375
+\makeMPintoPDFobject=\count376
+\everyMPtoPDFconversion=\toks57
 ) (/usr/local/texlive/2024/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
 Package: epstopdf-base 2020-01-24 v2.11 Base part for package epstopdf
 Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 4
@@ -1106,64 +1126,64 @@ Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 4
 File: epstopdf-sys.cfg 2010/07/13 v1.3 Configuration of (r)epstopdf for TeX Liv
 e
 ))
-Package hyperref Info: Link coloring OFF on input line 108.
+Package hyperref Info: Link coloring OFF on input line 109.
 
 (./source.out) (./source.out)
 \@outlinefile=\write8
 \openout8 = `source.out'.
 
 LaTeX Font Info:    Overwriting symbol font `operators' in version `normal'
-(Font)                  OT1/cmr/m/n --> OT1/cmss/m/n on input line 108.
+(Font)                  OT1/cmr/m/n --> OT1/cmss/m/n on input line 109.
 LaTeX Font Info:    Overwriting symbol font `operators' in version `bold'
-(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 108.
+(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 109.
 \symnumbers=\mathgroup6
 \sympureletters=\mathgroup7
 LaTeX Font Info:    Overwriting math alphabet `\mathrm' in version `normal'
-(Font)                  OT1/cmss/m/n --> OT1/cmr/m/n on input line 108.
-LaTeX Font Info:    Redeclaring math alphabet \mathbf on input line 108.
+(Font)                  OT1/cmss/m/n --> OT1/cmr/m/n on input line 109.
+LaTeX Font Info:    Redeclaring math alphabet \mathbf on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `normal'
-(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 108.
+(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `bold'
-(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 108.
-LaTeX Font Info:    Redeclaring math alphabet \mathsf on input line 108.
+(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 109.
+LaTeX Font Info:    Redeclaring math alphabet \mathsf on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `normal'
-(Font)                  OT1/cmss/m/n --> OT1/cmss/m/n on input line 108.
+(Font)                  OT1/cmss/m/n --> OT1/cmss/m/n on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `bold'
-(Font)                  OT1/cmss/bx/n --> OT1/cmss/m/n on input line 108.
-LaTeX Font Info:    Redeclaring math alphabet \mathit on input line 108.
+(Font)                  OT1/cmss/bx/n --> OT1/cmss/m/n on input line 109.
+LaTeX Font Info:    Redeclaring math alphabet \mathit on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `normal'
-(Font)                  OT1/cmr/m/it --> OT1/cmss/m/it on input line 108.
+(Font)                  OT1/cmr/m/it --> OT1/cmss/m/it on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `bold'
-(Font)                  OT1/cmr/bx/it --> OT1/cmss/m/it on input line 108.
-LaTeX Font Info:    Redeclaring math alphabet \mathtt on input line 108.
+(Font)                  OT1/cmr/bx/it --> OT1/cmss/m/it on input line 109.
+LaTeX Font Info:    Redeclaring math alphabet \mathtt on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `normal'
-(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 108.
+(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `bold'
-(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 108.
+(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 109.
 LaTeX Font Info:    Overwriting symbol font `numbers' in version `bold'
-(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 108.
+(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 109.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `bold'
-(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 108.
+(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathrm' in version `bold'
-(Font)                  OT1/cmss/b/n --> OT1/cmr/b/n on input line 108.
+(Font)                  OT1/cmss/b/n --> OT1/cmr/b/n on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `bold'
-(Font)                  OT1/cmss/b/n --> OT1/cmss/b/n on input line 108.
+(Font)                  OT1/cmss/b/n --> OT1/cmss/b/n on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `bold'
-(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 108.
+(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `bold'
-(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 108.
+(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 109.
 LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `bold'
-(Font)                  OT1/cmtt/m/n --> OT1/cmtt/b/n on input line 108.
-LaTeX Font Info:    Redeclaring symbol font `pureletters' on input line 108.
+(Font)                  OT1/cmtt/m/n --> OT1/cmtt/b/n on input line 109.
+LaTeX Font Info:    Redeclaring symbol font `pureletters' on input line 109.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `normal'
 (Font)                  OT1/cmss/m/it --> OT1/mathkerncmss/m/sl on input line 1
-08.
+09.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `bold'
 (Font)                  OT1/cmss/b/it --> OT1/mathkerncmss/m/sl on input line 1
-08.
+09.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `bold'
 (Font)                  OT1/mathkerncmss/m/sl --> OT1/mathkerncmss/bx/sl on inp
-ut line 108.
+ut line 109.
 
 (/usr/local/texlive/2024/texmf-dist/tex/latex/translator/translator-basic-dicti
 onary-English.dict
@@ -1204,40 +1224,50 @@ Overfull \hbox (9.7242pt too wide) in paragraph at lines 37--38
 ) [2
 
 ]
-LaTeX Font Info:    Trying to load font information for U+msa on input line 188
+LaTeX Font Info:    Trying to load font information for U+msa on input line 180
 .
  (/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsa.fd
 File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 188
+LaTeX Font Info:    Trying to load font information for U+msb on input line 180
 .
 
 (/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsb.fd
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
 LaTeX Font Info:    Trying to load font information for OT1+mathkerncmss on inp
-ut line 188.
+ut line 180.
 
 (/usr/local/texlive/2024/texmf-dist/tex/latex/sansmathaccent/ot1mathkerncmss.fd
 File: ot1mathkerncmss.fd 2020/01/31 Fontinst v1.933 font definitions for OT1/ma
 thkerncmss.
 ) [3
 
-]
-pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
- been already used, duplicate ignored
-<to be read again> 
-                   \relax 
-l.206 \end{frame}
-                  [4
+] [4
+
+] [5
+
+] [6
 
 ]
 pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
  been already used, duplicate ignored
 <to be read again> 
                    \relax 
-l.244 \end{frame}
-                  [5
+l.273 \end{frame}
+                  [7
+
+]
+pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
+ been already used, duplicate ignored
+<to be read again> 
+                   \relax 
+l.311 \end{frame}
+                  [8
+
+] [9
+
+] [10
 
 ]
 \openout4 = `source.vrb'.
@@ -1253,7 +1283,7 @@ No need to recompile robustExternalize/robExt-41F0E55DE3F19F3A33026059776E9B15.
 pdf
 (./robustExternalize/robExt-41F0E55DE3F19F3A33026059776E9B15-out.tex)
 (./robustExternalize/robExt-41F0E55DE3F19F3A33026059776E9B15.pgf)
-Finished to include the file.) [6
+Finished to include the file.) [11
 
 ]
 \openout4 = `source.vrb'.
@@ -1274,7 +1304,7 @@ Overfull \hbox (17.98798pt too wide) in paragraph at lines 1876--60
  [] 
  []
 
-) [7
+) [12
 
 ]
 \openout4 = `source.vrb'.
@@ -1290,7 +1320,7 @@ No need to recompile robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369.
 pdf
 (./robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369-out.tex)
 (./robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369.pgf)
-Finished to include the file.) [8
+Finished to include the file.) [13
 
 ]
 \openout4 = `source.vrb'.
@@ -1306,7 +1336,11 @@ No need to recompile robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119.
 pdf
 (./robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119-out.tex)
 (./robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119.pgf)
-Finished to include the file.) [9
+Finished to include the file.) [14
+
+] [15
+
+] [16
 
 ]
 \tf@nav=\write9
@@ -1331,35 +1365,40 @@ Package rerunfilecheck Info: File `source.out' has not changed.
 (rerunfilecheck)             Checksum: D41D8CD98F00B204E9800998ECF8427E;0.
  ) 
 Here is how much of TeX's memory you used:
- 31775 strings out of 474116
- 672129 string characters out of 5743681
+ 32388 strings out of 474116
+ 683263 string characters out of 5743681
  1949187 words of memory out of 5000000
- 53471 multiletter control sequences out of 15000+600000
- 571451 words of font info for 83 fonts, out of 8000000 for 9000
+ 54059 multiletter control sequences out of 15000+600000
+ 572116 words of font info for 85 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  128i,14n,123p,6310b,936s stack positions out of 10000i,1000n,20000p,200000b,200000s
-</usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cmextra/cmex7
-.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cmextra/cm
-ex8.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi
-10.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6
-.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.p
-fb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb
-></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr12.pfb><
-/usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr6.pfb></us
-r/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/l
-ocal/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmss10.pfb></usr/lo
-cal/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmss12.pfb></usr/loc
-al/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmss8.pfb></usr/local
-/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssbx10.pfb></usr/loca
-l/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssi10.pfb></usr/loca
-l/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssi8.pfb></usr/local
-/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/
-texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></usr/local/te
-xlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb>
-Output written on source.pdf (9 pages, 226353 bytes).
+</usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb
+></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cmextra/cmex7.
+pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cmextra/cme
+x8.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi1
+0.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.
+pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pf
+b></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb>
+</usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></
+usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr12.pfb></us
+r/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr6.pfb></usr/l
+ocal/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/loca
+l/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmss10.pfb></usr/local
+/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmss12.pfb></usr/local/
+texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmss8.pfb></usr/local/te
+xlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssbx10.pfb></usr/local/t
+exlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssi10.pfb></usr/local/t
+exlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssi12.pfb></usr/local/t
+exlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmssi8.pfb></usr/local/te
+xlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/tex
+live/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></usr/local/texli
+ve/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></usr/local/texlive
+/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local/texlive/2
+024/texmf-dist/fonts/type1/public/amsfonts/symbols/msam10.pfb>
+Output written on source.pdf (16 pages, 292230 bytes).
 PDF statistics:
- 348 PDF objects out of 1000 (max. 8388607)
- 290 compressed objects within 3 object streams
- 20 named destinations out of 1000 (max. 500000)
+ 553 PDF objects out of 1000 (max. 8388607)
+ 476 compressed objects within 5 object streams
+ 34 named destinations out of 1000 (max. 500000)
  43 words of extra memory for PDF output out of 10000 (max. 10000000)
 
