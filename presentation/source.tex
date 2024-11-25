@@ -11,8 +11,9 @@
 \usepackage{float}
 \usepackage{mathtools}
 \usepackage{caption}
-\usepackage[dvipsnames, x11names]{xcolor}
+\usepackage[dvipsnames, x11names, svgnames]{xcolor}
 \usepackage{colortbl}
+\usepackage{color,soul}
 \pgfmathsetseed{\number\pdfrandomseed}
 \usetikzlibrary{tikzmark, positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
 \robExtConfigure{enable fallback to manual mode} % prints command to run in PDF if shell-escape is not used/forgotten
@@ -86,9 +87,13 @@ depth .25\baselineskip height #1\baselineskip\relax}
 \tikzset{
     bigbox/.style={draw, rounded corners, minimum width=1.5cm, minimum height=1cm},
     smallbox/.style={draw, rounded corners, minimum width=1.25cm, minimum height=0.75cm},
+    tinybox/.style={draw, rounded corners, minimum width=1.25cm, minimum height=0.6cm},
     bigcircle/.style={draw, circle, minimum size=1cm},
     bigellipse/.style={draw, ellipse, minimum width=1.5cm, minimum height=1.25cm},
     place/.style={inner sep=0pt, outer sep=0pt},
+    colprimaryl/.style={draw=NavyBlue, fill=LightSkyBlue, text=black},
+    colprimary/.style={draw=NavyBlue, fill=NavyBlue, text=white},
+    operation/.style={draw=FireBrick, fill=LightSalmon, text=black, rounded corners},
     fork/.style={decorate, decoration={show path construction, lineto code={
         \draw[->](\tikzinputsegmentfirst)-|($(\tikzinputsegmentfirst)!.5!(\tikzinputsegmentlast)$)|-(\tikzinputsegmentlast);}
     }},
@@ -110,6 +115,164 @@ depth .25\baselineskip height #1\baselineskip\relax}
 
 \frame{\titlepage}
 
+
+\begin{frame}[fragile]
+  \frametitle{Seed and Extend approach}
+
+  \begin{center}
+    \begin{tikzpicture}[scale=.6, transform shape, node distance=1cm, >=Latex, overlay, remember picture, shift={(0,3.5)}]
+
+      \node (ap1title) at (0,2) {(k,w)-minimizers};
+      \draw[rounded corners=3pt]
+      (ap1title) -| (-8.5,-2) -| (8.5,2) -- (ap1title);
+  
+      \node (ap2title) at (0,-2.5) {Spacing};
+      \draw[rounded corners=3pt]
+      (ap2title) -| (-8.5,-6.5) -| (8.5,-2.5) -- (ap2title);
+  
+      \node (ap3title) at (0,-7) {Strobomers};
+      \draw[rounded corners=3pt]
+      (ap3title) -| (-8.5,-11) -| (8.5,-7) -- (ap3title);
+    
+      \node(k1)[tinybox, colprimaryl, below left=0.4cm and 3cm of ap1title]{GCTATTA};
+      \node(k2)[tinybox, colprimaryl, below right=0.1cm and -1.7cm of k1]{CTATTAC};
+      \node(k3)[tinybox, colprimaryl, below right=0.1cm and -1.7cm of k2]{TATTACC};
+      \node(k4)[tinybox, colprimaryl, below right=0.1cm and -1.7cm of k3]{ATTACCT};
+  
+      \node(h1)[tinybox, colprimary, right=1.5cm of k1]{Hash};
+      \node(h2)[tinybox, colprimary, below=0.1cm of h1]{Hash};
+      \node(h3)[tinybox, colprimary, below=0.1cm of h2]{Hash};
+      \node(h4)[tinybox, colprimary, below=0.1cm of h3]{Hash};
+  
+      \node(h1v)[tinybox, right=1.5cm of h1]{\texttt{0xA1}};
+      \node(h2v)[tinybox, below=0.1cm of h1v]{\texttt{0x02}};
+      \node(h3v)[tinybox, below=0.1cm of h2v]{\texttt{0xFC}};
+      \node(h4v)[tinybox, below=0.1cm of h3v]{\texttt{0x45}};
+  
+      \draw[->](k1)--(h1);
+      \draw[->](k2)--(h2);
+      \draw[->](k3)--(h3);
+      \draw[->](k4)--(h4);
+  
+      \draw[->](h1)--(h1v);
+      \draw[->](h2)--(h2v);
+      \draw[->](h3)--(h3v);
+      \draw[->](h4)--(h4v);
+  
+      \node(min)[operation, minimum width=1cm, minimum height=2.5cm, below right=-0.5cm and 1.5cm of h1v]{Find Min};
+  
+      \draw[fork](h1v.east)--(min.west);
+      \draw[fork](h2v.east)--(min.west);
+      \draw[fork](h3v.east)--(min.west);
+      \draw[fork](h4v.east)--(min.west);
+  
+      \node(minh)[tinybox, right=4.5cm of h1v]{\texttt{0x02}};
+      \draw[->](min.east) |- ++(0.3cm, 0mm) coordinate(min) |- (minh.west);
+  
+      \node(minmer)[tinybox, colprimaryl, below=1.3cm of minh]{CTATTAC};
+      \draw[->](minh)--(minmer);
+  
+      % BOX
+      \node (seedbox1)[below=0.1cm of minmer] {Seed: Minimizer};
+      \draw[rounded corners=3pt] (seedbox1) -| ++(-1.5cm, 1.3cm) coordinate(seedbox1) -| ++(2.9cm, -1.3cm) coordinate(seedbox1) |- ++(-0.2cm, 0cm) coordinate(seedbox1);
+  
+      % Second one
+  
+      \node(spk1)[tinybox, colprimaryl, below left=0.4cm and 3cm of ap2title]{GCTATTA};
+      \node(spk2)[tinybox, colprimaryl, below=0.1cm of spk1]{GATACTA};
+      \node(spk3)[tinybox, colprimaryl, below=0.1cm of spk2]{GACACTA};
+  
+      \node(p1)[tinybox, right=0.9cm of spk1]{Pattern};
+      \node(p2)[tinybox, below=0.1cm of p1]{Pattern};
+      \node(p3)[tinybox, below=0.1cm of p2]{Pattern};
+  
+      \node(sps1)[tinybox, colprimaryl, right=0.9cm of p1]{G\hl{\textbf{X}}TA\hl{\textbf{X}}TA};
+      \node(sps2)[tinybox, colprimaryl, below=0.1cm of sps1]{G\hl{\textbf{X}}TA\hl{\textbf{X}}TA};
+      \node(sps3)[tinybox, colprimaryl, below=0.1cm of sps2]{G\hl{\textbf{X}}CA\hl{\textbf{X}}TA};
+  
+      % BOX
+      \node (seedbox2)[below=0.9cm of sps2] {Seeds: Spaced};
+      \draw[rounded corners=3pt] (seedbox2) -| ++(-1.5cm, 2.8cm) coordinate(seedbox2) -| ++(2.9cm, -2.8cm) coordinate(seedbox2) |- ++(-0.2cm, 0cm) coordinate(seedbox2);
+  
+      \node(sh1)[tinybox, colprimary, right=0.9cm of sps1]{Hash};
+      \node(sh2)[tinybox, colprimary, below=0.1cm of sh1]{Hash};
+      \node(sh3)[tinybox, colprimary, below=0.1cm of sh2]{Hash};
+  
+      \node(sh1v)[tinybox, right=0.9cm of sh1]{\texttt{0xA1}};
+      \node(sh2v)[tinybox, below=0.1cm of sh1v]{\texttt{0xA1}};
+      \node(sh3v)[tinybox, below=0.1cm of sh2v]{\texttt{0xFC}};
+  
+      \draw[->](spk1)--(p1);
+      \draw[->](spk2)--(p2);
+      \draw[->](spk3)--(p3);
+  
+      \draw[->](p1)--(sps1);
+      \draw[->](p2)--(sps2);
+      \draw[->](p3)--(sps3);
+  
+      \draw[->](sps1)--(sh1);
+      \draw[->](sps2)--(sh2);
+      \draw[->](sps3)--(sh3);
+  
+      \draw[->](sh1)--(sh1v);
+      \draw[->](sh2)--(sh2v);
+      \draw[->](sh3)--(sh3v);
+  
+      % Third 
+  
+      \node(stk1)[tinybox, colprimaryl, below left=0.4cm and 0.7cm of ap3title]{\hl{\textbf{GCTA}}TTACC\hl{\textbf{TTAA}}TGTGA\hl{\textbf{TGGA}}C};
+      \node(stk2)[tinybox, colprimaryl, below=0.1cm of stk1]{\hl{\textbf{GCTA}}TCCCC\hl{\textbf{TTAA}}TGGGA\hl{\textbf{TGGA}}C};
+      \node(stk3)[tinybox, colprimaryl, below=0.1cm of stk2]{GC\tikzmark{stk3h1b}\hl{\textbf{CCTC}}\tikzmark{stk3h1e}CCCT\tikzmark{stk3h2b}\hl{\textbf{TAAA}}\tikzmark{stk3h2e}GGGA\tikzmark{stk3h3b}\hl{\textbf{TGGA}}\tikzmark{stk3h3e}C};
+  
+      \node(stkdescription)[below=0.4cm of stk3]{Selected k-mers};
+  
+      \path ($(pic cs:stk3h1b)!0.15!(pic cs:stk3h1e)$) |- (stkdescription) coordinate [pos=0.12] (stk3h1x);
+      \path ($(pic cs:stk3h2b)!-0.7!(pic cs:stk3h2e)$) |- (stkdescription.north) coordinate [pos=0.18] (stk3h2x);
+      \path ($(pic cs:stk3h3b)!-1.3!(pic cs:stk3h3e)$) |- (stkdescription) coordinate [pos=0.12] (stk3h3x);
+      \draw (stk3h1x) |- (stkdescription.west);
+      \draw (stk3h2x) |- (stkdescription.north);
+      \draw (stk3h3x) |- (stkdescription.east);
+  
+      \node(l1)[tinybox, right=0.6cm of stk1]{Link};
+      \node(l2)[tinybox, below=0.1cm of l1]{Link};
+      \node(l3)[tinybox, below=0.1cm of l2]{Link};
+  
+      \node(sts1)[tinybox, colprimaryl, right=0.6cm of l1]{GCTATTAATGGA};
+      \node(sts2)[tinybox, colprimaryl, below=0.1cm of sts1]{GCTATTAATGGA};
+      \node(sts3)[tinybox, colprimaryl, below=0.1cm of sts2]{CCTCTAAATGGA};
+  
+      % BOX
+      \node (seedbox3)[below=1cm of sts2] {Seeds: Strobomers};
+      \draw[rounded corners=3pt] (seedbox3) -| ++(-2cm, 2.8cm) coordinate(seedbox3) -| ++(3.8cm, -2.8cm) coordinate(seedbox3) |- ++(-0.2cm, 0cm) coordinate(seedbox3);
+  
+      \node(sth1)[tinybox, colprimary, right=0.6cm of sts1]{Hash};
+      \node(sth2)[tinybox, colprimary, below=0.1cm of sth1]{Hash};
+      \node(sth3)[tinybox, colprimary, below=0.1cm of sth2]{Hash};
+      
+      \node(sth1v)[tinybox, right=0.6cm of sth1]{\texttt{0xA1}};
+      \node(sth2v)[tinybox, below=0.1cm of sth1v]{\texttt{0xA1}};
+      \node(sth3v)[tinybox, below=0.1cm of sth2v]{\texttt{0xFC}};
+  
+      \draw[->](stk1)--(l1);
+      \draw[->](stk2)--(l2);
+      \draw[->](stk3)--(l3);
+  
+      \draw[->](l1)--(sts1);
+      \draw[->](l2)--(sts2);
+      \draw[->](l3)--(sts3);
+  
+      \draw[->](sts1)--(sth1);
+      \draw[->](sts2)--(sth2);
+      \draw[->](sts3)--(sth3);
+  
+      \draw[->](sth1)--(sth1v);
+      \draw[->](sth2)--(sth2v);
+      \draw[->](sth3)--(sth3v);
+      
+    \end{tikzpicture}
+  \end{center}
+
+\end{frame}
 
 \begin{frame}[fragile]
   \frametitle{Seed and Extend approach}
