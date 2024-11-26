@@ -14,6 +14,8 @@
 \usepackage[dvipsnames, x11names, svgnames]{xcolor}
 \usepackage{colortbl}
 \usepackage{color,soul}
+\usepackage{minted}
+
 \pgfmathsetseed{\number\pdfrandomseed}
 \usetikzlibrary{tikzmark, positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
 \robExtConfigure{enable fallback to manual mode} % prints command to run in PDF if shell-escape is not used/forgotten
@@ -369,14 +371,70 @@ depth .25\baselineskip height #1\baselineskip\relax}
 
 \end{frame}
 
+\begin{frame}[fragile]
+  \frametitle{Minimizer generation i.e numpy magic}
+
+  \begin{minted}[fontsize=\scriptsize]{python}
+  def get_minimizers(seq_arr: NDArray[Shape["*"], UInt8]): 
+      sequence_len = len(seq_arr)
+      mask = generate_mask(KMER_LEN)  # Bitwise mask
+
+      # Function to compute kmer value based on the previous
+      # (on the left side) kmer value and new nucleotide
+      uadd = frompyfunc(lambda x, y: ((x << 2) | y) & mask, 2, 1)
+      kmers = uadd.accumulate(seq_arr, dtype=object).astype(int)
+      kmers[:KMER_LEN-2] = 0
+      
+      # Do sliding window and get min kmers positions
+      kmers_min_pos = add(
+          argmin(
+            sliding_window_view(kmers, window_shape=WINDOW_LEN
+          ), axis=1),
+          arange(0, sequence_len - WINDOW_LEN + 1)
+      )
+      
+      # ...
+  \end{minted}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Minimizer generation i.e numpy magic}
+
+  \begin{minted}[fontsize=\tiny]{python}
+      # ...
+      # Now collect all selected mimumum and kmers into single table
+      selected_kmers = column_stack((
+        kmers[kmers_min_pos],
+        kmers_min_pos,
+      ))[KMER_LEN:].astype(uint32)
+
+      # Remove duplicates
+      selected_kmers = selected_kmers[selected_kmers[:, 0].argsort()]
+      selected_kmers = unique(selected_kmers, axis=0)
+
+      # This part performs "group by" using the kmer value
+      selected_kmers_unique_idx = unique(
+        selected_kmers[:, 0], return_index=True
+      )[1][1:]
+      selected_kmers_entries_split = split(selected_kmers[:, 1], selected_kmers_unique_idx)
+
+      if len(selected_kmers) == 0:
+          return dict()
+      return dict(zip(
+        chain([selected_kmers[0, 0]], selected_kmers[selected_kmers_unique_idx, 0]),
+        selected_kmers_entries_split
+      ))
+  \end{minted}
+\end{frame}
+
 \begin{frame}
   \frametitle{Problem of extending seeds}
 
   \begin{itemize}
     \item minimap2 approach with dynamic programming similar to normal alignment (plus exponential forward lookups)
     \item We have only one potential match so maybe assume that $match \in LIS(matches)$
-    \item Can we formulate sliding window approach to generate the biggest sporring windows included in $LIS(matches)$?
-    \item For which case assumtion $match \in LIS(matches)$ won't work?
+    \item Can we formulate sliding window approach to generate the biggest scorring windows included in $LIS(matches)$?
+    \item For which case assumption that $match \in LIS(matches)$ won't work?
     \item Can we modify LIS to perhaps include other potential matches?
   \end{itemize}
 \end{frame}
@@ -435,8 +493,57 @@ depth .25\baselineskip height #1\baselineskip\relax}
   \end{algorithm}
 \end{frame}
 
+\begin{frame}[fragile]
+  \frametitle{Seed extension (unwanted case)}
+
+  \begin{center}
+    \begin{tikzpicture}[scale=.6, transform shape, node distance=1cm, >=Latex, remember picture]
+
+      \node(kstart)[]{};
+      \node(k1)[tinybox, right=0.5cm of kstart, align=center]{$k_1$\\$10-80$};
+      \node(k2)[tinybox, right=0.5cm of k1, align=center]{$k_2$\\$90-142$};
+      \node(k3)[tinybox, right=0.5cm of k2, align=center]{$k_3$\\$150-233$};
+      \node(k4)[tinybox, colprimary, right=0.9cm of k3, align=center]{$k_4 (l=562)$\\$239-801$};
+      \node(k5)[tinybox, right=0.9cm of k4, align=center]{$k_5$\\$602-605$};
+      \node(k6)[tinybox, colprimary, right=0.9cm of k5, align=center]{$k_6 (l=691)$\\$306-997$};
+      \node(k7)[tinybox, right=0.5cm of k6, align=center]{$k_7$\\$950-960$};
+      \node(kend)[right=0.5cm of k7]{};
+  
+      \draw[->](kstart)--(k1);
+      \draw[-](k1)--(k2);
+      \draw[-](k2)--(k3);
+      \draw[-](k3)--(k4);
+      \draw[-](k4)--(k5);
+      \draw[-](k5)--(k6);
+      \draw[-](k6)--(k7);
+      \draw[->](k7)--(kend);
+  
+      \node(desctail)[below=0.6cm of k2]{Unwanted tail};
+      \draw (k1) |- (desctail.west);
+      \draw (k2) -- (desctail.north);
+      \draw (k3) |- (desctail.east);
+  
+      \node(desck4)[below=1.2cm of k4]{Worse candidate compared to $k6$};
+      \draw (k4) -- (desck4.north);
+  
+      \node(desck6)[below=0.6cm of k6]{Will be cut to $606-997 (l=391)$ because of the tail};
+      \draw (k6) -- (desck6.north);
+  
+      \node (listitle)[below right=3cm and 1.5cm of k1]{LIS vs what we want};
+      \draw[rounded corners=3pt]
+      (listitle) -| ++(-3cm, -2cm) coordinate(listitle) -| ++(15cm, 2cm) coordinate(listitle) -- ++(-10cm, 0cm) coordinate(listitle);
+  
+      \node(listext1)[below right=0.35cm and -4.2cm of listitle]{$LIS([k_1,...k_7]) = [ (10, 80); (90; 142); (150; 233); $\hl{(239; 801)}$; (602; 605); $\hl{(606, 997)}$ ]$};
+  
+      \node(listext2)[below=0.1cm of listext1]{$LIS'([k_1,...k_7]) = [ (10, 80); (90; 142); (150; 233); $\hl{(239; 400)}$; $\hl{(401, 997)}$ ]$};
+      
+    \end{tikzpicture}
+  \end{center}
+
+\end{frame}
+
 \begin{frame}
-  \frametitle{Seed extension}
+  \frametitle{Seed extension (heuristic)}
   
   \begin{algorithm}[H]
       \captionsetup{font=scriptsize}

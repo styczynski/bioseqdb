@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.11.20)  25 NOV 2024 21:04
+This is pdfTeX, Version 3.141592653-2.6-1.40.26 (TeX Live 2024) (preloaded format=pdflatex 2024.11.20)  26 NOV 2024 20:47
 entering extended mode
  \write18 enabled.
  %&-line parsing enabled.
@@ -1005,14 +1005,124 @@ Package: soul-ori 2023-06-14 v3.1 letterspacing/underlining (mf)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/etexcmds/etexcmds.sty
 Package: etexcmds 2019/12/15 v1.7 Avoid name clashes with e-TeX commands (HO)
 ))
+(/usr/local/texlive/2024/texmf-dist/tex/latex/minted/minted.sty
+Package: minted 2023/12/18 v2.9 Yet another Pygments shim for LaTeX
+
+(/usr/local/texlive/2024/texmf-dist/tex/latex/fvextra/fvextra.sty
+Package: fvextra 2023/11/28 v1.6.1 fvextra - extensions and patches for fancyvr
+b
+
+(/usr/local/texlive/2024/texmf-dist/tex/latex/fancyvrb/fancyvrb.sty
+Package: fancyvrb 2024/01/20 4.5c verbatim text (tvz,hv)
+\FV@CodeLineNo=\count373
+\FV@InFile=\read4
+\FV@TabBox=\box87
+\c@FancyVerbLine=\count374
+\FV@StepNumber=\count375
+\FV@OutFile=\write8
+)
+(/usr/local/texlive/2024/texmf-dist/tex/latex/upquote/upquote.sty
+Package: upquote 2012/04/19 v1.3 upright-quote and grave-accent glyphs in verba
+tim
+)
+(/usr/local/texlive/2024/texmf-dist/tex/latex/lineno/lineno.sty
+Package: lineno 2023/05/20 line numbers on paragraphs v5.3
+\linenopenalty=\count376
+\output=\toks62
+\linenoprevgraf=\count377
+\linenumbersep=\dimen336
+\linenumberwidth=\dimen337
+\c@linenumber=\count378
+\c@pagewiselinenumber=\count379
+\c@LN@truepage=\count380
+\c@internallinenumber=\count381
+\c@internallinenumbers=\count382
+\quotelinenumbersep=\dimen338
+\bframerule=\dimen339
+\bframesep=\dimen340
+\bframebox=\box88
+\linenoamsmath@ams@eqpen=\count383
+LaTeX Info: Redefining \\ on input line 3180.
+)
+\c@FancyVerbWriteLine=\count384
+\c@FancyVerbBufferIndex=\count385
+\c@FancyVerbBufferLength=\count386
+\c@FancyVerbBufferLine=\count387
+\c@FV@oldbufferlength=\count388
+\c@FV@TrueTabGroupLevel=\count389
+\c@FV@TrueTabCounter=\count390
+\FV@TabBox@Group=\box89
+\FV@TmpLength=\skip76
+\c@FV@HighlightLinesStart=\count391
+\c@FV@HighlightLinesStop=\count392
+\FV@LoopCount=\count393
+\FV@NCharsBox=\box90
+\FV@BreakIndent=\dimen341
+\FV@BreakIndentNChars=\count394
+\FV@BreakSymbolSepLeft=\dimen342
+\FV@BreakSymbolSepLeftNChars=\count395
+\FV@BreakSymbolSepRight=\dimen343
+\FV@BreakSymbolSepRightNChars=\count396
+\FV@BreakSymbolIndentLeft=\dimen344
+\FV@BreakSymbolIndentLeftNChars=\count397
+\FV@BreakSymbolIndentRight=\dimen345
+\FV@BreakSymbolIndentRightNChars=\count398
+\c@FancyVerbLineBreakLast=\count399
+\FV@LineBox=\box91
+\FV@LineIndentBox=\box92
+\c@FV@BreakBufferDepth=\count400
+\FV@LineWidth=\dimen346
+)
+(/usr/local/texlive/2024/texmf-dist/tex/latex/ifplatform/ifplatform.sty
+Package: ifplatform 2017/10/13 v0.4a Testing for the operating system
+
+(/usr/local/texlive/2024/texmf-dist/tex/generic/catchfile/catchfile.sty
+Package: catchfile 2019/12/09 v1.8 Catch the contents of a file (HO)
+)
+(/usr/local/texlive/2024/texmf-dist/tex/generic/iftex/ifluatex.sty
+Package: ifluatex 2019/10/25 v1.5 ifluatex legacy package. Use iftex instead.
+)
+runsystem(uname -s > "source.w18")...executed.
+
+
+(./source.w18)
+runsystem(rm -- "source.w18")...executed.
+
+)
+(/usr/local/texlive/2024/texmf-dist/tex/generic/xstring/xstring.sty
+(/usr/local/texlive/2024/texmf-dist/tex/generic/xstring/xstring.tex
+\xs_counta=\count401
+\xs_countb=\count402
+)
+Package: xstring 2023/08/22 v1.86 String manipulations (CT)
+)
+(/usr/local/texlive/2024/texmf-dist/tex/latex/framed/framed.sty
+Package: framed 2011/10/22 v 0.96: framed or shaded text with page breaks
+\OuterFrameSep=\skip77
+\fb@frw=\dimen347
+\fb@frh=\dimen348
+\FrameRule=\dimen349
+\FrameSep=\dimen350
+)
+\minted@appexistsfile=\read5
+\minted@bgbox=\box93
+\minted@code=\write9
+\c@minted@FancyVerbLineTemp=\count403
+\c@minted@pygmentizecounter=\count404
+\@float@every@listing=\toks63
+\c@listing=\count405
+)
+runsystem(mkdir -p _minted-source)...executed.
+
+
 (/usr/local/texlive/2024/texmf-dist/tex/latex/tikzmark/tikzlibrarytikzmark.code
 .tex
 File: tikzlibrarytikzmark.code.tex 2022/08/24 v1.15 TikZ library for marking po
 sitions in a document
-\l__sn_x_dim=\dimen336
-\l__sn_y_dim=\dimen337
-\l__sn_xa_dim=\dimen338
-\l__sn_ya_dim=\dimen339
+\l__sn_x_dim=\dimen351
+\l__sn_y_dim=\dimen352
+\l__sn_xa_dim=\dimen353
+\l__sn_ya_dim=\dimen354
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibrarypositioning.code.tex
@@ -1024,16 +1134,16 @@ s/tikzlibrarydecorations.pathreplacing.code.tex
 s/tikzlibrarydecorations.code.tex
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/modules/pgfmoduledecoration
 s.code.tex
-\pgfdecoratedcompleteddistance=\dimen340
-\pgfdecoratedremainingdistance=\dimen341
-\pgfdecoratedinputsegmentcompleteddistance=\dimen342
-\pgfdecoratedinputsegmentremainingdistance=\dimen343
-\pgf@decorate@distancetomove=\dimen344
-\pgf@decorate@repeatstate=\count373
-\pgfdecorationsegmentamplitude=\dimen345
-\pgfdecorationsegmentlength=\dimen346
+\pgfdecoratedcompleteddistance=\dimen355
+\pgfdecoratedremainingdistance=\dimen356
+\pgfdecoratedinputsegmentcompleteddistance=\dimen357
+\pgfdecoratedinputsegmentremainingdistance=\dimen358
+\pgf@decorate@distancetomove=\dimen359
+\pgf@decorate@repeatstate=\count406
+\pgfdecorationsegmentamplitude=\dimen360
+\pgfdecorationsegmentlength=\dimen361
 )
-\tikz@lib@dec@box=\box87
+\tikz@lib@dec@box=\box94
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/libraries/decorations/pgfli
 brarydecorations.pathreplacing.code.tex))
@@ -1044,10 +1154,10 @@ File: tikzlibrarycalc.code.tex 2023-01-15 v3.1.10 (3.1.10)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/libraries/pgflibraryarrows.
 meta.code.tex
 File: pgflibraryarrows.meta.code.tex 2023-01-15 v3.1.10 (3.1.10)
-\pgfarrowinset=\dimen347
-\pgfarrowlength=\dimen348
-\pgfarrowwidth=\dimen349
-\pgfarrowlinewidth=\dimen350
+\pgfarrowinset=\dimen362
+\pgfarrowlength=\dimen363
+\pgfarrowwidth=\dimen364
+\pgfarrowlinewidth=\dimen365
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibraryshapes.geometric.code.tex
@@ -1060,8 +1170,8 @@ File: pgflibraryshapes.geometric.code.tex 2023-01-15 v3.1.10 (3.1.10)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibrarybackgrounds.code.tex
 File: tikzlibrarybackgrounds.code.tex 2023-01-15 v3.1.10 (3.1.10)
-\pgf@layerbox@background=\box88
-\pgf@layerboxsaved@background=\box89
+\pgf@layerbox@background=\box95
+\pgf@layerboxsaved@background=\box96
 )
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/frontendlayer/tikz/librarie
 s/tikzlibraryarrows.code.tex
@@ -1070,9 +1180,13 @@ File: tikzlibraryarrows.code.tex 2023-01-15 v3.1.10 (3.1.10)
 (/usr/local/texlive/2024/texmf-dist/tex/generic/pgf/libraries/pgflibraryarrows.
 code.tex
 File: pgflibraryarrows.code.tex 2023-01-15 v3.1.10 (3.1.10)
-\arrowsize=\dimen351
+\arrowsize=\dimen366
 ))
-\ALG@printindent@tempcnta=\count374
+\ALG@printindent@tempcnta=\count407
+runsystem(command -v pygmentize && touch source.aex)...executed.
+
+runsystem(rm source.aex)...executed.
+
  (./source.aux
 
 LaTeX Warning: Label `alg:cap' multiply defined.
@@ -1083,24 +1197,24 @@ LaTeX Warning: Label `alg:cap' multiply defined.
 )
 \openout1 = `source.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 114.
-LaTeX Font Info:    ... okay on input line 114.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 116.
+LaTeX Font Info:    ... okay on input line 116.
 
 *geometry* driver: auto-detecting
 *geometry* detected driver: pdftex
@@ -1138,17 +1252,17 @@ LaTeX Font Info:    ... okay on input line 114.
 
 (/usr/local/texlive/2024/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
 [Loading MPS to PDF converter (version 2006.09.02).]
-\scratchcounter=\count375
-\scratchdimen=\dimen352
-\scratchbox=\box90
-\nofMPsegments=\count376
-\nofMParguments=\count377
-\everyMPshowfont=\toks62
-\MPscratchCnt=\count378
-\MPscratchDim=\dimen353
-\MPnumerator=\count379
-\makeMPintoPDFobject=\count380
-\everyMPtoPDFconversion=\toks63
+\scratchcounter=\count408
+\scratchdimen=\dimen367
+\scratchbox=\box97
+\nofMPsegments=\count409
+\nofMParguments=\count410
+\everyMPshowfont=\toks64
+\MPscratchCnt=\count411
+\MPscratchDim=\dimen368
+\MPnumerator=\count412
+\makeMPintoPDFobject=\count413
+\everyMPtoPDFconversion=\toks65
 ) (/usr/local/texlive/2024/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
 Package: epstopdf-base 2020-01-24 v2.11 Base part for package epstopdf
 Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 4
@@ -1158,64 +1272,64 @@ Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 4
 File: epstopdf-sys.cfg 2010/07/13 v1.3 Configuration of (r)epstopdf for TeX Liv
 e
 ))
-Package hyperref Info: Link coloring OFF on input line 114.
+Package hyperref Info: Link coloring OFF on input line 116.
 
 (./source.out) (./source.out)
-\@outlinefile=\write8
-\openout8 = `source.out'.
+\@outlinefile=\write10
+\openout10 = `source.out'.
 
 LaTeX Font Info:    Overwriting symbol font `operators' in version `normal'
-(Font)                  OT1/cmr/m/n --> OT1/cmss/m/n on input line 114.
+(Font)                  OT1/cmr/m/n --> OT1/cmss/m/n on input line 116.
 LaTeX Font Info:    Overwriting symbol font `operators' in version `bold'
-(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 114.
+(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 116.
 \symnumbers=\mathgroup6
 \sympureletters=\mathgroup7
 LaTeX Font Info:    Overwriting math alphabet `\mathrm' in version `normal'
-(Font)                  OT1/cmss/m/n --> OT1/cmr/m/n on input line 114.
-LaTeX Font Info:    Redeclaring math alphabet \mathbf on input line 114.
+(Font)                  OT1/cmss/m/n --> OT1/cmr/m/n on input line 116.
+LaTeX Font Info:    Redeclaring math alphabet \mathbf on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `normal'
-(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 114.
+(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `bold'
-(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 114.
-LaTeX Font Info:    Redeclaring math alphabet \mathsf on input line 114.
+(Font)                  OT1/cmr/bx/n --> OT1/cmss/b/n on input line 116.
+LaTeX Font Info:    Redeclaring math alphabet \mathsf on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `normal'
-(Font)                  OT1/cmss/m/n --> OT1/cmss/m/n on input line 114.
+(Font)                  OT1/cmss/m/n --> OT1/cmss/m/n on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `bold'
-(Font)                  OT1/cmss/bx/n --> OT1/cmss/m/n on input line 114.
-LaTeX Font Info:    Redeclaring math alphabet \mathit on input line 114.
+(Font)                  OT1/cmss/bx/n --> OT1/cmss/m/n on input line 116.
+LaTeX Font Info:    Redeclaring math alphabet \mathit on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `normal'
-(Font)                  OT1/cmr/m/it --> OT1/cmss/m/it on input line 114.
+(Font)                  OT1/cmr/m/it --> OT1/cmss/m/it on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `bold'
-(Font)                  OT1/cmr/bx/it --> OT1/cmss/m/it on input line 114.
-LaTeX Font Info:    Redeclaring math alphabet \mathtt on input line 114.
+(Font)                  OT1/cmr/bx/it --> OT1/cmss/m/it on input line 116.
+LaTeX Font Info:    Redeclaring math alphabet \mathtt on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `normal'
-(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 114.
+(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `bold'
-(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 114.
+(Font)                  OT1/cmtt/m/n --> OT1/cmtt/m/n on input line 116.
 LaTeX Font Info:    Overwriting symbol font `numbers' in version `bold'
-(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 114.
+(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 116.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `bold'
-(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 114.
+(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathrm' in version `bold'
-(Font)                  OT1/cmss/b/n --> OT1/cmr/b/n on input line 114.
+(Font)                  OT1/cmss/b/n --> OT1/cmr/b/n on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathbf' in version `bold'
-(Font)                  OT1/cmss/b/n --> OT1/cmss/b/n on input line 114.
+(Font)                  OT1/cmss/b/n --> OT1/cmss/b/n on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathsf' in version `bold'
-(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 114.
+(Font)                  OT1/cmss/m/n --> OT1/cmss/b/n on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathit' in version `bold'
-(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 114.
+(Font)                  OT1/cmss/m/it --> OT1/cmss/b/it on input line 116.
 LaTeX Font Info:    Overwriting math alphabet `\mathtt' in version `bold'
-(Font)                  OT1/cmtt/m/n --> OT1/cmtt/b/n on input line 114.
-LaTeX Font Info:    Redeclaring symbol font `pureletters' on input line 114.
+(Font)                  OT1/cmtt/m/n --> OT1/cmtt/b/n on input line 116.
+LaTeX Font Info:    Redeclaring symbol font `pureletters' on input line 116.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `normal'
 (Font)                  OT1/cmss/m/it --> OT1/mathkerncmss/m/sl on input line 1
-14.
+16.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `bold'
 (Font)                  OT1/cmss/b/it --> OT1/mathkerncmss/m/sl on input line 1
-14.
+16.
 LaTeX Font Info:    Overwriting symbol font `pureletters' in version `bold'
 (Font)                  OT1/mathkerncmss/m/sl --> OT1/mathkerncmss/bx/sl on inp
-ut line 114.
+ut line 116.
 
 (/usr/local/texlive/2024/texmf-dist/tex/latex/translator/translator-basic-dicti
 onary-English.dict
@@ -1261,19 +1375,19 @@ Overfull \hbox (9.7242pt too wide) in paragraph at lines 37--38
 ) [3
 
 ]
-LaTeX Font Info:    Trying to load font information for U+msa on input line 343
+LaTeX Font Info:    Trying to load font information for U+msa on input line 345
 .
  (/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsa.fd
 File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 343
+LaTeX Font Info:    Trying to load font information for U+msb on input line 345
 .
 
 (/usr/local/texlive/2024/texmf-dist/tex/latex/amsfonts/umsb.fd
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
 LaTeX Font Info:    Trying to load font information for OT1+mathkerncmss on inp
-ut line 343.
+ut line 345.
 
 (/usr/local/texlive/2024/texmf-dist/tex/latex/sansmathaccent/ot1mathkerncmss.fd
 File: ot1mathkerncmss.fd 2020/01/31 Fontinst v1.933 font definitions for OT1/ma
@@ -1282,29 +1396,65 @@ thkerncmss.
 
 ] [5
 
-] [6
+]
+\openout4 = `source.vrb'.
 
-] [7
+ (./source.vrb
+\openout8 = `source.pyg'.
+
+ (./_minted-source/default.pygstyle)
+(./_minted-source/5533E54D705FBC1F82DE249A5EA78109B634A66B45A49A46578E491A48DA5
+59C.pygtex
+LaTeX Font Info:    Font shape `OT1/cmtt/bx/n' in size <8> not available
+(Font)              Font shape `OT1/cmtt/m/n' tried instead on input line 2.
+)) [6
+
+]
+\openout4 = `source.vrb'.
+
+ (./source.vrb
+\openout8 = `source.pyg'.
+
+
+(./_minted-source/747048D921AD185C0155BE4EB3D0067BB634A66B45A49A46578E491A48DA5
+59C.pygtex
+LaTeX Font Info:    Font shape `OT1/cmtt/bx/n' in size <6> not available
+(Font)              Font shape `OT1/cmtt/m/n' tried instead on input line 15.
+)) [7
+
+] [8
+
+] [9
 
 ]
 pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
  been already used, duplicate ignored
 <to be read again> 
                    \relax 
-l.436 \end{frame}
-                  [8
+l.494 \end{frame}
+                  [10
+
+]
+\openout4 = `source.vrb'.
+
+ (./source.vrb
+Overfull \hbox (19.12952pt too wide) in paragraph at lines 44--45
+ [] 
+ []
+
+) [11
 
 ]
 pdfTeX warning (ext4): destination with the same identifier (name{alg:cap}) has
  been already used, duplicate ignored
 <to be read again> 
                    \relax 
-l.474 \end{frame}
-                  [9
+l.581 \end{frame}
+                  [12
 
-] [10
+] [13
 
-] [11
+] [14
 
 ]
 \openout4 = `source.vrb'.
@@ -1320,7 +1470,7 @@ No need to recompile robustExternalize/robExt-41F0E55DE3F19F3A33026059776E9B15.
 pdf
 (./robustExternalize/robExt-41F0E55DE3F19F3A33026059776E9B15-out.tex)
 (./robustExternalize/robExt-41F0E55DE3F19F3A33026059776E9B15.pgf)
-Finished to include the file.) [12
+Finished to include the file.) [15
 
 ]
 \openout4 = `source.vrb'.
@@ -1341,7 +1491,7 @@ Overfull \hbox (17.98798pt too wide) in paragraph at lines 1876--60
  [] 
  []
 
-) [13
+) [16
 
 ]
 \openout4 = `source.vrb'.
@@ -1357,7 +1507,7 @@ No need to recompile robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369.
 pdf
 (./robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369-out.tex)
 (./robustExternalize/robExt-CE1B0DD3CA6F40F75FCB000D22EFF369.pgf)
-Finished to include the file.) [14
+Finished to include the file.) [17
 
 ]
 \openout4 = `source.vrb'.
@@ -1373,21 +1523,21 @@ No need to recompile robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119.
 pdf
 (./robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119-out.tex)
 (./robustExternalize/robExt-5A2A34D2EBF723BB3C7CDBA4D3CC2119.pgf)
-Finished to include the file.) [15
+Finished to include the file.) [18
 
-] [16
+] [19
 
-] [17
+] [20
 
 ]
-\tf@nav=\write9
-\openout9 = `source.nav'.
+\tf@nav=\write11
+\openout11 = `source.nav'.
 
-\tf@toc=\write10
-\openout10 = `source.toc'.
+\tf@toc=\write12
+\openout12 = `source.toc'.
 
-\tf@snm=\write11
-\openout11 = `source.snm'.
+\tf@snm=\write13
+\openout13 = `source.snm'.
 
  (./source.aux)
  ***********
@@ -1400,19 +1550,22 @@ LaTeX Warning: There were multiply-defined labels.
 
 Package rerunfilecheck Info: File `source.out' has not changed.
 (rerunfilecheck)             Checksum: D41D8CD98F00B204E9800998ECF8427E;0.
+runsystem(rm source.pyg)...executed.
+
  ) 
 Here is how much of TeX's memory you used:
- 33237 strings out of 474116
- 696860 string characters out of 5743681
+ 36261 strings out of 474116
+ 764083 string characters out of 5743681
  1973187 words of memory out of 5000000
- 54888 multiletter control sequences out of 15000+600000
- 572597 words of font info for 87 fonts, out of 8000000 for 9000
+ 57842 multiletter control sequences out of 15000+600000
+ 573269 words of font info for 91 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 128i,14n,123p,6310b,1014s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 128i,14n,123p,6310b,1016s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb
 ></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cmextra/cmex7.
 pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cmextra/cme
-x8.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi1
+x8.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmitt
+10.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi1
 0.pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.
 pfb></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pf
 b></usr/local/texlive/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb>
@@ -1432,11 +1585,12 @@ live/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></usr/local/texli
 ve/2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></usr/local/texlive
 /2024/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local/texlive/2
 024/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/local/texlive/20
-24/texmf-dist/fonts/type1/public/amsfonts/symbols/msam10.pfb>
-Output written on source.pdf (17 pages, 313601 bytes).
+24/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt8.pfb></usr/local/texlive/2024
+/texmf-dist/fonts/type1/public/amsfonts/symbols/msam10.pfb>
+Output written on source.pdf (20 pages, 342943 bytes).
 PDF statistics:
- 584 PDF objects out of 1000 (max. 8388607)
- 503 compressed objects within 6 object streams
- 36 named destinations out of 1000 (max. 500000)
+ 673 PDF objects out of 1000 (max. 8388607)
+ 585 compressed objects within 6 object streams
+ 42 named destinations out of 1000 (max. 500000)
  43 words of extra memory for PDF output out of 10000 (max. 10000000)
 
