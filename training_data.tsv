@@ -1,0 +1,21 @@
+fasta_file	geo_loc_name	lat_lon	train_line
+train/SRR27257279_1.fasta.gz	Auckland	36.8624366 S 174.8095119 E	Orakei_station_
+train/SRR27257421_1.fasta.gz	Auckland	36.8623448 S 174.8094938 E	Orakei_station_
+train/SRR27257537_1.fasta.gz	Auckland	36.8662936 S 174.8206704 E	Meadowbank_station_
+train/SRR27257459_1.fasta.gz	Berlin	52.5088698 N 13.3227731 E	Ernst-Reuter-Platz_
+train/SRR27257508_1.fasta.gz	Berlin	52.5167008 N 13.4407376 E	Weberwiese_
+train/SRR27257511_1.fasta.gz	Berlin	52.515238 N 13.4680932 E	Samariterstrasse_
+train/SRR27257433_1.fasta.gz	Birmingham	52.478263 N 1.894614	W	Birmingham_Bull_Ring
+train/SRR27257470_1.fasta.gz	Birmingham	52.440643 N 1.939934	W	Sainsburys
+train/SRR28910726_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
+train/SRR28910742_1.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
+train/SRR28910758_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
+train/SRR27257243_1.fasta.gz	London	51.51010128 N 0.13399405	W	Picadilly	Circus
+train/SRR27257254_1.fasta.gz	London	51.51742113 N 0.08295875	W	Liverpool	Street
+train/SRR27257310_1.fasta.gz	London	51.52313116 N 0.15688184	W	Baker	Street
+train/SRR28910730_1.fasta.gz	Singapore	1.432157 N 103.773752 E	marsiling
+train/SRR28910734_1.fasta.gz	Singapore	1.384295 N 103.744638 E	cck
+train/SRR28910738_1.fasta.gz	Singapore	1.431277 N 103.773962 E	marsiling
+train/SRR27257294_1.fasta.gz	Tokyo	35.60088801 N 139.6848696 E	Tokyo_Tech
+train/SRR27257468_1.fasta.gz	Tokyo	35.60114099 N 139.6846014 E	Tokyo_Tech
+train/SRR27257649_1.fasta.gz	Tokyo	35.6053238 N 139.6824074 E	West_Hall

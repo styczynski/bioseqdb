@@ -10,3 +10,6 @@ data_big/
 *_dbg.txt
 trace.txt
 *.html
+train/
+test/
+train_simple/
