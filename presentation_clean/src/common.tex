@@ -1,4 +1,3 @@
-
 \usepackage{lipsum}
 \usepackage{tikz}
 \usepackage{shellesc}
@@ -15,11 +14,23 @@
 \usepackage{colortbl}
 \usepackage{color,soul}
 \usepackage{minted}
+\usepackage{filecontents}
+\usepackage[backend=biber]{biblatex}
+
+
+\addbibresource{main.bib}
 
 \pgfmathsetseed{\number\pdfrandomseed}
 \usetikzlibrary{tikzmark, positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
-\robExtConfigure{enable fallback to manual mode} % prints command to run in PDF if shell-escape is not used/forgotten
+
+\robExtConfigure{
+  compile in parallel with gnu parallel
+}
+
 \def\mathdefault#1{#1} % Needed in matplotlib 3.8: https://github.com/matplotlib/matplotlib/issues/27907
+\setbeamertemplate{frametitle}[default][center]
+% Removes icon in bibliography
+\setbeamertemplate{bibliography item}{}
 
 \renewcommand{\algorithmiccomment}[1]{\hfill$\triangleright$\textit{#1}}
 \newcommand{\CommentH}[1]{\Comment{\textbf{\textcolor{BlueViolet}{#1}}}}
@@ -105,3 +116,17 @@ depth .25\baselineskip height #1\baselineskip\relax}
                 ([rotate around={180:#1}]perpendicular cs: horizontal line through={#1},
                                     vertical line through={(current bounding box.west)});}}
 }
+
+\let\oldtikzpicture\tikzpicture
+\let\oldendtikzpicture\endtikzpicture
+
+\renewenvironment{tikzpicture}{%
+    \ifbuilddraft\comment%
+    \else\expandafter\oldtikzpicture%   
+    \fi
+}{%
+    \ifbuilddraft\endcomment%
+    \else\oldendtikzpicture%
+    \fi
+}
+

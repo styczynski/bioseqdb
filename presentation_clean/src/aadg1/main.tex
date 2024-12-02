@@ -1,5 +1,7 @@
-\usepackage{../common}
 \documentclass{beamer}
+
+\input{vars.tex}
+\input{common.tex}
 
 
 \title{Fast Python sequence aligner}
@@ -746,6 +748,7 @@
   \frametitle{Match quality evaluation}
 
   Assuming we have match $(r_1, r_2)$ and expect $(e_1, e_2)$
+  LOL~\nocite{wombat2016}
   We define the following:
 
   \begin{itemize}
@@ -777,6 +780,12 @@
   
   \end{table}
 
+\end{frame}
+
+\begin{frame}
+  \frametitle{References}
+  % This prints the bibliography on the slide
+  \printbibliography
 \end{frame}
 
 \begin{frame}{}
