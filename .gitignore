@@ -13,3 +13,8 @@ trace.txt
 train/
 test/
 train_simple/
+**/CMakeFiles/
+**/build/
+**/Makefile
+**/CMakeCache.txt
+*.cmake
