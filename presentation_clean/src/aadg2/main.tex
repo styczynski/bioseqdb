@@ -1,0 +1,70 @@
+\documentclass{beamer}
+
+\input{vars.tex}
+\input{common.tex}
+
+
+\title{Fast Python sequence classification}
+\author{Piotr Styczyński}
+\institute{MIM UW}
+\date{2024}
+
+\begin{document}
+
+\frame{\titlepage}
+
+\begin{frame}
+  \frametitle{Match quality evaluation}
+
+  Assuming we have match $(r_1, r_2)$ and expect $(e_1, e_2)$
+  LOL~\nocite{wombat2016}
+  We define the following:
+
+  \begin{itemize}
+    \item $d_1 \coloneqq |e_1 - r_1|$
+    \item $d_2 \coloneqq |e_2 - r_2|$
+    \item $d_s \coloneqq d_1 + d_2$
+    \item $d_m \coloneqq max(d_1, d_2)$
+  \end{itemize}
+
+  \begin{itemize}
+    \item $score((r_1, r_2)) = AA$ iff $d_s < 10$
+    \item $score((r_1, r_2)) = AB$ iff $d_s < 20$
+    \item $score((r_1, r_2)) = C$ iff $d_m < 20$
+    \item $score((r_1, r_2)) = D$ iff $d_m \geq 20$
+  \end{itemize}
+
+  
+  \begin{table}[]
+    \begin{tabular}{|l|l|l|l|l|l|l|}
+    \hline
+    case name                        & ok                          & unmapped                 & AA                         & AB                        & C                        & D (bad)                  \\ \hline
+    \rowcolor[HTML]{333333} 
+    {\color[HTML]{FFFFFF} reads20Mb} & {\color[HTML]{FFFFFF} 1000} & {\color[HTML]{FFFFFF} 0} & {\color[HTML]{FFFFFF} 936} & {\color[HTML]{FFFFFF} 64} & {\color[HTML]{FFFFFF} 0} & {\color[HTML]{FFFFFF} 0} \\ \hline
+    \rowcolor[HTML]{FFFFFF} 
+    {\color[HTML]{333333} reads20Ma} & {\color[HTML]{333333} 1000} & {\color[HTML]{333333} 0} & {\color[HTML]{333333} 975} & {\color[HTML]{333333} 25} & {\color[HTML]{333333} 0} & {\color[HTML]{333333} 0} \\ \hline
+    \rowcolor[HTML]{333333} 
+    {\color[HTML]{DAE8FC} reads2}    & {\color[HTML]{DAE8FC} 100}  & {\color[HTML]{DAE8FC} 0} & {\color[HTML]{DAE8FC} 90}  & {\color[HTML]{DAE8FC} 10} & {\color[HTML]{DAE8FC} 0} & {\color[HTML]{DAE8FC} 0} \\ \hline
+    \end{tabular}
+  
+  \end{table}
+
+\end{frame}
+
+\begin{frame}
+  \frametitle{References}
+  % This prints the bibliography on the slide
+  \printbibliography
+\end{frame}
+
+\begin{frame}{}
+  \centering \Large
+  \emph{Thank you}
+\end{frame}
+
+\end{document}
+
+
+% % Local Variables:
+% % TeX-command-extra-options: "--shell-escape -halt-on-error"
+% % End:
