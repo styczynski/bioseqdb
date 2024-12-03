@@ -16,14 +16,27 @@
 \usepackage{minted}
 \usepackage{filecontents}
 
+\newcommand{\nop}[1]{}
+
+\makeatletter
 \ifbuildhasbibliography
     \usepackage[backend=biber, style=authortitle]{biblatex}
     \addbibresource{main.bib}
     \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
     % Removes icon in bibliography
     %\setbeamertemplate{bibliography item}{}
-    \setbeamertemplate{navigation symbols}{}
+    \@ifclassloaded{beamer}{%
+        \setbeamertemplate{navigation symbols}{}
+    }{%
+        \nop{}
+    } 
 \fi
+\@ifclassloaded{beamer}{%
+    \setbeamertemplate{frametitle}[default][center]
+}{%
+    \nop{}
+} 
+\makeatother
 
 
 \pgfmathsetseed{\number\pdfrandomseed}
@@ -34,7 +47,6 @@
 }
 
 \def\mathdefault#1{#1} % Needed in matplotlib 3.8: https://github.com/matplotlib/matplotlib/issues/27907
-\setbeamertemplate{frametitle}[default][center]
 
 
 \renewcommand{\algorithmiccomment}[1]{\hfill$\triangleright$\textit{#1}}
@@ -135,3 +147,23 @@ depth .25\baselineskip height #1\baselineskip\relax}
     \fi
 }
 
+%% Document meta
+
+\makeatletter
+\@ifclassloaded{beamer}{%
+    \author{\buildauthor}
+    \institute{\buildinstitute}
+    \date{\builddate}
+}{%
+    \nop{}
+} 
+
+\@ifclassloaded{article}{%
+    \usepackage{authblk}
+    \author[1]{\buildauthor}
+    \affil[1]{\buildinstitute}
+    \date{\builddate}
+}{%
+    \nop{}
+} 
+\makeatother
