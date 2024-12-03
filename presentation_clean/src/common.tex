@@ -15,10 +15,16 @@
 \usepackage{color,soul}
 \usepackage{minted}
 \usepackage{filecontents}
-\usepackage[backend=biber]{biblatex}
 
+\ifbuildhasbibliography
+    \usepackage[backend=biber, style=authortitle]{biblatex}
+    \addbibresource{main.bib}
+    \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
+    % Removes icon in bibliography
+    %\setbeamertemplate{bibliography item}{}
+    \setbeamertemplate{navigation symbols}{}
+\fi
 
-\addbibresource{main.bib}
 
 \pgfmathsetseed{\number\pdfrandomseed}
 \usetikzlibrary{tikzmark, positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
@@ -29,8 +35,7 @@
 
 \def\mathdefault#1{#1} % Needed in matplotlib 3.8: https://github.com/matplotlib/matplotlib/issues/27907
 \setbeamertemplate{frametitle}[default][center]
-% Removes icon in bibliography
-\setbeamertemplate{bibliography item}{}
+
 
 \renewcommand{\algorithmiccomment}[1]{\hfill$\triangleright$\textit{#1}}
 \newcommand{\CommentH}[1]{\Comment{\textbf{\textcolor{BlueViolet}{#1}}}}

@@ -1,5 +1,4 @@
 \documentclass{beamer}
-
 \input{vars.tex}
 \input{common.tex}
 
@@ -16,6 +15,7 @@
 
 \begin{frame}[fragile]
   \frametitle{Seed and Extend approach}
+  \nocite{blend}
 
   \begin{center}
     \begin{tikzpicture}[scale=.6, transform shape, node distance=1cm, >=Latex, overlay, remember picture, shift={(0,3.5)}]
@@ -124,9 +124,9 @@
   
       \node(stkdescription)[below=0.4cm of stk3]{Selected k-mers};
   
-      \path ($(pic cs:stk3h1b)!0.15!(pic cs:stk3h1e)$) |- (stkdescription) coordinate [pos=0.12] (stk3h1x);
-      \path ($(pic cs:stk3h2b)!-0.7!(pic cs:stk3h2e)$) |- (stkdescription.north) coordinate [pos=0.18] (stk3h2x);
-      \path ($(pic cs:stk3h3b)!-1.3!(pic cs:stk3h3e)$) |- (stkdescription) coordinate [pos=0.12] (stk3h3x);
+      \path let \p1=($(pic cs:stk3h1b)!0.5!(pic cs:stk3h1e)$), \p2=($(stkdescription)!0.5!(stk3)$) in ($ (\x1, \y2) - (7, 0) $) |- (stkdescription) coordinate [pos=0] (stk3h1x);
+      \path let \p1=($(pic cs:stk3h2b)!0.5!(pic cs:stk3h2e)$), \p2=($(stkdescription)!0.5!(stk3)$) in ($ (\x1, \y2) - (5, 0) $) |- (stkdescription.north) coordinate [pos=0] (stk3h2x);
+      \path let \p1=($(pic cs:stk3h3b)!0.5!(pic cs:stk3h3e)$), \p2=($(stkdescription)!0.5!(stk3)$) in ($ (\x1, \y2) - (3, 0) $) |- (stkdescription) coordinate [pos=0] (stk3h3x);
       \draw (stk3h1x) |- (stkdescription.west);
       \draw (stk3h2x) |- (stkdescription.north);
       \draw (stk3h3x) |- (stkdescription.east);
@@ -327,7 +327,7 @@
   \frametitle{Problem of extending seeds}
 
   \begin{itemize}
-    \item minimap2 approach with dynamic programming similar to normal alignment (plus exponential forward lookups)
+    \item minimap2 \footcite{minimap2} approach with dynamic programming similar to normal alignment (plus exponential forward lookups)
     \item We have only one potential match so maybe assume that $match \in LIS(matches)$
     \item Can we formulate sliding window approach to generate the biggest scorring windows included in $LIS(matches)$?
     \item For which case assumption that $match \in LIS(matches)$ won't work?
@@ -748,7 +748,6 @@
   \frametitle{Match quality evaluation}
 
   Assuming we have match $(r_1, r_2)$ and expect $(e_1, e_2)$
-  LOL~\nocite{wombat2016}
   We define the following:
 
   \begin{itemize}
