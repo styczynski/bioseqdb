@@ -22,6 +22,7 @@
 \newcommand\prob{\problike{Pr}}
 \newcommand\pre{\problike{H}}
 \newcommand\pri{\problike{I}}
+\DeclareRobustCommand\iff{\;\Longleftrightarrow\;}
 \makeatother
 
 \newcommand\bigexists{%
@@ -37,5 +38,155 @@
 
 \section{Problem 1}
 
+Intuitivelly choosing $F$ gives us the values for each $X$ while $X$ only says about some of the values.
+We can construct such set $L$ that $f_{i}(x) = x \iff x \leq k$ for $k = \inf\{ k : (n-k)! \geq n \}$
+For such a contruct $X=x \land x \leq k \implies Y=y=x$
+If $k=n$ then we have just $X=x \implies Y=y$ 
+That is discussed later in examples section.
+
+
+Now let's take a look at the fact that:
+\begin{equation}
+\begin{cases}
+    \pri{Y;X} = \pre{Y} - \pre{Y}[X] \\
+    \pri{Y;F} = \pre{Y} - \pre{Y}[F]
+\end{cases}
+\end{equation}
+
+\begin{gather*}
+\pri{Y;X} \leq \pri{Y;F} \\
+- \pre{Y}[X] \leq - \pre{Y}[F] 
+\end{gather*}
+
+\begin{gather*}
+\sum_{x}{\prob{X} * \sum_{y}{ \prob{Y=y}[X=x] * \log{\prob{Y=y}[X=x]} }} \leq \\
+\leq \sum_{f}{\prob{F} * \sum_{y}{ \prob{Y=y}[F=f] * \log{\prob{Y=y}[F=f]} }} 
+\end{gather*}
+
+We can get rid of any of the $\prob{X}$ and $\prob{F}$:
+
+\begin{gather*}
+\sum_{x}{\sum_{y}{ \prob{Y=y}[X=x] * \log{\prob{Y=y}[X=x]} }} \leq \\
+\leq \sum_{f}{\sum_{y}{ \prob{Y=y}[F=f] * \log{\prob{Y=y}[F=f]} }} 
+\end{gather*}
+
+We expand the definition using $\prob{b} = \sum_a{\prob{a} * \prob{b}[a]}$:
+% \begin{gather*}
+% \sum_{x}{\sum_{y}{\{ (\sum_{f}{\prob{F=f}[X=x, Y=y]*[f(x)=y]}) * \log{\sum_{f}{\prob{F=f}[X=x, Y=y]*[f(x)=y]}} \}}} \leq \\
+% \leq \sum_{f}{\sum_{y}{\{ (\sum_{x}{\prob{X=x}[F=f, Y=y]*[f(x)=y]}) * \log{\sum_{x}{\prob{X=x}[F=f, Y=y]*[f(x)=y]}} \}}} 
+% \end{gather*}
+
+% \begin{gather*}
+% \sum_{x}{\sum_{y}{\{ (\sum_{f}{\prob{F=f}[f(x)=y]}) * \log{\sum_{f}{\prob{F=f}[f(x)=y]}} \}}} \leq \\
+% \leq \sum_{f}{\sum_{y}{\{ (\sum_{x}{\prob{X=x}[f(1)=x_1, ..., f(n)=x_n]}) * \log{\sum_{x}{\prob{X=x}[f(1)=x_1, ..., f(n)=x_n]}} \}}} 
+% \end{gather*}
+
+% \begin{gather*}
+% \sum_{x}{\sum_{y}{\{ (\sum_{f}{\prob{F=f}[f(x)=y]}) * \log{\sum_{f}{\prob{F=f}[f(x)=y]}} \}}} \leq \\
+% \leq \sum_{f}{\sum_{y}{\{ (\sum_{x}{\prob{X=x}[f(x)=y]}) * \log{\sum_{x}{\prob{X=x}[f(1)=x_1, ..., f(n)=x_n]}} \}}} 
+% \end{gather*}
+
+% We can use the Golden lemma now 
+
+\begin{gather*}
+\sum_{x}{\sum_{y}{\{ (\sum_{f}{\prob{F}*\prob{Y=y}[X=x, F=f]}) * \log{\sum_{f}{\prob{F}*\prob{Y=y}[X=x, F=f]}} \}}} \leq \\
+\leq \sum_{f}{\sum_{y}{\{ (\sum_{x}{\prob{X}*\prob{Y=y}[F=f, X=x]}) * \log{\sum_{x}{\prob{X}*\prob{Y=y}[F=f, X=x]}} \}}} 
+\end{gather*}
+
+We can get rid of $\prob{F}$ and $\prob{X}$:
+
+\begin{gather*}
+\sum_{x}{\sum_{y}{\{ (\sum_{f}{\prob{Y=y}[X=x, F=f]}) * \log{\sum_{f}{\prob{F}*\prob{Y=y}[X=x, F=f]}} \}}} \leq \\
+\leq \sum_{f}{\sum_{y}{\{ (\sum_{x}{\prob{Y=y}[F=f, X=x]}) * \log{\sum_{x}{\prob{X}*\prob{Y=y}[F=f, X=x]}} \}}} 
+\end{gather*}
+
+If we define $a_{x,y,z} \defeq \prob{Y=y}[X=x, F=f]$ and $k=1/n$ rename $z$ as follows: $z \defeq f$, we get:
+
+\begin{gather*}
+\sum_{x}{\sum_{y}{\{ (\sum_{z}{a_{x,y,z}}) * \log{\sum_{z}{k*a_{x,y,z}}} \}}} \leq \\
+\leq \sum_{z}{\sum_{y}{\{ (\sum_{x}{a_{x,y,z}}) * \log{\sum_{x}{k*a_{x,y,z}}} \}}} 
+\end{gather*}
+
+\begin{gather*}
+\sum_{x}{\sum_{y}{\{ k*(\sum_{z}{a_{x,y,z}}) + (\sum_{z}{a_{x,y,z}}) * \log{\sum_{z}{a_{x,y,z}}} \}}} \leq \\
+\leq \sum_{z}{\sum_{y}{\{ k*(\sum_{x}{a_{x,y,z}}) + (\sum_{x}{a_{x,y,z}}) * \log{\sum_{x}{a_{x,y,z}}} \}}} 
+\end{gather*}
+
+The first term in inner sum dissappear:
+\begin{gather*}
+\sum_{x}{\sum_{y}{\{ (\sum_{z}{a_{x,y,z}}) * \log{\sum_{z}{a_{x,y,z}}} \}}} \leq \\
+\leq \sum_{z}{\sum_{y}{\{ (\sum_{x}{a_{x,y,z}}) * \log{\sum_{x}{a_{x,y,z}}} \}}} 
+\end{gather*}
+
+\begin{gather*}
+\sum_{x}{\sum_{y}{\{ (\sum_{z}{a_{x,y,z}}) * \log{\sum_{z}{a_{x,y,z}}} \}}} \leq \\
+\leq \sum_{z}{\sum_{y}{\{ (\sum_{z}{a_{x,y,z}}) * \log{\sum_{x}{a_{x,y,z}}} \}}} 
+\end{gather*}
+
+We use Golden lemma here for property that (for iteration over $x$) each function is permutation so each value will occur once and
+(for iteration over $z$) we will have multiple non-zero elements.
+
+We can observe that Golden Lemma says that euality holds if respective values are equal. In that case it can be implied by having symmetrical matrix
+(special cases are discussed below. Such case can correspond to $|S_n|=|L|$ with $X \perp F$)
+
+
+\subsection{Examples}
+
+We observe that for $X=F$ we alsways have equality in all of the cases.
+
+Now, if we assume $X \perp F$ and $|S_n|=|L|$ then there are $(n-1)!$ permutations for each pair that sends $x$ into $y$:
+\begin{equation}
+\prob{Y=y}[X=x]=\prob{F(x)=y}[X=x]=\prob{F(x)=y}=1/n
+\end{equation}
+That is not dependent on $x$ which shows that $Y \perp X$ and we can also show that $Y \perp F$
+In that case we have equality, because the mutual information is zeroed.
+The first condition implies that this happens for $n=1$ and $n=2$
+
+In more general case for any $n$ and $F=g(X)$ we have equality, because $Y=g(X)(X)$ and both terms are zeroed.
+
+% We can remove sum over $y$ which means that we will quantify over all $y$ for each term:
+
+% \begin{gather*}
+% \sum_{x}{\{ (\sum_{z}{a_{x,z}}) * \log{\sum_{z}{a_{x,z}}} \}} \leq \\
+% \leq \sum_{z}{\{ (\sum_{x}{a_{x,z}}) * \log{\sum_{x}{a_{x,z}}} \}}
+% \end{gather*}
+
+%% END FAKE
+  
+% I we use the "triangle" inequality i.e $\pre{C}[B] + \pre{B}[A] \geq \pre{C}[A]$ for:
+% \begin{equation}
+% \begin{cases}
+%     A=F\\
+%     B=X\\
+%     C=Y
+% \end{cases}
+% \end{equation}
+
+% We get:
+% \begin{gather*}
+% \pre{Y}[X] + \pre{X}[F] \geq \pre{Y}[F] \\
+% - \pre{Y}[X] - \pre{X}[F] \leq - \pre{Y}[F] \\
+% \pre{Y} - \pre{Y}[X] - \pre{X}[F] \leq \pre{Y} - \pre{Y}[F] \\
+% \pri{Y;X} - \pre{X}[F] \leq \pri{Y;F}
+% \end{gather*}
+
+% Doing the same for:
+% \begin{equation}
+% \begin{cases}
+%     A=X\\
+%     B=F\\
+%     C=Y
+% \end{cases}
+% \end{equation}
+% We get:
+% \begin{gather*}
+% \pri{Y;F} - \pre{F}[X] \leq \pri{Y;X}
+% \end{gather*}
+
+% So:
+% \begin{gather*}
+% \pri{Y;F} - \pre{F}[X] \leq \pri{Y;X} \\
+% \pri{Y;X} - \pre{X}[F] \leq \pri{Y;F}
+% \end{gather*}
 
 \end{document}
