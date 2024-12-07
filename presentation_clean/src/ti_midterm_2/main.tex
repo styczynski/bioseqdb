@@ -1,0 +1,141 @@
+\documentclass{article}
+
+\input{vars.tex}
+\input{common.tex}
+
+\usepackage{blindtext}
+\usepackage[a4paper, total={6in, 8in}]{geometry}
+
+\makeatletter
+\newcommand{\defeq}{\vcentcolon=}
+\newcommand{\@giventhatstar}[2]{\left(#1\;\middle|\;#2\right)}
+\newcommand{\@giventhatnostar}[3][]{#1(#2\;#1|\;#3#1)}
+\newcommand{\giventhat}{\@ifstar\@giventhatstar\@giventhatnostar}
+\newcommand\problike[2]{\def\probname{#1}\def\probp1{#2}\problikeaux}
+\newcommand\problikeaux[1][]{%
+  \ifx\relax#1\relax%
+    \probname(\probp1)
+  \else%
+    \probname\giventhat{\probp1}{#1}
+  \fi
+}
+\newcommand\prob{\problike{Pr}}
+\newcommand\pre{\problike{H}}
+\newcommand\pri{\problike{I}}
+\newcommand\prt[2]{\problike{P}{#1 \rightarrow #2}}
+\newcommand\prtf[3]{\problike{P_{#1}}{#2 \rightarrow #3}}
+\DeclareRobustCommand\iff{\;\Longleftrightarrow\;}
+\makeatother
+
+\newcommand\bigforall{%
+  \mathop{\lower0.75ex\hbox{\ensuremath{%
+    \mathlarger{\mathlarger{\mathlarger{\mathlarger{\forall}}}}}}}%
+  \limits}
+
+\newcommand\bigexists{%
+  \mathop{\lower0.75ex\hbox{\ensuremath{%
+    \mathlarger{\mathlarger{\mathlarger{\mathlarger{\exists}}}}}}}%
+  \limits}
+
+\title{Teoria informacji kolokwium 4 grudnia 2024}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem 2}
+
+\subsection{Task 1}
+
+We observe that for binary input and perfect channel combined in series with Z-channel we have:
+\begin{equation}
+\begin{cases}
+    \prtf{A}{\alpha}{\alpha} = 1 \\
+    \prtf{A}{\beta}{\beta} = 1 \\
+    \prtf{B}{\alpha}{\alpha} = 1-p \\
+    \prtf{B}{\alpha}{\beta} = p \\
+    \prtf{B}{\beta}{\beta} = 1
+\end{cases}
+\end{equation}
+
+$\prob{B}[A,C]$ won't be well defined for a channel matrix, because:
+\begin{equation}
+\begin{cases}
+\prob{B=\alpha}[A=\alpha, C=\beta] = 1 \\
+\prob{B=\alpha}[A=\alpha, C=\alpha] = 1
+\end{cases}
+\end{equation}
+
+Hence the requirement that there are no zero elements in matrices of both channels will come into play.
+We consider the probability to be well defined if:
+
+\begin{enumerate}
+\item $\bigexists_{f \perp P(A)}{\bigforall_{\substack{a \in A \\ c \in C}}{ \prob{B=b}[A=a, C=c] = f(...) }}$
+\item $\bigforall_{\substack{a \in A \\ c \in C}}{ 0 < \prob{B=b}[A=a, C=c] < 1 }$
+\item $\bigforall_{\substack{a \in A \\ c \in C}}{ \sum_{b \in B}{\prob{B=b}[A=a, C=c]} = 1 }$
+\end{enumerate}
+
+Now let's start by expanding the probability using Bayes' theorem:
+\begin{equation}
+\prob{b}[a,c] = \frac{ \prob{a,c}[b]*\prob{b} }{ \prob{a,c} }
+\end{equation}
+
+For numerator we use the fact that $\prob{x,y}[z] = \prob{x}[y,z]*\prob{y}[z]$ and for enumerator we use $\prob{x,y}=\prob{x}[y]*\prob{y}$:
+\begin{equation}
+\prob{b}[a,c] = \frac{ \prob{a}[b,c]*\prob{b}*\prob{c}[b] }{ \prob{a}[c] * \prob{c} }
+\end{equation}
+
+Now we use conditional independence contraint so $\prob{a}[b,c] = \prob{a}[b]$:
+\begin{equation}
+\prob{b}[a,c] = \frac{ \prob{a}[b]*\prob{b}*\prob{c}[b] }{ \prob{a}[c] * \prob{c} }
+\end{equation}
+
+We use the fact that $\prob{x}[y] = \prob{y}[x] * \frac{\prob{x}}{\prob{y}}$:
+\begin{equation}
+\prob{b}[a,c] = \frac{ \prob{b}[a]*\prob{a}*\prob{b}*\prob{c}[b] }{ \prob{a}[c] * \prob{c} * \prob{b} }
+\end{equation}
+
+After reorganising terms:
+\begin{equation}
+\prob{b}[a,c] = (\prob{b}[a] * \prob{c}[b]) * \frac{ \prob{a} }{ \prob{a}[c] } * \frac{1}{\prob{c}}
+\end{equation}
+
+Now let's observe that $\frac{\prob{x}}{\prob{x}[y]} = \frac{\prob{y}}{\prob{y}[x]}$:
+\begin{equation}
+\prob{b}[a,c] = (\prob{b}[a] * \prob{c}[b]) * \frac{ \prob{c} }{ \prob{c}[a] } * \frac{1}{\prob{c}}
+\end{equation}
+
+This can be written as:
+\begin{equation}
+\prob{b}[a,c] = \prtf{\Gamma_1}{a}{b} * \prtf{\Gamma_2}{b}{c} * \frac{ 1 }{ \prob{c}[a] }
+\end{equation}
+
+We observe that $\prob{c}[a]$ in fact does not depend on the distribution of $A$, which proves first point.
+In all our transformations we inmplicitly use the facts that $\prob{a}, \prob{b}, \prob{c} \neq 0$
+Second point is trivial to show, because $0 < \prtf{\Gamma_1}{a}{b}, \prtf{\Gamma_2}{b}{c}, \prob{c}[a] < 1$
+Third point is direct consequence of conditional independence.
+
+\subsection{Task 2}
+
+Let's assume we take channel $\Gamma_E$ and squeeze the symbol space using mapping $s_1 \in {(A \times C)}^{A} \defeq s_1(a,c) = a$
+
+In such scenario:
+\begin{gather*}
+\prtf{\Gamma_E}{s_1(a,c)}{b} = \sum_{c}{ \prtf{\Gamma_E}{a,c}{b} } \\
+\sum_{c}{ \prtf{\Gamma_1}{a}{b} * \prtf{\Gamma_2}{b}{c} * \frac{ 1 }{ \prob{c}[a] } } \\
+\prtf{\Gamma_F}{a}{b} = \prtf{\Gamma_1}{a}{b}  * \sum_{c}{ \frac{ \prtf{\Gamma_2}{b}{c} }{ \prob{c}[a] } } 
+%(\Gamma_E)_{s_1(a,b), c} = \frac{ 1 }{ \prob{c}[a] } * (\Gamma_1 \times \Gamma_2)_{a,c}
+\end{gather*}
+
+We know that $\sum_{c}{\prob{c}[a]} = 1$
+
+If we compare $\prtf{\Gamma_F}{a}{b}$ and $\prtf{\Gamma_1}{a}{b}$ then in $I(A,B)$ we will notice that in worst case we can select such a coefficients that $\Gamma_F$ is as bad as using $\Gamma_1$
+The original matrix $\Gamma_F$ has more rows than $\Gamma_E$ (such that rows of $\Gamma_F$ are linear combinations of $\Gamma_E$) meaning that the capacity of original $Gamma_E$ cannot be lower.
+
+Hance we prove that capacity of $\Gamma_E$ is no lower than $\Gamma_F$
+
+\subsection{Task 3}
+
+My best guess is that we use some prime factors to make $\Gamma_E$ have all rows independent, then that will work. However I was unable to showcase some concrete example.
+
+\end{document}
