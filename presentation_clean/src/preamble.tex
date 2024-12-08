@@ -1,0 +1,74 @@
+\input{vars.tex}
+
+\newcommand{\nop}[1]{}
+
+\def\gettexliveversion#1(#2 #3 #4#5#6#7#8)#9\relax{#4#5#6#7}
+\edef\texliveversion{\expandafter\gettexliveversion\pdftexbanner\relax}
+
+\def\bthandled{0}
+\def\btunhandled{0}
+\def\btproblems{problems}%
+\def\bttechnicalslides{technicalslides}%
+
+\ifx\buildtype\btproblems
+    \documentclass{article}
+    \def\bthandled{1}
+    \usepackage{authblk}
+    \usepackage[a4paper, total={6in, 8in}]{geometry}
+    \author[1]{\buildauthor}
+    \affil[1]{\buildinstitute}
+    \date{\buildcreated\hspace*{0.5cm}(updated: \builddate)}
+    \title{\buildtitle}
+
+    \def\buildpdftitle{\buildtitle}
+    \def\buildpdfsubject{Simple short report for classes}
+    \def\buildpdfauthor{\buildauthor}
+    \def\buildpdfkeywords{}
+    \def\buildpdfcreator{\buildauthor - \buildinstitute}
+    \def\buildpdfproducer{TeXLive=\texliveversion; CMake=\buildcmakeversion; Template=\buildtype(article)}
+
+    \input{common.tex}
+    \begin{document}
+    \maketitle
+\fi
+
+\ifx\buildtype\bttechnicalslides
+    \documentclass{beamer}
+    \def\bthandled{1}
+    \author{\buildauthor}
+    \institute{\buildinstitute}
+    \date{\buildcreated\hspace*{0.5cm}(updated: \builddate)}
+    \title{\buildtitle}
+
+    \def\buildpdftitle{\buildtitle}
+    \def\buildpdfsubject{Technical slide deck}
+    \def\buildpdfauthor{\buildauthor}
+    \def\buildpdfkeywords{}
+    \def\buildpdfcreator{\buildauthor - \buildinstitute}
+    \def\buildpdfproducer{TeXLive=\texliveversion; CMake=\buildcmakeversion; Template=\buildtype(beamer)}
+
+    \makeatletter
+        \ifbuildhasbibliography
+            \usepackage[backend=biber, style=authortitle]{biblatex}
+            \addbibresource{main.bib}
+            \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
+            \setbeamertemplate{navigation symbols}{}
+        \fi
+        \setbeamertemplate{frametitle}[default][center]
+    \makeatother
+
+    \input{common.tex}
+    \begin{document}
+    \frame{\titlepage}
+\fi
+
+
+\ifx\bthandled\btunhandled
+    % Throw error normally
+    \PackageError{preamble}{Unrecognized type of document: '\buildtype'}{}
+    % change interaction mode (if not yet in batchmode)
+    \batchmode
+    % ask for terminal input (which would be stored in the macro `\foo`)
+    \read-1 to \foo
+\fi
+

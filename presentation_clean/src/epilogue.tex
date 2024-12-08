@@ -1,0 +1,28 @@
+\ifx\buildtype\btproblems
+  \end{document}  
+\fi
+
+\ifx\buildtype\bttechnicalslides
+  
+  \ifbuildhasbibliography
+    \begin{frame}
+      \frametitle{References}
+      % This prints the bibliography on the slide
+      \printbibliography
+    \end{frame}
+  \fi
+
+  \begin{frame}{}
+    \centering \Large
+    \emph{Thank you}
+  \end{frame}
+  
+  \end{document}  
+\fi
+
+
+% \begin{frame}
+%   \frametitle{References}
+%   % This prints the bibliography on the slide
+%   \printbibliography
+% \end{frame}

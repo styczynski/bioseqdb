@@ -1,39 +1,7 @@
-\documentclass{article}
-
-\input{vars.tex}
-\input{common.tex}
-
-\usepackage{blindtext}
-\usepackage[a4paper, total={6in, 8in}]{geometry}
-
-\makeatletter
-\newcommand{\defeq}{\vcentcolon=}
-\newcommand{\@giventhatstar}[2]{\left(#1\;\middle|\;#2\right)}
-\newcommand{\@giventhatnostar}[3][]{#1(#2\;#1|\;#3#1)}
-\newcommand{\giventhat}{\@ifstar\@giventhatstar\@giventhatnostar}
-\newcommand\problike[2]{\def\probname{#1}\def\probp1{#2}\problikeaux}
-\newcommand\problikeaux[1][]{%
-  \ifx\relax#1\relax%
-    \probname(\probp1)
-  \else%
-    \probname\giventhat{\probp1}{#1}
-  \fi
-}
-\newcommand\prob{\problike{Pr}}
-\newcommand\pre{\problike{H}}
-\newcommand\pri{\problike{I}}
-\makeatother
-
-\newcommand\bigexists{%
-  \mathop{\lower0.75ex\hbox{\ensuremath{%
-    \mathlarger{\mathlarger{\mathlarger{\mathlarger{\exists}}}}}}}%
-  \limits}
-
-\title{Teoria informacji kolokwium 4 grudnia 2024}
-
-\begin{document}
-
-\maketitle
+% type: problems
+% title: Teoria informacji kolokwium 4 grudnia 2024
+% created: 2024-12-08
+\input{preamble.tex}
 
 \section{Problem 3}
 
@@ -159,4 +127,4 @@ As a side note (as I often used it and I'm not entirely sure if that is consider
 \pre{Y}[X] + \pre{Z}[Y] \geq \pre{Y}[X] + \pre{Z}[Y,X] = \pre{Y,Z}[X] \geq \pre{Z}[X]
 \end{equation}
 
-\end{document}
+\input{epilogue.tex}

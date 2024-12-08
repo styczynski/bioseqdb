@@ -218,9 +218,22 @@ SPECIAL_VALUES = dict(
     CURRENT_DATE=datetime.today().strftime('%Y-%m-%d'),
 )
 
+def _merge(a: dict, b: dict, path=[]):
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                _merge(a[key], b[key], path + [str(key)])
+            elif a[key] != b[key]:
+                # Conflict
+                a[key] = b[key]
+        else:
+            a[key] = b[key]
+    return a
+
 def configure(
     vars_file_name,
     meta_file_name,
+    main_file_name,
     vars_str_defs,
 ):
     vars_latex_defs = []
@@ -235,6 +248,22 @@ def configure(
             [var_name, var_value, *_] = tokens
             defs[var_name] = var_value
     
+    # Load main
+    extracted_main_meta_lines = []
+    with open(main_file_name, "r") as main_file:
+        for line_raw in main_file:
+            line = line_raw.replace("\n", "").replace("\r", "").strip()
+            if line.startswith("%"):
+                buf_line = line.removeprefix("%")
+                if len(buf_line.strip()) > 0:
+                    extracted_main_meta_lines.append(buf_line)
+            if len(line) > 0 and not line.startswith("%"):
+                # Non-comment detected
+                break
+    if len(extracted_main_meta_lines) > 0:
+        main_meta = loads("\n".join(extracted_main_meta_lines))
+        defs = _merge(defs, main_meta)
+
     for var_name, var_value in defs.items():
         if var_value in ["true", "false"]:
             vars_latex_defs.append(f"\\newif\\ifbuild{var_name}\n")
@@ -252,5 +281,6 @@ if __name__ == '__main__':
     configure(
         vars_file_name=sys.argv[1],
         meta_file_name=sys.argv[2],
-        vars_str_defs=sys.argv[3:],
+        main_file_name=sys.argv[3],
+        vars_str_defs=sys.argv[4:],
     )

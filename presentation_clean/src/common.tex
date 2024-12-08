@@ -1,3 +1,6 @@
+\input{vars.tex}
+\usepackage{hyperref}
+\usepackage{hyperxmp}
 \usepackage{lipsum}
 \usepackage{tikz}
 \usepackage{shellesc}
@@ -15,29 +18,6 @@
 \usepackage{color,soul}
 \usepackage{minted}
 \usepackage{filecontents}
-
-\newcommand{\nop}[1]{}
-
-\makeatletter
-\ifbuildhasbibliography
-    \usepackage[backend=biber, style=authortitle]{biblatex}
-    \addbibresource{main.bib}
-    \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
-    % Removes icon in bibliography
-    %\setbeamertemplate{bibliography item}{}
-    \@ifclassloaded{beamer}{%
-        \setbeamertemplate{navigation symbols}{}
-    }{%
-        \nop{}
-    } 
-\fi
-\@ifclassloaded{beamer}{%
-    \setbeamertemplate{frametitle}[default][center]
-}{%
-    \nop{}
-} 
-\makeatother
-
 
 \pgfmathsetseed{\number\pdfrandomseed}
 \usetikzlibrary{tikzmark, positioning, decorations.pathreplacing, calc, arrows.meta, shapes.geometric, backgrounds, arrows}
@@ -147,23 +127,51 @@ depth .25\baselineskip height #1\baselineskip\relax}
     \fi
 }
 
-%% Document meta
-
+%% Custom definitions
 \makeatletter
-\@ifclassloaded{beamer}{%
-    \author{\buildauthor}
-    \institute{\buildinstitute}
-    \date{\builddate}
-}{%
-    \nop{}
-} 
-
-\@ifclassloaded{article}{%
-    \usepackage{authblk}
-    \author[1]{\buildauthor}
-    \affil[1]{\buildinstitute}
-    \date{\builddate}
-}{%
-    \nop{}
-} 
+\newcommand{\defeq}{\vcentcolon=}
+\newcommand{\@giventhatstar}[2]{\left(#1\;\middle|\;#2\right)}
+\newcommand{\@giventhatnostar}[3][]{#1(#2\;#1|\;#3#1)}
+\newcommand{\giventhat}{\@ifstar\@giventhatstar\@giventhatnostar}
+\newcommand\problike[2]{\def\probname{#1}\def\probp1{#2}\problikeaux}
+\newcommand\problikeaux[1][]{%
+  \ifx\relax#1\relax%
+    \probname(\probp1)
+  \else%
+    \probname\giventhat{\probp1}{#1}
+  \fi
+}
+\newcommand\prob{\problike{Pr}}
+\newcommand\pre{\problike{H}}
+\newcommand\pri{\problike{I}}
+\newcommand\prt[2]{\problike{P}{#1 \rightarrow #2}}
+\newcommand\prtf[3]{\problike{P_{#1}}{#2 \rightarrow #3}}
+\DeclareRobustCommand\iff{\;\Longleftrightarrow\;}
 \makeatother
+
+\newcommand\bigforall{%
+  \mathop{\lower0.75ex\hbox{\ensuremath{%
+    \mathlarger{\mathlarger{\mathlarger{\mathlarger{\forall}}}}}}}%
+  \limits}
+
+\newcommand\bigexists{%
+  \mathop{\lower0.75ex\hbox{\ensuremath{%
+    \mathlarger{\mathlarger{\mathlarger{\mathlarger{\exists}}}}}}}%
+  \limits}
+
+\makeatother
+
+
+% Meta
+
+\hypersetup{
+  pdfinfo={%
+      Title={\buildpdftitle},%
+      Author={\buildpdfauthor},%
+      Subject={\buildpdfsubject},%
+      Producer={\buildpdfproducer},%
+      Creator={\buildpdfcreator},%
+      Keywords={\buildpdfkeywords},%    
+    },%
+    keeppdfinfo %keep info entries
+}
