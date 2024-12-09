@@ -1,6 +1,8 @@
 import sys
 from datetime import datetime
 import yaml
+import yaml_include
+import os
 
 # End YAML parser
 
@@ -133,9 +135,11 @@ def configure(
     main_file_name,
     vars_str_defs,
 ):
+    yaml.add_constructor("!include", yaml_include.Constructor(base_dir=os.path.dirname(main_file_name)))
+
     defs = dict()
     with open(meta_file_name, 'r') as meta_file:
-        defs = yaml.safe_load(meta_file)
+        defs = yaml.full_load(meta_file)
 
     for var_str in vars_str_defs:
         tokens = var_str.split("=")
@@ -159,7 +163,7 @@ def configure(
         base_indent = len(extracted_main_meta_lines[0]) - len(extracted_main_meta_lines[0].lstrip())
         yaml_str = "\n".join([line[base_indent:] for line in extracted_main_meta_lines])
         print(yaml_str)
-        main_meta = yaml.safe_load(yaml_str)
+        main_meta = yaml.full_load(yaml_str)
         defs = _merge(defs, main_meta)
         print(defs)
 
