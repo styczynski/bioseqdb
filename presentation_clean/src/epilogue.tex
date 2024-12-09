@@ -1,10 +1,9 @@
-\ifx\buildtype\btproblems
+\if\dataeq{type}{problems}
   \end{document}  
 \fi
 
-\ifx\buildtype\bttechnicalslides
-  
-  \ifbuildhasbibliography
+\if\dataeq{type}{technicalslides}
+  \if\dataeq{hasbibliography}{true}
     \begin{frame}
       \frametitle{References}
       % This prints the bibliography on the slide

@@ -1,7 +1,21 @@
 % type: technicalslides
 % title: Fast Python sequence classification
 % created: 2024-12-08
+% somedata:
+%   - name: entry1
+%   - name: entry2
 \input{preamble.tex}
+
+\begin{frame}[fragile]
+  \frametitle{Seed and Extend approach}
+
+  \data{somedata}
+
+  \foreachdata{somedata}{\i} {
+    Entry \data{somedata.\i.name}
+  }
+
+\end{frame}
 
 \begin{frame}[fragile]
   \frametitle{Seed and Extend approach}

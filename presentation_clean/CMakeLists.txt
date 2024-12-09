@@ -2,6 +2,56 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.30)
 PROJECT(LatexProject NONE)
 
+set(CMAKE_VERBOSE_MAKEFILE ON)
+
+macro(find_Python3_package PACKAGE VARIABLE)
+  if(NOT DEFINED "${VARIABLE}")
+    if(NOT CMAKE_REQUIRED_QUIET)
+      # CMake 3.17+ use CHECK_START/CHECK_PASS/CHECK_FAIL
+      message(STATUS "Looking for ${PACKAGE}")
+    endif()
+    if(Python3_VERSION VERSION_GREATER_EQUAL "3.8.0")
+      # importlib.metadata was added in version 3.8
+      set(CMD "from importlib.metadata import version; print(version('${PACKAGE}'), end='')")
+      execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "${CMD}"
+        RESULT_VARIABLE EXIT_CODE
+        OUTPUT_VARIABLE ${PACKAGE}_VERSION
+        ERROR_QUIET
+      )
+    else()
+      # importlib_metadata backport needed for older Python3 versions
+      execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import importlib_metadata"
+        RESULT_VARIABLE EXIT_CODE
+        OUTPUT_QUIET ERROR_QUIET
+      )
+      if(EXIT_CODE EQUAL 0)
+        set(CMD "from importlib_metadata import version; print(version('${PACKAGE}'), end='')")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c "${CMD}"
+            RESULT_VARIABLE EXIT_CODE
+            OUTPUT_VARIABLE ${PACKAGE}_VERSION
+            ERROR_QUIET
+        )
+      else()
+        message(WARNING "importlib_metadata backport package required for Python <3.8")
+      endif()
+    endif()
+    if(EXIT_CODE EQUAL 0)
+      if(NOT CMAKE_REQUIRED_QUIET)
+        message(STATUS "Looking for ${PACKAGE} - found version \"${${PACKAGE}_VERSION}\"")
+      endif()
+      set(${VARIABLE} 1 CACHE INTERNAL "Have package ${PACKAGE}")
+    else()
+      if(NOT CMAKE_REQUIRED_QUIET)
+        message(STATUS "Looking for ${PACKAGE} - not found")
+      endif()
+      set(${VARIABLE} "" CACHE INTERNAL "Have package ${PACKAGE}")
+    endif()
+  endif()
+endmacro()
+
 FIND_PACKAGE(LATEX)
 IF(LATEX_FOUND)
 	IF(LUALATEX__FOUND)
@@ -23,9 +73,38 @@ ELSE()
 	MESSAGE(ERROR "No latex tools found!")
 ENDIF()
 
+SET ( VENV_DEPENDENCIES "" ) 
+
 FIND_PACKAGE(Python3 COMPONENTS Interpreter)
 IF(Python3_Interpreter_FOUND)
 	MESSAGE(STATUS "Python3 found")
+	find_Python3_package("pyyaml" HAS_PYYAML)
+	if(NOT HAS_PYYAML)
+		MESSAGE(STATUS "No pyyaml found. Will install build dependencies in virtual environment.")
+		# EXECUTE_PROCESS(
+		# 	COMMAND "${Python3_EXECUTABLE}" -m pip install --user pyyaml
+		# 	RESULT_VARIABLE PYYAML_INSTALL_RESULTS
+		# )
+		# MESSAGE("${PYYAML_INSTALL_RESULTS}")
+		# EXECUTE_PROCESS(
+		# 	COMMAND "${Python3_EXECUTABLE}" -m venv 
+		# 	RESULT_VARIABLE PYYAML_INSTALL_RESULTS
+		# )
+		# MESSAGE("${PYYAML_INSTALL_RESULTS}")
+
+		SET ( VENV_BUILD_PATH "${CMAKE_SOURCE_DIR}/build/venv" )
+		SET ( VENV_PYTHON3_PATH "${VENV_BUILD_PATH}/bin/python3" )
+		SET ( VENV_DEPENDENCIES "${VENV_PYTHON3_PATH}" ) 
+		SET ( Python3_INTERPRETER "${VENV_PYTHON3_PATH}" ) 
+
+		ADD_CUSTOM_COMMAND(
+			OUTPUT "${VENV_PYTHON3_PATH}"
+			COMMAND ${Python3_EXECUTABLE} -m venv ${VENV_BUILD_PATH}
+			COMMAND ${VENV_PYTHON3_PATH} -m pip install pyyaml
+			COMMENT "Create build virtual env"
+		)
+
+	endif()
 	#EXECUTE_PROCESS(COMMAND ${Python3_EXECUTABLE} -m pip install pyyaml)
 ELSE()
 	MESSAGE(ERROR "No Python 3 found!")
@@ -72,6 +151,8 @@ SET ( MKDIR_COMMAND "mkdir" "-p" )
 
 set(LATEX_ALL_TARGETS "")
 
+SET( COMMON_TEX_ARGS "-interaction" "nonstopmode" "-halt-on-error" "-file-line-error" )
+
 FILE(GLOB TEX_MAIN_SOURCES "${CMAKE_SOURCE_DIR}/src/**/main.tex")
 FOREACH(MAIN_TEX ${TEX_MAIN_SOURCES})
 
@@ -111,20 +192,20 @@ FOREACH(MAIN_TEX ${TEX_MAIN_SOURCES})
 		ADD_CUSTOM_COMMAND(
 			OUTPUT "${JOB_OUT_DIRECTORY_PREBUILD}/vars.tex"
 			COMMAND ${Python3_INTERPRETER} ${VARS_CONFIGURE_PATH} ${JOB_OUT_DIRECTORY_PREBUILD}/vars.tex ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_PREBUILD}/main.tex" "draft=true" "hasbibliography=true" ${COMMON_VARS_SPECS}
-			DEPENDS ${JOB_OUT_DIRECTORY_PREBUILD}/main.tex ${VARS_CONFIGURE_PATH} ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_PREBUILD}/main.tex"
+			DEPENDS ${VENV_DEPENDENCIES} ${JOB_OUT_DIRECTORY_PREBUILD}/main.tex ${VARS_CONFIGURE_PATH} ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_PREBUILD}/main.tex"
 			COMMENT "${TEX_JOB}: Generate prebuild Latex variables"
 		)
 
 		ADD_CUSTOM_COMMAND(
 			OUTPUT "${JOB_OUT_DIRECTORY_ASSEMBLY}/vars.tex"
 			COMMAND ${Python3_INTERPRETER} ${VARS_CONFIGURE_PATH} ${JOB_OUT_DIRECTORY_ASSEMBLY}/vars.tex ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_PREBUILD}/main.tex" "draft=false" "hasbibliography=true" ${COMMON_VARS_SPECS}
-			DEPENDS "${JOB_OUT_DIRECTORY_BIBGEN}/main.aux" ${VARS_CONFIGURE_PATH} ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_PREBUILD}/main.tex"
+			DEPENDS ${VENV_DEPENDENCIES} "${JOB_OUT_DIRECTORY_BIBGEN}/main.aux" ${VARS_CONFIGURE_PATH} ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_PREBUILD}/main.tex"
 			COMMENT "${TEX_JOB}: Generate bib-gen Latex variables"
 		)
 
 		ADD_CUSTOM_COMMAND(
 				OUTPUT "${JOB_OUT_DIRECTORY_PREBUILD}/main.aux"
-				COMMAND ${PDFLATEX_COMPILER}  ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_PREBUILD} -draftmode -interaction nonstopmode -halt-on-error -file-line-error ${JOB_OUT_DIRECTORY_PREBUILD}/main.tex
+				COMMAND ${PDFLATEX_COMPILER}  ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_PREBUILD} -draftmode ${COMMON_TEX_ARGS} ${JOB_OUT_DIRECTORY_PREBUILD}/main.tex
 				WORKING_DIRECTORY ${JOB_OUT_DIRECTORY_PREBUILD}
 				DEPENDS ${JOB_OUT_DIRECTORY_PREBUILD}/main.tex "${JOB_OUT_DIRECTORY_PREBUILD}/vars.tex"
 				COMMENT "${TEX_JOB}: Prebuild (draft) resources"
@@ -142,7 +223,7 @@ FOREACH(MAIN_TEX ${TEX_MAIN_SOURCES})
 		ADD_CUSTOM_COMMAND(
 			OUTPUT ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.aux ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.pdf
 			COMMAND ${RSYNC_COMMAND} --exclude vars.tex ${JOB_OUT_DIRECTORY_BIBGEN}/* ${JOB_OUT_DIRECTORY_ASSEMBLY}
-			COMMAND ${PDFLATEX_COMPILER} ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_ASSEMBLY} ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex
+			COMMAND ${PDFLATEX_COMPILER} ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_ASSEMBLY} ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex ${COMMON_TEX_ARGS}
 			WORKING_DIRECTORY ${JOB_OUT_DIRECTORY_ASSEMBLY}
 			DEPENDS "${JOB_OUT_DIRECTORY_BIBGEN}/main.aux" "${JOB_OUT_DIRECTORY_ASSEMBLY}/vars.tex"
 			COMMENT "${TEX_JOB}: Assembly final resources"
@@ -167,14 +248,14 @@ FOREACH(MAIN_TEX ${TEX_MAIN_SOURCES})
 		ADD_CUSTOM_COMMAND(
 			OUTPUT "${JOB_OUT_DIRECTORY_ASSEMBLY}/vars.tex"
 			COMMAND ${Python3_INTERPRETER} ${VARS_CONFIGURE_PATH} ${JOB_OUT_DIRECTORY_ASSEMBLY}/vars.tex ${VARS_META_PATH} "${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex" "draft=false" "hasbibliography=false" ${COMMON_VARS_SPECS}
-			DEPENDS "${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex" ${VARS_CONFIGURE_PATH}  ${VARS_META_PATH}
+			DEPENDS ${VENV_DEPENDENCIES} "${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex" ${VARS_CONFIGURE_PATH}  ${VARS_META_PATH}
 			COMMENT "${TEX_JOB}: Generate assembly Latex variables"
 		)
 
 		ADD_CUSTOM_COMMAND(
 			OUTPUT ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.aux ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.pdf
-			COMMAND ${PDFLATEX_COMPILER} ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_ASSEMBLY} ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex
-			COMMAND ${PDFLATEX_COMPILER} ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_ASSEMBLY} ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex
+			COMMAND ${PDFLATEX_COMPILER} ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_ASSEMBLY} ${COMMON_TEX_ARGS} ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex
+			COMMAND ${PDFLATEX_COMPILER} ${PDFLATEX_ARGS} -output-directory ${JOB_OUT_DIRECTORY_ASSEMBLY} ${COMMON_TEX_ARGS} ${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex
 			WORKING_DIRECTORY ${JOB_OUT_DIRECTORY_ASSEMBLY}
 			DEPENDS "${JOB_OUT_DIRECTORY_ASSEMBLY}/main.tex" "${JOB_OUT_DIRECTORY_ASSEMBLY}/vars.tex"
 			COMMENT "${TEX_JOB}: Assembly final resources"

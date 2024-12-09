@@ -1,5 +1,4 @@
 \input{vars.tex}
-
 \newcommand{\nop}[1]{}
 
 \def\gettexliveversion#1(#2 #3 #4#5#6#7#8)#9\relax{#4#5#6#7}
@@ -7,55 +6,51 @@
 
 \def\bthandled{0}
 \def\btunhandled{0}
-\def\btproblems{problems}%
-\def\bttechnicalslides{technicalslides}%
 
-\ifx\buildtype\btproblems
+\if\dataeq{type}{problems}
     \documentclass{article}
     \def\bthandled{1}
     \usepackage{authblk}
     \usepackage[a4paper, total={6in, 8in}]{geometry}
-    \author[1]{\buildauthor}
-    \affil[1]{\buildinstitute}
-    \date{\buildcreated\hspace*{0.5cm}(updated: \builddate)}
-    \title{\buildtitle}
+    \author[1]{\data{author}}
+    \affil[1]{\data{institute}}
+    \date{\data{created}\hspace*{0.5cm}(updated: \data{date})}
+    \title{\data{title}}
 
-    \def\buildpdftitle{\buildtitle}
+    \def\buildpdftitle{\data{title}}
     \def\buildpdfsubject{Simple short report for classes}
-    \def\buildpdfauthor{\buildauthor}
+    \def\buildpdfauthor{\data{author}}
     \def\buildpdfkeywords{}
-    \def\buildpdfcreator{\buildauthor - \buildinstitute}
-    \def\buildpdfproducer{TeXLive=\texliveversion; CMake=\buildcmakeversion; Template=\buildtype(article)}
+    \def\buildpdfcreator{\data{author} - \data{institute}}
+    \def\buildpdfproducer{TeXLive=\texliveversion; CMake=\data{cmakeversion}; Template=\data{type}(article)}
 
     \input{common.tex}
     \begin{document}
     \maketitle
 \fi
 
-\ifx\buildtype\bttechnicalslides
+\if\dataeq{type}{technicalslides}
     \documentclass{beamer}
     \def\bthandled{1}
-    \author{\buildauthor}
-    \institute{\buildinstitute}
-    \date{\buildcreated\hspace*{0.5cm}(updated: \builddate)}
-    \title{\buildtitle}
+    \author{\data{author}}
+    \institute{\data{institute}}
+    \date{\data{created}\hspace*{0.5cm}(updated: \data{date})}
+    \title{\data{title}}
 
-    \def\buildpdftitle{\buildtitle}
+    \def\buildpdftitle{\data{title}}
     \def\buildpdfsubject{Technical slide deck}
-    \def\buildpdfauthor{\buildauthor}
+    \def\buildpdfauthor{\data{author}}
     \def\buildpdfkeywords{}
-    \def\buildpdfcreator{\buildauthor - \buildinstitute}
-    \def\buildpdfproducer{TeXLive=\texliveversion; CMake=\buildcmakeversion; Template=\buildtype(beamer)}
+    \def\buildpdfcreator{\data{author} - \data{institute}}
+    \def\buildpdfproducer{TeXLive=\texliveversion; CMake=\data{cmakeversion}; Template=\data{type}(beamer)}
 
-    \makeatletter
-        \ifbuildhasbibliography
-            \usepackage[backend=biber, style=authortitle]{biblatex}
-            \addbibresource{main.bib}
-            \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
-            \setbeamertemplate{navigation symbols}{}
-        \fi
-        \setbeamertemplate{frametitle}[default][center]
-    \makeatother
+    \if\dataeq{hasbibliography}{true}
+        \usepackage[backend=biber, style=authortitle]{biblatex}
+        \addbibresource{main.bib}
+        \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
+        \setbeamertemplate{navigation symbols}{}
+    \fi
+    \setbeamertemplate{frametitle}[default][center]
 
     \input{common.tex}
     \begin{document}
@@ -65,10 +60,9 @@
 
 \ifx\bthandled\btunhandled
     % Throw error normally
-    \PackageError{preamble}{Unrecognized type of document: '\buildtype'}{}
+    \PackageError{preamble}{Unrecognized type of document: '\data{type}'}{}
     % change interaction mode (if not yet in batchmode)
     \batchmode
     % ask for terminal input (which would be stored in the macro `\foo`)
     \read-1 to \foo
 \fi
-

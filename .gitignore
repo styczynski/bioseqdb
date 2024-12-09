@@ -18,3 +18,4 @@ train_simple/
 **/Makefile
 **/CMakeCache.txt
 *.cmake
+venv/

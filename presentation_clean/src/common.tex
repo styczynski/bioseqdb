@@ -1,4 +1,4 @@
-\input{vars.tex}
+%input{vars.tex}
 \usepackage{hyperref}
 \usepackage{hyperxmp}
 \usepackage{lipsum}
@@ -118,11 +118,11 @@ depth .25\baselineskip height #1\baselineskip\relax}
 \let\oldendtikzpicture\endtikzpicture
 
 \renewenvironment{tikzpicture}{%
-    \ifbuilddraft\comment%
+    \if\dataeq{draft}{true}\comment%
     \else\expandafter\oldtikzpicture%   
     \fi
 }{%
-    \ifbuilddraft\endcomment%
+    \if\dataeq{draft}{true}\endcomment%
     \else\oldendtikzpicture%
     \fi
 }
