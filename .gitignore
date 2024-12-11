@@ -19,3 +19,4 @@ train_simple/
 **/CMakeCache.txt
 *.cmake
 venv/
+_profiling/

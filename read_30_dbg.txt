@@ -1,2 +1,0 @@
-Sequence read alignnment (Total time: 1.4 s)
- +-- Load target sequence (1.4 s)
