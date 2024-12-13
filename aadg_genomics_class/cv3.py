@@ -210,7 +210,7 @@ def run_classifier_pipeline(
     # Train
     # Multiprocessing
     # Setup a list of processes that we want to run
-    results = [pool.apply(load_data_class_mp, args=(cls, training_datasets[cls],)) for cls in classes]
+    results = pool.starmap(load_data_class_mp, [(cls, training_datasets[cls]) for cls in classes])
     training_classes = { cls: cls_sig for (cls, _, cls_sig) in results }
     l_1m_speeds += [speed_1m for (_, speed_1m, _) in results]
     #training_classes = { cls: load_data_class(cls, training_datasets[cls]) for cls in classes }
