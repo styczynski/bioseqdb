@@ -57,7 +57,7 @@ WINDOW_LEN = 8 # was: 5
 
 DATASET_READ_MAX_SIZE = 152
 
-DATASET_CHUNK_SIZE = 10000
+DATASET_CHUNK_SIZE = 60000
 
 # mask[k] := mask used to calculate hash for k-mer of length k
 _global_masks = None
@@ -101,10 +101,10 @@ def dist_dataset(ds1, ds2):
 
 _total_loaded_reads = 0
 
-def load_data_class(class_name, datasets_paths):
+def load_data_class(class_name, datasets_paths, is_test):
     
     moment_start = time_ns()
-    SIG_LEN = 5000
+    SIG_LEN = 2000 * (17 if is_test else 1)
     seq_buffer = ""
     loaded_reads = 0
     total_reads = 0
@@ -146,7 +146,8 @@ def load_data_class(class_name, datasets_paths):
                     kmers = uadd.accumulate(seq_arr, dtype=object).astype(int)
                     kmers[:KMER_LEN-2] = 0
                 
-                kmers = sort(kmers)
+                #kmers = sort(kmers)
+                kmers = unique(kmers)
                 
                 sig1 += kmers[KMER_LEN-2:KMER_LEN-2+SIG_LEN].tolist()
                 sig2 += kmers[-SIG_LEN:].tolist()
@@ -177,8 +178,8 @@ def measure_class_distance(test_sig, classes, training_classes):
         scores.append(similarity_score)
     return scores
 
-def load_data_class_mp(class_name, datasets_paths):
-    (speed, sig) = load_data_class(class_name, datasets_paths)
+def load_data_class_mp(class_name, datasets_paths, is_test):
+    (speed, sig) = load_data_class(class_name, datasets_paths, is_test)
     return (class_name, speed, sig)
 
 # Entrypoint to the aligner
@@ -210,7 +211,7 @@ def run_classifier_pipeline(
     # Train
     # Multiprocessing
     # Setup a list of processes that we want to run
-    results = pool.starmap(load_data_class_mp, [(cls, training_datasets[cls]) for cls in classes])
+    results = pool.starmap(load_data_class_mp, [(cls, training_datasets[cls], False) for cls in classes])
     training_classes = { cls: cls_sig for (cls, _, cls_sig) in results }
     l_1m_speeds += [speed_1m for (_, speed_1m, _) in results]
     #training_classes = { cls: load_data_class(cls, training_datasets[cls]) for cls in classes }
@@ -223,7 +224,7 @@ def run_classifier_pipeline(
             next(k)
             for testing_dataset_path in k:
                 #p_args.append((testing_file_path, [testing_dataset_path],))
-                (speed_1m, test_sig) = load_data_class("unknown_test", [testing_dataset_path])
+                (speed_1m, test_sig) = load_data_class("unknown_test", [testing_dataset_path], True)
                 output_line = testing_dataset_path + "\t" + "\t".join([str(dist) for dist in measure_class_distance(test_sig, classes, training_classes)]) + "\n"
                 output_buf.append(output_line)
                 l_1m_speeds.append(speed_1m)
