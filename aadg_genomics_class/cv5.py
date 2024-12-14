@@ -185,11 +185,17 @@ def measure_class_distance(test_sig, classes, training_classes):
         similarity_score = 0
         for ii in range(2):
             points = 0
+            points_all = 0
             for kmer in doc1[ii]:
                 if kmer in doc2[ii]:
-                    points += min(doc1[ii], doc2[ii])
-            els1 = sum(doc1[ii].values()) + sum(doc2[ii].values())
-            similarity_score += points / els1
+                    points += 1 # min(doc1[ii][kmer], doc2[ii][kmer])
+                    points_all += 1 # max(doc1[ii][kmer], doc2[ii][kmer])
+                else:
+                    points_all += 1 # doc1[ii][kmer]
+            for kmer in doc2[ii]:
+                if kmer not in doc1[ii]:
+                    points_all += 1 #doc2[ii][kmer]
+            similarity_score += points / points_all
         scores.append(similarity_score)
 
     return scores
