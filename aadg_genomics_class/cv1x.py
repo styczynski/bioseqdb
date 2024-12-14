@@ -51,7 +51,7 @@ MAPPING_FN = vectorize(MAPPING.get, otypes=[uint8])
 REFERENCE_INDEX_CHUNK_SIZE = 800000
 
 # Length of k-mer used to generate (k,w)-minimizer indices
-KMER_LEN = 10 # was: 16
+KMER_LEN = 17 # was: 16
 # Length of window to generate (k,w)-minimizer indices
 WINDOW_LEN = 8 # was: 5
 
