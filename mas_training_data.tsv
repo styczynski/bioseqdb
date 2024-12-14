@@ -1,0 +1,7 @@
+fasta_file	geo_loc_name	lat_lon	train_line
+/home/staff/iinf/ajank/adg/train/SRR27257433_1.fasta.gz	Birmingham	52.478263 N 1.894614	W	Birmingham_Bull_Ring
+/home/staff/iinf/ajank/adg/train/SRR27257470_1.fasta.gz	Birmingham	52.440643 N 1.939934	W	Sainsburys
+/home/staff/iinf/ajank/adg/train/SRR28910726_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
+/home/staff/iinf/ajank/adg/train/SRR28910742_1.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
+/home/staff/iinf/ajank/adg/train/SRR28910758_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
+

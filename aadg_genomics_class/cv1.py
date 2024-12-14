@@ -226,7 +226,7 @@ def run_alignment_cli():
         training_file_path=sys_argv[1],
         testing_file_path=sys_argv[2],
         output_file_path=sys_argv[3],
-        ground_truth_file="./testing_ground_truth.tsv",
+        ground_truth_file=sys_argv[4],
     )
 
 if __name__ == '__main__':
