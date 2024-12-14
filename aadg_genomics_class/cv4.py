@@ -212,7 +212,7 @@ def run_classifier_pipeline(
                 training_datasets[tokens[1]].append(tokens[0])
     classes = list(sorted(training_datasets.keys()))
     
-    pool = mp.Pool(processes=4)
+    pool = mp.Pool(processes=12)
 
     # Train
     # Multiprocessing
@@ -292,7 +292,7 @@ def run_alignment_cli():
         training_file_path=sys_argv[1],
         testing_file_path=sys_argv[2],
         output_file_path=sys_argv[3],
-        ground_truth_file="./testing_ground_truth.tsv",
+        ground_truth_file=sys_argv[4],
     )
 
 if __name__ == '__main__':
