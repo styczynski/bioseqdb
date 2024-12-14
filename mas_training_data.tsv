@@ -4,4 +4,3 @@ fasta_file	geo_loc_name	lat_lon	train_line
 /home/staff/iinf/ajank/adg/train/SRR28910726_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
 /home/staff/iinf/ajank/adg/train/SRR28910742_1.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
 /home/staff/iinf/ajank/adg/train/SRR28910758_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
-
