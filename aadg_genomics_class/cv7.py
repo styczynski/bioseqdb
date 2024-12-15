@@ -109,8 +109,8 @@ def load_data_class(class_name, datasets_paths, is_test):
     reads_per_chunk = DATASET_CHUNK_SIZE * test_mul
     total_est_chunks = round(1000000/reads_per_chunk * 3)
 
-    MAX_SIG_LEN_PER_CLASS = 800000
-    MAX_KMER_VALUE = 10000
+    MAX_SIG_LEN_PER_CLASS = 1000000
+    MAX_KMER_VALUE = 1000000000
     sig_per_step = round(MAX_SIG_LEN_PER_CLASS / total_est_chunks * 2.5)
 
     #SIG_LEN = 50000 * (2 if is_test else 1)
@@ -156,7 +156,8 @@ def load_data_class(class_name, datasets_paths, is_test):
                 kmers = kmers[KMER_LEN-2:]
                 # kmers = sort(kmers)
 
-                kappa = kmers[kmers < MAX_KMER_VALUE]
+                #kappa = kmers[kmers < MAX_KMER_VALUE]
+                kappa = kmers
                 kappa = np.column_stack(np.unique(kappa, return_counts=True))   
                 if is_test:
                     kappa[:,1] *= -1   
@@ -172,7 +173,7 @@ def load_data_class(class_name, datasets_paths, is_test):
                 # Clear buffer
                 seq_buffer = ""
                 loaded_reads = 0
-                del seq_arr
+                #del seq_arr
         
         sig1 = sorted(sig1+part_sig1)[:MAX_SIG_LEN_PER_CLASS]
         sig2 = sorted(sig2+part_sig2)[:MAX_SIG_LEN_PER_CLASS]
@@ -232,14 +233,21 @@ def measure_class_distance(truth_class, test_path, test_sig, classes, training_c
             last_kmer = 0
             for (kmer, occ) in sorted(doc1[ii] + doc2[ii]):
                 if kmer != last_kmer:
+                    #print(f"{kmer} -> {occ1} {occ2}")
                     if occ1 > 0 and occ2 > 0:
                         points += 1 + math.log(min(occ1, occ2))
+                        points_all += 1 + math.log(max(occ1, occ2))
                     elif occ1 > 0:
                         points_all += 1 + math.log(occ1)
                     elif occ2 > 0:
                         points_all += 1 + math.log(occ2)
                     occ1 = 0
                     occ2 = 0
+                    if occ < 0:
+                        occ2 += -occ
+                    else:
+                        occ1 += occ
+                    last_kmer = kmer
                 else:
                     if occ < 0:
                         occ2 += -occ
@@ -301,7 +309,7 @@ def run_classifier_pipeline(
     # Setup a list of processes that we want to run
     results = pool.starmap(load_data_class_mp, [(cls, training_datasets[cls], False) for cls in classes])
     training_classes = { cls: cls_sig for (cls, _, cls_sig, _) in results }
-    l_1m_speeds += [speed_1m for (_, speed_1m, _) in results]
+    l_1m_speeds += [speed_1m for (_, speed_1m, _, _) in results]
 
     print(f"Signature size per class:")
     for (cls, _, _, size_mb) in results:
