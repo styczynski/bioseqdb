@@ -20,3 +20,5 @@ train_simple/
 *.cmake
 venv/
 _profiling/
+memray-*.html
+*.pkl

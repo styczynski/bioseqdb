@@ -9,6 +9,7 @@ from sys import maxsize, argv as sys_argv, exit
 from functools import partial
 import gzip
 import multiprocessing as mp
+import pickle
 
 from time import time_ns
 from itertools import chain
@@ -102,6 +103,10 @@ def dist_dataset(ds1, ds2):
 
 _total_loaded_reads = 0
 
+OCC_MASK = 31
+OCC_MASK_LEN = 5
+KMER_MASK = 8796093022176
+
 def load_data_class(class_name, datasets_paths, is_test):
     
     moment_start = time_ns()
@@ -109,7 +114,7 @@ def load_data_class(class_name, datasets_paths, is_test):
     reads_per_chunk = DATASET_CHUNK_SIZE * test_mul
     total_est_chunks = round(1000000/reads_per_chunk * 3)
 
-    MAX_SIG_LEN_PER_CLASS = 1000000
+    MAX_SIG_LEN_PER_CLASS = 3000000
     MAX_KMER_VALUE = 1000000000
     sig_per_step = round(MAX_SIG_LEN_PER_CLASS / total_est_chunks * 2.5)
 
@@ -158,13 +163,19 @@ def load_data_class(class_name, datasets_paths, is_test):
 
                 #kappa = kmers[kmers < MAX_KMER_VALUE]
                 kappa = kmers
-                kappa = np.column_stack(np.unique(kappa, return_counts=True))   
-                if is_test:
-                    kappa[:,1] *= -1   
+                kappa = np.column_stack(np.unique(kappa, return_counts=True))     
                 kappa = kappa[kappa[:,0].argsort()]    
+                
+                # Compress
+                if is_test:
+                    part_sig1 += [(((kmer << OCC_MASK_LEN) | (occ & OCC_MASK)) << 1) | 1 for [kmer, occ] in kappa[:sig_per_step].tolist()]
+                    part_sig2 += [(((kmer << OCC_MASK_LEN) | (occ & OCC_MASK)) << 1) | 1 for [kmer, occ] in kappa[-sig_per_step:].tolist()]
+                else:
+                    part_sig1 += [(((kmer << OCC_MASK_LEN) | (occ & OCC_MASK)) << 1) for [kmer, occ] in kappa[:sig_per_step].tolist()]
+                    part_sig2 += [(((kmer << OCC_MASK_LEN) | (occ & OCC_MASK)) << 1) for [kmer, occ] in kappa[-sig_per_step:].tolist()]
 
-                part_sig1 += list(map(tuple(kappa[:sig_per_step].tolist())))
-                part_sig2 += list(map(tuple(kappa[-sig_per_step:].tolist())))
+                #part_sig1 += list(map(tuple, kappa[:sig_per_step].tolist()))
+                #part_sig2 += list(map(tuple, kappa[-sig_per_step:].tolist()))
           
                 del kappa
                 del kmers
@@ -178,7 +189,7 @@ def load_data_class(class_name, datasets_paths, is_test):
         sig1 = sorted(sig1+part_sig1)[:MAX_SIG_LEN_PER_CLASS]
         sig2 = sorted(sig2+part_sig2)[:MAX_SIG_LEN_PER_CLASS]
             
-    sig = (sig1, sig2)
+    sig = (np.array(sig1), np.array(sig2))
     moment_end = time_ns()
 
     #print(f"Train: Total sig length for cls={class_name} is {sum((len(s) for s in sig))}")
@@ -231,7 +242,13 @@ def measure_class_distance(truth_class, test_path, test_sig, classes, training_c
             occ1 = 0
             occ2 = 0
             last_kmer = 0
-            for (kmer, occ) in sorted(doc1[ii] + doc2[ii]):
+            combine = np.sort(np.concatenate((doc1[ii],doc2[ii])))
+            for v in combine.tolist():
+                # ((tupx & kmermask) >> occmask_len, (tupx & occmask))
+                is_test = (v & 1)
+                v = v >> 1
+                kmer = (v & KMER_MASK) >> OCC_MASK_LEN
+                occ = v & OCC_MASK
                 if kmer != last_kmer:
                     #print(f"{kmer} -> {occ1} {occ2}")
                     if occ1 > 0 and occ2 > 0:
@@ -243,14 +260,14 @@ def measure_class_distance(truth_class, test_path, test_sig, classes, training_c
                         points_all += 1 + math.log(occ2)
                     occ1 = 0
                     occ2 = 0
-                    if occ < 0:
-                        occ2 += -occ
+                    if is_test:
+                        occ2 += occ
                     else:
                         occ1 += occ
                     last_kmer = kmer
                 else:
-                    if occ < 0:
-                        occ2 += -occ
+                    if is_test:
+                        occ2 += occ
                     else:
                         occ1 += occ
 
@@ -277,7 +294,10 @@ def run_classifier_pipeline(
     testing_file_path: str,
     output_file_path: str,
     ground_truth_file: str,
+    test_dump_file: str,
 ):
+    preload_train = True
+
     # Thisable garbage collection, this should make memory usages a little bit better
     gc_disable()
 
@@ -307,16 +327,27 @@ def run_classifier_pipeline(
     # Train
     # Multiprocessing
     # Setup a list of processes that we want to run
-    results = pool.starmap(load_data_class_mp, [(cls, training_datasets[cls], False) for cls in classes])
-    training_classes = { cls: cls_sig for (cls, _, cls_sig, _) in results }
-    l_1m_speeds += [speed_1m for (_, speed_1m, _, _) in results]
+    if preload_train:
+        with open(test_dump_file, 'rb') as dump_file:
+            training_classes = pickle.load(dump_file)
+        print(f"Loaded pretrain data")
+        print("==============================")
+    else:
+        results = pool.starmap(load_data_class_mp, [(cls, training_datasets[cls], False) for cls in classes])
+        training_classes = { cls: cls_sig for (cls, _, cls_sig, _) in results }
+        l_1m_speeds += [speed_1m for (_, speed_1m, _, _) in results]
 
-    print(f"Signature size per class:")
-    for (cls, _, _, size_mb) in results:
-        print(f" ==> Class {cls} stores {size_mb} MB")
-    print("==============================")
-    print(f"TOTAL MEM ALLOCATED FOR SIGNATURES: {_size_mb(training_classes)} MB")
-    print("==============================")
+        print(f"Signature size per class:")
+        for (cls, _, _, size_mb) in results:
+            print(f" ==> Class {cls} stores {size_mb} MB")
+        print("==============================")
+
+        with open(test_dump_file, 'wb') as dump_file:
+            pickle.dump(training_classes, dump_file)
+            print(f"Dumped train data to {test_dump_file}")
+
+    #print(f"TOTAL MEM ALLOCATED FOR SIGNATURES: {_size_mb(training_classes)} MB")
+    #print("==============================")
 
     #training_classes = { cls: load_data_class(cls, training_datasets[cls]) for cls in classes }
 
@@ -392,6 +423,7 @@ def run_alignment_cli():
         testing_file_path=sys_argv[2],
         output_file_path=sys_argv[3],
         ground_truth_file=sys_argv[4],
+        test_dump_file=sys_argv[5],
     )
 
 if __name__ == '__main__':

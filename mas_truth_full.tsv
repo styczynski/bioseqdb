@@ -1,12 +1,4 @@
 fasta_file	geo_loc_name	lat_lon	train_line
-/home/staff/iinf/ajank/adg/test/SRR27257555_1.fasta.gz	Birmingham	52.440695 N 1.939762 W	Sainsburys
-/home/staff/iinf/ajank/adg/test/SRR27257555_2.fasta.gz	Birmingham	52.440695 N 1.939762 W	Sainsburys
-/home/staff/iinf/ajank/adg/test/SRR27257797_1.fasta.gz	Birmingham	52.475173 N 1.895698 W	Birmingham_China_Town
-/home/staff/iinf/ajank/adg/test/SRR27257797_2.fasta.gz	Birmingham	52.475173 N 1.895698 W	Birmingham_China_Town
-/home/staff/iinf/ajank/adg/test/SRR27257846_1.fasta.gz	Birmingham	52.440878 N 1.940148 W	Sainsbury's
-/home/staff/iinf/ajank/adg/test/SRR27257846_2.fasta.gz	Birmingham	52.440878 N 1.940148 W	Sainsbury's
-/home/staff/iinf/ajank/adg/test/SRR27257887_1.fasta.gz	Birmingham	52.475823 N 1.895886 W	Birmingham_Market
-/home/staff/iinf/ajank/adg/test/SRR27257887_2.fasta.gz	Birmingham	52.475823 N 1.895886 W	Birmingham_Market
 /home/staff/iinf/ajank/adg/test/SRR28910762_1.fasta.gz	Kyiv	missing	Heroiv_Dnipra
 /home/staff/iinf/ajank/adg/test/SRR28910762_2.fasta.gz	Kyiv	missing	Heroiv_Dnipra
 /home/staff/iinf/ajank/adg/test/SRR28910780_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
@@ -21,3 +13,11 @@ fasta_file	geo_loc_name	lat_lon	train_line
 /home/staff/iinf/ajank/adg/test/SRR28910791_2.fasta.gz	Kyiv	missing	Heroiv_Dnipra
 /home/staff/iinf/ajank/adg/test/SRR28910794_1.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
 /home/staff/iinf/ajank/adg/test/SRR28910794_2.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
+/home/staff/iinf/ajank/adg/test/SRR27257555_1.fasta.gz	Birmingham	52.440695 N 1.939762 W	Sainsburys
+/home/staff/iinf/ajank/adg/test/SRR27257555_2.fasta.gz	Birmingham	52.440695 N 1.939762 W	Sainsburys
+/home/staff/iinf/ajank/adg/test/SRR27257797_1.fasta.gz	Birmingham	52.475173 N 1.895698 W	Birmingham_China_Town
+/home/staff/iinf/ajank/adg/test/SRR27257797_2.fasta.gz	Birmingham	52.475173 N 1.895698 W	Birmingham_China_Town
+/home/staff/iinf/ajank/adg/test/SRR27257846_1.fasta.gz	Birmingham	52.440878 N 1.940148 W	Sainsbury's
+/home/staff/iinf/ajank/adg/test/SRR27257846_2.fasta.gz	Birmingham	52.440878 N 1.940148 W	Sainsbury's
+/home/staff/iinf/ajank/adg/test/SRR27257887_1.fasta.gz	Birmingham	52.475823 N 1.895886 W	Birmingham_Market
+/home/staff/iinf/ajank/adg/test/SRR27257887_2.fasta.gz	Birmingham	52.475823 N 1.895886 W	Birmingham_Market

@@ -1,2 +1,29 @@
 venv/bin/python3 -m memray run -o profile_cv6.bin aadg_genomics_class/cv6.py mas_training_data.tsv mas_testing_data.tsv mas_output_cv6.tsv ./mas_truth_full.tsv
 
+venv/bin/python3 -m memray run -o profile_cv8l.bin aadg_genomics_class/cv8l.py max_training_data.tsv max_testing_data.tsv max_output_cv8lm.tsv ./max_truth_full.tsv ./max_train_cv8lm_dump.pkl
+
+
+
+#### 
+venv/bin/python3 aadg_genomics_class/cv8l.py max_training_data.tsv max_testing_data.tsv max_output_cv8l.tsv ./max_truth_full.tsv ./max_train_cv8l_dump.pkl
+
+
+
+####
+
+
+venv/bin/python3 -m memray run -o profile_cv11m.bin aadg_genomics_class/cv11m.py max_training_data.tsv max_testing_data.tsv max_output_cv11m.tsv ./max_truth_full.tsv ./max_train_cv11.pkl
+
+#####
+
+
+venv/bin/python3 aadg_genomics_class/cv12.py max_training_data.tsv max_testing_data.tsv max_output_cv12.tsv ./max_truth_full.tsv ./max_train_cv11.pkl
+
+
+####
+WAZNE ZROBIC TO:
+venv/bin/python3 -m memray run  --aggregate -o profile_cv11m.bin aadg_genomics_class/cv11m.py max_training_data.tsv max_testing_data.tsv max_output_cv11m.tsv ./max_truth_full.tsv ./max_train_cv11.pkl
+
+venv/bin/python3 -m memray run  --aggregate -o profile_cv12m.bin aadg_genomics_class/cv12m.py max_training_data.tsv max_testing_data.tsv max_output_cv12m.tsv ./max_truth_full.tsv ./max_train_cv11.pkl
+
+venv/bin/python3 aadg_genomics_class/cv13.py training_data.tsv testing_data.tsv low_output_cv13.tsv
