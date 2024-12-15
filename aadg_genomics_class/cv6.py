@@ -158,6 +158,8 @@ def load_data_class(class_name, datasets_paths, is_test):
                 seq_buffer = ""
                 loaded_reads = 0
                 del seq_arr
+
+            
     sig = (sig1, sig2)
     moment_end = time_ns()
 
