@@ -163,8 +163,8 @@ def load_data_class(class_name, datasets_paths, is_test):
                     kappa[:,1] *= -1   
                 kappa = kappa[kappa[:,0].argsort()]    
 
-                part_sig1 += kappa[:sig_per_step].tolist()
-                part_sig2 += kappa[-sig_per_step:].tolist()
+                part_sig1 += list(map(tuple(kappa[:sig_per_step].tolist())))
+                part_sig2 += list(map(tuple(kappa[-sig_per_step:].tolist())))
           
                 del kappa
                 del kmers

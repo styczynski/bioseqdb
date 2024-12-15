@@ -1,0 +1,2 @@
+venv/bin/python3 -m memray run -o profile_cv6.bin aadg_genomics_class/cv6.py mas_training_data.tsv mas_testing_data.tsv mas_output_cv6.tsv ./mas_truth_full.tsv
+
