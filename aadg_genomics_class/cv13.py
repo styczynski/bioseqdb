@@ -177,7 +177,7 @@ def load_data_class(class_name, datasets_paths, is_test):
     gc_collect()
     return sig
 
-def measure_class_distance(truth_class, test_path, test_sig, classes, training_classes):
+def measure_class_distance(test_sig, classes, training_classes):
     mask, occ_mask, signo_mask = generate_masks(KMER_LEN)
     scores = []
     for cls in classes:
@@ -286,7 +286,7 @@ def run_classifier_pipeline(
         next(k)
         for testing_dataset_path in k:
             test_sig = load_data_class("unknown_test", [testing_dataset_path], True)
-            output_line = testing_dataset_path + "\t" + "\t".join([str(dist) for dist in measure_class_distance(gt_cls[testing_dataset_path], testing_dataset_path, test_sig, classes, training_classes)]) + "\n"
+            output_line = testing_dataset_path + "\t" + "\t".join([str(dist) for dist in measure_class_distance(test_sig, classes, training_classes)]) + "\n"
             print(output_line)
             output_buf.append(output_line)
     
