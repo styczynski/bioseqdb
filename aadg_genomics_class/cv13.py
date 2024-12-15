@@ -90,8 +90,7 @@ def load_data_class(class_name, datasets_paths, is_test):
     mask, occ_mask, signo_mask = generate_masks(KMER_LEN)
 
     moment_start = time_ns()
-    test_mul = 3 if is_test else 1
-    reads_per_chunk = DATASET_CHUNK_SIZE * test_mul
+    reads_per_chunk = DATASET_CHUNK_SIZE
     total_est_chunks = round(1000000/reads_per_chunk * 3)
 
     MAX_SIG_LEN_PER_CLASS = 3000000
@@ -245,6 +244,7 @@ def measure_class_distance(test_sig, classes, training_classes):
         scores.append(similarity_score)
     del combine
     gc_collect()
+    gc_collect()
     return scores
 
 # Entrypoint to the aligner
@@ -253,12 +253,6 @@ def run_classifier_pipeline(
     testing_file_path: str,
     output_file_path: str,
 ):
-
-    preload_train = True
-    super_debug = True
-    dump_file = False
-    dump_tests = False
-    preload_test = True
 
     # Thisable garbage collection, this should make memory usages a little bit better
     gc_disable()
