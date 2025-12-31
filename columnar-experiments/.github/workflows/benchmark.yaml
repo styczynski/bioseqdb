@@ -1,0 +1,86 @@
+name: Benchmark
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        required: true
+        type: string
+        default: ghcr.io/hydradatabase/hydra
+      benchmark:
+        required: true
+        type: string
+      tag:
+        required: true
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      repo:
+        required: true
+        type: choice
+        default: ghcr.io/hydradatabase/hydra
+        options:
+         - ghcr.io/hydradatabase/hydra
+         - 011789831835.dkr.ecr.us-east-1.amazonaws.com/spilo
+      benchmark:
+        required: true
+        type: choice
+        default: clickbench-1M
+        options:
+          - clickbench-10k
+          - clickbench-1M
+          - clickbench-100M
+          - warehouse-1G
+          - warehouse-10G
+      tag:
+        type: string
+env:
+  BENCHMARK: ${{ inputs.benchmark || 'clickbench-1M' }}
+  REPO: ${{ inputs.repo || 'ghcr.io/hydradatabase/hydra' }}
+  TAG: ${{ inputs.tag || format('15-{0}', github.sha) }}
+  BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+  BENCHER_TESTBED: gh-4core
+
+jobs:
+  benchmarks:
+
+    name: Run Benchmark
+    # 16gb ram, 4vcpu, 150gb disk
+    runs-on: benchmarks-ubuntu-latest-4core
+
+    steps:
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - uses: docker/setup-buildx-action@v2
+
+      - uses: unfor19/install-aws-cli-action@v1
+        with:
+          arch: amd64
+
+      - uses: bencherdev/bencher@main
+
+      - name: Checkout benchmarks
+        uses: actions/checkout@v3
+        with:
+          repository: hydradatabase/benchmarks
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY || secrets.BENCHMARKS_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY || secrets.BENCHMARKS_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          mask-aws-account-id: no
+
+      - name: Login to Amazon ECR
+        if: ${{ github.repository == 'hydradatabase/hydra-internal' && env.REPO == '011789831835.dkr.ecr.us-east-1.amazonaws.com/spilo' }}
+        id: spilo-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+        with:
+          registries: "011789831835"
+
+      - name: Run benchmark
+        run: ./run-gha.sh

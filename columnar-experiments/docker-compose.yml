@@ -1,0 +1,13 @@
+services:
+  hydra:
+    container_name: hydra
+    image: ghcr.io/hydradatabase/hydra:latest
+    ports:
+      - ${POSTGRES_PORT}:5432
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./volumes/db:/var/lib/postgresql/data
+      - ./files/postgres/postgresql.conf:/etc/postgresql/postgresql.conf
+    command: postgres -c 'config_file=/etc/postgresql/postgresql.conf'
