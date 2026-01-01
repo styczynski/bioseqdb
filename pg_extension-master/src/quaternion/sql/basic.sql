@@ -1,0 +1,4 @@
+CREATE TABLE test(id SERIAL, quat QUATERNION);
+INSERT INTO test(quat) VALUES ('(1,2,3,4)');
+SELECT * FROM test;
+

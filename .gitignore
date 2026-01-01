@@ -3,3 +3,5 @@
 
 columnar-experiments/columnar/configure~
 paradedb-experiments/target/
+**/build
+

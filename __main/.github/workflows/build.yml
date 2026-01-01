@@ -1,0 +1,36 @@
+name: Debug Build on Ubuntu 18.04 
+
+on:
+  pull_request:
+    branches: [ master ]
+    paths-ignore:
+      - '**.md'
+      - LICENSE
+
+jobs:
+  build-ubuntu:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        version: [11, 12, 13, 14]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Setup PGDG
+      run: |
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+    - name: Install PostgreSQL
+      run: sudo apt-get -y install cmake postgresql postgresql-server-dev-all postgresql-server-dev-${{ matrix.version }}
+    - name: Check that tools were successfully installed
+      run: |
+        pg_config
+        ls `pg_config --includedir-server`
+    - name: CMake configure
+      run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+    - name: Build extensions
+      run: cmake --build build
+    - name: Install extensions
+      run: sudo cmake --install build
+    - name: Run CTest
+      run: ctest --verbose --output-on-failure --test-dir build
