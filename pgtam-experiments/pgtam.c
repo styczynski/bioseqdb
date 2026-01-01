@@ -357,8 +357,7 @@ static void memam_vacuum_rel(
 
 static bool memam_scan_analyze_next_block(
   TableScanDesc scan,
-  BlockNumber blockno,
-  BufferAccessStrategy bstrategy
+  ReadStream *stream
 ) {
   DEBUG_FUNC();
   return false;
