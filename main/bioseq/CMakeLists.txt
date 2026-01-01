@@ -13,7 +13,7 @@ PostgreSQL_add_extension(postgresql_bioseq
   SOURCES
     ${SRC_FILES}
   INSTALLS
-    sql/citus_columnar--13.2-1--14.0-1.sql
+    sql/bioseq--1.0.sql
 )
 
 # configure
@@ -26,7 +26,7 @@ target_include_directories(postgresql_bioseq PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include
 )
 
-target_link_libraries(postgresql_bioseq PRIVATE safestring_shared)
+target_link_libraries(postgresql_bioseq PRIVATE safestring_static)
 
 # safestring_shared
 

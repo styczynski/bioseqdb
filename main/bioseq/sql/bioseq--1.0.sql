@@ -1,5 +1,5 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "CREATE EXTENSION citus_columnar" to load this file. \quit
+\echo Use "CREATE EXTENSION bioseq" to load this file. \quit
 
 -- columnar--9.5-1--10.0-1.sql
 
@@ -382,7 +382,7 @@ SELECT columnar_internal.columnar_ensure_am_depends_catalog();
 
 CREATE FUNCTION columnar.get_storage_id(regclass) RETURNS bigint
     LANGUAGE C STRICT
-    AS 'citus_columnar', $$columnar_relation_storageid$$;
+    AS 'MODULE_PATHNAME', $$columnar_relation_storageid$$;
 
 -- create views for columnar table information
 
@@ -433,3 +433,8 @@ COMMENT ON VIEW columnar.chunk
   IS 'Columnar chunk information for tables on which the current user has ownership privileges.';
 GRANT SELECT ON columnar.chunk TO PUBLIC;
 
+-- TUTAJ
+CREATE OR REPLACE FUNCTION mmsearch(el ANYELEMENT, query TEXT)
+    RETURNS BOOLEAN
+    AS 'MODULE_PATHNAME'
+    LANGUAGE C IMMUTABLE STRICT;

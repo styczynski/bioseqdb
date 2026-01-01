@@ -36,7 +36,7 @@ project(
 )
 # set this to "${PROJECT_VERSION}" on release
 #set(INSTALL_VERSION "${PROJECT_VERSION}")
-set(INSTALL_VERSION "unreleased")
+set(INSTALL_VERSION "1.0")
 set(H3_CORE_VERSION 4.2.0)
 set(H3_CORE_SHA256 438db46fc2b388785d2a0d8e26aa5509739240a7b50b2510c416778d871a4e11)
 
@@ -47,6 +47,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 # Allow forcing PostgreSQL version
 set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version major")
 
+# Find packages go here.
+find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED
+)
+include(AddPostgreSQLExtension)
+
 add_definitions(-DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
 # https://cliutils.gitlab.io/modern-cmake/chapters/testing.html
@@ -55,6 +60,17 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 endif()
 
 # Include extensions and their shared code
+#add_subdirectory(include)
 add_subdirectory(bioseq)
 add_subdirectory(safestringlib)
+#add_subdirectory(h3_postgis)
 
+# Add target that bundles for pgxn
+#configure_file(META.json.in META.json)
+# add_custom_target(pgxn
+#   COMMAND git archive --format zip
+#                       --prefix="h3-${INSTALL_VERSION}/"
+#                       --add-file ${CMAKE_BINARY_DIR}/META.json
+#                       -o h3-${INSTALL_VERSION}.zip HEAD
+#   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+# )

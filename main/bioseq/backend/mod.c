@@ -23,10 +23,17 @@
 
 PG_MODULE_MAGIC;
 
+
 void _PG_init(void);
 
 void
 _PG_init(void)
 {
 	columnar_init();
+}
+
+PG_FUNCTION_INFO_V1(mmsearch);
+Datum mmsearch(PG_FUNCTION_ARGS) {
+  // Nothing here
+  return BoolGetDatum(true);
 }
