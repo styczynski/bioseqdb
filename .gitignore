@@ -1,3 +1,5 @@
 .DS_Store
 *.dylib
 
+columnar-experiments/columnar/configure~
+paradedb-experiments/target/

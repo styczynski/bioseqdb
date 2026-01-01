@@ -3036,6 +3036,21 @@ columnar_handler(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(&columnar_am_methods);
 }
 
+//PAPIESZ: Here is my code:
+PG_FUNCTION_INFO_V1(mmsearch);
+Datum mmsearch(PG_FUNCTION_ARGS) {
+  // Nothing here
+  return BoolGetDatum(true);
+}
+
+
+PG_FUNCTION_INFO_V1(mmscore);
+Datum mmscore(PG_FUNCTION_ARGS) {
+  // Nothing here
+  return Int32GetDatum(2137);
+}
+
+
 
 /*
  * detoast_values

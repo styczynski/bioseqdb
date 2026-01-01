@@ -1,7 +1,7 @@
 SHELL=/bin/bash -o pipefail
 
 TARGET ?= default
-POSTGRES_BASE_VERSION ?= 14
+POSTGRES_BASE_VERSION ?= 16
 
 ECR_REGISTRY ?= 011789831835.dkr.ecr.us-east-1.amazonaws.com
 

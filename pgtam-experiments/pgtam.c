@@ -518,3 +518,10 @@ Datum mem_tableam_handler(PG_FUNCTION_ARGS) {
 
   PG_RETURN_POINTER(&memam_methods);
 }
+
+PG_FUNCTION_INFO_V1(mmsearch);
+Datum mmsearch(PG_FUNCTION_ARGS) {
+  // Nothing here
+  return BoolGetDatum(true);
+}
+

@@ -2213,6 +2213,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 							columnarScanState->vectorization.resultVectorSlot);
 	}
 
+	// PAPIESZ: Custom scan uses TAM
 	/*
 	 * get a tuple from the access method.  Loop until we obtain a tuple that
 	 * passes the qualification.
@@ -2504,7 +2505,7 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 	/*
 	 * Free the exprcontext
 	 */
-	ExecFreeExprContext(&node->ss.ps);
+	// ExecFreeExprContext(&node->ss.ps);
 
 	/*
 	 * clean out the tuple table

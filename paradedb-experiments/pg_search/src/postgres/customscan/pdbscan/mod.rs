@@ -742,6 +742,7 @@ impl CustomScan for PdbScan {
         }
     }
 
+    // PAPIESZ: Add custom path
     fn plan_custom_path(mut builder: CustomScanBuilder<Self>) -> pg_sys::CustomScan {
         unsafe {
             let mut tlist = PgList::<pg_sys::TargetEntry>::from_pg(builder.args().tlist.as_ptr());
@@ -810,6 +811,8 @@ impl CustomScan for PdbScan {
                 .chain(snippets_funcoids().iter().copied())
                 .chain(snippet_positions_funcoids().iter().copied())
                 .collect();
+
+            //PAPIESZ: Tujtaj przeprowadzona jest ekstrakcja wszystkich calli do funkcji
             for te in processed_tlist.iter_ptr() {
                 let func_vars_at_level =
                     pullout_funcexprs(te.cast(), &funcoids, rti, builder.args().root);

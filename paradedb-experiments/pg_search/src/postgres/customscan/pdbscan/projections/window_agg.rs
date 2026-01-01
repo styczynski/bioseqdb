@@ -570,6 +570,7 @@ unsafe fn window_has_order_by(parse: *mut pg_sys::Query, order_clause: *mut pg_s
 /// This two-phase approach is necessary because:
 /// 1. At planner_hook time: We serialize filters as PostgresExpression (no PlannerInfo yet)
 /// 2. At plan_custom_path time: We convert to SearchQueryInput (PlannerInfo available)
+/// PAPIESZ
 pub unsafe fn resolve_window_aggregate_filters_at_plan_time(
     window_aggregates: &mut [WindowAggregateInfo],
     bm25_index: &PgSearchRelation,

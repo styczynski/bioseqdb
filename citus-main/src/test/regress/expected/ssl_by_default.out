@@ -1,0 +1,91 @@
+-- Citus uses ssl by default now. It does so by turning on ssl and if needed will generate
+-- self-signed certificates.
+--
+-- This test verifies:
+-- 1) ssl=on on coordinator and workers
+-- 2) coordinator->workers connections use SSL (pg_stat_ssl true)
+-- 3) ssl_ciphers is non-empty and has a colon-separated rule/list on both coordinator and workers
+--    (PG18/OpenSSL may report a rule string like HIGH:MEDIUM:+3DES:!aNULL instead of an expanded list)
+-- 0) Is this an OpenSSL-enabled build? (if not, ssl_ciphers is 'none')
+--    Keep the “hasssl” signal but don’t rely on the literal cipher list value.
+SHOW ssl_ciphers \gset
+SELECT :'ssl_ciphers' <> 'none' AS hasssl;
+ hasssl
+---------------------------------------------------------------------
+ t
+(1 row)
+
+-- 1) ssl must be on (coordinator + workers)
+SHOW ssl;
+ ssl
+---------------------------------------------------------------------
+ on
+(1 row)
+
+SELECT run_command_on_workers($$
+    SHOW ssl;
+$$);
+ run_command_on_workers
+---------------------------------------------------------------------
+ (localhost,57637,t,on)
+ (localhost,57638,t,on)
+(2 rows)
+
+-- 2) connections to workers carry sslmode=require
+SHOW citus.node_conninfo;
+ citus.node_conninfo
+---------------------------------------------------------------------
+ sslmode=require
+(1 row)
+
+SELECT run_command_on_workers($$
+    SHOW citus.node_conninfo;
+$$);
+       run_command_on_workers
+---------------------------------------------------------------------
+ (localhost,57637,t,sslmode=require)
+ (localhost,57638,t,sslmode=require)
+(2 rows)
+
+-- 3) pg_stat_ssl says SSL is active on each worker connection
+SELECT run_command_on_workers($$
+    SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid();
+$$);
+ run_command_on_workers
+---------------------------------------------------------------------
+ (localhost,57637,t,t)
+ (localhost,57638,t,t)
+(2 rows)
+
+-- 4) ssl_ciphers checks (coordinator): non-empty and contains at least one ':'
+SELECT current_setting('ssl_ciphers') <> '' AS has_ssl_ciphers;
+ has_ssl_ciphers
+---------------------------------------------------------------------
+ t
+(1 row)
+
+SELECT position(':' in current_setting('ssl_ciphers')) > 0 AS has_colon;
+ has_colon
+---------------------------------------------------------------------
+ t
+(1 row)
+
+-- 5) ssl_ciphers checks (workers)
+SELECT run_command_on_workers($$
+  SELECT current_setting('ssl_ciphers') <> '' AS has_ssl_ciphers
+$$);
+ run_command_on_workers
+---------------------------------------------------------------------
+ (localhost,57637,t,t)
+ (localhost,57638,t,t)
+(2 rows)
+
+SELECT run_command_on_workers($$
+  SELECT position(':' in current_setting('ssl_ciphers')) > 0 AS has_at_least_two_ciphers
+$$);
+ run_command_on_workers
+---------------------------------------------------------------------
+ (localhost,57637,t,t)
+ (localhost,57638,t,t)
+(2 rows)
+
