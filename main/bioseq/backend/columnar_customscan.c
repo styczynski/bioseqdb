@@ -1492,6 +1492,14 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		allClauses = list_concat(allClauses, path->param_info->ppi_clauses);
 	}
 
+	JustLog("   ===> AddColumnarScanPath iterate");
+	ListCell *lcz;
+	foreach(lcz, allClauses)
+	{
+		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lcz);
+		LogNode(rinfo, "   ===> AddColumnarScanPath restrict node");
+	}
+
 	allClauses = FilterPushdownClauses(root, rel, allClauses);
 
 	/*
@@ -1733,6 +1741,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 								List *clauses,
 								List *custom_plans)
 {
+	// PAPIESZ: ADD HERE
 	/*
 	 * Must return a CustomScan, not a larger structure containing a
 	 * CustomScan as the first field. Otherwise, copyObject() will fail to

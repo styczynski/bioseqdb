@@ -14,6 +14,10 @@
 #include "postgres.h"
 #include "pg_version_constants.h"
 
+#include "nodes/print.h"
+
+#define LogNode(NODE, MESSAGE) elog_node_display(NOTICE, (MESSAGE), (NODE), true);
+
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 #define AT __FILE__ ":" TOSTRING(__LINE__)

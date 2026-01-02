@@ -32,7 +32,7 @@ endif()
 project(
   bioseq
   VERSION 4.2.3
-  LANGUAGES C
+  LANGUAGES CXX
 )
 # set this to "${PROJECT_VERSION}" on release
 #set(INSTALL_VERSION "${PROJECT_VERSION}")
