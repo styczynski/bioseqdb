@@ -5,29 +5,29 @@
  * This file contains the implementation of a postgres custom scan that
  * we use to push down the projections into the table access methods.
  *
+ * Copyright (c) Citus Data, Inc.
+ * Copyright (c) Hydra, Inc.
+ *
  * $Id$
  *
  *-------------------------------------------------------------------------
  */
 
-#include <math.h>
+#include "citus_version.h"
+#include "pg_version_compat.h"
 
 #include "postgres.h"
 
-#include "miscadmin.h"
+#include <math.h>
 
 #include "access/amapi.h"
 #include "access/skey.h"
+#include "access/xact.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_statistic.h"
 #include "commands/defrem.h"
-
-#include "columnar/columnar_version_compat.h"
-#if PG_VERSION_NUM >= PG_VERSION_18
-#include "commands/explain_format.h"
-#endif
-#include "executor/executor.h"   /* for ExecInitExprWithParams(), ExecEvalExpr() */
-#include "nodes/execnodes.h"     /* for ExprState, ExprContext, etc. */
+#include "commands/explain.h"
+#include "miscadmin.h"
 #include "nodes/extensible.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -39,8 +39,11 @@
 #include "optimizer/paths.h"
 #include "optimizer/plancat.h"
 #include "optimizer/restrictinfo.h"
+#if PG_VERSION_NUM >= PG_VERSION_16
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
+#endif
+#include "storage/smgr.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
@@ -49,14 +52,18 @@
 #include "utils/selfuncs.h"
 #include "utils/spccache.h"
 
-#include "citus_version.h"
-
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
 #include "columnar/columnar_metadata.h"
 #include "columnar/columnar_tableam.h"
+#include "columnar/utils/listutils.h"
 
-#include "utils/listutils.h"
+#include "columnar/vectorization/columnar_vector_execution.h"
+#include "columnar/vectorization/columnar_vector_types.h"
+
+#ifndef Abs
+#define Abs(x)			((x) >= 0 ? (x) : -(x))
+#endif
 
 /*
  * ColumnarScanState represents the state for a columnar scan. It's a
@@ -65,11 +72,32 @@
 typedef struct ColumnarScanState
 {
 	CustomScanState custom_scanstate; /* must be first field */
+	Bitmapset *attrNeeded;
 
 	ExprContext *css_RuntimeContext;
 	List *qual;
-} ColumnarScanState;
 
+	/* Parallel execution */
+	ParallelColumnarScan parallelColumnarScan;
+
+	/* Vectorization */
+	struct
+	{
+		bool vectorizationEnabled;
+		bool vectorizationAggregate;
+		TupleTableSlot *scanVectorSlot;
+		TupleTableSlot *resultVectorSlot;
+		uint32 vectorPendingRowNumber;
+		uint32 vectorRowIndex;
+		List *vectorizedQualList;
+		List *constructedVectorizedQualList;
+		List *attrNeededList;
+	} vectorization;
+
+	/* Scan snapshot*/
+	Snapshot snapshot;
+	bool snapshotRegisteredByUs;
+} ColumnarScanState;
 
 typedef bool (*PathPredicate)(Path *path);
 
@@ -79,6 +107,7 @@ static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId
 static void CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 								  IndexPath *indexPath);
 static void CostColumnarSeqPath(RelOptInfo *rel, Oid relationId, Path *path);
+static void AdjustColumnarParallelScanCost(Path *path);
 static void CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 							 CustomPath *cpath, int numberOfColumnsRead,
 							 int nClauses);
@@ -86,8 +115,8 @@ static void CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 /* functions to add new paths */
 static void AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel,
 								 RangeTblEntry *rte);
-static void AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel,
-								RangeTblEntry *rte, Relids required_relids);
+static Path * AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel,
+								  RangeTblEntry *rte, Relids required_relids);
 
 /* helper functions to be used when costing paths or altering them */
 static void RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate);
@@ -110,6 +139,7 @@ static void ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index
 									   RangeTblEntry *rte);
 static void ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 										bool inhparent, RelOptInfo *rel);
+
 static Plan * ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 											  RelOptInfo *rel,
 											  struct CustomPath *best_path,
@@ -123,23 +153,38 @@ static Node * ColumnarScan_CreateCustomScanState(CustomScan *cscan);
 
 static void ColumnarScan_BeginCustomScan(CustomScanState *node, EState *estate,
 										 int eflags);
+
+static TupleTableSlot * CustomExecScan(ColumnarScanState *node,
+									   ExecScanAccessMtd accessMtd,
+									   ExecScanRecheckMtd recheckMtd);
 static TupleTableSlot * ColumnarScan_ExecCustomScan(CustomScanState *node);
 static void ColumnarScan_EndCustomScan(CustomScanState *node);
 static void ColumnarScan_ReScanCustomScan(CustomScanState *node);
 static void ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 										   ExplainState *es);
+static Size Columnar_EstimateDSMCustomScan(CustomScanState *node,
+										   ParallelContext *pcxt);
+static void Columnar_InitializeDSMCustomScan(CustomScanState *node,
+											ParallelContext *pcxt,
+											void *coordinate);
+static void Columnar_ReinitializeDSMCustomScan(CustomScanState *node,
+											   ParallelContext *pcxt,
+											   void *coordinate);
+static void Columnar_InitializeWorkerCustomScan(CustomScanState *node,
+												shm_toc *toc,
+												void *coordinate);
 
 /* helper functions to build strings for EXPLAIN */
 static const char * ColumnarPushdownClausesStr(List *context, List *clauses);
 static const char * ColumnarProjectedColumnsStr(List *context,
 												List *projectedColumns);
+#if PG_VERSION_NUM >= 130000
 static List * set_deparse_context_planstate(List *dpcontext, Node *node,
 											List *ancestors);
+#endif
 
 /* other helpers */
 static List * ColumnarVarNeeded(ColumnarScanState *columnarScanState);
-static Bitmapset * ColumnarAttrNeeded(ScanState *ss);
-static Bitmapset * fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns);
 
 /* saved hook value in case of unload */
 static set_rel_pathlist_hook_type PreviousSetRelPathlistHook = NULL;
@@ -147,7 +192,7 @@ static get_relation_info_hook_type PreviousGetRelationInfoHook = NULL;
 
 static bool EnableColumnarCustomScan = true;
 static bool EnableColumnarQualPushdown = true;
-static double ColumnarQualPushdownCorrelationThreshold = 0.9;
+static double ColumnarQualPushdownCorrelationThreshold = 0.4;
 static int ColumnarMaxCustomScanPaths = 64;
 static int ColumnarPlannerDebugLevel = DEBUG3;
 
@@ -172,6 +217,11 @@ const struct CustomExecMethods ColumnarScanExecuteMethods = {
 	.ReScanCustomScan = ColumnarScan_ReScanCustomScan,
 
 	.ExplainCustomScan = ColumnarScan_ExplainCustomScan,
+
+	.EstimateDSMCustomScan = Columnar_EstimateDSMCustomScan,
+	.InitializeDSMCustomScan = Columnar_InitializeDSMCustomScan,
+	.ReInitializeDSMCustomScan = Columnar_ReinitializeDSMCustomScan,
+	.InitializeWorkerCustomScan = Columnar_InitializeWorkerCustomScan
 };
 
 static const struct config_enum_entry debug_level_options[] = {
@@ -187,6 +237,13 @@ static const struct config_enum_entry debug_level_options[] = {
 	{ "log", LOG, false },
 	{ NULL, 0, false }
 };
+
+
+const CustomScanMethods *
+columnar_customscan_methods(void)
+{
+	return &ColumnarScanScanMethods;
+}
 
 
 /*
@@ -205,8 +262,8 @@ columnar_customscan_init()
 	/* register customscan specific GUC's */
 	DefineCustomBoolVariable(
 		"columnar.enable_custom_scan",
-		gettext_noop("Enables the use of a custom scan to push projections and quals "
-					 "into the storage layer."),
+		"Enables the use of a custom scan to push projections and quals "
+					 "into the storage layer.",
 		NULL,
 		&EnableColumnarCustomScan,
 		true,
@@ -215,8 +272,8 @@ columnar_customscan_init()
 		NULL, NULL, NULL);
 	DefineCustomBoolVariable(
 		"columnar.enable_qual_pushdown",
-		gettext_noop("Enables qual pushdown into columnar. This has no effect unless "
-					 "columnar.enable_custom_scan is true."),
+		"Enables qual pushdown into columnar. This has no effect unless "
+					 "columnar.enable_custom_scan is true.",
 		NULL,
 		&EnableColumnarQualPushdown,
 		true,
@@ -225,22 +282,22 @@ columnar_customscan_init()
 		NULL, NULL, NULL);
 	DefineCustomRealVariable(
 		"columnar.qual_pushdown_correlation_threshold",
-		gettext_noop("Correlation threshold to attempt to push a qual "
+		"Correlation threshold to attempt to push a qual "
 					 "referencing the given column. A value of 0 means "
 					 "attempt to push down all quals, even if the column "
-					 "is uncorrelated."),
+					 "is uncorrelated.",
 		NULL,
 		&ColumnarQualPushdownCorrelationThreshold,
-		0.9,
+		0.4,
 		0.0,
 		1.0,
 		PGC_USERSET,
-		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+		GUC_NO_SHOW_ALL |GUC_NOT_IN_SAMPLE,
 		NULL, NULL, NULL);
 	DefineCustomIntVariable(
 		"columnar.max_custom_scan_paths",
-		gettext_noop("Maximum number of custom scan paths to generate "
-					 "for a columnar table when planning."),
+		"Maximum number of custom scan paths to generate "
+					 "for a columnar table when planning.",
 		NULL,
 		&ColumnarMaxCustomScanPaths,
 		64,
@@ -265,7 +322,6 @@ columnar_customscan_init()
 	RegisterCustomScanMethods(&ColumnarScanScanMethods);
 }
 
-
 static void
 ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						   RangeTblEntry *rte)
@@ -288,26 +344,12 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	 * into the scan of the table to minimize the data read.
 	 */
 	Relation relation = RelationIdGetRelation(rte->relid);
-	if (!RelationIsValid(relation))
-	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", rte->relid)));
-	}
-
 	if (relation->rd_tableam == GetColumnarTableAmRoutine())
 	{
 		if (rte->tablesample != NULL)
 		{
 			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							errmsg("sample scans not supported on columnar tables")));
-		}
-
-		if (list_length(rel->partial_pathlist) != 0)
-		{
-			/*
-			 * Parallel scans on columnar tables are already discardad by
-			 * ColumnarGetRelationInfoHook but be on the safe side.
-			 */
-			elog(ERROR, "parallel scans on columnar are not supported");
 		}
 
 		/*
@@ -328,8 +370,6 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 
 		if (EnableColumnarCustomScan)
 		{
-			ereport(DEBUG1, (errmsg("pathlist hook for columnar table am")));
-
 			/*
 			 * When columnar custom scan is enabled (columnar.enable_custom_scan),
 			 * we only consider ColumnarScanPath's & IndexPath's. For this reason,
@@ -367,7 +407,7 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 
 		/* disable index-only scan */
 		IndexOptInfo *indexOptInfo = NULL;
-		foreach_declared_ptr(indexOptInfo, rel->indexlist)
+		foreach_decl_ptr(indexOptInfo, rel->indexlist)
 		{
 			memset(indexOptInfo->canreturn, false, indexOptInfo->ncolumns * sizeof(bool));
 		}
@@ -383,9 +423,10 @@ static void
 RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 {
 	List *filteredPathList = NIL;
+	List *filteredPartialPathList = NIL;
 
 	Path *path = NULL;
-	foreach_declared_ptr(path, rel->pathlist)
+	foreach_decl_ptr(path, rel->pathlist)
 	{
 		if (!removePathPredicate(path))
 		{
@@ -394,6 +435,16 @@ RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 	}
 
 	rel->pathlist = filteredPathList;
+
+	foreach_decl_ptr(path, rel->partial_pathlist)
+	{
+		if (!removePathPredicate(path))
+		{
+			filteredPartialPathList = lappend(filteredPartialPathList, path);
+		}
+	}
+
+	rel->partial_pathlist = filteredPartialPathList;
 }
 
 
@@ -432,7 +483,7 @@ static void
 CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
 	Path *path = NULL;
-	foreach_declared_ptr(path, rel->pathlist)
+	foreach_decl_ptr(path, rel->pathlist)
 	{
 		if (IsA(path, IndexPath))
 		{
@@ -477,9 +528,13 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	 * instead of overwriting total cost, we "add" ours to the cost estimated
 	 * by indexAM since we should consider index traversal related costs too.
 	 */
-	Cost columnarIndexScanCost = ColumnarIndexScanAdditionalCost(root, rel, relationId,
-																 indexPath);
-	indexPath->path.total_cost += columnarIndexScanCost;
+	
+	if (!columnar_index_scan)
+	{
+		Cost columnarIndexScanCost = ColumnarIndexScanAdditionalCost(root, rel, relationId,
+																	indexPath);
+		indexPath->path.total_cost += columnarIndexScanCost;
+	}
 
 	ereport(DEBUG4, (errmsg("columnar table index scan costs re-estimated "
 							"by columnarAM (including indexAM costs): "
@@ -517,11 +572,6 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 				   &indexCorrelation, &fakeIndexPages);
 
 	Relation relation = RelationIdGetRelation(relationId);
-	if (!RelationIsValid(relation))
-	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
-	}
-
 	uint64 rowCount = ColumnarTableRowCount(relation);
 	RelationClose(relation);
 	double estimatedRows = rowCount * indexSelectivity;
@@ -548,7 +598,7 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 	 * "anti-correlated" (-1) since both help us avoiding from reading the
 	 * same stripe again and again.
 	 */
-	double absIndexCorrelation = fabs(indexCorrelation);
+	double absIndexCorrelation = Abs(indexCorrelation);
 
 	/*
 	 * To estimate the number of stripes that we need to read, we do linear
@@ -603,6 +653,7 @@ CostColumnarSeqPath(RelOptInfo *rel, Oid relationId, Path *path)
 	double stripesToRead = ColumnarTableStripeCount(relationId);
 	int numberOfColumnsRead = RelationIdGetNumberOfAttributes(relationId);
 
+	path->rows = rel->tuples;
 	path->startup_cost = 0;
 	path->total_cost = stripesToRead *
 					   ColumnarPerStripeScanCost(rel, relationId, numberOfColumnsRead);
@@ -617,11 +668,6 @@ static int
 RelationIdGetNumberOfAttributes(Oid relationId)
 {
 	Relation relation = RelationIdGetRelation(relationId);
-	if (!RelationIsValid(relation))
-	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
-	}
-
 	int nattrs = relation->rd_att->natts;
 	RelationClose(relation);
 	return nattrs;
@@ -667,7 +713,7 @@ CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation
 	 * If the Var is not highly correlated, then the chunk's min/max bounds
 	 * will be nearly useless.
 	 */
-	if (fabs(varCorrelation) < ColumnarQualPushdownCorrelationThreshold)
+	if (Abs(varCorrelation) < ColumnarQualPushdownCorrelationThreshold)
 	{
 		if (absVarCorrelation)
 		{
@@ -675,7 +721,7 @@ CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation
 			 * Report absVarCorrelation if caller wants to know why given
 			 * var is rejected.
 			 */
-			*absVarCorrelation = fabs(varCorrelation);
+			*absVarCorrelation = Abs(varCorrelation);
 		}
 		return false;
 	}
@@ -724,7 +770,7 @@ ExprReferencesRelid(Expr *expr, Index relid)
  * i)   AND_EXPR:
  *      Take pushdownable args of AND expressions by ignoring the other args.
  * ii)  OR_EXPR:
- *      Ignore the whole OR expression if we cannot exract a pushdownable Expr
+ *      Ignore the whole OR expression if we cannot extract a pushdownable Expr
  *      from one of its args.
  * iii) NOT_EXPR:
  *      Simply ignore NOT expressions since we don't expect to see them before
@@ -787,7 +833,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		List *pushdownableArgs = NIL;
 
 		Node *boolExprArg = NULL;
-		foreach_declared_ptr(boolExprArg, boolExpr->args)
+		foreach_decl_ptr(boolExprArg, boolExpr->args)
 		{
 			Expr *pushdownableArg = ExtractPushdownClause(root, rel,
 														  (Node *) boolExprArg);
@@ -814,7 +860,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 			ereport(ColumnarPlannerDebugLevel,
 					(errmsg("columnar planner: cannot push down clause: "
 							"none of the arguments were pushdownable, "
-							"due to the reason(s) given above ")));
+							"due to the reason(s) given above")));
 			return NULL;
 		}
 		else if (npushdownableArgs == 1)
@@ -833,18 +879,6 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		else
 		{
 			/* already discarded NOT expr, so should not be reachable */
-			return NULL;
-		}
-	}
-
-	if (IsA(node, ScalarArrayOpExpr))
-	{
-		if (!contain_volatile_functions(node))
-		{
-			return (Expr *) node;
-		}
-		else
-		{
 			return NULL;
 		}
 	}
@@ -1055,13 +1089,9 @@ FindCandidateRelids(PlannerInfo *root, RelOptInfo *rel, List *joinClauses)
 
 	candidateRelids = bms_del_members(candidateRelids, rel->relids);
 	candidateRelids = bms_del_members(candidateRelids, rel->lateral_relids);
-
-	/*
-	 * For the relevant PG16 commit requiring this addition:
-	 * postgres/postgres@2489d76
-	 */
+#if PG_VERSION_NUM >= PG_VERSION_16
 	candidateRelids = bms_del_members(candidateRelids, root->outer_join_rels);
-
+#endif
 	return candidateRelids;
 }
 
@@ -1206,7 +1236,55 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	check_stack_depth();
 
 	Assert(!bms_overlap(paramRelids, candidateRelids));
-	AddColumnarScanPath(root, rel, rte, paramRelids);
+
+	Path *columnarScanPath = AddColumnarScanPath(root, rel, rte, paramRelids);
+	add_path(rel, columnarScanPath);
+	if (columnar_enable_parallel_execution)
+		columnarScanPath->total_cost += columnarScanPath->rows * 0.1;
+
+	/* For columnar custom scan we should also do planning for parallel exeuction
+	 * if it is enabled with GUC.
+	 */
+	if (columnar_enable_parallel_execution)
+	{
+		int columnar_min_parallel_process_running = columnar_min_parallel_processes;
+
+		if (columnar_min_parallel_processes > max_parallel_workers)
+		{
+			elog(DEBUG1, "columnar.min_parallel_proceses is set higher than max_parallel_workers.");
+			elog(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
+			columnar_min_parallel_process_running = 
+				Min(max_parallel_workers, columnar_min_parallel_processes);
+		}
+
+		if (parallel_leader_participation)
+			columnar_min_parallel_process_running--;
+
+		/*
+		 * We know how many workers are we going to run. Since workers are using single stripe
+		 * probably it doesn't have much sense to spawn more workers than stripes in table.
+		 */
+		columnar_min_parallel_process_running = Min(columnar_min_parallel_process_running,
+													parallel_leader_participation ?
+													ColumnarTableStripeCount(rte->relid) - 1 :
+													ColumnarTableStripeCount(rte->relid));
+
+		if (rel->consider_parallel && rel->lateral_relids == NULL && 
+			columnar_min_parallel_process_running > 0)
+		{
+			/*
+			 * Passing NULL for JOIN quals in parallel execution.
+			 */
+			Path *parallelColumnarScanPath = 
+				AddColumnarScanPath(root, rel, rte, NULL);
+
+			parallelColumnarScanPath->parallel_workers = columnar_min_parallel_process_running;
+			parallelColumnarScanPath->parallel_aware = true;
+			AdjustColumnarParallelScanCost(parallelColumnarScanPath);
+
+			add_partial_path(rel, parallelColumnarScanPath);
+		}
+	}
 
 	/* recurse for all candidateRelids, unless we hit the depth limit */
 	Assert(depthLimit >= 0);
@@ -1303,6 +1381,66 @@ ContainsExecParams(Node *node, void *notUsed)
 	return expression_tree_walker(node, ContainsExecParams, NULL);
 }
 
+#if PG_VERSION_NUM >= PG_VERSION_16
+
+/*
+ * fixup_inherited_columns
+ *
+ * Exact function Copied from PG16 as it's static.
+ *
+ * When user is querying on a table with children, it implicitly accesses
+ * child tables also. So, we also need to check security label of child
+ * tables and columns, but there is no guarantee attribute numbers are
+ * same between the parent and children.
+ * It returns a bitmapset which contains attribute number of the child
+ * table based on the given bitmapset of the parent.
+ */
+static Bitmapset *
+fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
+{
+	Bitmapset *result = NULL;
+
+	/*
+	 * obviously, no need to do anything here
+	 */
+	if (parentId == childId)
+	{
+		return columns;
+	}
+
+	int index = -1;
+	while ((index = bms_next_member(columns, index)) >= 0)
+	{
+		/* bit numbers are offset by FirstLowInvalidHeapAttributeNumber */
+		AttrNumber attno = index + FirstLowInvalidHeapAttributeNumber;
+
+		/*
+		 * whole-row-reference shall be fixed-up later
+		 */
+		if (attno == InvalidAttrNumber)
+		{
+			result = bms_add_member(result, index);
+			continue;
+		}
+
+		char *attname = get_attname(parentId, attno, false);
+		attno = get_attnum(childId, attname);
+		if (attno == InvalidAttrNumber)
+		{
+			elog(ERROR, "cache lookup failed for attribute %s of relation %u",
+				 attname, childId);
+		}
+
+		result = bms_add_member(result,
+								attno - FirstLowInvalidHeapAttributeNumber);
+
+		pfree(attname);
+	}
+
+	return result;
+}
+#endif
+
 
 /*
  * Create and add a path with the given parameterization paramRelids.
@@ -1310,7 +1448,7 @@ ContainsExecParams(Node *node, void *notUsed)
  * XXX: Consider refactoring to be more like postgresGetForeignPaths(). The
  * only differences are param_info and custom_private.
  */
-static void
+static Path *
 AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 					Relids paramRelids)
 {
@@ -1322,9 +1460,6 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	CustomPath *cpath = makeNode(CustomPath);
 
 	cpath->methods = &ColumnarScanPathMethods;
-
-	/* necessary to avoid extra Result node in PG15 */
-	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 
 	/*
 	 * populate generic path information
@@ -1389,6 +1524,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	}
 
 	int numberOfColumnsRead = 0;
+#if PG_VERSION_NUM >= PG_VERSION_16
 	if (rte->perminfoindex > 0)
 	{
 		/*
@@ -1420,8 +1556,17 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 																	  perminfo->
 																	  selectedCols));
 	}
-
+#else
+	numberOfColumnsRead = bms_num_members(rte->selectedCols);
+#endif
 	int numberOfClausesPushed = list_length(allClauses);
+
+	/* Queries that contain only aggregate with STAR doesn't have any
+	 * selectedCols so we should consider at least one column that needs
+	 * read (for better cost calculation).
+	 */
+	if (numberOfColumnsRead == 0)
+		numberOfColumnsRead = 1;
 
 	CostColumnarScan(root, rel, rte->relid, cpath, numberOfColumnsRead,
 					 numberOfClausesPushed);
@@ -1436,65 +1581,36 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 					   ParameterizationAsString(root, paramRelids, &buf),
 					   numberOfClausesPushed)));
 
-	add_path(rel, path);
+	return path;
 }
 
 
 /*
- * fixup_inherited_columns
- *
- * Exact function Copied from PG16 as it's static.
- *
- * When user is querying on a table with children, it implicitly accesses
- * child tables also. So, we also need to check security label of child
- * tables and columns, but there is no guarantee attribute numbers are
- * same between the parent and children.
- * It returns a bitmapset which contains attribute number of the child
- * table based on the given bitmapset of the parent.
+ * AdjustColumnarParallelScanCost calculates path cost based on
+ * number of parallel workers (based on postgres code).
  */
-static Bitmapset *
-fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
+static void
+AdjustColumnarParallelScanCost(Path *path) 
 {
-	Bitmapset *result = NULL;
-
-	/*
-	 * obviously, no need to do anything here
-	 */
-	if (parentId == childId)
+	/* Adjust costing for parallelism, if used. */
+	if (path->parallel_workers > 0)
 	{
-		return columns;
-	}
+		double parallel_divisor = path->parallel_workers;
 
-	int index = -1;
-	while ((index = bms_next_member(columns, index)) >= 0)
-	{
-		/* bit numbers are offset by FirstLowInvalidHeapAttributeNumber */
-		AttrNumber attno = index + FirstLowInvalidHeapAttributeNumber;
-
-		/*
-		 * whole-row-reference shall be fixed-up later
-		 */
-		if (attno == InvalidAttrNumber)
+		if (parallel_leader_participation)
 		{
-			result = bms_add_member(result, index);
-			continue;
+			double leader_contribution;
+
+			leader_contribution = 1.0 - (0.3 * path->parallel_workers);
+			if (leader_contribution > 0)
+				parallel_divisor += leader_contribution;
 		}
 
-		char *attname = get_attname(parentId, attno, false);
-		attno = get_attnum(childId, attname);
-		if (attno == InvalidAttrNumber)
-		{
-			elog(ERROR, "cache lookup failed for attribute %s of relation %u",
-				 attname, childId);
-		}
+		/* The CPU cost is divided among all the workers. */
+		path->total_cost /= parallel_divisor;
 
-		result = bms_add_member(result,
-								attno - FirstLowInvalidHeapAttributeNumber);
-
-		pfree(attname);
+		path->rows = clamp_row_est(path->rows / parallel_divisor);
 	}
-
-	return result;
 }
 
 
@@ -1521,7 +1637,7 @@ CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	double stripesToRead = clauseSel * ColumnarTableStripeCount(relationId);
 	stripesToRead = Max(stripesToRead, 1.0);
 
-	path->rows = rel->rows;
+	path->rows = rel->tuples;
 	path->startup_cost = 0;
 	path->total_cost = stripesToRead *
 					   ColumnarPerStripeScanCost(rel, relationId, numberOfColumnsRead);
@@ -1537,18 +1653,13 @@ static Cost
 ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId, int numberOfColumnsRead)
 {
 	Relation relation = RelationIdGetRelation(relationId);
-	if (!RelationIsValid(relation))
-	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
-	}
-
-	List *stripeList = StripesForRelfilelocator(relation);
+	List *stripeList = StripesForRelfilenode(RelationPhysicalIdentifier_compat(relation), ForwardScanDirection);
 	RelationClose(relation);
 
 	uint32 maxColumnCount = 0;
 	uint64 totalStripeSize = 0;
 	StripeMetadata *stripeMetadata = NULL;
-	foreach_declared_ptr(stripeMetadata, stripeList)
+	foreach_decl_ptr(stripeMetadata, stripeList)
 	{
 		totalStripeSize += stripeMetadata->dataLength;
 		maxColumnCount = Max(maxColumnCount, stripeMetadata->columnCount);
@@ -1594,12 +1705,7 @@ static uint64
 ColumnarTableStripeCount(Oid relationId)
 {
 	Relation relation = RelationIdGetRelation(relationId);
-	if (!RelationIsValid(relation))
-	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
-	}
-
-	List *stripeList = StripesForRelfilelocator(relation);
+	List *stripeList = StripesForRelfilenode(RelationPhysicalIdentifier_compat(relation), ForwardScanDirection);
 	int stripeCount = list_length(stripeList);
 	RelationClose(relation);
 
@@ -1658,11 +1764,27 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
 
-#if (PG_VERSION_NUM >= 150000)
+	/*
+	 * Vectorized QUAL execution. Split QUAL list into vectorized list 
+	 * stored in third position of custom_exprs list and rest of
+	 * qual list (which can't be vectorized) in scan.plan.qual.
+	 */
+	if (columnar_enable_vectorization)
+	{
+		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
+		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);
 
-	/* necessary to avoid extra Result node in PG15 */
-	cscan->flags = CUSTOMPATH_SUPPORT_PROJECTION;
-#endif
+		cscan->custom_exprs = lappend(cscan->custom_exprs, listDifference);
+
+		if (listDifference != NULL)
+			cscan->scan.plan.qual = list_intersection(cscan->scan.plan.qual,
+													  candidateQualList);
+	}
+	else
+	{
+		/* We still need to create third entry in custom_exprs */
+		cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
+	}
 
 	return (Plan *) cscan;
 }
@@ -1800,6 +1922,86 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	columnarScanState->qual = (List *) EvalParamsMutator(
 		(Node *) plainClauses, columnarScanState->css_RuntimeContext);
 
+	/*
+	 * Third list in custom_exprs should contain vectorized qual list if not 
+	 * NULL.
+	 */
+	if (lthird(cscan->custom_exprs) != NIL)
+		columnarScanState->vectorization.vectorizedQualList =  lthird(cscan->custom_exprs);
+
+	ListCell *lc;
+	foreach(lc, cscan->custom_private)
+	{
+		Const *privateCustomData = lfirst(lc);
+		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
+		{
+			columnarScanState->vectorization.vectorizationAggregate =
+				privateCustomData->constvalue;
+		}
+	}
+
+	/*
+	 * Vectorization is enabled if global variable is set and there is at least one
+	 * filter which can be vectorized.
+	 */
+	columnarScanState->vectorization.vectorizationEnabled =
+		columnar_enable_vectorization &&
+		(columnarScanState->vectorization.vectorizedQualList != NULL ||
+		 columnarScanState->vectorization.vectorizationAggregate);
+
+	if (columnarScanState->vectorization.vectorizationAggregate)
+	{
+		ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
+
+		if (node->ps.ps_ProjInfo)
+		{
+			columnarScanState->vectorization.resultVectorSlot =
+				CreateVectorTupleTableSlot(node->ps.ps_ProjInfo->pi_state.resultslot->tts_tupleDescriptor);
+		}
+		else
+		{
+			columnarScanState->vectorization.resultVectorSlot =
+				CreateVectorTupleTableSlot(node->ps.ps_ResultTupleDesc);
+		}
+	}
+
+	if (columnarScanState->vectorization.vectorizationEnabled)
+	{
+		columnarScanState->vectorization.scanVectorSlot =
+			CreateVectorTupleTableSlot(cscanstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor);
+	}
+
+	columnarScanState->attrNeeded = 
+		ColumnarAttrNeeded(&cscanstate->ss, columnarScanState->vectorization.vectorizedQualList);
+
+	int bmsMember = -1;
+	while ((bmsMember = bms_next_member(columnarScanState->attrNeeded, bmsMember)) >= 0)
+	{
+		columnarScanState->vectorization.attrNeededList = 
+			lappend_int(columnarScanState->vectorization.attrNeededList, bmsMember);
+	}
+
+	/*
+	 * If we have pending changes that need to be flushed (row_mask after update/delete)
+	 * or new stripe we need to to them here because sequential columnar scan 
+	 * can have parallel execution and updated are not allowed in parallel mode.
+	 */
+	columnarScanState->snapshot = estate->es_snapshot;
+	columnarScanState->snapshotRegisteredByUs = false;
+#if PG_VERSION_NUM >= PG_VERSION_16
+	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
+#else
+	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_node.relNode;
+#endif
+
+	if(!IsInParallelMode())
+	{
+		RowMaskFlushWriteStateForRelfilenode(relationOid, GetCurrentSubTransactionId());
+
+		FlushWriteStateWithNewSnapshot(relationOid, &columnarScanState->snapshot,
+									   &columnarScanState->snapshotRegisteredByUs);
+	}
+
 	/* scan slot is already initialized */
 }
 
@@ -1810,8 +2012,8 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
  * Throws an error if finds a Var referencing to an attribute not supported
  * by ColumnarScan.
  */
-static Bitmapset *
-ColumnarAttrNeeded(ScanState *ss)
+Bitmapset *
+ColumnarAttrNeeded(ScanState *ss, List *customList)
 {
 	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
 	int natts = slot->tts_tupleDescriptor->natts;
@@ -1821,33 +2023,379 @@ ColumnarAttrNeeded(ScanState *ss)
 				PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
 	List *vars = list_concat(pull_var_clause((Node *) plan->targetlist, flags),
 							 pull_var_clause((Node *) plan->qual, flags));
+
+	if (customList != NULL)
+		vars = list_concat(vars, pull_var_clause((Node *)customList, flags));
+
 	ListCell *lc;
 
 	foreach(lc, vars)
 	{
 		Var *var = lfirst(lc);
 
-		if (var->varattno < 0)
+		/* 
+		 * We support following special variables with update / delete.
+		 */
+		if (var->varattno == SelfItemPointerAttributeNumber ||
+			var->varattno == TableOidAttributeNumber)
 		{
-			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg(
-								"UPDATE and CTID scans not supported for ColumnarScan")));
+			continue;
+		}
+		else if (var->varattno < SelfItemPointerAttributeNumber)
+		{
+			ereport(ERROR, 
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("MIN / MAX TransactionID or CommandID not supported for ColumnarScan")));
 		}
 
-		if (var->varattno == 0)
+		if (var->varattno == 0 )
 		{
-			elog(DEBUG1, "Need attribute: all");
-
 			/* all attributes are required, we don't need to add more so break*/
 			attr_needed = bms_add_range(attr_needed, 0, natts - 1);
 			break;
 		}
 
-		elog(DEBUG1, "Need attribute: %d", var->varattno);
 		attr_needed = bms_add_member(attr_needed, var->varattno - 1);
 	}
 
 	return attr_needed;
+}
+
+
+/*
+ * ExecScanFetch -- check interrupts & fetch next potential tuple
+ *
+ * This routine is concerned with substituting a test tuple if we are
+ * inside an EvalPlanQual recheck.  If we aren't, just execute
+ * the access method's next-tuple routine.
+ */
+static inline TupleTableSlot *
+ExecScanFetch(ScanState *node,
+			  ExecScanAccessMtd accessMtd,
+			  ExecScanRecheckMtd recheckMtd)
+{
+	EState	   *estate = node->ps.state;
+
+	CHECK_FOR_INTERRUPTS();
+
+	if (estate->es_epq_active != NULL)
+	{
+		EPQState   *epqstate = estate->es_epq_active;
+
+		/*
+		 * We are inside an EvalPlanQual recheck.  Return the test tuple if
+		 * one is available, after rechecking any access-method-specific
+		 * conditions.
+		 */
+		Index		scanrelid = ((Scan *) node->ps.plan)->scanrelid;
+
+		if (scanrelid == 0)
+		{
+			/*
+			 * This is a ForeignScan or CustomScan which has pushed down a
+			 * join to the remote side.  The recheck method is responsible not
+			 * only for rechecking the scan/join quals but also for storing
+			 * the correct tuple in the slot.
+			 */
+
+			TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+			if (!(*recheckMtd) (node, slot))
+				ExecClearTuple(slot);	/* would not be returned by scan */
+			return slot;
+		}
+		else if (epqstate->relsubs_done[scanrelid - 1])
+		{
+			/*
+			 * Return empty slot, as we already performed an EPQ substitution
+			 * for this relation.
+			 */
+
+			TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+			/* Return empty slot, as we already returned a tuple */
+			return ExecClearTuple(slot);
+		}
+		else if (epqstate->relsubs_slot[scanrelid - 1] != NULL)
+		{
+			/*
+			 * Return replacement tuple provided by the EPQ caller.
+			 */
+
+			TupleTableSlot *slot = epqstate->relsubs_slot[scanrelid - 1];
+
+			Assert(epqstate->relsubs_rowmark[scanrelid - 1] == NULL);
+
+			/* Mark to remember that we shouldn't return more */
+			epqstate->relsubs_done[scanrelid - 1] = true;
+
+			/* Return empty slot if we haven't got a test tuple */
+			if (TupIsNull(slot))
+				return NULL;
+
+			/* Check if it meets the access-method conditions */
+			if (!(*recheckMtd) (node, slot))
+				return ExecClearTuple(slot);	/* would not be returned by
+												 * scan */
+			return slot;
+		}
+		else if (epqstate->relsubs_rowmark[scanrelid - 1] != NULL)
+		{
+			/*
+			 * Fetch and return replacement tuple using a non-locking rowmark.
+			 */
+
+			TupleTableSlot *slot = node->ss_ScanTupleSlot;
+
+			/* Mark to remember that we shouldn't return more */
+			epqstate->relsubs_done[scanrelid - 1] = true;
+
+			if (!EvalPlanQualFetchRowMark(epqstate, scanrelid, slot))
+				return NULL;
+
+			/* Return empty slot if we haven't got a test tuple */
+			if (TupIsNull(slot))
+				return NULL;
+
+			/* Check if it meets the access-method conditions */
+			if (!(*recheckMtd) (node, slot))
+				return ExecClearTuple(slot);	/* would not be returned by
+												 * scan */
+			return slot;
+		}
+	}
+
+	/*
+	 * Run the node-type-specific access method function to get the next tuple
+	 */
+	return (*accessMtd) (node);
+}
+
+static TupleTableSlot *
+CustomExecScan(ColumnarScanState *columnarScanState,
+			   ExecScanAccessMtd accessMtd,
+			   ExecScanRecheckMtd recheckMtd)
+{
+	ExprContext *econtext;
+	ExprState  *qual;
+	ProjectionInfo *projInfo;
+
+	ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
+
+	/*
+	 * Fetch data from node
+	 */
+	qual = node->ps.qual;
+	projInfo = node->ps.ps_ProjInfo;
+	econtext = node->ps.ps_ExprContext;
+
+	/* interrupt checks are in ExecScanFetch */
+
+	/*
+	 * No qual to check and no projection to do and vectorization is not enabled,
+	 * just skip all the overhead and return the raw scan tuple.
+	 */
+	if (!qual && !projInfo && !columnarScanState->vectorization.vectorizationEnabled)
+	{
+		ResetExprContext(econtext);
+		return ExecScanFetch(node, accessMtd, recheckMtd);
+	}
+
+	/*
+	 * Reset per-tuple memory context to free any expression evaluation
+	 * storage allocated in the previous tuple cycle.
+	 */
+	ResetExprContext(econtext);
+	
+	uint resultVectorTupleSlotIdx = 0;
+
+	if (columnarScanState->vectorization.vectorizationAggregate)
+	{
+		ExecClearTuple(columnarScanState->vectorization.resultVectorSlot);
+		CleanupVectorSlot((VectorTupleTableSlot *)
+							columnarScanState->vectorization.resultVectorSlot);
+	}
+
+	/*
+	 * get a tuple from the access method.  Loop until we obtain a tuple that
+	 * passes the qualification.
+	 */
+	for (;;)
+	{
+		TupleTableSlot *slot = NULL;
+
+		if (columnarScanState->vectorization.vectorizationEnabled && 
+			columnarScanState->vectorization.vectorPendingRowNumber == 0 &&
+			resultVectorTupleSlotIdx > 0)
+		{
+			((VectorTupleTableSlot *) columnarScanState->vectorization.resultVectorSlot)->dimension = resultVectorTupleSlotIdx;
+			ExecStoreVirtualTuple(columnarScanState->vectorization.resultVectorSlot);
+			resultVectorTupleSlotIdx = 0;
+			return columnarScanState->vectorization.resultVectorSlot;
+		}
+
+		/*
+		 * No vectorizaion in place so fetch slot by slot.
+		 */
+		if (!columnarScanState->vectorization.vectorizationEnabled)
+		{
+			slot = ExecScanFetch(node, accessMtd, recheckMtd);
+
+			resultVectorTupleSlotIdx = 0;
+
+			/*
+			 * if the slot returned by the accessMtd contains NULL, then it means
+			 * there is nothing more to scan so we just return an empty slot,
+			 * being careful to use the projection result slot so it has correct
+			 * tupleDesc.
+			 */
+			if (TupIsNull(slot))
+			{
+				if (projInfo)
+					return ExecClearTuple(projInfo->pi_state.resultslot);
+				else
+					return slot;
+			}
+		}
+		/*
+		 * Get next tuple from vector tuple slot if vectorization exeuction is enabled
+		 * and if we exhausted previous vector.
+		 */
+		else if (columnarScanState->vectorization.vectorizationEnabled &&
+				 columnarScanState->vectorization.vectorPendingRowNumber == 0)
+		{
+			slot = ExecScanFetch(node, accessMtd, recheckMtd);
+
+			/*
+			 * if the slot returned by the accessMtd contains NULL, then it means
+			 * there is nothing more to scan so we just return an empty slot,
+			 * being careful to use the projection result slot so it has correct
+			 * tupleDesc.
+			 */
+			if (TupIsNull(slot))
+			{
+				if (projInfo)
+					return ExecClearTuple(projInfo->pi_state.resultslot);
+				else
+					return slot;
+			}
+
+			if (columnarScanState->vectorization.vectorizedQualList != NULL)
+			{
+
+				if (columnarScanState->vectorization.constructedVectorizedQualList == NULL)
+				{
+					columnarScanState->vectorization.constructedVectorizedQualList =
+						ConstructVectorizedQualList(slot, columnarScanState->vectorization.vectorizedQualList);
+				}
+
+				VectorTupleTableSlot *vectorSlot = (VectorTupleTableSlot *) slot;
+
+				bool *resultQual = 
+					ExecuteVectorizedQual(slot,
+										columnarScanState->vectorization.constructedVectorizedQualList,
+										AND_EXPR, econtext);
+
+				memcpy(vectorSlot->keep, resultQual, COLUMNAR_VECTOR_COLUMN_SIZE);
+			}
+			/*
+			 * No qual, no vectorized qual, no projection but we need to return vector
+			 * for vectorized aggregate
+			 */
+			else if (!qual && !projInfo && columnarScanState->vectorization.vectorizationAggregate)
+			{
+				columnarScanState->vectorization.vectorPendingRowNumber = 0;
+				return slot;
+			}
+		}
+
+		uint64 rowNumber = 0;
+
+		/*
+		 * Get next tuple from vector tuple slot if vectorization execution 
+		 * is enabled.
+		 */
+		if (columnarScanState->vectorization.vectorizationEnabled)
+		{
+			VectorTupleTableSlot *vectorSlot = 
+				(VectorTupleTableSlot *) columnarScanState->vectorization.scanVectorSlot;
+
+			bool rowFound = false;
+
+			while (columnarScanState->vectorization.vectorPendingRowNumber != 0 &&
+				   rowFound == false)
+			{
+				if (vectorSlot->keep[columnarScanState->vectorization.vectorRowIndex])
+				{
+					slot = columnarScanState->custom_scanstate.ss.ss_ScanTupleSlot;
+					ExecClearTuple(slot);
+					ExtractTupleFromVectorSlot(slot,
+											   vectorSlot,
+											   columnarScanState->vectorization.vectorRowIndex,
+											   columnarScanState->vectorization.attrNeededList);
+					
+					rowNumber = vectorSlot->rowNumber[columnarScanState->vectorization.vectorRowIndex];
+					if (!columnarScanState->vectorization.vectorizationAggregate)
+						slot->tts_tid = row_number_to_tid(rowNumber);
+					rowFound = true;
+				}
+				columnarScanState->vectorization.vectorPendingRowNumber--;
+				columnarScanState->vectorization.vectorRowIndex++;
+			}
+
+			if (rowFound == false)
+				continue;
+		}
+
+		/*
+		 * place the current tuple into the expr context
+		 */
+		econtext->ecxt_scantuple = slot;
+
+		/*
+		 * check that the current tuple satisfies the qual-clause
+		 *
+		 * check for non-null qual here to avoid a function call to ExecQual()
+		 * when the qual is null ... saves only a few cycles, but they add up
+		 * ...
+		 */
+		if (qual == NULL || ExecQual(qual, econtext))
+		{
+			/*
+			 * Found a satisfactory scan tuple.
+			 */
+			if (projInfo)
+			{
+				/*
+				 * Form a projection tuple, store it in the result tuple slot
+				 * and return it.
+				 */
+				slot = ExecProject(projInfo);
+			}
+
+			if (columnarScanState->vectorization.vectorizationAggregate)
+			{
+				WriteTupleToVectorSlot(slot,
+									  (VectorTupleTableSlot *) columnarScanState->vectorization.resultVectorSlot,
+									  resultVectorTupleSlotIdx);
+				((VectorTupleTableSlot *) 
+					columnarScanState->vectorization.resultVectorSlot)->rowNumber[resultVectorTupleSlotIdx] = rowNumber;
+				resultVectorTupleSlotIdx++;
+				continue;
+			}		
+			else
+			{
+				return slot;
+			}
+		}
+		else
+			InstrCountFiltered1(node, 1);
+
+		/*
+		 * Tuple fails qual, so free per-tuple memory and try again.
+		 */
+		ResetExprContext(econtext);
+	}
 }
 
 
@@ -1862,34 +2410,66 @@ ColumnarScanNext(ColumnarScanState *columnarScanState)
 	TableScanDesc scandesc = node->ss.ss_currentScanDesc;
 	EState *estate = node->ss.ps.state;
 	ScanDirection direction = estate->es_direction;
-	TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+	bool vectorizationEnabled = columnarScanState->vectorization.vectorizationEnabled;
+
+	TupleTableSlot *slot = NULL;
+
+	if (vectorizationEnabled)
+		slot = columnarScanState->vectorization.scanVectorSlot;
+	else
+		slot = node->ss.ss_ScanTupleSlot;
 
 	if (scandesc == NULL)
 	{
 		/* the columnar access method does not use the flags, they are specific to heap */
 		uint32 flags = 0;
-		Bitmapset *attr_needed = ColumnarAttrNeeded(&node->ss);
 
 		/*
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
 		scandesc = columnar_beginscan_extended(node->ss.ss_currentRelation,
-											   estate->es_snapshot,
-											   0, NULL, NULL, flags, attr_needed,
-											   columnarScanState->qual);
-		bms_free(attr_needed);
+											   columnarScanState->snapshot,
+											   0, NULL, NULL, flags,
+											   columnarScanState->attrNeeded,
+											   columnarScanState->qual,
+											   columnarScanState->parallelColumnarScan,
+											   vectorizationEnabled);
 
 		node->ss.ss_currentScanDesc = scandesc;
 	}
 
-	/*
-	 * get the next tuple from the table
+	/* 
+	* Cleanup vector tuple table slot when reading next chunk
 	 */
+	if (vectorizationEnabled)
+	{
+		VectorTupleTableSlot *vectorSlot = (VectorTupleTableSlot *) slot;
+		int attrIndex = -1;
+		foreach_decl_int(attrIndex, columnarScanState->vectorization.attrNeededList)
+		{
+			VectorColumn *column = (VectorColumn *) vectorSlot->tts.tts_values[attrIndex];
+			memset(column->isnull, true, COLUMNAR_VECTOR_COLUMN_SIZE);
+			column->dimension = 0;
+		}
+		vectorSlot->dimension = 0;
+	}
+
 	if (table_scan_getnextslot(scandesc, direction, slot))
 	{
+		/*
+		* Setup custom scan state for reading tuples directly from stored
+		* vector tuple table slot
+		*/
+		if (vectorizationEnabled)
+		{
+			columnarScanState->vectorization.vectorPendingRowNumber = 
+				((VectorTupleTableSlot *) slot)->dimension;
+			columnarScanState->vectorization.vectorRowIndex = 0;
+		}
 		return slot;
 	}
+
 	return NULL;
 }
 
@@ -1907,19 +2487,27 @@ ColumnarScanRecheck(ColumnarScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 ColumnarScan_ExecCustomScan(CustomScanState *node)
 {
-	return ExecScan(&node->ss,
-					(ExecScanAccessMtd) ColumnarScanNext,
-					(ExecScanRecheckMtd) ColumnarScanRecheck);
+	return CustomExecScan((ColumnarScanState *) node,
+						  (ExecScanAccessMtd) ColumnarScanNext,
+						  (ExecScanRecheckMtd) ColumnarScanRecheck);
 }
 
 
 static void
 ColumnarScan_EndCustomScan(CustomScanState *node)
 {
-	/*
-	 * get information from node
-	 */
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
+	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+
+	/*
+	 * Cleanup BMS of selected scan attributes
+	 */
+	bms_free(((ColumnarScanState *)node)->attrNeeded);
+
+	/*
+	 * Free the exprcontext
+	 */
+	ExecFreeExprContext(&node->ss.ps);
 
 	/*
 	 * clean out the tuple table
@@ -1936,6 +2524,12 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 	if (scanDesc != NULL)
 	{
 		table_endscan(scanDesc);
+	}
+
+	/* Unregister snapshot */
+	if (columnarScanState->snapshotRegisteredByUs)
+	{
+		UnregisterSnapshot(columnarScanState->snapshot);
 	}
 }
 
@@ -1996,6 +2590,138 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				NULL, ColumnarScanChunkGroupsFiltered(columnarScanDesc), es);
 		}
 	}
+
+	if (columnarScanState->vectorization.vectorizationEnabled &&
+		columnarScanState->vectorization.vectorizedQualList != NULL)
+	{
+		const char *vectorizedWhereClauses = ColumnarPushdownClausesStr(
+					context, columnarScanState->vectorization.vectorizedQualList);
+		ExplainPropertyText("Columnar Vectorized Filter", 
+							vectorizedWhereClauses, es);
+	}
+
+	if (columnar_enable_page_cache)
+	{
+		ColumnarCacheStatistics *statistics = ColumnarGetCacheStatistics();
+
+		ExplainPropertyUInteger(
+			"Cache Hits",
+			NULL,
+			statistics->hits,
+			es);
+
+		ExplainPropertyUInteger(
+			"Cache Misses",
+			NULL,
+			statistics->misses,
+			es);
+
+		ExplainPropertyUInteger(
+			"Cache Evictions",
+			NULL,
+			statistics->evictions,
+			es);
+
+		ExplainPropertyUInteger(
+			"Cache Writes",
+			NULL,
+			statistics->writes,
+			es);
+
+		ExplainPropertyUInteger(
+			"Cache Maximum Size",
+			NULL,
+			statistics->maximumCacheSize,
+			es);
+
+		ExplainPropertyUInteger(
+			"Cache Ending Size", 
+			NULL, 
+			statistics->endingCacheSize,
+			es);
+
+		ExplainPropertyUInteger(
+			"Total Cache Entries",
+			NULL,
+			statistics->entries,
+			es
+		);
+	}
+}
+
+
+/* Parallel Execution */
+
+static Size 
+Columnar_EstimateDSMCustomScan(CustomScanState *node,
+							   ParallelContext *pcxt)
+{
+	Size nbytes;
+
+	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+
+	nbytes = offsetof(ParallelColumnarScanData, snapshotData);
+	nbytes = add_size(nbytes, EstimateSnapshotSpace(columnarScanState->snapshot));
+	nbytes = MAXALIGN(nbytes);
+
+	return nbytes;
+}
+
+
+static void 
+Columnar_InitializeDSMCustomScan(CustomScanState *node,
+								 ParallelContext *pcxt,
+								 void *coordinate)
+{
+	ParallelColumnarScan pscan = (ParallelColumnarScan) coordinate;
+	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	
+	/* 
+	 * Serialize scan snapshot for workers so they see changes
+	 * if we have flushed stripe / row_mask during this scan.
+	 */
+	SerializeSnapshot(columnarScanState->snapshot, pscan->snapshotData);
+
+	/* Initialize parallel scan mutex */
+	SpinLockInit(&pscan->mutex);
+
+	/* Stripe numbers are starting from index 1 */
+	pg_atomic_init_u64(&pscan->nextStripeId, 1);
+
+	if(parallel_leader_participation)
+		columnarScanState->parallelColumnarScan = pscan;
+	else
+		columnarScanState->parallelColumnarScan = NULL;
+}
+
+
+static void 
+Columnar_ReinitializeDSMCustomScan(CustomScanState *node,
+								   ParallelContext *pcxt,
+								   void *coordinate)
+{
+	ParallelColumnarScan pscan = (ParallelColumnarScan) coordinate;
+	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+
+	/* Reset atomic nextStripeId to initial value */
+	pg_atomic_init_u64(&pscan->nextStripeId, 1);
+
+	if(parallel_leader_participation)
+		columnarScanState->parallelColumnarScan = pscan;
+	else
+		columnarScanState->parallelColumnarScan = NULL;
+}
+
+
+static void 
+Columnar_InitializeWorkerCustomScan(CustomScanState *node,
+									shm_toc *toc,
+									void *coordinate)
+{
+	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	ParallelColumnarScan pscan = (ParallelColumnarScan) coordinate;
+	columnarScanState->parallelColumnarScan = pscan;
+	columnarScanState->snapshot = RestoreSnapshot(pscan->snapshotData);
 }
 
 
@@ -2057,7 +2783,9 @@ ColumnarVarNeeded(ColumnarScanState *columnarScanState)
 
 	List *varList = NIL;
 
-	Bitmapset *neededAttrSet = ColumnarAttrNeeded(scanState);
+	Bitmapset *neededAttrSet =
+		ColumnarAttrNeeded(scanState, columnarScanState->vectorization.vectorizedQualList);
+
 	int bmsMember = -1;
 	while ((bmsMember = bms_next_member(neededAttrSet, bmsMember)) >= 0)
 	{
@@ -2110,6 +2838,8 @@ ColumnarVarNeeded(ColumnarScanState *columnarScanState)
 }
 
 
+#if PG_VERSION_NUM >= 130000
+
 /*
  * set_deparse_context_planstate is a compatibility wrapper for versions 13+.
  */
@@ -2119,3 +2849,6 @@ set_deparse_context_planstate(List *dpcontext, Node *node, List *ancestors)
 	PlanState *ps = (PlanState *) node;
 	return set_deparse_context_plan(dpcontext, ps->plan, ancestors);
 }
+
+
+#endif

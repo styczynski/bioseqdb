@@ -1,62 +1,74 @@
-#include <math.h>
+#include "citus_version.h"
 
 #include "postgres.h"
+#include "fmgr.h"
+
+#include <math.h>
 
 #include "miscadmin.h"
-#include "pgstat.h"
-#include "safe_lib.h"
 
-#include "access/detoast.h"
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/tableam.h"
 #include "access/tsmapi.h"
+#include "storage/lockdefs.h"
+#include "utils/palloc.h"
+#include "utils/snapmgr.h"
+#if PG_VERSION_NUM >= 130000
+#include "access/detoast.h"
+#else
+#include "access/tuptoaster.h"
+#endif
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
-#include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_am.h"
-#include "catalog/pg_extension.h"
 #include "catalog/pg_publication.h"
 #include "catalog/pg_trigger.h"
+#include "catalog/pg_extension.h"
 #include "catalog/storage.h"
 #include "catalog/storage_xlog.h"
-#include "commands/defrem.h"
-#include "commands/extension.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
+#include "commands/extension.h"
+#include "commands/trigger.h"
 #include "executor/executor.h"
+#include "funcapi.h"
 #include "nodes/makefuncs.h"
+#include "nodes/pg_list.h"
 #include "optimizer/plancat.h"
+#include "pgstat.h"
+#include "safe_lib.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
+#include "storage/proc.h"
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
-#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/pg_rusage.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
-
-#include "citus_version.h"
-#include "pg_version_compat.h"
-
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
+#include "columnar/columnar_metadata.h"
 #include "columnar/columnar_storage.h"
 #include "columnar/columnar_tableam.h"
 #include "columnar/columnar_version_compat.h"
+#include "columnar/utils/listutils.h"
 
-#include "utils/listutils.h"
+#include "columnar/vectorization/columnar_vector_types.h"
+#include "columnar/columnar_metadata.h"
 
 /*
  * Timing parameters for truncate locking heuristics.
@@ -82,6 +94,12 @@ typedef struct ColumnarScanDescData
 	MemoryContext scanContext;
 	Bitmapset *attr_needed;
 	List *scanQual;
+
+	/* Parallel Scan Data */
+	ParallelColumnarScan parallelColumnarScan;
+
+	/* Vectorization */
+	bool returnVectorizedTuple;
 } ColumnarScanDescData;
 
 
@@ -93,6 +111,9 @@ typedef struct IndexFetchColumnarData
 {
 	IndexFetchTableData cs_base;
 	ColumnarReadState *cs_readState;
+	Bitmapset *attr_needed;
+	List *stripeMetadataList;
+	bool is_select_query; /* CustomIndexScan only gets planned with SELECT query */
 
 	/*
 	 * We initialize cs_readState lazily in the first columnar_index_fetch_tuple
@@ -102,6 +123,9 @@ typedef struct IndexFetchColumnarData
 	 */
 	MemoryContext scanContext;
 } IndexFetchColumnarData;
+
+/* available to other extensions using find_rendezvous_variable() */
+static ColumnarTableSetOptions_hook_type ColumnarTableSetOptions_hook = NULL;
 
 static object_access_hook_type PrevObjectAccessHook = NULL;
 static ProcessUtility_hook_type PrevProcessUtilityHook = NULL;
@@ -113,25 +137,26 @@ static void ColumnarTriggerCreateHook(Oid tgid);
 static void ColumnarTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
 											Oid objectId, int subId,
 											void *arg);
-static RangeVar * ColumnarProcessAlterTable(AlterTableStmt *alterTableStmt,
-											List **columnarOptions);
 static void ColumnarProcessUtility(PlannedStmt *pstmt,
 								   const char *queryString,
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 								   bool readOnlyTree,
+#endif
 								   ProcessUtilityContext context,
 								   ParamListInfo params,
 								   struct QueryEnvironment *queryEnv,
 								   DestReceiver *dest,
-								   QueryCompletion *completionTag);
+								   QueryCompletionCompat *completionTag);
 static bool ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode,
-											   int timeout, int retryInterval);
+											   int timeout, int retryInterval,
+											   bool acquire);
 static List * NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed);
 static void LogRelationStats(Relation rel, int elevel);
 static void TruncateColumnar(Relation rel, int elevel);
+static bool TruncateAndCombineColumnarStripes(Relation rel, int elevel);
 static HeapTuple ColumnarSlotCopyHeapTuple(TupleTableSlot *slot);
 static void ColumnarCheckLogicalReplication(Relation rel);
 static Datum * detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull);
-static ItemPointerData row_number_to_tid(uint64 rowNumber);
 static uint64 tid_to_row_number(ItemPointerData tid);
 static void ErrorIfInvalidRowNumber(uint64 rowNumber);
 static void ColumnarReportTotalVirtualBlocks(Relation relation, Snapshot snapshot,
@@ -153,25 +178,12 @@ static void ColumnarReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexR
 static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort,
 														ItemPointer targetItemPointer);
 
-/* functions for CheckCitusColumnarVersion */
-static bool CheckAvailableVersionColumnar(int elevel);
-static bool CheckInstalledVersionColumnar(int elevel);
-static char * AvailableExtensionVersionColumnar(void);
-static char * InstalledExtensionVersionColumnar(void);
-static bool CitusColumnarHasBeenLoadedInternal(void);
-static bool CitusColumnarHasBeenLoaded(void);
-static bool CheckCitusColumnarVersion(int elevel);
-static bool MajorVersionsCompatibleColumnar(char *leftVersion, char *rightVersion);
-static bool MinorVersionsCompatibleRelaxedColumnar(char *leftVersion, char *rightVersion);
-static int ParseVersionComponent(const char *version, char **endPtr);
-
-/* global variables for CheckCitusColumnarVersion */
-static bool extensionLoadedColumnar = false;
-static bool EnableVersionChecksColumnar = true;
-static bool citusVersionKnownCompatibleColumnar = false;
 
 /* Custom tuple slot ops used for columnar. Initialized in columnar_tableam_init(). */
 static TupleTableSlotOps TTSOpsColumnar;
+
+/* Previous cache enabled state. */
+static bool previousCacheEnabledState = false;
 
 static const TupleTableSlotOps *
 columnar_slot_callbacks(Relation relation)
@@ -186,7 +198,7 @@ columnar_beginscan(Relation relation, Snapshot snapshot,
 				   ParallelTableScanDesc parallel_scan,
 				   uint32 flags)
 {
-	CheckCitusColumnarVersion(ERROR);
+	previousCacheEnabledState = columnar_enable_page_cache;
 
 	int natts = relation->rd_att->natts;
 
@@ -195,7 +207,9 @@ columnar_beginscan(Relation relation, Snapshot snapshot,
 
 	TableScanDesc scandesc = columnar_beginscan_extended(relation, snapshot, nkeys, key,
 														 parallel_scan,
-														 flags, attr_needed, NULL);
+														 flags, attr_needed, NULL,
+														 NULL,
+														 false);
 
 	bms_free(attr_needed);
 
@@ -207,11 +221,16 @@ TableScanDesc
 columnar_beginscan_extended(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
-							uint32 flags, Bitmapset *attr_needed, List *scanQual)
+							uint32 flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple)
 {
-	CheckCitusColumnarVersion(ERROR);
-	RelFileNumber relfilenumber = relation->rd_locator.relNumber;
-
+	previousCacheEnabledState = columnar_enable_page_cache;
+#if PG_VERSION_NUM >= PG_VERSION_16
+	Oid relfilelocator = relation->rd_locator.relNumber;
+#else
+	Oid relfilelocator = relation->rd_node.relNode;
+#endif
 	/*
 	 * A memory context to use for scan-wide data, including the lazily
 	 * initialized read state. We assume that beginscan is called in a
@@ -240,7 +259,13 @@ columnar_beginscan_extended(Relation relation, Snapshot snapshot,
 	scan->scanQual = copyObject(scanQual);
 	scan->scanContext = scanContext;
 
-	if (PendingWritesInUpperTransactions(relfilenumber, GetCurrentSubTransactionId()))
+	/* Parallel execution scan data */;
+	scan->parallelColumnarScan = parallelColumnarScan;
+
+	/* Vectorized result */
+	scan->returnVectorizedTuple = returnVectorizedTuple;
+
+	if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 	{
 		elog(ERROR,
 			 "cannot read from table when there is unflushed data in upper transactions");
@@ -250,7 +275,6 @@ columnar_beginscan_extended(Relation relation, Snapshot snapshot,
 
 	return ((TableScanDesc) scan);
 }
-
 
 /*
  * CreateColumnarScanMemoryContext creates a memory context to store
@@ -271,14 +295,16 @@ CreateColumnarScanMemoryContext(void)
 static ColumnarReadState *
 init_columnar_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_needed,
 						 List *scanQual, MemoryContext scanContext, Snapshot snapshot,
-						 bool randomAccess)
+						 bool randomAccess,
+						 ParallelColumnarScan parallelColumnarScan)
 {
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
 	List *neededColumnList = NeededColumnsList(tupdesc, attr_needed);
 	ColumnarReadState *readState = ColumnarBeginRead(relation, tupdesc, neededColumnList,
 													 scanQual, scanContext, snapshot,
-													 randomAccess);
+													 randomAccess,
+													 parallelColumnarScan);
 
 	MemoryContextSwitchTo(oldContext);
 
@@ -300,6 +326,16 @@ columnar_endscan(TableScanDesc sscan)
 	{
 		UnregisterSnapshot(scan->cs_base.rs_snapshot);
 	}
+
+	/* clean up any caches. */
+	if (columnar_enable_page_cache == true)
+	{
+		ColumnarResetCache();
+	}
+
+	MemoryContextDelete(scan->scanContext);
+
+	columnar_enable_page_cache = previousCacheEnabledState;
 }
 
 
@@ -334,23 +370,47 @@ columnar_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlo
 			init_columnar_read_state(scan->cs_base.rs_rd, slot->tts_tupleDescriptor,
 									 scan->attr_needed, scan->scanQual,
 									 scan->scanContext, scan->cs_base.rs_snapshot,
-									 randomAccess);
+									 randomAccess,
+									 scan->parallelColumnarScan);
 	}
 
 	ExecClearTuple(slot);
 
-	uint64 rowNumber;
-	bool nextRowFound = ColumnarReadNextRow(scan->cs_readState, slot->tts_values,
-											slot->tts_isnull, &rowNumber);
-
-	if (!nextRowFound)
+	if (scan->returnVectorizedTuple)
 	{
-		return false;
+		VectorTupleTableSlot * vectorTTS = (VectorTupleTableSlot *) slot;
+
+		int newVectorSize = 0;
+
+		bool nextRowFound = ColumnarReadNextVector(scan->cs_readState,
+												   vectorTTS->tts.tts_values,
+												   vectorTTS->tts.tts_isnull,
+												   vectorTTS->rowNumber,
+												   &newVectorSize);
+
+		if (!nextRowFound)
+			return false;
+
+		vectorTTS->dimension = newVectorSize;
+
+		memset(vectorTTS->keep, true, newVectorSize);
+
+		ExecStoreVirtualTuple(slot);
 	}
+	else
+	{
+		uint64 rowNumber;
+		bool nextRowFound = ColumnarReadNextRow(scan->cs_readState, slot->tts_values,
+												slot->tts_isnull, &rowNumber);
 
-	ExecStoreVirtualTuple(slot);
+		if (!nextRowFound)
+		{
+			return false;
+		}
 
-	slot->tts_tid = row_number_to_tid(rowNumber);
+		ExecStoreVirtualTuple(slot);
+		slot->tts_tid = row_number_to_tid(rowNumber);
+	}
 
 	return true;
 }
@@ -359,7 +419,7 @@ columnar_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlo
 /*
  * row_number_to_tid maps given rowNumber to ItemPointerData.
  */
-static ItemPointerData
+ItemPointerData
 row_number_to_tid(uint64 rowNumber)
 {
 	ErrorIfInvalidRowNumber(rowNumber);
@@ -434,10 +494,12 @@ columnar_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 static IndexFetchTableData *
 columnar_index_fetch_begin(Relation rel)
 {
-	CheckCitusColumnarVersion(ERROR);
-
-	RelFileNumber relfilenumber = rel->rd_locator.relNumber;
-	if (PendingWritesInUpperTransactions(relfilenumber, GetCurrentSubTransactionId()))
+#if PG_VERSION_NUM >= PG_VERSION_16
+	Oid relfilelocator = rel->rd_locator.relNumber;
+#else
+	Oid relfilelocator = rel->rd_node.relNode;
+#endif
+	if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
 		elog(ERROR, "cannot read from index when there is unflushed data in "
@@ -450,7 +512,41 @@ columnar_index_fetch_begin(Relation rel)
 	IndexFetchColumnarData *scan = palloc0(sizeof(IndexFetchColumnarData));
 	scan->cs_base.rel = rel;
 	scan->cs_readState = NULL;
+	scan->stripeMetadataList = NIL;
 	scan->scanContext = scanContext;
+	scan->is_select_query = false;
+
+	MemoryContextSwitchTo(oldContext);
+
+	return &scan->cs_base;
+}
+
+IndexFetchTableData *
+columnar_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
+{
+#if PG_VERSION_NUM >= PG_VERSION_16
+	Oid relfilenode = rel->rd_locator.relNumber;
+#else
+	Oid relfilenode = rel->rd_node.relNode;
+#endif
+	if (PendingWritesInUpperTransactions(relfilenode, GetCurrentSubTransactionId()))
+	{
+		/* XXX: maybe we can just flush the data and continue */
+		elog(ERROR, "cannot read from index when there is unflushed data in "
+					"upper transactions");
+	}
+
+	MemoryContext scanContext = CreateColumnarScanMemoryContext();
+	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
+
+	IndexFetchColumnarData *scan = palloc0(sizeof(IndexFetchColumnarData));
+	scan->cs_base.rel = rel;
+	scan->cs_readState = NULL;
+	scan->stripeMetadataList = NIL;
+	scan->scanContext = scanContext;
+
+	scan->attr_needed = bms_copy(attr_needed);
+	scan->is_select_query = true;
 
 	MemoryContextSwitchTo(oldContext);
 
@@ -476,6 +572,50 @@ columnar_index_fetch_end(IndexFetchTableData *sscan)
 		ColumnarEndRead(scan->cs_readState);
 		scan->cs_readState = NULL;
 	}
+
+	bms_free(scan->attr_needed);
+
+	/* clean up any caches. */
+	if (columnar_enable_page_cache == true)
+	{
+		ColumnarResetCache();
+	}
+
+	MemoryContextDelete(scan->scanContext);
+}
+
+static StripeMetadata *
+FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64 rowNumber)
+{
+	ListCell *lc = NULL;
+
+	int high = scan->stripeMetadataList->length - 1;
+	int low = 0;
+
+	while(low <= high)
+	{
+		int mid = low + (high - low) / 2;
+
+		lc = list_nth_cell(scan->stripeMetadataList, mid);
+
+		StripeMetadata *stripeMetadata = lc->ptr_value;
+
+		if (rowNumber >= stripeMetadata->firstRowNumber &&
+			rowNumber < stripeMetadata->firstRowNumber + stripeMetadata->rowCount)
+		{
+			return stripeMetadata;
+		}
+
+		if (stripeMetadata->firstRowNumber > rowNumber)
+		{
+			high = mid - 1;
+		}
+		else
+		{
+			low = mid + 1;
+		}
+	}
+	return NULL;
 }
 
 
@@ -509,24 +649,44 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 	/* initialize read state for the first row */
 	if (scan->cs_readState == NULL)
 	{
-		/* we need all columns */
-		int natts = columnarRelation->rd_att->natts;
-		Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
-
 		/* no quals for index scan */
 		List *scanQual = NIL;
+
+		if (bms_is_empty(scan->attr_needed))
+		{
+			/* we need all columns */
+			int natts = columnarRelation->rd_att->natts;
+			bms_free(scan->attr_needed);
+			scan->attr_needed = bms_add_range(NULL, 0, natts - 1);
+		}
 
 		bool randomAccess = true;
 		scan->cs_readState = init_columnar_read_state(columnarRelation,
 													  slot->tts_tupleDescriptor,
-													  attr_needed, scanQual,
+													  scan->attr_needed, scanQual,
 													  scan->scanContext,
-													  snapshot, randomAccess);
+													  snapshot, randomAccess,
+													  NULL);
+		if (scan->is_select_query)
+#if PG_VERSION_NUM >= PG_VERSION_16
+			scan->stripeMetadataList =
+				StripesForRelfilenode(columnarRelation->rd_locator, ForwardScanDirection);
+#else
+			scan->stripeMetadataList =
+				StripesForRelfilenode(columnarRelation->rd_node, ForwardScanDirection);
+#endif
+
 	}
 
 	uint64 rowNumber = tid_to_row_number(*tid);
-	StripeMetadata *stripeMetadata =
-		FindStripeWithMatchingFirstRowNumber(columnarRelation, rowNumber, snapshot);
+
+	StripeMetadata *stripeMetadata = NULL;
+	
+	if (scan->is_select_query)
+		stripeMetadata = FindStripeMetadataFromListBinarySearch(scan, rowNumber);
+	else
+		stripeMetadata = FindStripeWithMatchingFirstRowNumber(columnarRelation, rowNumber, snapshot);
+	
 	if (!stripeMetadata)
 	{
 		/* it is certain that tuple with rowNumber doesn't exist */
@@ -534,6 +694,7 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 	}
 
 	StripeWriteStateEnum stripeWriteState = StripeWriteState(stripeMetadata);
+
 	if (stripeWriteState == STRIPE_WRITE_FLUSHED &&
 		!ColumnarReadRowByRowNumber(scan->cs_readState, rowNumber,
 									slot->tts_values, slot->tts_isnull))
@@ -552,6 +713,7 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 		 * constraint violation. In that case, indexAM provides dirty
 		 * snapshot to index_fetch_tuple callback.
 		 */
+		pfree(stripeMetadata);
 		Assert(snapshot->snapshot_type == SNAPSHOT_DIRTY);
 		return false;
 	}
@@ -622,6 +784,8 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 		Assert(stripeWriteState == STRIPE_WRITE_FLUSHED);
 	}
 
+	if (!scan->is_select_query)
+		pfree(stripeMetadata);
 	slot->tts_tableOid = RelationGetRelid(columnarRelation);
 	slot->tts_tid = *tid;
 	ExecStoreVirtualTuple(slot);
@@ -636,7 +800,41 @@ columnar_fetch_row_version(Relation relation,
 						   Snapshot snapshot,
 						   TupleTableSlot *slot)
 {
-	elog(ERROR, "columnar_fetch_row_version not implemented");
+	uint64 rowNumber = tid_to_row_number(*tid);
+	ColumnarReadState **readState =
+		FindReadStateCache(relation, GetCurrentSubTransactionId());
+
+	if (readState == NULL)
+	{
+		readState = InitColumnarReadStateCache(relation, GetCurrentSubTransactionId());
+
+		int natts = relation->rd_att->natts;
+		Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+
+		List *scanQual = NIL;
+
+		bool randomAccess = false;
+
+		*readState = init_columnar_read_state(relation,
+											  slot->tts_tupleDescriptor,
+											  attr_needed, scanQual,
+											  GetColumnarReadStateCache(),
+											  snapshot, randomAccess,
+											  NULL);
+	}
+
+	MemoryContext oldContext = MemoryContextSwitchTo(GetColumnarReadStateCache());
+	ColumnarReadRowByRowNumber(*readState, rowNumber,
+							   slot->tts_values, slot->tts_isnull);
+	MemoryContextSwitchTo(oldContext);
+
+	slot->tts_tableOid = RelationGetRelid(relation);
+	slot->tts_tid = *tid;
+
+	if (TTS_EMPTY(slot))
+		ExecStoreVirtualTuple(slot);
+
+	return true;
 }
 
 
@@ -659,19 +857,19 @@ static bool
 columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 								  Snapshot snapshot)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	uint64 rowNumber = tid_to_row_number(slot->tts_tid);
 	StripeMetadata *stripeMetadata = FindStripeByRowNumber(rel, rowNumber, snapshot);
 	return stripeMetadata != NULL;
 }
 
 
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 static TransactionId
 columnar_index_delete_tuples(Relation rel,
 							 TM_IndexDeleteOp *delstate)
 {
-	CheckCitusColumnarVersion(ERROR);
+	previousCacheEnabledState = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
 
 	/*
 	 * XXX: We didn't bother implementing index_delete_tuple for neither of
@@ -715,11 +913,25 @@ columnar_index_delete_tuples(Relation rel,
 }
 
 
+#else
+static TransactionId
+columnar_compute_xid_horizon_for_tuples(Relation rel,
+										ItemPointerData *tids,
+										int nitems)
+{
+	elog(ERROR, "columnar_compute_xid_horizon_for_tuples not implemented");
+}
+
+
+#endif
+
+
 static void
 columnar_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 					  int options, BulkInsertState bistate)
 {
-	CheckCitusColumnarVersion(ERROR);
+	previousCacheEnabledState = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
 
 	/*
 	 * columnar_init_write_state allocates the write state in a longer
@@ -727,9 +939,8 @@ columnar_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 	 */
 	ColumnarWriteState *writeState = columnar_init_write_state(relation,
 															   RelationGetDescr(relation),
-															   slot->tts_tableOid,
+																 slot->tts_tableOid,
 															   GetCurrentSubTransactionId());
-
 	MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
 														 writeState));
 
@@ -745,6 +956,8 @@ columnar_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 	MemoryContextSwitchTo(oldContext);
 	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
+
+	pgstat_count_heap_insert(relation, 1);
 }
 
 
@@ -753,7 +966,44 @@ columnar_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 								  CommandId cid, int options,
 								  BulkInsertState bistate, uint32 specToken)
 {
-	elog(ERROR, "columnar_tuple_insert_speculative not implemented");
+	previousCacheEnabledState = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
+
+	/*
+	 * columnar_init_write_state allocates the write state in a longer
+	 * lasting context, so no need to worry about it.
+	 */
+	ColumnarWriteState *writeState = columnar_init_write_state(relation,
+															   RelationGetDescr(relation),
+																 slot->tts_tableOid,
+															   GetCurrentSubTransactionId());
+	MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
+														 writeState));
+
+	ColumnarCheckLogicalReplication(relation);
+
+	slot_getallattrs(slot);
+
+	Datum *values = detoast_values(slot->tts_tupleDescriptor,
+								   slot->tts_values, slot->tts_isnull);
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	uint64 storageId = LookupStorageId(relation->rd_locator);
+#else
+	uint64 storageId = LookupStorageId(relation->rd_node);
+#endif
+	uint64 writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
+#if PG_VERSION_NUM >= PG_VERSION_16
+	UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
+#else
+	UpdateRowMask(relation->rd_node, storageId,  NULL, writtenRowNumber);
+#endif
+	slot->tts_tid = row_number_to_tid(writtenRowNumber);
+
+	MemoryContextSwitchTo(oldContext);
+	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
+
+	pgstat_count_heap_insert(relation, 1);
 }
 
 
@@ -761,24 +1011,25 @@ static void
 columnar_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 									uint32 specToken, bool succeeded)
 {
-	elog(ERROR, "columnar_tuple_complete_speculative not implemented");
-}
+#if PG_VERSION_NUM >= PG_VERSION_16
+	uint64 storageId = LookupStorageId(relation->rd_locator);
+#else
+	uint64 storageId = LookupStorageId(relation->rd_node);
+#endif
+	/* Set lock for relation until transaction ends */
+	DirectFunctionCall1(pg_advisory_xact_lock_int8,
+						Int64GetDatum((int64) storageId));
 
+	columnar_enable_page_cache = previousCacheEnabledState;
+}
 
 static void
 columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 					  CommandId cid, int options, BulkInsertState bistate)
 {
-	CheckCitusColumnarVersion(ERROR);
-
-	/*
-	 * The callback to .multi_insert is table_multi_insert() and this is only used for the COPY
-	 * command, so slot[i]->tts_tableoid will always be equal to relation->id. Thus, we can send
-	 * RelationGetRelid(relation) as the tupSlotTableOid
-	 */
 	ColumnarWriteState *writeState = columnar_init_write_state(relation,
 															   RelationGetDescr(relation),
-															   RelationGetRelid(relation),
+																 slots[0]->tts_tableOid,
 															   GetCurrentSubTransactionId());
 
 	ColumnarCheckLogicalReplication(relation);
@@ -797,12 +1048,41 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		uint64 writtenRowNumber = ColumnarWriteRow(writeState, values,
 												   tupleSlot->tts_isnull);
+
+		EState *estate = create_estate_for_relation(relation);
+
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
+		ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
+		InitResultRelInfo(resultRelInfo, relation, 1, NULL, 0);
+#else
+		ResultRelInfo *resultRelInfo = estate->es_result_relation_info;
+#endif
+
+		ExecOpenIndices(resultRelInfo, false);
+
+		if (relation->rd_att->constr)
+			ExecConstraints(resultRelInfo, tupleSlot, estate);
+
+		ExecCloseIndices(resultRelInfo);
+
+		AfterTriggerEndQuery(estate);
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
+		ExecCloseResultRelations(estate);
+		ExecCloseRangeTableRelations(estate);
+#else
+		ExecCleanUpTriggerState(estate);
+#endif
+		ExecResetTupleTable(estate->es_tupleTable, false);
+		FreeExecutorState(estate);
+
 		tupleSlot->tts_tid = row_number_to_tid(writtenRowNumber);
 
-		MemoryContextReset(ColumnarWritePerTupleContext(writeState));
+		MemoryContextResetAndDeleteChildren(ColumnarWritePerTupleContext(writeState));
 	}
 
 	MemoryContextSwitchTo(oldContext);
+
+	pgstat_count_heap_insert(relation, ntuples);
 }
 
 
@@ -811,17 +1091,73 @@ columnar_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 					  Snapshot snapshot, Snapshot crosscheck, bool wait,
 					  TM_FailureData *tmfd, bool changingPart)
 {
-	elog(ERROR, "columnar_tuple_delete not implemented");
+	uint64 rowNumber = tid_to_row_number(*tid);
+#if PG_VERSION_NUM >= PG_VERSION_16
+	uint64 storageId = LookupStorageId(relation->rd_locator);
+#else
+	uint64 storageId = LookupStorageId(relation->rd_node);
+#endif
+	/* Set lock for relation until transaction ends */
+	DirectFunctionCall1(pg_advisory_xact_lock_int8,
+						Int64GetDatum((int64) storageId));
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	if (!UpdateRowMask(relation->rd_locator, storageId,  snapshot, rowNumber))
+#else
+	if (!UpdateRowMask(relation->rd_node, storageId,  snapshot, rowNumber))
+#endif
+		return TM_Deleted;
+
+	pgstat_count_heap_delete(relation);
+
+	return TM_Ok;
 }
 
 
+#if PG_VERSION_NUM >= PG_VERSION_16
 static TM_Result
 columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 					  bool wait, TM_FailureData *tmfd,
 					  LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
+#else
+static TM_Result
+columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
+					  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
+					  bool wait, TM_FailureData *tmfd,
+					  LockTupleMode *lockmode, bool *update_indexes)
+#endif
 {
-	elog(ERROR, "columnar_tuple_update not implemented");
+
+	
+	uint64 rowNumber = tid_to_row_number(*otid);
+#if PG_VERSION_NUM >= PG_VERSION_16
+	uint64 storageId = LookupStorageId(relation->rd_locator);
+#else
+	uint64 storageId = LookupStorageId(relation->rd_node);
+#endif
+
+	/* Set lock for relation until transaction ends */
+	DirectFunctionCall1(pg_advisory_xact_lock_int8,
+						Int64GetDatum((int64) storageId));
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	if (!UpdateRowMask(relation->rd_locator, storageId, snapshot, rowNumber))
+#else
+	if (!UpdateRowMask(relation->rd_node, storageId, snapshot, rowNumber))
+#endif
+		return TM_Deleted;
+
+	columnar_tuple_insert(relation, slot, cid, 0, NULL);
+
+	*update_indexes = true;
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	pgstat_count_heap_update(relation, false, false);
+#else
+	pgstat_count_heap_update(relation, false);
+#endif
+	return TM_Ok;
 }
 
 
@@ -831,7 +1167,35 @@ columnar_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 					LockWaitPolicy wait_policy, uint8 flags,
 					TM_FailureData *tmfd)
 {
-	elog(ERROR, "columnar_tuple_lock not implemented");
+	uint64 rowNumber = tid_to_row_number(*tid);
+	ColumnarReadState *readState = NULL;
+
+	int natts = relation->rd_att->natts;
+	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+
+	List *scanQual = NIL;
+
+	bool randomAccess = true;
+
+	readState = init_columnar_read_state(relation,
+										slot->tts_tupleDescriptor,
+										attr_needed, scanQual,
+										CurrentMemoryContext, // to be checked
+										GetTransactionSnapshot(), randomAccess,
+										NULL);
+
+	ColumnarReadRowByRowNumber(readState, rowNumber,
+							   slot->tts_values, slot->tts_isnull);
+
+	slot->tts_tableOid = RelationGetRelid(relation);
+	slot->tts_tid = *tid;
+
+	if (TTS_EMPTY(slot))
+	{
+		ExecStoreVirtualTuple(slot);
+	}
+
+	return TM_Ok;
 }
 
 
@@ -845,14 +1209,12 @@ columnar_finish_bulk_insert(Relation relation, int options)
 
 
 static void
-columnar_relation_set_new_filelocator(Relation rel,
-									  const RelFileLocator *newrlocator,
-									  char persistence,
-									  TransactionId *freezeXid,
-									  MultiXactId *minmulti)
+columnar_relation_set_new_filenode(Relation rel,
+								   const RelFileLocator *newrnode,
+								   char persistence,
+								   TransactionId *freezeXid,
+								   MultiXactId *minmulti)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	if (persistence == RELPERSISTENCE_UNLOGGED)
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -860,22 +1222,33 @@ columnar_relation_set_new_filelocator(Relation rel,
 	}
 
 	/*
-	 * If existing and new relfilenode are different, that means the existing
+	 * If existing and new relfilelocator are different, that means the existing
 	 * storage was dropped and we also need to clean up the metadata and
 	 * state. If they are equal, this is a new relation object and we don't
 	 * need to clean anything.
 	 */
-	if (rel->rd_locator.relNumber != newrlocator->relNumber)
+#if PG_VERSION_NUM >= PG_VERSION_16
+	if (rel->rd_locator.relNumber != newrnode->relNumber)
 	{
-		MarkRelfilenumberDropped(rel->rd_locator.relNumber,
-								 GetCurrentSubTransactionId());
+		MarkRelfilenodeDropped(rel->rd_locator.relNumber, GetCurrentSubTransactionId());
 
-		DeleteMetadataRows(rel);
+		DeleteMetadataRows(rel->rd_locator);
 	}
+#else
+	if (rel->rd_node.relNode != newrnode->relNode)
+	{
+		MarkRelfilenodeDropped(rel->rd_node.relNode, GetCurrentSubTransactionId());
 
+		DeleteMetadataRows(rel->rd_node);
+	}
+#endif
 	*freezeXid = RecentXmin;
 	*minmulti = GetOldestMultiXactId();
-	SMgrRelation srel = RelationCreateStorage(*newrlocator, persistence, true);
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
+	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
+#else
+	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence);
+#endif
 
 	ColumnarStorageInit(srel, ColumnarMetadataNewStorageId());
 	InitColumnarOptions(rel->rd_id);
@@ -889,16 +1262,20 @@ columnar_relation_set_new_filelocator(Relation rel,
 static void
 columnar_relation_nontransactional_truncate(Relation rel)
 {
-	CheckCitusColumnarVersion(ERROR);
+#if PG_VERSION_NUM >= PG_VERSION_16
 	RelFileLocator relfilelocator = rel->rd_locator;
 
 	NonTransactionDropWriteState(relfilelocator.relNumber);
+#else
+	RelFileLocator relfilelocator = rel->rd_node;
 
-	/* Delete old relfilenode metadata */
-	DeleteMetadataRows(rel);
+	NonTransactionDropWriteState(relfilelocator.relNode);
+#endif
+	/* Delete old relfilelocator metadata */
+	DeleteMetadataRows(relfilelocator);
 
 	/*
-	 * No need to set new relfilenode, since the table was created in this
+	 * No need to set new relfilelocator, since the table was created in this
 	 * transaction and no other transaction can see this relation yet. We
 	 * can just truncate the relation.
 	 *
@@ -907,6 +1284,7 @@ columnar_relation_nontransactional_truncate(Relation rel)
 	RelationTruncate(rel, 0);
 
 	uint64 storageId = ColumnarMetadataNewStorageId();
+
 	ColumnarStorageInit(RelationGetSmgr(rel), storageId);
 }
 
@@ -914,7 +1292,45 @@ columnar_relation_nontransactional_truncate(Relation rel)
 static void
 columnar_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 {
-	elog(ERROR, "columnar_relation_copy_data not implemented");
+	char persistence = rel->rd_rel->relpersistence;
+
+	/*
+	 * Since we copy the file directly without looking at the shared buffers,
+	 * we'd better first flush out any pages of the source relation that are
+	 * in shared buffers.  We assume on new changes will be made while we are
+	 * holding exclusive lock on the rel.
+	 */
+	FlushRelationBuffers(rel);
+
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
+	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
+#else
+	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence);
+#endif
+
+	/* copy main fork */
+	RelationCopyStorage(RelationGetSmgr(rel), srel, MAIN_FORKNUM, persistence);
+
+	for (ForkNumber forkNum = MAIN_FORKNUM + 1;
+		forkNum <= MAX_FORKNUM; forkNum++)
+	{
+		if (smgrexists(srel, forkNum))
+		{
+			smgrcreate(srel, forkNum, false);
+
+			/*
+			 * WAL log creation if the relation is persistent, or
+			 * this is the init fork of an unlogged relation.
+			 */
+			if (RelationIsPermanent(rel) ||
+				(persistence == RELPERSISTENCE_UNLOGGED &&
+				forkNum == INIT_FORKNUM))
+				log_smgrcreate(newrnode, forkNum);
+
+			RelationCopyStorage(RelationGetSmgr(rel), srel,
+						forkNum, persistence);
+		}
+	}
 }
 
 
@@ -935,8 +1351,6 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								   double *tups_vacuumed,
 								   double *tups_recently_dead)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	TupleDesc sourceDesc = RelationGetDescr(OldHeap);
 	TupleDesc targetDesc = RelationGetDescr(NewHeap);
 
@@ -954,14 +1368,19 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 */
 	Assert(sourceDesc->natts == targetDesc->natts);
 
-	/* read settings from old heap, relfilenode will be swapped at the end */
+	/* read settings from old heap, relfilelocator will be swapped at the end */
 	ColumnarOptions columnarOptions = { 0 };
 	ReadColumnarOptions(OldHeap->rd_id, &columnarOptions);
 
-	ColumnarWriteState *writeState = ColumnarBeginWrite(NewHeap,
+#if PG_VERSION_NUM >= PG_VERSION_16
+	ColumnarWriteState *writeState = ColumnarBeginWrite(NewHeap->rd_locator,
 														columnarOptions,
 														targetDesc);
-
+#else
+	ColumnarWriteState *writeState = ColumnarBeginWrite(NewHeap->rd_node,
+														columnarOptions,
+														targetDesc);
+#endif
 	/* we need all columns */
 	int natts = OldHeap->rd_att->natts;
 	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
@@ -977,7 +1396,8 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	ColumnarReadState *readState = init_columnar_read_state(OldHeap, sourceDesc,
 															attr_needed, scanQual,
 															scanContext, snapshot,
-															randomAccess);
+															randomAccess,
+															NULL);
 
 	Datum *values = palloc0(sourceDesc->natts * sizeof(Datum));
 	bool *nulls = palloc0(sourceDesc->natts * sizeof(bool));
@@ -995,6 +1415,7 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	ColumnarEndWrite(writeState);
 	ColumnarEndRead(readState);
+	MemoryContextDelete(scanContext);
 }
 
 
@@ -1009,7 +1430,7 @@ NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed)
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
-		if (TupleDescAttr(tupdesc, i)->attisdropped)
+		if (tupdesc->attrs[i].attisdropped)
 		{
 			continue;
 		}
@@ -1025,6 +1446,207 @@ NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed)
 	return columnList;
 }
 
+/*
+ * TruncateAndCombineColumnarStripes will combine last n stripes so they can fit
+ * maximum number of rows per stripe. Stripes that are going to be combined are deleted
+ * and new stripe will be written at the end of untouched last stripe. We also include
+ * information about deleted rows for this implementation.
+ */
+static bool
+TruncateAndCombineColumnarStripes(Relation rel, int elevel)
+{
+	uint64 totalRowNumberCount = 0;
+	uint32 startingStripeListPosition = 0;
+
+	TupleDesc tupleDesc = RelationGetDescr(rel);
+
+	if (tupleDesc->natts == 0)
+	{
+		ereport(elevel,
+				(errmsg("\"%s\": stopping vacuum due to zero column table",
+						RelationGetRelationName(rel))));
+		return false;
+	}
+
+	/* Get current columnar options */
+	ColumnarOptions columnarOptions = { 0 };
+	ReadColumnarOptions(rel->rd_id, &columnarOptions);
+
+	/* Get all stripes in reverse order */
+#if PG_VERSION_NUM >= PG_VERSION_16
+	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, BackwardScanDirection);
+#else
+	List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, BackwardScanDirection);
+#endif
+	/* Empty table nothing to do */
+	if (stripeMetadataList == NIL)
+	{
+		ereport(elevel,
+				(errmsg("\"%s\": stopping vacuum due to empty table",
+						RelationGetRelationName(rel))));
+		return false;
+	}
+
+	ListCell *lc = NULL;
+
+	uint32 lastStripeDeletedRows = 0;
+
+	Size totalDecompressedStripeLength = 0;
+
+	foreach(lc, stripeMetadataList)
+	{
+		StripeMetadata * stripeMetadata = lfirst(lc);
+#if PG_VERSION_NUM >= PG_VERSION_16
+		lastStripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
+													 stripeMetadata->chunkCount,
+													 stripeMetadata->id);
+		totalDecompressedStripeLength += 
+			DecompressedLengthForStripe(rel->rd_locator, stripeMetadata->id);
+#else
+		lastStripeDeletedRows = DeletedRowsForStripe(rel->rd_node,
+													 stripeMetadata->chunkCount,
+													 stripeMetadata->id);
+		totalDecompressedStripeLength += 
+			DecompressedLengthForStripe(rel->rd_node, stripeMetadata->id);
+#endif
+
+		if (totalDecompressedStripeLength >= 1024000000)
+		{
+			break;
+		}
+
+		uint64 stripeRowCount = stripeMetadata->rowCount - lastStripeDeletedRows;
+
+		if ((totalRowNumberCount + stripeRowCount >= columnarOptions.stripeRowCount))
+		{
+			break;
+		}
+
+		totalRowNumberCount += stripeRowCount;
+		startingStripeListPosition++;
+	}
+
+	/*
+	 * One stripe that is "full" so do nothing.
+	 */
+	if (startingStripeListPosition == 0)
+	{
+		return false;
+	}
+
+	/*
+	 * There is only one stripe that is candidate. Maybe we should vacuum
+	 * it if condition is met.
+	 */
+	else if (startingStripeListPosition == 1)
+	{
+		/* Maybe we should vacuum only one stripe if count of
+		 * deleted rows is higher than 20 percent.
+		 */
+		float percentageOfDeleteRows =
+			(float)lastStripeDeletedRows / (float)(totalRowNumberCount + lastStripeDeletedRows);
+
+		bool shouldVacuumOnlyStripe = percentageOfDeleteRows > 0.2f;
+
+		if (!shouldVacuumOnlyStripe)
+		{
+			return false;
+		}
+	}
+
+	/*
+	 * We need to clear current proces (VACUUUM) status flag here. Why?
+	 * Current process has flag `PROC_IN_VACUUM` which is problematic because
+	 * we write here into metadata heap tables. If concurrent process
+	 * read page in which we inserted metadata tuples these tuples will be considered
+	 * DEAD and will be removed (in problematic scenarion).
+	 * Concurrent process, when assigning RecentXmin will scan all active processes in
+	 * system but will NOT consider this process because of
+	 * `PROC_IN_VACUUM` flag set. It looks that invalidating status flag here doesn't affect
+	 * further execution.
+	 */
+
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
+	MyProc->statusFlags = 0;
+	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+#else
+	MyPgXact->vacuumFlags = 0;
+#endif
+	LWLockRelease(ProcArrayLock);
+
+	/* We need to re-assing RecentXmin here */
+	PushActiveSnapshot(GetTransactionSnapshot());
+#if PG_VERSION_NUM >= PG_VERSION_16
+	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_locator,
+														columnarOptions,
+														tupleDesc);
+#else
+	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_node,
+														columnarOptions,
+														tupleDesc);
+#endif
+
+	/* we need all columns */
+	int natts = rel->rd_att->natts;
+	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+
+	/* no quals for table rewrite */
+	List *scanQual = NIL;
+
+	MemoryContext scanContext = CreateColumnarScanMemoryContext();
+	bool randomAccess = true;
+	ColumnarReadState *readState = init_columnar_read_state(rel, tupleDesc,
+															attr_needed, scanQual,
+															scanContext, SnapshotAny,
+															randomAccess,
+															NULL);
+
+	ColumnarSetStripeReadState(readState,
+							   list_nth(stripeMetadataList, startingStripeListPosition - 1));
+
+	Datum *values = palloc0(tupleDesc->natts * sizeof(Datum));
+	bool *nulls = palloc0(tupleDesc->natts * sizeof(bool));
+
+	/* we don't need to know rowNumber here */
+	while (ColumnarReadNextRow(readState, values, nulls, NULL))
+	{
+		ColumnarWriteRow(writeState, values, nulls);
+	}
+
+	uint64 newDataReservation;
+
+	if (list_length(stripeMetadataList) > startingStripeListPosition)
+	{
+		StripeMetadata *mtd = list_nth(stripeMetadataList, startingStripeListPosition);
+		newDataReservation = mtd->fileOffset + mtd->dataLength - 1;
+	}
+	else
+	{
+		StripeMetadata *mtd = list_nth(stripeMetadataList, startingStripeListPosition - 1);
+		newDataReservation = mtd->fileOffset;
+	}
+
+	ColumnarStorageTruncate(rel, newDataReservation);
+
+	ColumnarEndWrite(writeState);
+	ColumnarEndRead(readState);
+	MemoryContextDelete(scanContext);
+
+	for (int i = 0; i < startingStripeListPosition; i++)
+	{
+		StripeMetadata *metadata = list_nth(stripeMetadataList, i);
+#if PG_VERSION_NUM >= PG_VERSION_16
+		DeleteMetadataRowsForStripeId(rel->rd_locator, metadata->id);
+#else
+		DeleteMetadataRowsForStripeId(rel->rd_node, metadata->id);
+#endif
+	}
+
+	PopActiveSnapshot();
+
+	return true;
+}
 
 /*
  * ColumnarTableTupleCount returns the number of tuples that columnar
@@ -1033,7 +1655,11 @@ NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed)
 static uint64
 ColumnarTableTupleCount(Relation relation)
 {
-	List *stripeList = StripesForRelfilelocator(relation);
+#if PG_VERSION_NUM >= PG_VERSION_16
+	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
+#else
+	List *stripeList = StripesForRelfilenode(relation->rd_node, ForwardScanDirection);
+#endif
 	uint64 tupleCount = 0;
 
 	ListCell *lc = NULL;
@@ -1046,7 +1672,6 @@ ColumnarTableTupleCount(Relation relation)
 	return tupleCount;
 }
 
-
 /*
  * columnar_vacuum_rel implements VACUUM without FULL option.
  */
@@ -1054,17 +1679,12 @@ static void
 columnar_vacuum_rel(Relation rel, VacuumParams *params,
 					BufferAccessStrategy bstrategy)
 {
-	if (!CheckCitusColumnarVersion(WARNING))
-	{
-		/*
-		 * Skip if the extension catalogs are not up-to-date, but avoid
-		 * erroring during auto-vacuum.
-		 */
-		return;
-	}
+	/* Capture the cache state and disable it for a vacuum. */
+	bool old_cache_mode = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
-								  RelationGetRelid(rel));
+ 									RelationGetRelid(rel));
 
 	/*
 	 * If metapage version of relation is older, then we hint users to VACUUM
@@ -1079,7 +1699,10 @@ columnar_vacuum_rel(Relation rel, VacuumParams *params,
 	/* this should have been resolved by vacuum.c until now */
 	Assert(params->truncate != VACOPTVALUE_UNSPECIFIED);
 
-	LogRelationStats(rel, elevel);
+	if (params->options & VACOPT_VERBOSE)
+	{
+		LogRelationStats(rel, elevel);
+	}
 
 	/*
 	 * We don't have updates, deletes, or concurrent updates, so all we
@@ -1096,6 +1719,7 @@ columnar_vacuum_rel(Relation rel, VacuumParams *params,
 	List *indexList = RelationGetIndexList(rel);
 	int nindexes = list_length(indexList);
 
+#if PG_VERSION_NUM >= PG_VERSION_16
 	struct VacuumCutoffs cutoffs;
 	vacuum_get_cutoffs(rel, params, &cutoffs);
 
@@ -1116,41 +1740,81 @@ columnar_vacuum_rel(Relation rel, VacuumParams *params,
 	bool frozenxid_updated;
 	bool minmulti_updated;
 
-/* for PG 18+, vac_update_relstats gained a new “all_frozen” param */
-#if PG_VERSION_NUM >= PG_VERSION_18
-
-	/* all frozen pages are always 0, because columnar stripes never store XIDs */
-	BlockNumber new_rel_allfrozen = 0;
-
-	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
-						new_rel_allvisible,  /* allvisible */
-						new_rel_allfrozen,   /* all_frozen */
-						nindexes > 0,
-						newRelFrozenXid, newRelminMxid,
-						&frozenxid_updated, &minmulti_updated,
-						false);
-#else
 	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
 						new_rel_allvisible, nindexes > 0,
 						newRelFrozenXid, newRelminMxid,
-						&frozenxid_updated, &minmulti_updated,
-						false);
-#endif
+						&frozenxid_updated, &minmulti_updated, false);
 
-#if PG_VERSION_NUM >= PG_VERSION_18
-	pgstat_report_vacuum(RelationGetRelid(rel),
-						 rel->rd_rel->relisshared,
-						 Max(new_live_tuples, 0), /* live tuples */
-						 0,                       /* dead tuples */
-						 GetCurrentTimestamp());  /* start time */
 #else
-	pgstat_report_vacuum(RelationGetRelid(rel),
-						 rel->rd_rel->relisshared,
-						 Max(new_live_tuples, 0),
-						 0);
+	TransactionId oldestXmin;
+	TransactionId freezeLimit;
+	MultiXactId multiXactCutoff;
+
+	/* initialize xids */
+#if (PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15) && (PG_VERSION_NUM < PG_VERSION_16)
+	MultiXactId oldestMxact;
+	vacuum_set_xid_limits(rel,
+						params->freeze_min_age,
+						params->freeze_table_age,
+						params->multixact_freeze_min_age,
+						params->multixact_freeze_table_age,
+						&oldestXmin, &oldestMxact,
+						&freezeLimit, &multiXactCutoff);
+
+	Assert(MultiXactIdPrecedesOrEquals(multiXactCutoff, oldestMxact));
+#else
+	TransactionId xidFullScanLimit;
+	MultiXactId mxactFullScanLimit;
+	vacuum_set_xid_limits(rel,
+							params->freeze_min_age,
+							params->freeze_table_age,
+							params->multixact_freeze_min_age,
+							params->multixact_freeze_table_age,
+							&oldestXmin, &freezeLimit, &xidFullScanLimit,
+							&multiXactCutoff, &mxactFullScanLimit);
 #endif
 
+	Assert(TransactionIdPrecedesOrEquals(freezeLimit, oldestXmin));
+
+	/*
+	 * Columnar storage doesn't hold any transaction IDs, so we can always
+	 * just advance to the most aggressive value.
+	 */
+	TransactionId newRelFrozenXid = oldestXmin;
+#if (PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15) && (PG_VERSION_NUM < PG_VERSION_16)
+	MultiXactId newRelminMxid = oldestMxact;
+#else
+	MultiXactId newRelminMxid = multiXactCutoff;
+#endif
+
+	double new_live_tuples = ColumnarTableTupleCount(rel);
+
+	/* all visible pages are always 0 */
+	BlockNumber new_rel_allvisible = 0;
+
+#if (PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15) && (PG_VERSION_NUM < PG_VERSION_16)
+	bool frozenxid_updated;
+	bool minmulti_updated;
+
+	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
+						new_rel_allvisible, nindexes > 0,
+						newRelFrozenXid, newRelminMxid,
+						&frozenxid_updated, &minmulti_updated, false);
+#else
+	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
+						new_rel_allvisible, nindexes > 0,
+						newRelFrozenXid, newRelminMxid, false);
+#endif
+#endif
+
+	pgstat_report_vacuum(RelationGetRelid(rel),
+							rel->rd_rel->relisshared,
+							Max(new_live_tuples, 0),
+							0);
 	pgstat_progress_end_command();
+
+	/* Reenable the cache state. */
+	columnar_enable_page_cache = old_cache_mode;
 }
 
 
@@ -1161,6 +1825,11 @@ static void
 LogRelationStats(Relation rel, int elevel)
 {
 	ListCell *stripeMetadataCell = NULL;
+#if PG_VERSION_NUM >= PG_VERSION_16
+	RelFileLocator relfilelocator = rel->rd_locator;
+#else
+	RelFileLocator relfilelocator = rel->rd_node;
+#endif
 	StringInfo infoBuf = makeStringInfo();
 
 	int compressionStats[COMPRESSION_COUNT] = { 0 };
@@ -1171,23 +1840,25 @@ LogRelationStats(Relation rel, int elevel)
 	uint64 droppedChunksWithData = 0;
 	uint64 totalDecompressedLength = 0;
 
-	List *stripeList = StripesForRelfilelocator(rel);
+	List *stripeList = StripesForRelfilenode(relfilelocator, ForwardScanDirection);
 	int stripeCount = list_length(stripeList);
+
+	MemoryContext relation_stats_ctx =
+		AllocSetContextCreate(CurrentMemoryContext, "Vacuum Relation Stats Context",
+							  ALLOCSET_SMALL_SIZES);
+
+	MemoryContext oldcontext = MemoryContextSwitchTo(relation_stats_ctx);
 
 	foreach(stripeMetadataCell, stripeList)
 	{
 		StripeMetadata *stripe = lfirst(stripeMetadataCell);
-
-		Snapshot snapshot = RegisterSnapshot(GetTransactionSnapshot());
-		StripeSkipList *skiplist = ReadStripeSkipList(rel, stripe->id,
+		StripeSkipList *skiplist = ReadStripeSkipList(relfilelocator, stripe->id,
 													  RelationGetDescr(rel),
 													  stripe->chunkCount,
-													  snapshot);
-		UnregisterSnapshot(snapshot);
-
+													  GetTransactionSnapshot());
 		for (uint32 column = 0; column < skiplist->columnCount; column++)
 		{
-			bool attrDropped = TupleDescAttr(tupdesc, column)->attisdropped;
+			bool attrDropped = tupdesc->attrs[column].attisdropped;
 			for (uint32 chunk = 0; chunk < skiplist->chunkCount; chunk++)
 			{
 				ColumnChunkSkipNode *skipnode =
@@ -1216,7 +1887,11 @@ LogRelationStats(Relation rel, int elevel)
 
 		tupleCount += stripe->rowCount;
 		totalStripeLength += stripe->dataLength;
+
+		MemoryContextReset(relation_stats_ctx);
 	}
+
+	MemoryContextSwitchTo(oldcontext);
 
 	uint64 relPages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	RelationCloseSmgr(rel);
@@ -1300,7 +1975,8 @@ TruncateColumnar(Relation rel, int elevel)
 	 */
 	if (!ConditionalLockRelationWithTimeout(rel, AccessExclusiveLock,
 											VACUUM_TRUNCATE_LOCK_TIMEOUT,
-											VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL))
+											VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL,
+											false))
 	{
 		/*
 		 * We failed to establish the lock in the specified number of
@@ -1312,23 +1988,44 @@ TruncateColumnar(Relation rel, int elevel)
 		return;
 	}
 
+	bool stripesTruncated = TruncateAndCombineColumnarStripes(rel, elevel);
+
 	/*
-	 * Due to the AccessExclusive lock there's no danger that
-	 * new stripes be added beyond highestPhysicalAddress while
-	 * we're truncating.
+	 * If we didn't truncate and combine tail stripes we could have
+	 * stituation where we need to truncate storage at the end.
 	 */
-	uint64 newDataReservation = Max(GetHighestUsedAddress(rel) + 1,
-									ColumnarFirstLogicalOffset);
-
-	BlockNumber old_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
-
-	if (!ColumnarStorageTruncate(rel, newDataReservation))
+	if (!stripesTruncated)
 	{
-		UnlockRelation(rel, AccessExclusiveLock);
-		return;
-	}
 
-	BlockNumber new_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
+		/*
+		* Due to the AccessExclusive lock there's no danger that
+		* new stripes be added beyond highestPhysicalAddress while
+		* we're truncating.
+		*/
+#if PG_VERSION_NUM >= PG_VERSION_16
+		uint64 newDataReservation = Max(GetHighestUsedAddress(rel->rd_locator) + 1,
+										ColumnarFirstLogicalOffset);
+#else
+		uint64 newDataReservation = Max(GetHighestUsedAddress(rel->rd_node) + 1,
+										ColumnarFirstLogicalOffset);
+#endif
+
+		BlockNumber old_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
+
+		if (!ColumnarStorageTruncate(rel, newDataReservation))
+		{
+			UnlockRelation(rel, AccessExclusiveLock);
+			return;
+		}
+
+		BlockNumber new_rel_pages = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
+
+		ereport(elevel,
+		(errmsg("\"%s\": truncated %u to %u pages",
+				RelationGetRelationName(rel),
+				old_rel_pages, new_rel_pages),
+			errdetail_internal("%s", pg_rusage_show(&ru0))));
+	}
 
 	/*
 	 * We can release the exclusive lock as soon as we have truncated.
@@ -1338,14 +2035,7 @@ TruncateColumnar(Relation rel, int elevel)
 	 * they acquire lock on the relation.
 	 */
 	UnlockRelation(rel, AccessExclusiveLock);
-
-	ereport(elevel,
-			(errmsg("\"%s\": truncated %u to %u pages",
-					RelationGetRelationName(rel),
-					old_rel_pages, new_rel_pages),
-			 errdetail_internal("%s", pg_rusage_show(&ru0))));
 }
-
 
 /*
  * ConditionalLockRelationWithTimeout tries to acquire a relation lock until
@@ -1356,7 +2046,7 @@ TruncateColumnar(Relation rel, int elevel)
  */
 static bool
 ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode, int timeout,
-								   int retryInterval)
+								   int retryInterval, bool acquire)
 {
 	int lock_retry = 0;
 
@@ -1372,7 +2062,7 @@ ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode, int timeout,
 		 */
 		CHECK_FOR_INTERRUPTS();
 
-		if (++lock_retry > (timeout / retryInterval))
+		if (!acquire && (++lock_retry > (timeout / retryInterval)))
 		{
 			return false;
 		}
@@ -1385,32 +2075,15 @@ ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode, int timeout,
 
 
 static bool
-columnar_scan_analyze_next_block(TableScanDesc scan,
-#if PG_VERSION_NUM >= PG_VERSION_17
-								 ReadStream *stream)
-#else
-								 BlockNumber blockno,
+columnar_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
 								 BufferAccessStrategy bstrategy)
-#endif
 {
 	/*
 	 * Our access method is not pages based, i.e. tuples are not confined
 	 * to pages boundaries. So not much to do here. We return true anyway
 	 * so acquire_sample_rows() in analyze.c would call our
 	 * columnar_scan_analyze_next_tuple() callback.
-	 * In PG17, we return false in case there is no buffer left, since
-	 * the outer loop changed in acquire_sample_rows(), and it is
-	 * expected for the scan_analyze_next_block function to check whether
-	 * there are any blocks left in the block sampler.
 	 */
-#if PG_VERSION_NUM >= PG_VERSION_17
-	Buffer buf = read_stream_next_buffer(stream, NULL);
-	if (!BufferIsValid(buf))
-	{
-		return false;
-	}
-	ReleaseBuffer(buf);
-#endif
 	return true;
 }
 
@@ -1420,6 +2093,10 @@ columnar_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 								 double *liverows, double *deadrows,
 								 TupleTableSlot *slot)
 {
+	/* Capture the cache state and disable it for a vacuum. */
+	bool old_cache_mode = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
+
 	/*
 	 * Currently we don't do anything smart to reduce number of rows returned
 	 * for ANALYZE. The TableAM API's ANALYZE functions are designed for page
@@ -1434,8 +2111,15 @@ columnar_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 	if (columnar_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		(*liverows)++;
+
+		/* Reset cache to previous state. */
+		columnar_enable_page_cache = old_cache_mode;
+
 		return true;
 	}
+
+	/* Reset cache to previous state. */
+	columnar_enable_page_cache = old_cache_mode;
 
 	return false;
 }
@@ -1454,8 +2138,6 @@ columnar_index_build_range_scan(Relation columnarRelation,
 								void *callback_state,
 								TableScanDesc scan)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	if (start_blockno != 0 || numblocks != InvalidBlockNumber)
 	{
 		/*
@@ -1474,6 +2156,10 @@ columnar_index_build_range_scan(Relation columnarRelation,
 		elog(ERROR, "parallel scans on columnar are not supported");
 	}
 
+	/* Disable the page cache for the index build. */
+	bool old_cache_mode = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
+
 	/*
 	 * In a normal index build, we use SnapshotAny to retrieve all tuples. In
 	 * a concurrent build or during bootstrap, we take a regular MVCC snapshot
@@ -1483,7 +2169,8 @@ columnar_index_build_range_scan(Relation columnarRelation,
 	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
 	{
 		/* ignore lazy VACUUM's */
-		OldestXmin = GetOldestNonRemovableTransactionId(columnarRelation);
+		OldestXmin = GetOldestNonRemovableTransactionId_compat(columnarRelation,
+															   PROCARRAY_FLAGS_VACUUM);
 	}
 
 	Snapshot snapshot = { 0 };
@@ -1545,6 +2232,9 @@ columnar_index_build_range_scan(Relation columnarRelation,
 	FreeExecutorState(estate);
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
+
+	/* Reset the cache mode. */
+	columnar_enable_page_cache = old_cache_mode;
 
 	return reltuples;
 }
@@ -1678,8 +2368,15 @@ ColumnarReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		/* currently, columnar tables can't have dead tuples */
 		bool tupleIsAlive = true;
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_13
 		indexCallback(indexRelation, &itemPointerData, indexValues, indexNulls,
 					  tupleIsAlive, indexCallbackState);
+#else
+		HeapTuple scanTuple = ExecCopySlotHeapTuple(slot);
+		scanTuple->t_self = itemPointerData;
+		indexCallback(indexRelation, scanTuple, indexValues, indexNulls,
+					  tupleIsAlive, indexCallbackState);
+#endif
 
 		reltuples++;
 	}
@@ -1696,8 +2393,6 @@ columnar_index_validate_scan(Relation columnarRelation,
 							 ValidateIndexState *
 							 validateIndexState)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	ColumnarReportTotalVirtualBlocks(columnarRelation, snapshot,
 									 PROGRESS_SCAN_BLOCKS_TOTAL);
 
@@ -1811,8 +2506,8 @@ ColumnarReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 		Relation columnarRelation = scan->rs_rd;
 		IndexUniqueCheck indexUniqueCheck =
 			indexInfo->ii_Unique ? UNIQUE_CHECK_YES : UNIQUE_CHECK_NO;
-		index_insert(indexRelation, indexValues, indexNulls, columnarItemPointer,
-					 columnarRelation, indexUniqueCheck, false, indexInfo);
+		index_insert_compat(indexRelation, indexValues, indexNulls, columnarItemPointer,
+							columnarRelation, indexUniqueCheck, false, indexInfo);
 
 		validateIndexState->tups_inserted += 1;
 	}
@@ -1841,8 +2536,8 @@ TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort, ItemPointer targetIt
 		Datum *abbrev = NULL;
 		Datum tsDatum;
 		bool tsDatumIsNull;
-		if (!tuplesort_getdatum(tupleSort, forwardDirection, false,
-								&tsDatum, &tsDatumIsNull, abbrev))
+		if (!tuplesort_getdatum_compat(tupleSort, forwardDirection, false,
+									   &tsDatum, &tsDatumIsNull, abbrev))
 		{
 			ItemPointerSetInvalid(&tsItemPointerData);
 			break;
@@ -1868,8 +2563,6 @@ TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort, ItemPointer targetIt
 static uint64
 columnar_relation_size(Relation rel, ForkNumber forkNumber)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	uint64 nblocks = 0;
 
 	/* InvalidForkNumber indicates returning the size for all forks */
@@ -1892,8 +2585,6 @@ columnar_relation_size(Relation rel, ForkNumber forkNumber)
 static bool
 columnar_relation_needs_toast_table(Relation rel)
 {
-	CheckCitusColumnarVersion(ERROR);
-
 	return false;
 }
 
@@ -1903,7 +2594,6 @@ columnar_estimate_rel_size(Relation rel, int32 *attr_widths,
 						   BlockNumber *pages, double *tuples,
 						   double *allvisfrac)
 {
-	CheckCitusColumnarVersion(ERROR);
 	*pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	*tuples = ColumnarTableRowCount(rel);
 
@@ -1949,6 +2639,7 @@ ColumnarXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_PARALLEL_ABORT:
 		{
 			DiscardWriteStateForAllRels(GetCurrentSubTransactionId(), 0);
+			CleanupReadStateCache(GetCurrentSubTransactionId());
 			break;
 		}
 
@@ -1957,6 +2648,7 @@ ColumnarXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_PRE_PREPARE:
 		{
 			FlushWriteStateForAllRels(GetCurrentSubTransactionId(), 0);
+			CleanupReadStateCache(GetCurrentSubTransactionId());
 			break;
 		}
 	}
@@ -1979,12 +2671,14 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 		case SUBXACT_EVENT_ABORT_SUB:
 		{
 			DiscardWriteStateForAllRels(mySubid, parentSubid);
+			CleanupReadStateCache(mySubid);
 			break;
 		}
 
 		case SUBXACT_EVENT_PRE_COMMIT_SUB:
 		{
 			FlushWriteStateForAllRels(mySubid, parentSubid);
+			CleanupReadStateCache(mySubid);
 			break;
 		}
 	}
@@ -1994,6 +2688,11 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 void
 columnar_tableam_init()
 {
+	ColumnarTableSetOptions_hook_type **ColumnarTableSetOptions_hook_ptr =
+		(ColumnarTableSetOptions_hook_type **) find_rendezvous_variable(
+			COLUMNAR_SETOPTIONS_HOOK_SYM);
+	*ColumnarTableSetOptions_hook_ptr = &ColumnarTableSetOptions_hook;
+
 	RegisterXactCallback(ColumnarXactCallback, NULL);
 	RegisterSubXactCallback(ColumnarSubXactCallback, NULL);
 
@@ -2009,15 +2708,6 @@ columnar_tableam_init()
 
 	TTSOpsColumnar = TTSOpsVirtual;
 	TTSOpsColumnar.copy_heap_tuple = ColumnarSlotCopyHeapTuple;
-	DefineCustomBoolVariable(
-		"columnar.enable_version_checks",
-		gettext_noop("Enables Version Check for Columnar"),
-		NULL,
-		&EnableVersionChecksColumnar,
-		true,
-		PGC_USERSET,
-		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-		NULL, NULL, NULL);
 }
 
 
@@ -2076,20 +2766,23 @@ ColumnarTableDropHook(Oid relid)
 
 	if (IsColumnarTableAmTable(relid))
 	{
-		CheckCitusColumnarVersion(ERROR);
-
 		/*
 		 * Drop metadata. No need to drop storage here since for
 		 * tableam tables storage is managed by postgres.
 		 */
 		Relation rel = table_open(relid, AccessExclusiveLock);
+#if PG_VERSION_NUM >= PG_VERSION_16
 		RelFileLocator relfilelocator = rel->rd_locator;
-
-		DeleteMetadataRows(rel);
+#else
+		RelFileLocator relfilelocator = rel->rd_node;
+#endif
+		DeleteMetadataRows(relfilelocator);
 		DeleteColumnarTableOptions(rel->rd_id, true);
-
-		MarkRelfilenumberDropped(relfilelocator.relNumber,
-								 GetCurrentSubTransactionId());
+#if PG_VERSION_NUM >= PG_VERSION_16
+		MarkRelfilenodeDropped(relfilelocator.relNumber, GetCurrentSubTransactionId());
+#else
+		MarkRelfilenodeDropped(relfilelocator.relNode, GetCurrentSubTransactionId());
+#endif
 
 		/* keep the lock since we did physical changes to the relation */
 		table_close(rel, NoLock);
@@ -2169,211 +2862,53 @@ ColumnarTableAMObjectAccessHook(ObjectAccessType access, Oid classId, Oid object
 
 
 /*
- * ColumnarProcessAlterTable - if modifying a columnar table, extract columnar
- * options and return the table's RangeVar.
- */
-static RangeVar *
-ColumnarProcessAlterTable(AlterTableStmt *alterTableStmt, List **columnarOptions)
-{
-	RangeVar *columnarRangeVar = NULL;
-	Relation rel = relation_openrv_extended(alterTableStmt->relation, AccessShareLock,
-											alterTableStmt->missing_ok);
-
-	if (rel == NULL)
-	{
-		return NULL;
-	}
-
-	/* track separately in case of ALTER TABLE ... SET ACCESS METHOD */
-	bool srcIsColumnar = rel->rd_tableam == GetColumnarTableAmRoutine();
-	bool destIsColumnar = srcIsColumnar;
-
-	ListCell *lc = NULL;
-	foreach(lc, alterTableStmt->cmds)
-	{
-		AlterTableCmd *alterTableCmd = castNode(AlterTableCmd, lfirst(lc));
-
-		if (alterTableCmd->subtype == AT_SetRelOptions ||
-			alterTableCmd->subtype == AT_ResetRelOptions)
-		{
-			List *options = castNode(List, alterTableCmd->def);
-
-			alterTableCmd->def = (Node *) ExtractColumnarRelOptions(
-				options, columnarOptions);
-
-			if (destIsColumnar)
-			{
-				columnarRangeVar = alterTableStmt->relation;
-			}
-		}
-		else if (alterTableCmd->subtype == AT_SetAccessMethod)
-		{
-			if (columnarRangeVar || *columnarOptions)
-			{
-				ereport(ERROR, (errmsg(
-									"ALTER TABLE cannot alter the access method after altering storage parameters"),
-								errhint(
-									"Specify SET ACCESS METHOD before storage parameters, or use separate ALTER TABLE commands.")));
-			}
-
-			destIsColumnar = (strcmp(alterTableCmd->name ? alterTableCmd->name :
-									 default_table_access_method,
-									 COLUMNAR_AM_NAME) == 0);
-
-			if (srcIsColumnar && !destIsColumnar)
-			{
-				DeleteColumnarTableOptions(RelationGetRelid(rel), true);
-			}
-		}
-	}
-
-	relation_close(rel, NoLock);
-
-	return columnarRangeVar;
-}
-
-
-/*
  * Utility hook for columnar tables.
  */
 static void
 ColumnarProcessUtility(PlannedStmt *pstmt,
 					   const char *queryString,
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 					   bool readOnlyTree,
+#endif
 					   ProcessUtilityContext context,
 					   ParamListInfo params,
 					   struct QueryEnvironment *queryEnv,
 					   DestReceiver *dest,
-					   QueryCompletion *completionTag)
+					   QueryCompletionCompat *completionTag)
 {
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	if (readOnlyTree)
 	{
 		pstmt = copyObject(pstmt);
 	}
+#endif
 
 	Node *parsetree = pstmt->utilityStmt;
 
-	RangeVar *columnarRangeVar = NULL;
-	List *columnarOptions = NIL;
-
-	switch (nodeTag(parsetree))
+	if (IsA(parsetree, IndexStmt))
 	{
-		case T_IndexStmt:
+		IndexStmt *indexStmt = (IndexStmt *) parsetree;
+
+		Relation rel = relation_openrv(indexStmt->relation,
+									   indexStmt->concurrent ? ShareUpdateExclusiveLock :
+									   ShareLock);
+
+		if (rel->rd_tableam == GetColumnarTableAmRoutine())
 		{
-			IndexStmt *indexStmt = (IndexStmt *) parsetree;
-
-			Relation rel = relation_openrv(indexStmt->relation,
-										   indexStmt->concurrent ?
-										   ShareUpdateExclusiveLock :
-										   ShareLock);
-
-			if (rel->rd_tableam == GetColumnarTableAmRoutine())
+			if (!ColumnarSupportsIndexAM(indexStmt->accessMethod))
 			{
-				CheckCitusColumnarVersion(ERROR);
-				if (!ColumnarSupportsIndexAM(indexStmt->accessMethod))
-				{
-					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									errmsg("unsupported access method for the "
-										   "index on columnar table %s",
-										   RelationGetRelationName(rel))));
-				}
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("unsupported access method for the "
+									   "index on columnar table %s (%s)",
+									   RelationGetRelationName(rel), indexStmt->accessMethod)));
 			}
-
-			RelationClose(rel);
-			break;
 		}
 
-		case T_CreateStmt:
-		{
-			CreateStmt *createStmt = castNode(CreateStmt, parsetree);
-			bool no_op = false;
-
-			if (createStmt->if_not_exists)
-			{
-				Oid existing_relid;
-
-				/* use same check as transformCreateStmt */
-				(void) RangeVarGetAndCheckCreationNamespace(
-					createStmt->relation, AccessShareLock, &existing_relid);
-
-				no_op = OidIsValid(existing_relid);
-			}
-
-			if (!no_op && createStmt->accessMethod != NULL &&
-				!strcmp(createStmt->accessMethod, COLUMNAR_AM_NAME))
-			{
-				columnarRangeVar = createStmt->relation;
-				createStmt->options = ExtractColumnarRelOptions(createStmt->options,
-																&columnarOptions);
-			}
-			break;
-		}
-
-		case T_CreateTableAsStmt:
-		{
-			CreateTableAsStmt *createTableAsStmt = castNode(CreateTableAsStmt, parsetree);
-			IntoClause *into = createTableAsStmt->into;
-			bool no_op = false;
-
-			if (createTableAsStmt->if_not_exists)
-			{
-				Oid existing_relid;
-
-				/* use same check as transformCreateStmt */
-				(void) RangeVarGetAndCheckCreationNamespace(
-					into->rel, AccessShareLock, &existing_relid);
-
-				no_op = OidIsValid(existing_relid);
-			}
-
-			if (!no_op && into->accessMethod != NULL &&
-				!strcmp(into->accessMethod, COLUMNAR_AM_NAME))
-			{
-				columnarRangeVar = into->rel;
-				into->options = ExtractColumnarRelOptions(into->options,
-														  &columnarOptions);
-			}
-			break;
-		}
-
-		case T_AlterTableStmt:
-		{
-			AlterTableStmt *alterTableStmt = castNode(AlterTableStmt, parsetree);
-			columnarRangeVar = ColumnarProcessAlterTable(alterTableStmt,
-														 &columnarOptions);
-			break;
-		}
-
-		default:
-		{
-			/* FALL THROUGH */
-			break;
-		}
+		RelationClose(rel);
 	}
 
-	if (columnarOptions != NIL && columnarRangeVar == NULL)
-	{
-		ereport(ERROR,
-				(errmsg("columnar storage parameters specified on non-columnar table")));
-	}
-
-	if (IsA(parsetree, CreateExtensionStmt))
-	{
-		CheckCitusColumnarCreateExtensionStmt(parsetree);
-	}
-
-	if (IsA(parsetree, AlterExtensionStmt))
-	{
-		CheckCitusColumnarAlterExtensionStmt(parsetree);
-	}
-
-	PrevProcessUtilityHook(pstmt, queryString, false, context,
-						   params, queryEnv, dest, completionTag);
-
-	if (columnarOptions != NIL)
-	{
-		SetColumnarRelOptions(columnarRangeVar, columnarOptions);
-	}
+	PrevProcessUtilityHook_compat(pstmt, queryString, false, context,
+								  params, queryEnv, dest, completionTag);
 }
 
 
@@ -2385,7 +2920,11 @@ bool
 ColumnarSupportsIndexAM(char *indexAMName)
 {
 	return strncmp(indexAMName, "btree", NAMEDATALEN) == 0 ||
-		   strncmp(indexAMName, "hash", NAMEDATALEN) == 0;
+				strncmp(indexAMName, "hash", NAMEDATALEN) == 0 ||
+				strncmp(indexAMName, "gin", NAMEDATALEN) == 0 ||
+				strncmp(indexAMName, "gist", NAMEDATALEN) == 0 ||
+				strncmp(indexAMName, "spgist", NAMEDATALEN) == 0 ||
+				strncmp(indexAMName, "rum", NAMEDATALEN) == 0;
 }
 
 
@@ -2413,66 +2952,6 @@ IsColumnarTableAmTable(Oid relationId)
 }
 
 
-/*
- * CheckCitusColumnarCreateExtensionStmt determines whether can install
- * citus_columnar per given CREATE extension statment
- */
-void
-CheckCitusColumnarCreateExtensionStmt(Node *parseTree)
-{
-	CreateExtensionStmt *createExtensionStmt = castNode(CreateExtensionStmt,
-														parseTree);
-	if (get_extension_oid("citus_columnar", true) == InvalidOid)
-	{
-		if (strcmp(createExtensionStmt->extname, "citus_columnar") == 0)
-		{
-			DefElem *newVersionValue = GetExtensionOption(
-				createExtensionStmt->options,
-				"new_version");
-
-			/*we are not allowed to install citus_columnar as version 11.1-0 by cx*/
-			if (newVersionValue)
-			{
-				const char *newVersion = defGetString(newVersionValue);
-				if (strcmp(newVersion, CITUS_COLUMNAR_INTERNAL_VERSION) == 0)
-				{
-					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									errmsg(
-										"unsupported citus_columnar version 11.1-0")));
-				}
-			}
-		}
-	}
-}
-
-
-/*
- * CheckCitusColumnarAlterExtensionStmt determines whether can alter
- * citus_columnar per given ALTER extension statment
- */
-void
-CheckCitusColumnarAlterExtensionStmt(Node *parseTree)
-{
-	AlterExtensionStmt *alterExtensionStmt = castNode(AlterExtensionStmt, parseTree);
-	if (strcmp(alterExtensionStmt->extname, "citus_columnar") == 0)
-	{
-		DefElem *newVersionValue = GetExtensionOption(alterExtensionStmt->options,
-													  "new_version");
-
-		/*we are not allowed cx to downgrade citus_columnar to 11.1-0*/
-		if (newVersionValue)
-		{
-			const char *newVersion = defGetString(newVersionValue);
-			if (strcmp(newVersion, CITUS_COLUMNAR_INTERNAL_VERSION) == 0)
-			{
-				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("unsupported citus_columnar version 11.1-0")));
-			}
-		}
-	}
-}
-
-
 static const TableAmRoutine columnar_am_methods = {
 	.type = T_TableAmRoutine,
 
@@ -2496,7 +2975,11 @@ static const TableAmRoutine columnar_am_methods = {
 	.tuple_get_latest_tid = columnar_get_latest_tid,
 	.tuple_tid_valid = columnar_tuple_tid_valid,
 	.tuple_satisfies_snapshot = columnar_tuple_satisfies_snapshot,
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	.index_delete_tuples = columnar_index_delete_tuples,
+#else
+	.compute_xid_horizon_for_tuples = columnar_compute_xid_horizon_for_tuples,
+#endif
 
 	.tuple_insert = columnar_tuple_insert,
 	.tuple_insert_speculative = columnar_tuple_insert_speculative,
@@ -2507,7 +2990,11 @@ static const TableAmRoutine columnar_am_methods = {
 	.tuple_lock = columnar_tuple_lock,
 	.finish_bulk_insert = columnar_finish_bulk_insert,
 
-	.relation_set_new_filelocator = columnar_relation_set_new_filelocator,
+#if PG_VERSION_NUM >= PG_VERSION_16
+	.relation_set_new_filelocator = columnar_relation_set_new_filenode,
+#else
+	.relation_set_new_filenode = columnar_relation_set_new_filenode,
+#endif
 	.relation_nontransactional_truncate = columnar_relation_nontransactional_truncate,
 	.relation_copy_data = columnar_relation_copy_data,
 	.relation_copy_for_cluster = columnar_relation_copy_for_cluster,
@@ -2522,13 +3009,8 @@ static const TableAmRoutine columnar_am_methods = {
 
 	.relation_estimate_size = columnar_estimate_rel_size,
 
-#if PG_VERSION_NUM < PG_VERSION_18
-
-	/* these two fields were removed in PG 18 */
 	.scan_bitmap_next_block = NULL,
 	.scan_bitmap_next_tuple = NULL,
-#endif
-
 	.scan_sample_next_block = columnar_scan_sample_next_block,
 	.scan_sample_next_tuple = columnar_scan_sample_next_tuple
 };
@@ -2566,20 +3048,14 @@ detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
 
 	for (int i = 0; i < tupleDesc->natts; i++)
 	{
-		if (!isnull[i] && TupleDescAttr(tupleDesc, i)->attlen == -1 &&
+		if (!isnull[i] && tupleDesc->attrs[i].attlen == -1 &&
 			VARATT_IS_EXTENDED(values[i]))
 		{
 			/* make a copy */
 			if (values == orig_values)
 			{
 				values = palloc(sizeof(Datum) * natts);
-
-				/*
-				 * We use IGNORE-BANNED here since we don't want to limit
-				 * size of the buffer that holds the datum array to RSIZE_MAX
-				 * unnecessarily.
-				 */
-				memcpy(values, orig_values, sizeof(Datum) * natts); /* IGNORE-BANNED */
+				memcpy(values, orig_values, sizeof(Datum) * natts);
 			}
 
 			/* will be freed when per-tuple context is reset */
@@ -2610,12 +3086,22 @@ ColumnarCheckLogicalReplication(Relation rel)
 		return;
 	}
 
+#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	{
 		PublicationDesc pubdesc;
 
 		RelationBuildPublicationDesc(rel, &pubdesc);
 		pubActionInsert = pubdesc.pubactions.pubinsert;
 	}
+#else
+	if (rel->rd_pubactions == NULL)
+	{
+		GetRelationPublicationActions(rel);
+		Assert(rel->rd_pubactions != NULL);
+	}
+
+	pubActionInsert = rel->rd_pubactions->pubinsert;
+#endif
 
 	if (pubActionInsert)
 	{
@@ -2627,36 +3113,222 @@ ColumnarCheckLogicalReplication(Relation rel)
 
 
 /*
- * alter_columnar_table_set()
+ * alter_columnar_table_set is a UDF exposed in postgres to change settings on a columnar
+ * table. Calling this function on a non-columnar table gives an error.
  *
- * Deprecated in 11.1-1: should issue ALTER TABLE ... SET instead. Function
- * still available, but implemented in PL/pgSQL instead of C.
+ * sql syntax:
+ *   pg_catalog.alter_columnar_table_set(
+ *        table_name regclass,
+ *        chunk_group_row_limit int DEFAULT NULL,
+ *        stripe_row_limit int DEFAULT NULL,
+ *        compression name DEFAULT null)
  *
- * C code is removed -- the symbol may still be required in some
- * upgrade/downgrade paths, but it should not be called.
+ * All arguments except the table name are optional. The UDF is supposed to be called
+ * like:
+ *   SELECT alter_columnar_table_set('table', compression => 'pglz');
+ *
+ * This will only update the compression of the table, keeping all other settings the
+ * same. Multiple settings can be changed at the same time by providing multiple
+ * arguments. Calling the argument with the NULL value will be interperted as not having
+ * provided the argument.
  */
 PG_FUNCTION_INFO_V1(alter_columnar_table_set);
 Datum
 alter_columnar_table_set(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "alter_columnar_table_set is deprecated");
+	Oid relationId = PG_GETARG_OID(0);
+
+	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
+	if (!IsColumnarTableAmTable(relationId))
+	{
+		ereport(ERROR, (errmsg("table %s is not a columnar table",
+							   quote_identifier(RelationGetRelationName(rel)))));
+	}
+#if PG_VERSION_NUM >= PG_VERSION_16
+	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
+#else
+	if (!pg_class_ownercheck(relationId, GetUserId()))
+#endif
+	{
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
+					   get_rel_name(relationId));
+	}
+
+	ColumnarOptions options = { 0 };
+	if (!ReadColumnarOptions(relationId, &options))
+	{
+		ereport(ERROR, (errmsg("unable to read current options for table")));
+	}
+
+	/* chunk_group_row_limit => not null */
+	if (!PG_ARGISNULL(1))
+	{
+		options.chunkRowCount = PG_GETARG_INT32(1);
+		if (options.chunkRowCount < CHUNK_ROW_COUNT_MINIMUM ||
+			options.chunkRowCount > CHUNK_ROW_COUNT_MAXIMUM)
+		{
+			ereport(ERROR, (errmsg("chunk group row count limit out of range"),
+							errhint("chunk group row count limit must be between "
+									UINT64_FORMAT " and " UINT64_FORMAT,
+									(uint64) CHUNK_ROW_COUNT_MINIMUM,
+									(uint64) CHUNK_ROW_COUNT_MAXIMUM)));
+		}
+		ereport(DEBUG1,
+				(errmsg("updating chunk row count to %d", options.chunkRowCount)));
+	}
+
+	/* stripe_row_limit => not null */
+	if (!PG_ARGISNULL(2))
+	{
+		options.stripeRowCount = PG_GETARG_INT32(2);
+		if (options.stripeRowCount < STRIPE_ROW_COUNT_MINIMUM ||
+			options.stripeRowCount > STRIPE_ROW_COUNT_MAXIMUM)
+		{
+			ereport(ERROR, (errmsg("stripe row count limit out of range"),
+							errhint("stripe row count limit must be between "
+									UINT64_FORMAT " and " UINT64_FORMAT,
+									(uint64) STRIPE_ROW_COUNT_MINIMUM,
+									(uint64) STRIPE_ROW_COUNT_MAXIMUM)));
+		}
+		ereport(DEBUG1, (errmsg(
+							 "updating stripe row count to " UINT64_FORMAT,
+							 options.stripeRowCount)));
+	}
+
+	/* compression => not null */
+	if (!PG_ARGISNULL(3))
+	{
+		Name compressionName = PG_GETARG_NAME(3);
+		options.compressionType = ParseCompressionType(NameStr(*compressionName));
+		if (options.compressionType == COMPRESSION_TYPE_INVALID)
+		{
+			ereport(ERROR, (errmsg("unknown compression type for columnar table: %s",
+								   quote_identifier(NameStr(*compressionName)))));
+		}
+		ereport(DEBUG1, (errmsg("updating compression to %s",
+								CompressionTypeStr(options.compressionType))));
+	}
+
+	/* compression_level => not null */
+	if (!PG_ARGISNULL(4))
+	{
+		options.compressionLevel = PG_GETARG_INT32(4);
+		if (options.compressionLevel < COMPRESSION_LEVEL_MIN ||
+			options.compressionLevel > COMPRESSION_LEVEL_MAX)
+		{
+			ereport(ERROR, (errmsg("compression level out of range"),
+							errhint("compression level must be between %d and %d",
+									COMPRESSION_LEVEL_MIN,
+									COMPRESSION_LEVEL_MAX)));
+		}
+
+		ereport(DEBUG1, (errmsg("updating compression level to %d",
+								options.compressionLevel)));
+	}
+
+	if (ColumnarTableSetOptions_hook != NULL)
+	{
+		ColumnarTableSetOptions_hook(relationId, options);
+	}
+
+	SetColumnarOptions(relationId, &options);
+
+	table_close(rel, NoLock);
+
+	PG_RETURN_VOID();
 }
 
 
 /*
- * alter_columnar_table_reset()
+ * alter_columnar_table_reset is a UDF exposed in postgres to reset the settings on a
+ * columnar table. Calling this function on a non-columnar table gives an error.
  *
- * Deprecated in 11.1-1: should issue ALTER TABLE ... RESET instead. Function
- * still available, but implemented in PL/pgSQL instead of C.
+ * sql syntax:
+ *   pg_catalog.alter_columnar_table_re
+ *   teset(
+ *        table_name regclass,
+ *        chunk_group_row_limit bool DEFAULT FALSE,
+ *        stripe_row_limit bool DEFAULT FALSE,
+ *        compression bool DEFAULT FALSE)
  *
- * C code is removed -- the symbol may still be required in some
- * upgrade/downgrade paths, but it should not be called.
+ * All arguments except the table name are optional. The UDF is supposed to be called
+ * like:
+ *   SELECT alter_columnar_table_set('table', compression => true);
+ *
+ * All options set to true will be reset to the default system value.
  */
 PG_FUNCTION_INFO_V1(alter_columnar_table_reset);
 Datum
 alter_columnar_table_reset(PG_FUNCTION_ARGS)
 {
-	elog(ERROR, "alter_columnar_table_reset is deprecated");
+	Oid relationId = PG_GETARG_OID(0);
+
+	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
+	if (!IsColumnarTableAmTable(relationId))
+	{
+		ereport(ERROR, (errmsg("table %s is not a columnar table",
+							   quote_identifier(RelationGetRelationName(rel)))));
+	}
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
+#else
+	if (!pg_class_ownercheck(relationId, GetUserId()))
+#endif
+	{
+		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
+					   get_rel_name(relationId));
+	}
+
+	ColumnarOptions options = { 0 };
+	if (!ReadColumnarOptions(relationId, &options))
+	{
+		ereport(ERROR, (errmsg("unable to read current options for table")));
+	}
+
+	/* chunk_group_row_limit => true */
+	if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1))
+	{
+		options.chunkRowCount = columnar_chunk_group_row_limit;
+		ereport(DEBUG1,
+				(errmsg("resetting chunk row count to %d", options.chunkRowCount)));
+	}
+
+	/* stripe_row_limit => true */
+	if (!PG_ARGISNULL(2) && PG_GETARG_BOOL(2))
+	{
+		options.stripeRowCount = columnar_stripe_row_limit;
+		ereport(DEBUG1,
+				(errmsg("resetting stripe row count to " UINT64_FORMAT,
+						options.stripeRowCount)));
+	}
+
+	/* compression => true */
+	if (!PG_ARGISNULL(3) && PG_GETARG_BOOL(3))
+	{
+		options.compressionType = columnar_compression;
+		ereport(DEBUG1, (errmsg("resetting compression to %s",
+								CompressionTypeStr(options.compressionType))));
+	}
+
+	/* compression_level => true */
+	if (!PG_ARGISNULL(4) && PG_GETARG_BOOL(4))
+	{
+		options.compressionLevel = columnar_compression_level;
+		ereport(DEBUG1, (errmsg("reseting compression level to %d",
+								columnar_compression_level)));
+	}
+
+	if (ColumnarTableSetOptions_hook != NULL)
+	{
+		ColumnarTableSetOptions_hook(relationId, options);
+	}
+
+	SetColumnarOptions(relationId, &options);
+
+	table_close(rel, NoLock);
+
+	PG_RETURN_VOID();
 }
 
 
@@ -2731,388 +3403,622 @@ downgrade_columnar_storage(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
-
-/*
- * Code to check the Citus Version, helps remove dependency from Citus
- */
-
-/*
- * CitusColumnarHasBeenLoaded returns true if the citus extension has been created
- * in the current database and the extension script has been executed. Otherwise,
- * it returns false. The result is cached as this is called very frequently.
- */
-bool
-CitusColumnarHasBeenLoaded(void)
+typedef struct StripeHole
 {
-	if (!extensionLoadedColumnar || creating_extension)
+	uint64 fileOffset;
+	uint64 dataLength;
+} StripeHole;
+
+/*
+ * HolesForRelation returns a list of holes in the Relation id in the current
+ * MemoryContext.
+ */
+static List *HolesForRelation(Relation rel)
+{
+	List *holes = NIL;
+
+	/* Get current columnar options */
+	ColumnarOptions columnarOptions = { 0 };
+	ReadColumnarOptions(rel->rd_id, &columnarOptions);
+
+	ListCell *lc = NULL;
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
+#else
+	List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
+#endif
+	uint64 lastMinimalOffset = ColumnarFirstLogicalOffset;
+
+	foreach(lc, stripeMetadataList)
 	{
+		StripeMetadata * stripeMetadata = lfirst(lc);
+
+		/* Arbitrary check to see if the offset will be large enough, 10000 bytes is what was chosen. */
+		if (stripeMetadata->fileOffset == lastMinimalOffset || stripeMetadata->fileOffset - lastMinimalOffset < 10000) {
+			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
+			continue;
+		} else {
+			StripeHole * hole = palloc(sizeof(StripeHole));
+			hole->fileOffset = lastMinimalOffset;
+			hole->dataLength = stripeMetadata->fileOffset + stripeMetadata->dataLength - lastMinimalOffset;
+			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
+
+			holes = lappend(holes, hole);
+		}
+	}
+
+	return holes;
+}
+
+/*
+ * This is a check whether we need to bail out of a vacuum, it is set by the
+ * signal handler, and checked by the vacuum UDF process.
+ */
+static bool need_to_bail = false;
+static int last_signal = 0;
+static struct sigaction abt_action;
+static struct sigaction int_action;
+static struct sigaction trm_action;
+static struct sigaction kil_action;
+
+/*
+ * vacuum_signal_handler - catch any signals sent during the UDF vacuum, and
+ * attempt to clean up as much as we can and bail as cleanly as possible.
+ */
+static void vacuum_signal_handler(int signal)
+{
+	elog(DEBUG3, "Received signal %d during a vacuum request", signal);
+
+	/* Set up the ability to bail from the vacuum, with needed information. */
+	need_to_bail = true;
+	last_signal = signal;
+}
+
+/*
+ * vacuum_columnar_table
+ */
+typedef struct StripeVacuumCandidate
+{
+	uint64 stripeId;
+	int32 stripeMetadataIndex;
+	uint32 candidateTotalSize;
+	uint32 activeRows;
+	StripeMetadata *stripeMetadata;
+} StripeVacuumCandidate;
+
+PG_FUNCTION_INFO_V1(vacuum_columnar_table);
+Datum
+vacuum_columnar_table(PG_FUNCTION_ARGS)
+{
+	Oid relid = PG_GETARG_OID(0);
+	Relation rel = RelationIdGetRelation(relid);
+	TupleDesc tupleDesc = RelationGetDescr(rel);
+	MemoryContext oldcontext = CurrentMemoryContext;
+	uint32 stripeCount = PG_GETARG_UINT32(1);
+	uint32 progress = 0;
+	bool completelyDone = false;
+	struct sigaction action;
+
+	/* Capture the cache state and disable it for a vacuum. */
+	bool old_cache_mode = columnar_enable_page_cache;
+	columnar_enable_page_cache = false;
+
+	/*
+	 * Set up signal handlers for any incoming signals during the vacuum,
+	 * killing during a write could cause corruption.  Give us time to
+	 * clean as much as we can up before letting the signal pass on.
+	 */
+	need_to_bail = false;
+	last_signal = 0;
+
+	action.sa_handler = vacuum_signal_handler;
+	sigemptyset (&action.sa_mask);
+	action.sa_flags = 0;
+
+	sigaction(SIGINT, &action, &int_action);
+	sigaction(SIGTERM, &action, &trm_action);
+	sigaction(SIGABRT, &action, &abt_action);
+	sigaction(SIGKILL, &action, &kil_action);
+
+	MemoryContext vacuum_context = AllocSetContextCreate(CurrentMemoryContext,
+						"Columnar Vacuum Context",
+						ALLOCSET_SMALL_SIZES);
+
+	oldcontext = MemoryContextSwitchTo(vacuum_context);
+
+	if (tupleDesc->natts == 0)
+	{
+		ereport(INFO,
+				(errmsg("\"%s\": stopping vacuum due to zero column table",
+						RelationGetRelationName(rel))));
+
+		MemoryContextSwitchTo(oldcontext);
+
+		/* Reset cache to previous state. */
+		columnar_enable_page_cache = old_cache_mode;
+
+		PG_RETURN_VOID();
+	}
+
+	LockRelation(rel, ExclusiveLock);
+
+	/* Get current columnar options */
+	ColumnarOptions columnarOptions = { 0 };
+	ReadColumnarOptions(rel->rd_id, &columnarOptions);
+
+	/* Get all stripes in order. */
+#if PG_VERSION_NUM >= PG_VERSION_16
+	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
+#else
+	List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
+#endif
+	List *vacuumCandidatesStripeList = NIL;
+
+	/* Empty table nothing to do */
+	if (stripeMetadataList == NIL)
+	{
+		ereport(INFO,
+				(errmsg("\"%s\": stopping vacuum due to empty table",
+						RelationGetRelationName(rel))));
+
+		/* Close the relation as we are done with it */
+		RelationClose(rel);
+
+		MemoryContextSwitchTo(oldcontext);
+
+		/* Reset cache to previous state. */
+		columnar_enable_page_cache = old_cache_mode;
+
+		PG_RETURN_VOID();
+	}
+
+	ListCell *lc = NULL;
+
+	int stripeMetadataIndex = 0;
+
+	elog(DEBUG3, "Beginning combination of stripes");
+
+	/*
+	 * Get a list of all stripes that can be combined into larger stripes.
+	 */
+	foreach(lc, stripeMetadataList)
+	{
+		/* We should not consider the last stripe. */
+		if (lfirst(lc) == llast(stripeMetadataList))
+		{
+			break;
+		}
+
+		StripeMetadata * stripeMetadata = lfirst(lc);
+#if PG_VERSION_NUM >= PG_VERSION_16
+		uint32 stripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
+												 		stripeMetadata->chunkCount,
+														stripeMetadata->id);
+#else
+		uint32 stripeDeletedRows = DeletedRowsForStripe(rel->rd_node,
+												 		stripeMetadata->chunkCount,
+														stripeMetadata->id);
+#endif
+		float percentageOfDeleteRows =
+			(float)stripeDeletedRows / (float)(stripeMetadata->rowCount);
+
 		/*
-		 * Refresh if we have not determined whether the extension has been
-		 * loaded yet, or in case of ALTER EXTENSION since we want to treat
-		 * Citus as "not loaded" during ALTER EXTENSION citus.
-		 */
-		bool extensionLoaded = CitusColumnarHasBeenLoadedInternal();
-		extensionLoadedColumnar = extensionLoaded;
+		 * If inspected stripe has less than 0.5 percent of maximum strip row size
+		 * or percentage of deleted rows is less than 20% we will skip this stripe
+		 * for vacuum.
+		*/
+		if ((stripeMetadata->rowCount > columnarOptions.stripeRowCount * 0.5) &&
+			percentageOfDeleteRows <= 0.2f)
+		{
+			continue;
+		}
+
+		StripeVacuumCandidate *vacuumCandidate = palloc(sizeof(StripeVacuumCandidate));
+		vacuumCandidate->stripeMetadataIndex = stripeMetadataIndex;
+		vacuumCandidate->candidateTotalSize = stripeMetadata->rowCount - stripeDeletedRows;
+		vacuumCandidate->stripeMetadata = stripeMetadata;
+		vacuumCandidate->activeRows = stripeMetadata->rowCount - stripeDeletedRows;
+
+		vacuumCandidatesStripeList = lappend(vacuumCandidatesStripeList, vacuumCandidate);
 	}
 
-	return extensionLoadedColumnar;
-}
+	/* We need all columns. */
+	int natts = rel->rd_att->natts;
+	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
 
+	/* No quals for table rewrite */
+	List *scanQual = NIL;
 
-/*
- * CitusColumnarHasBeenLoadedInternal returns true if the citus extension has been created
- * in the current database and the extension script has been executed. Otherwise,
- * it returns false.
- */
-static bool
-CitusColumnarHasBeenLoadedInternal(void)
-{
-	if (IsBinaryUpgrade)
+	/* Use SnapshotAny when re-writing table as heapAM does. */
+	Snapshot snapshot = SnapshotAny;
+
+	MemoryContext scanContext = CreateColumnarScanMemoryContext();
+	bool randomAccess = true;
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_locator,
+											columnarOptions,
+											tupleDesc);
+#else
+	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_node,
+											columnarOptions,
+											tupleDesc);
+#endif
+
+	/*
+	 * Combine the vacuum candidates into their own stripes appended to the rel, this
+	 * should clear out any space from partial stripes to make space to move stripes into.
+	 */
+	foreach(lc, vacuumCandidatesStripeList)
 	{
-		/* never use Citus logic during pg_upgrade */
-		return false;
+		StripeVacuumCandidate *vacuumCandidate = lfirst(lc);
+
+		MemoryContext combineContext = AllocSetContextCreate(CurrentMemoryContext,
+						"Stripe Combine Context", ALLOCSET_DEFAULT_SIZES);
+		MemoryContext previousContext = MemoryContextSwitchTo(combineContext);
+
+		ColumnarReadState *readState = init_columnar_read_state(rel, tupleDesc,
+															attr_needed, scanQual,
+															scanContext, snapshot,
+															randomAccess,
+															NULL);
+
+
+		ColumnarSetStripeReadState(readState,
+								vacuumCandidate->stripeMetadata);
+
+		Datum *values = palloc0(tupleDesc->natts * sizeof(Datum));
+		bool *nulls = palloc0(tupleDesc->natts * sizeof(bool));
+
+		int32 rowCount = 0;
+
+		while (rowCount < vacuumCandidate->activeRows && ColumnarReadNextRow(readState, values, nulls, NULL))
+		{
+			ColumnarWriteRow(writeState, values, nulls);
+			rowCount++;
+		}
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+		DeleteMetadataRowsForStripeId(rel->rd_locator, vacuumCandidate->stripeMetadata->id);
+#else
+		DeleteMetadataRowsForStripeId(rel->rd_node, vacuumCandidate->stripeMetadata->id);
+#endif
+		ColumnarEndRead(readState);
+
+		pfree(values);
+		pfree(nulls);
+
+		progress++;
+
+		/* Check if a signal has been sent, if so close out and deal with it. */
+		if (need_to_bail)
+		{
+			ColumnarEndWrite(writeState);
+			UnlockRelation(rel, ExclusiveLock);
+			relation_close(rel, NoLock);
+
+			need_to_bail = 0;
+			/* Reset the signal handlers back to their original state. */
+			sigaction(SIGINT, &int_action, NULL);
+			sigaction(SIGTERM, &trm_action, NULL);
+			sigaction(SIGABRT, &abt_action, NULL);
+			sigaction(SIGKILL, &kil_action, NULL);
+
+			/* Call any missed signal handlers. */
+			if (last_signal == SIGABRT && abt_action.sa_handler)
+			{
+				abt_action.sa_handler(SIGABRT);
+			} else if (last_signal == SIGTERM && trm_action.sa_handler)
+			{
+				trm_action.sa_handler(SIGTERM);
+			} else if (last_signal == SIGINT && int_action.sa_handler)
+			{
+				int_action.sa_handler(SIGINT);
+			} else if (last_signal == SIGKILL && kil_action.sa_handler)
+			{
+				kil_action.sa_handler(SIGKILL);
+			}
+
+			/* Reset cache to previous state. */
+			columnar_enable_page_cache = old_cache_mode;
+
+			PG_RETURN_NULL();
+		}
+
+		if (stripeCount && progress >= stripeCount)
+		{
+			completelyDone = true;
+			break;
+		}
+
+		MemoryContextSwitchTo(previousContext);
+		MemoryContextDelete(combineContext);
+	}
+	/*
+	 * We have finished the first route of writes, let's drop our lock until we are
+	 * ready for the next stage: compaction.
+	 */
+	ColumnarEndWrite(writeState);
+
+	elog(DEBUG3, "Combined %d stripes", progress);
+
+	if (completelyDone)
+	{
+		relation_close(rel, NoLock);
+		TruncateColumnar(rel, DEBUG3);
+		UnlockRelation(rel, ExclusiveLock);
+
+		/* Reset cache to previous state. */
+		columnar_enable_page_cache = old_cache_mode;
+
+		PG_RETURN_UINT32(progress);
 	}
 
-	Oid citusExtensionOid = get_extension_oid("citus", true);
-	if (citusExtensionOid == InvalidOid)
-	{
-		/* Citus extension does not exist yet */
-		return false;
-	}
+	elog(DEBUG3, "Beginning reorganization");
+	/*
+	 * Continually iterate through the holes, finding where we can place
+	 * old stripes.
+	 */
+	bool done = false;
 
-	if (creating_extension && CurrentExtensionObject == citusExtensionOid)
+	uint32 relocationProgress = 0;
+
+	while (!done)
 	{
+		MemoryContext rewriteContext = AllocSetContextCreate(CurrentMemoryContext,
+					"Stripe Rewrite Context", ALLOCSET_DEFAULT_SIZES);
+		MemoryContext previousContext = MemoryContextSwitchTo(rewriteContext);
+
+		/* Check if a signal has been sent, if so close out and deal with it. */
+		if (need_to_bail)
+		{
+			relation_close(rel, NoLock);
+			TruncateColumnar(rel, DEBUG3);
+			UnlockRelation(rel, ExclusiveLock);
+			ForceSyncCommit();
+
+			need_to_bail = 0;
+			/* Reset the signal handlers back to their original state. */
+			sigaction(SIGINT, &int_action, NULL);
+			sigaction(SIGTERM, &trm_action, NULL);
+			sigaction(SIGABRT, &abt_action, NULL);
+			sigaction(SIGKILL, &kil_action, NULL);
+
+			/* Call any missed signal handlers. */
+			if (last_signal == SIGABRT && abt_action.sa_handler)
+			{
+				abt_action.sa_handler(SIGABRT);
+			} else if (last_signal == SIGTERM && trm_action.sa_handler)
+			{
+				trm_action.sa_handler(SIGTERM);
+			} else if (last_signal == SIGINT && int_action.sa_handler)
+			{
+				int_action.sa_handler(SIGINT);
+			} else if (last_signal == SIGKILL && kil_action.sa_handler)
+			{
+				kil_action.sa_handler(SIGKILL);
+			}
+
+			/* Reset cache to previous state. */
+			columnar_enable_page_cache = old_cache_mode;
+
+			PG_RETURN_NULL();
+		}
+
 		/*
-		 * We do not use Citus hooks during CREATE/ALTER EXTENSION citus
-		 * since the objects used by the C code might be not be there yet.
+		 * Get a List of empty spaces to fill with later stripes.
 		 */
-		return false;
-	}
+		List *holes = HolesForRelation(rel);
 
-	/* citus extension exists and has been created */
-	return true;
-}
-
-
-/*
- * CheckCitusColumnarVersion checks whether there is a version mismatch between the
- * available version and the loaded version or between the installed version
- * and the loaded version. Returns true if compatible, false otherwise.
- *
- * As a side effect, this function also sets citusVersionKnownCompatible_Columnar global
- * variable to true which reduces version check cost of next calls.
- */
-bool
-CheckCitusColumnarVersion(int elevel)
-{
-	if (citusVersionKnownCompatibleColumnar ||
-		!CitusColumnarHasBeenLoaded() ||
-		!EnableVersionChecksColumnar)
-	{
-		return true;
-	}
-
-	if (CheckAvailableVersionColumnar(elevel) && CheckInstalledVersionColumnar(elevel))
-	{
-		citusVersionKnownCompatibleColumnar = true;
-		return true;
-	}
-	else
-	{
-		return false;
-	}
-}
-
-
-/*
- * CheckAvailableVersion compares CITUS_EXTENSIONVERSION and the currently
- * available version from the citus.control file. If they are not compatible,
- * this function logs an error with the specified elevel and returns false,
- * otherwise it returns true.
- */
-bool
-CheckAvailableVersionColumnar(int elevel)
-{
-	if (!EnableVersionChecksColumnar)
-	{
-		return true;
-	}
-
-	char *availableVersion = AvailableExtensionVersionColumnar();
-
-	if (!MajorVersionsCompatibleColumnar(availableVersion, CITUS_EXTENSIONVERSION))
-	{
-		ereport(elevel, (errmsg("loaded Citus library version differs from latest "
-								"available extension version"),
-						 errdetail("Loaded library requires %s, but the latest control "
-								   "file specifies %s.", CITUS_MAJORVERSION,
-								   availableVersion),
-						 errhint("Restart the database to load the latest Citus "
-								 "library.")));
-		pfree(availableVersion);
-		return false;
-	}
-	pfree(availableVersion);
-	return true;
-}
-
-
-/*
- * CheckInstalledVersion compares CITUS_EXTENSIONVERSION and the
- * extension's current version from the pg_extension catalog table. If they
- * are not compatible, this function logs an error with the specified elevel,
- * otherwise it returns true.
- */
-static bool
-CheckInstalledVersionColumnar(int elevel)
-{
-	Assert(CitusColumnarHasBeenLoaded());
-	Assert(EnableVersionChecksColumnar);
-
-	char *installedVersion = InstalledExtensionVersionColumnar();
-
-	if (!MinorVersionsCompatibleRelaxedColumnar(installedVersion, CITUS_EXTENSIONVERSION))
-	{
-		ereport(elevel, (errmsg("loaded Citus library version differs from installed "
-								"extension version"),
-						 errdetail("Loaded library requires %s, but the installed "
-								   "extension version is %s.", CITUS_MAJORVERSION,
-								   installedVersion),
-						 errhint("Run ALTER EXTENSION citus UPDATE and try again.")));
-		pfree(installedVersion);
-		return false;
-	}
-	pfree(installedVersion);
-	return true;
-}
-
-
-/*
- * MajorVersionsCompatible checks whether both versions are compatible. They
- * are if major and minor version numbers match, the schema version is
- * ignored.  Returns true if compatible, false otherwise.
- */
-bool
-MajorVersionsCompatibleColumnar(char *leftVersion, char *rightVersion)
-{
-	const char schemaVersionSeparator = '-';
-
-	char *leftSeperatorPosition = strchr(leftVersion, schemaVersionSeparator);
-	char *rightSeperatorPosition = strchr(rightVersion, schemaVersionSeparator);
-	int leftComparisionLimit = 0;
-	int rightComparisionLimit = 0;
-
-	if (leftSeperatorPosition != NULL)
-	{
-		leftComparisionLimit = leftSeperatorPosition - leftVersion;
-	}
-	else
-	{
-		leftComparisionLimit = strlen(leftVersion);
-	}
-
-	if (rightSeperatorPosition != NULL)
-	{
-		rightComparisionLimit = rightSeperatorPosition - rightVersion;
-	}
-	else
-	{
-		rightComparisionLimit = strlen(rightVersion);
-	}
-
-	/* we can error out early if hypens are not in the same position */
-	if (leftComparisionLimit != rightComparisionLimit)
-	{
-		return false;
-	}
-
-	return strncmp(leftVersion, rightVersion, leftComparisionLimit) == 0;
-}
-
-
-/*
- * ParseVersionComponent parses the integer at the current position and
- * advances endPtr past the parsed digits to the next character.
- */
-static int
-ParseVersionComponent(const char *version, char **endPtr)
-{
-	errno = 0;
-	long int val = strtol(version, endPtr, 10);
-
-	if (errno == ERANGE || val > INT_MAX || val < INT_MIN)
-	{
-		ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						errmsg("Invalid integer in version string")));
-	}
-	return (int) val;
-}
-
-
-/*
- * MinorVersionsCompatibleRelaxedColumnar checks if two versions have the same major
- * version and their minor versions differ by at most 1. The schema version
- * (after '-') is ignored. Returns true if compatible, false otherwise.
- *
- * Version format expected: "major.minor-schema" (e.g., "13.1-2")
- */
-bool
-MinorVersionsCompatibleRelaxedColumnar(char *leftVersion, char *rightVersion)
-{
-	char *leftSep;
-	char *rightSep;
-
-	int leftMajor = ParseVersionComponent(leftVersion, &leftSep);
-	int rightMajor = ParseVersionComponent(rightVersion, &rightSep);
-
-	if (leftMajor != rightMajor)
-	{
-		return false;
-	}
-
-	int leftMinor = (*leftSep == '.') ? ParseVersionComponent(leftSep + 1, &leftSep) : 0;
-	int rightMinor = (*rightSep == '.') ? ParseVersionComponent(rightSep + 1, &rightSep) :
-					 0;
-
-	int diff = leftMinor - rightMinor;
-	return diff >= -1 && diff <= 1;
-}
-
-
-/*
- * AvailableExtensionVersion returns the Citus version from citus.control file. It also
- * saves the result, thus consecutive calls to CitusExtensionAvailableVersion will
- * not read the citus.control file again.
- */
-static char *
-AvailableExtensionVersionColumnar(void)
-{
-	LOCAL_FCINFO(fcinfo, 0);
-	FmgrInfo flinfo;
-
-	bool goForward = true;
-	bool doCopy = false;
-	char *availableExtensionVersion;
-
-	EState *estate = CreateExecutorState();
-	ReturnSetInfo *extensionsResultSet = makeNode(ReturnSetInfo);
-	extensionsResultSet->econtext = GetPerTupleExprContext(estate);
-	extensionsResultSet->allowedModes = SFRM_Materialize;
-
-	fmgr_info(F_PG_AVAILABLE_EXTENSIONS, &flinfo);
-	InitFunctionCallInfoData(*fcinfo, &flinfo, 0, InvalidOid, NULL,
-							 (Node *) extensionsResultSet);
-
-	/* pg_available_extensions returns result set containing all available extensions */
-	(*pg_available_extensions)(fcinfo);
-
-	TupleTableSlot *tupleTableSlot = MakeSingleTupleTableSlot(
-		extensionsResultSet->setDesc,
-		&TTSOpsMinimalTuple);
-	bool hasTuple = tuplestore_gettupleslot(extensionsResultSet->setResult, goForward,
-											doCopy,
-											tupleTableSlot);
-	while (hasTuple)
-	{
-		bool isNull = false;
-
-		Datum extensionNameDatum = slot_getattr(tupleTableSlot, 1, &isNull);
-		char *extensionName = NameStr(*DatumGetName(extensionNameDatum));
-		if (strcmp(extensionName, "citus") == 0)
+		if (list_length(holes) == 0)
 		{
-			Datum availableVersion = slot_getattr(tupleTableSlot, 2, &isNull);
-
-
-			availableExtensionVersion = text_to_cstring(DatumGetTextPP(availableVersion));
-
-
-			ExecClearTuple(tupleTableSlot);
-			ExecDropSingleTupleTableSlot(tupleTableSlot);
-
-			return availableExtensionVersion;
+			done = true;
+			continue;
 		}
 
-		ExecClearTuple(tupleTableSlot);
-		hasTuple = tuplestore_gettupleslot(extensionsResultSet->setResult, goForward,
-										   doCopy, tupleTableSlot);
-	}
-
-	ExecDropSingleTupleTableSlot(tupleTableSlot);
-
-	ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					errmsg("citus extension is not found")));
-
-	return NULL; /* keep compiler happy */
-}
-
-
-/*
- * InstalledExtensionVersion returns the Citus version in PostgreSQL pg_extension table.
- */
-static char *
-InstalledExtensionVersionColumnar(void)
-{
-	ScanKeyData entry[1];
-	char *installedExtensionVersion = NULL;
-
-	Relation relation = table_open(ExtensionRelationId, AccessShareLock);
-
-	ScanKeyInit(&entry[0], Anum_pg_extension_extname, BTEqualStrategyNumber, F_NAMEEQ,
-				CStringGetDatum("citus"));
-
-	SysScanDesc scandesc = systable_beginscan(relation, ExtensionNameIndexId, true,
-											  NULL, 1, entry);
-
-	HeapTuple extensionTuple = systable_getnext(scandesc);
-
-	/* We assume that there can be at most one matching tuple */
-	if (HeapTupleIsValid(extensionTuple))
-	{
-		int extensionIndex = Anum_pg_extension_extversion;
-		TupleDesc tupleDescriptor = RelationGetDescr(relation);
-		bool isNull = false;
-
-		Datum installedVersion = heap_getattr(extensionTuple, extensionIndex,
-											  tupleDescriptor, &isNull);
-
-		if (isNull)
+		/*
+		 * Iterate through the holes, moving later slices into the holes.
+		 */
+		foreach(lc, holes)
 		{
-			ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-							errmsg("citus extension version is null")));
+			StripeHole *hole = lfirst(lc);
+
+			ListCell *stripeLc = NULL;
+
+			/* Reload the metadata. */
+#if PG_VERSION_NUM >= PG_VERSION_16
+			stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
+#else
+			stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
+#endif
+			foreach(stripeLc, stripeMetadataList)
+			{
+				StripeMetadata *stripe = lfirst(stripeLc);
+
+				/* If we are marked done, we should simply drop out. */
+				if (done)
+				{
+					break;
+				}
+
+				/* Find one that will fit, and move it. */
+				if (hole->fileOffset && stripe->dataLength < hole->dataLength && stripe->fileOffset > hole->fileOffset)
+				{
+					/* Read a copy of the old row. */
+					char * data = palloc(stripe->dataLength);
+					ColumnarStorageRead(rel, stripe->fileOffset, data, stripe->dataLength);
+
+					/* Write the data to the new offset. */
+					ColumnarStorageWrite(rel, hole->fileOffset, data, stripe->dataLength);
+
+					/* Update the stripe metadata for the moved stripe. */
+					RewriteStripeMetadataRowWithNewValues(rel, stripe->id, stripe->dataLength, hole->fileOffset, stripe->rowCount, stripe->chunkCount);
+
+					relocationProgress++;
+
+					pfree(data);
+
+					if (relocationProgress >= 1)
+					{
+						done = true;
+					}
+
+					break;
+				}
+			}
+
+
+			if (relocationProgress >= 1)
+			{
+				done = true;
+			}
+
+			holes = HolesForRelation(rel);
 		}
 
+		MemoryContextSwitchTo(previousContext);
+		MemoryContextDelete(rewriteContext);
+	}
 
-		installedExtensionVersion = text_to_cstring(DatumGetTextPP(installedVersion));
+	elog(DEBUG3, "Ending reorganization");
+
+	relation_close(rel, NoLock);
+
+	TruncateColumnar(rel, DEBUG3);
+	UnlockRelation(rel, ExclusiveLock);
+
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Reset the signal handlers back to their original state. */
+	sigaction(SIGINT, &int_action, NULL);
+	sigaction(SIGTERM, &trm_action, NULL);
+	sigaction(SIGABRT, &abt_action, NULL);
+	sigaction(SIGKILL, &kil_action, NULL);
+
+	/* Reset cache to previous state. */
+	columnar_enable_page_cache = old_cache_mode;
+
+	PG_RETURN_UINT32(progress + relocationProgress);
+}
+
+/*
+ * Data storage for columnar stats.
+ */
+typedef struct ColumnarStats
+{
+	uint64 stripeId;
+	uint64 fileOffset;
+	uint32 rowCount;
+	uint32 deletedRows;
+	uint32 chunkCount;
+	uint32 dataLength;
+} ColumnarStats;
+
+/* We return 6 columns. */
+#define STATS_INFO_NATTS 6
+
+PG_FUNCTION_INFO_V1(columnar_stats);
+Datum
+columnar_stats(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	int call_cntr;
+	int max_calls;
+	TupleDesc tupdesc;
+	AttInMetadata *attinmeta;
+
+
+	/* If this is the first call in, set up the data. */
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldcontext;
+
+		Oid relid = PG_GETARG_OID(0);
+		Relation rel = RelationIdGetRelation(relid);
+
+		/* Function context for persistance. */
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		/* Use the SRF memory context */
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* Retrieve the stripe metadata. */
+#if PG_VERSION_NUM >= PG_VERSION_16
+		List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
+#else
+		List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
+#endif
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+				ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									errmsg("function returning record called in context "
+												"that cannot accept type record")));
+
+		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		funcctx->attinmeta = attinmeta;
+
+		/* Set up the stats. */
+		ColumnarStats *stats = palloc(sizeof(ColumnarStats) * list_length(stripeMetadataList));
+		funcctx->max_calls = list_length(stripeMetadataList);
+
+		/* Iterate through the stripes to get a copy of the important data. */
+		for (int i = 0; i < funcctx->max_calls; i++)
+		{
+			StripeMetadata *data = list_nth(stripeMetadataList, i);
+
+			stats[i].stripeId = data->id;
+			stats[i].fileOffset = data->fileOffset;
+			stats[i].rowCount = data->rowCount;
+			stats[i].chunkCount = data->chunkCount;
+			stats[i].dataLength = data->dataLength;
+#if PG_VERSION_NUM >= PG_VERSION_16
+			stats[i].deletedRows = DeletedRowsForStripe(rel->rd_locator,
+												 		data->chunkCount,
+														data->id);
+#else
+			stats[i].deletedRows = DeletedRowsForStripe(rel->rd_node,
+												 		data->chunkCount,
+														data->id);
+#endif
+		}
+
+		funcctx->user_fctx = stats;
+
+		table_close(rel, NoLock);
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+
+	call_cntr = funcctx->call_cntr;
+	max_calls = funcctx->max_calls;
+	ColumnarStats *stats = funcctx->user_fctx;
+
+	if (call_cntr < max_calls)
+	{
+		Datum result;
+
+		Datum values[STATS_INFO_NATTS] = { 0 };
+		bool nulls[STATS_INFO_NATTS] = { 0 };
+
+		get_call_result_type(fcinfo, NULL, &tupdesc);
+
+		values[0] = Int64GetDatum(stats[call_cntr].stripeId);
+		values[1] = Int64GetDatum(stats[call_cntr].fileOffset);
+		values[2] = Int32GetDatum(stats[call_cntr].rowCount);
+		values[3] = Int32GetDatum(stats[call_cntr].deletedRows);
+		values[4] = Int32GetDatum(stats[call_cntr].chunkCount);
+		values[5] = Int32GetDatum(stats[call_cntr].dataLength);
+
+		HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+		result = HeapTupleGetDatum(tuple);
+
+		SRF_RETURN_NEXT(funcctx, result);
 	}
 	else
 	{
-		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg("citus extension is not loaded")));
+		SRF_RETURN_DONE(funcctx);
 	}
-
-	systable_endscan(scandesc);
-
-	table_close(relation, AccessShareLock);
-
-	return installedExtensionVersion;
-}
-
-
-/*
- * GetExtensionOption returns DefElem * node with "defname" from "options" list
- */
-DefElem *
-GetExtensionOption(List *extensionOptions, const char *defname)
-{
-	DefElem *defElement = NULL;
-	foreach_declared_ptr(defElement, extensionOptions)
-	{
-		if (IsA(defElement, DefElem) &&
-			strncmp(defElement->defname, defname, NAMEDATALEN) == 0)
-		{
-			return defElement;
-		}
-	}
-
-	return NULL;
 }

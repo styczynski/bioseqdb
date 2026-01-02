@@ -11,7 +11,69 @@
 #ifndef PG_VERSION_COMPAT_H
 #define PG_VERSION_COMPAT_H
 
+#include "postgres.h"
 #include "pg_version_constants.h"
+
+// OLD COMPAT
+
+
+#define RelationPhysicalIdentifier_compat(a) ((a)->rd_locator)
+#define RelationTablespace_compat(a) (a.spcOid)
+#define RelationPhysicalIdentifierNumber_compat(a) (a.relNumber)
+#define tuplesort_getdatum_compat(a, b, c, d, e, f) tuplesort_getdatum(a, b, c, d, e, f)
+#define AlterTableStmtObjType_compat(a) ((a)->objtype)
+#define getObjectTypeDescription_compat(a, b) getObjectTypeDescription(a, b)
+#define getObjectIdentity_compat(a, b) getObjectIdentity(a, b)
+/* for MemoryContextMethods->stats */
+#define stats_compat(a, b, c, d, e) stats(a, b, c, d, e)
+#define FuncnameGetCandidates_compat(a, b, c, d, e, f, g) \
+	FuncnameGetCandidates(a, b, c, d, e, f, g)
+#define expand_function_arguments_compat(a, b, c, d) expand_function_arguments(a, b, c, d)
+#define BeginCopyFrom_compat(a, b, c, d, e, f, g, h) BeginCopyFrom(a, b, c, d, e, f, g, h)
+#define standard_ProcessUtility_compat(a, b, c, d, e, f, g, h) \
+	standard_ProcessUtility(a, b, c, d, e, f, g, h)
+#define ProcessUtility_compat(a, b, c, d, e, f, g, h) \
+	ProcessUtility(a, b, c, d, e, f, g, h)
+#define SetTuplestoreDestReceiverParams_compat(a, b, c, d, e, f) \
+	SetTuplestoreDestReceiverParams(a, b, c, d, e, f)
+#define pgproc_statusflags_compat(pgproc) ((pgproc)->statusFlags)
+#define get_partition_parent_compat(a, b) get_partition_parent(a, b)
+#define RelationGetPartitionDesc_compat(a, b) RelationGetPartitionDesc(a, b)
+#define make_simple_restrictinfo_compat(a, b) make_simple_restrictinfo(a, b)
+#define pull_varnos_compat(a, b) pull_varnos(a, b)
+#define lnext_compat(l, r) lnext(l, r)
+#define list_delete_cell_compat(l, c, p) list_delete_cell(l, c)
+#define pg_plan_query_compat(p, q, c, b) pg_plan_query(p, q, c, b)
+#define planner_compat(p, c, b) planner(p, NULL, c, b)
+#define standard_planner_compat(a, c, d) standard_planner(a, NULL, c, d)
+#define GetSequencesOwnedByRelation(a) getOwnedSequences(a)
+#define GetSequencesOwnedByColumn(a, b) getOwnedSequences_internal(a, b, 0)
+#define CMDTAG_SELECT_COMPAT CMDTAG_SELECT
+#define ExplainOnePlanCompat(a, b, c, d, e, f, g, h) \
+	ExplainOnePlan(a, b, c, d, e, f, g, h)
+#define SetListCellPtr(a, b) ((a)->ptr_value = (b))
+#define RangeTableEntryFromNSItem(a) ((a)->p_rte)
+#define QueryCompletionCompat QueryCompletion
+#define CreateTableSlotForRel(rel) table_slot_create(rel, NULL)
+#define MakeSingleTupleTableSlotCompat MakeSingleTupleTableSlot
+#define AllocSetContextCreateExtended AllocSetContextCreateInternal
+#define NextCopyFromCompat NextCopyFrom
+#define ArrayRef SubscriptingRef
+#define T_ArrayRef T_SubscriptingRef
+#define or_clause is_orclause
+#define GetSysCacheOid1Compat GetSysCacheOid1
+#define GetSysCacheOid2Compat GetSysCacheOid2
+#define GetSysCacheOid3Compat GetSysCacheOid3
+#define GetSysCacheOid4Compat GetSysCacheOid4
+#define fcGetArgValue(fc, n) ((fc)->args[n].value)
+#define fcGetArgNull(fc, n) ((fc)->args[n].isnull)
+#define fcSetArgExt(fc, n, val, is_null) \
+	(((fc)->args[n].isnull = (is_null)), ((fc)->args[n].value = (val)))
+#define fcSetArg(fc, n, value) fcSetArgExt(fc, n, value, false)
+#define fcSetArgNull(fc, n) fcSetArgExt(fc, n, (Datum) 0, true)
+
+
+// OLD COMAPT END
 
 #if PG_VERSION_NUM >= PG_VERSION_18
 #define create_foreignscan_path_compat(a, b, c, d, e, f, g, h, i, j, k) \

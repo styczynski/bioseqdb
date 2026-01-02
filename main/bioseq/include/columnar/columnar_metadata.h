@@ -12,13 +12,7 @@
 #ifndef COLUMNAR_METADATA_H
 #define COLUMNAR_METADATA_H
 
-#include "postgres.h"
-
-#include "storage/relfilelocator.h"
-
-#include "pg_version_compat.h"
-#include "pg_version_constants.h"
-
+#include "access/sdir.h"
 
 /*
  * StripeMetadata represents information about a stripe. This information is
@@ -57,9 +51,13 @@ typedef struct EmptyStripeReservation
 	uint64 stripeFirstRowNumber;
 } EmptyStripeReservation;
 
-extern List * StripesForRelfilelocator(Relation rel);
+extern List * StripesForRelfilenode(RelFileLocator relfilelocator, ScanDirection scanDirection);
+extern uint32 DeletedRowsForStripe(RelFileLocator relfilelocator,
+								   uint32 chunkCount,
+								   uint64 stripeId);
+extern Size DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64 stripeId);
 extern void ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade);
-extern List * ExtractColumnarRelOptions(List *inOptions, List **outColumnarOptions);
-extern void SetColumnarRelOptions(RangeVar *rv, List *reloptions);
+extern StripeMetadata * RewriteStripeMetadataRowWithNewValues(Relation rel, uint64 stripeId,
+              uint64 sizeBytes, uint64 fileOffset, uint64 rowCount, uint64 chunkCount);
 
 #endif /* COLUMNAR_METADATA_H */

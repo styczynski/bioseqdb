@@ -15,6 +15,7 @@ PostgreSQL_add_extension(postgresql_bioseq
   INSTALLS
     sql/bioseq--1.0.sql
 )
+# target_compile_features(postgresql_bioseq PRIVATE cxx_std_17)
 
 # configure
 #configure_file(src/config.h.in src/config.h)
@@ -27,6 +28,8 @@ target_include_directories(postgresql_bioseq PRIVATE
 )
 
 target_link_libraries(postgresql_bioseq PRIVATE safestring_static)
+
+
 
 # safestring_shared
 

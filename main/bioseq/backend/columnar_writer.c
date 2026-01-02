@@ -13,25 +13,29 @@
  *-------------------------------------------------------------------------
  */
 
+#include "pg_version_compat.h"
 
 #include "postgres.h"
 
-#include "miscadmin.h"
 #include "safe_lib.h"
 
 #include "access/heapam.h"
 #include "access/nbtree.h"
 #include "catalog/pg_am.h"
+#include "miscadmin.h"
 #include "storage/fd.h"
-#include "storage/relfilelocator.h"
 #include "storage/smgr.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/palloc.h"
 #include "utils/rel.h"
-#include "utils/relfilenumbermap.h"
 
-#include "pg_version_compat.h"
-#include "pg_version_constants.h"
+#if PG_VERSION_NUM >= PG_VERSION_16
+#include "utils/relfilenumbermap.h"
+#else
+#include "utils/relfilenodemap.h"
+#endif
+
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_storage.h"
@@ -42,12 +46,6 @@ struct ColumnarWriteState
 	TupleDesc tupleDescriptor;
 	FmgrInfo **comparisonFunctionArray;
 	RelFileLocator relfilelocator;
-
-	/*
-	 * We can't rely on RelidByRelfilenumber for temp tables since
-	 * PG18(it was backpatched through PG13).
-	 */
-	Oid temp_relid;
 
 	MemoryContext stripeWriteContext;
 	MemoryContext perTupleContext;
@@ -94,12 +92,10 @@ static StringInfo CopyStringInfo(StringInfo sourceString);
  * data load operation.
  */
 ColumnarWriteState *
-ColumnarBeginWrite(Relation rel,
+ColumnarBeginWrite(RelFileLocator relfilelocator,
 				   ColumnarOptions options,
 				   TupleDesc tupleDescriptor)
 {
-	RelFileLocator relfilelocator = rel->rd_locator;
-
 	/* get comparison function pointers for each of the columns */
 	uint32 columnCount = tupleDescriptor->natts;
 	FmgrInfo **comparisonFunctionArray = palloc0(columnCount * sizeof(FmgrInfo *));
@@ -137,7 +133,6 @@ ColumnarBeginWrite(Relation rel,
 
 	ColumnarWriteState *writeState = palloc0(sizeof(ColumnarWriteState));
 	writeState->relfilelocator = relfilelocator;
-	writeState->temp_relid = RelationPrecomputeOid(rel);
 	writeState->options = options;
 	writeState->tupleDescriptor = CreateTupleDescCopy(tupleDescriptor);
 	writeState->comparisonFunctionArray = comparisonFunctionArray;
@@ -153,7 +148,6 @@ ColumnarBeginWrite(Relation rel,
 
 	return writeState;
 }
-
 
 /*
  * ColumnarWriteRow adds a row to the columnar table. If the stripe is not initialized,
@@ -177,6 +171,58 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 	ChunkData *chunkData = writeState->chunkData;
 	MemoryContext oldContext = MemoryContextSwitchTo(writeState->stripeWriteContext);
 
+	uint32 chunkIndex;
+	uint32 chunkRowIndex;
+
+	if (stripeBuffers)
+	{
+		chunkIndex = stripeBuffers->rowCount / chunkRowCount;
+		chunkRowIndex = stripeBuffers->rowCount % chunkRowCount;
+		/*
+		* For each column, we first need to check to see if the next row will fit
+		* inside the chunk buffer.  If it does not fit, then we need to serialize
+		* the stripe and make a new stripe for insertion.
+		*/
+		bool fits = true;
+
+		for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
+		{
+
+			/* Check for nulls, skip if null. */
+			if (columnNulls[columnIndex])
+			{
+				continue;
+			}
+
+			Form_pg_attribute attributeForm =
+				TupleDescAttr(writeState->tupleDescriptor, columnIndex);
+
+			int columnTypeLength = attributeForm->attlen;
+			char columnTypeAlign = attributeForm->attalign;
+
+			uint32 datumLength = att_addlength_datum(0, columnTypeLength, columnValues[columnIndex]);
+			uint32 datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
+
+			/* Check to see if we are within the 1 gigabyte value. */
+			if ((long) chunkData->valueBufferArray[columnIndex]->len + (long) datumLengthAligned > 1024000000)
+			{
+				fits = false;
+				break;
+			}
+		}
+
+		if (!fits)
+		{
+			/* Flush the stripe. */
+			ColumnarFlushPendingWrites(writeState);
+
+			/* Then set up for new stripeBuffers. */
+			stripeBuffers = NULL;
+
+			chunkData->rowCount = 0;
+		}
+	}
+
 	if (stripeBuffers == NULL)
 	{
 		stripeBuffers = CreateEmptyStripeBuffers(options->stripeRowCount,
@@ -187,9 +233,13 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		writeState->stripeSkipList = stripeSkipList;
 		writeState->compressionBuffer = makeStringInfo();
 
-		Oid relationId = ColumnarRelationId(writeState->temp_relid,
-											writeState->relfilelocator);
-
+#if PG_VERSION_NUM >= PG_VERSION_16
+		Oid relationId = RelidByRelfilenumber(writeState->relfilelocator.spcOid,
+											  writeState->relfilelocator.relNumber);
+#else
+		Oid relationId = RelidByRelfilenode(writeState->relfilelocator.spcNode,
+											writeState->relfilelocator.relNode);
+#endif
 		Relation relation = relation_open(relationId, NoLock);
 		writeState->emptyStripeReservation =
 			ReserveEmptyStripe(relation, columnCount, chunkRowCount,
@@ -202,12 +252,19 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		 */
 		for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 		{
+#if PG_VERSION_NUM >= PG_VERSION_16
+			cached_StringInfo *value = palloc(sizeof(cached_StringInfo));
+			initStringInfo(&value->data);
+			value->cached = false;
+			chunkData->valueBufferArray[columnIndex] = (StringInfo)value;
+#else
 			chunkData->valueBufferArray[columnIndex] = makeStringInfo();
+#endif
 		}
 	}
 
-	uint32 chunkIndex = stripeBuffers->rowCount / chunkRowCount;
-	uint32 chunkRowIndex = stripeBuffers->rowCount % chunkRowCount;
+	chunkIndex = stripeBuffers->rowCount / chunkRowCount;
+	chunkRowIndex = stripeBuffers->rowCount % chunkRowCount;
 
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
@@ -231,6 +288,15 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 			char columnTypeAlign = attributeForm->attalign;
 
 			chunkData->existsArray[columnIndex][chunkRowIndex] = true;
+
+			uint32 datumLength = att_addlength_datum(0, columnTypeLength, columnValues[columnIndex]);
+			uint32 datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
+
+			if (datumLengthAligned >= (256UL << 20))
+			{
+				elog(ERROR, "Error with insert on column \'%s\'. Inserting %d bytes, exceeding 256MB",
+							 attributeForm->attname.data, datumLength);
+			}
 
 			SerializeSingleDatum(chunkData->valueBufferArray[columnIndex],
 								 columnValues[columnIndex], columnTypeByValue,
@@ -407,8 +473,13 @@ FlushStripe(ColumnarWriteState *writeState)
 
 	elog(DEBUG1, "Flushing Stripe of size %d", stripeBuffers->rowCount);
 
-	Oid relationId = ColumnarRelationId(writeState->temp_relid,
-										writeState->relfilelocator);
+#if PG_VERSION_NUM >= PG_VERSION_16
+	Oid relationId = RelidByRelfilenumber(writeState->relfilelocator.spcOid,
+										  writeState->relfilelocator.relNumber);
+#else
+	Oid relationId = RelidByRelfilenode(writeState->relfilelocator.spcNode,
+										writeState->relfilelocator.relNode);
+#endif
 
 	Relation relation = relation_open(relationId, NoLock);
 
@@ -501,14 +572,16 @@ FlushStripe(ColumnarWriteState *writeState)
 		}
 	}
 
-	SaveChunkGroups(writeState->temp_relid,
-					writeState->relfilelocator,
+	SaveChunkGroups(writeState->relfilelocator,
 					stripeMetadata->id,
 					writeState->chunkGroupRowCounts);
-	SaveStripeSkipList(writeState->temp_relid,
-					   writeState->relfilelocator,
+	SaveStripeSkipList(writeState->relfilelocator,
 					   stripeMetadata->id,
 					   stripeSkipList, tupleDescriptor);
+	SaveEmptyRowMask(LookupStorageId(writeState->relfilelocator),
+					 stripeMetadata->id,
+					 stripeMetadata->firstRowNumber,
+					 writeState->chunkGroupRowCounts);
 
 	writeState->chunkGroupRowCounts = NIL;
 
@@ -548,9 +621,6 @@ SerializeBoolArray(bool *boolArray, uint32 boolArrayLength)
 /*
  * SerializeSingleDatum serializes the given datum value and appends it to the
  * provided string info buffer.
- *
- * Since we don't want to limit datum buffer size to RSIZE_MAX unnecessarily,
- * we use memcpy instead of memcpy_s several places in this function.
  */
 static void
 SerializeSingleDatum(StringInfo datumBuffer, Datum datum, bool datumTypeByValue,
@@ -572,13 +642,13 @@ SerializeSingleDatum(StringInfo datumBuffer, Datum datum, bool datumTypeByValue,
 		}
 		else
 		{
-			memcpy(currentDatumDataPointer, DatumGetPointer(datum), datumTypeLength); /* IGNORE-BANNED */
+			memcpy(currentDatumDataPointer, DatumGetPointer(datum), datumTypeLength);
 		}
 	}
 	else
 	{
 		Assert(!datumTypeByValue);
-		memcpy(currentDatumDataPointer, DatumGetPointer(datum), datumLength); /* IGNORE-BANNED */
+		memcpy(currentDatumDataPointer, DatumGetPointer(datum), datumLength);
 	}
 
 	datumBuffer->len += datumLengthAligned;
@@ -638,6 +708,7 @@ SerializeChunkData(ColumnarWriteState *writeState, uint32 chunkIndex, uint32 row
 		bool compressed = CompressBuffer(serializedValueBuffer, compressionBuffer,
 										 requestedCompressionType,
 										 compressionLevel);
+
 		if (compressed)
 		{
 			serializedValueBuffer = compressionBuffer;
@@ -695,6 +766,9 @@ UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode, Datum columnValue,
 
 		if (minimumComparison < 0)
 		{
+			if (!columnTypeByValue)
+				pfree(DatumGetPointer(previousMinimum));
+
 			currentMinimum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
 		}
 		else
@@ -704,6 +778,9 @@ UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode, Datum columnValue,
 
 		if (maximumComparison > 0)
 		{
+			if (!columnTypeByValue)
+				pfree(DatumGetPointer(previousMaximum));
+
 			currentMaximum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
 		}
 		else
@@ -732,12 +809,7 @@ DatumCopy(Datum datum, bool datumTypeByValue, int datumTypeLength)
 	{
 		uint32 datumLength = att_addlength_datum(0, datumTypeLength, datum);
 		char *datumData = palloc0(datumLength);
-
-		/*
-		 * We use IGNORE-BANNED here since we don't want to limit datum size to
-		 * RSIZE_MAX unnecessarily.
-		 */
-		memcpy(datumData, DatumGetPointer(datum), datumLength); /* IGNORE-BANNED */
+		memcpy(datumData, DatumGetPointer(datum), datumLength);
 
 		datumCopy = PointerGetDatum(datumData);
 	}
@@ -760,12 +832,7 @@ CopyStringInfo(StringInfo sourceString)
 		targetString->data = palloc0(sourceString->len);
 		targetString->len = sourceString->len;
 		targetString->maxlen = sourceString->len;
-
-		/*
-		 * We use IGNORE-BANNED here since we don't want to limit string
-		 * buffer size to RSIZE_MAX unnecessarily.
-		 */
-		memcpy(targetString->data, sourceString->data, sourceString->len); /* IGNORE-BANNED */
+		memcpy(targetString->data, sourceString->data, sourceString->len);
 	}
 
 	return targetString;

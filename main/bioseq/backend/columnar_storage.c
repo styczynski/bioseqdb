@@ -36,19 +36,18 @@
 
 #include "postgres.h"
 
-#include "miscadmin.h"
 #include "safe_lib.h"
 
 #include "access/generic_xlog.h"
 #include "catalog/storage.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
-
-#include "pg_version_compat.h"
+#include "storage/smgr.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_storage.h"
-
+#include "columnar/columnar_version_compat.h"
 
 /*
  * Content of the first page in main fork, which stores metadata at file
@@ -168,8 +167,13 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 			 nblocks);
 	}
 
+
 	/* create two pages */
+#if PG_VERSION_NUM >= PG_VERSION_16
 	PGIOAlignedBlock block;
+#else
+	PGAlignedBlock block;
+#endif
 	Page page = block.data;
 
 	/* write metapage */
@@ -187,17 +191,28 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower,
 			 (char *) &metapage, sizeof(ColumnarMetapage));
 	phdr->pd_lower += sizeof(ColumnarMetapage);
-
+#if PG_VERSION_NUM >= PG_VERSION_16
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
 				COLUMNAR_METAPAGE_BLOCKNO, page, true);
+#else
+	log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
+				COLUMNAR_METAPAGE_BLOCKNO, page, true);
+#endif
+
 	PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
 
 	/* write empty page */
 	PageInit(page, BLCKSZ, 0);
 
+#if PG_VERSION_NUM >= PG_VERSION_16
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
 				COLUMNAR_EMPTY_BLOCKNO, page, true);
+#else
+	log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
+				COLUMNAR_EMPTY_BLOCKNO, page, true);
+#endif
+
 	PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
 
@@ -348,6 +363,22 @@ ColumnarStorageGetReservedOffset(Relation rel, bool force)
 	return metapage.reservedOffset;
 }
 
+/*
+ * RelationGetSmgr got backported in 13.10 and 14.7 so redefining it for any
+ * version higher causes compilation errors due to redefining of the function.
+ * We want to use it in all versions. So we backport it ourselves in earlier
+ * versions, and rely on the Postgres provided version in the later versions.
+ */
+#if PG_VERSION_NUM < 140007
+inline SMgrRelation RelationGetSmgr(Relation rel)
+{
+	if (unlikely(rel->rd_smgr == NULL))
+	{
+		smgrsetowner(&(rel->rd_smgr), smgropen(rel->rd_node, rel->rd_backend));
+	}
+	return rel->rd_smgr;
+}
+#endif
 
 /*
  * ColumnarStorageIsCurrent - return true if metapage exists and is not
@@ -543,8 +574,7 @@ ColumnarStorageTruncate(Relation rel, uint64 newDataReservation)
 	if (!ColumnarLogicalOffsetIsValid(newDataReservation))
 	{
 		elog(ERROR,
-			 "attempted to truncate relation %d to "
-			 "invalid logical offset: " UINT64_FORMAT,
+			 "attempted to truncate relation %d to invalid logical offset: " UINT64_FORMAT,
 			 rel->rd_id, newDataReservation);
 	}
 

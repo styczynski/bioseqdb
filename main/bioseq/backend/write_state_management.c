@@ -1,17 +1,25 @@
 
-#include <math.h>
+#include "citus_version.h"
 
 #include "postgres.h"
+#include "columnar/columnar.h"
+
+
+#include <math.h>
 
 #include "miscadmin.h"
-#include "pgstat.h"
 
 #include "access/genam.h"
 #include "access/heapam.h"
-#include "access/heaptoast.h"
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/tsmapi.h"
+#if PG_VERSION_NUM >= 130000
+#include "access/heaptoast.h"
+#include "common/hashfn.h"
+#else
+#include "access/tuptoaster.h"
+#endif
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -22,12 +30,13 @@
 #include "catalog/storage_xlog.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
-#include "common/hashfn.h"
 #include "executor/executor.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/plancat.h"
+#include "pgstat.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
+#include "storage/bufmgr.h"
 #include "storage/lmgr.h"
 #include "storage/predicate.h"
 #include "storage/procarray.h"
@@ -38,10 +47,6 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
-#include "citus_version.h"
-#include "pg_version_compat.h"
-
-#include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
 #include "columnar/columnar_tableam.h"
 #include "columnar/columnar_version_compat.h"
@@ -65,7 +70,6 @@ typedef struct SubXidWriteState
 {
 	SubTransactionId subXid;
 	ColumnarWriteState *writeState;
-
 	struct SubXidWriteState *next;
 } SubXidWriteState;
 
@@ -76,7 +80,7 @@ typedef struct SubXidWriteState
 typedef struct WriteStateMapEntry
 {
 	/* key of the entry */
-	RelFileNumber relfilenumber;
+	Oid relfilenode;
 
 	/*
 	 * If a table is dropped, we set dropped to true and set dropSubXid to the
@@ -112,8 +116,7 @@ CleanupWriteStateMap(void *arg)
 
 ColumnarWriteState *
 columnar_init_write_state(Relation relation, TupleDesc tupdesc,
-						  Oid tupSlotRelationId,
-						  SubTransactionId currentSubXid)
+						  Oid tupSlotRelationId, SubTransactionId currentSubXid)
 {
 	bool found;
 
@@ -131,7 +134,7 @@ columnar_init_write_state(Relation relation, TupleDesc tupdesc,
 		HASHCTL info;
 		uint32 hashFlags = (HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
 		memset(&info, 0, sizeof(info));
-		info.keysize = sizeof(RelFileNumber);
+		info.keysize = sizeof(Oid);
 		info.hash = oid_hash;
 		info.entrysize = sizeof(WriteStateMapEntry);
 		info.hcxt = WriteStateContext;
@@ -145,8 +148,12 @@ columnar_init_write_state(Relation relation, TupleDesc tupdesc,
 		MemoryContextRegisterResetCallback(WriteStateContext, &cleanupCallback);
 	}
 
-	WriteStateMapEntry *hashEntry = hash_search(WriteStateMap,
-												&(relation->rd_locator.relNumber),
+#if PG_VERSION_NUM >= PG_VERSION_16
+	WriteStateMapEntry *hashEntry = hash_search(WriteStateMap, &relation->rd_locator.relNumber,
+#else
+	WriteStateMapEntry *hashEntry = hash_search(WriteStateMap, &relation->rd_node.relNode,
+#endif
+
 												HASH_ENTER, &found);
 	if (!found)
 	{
@@ -189,7 +196,12 @@ columnar_init_write_state(Relation relation, TupleDesc tupdesc,
 	ReadColumnarOptions(tupSlotRelationId, &columnarOptions);
 
 	SubXidWriteState *stackEntry = palloc0(sizeof(SubXidWriteState));
-	stackEntry->writeState = ColumnarBeginWrite(relation,
+#if PG_VERSION_NUM >= PG_VERSION_16
+	stackEntry->writeState = ColumnarBeginWrite(relation->rd_locator,
+#else
+	stackEntry->writeState = ColumnarBeginWrite(relation->rd_node,
+#endif
+
 												columnarOptions,
 												tupdesc);
 	stackEntry->subXid = currentSubXid;
@@ -206,16 +218,14 @@ columnar_init_write_state(Relation relation, TupleDesc tupdesc,
  * Flushes pending writes for given relfilenode in the given subtransaction.
  */
 void
-FlushWriteStateForRelfilenumber(RelFileNumber relfilenumber,
-								SubTransactionId currentSubXid)
+FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId currentSubXid)
 {
 	if (WriteStateMap == NULL)
 	{
 		return;
 	}
 
-	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenumber, HASH_FIND,
-											NULL);
+	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL);
 
 	Assert(!entry || !entry->dropped);
 
@@ -237,9 +247,10 @@ FlushWriteStateForRelfilenumber(RelFileNumber relfilenumber,
  * tables, and either propagates the dropped flag to parent subtransaction or
  * rolls back abort.
  */
-static void
-PopWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId parentSubXid,
-						bool commit)
+void
+ColumnarPopWriteStateForAllRels(SubTransactionId currentSubXid,
+								SubTransactionId parentSubXid,
+								bool commit)
 {
 	HASH_SEQ_STATUS status;
 	WriteStateMapEntry *entry;
@@ -299,37 +310,17 @@ PopWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId parentS
 
 
 /*
- * Called when current subtransaction is committed.
- */
-void
-FlushWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId parentSubXid)
-{
-	PopWriteStateForAllRels(currentSubXid, parentSubXid, true);
-}
-
-
-/*
- * Called when current subtransaction is aborted.
- */
-void
-DiscardWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId parentSubXid)
-{
-	PopWriteStateForAllRels(currentSubXid, parentSubXid, false);
-}
-
-
-/*
  * Called when the given relfilenode is dropped.
  */
 void
-MarkRelfilenumberDropped(RelFileNumber relfilenumber, SubTransactionId currentSubXid)
+ColumnarMarkRelfilenodeDroppedColumnar(Oid relfilenode, SubTransactionId currentSubXid)
 {
 	if (WriteStateMap == NULL)
 	{
 		return;
 	}
 
-	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenumber, HASH_FIND,
+	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND,
 											NULL);
 	if (!entry || entry->dropped)
 	{
@@ -345,11 +336,11 @@ MarkRelfilenumberDropped(RelFileNumber relfilenumber, SubTransactionId currentSu
  * Called when the given relfilenode is dropped in non-transactional TRUNCATE.
  */
 void
-NonTransactionDropWriteState(RelFileNumber relfilenumber)
+ColumnarNonTransactionDropWriteState(Oid relfilenode)
 {
 	if (WriteStateMap)
 	{
-		hash_search(WriteStateMap, &relfilenumber, HASH_REMOVE, false);
+		hash_search(WriteStateMap, &relfilenode, HASH_REMOVE, false);
 	}
 }
 
@@ -358,16 +349,14 @@ NonTransactionDropWriteState(RelFileNumber relfilenumber)
  * Returns true if there are any pending writes in upper transactions.
  */
 bool
-PendingWritesInUpperTransactions(RelFileNumber relfilenumber,
-								 SubTransactionId currentSubXid)
+ColumnarPendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId currentSubXid)
 {
 	if (WriteStateMap == NULL)
 	{
 		return false;
 	}
 
-	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenumber, HASH_FIND,
-											NULL);
+	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL);
 
 	if (entry && entry->writeStateStack != NULL)
 	{
@@ -394,7 +383,7 @@ PendingWritesInUpperTransactions(RelFileNumber relfilenumber,
  * purposes.
  */
 extern MemoryContext
-GetWriteContextForDebug(void)
+GetColumnarWriteContextForDebug(void)
 {
 	return WriteStateContext;
 }

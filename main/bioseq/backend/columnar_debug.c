@@ -11,12 +11,12 @@
 #include "postgres.h"
 
 #include "funcapi.h"
-#include "miscadmin.h"
-
 #include "access/nbtree.h"
 #include "access/table.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_type.h"
+#include "pg_version_constants.h"
+#include "miscadmin.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"
 #include "utils/guc.h"
@@ -25,8 +25,6 @@
 #include "utils/tuplestore.h"
 
 #include "pg_version_compat.h"
-#include "pg_version_constants.h"
-
 #include "columnar/columnar.h"
 #include "columnar/columnar_storage.h"
 #include "columnar/columnar_version_compat.h"
@@ -38,8 +36,9 @@ PG_FUNCTION_INFO_V1(columnar_storage_info);
 
 
 /*
- * columnar_store_memory_stats returns a record of 3 values: size of
- * TopMemoryContext, TopTransactionContext, and Write State context.
+ * columnar_store_memory_stats returns a record of 4 values: size of
+ * TopMemoryContext, TopTransactionContext, , Write State context and
+ * Row Mask context.
  */
 Datum
 columnar_store_memory_stats(PG_FUNCTION_ARGS)
@@ -54,21 +53,26 @@ columnar_store_memory_stats(PG_FUNCTION_ARGS)
 					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 3, "WriteStateContext",
 					   INT8OID, -1, 0);
+	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 4, "RowMaskWriteStateContext",
+					   INT8OID, -1, 0);
 
 	tupleDescriptor = BlessTupleDesc(tupleDescriptor);
 
 	MemoryContextCounters transactionCounters = { 0 };
 	MemoryContextCounters topCounters = { 0 };
 	MemoryContextCounters writeStateCounters = { 0 };
+	MemoryContextCounters rowMaskCacheCounters = { 0 };
 	MemoryContextTotals(TopTransactionContext, &transactionCounters);
 	MemoryContextTotals(TopMemoryContext, &topCounters);
-	MemoryContextTotals(GetWriteContextForDebug(), &writeStateCounters);
+	MemoryContextTotals(GetColumnarWriteContextForDebug(), &writeStateCounters);
+	MemoryContextTotals(GetRowMaskWriteStateContextForDebug(), &rowMaskCacheCounters);
 
-	bool nulls[3] = { false };
-	Datum values[3] = {
+	bool nulls[4] = { false };
+	Datum values[4] = {
 		Int64GetDatum(topCounters.totalspace),
 		Int64GetDatum(transactionCounters.totalspace),
-		Int64GetDatum(writeStateCounters.totalspace)
+		Int64GetDatum(writeStateCounters.totalspace),
+		Int64GetDatum(rowMaskCacheCounters.totalspace)
 	};
 
 	HeapTuple tuple = heap_form_tuple(tupleDescriptor, values, nulls);
@@ -161,5 +165,5 @@ MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters)
 		MemoryContextTotals(child, counters);
 	}
 
-	context->methods->stats(context, NULL, NULL, counters, true);
+	context->methods->stats_compat(context, NULL, NULL, counters, true);
 }

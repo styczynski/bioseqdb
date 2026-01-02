@@ -1,17 +1,17 @@
 #ifndef COLUMNAR_TABLEAM_H
 #define COLUMNAR_TABLEAM_H
+#include "citus_version.h"
+
 #include "postgres.h"
-
 #include "fmgr.h"
-
-#include "access/heapam.h"
-#include "access/skey.h"
 #include "access/tableam.h"
-#include "catalog/indexing.h"
+#include "access/skey.h"
 #include "nodes/bitmapset.h"
+#include "access/heapam.h"
+#include "catalog/indexing.h"
 #include "utils/acl.h"
 
-#include "citus_version.h"
+#include "columnar/columnar.h"
 
 /*
  * Number of valid ItemPointer Offset's for "row number" <> "ItemPointer"
@@ -29,7 +29,7 @@
  * to the following interval: [FirstOffsetNumber, MaxHeapTuplesPerPage].
  */
 #define VALID_ITEMPOINTER_OFFSETS \
-		((uint64) (MaxHeapTuplesPerPage - FirstOffsetNumber + 1))
+	((uint64) (MaxHeapTuplesPerPage - FirstOffsetNumber + 1))
 
 /*
  * Number of valid ItemPointer BlockNumber's for "row number" <> "ItemPointer"
@@ -56,13 +56,14 @@ extern TableScanDesc columnar_beginscan_extended(Relation relation, Snapshot sna
 												 int nkeys, ScanKey key,
 												 ParallelTableScanDesc parallel_scan,
 												 uint32 flags, Bitmapset *attr_needed,
-												 List *scanQual);
+												 List *scanQual,
+												 ParallelColumnarScan parallelColumnarScan,
+												 bool returnVectorResult);
+extern IndexFetchTableData * columnar_index_fetch_begin_extended(Relation rel,
+																 Bitmapset *attr_neededs);
 extern int64 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);
-extern PGDLLEXPORT bool ColumnarSupportsIndexAM(char *indexAMName);
+extern bool ColumnarSupportsIndexAM(char *indexAMName);
 extern bool IsColumnarTableAmTable(Oid relationId);
-extern void CheckCitusColumnarCreateExtensionStmt(Node *parseTree);
-extern void CheckCitusColumnarAlterExtensionStmt(Node *parseTree);
-extern DefElem * GetExtensionOption(List *extensionOptions,
-									const char *defname);
+
 
 #endif /* COLUMNAR_TABLEAM_H */

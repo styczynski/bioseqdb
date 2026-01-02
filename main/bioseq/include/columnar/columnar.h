@@ -5,30 +5,39 @@
  * Type and function declarations for Columnar
  *
  * Copyright (c) Citus Data, Inc.
+ * Copyright (c) Hydra, Inc.
  *
  *-------------------------------------------------------------------------
  */
 
 #ifndef COLUMNAR_H
 #define COLUMNAR_H
-#include "postgres.h"
-
-#include "fmgr.h"
-
-#include "lib/stringinfo.h"
-#include "nodes/parsenodes.h"
-#include "storage/bufpage.h"
-#include "storage/lockdefs.h"
-#include "storage/relfilelocator.h"
-#include "utils/relcache.h"
-#include "utils/snapmgr.h"
 
 #include "pg_version_compat.h"
 
+#include "postgres.h"
+
+#include "fmgr.h"
+#include "lib/stringinfo.h"
+#include "nodes/parsenodes.h"
+#include "nodes/extensible.h"
+#include "port/atomics.h"
+#include "storage/bufpage.h"
+#include "storage/lockdefs.h"
+#if PG_VERSION_NUM >= PG_VERSION_16
+#include "storage/relfilelocator.h"
+#else
+#include "storage/relfilenode.h"
+typedef struct RelFileNode RelFileLocator;
+#endif
+#include "storage/s_lock.h"
+#include "utils/relcache.h"
+#include "utils/snapmgr.h"
+
 #include "columnar/columnar_compression.h"
 #include "columnar/columnar_metadata.h"
+#include "columnar/columnar_write_state_row_mask.h"
 
-#define COLUMNAR_AM_NAME "columnar"
 #define COLUMNAR_MODULE_NAME "citus_columnar"
 
 #define COLUMNAR_SETOPTIONS_HOOK_SYM "ColumnarTableSetOptions_hook"
@@ -40,9 +49,9 @@
 
 /* Limits for option parameters */
 #define STRIPE_ROW_COUNT_MINIMUM 1000
-#define STRIPE_ROW_COUNT_MAXIMUM 10000000
+#define STRIPE_ROW_COUNT_MAXIMUM 100000000
 #define CHUNK_ROW_COUNT_MINIMUM 1000
-#define CHUNK_ROW_COUNT_MAXIMUM 100000
+#define CHUNK_ROW_COUNT_MAXIMUM 100000000
 #define COMPRESSION_LEVEL_MIN 1
 #define COMPRESSION_LEVEL_MAX 19
 
@@ -56,16 +65,8 @@
 #define COLUMNAR_POSTSCRIPT_SIZE_MAX 256
 #define COLUMNAR_BYTES_PER_PAGE (BLCKSZ - SizeOfPageHeaderData)
 
-/*global variables for citus_columnar fake version Y */
-#define CITUS_COLUMNAR_INTERNAL_VERSION "11.1-0"
-
-/*
- * We can't rely on RelidByRelfilenumber for temp tables since PG18(it was backpatched
- * through PG13), so we can use this macro to define relid within relation in case of
- * temp relations. Otherwise RelidByRelfilenumber should be used.
- */
-#define RelationPrecomputeOid(a) (RelationUsesLocalBuffers(a) ? RelationGetRelid(a) : \
-								  InvalidOid)
+/* Columnar row mask byte array size */
+#define COLUMNAR_ROW_MASK_CHUNK_SIZE 10000
 
 /*
  * ColumnarOptions holds the option values to be used when reading or writing
@@ -120,10 +121,20 @@ typedef struct StripeSkipList
 {
 	ColumnChunkSkipNode **chunkSkipNodeArray;
 	uint32 *chunkGroupRowCounts;
+	uint32 *chunkGroupRowOffset;
+	uint32 *chunkGroupDeletedRows;
 	uint32 columnCount;
 	uint32 chunkCount;
 } StripeSkipList;
 
+
+#if PG_VERSION_NUM >= PG_VERSION_16
+typedef struct cached_StringInfo
+{
+	StringInfoData data;
+	bool cached;
+} cached_StringInfo;
+#endif
 
 /*
  * ChunkData represents a chunk of data for multiple columns. valueArray stores
@@ -183,6 +194,8 @@ typedef struct StripeBuffers
 	ColumnBuffers **columnBuffersArray;
 
 	uint32 *selectedChunkGroupRowCounts;
+	uint32 *selectedChunkGroupRowOffset;
+	uint32 *selectedChunkGroupDeletedRows;
 } StripeBuffers;
 
 
@@ -206,6 +219,17 @@ typedef enum StripeWriteStateEnum
 	STRIPE_WRITE_IN_PROGRESS
 } StripeWriteStateEnum;
 
+
+/* Parallel Custom Scan shared data */
+typedef struct ParallelColumnarScanData
+{
+	slock_t mutex;
+	pg_atomic_uint64 nextStripeId;	/* Fetch next stripe id to be read and increment */
+	char snapshotData[FLEXIBLE_ARRAY_MEMBER];
+} ParallelColumnarScanData;
+typedef struct ParallelColumnarScanData *ParallelColumnarScan;
+
+
 typedef bool (*ColumnarSupportsIndexAM_type)(char *);
 typedef const char *(*CompressionTypeStr_type)(CompressionType);
 typedef bool (*IsColumnarTableAmTable_type)(Oid);
@@ -220,22 +244,45 @@ typedef struct ColumnarReadState ColumnarReadState;
 struct ColumnarWriteState;
 typedef struct ColumnarWriteState ColumnarWriteState;
 
+/* RowMaskWriteStateEntry represents write state entry of columnar.row_mask row */
+struct RowMaskWriteStateEntry;
+typedef struct RowMaskWriteStateEntry RowMaskWriteStateEntry;
+
+/* Cache statistics for when caching is enabled and used. */
+typedef struct ColumnarCacheStatistics
+{
+	uint64 hits;
+	uint64 misses;
+	uint64 evictions;
+	uint64 writes;
+	uint64 maximumCacheSize;
+	uint64 endingCacheSize;
+	uint64 entries;
+} ColumnarCacheStatistics;
+
 /* GUCs */
 extern int columnar_compression;
 extern int columnar_stripe_row_limit;
 extern int columnar_chunk_group_row_limit;
 extern int columnar_compression_level;
+extern bool columnar_enable_parallel_execution;
+extern int columnar_min_parallel_processes;
+extern bool columnar_enable_vectorization;
+extern bool columnar_enable_dml;
+extern bool columnar_enable_page_cache;
+extern int columnar_page_cache_size;
+extern bool columnar_index_scan;
+
 
 /* called when the user changes options on the given relation */
 typedef void (*ColumnarTableSetOptions_hook_type)(Oid relid, ColumnarOptions options);
 
 extern void columnar_init(void);
-extern void columnar_init_gucs(void);
 
 extern CompressionType ParseCompressionType(const char *compressionTypeString);
 
 /* Function declarations for writing to a columnar table */
-extern ColumnarWriteState * ColumnarBeginWrite(Relation rel,
+extern ColumnarWriteState * ColumnarBeginWrite(RelFileLocator relfilelocator,
 											   ColumnarOptions options,
 											   TupleDesc tupleDescriptor);
 extern uint64 ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
@@ -254,7 +301,8 @@ extern ColumnarReadState * ColumnarBeginRead(Relation relation,
 											 List *qualConditions,
 											 MemoryContext scanContext,
 											 Snapshot snaphot,
-											 bool randomAccess);
+											 bool randomAccess,
+											 ParallelColumnarScan parallaleColumnarScan);
 extern void ColumnarReadFlushPendingWrites(ColumnarReadState *readState);
 extern void ColumnarEndRead(ColumnarReadState *state);
 extern void ColumnarResetRead(ColumnarReadState *readState);
@@ -262,6 +310,9 @@ extern void ColumnarResetRead(ColumnarReadState *readState);
 /* functions only applicable for sequential access */
 extern bool ColumnarReadNextRow(ColumnarReadState *state, Datum *columnValues,
 								bool *columnNulls, uint64 *rowNumber);
+extern bool ColumnarReadNextVector(ColumnarReadState *readState, Datum *columnValues,
+								   bool *columnNulls, uint64 *rowNumber,
+								   int *newVectorSize);
 extern int64 ColumnarReadChunkGroupsFiltered(ColumnarReadState *state);
 extern void ColumnarRescan(ColumnarReadState *readState, List *scanQual);
 
@@ -272,6 +323,8 @@ extern void ColumnarReadRowByRowNumberOrError(ColumnarReadState *readState,
 extern bool ColumnarReadRowByRowNumber(ColumnarReadState *readState,
 									   uint64 rowNumber, Datum *columnValues,
 									   bool *columnNulls);
+extern bool ColumnarSetStripeReadState(ColumnarReadState *readState,
+									   StripeMetadata *startStripeMetadata);
 
 /* Function declarations for common functions */
 extern FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
@@ -279,32 +332,38 @@ extern FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
 extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
 										uint32 chunkGroupRowCount);
 extern void FreeChunkData(ChunkData *chunkData);
+extern void FreeChunkBufferValueArray(ChunkData *chunkData);
 extern uint64 ColumnarTableRowCount(Relation relation);
-extern PGDLLEXPORT const char * CompressionTypeStr(CompressionType type);
+extern const char * CompressionTypeStr(CompressionType type);
+extern ItemPointerData row_number_to_tid(uint64 rowNumber);
+extern uint64 LookupStorageId(RelFileLocator relfilelocator);
 
 /* columnar_metadata_tables.c */
-extern PGDLLEXPORT void InitColumnarOptions(Oid regclass);
-extern PGDLLEXPORT void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
-extern PGDLLEXPORT bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
-extern PGDLLEXPORT bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
-extern PGDLLEXPORT bool IsColumnarTableAmTable(Oid relationId);
+extern void InitColumnarOptions(Oid regclass);
+extern void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
+extern bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
+extern bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
+extern bool IsColumnarTableAmTable(Oid relationId);
 
 /* columnar_metadata_tables.c */
-extern void DeleteMetadataRows(Relation rel);
+extern void DeleteMetadataRows(RelFileLocator relfilelocator);
+extern void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
 extern uint64 ColumnarMetadataNewStorageId(void);
-extern uint64 GetHighestUsedAddress(Relation rel);
+extern uint64 GetHighestUsedAddress(RelFileLocator relfilelocator);
 extern EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64 columnCount,
 												   uint64 chunkGroupRowCount,
 												   uint64 stripeRowCount);
 extern StripeMetadata * CompleteStripeReservation(Relation rel, uint64 stripeId,
 												  uint64 sizeBytes, uint64 rowCount,
 												  uint64 chunkCount);
-extern void SaveStripeSkipList(Oid relid, RelFileLocator relfilelocator, uint64 stripe,
+extern void SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
 							   StripeSkipList *stripeSkipList,
 							   TupleDesc tupleDescriptor);
-extern void SaveChunkGroups(Oid relid, RelFileLocator relfilelocator, uint64 stripe,
+extern void SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
 							List *chunkGroupRowCounts);
-extern StripeSkipList * ReadStripeSkipList(Relation rel, uint64 stripe,
+extern void UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
+										uint32 chunkGroupId, uint32 deletedRowNumber);
+extern StripeSkipList * ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
 										   TupleDesc tupleDescriptor,
 										   uint32 chunkCount,
 										   Snapshot snapshot);
@@ -315,30 +374,94 @@ extern StripeMetadata * FindStripeByRowNumber(Relation relation, uint64 rowNumbe
 extern StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
 															 uint64 rowNumber,
 															 Snapshot snapshot);
+extern StripeMetadata *  FindNextStripeForParallelWorker(Relation relation,
+														 Snapshot snapshot,
+														 uint64 nextStripeId,
+														 uint64 * nextHigherStripeId);
 extern StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
 extern uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
 extern StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
 													   Snapshot snapshot);
 extern Datum columnar_relation_storageid(PG_FUNCTION_ARGS);
-extern Oid ColumnarRelationId(Oid relid, RelFileLocator relfilelocator);
+extern bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
+							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
+extern bool UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
+						  Snapshot snapshot, uint64 rowNumber);
+extern void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
+extern bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
+								MemoryContext ctx,
+								uint64 stripeFirstRowNumber, int rowCount);
+extern Datum create_table_row_mask(PG_FUNCTION_ARGS);
+extern EState * create_estate_for_relation(Relation rel);
 
+/* columnar_planner_hook.c */
+extern void columnar_planner_init(void);
+
+/* write_state_interface.c */
+extern void FlushWriteStateWithNewSnapshot(Oid relfilelocator,
+										   Snapshot * snapshot,
+										   bool * snapShotRegisteredByUs);
+extern void FlushWriteStateForAllRels(SubTransactionId currentSubXid,
+									  SubTransactionId parentSubXid);
+extern void DiscardWriteStateForAllRels(SubTransactionId currentSubXid,
+										SubTransactionId parentSubXid);
+extern void MarkRelfilenodeDropped(Oid relfilelocator, SubTransactionId currentSubXid);
+extern void NonTransactionDropWriteState(Oid relfilelocator);
+extern bool PendingWritesInUpperTransactions(Oid relfilelocator,
+											 SubTransactionId currentSubXid);
 
 /* write_state_management.c */
 extern ColumnarWriteState * columnar_init_write_state(Relation relation, TupleDesc
 													  tupdesc,
-													  Oid tupSlotRelationId,
+														Oid tupSlotRelationId,
 													  SubTransactionId currentSubXid);
-extern void FlushWriteStateForRelfilenumber(RelFileNumber relfilenumber,
-											SubTransactionId currentSubXid);
-extern void FlushWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId
-									  parentSubXid);
-extern void DiscardWriteStateForAllRels(SubTransactionId currentSubXid, SubTransactionId
-										parentSubXid);
-extern void MarkRelfilenumberDropped(RelFileNumber relfilenumber,
-									 SubTransactionId currentSubXid);
-extern void NonTransactionDropWriteState(RelFileNumber relfilenumber);
-extern bool PendingWritesInUpperTransactions(RelFileNumber relfilenumber,
-											 SubTransactionId currentSubXid);
-extern MemoryContext GetWriteContextForDebug(void);
+extern void ColumnarPopWriteStateForAllRels(SubTransactionId currentSubXid,
+											SubTransactionId parentSubXid,
+											bool commit);
+extern void ColumnarMarkRelfilenodeDroppedColumnar(Oid relfilelocator,
+												   SubTransactionId currentSubXid);
+extern void ColumnarNonTransactionDropWriteState(Oid relfilelocator);
+extern bool ColumnarPendingWritesInUpperTransactions(Oid relfilelocator,
+													 SubTransactionId currentSubXid);
+extern void FlushWriteStateForRelfilenode(Oid relfilelocator, SubTransactionId
+										  currentSubXid);
+extern MemoryContext GetColumnarWriteContextForDebug(void);
+
+/* write_state_row_mask.c */
+extern RowMaskWriteStateEntry * RowMaskInitWriteState(Oid relfilelocator,
+													  uint64 storageId,
+													  SubTransactionId currentSubXid,
+							 						  bytea *rowMask);
+extern void RowMaskFlushWriteStateForRelfilenode(Oid relfilelocator, 
+												 SubTransactionId currentSubXid);
+extern RowMaskWriteStateEntry * RowMaskFindWriteState(Oid relfilelocator,
+					  								  SubTransactionId currentSubXid,
+													  uint64 rowId);
+extern void  RowMaskPopWriteStateForAllRels(SubTransactionId currentSubXid,
+											SubTransactionId parentSubXid,
+											bool commit);
+extern void RowMaskMarkRelfilenodeDropped(Oid relfilelocator,
+										  SubTransactionId currentSubXid);
+extern void RowMaskNonTransactionDrop(Oid relfilelocator);
+extern bool RowMaskPendingWritesInUpperTransactions(Oid relfilelocator,
+													SubTransactionId currentSubXid);
+extern MemoryContext GetRowMaskWriteStateContextForDebug(void);
+
+/* columanar_read_state_cache.c */
+extern ColumnarReadState ** InitColumnarReadStateCache(Relation relation,
+													  SubTransactionId currentSubXid);
+extern ColumnarReadState ** FindReadStateCache(Relation relation,
+											   SubTransactionId currentSubXid);
+extern void CleanupReadStateCache(SubTransactionId currentSubXid);
+extern MemoryContext GetColumnarReadStateCache(void);
+
+/* columnar_cache.c */
+extern void ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
+extern void ColumnarAddCacheEntry(uint64, uint64, uint64, uint32, void *);
+extern void *ColumnarRetrieveCache(uint64, uint64, uint64, uint32);
+extern void ColumnarResetCache(void);
+extern ColumnarCacheStatistics *ColumnarGetCacheStatistics(void);
+extern MemoryContext ColumnarCacheMemoryContext(void);
+
 
 #endif /* COLUMNAR_H */
