@@ -14,6 +14,13 @@
 #include "postgres.h"
 #include "pg_version_constants.h"
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+#define AT __FILE__ ":" TOSTRING(__LINE__)
+#define BMethod(NAME) elog(NOTICE, "Columnar [CALL] " __FILE__ ":" TOSTRING(__LINE__) " => " TOSTRING(NAME));
+#define EMethod(NAME) elog(NOTICE, "Columnar [EXIT] " __FILE__ ":" TOSTRING(__LINE__) " => " TOSTRING(NAME));
+#define JustLog(LOG) elog(NOTICE, "Columnar [LOG] " __FILE__ ":" TOSTRING(__LINE__)); elog(NOTICE, (LOG));
+
 // OLD COMPAT
 
 
@@ -538,5 +545,25 @@ getStxstattarget_compat(HeapTuple tup)
 		"CREATE %sSEQUENCE IF NOT EXISTS %s AS %s INCREMENT BY " INT64_FORMAT \
 		" MINVALUE " INT64_FORMAT " MAXVALUE " INT64_FORMAT \
 		" START WITH " INT64_FORMAT " CACHE " INT64_FORMAT " %sCYCLE"
+
+
+// DEBUG UTILS
+#include "access/relation.h"
+
+__attribute__((always_inline))
+static inline Relation safe_relation_open(Oid relationId, LOCKMODE lockmode) {
+	elog(NOTICE, "Columnar [safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
+	const Relation rel = relation_open(relationId, lockmode);
+	elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
+	return rel;
+}
+
+__attribute__((always_inline))
+static inline Relation try_safe_relation_open(Oid relationId, LOCKMODE lockmode) {
+	elog(NOTICE, "Columnar [try_safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
+	const Relation rel = try_relation_open(relationId, lockmode);
+	elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
+	return rel;
+}
 
 #endif   /* PG_VERSION_COMPAT_H */

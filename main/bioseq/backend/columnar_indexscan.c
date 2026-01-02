@@ -721,9 +721,6 @@ ColumnarIndexScan_BeginCustomScan(CustomScanState *css, EState *estate, int efla
 	ColumnarIndexScanState *ciis = (ColumnarIndexScanState*) css;
 	CustomScan  *cscan = (CustomScan *)css->ss.ps.plan;
 	IndexScan *isNode = (IndexScan *) linitial(cscan->custom_plans);
-	
-	/* Free the exprcontext */
-	ExecFreeExprContext(&css->ss.ps);
 
 	/* Clean out the tuple table */
 	ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);

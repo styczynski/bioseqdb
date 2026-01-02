@@ -1269,9 +1269,17 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 													ColumnarTableStripeCount(rte->relid) - 1 :
 													ColumnarTableStripeCount(rte->relid));
 
-		if (rel->consider_parallel && rel->lateral_relids == NULL && 
-			columnar_min_parallel_process_running > 0)
+		// FIXME: Fix this!!!
+		const bool force_parallel = true;
+		if (force_parallel) {
+			JustLog("PARA Override columnar_min_parallel_processes;");
+			columnar_min_parallel_process_running = columnar_min_parallel_processes;
+		}
+
+		if (force_parallel || (rel->consider_parallel && rel->lateral_relids == NULL && 
+			columnar_min_parallel_process_running > 0))
 		{
+			JustLog("PARA Append");
 			/*
 			 * Passing NULL for JOIN quals in parallel execution.
 			 */
@@ -1608,6 +1616,10 @@ AdjustColumnarParallelScanCost(Path *path)
 
 		/* The CPU cost is divided among all the workers. */
 		path->total_cost /= parallel_divisor;
+
+		// FIXME: Remove
+		JustLog("PARA Set parallel cost to 0");
+		path->total_cost = 0;
 
 		path->rows = clamp_row_est(path->rows / parallel_divisor);
 	}
@@ -2503,11 +2515,6 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 	 * Cleanup BMS of selected scan attributes
 	 */
 	bms_free(((ColumnarScanState *)node)->attrNeeded);
-
-	/*
-	 * Free the exprcontext
-	 */
-	ExecFreeExprContext(&node->ss.ps);
 
 	/*
 	 * clean out the tuple table

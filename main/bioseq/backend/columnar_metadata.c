@@ -69,6 +69,16 @@
 #include "utils/relfilenodemap.h"
 #endif
 
+Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
+	elog(NOTICE, "Columnar [safe_safe_get_relname_relid] " __FILE__ ":" TOSTRING(__LINE__) " => ");
+	elog(NOTICE, relname);
+	const Oid relid = get_relname_relid(relname, relnamespace);
+	elog(NOTICE, "Columnar [safe_safe_get_relname_relid] [SUCCESS]" __FILE__ ":" TOSTRING(__LINE__));
+	return relid;
+}
+
+
+
 typedef struct
 {
 	Relation rel;
@@ -297,7 +307,7 @@ WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite)
 	values[Anum_columnar_options_compression - 1] = NameGetDatum(&compressionName);
 
 	/* create heap tuple and insert into catalog table */
-	Relation columnarOptions = relation_open(ColumnarOptionsRelationId(),
+	Relation columnarOptions = safe_relation_open(ColumnarOptionsRelationId(),
 											 RowExclusiveLock);
 	TupleDesc tupleDescriptor = RelationGetDescr(columnarOptions);
 
@@ -368,7 +378,7 @@ DeleteColumnarTableOptions(Oid regclass, bool missingOk)
 	 */
 	Assert(!IsBinaryUpgrade);
 
-	Relation columnarOptions = try_relation_open(ColumnarOptionsRelationId(),
+	Relation columnarOptions = try_safe_relation_open(ColumnarOptionsRelationId(),
 												 RowExclusiveLock);
 	if (columnarOptions == NULL)
 	{
@@ -417,7 +427,7 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 				ObjectIdGetDatum(regclass));
 
 	Oid columnarOptionsOid = ColumnarOptionsRelationId();
-	Relation columnarOptions = try_relation_open(columnarOptionsOid, AccessShareLock);
+	Relation columnarOptions = try_safe_relation_open(columnarOptionsOid, AccessShareLock);
 	if (columnarOptions == NULL)
 	{
 		/*
@@ -427,7 +437,7 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 		return false;
 	}
 
-	Relation index = try_relation_open(ColumnarOptionsIndexRegclass(), AccessShareLock);
+	Relation index = try_safe_relation_open(ColumnarOptionsIndexRegclass(), AccessShareLock);
 	if (index == NULL)
 	{
 		table_close(columnarOptions, AccessShareLock);
@@ -1978,7 +1988,7 @@ DeleteStorageFromColumnarMetadataTable(Oid metadataTableId,
 	ScanKeyInit(&scanKey[0], storageIdAtrrNumber, BTEqualStrategyNumber,
 				F_INT8EQ, UInt64GetDatum(storageId));
 
-	Relation metadataTable = try_relation_open(metadataTableId, AccessShareLock);
+	Relation metadataTable = try_safe_relation_open(metadataTableId, AccessShareLock);
 	if (metadataTable == NULL)
 	{
 		/* extension has been dropped */
@@ -2026,7 +2036,7 @@ DeleteStripeFromColumnarMetadataTable(Oid metadataTableId,
 	ScanKeyInit(&scanKey[1], stripeIdAttrNumber, BTEqualStrategyNumber,
 				F_INT8EQ, UInt64GetDatum(stripeId));
 
-	Relation metadataTable = try_relation_open(metadataTableId, RowShareLock);
+	Relation metadataTable = try_safe_relation_open(metadataTableId, RowShareLock);
 	if (metadataTable == NULL)
 	{
 		/* extension has been dropped */
@@ -2259,7 +2269,7 @@ ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm)
 static Oid
 ColumnarStorageIdSequenceRelationId(void)
 {
-	return get_relname_relid("storageid_seq", ColumnarNamespaceId());
+	return safe_get_relname_relid("storageid_seq", ColumnarNamespaceId());
 }
 
 
@@ -2270,7 +2280,7 @@ ColumnarStorageIdSequenceRelationId(void)
 static Oid
 ColumnarStripeRelationId(void)
 {
-	return get_relname_relid("stripe", ColumnarNamespaceId());
+	return safe_get_relname_relid("stripe", ColumnarNamespaceId());
 }
 
 
@@ -2281,7 +2291,7 @@ ColumnarStripeRelationId(void)
 static Oid
 ColumnarStripePKeyIndexRelationId(void)
 {
-	return get_relname_relid("stripe_pkey", ColumnarNamespaceId());
+	return safe_get_relname_relid("stripe_pkey", ColumnarNamespaceId());
 }
 
 
@@ -2293,7 +2303,7 @@ ColumnarStripePKeyIndexRelationId(void)
 static Oid
 ColumnarStripeFirstRowNumberIndexRelationId(void)
 {
-	return get_relname_relid("stripe_first_row_number_idx", ColumnarNamespaceId());
+	return safe_get_relname_relid("stripe_first_row_number_idx", ColumnarNamespaceId());
 }
 
 
@@ -2303,7 +2313,8 @@ ColumnarStripeFirstRowNumberIndexRelationId(void)
 static Oid
 ColumnarOptionsRelationId(void)
 {
-	return get_relname_relid("options", ColumnarNamespaceId());
+
+	return safe_get_relname_relid("options", ColumnarNamespaceId());
 }
 
 
@@ -2313,7 +2324,8 @@ ColumnarOptionsRelationId(void)
 static Oid
 ColumnarOptionsIndexRegclass(void)
 {
-	return get_relname_relid("options_pkey", ColumnarNamespaceId());
+	BMethod(ColumnarOptionsIndexRegclass);
+	return safe_get_relname_relid("options_pkey", ColumnarNamespaceId());
 }
 
 
@@ -2324,7 +2336,8 @@ ColumnarOptionsIndexRegclass(void)
 static Oid
 ColumnarChunkRelationId(void)
 {
-	return get_relname_relid("chunk", ColumnarNamespaceId());
+	BMethod(ColumnarChunkRelationId);
+	return safe_get_relname_relid("chunk", ColumnarNamespaceId());
 }
 
 
@@ -2335,7 +2348,8 @@ ColumnarChunkRelationId(void)
 static Oid
 ColumnarChunkGroupRelationId(void)
 {
-	return get_relname_relid("chunk_group", ColumnarNamespaceId());
+	BMethod(ColumnarChunkGroupRelationId);
+	return safe_get_relname_relid("chunk_group", ColumnarNamespaceId());
 }
 
 
@@ -2345,7 +2359,8 @@ ColumnarChunkGroupRelationId(void)
 static Oid
 ColumnarRowMaskRelationId(void)
 {
-	return get_relname_relid("row_mask", ColumnarNamespaceId());
+	BMethod(ColumnarRowMaskRelationId);
+	return safe_get_relname_relid("row_mask", ColumnarNamespaceId());
 }
 
 
@@ -2355,7 +2370,8 @@ ColumnarRowMaskRelationId(void)
 static Oid
 ColumnarRowMaskSeqId(void)
 {
-	return get_relname_relid("row_mask_seq", ColumnarNamespaceId());
+	BMethod(ColumnarRowMaskSeqId);
+	return safe_get_relname_relid("row_mask_seq", ColumnarNamespaceId());
 }
 
 
@@ -2367,7 +2383,8 @@ ColumnarRowMaskSeqId(void)
 static Oid
 ColumnarChunkIndexRelationId(void)
 {
-	return get_relname_relid("chunk_pkey", ColumnarNamespaceId());
+	BMethod(ColumnarChunkIndexRelationId);
+	return safe_get_relname_relid("chunk_pkey", ColumnarNamespaceId());
 }
 
 
@@ -2378,7 +2395,8 @@ ColumnarChunkIndexRelationId(void)
 static Oid
 ColumnarChunkGroupIndexRelationId(void)
 {
-	return get_relname_relid("chunk_group_pkey", ColumnarNamespaceId());
+	BMethod(ColumnarChunkGroupIndexRelationId);
+	return safe_get_relname_relid("chunk_group_pkey", ColumnarNamespaceId());
 }
 
 
@@ -2389,7 +2407,8 @@ ColumnarChunkGroupIndexRelationId(void)
 static Oid
 ColumnarRowMaskIndexRelationId(void)
 {
-	return get_relname_relid("row_mask_pkey", ColumnarNamespaceId());
+	BMethod(ColumnarRowMaskIndexRelationId);
+	return safe_get_relname_relid("row_mask_pkey", ColumnarNamespaceId());
 }
 
 /*
@@ -2399,7 +2418,8 @@ ColumnarRowMaskIndexRelationId(void)
 static Oid
 ColumnarRowMaskStripeIndexRelationId(void)
 {
-	return get_relname_relid("row_mask_stripe_unique", ColumnarNamespaceId());
+	BMethod(ColumnarRowMaskStripeIndexRelationId);
+	return safe_get_relname_relid("row_mask_stripe_unique", ColumnarNamespaceId());
 }
 
 
@@ -2410,7 +2430,15 @@ ColumnarRowMaskStripeIndexRelationId(void)
 static Oid
 ColumnarNamespaceId(void)
 {
-	return get_namespace_oid("columnar", false);
+	Oid namespace = get_namespace_oid("columnar_internal", true);
+	JustLog("Check fetch columnar namespace");
+	/* if schema is earlier than 11.1-1 */
+	if (!OidIsValid(namespace))
+	{
+		namespace = get_namespace_oid("columnar", false);
+	}
+	JustLog("Fetch columnar namespace done");
+	return namespace;
 }
 
 
@@ -2421,11 +2449,12 @@ ColumnarNamespaceId(void)
 uint64
 LookupStorageId(RelFileLocator relfilelocator)
 {
+	BMethod(LookupStorageId);
 	Oid relationId = RelidByRelfilenumber(RelationTablespace_compat(relfilelocator),
 										  RelationPhysicalIdentifierNumber_compat(
 											  relfilelocator));
 
-	Relation relation = relation_open(relationId, AccessShareLock);
+	Relation relation = safe_relation_open(relationId, AccessShareLock);
 	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
 	table_close(relation, AccessShareLock);
 
@@ -2440,6 +2469,7 @@ LookupStorageId(RelFileLocator relfilelocator)
 uint64
 ColumnarMetadataNewStorageId()
 {
+	BMethod(ColumnarMetadataNewStorageId);
 	return nextval_internal(ColumnarStorageIdSequenceRelationId(), false);
 }
 
@@ -2452,7 +2482,7 @@ Datum
 columnar_relation_storageid(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
-	Relation relation = relation_open(relationId, AccessShareLock);
+	Relation relation = safe_relation_open(relationId, AccessShareLock);
 	if (!IsColumnarTableAmTable(relationId))
 	{
 		elog(ERROR, "relation \"%s\" is not a columnar table",
@@ -2474,7 +2504,7 @@ create_table_row_mask(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
-	Relation relation = relation_open(relationId, AccessShareLock);
+	Relation relation = safe_relation_open(relationId, AccessShareLock);
 
 	if (!IsColumnarTableAmTable(relationId))
 	{
@@ -2547,12 +2577,14 @@ create_table_row_mask(PG_FUNCTION_ARGS)
 void
 ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade)
 {
+	BMethod(ColumnarStorageUpdateIfNeeded);
 	if (ColumnarStorageIsCurrent(rel))
 	{
 		return;
 	}
 
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
+	JustLog("ColumnarStorageUpdateIfNeeded Check nblocks < 2");
 	if (nblocks < 2)
 	{
 		ColumnarStorageInit(rel->rd_smgr, ColumnarMetadataNewStorageId());

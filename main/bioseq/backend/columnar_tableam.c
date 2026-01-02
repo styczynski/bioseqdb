@@ -1077,7 +1077,7 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		tupleSlot->tts_tid = row_number_to_tid(writtenRowNumber);
 
-		MemoryContextResetAndDeleteChildren(ColumnarWritePerTupleContext(writeState));
+		MemoryContextReset(ColumnarWritePerTupleContext(writeState));
 	}
 
 	MemoryContextSwitchTo(oldContext);
@@ -1250,7 +1250,9 @@ columnar_relation_set_new_filenode(Relation rel,
 	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence);
 #endif
 
+	JustLog("columnar_relation_set_new_filenode init columnar storage");
 	ColumnarStorageInit(srel, ColumnarMetadataNewStorageId());
+	JustLog("columnar_relation_set_new_filenode init columnar options");
 	InitColumnarOptions(rel->rd_id);
 
 	smgrclose(srel);
@@ -1283,6 +1285,7 @@ columnar_relation_nontransactional_truncate(Relation rel)
 	 */
 	RelationTruncate(rel, 0);
 
+	JustLog("columnar_relation_nontransactional_truncate init columnar storage");
 	uint64 storageId = ColumnarMetadataNewStorageId();
 
 	ColumnarStorageInit(RelationGetSmgr(rel), storageId);
@@ -2075,8 +2078,13 @@ ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode, int timeout,
 
 
 static bool
-columnar_scan_analyze_next_block(TableScanDesc scan, BlockNumber blockno,
+columnar_scan_analyze_next_block(TableScanDesc scan,
+#if PG_VERSION_NUM >= PG_VERSION_17
+								 ReadStream *stream)
+#else
+								 BlockNumber blockno,
 								 BufferAccessStrategy bstrategy)
+#endif
 {
 	/*
 	 * Our access method is not pages based, i.e. tuples are not confined
@@ -2688,6 +2696,7 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 void
 columnar_tableam_init()
 {
+	BMethod(columnar_tableam_init);
 	ColumnarTableSetOptions_hook_type **ColumnarTableSetOptions_hook_ptr =
 		(ColumnarTableSetOptions_hook_type **) find_rendezvous_variable(
 			COLUMNAR_SETOPTIONS_HOOK_SYM);
@@ -2737,6 +2746,7 @@ ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc)
 static HeapTuple
 ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 {
+	BMethod(ColumnarSlotCopyHeapTuple);
 	Assert(!TTS_EMPTY(slot));
 
 	HeapTuple tuple = heap_form_tuple(slot->tts_tupleDescriptor,
@@ -2758,6 +2768,7 @@ ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 static void
 ColumnarTableDropHook(Oid relid)
 {
+	BMethod(ColumnarTableDropHook);
 	/*
 	 * Lock relation to prevent it from being dropped and to avoid
 	 * race conditions in the next if block.
@@ -2796,6 +2807,7 @@ ColumnarTableDropHook(Oid relid)
 static void
 ColumnarTriggerCreateHook(Oid tgid)
 {
+	BMethod(ColumnarTriggerCreateHook);
 	/*
 	 * Fetch the pg_trigger tuple by the Oid of the trigger
 	 */
@@ -2919,6 +2931,7 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 bool
 ColumnarSupportsIndexAM(char *indexAMName)
 {
+	BMethod(ColumnarSupportsIndexAM);
 	return strncmp(indexAMName, "btree", NAMEDATALEN) == 0 ||
 				strncmp(indexAMName, "hash", NAMEDATALEN) == 0 ||
 				strncmp(indexAMName, "gin", NAMEDATALEN) == 0 ||
@@ -2935,6 +2948,7 @@ ColumnarSupportsIndexAM(char *indexAMName)
 bool
 IsColumnarTableAmTable(Oid relationId)
 {
+	BMethod(IsColumnarTableAmTable);
 	if (!OidIsValid(relationId))
 	{
 		return false;
@@ -2944,7 +2958,7 @@ IsColumnarTableAmTable(Oid relationId)
 	 * Lock relation to prevent it from being dropped &
 	 * avoid race conditions.
 	 */
-	Relation rel = relation_open(relationId, AccessShareLock);
+	Relation rel = safe_relation_open(relationId, AccessShareLock);
 	bool result = rel->rd_tableam == GetColumnarTableAmRoutine();
 	relation_close(rel, NoLock);
 
@@ -3019,6 +3033,7 @@ static const TableAmRoutine columnar_am_methods = {
 const TableAmRoutine *
 GetColumnarTableAmRoutine(void)
 {
+	BMethod(GetColumnarTableAmRoutine);
 	return &columnar_am_methods;
 }
 
@@ -3027,6 +3042,7 @@ PG_FUNCTION_INFO_V1(columnar_handler);
 Datum
 columnar_handler(PG_FUNCTION_ARGS)
 {
+	BMethod(columnar_handler);
 	PG_RETURN_POINTER(&columnar_am_methods);
 }
 

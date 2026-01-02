@@ -158,8 +158,10 @@ static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapag
 void
 ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 {
+	JustLog("check smgr number of blocks");
 	BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
 
+	JustLog("Check init storage blocks > 0");
 	if (nblocks > 0)
 	{
 		elog(ERROR,
@@ -177,6 +179,7 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 	Page page = block.data;
 
 	/* write metapage */
+	JustLog("Init page");
 	PageInit(page, BLCKSZ, 0);
 	PageHeader phdr = (PageHeader) page;
 
@@ -199,9 +202,11 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 				COLUMNAR_METAPAGE_BLOCKNO, page, true);
 #endif
 
+	JustLog("Page checksum inplace");
 	PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
 
+	JustLog("Init page");
 	/* write empty page */
 	PageInit(page, BLCKSZ, 0);
 
@@ -213,7 +218,10 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 				COLUMNAR_EMPTY_BLOCKNO, page, true);
 #endif
 
+	JustLog("Page checksum inplace");
 	PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
+
+	JustLog("smgr extend");
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
 
 	/*
@@ -221,6 +229,7 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 	 * write did not go through shared_buffers and therefore a concurrent
 	 * checkpoint may have moved the redo pointer past our xlog record.
 	 */
+	JustLog("Immediate sync");
 	smgrimmedsync(srel, MAIN_FORKNUM);
 }
 
@@ -871,7 +880,7 @@ test_columnar_storage_write_new_page(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
-	Relation relation = relation_open(relationId, AccessShareLock);
+	Relation relation = safe_relation_open(relationId, AccessShareLock);
 
 	/*
 	 * Allocate a new page, write some data to there, and set reserved offset

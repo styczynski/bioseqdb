@@ -290,7 +290,7 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	Relation relation = RelationIdGetRelation(rte->relid);
 	if (!RelationIsValid(relation))
 	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", rte->relid)));
+		ereport(ERROR, (errmsg("ColumnarSetRelPathlistHook: could not open relation with OID %u", rte->relid)));
 	}
 
 	if (relation->rd_tableam == GetColumnarTableAmRoutine())
@@ -519,7 +519,7 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 	Relation relation = RelationIdGetRelation(relationId);
 	if (!RelationIsValid(relation))
 	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
+		ereport(ERROR, (errmsg("ColumnarIndexScanAdditionalCost: could not open relation with OID %u", relationId)));
 	}
 
 	uint64 rowCount = ColumnarTableRowCount(relation);
@@ -619,7 +619,7 @@ RelationIdGetNumberOfAttributes(Oid relationId)
 	Relation relation = RelationIdGetRelation(relationId);
 	if (!RelationIsValid(relation))
 	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
+		ereport(ERROR, (errmsg("RelationIdGetNumberOfAttributes: could not open relation with OID %u", relationId)));
 	}
 
 	int nattrs = relation->rd_att->natts;
@@ -1539,7 +1539,7 @@ ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId, int numberOfColumnsRe
 	Relation relation = RelationIdGetRelation(relationId);
 	if (!RelationIsValid(relation))
 	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
+		ereport(ERROR, (errmsg("ColumnarPerStripeScanCost: could not open relation with OID %u", relationId)));
 	}
 
 	List *stripeList = StripesForRelfilelocator(relation);
@@ -1596,7 +1596,7 @@ ColumnarTableStripeCount(Oid relationId)
 	Relation relation = RelationIdGetRelation(relationId);
 	if (!RelationIsValid(relation))
 	{
-		ereport(ERROR, (errmsg("could not open relation with OID %u", relationId)));
+		ereport(ERROR, (errmsg("ColumnarTableStripeCount: could not open relation with OID %u", relationId)));
 	}
 
 	List *stripeList = StripesForRelfilelocator(relation);

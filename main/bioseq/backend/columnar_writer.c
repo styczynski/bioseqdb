@@ -240,7 +240,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		Oid relationId = RelidByRelfilenode(writeState->relfilelocator.spcNode,
 											writeState->relfilelocator.relNode);
 #endif
-		Relation relation = relation_open(relationId, NoLock);
+		Relation relation = safe_relation_open(relationId, NoLock);
 		writeState->emptyStripeReservation =
 			ReserveEmptyStripe(relation, columnCount, chunkRowCount,
 							   options->stripeRowCount);
@@ -481,7 +481,7 @@ FlushStripe(ColumnarWriteState *writeState)
 										writeState->relfilelocator.relNode);
 #endif
 
-	Relation relation = relation_open(relationId, NoLock);
+	Relation relation = safe_relation_open(relationId, NoLock);
 
 	/*
 	 * check if the last chunk needs serialization , the last chunk was not serialized

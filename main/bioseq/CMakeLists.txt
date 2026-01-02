@@ -1,5 +1,5 @@
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
-file(GLOB SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
+file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
 message("SOURCES ${SRC_FILES}")
 
 find_package(Intl)

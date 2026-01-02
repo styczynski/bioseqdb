@@ -70,6 +70,7 @@ typedef struct PlanTreeMutatorContext
 static bool
 columnar_index_table(Oid indexOid, Oid columnarTableAmOid)
 {
+	BMethod(columnar_index_table);
 	HeapTuple ht_idx;
 	Form_pg_index idxrec;
 	HeapTuple ht_table;
@@ -96,6 +97,7 @@ columnar_index_table(Oid indexOid, Oid columnarTableAmOid)
 static Node *
 AggRefArgsExpressionMutator(Node *node, void *context)
 {
+	BMethod(AggRefArgsExpressionMutator);
 	if (node == NULL)
 		return NULL;
 
@@ -138,6 +140,7 @@ AggRefArgsExpressionMutator(Node *node, void *context)
 static Node *
 ExpressionMutator(Node *node, void *context)
 {
+	BMethod(ExpressionMutator);
 	if (node == NULL)
 		return NULL;
 
@@ -315,6 +318,7 @@ ColumnarPlannerHook(Query *parse,
 					int cursorOptions,
 					ParamListInfo boundParams)
 {
+	BMethod(ColumnarPlannerHook);
 	PlannedStmt	*stmt;
 #if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	Plan *savedPlanTree;
@@ -407,6 +411,7 @@ ColumnarPlannerHook(Query *parse,
 static bool
 IsCreateTableAs(const char *query)
 {
+	BMethod(IsCreateTableAs);
 	char *c, *t, *a;
 	size_t query_len = strlen(query);
 	char *haystack = (char *) palloc(query_len + 1);
@@ -448,6 +453,7 @@ IsCreateTableAs(const char *query)
 
 void columnar_planner_init(void)
 {
+	BMethod(columnar_planner_init);
 	PreviousPlannerHook = planner_hook;
 	planner_hook = ColumnarPlannerHook;
 #if  PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
