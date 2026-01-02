@@ -239,7 +239,7 @@ columnar_beginscan_extended(Relation relation, Snapshot snapshot,
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-	ColumnarScanDesc scan = palloc0(sizeof(ColumnarScanDescData));
+	ColumnarScanDesc scan = make<ColumnarScanDescData>();
 	scan->cs_base.rs_rd = relation;
 	scan->cs_base.rs_snapshot = snapshot;
 	scan->cs_base.rs_nkeys = nkeys;
@@ -509,7 +509,7 @@ columnar_index_fetch_begin(Relation rel)
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-	IndexFetchColumnarData *scan = palloc0(sizeof(IndexFetchColumnarData));
+	IndexFetchColumnarData *scan = make<IndexFetchColumnarData>();
 	scan->cs_base.rel = rel;
 	scan->cs_readState = NULL;
 	scan->stripeMetadataList = NIL;
@@ -539,7 +539,7 @@ columnar_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-	IndexFetchColumnarData *scan = palloc0(sizeof(IndexFetchColumnarData));
+	IndexFetchColumnarData *scan = make<IndexFetchColumnarData>();
 	scan->cs_base.rel = rel;
 	scan->cs_readState = NULL;
 	scan->stripeMetadataList = NIL;
@@ -598,7 +598,7 @@ FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64 rowN
 
 		lc = list_nth_cell(scan->stripeMetadataList, mid);
 
-		StripeMetadata *stripeMetadata = lc->ptr_value;
+		StripeMetadata *stripeMetadata = static_cast<StripeMetadata*>(lc->ptr_value);
 
 		if (rowNumber >= stripeMetadata->firstRowNumber &&
 			rowNumber < stripeMetadata->firstRowNumber + stripeMetadata->rowCount)
@@ -1150,7 +1150,7 @@ columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 
 	columnar_tuple_insert(relation, slot, cid, 0, NULL);
 
-	*update_indexes = true;
+	*update_indexes = (TU_UpdateIndexes) true;
 
 #if PG_VERSION_NUM >= PG_VERSION_16
 	pgstat_count_heap_update(relation, false, false);
@@ -1314,8 +1314,8 @@ columnar_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 	/* copy main fork */
 	RelationCopyStorage(RelationGetSmgr(rel), srel, MAIN_FORKNUM, persistence);
 
-	for (ForkNumber forkNum = MAIN_FORKNUM + 1;
-		forkNum <= MAX_FORKNUM; forkNum++)
+	for (ForkNumber forkNum = static_cast<ForkNumber>(MAIN_FORKNUM + 1);
+		forkNum <= MAX_FORKNUM; forkNum = static_cast<ForkNumber>(static_cast<int>(forkNum) + 1))
 	{
 		if (smgrexists(srel, forkNum))
 		{
@@ -1402,8 +1402,8 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 															randomAccess,
 															NULL);
 
-	Datum *values = palloc0(sourceDesc->natts * sizeof(Datum));
-	bool *nulls = palloc0(sourceDesc->natts * sizeof(bool));
+	Datum *values = make<Datum>(sourceDesc->natts * sizeof(Datum));
+	bool *nulls = make<bool>(sourceDesc->natts * sizeof(bool));
 
 	*num_tuples = 0;
 
@@ -1490,15 +1490,16 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 		return false;
 	}
 
-	ListCell *lc = NULL;
+	//ListCell *lc = NULL;
 
 	uint32 lastStripeDeletedRows = 0;
 
 	Size totalDecompressedStripeLength = 0;
 
-	foreach(lc, stripeMetadataList)
+	//foreach(lc, stripeMetadataList)
+	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
-		StripeMetadata * stripeMetadata = lfirst(lc);
+		//StripeMetadata * stripeMetadata = lfirst(lc);
 #if PG_VERSION_NUM >= PG_VERSION_16
 		lastStripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
 													 stripeMetadata->chunkCount,
@@ -1606,10 +1607,10 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 															NULL);
 
 	ColumnarSetStripeReadState(readState,
-							   list_nth(stripeMetadataList, startingStripeListPosition - 1));
+							   static_cast<StripeMetadata*>(list_nth(stripeMetadataList, startingStripeListPosition - 1)));
 
-	Datum *values = palloc0(tupleDesc->natts * sizeof(Datum));
-	bool *nulls = palloc0(tupleDesc->natts * sizeof(bool));
+	Datum *values = make<Datum>(tupleDesc->natts * sizeof(Datum));
+	bool *nulls = make<bool>(tupleDesc->natts * sizeof(bool));
 
 	/* we don't need to know rowNumber here */
 	while (ColumnarReadNextRow(readState, values, nulls, NULL))
@@ -1621,12 +1622,12 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 
 	if (list_length(stripeMetadataList) > startingStripeListPosition)
 	{
-		StripeMetadata *mtd = list_nth(stripeMetadataList, startingStripeListPosition);
+		StripeMetadata *mtd = static_cast<StripeMetadata*>(list_nth(stripeMetadataList, startingStripeListPosition));
 		newDataReservation = mtd->fileOffset + mtd->dataLength - 1;
 	}
 	else
 	{
-		StripeMetadata *mtd = list_nth(stripeMetadataList, startingStripeListPosition - 1);
+		StripeMetadata *mtd = static_cast<StripeMetadata*>(list_nth(stripeMetadataList, startingStripeListPosition - 1));
 		newDataReservation = mtd->fileOffset;
 	}
 
@@ -1638,7 +1639,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 
 	for (int i = 0; i < startingStripeListPosition; i++)
 	{
-		StripeMetadata *metadata = list_nth(stripeMetadataList, i);
+		StripeMetadata *metadata = static_cast<StripeMetadata*>(list_nth(stripeMetadataList, i));
 #if PG_VERSION_NUM >= PG_VERSION_16
 		DeleteMetadataRowsForStripeId(rel->rd_locator, metadata->id);
 #else
@@ -1665,10 +1666,10 @@ ColumnarTableTupleCount(Relation relation)
 #endif
 	uint64 tupleCount = 0;
 
-	ListCell *lc = NULL;
-	foreach(lc, stripeList)
+	//ListCell *lc = NULL;
+	//foreach(lc, stripeList)
+	for(auto stripe : PList<StripeMetadata>(stripeList))
 	{
-		StripeMetadata *stripe = lfirst(lc);
 		tupleCount += stripe->rowCount;
 	}
 
@@ -1852,9 +1853,10 @@ LogRelationStats(Relation rel, int elevel)
 
 	MemoryContext oldcontext = MemoryContextSwitchTo(relation_stats_ctx);
 
-	foreach(stripeMetadataCell, stripeList)
+	//foreach(stripeMetadataCell, stripeList)
+	for(auto stripe : PList<StripeMetadata>(stripeList))
 	{
-		StripeMetadata *stripe = lfirst(stripeMetadataCell);
+		//StripeMetadata *stripe = lfirst(stripeMetadataCell);
 		StripeSkipList *skiplist = ReadStripeSkipList(relfilelocator, stripe->id,
 													  RelationGetDescr(rel),
 													  stripe->chunkCount,
@@ -1921,7 +1923,7 @@ LogRelationStats(Relation rel, int elevel)
 					 chunkCount, droppedChunksWithData);
 	for (int compressionType = 0; compressionType < COMPRESSION_COUNT; compressionType++)
 	{
-		const char *compressionName = CompressionTypeStr(compressionType);
+		const char *compressionName = CompressionTypeStr(static_cast<CompressionType>(compressionType));
 
 		/* skip if this compression algorithm has not been compiled */
 		if (compressionName == NULL)
@@ -2578,7 +2580,7 @@ columnar_relation_size(Relation rel, ForkNumber forkNumber)
 	{
 		for (int i = 0; i < MAX_FORKNUM; i++)
 		{
-			nblocks += smgrnblocks(RelationGetSmgr(rel), i);
+			nblocks += smgrnblocks(RelationGetSmgr(rel), static_cast<ForkNumber>(i));
 		}
 	}
 	else
@@ -3070,7 +3072,7 @@ detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
 			/* make a copy */
 			if (values == orig_values)
 			{
-				values = palloc(sizeof(Datum) * natts);
+				values = make<Datum>(sizeof(Datum) * natts);
 				memcpy(values, orig_values, sizeof(Datum) * natts);
 			}
 
@@ -3322,7 +3324,7 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
 	/* compression => true */
 	if (!PG_ARGISNULL(3) && PG_GETARG_BOOL(3))
 	{
-		options.compressionType = columnar_compression;
+		options.compressionType = static_cast<CompressionType>(columnar_compression);
 		ereport(DEBUG1, (errmsg("resetting compression to %s",
 								CompressionTypeStr(options.compressionType))));
 	}
@@ -3446,16 +3448,17 @@ static List *HolesForRelation(Relation rel)
 #endif
 	uint64 lastMinimalOffset = ColumnarFirstLogicalOffset;
 
-	foreach(lc, stripeMetadataList)
+	//foreach(lc, stripeMetadataList)
+	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
-		StripeMetadata * stripeMetadata = lfirst(lc);
+		//StripeMetadata * stripeMetadata = lfirst(lc);
 
 		/* Arbitrary check to see if the offset will be large enough, 10000 bytes is what was chosen. */
 		if (stripeMetadata->fileOffset == lastMinimalOffset || stripeMetadata->fileOffset - lastMinimalOffset < 10000) {
 			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
 			continue;
 		} else {
-			StripeHole * hole = palloc(sizeof(StripeHole));
+			StripeHole * hole = make<StripeHole>();
 			hole->fileOffset = lastMinimalOffset;
 			hole->dataLength = stripeMetadata->fileOffset + stripeMetadata->dataLength - lastMinimalOffset;
 			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
@@ -3589,7 +3592,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 		PG_RETURN_VOID();
 	}
 
-	ListCell *lc = NULL;
+	// ListCell *lc = NULL;
 
 	int stripeMetadataIndex = 0;
 
@@ -3598,15 +3601,15 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 	/*
 	 * Get a list of all stripes that can be combined into larger stripes.
 	 */
-	foreach(lc, stripeMetadataList)
+	//foreach(lc, stripeMetadataList)
+	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
 		/* We should not consider the last stripe. */
-		if (lfirst(lc) == llast(stripeMetadataList))
+		if (stripeMetadata == static_cast<StripeMetadata*>(llast(stripeMetadataList)))
 		{
 			break;
 		}
 
-		StripeMetadata * stripeMetadata = lfirst(lc);
 #if PG_VERSION_NUM >= PG_VERSION_16
 		uint32 stripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
 												 		stripeMetadata->chunkCount,
@@ -3630,7 +3633,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 			continue;
 		}
 
-		StripeVacuumCandidate *vacuumCandidate = palloc(sizeof(StripeVacuumCandidate));
+		StripeVacuumCandidate *vacuumCandidate = make<StripeVacuumCandidate>();
 		vacuumCandidate->stripeMetadataIndex = stripeMetadataIndex;
 		vacuumCandidate->candidateTotalSize = stripeMetadata->rowCount - stripeDeletedRows;
 		vacuumCandidate->stripeMetadata = stripeMetadata;
@@ -3666,9 +3669,10 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 	 * Combine the vacuum candidates into their own stripes appended to the rel, this
 	 * should clear out any space from partial stripes to make space to move stripes into.
 	 */
-	foreach(lc, vacuumCandidatesStripeList)
+	//foreach(lc, vacuumCandidatesStripeList)
+	for(auto vacuumCandidate : PList<StripeVacuumCandidate>(vacuumCandidatesStripeList))
 	{
-		StripeVacuumCandidate *vacuumCandidate = lfirst(lc);
+		//StripeVacuumCandidate *vacuumCandidate = lfirst(lc);
 
 		MemoryContext combineContext = AllocSetContextCreate(CurrentMemoryContext,
 						"Stripe Combine Context", ALLOCSET_DEFAULT_SIZES);
@@ -3684,8 +3688,8 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 		ColumnarSetStripeReadState(readState,
 								vacuumCandidate->stripeMetadata);
 
-		Datum *values = palloc0(tupleDesc->natts * sizeof(Datum));
-		bool *nulls = palloc0(tupleDesc->natts * sizeof(bool));
+		Datum *values = make<Datum>(tupleDesc->natts * sizeof(Datum));
+		bool *nulls = make<bool>(tupleDesc->natts * sizeof(bool));
 
 		int32 rowCount = 0;
 
@@ -3836,9 +3840,10 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 		/*
 		 * Iterate through the holes, moving later slices into the holes.
 		 */
-		foreach(lc, holes)
+		//foreach(lc, holes)
+		for(auto hole : PList<StripeHole>(holes))
 		{
-			StripeHole *hole = lfirst(lc);
+			//StripeHole *hole = static_cast<StripeHole*>(lfirst(lc));
 
 			ListCell *stripeLc = NULL;
 
@@ -3850,7 +3855,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 #endif
 			foreach(stripeLc, stripeMetadataList)
 			{
-				StripeMetadata *stripe = lfirst(stripeLc);
+				StripeMetadata *stripe = static_cast<StripeMetadata*>(lfirst(stripeLc));
 
 				/* If we are marked done, we should simply drop out. */
 				if (done)
@@ -3862,7 +3867,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 				if (hole->fileOffset && stripe->dataLength < hole->dataLength && stripe->fileOffset > hole->fileOffset)
 				{
 					/* Read a copy of the old row. */
-					char * data = palloc(stripe->dataLength);
+					char * data = make<char>(stripe->dataLength);
 					ColumnarStorageRead(rel, stripe->fileOffset, data, stripe->dataLength);
 
 					/* Write the data to the new offset. */
@@ -3975,13 +3980,13 @@ columnar_stats(PG_FUNCTION_ARGS)
 		funcctx->attinmeta = attinmeta;
 
 		/* Set up the stats. */
-		ColumnarStats *stats = palloc(sizeof(ColumnarStats) * list_length(stripeMetadataList));
+		ColumnarStats *stats = make<ColumnarStats>(sizeof(ColumnarStats) * list_length(stripeMetadataList));
 		funcctx->max_calls = list_length(stripeMetadataList);
 
 		/* Iterate through the stripes to get a copy of the important data. */
 		for (int i = 0; i < funcctx->max_calls; i++)
 		{
-			StripeMetadata *data = list_nth(stripeMetadataList, i);
+			StripeMetadata *data = static_cast<StripeMetadata*>(list_nth(stripeMetadataList, i));
 
 			stats[i].stripeId = data->id;
 			stats[i].fileOffset = data->fileOffset;
@@ -4010,7 +4015,7 @@ columnar_stats(PG_FUNCTION_ARGS)
 
 	call_cntr = funcctx->call_cntr;
 	max_calls = funcctx->max_calls;
-	ColumnarStats *stats = funcctx->user_fctx;
+	ColumnarStats *stats = static_cast<ColumnarStats*>(funcctx->user_fctx);
 
 	if (call_cntr < max_calls)
 	{

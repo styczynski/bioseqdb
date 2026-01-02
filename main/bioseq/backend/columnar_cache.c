@@ -9,17 +9,14 @@
  *-------------------------------------------------------------------------
  */
 
+#include "pg_version_compat.h"
 
-#include "postgres.h"
-
-#include "c.h"
 #include "columnar/columnar.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "lib/ilist.h"
 #include "lib/stringinfo.h"
 #include "utils/memutils.h"
-#include "utils/palloc.h"
 
 #include <time.h>
 #include <unistd.h>
@@ -237,7 +234,7 @@ EvictCache(uint64 size)
 				totalAllocationLength -= entry->length;
 				statistics.evictions++;
 
-				StringInfo str = entry->store;
+				StringInfo str = static_cast<StringInfo>(entry->store);
 				if (str->data) {
 					pfree(str->data);
 				}
@@ -284,8 +281,7 @@ ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
 
 	if (!found)
 	{
-		ColumarCacheChunkGroupInUse *newChunkGroupInUse =
-			palloc0(sizeof(ColumarCacheChunkGroupInUse));
+		ColumarCacheChunkGroupInUse *newChunkGroupInUse = make<ColumarCacheChunkGroupInUse>();
 
 		newChunkGroupInUse->relId = relId;
 		newChunkGroupInUse->stripeId = stripeId;
@@ -315,7 +311,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 
 	if (head == NULL)
 	{
-		head = palloc0(sizeof(dlist_head));
+		head = make<dlist_head>();
 	}
 
 	ColumnarCacheEntry *entry = ColumnarFindInCache(relId, stripeId, chunkId, columnId);
@@ -323,7 +319,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 	if (entry != NULL)
 	{
 		/* Free up any existing stored data, everything else will be overwritten. */
-		StringInfo str = entry->store;
+		StringInfo str = static_cast<StringInfo>(entry->store);
 		if (str->data)
 		{
 			pfree(str->data);
@@ -335,7 +331,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 	}
 	else
 	{
-		entry = palloc0(sizeof(ColumnarCacheEntry));
+		entry = make<ColumnarCacheEntry>();
 
 		entry->relId = relId;
 		entry->stripeId = stripeId;

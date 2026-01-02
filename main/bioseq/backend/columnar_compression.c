@@ -11,9 +11,6 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "postgres.h"
-
-#include "citus_version.h"
 #include "pg_version_compat.h"
 
 #include "common/pg_lzcompress.h"
@@ -241,7 +238,7 @@ DecompressBuffer(StringInfo buffer,
 										  compressedDataSize, buffer->len)));
 			}
 
-			char *decompressedData = palloc0(decompressedDataSize);
+			char *decompressedData = make<char>(decompressedDataSize);
 
 			int32 decompressedByteCount = pglz_decompress(COLUMNAR_COMPRESS_RAWDATA(
 															  buffer->data),
@@ -255,7 +252,7 @@ DecompressBuffer(StringInfo buffer,
 								errdetail("compressed data is corrupted")));
 			}
 
-			StringInfo decompressedBuffer = palloc0(sizeof(StringInfoData));
+			StringInfo decompressedBuffer = make<StringInfoData>();
 			decompressedBuffer->data = decompressedData;
 			decompressedBuffer->len = decompressedDataSize;
 			decompressedBuffer->maxlen = decompressedDataSize;

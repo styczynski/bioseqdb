@@ -252,9 +252,9 @@ InitColumnarOptions(Oid regclass)
 	}
 
 	ColumnarOptions defaultOptions = {
-		.chunkRowCount = columnar_chunk_group_row_limit,
-		.stripeRowCount = columnar_stripe_row_limit,
-		.compressionType = columnar_compression,
+		.chunkRowCount = static_cast<uint32>(columnar_chunk_group_row_limit),
+		.stripeRowCount = static_cast<uint32>(columnar_stripe_row_limit),
+		.compressionType = static_cast<CompressionType>(columnar_compression),
 		.compressionLevel = columnar_compression_level
 	};
 
@@ -462,9 +462,9 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 	else
 	{
 		/* populate options with system defaults */
-		options->compressionType = columnar_compression;
-		options->stripeRowCount = columnar_stripe_row_limit;
-		options->chunkRowCount = columnar_chunk_group_row_limit;
+		options->compressionType = static_cast<CompressionType>(columnar_compression);
+		options->stripeRowCount = static_cast<uint32>(columnar_stripe_row_limit);
+		options->chunkRowCount = static_cast<uint32>(columnar_chunk_group_row_limit);
 		options->compressionLevel = columnar_compression_level;
 	}
 
@@ -632,7 +632,7 @@ SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 				maskSize = COLUMNAR_ROW_MASK_CHUNK_SIZE / 8;
 			}
 
-			bytea *initialLookupRecord = (bytea *) palloc0(maskSize + VARHDRSZ);
+			bytea *initialLookupRecord = make<bytea>(maskSize + VARHDRSZ);
 			SET_VARSIZE(initialLookupRecord, maskSize + VARHDRSZ);
 
 			int64 nextSeqId = nextval_internal(columnarRowMaskSeq, false);
@@ -714,14 +714,14 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
 															snapshot, 2, scanKey);
 
-	StripeSkipList *chunkList = palloc0(sizeof(StripeSkipList));
+	StripeSkipList *chunkList = make<StripeSkipList>();
 	chunkList->chunkCount = chunkCount;
 	chunkList->columnCount = columnCount;
-	chunkList->chunkSkipNodeArray = palloc0(columnCount * sizeof(ColumnChunkSkipNode *));
+	chunkList->chunkSkipNodeArray = make<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		chunkList->chunkSkipNodeArray[columnIndex] =
-			palloc0(chunkCount * sizeof(ColumnChunkSkipNode));
+			make<ColumnChunkSkipNode>(chunkCount * sizeof(ColumnChunkSkipNode));
 	}
 
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
@@ -763,7 +763,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 		chunk->existsLength =
 			DatumGetInt64(datumArray[Anum_columnar_chunk_exists_stream_length - 1]);
 		chunk->valueCompressionType =
-			DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_type - 1]);
+			static_cast<CompressionType>(DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_type - 1]));
 		chunk->valueCompressionLevel =
 			DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_level - 1]);
 		chunk->decompressedValueSize =
@@ -799,7 +799,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 							&chunkList->chunkGroupDeletedRows,
 							snapshot);
 
-	chunkList->chunkGroupRowOffset = palloc0(chunkCount * sizeof(uint32));
+	chunkList->chunkGroupRowOffset = make<uint32>(chunkCount * sizeof(uint32));
 
 	for (chunkGroupIndex = 0; chunkGroupIndex < chunkCount; chunkGroupIndex++)
 	{
@@ -835,7 +835,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 			(rowCount / 8 + 1) :
 			(rowCount / 8);
 
-	bytea *chunkRowMaskBytea = (bytea *) palloc0(chunkMaskSize + VARHDRSZ);
+	bytea *chunkRowMaskBytea = make<bytea>(chunkMaskSize + VARHDRSZ);
 	SET_VARSIZE(chunkRowMaskBytea, chunkMaskSize + VARHDRSZ);
 
 	ScanKeyInit(&scanKey[0], Anum_columnar_row_mask_storage_id,
@@ -1385,8 +1385,8 @@ ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe, uint32 chunkGroupCount,
 
 	HeapTuple heapTuple = NULL;
 
-	*chunkGroupRowCounts = palloc0(chunkGroupCount * sizeof(uint32));
-	*chunkGroupDeletedRows = palloc0(chunkGroupCount * sizeof(uint32));
+	*chunkGroupRowCounts = make<uint32>(chunkGroupCount * sizeof(uint32));
+	*chunkGroupDeletedRows = make<uint32>(chunkGroupCount * sizeof(uint32));
 
 	/*
 	 * Since we have now updates of `chunk_group`, there could be multiple tuples
@@ -1662,9 +1662,10 @@ GetHighestUsedAddressAndId(uint64 storageId,
 	/* file starts with metapage */
 	*highestUsedAddress = COLUMNAR_BYTES_PER_PAGE;
 
-	foreach(stripeMetadataCell, stripeMetadataList)
+	//foreach(stripeMetadataCell, stripeMetadataList)
+	for(auto stripe : PList<StripeMetadata>(stripeMetadataList))
 	{
-		StripeMetadata *stripe = lfirst(stripeMetadataCell);
+		//StripeMetadata *stripe = lfirst(stripeMetadataCell);
 		uint64 lastByte = stripe->fileOffset + stripe->dataLength - 1;
 		*highestUsedAddress = Max(*highestUsedAddress, lastByte);
 		*highestUsedId = Max(*highestUsedId, stripe->id);
@@ -1681,7 +1682,7 @@ EmptyStripeReservation *
 ReserveEmptyStripe(Relation rel, uint64 columnCount, uint64 chunkGroupRowCount,
 				   uint64 stripeRowCount)
 {
-	EmptyStripeReservation *stripeReservation = palloc0(sizeof(EmptyStripeReservation));
+	EmptyStripeReservation *stripeReservation = make<EmptyStripeReservation>();
 
 	uint64 storageId = ColumnarStorageGetStorageId(rel, false);
 
@@ -1857,7 +1858,7 @@ BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple)
 	heap_deform_tuple(heapTuple, RelationGetDescr(columnarStripes),
 					  datumArray, isNullArray);
 
-	StripeMetadata *stripeMetadata = palloc0(sizeof(StripeMetadata));
+	StripeMetadata *stripeMetadata = make<StripeMetadata>();
 	stripeMetadata->id = DatumGetInt64(datumArray[Anum_columnar_stripe_stripe - 1]);
 	stripeMetadata->fileOffset = DatumGetInt64(
 		datumArray[Anum_columnar_stripe_file_offset - 1]);
@@ -2083,7 +2084,7 @@ StartModifyRelation(Relation rel)
 	/* ExecSimpleRelationInsert, ... require caller to open indexes */
 	ExecOpenIndices(resultRelInfo, false);
 
-	ModifyState *modifyState = palloc(sizeof(ModifyState));
+	ModifyState *modifyState = make<ModifyState>();
 	modifyState->rel = rel;
 	modifyState->estate = estate;
 	modifyState->resultRelInfo = resultRelInfo;
@@ -2217,7 +2218,7 @@ static bytea *
 DatumToBytea(Datum value, Form_pg_attribute attrForm)
 {
 	int datumLength = att_addlength_datum(0, attrForm->attlen, value);
-	bytea *result = palloc0(datumLength + VARHDRSZ);
+	bytea *result = make<bytea>(datumLength + VARHDRSZ);
 
 	SET_VARSIZE(result, datumLength + VARHDRSZ);
 
@@ -2254,7 +2255,7 @@ ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm)
 	 * We copy the data so the result of this function lives even
 	 * after the byteaDatum is freed.
 	 */
-	char *binaryDataCopy = palloc0(VARSIZE_ANY_EXHDR(bytes));
+	char *binaryDataCopy = make<char>(VARSIZE_ANY_EXHDR(bytes));
 	memcpy(binaryDataCopy, /*VARSIZE_ANY_EXHDR(bytes),*/
 			 VARDATA_ANY(bytes), VARSIZE_ANY_EXHDR(bytes));
 
@@ -2430,15 +2431,15 @@ ColumnarRowMaskStripeIndexRelationId(void)
 static Oid
 ColumnarNamespaceId(void)
 {
-	Oid namespace = get_namespace_oid("columnar_internal", true);
+	Oid nspace = get_namespace_oid("columnar_internal", true);
 	JustLog("Check fetch columnar namespace");
 	/* if schema is earlier than 11.1-1 */
-	if (!OidIsValid(namespace))
+	if (!OidIsValid(nspace))
 	{
-		namespace = get_namespace_oid("columnar", false);
+		nspace = get_namespace_oid("columnar", false);
 	}
 	JustLog("Fetch columnar namespace done");
-	return namespace;
+	return nspace;
 }
 
 
@@ -2621,8 +2622,9 @@ GetHighestUsedRowNumber(uint64 storageId)
 	List *stripeMetadataList = ReadDataFileStripeList(storageId,
 													  GetTransactionSnapshot(),
 													  ForwardScanDirection);
-	StripeMetadata *stripeMetadata = NULL;
-	foreach_decl_ptr(stripeMetadata, stripeMetadataList)
+	//StripeMetadata *stripeMetadata = NULL;
+	//foreach_decl_ptr(stripeMetadata, stripeMetadataList)
+	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
 		highestRowNumber = Max(highestRowNumber,
 							   StripeGetHighestRowNumber(stripeMetadata));

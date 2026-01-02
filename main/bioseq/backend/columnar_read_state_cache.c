@@ -111,10 +111,10 @@ InitColumnarReadStateCache(Relation relation, SubTransactionId currentSubXid)
 
 #if PG_VERSION_NUM >= PG_VERSION_16
 	ColumnarReadStateMapEntry *hashEntry =
-		hash_search(ColumnarReadStateMap, &relation->rd_locator.relNumber, HASH_ENTER, &found);
+		static_cast<ColumnarReadStateMapEntry*>(hash_search(ColumnarReadStateMap, &relation->rd_locator.relNumber, HASH_ENTER, &found));
 #else
 	ColumnarReadStateMapEntry *hashEntry =
-		hash_search(ColumnarReadStateMap, &relation->rd_node.relNode, HASH_ENTER, &found);
+		static_cast<ColumnarReadStateMapEntry*>(hash_search(ColumnarReadStateMap, &relation->rd_node.relNode, HASH_ENTER, &found));
 #endif
 
 	if (!found)
@@ -137,7 +137,7 @@ InitColumnarReadStateCache(Relation relation, SubTransactionId currentSubXid)
 
 	if (stackEntry == NULL)
 	{
-		stackEntry = palloc0(sizeof(SubXidWriteState));
+		stackEntry = make<SubXidWriteState>();
 		stackEntry->subXid = currentSubXid;
 		stackEntry->next = hashEntry->writeStateStack;
 		hashEntry->writeStateStack = stackEntry;
@@ -162,10 +162,10 @@ FindReadStateCache(Relation relation, SubTransactionId currentSubXid)
 
 #if PG_VERSION_NUM >= PG_VERSION_16
 	ColumnarReadStateMapEntry *hashEntry =
-		hash_search(ColumnarReadStateMap, &relation->rd_locator.relNumber, HASH_FIND, &found);
+		static_cast<ColumnarReadStateMapEntry*>(hash_search(ColumnarReadStateMap, &relation->rd_locator.relNumber, HASH_FIND, &found));
 #else
 	ColumnarReadStateMapEntry *hashEntry =
-		hash_search(ColumnarReadStateMap, &relation->rd_node.relNode, HASH_FIND, &found);
+		static_cast<ColumnarReadStateMapEntry*>(hash_search(ColumnarReadStateMap, &relation->rd_node.relNode, HASH_FIND, &found));
 #endif
 
 	/* No cache for table found*/
@@ -204,7 +204,7 @@ CleanupReadStateCache(SubTransactionId currentSubXid)
 
 	hash_seq_init(&status, ColumnarReadStateMap);
 
-	while ((entry = hash_seq_search(&status)) != 0)
+	while ((entry = static_cast<ColumnarReadStateMapEntry*>(hash_seq_search(&status))) != 0)
 	{
 		if (entry->writeStateStack == NULL) 
 		{

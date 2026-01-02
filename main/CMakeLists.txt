@@ -34,6 +34,7 @@ project(
   VERSION 4.2.3
   LANGUAGES CXX
 )
+set(CMAKE_CXX_STANDARD 20)
 # set this to "${PROJECT_VERSION}" on release
 #set(INSTALL_VERSION "${PROJECT_VERSION}")
 set(INSTALL_VERSION "1.0")

@@ -11,10 +11,20 @@
 #ifndef PG_VERSION_COMPAT_H
 #define PG_VERSION_COMPAT_H
 
+#ifdef __cplusplus
+#undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
+#define __builtin_types_compatible_p(a, b) (1)
+#endif
+
+#include "c.h"
+
+#include "citus_version.h"
 #include "postgres.h"
 #include "pg_version_constants.h"
 
 #include "nodes/print.h"
+
+#include "utils.hpp"
 
 #define LogNode(NODE, MESSAGE) elog_node_display(NOTICE, (MESSAGE), (NODE), true);
 

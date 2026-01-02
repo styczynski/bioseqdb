@@ -370,11 +370,12 @@ ColumnarPlannerHook(Query *parse,
 
 		stmt->planTree = (Plan *) PlanTreeMutator(stmt->planTree, (void *) &plainTreeContext);
 
-		foreach(cell, stmt->subplans)
+		//foreach(cell, stmt->subplans)
+		for(auto plan : PList<Plan>(stmt->subplans))
 		{
 			PlanTreeMutatorContext subPlainTreeContext;
 			plainTreeContext.vectorizedAggregation = 0;
-			Plan *subplan = (Plan *) PlanTreeMutator(lfirst(cell), (void *) &subPlainTreeContext);
+			Plan *subplan = static_cast<Plan*>(PlanTreeMutator(plan, (void *) &subPlainTreeContext));
 			subplans = lappend(subplans, subplan);
 		}
 

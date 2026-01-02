@@ -16,6 +16,8 @@
 #include "citus_version.h"
 #include "pg_version_compat.h"
 
+#include "custom_scan_builder.h"
+
 #include "postgres.h"
 
 #include <math.h>
@@ -406,11 +408,13 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 		rel->rel_parallel_workers = 0;
 
 		/* disable index-only scan */
-		IndexOptInfo *indexOptInfo = NULL;
-		foreach_decl_ptr(indexOptInfo, rel->indexlist)
-		{
+		for(auto indexOptInfo : PList<IndexOptInfo>(rel->indexlist)) {
 			memset(indexOptInfo->canreturn, false, indexOptInfo->ncolumns * sizeof(bool));
 		}
+		// foreach_decl_ptr(indexOptInfo, rel->indexlist)
+		// {
+		// 	memset(indexOptInfo->canreturn, false, indexOptInfo->ncolumns * sizeof(bool));
+		// }
 	}
 }
 
@@ -425,8 +429,7 @@ RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 	List *filteredPathList = NIL;
 	List *filteredPartialPathList = NIL;
 
-	Path *path = NULL;
-	foreach_decl_ptr(path, rel->pathlist)
+	for(auto path : PList<Path>(rel->pathlist))
 	{
 		if (!removePathPredicate(path))
 		{
@@ -436,7 +439,7 @@ RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 
 	rel->pathlist = filteredPathList;
 
-	foreach_decl_ptr(path, rel->partial_pathlist)
+	for(auto path : PList<Path>(rel->partial_pathlist))
 	{
 		if (!removePathPredicate(path))
 		{
@@ -482,8 +485,7 @@ CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 static void
 CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
-	Path *path = NULL;
-	foreach_decl_ptr(path, rel->pathlist)
+	for(auto path : PList<Path>(rel->pathlist))
 	{
 		if (IsA(path, IndexPath))
 		{
@@ -832,8 +834,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 
 		List *pushdownableArgs = NIL;
 
-		Node *boolExprArg = NULL;
-		foreach_decl_ptr(boolExprArg, boolExpr->args)
+		for(auto boolExprArg : PList<Node>(boolExpr->args))
 		{
 			Expr *pushdownableArg = ExtractPushdownClause(root, rel,
 														  (Node *) boolExprArg);
@@ -892,8 +893,9 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 	}
 
 	OpExpr *opExpr = castNode(OpExpr, node);
-	Expr *lhs = list_nth(opExpr->args, 0);
-	Expr *rhs = list_nth(opExpr->args, 1);
+	PList<Expr> args(opExpr->args);
+	Expr *lhs = args[0];
+	Expr *rhs = args[1];
 
 	Var *varSide;
 	Expr *exprSide;
@@ -1529,6 +1531,8 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * everything in the custom_private list. To keep the two lists separate,
 	 * we make them sublists in a 2-element list.
 	 */
+	// FIXME: Thios hould be changed
+	// auto custom_path_data = CustomPathNodeData();
 	if (EnableColumnarQualPushdown)
 	{
 		cpath->custom_private = list_make2(copyObject(plainClauses),
@@ -1538,6 +1542,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	{
 		cpath->custom_private = list_make2(NIL, NIL);
 	}
+	// cpath->custom_private = custom_path_data.ptr();
 
 	int numberOfColumnsRead = 0;
 #if PG_VERSION_NUM >= PG_VERSION_16
@@ -1645,7 +1650,7 @@ CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 {
 	Path *path = &cpath->path;
 
-	List *allClauses = lsecond(cpath->custom_private);
+	List *allClauses = PList<List>(cpath->custom_private).second(); //lsecond(cpath->custom_private);
 	Selectivity clauseSel = clauselist_selectivity(
 		root, allClauses, rel->relid, JOIN_INNER, NULL);
 
@@ -1678,8 +1683,7 @@ ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId, int numberOfColumnsRe
 
 	uint32 maxColumnCount = 0;
 	uint64 totalStripeSize = 0;
-	StripeMetadata *stripeMetadata = NULL;
-	foreach_decl_ptr(stripeMetadata, stripeList)
+	for(auto stripeMetadata : PList<StripeMetadata>(stripeList))
 	{
 		totalStripeSize += stripeMetadata->dataLength;
 		maxColumnCount = Max(maxColumnCount, stripeMetadata->columnCount);
@@ -1769,10 +1773,10 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 		 * fix this by processing the quals more completely and using
 		 * ScanKeys.
 		 */
-		List *plainClauses = extract_actual_clauses(
-			linitial(best_path->custom_private), false /* no pseudoconstants */);
-		List *allClauses = extract_actual_clauses(
-			lsecond(best_path->custom_private), false /* no pseudoconstants */);
+		List *plainClauses = (List*)extract_actual_clauses(
+			(List*)linitial(best_path->custom_private), false /* no pseudoconstants */);
+		List *allClauses = (List*)extract_actual_clauses(
+			(List*)lsecond(best_path->custom_private), false /* no pseudoconstants */);
 		cscan->custom_exprs = copyObject(list_make2(plainClauses, allClauses));
 	}
 	else
@@ -1939,7 +1943,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	cscanstate->ss.ps.ps_ExprContext = stdecontext;
 
 	ResetExprContext(columnarScanState->css_RuntimeContext);
-	List *plainClauses = linitial(cscan->custom_exprs);
+	List *plainClauses = (List*)linitial(cscan->custom_exprs);
 	columnarScanState->qual = (List *) EvalParamsMutator(
 		(Node *) plainClauses, columnarScanState->css_RuntimeContext);
 
@@ -1948,12 +1952,11 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * NULL.
 	 */
 	if (lthird(cscan->custom_exprs) != NIL)
-		columnarScanState->vectorization.vectorizedQualList =  lthird(cscan->custom_exprs);
+		columnarScanState->vectorization.vectorizedQualList =  (List*) lthird(cscan->custom_exprs);
 
-	ListCell *lc;
-	foreach(lc, cscan->custom_private)
+	for(auto lc : PList<ListCell>(cscan->custom_private))
 	{
-		Const *privateCustomData = lfirst(lc);
+		Const *privateCustomData = (Const*) lfirst(lc);
 		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
 			columnarScanState->vectorization.vectorizationAggregate =
@@ -2048,11 +2051,11 @@ ColumnarAttrNeeded(ScanState *ss, List *customList)
 	if (customList != NULL)
 		vars = list_concat(vars, pull_var_clause((Node *)customList, flags));
 
-	ListCell *lc;
-
-	foreach(lc, vars)
+	//ListCell *lc;
+	//foreach(lc, vars)
+	for(auto var : PList<Var>(vars))
 	{
-		Var *var = lfirst(lc);
+		//Var *var = lfirst(lc);
 
 		/* 
 		 * We support following special variables with update / delete.
@@ -2557,7 +2560,7 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
 
 	ResetExprContext(columnarScanState->css_RuntimeContext);
-	List *allClauses = lsecond(cscan->custom_exprs);
+	List *allClauses = (List*) lsecond(cscan->custom_exprs);
 	columnarScanState->qual = (List *) EvalParamsMutator(
 		(Node *) allClauses, columnarScanState->css_RuntimeContext);
 
@@ -2589,7 +2592,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						projectedColumnsStr, es);
 
 	CustomScan *cscan = castNode(CustomScan, node->ss.ps.plan);
-	List *chunkGroupFilter = lsecond(cscan->custom_exprs);
+	List *chunkGroupFilter = (List*) lsecond(cscan->custom_exprs);
 	if (chunkGroupFilter != NULL)
 	{
 		const char *pushdownClausesStr = ColumnarPushdownClausesStr(

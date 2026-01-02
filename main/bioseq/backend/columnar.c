@@ -13,6 +13,7 @@
  */
 
 #include "postgres.h"
+#include <iostream>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -228,7 +229,7 @@ ParseCompressionType(const char *compressionTypeString)
 		const char *compressionName = columnar_compression_options[compressionIndex].name;
 		if (strncmp(compressionTypeString, compressionName, NAMEDATALEN) == 0)
 		{
-			return columnar_compression_options[compressionIndex].val;
+			return static_cast<CompressionType>(columnar_compression_options[compressionIndex].val);
 		}
 	}
 
@@ -249,7 +250,7 @@ CompressionTypeStr(CompressionType requestedType)
 		 compressionIndex++)
 	{
 		CompressionType compressionType =
-			columnar_compression_options[compressionIndex].val;
+			static_cast<CompressionType>(columnar_compression_options[compressionIndex].val);
 		if (compressionType == requestedType)
 		{
 			return columnar_compression_options[compressionIndex].name;
