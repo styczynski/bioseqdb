@@ -139,9 +139,7 @@ static void ColumnarTableAMObjectAccessHook(ObjectAccessType access, Oid classId
 											void *arg);
 static void ColumnarProcessUtility(PlannedStmt *pstmt,
 								   const char *queryString,
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 								   bool readOnlyTree,
-#endif
 								   ProcessUtilityContext context,
 								   ParamListInfo params,
 								   struct QueryEnvironment *queryEnv,
@@ -863,7 +861,6 @@ columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 }
 
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 static TransactionId
 columnar_index_delete_tuples(Relation rel,
 							 TM_IndexDeleteOp *delstate)
@@ -911,19 +908,6 @@ columnar_index_delete_tuples(Relation rel,
 		elog(ERROR, "columnar_index_delete_tuples not implemented for simple deletion");
 	}
 }
-
-
-#else
-static TransactionId
-columnar_compute_xid_horizon_for_tuples(Relation rel,
-										ItemPointerData *tids,
-										int nitems)
-{
-	elog(ERROR, "columnar_compute_xid_horizon_for_tuples not implemented");
-}
-
-
-#endif
 
 
 static void
@@ -1051,12 +1035,8 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 		EState *estate = create_estate_for_relation(relation);
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 		ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
 		InitResultRelInfo(resultRelInfo, relation, 1, NULL, 0);
-#else
-		ResultRelInfo *resultRelInfo = estate->es_result_relation_info;
-#endif
 
 		ExecOpenIndices(resultRelInfo, false);
 
@@ -1066,12 +1046,9 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 		ExecCloseIndices(resultRelInfo);
 
 		AfterTriggerEndQuery(estate);
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 		ExecCloseResultRelations(estate);
 		ExecCloseRangeTableRelations(estate);
-#else
-		ExecCleanUpTriggerState(estate);
-#endif
+
 		ExecResetTupleTable(estate->es_tupleTable, false);
 		FreeExecutorState(estate);
 
@@ -1227,28 +1204,15 @@ columnar_relation_set_new_filenode(Relation rel,
 	 * state. If they are equal, this is a new relation object and we don't
 	 * need to clean anything.
 	 */
-#if PG_VERSION_NUM >= PG_VERSION_16
 	if (rel->rd_locator.relNumber != newrnode->relNumber)
 	{
 		MarkRelfilenodeDropped(rel->rd_locator.relNumber, GetCurrentSubTransactionId());
 
 		DeleteMetadataRows(rel->rd_locator);
 	}
-#else
-	if (rel->rd_node.relNode != newrnode->relNode)
-	{
-		MarkRelfilenodeDropped(rel->rd_node.relNode, GetCurrentSubTransactionId());
-
-		DeleteMetadataRows(rel->rd_node);
-	}
-#endif
 	*freezeXid = RecentXmin;
 	*minmulti = GetOldestMultiXactId();
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
-#else
-	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence);
-#endif
 
 	JustLog("columnar_relation_set_new_filenode init columnar storage");
 	ColumnarStorageInit(srel, ColumnarMetadataNewStorageId());
@@ -1305,11 +1269,7 @@ columnar_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 	 */
 	FlushRelationBuffers(rel);
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
-#else
-	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence);
-#endif
 
 	/* copy main fork */
 	RelationCopyStorage(RelationGetSmgr(rel), srel, MAIN_FORKNUM, persistence);
@@ -1571,25 +1531,16 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	 */
 
 	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	MyProc->statusFlags = 0;
 	ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
-#else
-	MyPgXact->vacuumFlags = 0;
-#endif
+
 	LWLockRelease(ProcArrayLock);
 
 	/* We need to re-assing RecentXmin here */
 	PushActiveSnapshot(GetTransactionSnapshot());
-#if PG_VERSION_NUM >= PG_VERSION_16
 	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_locator,
 														columnarOptions,
 														tupleDesc);
-#else
-	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_node,
-														columnarOptions,
-														tupleDesc);
-#endif
 
 	/* we need all columns */
 	int natts = rel->rd_att->natts;
@@ -1723,7 +1674,6 @@ columnar_vacuum_rel(Relation rel, VacuumParams *params,
 	List *indexList = RelationGetIndexList(rel);
 	int nindexes = list_length(indexList);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	struct VacuumCutoffs cutoffs;
 	vacuum_get_cutoffs(rel, params, &cutoffs);
 
@@ -1748,68 +1698,6 @@ columnar_vacuum_rel(Relation rel, VacuumParams *params,
 						new_rel_allvisible, nindexes > 0,
 						newRelFrozenXid, newRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
-
-#else
-	TransactionId oldestXmin;
-	TransactionId freezeLimit;
-	MultiXactId multiXactCutoff;
-
-	/* initialize xids */
-#if (PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15) && (PG_VERSION_NUM < PG_VERSION_16)
-	MultiXactId oldestMxact;
-	vacuum_set_xid_limits(rel,
-						params->freeze_min_age,
-						params->freeze_table_age,
-						params->multixact_freeze_min_age,
-						params->multixact_freeze_table_age,
-						&oldestXmin, &oldestMxact,
-						&freezeLimit, &multiXactCutoff);
-
-	Assert(MultiXactIdPrecedesOrEquals(multiXactCutoff, oldestMxact));
-#else
-	TransactionId xidFullScanLimit;
-	MultiXactId mxactFullScanLimit;
-	vacuum_set_xid_limits(rel,
-							params->freeze_min_age,
-							params->freeze_table_age,
-							params->multixact_freeze_min_age,
-							params->multixact_freeze_table_age,
-							&oldestXmin, &freezeLimit, &xidFullScanLimit,
-							&multiXactCutoff, &mxactFullScanLimit);
-#endif
-
-	Assert(TransactionIdPrecedesOrEquals(freezeLimit, oldestXmin));
-
-	/*
-	 * Columnar storage doesn't hold any transaction IDs, so we can always
-	 * just advance to the most aggressive value.
-	 */
-	TransactionId newRelFrozenXid = oldestXmin;
-#if (PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15) && (PG_VERSION_NUM < PG_VERSION_16)
-	MultiXactId newRelminMxid = oldestMxact;
-#else
-	MultiXactId newRelminMxid = multiXactCutoff;
-#endif
-
-	double new_live_tuples = ColumnarTableTupleCount(rel);
-
-	/* all visible pages are always 0 */
-	BlockNumber new_rel_allvisible = 0;
-
-#if (PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15) && (PG_VERSION_NUM < PG_VERSION_16)
-	bool frozenxid_updated;
-	bool minmulti_updated;
-
-	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
-						new_rel_allvisible, nindexes > 0,
-						newRelFrozenXid, newRelminMxid,
-						&frozenxid_updated, &minmulti_updated, false);
-#else
-	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
-						new_rel_allvisible, nindexes > 0,
-						newRelFrozenXid, newRelminMxid, false);
-#endif
-#endif
 
 	pgstat_report_vacuum(RelationGetRelid(rel),
 							rel->rd_rel->relisshared,
@@ -2378,15 +2266,8 @@ ColumnarReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		/* currently, columnar tables can't have dead tuples */
 		bool tupleIsAlive = true;
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_13
 		indexCallback(indexRelation, &itemPointerData, indexValues, indexNulls,
 					  tupleIsAlive, indexCallbackState);
-#else
-		HeapTuple scanTuple = ExecCopySlotHeapTuple(slot);
-		scanTuple->t_self = itemPointerData;
-		indexCallback(indexRelation, scanTuple, indexValues, indexNulls,
-					  tupleIsAlive, indexCallbackState);
-#endif
 
 		reltuples++;
 	}
@@ -2881,21 +2762,17 @@ ColumnarTableAMObjectAccessHook(ObjectAccessType access, Oid classId, Oid object
 static void
 ColumnarProcessUtility(PlannedStmt *pstmt,
 					   const char *queryString,
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 					   bool readOnlyTree,
-#endif
 					   ProcessUtilityContext context,
 					   ParamListInfo params,
 					   struct QueryEnvironment *queryEnv,
 					   DestReceiver *dest,
 					   QueryCompletionCompat *completionTag)
 {
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	if (readOnlyTree)
 	{
 		pstmt = copyObject(pstmt);
 	}
-#endif
 
 	Node *parsetree = pstmt->utilityStmt;
 
@@ -2991,11 +2868,7 @@ static const TableAmRoutine columnar_am_methods = {
 	.tuple_get_latest_tid = columnar_get_latest_tid,
 	.tuple_tid_valid = columnar_tuple_tid_valid,
 	.tuple_satisfies_snapshot = columnar_tuple_satisfies_snapshot,
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	.index_delete_tuples = columnar_index_delete_tuples,
-#else
-	.compute_xid_horizon_for_tuples = columnar_compute_xid_horizon_for_tuples,
-#endif
 
 	.tuple_insert = columnar_tuple_insert,
 	.tuple_insert_speculative = columnar_tuple_insert_speculative,
@@ -3104,22 +2977,12 @@ ColumnarCheckLogicalReplication(Relation rel)
 		return;
 	}
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	{
 		PublicationDesc pubdesc;
 
 		RelationBuildPublicationDesc(rel, &pubdesc);
 		pubActionInsert = pubdesc.pubactions.pubinsert;
 	}
-#else
-	if (rel->rd_pubactions == NULL)
-	{
-		GetRelationPublicationActions(rel);
-		Assert(rel->rd_pubactions != NULL);
-	}
-
-	pubActionInsert = rel->rd_pubactions->pubinsert;
-#endif
 
 	if (pubActionInsert)
 	{

@@ -2074,12 +2074,9 @@ StartModifyRelation(Relation rel)
 {
 	EState *estate = create_estate_for_relation(rel);
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
 	InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
-#else
-	ResultRelInfo *resultRelInfo = estate->es_result_relation_info;
-#endif
+
 
 	/* ExecSimpleRelationInsert, ... require caller to open indexes */
 	ExecOpenIndices(resultRelInfo, false);
@@ -2136,11 +2133,8 @@ DeleteTupleAndEnforceConstraints(ModifyState *state, HeapTuple heapTuple)
 	simple_heap_delete(state->rel, tid);
 
 	/* execute AFTER ROW DELETE Triggers to enforce constraints */
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	ExecARDeleteTriggers(estate, resultRelInfo, tid, NULL, NULL, true);
-#else
-	ExecARDeleteTriggers(estate, resultRelInfo, tid, NULL, NULL);
-#endif
+
 }
 
 
@@ -2153,12 +2147,10 @@ FinishModifyRelation(ModifyState *state)
 	ExecCloseIndices(state->resultRelInfo);
 
 	AfterTriggerEndQuery(state->estate);
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
+
 	ExecCloseResultRelations(state->estate);
 	ExecCloseRangeTableRelations(state->estate);
-#else
-	ExecCleanUpTriggerState(state->estate);
-#endif
+
 	ExecResetTupleTable(state->estate->es_tupleTable, false);
 	FreeExecutorState(state->estate);
 
@@ -2185,22 +2177,12 @@ create_estate_for_relation(Relation rel)
 	rte->relid = RelationGetRelid(rel);
 	rte->relkind = rel->rd_rel->relkind;
 	rte->rellockmode = AccessShareLock;
-#if PG_VERSION_NUM >= PG_VERSION_16
+
 	List *perminfos = NIL;
 	addRTEPermissionInfo(&perminfos, rte);
 	ExecInitRangeTable(estate, list_make1(rte), perminfos);
-#else
-	ExecInitRangeTable(estate, list_make1(rte));
-#endif
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_14
-	ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
-	InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
 
-	estate->es_result_relations = resultRelInfo;
-	estate->es_num_result_relations = 1;
-	estate->es_result_relation_info = resultRelInfo;
-#endif
 
 	estate->es_output_cid = GetCurrentCommandId(true);
 

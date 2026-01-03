@@ -54,7 +54,7 @@ static PlannedStmt * ColumnarPlannerHook(Query *parse,  const char *query_string
 										 int cursorOptions, ParamListInfo boundParams);
 static bool IsCreateTableAs(const char *query);
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
+
 static Plan * PlanTreeMutator(Plan *node, void *context);
 
 typedef struct PlanTreeMutatorContext
@@ -310,7 +310,6 @@ PlanTreeMutator(Plan *node, void *context)
 
 	return node;
 }
-#endif
 
 static PlannedStmt *
 ColumnarPlannerHook(Query *parse,
@@ -320,11 +319,9 @@ ColumnarPlannerHook(Query *parse,
 {
 	BMethod(ColumnarPlannerHook);
 	PlannedStmt	*stmt;
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	Plan *savedPlanTree;
 	List *savedSubplan;
 	MemoryContext saved_context;
-#endif
 
 	if (PreviousPlannerHook)
 		stmt = PreviousPlannerHook(parse, query_string, cursorOptions, boundParams);
@@ -345,7 +342,6 @@ ColumnarPlannerHook(Query *parse,
 		}
 	}
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	if (!(columnar_enable_vectorization			/* Vectorization should be enabled */
 			|| columnar_index_scan)				/* or Columnar Index Scan */
 		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
@@ -397,7 +393,6 @@ ColumnarPlannerHook(Query *parse,
 	}
 
 	PG_END_TRY();
-#endif
 
 	return stmt;
 }
@@ -457,8 +452,6 @@ void columnar_planner_init(void)
 	BMethod(columnar_planner_init);
 	PreviousPlannerHook = planner_hook;
 	planner_hook = ColumnarPlannerHook;
-#if  PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	columnar_register_aggregator_node();
-#endif
 	columnar_register_indexscan_node();
 }

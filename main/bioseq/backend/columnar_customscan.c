@@ -2381,7 +2381,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 		 *
 		 * check for non-null qual here to avoid a function call to ExecQual()
 		 * when the qual is null ... saves only a few cycles, but they add up
-		 * ...
+		 * ... 
 		 */
 		if (qual == NULL || ExecQual(qual, econtext))
 		{

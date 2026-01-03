@@ -1,5 +1,5 @@
 
-#include "postgres.h"
+#include "pg_version_compat.h"
 
 #include "fmgr.h"
 #include "nodes/execnodes.h"
@@ -264,20 +264,11 @@ vint2int4avg(PG_FUNCTION_ARGS)
 	if (transdata->N == 0)
 		PG_RETURN_NULL();
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	Numeric sumNumeric, nNumeric, res;
 	nNumeric = int64_to_numeric(transdata->N);
 	sumNumeric = int64_to_numeric(transdata->sumX);
 	res = numeric_div_opt_error(sumNumeric, nNumeric, NULL);
 	PG_RETURN_NUMERIC(res);
-#else
-	Datum countd, sumd;
-	countd = DirectFunctionCall1(int8_numeric,
-								 Int64GetDatumFast(transdata->N));
-	sumd = DirectFunctionCall1(int8_numeric,
-							   Int64GetDatumFast(transdata->sumX));
-	PG_RETURN_DATUM(DirectFunctionCall2(numeric_div, sumd, countd));
-#endif
 
 }
 
@@ -305,7 +296,7 @@ vint8acc(PG_FUNCTION_ARGS)
 	/* Create the state data on the first call */
 	if (state == NULL)
 	{
-		state = palloc0(sizeof(Int128AggState));
+		state = make<Int128AggState>();
 		state->calcSumX2 = false;
 	}
 

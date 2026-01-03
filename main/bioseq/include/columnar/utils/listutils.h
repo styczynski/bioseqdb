@@ -151,10 +151,6 @@ typedef struct ListCellAndListWrapper
  *
  *	  For more information, see postgres commit with sha
  *	  1cff1b95ab6ddae32faa3efe0d95a820dbfdc164
- */
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_13
-
-/*
  *	  How it works:
  *	  - An index is declared with the name {var}PositionDoNotUse and used
  *	    throughout the for loop using ## to concat.
@@ -168,9 +164,6 @@ typedef struct ListCellAndListWrapper
 		 (var ## PositionDoNotUse) < list_length(l) && \
 		 (((var) = list_nth(l, var ## PositionDoNotUse)) || true); \
 		 var ## PositionDoNotUse ++)
-#else
-#define foreach_decl_ptr_append(var, l) foreach_decl_ptr(var, l)
-#endif
 
 static inline List*
 CustomBuildTargetList(List* tlist, Index varNo)

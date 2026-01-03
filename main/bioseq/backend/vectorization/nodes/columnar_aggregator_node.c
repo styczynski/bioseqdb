@@ -1,7 +1,5 @@
-#include "postgres.h"
-#include "pg_version_constants.h"
+#include "pg_version_compat.h"
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 
 /*-------------------------------------------------------------------------
  *
@@ -213,9 +211,6 @@
  *
  *	  Spilled data is written to logical tapes. These provide better control
  *	  over memory usage, disk space, and the number of files than if we were
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
- *	  to use a BufFile for each spill.
-#else
  *	  to use a BufFile for each spill.  We don't know the number of tapes needed
  *	  at the start of the algorithm (because it can recurse), so a tape set is
  *	  allocated at the beginning, and individual tapes are created as needed.
@@ -226,7 +221,6 @@
  *	  once. We only need one tape open at a time in read mode (using a buffer
  *	  that's a multiple of BLCKSZ); but we need one tape open in write mode (each
  *	  requiring a buffer of size BLCKSZ) for each partition.
-#endif
  *
  *	  Note that it's possible for transition states to start small but then
  *	  grow very large; for instance in the case of ARRAY_AGG. In such cases,
@@ -246,11 +240,7 @@
  *    to filter expressions having to be evaluated early, and allows to JIT
  *    the entire expression into one native function.
  *
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
-#else
  * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
-#endif
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -335,29 +325,6 @@
  */
 #define CHUNKHDRSZ 16
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-/*
- * Track all tapes needed for a HashAgg that spills. We don't know the maximum
- * number of tapes needed at the start of the algorithm (because it can
- * recurse), so one tape set is allocated and extended as needed for new
- * tapes. When a particular tape is already read, rewind it for write mode and
- * put it in the free list.
- *
- * Tapes' buffers can take up substantial memory when many tapes are open at
- * once. We only need one tape open at a time in read mode (using a buffer
- * that's a multiple of BLCKSZ); but we need one tape open in write mode (each
- * requiring a buffer of size BLCKSZ) for each partition.
- */
-typedef struct HashTapeInfo
-{
-	LogicalTapeSet *tapeset;
-	int			ntapes;
-	int		   *freetapes;
-	int			nfreetapes;
-	int			freetapes_alloc;
-} HashTapeInfo;
-#endif
-
 /*
  * Represents partitioned spill data for a single hashtable. Contains the
  * necessary information to route tuples to the correct partition, and to
@@ -369,15 +336,8 @@ typedef struct HashTapeInfo
  */
 typedef struct HashAggSpill
 {
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	LogicalTapeSet *tapeset;	/* borrowed reference to tape set */
-#endif
 	int			npartitions;	/* number of partitions */
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	int		   *partitions;		/* spill partition tape numbers */
-#else
 	LogicalTape **partitions;	/* spill partition tapes */
-#endif
 	int64	   *ntuples;		/* number of tuples in each partition */
 	uint32		mask;			/* mask to find partition from hash value */
 	int			shift;			/* after masking, shift by this amount */
@@ -397,12 +357,7 @@ typedef struct HashAggBatch
 {
 	int			setno;			/* grouping set */
 	int			used_bits;		/* number of bits of hash already used */
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	LogicalTapeSet *tapeset;	/* borrowed reference to tape set */
-	int			input_tapenum;	/* input partition tape */
-#else
 	LogicalTape *input_tape;	/* input partition tape */
-#endif
 	int64		input_tuples;	/* number of tuples in this batch */
 	double		input_card;		/* estimated group cardinality */
 } HashAggBatch;
@@ -478,47 +433,25 @@ static void hash_agg_update_metrics(AggState *aggstate, bool from_tape,
 									int npartitions);
 static void hashagg_finish_initial_spills(AggState *aggstate);
 static void hashagg_reset_spill_state(AggState *aggstate);
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-static HashAggBatch *hashagg_batch_new(LogicalTapeSet *tapeset,
-									   int input_tapenum, int setno,
-#else
 static HashAggBatch *hashagg_batch_new(LogicalTape *input_tape, int setno,
-#endif
 									   int64 input_tuples, double input_card,
 									   int used_bits);
 static MinimalTuple hashagg_batch_read(HashAggBatch *batch, uint32 *hashp);
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-static void hashagg_spill_init(HashAggSpill *spill, HashTapeInfo *tapeinfo,
-#else
 static void hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *lts,
-#endif
 							   int used_bits, double input_groups,
 							   double hashentrysize);
 static Size hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 								TupleTableSlot *slot, uint32 hash);
 static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
 								 int setno);
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-static void hashagg_tapeinfo_init(AggState *aggstate);
-static void hashagg_tapeinfo_assign(HashTapeInfo *tapeinfo, int *dest,
-									int ndest);
-static void hashagg_tapeinfo_release(HashTapeInfo *tapeinfo, int tapenum);
-#endif
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
 static void build_pertrans_for_aggref(AggStatePerTrans pertrans,
 									  AggState *aggstate, EState *estate,
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-									  Aggref *aggref, Oid aggtransfn, Oid aggtranstype,
-									  Oid aggserialfn, Oid aggdeserialfn,
-									  Datum initValue, bool initValueIsNull,
-									  Oid *inputTypes, int numArguments);
-#else
 									  Aggref *aggref, Oid transfn_oid,
 									  Oid aggtranstype, Oid aggserialfn,
 									  Oid aggdeserialfn, Datum initValue,
 									  bool initValueIsNull, Oid *inputTypes,
 									  int numArguments);
-#endif
 static AggState * VExecInitAgg(Agg *node, EState *estate, int eflags);
 
 /*
@@ -602,11 +535,7 @@ initialize_phase(AggState *aggstate, int newphase)
 												  sortnode->collations,
 												  sortnode->nullsFirst,
 												  work_mem,
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-												  NULL, false);
-#else
 												  NULL, TUPLESORT_NONE);
-#endif
 	}
 
 	aggstate->current_phase = newphase;
@@ -683,11 +612,7 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 									  pertrans->sortOperators[0],
 									  pertrans->sortCollations[0],
 									  pertrans->sortNullsFirst[0],
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-									  work_mem, NULL, false);
-#else
 									  work_mem, NULL, TUPLESORT_NONE);
-#endif
 		}
 		else
 			pertrans->sortstates[aggstate->current_set] =
@@ -697,11 +622,7 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 									 pertrans->sortOperators,
 									 pertrans->sortCollations,
 									 pertrans->sortNullsFirst,
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-									 work_mem, NULL, false);
-#else
 									 work_mem, NULL, TUPLESORT_NONE);
-#endif
 	}
 
 	/*
@@ -879,17 +800,10 @@ advance_transition_function(AggState *aggstate,
 	if (!pertrans->transtypeByVal &&
 		DatumGetPointer(newVal) != DatumGetPointer(pergroupstate->transValue))
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 		newVal = ExecAggCopyTransValue(aggstate, pertrans,
 									   newVal, fcinfo->isnull,
 									   pergroupstate->transValue,
 									   pergroupstate->transValueIsNull);
-#else
-		newVal = ExecAggTransReparent(aggstate, pertrans,
-									  newVal, fcinfo->isnull,
-									  pergroupstate->transValue,
-									  pergroupstate->transValueIsNull);
-#endif
 
 
 	pergroupstate->transValue = newVal;
@@ -972,13 +886,8 @@ process_ordered_aggregate_single(AggState *aggstate,
 	 * pfree them when they are no longer needed.
 	 */
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	while (tuplesort_getdatum(pertrans->sortstates[aggstate->current_set],
 							  true, false, newVal, isNull, &newAbbrevVal))
-#else
-	while (tuplesort_getdatum(pertrans->sortstates[aggstate->current_set],
-							  true, newVal, isNull, &newAbbrevVal))
-#endif
 	{
 		/*
 		 * Clear and select the working context for evaluation of the equality
@@ -1142,7 +1051,7 @@ finalize_aggregate(AggState *aggstate,
 	bool		anynull = false;
 	MemoryContext oldContext;
 	int			i;
-	ListCell   *lc;
+	//ListCell   *lc;
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
 	oldContext = MemoryContextSwitchTo(aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
@@ -1154,9 +1063,9 @@ finalize_aggregate(AggState *aggstate,
 	 * for the transition state value.
 	 */
 	i = 1;
-	foreach(lc, peragg->aggdirectargs)
+	for(auto expr : PList<ExprState>(peragg->aggdirectargs))
 	{
-		ExprState  *expr = (ExprState *) lfirst(lc);
+		//ExprState  *expr = (ExprState *) lfirst(lc);
 
 		fcinfo->args[i].value = ExecEvalExpr(expr,
 											 aggstate->ss.ps.ps_ExprContext,
@@ -1178,7 +1087,7 @@ finalize_aggregate(AggState *aggstate,
 		InitFunctionCallInfoData(*fcinfo, &peragg->finalfn,
 								 numFinalArgs,
 								 pertrans->aggCollation,
-								 (void *) aggstate, NULL);
+								 static_cast<Node*>((void*)aggstate), NULL);
 
 		/* Fill in the transition state value */
 		fcinfo->args[0].value =
@@ -1211,30 +1120,12 @@ finalize_aggregate(AggState *aggstate,
 	}
 	else
 	{
-#if PG_VERSION_NUM >= PG_VERSION_16
 		*resultVal =
 			MakeExpandedObjectReadOnly(pergroupstate->transValue,
 									   pergroupstate->transValueIsNull,
 									   pertrans->transtypeLen);
 		*resultIsNull = pergroupstate->transValueIsNull;
-#else
-		/* Don't need MakeExpandedObjectReadOnly; datumCopy will copy it */
-		*resultVal = pergroupstate->transValue;
-		*resultIsNull = pergroupstate->transValueIsNull;
-#endif
 	}
-
-#if PG_VERSION_NUM < PG_VERSION_16
-	/*
-	 * If result is pass-by-ref, make sure it is in the right context.
-	 */
-	if (!peragg->resulttypeByVal && !*resultIsNull &&
-		!MemoryContextContains(CurrentMemoryContext,
-							   DatumGetPointer(*resultVal)))
-		*resultVal = datumCopy(*resultVal,
-							   peragg->resulttypeByVal,
-							   peragg->resulttypeLen);
-#endif
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -1285,30 +1176,12 @@ finalize_partialaggregate(AggState *aggstate,
 	}
 	else
 	{
-#if PG_VERSION_NUM >= PG_VERSION_16
 		*resultVal =
 			MakeExpandedObjectReadOnly(pergroupstate->transValue,
 									   pergroupstate->transValueIsNull,
 									   pertrans->transtypeLen);
 		*resultIsNull = pergroupstate->transValueIsNull;
-#else
-		/* Don't need MakeExpandedObjectReadOnly; datumCopy will copy it */
-		*resultVal = pergroupstate->transValue;
-		*resultIsNull = pergroupstate->transValueIsNull;
-#endif
 	}
-
-#if PG_VERSION_NUM < PG_VERSION_16
-	/*
-	 * If result is pass-by-ref, make sure it is in the right context.
-	 */
-	if (!peragg->resulttypeByVal && !*resultIsNull &&
-		!MemoryContextContains(CurrentMemoryContext,
-							   DatumGetPointer(*resultVal)))
-		*resultVal = datumCopy(*resultVal,
-							   peragg->resulttypeByVal,
-							   peragg->resulttypeLen);
-#endif
 
 	MemoryContextSwitchTo(oldContext);
 }
@@ -1387,6 +1260,7 @@ prepare_projection_slot(AggState *aggstate, TupleTableSlot *slot, int currentSet
 			/* all_grouped_cols is arranged in desc order */
 			slot_getsomeattrs(slot, linitial_int(aggstate->all_grouped_cols));
 
+			// FIXME: int list foreach
 			foreach(lc, aggstate->all_grouped_cols)
 			{
 				int			attnum = lfirst_int(lc);
@@ -1713,6 +1587,7 @@ find_hash_columns(AggState *aggstate)
 			Bitmapset  *grouped_cols = aggstate->phases[0].grouped_cols[j];
 			ListCell   *lc;
 
+			//FIXME: int list foreach
 			foreach(lc, aggstate->all_grouped_cols)
 			{
 				int			attnum = lfirst_int(lc);
@@ -1731,9 +1606,9 @@ find_hash_columns(AggState *aggstate)
 		maxCols = bms_num_members(colnos) + perhash->numCols;
 
 		perhash->hashGrpColIdxInput =
-			palloc(maxCols * sizeof(AttrNumber));
+			make<AttrNumber>(maxCols * sizeof(AttrNumber));
 		perhash->hashGrpColIdxHash =
-			palloc(perhash->numCols * sizeof(AttrNumber));
+			make<AttrNumber>(perhash->numCols * sizeof(AttrNumber));
 
 		/* Add all the grouping columns to colnos */
 		for (i = 0; i < perhash->numCols; i++)
@@ -1756,12 +1631,8 @@ find_hash_columns(AggState *aggstate)
 		}
 
 		/* and add the remaining columns */
-#if PG_VERSION_NUM >= PG_VERSION_16
 		i = -1;
 		while ((i = bms_next_member(colnos, i)) >= 0)
-#else
-		while ((i = bms_first_member(colnos)) >= 0)
-#endif
 		{
 			perhash->hashGrpColIdxInput[perhash->numhashGrpCols] = i;
 			perhash->numhashGrpCols++;
@@ -1993,33 +1864,21 @@ hash_agg_enter_spill_mode(AggState *aggstate)
 
 	if (!aggstate->hash_ever_spilled)
 	{
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		Assert(aggstate->hash_tapeinfo == NULL);
-#else
 		Assert(aggstate->hash_tapeset == NULL);
-#endif
 		Assert(aggstate->hash_spills == NULL);
 
 		aggstate->hash_ever_spilled = true;
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		hashagg_tapeinfo_init(aggstate);
-#else
 		aggstate->hash_tapeset = LogicalTapeSetCreate(true, NULL, -1);
-#endif
 
-		aggstate->hash_spills = palloc(sizeof(HashAggSpill) * aggstate->num_hashes);
+		aggstate->hash_spills = make<HashAggSpill>(sizeof(HashAggSpill) * aggstate->num_hashes);
 
 		for (int setno = 0; setno < aggstate->num_hashes; setno++)
 		{
 			AggStatePerHash perhash = &aggstate->perhash[setno];
 			HashAggSpill *spill = &aggstate->hash_spills[setno];
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-			hashagg_spill_init(spill, aggstate->hash_tapeinfo, 0,
-#else
 			hashagg_spill_init(spill, aggstate->hash_tapeset, 0,
-#endif
 							   perhash->aggnode->numGroups,
 							   aggstate->hashentrysize);
 		}
@@ -2061,17 +1920,9 @@ hash_agg_update_metrics(AggState *aggstate, bool from_tape, int npartitions)
 		aggstate->hash_mem_peak = total_mem;
 
 	/* update disk usage */
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	if (aggstate->hash_tapeinfo != NULL)
-#else
 	if (aggstate->hash_tapeset != NULL)
-#endif
 	{
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		uint64		disk_used = LogicalTapeSetBlocks(aggstate->hash_tapeinfo->tapeset) * (BLCKSZ / 1024);
-#else
 		uint64		disk_used = LogicalTapeSetBlocks(aggstate->hash_tapeset) * (BLCKSZ / 1024);
-#endif
 
 		if (aggstate->hash_disk_used < disk_used)
 			aggstate->hash_disk_used = disk_used;
@@ -2250,7 +2101,7 @@ lookup_hash_entries(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
-			pergroup[setno] = entry->additional;
+			pergroup[setno] = static_cast<AggStatePerGroupData*>(entry->additional);
 		}
 		else
 		{
@@ -2258,11 +2109,7 @@ lookup_hash_entries(AggState *aggstate)
 			TupleTableSlot *slot = aggstate->tmpcontext->ecxt_outertuple;
 
 			if (spill->partitions == NULL)
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-				hashagg_spill_init(spill, aggstate->hash_tapeinfo, 0,
-#else
 				hashagg_spill_init(spill, aggstate->hash_tapeset, 0,
-#endif
 								   perhash->aggnode->numGroups,
 								   aggstate->hashentrysize);
 
@@ -2325,11 +2172,7 @@ ExecAgg(PlanState *pstate)
 static TupleTableSlot *
 agg_retrieve_direct(VectorAggState *vectoraggstate)
 {
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	AggState 	*aggstate = vectoraggstate->aggstate;	
-#else
 	AggState *aggstate = vectoraggstate->aggstate;	
-#endif
 	Agg		   *node = aggstate->phase->aggnode;
 	ExprContext *econtext;
 	ExprContext *tmpcontext;
@@ -2756,18 +2599,14 @@ agg_refill_hash_table(AggState *aggstate)
 	HashAggBatch *batch;
 	AggStatePerHash perhash;
 	HashAggSpill spill;
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	HashTapeInfo *tapeinfo = aggstate->hash_tapeinfo;
-#else
 	LogicalTapeSet *tapeset = aggstate->hash_tapeset;
-#endif
 	bool		spill_initialized = false;
 
 	if (aggstate->hash_batches == NIL)
 		return false;
 
 	/* hash_batches is a stack, with the top item at the end of the list */
-	batch = llast(aggstate->hash_batches);
+	batch = static_cast<HashAggBatch*>(llast(aggstate->hash_batches));
 	aggstate->hash_batches = list_delete_last(aggstate->hash_batches);
 
 	hash_agg_set_limits(aggstate->hashentrysize, batch->input_card,
@@ -2838,19 +2677,14 @@ agg_refill_hash_table(AggState *aggstate)
 		prepare_hash_slot(perhash,
 						  aggstate->tmpcontext->ecxt_outertuple,
 						  hashslot);
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		entry = LookupTupleHashEntryHash(
-										 perhash->hashtable, hashslot, p_isnew, hash);
-#else
 		entry = LookupTupleHashEntryHash(perhash->hashtable, hashslot,
 										 p_isnew, hash);
-#endif
 
 		if (entry != NULL)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, perhash->hashtable, entry);
-			aggstate->hash_pergroup[batch->setno] = entry->additional;
+			aggstate->hash_pergroup[batch->setno] = static_cast<AggStatePerGroupData*>(entry->additional);
 			advance_aggregates(aggstate);
 		}
 		else
@@ -2862,11 +2696,7 @@ agg_refill_hash_table(AggState *aggstate)
 				 * that we don't assign tapes that will never be used.
 				 */
 				spill_initialized = true;
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-				hashagg_spill_init(&spill, tapeinfo, batch->used_bits,
-#else
 				hashagg_spill_init(&spill, tapeset, batch->used_bits,
-#endif
 								   batch->input_card, aggstate->hashentrysize);
 			}
 			/* no memory for a new group, spill */
@@ -2882,11 +2712,7 @@ agg_refill_hash_table(AggState *aggstate)
 		ResetExprContext(aggstate->tmpcontext);
 	}
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	hashagg_tapeinfo_release(tapeinfo, batch->input_tapenum);
-#else
 	LogicalTapeClose(batch->input_tape);
-#endif
 
 	/* change back to phase 0 */
 	aggstate->current_phase = 0;
@@ -3061,69 +2887,6 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 	return NULL;
 }
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-/*
- * Initialize HashTapeInfo
- */
-static void
-hashagg_tapeinfo_init(AggState *aggstate)
-{
-	HashTapeInfo *tapeinfo = palloc(sizeof(HashTapeInfo));
-	int			init_tapes = 16;	/* expanded dynamically */
-
-	tapeinfo->tapeset = LogicalTapeSetCreate(init_tapes, true, NULL, NULL, -1);
-	tapeinfo->ntapes = init_tapes;
-	tapeinfo->nfreetapes = init_tapes;
-	tapeinfo->freetapes_alloc = init_tapes;
-	tapeinfo->freetapes = palloc(init_tapes * sizeof(int));
-	for (int i = 0; i < init_tapes; i++)
-		tapeinfo->freetapes[i] = i;
-
-	aggstate->hash_tapeinfo = tapeinfo;
-}
-
-/*
- * Assign unused tapes to spill partitions, extending the tape set if
- * necessary.
- */
-static void
-hashagg_tapeinfo_assign(HashTapeInfo *tapeinfo, int *partitions,
-						int npartitions)
-{
-	int			partidx = 0;
-
-	/* use free tapes if available */
-	while (partidx < npartitions && tapeinfo->nfreetapes > 0)
-		partitions[partidx++] = tapeinfo->freetapes[--tapeinfo->nfreetapes];
-
-	if (partidx < npartitions)
-	{
-		LogicalTapeSetExtend(tapeinfo->tapeset, npartitions - partidx);
-
-		while (partidx < npartitions)
-			partitions[partidx++] = tapeinfo->ntapes++;
-	}
-}
-
-/*
- * After a tape has already been written to and then read, this function
- * rewinds it for writing and adds it to the free list.
- */
-static void
-hashagg_tapeinfo_release(HashTapeInfo *tapeinfo, int tapenum)
-{
-	/* rewinding frees the buffer while not in use */
-	LogicalTapeRewindForWrite(tapeinfo->tapeset, tapenum);
-	if (tapeinfo->freetapes_alloc == tapeinfo->nfreetapes)
-	{
-		tapeinfo->freetapes_alloc <<= 1;
-		tapeinfo->freetapes = repalloc(tapeinfo->freetapes,
-									   tapeinfo->freetapes_alloc * sizeof(int));
-	}
-	tapeinfo->freetapes[tapeinfo->nfreetapes++] = tapenum;
-}
-#endif
-
 /*
  * hashagg_spill_init
  *
@@ -3131,11 +2894,7 @@ hashagg_tapeinfo_release(HashTapeInfo *tapeinfo, int tapenum)
  * of partitions to create, and initializes them.
  */
 static void
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-hashagg_spill_init(HashAggSpill *spill, HashTapeInfo *tapeinfo, int used_bits,
-#else
 hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
-#endif
 				   double input_groups, double hashentrysize)
 {
 	int			npartitions;
@@ -3144,24 +2903,13 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
 	npartitions = hash_choose_num_partitions(input_groups, hashentrysize,
 											 used_bits, &partition_bits);
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	spill->partitions = palloc0(sizeof(int) * npartitions);
-#else
-	spill->partitions = palloc0(sizeof(LogicalTape *) * npartitions);
-#endif
-	spill->ntuples = palloc0(sizeof(int64) * npartitions);
-	spill->hll_card = palloc0(sizeof(hyperLogLogState) * npartitions);
+	spill->partitions = make<LogicalTape*>(sizeof(LogicalTape *) * npartitions);
+	spill->ntuples = make<int64>(sizeof(int64) * npartitions);
+	spill->hll_card = make<hyperLogLogState>(sizeof(hyperLogLogState) * npartitions);
 
-#if PG_VERSION_NUM <= DEPRECATED_PG_VERSION_15
-	hashagg_tapeinfo_assign(tapeinfo, spill->partitions, npartitions);
-#else
 	for (int i = 0; i < npartitions; i++)
 		spill->partitions[i] = LogicalTapeCreate(tapeset);
-#endif
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	spill->tapeset = tapeinfo->tapeset;
-#endif
 	spill->shift = 32 - used_bits - partition_bits;
 	spill->mask = (npartitions - 1) << spill->shift;
 	spill->npartitions = npartitions;
@@ -3180,17 +2928,10 @@ static Size
 hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 					TupleTableSlot *inputslot, uint32 hash)
 {
-#if PG_VERSION_NUM <= DEPRECATED_PG_VERSION_15
-	LogicalTapeSet *tapeset = spill->tapeset;
-#endif
 	TupleTableSlot *spillslot;
 	int			partition;
 	MinimalTuple tuple;
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	int			tapenum;
-#else
 	LogicalTape *tape;
-#endif
 	int			total_written = 0;
 	bool		shouldFree;
 
@@ -3229,24 +2970,12 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 	 */
 	addHyperLogLog(&spill->hll_card[partition], hash_bytes_uint32(hash));
 
-#if PG_VERSION_NUM <= DEPRECATED_PG_VERSION_15
-	tapenum = spill->partitions[partition];
-#else
 	tape = spill->partitions[partition];
-#endif
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	LogicalTapeWrite(tapeset, tapenum, (void *) &hash, sizeof(uint32));
-#else
 	LogicalTapeWrite(tape, (void *) &hash, sizeof(uint32));
-#endif
 	total_written += sizeof(uint32);
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	LogicalTapeWrite(tapeset, tapenum, (void *) tuple, tuple->t_len);
-#else
 	LogicalTapeWrite(tape, (void *) tuple, tuple->t_len);
-#endif
 	total_written += tuple->t_len;
 
 	if (shouldFree)
@@ -3262,23 +2991,14 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
  * be done.
  */
 static HashAggBatch *
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-hashagg_batch_new(LogicalTapeSet *tapeset, int tapenum, int setno,
-#else
 hashagg_batch_new(LogicalTape *input_tape, int setno,
-#endif
 				  int64 input_tuples, double input_card, int used_bits)
 {
-	HashAggBatch *batch = palloc0(sizeof(HashAggBatch));
+	HashAggBatch *batch = make<HashAggBatch>(sizeof(HashAggBatch));
 
 	batch->setno = setno;
 	batch->used_bits = used_bits;
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	batch->tapeset = tapeset;
-	batch->input_tapenum = tapenum;
-#else
 	batch->input_tape = input_tape;
-#endif
 	batch->input_tuples = input_tuples;
 	batch->input_card = input_card;
 
@@ -3292,73 +3012,41 @@ hashagg_batch_new(LogicalTape *input_tape, int setno,
 static MinimalTuple
 hashagg_batch_read(HashAggBatch *batch, uint32 *hashp)
 {
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	LogicalTapeSet *tapeset = batch->tapeset;
-	int			tapenum = batch->input_tapenum;
-#else
 	LogicalTape *tape = batch->input_tape;
-#endif
 	MinimalTuple tuple;
 	uint32		t_len;
 	size_t		nread;
 	uint32		hash;
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	nread = LogicalTapeRead(tapeset, tapenum, &hash, sizeof(uint32));
-#else
 	nread = LogicalTapeRead(tape, &hash, sizeof(uint32));
-#endif
 	if (nread == 0)
 		return NULL;
 	if (nread != sizeof(uint32))
 		ereport(ERROR,
 				(errcode_for_file_access(),
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-				 errmsg("unexpected EOF for tape %d: requested %zu bytes, read %zu bytes",
-						tapenum, sizeof(uint32), nread)));
-#else
 				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
 								 tape, sizeof(uint32), nread)));
-#endif
 	if (hashp != NULL)
 		*hashp = hash;
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	nread = LogicalTapeRead(tapeset, tapenum, &t_len, sizeof(t_len));
-#else
 	nread = LogicalTapeRead(tape, &t_len, sizeof(t_len));
-#endif
 	if (nread != sizeof(uint32))
 		ereport(ERROR,
 				(errcode_for_file_access(),
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-				 errmsg("unexpected EOF for tape %d: requested %zu bytes, read %zu bytes",
-						tapenum, sizeof(uint32), nread)));
-#else
 				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
 								 tape, sizeof(uint32), nread)));
-#endif
 
-	tuple = (MinimalTuple) palloc(t_len);
+	tuple = make<MinimalTupleData>(t_len);
 	tuple->t_len = t_len;
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	nread = LogicalTapeRead(tapeset, tapenum,
-#else
 	nread = LogicalTapeRead(tape,
-#endif
 							(void *) ((char *) tuple + sizeof(uint32)),
 							t_len - sizeof(uint32));
 	if (nread != t_len - sizeof(uint32))
 		ereport(ERROR,
 				(errcode_for_file_access(),
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-				 errmsg("unexpected EOF for tape %d: requested %zu bytes, read %zu bytes",
-						tapenum, t_len - sizeof(uint32), nread)));
-#else
 				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
 								 tape, t_len - sizeof(uint32), nread)));
-#endif
 
 	return tuple;
 }
@@ -3415,12 +3103,7 @@ hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 
 	for (i = 0; i < spill->npartitions; i++)
 	{
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		LogicalTapeSet *tapeset = aggstate->hash_tapeinfo->tapeset;
-		int			tapenum = spill->partitions[i];
-#else
 		LogicalTape *tape = spill->partitions[i];
-#endif
 		HashAggBatch *new_batch;
 		double		cardinality;
 
@@ -3432,18 +3115,9 @@ hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill, int setno)
 		freeHyperLogLog(&spill->hll_card[i]);
 
 		/* rewinding frees the buffer while not in use */
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		LogicalTapeRewindForRead(tapeset, tapenum,
-								 HASHAGG_READ_BUFFER_SIZE);
-#else
 		LogicalTapeRewindForRead(tape, HASHAGG_READ_BUFFER_SIZE);
-#endif
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		new_batch = hashagg_batch_new(tapeset, tapenum, setno,
-#else
 		new_batch = hashagg_batch_new(tape, setno,
-#endif
 									  spill->ntuples[i], cardinality,
 									  used_bits);
 		aggstate->hash_batches = lappend(aggstate->hash_batches, new_batch);
@@ -3482,23 +3156,10 @@ hashagg_reset_spill_state(AggState *aggstate)
 	aggstate->hash_batches = NIL;
 
 	/* close tape set */
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	if (aggstate->hash_tapeinfo != NULL)
-#else
 	if (aggstate->hash_tapeset != NULL)
-#endif
 	{
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		HashTapeInfo *tapeinfo = aggstate->hash_tapeinfo;
-
-		LogicalTapeSetClose(tapeinfo->tapeset);
-		pfree(tapeinfo->freetapes);
-		pfree(tapeinfo);
-		aggstate->hash_tapeinfo = NULL;
-#else 
 		LogicalTapeSetClose(aggstate->hash_tapeset);
 		aggstate->hash_tapeset = NULL;
-#endif
 	}
 }
 
@@ -3528,7 +3189,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	int			numtrans;
 	int			phase;
 	int			phaseidx;
-	ListCell   *l;
+	//ListCell   *l;
 	Bitmapset  *all_grouped_cols = NULL;
 	int			numGroupingSets = 1;
 	int			numPhases;
@@ -3583,9 +3244,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	{
 		numGroupingSets = list_length(node->groupingSets);
 
-		foreach(l, node->chain)
+		for(auto agg : PList<Agg>(node->chain))
 		{
-			Agg		   *agg = lfirst(l);
+			//Agg		   *agg = lfirst(l);
 
 			numGroupingSets = Max(numGroupingSets,
 								  list_length(agg->groupingSets));
@@ -3605,7 +3266,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->numphases = numPhases;
 
 	aggstate->aggcontexts = (ExprContext **)
-		palloc0(sizeof(ExprContext *) * numGroupingSets);
+		make<ExprContext*>(sizeof(ExprContext *) * numGroupingSets);
 
 	/*
 	 * Create expression contexts.  We need three or more, one for
@@ -3714,9 +3375,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	numaggrefs = list_length(aggstate->aggs);
 	max_aggno = -1;
 	max_transno = -1;
-	foreach(l, aggstate->aggs)
+	for(auto aggref : PList<Aggref>(aggstate->aggs))
 	{
-		Aggref	   *aggref = (Aggref *) lfirst(l);
+		//Aggref	   *aggref = (Aggref *) lfirst(l);
 
 		max_aggno = Max(max_aggno, aggref->aggno);
 		max_transno = Max(max_transno, aggref->aggtransno);
@@ -3728,15 +3389,15 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * For each phase, prepare grouping set data and fmgr lookup data for
 	 * compare functions.  Accumulate all_grouped_cols in passing.
 	 */
-	aggstate->phases = palloc0(numPhases * sizeof(AggStatePerPhaseData));
+	aggstate->phases = make<AggStatePerPhaseData>(numPhases * sizeof(AggStatePerPhaseData));
 
 	aggstate->num_hashes = numHashes;
 	if (numHashes)
 	{
-		aggstate->perhash = palloc0(sizeof(AggStatePerHashData) * numHashes);
+		aggstate->perhash = make<AggStatePerHashData>(sizeof(AggStatePerHashData) * numHashes);
 		aggstate->phases[0].numsets = 0;
-		aggstate->phases[0].gset_lengths = palloc(numHashes * sizeof(int));
-		aggstate->phases[0].grouped_cols = palloc(numHashes * sizeof(Bitmapset *));
+		aggstate->phases[0].gset_lengths = make<int>(numHashes * sizeof(int));
+		aggstate->phases[0].grouped_cols = make<Bitmapset*>(numHashes * sizeof(Bitmapset *));
 	}
 
 	phase = 0;
@@ -3795,13 +3456,13 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 			if (num_sets)
 			{
-				phasedata->gset_lengths = palloc(num_sets * sizeof(int));
-				phasedata->grouped_cols = palloc(num_sets * sizeof(Bitmapset *));
+				phasedata->gset_lengths = make<int>(num_sets * sizeof(int));
+				phasedata->grouped_cols = make<Bitmapset*>(num_sets * sizeof(Bitmapset *));
 
 				i = 0;
-				foreach(l, aggnode->groupingSets)
+				for(auto sublist : PList<List>(aggnode->groupingSets))
 				{
-					int			current_length = list_length(lfirst(l));
+					int			current_length = list_length(sublist);
 					Bitmapset  *cols = NULL;
 
 					/* planner forces this to be correct */
@@ -3839,7 +3500,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * need to be compared.
 				 */
 				phasedata->eqfunctions =
-					(ExprState **) palloc0(aggnode->numCols * sizeof(ExprState *));
+					make<ExprState*>(aggnode->numCols * sizeof(ExprState *));
 
 				/* for each grouping set */
 				for (i = 0; i < phasedata->numsets; i++)
@@ -3894,18 +3555,18 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * allocate my private per-agg working storage
 	 */
 	econtext = aggstate->ss.ps.ps_ExprContext;
-	econtext->ecxt_aggvalues = (Datum *) palloc0(sizeof(Datum) * numaggs);
-	econtext->ecxt_aggnulls = (bool *) palloc0(sizeof(bool) * numaggs);
+	econtext->ecxt_aggvalues = make<Datum>(sizeof(Datum) * numaggs);
+	econtext->ecxt_aggnulls = make<bool>(sizeof(bool) * numaggs);
 
-	peraggs = (AggStatePerAgg) palloc0(sizeof(AggStatePerAggData) * numaggs);
-	pertransstates = (AggStatePerTrans) palloc0(sizeof(AggStatePerTransData) * numtrans);
+	peraggs = make<AggStatePerAggData>(sizeof(AggStatePerAggData) * numaggs);
+	pertransstates = make<AggStatePerTransData>(sizeof(AggStatePerTransData) * numtrans);
 
 	aggstate->peragg = peraggs;
 	aggstate->pertrans = pertransstates;
 
 
 	aggstate->all_pergroups =
-		(AggStatePerGroup *) palloc0(sizeof(AggStatePerGroup)
+		make<AggStatePerGroup>(sizeof(AggStatePerGroup)
 									 * (numGroupingSets + numHashes));
 	pergroups = aggstate->all_pergroups;
 
@@ -3913,7 +3574,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	{
 		for (i = 0; i < numGroupingSets; i++)
 		{
-			pergroups[i] = (AggStatePerGroup) palloc0(sizeof(AggStatePerGroupData)
+			pergroups[i] = make<AggStatePerGroupData>(sizeof(AggStatePerGroupData)
 													  * numaggs);
 		}
 
@@ -3992,18 +3653,13 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * Perform lookups of aggregate function info, and initialize the
 	 * unchanging fields of the per-agg and per-trans data.
 	 */
-	foreach(l, aggstate->aggs)
+	for(auto aggref : PList<Aggref>(aggstate->aggs))
 	{
-		Aggref	   *aggref = lfirst(l);
+		//Aggref	   *aggref = lfirst(l);
 		AggStatePerAgg peragg;
 		AggStatePerTrans pertrans;
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		Oid			inputTypes[FUNC_MAX_ARGS];
-		int			numArguments;
-#else
 		Oid			aggTransFnInputTypes[FUNC_MAX_ARGS];
 		int			numAggTransFnArgs;
-#endif
 		int			numDirectArgs;
 		HeapTuple	aggTuple;
 		Form_pg_aggregate aggform;
@@ -4038,13 +3694,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple);
 
 		/* Check permission to call aggregate function */
-#if PG_VERSION_NUM >= PG_VERSION_16
 		aclresult = object_aclcheck(ProcedureRelationId, aggref->aggfnoid, GetUserId(),
 									ACL_EXECUTE);
-#else
-		aclresult = pg_proc_aclcheck(aggref->aggfnoid, GetUserId(),
-									 ACL_EXECUTE);
-#endif
 		if (aclresult != ACLCHECK_OK)
 			aclcheck_error(aclresult, OBJECT_AGGREGATE,
 						   get_func_name(aggref->aggfnoid));
@@ -4110,13 +3761,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 			if (OidIsValid(finalfn_oid))
 			{
-#if PG_VERSION_NUM >= PG_VERSION_16
 				aclresult = object_aclcheck(ProcedureRelationId, finalfn_oid, aggOwner,
 											ACL_EXECUTE);
-#else
-				aclresult = pg_proc_aclcheck(finalfn_oid, aggOwner,
-											 ACL_EXECUTE);
-#endif
 				if (aclresult != ACLCHECK_OK)
 					aclcheck_error(aclresult, OBJECT_FUNCTION,
 								   get_func_name(finalfn_oid));
@@ -4124,13 +3770,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			}
 			if (OidIsValid(serialfn_oid))
 			{
-#if PG_VERSION_NUM >= PG_VERSION_16
 				aclresult = object_aclcheck(ProcedureRelationId, serialfn_oid, aggOwner,
 											ACL_EXECUTE);
-#else
-				aclresult = pg_proc_aclcheck(serialfn_oid, aggOwner,
-											 ACL_EXECUTE);
-#endif
 				if (aclresult != ACLCHECK_OK)
 					aclcheck_error(aclresult, OBJECT_FUNCTION,
 								   get_func_name(serialfn_oid));
@@ -4138,13 +3779,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			}
 			if (OidIsValid(deserialfn_oid))
 			{
-#if PG_VERSION_NUM >= PG_VERSION_16
 				aclresult = object_aclcheck(ProcedureRelationId, deserialfn_oid, aggOwner,
 											ACL_EXECUTE);
-#else
-				aclresult = pg_proc_aclcheck(deserialfn_oid, aggOwner,
-											 ACL_EXECUTE);
-#endif
 				if (aclresult != ACLCHECK_OK)
 					aclcheck_error(aclresult, OBJECT_FUNCTION,
 								   get_func_name(deserialfn_oid));
@@ -4157,23 +3793,15 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		 * could be different from the agg's declared input types, when the
 		 * agg accepts ANY or a polymorphic type.
 		 */
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		numArguments = get_aggregate_argtypes(aggref, inputTypes);
-#else
 		numAggTransFnArgs = get_aggregate_argtypes(aggref,
 												   aggTransFnInputTypes);
-#endif
 
 		/* Count the "direct" arguments, if any */
 		numDirectArgs = list_length(aggref->aggdirectargs);
 
 		/* Detect how many arguments to pass to the finalfn */
 		if (aggform->aggfinalextra)
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-			peragg->numFinalArgs = numArguments + 1;
-#else
 			peragg->numFinalArgs = numAggTransFnArgs + 1;
-#endif
 		else
 			peragg->numFinalArgs = numDirectArgs + 1;
 
@@ -4187,11 +3815,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		 */
 		if (OidIsValid(finalfn_oid))
 		{
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-			build_aggregate_finalfn_expr(inputTypes,
-#else
 			build_aggregate_finalfn_expr(aggTransFnInputTypes,
-#endif
 										 peragg->numFinalArgs,
 										 aggtranstype,
 										 aggref->aggtype,
@@ -4234,14 +3858,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			else
 				transfn_oid = aggform->aggtransfn;
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-			aclresult = pg_proc_aclcheck(transfn_oid, aggOwner,
-										 ACL_EXECUTE);
-#elif PG_VERSION_NUM >= PG_VERSION_16
+
 			aclresult = object_aclcheck(ProcedureRelationId, transfn_oid, aggOwner, ACL_EXECUTE);
-#else
-			aclresult = pg_proc_aclcheck(transfn_oid, aggOwner, ACL_EXECUTE);
-#endif
 			if (aclresult != ACLCHECK_OK)
 				aclcheck_error(aclresult, OBJECT_FUNCTION,
 							   get_func_name(transfn_oid));
@@ -4259,13 +3877,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			else
 				initValue = GetAggInitVal(textInitVal, aggtranstype);
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-			build_pertrans_for_aggref(pertrans, aggstate, estate,
-									  aggref, transfn_oid, aggtranstype,
-									  serialfn_oid, deserialfn_oid,
-									  initValue, initValueIsNull,
-									  inputTypes, numArguments);
-#else
+
 			if (DO_AGGSPLIT_COMBINE(aggstate->aggsplit))
 			{
 				Oid			combineFnInputTypes[] = {aggtranstype,
@@ -4332,7 +3944,6 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 										aggref->aggfnoid)));
 				}
 			}
-#endif /* PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15 */
 		}
 		else
 			pertrans->aggshared = true;
@@ -4424,36 +4035,24 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
  * Build the state needed to calculate a state value for an aggregate.
  *
  * This initializes all the fields in 'pertrans'. 'aggref' is the aggregate
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
- * to initialize the state for. 'aggtransfn', 'aggtranstype', and the rest
-#else
  * to initialize the state for. 'transfn_oid', 'aggtranstype', and the rest
-#endif
  * of the arguments could be calculated from 'aggref', but the caller has
  * calculated them already, so might as well pass them.
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
  *
  * 'transfn_oid' may be either the Oid of the aggtransfn or the aggcombinefn.
-#endif
  */
 static void
 build_pertrans_for_aggref(AggStatePerTrans pertrans,
 						  AggState *aggstate, EState *estate,
 						  Aggref *aggref,
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-						  Oid aggtransfn, Oid aggtranstype,
-#else
 						  Oid transfn_oid, Oid aggtranstype,
-#endif
 						  Oid aggserialfn, Oid aggdeserialfn,
 						  Datum initValue, bool initValueIsNull,
 						  Oid *inputTypes, int numArguments)
 {
 	int			numGroupingSets = Max(aggstate->maxsets, 1);
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	Expr	   *transfnexpr;
 	int			numTransArgs;
-#endif
 	Expr	   *serialfnexpr = NULL;
 	Expr	   *deserialfnexpr = NULL;
 	ListCell   *lc;
@@ -4468,11 +4067,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 	pertrans->aggref = aggref;
 	pertrans->aggshared = false;
 	pertrans->aggCollation = aggref->inputcollid;
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	pertrans->transfn_oid = aggtransfn;
-#else
 	pertrans->transfn_oid = transfn_oid;
-#endif
 	pertrans->serialfn_oid = aggserialfn;
 	pertrans->deserialfn_oid = aggdeserialfn;
 	pertrans->initValue = initValue;
@@ -4486,79 +4081,13 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 
 	pertrans->aggtranstype = aggtranstype;
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 	/* account for the current transition state */
 	numTransArgs = pertrans->numTransInputs + 1;
-#endif
 
 	/*
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	 * When combining states, we have no use at all for the aggregate
-	 * function's transfn. Instead we use the combinefn.  In this case, the
-	 * transfn and transfn_oid fields of pertrans refer to the combine
-	 * function rather than the transition function.
-#else
 	 * Set up infrastructure for calling the transfn.  Note that invtrans is
 	 * not needed here.
-#endif
 	 */
-
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-	if (DO_AGGSPLIT_COMBINE(aggstate->aggsplit))
-	{
-		Expr	   *combinefnexpr;
-		size_t		numTransArgs;
-
-		/*
-		 * When combining there's only one input, the to-be-combined added
-		 * transition value from below (this node's transition value is
-		 * counted separately).
-		 */
-		pertrans->numTransInputs = 1;
-
-		/* account for the current transition state */
-		numTransArgs = pertrans->numTransInputs + 1;
-
-		build_aggregate_combinefn_expr(aggtranstype,
-									   aggref->inputcollid,
-									   aggtransfn,
-									   &combinefnexpr);
-		fmgr_info(aggtransfn, &pertrans->transfn);
-		fmgr_info_set_expr((Node *) combinefnexpr, &pertrans->transfn);
-
-		pertrans->transfn_fcinfo =
-			(FunctionCallInfo) palloc(SizeForFunctionCallInfo(2));
-		InitFunctionCallInfoData(*pertrans->transfn_fcinfo,
-								 &pertrans->transfn,
-								 numTransArgs,
-								 pertrans->aggCollation,
-								 (void *) aggstate, NULL);
-
-		/*
-		 * Ensure that a combine function to combine INTERNAL states is not
-		 * strict. This should have been checked during CREATE AGGREGATE, but
-		 * the strict property could have been changed since then.
-		 */
-		if (pertrans->transfn.fn_strict && aggtranstype == INTERNALOID)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-					 errmsg("combine function with transition type %s must not be declared STRICT",
-							format_type_be(aggtranstype))));
-	}
-	else
-	{
-		Expr	   *transfnexpr;
-		size_t		numTransArgs;
-
-		/* Detect how many arguments to pass to the transfn */
-		if (AGGKIND_IS_ORDERED_SET(aggref->aggkind))
-			pertrans->numTransInputs = numInputs;
-		else
-			pertrans->numTransInputs = numArguments;
-
-		/* account for the current transition state */
-		numTransArgs = pertrans->numTransInputs + 1;
-#else
 	build_aggregate_transfn_expr(inputTypes,
 								 numArguments,
 								 numDirectArgs,
@@ -4569,67 +4098,16 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 								 InvalidOid,
 								 &transfnexpr,
 								 NULL);
-#endif
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		/*
-		 * Set up infrastructure for calling the transfn.  Note that
-		 * invtransfn is not needed here.
-		 */
-		build_aggregate_transfn_expr(inputTypes,
-									 numArguments,
-									 numDirectArgs,
-									 aggref->aggvariadic,
-									 aggtranstype,
-									 aggref->inputcollid,
-									 aggtransfn,
-									 InvalidOid,
-									 &transfnexpr,
-									 NULL);
-		fmgr_info(aggtransfn, &pertrans->transfn);
-		fmgr_info_set_expr((Node *) transfnexpr, &pertrans->transfn);
-
-		pertrans->transfn_fcinfo =
-			(FunctionCallInfo) palloc(SizeForFunctionCallInfo(numTransArgs));
-		InitFunctionCallInfoData(*pertrans->transfn_fcinfo,
-								 &pertrans->transfn,
-								 numTransArgs,
-								 pertrans->aggCollation,
-								 (void *) aggstate, NULL);
-#else
 	fmgr_info(transfn_oid, &pertrans->transfn);
 	fmgr_info_set_expr((Node *) transfnexpr, &pertrans->transfn);
-#endif
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-		/*
-		 * If the transfn is strict and the initval is NULL, make sure input
-		 * type and transtype are the same (or at least binary-compatible), so
-		 * that it's OK to use the first aggregated input value as the initial
-		 * transValue.  This should have been checked at agg definition time,
-		 * but we must check again in case the transfn's strictness property
-		 * has been changed.
-		 */
-		if (pertrans->transfn.fn_strict && pertrans->initValueIsNull)
-		{
-			if (numArguments <= numDirectArgs ||
-				!IsBinaryCoercible(inputTypes[numDirectArgs],
-								   aggtranstype))
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-						 errmsg("aggregate %u needs to have compatible input type and transition type",
-								aggref->aggfnoid)));
-		}
-	}
-#else
-	pertrans->transfn_fcinfo =
-		(FunctionCallInfo) palloc(SizeForFunctionCallInfo(numTransArgs));
+	pertrans->transfn_fcinfo = make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(numTransArgs));
 	InitFunctionCallInfoData(*pertrans->transfn_fcinfo,
 							 &pertrans->transfn,
 							 numTransArgs,
 							 pertrans->aggCollation,
-							 (void *) aggstate, NULL);
-#endif
+							 static_cast<Node*>((void*)aggstate), NULL);
 
 	/* get info about the state value's datatype */
 	get_typlenbyval(aggtranstype,
@@ -4644,12 +4122,12 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		fmgr_info_set_expr((Node *) serialfnexpr, &pertrans->serialfn);
 
 		pertrans->serialfn_fcinfo =
-			(FunctionCallInfo) palloc(SizeForFunctionCallInfo(1));
+			make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
 		InitFunctionCallInfoData(*pertrans->serialfn_fcinfo,
 								 &pertrans->serialfn,
 								 1,
 								 InvalidOid,
-								 (void *) aggstate, NULL);
+								 static_cast<Node*>((void*)aggstate), NULL);
 	}
 
 	if (OidIsValid(aggdeserialfn))
@@ -4660,12 +4138,12 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		fmgr_info_set_expr((Node *) deserialfnexpr, &pertrans->deserialfn);
 
 		pertrans->deserialfn_fcinfo =
-			(FunctionCallInfo) palloc(SizeForFunctionCallInfo(2));
+			make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
 		InitFunctionCallInfoData(*pertrans->deserialfn_fcinfo,
 								 &pertrans->deserialfn,
 								 2,
 								 InvalidOid,
-								 (void *) aggstate, NULL);
+								 static_cast<Node*>((void*)aggstate), NULL);
 	}
 
 	/*
@@ -4719,10 +4197,8 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		 */
 		Assert(aggstate->aggstrategy != AGG_HASHED && aggstate->aggstrategy != AGG_MIXED);
 
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_15
 		/* ORDER BY aggregates are not supported with partial aggregation */
 		Assert(!DO_AGGSPLIT_COMBINE(aggstate->aggsplit));
-#endif
 
 		/* If we have only one input, we need its len/byval info. */
 		if (numInputs == 1)
@@ -4741,18 +4217,18 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 
 		/* Extract the sort information for use later */
 		pertrans->sortColIdx =
-			(AttrNumber *) palloc(numSortCols * sizeof(AttrNumber));
+			make<AttrNumber>(numSortCols * sizeof(AttrNumber));
 		pertrans->sortOperators =
-			(Oid *) palloc(numSortCols * sizeof(Oid));
+			make<Oid>(numSortCols * sizeof(Oid));
 		pertrans->sortCollations =
-			(Oid *) palloc(numSortCols * sizeof(Oid));
+			make<Oid>(numSortCols * sizeof(Oid));
 		pertrans->sortNullsFirst =
-			(bool *) palloc(numSortCols * sizeof(bool));
+			make<bool>(numSortCols * sizeof(bool));
 
 		i = 0;
-		foreach(lc, sortlist)
+		for(auto sortcl : PList<SortGroupClause>(sortlist))
 		{
-			SortGroupClause *sortcl = (SortGroupClause *) lfirst(lc);
+			//SortGroupClause *sortcl = (SortGroupClause *) lfirst(lc);
 			TargetEntry *tle = get_sortgroupclause_tle(sortcl, aggref->args);
 
 			/* the parser should have made sure of this */
@@ -4774,11 +4250,12 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		Assert(numArguments > 0);
 		Assert(list_length(aggref->aggdistinct) == numDistinctCols);
 
-		ops = palloc(numDistinctCols * sizeof(Oid));
+		ops = make<Oid>(numDistinctCols * sizeof(Oid));
 
 		i = 0;
-		foreach(lc, aggref->aggdistinct)
-			ops[i++] = ((SortGroupClause *) lfirst(lc))->eqop;
+		for(auto groupClause : PList<SortGroupClause>(aggref->aggdistinct)) {
+			ops[i++] = groupClause->eqop;
+		}
 
 		/* lookup / build the necessary comparators */
 		if (numDistinctCols == 1)
@@ -4794,8 +4271,8 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		pfree(ops);
 	}
 
-	pertrans->sortstates = (Tuplesortstate **)
-		palloc0(sizeof(Tuplesortstate *) * numGroupingSets);
+	pertrans->sortstates = 
+		make<Tuplesortstate*>(sizeof(Tuplesortstate *) * numGroupingSets);
 }
 
 
@@ -5093,31 +4570,6 @@ AggGetAggref(FunctionCallInfo fcinfo)
 	return NULL;
 }
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-/*
-
- * AggGetTempMemoryContext - fetch short-term memory context for aggregates
- *
- * This is useful in agg final functions; the context returned is one that
- * the final function can safely reset as desired.  This isn't useful for
- * transition functions, since the context returned MAY (we don't promise)
- * be the same as the context those are called in.
- *
- * As above, this is currently not useful for aggs called as window functions.
- */
-MemoryContext
-AggGetTempMemoryContext(FunctionCallInfo fcinfo)
-{
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
-	{
-		AggState   *aggstate = (AggState *) fcinfo->context;
-
-		return aggstate->tmpcontext->ecxt_per_tuple_memory;
-	}
-	return NULL;
-}
-#endif
-
 /*
  * AggStateIsShared - find out whether transition state is shared
  *
@@ -5156,39 +4608,6 @@ AggStateIsShared(FunctionCallInfo fcinfo)
 	return true;
 }
 
-#if PG_VERSION_NUM < DEPRECATED_PG_VERSION_15
-/*
- * AggRegisterCallback - register a cleanup callback for an aggregate
- *
- * This is useful for aggs to register shutdown callbacks, which will ensure
- * that non-memory resources are freed.  The callback will occur just before
- * the associated aggcontext (as returned by AggCheckCallContext) is reset,
- * either between groups or as a result of rescanning the query.  The callback
- * will NOT be called on error paths.  The typical use-case is for freeing of
- * tuplestores or tuplesorts maintained in aggcontext, or pins held by slots
- * created by the agg functions.  (The callback will not be called until after
- * the result of the finalfn is no longer needed, so it's safe for the finalfn
- * to return data that will be freed by the callback.)
- *
- * As above, this is currently not useful for aggs called as window functions.
- */
-void
-AggRegisterCallback(FunctionCallInfo fcinfo,
-					ExprContextCallbackFunction func,
-					Datum arg)
-{
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
-	{
-		AggState   *aggstate = (AggState *) fcinfo->context;
-		ExprContext *cxt = aggstate->curaggcontext;
-
-		RegisterExprContextCallback(cxt, func, arg);
-
-		return;
-	}
-	elog(ERROR, "aggregate function cannot register a callback in this context");
-}
-#endif
 
 /* ----------------------------------------------------------------
  *						Parallel Query Support
@@ -5336,4 +4755,4 @@ columnar_register_aggregator_node(void)
 	RegisterCustomScanMethods(&VectorAggNodeMethods);
 }
 
-#endif
+

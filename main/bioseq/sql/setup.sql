@@ -18,6 +18,6 @@ SET max_parallel_workers_per_gather = 3;
 SET max_parallel_workers = 6;
 SET debug_parallel_query = on;
 
-EXPLAIN (ANALYZE, BUFFERS) select * from x where mmsearch(a, 'A');
+EXPLAIN (ANALYZE, BUFFERS) select * from x where mmsearch(a, 'A') and a > 0;
 
 --select * from x where mmsearch(a, 'A');

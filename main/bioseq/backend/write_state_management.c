@@ -1,7 +1,5 @@
 
-#include "citus_version.h"
-
-#include "postgres.h"
+#include "pg_version_compat.h"
 #include "columnar/columnar.h"
 
 
@@ -14,12 +12,8 @@
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/tsmapi.h"
-#if PG_VERSION_NUM >= 130000
 #include "access/heaptoast.h"
 #include "common/hashfn.h"
-#else
-#include "access/tuptoaster.h"
-#endif
 #include "access/xact.h"
 #include "catalog/catalog.h"
 #include "catalog/index.h"
@@ -148,13 +142,7 @@ columnar_init_write_state(Relation relation, TupleDesc tupdesc,
 		MemoryContextRegisterResetCallback(WriteStateContext, &cleanupCallback);
 	}
 
-#if PG_VERSION_NUM >= PG_VERSION_16
-	WriteStateMapEntry *hashEntry = hash_search(WriteStateMap, &relation->rd_locator.relNumber,
-#else
-	WriteStateMapEntry *hashEntry = hash_search(WriteStateMap, &relation->rd_node.relNode,
-#endif
-
-												HASH_ENTER, &found);
+	WriteStateMapEntry *hashEntry = static_cast<WriteStateMapEntry*>(hash_search(WriteStateMap, &relation->rd_locator.relNumber, HASH_ENTER, &found));
 	if (!found)
 	{
 		hashEntry->writeStateStack = NULL;
@@ -195,12 +183,8 @@ columnar_init_write_state(Relation relation, TupleDesc tupdesc,
 	 */
 	ReadColumnarOptions(tupSlotRelationId, &columnarOptions);
 
-	SubXidWriteState *stackEntry = palloc0(sizeof(SubXidWriteState));
-#if PG_VERSION_NUM >= PG_VERSION_16
+	SubXidWriteState *stackEntry = make<SubXidWriteState>();
 	stackEntry->writeState = ColumnarBeginWrite(relation->rd_locator,
-#else
-	stackEntry->writeState = ColumnarBeginWrite(relation->rd_node,
-#endif
 
 												columnarOptions,
 												tupdesc);
@@ -225,7 +209,7 @@ FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId currentSubXid)
 		return;
 	}
 
-	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL);
+	WriteStateMapEntry *entry = static_cast<WriteStateMapEntry*>(hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL));
 
 	Assert(!entry || !entry->dropped);
 
@@ -261,7 +245,7 @@ ColumnarPopWriteStateForAllRels(SubTransactionId currentSubXid,
 	}
 
 	hash_seq_init(&status, WriteStateMap);
-	while ((entry = hash_seq_search(&status)) != 0)
+	while ((entry = static_cast<WriteStateMapEntry*>(hash_seq_search(&status))) != 0)
 	{
 		if (entry->writeStateStack == NULL)
 		{
@@ -320,8 +304,7 @@ ColumnarMarkRelfilenodeDroppedColumnar(Oid relfilenode, SubTransactionId current
 		return;
 	}
 
-	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND,
-											NULL);
+	WriteStateMapEntry *entry = static_cast<WriteStateMapEntry*>(hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL));
 	if (!entry || entry->dropped)
 	{
 		return;
@@ -340,7 +323,7 @@ ColumnarNonTransactionDropWriteState(Oid relfilenode)
 {
 	if (WriteStateMap)
 	{
-		hash_search(WriteStateMap, &relfilenode, HASH_REMOVE, false);
+		hash_search(WriteStateMap, &relfilenode, HASH_REMOVE, NULL);
 	}
 }
 
@@ -356,7 +339,7 @@ ColumnarPendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId curre
 		return false;
 	}
 
-	WriteStateMapEntry *entry = hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL);
+	WriteStateMapEntry *entry = static_cast<WriteStateMapEntry*>(hash_search(WriteStateMap, &relfilenode, HASH_FIND, NULL));
 
 	if (entry && entry->writeStateStack != NULL)
 	{

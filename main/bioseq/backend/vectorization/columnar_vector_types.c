@@ -9,7 +9,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
+#include "pg_version_compat.h"
 
 #include "utils/lsyscache.h"
 #include "nodes/bitmapset.h"
@@ -25,10 +25,10 @@ BuildVectorColumn(int16 columnDimension, int16 columnTypeLen,
 {
 	VectorColumn *vectorColumn;
 
-	vectorColumn = palloc0(sizeof(VectorColumn));
+	vectorColumn = make<VectorColumn>();
 
 	vectorColumn->dimension = 0;
-	vectorColumn->value = palloc0(columnTypeLen * COLUMNAR_VECTOR_COLUMN_SIZE);
+	vectorColumn->value = make<Datum>(columnTypeLen * COLUMNAR_VECTOR_COLUMN_SIZE);
 	vectorColumn->columnTypeLen = columnTypeLen;
 	vectorColumn->columnIsVal = columnIsVal;
 	vectorColumn->rowNumber = rowNumber;
@@ -140,7 +140,7 @@ WriteTupleToVectorSlot(TupleTableSlot *in, VectorTupleTableSlot *vectorSlot,
 
 				Datum *varLenTypeContainer = NULL;
 
-				varLenTypeContainer = palloc0(sizeof(int8) * data_length);
+				varLenTypeContainer = make<Datum>(sizeof(int8) * data_length);
 				memcpy(varLenTypeContainer, val, data_length);
 
 				*(Datum *) ((int8 *) column->value + column->columnTypeLen * index) = 

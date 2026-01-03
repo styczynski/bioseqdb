@@ -9,7 +9,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
+#include "pg_version_compat.h"
 
 #include "fmgr.h"
 #include "miscadmin.h"
@@ -35,7 +35,7 @@
 bool
 CheckOpExprArgumentRules(List *args)
 {
-	ListCell *lcOpExprArgs;
+	//ListCell *lcOpExprArgs;
 	bool invalidArgument = false;
 
 	/* We accept only one CONST argument */
@@ -43,12 +43,13 @@ CheckOpExprArgumentRules(List *args)
 	/* We accept only one VAR argument*/
 	bool singleVarArgument = false;
 
-	foreach(lcOpExprArgs, args)
+	//foreach(lcOpExprArgs, args)
+	for(auto arg : PList<Expr>(args))
 	{
 		if (invalidArgument)
 			break;
 	
-		Expr *arg = (Expr *) lfirst(lcOpExprArgs);
+		//Expr *arg = (Expr *) lfirst(lcOpExprArgs);
 		if (IsA(arg, Const))
 		{
 			if (singleConstArgument)
@@ -103,7 +104,7 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 	int originalProcedureNameLen = strlen(NameStr(procedureForm->proname));
 
 	char * vectorizedProcedureName =
-		palloc0(sizeof(char) * originalProcedureNameLen + 2);
+		make<char>(sizeof(char) * originalProcedureNameLen + 2);
 	
 	vectorizedProcedureName[0] = 'v';
 
@@ -115,12 +116,11 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 
 	funcNames = lappend(funcNames, makeString(vectorizedProcedureName));
 
-	argtypes = palloc(sizeof(Oid) * procedureForm->pronargs);
+	argtypes = make<Oid>(sizeof(Oid) * procedureForm->pronargs);
 
 	for (i = 0; i < procedureForm->pronargs; i++)
 		argtypes[i] = procedureForm->proargtypes.values[i];
 	
-#if PG_VERSION_NUM >= DEPRECATED_PG_VERSION_14
 	fdResult = func_get_detail(funcNames, NIL, NIL,
 								procedureForm->pronargs, argtypes,
 								false, true, false,
@@ -128,15 +128,6 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 								&retype, &retset,
 								&nvargs, &vatype,
 								&true_oid_array, NULL);
-#else
-	fdResult = func_get_detail(funcNames,
-								NIL, NIL,
-								procedureForm->pronargs, argtypes,
-								false, false,
-								vectorizedProcedureOid, &retype,
-								&retset, &nvargs, &vatype,
-								&true_oid_array, NULL);
-#endif
 
 	if ((fdResult == FUNCDETAIL_NOTFOUND || fdResult == FUNCDETAIL_MULTIPLE) || 
 		!OidIsValid(*vectorizedProcedureOid) ||
@@ -159,11 +150,13 @@ CreateVectorizedExprList(List *exprList)
 	check_stack_depth();
 
 	List *newQualList = NIL;
-	ListCell *lc;
+	//ListCell *lc;
 
-	foreach(lc, exprList)
+
+	//foreach(lc, exprList)
+	for(auto node : PList<Node>(exprList))
 	{
-		Node *node = lfirst(lc);
+		//Node *node = lfirst(lc);
 
 		if (node == NULL)
 			return NULL;
@@ -263,11 +256,8 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 	VectorTupleTableSlot *vectorSlot = (VectorTupleTableSlot *) slot;
 
 	List *vectorQualList = NIL;
-	ListCell *lc;
-
-	foreach(lc, vectorizedQual)
+	for(auto node : PList<Node>(vectorizedQual))
 	{
-		Node *node = lfirst(lc);
 
 		switch(nodeTag(node))
 		{
@@ -280,13 +270,13 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 				int argno = 0;
 				int nargs = list_length(opExprNode->args);
 
-				VectorQual *newVectorQual = palloc(sizeof(VectorQual));
+				VectorQual *newVectorQual = make<VectorQual>();
 				newVectorQual->vectorQualType = VECTOR_QUAL_EXPR;
 
-				newVectorQual->u.expr.fmgrInfo = palloc0(sizeof(FmgrInfo));
-				newVectorQual->u.expr.fcInfo  = palloc0(SizeForFunctionCallInfo(nargs));
+				newVectorQual->u.expr.fmgrInfo = make<FmgrInfo>();
+				newVectorQual->u.expr.fcInfo  = make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(nargs));
 				newVectorQual->u.expr.vectorFnArguments = 
-					(VectorFnArgument *) palloc0(sizeof(VectorFnArgument) * nargs);
+					make<VectorFnArgument>(sizeof(VectorFnArgument) * nargs);
 
 
 				fmgr_info(opExprNode->opfuncid, newVectorQual->u.expr.fmgrInfo);
@@ -297,10 +287,11 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 										 newVectorQual->u.expr.fmgrInfo,
 										 nargs, opExprNode->inputcollid, NULL, NULL);
 
-				ListCell *lcOpExprArgs;
-				foreach(lcOpExprArgs, opExprNode->args)
+				//ListCell *lcOpExprArgs;
+				//foreach(lcOpExprArgs, opExprNode->args)
+				for(auto arg : PList<Expr>( opExprNode->args))
 				{
-					Expr *arg = (Expr *) lfirst(lcOpExprArgs);
+					//Expr *arg = (Expr *) lfirst(lcOpExprArgs);
 
 					VectorFnArgument *vectorFnArgument = 
 						newVectorQual->u.expr.vectorFnArguments + argno;
@@ -338,7 +329,7 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 			{
 				BoolExpr *boolExpr = castNode(BoolExpr, node);
 
-				VectorQual *newVectorQual = palloc0(sizeof(VectorQual));
+				VectorQual *newVectorQual = make<VectorQual>();
 				newVectorQual->vectorQualType = VECTOR_QUAL_BOOL_EXPR;
 				
 				List *newQualExprArgList = 
@@ -346,12 +337,12 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 
 				newVectorQual->u.boolExpr.boolExprType = boolExpr->boolop;
 
-				ListCell *lcExprArgList;
-				foreach(lcExprArgList, newQualExprArgList)
+				//ListCell *lcExprArgList;
+				//foreach(lcExprArgList, newQualExprArgList)
+				for(auto qual : PList<VectorQual>(newQualExprArgList))
 				{
 					newVectorQual->u.boolExpr.vectorQualExprList = 
-						lappend(newVectorQual->u.boolExpr.vectorQualExprList, 
-								(VectorQual*)lfirst(lcExprArgList));
+						lappend(newVectorQual->u.boolExpr.vectorQualExprList, qual);
 				}
 
 				vectorQualList = lappend(vectorQualList, newVectorQual);
@@ -407,14 +398,13 @@ ExecuteVectorizedQual(TupleTableSlot *slot, List *vectorizedQualList,
 			BoolExprType boolType, ExprContext *econtext)
 {
 	VectorTupleTableSlot *vectorSlot = (VectorTupleTableSlot *) slot;
-	ListCell *lc;
+	//ListCell *lc;
 
 	bool *result = NULL;
 
-	foreach(lc, vectorizedQualList)
+	//foreach(lc, vectorizedQualList)
+	for(auto vectorQual : PList<VectorQual>(vectorizedQualList))
 	{
-		VectorQual *vectorQual = (VectorQual *) lfirst(lc);
-
 		bool *qualResult = NULL;
 
 		switch(vectorQual->vectorQualType)
