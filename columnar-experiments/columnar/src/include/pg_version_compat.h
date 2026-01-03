@@ -11,8 +11,52 @@
 #ifndef PG_VERSION_COMPAT_H
 #define PG_VERSION_COMPAT_H
 
+#undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
+#define __builtin_types_compatible_p(a, b) (1)
+
+#include "citus_version.h"
 #include "postgres.h"
-#include "pg_version_constants.h"
+#include "nodes/pg_list.h"
+#include "nodes/primnodes.h"
+#include "utils/array.h"
+#include "utils/hsearch.h"
+#include "executor/tuptable.h"
+#include "access/amapi.h"
+#include "access/skey.h"
+#include "access/xact.h"
+#include "catalog/pg_am.h"
+#include "catalog/pg_statistic.h"
+#include "commands/defrem.h"
+#include "commands/explain.h"
+#include "miscadmin.h"
+#include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/pg_list.h"
+#include "nodes/plannodes.h"
+#include "optimizer/cost.h"
+#include "optimizer/optimizer.h"
+#include "optimizer/pathnode.h"
+#include "optimizer/paths.h"
+#include "optimizer/plancat.h"
+#include "optimizer/restrictinfo.h"
+#include "parser/parse_relation.h"
+#include "parser/parsetree.h"
+#include "storage/smgr.h"
+#include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/lsyscache.h"
+#include "utils/relcache.h"
+#include "utils/ruleutils.h"
+#include "utils/selfuncs.h"
+#include "utils/spccache.h"
+#include "utils/numeric.h"
+#include "lib/stringinfo.h"
+
+
+#undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
+#define __builtin_types_compatible_p(a, b) (1)
+#include "c.h"
 
 #if PG_VERSION_NUM >= PG_VERSION_16
 #define RelationPhysicalIdentifier_compat(a) ((a)->rd_locator)

@@ -13,44 +13,10 @@
  *-------------------------------------------------------------------------
  */
 
-#include "citus_version.h"
 #include "pg_version_compat.h"
 
-#include "postgres.h"
 
 #include <math.h>
-
-#include "access/amapi.h"
-#include "access/skey.h"
-#include "access/xact.h"
-#include "catalog/pg_am.h"
-#include "catalog/pg_statistic.h"
-#include "commands/defrem.h"
-#include "commands/explain.h"
-#include "miscadmin.h"
-#include "nodes/extensible.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "nodes/pg_list.h"
-#include "nodes/plannodes.h"
-#include "optimizer/cost.h"
-#include "optimizer/optimizer.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/paths.h"
-#include "optimizer/plancat.h"
-#include "optimizer/restrictinfo.h"
-#if PG_VERSION_NUM >= PG_VERSION_16
-#include "parser/parse_relation.h"
-#include "parser/parsetree.h"
-#endif
-#include "storage/smgr.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/relcache.h"
-#include "utils/ruleutils.h"
-#include "utils/selfuncs.h"
-#include "utils/spccache.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"

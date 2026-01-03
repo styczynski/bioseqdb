@@ -63,7 +63,7 @@ endif()
 # Include extensions and their shared code
 #add_subdirectory(include)
 add_subdirectory(bioseq)
-add_subdirectory(safestringlib)
+add_subdirectory(vendor)
 #add_subdirectory(h3_postgis)
 
 # Add target that bundles for pgxn

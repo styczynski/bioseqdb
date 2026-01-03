@@ -392,15 +392,6 @@ extern "C" {
 #include "common/pg_lzcompress.h"
 
 
-#define LogNode(NODE, MESSAGE) elog_node_display(NOTICE, (MESSAGE), (NODE), true);
-
-#define STRINGIFY(x) #x
-#define TOSTRING(x) STRINGIFY(x)
-#define AT __FILE__ ":" TOSTRING(__LINE__)
-#define BMethod(NAME) elog(NOTICE, "Columnar [CALL] " __FILE__ ":" TOSTRING(__LINE__) " => " TOSTRING(NAME));
-#define EMethod(NAME) elog(NOTICE, "Columnar [EXIT] " __FILE__ ":" TOSTRING(__LINE__) " => " TOSTRING(NAME));
-#define JustLog(LOG) elog(NOTICE, "Columnar [LOG] " __FILE__ ":" TOSTRING(__LINE__)); elog(NOTICE, (LOG));
-
 // OLD COMPAT
 
 
@@ -922,6 +913,12 @@ getStxstattarget_compat(HeapTuple tup)
 
 #pragma GCC diagnostic pop
 }
+
+// CUSTOM UTILS
+
+#include "utils.hpp"
+#include "utils/logging.h"
+
 // DEBUG UTILS
 
 
@@ -941,8 +938,5 @@ static inline Relation try_safe_relation_open(Oid relationId, LOCKMODE lockmode)
 	return rel;
 }
 
-// CUSTOM UTILS
-
-#include "utils.hpp"
 
 #endif   /* PG_VERSION_COMPAT_H */

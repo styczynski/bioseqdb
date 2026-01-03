@@ -28,9 +28,10 @@ target_include_directories(postgresql_bioseq PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include
 )
 
-target_link_libraries(postgresql_bioseq PRIVATE safestring_static)
+target_link_libraries(postgresql_bioseq PRIVATE safestring_static fmt)
 
 
+include_directories(${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog)
 
 # safestring_shared
 

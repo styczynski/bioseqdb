@@ -24,6 +24,7 @@ void _PG_init(void);
 void
 _PG_init(void)
 {
+  log_configure();
 	columnar_init();
 }
 
