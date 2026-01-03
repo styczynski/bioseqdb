@@ -11,16 +11,12 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
-
-#include "fmgr.h"
-
-#include "citus_version.h"
+#include "pg_version_compat.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
-
+extern "C" {
 PG_MODULE_MAGIC;
 
 void _PG_init(void);
@@ -31,8 +27,9 @@ _PG_init(void)
 	columnar_init();
 }
 
-PG_FUNCTION_INFO_V1(mmsearch);
+CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
   // Nothing here
   return BoolGetDatum(true);
+}
 }

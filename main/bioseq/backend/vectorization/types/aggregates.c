@@ -1,27 +1,18 @@
-
 #include "pg_version_compat.h"
 
-#include "fmgr.h"
-#include "nodes/execnodes.h"
-#include "utils/date.h"
-#include "utils/array.h"
-#include "utils/numeric.h"
-#include "utils/fmgrprotos.h"
-
-#include "pg_version_constants.h"
 #include "columnar/vectorization/types/types.h"
 #include "columnar/vectorization/types/numeric.h"
 
 /* count */
 
-PG_FUNCTION_INFO_V1(vemptycount);
+CXX_PG_FUNCTION_INFO_V1(vemptycount);
 Datum vemptycount(PG_FUNCTION_ARGS)
 {
 	int64 arg = PG_GETARG_INT64(0);
 	PG_RETURN_INT64(arg);
 }
 
-PG_FUNCTION_INFO_V1(vanycount);
+CXX_PG_FUNCTION_INFO_V1(vanycount);
 Datum
 vanycount(PG_FUNCTION_ARGS)
 {
@@ -43,7 +34,7 @@ vanycount(PG_FUNCTION_ARGS)
 
 /* int2 */
 
-PG_FUNCTION_INFO_V1(vint2sum);
+CXX_PG_FUNCTION_INFO_V1(vint2sum);
 Datum
 vint2sum(PG_FUNCTION_ARGS)
 {
@@ -62,7 +53,7 @@ vint2sum(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(sumX);
 }
 
-PG_FUNCTION_INFO_V1(vint2acc);
+CXX_PG_FUNCTION_INFO_V1(vint2acc);
 Datum
 vint2acc(PG_FUNCTION_ARGS)
 {
@@ -97,7 +88,7 @@ vint2acc(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(transarray);
 }
 
-PG_FUNCTION_INFO_V1(vint2larger);
+CXX_PG_FUNCTION_INFO_V1(vint2larger);
 Datum vint2larger(PG_FUNCTION_ARGS)
 {
 	int16 maxValue = PG_GETARG_INT16(0);
@@ -120,7 +111,7 @@ Datum vint2larger(PG_FUNCTION_ARGS)
 	PG_RETURN_INT16(maxValue);
 }
 
-PG_FUNCTION_INFO_V1(vint2smaller);
+CXX_PG_FUNCTION_INFO_V1(vint2smaller);
 Datum vint2smaller(PG_FUNCTION_ARGS)
 {
 	int16 minValue = PG_GETARG_INT32(0);
@@ -145,7 +136,7 @@ Datum vint2smaller(PG_FUNCTION_ARGS)
 
 /* int4 */
 
-PG_FUNCTION_INFO_V1(vint4sum);
+CXX_PG_FUNCTION_INFO_V1(vint4sum);
 Datum
 vint4sum(PG_FUNCTION_ARGS)
 {
@@ -164,7 +155,7 @@ vint4sum(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(sumX);
 }
 
-PG_FUNCTION_INFO_V1(vint4acc);
+CXX_PG_FUNCTION_INFO_V1(vint4acc);
 Datum
 vint4acc(PG_FUNCTION_ARGS)
 {
@@ -199,7 +190,7 @@ vint4acc(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(transarray);
 }
 
-PG_FUNCTION_INFO_V1(vint4larger);
+CXX_PG_FUNCTION_INFO_V1(vint4larger);
 Datum vint4larger(PG_FUNCTION_ARGS)
 {
 	int32 maxValue = PG_GETARG_INT32(0);
@@ -222,7 +213,7 @@ Datum vint4larger(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(maxValue);
 }
 
-PG_FUNCTION_INFO_V1(vint4smaller);
+CXX_PG_FUNCTION_INFO_V1(vint4smaller);
 Datum vint4smaller(PG_FUNCTION_ARGS)
 {
 	int32 minValue = PG_GETARG_INT32(0);
@@ -247,7 +238,7 @@ Datum vint4smaller(PG_FUNCTION_ARGS)
 
 /* int2 / int4 */
 
-PG_FUNCTION_INFO_V1(vint2int4avg);
+CXX_PG_FUNCTION_INFO_V1(vint2int4avg);
 Datum
 vint2int4avg(PG_FUNCTION_ARGS)
 {
@@ -275,7 +266,7 @@ vint2int4avg(PG_FUNCTION_ARGS)
 
 /* int8 */
 
-PG_FUNCTION_INFO_V1(vint8acc);
+CXX_PG_FUNCTION_INFO_V1(vint8acc);
 Datum
 vint8acc(PG_FUNCTION_ARGS)
 {
@@ -316,7 +307,7 @@ vint8acc(PG_FUNCTION_ARGS)
 	PG_RETURN_POINTER(state);
 }
 
-PG_FUNCTION_INFO_V1(vint8sum);
+CXX_PG_FUNCTION_INFO_V1(vint8sum);
 Datum
 vint8sum(PG_FUNCTION_ARGS)
 {
@@ -333,7 +324,7 @@ vint8sum(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-PG_FUNCTION_INFO_V1(vint8avg);
+CXX_PG_FUNCTION_INFO_V1(vint8avg);
 Datum
 vint8avg(PG_FUNCTION_ARGS)
 {
@@ -353,7 +344,7 @@ vint8avg(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(res);
 }
 
-PG_FUNCTION_INFO_V1(vint8larger);
+CXX_PG_FUNCTION_INFO_V1(vint8larger);
 Datum vint8larger(PG_FUNCTION_ARGS)
 {
 	int64 maxValue = PG_GETARG_INT64(0);
@@ -376,7 +367,7 @@ Datum vint8larger(PG_FUNCTION_ARGS)
 	PG_RETURN_INT64(maxValue);
 }
 
-PG_FUNCTION_INFO_V1(vint8smaller);
+CXX_PG_FUNCTION_INFO_V1(vint8smaller);
 Datum vint8smaller(PG_FUNCTION_ARGS)
 {
 	int64 minValue = PG_GETARG_INT64(0);
@@ -401,7 +392,7 @@ Datum vint8smaller(PG_FUNCTION_ARGS)
 
 // date
 
-PG_FUNCTION_INFO_V1(vdatelarger);
+CXX_PG_FUNCTION_INFO_V1(vdatelarger);
 Datum vdatelarger(PG_FUNCTION_ARGS)
 {
 	int32 maxValue = PG_GETARG_INT32(0);
@@ -424,7 +415,7 @@ Datum vdatelarger(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(maxValue);
 }
 
-PG_FUNCTION_INFO_V1(vdatesmaller);
+CXX_PG_FUNCTION_INFO_V1(vdatesmaller);
 Datum vdatesmaller(PG_FUNCTION_ARGS)
 {
 	int32 minValue = PG_GETARG_INT32(0);

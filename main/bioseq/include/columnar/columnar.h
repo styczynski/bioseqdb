@@ -15,25 +15,6 @@
 
 #include "pg_version_compat.h"
 
-#include "postgres.h"
-
-#include "fmgr.h"
-#include "lib/stringinfo.h"
-#include "nodes/parsenodes.h"
-#include "nodes/extensible.h"
-#include "port/atomics.h"
-#include "storage/bufpage.h"
-#include "storage/lockdefs.h"
-#if PG_VERSION_NUM >= PG_VERSION_16
-#include "storage/relfilelocator.h"
-#else
-#include "storage/relfilenode.h"
-typedef struct RelFileNode RelFileLocator;
-#endif
-#include "storage/s_lock.h"
-#include "utils/relcache.h"
-#include "utils/snapmgr.h"
-
 #include "columnar/columnar_compression.h"
 #include "columnar/columnar_metadata.h"
 #include "columnar/columnar_write_state_row_mask.h"
@@ -382,7 +363,7 @@ extern StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
 extern uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
 extern StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
 													   Snapshot snapshot);
-extern Datum columnar_relation_storageid(PG_FUNCTION_ARGS);
+extern "C" Datum columnar_relation_storageid(PG_FUNCTION_ARGS);
 extern bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
 extern bool UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
@@ -391,7 +372,7 @@ extern void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
 extern bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 								MemoryContext ctx,
 								uint64 stripeFirstRowNumber, int rowCount);
-extern Datum create_table_row_mask(PG_FUNCTION_ARGS);
+extern "C" Datum create_table_row_mask(PG_FUNCTION_ARGS);
 extern EState * create_estate_for_relation(Relation rel);
 
 /* columnar_planner_hook.c */

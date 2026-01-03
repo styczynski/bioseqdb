@@ -12,6 +12,8 @@
 #ifndef COLUMNAR_WRITE_STATE_ROW_MASK_H
 #define COLUMNAR_WRITE_STATE_ROW_MASK_H
 
+#include "pg_version_compat.h"
+
 struct RowMaskWriteStateEntry
 {
 	uint64 id;

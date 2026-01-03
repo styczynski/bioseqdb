@@ -18,13 +18,10 @@
  *
  *-------------------------------------------------------------------------
  */
-
-
-#include "postgres.h"
+#include "pg_version_compat.h"
 
 #include "safe_lib.h"
 
-#include "citus_version.h"
 #include "columnar/columnar.h"
 #include "columnar/columnar_metadata.h"
 #include "columnar/columnar_storage.h"
@@ -32,42 +29,7 @@
 #include "columnar/utils/listutils.h"
 
 #include <sys/stat.h>
-#include "access/heapam.h"
-#include "access/htup_details.h"
-#include "access/nbtree.h"
-#include "access/xact.h"
-#include "catalog/indexing.h"
-#include "catalog/pg_namespace.h"
-#include "catalog/pg_collation.h"
-#include "catalog/pg_type.h"
-#include "catalog/namespace.h"
-#include "commands/defrem.h"
-#include "commands/sequence.h"
-#include "commands/trigger.h"
-#include "executor/executor.h"
-#include "executor/spi.h"
-#include "miscadmin.h"
-#include "nodes/execnodes.h"
-#include "lib/stringinfo.h"
-#if PG_VERSION_NUM >= PG_VERSION_16
-#include "parser/parse_relation.h"
-#endif
-#include "port.h"
-#include "storage/fd.h"
-#include "storage/lmgr.h"
-#include "storage/procarray.h"
-#include "storage/smgr.h"
-#include "utils/builtins.h"
-#include "utils/fmgroids.h"
-#include "utils/memutils.h"
-#include "utils/lsyscache.h"
-#include "utils/rel.h"
-#if PG_VERSION_NUM >= PG_VERSION_16
-#include "storage/relfilelocator.h"
-#include "utils/relfilenumbermap.h"
-#else
-#include "utils/relfilenodemap.h"
-#endif
+
 
 Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
 	elog(NOTICE, "Columnar [safe_safe_get_relname_relid] " __FILE__ ":" TOSTRING(__LINE__) " => ");
@@ -157,8 +119,8 @@ static StripeMetadata * StripeMetadataLookupRowNumber(Relation relation, uint64 
 													  RowNumberLookupMode lookupMode);
 static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
 
-PG_FUNCTION_INFO_V1(columnar_relation_storageid);
-PG_FUNCTION_INFO_V1(create_table_row_mask);
+CXX_PG_FUNCTION_INFO_V1(columnar_relation_storageid);
+CXX_PG_FUNCTION_INFO_V1(create_table_row_mask);
 
 /* constants for columnar.options */
 #define Natts_columnar_options 5

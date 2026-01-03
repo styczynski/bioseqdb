@@ -10,9 +10,7 @@
  *
  *-------------------------------------------------------------------------
  */
-
-#include "postgres.h"
-#include "access/xact.h"
+#include "pg_version_compat.h"
 
 #include "columnar/columnar.h"
 

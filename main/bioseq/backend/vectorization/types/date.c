@@ -1,8 +1,5 @@
+#include "pg_version_compat.h"
 
-#include "postgres.h"
-
-#include "nodes/execnodes.h"
-#include "utils/date.h"
 
 #include "columnar/vectorization/types/types.h"
 

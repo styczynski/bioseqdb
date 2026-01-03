@@ -12,17 +12,14 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
+#include "pg_version_compat.h"
 #include <iostream>
 
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "miscadmin.h"
-#include "utils/guc.h"
-#include "utils/rel.h"
+#include "safe_lib.h"
 
-#include "citus_version.h"
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 

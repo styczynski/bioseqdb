@@ -13,46 +13,11 @@
  *-------------------------------------------------------------------------
  */
 
-#include "citus_version.h"
 #include "pg_version_compat.h"
 
 #include "custom_scan_builder.h"
 
-#include "postgres.h"
-
 #include <math.h>
-
-#include "access/amapi.h"
-#include "access/skey.h"
-#include "access/xact.h"
-#include "catalog/pg_am.h"
-#include "catalog/pg_statistic.h"
-#include "commands/defrem.h"
-#include "commands/explain.h"
-#include "miscadmin.h"
-#include "nodes/extensible.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "nodes/pg_list.h"
-#include "nodes/plannodes.h"
-#include "optimizer/cost.h"
-#include "optimizer/optimizer.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/paths.h"
-#include "optimizer/plancat.h"
-#include "optimizer/restrictinfo.h"
-#if PG_VERSION_NUM >= PG_VERSION_16
-#include "parser/parse_relation.h"
-#include "parser/parsetree.h"
-#endif
-#include "storage/smgr.h"
-#include "utils/builtins.h"
-#include "utils/guc.h"
-#include "utils/lsyscache.h"
-#include "utils/relcache.h"
-#include "utils/ruleutils.h"
-#include "utils/selfuncs.h"
-#include "utils/spccache.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
@@ -328,6 +293,7 @@ static void
 ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						   RangeTblEntry *rte)
 {
+	JustLog("ColumnarSetRelPathlistHook()");
 	/* call into previous hook if assigned */
 	if (PreviousSetRelPathlistHook)
 	{
@@ -389,6 +355,7 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			AddColumnarScanPaths(root, rel, rte);
 		}
 	}
+	JustLog("RelationClose()");
 	RelationClose(relation);
 }
 
@@ -397,6 +364,7 @@ static void
 ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 							bool inhparent, RelOptInfo *rel)
 {
+	JustLog("ColumnarGetRelationInfoHook()");
 	if (PreviousGetRelationInfoHook)
 	{
 		PreviousGetRelationInfoHook(root, relationObjectId, inhparent, rel);
@@ -426,6 +394,7 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 static void
 RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 {
+	JustLog("RemovePathsByPredicate()");
 	List *filteredPathList = NIL;
 	List *filteredPartialPathList = NIL;
 
@@ -468,6 +437,7 @@ IsNotIndexPath(Path *path)
 static Path *
 CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
+	JustLog("CreateColumnarSeqScanPath()");
 	/* columnar doesn't support parallel scan */
 	int parallelWorkers = 0;
 
@@ -485,6 +455,7 @@ CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 static void
 CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
+	JustLog("CostColumnarPaths");
 	for(auto path : PList<Path>(rel->pathlist))
 	{
 		if (IsA(path, IndexPath))
@@ -554,6 +525,7 @@ static Cost
 ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 								Oid relationId, IndexPath *indexPath)
 {
+	JustLog("ColumnarIndexScanAdditionalCost");
 	int numberOfColumnsRead = RelationIdGetNumberOfAttributes(relationId);
 	Cost perStripeCost = ColumnarPerStripeScanCost(rel, relationId, numberOfColumnsRead);
 
@@ -685,6 +657,7 @@ RelationIdGetNumberOfAttributes(Oid relationId)
 static bool
 CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation)
 {
+	JustLog("CheckVarStats");
 	/*
 	 * Collect isunique, ndistinct, and varCorrelation.
 	 */
@@ -1186,6 +1159,7 @@ ChooseDepthLimit(int nCandidates)
 static void
 AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
+	JustLog("AddColumnarScanPaths");
 	List *joinClauses = FindPushdownJoinClauses(root, rel);
 	Relids candidateRelids = FindCandidateRelids(root, rel, joinClauses);
 
@@ -1196,6 +1170,8 @@ AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 
 	AddColumnarScanPathsRec(root, rel, rte, paramRelids, candidateRelids,
 							depthLimit);
+
+	JustLog("Terminate AddColumnarScanPaths()");
 }
 
 
@@ -1296,6 +1272,8 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		}
 	}
 
+	JustLog("recurse for all candidateRelids, unless we hit the depth limit");
+
 	/* recurse for all candidateRelids, unless we hit the depth limit */
 	Assert(depthLimit >= 0);
 	if (depthLimit-- == 0)
@@ -1308,6 +1286,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * generate paths of greater parameterization (and hopefully lower
 	 * cost).
 	 */
+	JustLog("Iterate through parameter combinations depth-first");
 	Relids tmpCandidateRelids = bms_copy(candidateRelids);
 	int relid = -1;
 	while ((relid = bms_next_member(candidateRelids, relid)) >= 0)
@@ -1462,6 +1441,7 @@ static Path *
 AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 					Relids paramRelids)
 {
+	JustLog("AddColumnarScanPath()");
 	/*
 	 * Must return a CustomPath, not a larger structure containing a
 	 * CustomPath as the first field. Otherwise, nodeToString() will fail to
@@ -1745,6 +1725,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 								List *clauses,
 								List *custom_plans)
 {
+	JustLog("ColumnarScanPath_PlanCustomPath()");
 	// PAPIESZ: ADD HERE
 	/*
 	 * Must return a CustomScan, not a larger structure containing a
@@ -1811,6 +1792,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 		cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
 	}
 
+	JustLog("ColumnarScanPath_PlanCustomPath EXIT ()");
 	return (Plan *) cscan;
 }
 
@@ -1878,12 +1860,14 @@ ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 static Node *
 ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 {
+	JustLog("ColumnarScan_CreateCustomScanState()");
 	ColumnarScanState *columnarScanState = (ColumnarScanState *) newNode(
 		sizeof(ColumnarScanState), T_CustomScanState);
 
 	CustomScanState *cscanstate = &columnarScanState->custom_scanstate;
 	cscanstate->methods = &ColumnarScanExecuteMethods;
-
+	
+	JustLog("ColumnarScan_CreateCustomScanState EXIT ()");
 	return (Node *) cscanstate;
 }
 
@@ -1930,6 +1914,7 @@ EvalParamsMutator(Node *node, ExprContext *econtext)
 static void
 ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int eflags)
 {
+	JustLog("ColumnarScan_BeginCustomScan()");
 	CustomScan *cscan = (CustomScan *) cscanstate->ss.ps.plan;
 	ColumnarScanState *columnarScanState = (ColumnarScanState *) cscanstate;
 	ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
@@ -1951,18 +1936,21 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * Third list in custom_exprs should contain vectorized qual list if not 
 	 * NULL.
 	 */
+	JustLog("Examine custom exprs for vectorization");
 	if (lthird(cscan->custom_exprs) != NIL)
 		columnarScanState->vectorization.vectorizedQualList =  (List*) lthird(cscan->custom_exprs);
 
-	for(auto lc : PList<ListCell>(cscan->custom_private))
+	JustLog("Iterate custom_private");
+	for(auto privateCustomData : PList<Const>(cscan->custom_private))
 	{
-		Const *privateCustomData = (Const*) lfirst(lc);
+		JustLog("Next expr from custom private");
 		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
 			columnarScanState->vectorization.vectorizationAggregate =
 				privateCustomData->constvalue;
 		}
 	}
+	JustLog("Iterate custom_private END");
 
 	/*
 	 * Vectorization is enabled if global variable is set and there is at least one
@@ -1973,6 +1961,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		(columnarScanState->vectorization.vectorizedQualList != NULL ||
 		 columnarScanState->vectorization.vectorizationAggregate);
 
+	JustLog("Check vectorizationAggregate");
 	if (columnarScanState->vectorization.vectorizationAggregate)
 	{
 		ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
@@ -1998,6 +1987,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	columnarScanState->attrNeeded = 
 		ColumnarAttrNeeded(&cscanstate->ss, columnarScanState->vectorization.vectorizedQualList);
 
+	JustLog("Iterate BMS members");
 	int bmsMember = -1;
 	while ((bmsMember = bms_next_member(columnarScanState->attrNeeded, bmsMember)) >= 0)
 	{
@@ -2018,6 +2008,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_node.relNode;
 #endif
 
+	JustLog("Check parallel mode");
 	if(!IsInParallelMode())
 	{
 		RowMaskFlushWriteStateForRelfilenode(relationOid, GetCurrentSubTransactionId());
@@ -2026,6 +2017,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 									   &columnarScanState->snapshotRegisteredByUs);
 	}
 
+	JustLog("Scan initiazed sucesfully");
 	/* scan slot is already initialized */
 }
 
@@ -2098,6 +2090,7 @@ ExecScanFetch(ScanState *node,
 			  ExecScanAccessMtd accessMtd,
 			  ExecScanRecheckMtd recheckMtd)
 {
+	JustLog("ExecScanFetch()");
 	EState	   *estate = node->ps.state;
 
 	CHECK_FOR_INTERRUPTS();
@@ -2200,6 +2193,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
+	JustLog("CustomExecScan()");
 	ExprContext *econtext;
 	ExprState  *qual;
 	ProjectionInfo *projInfo;
@@ -2426,6 +2420,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 static TupleTableSlot *
 ColumnarScanNext(ColumnarScanState *columnarScanState)
 {
+	JustLog("ColumnarScanNext()");
 	CustomScanState *node = (CustomScanState *) columnarScanState;
 
 	/*
@@ -2580,6 +2575,7 @@ static void
 ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							   ExplainState *es)
 {
+	JustLog("ColumnarScan_ExplainCustomScan()");
 	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
 
 	List *context = set_deparse_context_planstate(

@@ -13,9 +13,7 @@
 #ifndef COLUMNAR_INDEXSCAN_H
 #define COLUMNAR_INDEXSCAN_H
 
-#include "postgres.h"
-
-#include "nodes/execnodes.h"
+#include "pg_version_compat.h"
 
 typedef struct ColumnarIndexScanState
 {

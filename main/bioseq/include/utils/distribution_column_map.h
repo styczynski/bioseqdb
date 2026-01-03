@@ -11,10 +11,7 @@
 #ifndef DISTRIBUTION_COLUMN_HASH_H
 #define DISTRIBUTION_COLUMN_HASH_H
 
-#include "postgres.h"
-
-#include "nodes/primnodes.h"
-#include "utils/hsearch.h"
+#include "pg_version_compat.h"
 
 
 typedef HTAB DistributionColumnMap;

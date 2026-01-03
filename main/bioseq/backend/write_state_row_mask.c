@@ -12,15 +12,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
-
-#if PG_VERSION_NUM >= 130000
-#include "access/heaptoast.h"
-#include "common/hashfn.h"
-#else
-#include "access/tuptoaster.h"
-#endif
-#include "executor/executor.h"
+#include "pg_version_compat.h"
 
 #include "columnar/columnar_tableam.h"
 
@@ -124,7 +116,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 	}
 
 	RowMaskWriteStateMapEntry *hashEntry =
-		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_ENTER, &found);
+		static_cast<RowMaskWriteStateMapEntry*>(hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_ENTER, &found));
 
 	if (!found)
 	{
@@ -149,7 +141,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 
 	if (stackEntry == NULL)
 	{
-		stackEntry = palloc0(sizeof(SubXidWriteState));
+		stackEntry = make<SubXidWriteState>();
 		stackEntry->subXid = currentSubXid;
 		stackEntry->next = hashEntry->writeStateStack;
 		stackEntry->lastRowMaskWriteStateEntry = NULL;
@@ -169,7 +161,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 static RowMaskWriteStateEntry *
 InitRowMaskEntry(uint64 storageId, bytea *mask)
 {
-	RowMaskWriteStateEntry *rowMask = palloc0(sizeof(RowMaskWriteStateEntry));
+	RowMaskWriteStateEntry *rowMask = make<RowMaskWriteStateEntry>();
 
 	rowMask->storageId = storageId;
 	rowMask->mask = (bytea *)palloc0(VARSIZE(mask) + VARHDRSZ);
@@ -205,7 +197,7 @@ void RowMaskFlushWriteStateForRelfilenode(Oid relfilelocator,
 	}
 
 	RowMaskWriteStateMapEntry *entry =
-		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, NULL);
+		static_cast<RowMaskWriteStateMapEntry*>(hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, NULL));
 
 	Assert(!entry || !entry->dropped);
 
@@ -235,7 +227,7 @@ RowMaskFindWriteState(Oid relfilelocator, SubTransactionId currentSubXid,
 	bool found;
 
 	RowMaskWriteStateMapEntry *hashEntry =
-		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, &found);
+		static_cast<RowMaskWriteStateMapEntry*>(hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, &found));
 
 	/* No cache for table found*/
 	if (!found)
@@ -292,7 +284,7 @@ RowMaskPopWriteStateForAllRels(SubTransactionId currentSubXid,
 
 	hash_seq_init(&status, RowMaskWriteStateMap);
 
-	while ((entry = hash_seq_search(&status)) != 0)
+	while ((entry = static_cast<RowMaskWriteStateMapEntry*>(hash_seq_search(&status))) != 0)
 	{
 		if (entry->writeStateStack == NULL) 
 		{
@@ -349,7 +341,7 @@ RowMaskMarkRelfilenodeDropped(Oid relfilelocator, SubTransactionId currentSubXid
 	}
 
 	RowMaskWriteStateMapEntry *entry =
-		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, NULL);
+		static_cast<RowMaskWriteStateMapEntry*>(hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, NULL));
 	
 	if (!entry || entry->dropped)
 	{
@@ -366,7 +358,7 @@ RowMaskNonTransactionDrop(Oid relfilelocator)
 {
 	if (RowMaskWriteStateMap)
 	{
-		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_REMOVE, false);
+		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_REMOVE, NULL);
 	}
 }
 
@@ -380,7 +372,7 @@ RowMaskPendingWritesInUpperTransactions(Oid relfilelocator, SubTransactionId cur
 	}
 
 	RowMaskWriteStateMapEntry *entry =
-		hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, NULL);
+		static_cast<RowMaskWriteStateMapEntry*>(hash_search(RowMaskWriteStateMap, &relfilelocator, HASH_FIND, NULL));
 
 	if (entry && entry->writeStateStack != NULL)
 	{

@@ -1,5 +1,4 @@
 #include "pg_version_compat.h"
-#include "nodes/plannodes.h"
 
 class CustomPathNodeData {
 private:

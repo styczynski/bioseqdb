@@ -12,7 +12,7 @@
 #ifndef COLUMNAR_COMPAT_H
 #define COLUMNAR_COMPAT_H
 
-#include "pg_version_constants.h"
+#include "pg_version_compat.h"
 
 #define ColumnarProcessUtility_compat(a, b, c, d, e, f, g, h) \
 	ColumnarProcessUtility(a, b, c, d, e, f, g, h)

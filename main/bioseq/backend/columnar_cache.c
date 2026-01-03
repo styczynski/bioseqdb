@@ -12,11 +12,6 @@
 #include "pg_version_compat.h"
 
 #include "columnar/columnar.h"
-#include "fmgr.h"
-#include "funcapi.h"
-#include "lib/ilist.h"
-#include "lib/stringinfo.h"
-#include "utils/memutils.h"
 
 #include <time.h>
 #include <unistd.h>
@@ -433,9 +428,9 @@ ColumnarGetCacheStatistics(void)
 
 
 #define CACHE_NATTS 6
-Datum cache_walk(PG_FUNCTION_ARGS);
+extern "C" Datum cache_walk(PG_FUNCTION_ARGS);
 
-PG_FUNCTION_INFO_V1(cache_walk);
+CXX_PG_FUNCTION_INFO_V1(cache_walk);
 
 /*
  * Used for debugging, as this data is only available in a transaction
@@ -443,9 +438,9 @@ PG_FUNCTION_INFO_V1(cache_walk);
  */
 
 
-Datum cache_evict(PG_FUNCTION_ARGS);
+extern "C" Datum cache_evict(PG_FUNCTION_ARGS);
 
-PG_FUNCTION_INFO_V1(cache_evict);
+CXX_PG_FUNCTION_INFO_V1(cache_evict);
 
 /*
  * Also used for debugging, with the same constraints that it would only

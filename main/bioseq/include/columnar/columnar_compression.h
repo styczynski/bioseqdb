@@ -12,6 +12,8 @@
 #ifndef COLUMNAR_COMPRESSION_H
 #define COLUMNAR_COMPRESSION_H
 
+#include "pg_version_compat.h"
+
 /* Enumaration for columnar table's compression method */
 typedef enum
 {

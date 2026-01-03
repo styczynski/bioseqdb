@@ -11,9 +11,7 @@
 #ifndef CITUS_ARRAY_TYPE_H
 #define CITUS_ARRAY_TYPE_H
 
-#include "postgres.h"
-
-#include "utils/array.h"
+#include "pg_version_compat.h"
 
 
 extern Datum * DeconstructArrayObject(ArrayType *arrayObject);

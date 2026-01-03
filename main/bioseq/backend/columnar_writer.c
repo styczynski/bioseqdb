@@ -15,26 +15,7 @@
 
 #include "pg_version_compat.h"
 
-#include "postgres.h"
-
 #include "safe_lib.h"
-
-#include "access/heapam.h"
-#include "access/nbtree.h"
-#include "catalog/pg_am.h"
-#include "miscadmin.h"
-#include "storage/fd.h"
-#include "storage/smgr.h"
-#include "utils/guc.h"
-#include "utils/memutils.h"
-#include "utils/palloc.h"
-#include "utils/rel.h"
-
-#if PG_VERSION_NUM >= PG_VERSION_16
-#include "utils/relfilenumbermap.h"
-#else
-#include "utils/relfilenodemap.h"
-#endif
 
 
 #include "columnar/columnar.h"

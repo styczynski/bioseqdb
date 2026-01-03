@@ -11,9 +11,7 @@
 #ifndef CITUS_FUNCTION_H
 #define CITUS_FUNCTION_H
 
-#include "postgres.h"
-
-#include "fmgr.h"
+#include "pg_version_compat.h"
 
 
 extern FmgrInfo * GetFunctionInfo(Oid typeId, Oid accessMethodId, int16 procedureId);

@@ -1,10 +1,4 @@
-
-#include "postgres.h"
-#include "common/int.h"
-
-#include "fmgr.h"
-#include "nodes/execnodes.h"
-
+#include "pg_version_compat.h"
 #include "columnar/vectorization/types/types.h"
 
 // char

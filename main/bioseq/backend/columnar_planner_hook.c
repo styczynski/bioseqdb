@@ -10,34 +10,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "postgres.h"
-
-#include "miscadmin.h"
-
-#include "access/amapi.h"
-#include "catalog/pg_aggregate.h"
-#include "catalog/pg_am.h"
-#include "catalog/pg_class.h"
-#include "catalog/pg_index.h"
-#include "catalog/pg_statistic.h"
-#include "catalog/pg_operator.h"
-#include "catalog/pg_proc.h"
-#include "commands/defrem.h"
-#include "optimizer/cost.h"
-#include "optimizer/optimizer.h"
-#include "optimizer/pathnode.h"
-#include "optimizer/paths.h"
-#include "optimizer/plancat.h"
-#include "optimizer/planner.h"
-#include "optimizer/restrictinfo.h"
-#include "tcop/utility.h"
-#include "parser/parse_oper.h"
-#include "parser/parse_func.h"
-#include "utils/builtins.h"
-#include "utils/lsyscache.h"
-#include "utils/selfuncs.h"
-#include "utils/syscache.h"
-#include "utils/spccache.h"
+#include "pg_version_compat.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
@@ -334,6 +307,7 @@ ColumnarPlannerHook(Query *parse,
 	 * and in that case examines the query string to see if it matches the
 	 * pattern of a CREATE TABLE AS.  If so, set the parallelism to 0 (off).
 	 */
+	JustLog("Check CREATE TABLE AS query");
 	if (parse->commandType == CMD_SELECT)
 	{
 		if (IsCreateTableAs(query_string))
@@ -342,6 +316,7 @@ ColumnarPlannerHook(Query *parse,
 		}
 	}
 
+	JustLog("Check vectorization");
 	if (!(columnar_enable_vectorization			/* Vectorization should be enabled */
 			|| columnar_index_scan)				/* or Columnar Index Scan */
 		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
@@ -356,6 +331,7 @@ ColumnarPlannerHook(Query *parse,
 
 	saved_context = CurrentMemoryContext;
 
+	JustLog("Plan mutate");
 	PG_TRY();
 	{
 		List		*subplans = NULL;
@@ -367,13 +343,16 @@ ColumnarPlannerHook(Query *parse,
 		stmt->planTree = (Plan *) PlanTreeMutator(stmt->planTree, (void *) &plainTreeContext);
 
 		//foreach(cell, stmt->subplans)
+		JustLog("Iterate subplans");
 		for(auto plan : PList<Plan>(stmt->subplans))
 		{
+			JustLog("Iterate next");
 			PlanTreeMutatorContext subPlainTreeContext;
 			plainTreeContext.vectorizedAggregation = 0;
 			Plan *subplan = static_cast<Plan*>(PlanTreeMutator(plan, (void *) &subPlainTreeContext));
 			subplans = lappend(subplans, subplan);
 		}
+		JustLog("Iterate subplans END");
 
 		stmt->subplans = subplans;
 	}
@@ -390,9 +369,11 @@ ColumnarPlannerHook(Query *parse,
 					errdetail("%s", edata->message)));
 		stmt->planTree = savedPlanTree;
 		stmt->subplans = savedSubplan;
+		JustLog("Vectorized catch-block completed");
 	}
 
 	PG_END_TRY();
+	JustLog("Columnar planner hook exited");
 
 	return stmt;
 }

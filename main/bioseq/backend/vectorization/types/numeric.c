@@ -10,9 +10,6 @@
 
 #include "pg_version_compat.h"
 
-#include "utils/numeric.h"
-#include "common/int.h"
-
 #include "columnar/vectorization/types/numeric.h"
 #include "columnar/vectorization/types/types.h"
 

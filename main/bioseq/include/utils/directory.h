@@ -11,9 +11,7 @@
 #ifndef CITUS_DIRECTORY_H
 #define CITUS_DIRECTORY_H
 
-#include "postgres.h"
-
-#include "lib/stringinfo.h"
+#include "pg_version_compat.h"
 
 
 #define PG_JOB_CACHE_DIR "pgsql_job_cache"

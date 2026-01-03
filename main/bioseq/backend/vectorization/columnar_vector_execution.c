@@ -11,19 +11,6 @@
 
 #include "pg_version_compat.h"
 
-#include "fmgr.h"
-#include "miscadmin.h"
-
-#include "catalog/pg_operator.h"
-#include "catalog/pg_proc.h"
-#include "nodes/pg_list.h"
-#include "nodes/makefuncs.h"
-#include "parser/parse_oper.h"
-#include "parser/parse_func.h"
-
-#include "utils/syscache.h"
-
-#include "pg_version_constants.h"
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 

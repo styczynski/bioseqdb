@@ -12,9 +12,7 @@
 #ifndef COLUMNAR_VECTOR_EXECUTION_H
 #define COLUMNAR_VECTOR_EXECUTION_H
 
-#include "executor/tuptable.h"
-#include "nodes/pg_list.h"
-#include "nodes/primnodes.h"
+#include "pg_version_compat.h"
 
 extern bool CheckOpExprArgumentRules(List *args);
 extern bool GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid);

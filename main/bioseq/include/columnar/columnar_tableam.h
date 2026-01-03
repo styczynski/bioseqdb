@@ -1,15 +1,7 @@
 #ifndef COLUMNAR_TABLEAM_H
 #define COLUMNAR_TABLEAM_H
-#include "citus_version.h"
 
-#include "postgres.h"
-#include "fmgr.h"
-#include "access/tableam.h"
-#include "access/skey.h"
-#include "nodes/bitmapset.h"
-#include "access/heapam.h"
-#include "catalog/indexing.h"
-#include "utils/acl.h"
+#include "pg_version_compat.h"
 
 #include "columnar/columnar.h"
 

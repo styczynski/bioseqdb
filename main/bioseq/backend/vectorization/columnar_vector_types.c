@@ -11,9 +11,6 @@
 
 #include "pg_version_compat.h"
 
-#include "utils/lsyscache.h"
-#include "nodes/bitmapset.h"
-
 #include "columnar/columnar.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 

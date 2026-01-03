@@ -6,33 +6,16 @@
  *
  *-------------------------------------------------------------------------
  */
-
-
-#include "postgres.h"
-
-#include "funcapi.h"
-#include "access/nbtree.h"
-#include "access/table.h"
-#include "catalog/pg_am.h"
-#include "catalog/pg_type.h"
-#include "pg_version_constants.h"
-#include "miscadmin.h"
-#include "storage/fd.h"
-#include "storage/smgr.h"
-#include "utils/guc.h"
-#include "utils/memutils.h"
-#include "utils/rel.h"
-#include "utils/tuplestore.h"
-
 #include "pg_version_compat.h"
+
 #include "columnar/columnar.h"
 #include "columnar/columnar_storage.h"
 #include "columnar/columnar_version_compat.h"
 
 static void MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters);
 
-PG_FUNCTION_INFO_V1(columnar_store_memory_stats);
-PG_FUNCTION_INFO_V1(columnar_storage_info);
+CXX_PG_FUNCTION_INFO_V1(columnar_store_memory_stats);
+CXX_PG_FUNCTION_INFO_V1(columnar_storage_info);
 
 
 /*

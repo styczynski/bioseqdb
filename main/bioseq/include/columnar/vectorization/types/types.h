@@ -12,12 +12,12 @@
 #ifndef COLUMNAR_TYPES_H
 #define COLUMNAR_TYPES_H
 
-#include "postgres.h"
+#include "pg_version_compat.h"
 
 #include "columnar/vectorization/columnar_vector_types.h"
 
 #define _BUILD_CMP_OP_INT(FNAME, LTYPE, RTYPE, OPSYM, OPSTR)				\
-PG_FUNCTION_INFO_V1(v##FNAME##OPSTR);										\
+CXX_PG_FUNCTION_INFO_V1(v##FNAME##OPSTR);										\
 Datum v##FNAME##OPSTR(PG_FUNCTION_ARGS) 									\
 {																			\
 	VectorFnArgument *left = (VectorFnArgument *) PG_GETARG_POINTER(0);		\

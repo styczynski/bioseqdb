@@ -13,7 +13,7 @@
 #ifndef COLUMNAR_CUSTOMSCAN_H
 #define COLUMNAR_CUSTOMSCAN_H
 
-#include "nodes/extensible.h"
+#include "pg_version_compat.h"
 
 /* Flag to indicate is vectorized aggregate used in execution */
 #define CUSTOM_SCAN_VECTORIZED_AGGREGATE 1

@@ -12,12 +12,7 @@
 #ifndef COLUMNAR_VECTOR_TYPES_H
 #define COLUMNAR_VECTOR_TYPES_H
 
-#include "postgres.h"
-#include "fmgr.h"
-
-#include "executor/tuptable.h"
-#include "nodes/bitmapset.h"
-#include "nodes/primnodes.h"
+#include "pg_version_compat.h"
 
 /* DEFAULT_CHUNK_ROW_COUNT */
 #define COLUMNAR_VECTOR_COLUMN_SIZE 10000

@@ -1,64 +1,7 @@
-#include "citus_version.h"
-
-#include "postgres.h"
-#include "fmgr.h"
+#include "pg_version_compat.h"
 
 #include <math.h>
 
-#include "miscadmin.h"
-
-#include "access/genam.h"
-#include "access/heapam.h"
-#include "access/multixact.h"
-#include "access/rewriteheap.h"
-#include "access/tableam.h"
-#include "access/tsmapi.h"
-#include "storage/lockdefs.h"
-#include "utils/palloc.h"
-#include "utils/snapmgr.h"
-#if PG_VERSION_NUM >= 130000
-#include "access/detoast.h"
-#else
-#include "access/tuptoaster.h"
-#endif
-#include "access/xact.h"
-#include "catalog/catalog.h"
-#include "catalog/index.h"
-#include "catalog/objectaccess.h"
-#include "catalog/pg_am.h"
-#include "catalog/pg_publication.h"
-#include "catalog/pg_trigger.h"
-#include "catalog/pg_extension.h"
-#include "catalog/storage.h"
-#include "catalog/storage_xlog.h"
-#include "commands/progress.h"
-#include "commands/vacuum.h"
-#include "commands/extension.h"
-#include "commands/trigger.h"
-#include "executor/executor.h"
-#include "funcapi.h"
-#include "nodes/makefuncs.h"
-#include "nodes/pg_list.h"
-#include "optimizer/plancat.h"
-#include "pgstat.h"
-#include "safe_lib.h"
-#include "storage/bufmgr.h"
-#include "storage/bufpage.h"
-#include "storage/bufmgr.h"
-#include "storage/lmgr.h"
-#include "storage/predicate.h"
-#include "storage/proc.h"
-#include "storage/procarray.h"
-#include "storage/smgr.h"
-#include "tcop/utility.h"
-#include "utils/builtins.h"
-#include "utils/fmgroids.h"
-#include "utils/memutils.h"
-#include "utils/pg_rusage.h"
-#include "utils/rel.h"
-#include "utils/relcache.h"
-#include "utils/lsyscache.h"
-#include "utils/syscache.h"
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
 #include "columnar/columnar_metadata.h"
@@ -2912,8 +2855,7 @@ GetColumnarTableAmRoutine(void)
 	return &columnar_am_methods;
 }
 
-
-PG_FUNCTION_INFO_V1(columnar_handler);
+CXX_PG_FUNCTION_INFO_V1(columnar_handler);
 Datum
 columnar_handler(PG_FUNCTION_ARGS)
 {
@@ -3013,7 +2955,7 @@ ColumnarCheckLogicalReplication(Relation rel)
  * arguments. Calling the argument with the NULL value will be interperted as not having
  * provided the argument.
  */
-PG_FUNCTION_INFO_V1(alter_columnar_table_set);
+CXX_PG_FUNCTION_INFO_V1(alter_columnar_table_set);
 Datum
 alter_columnar_table_set(PG_FUNCTION_ARGS)
 {
@@ -3138,7 +3080,7 @@ alter_columnar_table_set(PG_FUNCTION_ARGS)
  *
  * All options set to true will be reset to the default system value.
  */
-PG_FUNCTION_INFO_V1(alter_columnar_table_reset);
+CXX_PG_FUNCTION_INFO_V1(alter_columnar_table_reset);
 Datum
 alter_columnar_table_reset(PG_FUNCTION_ARGS)
 {
@@ -3223,7 +3165,7 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
  *     STRICT
  *     LANGUAGE c AS 'MODULE_PATHNAME', 'upgrade_columnar_storage';
  */
-PG_FUNCTION_INFO_V1(upgrade_columnar_storage);
+CXX_PG_FUNCTION_INFO_V1(upgrade_columnar_storage);
 Datum
 upgrade_columnar_storage(PG_FUNCTION_ARGS)
 {
@@ -3259,7 +3201,7 @@ upgrade_columnar_storage(PG_FUNCTION_ARGS)
  *     STRICT
  *     LANGUAGE c AS 'MODULE_PATHNAME', 'downgrade_columnar_storage';
  */
-PG_FUNCTION_INFO_V1(downgrade_columnar_storage);
+CXX_PG_FUNCTION_INFO_V1(downgrade_columnar_storage);
 Datum
 downgrade_columnar_storage(PG_FUNCTION_ARGS)
 {
@@ -3369,7 +3311,7 @@ typedef struct StripeVacuumCandidate
 	StripeMetadata *stripeMetadata;
 } StripeVacuumCandidate;
 
-PG_FUNCTION_INFO_V1(vacuum_columnar_table);
+CXX_PG_FUNCTION_INFO_V1(vacuum_columnar_table);
 Datum
 vacuum_columnar_table(PG_FUNCTION_ARGS)
 {
@@ -3802,7 +3744,7 @@ typedef struct ColumnarStats
 /* We return 6 columns. */
 #define STATS_INFO_NATTS 6
 
-PG_FUNCTION_INFO_V1(columnar_stats);
+CXX_PG_FUNCTION_INFO_V1(columnar_stats);
 Datum
 columnar_stats(PG_FUNCTION_ARGS)
 {

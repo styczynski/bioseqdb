@@ -12,18 +12,6 @@
 #ifndef CITUS_LISTUTILS_H
 #define CITUS_LISTUTILS_H
 
-#include "postgres.h"
-#include "c.h"
-
-#include "nodes/pg_list.h"
-
-#include "utils/array.h"
-#include "utils/hsearch.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodes.h"
-#include "nodes/nodeFuncs.h"
-#include "nodes/primnodes.h"
-
 #include "pg_version_compat.h"
 
 

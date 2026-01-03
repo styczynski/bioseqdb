@@ -1,6 +1,3 @@
-#include "utils/palloc.h"
-#include "nodes/pg_list.h"
-
 #include <iterator>
 
 template<typename T>
@@ -35,7 +32,7 @@ public:
 
     p_list_iterator& operator++()
     {
-        if (cell != NULL) {
+        if (cell != NULL && l != NULL) {
             cell = lnext(l, cell);
         }
         return *this;

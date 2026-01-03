@@ -12,10 +12,7 @@
 #ifndef COLUMNAR_STORAGE_H
 #define COLUMNAR_STORAGE_H
 
-#include "postgres.h"
-
-#include "storage/smgr.h"
-#include "utils/rel.h"
+#include "pg_version_compat.h"
 
 #include "columnar/columnar_tableam.h"
 

@@ -32,18 +32,9 @@
  *
  *-------------------------------------------------------------------------
  */
-
-
-#include "postgres.h"
+#include "pg_version_compat.h"
 
 #include "safe_lib.h"
-
-#include "access/generic_xlog.h"
-#include "catalog/storage.h"
-#include "miscadmin.h"
-#include "storage/bufmgr.h"
-#include "storage/lmgr.h"
-#include "storage/smgr.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_storage.h"
@@ -107,7 +98,7 @@ typedef struct PhysicalAddr
 
 
 /* only for testing purposes */
-PG_FUNCTION_INFO_V1(test_columnar_storage_write_new_page);
+CXX_PG_FUNCTION_INFO_V1(test_columnar_storage_write_new_page);
 
 
 /*

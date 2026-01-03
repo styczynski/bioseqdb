@@ -12,7 +12,7 @@
 #ifndef COLUMNAR_METADATA_H
 #define COLUMNAR_METADATA_H
 
-#include "access/sdir.h"
+#include "pg_version_compat.h"
 
 /*
  * StripeMetadata represents information about a stripe. This information is
