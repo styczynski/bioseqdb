@@ -13,6 +13,8 @@
  */
 
 #include "pg_version_compat.h"
+#include "utils/logging.h"
+
 #include <iostream>
 
 #include <sys/stat.h>
@@ -49,6 +51,8 @@ bool columnar_enable_page_cache = false;
 int columnar_page_cache_size = 200U;
 bool columnar_index_scan = false;
 
+bool enable_logging = false;
+
 static const struct config_enum_entry columnar_compression_options[] =
 {
 	{ "none", COMPRESSION_NONE, false },
@@ -75,6 +79,17 @@ columnar_init(void)
 static void
 columnar_guc_init()
 {
+	// Enable logging
+	DefineCustomBoolVariable(
+		"columnar.logging",
+		"Enable dedicated extension logging",
+		NULL,
+		&enable_logging,
+		false,              // Disabled by default.
+		PGC_SUSET,          // Only allow superusers to modify
+		0,                  // No flags for this GUC
+		NULL, NULL, NULL    // No variable hooks necessary
+	);
 	DefineCustomEnumVariable("columnar.compression",
 							 "Compression type for columnar.",
 							 NULL,

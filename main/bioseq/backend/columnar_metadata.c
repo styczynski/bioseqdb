@@ -19,6 +19,8 @@
  *-------------------------------------------------------------------------
  */
 #include "pg_version_compat.h"
+#include "utils/logging.h"
+#include "utils/debug.h"
 
 #include "safe_lib.h"
 

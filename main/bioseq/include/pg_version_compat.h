@@ -210,6 +210,7 @@ extern "C" {
 #include "utils/syscache.h"
 #include "catalog/pg_type.h"
 #include "common/hashfn.h"
+#include "common/fe_memutils.h"
 #include "executor/execExpr.h"
 #include "executor/executor.h"
 #include "executor/nodeAgg.h"
@@ -917,26 +918,8 @@ getStxstattarget_compat(HeapTuple tup)
 // CUSTOM UTILS
 
 #include "utils.hpp"
-#include "utils/logging.h"
 
 // DEBUG UTILS
-
-
-__attribute__((always_inline))
-static inline Relation safe_relation_open(Oid relationId, LOCKMODE lockmode) {
-	elog(NOTICE, "Columnar [safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
-	const Relation rel = relation_open(relationId, lockmode);
-	elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
-	return rel;
-}
-
-__attribute__((always_inline))
-static inline Relation try_safe_relation_open(Oid relationId, LOCKMODE lockmode) {
-	elog(NOTICE, "Columnar [try_safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
-	const Relation rel = try_relation_open(relationId, lockmode);
-	elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
-	return rel;
-}
 
 
 #endif   /* PG_VERSION_COMPAT_H */

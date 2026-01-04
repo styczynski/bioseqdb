@@ -291,7 +291,14 @@ public:
 #ifdef _WIN32
     uint32_t tid = static_cast<uint32_t>(::GetCurrentThreadId());
 #else
+    // XXX: Deprecated on new MACOSX
+    #if __MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12
+    uint64_t tid64;
+    pthread_threadid_np(NULL, &tid64);
+    uint32_t tid = static_cast<uint32_t>(tid64);
+    #else
     uint32_t tid = static_cast<uint32_t>(::syscall(SYS_gettid));
+    #endif
 #endif
     fmtlog::threadBuffer->nameSize =
       fmt::format_to_n(fmtlog::threadBuffer->name, sizeof(fmtlog::threadBuffer->name), "{}", tid).size;

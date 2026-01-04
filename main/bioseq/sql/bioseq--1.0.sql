@@ -1,6 +1,8 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION bioseq" to load this file. \quit
 
+SET columnar.logging = off;
+
 -- columnar--9.5-1--10.0-1.sql
 
 CREATE SCHEMA IF NOT EXISTS columnar;

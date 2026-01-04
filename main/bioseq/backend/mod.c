@@ -12,6 +12,7 @@
  */
 
 #include "pg_version_compat.h"
+#include "utils/logging.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"

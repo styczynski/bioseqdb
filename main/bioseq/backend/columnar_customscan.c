@@ -14,6 +14,7 @@
  */
 
 #include "pg_version_compat.h"
+#include "utils/logging.h"
 
 #include "custom_scan_builder.h"
 

@@ -11,6 +11,7 @@
  */
 
 #include "pg_version_compat.h"
+#include "utils/logging.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
@@ -21,6 +22,8 @@
 #include "columnar/utils/listutils.h"
 
 static planner_hook_type PreviousPlannerHook = NULL;
+static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+
 static Oid columnar_tableam_oid = InvalidOid;
 
 static PlannedStmt * ColumnarPlannerHook(Query *parse,  const char *query_string,
@@ -284,6 +287,61 @@ PlanTreeMutator(Plan *node, void *context)
 	return node;
 }
 
+// New hook
+static void ProcessUtilityHook(
+    PlannedStmt *pstmt,
+    const char *queryString,
+    bool readOnlyTree,
+    ProcessUtilityContext context,
+    ParamListInfo params,
+    QueryEnvironment *queryEnv,
+    DestReceiver *dest,
+    QueryCompletion *qc)
+{
+  Node *parsetree = pstmt->utilityStmt;
+
+  // Reject DDL if enabled
+
+  if (pstmt->commandType == CMD_UTILITY && GetCommandLogLevel(parsetree) == LOGSTMT_DDL) {
+	//JustLog("DDL QUERY DETECTED [{}]", pstmt);
+	auto ut = pstmt->utilityStmt;
+	if(IsA(ut, CreateStmt)) {
+		//JustLog("GOT CREATE! :D");
+		auto createStatement = (CreateStmt*)(ut);
+		if (createStatement->accessMethod != nullptr) {
+			std::string am(createStatement->accessMethod);
+			//JustLog("am = '{}'", am);
+			if (am == "columnar") {
+				// Create table via access method
+				JustLog("Create table via access method [{}]", createStatement);
+				for(auto elt : PList<Node>(createStatement->tableElts)) {
+					if (IsA(elt, ColumnDef)) {
+						// column def
+						auto colDef = (ColumnDef*)(elt);
+						JustLog("found column '{}'", colDef->colname);
+					}
+				}
+			}
+		}
+	}
+  }
+
+  // Call downstream hooks
+
+  if (PreviousProcessUtilityHook) {
+    PreviousProcessUtilityHook(
+        pstmt, queryString, readOnlyTree, context, params,
+        queryEnv, dest, qc
+    );
+  } else {
+    standard_ProcessUtility(
+        pstmt, queryString, readOnlyTree, context, params,
+        queryEnv, dest, qc
+    );
+  }
+
+} // noddl_ProcessUtility
+
 static PlannedStmt *
 ColumnarPlannerHook(Query *parse,
 					const char *query_string,
@@ -296,10 +354,14 @@ ColumnarPlannerHook(Query *parse,
 	List *savedSubplan;
 	MemoryContext saved_context;
 
-	if (PreviousPlannerHook)
+	JustLog("Planner hook invoked: {}", *parse);
+	JustLog("Query: [{}]", std::string(query_string));
+
+	if (PreviousPlannerHook) {
 		stmt = PreviousPlannerHook(parse, query_string, cursorOptions, boundParams);
-	else
+	} else {
 		stmt = standard_planner(parse, query_string, cursorOptions, boundParams);
+	}
 
 	/*
 	 * In the case of a CREATE TABLE AS query, we are not able to successfully
@@ -431,8 +493,14 @@ IsCreateTableAs(const char *query)
 void columnar_planner_init(void)
 {
 	BMethod(columnar_planner_init);
+
 	PreviousPlannerHook = planner_hook;
 	planner_hook = ColumnarPlannerHook;
+
+	PreviousProcessUtilityHook = ProcessUtility_hook;
+	ProcessUtility_hook = ProcessUtilityHook;
+
+
 	columnar_register_aggregator_node();
 	columnar_register_indexscan_node();
 }
