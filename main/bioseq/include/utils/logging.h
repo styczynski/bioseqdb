@@ -10,6 +10,7 @@
 #include <string>
 
 #include "fmtlog.h"
+
 using namespace fmt::literals;
 
 #define LogNode(NODE, MESSAGE) elog_node_display(NOTICE, (MESSAGE), (NODE), true);

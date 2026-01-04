@@ -55,7 +55,7 @@ function(add_module_library name)
 
   add_library(${name})
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE CXX)
-
+  
   if (NOT ${${AML_IF}})
     # Create a non-modular library.
     target_sources(${name} PRIVATE ${AML_FALLBACK})

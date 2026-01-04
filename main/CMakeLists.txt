@@ -20,6 +20,10 @@
 # Keep minimum version in sync with:
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
+
+set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm/bin/clang)
+set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm/bin/clang++)
+
 set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 
 if(POLICY CMP0135)

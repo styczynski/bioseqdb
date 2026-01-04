@@ -13,9 +13,9 @@ find_program(PostgreSQL_INDENT pgindent)
 
 # Helper command to add extensions
 function(PostgreSQL_add_extension LIBRARY_NAME)
-  set(options RELOCATABLE)
-  set(oneValueArgs NAME COMMENT VERSION COMPONENT)
-  set(multiValueArgs REQUIRES SOURCES INSTALLS UPDATES)
+  set(options RELOCATABLE SUPPORT_CXX_MODULES)
+  set(oneValueArgs NAME COMMENT VERSION COMPONENT CXX)
+  set(multiValueArgs REQUIRES SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
   # Default extension name to same as library name
@@ -50,6 +50,47 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
       #C_VISIBILITY_PRESET hidden # @TODO: how to get this working?
       PREFIX "" # Avoid lib* prefix on output file
     )
+
+    # Support CXX
+    if(EXTENSION_CXX)
+      message("PostgreSQL extension support C++ version ${EXTENSION_CXX}")
+      set_source_files_properties(${EXTENSION_SOURCES} PROPERTIES LANGUAGE CXX )
+      set_property(TARGET ${LIBRARY_NAME} PROPERTY CXX_STANDARD ${EXTENSION_CXX})
+    endif()
+
+    # Include dirs
+    if(EXTENSION_INCLUDE_DIRS)
+      target_include_directories(
+        ${LIBRARY_NAME} PRIVATE ${EXTENSION_INCLUDE_DIRS}
+      )
+    endif()
+
+    # Link libraries
+    if(EXTENSION_LINKS)
+      target_link_libraries(${LIBRARY_NAME} PRIVATE ${EXTENSION_LINKS})
+    endif()
+
+    # Suport CXX modules
+    if(EXTENSION_SUPPORT_CXX_MODULES)
+      if(EXTENSION_CXX)
+        # Modules enables
+        if(EXTENSION_CXX_MOD_BASE_DIRS)
+          message("Enable CXX modules for the target PostgreSQL extension")
+          set(PG_EXT_FILE_SET_NAME "${LIBRARY_NAME}_CXX_MODULES_FILE_SET")
+          target_sources(
+            ${LIBRARY_NAME} PRIVATE
+            FILE_SET "${PG_EXT_FILE_SET_NAME}"
+            TYPE CXX_MODULES
+            BASE_DIRS ${EXTENSION_CXX_MOD_BASE_DIRS}
+            FILES ${EXTENSION_CXX_MOD_FILES}
+          )
+        else()
+          message("Cannot enable CXX modules, because either CXX_MOD_BASE_DIRS or CXX_MOD_FILES variables are missing. Please specify base dirs and module files list.")
+        endif()
+      else()
+        message("Cannot enable CXX modules, because EXTENSION_CXX setting is not provided. Please specify it like so: 'EXTENSION_CXX 20'")
+      endif()
+    endif()
 
     # Install .so/.dll to pkglib-dir
     install(

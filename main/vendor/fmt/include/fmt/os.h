@@ -14,6 +14,7 @@
 #  include <cerrno>
 #  include <cstddef>
 #  include <cstdio>
+#  include <cstdlib>
 #  include <system_error>  // std::system_error
 
 #  if FMT_HAS_INCLUDE(<xlocale.h>)
