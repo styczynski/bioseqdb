@@ -17,6 +17,7 @@ PostgreSQL_add_extension(postgresql_bioseq
 )
 #target_compile_features(postgresql_bioseq PRIVATE cxx_std_17)
 set_source_files_properties(${SRC_FILES} PROPERTIES LANGUAGE CXX )
+set_property(TARGET postgresql_bioseq PROPERTY CXX_STANDARD 26)
 
 # configure
 #configure_file(src/config.h.in src/config.h)
