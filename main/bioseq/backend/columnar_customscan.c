@@ -16,6 +16,8 @@
 #include "pg_version_compat.h"
 #include "utils/logging.h"
 
+#include <vector>
+
 #include "custom_scan_builder.h"
 
 #include <math.h>
@@ -36,6 +38,8 @@
 static int32_t counter = 12;
 static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
+static std::vector<TupleTableSlot*> buffer;
+static int buffer_pos = -1;
 
 /*
  * ColumnarScanState represents the state for a columnar scan. It's a
@@ -2336,6 +2340,19 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		 */
 		if (!columnarScanState->vectorization.vectorizationEnabled)
 		{
+			JustLog("Fetching buf_pos={} size={}", buffer_pos, buffer.size());
+
+			if (buffer_pos >= 0) {
+				if (buffer_pos < buffer.size()) {
+					auto mtup = buffer[buffer_pos];
+					buffer_pos++;
+					return mtup;
+				} else {
+					return nullptr;
+				}
+			}
+
+
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 			resultVectorTupleSlotIdx = 0;
@@ -2348,10 +2365,16 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			 */
 			if (TupIsNull(slot))
 			{
-				if (projInfo)
-					return ExecClearTuple(projInfo->pi_state.resultslot);
-				else
-					return slot;
+				buffer_pos++;
+				if (buffer_pos < buffer.size()) {
+					return buffer[buffer_pos];
+				} else {
+					return nullptr;
+				}
+				// if (projInfo)
+				// 	return ExecClearTuple(projInfo->pi_state.resultslot);
+				// else
+				// 	return slot;
 			}
 		}
 		/*
@@ -2485,7 +2508,15 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			}		
 			else
 			{
-				return slot;
+				
+				TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, slot->tts_ops);
+				ExecForceStoreMinimalTuple(ExecCopySlotMinimalTuple(slot),
+						  newSlot,
+						  true);
+				//slot->
+				//ExecMaterializeSlot(slot);
+				buffer.push_back(newSlot);
+				//return slot;
 			}
 		}
 		else
@@ -2494,7 +2525,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		/*
 		 * Tuple fails qual, so free per-tuple memory and try again.
 		 */
-		if(rec) ResetExprContext(econtext);
+		//if(rec) ResetExprContext(econtext);
 	}
 }
 
@@ -2538,6 +2569,8 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 			true,
 			true
 		);
+		buffer.clear();
+		buffer_pos = -1;
 
 		newtargetlist = (List*)VarInjectorMutator((Node*)targetlist, (void*) const_score_node);
 		//ps.plan->targetlist = newtargetlist;
@@ -2545,8 +2578,8 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 
 
 	JustLog("Start inner");
-	auto tupleSlot = Inner_CustomExecScan(columnarScanState, accessMtd, recheckMtd);
 
+	auto tupleSlot = Inner_CustomExecScan(columnarScanState, accessMtd, recheckMtd);
 
 
 
