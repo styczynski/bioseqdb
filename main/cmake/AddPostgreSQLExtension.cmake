@@ -84,6 +84,46 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
             BASE_DIRS ${EXTENSION_CXX_MOD_BASE_DIRS}
             FILES ${EXTENSION_CXX_MOD_FILES}
           )
+
+          #
+          #
+          # Enable modules in CMake
+          #
+
+          # This is required to write your own modules in your project.
+          if(CMAKE_VERSION VERSION_LESS "3.28.0")
+            if(CMAKE_VERSION VERSION_LESS "3.27.0")
+              set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API "2182bf5c-ef0d-489a-91da-49dbc3090d2a")
+            else()
+              set(CMAKE_EXPERIMENTAL_CXX_MODULE_CMAKE_API "aa1f7df0-828a-4fcd-9afc-2dc80491aca7")
+            endif()
+            set(CMAKE_EXPERIMENTAL_CXX_MODULE_DYNDEP 1)
+          else()
+            cmake_policy(VERSION 3.28)
+          endif()
+
+          #
+          # Import the modules from libc++
+          #
+          # set(CMAKE_CXX_EXTENSIONS OFF)
+          # include(FetchContent)
+          # FetchContent_Declare(
+          #   std
+          #   URL "file://${LIBCXX_BUILD}/modules/c++/v1/"
+          #   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+          #   SYSTEM
+          # )
+          # FetchContent_MakeAvailable(std)
+          # add_dependencies(${LIBRARY_NAME} std.compat)
+          # target_link_libraries(${LIBRARY_NAME} std.compat)
+          # set(CMAKE_CXX_EXTENSIONS ON)
+          #set(CMAKE_CXX_MODULE_STD ON)
+          
+          set_target_properties(
+            ${LIBRARY_NAME} PROPERTIES
+              CXX_MODULE_STD ON
+          )
+
         else()
           message("Cannot enable CXX modules, because either CXX_MOD_BASE_DIRS or CXX_MOD_FILES variables are missing. Please specify base dirs and module files list.")
         endif()

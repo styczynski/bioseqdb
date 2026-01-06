@@ -33,6 +33,10 @@
 #define Abs(x)			((x) >= 0 ? (x) : -(x))
 #endif
 
+static int32_t counter = 12;
+static List* newtargetlist = nullptr;
+static Const* const_score_node = nullptr;
+
 /*
  * ColumnarScanState represents the state for a columnar scan. It's a
  * CustomScanState with additional fields specific to columnar scans.
@@ -1451,6 +1455,8 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	CustomPath *cpath = makeNode(CustomPath);
 
 	cpath->methods = &ColumnarScanPathMethods;
+	// PAPIESZ: Do we support projections ????
+	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 
 	/*
 	 * populate generic path information
@@ -1480,7 +1486,8 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	foreach(lcz, allClauses)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lcz);
-		LogNode(rinfo, "   ===> AddColumnarScanPath restrict node");
+		// LogNode(rinfo, "   ===> AddColumnarScanPath restrict node");
+		//JustLog("===> AddColumnarScanPath restrict node {}", nodeStr(rinfo))
 	}
 
 	allClauses = FilterPushdownClauses(root, rel, allClauses);
@@ -1768,6 +1775,24 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 
 	cscan->scan.plan.qual = extract_actual_clauses(
 		clauses, false /* no pseudoconstants */);
+	//cscan->scan.plan.targetlist = list_copy(tlist);
+
+	// ?????? AYY LMAO
+	//ColumnarScanPath_PlanCustomPath tlist member => [{TARGETENTRY :expr {FUNCEXPR :funcid 535007 :funcresulttype 16 :funcretset false :funcvariadic false :funcformat 0 :funccollid 0 :inputcollid 100 :args ({VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location 24} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 27 :constvalue 5 [ 20 0 0 0 65 ]}) :location 15} :resno 3 :resname mmsearch :ressortgroupref 0 :resorigtbl 0 :resorigcol 0 :resjunk false}]
+
+	for(auto n : PList<TargetEntry>(root->processed_tlist)) {
+		JustLog("ColumnarScanPath_PlanCustomPath tlist member => [{}]", nodeStr(n));
+		if(IsA(n->expr, FuncExpr)) {
+			tlist = lappend(tlist, flatCopyTargetEntry(n));
+		}
+	}
+	JustLog("ALSO VAR: {}", tlist == nullptr);
+	for(auto n : PList<TargetEntry>(tlist)) {
+		JustLog("ColumnarScanPath_PlanCustomPath tlist(direct) member => [{}]", nodeStr(n));
+	}
+
+
+
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
 
@@ -1861,6 +1886,7 @@ ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 static Node *
 ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 {
+	const_score_node = nullptr;
 	JustLog("ColumnarScan_CreateCustomScanState()");
 	ColumnarScanState *columnarScanState = (ColumnarScanState *) newNode(
 		sizeof(ColumnarScanState), T_CustomScanState);
@@ -1944,6 +1970,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	JustLog("Iterate custom_private");
 	for(auto privateCustomData : PList<Const>(cscan->custom_private))
 	{
+		JustLog("Beginscan custom private node: [{}]", nodeStr((Node*)privateCustomData))
 		JustLog("Next expr from custom private");
 		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
@@ -2189,11 +2216,33 @@ ExecScanFetch(ScanState *node,
 	return (*accessMtd) (node);
 }
 
+static Node *
+VarInjectorMutator(Node *node, void* context)
+{
+	JustLog("VarInjectorMutator");
+	if (node == NULL)
+	{
+		return NULL;
+	}
+	if (IsA(node, FuncExpr)) {
+		auto funcExpr = (FuncExpr*)(node);
+		Oid oid = funcExpr->funcid;
+		JustLog("FUNCOID present in targetlist := {}", oid);
+		return (Node*)context;
+		// replace?
+
+	}
+	return expression_tree_mutator(node, VarInjectorMutator, context);
+}
+
+
+
 static TupleTableSlot *
-CustomExecScan(ColumnarScanState *columnarScanState,
+Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
+	bool rec = false;
 	JustLog("CustomExecScan()");
 	ExprContext *econtext;
 	ExprState  *qual;
@@ -2208,15 +2257,23 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 	projInfo = node->ps.ps_ProjInfo;
 	econtext = node->ps.ps_ExprContext;
 
+	if (projInfo == nullptr) {
+		JustLog("Check porjection? null");
+	} else {
+		JustLog("Check projection? {}", "");
+	}
+	JustLog("HEERE");
+
 	/* interrupt checks are in ExecScanFetch */
 
 	/*
 	 * No qual to check and no projection to do and vectorization is not enabled,
 	 * just skip all the overhead and return the raw scan tuple.
 	 */
-	if (!qual && !projInfo && !columnarScanState->vectorization.vectorizationEnabled)
+	// FIXME: Temporary disable this check
+	if (false && !qual && !projInfo && !columnarScanState->vectorization.vectorizationEnabled)
 	{
-		ResetExprContext(econtext);
+		if(rec) ResetExprContext(econtext);
 		return ExecScanFetch(node, accessMtd, recheckMtd);
 	}
 
@@ -2224,7 +2281,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 	 * Reset per-tuple memory context to free any expression evaluation
 	 * storage allocated in the previous tuple cycle.
 	 */
-	ResetExprContext(econtext);
+	if(rec) ResetExprContext(econtext);
 	
 	uint resultVectorTupleSlotIdx = 0;
 
@@ -2241,6 +2298,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 	 */
 	for (;;)
 	{
+
 		TupleTableSlot *slot = NULL;
 
 		if (columnarScanState->vectorization.vectorizationEnabled && 
@@ -2252,6 +2310,26 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 			resultVectorTupleSlotIdx = 0;
 			return columnarScanState->vectorization.resultVectorSlot;
 		}
+
+        // Fake proj here
+		const_score_node->constvalue = counter++;
+		const_score_node->constisnull = false;
+
+		auto newProj = ExecBuildProjectionInfo(
+			newtargetlist,
+			econtext,
+			node->ps.ps_ResultTupleSlot,
+			&(node->ps),
+			node->ss_ScanTupleSlot->tts_tupleDescriptor
+		);
+		if (projInfo == nullptr) {
+			JustLog("ProjInfo is null so its okay :D");
+		} else {
+			JustLog("Non null projection what now? :0")
+		}
+		projInfo = newProj;
+
+		//JustLog("NEW PROJECTION [{}]", nodeStr(newProj));
 
 		/*
 		 * No vectorizaion in place so fetch slot by slot.
@@ -2380,9 +2458,12 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 		 */
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			/*
-			 * Found a satisfactory scan tuple.
-			 */
+			
+			//slot = ExecProject(newProj);
+			
+			// /*
+			//  * Found a satisfactory scan tuple.
+			//  */
 			if (projInfo)
 			{
 				/*
@@ -2413,8 +2494,69 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 		/*
 		 * Tuple fails qual, so free per-tuple memory and try again.
 		 */
-		ResetExprContext(econtext);
+		if(rec) ResetExprContext(econtext);
 	}
+}
+
+
+static TupleTableSlot *
+CustomExecScan(ColumnarScanState *columnarScanState,
+			   ExecScanAccessMtd accessMtd,
+			   ExecScanRecheckMtd recheckMtd) {
+
+	// Testing custom exec scan
+	JustLog("Wrapping CustomExecScan() start");
+
+	ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
+	PlanState ps = node->ps;
+	auto context = ps.ps_ExprContext;
+	
+	JustLog("Get targetlist");
+	auto targetlist = ps.plan->targetlist;
+
+	JustLog("iterate targetlist");
+	if (targetlist != nullptr) {
+		JustLog("TARGETLIST IS NOT NULL!");
+	}
+	for(auto tgt : PList<Node>(targetlist)) {
+		JustLog("NEXT!");
+		if (tgt == nullptr) {
+			JustLog("TARGETLIST NULL NODE");
+		} else {
+			JustLog("Targetlist node = [{}]", nodeStr(tgt));
+		}
+	}
+	JustLog("END iterate targetlist");
+
+	if (const_score_node == nullptr) {
+		const_score_node = makeConst(
+			INT4OID,
+			-1,
+			InvalidOid,
+			4,
+			(Datum) ((int32_t) 0),
+			true,
+			true
+		);
+
+		newtargetlist = (List*)VarInjectorMutator((Node*)targetlist, (void*) const_score_node);
+		//ps.plan->targetlist = newtargetlist;
+	}
+
+
+	JustLog("Start inner");
+	auto tupleSlot = Inner_CustomExecScan(columnarScanState, accessMtd, recheckMtd);
+
+
+
+
+	//MemoryContextReset(econtext->ecxt_per_tuple_memory);
+
+	// (*(*state.projection_info()).pi_exprContext).ecxt_per_tuple_memory,
+	//ExecProject(newProj);
+
+
+	return tupleSlot;
 }
 
 

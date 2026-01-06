@@ -21,8 +21,27 @@
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
 
-set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm/bin/clang)
-set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm/bin/clang++)
+set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
+set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
+
+# Suport CXX modules
+set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+message("CMAKE is ${CMAKE_VERSION}")
+set(CMAKE_CXX_MODULE_STD ON)
+set(CMAKE_CXX_STANDARD 26)
+set(CMAKE_CXX_STANDARD_REQUIRED YES)
+set(CMAKE_CXX_EXTENSIONS ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES ON)
+
+# Support CXX modules on MacOS correctly
+if (APPLE)
+  set(SDKROOT "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+  SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${SDKROOT}")
+  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${SDKROOT}")
+endif()
+
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${SDKROOT}")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${SDKROOT}")
 
 set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 
@@ -38,7 +57,6 @@ project(
   VERSION 4.2.3
   LANGUAGES CXX
 )
-set(CMAKE_CXX_STANDARD 26)
 
 # set this to "${PROJECT_VERSION}" on release
 #set(INSTALL_VERSION "${PROJECT_VERSION}")

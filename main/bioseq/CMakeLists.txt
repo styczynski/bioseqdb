@@ -3,7 +3,10 @@
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
+file(GLOB_RECURSE SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm)
 message("SOURCES ${SRC_FILES}")
+
+message("MODULES? ${SRC_MOD_FILES}")
 
 find_package(Intl)
 
@@ -27,6 +30,8 @@ PostgreSQL_add_extension(postgresql_bioseq
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}"
+  CXX_MOD_FILES
+    ${SRC_MOD_FILES}
   INSTALLS
     sql/bioseq--1.0.sql
 )

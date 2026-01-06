@@ -313,7 +313,7 @@ static void ProcessUtilityHook(
 			//JustLog("am = '{}'", am);
 			if (am == "columnar") {
 				// Create table via access method
-				JustLog("Create table via access method [{}]", createStatement);
+				JustLog("Create table via access method [{}]", nodeStr(createStatement));
 				for(auto elt : PList<Node>(createStatement->tableElts)) {
 					if (IsA(elt, ColumnDef)) {
 						// column def
@@ -354,7 +354,7 @@ ColumnarPlannerHook(Query *parse,
 	List *savedSubplan;
 	MemoryContext saved_context;
 
-	JustLog("Planner hook invoked: {}", *parse);
+	JustLog("Planner hook invoked: {}", nodeStr(parse));
 	JustLog("Query: [{}]", std::string(query_string));
 
 	if (PreviousPlannerHook) {

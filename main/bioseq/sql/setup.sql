@@ -3,17 +3,45 @@ create extension bioseq;
 
 DROP DATABASE IF EXISTS bioseq;
 
+drop table if exists x CASCADE;
+
 create database bioseq;
 
 SET columnar.logging = on;
 
 create table x ( a INT, seq TEXT ) using columnar;
 
--- INSERT INTO x VALUES (
---     23, 'TEST1'
--- ), (
---     101, 'TEST2'
--- );
+-- select testtest();
+
+INSERT INTO x VALUES (
+    23, 'TEST1'
+), (
+    101, 'TEST2'
+), (
+    69, 'HE'
+), (
+    42, 'YO'
+);
+
+select
+    a, seq,
+    mmsearch(a, 'A')+1 AS heheszki,
+    mmsearch(a, 'A') AS lol
+from x; --where mmsearch(a, 'A');
+
+select
+    a, seq,
+    mmsearch(a, 'A')+1 AS heheszki,
+    mmsearch(a, 'A') AS lol
+from x;
+
+select
+    a, seq,
+    mmsearch(a, 'A')+1 AS heheszki,
+    mmsearch(a, 'A') AS lol
+from x;
+
+-- EXPLAIN (ANALYZE, BUFFERS) select a, seq, mmsearch(a, 'A') from x; -- where mmsearch(a, 'A');
 
 -- SET parallel_setup_cost = 0;
 -- SET parallel_tuple_cost = 0;
