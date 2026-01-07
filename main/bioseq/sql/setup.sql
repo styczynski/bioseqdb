@@ -8,9 +8,12 @@ drop table if exists x CASCADE;
 create database bioseq;
 
 SET bioseq.logging = on;
+SET bioseq.enable_bioseq_index_scan TO TRUE;
 
-create table x ( a INT, seq TEXT, c INT ) using bioseq;
-select create_distributed_table('x', 'a');
+create table x ( a INT PRIMARY KEY, seq TEXT, c INT ) using bioseq;
+CREATE INDEX x_default_index ON x USING btree(c);
+
+--select create_distributed_table('x', 'a', shard_count => 2);
 
 -- select testtest();
 
@@ -24,5 +27,16 @@ INSERT INTO x VALUES (
     42, 'YO', 2
 );
 
+--set bioseq.enable_custom_scan TO 'off';
+--set enable_seqscan TO off;
+--set seq_page_cost TO 10000000;
 
-EXPLAIN (ANALYZE, BUFFERS) select sum(a) from x where c >= 2;
+--EXPLAIN (ANALYZE, BUFFERS) select sum(a) from x where c >= 2;
+-- EXPLAIN (ANALYZE, BUFFERS) select a, seq, mmsearch(seq, 'A') from x;
+--select a, seq, mmsearch(seq, 'A') from x;
+
+
+
+--EXPLAIN (ANALYZE, BUFFERS) select a from x where a > 100;
+EXPLAIN (VERBOSE) SELECT a FROM x WHERE c > 1 ORDER BY c LIMIT 2;
+EXPLAIN (VERBOSE) SELECT a, mmsearch(a, 'Y'), mmsearch(a, 'Z') from x;

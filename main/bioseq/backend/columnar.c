@@ -49,7 +49,7 @@ bool bioseq_enable_vectorization = true;
 bool bioseq_enable_dml = true;
 bool bioseq_enable_page_cache = false;
 int bioseq_page_cache_size = 200U;
-bool bioseq_index_scan = false;
+bool bioseq_index_scan = true;
 
 bool enable_logging = false;
 
@@ -215,7 +215,7 @@ bioseq_guc_init()
 							 "Enables custom columnar index scan",
 							 NULL,
 							 &bioseq_index_scan,
-							 false,
+							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, 

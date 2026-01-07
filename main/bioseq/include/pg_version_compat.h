@@ -39,6 +39,7 @@ extern "C" {
 #include "pg_version_constants.h"
 #include "storage/relfilelocator.h"
 #include "utils/array.h"
+#include "optimizer/tlist.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -391,6 +392,7 @@ extern "C" {
 #include "common/hashfn.h"
 #include "executor/executor.h"
 #include "common/pg_lzcompress.h"
+#include "nodes/supportnodes.h"
 
 
 // OLD COMPAT

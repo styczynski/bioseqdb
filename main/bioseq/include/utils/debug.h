@@ -5,17 +5,17 @@
 
 __attribute__((always_inline))
 static inline Relation safe_relation_open(Oid relationId, LOCKMODE lockmode) {
-	elog(NOTICE, "Columnar [safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
+	//elog(NOTICE, "Columnar [safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
 	const Relation rel = relation_open(relationId, lockmode);
-	elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
+	//elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
 	return rel;
 }
 
 __attribute__((always_inline))
 static inline Relation try_safe_relation_open(Oid relationId, LOCKMODE lockmode) {
-	elog(NOTICE, "Columnar [try_safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
+	//elog(NOTICE, "Columnar [try_safe_relation_open] " __FILE__ ":" TOSTRING(__LINE__));
 	const Relation rel = try_relation_open(relationId, lockmode);
-	elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
+	//elog(NOTICE, "Columnar [safe_relation_open] [SUCCESS] " __FILE__ ":" TOSTRING(__LINE__));
 	return rel;
 }
 

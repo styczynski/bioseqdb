@@ -34,10 +34,10 @@
 
 
 Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
-	elog(NOTICE, "Columnar [safe_safe_get_relname_relid] " __FILE__ ":" TOSTRING(__LINE__) " => ");
-	elog(NOTICE, relname);
+	//elog(NOTICE, "Columnar [safe_safe_get_relname_relid] " __FILE__ ":" TOSTRING(__LINE__) " => ");
+	//elog(NOTICE, relname);
 	const Oid relid = get_relname_relid(relname, relnamespace);
-	elog(NOTICE, "Columnar [safe_safe_get_relname_relid] [SUCCESS]" __FILE__ ":" TOSTRING(__LINE__));
+	//elog(NOTICE, "Columnar [safe_safe_get_relname_relid] [SUCCESS]" __FILE__ ":" TOSTRING(__LINE__));
 	return relid;
 }
 

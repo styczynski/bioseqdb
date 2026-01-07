@@ -248,6 +248,7 @@ PlanTreeMutator(Plan *node, void *context)
 		}
 		case T_IndexScan:
 		{
+			JustLog("BISC immediate exit check {}", bioseq_index_scan);
 			if (!bioseq_index_scan)
 				return node;
 
@@ -256,8 +257,10 @@ PlanTreeMutator(Plan *node, void *context)
 			CustomScan *columnarIndexScan;
 
 			/* Check if index is build on columnar table */
-			if (!bioseq_index_table(indexScanNode->indexid, bioseq_tableam_oid))
+			if (!bioseq_index_table(indexScanNode->indexid, bioseq_tableam_oid)) {
+				JustLog("BISC no index");
 				return node;
+			}
 
 			columnarIndexScan = bioseq_create_indexscan_node();
 			FLATCOPY(newIndexScan, indexScanNode, IndexScan);
@@ -277,6 +280,7 @@ PlanTreeMutator(Plan *node, void *context)
 			columnarIndexScanPlan->plan_rows = indexScanNode->scan.plan.plan_rows;
 			columnarIndexScanPlan->plan_width = indexScanNode->scan.plan.plan_width;
 
+			JustLog("BISC Plan modified");
 			return (Plan *) columnarIndexScan;
 		}
 		default:
@@ -391,7 +395,10 @@ ColumnarPlannerHook(Query *parse,
 			|| bioseq_index_scan)				/* or Columnar Index Scan */
 		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
 		|| list_length(stmt->rtable) != 1)		/* JOINs are not yet supported */
-		return stmt;
+		{
+			JustLog("Plan fast return <-- vec={} iscan={} cmdtype={} rtable={}", bioseq_enable_vectorization, bioseq_index_scan, (stmt->commandType != CMD_SELECT), (list_length(stmt->rtable) != 1));
+			return stmt;
+		}
 
 	if (bioseq_tableam_oid == InvalidOid)
 		bioseq_tableam_oid = get_table_am_oid("columnar", true);

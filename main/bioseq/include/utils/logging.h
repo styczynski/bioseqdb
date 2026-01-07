@@ -28,7 +28,7 @@ using namespace fmt::literals;
 extern bool enable_logging;
 
 static inline void log_configure() {
-    fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", true);
+    fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", false);
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("main");
 }

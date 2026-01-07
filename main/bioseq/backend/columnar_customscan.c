@@ -35,7 +35,7 @@
 #define Abs(x)			((x) >= 0 ? (x) : -(x))
 #endif
 
-static int32_t counter = 12;
+static int32_t counter = 100;
 static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
 static std::vector<TupleTableSlot*> buffer;
@@ -496,6 +496,7 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 {
 	if (!enable_indexscan)
 	{
+		JustLog("BISC Cannot estimate, disabled via enable_indexscan");
 		/* costs are already set to disable_cost, don't adjust them */
 		return;
 	}
@@ -513,10 +514,13 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	
 	if (!bioseq_index_scan)
 	{
+		JustLog("BISC Cannot estimate, disabled normally");
 		Cost columnarIndexScanCost = ColumnarIndexScanAdditionalCost(root, rel, relationId,
 																	indexPath);
 		indexPath->path.total_cost += columnarIndexScanCost;
 	}
+
+	JustLog("BISC columnar index path done cost");
 
 	ereport(DEBUG4, (errmsg("columnar table index scan costs re-estimated "
 							"by columnarAM (including indexAM costs): "
@@ -1439,6 +1443,37 @@ fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
 }
 #endif
 
+static bool
+CostTestWalker(Node *node, Query *notUsed)
+{
+	JustLog("CHECK THE QUERY?");
+	for(auto g : PList<Node>(notUsed->targetList)) {
+		JustLog("Query targetlist item is {}", nodeStr(g));
+	}
+	if (node == NULL)
+	{
+		return false;
+	}
+	JustLog("CESTIMATE ptarget WALK {}", nodeStr(node));
+	if(IsA(node, Var)) {
+		Var* v = (Var*) node; 
+		auto varno = v->varno;
+		List* rtable = notUsed->rtable;
+		if (rtable == nullptr) {
+			JustLog("CESTIMATE ptarget VAR rtable is null");
+		} else {
+			if (varno == 0 || varno > list_length(rtable)) {
+				JustLog("Varno out of bounds? {} / {}", varno, list_length(rtable));
+			} else {
+				RangeTblEntry *rte = rt_fetch(varno, rtable);
+				RTEKind kind = rte->rtekind;
+				JustLog("RTE KIND DETECTED IS {}", (int)kind);
+			}
+		}
+	}
+	
+	return expression_tree_walker(node, CostTestWalker, (void*)notUsed);
+}
 
 /*
  * Create and add a path with the given parameterization paramRelids.
@@ -1468,7 +1503,36 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	Path *path = &cpath->path;
 	path->pathtype = T_CustomScan;
 	path->parent = rel;
-	path->pathtarget = rel->reltarget;
+	path->pathtarget = copy_pathtarget(rel->reltarget);
+
+	const Oid mmsearch_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
+											   CStringGetDatum("mmsearch(ANYELEMENT, TEXT)")));
+
+	bool wehavemagic = false;
+	int wehavemagic_cnt = 0;
+	JustLog("CESTIMATE mmsearch_oid = {}", mmsearch_oid);
+	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
+		if (IsA(tgt->expr, FuncExpr)) {
+			FuncExpr* fe = (FuncExpr*) tgt->expr;
+			JustLog("CESTIMATE targetlist has funcexpr : {}", nodeStr(fe));
+			if (fe->funcid == mmsearch_oid) {
+				JustLog("WE FOUND IT :DDDDD");
+				// Magic?
+				//if (!wehavemagic) lappend(path->pathtarget->exprs, tgt->expr);
+				//path->pathtarget->cost
+				wehavemagic = true;
+				wehavemagic_cnt++;
+			}
+		}
+	}
+
+	JustLog("CESTIMATE ptarget START");
+	for (auto expr : PList<Node>(path->pathtarget->exprs)) {
+		JustLog("CESTIMATE ptarget");
+		// Iterate expressions?
+		CostTestWalker(expr, root->parse);
+	}
+	JustLog("CESTIMATE ptarget END");
 
 	/* columnar scans are not parallel-aware, but they are parallel-safe */
 	path->parallel_safe = rel->consider_parallel;
@@ -1584,6 +1648,15 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	CostColumnarScan(root, rel, rte->relid, cpath, numberOfColumnsRead,
 					 numberOfClausesPushed);
 
+	if (wehavemagic) {
+		//(&cpath->path)->total_cost -= 90000;
+		PathTarget* pt = (&cpath->path)->pathtarget;
+		//auto curcost = pt->cost.per_tuple;
+		JustLog("CESTIMATE reduce mmsearch cost <p.total>={} <p.startup>={} pertuple={}, startup={} startupparent={} totalparent={}", path->total_cost, path->startup_cost, pt->cost.per_tuple, pt->cost.startup, (&cpath->path)->startup_cost, (&cpath->path)->total_cost);
+		cpath->path.total_cost = -100000 * wehavemagic_cnt;
+		cpath->path.startup_cost = -100000 * wehavemagic_cnt;
+	}
+
 
 	StringInfoData buf;
 	initStringInfo(&buf);
@@ -1623,8 +1696,8 @@ AdjustColumnarParallelScanCost(Path *path)
 		path->total_cost /= parallel_divisor;
 
 		// FIXME: Remove
-		JustLog("PARA Set parallel cost to 0");
-		path->total_cost = 0;
+		//JustLog("PARA Set parallel cost to 0");
+		//path->total_cost = 0;
 
 		path->rows = clamp_row_est(path->rows / parallel_divisor);
 	}
@@ -2318,6 +2391,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			columnarScanState->vectorization.vectorPendingRowNumber == 0 &&
 			resultVectorTupleSlotIdx > 0)
 		{
+			JustLog("CC vectorized quick exit");
 			((VectorTupleTableSlot *) columnarScanState->vectorization.resultVectorSlot)->dimension = resultVectorTupleSlotIdx;
 			ExecStoreVirtualTuple(columnarScanState->vectorization.resultVectorSlot);
 			resultVectorTupleSlotIdx = 0;
@@ -2327,6 +2401,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
         // Fake proj here
 		const_score_node->constvalue = counter++;
 		const_score_node->constisnull = false;
+		JustLog("CC Counter increased to {}", counter);
 
 		auto newProj = ExecBuildProjectionInfo(
 			newtargetlist,
@@ -2352,6 +2427,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			JustLog("Fetching buf_pos={} size={}", buffer_pos, buffer.size());
 
 			if (buffer_pos >= 0) {
+				JustLog("CC from buffer");
 				if (buffer_pos < buffer.size()) {
 					auto mtup = buffer[buffer_pos];
 					buffer_pos++;
@@ -2362,6 +2438,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			}
 
 
+			JustLog("CC exec scan fetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 			resultVectorTupleSlotIdx = 0;
@@ -2374,6 +2451,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			 */
 			if (TupIsNull(slot))
 			{
+				JustLog("CC discovered null tuple slot");
 				buffer_pos++;
 				if (buffer_pos < buffer.size()) {
 					return buffer[buffer_pos];
@@ -2393,6 +2471,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		else if (columnarScanState->vectorization.vectorizationEnabled &&
 				 columnarScanState->vectorization.vectorPendingRowNumber == 0)
 		{
+			JustLog("CC vectorized fetch 1");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 			/*
@@ -2446,6 +2525,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		 */
 		if (columnarScanState->vectorization.vectorizationEnabled)
 		{
+			JustLog("CC vectorized fetch 2");
 			VectorTupleTableSlot *vectorSlot = 
 				(VectorTupleTableSlot *) columnarScanState->vectorization.scanVectorSlot;
 
@@ -2488,8 +2568,10 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		 * when the qual is null ... saves only a few cycles, but they add up
 		 * ... 
 		 */
+		JustLog("CC qual");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
+			JustLog("CC simple fetch");
 			
 			//slot = ExecProject(newProj);
 			
@@ -2517,7 +2599,8 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			}		
 			else
 			{
-				
+				JustLog("CC pushback");
+
 				TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
 				ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
 				//slot->
@@ -2567,6 +2650,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 	JustLog("END iterate targetlist");
 
 	if (const_score_node == nullptr) {
+		JustLog("INIT CONST SCORE");
 		const_score_node = makeConst(
 			INT4OID,
 			-1,
@@ -2580,6 +2664,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 		buffer_pos = -1;
 
 		newtargetlist = (List*)VarInjectorMutator((Node*)targetlist, (void*) const_score_node);
+		//counter = 10;
 		//ps.plan->targetlist = newtargetlist;
 	}
 

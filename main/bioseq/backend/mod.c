@@ -43,6 +43,39 @@ Datum testtest(PG_FUNCTION_ARGS) {
 CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
   // Nothing here
-  return Int32GetDatum((int32_t) 100);
+  return Int32GetDatum((int32_t) 999999);
+}
+
+CXX_PG_FUNCTION_INFO_V1(mmsearch_support);
+Datum mmsearch_support(PG_FUNCTION_ARGS) {
+  JustLog("support -> mmsearch_support");
+  Node* ret = nullptr;
+  Node	   *rawreq = (Node *) PG_GETARG_POINTER(0);
+  if (IsA(rawreq, SupportRequestCost))
+  {
+    SupportRequestCost* r = (SupportRequestCost*)rawreq;
+    JustLog("support -> cost request support ");
+    PlannerInfo* root = r->root;
+    if (root == nullptr) {
+      JustLog("support -> root is none");
+    } else {
+      JustLog("support -> dump some data!");
+
+      JustLog("invoked from : [{}]", nodeStr(r->node));
+      if (root->non_recursive_path == nullptr) {
+        JustLog("support -> fuck");
+      } else {
+        JustLog("pathtytpe??? {}", (int)root->non_recursive_path->pathtype);
+      }
+      // for (PathKey* s : PList<PathKey>(root->path)) {
+      //   //JustLog("support -> what node {}", nodeStr(s));
+        
+      // }
+    }
+    r->startup = 100000;
+    r->per_tuple = 0;
+    PG_RETURN_POINTER(r);
+  }
+  PG_RETURN_POINTER(ret);
 }
 }
