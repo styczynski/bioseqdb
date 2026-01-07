@@ -4713,7 +4713,7 @@ ExplainAggNode(CustomScanState *node, List *ancestors, ExplainState *es)
 
 
 CustomScan *
-columnar_create_aggregator_node(void)
+bioseq_create_aggregator_node(void)
 {
 	CustomScan *cscan = (CustomScan *) makeNode(CustomScan);
 	cscan->methods = &VectorAggNodeMethods;
@@ -4722,7 +4722,7 @@ columnar_create_aggregator_node(void)
 
 
 void
-columnar_register_aggregator_node(void)
+bioseq_register_aggregator_node(void)
 {
 	RegisterCustomScanMethods(&VectorAggNodeMethods);
 }

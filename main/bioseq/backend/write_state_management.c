@@ -72,7 +72,7 @@ CleanupWriteStateMap(void *arg)
 
 
 ColumnarWriteState *
-columnar_init_write_state(Relation relation, TupleDesc tupdesc,
+bioseq_init_write_state(Relation relation, TupleDesc tupdesc,
 						  Oid tupSlotRelationId, SubTransactionId currentSubXid)
 {
 	bool found;

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_vector_execution.c
+ * bioseq_vector_execution.c
  *
  * Copyright (c) Hydra, Inc.
  *

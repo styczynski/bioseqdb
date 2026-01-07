@@ -61,10 +61,10 @@ typedef struct IndexFetchColumnarData
 	bool is_select_query; /* CustomIndexScan only gets planned with SELECT query */
 
 	/*
-	 * We initialize cs_readState lazily in the first columnar_index_fetch_tuple
+	 * We initialize cs_readState lazily in the first bioseq_index_fetch_tuple
 	 * call. However, we want to do memory allocations in a sub MemoryContext of
-	 * columnar_index_fetch_begin. For this reason, we store scanContext in
-	 * columnar_index_fetch_begin.
+	 * bioseq_index_fetch_begin. For this reason, we store scanContext in
+	 * bioseq_index_fetch_begin.
 	 */
 	MemoryContext scanContext;
 } IndexFetchColumnarData;
@@ -122,33 +122,33 @@ static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSor
 														ItemPointer targetItemPointer);
 
 
-/* Custom tuple slot ops used for columnar. Initialized in columnar_tableam_init(). */
+/* Custom tuple slot ops used for bioseq. Initialized in bioseq_tableam_init(). */
 static TupleTableSlotOps TTSOpsColumnar;
 
 /* Previous cache enabled state. */
 static bool previousCacheEnabledState = false;
 
 static const TupleTableSlotOps *
-columnar_slot_callbacks(Relation relation)
+bioseq_slot_callbacks(Relation relation)
 {
 	return &TTSOpsColumnar;
 }
 
 
 static TableScanDesc
-columnar_beginscan(Relation relation, Snapshot snapshot,
+bioseq_beginscan(Relation relation, Snapshot snapshot,
 				   int nkeys, ScanKey key,
 				   ParallelTableScanDesc parallel_scan,
 				   uint32 flags)
 {
-	previousCacheEnabledState = columnar_enable_page_cache;
+	previousCacheEnabledState = bioseq_enable_page_cache;
 
 	int natts = relation->rd_att->natts;
 
 	/* attr_needed represents 0-indexed attribute numbers */
 	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
 
-	TableScanDesc scandesc = columnar_beginscan_extended(relation, snapshot, nkeys, key,
+	TableScanDesc scandesc = bioseq_beginscan_extended(relation, snapshot, nkeys, key,
 														 parallel_scan,
 														 flags, attr_needed, NULL,
 														 NULL,
@@ -161,14 +161,14 @@ columnar_beginscan(Relation relation, Snapshot snapshot,
 
 
 TableScanDesc
-columnar_beginscan_extended(Relation relation, Snapshot snapshot,
+bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
 							uint32 flags, Bitmapset *attr_needed, List *scanQual,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple)
 {
-	previousCacheEnabledState = columnar_enable_page_cache;
+	previousCacheEnabledState = bioseq_enable_page_cache;
 #if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilelocator = relation->rd_locator.relNumber;
 #else
@@ -232,11 +232,11 @@ CreateColumnarScanMemoryContext(void)
 
 
 /*
- * init_columnar_read_state initializes a column store table read and returns the
+ * init_bioseq_read_state initializes a column store table read and returns the
  * state.
  */
 static ColumnarReadState *
-init_columnar_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_needed,
+init_bioseq_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_needed,
 						 List *scanQual, MemoryContext scanContext, Snapshot snapshot,
 						 bool randomAccess,
 						 ParallelColumnarScan parallelColumnarScan)
@@ -256,7 +256,7 @@ init_columnar_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_n
 
 
 static void
-columnar_endscan(TableScanDesc sscan)
+bioseq_endscan(TableScanDesc sscan)
 {
 	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
 	if (scan->cs_readState != NULL)
@@ -271,19 +271,19 @@ columnar_endscan(TableScanDesc sscan)
 	}
 
 	/* clean up any caches. */
-	if (columnar_enable_page_cache == true)
+	if (bioseq_enable_page_cache == true)
 	{
 		ColumnarResetCache();
 	}
 
 	MemoryContextDelete(scan->scanContext);
 
-	columnar_enable_page_cache = previousCacheEnabledState;
+	bioseq_enable_page_cache = previousCacheEnabledState;
 }
 
 
 static void
-columnar_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
+bioseq_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 				bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
 	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
@@ -299,7 +299,7 @@ columnar_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 
 
 static bool
-columnar_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
 	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
 
@@ -310,7 +310,7 @@ columnar_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlo
 	{
 		bool randomAccess = false;
 		scan->cs_readState =
-			init_columnar_read_state(scan->cs_base.rs_rd, slot->tts_tupleDescriptor,
+			init_bioseq_read_state(scan->cs_base.rs_rd, slot->tts_tupleDescriptor,
 									 scan->attr_needed, scan->scanQual,
 									 scan->scanContext, scan->cs_base.rs_snapshot,
 									 randomAccess,
@@ -414,28 +414,28 @@ ErrorIfInvalidRowNumber(uint64 rowNumber)
 
 
 static Size
-columnar_parallelscan_estimate(Relation rel)
+bioseq_parallelscan_estimate(Relation rel)
 {
-	elog(ERROR, "columnar_parallelscan_estimate not implemented");
+	elog(ERROR, "bioseq_parallelscan_estimate not implemented");
 }
 
 
 static Size
-columnar_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
+bioseq_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	elog(ERROR, "columnar_parallelscan_initialize not implemented");
+	elog(ERROR, "bioseq_parallelscan_initialize not implemented");
 }
 
 
 static void
-columnar_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
+bioseq_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	elog(ERROR, "columnar_parallelscan_reinitialize not implemented");
+	elog(ERROR, "bioseq_parallelscan_reinitialize not implemented");
 }
 
 
 static IndexFetchTableData *
-columnar_index_fetch_begin(Relation rel)
+bioseq_index_fetch_begin(Relation rel)
 {
 #if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilelocator = rel->rd_locator.relNumber;
@@ -465,7 +465,7 @@ columnar_index_fetch_begin(Relation rel)
 }
 
 IndexFetchTableData *
-columnar_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
+bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 {
 #if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilenode = rel->rd_locator.relNumber;
@@ -498,16 +498,16 @@ columnar_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 
 
 static void
-columnar_index_fetch_reset(IndexFetchTableData *sscan)
+bioseq_index_fetch_reset(IndexFetchTableData *sscan)
 {
 	/* no-op */
 }
 
 
 static void
-columnar_index_fetch_end(IndexFetchTableData *sscan)
+bioseq_index_fetch_end(IndexFetchTableData *sscan)
 {
-	columnar_index_fetch_reset(sscan);
+	bioseq_index_fetch_reset(sscan);
 
 	IndexFetchColumnarData *scan = (IndexFetchColumnarData *) sscan;
 	if (scan->cs_readState)
@@ -519,7 +519,7 @@ columnar_index_fetch_end(IndexFetchTableData *sscan)
 	bms_free(scan->attr_needed);
 
 	/* clean up any caches. */
-	if (columnar_enable_page_cache == true)
+	if (bioseq_enable_page_cache == true)
 	{
 		ColumnarResetCache();
 	}
@@ -563,7 +563,7 @@ FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64 rowN
 
 
 static bool
-columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
+bioseq_index_fetch_tuple(struct IndexFetchTableData *sscan,
 						   ItemPointer tid,
 						   Snapshot snapshot,
 						   TupleTableSlot *slot,
@@ -576,7 +576,7 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 	 * Initialize all_dead to false if passed to be non-NULL.
 	 *
 	 * XXX: For aborted writes, we should set all_dead to true but this would
-	 * require implementing columnar_index_delete_tuples for simple deletion
+	 * require implementing bioseq_index_delete_tuples for simple deletion
 	 * of dead tuples (TM_IndexDeleteOp.bottomup = false).
 	 */
 	if (all_dead)
@@ -604,7 +604,7 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 		}
 
 		bool randomAccess = true;
-		scan->cs_readState = init_columnar_read_state(columnarRelation,
+		scan->cs_readState = init_bioseq_read_state(columnarRelation,
 													  slot->tts_tupleDescriptor,
 													  scan->attr_needed, scanQual,
 													  scan->scanContext,
@@ -738,7 +738,7 @@ columnar_index_fetch_tuple(struct IndexFetchTableData *sscan,
 
 
 static bool
-columnar_fetch_row_version(Relation relation,
+bioseq_fetch_row_version(Relation relation,
 						   ItemPointer tid,
 						   Snapshot snapshot,
 						   TupleTableSlot *slot)
@@ -758,7 +758,7 @@ columnar_fetch_row_version(Relation relation,
 
 		bool randomAccess = false;
 
-		*readState = init_columnar_read_state(relation,
+		*readState = init_bioseq_read_state(relation,
 											  slot->tts_tupleDescriptor,
 											  attr_needed, scanQual,
 											  GetColumnarReadStateCache(),
@@ -782,22 +782,22 @@ columnar_fetch_row_version(Relation relation,
 
 
 static void
-columnar_get_latest_tid(TableScanDesc sscan,
+bioseq_get_latest_tid(TableScanDesc sscan,
 						ItemPointer tid)
 {
-	elog(ERROR, "columnar_get_latest_tid not implemented");
+	elog(ERROR, "bioseq_get_latest_tid not implemented");
 }
 
 
 static bool
-columnar_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
+bioseq_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
 {
-	elog(ERROR, "columnar_tuple_tid_valid not implemented");
+	elog(ERROR, "bioseq_tuple_tid_valid not implemented");
 }
 
 
 static bool
-columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
+bioseq_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 								  Snapshot snapshot)
 {
 	uint64 rowNumber = tid_to_row_number(slot->tts_tid);
@@ -807,11 +807,11 @@ columnar_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 
 
 static TransactionId
-columnar_index_delete_tuples(Relation rel,
+bioseq_index_delete_tuples(Relation rel,
 							 TM_IndexDeleteOp *delstate)
 {
-	previousCacheEnabledState = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	previousCacheEnabledState = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	/*
 	 * XXX: We didn't bother implementing index_delete_tuple for neither of
@@ -845,28 +845,28 @@ columnar_index_delete_tuples(Relation rel,
 		 * function index_compute_xid_horizon_for_tuples.
 		 *
 		 * For this reason, to avoid receiving simple deletion requests for
-		 * columnar tables (bottomup = false), columnar_index_fetch_tuple
+		 * columnar tables (bottomup = false), bioseq_index_fetch_tuple
 		 * doesn't ever set all_dead to true in order to prevent triggering
 		 * simple deletion of index tuples. But let's throw an error to be on
 		 * the safe side.
 		 */
-		elog(ERROR, "columnar_index_delete_tuples not implemented for simple deletion");
+		elog(ERROR, "bioseq_index_delete_tuples not implemented for simple deletion");
 	}
 }
 
 
 static void
-columnar_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
+bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 					  int options, BulkInsertState bistate)
 {
-	previousCacheEnabledState = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	previousCacheEnabledState = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	/*
-	 * columnar_init_write_state allocates the write state in a longer
+	 * bioseq_init_write_state allocates the write state in a longer
 	 * lasting context, so no need to worry about it.
 	 */
-	ColumnarWriteState *writeState = columnar_init_write_state(relation,
+	ColumnarWriteState *writeState = bioseq_init_write_state(relation,
 															   RelationGetDescr(relation),
 																 slot->tts_tableOid,
 															   GetCurrentSubTransactionId());
@@ -891,18 +891,18 @@ columnar_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 
 static void
-columnar_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
+bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 								  CommandId cid, int options,
 								  BulkInsertState bistate, uint32 specToken)
 {
-	previousCacheEnabledState = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	previousCacheEnabledState = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	/*
-	 * columnar_init_write_state allocates the write state in a longer
+	 * bioseq_init_write_state allocates the write state in a longer
 	 * lasting context, so no need to worry about it.
 	 */
-	ColumnarWriteState *writeState = columnar_init_write_state(relation,
+	ColumnarWriteState *writeState = bioseq_init_write_state(relation,
 															   RelationGetDescr(relation),
 																 slot->tts_tableOid,
 															   GetCurrentSubTransactionId());
@@ -937,7 +937,7 @@ columnar_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 
 static void
-columnar_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
+bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 									uint32 specToken, bool succeeded)
 {
 #if PG_VERSION_NUM >= PG_VERSION_16
@@ -949,14 +949,14 @@ columnar_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64) storageId));
 
-	columnar_enable_page_cache = previousCacheEnabledState;
+	bioseq_enable_page_cache = previousCacheEnabledState;
 }
 
 static void
-columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
+bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 					  CommandId cid, int options, BulkInsertState bistate)
 {
-	ColumnarWriteState *writeState = columnar_init_write_state(relation,
+	ColumnarWriteState *writeState = bioseq_init_write_state(relation,
 															   RelationGetDescr(relation),
 																 slots[0]->tts_tableOid,
 															   GetCurrentSubTransactionId());
@@ -1009,7 +1009,7 @@ columnar_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 
 static TM_Result
-columnar_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
+bioseq_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 					  Snapshot snapshot, Snapshot crosscheck, bool wait,
 					  TM_FailureData *tmfd, bool changingPart)
 {
@@ -1038,13 +1038,13 @@ columnar_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 
 #if PG_VERSION_NUM >= PG_VERSION_16
 static TM_Result
-columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
+bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 					  bool wait, TM_FailureData *tmfd,
 					  LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
 #else
 static TM_Result
-columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
+bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 					  bool wait, TM_FailureData *tmfd,
 					  LockTupleMode *lockmode, bool *update_indexes)
@@ -1070,7 +1070,7 @@ columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 #endif
 		return TM_Deleted;
 
-	columnar_tuple_insert(relation, slot, cid, 0, NULL);
+	bioseq_tuple_insert(relation, slot, cid, 0, NULL);
 
 	*update_indexes = (TU_UpdateIndexes) true;
 
@@ -1084,7 +1084,7 @@ columnar_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 
 
 static TM_Result
-columnar_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
+bioseq_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 					TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
 					LockWaitPolicy wait_policy, uint8 flags,
 					TM_FailureData *tmfd)
@@ -1099,7 +1099,7 @@ columnar_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 
 	bool randomAccess = true;
 
-	readState = init_columnar_read_state(relation,
+	readState = init_bioseq_read_state(relation,
 										slot->tts_tupleDescriptor,
 										attr_needed, scanQual,
 										CurrentMemoryContext, // to be checked
@@ -1122,7 +1122,7 @@ columnar_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 
 
 static void
-columnar_finish_bulk_insert(Relation relation, int options)
+bioseq_finish_bulk_insert(Relation relation, int options)
 {
 	/*
 	 * Nothing to do here. We keep write states live until transaction end.
@@ -1131,7 +1131,7 @@ columnar_finish_bulk_insert(Relation relation, int options)
 
 
 static void
-columnar_relation_set_new_filenode(Relation rel,
+bioseq_relation_set_new_filenode(Relation rel,
 								   const RelFileLocator *newrnode,
 								   char persistence,
 								   TransactionId *freezeXid,
@@ -1159,9 +1159,9 @@ columnar_relation_set_new_filenode(Relation rel,
 	*minmulti = GetOldestMultiXactId();
 	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
 
-	JustLog("columnar_relation_set_new_filenode init columnar storage");
+	JustLog("bioseq_relation_set_new_filenode init columnar storage");
 	ColumnarStorageInit(srel, ColumnarMetadataNewStorageId());
-	JustLog("columnar_relation_set_new_filenode init columnar options");
+	JustLog("bioseq_relation_set_new_filenode init columnar options");
 	InitColumnarOptions(rel->rd_id);
 
 	smgrclose(srel);
@@ -1171,7 +1171,7 @@ columnar_relation_set_new_filenode(Relation rel,
 
 
 static void
-columnar_relation_nontransactional_truncate(Relation rel)
+bioseq_relation_nontransactional_truncate(Relation rel)
 {
 #if PG_VERSION_NUM >= PG_VERSION_16
 	RelFileLocator relfilelocator = rel->rd_locator;
@@ -1194,7 +1194,7 @@ columnar_relation_nontransactional_truncate(Relation rel)
 	 */
 	RelationTruncate(rel, 0);
 
-	JustLog("columnar_relation_nontransactional_truncate init columnar storage");
+	JustLog("bioseq_relation_nontransactional_truncate init columnar storage");
 	uint64 storageId = ColumnarMetadataNewStorageId();
 
 	ColumnarStorageInit(RelationGetSmgr(rel), storageId);
@@ -1202,7 +1202,7 @@ columnar_relation_nontransactional_truncate(Relation rel)
 
 
 static void
-columnar_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
+bioseq_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 {
 	char persistence = rel->rd_rel->relpersistence;
 
@@ -1243,14 +1243,14 @@ columnar_relation_copy_data(Relation rel, const RelFileLocator *newrnode)
 
 
 /*
- * columnar_relation_copy_for_cluster is called on VACUUM FULL, at which
+ * bioseq_relation_copy_for_cluster is called on VACUUM FULL, at which
  * we should copy data from OldHeap to NewHeap.
  *
  * In general TableAM case this can also be called for the CLUSTER command
  * which is not applicable for columnar since it doesn't support indexes.
  */
 static void
-columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
+bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 								   Relation OldIndex, bool use_sort,
 								   TransactionId OldestXmin,
 								   TransactionId *xid_cutoff,
@@ -1301,7 +1301,7 @@ columnar_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	bool randomAccess = false;
-	ColumnarReadState *readState = init_columnar_read_state(OldHeap, sourceDesc,
+	ColumnarReadState *readState = init_bioseq_read_state(OldHeap, sourceDesc,
 															attr_needed, scanQual,
 															scanContext, snapshot,
 															randomAccess,
@@ -1496,7 +1496,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	bool randomAccess = true;
-	ColumnarReadState *readState = init_columnar_read_state(rel, tupleDesc,
+	ColumnarReadState *readState = init_bioseq_read_state(rel, tupleDesc,
 															attr_needed, scanQual,
 															scanContext, SnapshotAny,
 															randomAccess,
@@ -1573,15 +1573,15 @@ ColumnarTableTupleCount(Relation relation)
 }
 
 /*
- * columnar_vacuum_rel implements VACUUM without FULL option.
+ * bioseq_vacuum_rel implements VACUUM without FULL option.
  */
 static void
-columnar_vacuum_rel(Relation rel, VacuumParams *params,
+bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 					BufferAccessStrategy bstrategy)
 {
 	/* Capture the cache state and disable it for a vacuum. */
-	bool old_cache_mode = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	bool old_cache_mode = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
  									RelationGetRelid(rel));
@@ -1651,7 +1651,7 @@ columnar_vacuum_rel(Relation rel, VacuumParams *params,
 	pgstat_progress_end_command();
 
 	/* Reenable the cache state. */
-	columnar_enable_page_cache = old_cache_mode;
+	bioseq_enable_page_cache = old_cache_mode;
 }
 
 
@@ -1734,7 +1734,7 @@ LogRelationStats(Relation rel, int elevel)
 	uint64 relPages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	RelationCloseSmgr(rel);
 
-	Datum storageId = DirectFunctionCall1(columnar_relation_storageid,
+	Datum storageId = DirectFunctionCall1(bioseq_relation_storageid,
 										  ObjectIdGetDatum(RelationGetRelid(rel)));
 
 	double compressionRate = totalStripeLength ?
@@ -1913,7 +1913,7 @@ ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode, int timeout,
 
 
 static bool
-columnar_scan_analyze_next_block(TableScanDesc scan,
+bioseq_scan_analyze_next_block(TableScanDesc scan,
 #if PG_VERSION_NUM >= PG_VERSION_17
 								 ReadStream *stream)
 #else
@@ -1925,20 +1925,20 @@ columnar_scan_analyze_next_block(TableScanDesc scan,
 	 * Our access method is not pages based, i.e. tuples are not confined
 	 * to pages boundaries. So not much to do here. We return true anyway
 	 * so acquire_sample_rows() in analyze.c would call our
-	 * columnar_scan_analyze_next_tuple() callback.
+	 * bioseq_scan_analyze_next_tuple() callback.
 	 */
 	return true;
 }
 
 
 static bool
-columnar_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
+bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 								 double *liverows, double *deadrows,
 								 TupleTableSlot *slot)
 {
 	/* Capture the cache state and disable it for a vacuum. */
-	bool old_cache_mode = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	bool old_cache_mode = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	/*
 	 * Currently we don't do anything smart to reduce number of rows returned
@@ -1947,29 +1947,29 @@ columnar_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 	 * tuples from those pages.
 	 *
 	 * We could do something like that here by choosing sample stripes or chunks,
-	 * but getting that correct might need quite some work. Since columnar_fdw's
+	 * but getting that correct might need quite some work. Since bioseq_fdw's
 	 * ANALYZE scanned all rows, as a starter we do the same here and scan all
 	 * rows.
 	 */
-	if (columnar_getnextslot(scan, ForwardScanDirection, slot))
+	if (bioseq_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		(*liverows)++;
 
 		/* Reset cache to previous state. */
-		columnar_enable_page_cache = old_cache_mode;
+		bioseq_enable_page_cache = old_cache_mode;
 
 		return true;
 	}
 
 	/* Reset cache to previous state. */
-	columnar_enable_page_cache = old_cache_mode;
+	bioseq_enable_page_cache = old_cache_mode;
 
 	return false;
 }
 
 
 static double
-columnar_index_build_range_scan(Relation columnarRelation,
+bioseq_index_build_range_scan(Relation columnarRelation,
 								Relation indexRelation,
 								IndexInfo *indexInfo,
 								bool allow_sync,
@@ -2000,8 +2000,8 @@ columnar_index_build_range_scan(Relation columnarRelation,
 	}
 
 	/* Disable the page cache for the index build. */
-	bool old_cache_mode = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	bool old_cache_mode = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	/*
 	 * In a normal index build, we use SnapshotAny to retrieve all tuples. In
@@ -2077,7 +2077,7 @@ columnar_index_build_range_scan(Relation columnarRelation,
 	indexInfo->ii_PredicateState = NULL;
 
 	/* Reset the cache mode. */
-	columnar_enable_page_cache = old_cache_mode;
+	bioseq_enable_page_cache = old_cache_mode;
 
 	return reltuples;
 }
@@ -2176,7 +2176,7 @@ ColumnarReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 	ExprContext *econtext = GetPerTupleExprContext(estate);
 	TupleTableSlot *slot = econtext->ecxt_scantuple;
-	while (columnar_getnextslot(scan, ForwardScanDirection, slot))
+	while (bioseq_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		CHECK_FOR_INTERRUPTS();
 
@@ -2184,7 +2184,7 @@ ColumnarReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 		if (progress && lastReportedBlockNumber != currentBlockNumber)
 		{
 			/*
-			 * columnar_getnextslot guarantees that returned tuple will
+			 * bioseq_getnextslot guarantees that returned tuple will
 			 * always have a greater ItemPointer than the ones we fetched
 			 * before, so we directly use BlockNumber to report our progress.
 			 */
@@ -2222,7 +2222,7 @@ ColumnarReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 
 static void
-columnar_index_validate_scan(Relation columnarRelation,
+bioseq_index_validate_scan(Relation columnarRelation,
 							 Relation indexRelation,
 							 IndexInfo *indexInfo,
 							 Snapshot snapshot,
@@ -2282,7 +2282,7 @@ ColumnarReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 	ExprContext *econtext = GetPerTupleExprContext(estate);
 	TupleTableSlot *slot = econtext->ecxt_scantuple;
-	while (columnar_getnextslot(scan, ForwardScanDirection, slot))
+	while (bioseq_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		CHECK_FOR_INTERRUPTS();
 
@@ -2291,7 +2291,7 @@ ColumnarReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 		if (lastReportedBlockNumber != currentBlockNumber)
 		{
 			/*
-			 * columnar_getnextslot guarantees that returned tuple will
+			 * bioseq_getnextslot guarantees that returned tuple will
 			 * always have a greater ItemPointer than the ones we fetched
 			 * before, so we directly use BlockNumber to report our progress.
 			 */
@@ -2397,7 +2397,7 @@ TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort, ItemPointer targetIt
 
 
 static uint64
-columnar_relation_size(Relation rel, ForkNumber forkNumber)
+bioseq_relation_size(Relation rel, ForkNumber forkNumber)
 {
 	uint64 nblocks = 0;
 
@@ -2419,14 +2419,14 @@ columnar_relation_size(Relation rel, ForkNumber forkNumber)
 
 
 static bool
-columnar_relation_needs_toast_table(Relation rel)
+bioseq_relation_needs_toast_table(Relation rel)
 {
 	return false;
 }
 
 
 static void
-columnar_estimate_rel_size(Relation rel, int32 *attr_widths,
+bioseq_estimate_rel_size(Relation rel, int32 *attr_widths,
 						   BlockNumber *pages, double *tuples,
 						   double *allvisfrac)
 {
@@ -2444,17 +2444,17 @@ columnar_estimate_rel_size(Relation rel, int32 *attr_widths,
 
 
 static bool
-columnar_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
+bioseq_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 {
-	elog(ERROR, "columnar_scan_sample_next_block not implemented");
+	elog(ERROR, "bioseq_scan_sample_next_block not implemented");
 }
 
 
 static bool
-columnar_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
+bioseq_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 								TupleTableSlot *slot)
 {
-	elog(ERROR, "columnar_scan_sample_next_tuple not implemented");
+	elog(ERROR, "bioseq_scan_sample_next_tuple not implemented");
 }
 
 
@@ -2522,9 +2522,9 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 
 
 void
-columnar_tableam_init()
+bioseq_tableam_init()
 {
-	BMethod(columnar_tableam_init);
+	BMethod(bioseq_tableam_init);
 	ColumnarTableSetOptions_hook_type **ColumnarTableSetOptions_hook_ptr =
 		(ColumnarTableSetOptions_hook_type **) find_rendezvous_variable(
 			COLUMNAR_SETOPTIONS_HOOK_SYM);
@@ -2541,7 +2541,7 @@ columnar_tableam_init()
 							 standard_ProcessUtility;
 	ProcessUtility_hook = ColumnarProcessUtility;
 
-	columnar_customscan_init();
+	bioseq_customscan_init();
 
 	TTSOpsColumnar = TTSOpsVirtual;
 	TTSOpsColumnar.copy_heap_tuple = ColumnarSlotCopyHeapTuple;
@@ -2581,7 +2581,7 @@ ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 									  slot->tts_values,
 									  slot->tts_isnull);
 
-	/* slot->tts_tid is filled in columnar_getnextslot */
+	/* slot->tts_tid is filled in bioseq_getnextslot */
 	tuple->t_self = slot->tts_tid;
 
 	return tuple;
@@ -2766,7 +2766,7 @@ ColumnarSupportsIndexAM(char *indexAMName)
 
 
 /*
- * IsColumnarTableAmTable returns true if relation has columnar_tableam
+ * IsColumnarTableAmTable returns true if relation has bioseq_tableam
  * access method. This can be called before extension creation.
  */
 bool
@@ -2790,63 +2790,63 @@ IsColumnarTableAmTable(Oid relationId)
 }
 
 
-static const TableAmRoutine columnar_am_methods = {
+static const TableAmRoutine bioseq_am_methods = {
 	.type = T_TableAmRoutine,
 
-	.slot_callbacks = columnar_slot_callbacks,
+	.slot_callbacks = bioseq_slot_callbacks,
 
-	.scan_begin = columnar_beginscan,
-	.scan_end = columnar_endscan,
-	.scan_rescan = columnar_rescan,
-	.scan_getnextslot = columnar_getnextslot,
+	.scan_begin = bioseq_beginscan,
+	.scan_end = bioseq_endscan,
+	.scan_rescan = bioseq_rescan,
+	.scan_getnextslot = bioseq_getnextslot,
 
-	.parallelscan_estimate = columnar_parallelscan_estimate,
-	.parallelscan_initialize = columnar_parallelscan_initialize,
-	.parallelscan_reinitialize = columnar_parallelscan_reinitialize,
+	.parallelscan_estimate = bioseq_parallelscan_estimate,
+	.parallelscan_initialize = bioseq_parallelscan_initialize,
+	.parallelscan_reinitialize = bioseq_parallelscan_reinitialize,
 
-	.index_fetch_begin = columnar_index_fetch_begin,
-	.index_fetch_reset = columnar_index_fetch_reset,
-	.index_fetch_end = columnar_index_fetch_end,
-	.index_fetch_tuple = columnar_index_fetch_tuple,
+	.index_fetch_begin = bioseq_index_fetch_begin,
+	.index_fetch_reset = bioseq_index_fetch_reset,
+	.index_fetch_end = bioseq_index_fetch_end,
+	.index_fetch_tuple = bioseq_index_fetch_tuple,
 
-	.tuple_fetch_row_version = columnar_fetch_row_version,
-	.tuple_get_latest_tid = columnar_get_latest_tid,
-	.tuple_tid_valid = columnar_tuple_tid_valid,
-	.tuple_satisfies_snapshot = columnar_tuple_satisfies_snapshot,
-	.index_delete_tuples = columnar_index_delete_tuples,
+	.tuple_fetch_row_version = bioseq_fetch_row_version,
+	.tuple_get_latest_tid = bioseq_get_latest_tid,
+	.tuple_tid_valid = bioseq_tuple_tid_valid,
+	.tuple_satisfies_snapshot = bioseq_tuple_satisfies_snapshot,
+	.index_delete_tuples = bioseq_index_delete_tuples,
 
-	.tuple_insert = columnar_tuple_insert,
-	.tuple_insert_speculative = columnar_tuple_insert_speculative,
-	.tuple_complete_speculative = columnar_tuple_complete_speculative,
-	.multi_insert = columnar_multi_insert,
-	.tuple_delete = columnar_tuple_delete,
-	.tuple_update = columnar_tuple_update,
-	.tuple_lock = columnar_tuple_lock,
-	.finish_bulk_insert = columnar_finish_bulk_insert,
+	.tuple_insert = bioseq_tuple_insert,
+	.tuple_insert_speculative = bioseq_tuple_insert_speculative,
+	.tuple_complete_speculative = bioseq_tuple_complete_speculative,
+	.multi_insert = bioseq_multi_insert,
+	.tuple_delete = bioseq_tuple_delete,
+	.tuple_update = bioseq_tuple_update,
+	.tuple_lock = bioseq_tuple_lock,
+	.finish_bulk_insert = bioseq_finish_bulk_insert,
 
 #if PG_VERSION_NUM >= PG_VERSION_16
-	.relation_set_new_filelocator = columnar_relation_set_new_filenode,
+	.relation_set_new_filelocator = bioseq_relation_set_new_filenode,
 #else
-	.relation_set_new_filenode = columnar_relation_set_new_filenode,
+	.relation_set_new_filenode = bioseq_relation_set_new_filenode,
 #endif
-	.relation_nontransactional_truncate = columnar_relation_nontransactional_truncate,
-	.relation_copy_data = columnar_relation_copy_data,
-	.relation_copy_for_cluster = columnar_relation_copy_for_cluster,
-	.relation_vacuum = columnar_vacuum_rel,
-	.scan_analyze_next_block = columnar_scan_analyze_next_block,
-	.scan_analyze_next_tuple = columnar_scan_analyze_next_tuple,
-	.index_build_range_scan = columnar_index_build_range_scan,
-	.index_validate_scan = columnar_index_validate_scan,
+	.relation_nontransactional_truncate = bioseq_relation_nontransactional_truncate,
+	.relation_copy_data = bioseq_relation_copy_data,
+	.relation_copy_for_cluster = bioseq_relation_copy_for_cluster,
+	.relation_vacuum = bioseq_vacuum_rel,
+	.scan_analyze_next_block = bioseq_scan_analyze_next_block,
+	.scan_analyze_next_tuple = bioseq_scan_analyze_next_tuple,
+	.index_build_range_scan = bioseq_index_build_range_scan,
+	.index_validate_scan = bioseq_index_validate_scan,
 
-	.relation_size = columnar_relation_size,
-	.relation_needs_toast_table = columnar_relation_needs_toast_table,
+	.relation_size = bioseq_relation_size,
+	.relation_needs_toast_table = bioseq_relation_needs_toast_table,
 
-	.relation_estimate_size = columnar_estimate_rel_size,
+	.relation_estimate_size = bioseq_estimate_rel_size,
 
 	.scan_bitmap_next_block = NULL,
 	.scan_bitmap_next_tuple = NULL,
-	.scan_sample_next_block = columnar_scan_sample_next_block,
-	.scan_sample_next_tuple = columnar_scan_sample_next_tuple
+	.scan_sample_next_block = bioseq_scan_sample_next_block,
+	.scan_sample_next_tuple = bioseq_scan_sample_next_tuple
 };
 
 
@@ -2854,15 +2854,15 @@ const TableAmRoutine *
 GetColumnarTableAmRoutine(void)
 {
 	BMethod(GetColumnarTableAmRoutine);
-	return &columnar_am_methods;
+	return &bioseq_am_methods;
 }
 
-CXX_PG_FUNCTION_INFO_V1(columnar_handler);
+CXX_PG_FUNCTION_INFO_V1(bioseq_handler);
 Datum
-columnar_handler(PG_FUNCTION_ARGS)
+bioseq_handler(PG_FUNCTION_ARGS)
 {
-	BMethod(columnar_handler);
-	PG_RETURN_POINTER(&columnar_am_methods);
+	BMethod(bioseq_handler);
+	PG_RETURN_POINTER(&bioseq_am_methods);
 }
 
 
@@ -2938,11 +2938,11 @@ ColumnarCheckLogicalReplication(Relation rel)
 
 
 /*
- * alter_columnar_table_set is a UDF exposed in postgres to change settings on a columnar
+ * alter_bioseq_table_set is a UDF exposed in postgres to change settings on a columnar
  * table. Calling this function on a non-columnar table gives an error.
  *
  * sql syntax:
- *   pg_catalog.alter_columnar_table_set(
+ *   pg_catalog.alter_bioseq_table_set(
  *        table_name regclass,
  *        chunk_group_row_limit int DEFAULT NULL,
  *        stripe_row_limit int DEFAULT NULL,
@@ -2950,16 +2950,16 @@ ColumnarCheckLogicalReplication(Relation rel)
  *
  * All arguments except the table name are optional. The UDF is supposed to be called
  * like:
- *   SELECT alter_columnar_table_set('table', compression => 'pglz');
+ *   SELECT alter_bioseq_table_set('table', compression => 'pglz');
  *
  * This will only update the compression of the table, keeping all other settings the
  * same. Multiple settings can be changed at the same time by providing multiple
  * arguments. Calling the argument with the NULL value will be interperted as not having
  * provided the argument.
  */
-CXX_PG_FUNCTION_INFO_V1(alter_columnar_table_set);
+CXX_PG_FUNCTION_INFO_V1(alter_bioseq_table_set);
 Datum
-alter_columnar_table_set(PG_FUNCTION_ARGS)
+alter_bioseq_table_set(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
@@ -3065,11 +3065,11 @@ alter_columnar_table_set(PG_FUNCTION_ARGS)
 
 
 /*
- * alter_columnar_table_reset is a UDF exposed in postgres to reset the settings on a
+ * alter_bioseq_table_reset is a UDF exposed in postgres to reset the settings on a
  * columnar table. Calling this function on a non-columnar table gives an error.
  *
  * sql syntax:
- *   pg_catalog.alter_columnar_table_re
+ *   pg_catalog.alter_bioseq_table_re
  *   teset(
  *        table_name regclass,
  *        chunk_group_row_limit bool DEFAULT FALSE,
@@ -3078,13 +3078,13 @@ alter_columnar_table_set(PG_FUNCTION_ARGS)
  *
  * All arguments except the table name are optional. The UDF is supposed to be called
  * like:
- *   SELECT alter_columnar_table_set('table', compression => true);
+ *   SELECT alter_bioseq_table_set('table', compression => true);
  *
  * All options set to true will be reset to the default system value.
  */
-CXX_PG_FUNCTION_INFO_V1(alter_columnar_table_reset);
+CXX_PG_FUNCTION_INFO_V1(alter_bioseq_table_reset);
 Datum
-alter_columnar_table_reset(PG_FUNCTION_ARGS)
+alter_bioseq_table_reset(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
@@ -3114,7 +3114,7 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
 	/* chunk_group_row_limit => true */
 	if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1))
 	{
-		options.chunkRowCount = columnar_chunk_group_row_limit;
+		options.chunkRowCount = bioseq_chunk_group_row_limit;
 		ereport(DEBUG1,
 				(errmsg("resetting chunk row count to %d", options.chunkRowCount)));
 	}
@@ -3122,7 +3122,7 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
 	/* stripe_row_limit => true */
 	if (!PG_ARGISNULL(2) && PG_GETARG_BOOL(2))
 	{
-		options.stripeRowCount = columnar_stripe_row_limit;
+		options.stripeRowCount = bioseq_stripe_row_limit;
 		ereport(DEBUG1,
 				(errmsg("resetting stripe row count to " UINT64_FORMAT,
 						options.stripeRowCount)));
@@ -3131,7 +3131,7 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
 	/* compression => true */
 	if (!PG_ARGISNULL(3) && PG_GETARG_BOOL(3))
 	{
-		options.compressionType = static_cast<CompressionType>(columnar_compression);
+		options.compressionType = static_cast<CompressionType>(bioseq_compression);
 		ereport(DEBUG1, (errmsg("resetting compression to %s",
 								CompressionTypeStr(options.compressionType))));
 	}
@@ -3139,9 +3139,9 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
 	/* compression_level => true */
 	if (!PG_ARGISNULL(4) && PG_GETARG_BOOL(4))
 	{
-		options.compressionLevel = columnar_compression_level;
+		options.compressionLevel = bioseq_compression_level;
 		ereport(DEBUG1, (errmsg("reseting compression level to %d",
-								columnar_compression_level)));
+								bioseq_compression_level)));
 	}
 
 	if (ColumnarTableSetOptions_hook != NULL)
@@ -3158,18 +3158,18 @@ alter_columnar_table_reset(PG_FUNCTION_ARGS)
 
 
 /*
- * upgrade_columnar_storage - upgrade columnar storage to the current
+ * upgrade_bioseq_storage - upgrade columnar storage to the current
  * version.
  *
  * DDL:
- *   CREATE OR REPLACE FUNCTION upgrade_columnar_storage(rel regclass)
+ *   CREATE OR REPLACE FUNCTION upgrade_bioseq_storage(rel regclass)
  *     RETURNS VOID
  *     STRICT
- *     LANGUAGE c AS 'MODULE_PATHNAME', 'upgrade_columnar_storage';
+ *     LANGUAGE c AS 'MODULE_PATHNAME', 'upgrade_bioseq_storage';
  */
-CXX_PG_FUNCTION_INFO_V1(upgrade_columnar_storage);
+CXX_PG_FUNCTION_INFO_V1(upgrade_bioseq_storage);
 Datum
-upgrade_columnar_storage(PG_FUNCTION_ARGS)
+upgrade_bioseq_storage(PG_FUNCTION_ARGS)
 {
 	Oid relid = PG_GETARG_OID(0);
 
@@ -3194,18 +3194,18 @@ upgrade_columnar_storage(PG_FUNCTION_ARGS)
 
 
 /*
- * downgrade_columnar_storage - downgrade columnar storage to the
+ * downgrade_bioseq_storage - downgrade columnar storage to the
  * current version.
  *
  * DDL:
- *   CREATE OR REPLACE FUNCTION downgrade_columnar_storage(rel regclass)
+ *   CREATE OR REPLACE FUNCTION downgrade_bioseq_storage(rel regclass)
  *     RETURNS VOID
  *     STRICT
- *     LANGUAGE c AS 'MODULE_PATHNAME', 'downgrade_columnar_storage';
+ *     LANGUAGE c AS 'MODULE_PATHNAME', 'downgrade_bioseq_storage';
  */
-CXX_PG_FUNCTION_INFO_V1(downgrade_columnar_storage);
+CXX_PG_FUNCTION_INFO_V1(downgrade_bioseq_storage);
 Datum
-downgrade_columnar_storage(PG_FUNCTION_ARGS)
+downgrade_bioseq_storage(PG_FUNCTION_ARGS)
 {
 	Oid relid = PG_GETARG_OID(0);
 
@@ -3302,7 +3302,7 @@ static void vacuum_signal_handler(int signal)
 }
 
 /*
- * vacuum_columnar_table
+ * vacuum_bioseq_table
  */
 typedef struct StripeVacuumCandidate
 {
@@ -3313,9 +3313,9 @@ typedef struct StripeVacuumCandidate
 	StripeMetadata *stripeMetadata;
 } StripeVacuumCandidate;
 
-CXX_PG_FUNCTION_INFO_V1(vacuum_columnar_table);
+CXX_PG_FUNCTION_INFO_V1(vacuum_bioseq_table);
 Datum
-vacuum_columnar_table(PG_FUNCTION_ARGS)
+vacuum_bioseq_table(PG_FUNCTION_ARGS)
 {
 	Oid relid = PG_GETARG_OID(0);
 	Relation rel = RelationIdGetRelation(relid);
@@ -3327,8 +3327,8 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 	struct sigaction action;
 
 	/* Capture the cache state and disable it for a vacuum. */
-	bool old_cache_mode = columnar_enable_page_cache;
-	columnar_enable_page_cache = false;
+	bool old_cache_mode = bioseq_enable_page_cache;
+	bioseq_enable_page_cache = false;
 
 	/*
 	 * Set up signal handlers for any incoming signals during the vacuum,
@@ -3362,7 +3362,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Reset cache to previous state. */
-		columnar_enable_page_cache = old_cache_mode;
+		bioseq_enable_page_cache = old_cache_mode;
 
 		PG_RETURN_VOID();
 	}
@@ -3394,7 +3394,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Reset cache to previous state. */
-		columnar_enable_page_cache = old_cache_mode;
+		bioseq_enable_page_cache = old_cache_mode;
 
 		PG_RETURN_VOID();
 	}
@@ -3485,7 +3485,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 						"Stripe Combine Context", ALLOCSET_DEFAULT_SIZES);
 		MemoryContext previousContext = MemoryContextSwitchTo(combineContext);
 
-		ColumnarReadState *readState = init_columnar_read_state(rel, tupleDesc,
+		ColumnarReadState *readState = init_bioseq_read_state(rel, tupleDesc,
 															attr_needed, scanQual,
 															scanContext, snapshot,
 															randomAccess,
@@ -3548,7 +3548,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 			}
 
 			/* Reset cache to previous state. */
-			columnar_enable_page_cache = old_cache_mode;
+			bioseq_enable_page_cache = old_cache_mode;
 
 			PG_RETURN_NULL();
 		}
@@ -3577,7 +3577,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 		UnlockRelation(rel, ExclusiveLock);
 
 		/* Reset cache to previous state. */
-		columnar_enable_page_cache = old_cache_mode;
+		bioseq_enable_page_cache = old_cache_mode;
 
 		PG_RETURN_UINT32(progress);
 	}
@@ -3628,7 +3628,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 			}
 
 			/* Reset cache to previous state. */
-			columnar_enable_page_cache = old_cache_mode;
+			bioseq_enable_page_cache = old_cache_mode;
 
 			PG_RETURN_NULL();
 		}
@@ -3725,7 +3725,7 @@ vacuum_columnar_table(PG_FUNCTION_ARGS)
 	sigaction(SIGKILL, &kil_action, NULL);
 
 	/* Reset cache to previous state. */
-	columnar_enable_page_cache = old_cache_mode;
+	bioseq_enable_page_cache = old_cache_mode;
 
 	PG_RETURN_UINT32(progress + relocationProgress);
 }
@@ -3746,9 +3746,9 @@ typedef struct ColumnarStats
 /* We return 6 columns. */
 #define STATS_INFO_NATTS 6
 
-CXX_PG_FUNCTION_INFO_V1(columnar_stats);
+CXX_PG_FUNCTION_INFO_V1(bioseq_stats);
 Datum
-columnar_stats(PG_FUNCTION_ARGS)
+bioseq_stats(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
 	int call_cntr;

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_vector_types.h
+ * bioseq_vector_types.h
  *
  * Structures used in vectorization execution
  *

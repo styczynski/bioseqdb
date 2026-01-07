@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_debug.c
+ * bioseq_debug.c
  *
  * Helper functions to debug column store.
  *
@@ -14,17 +14,17 @@
 
 static void MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters);
 
-CXX_PG_FUNCTION_INFO_V1(columnar_store_memory_stats);
-CXX_PG_FUNCTION_INFO_V1(columnar_storage_info);
+CXX_PG_FUNCTION_INFO_V1(bioseq_store_memory_stats);
+CXX_PG_FUNCTION_INFO_V1(bioseq_storage_info);
 
 
 /*
- * columnar_store_memory_stats returns a record of 4 values: size of
+ * bioseq_store_memory_stats returns a record of 4 values: size of
  * TopMemoryContext, TopTransactionContext, , Write State context and
  * Row Mask context.
  */
 Datum
-columnar_store_memory_stats(PG_FUNCTION_ARGS)
+bioseq_store_memory_stats(PG_FUNCTION_ARGS)
 {
 	const int resultColumnCount = 3;
 
@@ -65,10 +65,10 @@ columnar_store_memory_stats(PG_FUNCTION_ARGS)
 
 
 /*
- * columnar_storage_info - UDF to return internal storage info for a columnar relation.
+ * bioseq_storage_info - UDF to return internal storage info for a columnar relation.
  *
  * DDL:
- *  CREATE OR REPLACE FUNCTION columnar_storage_info(
+ *  CREATE OR REPLACE FUNCTION bioseq_storage_info(
  *      rel regclass,
  *      version_major OUT int4,
  *      version_minor OUT int4,
@@ -77,10 +77,10 @@ columnar_store_memory_stats(PG_FUNCTION_ARGS)
  *      reserved_row_number OUT int8,
  *      reserved_offset OUT int8)
  *    STRICT
- *    LANGUAGE c AS 'MODULE_PATHNAME', 'columnar_storage_info';
+ *    LANGUAGE c AS 'MODULE_PATHNAME', 'bioseq_storage_info';
  */
 Datum
-columnar_storage_info(PG_FUNCTION_ARGS)
+bioseq_storage_info(PG_FUNCTION_ARGS)
 {
 #define STORAGE_INFO_NATTS 6
 	Oid relid = PG_GETARG_OID(0);

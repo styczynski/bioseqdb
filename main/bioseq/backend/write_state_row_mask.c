@@ -4,7 +4,7 @@
  *
  * Copyright (c) Hydra, Inc.
  *
- * Write state for columnar.row_mask table. It is used to aggregate updates
+ * Write state for bioseq.row_mask table. It is used to aggregate updates
  * for rows and flush them when needed (commit / scan).
  *
  * Following code is done in similiar way as write_state_management module.

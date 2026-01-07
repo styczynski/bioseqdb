@@ -37,23 +37,23 @@
 #define DEFAULT_COMPRESSION_TYPE COMPRESSION_PG_LZ
 #endif
 
-static void columnar_guc_init(void);
+static void bioseq_guc_init(void);
 
-int columnar_compression = DEFAULT_COMPRESSION_TYPE;
-int columnar_stripe_row_limit = DEFAULT_STRIPE_ROW_COUNT;
-int columnar_chunk_group_row_limit = DEFAULT_CHUNK_ROW_COUNT;
-int columnar_compression_level = 3;
-bool columnar_enable_parallel_execution = true;
-int columnar_min_parallel_processes = 8;
-bool columnar_enable_vectorization = true;
-bool columnar_enable_dml = true;
-bool columnar_enable_page_cache = false;
-int columnar_page_cache_size = 200U;
-bool columnar_index_scan = false;
+int bioseq_compression = DEFAULT_COMPRESSION_TYPE;
+int bioseq_stripe_row_limit = DEFAULT_STRIPE_ROW_COUNT;
+int bioseq_chunk_group_row_limit = DEFAULT_CHUNK_ROW_COUNT;
+int bioseq_compression_level = 3;
+bool bioseq_enable_parallel_execution = true;
+int bioseq_min_parallel_processes = 8;
+bool bioseq_enable_vectorization = true;
+bool bioseq_enable_dml = true;
+bool bioseq_enable_page_cache = false;
+int bioseq_page_cache_size = 200U;
+bool bioseq_index_scan = false;
 
 bool enable_logging = false;
 
-static const struct config_enum_entry columnar_compression_options[] =
+static const struct config_enum_entry bioseq_compression_options[] =
 {
 	{ "none", COMPRESSION_NONE, false },
 	{ "pglz", COMPRESSION_PG_LZ, false },
@@ -67,21 +67,21 @@ static const struct config_enum_entry columnar_compression_options[] =
 };
 
 void
-columnar_init(void)
+bioseq_init(void)
 {
-	BMethod(columnar_init);
-	columnar_guc_init();
-	columnar_tableam_init();
-	columnar_planner_init();
+	BMethod(bioseq_init);
+	bioseq_guc_init();
+	bioseq_tableam_init();
+	bioseq_planner_init();
 }
 
 
 static void
-columnar_guc_init()
+bioseq_guc_init()
 {
 	// Enable logging
 	DefineCustomBoolVariable(
-		"columnar.logging",
+		"bioseq.logging",
 		"Enable dedicated extension logging",
 		NULL,
 		&enable_logging,
@@ -90,22 +90,22 @@ columnar_guc_init()
 		0,                  // No flags for this GUC
 		NULL, NULL, NULL    // No variable hooks necessary
 	);
-	DefineCustomEnumVariable("columnar.compression",
-							 "Compression type for columnar.",
+	DefineCustomEnumVariable("bioseq.compression",
+							 "Compression type for bioseq.",
 							 NULL,
-							 &columnar_compression,
+							 &bioseq_compression,
 							 DEFAULT_COMPRESSION_TYPE,
-							 columnar_compression_options,
+							 bioseq_compression_options,
 							 PGC_USERSET,
 							 0,
 							 NULL,
 							 NULL,
 							 NULL);
 
-	DefineCustomIntVariable("columnar.compression_level",
+	DefineCustomIntVariable("bioseq.compression_level",
 							"Compression level to be used with zstd.",
 							NULL,
-							&columnar_compression_level,
+							&bioseq_compression_level,
 							3,
 							COMPRESSION_LEVEL_MIN,
 							COMPRESSION_LEVEL_MAX,
@@ -115,10 +115,10 @@ columnar_guc_init()
 							NULL,
 							NULL);
 
-	DefineCustomIntVariable("columnar.stripe_row_limit",
+	DefineCustomIntVariable("bioseq.stripe_row_limit",
 							"Maximum number of tuples per stripe.",
 							NULL,
-							&columnar_stripe_row_limit,
+							&bioseq_stripe_row_limit,
 							DEFAULT_STRIPE_ROW_COUNT,
 							STRIPE_ROW_COUNT_MINIMUM,
 							STRIPE_ROW_COUNT_MAXIMUM,
@@ -128,10 +128,10 @@ columnar_guc_init()
 							NULL,
 							NULL);
 
-	DefineCustomIntVariable("columnar.chunk_group_row_limit",
+	DefineCustomIntVariable("bioseq.chunk_group_row_limit",
 							"Maximum number of rows per chunk.",
 							NULL,
-							&columnar_chunk_group_row_limit,
+							&bioseq_chunk_group_row_limit,
 							DEFAULT_CHUNK_ROW_COUNT,
 							CHUNK_ROW_COUNT_MINIMUM,
 							CHUNK_ROW_COUNT_MAXIMUM,
@@ -141,10 +141,10 @@ columnar_guc_init()
 							NULL,
 							NULL);
 
-	DefineCustomBoolVariable("columnar.enable_parallel_execution",
+	DefineCustomBoolVariable("bioseq.enable_parallel_execution",
 							 "Enables parallel execution",
 							 NULL,
-							 &columnar_enable_parallel_execution,
+							 &bioseq_enable_parallel_execution,
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -152,10 +152,10 @@ columnar_guc_init()
 							 NULL, 
 							 NULL);
 
-	DefineCustomIntVariable("columnar.min_parallel_processes",
+	DefineCustomIntVariable("bioseq.min_parallel_processes",
 							"Minimum number of parallel processes",
 							NULL,
-							&columnar_min_parallel_processes,
+							&bioseq_min_parallel_processes,
 							8,
 							1,
 							32,
@@ -165,10 +165,10 @@ columnar_guc_init()
 							NULL,
 							NULL);
 
-	DefineCustomBoolVariable("columnar.enable_vectorization",
+	DefineCustomBoolVariable("bioseq.enable_vectorization",
 							 "Enables vectorized execution",
 							 NULL,
-							 &columnar_enable_vectorization,
+							 &bioseq_enable_vectorization,
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -176,10 +176,10 @@ columnar_guc_init()
 							 NULL, 
 							 NULL);
 
-	DefineCustomBoolVariable("columnar.enable_dml",
+	DefineCustomBoolVariable("bioseq.enable_dml",
 							"Enables DML",
 							NULL,
-							&columnar_enable_dml,
+							&bioseq_enable_dml,
 							true,
 							PGC_USERSET,
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -187,10 +187,10 @@ columnar_guc_init()
 							NULL, 
 							NULL);
 
-	DefineCustomBoolVariable("columnar.enable_column_cache",
+	DefineCustomBoolVariable("bioseq.enable_column_cache",
 							"Enables column based caching",
 							NULL,
-							&columnar_enable_page_cache,
+							&bioseq_enable_page_cache,
 							false,
 							PGC_USERSET,
 							0,
@@ -198,10 +198,10 @@ columnar_guc_init()
 							NULL,
 							NULL);
 
-	DefineCustomIntVariable("columnar.column_cache_size",
+	DefineCustomIntVariable("bioseq.column_cache_size",
 							"Size of the column based cache in megabytes",
 							NULL,
-							&columnar_page_cache_size,
+							&bioseq_page_cache_size,
 							200U,
 							20U,
 							20000U,
@@ -211,10 +211,10 @@ columnar_guc_init()
 							NULL,
 							NULL);
 
-	DefineCustomBoolVariable("columnar.enable_columnar_index_scan",
+	DefineCustomBoolVariable("bioseq.enable_bioseq_index_scan",
 							 "Enables custom columnar index scan",
 							 NULL,
-							 &columnar_index_scan,
+							 &bioseq_index_scan,
 							 false,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -235,13 +235,13 @@ ParseCompressionType(const char *compressionTypeString)
 	Assert(compressionTypeString != NULL);
 
 	for (int compressionIndex = 0;
-		 columnar_compression_options[compressionIndex].name != NULL;
+		 bioseq_compression_options[compressionIndex].name != NULL;
 		 compressionIndex++)
 	{
-		const char *compressionName = columnar_compression_options[compressionIndex].name;
+		const char *compressionName = bioseq_compression_options[compressionIndex].name;
 		if (strncmp(compressionTypeString, compressionName, NAMEDATALEN) == 0)
 		{
-			return static_cast<CompressionType>(columnar_compression_options[compressionIndex].val);
+			return static_cast<CompressionType>(bioseq_compression_options[compressionIndex].val);
 		}
 	}
 
@@ -258,14 +258,14 @@ const char *
 CompressionTypeStr(CompressionType requestedType)
 {
 	for (int compressionIndex = 0;
-		 columnar_compression_options[compressionIndex].name != NULL;
+		 bioseq_compression_options[compressionIndex].name != NULL;
 		 compressionIndex++)
 	{
 		CompressionType compressionType =
-			static_cast<CompressionType>(columnar_compression_options[compressionIndex].val);
+			static_cast<CompressionType>(bioseq_compression_options[compressionIndex].val);
 		if (compressionType == requestedType)
 		{
-			return columnar_compression_options[compressionIndex].name;
+			return bioseq_compression_options[compressionIndex].name;
 		}
 	}
 

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_cache.c
+ * bioseq_cache.c
  *
  * Storage and management of cached data.
  *
@@ -89,9 +89,9 @@ ColumnarCacheMemoryContext(void)
 	{
 		columnarCacheContext = 
 			AllocSetContextCreate(TopMemoryContext, 
-								  "Columnar Decompression Cache", 
-								  0, (uint64) (columnar_page_cache_size * 1024 * 1024 * .1), 
-								  columnar_page_cache_size * 1024 * 1024);
+								  "Bioseq Decompression Cache", 
+								  0, (uint64) (bioseq_page_cache_size * 1024 * 1024 * .1), 
+								  bioseq_page_cache_size * 1024 * 1024);
 		memset(&statistics, 0, sizeof(ColumnarCacheStatistics));
 		head = NULL;
 	}
@@ -297,7 +297,7 @@ void
 ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, 
 					  uint32 columnId, void *data)
 {
-	if (columnar_enable_page_cache == false)
+	if (bioseq_enable_page_cache == false)
 	{
 		return;
 	}
@@ -352,10 +352,10 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 	}
 
 	/* If we are over our cache allocation, clear until we are at 90%. */
-	if (totalAllocationLength >= (columnar_page_cache_size * 1024 * 1024))
+	if (totalAllocationLength >= (bioseq_page_cache_size * 1024 * 1024))
 	{
-		EvictCache((columnar_page_cache_size * 1024 * 1024 * .1) + 
-					(totalAllocationLength - (columnar_page_cache_size * 1024 * 1024)));
+		EvictCache((bioseq_page_cache_size * 1024 * 1024 * .1) + 
+					(totalAllocationLength - (bioseq_page_cache_size * 1024 * 1024)));
 	}
 
 	statistics.writes++;
@@ -372,7 +372,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 void *
 ColumnarRetrieveCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId)
 {
-	if (columnar_enable_page_cache == false)
+	if (bioseq_enable_page_cache == false)
 	{
 		return NULL;
 	}

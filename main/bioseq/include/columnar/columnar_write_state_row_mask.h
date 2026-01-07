@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_write_state_row_mask.h
+ * bioseq_write_state_row_mask.h
  *
  * Declaration for Row Mask Entry
  *

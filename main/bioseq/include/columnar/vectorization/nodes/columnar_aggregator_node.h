@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_aggregator_node.h
+ * bioseq_aggregator_node.h
  *	Custom scan method for aggregation
  * 
  * IDENTIFICATION
@@ -21,7 +21,7 @@ typedef struct VectorAggState
 	AggState *aggstate;
 } VectorAggState;
 
-extern CustomScan *columnar_create_aggregator_node(void);
-extern void columnar_register_aggregator_node(void);
+extern CustomScan *bioseq_create_aggregator_node(void);
+extern void bioseq_register_aggregator_node(void);
 
 #endif

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_customscan.c
+ * bioseq_customscan.c
  *
  * This file contains the implementation of a postgres custom scan that
  * we use to push down the projections into the table access methods.
@@ -174,18 +174,18 @@ static int ColumnarPlannerDebugLevel = DEBUG3;
 
 
 const struct CustomPathMethods ColumnarScanPathMethods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "BioseqScan",
 	.PlanCustomPath = ColumnarScanPath_PlanCustomPath,
 	.ReparameterizeCustomPathByChild = ColumnarScanPath_ReparameterizeCustomPathByChild,
 };
 
 const struct CustomScanMethods ColumnarScanScanMethods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "BioseqScan",
 	.CreateCustomScanState = ColumnarScan_CreateCustomScanState,
 };
 
 const struct CustomExecMethods ColumnarScanExecuteMethods = {
-	.CustomName = "ColumnarScan",
+	.CustomName = "BioseqScan",
 
 	.BeginCustomScan = ColumnarScan_BeginCustomScan,
 	.ExecCustomScan = ColumnarScan_ExecCustomScan,
@@ -216,18 +216,18 @@ static const struct config_enum_entry debug_level_options[] = {
 
 
 const CustomScanMethods *
-columnar_customscan_methods(void)
+bioseq_customscan_methods(void)
 {
 	return &ColumnarScanScanMethods;
 }
 
 
 /*
- * columnar_customscan_init installs the hook required to intercept the postgres planner and
+ * bioseq_customscan_init installs the hook required to intercept the postgres planner and
  * provide extra paths for columnar tables
  */
 void
-columnar_customscan_init()
+bioseq_customscan_init()
 {
 	PreviousSetRelPathlistHook = set_rel_pathlist_hook;
 	set_rel_pathlist_hook = ColumnarSetRelPathlistHook;
@@ -237,7 +237,7 @@ columnar_customscan_init()
 
 	/* register customscan specific GUC's */
 	DefineCustomBoolVariable(
-		"columnar.enable_custom_scan",
+		"bioseq.enable_custom_scan",
 		"Enables the use of a custom scan to push projections and quals "
 					 "into the storage layer.",
 		NULL,
@@ -247,9 +247,9 @@ columnar_customscan_init()
 		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 		NULL, NULL, NULL);
 	DefineCustomBoolVariable(
-		"columnar.enable_qual_pushdown",
-		"Enables qual pushdown into columnar. This has no effect unless "
-					 "columnar.enable_custom_scan is true.",
+		"bioseq.enable_qual_pushdown",
+		"Enables qual pushdown into bioseq. This has no effect unless "
+					 "bioseq.enable_custom_scan is true.",
 		NULL,
 		&EnableColumnarQualPushdown,
 		true,
@@ -257,7 +257,7 @@ columnar_customscan_init()
 		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 		NULL, NULL, NULL);
 	DefineCustomRealVariable(
-		"columnar.qual_pushdown_correlation_threshold",
+		"bioseq.qual_pushdown_correlation_threshold",
 		"Correlation threshold to attempt to push a qual "
 					 "referencing the given column. A value of 0 means "
 					 "attempt to push down all quals, even if the column "
@@ -271,7 +271,7 @@ columnar_customscan_init()
 		GUC_NO_SHOW_ALL |GUC_NOT_IN_SAMPLE,
 		NULL, NULL, NULL);
 	DefineCustomIntVariable(
-		"columnar.max_custom_scan_paths",
+		"bioseq.max_custom_scan_paths",
 		"Maximum number of custom scan paths to generate "
 					 "for a columnar table when planning.",
 		NULL,
@@ -283,7 +283,7 @@ columnar_customscan_init()
 		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 		NULL, NULL, NULL);
 	DefineCustomEnumVariable(
-		"columnar.planner_debug_level",
+		"bioseq.planner_debug_level",
 		"Message level for columnar planning information.",
 		NULL,
 		&ColumnarPlannerDebugLevel,
@@ -348,7 +348,7 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 		if (EnableColumnarCustomScan)
 		{
 			/*
-			 * When columnar custom scan is enabled (columnar.enable_custom_scan),
+			 * When columnar custom scan is enabled (bioseq.enable_custom_scan),
 			 * we only consider ColumnarScanPath's & IndexPath's. For this reason,
 			 * we remove other paths and re-estimate IndexPath costs to make accurate
 			 * comparisons between them.
@@ -511,7 +511,7 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	 * by indexAM since we should consider index traversal related costs too.
 	 */
 	
-	if (!columnar_index_scan)
+	if (!bioseq_index_scan)
 	{
 		Cost columnarIndexScanCost = ColumnarIndexScanAdditionalCost(root, rel, relationId,
 																	indexPath);
@@ -960,7 +960,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 				(errmsg("columnar planner: cannot push down clause: "
 						"absolute correlation (%.3f) of var attribute %d is "
 						"smaller than the value configured in "
-						"\"columnar.qual_pushdown_correlation_threshold\" "
+						"\"bioseq.qual_pushdown_correlation_threshold\" "
 						"(%.3f)", absVarCorrelation, varSide->varattno,
 						ColumnarQualPushdownCorrelationThreshold)));
 		return NULL;
@@ -1226,32 +1226,32 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	Path *columnarScanPath = AddColumnarScanPath(root, rel, rte, paramRelids);
 	add_path(rel, columnarScanPath);
-	if (columnar_enable_parallel_execution)
+	if (bioseq_enable_parallel_execution)
 		columnarScanPath->total_cost += columnarScanPath->rows * 0.1;
 
 	/* For columnar custom scan we should also do planning for parallel exeuction
 	 * if it is enabled with GUC.
 	 */
-	if (columnar_enable_parallel_execution)
+	if (bioseq_enable_parallel_execution)
 	{
-		int columnar_min_parallel_process_running = columnar_min_parallel_processes;
+		int bioseq_min_parallel_process_running = bioseq_min_parallel_processes;
 
-		if (columnar_min_parallel_processes > max_parallel_workers)
+		if (bioseq_min_parallel_processes > max_parallel_workers)
 		{
-			elog(DEBUG1, "columnar.min_parallel_proceses is set higher than max_parallel_workers.");
+			elog(DEBUG1, "bioseq.min_parallel_proceses is set higher than max_parallel_workers.");
 			elog(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
-			columnar_min_parallel_process_running = 
-				Min(max_parallel_workers, columnar_min_parallel_processes);
+			bioseq_min_parallel_process_running = 
+				Min(max_parallel_workers, bioseq_min_parallel_processes);
 		}
 
 		if (parallel_leader_participation)
-			columnar_min_parallel_process_running--;
+			bioseq_min_parallel_process_running--;
 
 		/*
 		 * We know how many workers are we going to run. Since workers are using single stripe
 		 * probably it doesn't have much sense to spawn more workers than stripes in table.
 		 */
-		columnar_min_parallel_process_running = Min(columnar_min_parallel_process_running,
+		bioseq_min_parallel_process_running = Min(bioseq_min_parallel_process_running,
 													parallel_leader_participation ?
 													ColumnarTableStripeCount(rte->relid) - 1 :
 													ColumnarTableStripeCount(rte->relid));
@@ -1259,12 +1259,12 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		// FIXME: Fix this!!!
 		const bool force_parallel = true;
 		if (force_parallel) {
-			JustLog("PARA Override columnar_min_parallel_processes;");
-			columnar_min_parallel_process_running = columnar_min_parallel_processes;
+			JustLog("PARA Override bioseq_min_parallel_processes;");
+			bioseq_min_parallel_process_running = bioseq_min_parallel_processes;
 		}
 
 		if (force_parallel || (rel->consider_parallel && rel->lateral_relids == NULL && 
-			columnar_min_parallel_process_running > 0))
+			bioseq_min_parallel_process_running > 0))
 		{
 			JustLog("PARA Append");
 			/*
@@ -1273,7 +1273,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			Path *parallelColumnarScanPath = 
 				AddColumnarScanPath(root, rel, rte, NULL);
 
-			parallelColumnarScanPath->parallel_workers = columnar_min_parallel_process_running;
+			parallelColumnarScanPath->parallel_workers = bioseq_min_parallel_process_running;
 			parallelColumnarScanPath->parallel_aware = true;
 			AdjustColumnarParallelScanCost(parallelColumnarScanPath);
 
@@ -1805,7 +1805,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	 * stored in third position of custom_exprs list and rest of
 	 * qual list (which can't be vectorized) in scan.plan.qual.
 	 */
-	if (columnar_enable_vectorization)
+	if (bioseq_enable_vectorization)
 	{
 		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
 		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);
@@ -1998,11 +1998,11 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * filter which can be vectorized.
 	 */
 	columnarScanState->vectorization.vectorizationEnabled =
-		columnar_enable_vectorization &&
+		bioseq_enable_vectorization &&
 		(columnarScanState->vectorization.vectorizedQualList != NULL ||
 		 columnarScanState->vectorization.vectorizationAggregate);
 
-	JustLog("Begin scan check vectorizationAggregate columnar_enable_vectorization:{} vectorizedQualList!=NULL:{} vectorizationAggregate:{}", columnar_enable_vectorization, (columnarScanState->vectorization.vectorizedQualList != NULL), columnarScanState->vectorization.vectorizationAggregate);
+	JustLog("Begin scan check vectorizationAggregate bioseq_enable_vectorization:{} vectorizedQualList!=NULL:{} vectorizationAggregate:{}", bioseq_enable_vectorization, (columnarScanState->vectorization.vectorizedQualList != NULL), columnarScanState->vectorization.vectorizationAggregate);
 	if (columnarScanState->vectorization.vectorizationAggregate)
 	{
 		ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
@@ -2102,7 +2102,7 @@ ColumnarAttrNeeded(ScanState *ss, List *customList)
 		{
 			ereport(ERROR, 
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("MIN / MAX TransactionID or CommandID not supported for ColumnarScan")));
+					 errmsg("MIN / MAX TransactionID or CommandID not supported for BioseqScan")));
 		}
 
 		if (var->varattno == 0 )
@@ -2630,7 +2630,7 @@ ColumnarScanNext(ColumnarScanState *columnarScanState)
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
-		scandesc = columnar_beginscan_extended(node->ss.ss_currentRelation,
+		scandesc = bioseq_beginscan_extended(node->ss.ss_currentRelation,
 											   columnarScanState->snapshot,
 											   0, NULL, NULL, flags,
 											   columnarScanState->attrNeeded,
@@ -2767,7 +2767,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	List *projectedColumns = ColumnarVarNeeded(columnarScanState);
 	const char *projectedColumnsStr = ColumnarProjectedColumnsStr(
 		context, projectedColumns);
-	ExplainPropertyText("Columnar Projected Columns",
+	ExplainPropertyText("Bioseq Projected Columns",
 						projectedColumnsStr, es);
 
 	CustomScan *cscan = castNode(CustomScan, node->ss.ps.plan);
@@ -2776,7 +2776,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	{
 		const char *pushdownClausesStr = ColumnarPushdownClausesStr(
 			context, chunkGroupFilter);
-		ExplainPropertyText("Columnar Chunk Group Filters",
+		ExplainPropertyText("Bioseq Chunk Group Filters",
 							pushdownClausesStr, es);
 
 		ColumnarScanDesc columnarScanDesc =
@@ -2784,7 +2784,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		if (columnarScanDesc != NULL)
 		{
 			ExplainPropertyInteger(
-				"Columnar Chunk Groups Removed by Filter",
+				"Bioseq Chunk Groups Removed by Filter",
 				NULL, ColumnarScanChunkGroupsFiltered(columnarScanDesc), es);
 		}
 	}
@@ -2794,11 +2794,11 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	{
 		const char *vectorizedWhereClauses = ColumnarPushdownClausesStr(
 					context, columnarScanState->vectorization.vectorizedQualList);
-		ExplainPropertyText("Columnar Vectorized Filter", 
+		ExplainPropertyText("Bioseq Vectorized Filter", 
 							vectorizedWhereClauses, es);
 	}
 
-	if (columnar_enable_page_cache)
+	if (bioseq_enable_page_cache)
 	{
 		ColumnarCacheStatistics *statistics = ColumnarGetCacheStatistics();
 

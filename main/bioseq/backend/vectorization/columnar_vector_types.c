@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_vector_types.c
+ * bioseq_vector_types.c
  *
  * Copyright (c) Hydra, Inc.
  *

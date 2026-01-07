@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_compression.h
+ * bioseq_compression.h
  *
  * Type and function declarations for compression methods.
  *

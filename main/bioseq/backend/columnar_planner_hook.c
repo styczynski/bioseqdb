@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_planner_hook.c
+ * bioseq_planner_hook.c
  *
  * Copyright (c) Hydra, Inc.
  *
@@ -24,7 +24,7 @@
 static planner_hook_type PreviousPlannerHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
-static Oid columnar_tableam_oid = InvalidOid;
+static Oid bioseq_tableam_oid = InvalidOid;
 
 static PlannedStmt * ColumnarPlannerHook(Query *parse,  const char *query_string,
 										 int cursorOptions, ParamListInfo boundParams);
@@ -44,9 +44,9 @@ typedef struct PlanTreeMutatorContext
 
 
 static bool
-columnar_index_table(Oid indexOid, Oid columnarTableAmOid)
+bioseq_index_table(Oid indexOid, Oid columnarTableAmOid)
 {
-	BMethod(columnar_index_table);
+	BMethod(bioseq_index_table);
 	HeapTuple ht_idx;
 	Form_pg_index idxrec;
 	HeapTuple ht_table;
@@ -169,7 +169,7 @@ PlanTreeMutator(Plan *node, void *context)
 			JustLog("Plan tree mutator encountered custom plan");
 			CustomScan *customScan = (CustomScan *) node;
 
-			if (customScan->methods == columnar_customscan_methods())
+			if (customScan->methods == bioseq_customscan_methods())
 			{
 				PlanTreeMutatorContext *planTreeContext = (PlanTreeMutatorContext *) context;
 
@@ -197,7 +197,7 @@ PlanTreeMutator(Plan *node, void *context)
 			Agg	*newAgg;
 			CustomScan *vectorizedAggNode;
 
-			if (!columnar_enable_vectorization)
+			if (!bioseq_enable_vectorization)
 				return node;
 
 			if (aggNode->plan.lefttree->type == T_CustomScan)
@@ -206,7 +206,7 @@ PlanTreeMutator(Plan *node, void *context)
 				if (aggNode->aggstrategy == AGG_PLAIN)
 				{
 					JustLog("Agg plain");
-					vectorizedAggNode = columnar_create_aggregator_node();
+					vectorizedAggNode = bioseq_create_aggregator_node();
 
 					FLATCOPY(newAgg, aggNode, Agg);
 
@@ -248,7 +248,7 @@ PlanTreeMutator(Plan *node, void *context)
 		}
 		case T_IndexScan:
 		{
-			if (!columnar_index_scan)
+			if (!bioseq_index_scan)
 				return node;
 
 			IndexScan *indexScanNode = (IndexScan *) node;
@@ -256,10 +256,10 @@ PlanTreeMutator(Plan *node, void *context)
 			CustomScan *columnarIndexScan;
 
 			/* Check if index is build on columnar table */
-			if (!columnar_index_table(indexScanNode->indexid, columnar_tableam_oid))
+			if (!bioseq_index_table(indexScanNode->indexid, bioseq_tableam_oid))
 				return node;
 
-			columnarIndexScan = columnar_create_indexscan_node();
+			columnarIndexScan = bioseq_create_indexscan_node();
 			FLATCOPY(newIndexScan, indexScanNode, IndexScan);
 
 			columnarIndexScan->custom_plans = 
@@ -359,13 +359,16 @@ ColumnarPlannerHook(Query *parse,
 	MemoryContext saved_context;
 
 	JustLog("Planner hook invoked: {}", nodeStr(parse));
-	JustLog("Query: [{}]", std::string(query_string));
+	//JustLog("Query: [{}]", std::string(query_string));
 
 	if (PreviousPlannerHook) {
+		JustLog("Previous planner hook");
 		stmt = PreviousPlannerHook(parse, query_string, cursorOptions, boundParams);
 	} else {
+		JustLog("standard_planner");
 		stmt = standard_planner(parse, query_string, cursorOptions, boundParams);
 	}
+	JustLog("Done previous hook exec.");
 
 	/*
 	 * In the case of a CREATE TABLE AS query, we are not able to successfully
@@ -376,21 +379,22 @@ ColumnarPlannerHook(Query *parse,
 	JustLog("Check CREATE TABLE AS query");
 	if (parse->commandType == CMD_SELECT)
 	{
-		if (IsCreateTableAs(query_string))
+		JustLog("Sanity check query is null => {}", query_string == nullptr);
+		if (query_string != nullptr && IsCreateTableAs(query_string))
 		{
 			stmt->parallelModeNeeded = 0;
 		}
 	}
 
 	JustLog("Check vectorization");
-	if (!(columnar_enable_vectorization			/* Vectorization should be enabled */
-			|| columnar_index_scan)				/* or Columnar Index Scan */
+	if (!(bioseq_enable_vectorization			/* Vectorization should be enabled */
+			|| bioseq_index_scan)				/* or Columnar Index Scan */
 		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
 		|| list_length(stmt->rtable) != 1)		/* JOINs are not yet supported */
 		return stmt;
 
-	if (columnar_tableam_oid == InvalidOid)
-		columnar_tableam_oid = get_table_am_oid("columnar", true);
+	if (bioseq_tableam_oid == InvalidOid)
+		bioseq_tableam_oid = get_table_am_oid("columnar", true);
 
 	savedPlanTree = stmt->planTree;
 	savedSubplan = stmt->subplans;
@@ -471,6 +475,7 @@ IsCreateTableAs(const char *query)
 	c = strstr(haystack, "create");
 	if (c == NULL)
 	{
+		JustLog("IsCreateTableAs exit => false");
 		pfree(haystack);
 		return false;
 	}
@@ -478,6 +483,7 @@ IsCreateTableAs(const char *query)
 	t = strstr(c + 6, "table");
 	if (t == NULL)
 	{
+		JustLog("IsCreateTableAs exit => false");
 		pfree(haystack);
 		return false;
 	}
@@ -485,18 +491,20 @@ IsCreateTableAs(const char *query)
 	a = strstr(t + 5, "as");
 	if (a == NULL)
 	{
+		JustLog("IsCreateTableAs exit => false");
 		pfree(haystack);
 		return false;
 	}
 
 	pfree(haystack);
 
+	JustLog("IsCreateTableAs exit => true");
 	return true;
 }
 
-void columnar_planner_init(void)
+void bioseq_planner_init(void)
 {
-	BMethod(columnar_planner_init);
+	BMethod(bioseq_planner_init);
 
 	PreviousPlannerHook = planner_hook;
 	planner_hook = ColumnarPlannerHook;
@@ -505,6 +513,6 @@ void columnar_planner_init(void)
 	ProcessUtility_hook = ProcessUtilityHook;
 
 
-	columnar_register_aggregator_node();
-	columnar_register_indexscan_node();
+	bioseq_register_aggregator_node();
+	bioseq_register_indexscan_node();
 }

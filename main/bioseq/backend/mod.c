@@ -27,7 +27,7 @@ void
 _PG_init(void)
 {
   log_configure();
-	columnar_init();
+	bioseq_init();
 }
 
 CXX_PG_FUNCTION_INFO_V1(testtest);

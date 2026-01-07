@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_storage.h
+ * bioseq_storage.h
  *
  * Type and function declarations for storage of columnar data in blocks.
  *
@@ -27,7 +27,7 @@
 
 /*
  * Logical offsets never fall on the first two physical pages. See
- * comments in columnar_storage.c.
+ * comments in bioseq_storage.c.
  */
 #define ColumnarInvalidLogicalOffset 0
 #define ColumnarFirstLogicalOffset ((BLCKSZ - SizeOfPageHeaderData) * 2)

@@ -188,7 +188,7 @@ typedef enum StripeWriteStateEnum
 
 	/*
 	 * Writer transaction did abort either before inserting into
-	 * columnar.stripe or after.
+	 * bioseq.stripe or after.
 	 */
 	STRIPE_WRITE_ABORTED,
 
@@ -225,7 +225,7 @@ typedef struct ColumnarReadState ColumnarReadState;
 struct ColumnarWriteState;
 typedef struct ColumnarWriteState ColumnarWriteState;
 
-/* RowMaskWriteStateEntry represents write state entry of columnar.row_mask row */
+/* RowMaskWriteStateEntry represents write state entry of bioseq.row_mask row */
 struct RowMaskWriteStateEntry;
 typedef struct RowMaskWriteStateEntry RowMaskWriteStateEntry;
 
@@ -242,23 +242,23 @@ typedef struct ColumnarCacheStatistics
 } ColumnarCacheStatistics;
 
 /* GUCs */
-extern int columnar_compression;
-extern int columnar_stripe_row_limit;
-extern int columnar_chunk_group_row_limit;
-extern int columnar_compression_level;
-extern bool columnar_enable_parallel_execution;
-extern int columnar_min_parallel_processes;
-extern bool columnar_enable_vectorization;
-extern bool columnar_enable_dml;
-extern bool columnar_enable_page_cache;
-extern int columnar_page_cache_size;
-extern bool columnar_index_scan;
+extern int bioseq_compression;
+extern int bioseq_stripe_row_limit;
+extern int bioseq_chunk_group_row_limit;
+extern int bioseq_compression_level;
+extern bool bioseq_enable_parallel_execution;
+extern int bioseq_min_parallel_processes;
+extern bool bioseq_enable_vectorization;
+extern bool bioseq_enable_dml;
+extern bool bioseq_enable_page_cache;
+extern int bioseq_page_cache_size;
+extern bool bioseq_index_scan;
 
 
 /* called when the user changes options on the given relation */
 typedef void (*ColumnarTableSetOptions_hook_type)(Oid relid, ColumnarOptions options);
 
-extern void columnar_init(void);
+extern void bioseq_init(void);
 
 extern CompressionType ParseCompressionType(const char *compressionTypeString);
 
@@ -319,14 +319,14 @@ extern const char * CompressionTypeStr(CompressionType type);
 extern ItemPointerData row_number_to_tid(uint64 rowNumber);
 extern uint64 LookupStorageId(RelFileLocator relfilelocator);
 
-/* columnar_metadata_tables.c */
+/* bioseq_metadata_tables.c */
 extern void InitColumnarOptions(Oid regclass);
 extern void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
 extern bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
 extern bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
 extern bool IsColumnarTableAmTable(Oid relationId);
 
-/* columnar_metadata_tables.c */
+/* bioseq_metadata_tables.c */
 extern void DeleteMetadataRows(RelFileLocator relfilelocator);
 extern void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
 extern uint64 ColumnarMetadataNewStorageId(void);
@@ -363,7 +363,7 @@ extern StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
 extern uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
 extern StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
 													   Snapshot snapshot);
-extern "C" Datum columnar_relation_storageid(PG_FUNCTION_ARGS);
+extern "C" Datum bioseq_relation_storageid(PG_FUNCTION_ARGS);
 extern bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
 extern bool UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
@@ -375,8 +375,8 @@ extern bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot
 extern "C" Datum create_table_row_mask(PG_FUNCTION_ARGS);
 extern EState * create_estate_for_relation(Relation rel);
 
-/* columnar_planner_hook.c */
-extern void columnar_planner_init(void);
+/* bioseq_planner_hook.c */
+extern void bioseq_planner_init(void);
 
 /* write_state_interface.c */
 extern void FlushWriteStateWithNewSnapshot(Oid relfilelocator,
@@ -392,7 +392,7 @@ extern bool PendingWritesInUpperTransactions(Oid relfilelocator,
 											 SubTransactionId currentSubXid);
 
 /* write_state_management.c */
-extern ColumnarWriteState * columnar_init_write_state(Relation relation, TupleDesc
+extern ColumnarWriteState * bioseq_init_write_state(Relation relation, TupleDesc
 													  tupdesc,
 														Oid tupSlotRelationId,
 													  SubTransactionId currentSubXid);
@@ -436,7 +436,7 @@ extern ColumnarReadState ** FindReadStateCache(Relation relation,
 extern void CleanupReadStateCache(SubTransactionId currentSubXid);
 extern MemoryContext GetColumnarReadStateCache(void);
 
-/* columnar_cache.c */
+/* bioseq_cache.c */
 extern void ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
 extern void ColumnarAddCacheEntry(uint64, uint64, uint64, uint32, void *);
 extern void *ColumnarRetrieveCache(uint64, uint64, uint64, uint32);

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_indexscan.h
+ * bioseq_indexscan.h
  *	Custom scan method for index
  * 
  * IDENTIFICATION
@@ -21,7 +21,7 @@ typedef struct ColumnarIndexScanState
 	IndexScanState *indexscan_state;
 } ColumnarIndexScanState;
 
-extern CustomScan * columnar_create_indexscan_node(void);
-extern void columnar_register_indexscan_node(void);
+extern CustomScan * bioseq_create_indexscan_node(void);
+extern void bioseq_register_indexscan_node(void);
 
 #endif

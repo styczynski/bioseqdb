@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_storage.c
+ * bioseq_storage.c
  *
  * Copyright (c) Citus Data, Inc.
  *
@@ -100,7 +100,7 @@ typedef struct PhysicalAddr
 
 
 /* only for testing purposes */
-CXX_PG_FUNCTION_INFO_V1(test_columnar_storage_write_new_page);
+CXX_PG_FUNCTION_INFO_V1(test_bioseq_storage_write_new_page);
 
 
 /*
@@ -863,13 +863,13 @@ ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage)
 
 
 /*
- * test_columnar_storage_write_new_page is a UDF only used for testing
- * purposes. It could make more sense to define this in columnar_debug.c,
+ * test_bioseq_storage_write_new_page is a UDF only used for testing
+ * purposes. It could make more sense to define this in bioseq_debug.c,
  * but the storage layer doesn't expose ColumnarMetapage to any other files,
  * so we define it here.
  */
 Datum
-test_columnar_storage_write_new_page(PG_FUNCTION_ARGS)
+test_bioseq_storage_write_new_page(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
 

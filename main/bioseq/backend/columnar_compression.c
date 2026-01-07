@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_compression.c
+ * bioseq_compression.c
  *
  * This file contains compression/decompression functions definitions
  * used for columnar.

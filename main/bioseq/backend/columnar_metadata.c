@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_metadata.c
+ * bioseq_metadata.c
  *
  * Copyright (c) Citus Data, Inc.
  * Copyright (c) Hydra, Inc.
@@ -121,22 +121,22 @@ static StripeMetadata * StripeMetadataLookupRowNumber(Relation relation, uint64 
 													  RowNumberLookupMode lookupMode);
 static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
 
-CXX_PG_FUNCTION_INFO_V1(columnar_relation_storageid);
+CXX_PG_FUNCTION_INFO_V1(bioseq_relation_storageid);
 CXX_PG_FUNCTION_INFO_V1(create_table_row_mask);
 
-/* constants for columnar.options */
-#define Natts_columnar_options 5
-#define Anum_columnar_options_regclass 1
-#define Anum_columnar_options_chunk_group_row_limit 2
-#define Anum_columnar_options_stripe_row_limit 3
-#define Anum_columnar_options_compression_level 4
-#define Anum_columnar_options_compression 5
+/* constants for bioseq.options */
+#define Natts_bioseq_options 5
+#define Anum_bioseq_options_regclass 1
+#define Anum_bioseq_options_chunk_group_row_limit 2
+#define Anum_bioseq_options_stripe_row_limit 3
+#define Anum_bioseq_options_compression_level 4
+#define Anum_bioseq_options_compression 5
 
 /* ----------------
- *		columnar.options definition.
+ *		bioseq.options definition.
  * ----------------
  */
-typedef struct FormData_columnar_options
+typedef struct FormData_bioseq_options
 {
 	Oid regclass;
 	int32 chunk_group_row_limit;
@@ -146,57 +146,57 @@ typedef struct FormData_columnar_options
 
 #ifdef CATALOG_VARLEN           /* variable-length fields start here */
 #endif
-} FormData_columnar_options;
-typedef FormData_columnar_options *Form_columnar_options;
+} FormData_bioseq_options;
+typedef FormData_bioseq_options *Form_bioseq_options;
 
 
-/* constants for columnar.stripe */
-#define Natts_columnar_stripe 9
-#define Anum_columnar_stripe_storageid 1
-#define Anum_columnar_stripe_stripe 2
-#define Anum_columnar_stripe_file_offset 3
-#define Anum_columnar_stripe_data_length 4
-#define Anum_columnar_stripe_column_count 5
-#define Anum_columnar_stripe_chunk_row_count 6
-#define Anum_columnar_stripe_row_count 7
-#define Anum_columnar_stripe_chunk_count 8
-#define Anum_columnar_stripe_first_row_number 9
+/* constants for bioseq.stripe */
+#define Natts_bioseq_stripe 9
+#define Anum_bioseq_stripe_storageid 1
+#define Anum_bioseq_stripe_stripe 2
+#define Anum_bioseq_stripe_file_offset 3
+#define Anum_bioseq_stripe_data_length 4
+#define Anum_bioseq_stripe_column_count 5
+#define Anum_bioseq_stripe_chunk_row_count 6
+#define Anum_bioseq_stripe_row_count 7
+#define Anum_bioseq_stripe_chunk_count 8
+#define Anum_bioseq_stripe_first_row_number 9
 
-/* constants for columnar.chunk_group */
-#define Natts_columnar_chunkgroup 5
-#define Anum_columnar_chunkgroup_storageid 1
-#define Anum_columnar_chunkgroup_stripe 2
-#define Anum_columnar_chunkgroup_chunk 3
-#define Anum_columnar_chunkgroup_row_count 4
-#define Anum_columnar_chunkgroup_deleted_rows 5
+/* constants for bioseq.chunk_group */
+#define Natts_bioseq_chunkgroup 5
+#define Anum_bioseq_chunkgroup_storageid 1
+#define Anum_bioseq_chunkgroup_stripe 2
+#define Anum_bioseq_chunkgroup_chunk 3
+#define Anum_bioseq_chunkgroup_row_count 4
+#define Anum_bioseq_chunkgroup_deleted_rows 5
 
-/* constants for columnar.chunk */
-#define Natts_columnar_chunk 14
-#define Anum_columnar_chunk_storageid 1
-#define Anum_columnar_chunk_stripe 2
-#define Anum_columnar_chunk_attr 3
-#define Anum_columnar_chunk_chunk 4
-#define Anum_columnar_chunk_minimum_value 5
-#define Anum_columnar_chunk_maximum_value 6
-#define Anum_columnar_chunk_value_stream_offset 7
-#define Anum_columnar_chunk_value_stream_length 8
-#define Anum_columnar_chunk_exists_stream_offset 9
-#define Anum_columnar_chunk_exists_stream_length 10
-#define Anum_columnar_chunk_value_compression_type 11
-#define Anum_columnar_chunk_value_compression_level 12
-#define Anum_columnar_chunk_value_decompressed_size 13
-#define Anum_columnar_chunk_value_count 14
+/* constants for bioseq.chunk */
+#define Natts_bioseq_chunk 14
+#define Anum_bioseq_chunk_storageid 1
+#define Anum_bioseq_chunk_stripe 2
+#define Anum_bioseq_chunk_attr 3
+#define Anum_bioseq_chunk_chunk 4
+#define Anum_bioseq_chunk_minimum_value 5
+#define Anum_bioseq_chunk_maximum_value 6
+#define Anum_bioseq_chunk_value_stream_offset 7
+#define Anum_bioseq_chunk_value_stream_length 8
+#define Anum_bioseq_chunk_exists_stream_offset 9
+#define Anum_bioseq_chunk_exists_stream_length 10
+#define Anum_bioseq_chunk_value_compression_type 11
+#define Anum_bioseq_chunk_value_compression_level 12
+#define Anum_bioseq_chunk_value_decompressed_size 13
+#define Anum_bioseq_chunk_value_count 14
 
-/* constants for columnar.row_mask */
-#define Natts_columnar_row_mask 8
-#define Anum_columnar_row_mask_id 1
-#define Anum_columnar_row_mask_storage_id 2
-#define Anum_columnar_row_mask_stripe_id 3
-#define Anum_columnar_row_mask_chunk_id 4
-#define Anum_columnar_row_mask_start_row_number 5
-#define Anum_columnar_row_mask_end_row_number 6
-#define Anum_columnar_row_mask_deleted_rows 7
-#define Anum_columnar_row_mask_mask 8
+/* constants for bioseq.row_mask */
+#define Natts_bioseq_row_mask 8
+#define Anum_bioseq_row_mask_id 1
+#define Anum_bioseq_row_mask_storage_id 2
+#define Anum_bioseq_row_mask_stripe_id 3
+#define Anum_bioseq_row_mask_chunk_id 4
+#define Anum_bioseq_row_mask_start_row_number 5
+#define Anum_bioseq_row_mask_end_row_number 6
+#define Anum_bioseq_row_mask_deleted_rows 7
+#define Anum_bioseq_row_mask_mask 8
 
 
 /*
@@ -208,7 +208,7 @@ InitColumnarOptions(Oid regclass)
 {
 	/*
 	 * When upgrading we retain options for all columnar tables by upgrading
-	 * "columnar.options" catalog table, so we shouldn't do anything here.
+	 * "bioseq.options" catalog table, so we shouldn't do anything here.
 	 */
 	if (IsBinaryUpgrade)
 	{
@@ -216,10 +216,10 @@ InitColumnarOptions(Oid regclass)
 	}
 
 	ColumnarOptions defaultOptions = {
-		.chunkRowCount = static_cast<uint32>(columnar_chunk_group_row_limit),
-		.stripeRowCount = static_cast<uint32>(columnar_stripe_row_limit),
-		.compressionType = static_cast<CompressionType>(columnar_compression),
-		.compressionLevel = columnar_compression_level
+		.chunkRowCount = static_cast<uint32>(bioseq_chunk_group_row_limit),
+		.stripeRowCount = static_cast<uint32>(bioseq_stripe_row_limit),
+		.compressionType = static_cast<CompressionType>(bioseq_compression),
+		.compressionLevel = bioseq_compression_level
 	};
 
 	WriteColumnarOptions(regclass, &defaultOptions, false);
@@ -257,8 +257,8 @@ WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite)
 
 	bool written = false;
 
-	bool nulls[Natts_columnar_options] = { 0 };
-	Datum values[Natts_columnar_options] = {
+	bool nulls[Natts_bioseq_options] = { 0 };
+	Datum values[Natts_bioseq_options] = {
 		ObjectIdGetDatum(regclass),
 		Int32GetDatum(options->chunkRowCount),
 		Int32GetDatum(options->stripeRowCount),
@@ -268,7 +268,7 @@ WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite)
 
 	NameData compressionName = { 0 };
 	namestrcpy(&compressionName, CompressionTypeStr(options->compressionType));
-	values[Anum_columnar_options_compression - 1] = NameGetDatum(&compressionName);
+	values[Anum_bioseq_options_compression - 1] = NameGetDatum(&compressionName);
 
 	/* create heap tuple and insert into catalog table */
 	Relation columnarOptions = safe_relation_open(ColumnarOptionsRelationId(),
@@ -277,7 +277,7 @@ WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite)
 
 	/* find existing item to perform update if exist */
 	ScanKeyData scanKey[1] = { 0 };
-	ScanKeyInit(&scanKey[0], Anum_columnar_options_regclass, BTEqualStrategyNumber,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ,
 				ObjectIdGetDatum(regclass));
 
@@ -292,11 +292,11 @@ WriteColumnarOptions(Oid regclass, ColumnarOptions *options, bool overwrite)
 		{
 			/* TODO check if the options are actually different, skip if not changed */
 			/* update existing record */
-			bool update[Natts_columnar_options] = { 0 };
-			update[Anum_columnar_options_chunk_group_row_limit - 1] = true;
-			update[Anum_columnar_options_stripe_row_limit - 1] = true;
-			update[Anum_columnar_options_compression_level - 1] = true;
-			update[Anum_columnar_options_compression - 1] = true;
+			bool update[Natts_bioseq_options] = { 0 };
+			update[Anum_bioseq_options_chunk_group_row_limit - 1] = true;
+			update[Anum_bioseq_options_stripe_row_limit - 1] = true;
+			update[Anum_bioseq_options_compression_level - 1] = true;
+			update[Anum_bioseq_options_compression - 1] = true;
 
 			HeapTuple tuple = heap_modify_tuple(heapTuple, tupleDescriptor,
 												values, nulls, update);
@@ -352,7 +352,7 @@ DeleteColumnarTableOptions(Oid regclass, bool missingOk)
 
 	/* find existing item to remove */
 	ScanKeyData scanKey[1] = { 0 };
-	ScanKeyInit(&scanKey[0], Anum_columnar_options_regclass, BTEqualStrategyNumber,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ,
 				ObjectIdGetDatum(regclass));
 
@@ -386,7 +386,7 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 {
 	ScanKeyData scanKey[1];
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_options_regclass, BTEqualStrategyNumber,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ,
 				ObjectIdGetDatum(regclass));
 
@@ -416,7 +416,7 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
 	if (HeapTupleIsValid(heapTuple))
 	{
-		Form_columnar_options tupOptions = (Form_columnar_options) GETSTRUCT(heapTuple);
+		Form_bioseq_options tupOptions = (Form_bioseq_options) GETSTRUCT(heapTuple);
 
 		options->chunkRowCount = tupOptions->chunk_group_row_limit;
 		options->stripeRowCount = tupOptions->stripe_row_limit;
@@ -426,10 +426,10 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 	else
 	{
 		/* populate options with system defaults */
-		options->compressionType = static_cast<CompressionType>(columnar_compression);
-		options->stripeRowCount = static_cast<uint32>(columnar_stripe_row_limit);
-		options->chunkRowCount = static_cast<uint32>(columnar_chunk_group_row_limit);
-		options->compressionLevel = columnar_compression_level;
+		options->compressionType = static_cast<CompressionType>(bioseq_compression);
+		options->stripeRowCount = static_cast<uint32>(bioseq_stripe_row_limit);
+		options->chunkRowCount = static_cast<uint32>(bioseq_chunk_group_row_limit);
+		options->compressionLevel = bioseq_compression_level;
 	}
 
 	systable_endscan_ordered(scanDescriptor);
@@ -442,7 +442,7 @@ ReadColumnarOptions(Oid regclass, ColumnarOptions *options)
 
 /*
  * SaveStripeSkipList saves chunkList for a given stripe as rows
- * of columnar.chunk.
+ * of bioseq.chunk.
  */
 void
 SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, StripeSkipList *chunkList,
@@ -464,7 +464,7 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, StripeSkipList 
 			ColumnChunkSkipNode *chunk =
 				&chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
 
-			Datum values[Natts_columnar_chunk] = {
+			Datum values[Natts_bioseq_chunk] = {
 				UInt64GetDatum(storageId),
 				Int64GetDatum(stripe),
 				Int32GetDatum(columnIndex + 1),
@@ -481,21 +481,21 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, StripeSkipList 
 				Int64GetDatum(chunk->rowCount)
 			};
 
-			bool nulls[Natts_columnar_chunk] = { false };
+			bool nulls[Natts_bioseq_chunk] = { false };
 
 			if (chunk->hasMinMax)
 			{
-				values[Anum_columnar_chunk_minimum_value - 1] =
+				values[Anum_bioseq_chunk_minimum_value - 1] =
 					PointerGetDatum(DatumToBytea(chunk->minimumValue,
 												 &tupleDescriptor->attrs[columnIndex]));
-				values[Anum_columnar_chunk_maximum_value - 1] =
+				values[Anum_bioseq_chunk_maximum_value - 1] =
 					PointerGetDatum(DatumToBytea(chunk->maximumValue,
 												 &tupleDescriptor->attrs[columnIndex]));
 			}
 			else
 			{
-				nulls[Anum_columnar_chunk_minimum_value - 1] = true;
-				nulls[Anum_columnar_chunk_maximum_value - 1] = true;
+				nulls[Anum_bioseq_chunk_minimum_value - 1] = true;
+				nulls[Anum_bioseq_chunk_maximum_value - 1] = true;
 			}
 
 			InsertTupleAndEnforceConstraints(modifyState, values, nulls);
@@ -508,7 +508,7 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, StripeSkipList 
 
 
 /*
- * SaveChunkGroups saves the metadata for given chunk groups in columnar.chunk_group.
+ * SaveChunkGroups saves the metadata for given chunk groups in bioseq.chunk_group.
  */
 void
 SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
@@ -525,7 +525,7 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
 	foreach(lc, chunkGroupRowCounts)
 	{
 		int64 rowCount = lfirst_int(lc);
-		Datum values[Natts_columnar_chunkgroup] = {
+		Datum values[Natts_bioseq_chunkgroup] = {
 			UInt64GetDatum(storageId),
 			Int64GetDatum(stripe),
 			Int32GetDatum(chunkId),
@@ -533,7 +533,7 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
 			Int32GetDatum(0)
 		};
 
-		bool nulls[Natts_columnar_chunkgroup] = { false };
+		bool nulls[Natts_bioseq_chunkgroup] = { false };
 
 		InsertTupleAndEnforceConstraints(modifyState, values, nulls);
 		chunkId++;
@@ -545,7 +545,7 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
 
 
 /*
- * SaveEmptyRowMask saves the metadata for inserted rows in columnar.mask_row
+ * SaveEmptyRowMask saves the metadata for inserted rows in bioseq.mask_row
  */
 extern bool 
 SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
@@ -601,7 +601,7 @@ SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 
 			int64 nextSeqId = nextval_internal(columnarRowMaskSeq, false);
 
-			Datum values[Natts_columnar_row_mask] = {
+			Datum values[Natts_bioseq_row_mask] = {
 				Int64GetDatum(nextSeqId),
 				Int64GetDatum(storageId),
 				Int64GetDatum(stripeId),
@@ -612,13 +612,13 @@ SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 				0, /* to be filled below */
 			};
 
-			values[Anum_columnar_row_mask_mask - 1] =
+			values[Anum_bioseq_row_mask_mask - 1] =
 				PointerGetDatum(initialLookupRecord);
 
-			bool nulls[Natts_columnar_row_mask] = { false };
+			bool nulls[Natts_bioseq_row_mask] = { false };
 
 			/*
-			 * columnar.row_mask has UNIQUE constraint which can throw
+			 * bioseq.row_mask has UNIQUE constraint which can throw
 			 * error so we need to catch this and return to function caller
 			 * if saving empty row mask was succesful or not.
 			 */
@@ -670,9 +670,9 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 	Relation columnarChunk = table_open(columnarChunkOid, AccessShareLock);
 	Relation index = index_open(ColumnarChunkIndexRelationId(), AccessShareLock);
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_chunk_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], Anum_columnar_chunk_stripe,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripe));
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
@@ -691,14 +691,14 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		Datum datumArray[Natts_columnar_chunk];
-		bool isNullArray[Natts_columnar_chunk];
+		Datum datumArray[Natts_bioseq_chunk];
+		bool isNullArray[Natts_bioseq_chunk];
 
 		heap_deform_tuple(heapTuple, RelationGetDescr(columnarChunk), datumArray,
 						  isNullArray);
 
-		int32 attr = DatumGetInt32(datumArray[Anum_columnar_chunk_attr - 1]);
-		int32 chunkIndex = DatumGetInt32(datumArray[Anum_columnar_chunk_chunk - 1]);
+		int32 attr = DatumGetInt32(datumArray[Anum_bioseq_chunk_attr - 1]);
+		int32 chunkIndex = DatumGetInt32(datumArray[Anum_bioseq_chunk_chunk - 1]);
 
 		if (attr <= 0 || attr > columnCount)
 		{
@@ -716,34 +716,34 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 
 		ColumnChunkSkipNode *chunk =
 			&chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
-		chunk->rowCount = DatumGetInt64(datumArray[Anum_columnar_chunk_value_count -
+		chunk->rowCount = DatumGetInt64(datumArray[Anum_bioseq_chunk_value_count -
 												   1]);
 		chunk->valueChunkOffset =
-			DatumGetInt64(datumArray[Anum_columnar_chunk_value_stream_offset - 1]);
+			DatumGetInt64(datumArray[Anum_bioseq_chunk_value_stream_offset - 1]);
 		chunk->valueLength =
-			DatumGetInt64(datumArray[Anum_columnar_chunk_value_stream_length - 1]);
+			DatumGetInt64(datumArray[Anum_bioseq_chunk_value_stream_length - 1]);
 		chunk->existsChunkOffset =
-			DatumGetInt64(datumArray[Anum_columnar_chunk_exists_stream_offset - 1]);
+			DatumGetInt64(datumArray[Anum_bioseq_chunk_exists_stream_offset - 1]);
 		chunk->existsLength =
-			DatumGetInt64(datumArray[Anum_columnar_chunk_exists_stream_length - 1]);
+			DatumGetInt64(datumArray[Anum_bioseq_chunk_exists_stream_length - 1]);
 		chunk->valueCompressionType =
-			static_cast<CompressionType>(DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_type - 1]));
+			static_cast<CompressionType>(DatumGetInt32(datumArray[Anum_bioseq_chunk_value_compression_type - 1]));
 		chunk->valueCompressionLevel =
-			DatumGetInt32(datumArray[Anum_columnar_chunk_value_compression_level - 1]);
+			DatumGetInt32(datumArray[Anum_bioseq_chunk_value_compression_level - 1]);
 		chunk->decompressedValueSize =
-			DatumGetInt64(datumArray[Anum_columnar_chunk_value_decompressed_size - 1]);
+			DatumGetInt64(datumArray[Anum_bioseq_chunk_value_decompressed_size - 1]);
 
-		if (isNullArray[Anum_columnar_chunk_minimum_value - 1] ||
-			isNullArray[Anum_columnar_chunk_maximum_value - 1])
+		if (isNullArray[Anum_bioseq_chunk_minimum_value - 1] ||
+			isNullArray[Anum_bioseq_chunk_maximum_value - 1])
 		{
 			chunk->hasMinMax = false;
 		}
 		else
 		{
 			bytea *minValue = DatumGetByteaP(
-				datumArray[Anum_columnar_chunk_minimum_value - 1]);
+				datumArray[Anum_bioseq_chunk_minimum_value - 1]);
 			bytea *maxValue = DatumGetByteaP(
-				datumArray[Anum_columnar_chunk_maximum_value - 1]);
+				datumArray[Anum_bioseq_chunk_maximum_value - 1]);
 
 			chunk->minimumValue =
 				ByteaToDatum(minValue, &tupleDescriptor->attrs[columnIndex]);
@@ -802,11 +802,11 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 	bytea *chunkRowMaskBytea = make<bytea>(chunkMaskSize + VARHDRSZ);
 	SET_VARSIZE(chunkRowMaskBytea, chunkMaskSize + VARHDRSZ);
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_row_mask_storage_id,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_row_mask_storage_id,
 				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], Anum_columnar_row_mask_start_row_number,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_row_mask_start_row_number,
 				BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(stripeFirstRowNumber));
-	ScanKeyInit(&scanKey[2], Anum_columnar_row_mask_end_row_number,
+	ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
 				BTLessEqualStrategyNumber, F_INT8LE, UInt64GetDatum(stripeFirstRowNumber + rowCount - 1));
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarRowMask,
@@ -817,11 +817,11 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		Datum datumArray[Natts_columnar_row_mask];
-		bool isNullArray[Natts_columnar_row_mask];
+		Datum datumArray[Natts_bioseq_row_mask];
+		bool isNullArray[Natts_bioseq_row_mask];
 
 		heap_deform_tuple(heapTuple, RelationGetDescr(columnarRowMask), datumArray, isNullArray);
-		bytea * currentRowMask = DatumGetByteaP(datumArray[Anum_columnar_row_mask_mask - 1]);
+		bytea * currentRowMask = DatumGetByteaP(datumArray[Anum_bioseq_row_mask_mask - 1]);
 
 		memcpy(VARDATA(chunkRowMaskBytea) + pos,
 			   VARDATA(currentRowMask),
@@ -865,11 +865,11 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
 
 		Relation index = index_open(ColumnarRowMaskIndexRelationId(), AccessShareLock);
 
-		ScanKeyInit(&scanKey[0], Anum_columnar_row_mask_storage_id,
+		ScanKeyInit(&scanKey[0], Anum_bioseq_row_mask_storage_id,
 					BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
-		ScanKeyInit(&scanKey[1], Anum_columnar_row_mask_start_row_number,
+		ScanKeyInit(&scanKey[1], Anum_bioseq_row_mask_start_row_number,
 					BTLessEqualStrategyNumber, F_INT8LE, UInt64GetDatum(rowNumber));
-		ScanKeyInit(&scanKey[2], Anum_columnar_row_mask_end_row_number,
+		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
 					BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(rowNumber));
 
 		SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarRowMask,
@@ -883,7 +883,7 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
 			bool isnull;
 
 			Datum mask =
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_mask,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_mask,
 								tupleDescriptor, &isnull);
 		
 #if PG_VERSION_NUM >= PG_VERSION_16
@@ -901,31 +901,31 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
 			 * Populate row mask cache with values from heap table
 			 */
 			rowMaskEntry->id = DatumGetUInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_id,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_id,
 								tupleDescriptor, &isnull));
 
 			rowMaskEntry->storageId = DatumGetUInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_storage_id,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_storage_id,
 								tupleDescriptor, &isnull));
 			
 			rowMaskEntry->stripeId = DatumGetUInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_stripe_id,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_stripe_id,
 								tupleDescriptor, &isnull));
 			
 			rowMaskEntry->chunkId = DatumGetInt32(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_chunk_id,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_chunk_id,
 								tupleDescriptor, &isnull));
 
 			rowMaskEntry->startRowNumber = DatumGetInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_start_row_number,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_start_row_number,
 								tupleDescriptor, &isnull));
 
 			rowMaskEntry->deletedRows = DatumGetInt32(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_deleted_rows,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_deleted_rows,
 								tupleDescriptor, &isnull));
 
 			rowMaskEntry->endRowNumber = DatumGetInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_columnar_row_mask_end_row_number,
+					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_end_row_number,
 								tupleDescriptor, &isnull));
 
 			rowMask = rowMaskEntry->mask;
@@ -983,7 +983,7 @@ void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 
 	Relation index = index_open(ColumnarRowMaskIndexRelationId(), AccessShareLock);
 
-	ScanKeyInit(&scanKey, Anum_columnar_row_mask_id,
+	ScanKeyInit(&scanKey, Anum_bioseq_row_mask_id,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(rowMaskEntry->id));
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunkGroupMask,
@@ -996,17 +996,17 @@ void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 
 	if (HeapTupleIsValid(oldHeapTuple))
 	{
-		bool update[Natts_columnar_row_mask] = { 0 };
-		bool nulls[Natts_columnar_row_mask] = { 0 };
-		Datum values[Natts_columnar_row_mask] = { 0 };
+		bool update[Natts_bioseq_row_mask] = { 0 };
+		bool nulls[Natts_bioseq_row_mask] = { 0 };
+		Datum values[Natts_bioseq_row_mask] = { 0 };
 
 		// Update deleted row count
-		update[Anum_columnar_row_mask_deleted_rows - 1] = true;
-		values[Anum_columnar_row_mask_deleted_rows - 1] = rowMaskEntry->deletedRows;
+		update[Anum_bioseq_row_mask_deleted_rows - 1] = true;
+		values[Anum_bioseq_row_mask_deleted_rows - 1] = rowMaskEntry->deletedRows;
 
 		// Update mask byte array
-		update[Anum_columnar_row_mask_mask - 1] = true;
-		values[Anum_columnar_row_mask_mask - 1] = PointerGetDatum(rowMaskEntry->mask);
+		update[Anum_bioseq_row_mask_mask - 1] = true;
+		values[Anum_bioseq_row_mask_mask - 1] = PointerGetDatum(rowMaskEntry->mask);
 
 		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
 												   values, nulls, update);
@@ -1096,10 +1096,10 @@ FindNextStripeForParallelWorker(Relation relation,
 	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
 	ScanKeyData scanKey[2];
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
 
-	ScanKeyInit(&scanKey[1], Anum_columnar_stripe_stripe,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
 				BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(nextStripeId));
 
 	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
@@ -1175,7 +1175,7 @@ StripeMetadataLookupRowNumber(Relation relation, uint64 rowNumber, Snapshot snap
 
 	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
 	ScanKeyData scanKey[2];
-	ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
 
 	StrategyNumber strategyNumber = InvalidStrategy;
@@ -1190,7 +1190,7 @@ StripeMetadataLookupRowNumber(Relation relation, uint64 rowNumber, Snapshot snap
 		strategyNumber = BTGreaterStrategyNumber;
 		procedure = F_INT8GT;
 	}
-	ScanKeyInit(&scanKey[1], Anum_columnar_stripe_first_row_number,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_first_row_number,
 				strategyNumber, procedure, UInt64GetDatum(rowNumber));
 
 
@@ -1231,7 +1231,7 @@ StripeMetadataLookupRowNumber(Relation relation, uint64 rowNumber, Snapshot snap
  *
  * Checks performed here are just to catch bugs, so it is encouraged to call
  * this function whenever a StripeMetadata object is built from an heap tuple
- * of columnar.stripe. Currently, BuildStripeMetadata is the only function
+ * of bioseq.stripe. Currently, BuildStripeMetadata is the only function
  * that does this.
  */
 static void
@@ -1301,7 +1301,7 @@ FindStripeWithHighestRowNumber(Relation relation, Snapshot snapshot)
 
 	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
 	ScanKeyData scanKey[1];
-	ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
 
 	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
@@ -1339,9 +1339,9 @@ ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe, uint32 chunkGroupCount,
 	Relation index = index_open(ColumnarChunkGroupIndexRelationId(), AccessShareLock);
 
 	ScanKeyData scanKey[2];
-	ScanKeyInit(&scanKey[0], Anum_columnar_chunkgroup_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_chunkgroup_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], Anum_columnar_chunkgroup_stripe,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_chunkgroup_stripe,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripe));
 
 	SysScanDesc scanDescriptor =
@@ -1364,15 +1364,15 @@ ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe, uint32 chunkGroupCount,
 		if (HeapTupleHeaderIsHotUpdated(heapTuple->t_data))
 			continue;
 
-		Datum datumArray[Natts_columnar_chunkgroup];
-		bool isNullArray[Natts_columnar_chunkgroup];
+		Datum datumArray[Natts_bioseq_chunkgroup];
+		bool isNullArray[Natts_bioseq_chunkgroup];
 
 		heap_deform_tuple(heapTuple,
 						  RelationGetDescr(columnarChunkGroup),
 						  datumArray, isNullArray);
 
 		uint32 tupleChunkGroupIndex =
-			DatumGetUInt32(datumArray[Anum_columnar_chunkgroup_chunk - 1]);
+			DatumGetUInt32(datumArray[Anum_bioseq_chunkgroup_chunk - 1]);
 
 		if (tupleChunkGroupIndex > chunkGroupCount)
 		{
@@ -1381,10 +1381,10 @@ ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe, uint32 chunkGroupCount,
 		}
 
 		(*chunkGroupRowCounts)[tupleChunkGroupIndex] =
-			(uint32) DatumGetUInt64(datumArray[Anum_columnar_chunkgroup_row_count - 1]);
+			(uint32) DatumGetUInt64(datumArray[Anum_bioseq_chunkgroup_row_count - 1]);
 
 		(*chunkGroupDeletedRows)[tupleChunkGroupIndex] =
-			(uint32) DatumGetUInt64(datumArray[Anum_columnar_chunkgroup_deleted_rows - 1]);
+			(uint32) DatumGetUInt64(datumArray[Anum_bioseq_chunkgroup_deleted_rows - 1]);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
@@ -1409,11 +1409,11 @@ UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
 	Relation index = index_open(ColumnarChunkGroupIndexRelationId(), AccessShareLock);
 
 	ScanKeyData scanKey[3];
-	ScanKeyInit(&scanKey[0], Anum_columnar_chunkgroup_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_chunkgroup_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], Anum_columnar_chunkgroup_stripe,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_chunkgroup_stripe,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripe));
-	ScanKeyInit(&scanKey[2], Anum_columnar_chunkgroup_chunk,
+	ScanKeyInit(&scanKey[2], Anum_bioseq_chunkgroup_chunk,
 				BTEqualStrategyNumber, F_OIDEQ, Int32GetDatum(chunkGroupId));
 
 	SysScanDesc scanDescriptor =
@@ -1425,13 +1425,13 @@ UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
 
 	if (HeapTupleIsValid(oldHeapTuple))
 	{
-		bool update[Natts_columnar_chunkgroup] = { 0 };
-		bool nulls[Natts_columnar_chunkgroup] = { 0 };
-		Datum values[Natts_columnar_chunkgroup] = { 0 };
+		bool update[Natts_bioseq_chunkgroup] = { 0 };
+		bool nulls[Natts_bioseq_chunkgroup] = { 0 };
+		Datum values[Natts_bioseq_chunkgroup] = { 0 };
 
 		// Update deleted row count
-		update[Anum_columnar_chunkgroup_deleted_rows - 1] = true;
-		values[Anum_columnar_chunkgroup_deleted_rows - 1] = (deletedRowNumber);
+		update[Anum_bioseq_chunkgroup_deleted_rows - 1] = true;
+		values[Anum_bioseq_chunkgroup_deleted_rows - 1] = (deletedRowNumber);
 
 		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
 												   values, nulls, update);
@@ -1449,35 +1449,35 @@ UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
 
 
 /*
- * InsertEmptyStripeMetadataRow adds a row to columnar.stripe for the empty
+ * InsertEmptyStripeMetadataRow adds a row to bioseq.stripe for the empty
  * stripe reservation made for stripeId.
  */
 static void
 InsertEmptyStripeMetadataRow(uint64 storageId, uint64 stripeId, uint32 columnCount,
 							 uint32 chunkGroupRowCount, uint64 firstRowNumber)
 {
-	bool nulls[Natts_columnar_stripe] = { false };
+	bool nulls[Natts_bioseq_stripe] = { false };
 
-	Datum values[Natts_columnar_stripe] = { 0 };
-	values[Anum_columnar_stripe_storageid - 1] =
+	Datum values[Natts_bioseq_stripe] = { 0 };
+	values[Anum_bioseq_stripe_storageid - 1] =
 		UInt64GetDatum(storageId);
-	values[Anum_columnar_stripe_stripe - 1] =
+	values[Anum_bioseq_stripe_stripe - 1] =
 		UInt64GetDatum(stripeId);
-	values[Anum_columnar_stripe_column_count - 1] =
+	values[Anum_bioseq_stripe_column_count - 1] =
 		UInt32GetDatum(columnCount);
-	values[Anum_columnar_stripe_chunk_row_count - 1] =
+	values[Anum_bioseq_stripe_chunk_row_count - 1] =
 		UInt32GetDatum(chunkGroupRowCount);
-	values[Anum_columnar_stripe_first_row_number - 1] =
+	values[Anum_bioseq_stripe_first_row_number - 1] =
 		UInt64GetDatum(firstRowNumber);
 
 	/* stripe has no rows yet, so initialize rest of the columns accordingly */
-	values[Anum_columnar_stripe_row_count - 1] =
+	values[Anum_bioseq_stripe_row_count - 1] =
 		UInt64GetDatum(0);
-	values[Anum_columnar_stripe_file_offset - 1] =
+	values[Anum_bioseq_stripe_file_offset - 1] =
 		UInt64GetDatum(ColumnarInvalidLogicalOffset);
-	values[Anum_columnar_stripe_data_length - 1] =
+	values[Anum_bioseq_stripe_data_length - 1] =
 		UInt64GetDatum(0);
-	values[Anum_columnar_stripe_chunk_count - 1] =
+	values[Anum_bioseq_stripe_chunk_count - 1] =
 		UInt32GetDatum(0);
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
@@ -1552,9 +1552,9 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64 stripeId)
 	Relation columnarChunk = table_open(columnarChunkOid, AccessShareLock);
 	Relation index = index_open(ColumnarChunkIndexRelationId(), AccessShareLock);
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_chunk_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], Anum_columnar_chunk_stripe,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripeId));
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
@@ -1565,14 +1565,14 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64 stripeId)
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		Datum datumArray[Natts_columnar_chunk];
-		bool isNullArray[Natts_columnar_chunk];
+		Datum datumArray[Natts_bioseq_chunk];
+		bool isNullArray[Natts_bioseq_chunk];
 
 		heap_deform_tuple(heapTuple, RelationGetDescr(columnarChunk), datumArray,
 						  isNullArray);
 
 		decompressedChunkSize +=
-			DatumGetInt64(datumArray[Anum_columnar_chunk_value_decompressed_size - 1]);
+			DatumGetInt64(datumArray[Anum_bioseq_chunk_value_decompressed_size - 1]);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
@@ -1639,7 +1639,7 @@ GetHighestUsedAddressAndId(uint64 storageId,
 
 /*
  * ReserveEmptyStripe reserves an empty stripe for given relation
- * and inserts it into columnar.stripe. It is guaranteed that concurrent
+ * and inserts it into bioseq.stripe. It is guaranteed that concurrent
  * writes won't overwrite the returned stripe.
  */
 EmptyStripeReservation *
@@ -1655,7 +1655,7 @@ ReserveEmptyStripe(Relation rel, uint64 columnCount, uint64 chunkGroupRowCount,
 		ColumnarStorageReserveRowNumber(rel, stripeRowCount);
 
 	/*
-	 * XXX: Instead of inserting a dummy entry to columnar.stripe and
+	 * XXX: Instead of inserting a dummy entry to bioseq.stripe and
 	 * updating it when flushing the stripe, we could have a hash table
 	 * in shared memory for the bookkeeping of ongoing writes.
 	 */
@@ -1679,17 +1679,17 @@ CompleteStripeReservation(Relation rel, uint64 stripeId, uint64 sizeBytes,
 	uint64 resLogicalStart = ColumnarStorageReserveData(rel, sizeBytes);
 	uint64 storageId = ColumnarStorageGetStorageId(rel, false);
 
-	bool update[Natts_columnar_stripe] = { false };
-	update[Anum_columnar_stripe_file_offset - 1] = true;
-	update[Anum_columnar_stripe_data_length - 1] = true;
-	update[Anum_columnar_stripe_row_count - 1] = true;
-	update[Anum_columnar_stripe_chunk_count - 1] = true;
+	bool update[Natts_bioseq_stripe] = { false };
+	update[Anum_bioseq_stripe_file_offset - 1] = true;
+	update[Anum_bioseq_stripe_data_length - 1] = true;
+	update[Anum_bioseq_stripe_row_count - 1] = true;
+	update[Anum_bioseq_stripe_chunk_count - 1] = true;
 
-	Datum newValues[Natts_columnar_stripe] = { 0 };
-	newValues[Anum_columnar_stripe_file_offset - 1] = Int64GetDatum(resLogicalStart);
-	newValues[Anum_columnar_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
-	newValues[Anum_columnar_stripe_row_count - 1] = UInt64GetDatum(rowCount);
-	newValues[Anum_columnar_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
+	Datum newValues[Natts_bioseq_stripe] = { 0 };
+	newValues[Anum_bioseq_stripe_file_offset - 1] = Int64GetDatum(resLogicalStart);
+	newValues[Anum_bioseq_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
+	newValues[Anum_bioseq_stripe_row_count - 1] = UInt64GetDatum(rowCount);
+	newValues[Anum_bioseq_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
 
 	return UpdateStripeMetadataRow(storageId, stripeId, update, newValues);
 }
@@ -1709,9 +1709,9 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 	InitDirtySnapshot(dirtySnapshot);
 
 	ScanKeyData scanKey[2];
-	ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
-	ScanKeyInit(&scanKey[1], Anum_columnar_stripe_stripe,
+	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripeId));
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
@@ -1737,7 +1737,7 @@ UpdateStripeMetadataRow(uint64 storageId, uint64 stripeId, bool *update,
 	 * heap_inplace_update already doesn't allow changing size of the original
 	 * tuple, so we don't allow setting any Datum's to NULL values.
 	 */
-	bool newNulls[Natts_columnar_stripe] = { false };
+	bool newNulls[Natts_bioseq_stripe] = { false };
 	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
 	HeapTuple modifiedTuple = heap_modify_tuple(oldTuple, tupleDescriptor,
 												newValues, newNulls, update);
@@ -1779,7 +1779,7 @@ ReadDataFileStripeList(uint64 storageId, Snapshot snapshot, ScanDirection scanDi
 	ScanKeyData scanKey[1];
 	HeapTuple heapTuple;
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
@@ -1817,27 +1817,27 @@ BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple)
 {
 	Assert(RelationGetRelid(columnarStripes) == ColumnarStripeRelationId());
 
-	Datum datumArray[Natts_columnar_stripe];
-	bool isNullArray[Natts_columnar_stripe];
+	Datum datumArray[Natts_bioseq_stripe];
+	bool isNullArray[Natts_bioseq_stripe];
 	heap_deform_tuple(heapTuple, RelationGetDescr(columnarStripes),
 					  datumArray, isNullArray);
 
 	StripeMetadata *stripeMetadata = make<StripeMetadata>();
-	stripeMetadata->id = DatumGetInt64(datumArray[Anum_columnar_stripe_stripe - 1]);
+	stripeMetadata->id = DatumGetInt64(datumArray[Anum_bioseq_stripe_stripe - 1]);
 	stripeMetadata->fileOffset = DatumGetInt64(
-		datumArray[Anum_columnar_stripe_file_offset - 1]);
+		datumArray[Anum_bioseq_stripe_file_offset - 1]);
 	stripeMetadata->dataLength = DatumGetInt64(
-		datumArray[Anum_columnar_stripe_data_length - 1]);
+		datumArray[Anum_bioseq_stripe_data_length - 1]);
 	stripeMetadata->columnCount = DatumGetInt32(
-		datumArray[Anum_columnar_stripe_column_count - 1]);
+		datumArray[Anum_bioseq_stripe_column_count - 1]);
 	stripeMetadata->chunkCount = DatumGetInt32(
-		datumArray[Anum_columnar_stripe_chunk_count - 1]);
+		datumArray[Anum_bioseq_stripe_chunk_count - 1]);
 	stripeMetadata->chunkGroupRowCount = DatumGetInt32(
-		datumArray[Anum_columnar_stripe_chunk_row_count - 1]);
+		datumArray[Anum_bioseq_stripe_chunk_row_count - 1]);
 	stripeMetadata->rowCount = DatumGetInt64(
-		datumArray[Anum_columnar_stripe_row_count - 1]);
+		datumArray[Anum_bioseq_stripe_row_count - 1]);
 	stripeMetadata->firstRowNumber = DatumGetUInt64(
-		datumArray[Anum_columnar_stripe_first_row_number - 1]);
+		datumArray[Anum_bioseq_stripe_first_row_number - 1]);
 
 	/*
 	 * If there is unflushed data in a parent transaction, then we would
@@ -1877,19 +1877,19 @@ DeleteMetadataRows(RelFileLocator relfilelocator)
 	uint64 storageId = LookupStorageId(relfilelocator);
 
 	DeleteStorageFromColumnarMetadataTable(ColumnarStripeRelationId(),
-										   Anum_columnar_stripe_storageid,
+										   Anum_bioseq_stripe_storageid,
 										   ColumnarStripePKeyIndexRelationId(),
 										   storageId);
 	DeleteStorageFromColumnarMetadataTable(ColumnarChunkGroupRelationId(),
-										   Anum_columnar_chunkgroup_storageid,
+										   Anum_bioseq_chunkgroup_storageid,
 										   ColumnarChunkGroupIndexRelationId(),
 										   storageId);
 	DeleteStorageFromColumnarMetadataTable(ColumnarChunkRelationId(),
-										   Anum_columnar_chunk_storageid,
+										   Anum_bioseq_chunk_storageid,
 										   ColumnarChunkIndexRelationId(),
 										   storageId);
 	DeleteStorageFromColumnarMetadataTable(ColumnarRowMaskRelationId(),
-										   Anum_columnar_row_mask_storage_id,
+										   Anum_bioseq_row_mask_storage_id,
 										   ColumnarRowMaskIndexRelationId(),
 										   storageId);
 }
@@ -1915,26 +1915,26 @@ DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId)
 
 	DeleteStripeFromColumnarMetadataTable(
 		ColumnarStripeRelationId(),
-		Anum_columnar_stripe_storageid,
-		Anum_columnar_stripe_stripe,
+		Anum_bioseq_stripe_storageid,
+		Anum_bioseq_stripe_stripe,
 		ColumnarStripePKeyIndexRelationId(),
 		storageId, stripeId);
 	DeleteStripeFromColumnarMetadataTable(
 		ColumnarChunkGroupRelationId(),
-		Anum_columnar_chunkgroup_storageid,
-		Anum_columnar_chunkgroup_stripe,
+		Anum_bioseq_chunkgroup_storageid,
+		Anum_bioseq_chunkgroup_stripe,
 		ColumnarChunkGroupIndexRelationId(),
 		storageId, stripeId);
 	DeleteStripeFromColumnarMetadataTable(
 		ColumnarChunkRelationId(),
-		Anum_columnar_chunk_storageid,
-		Anum_columnar_chunk_stripe,
+		Anum_bioseq_chunk_storageid,
+		Anum_bioseq_chunk_stripe,
 		ColumnarChunkIndexRelationId(),
 		storageId, stripeId);
 	DeleteStripeFromColumnarMetadataTable(
 		ColumnarRowMaskRelationId(),
-		Anum_columnar_row_mask_storage_id,
-		Anum_columnar_row_mask_stripe_id,
+		Anum_bioseq_row_mask_storage_id,
+		Anum_bioseq_row_mask_stripe_id,
 		ColumnarRowMaskStripeIndexRelationId(),
 		storageId, stripeId);
 }
@@ -2210,7 +2210,7 @@ ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm)
 
 
 /*
- * ColumnarStorageIdSequenceRelationId returns relation id of columnar.stripe.
+ * ColumnarStorageIdSequenceRelationId returns relation id of bioseq.stripe.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2221,7 +2221,7 @@ ColumnarStorageIdSequenceRelationId(void)
 
 
 /*
- * ColumnarStripeRelationId returns relation id of columnar.stripe.
+ * ColumnarStripeRelationId returns relation id of bioseq.stripe.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2232,7 +2232,7 @@ ColumnarStripeRelationId(void)
 
 
 /*
- * ColumnarStripePKeyIndexRelationId returns relation id of columnar.stripe_pkey.
+ * ColumnarStripePKeyIndexRelationId returns relation id of bioseq.stripe_pkey.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2244,7 +2244,7 @@ ColumnarStripePKeyIndexRelationId(void)
 
 /*
  * ColumnarStripeFirstRowNumberIndexRelationId returns relation id of
- * columnar.stripe_first_row_number_idx.
+ * bioseq.stripe_first_row_number_idx.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2255,7 +2255,7 @@ ColumnarStripeFirstRowNumberIndexRelationId(void)
 
 
 /*
- * ColumnarOptionsRelationId returns relation id of columnar.options.
+ * ColumnarOptionsRelationId returns relation id of bioseq.options.
  */
 static Oid
 ColumnarOptionsRelationId(void)
@@ -2266,7 +2266,7 @@ ColumnarOptionsRelationId(void)
 
 
 /*
- * ColumnarOptionsIndexRegclass returns relation id of columnar.options_pkey.
+ * ColumnarOptionsIndexRegclass returns relation id of bioseq.options_pkey.
  */
 static Oid
 ColumnarOptionsIndexRegclass(void)
@@ -2277,7 +2277,7 @@ ColumnarOptionsIndexRegclass(void)
 
 
 /*
- * ColumnarChunkRelationId returns relation id of columnar.chunk.
+ * ColumnarChunkRelationId returns relation id of bioseq.chunk.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2289,7 +2289,7 @@ ColumnarChunkRelationId(void)
 
 
 /*
- * ColumnarChunkGroupRelationId returns relation id of columnar.chunk_group.
+ * ColumnarChunkGroupRelationId returns relation id of bioseq.chunk_group.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2301,7 +2301,7 @@ ColumnarChunkGroupRelationId(void)
 
 
 /*
- * ColumnarRowMaskRelationId returns relation id of columnar.row_mask.
+ * ColumnarRowMaskRelationId returns relation id of bioseq.row_mask.
  */
 static Oid
 ColumnarRowMaskRelationId(void)
@@ -2312,7 +2312,7 @@ ColumnarRowMaskRelationId(void)
 
 
 /*
- * ColumnarRowMaskSeqId returns relation id of columnar.row_mask_seq.
+ * ColumnarRowMaskSeqId returns relation id of bioseq.row_mask_seq.
  */
 static Oid
 ColumnarRowMaskSeqId(void)
@@ -2324,7 +2324,7 @@ ColumnarRowMaskSeqId(void)
 
 
 /*
- * ColumnarChunkIndexRelationId returns relation id of columnar.chunk_pkey.
+ * ColumnarChunkIndexRelationId returns relation id of bioseq.chunk_pkey.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2336,7 +2336,7 @@ ColumnarChunkIndexRelationId(void)
 
 
 /*
- * ColumnarChunkGroupIndexRelationId returns relation id of columnar.chunk_group_pkey.
+ * ColumnarChunkGroupIndexRelationId returns relation id of bioseq.chunk_group_pkey.
  * TODO: should we cache this similar to citus?
  */
 static Oid
@@ -2349,7 +2349,7 @@ ColumnarChunkGroupIndexRelationId(void)
 
 /*
  * ColumnarRowMaskIndexRelationId returns relation id 
- * of columnar.row_mask_pkey
+ * of bioseq.row_mask_pkey
  */
 static Oid
 ColumnarRowMaskIndexRelationId(void)
@@ -2360,7 +2360,7 @@ ColumnarRowMaskIndexRelationId(void)
 
 /*
  * ColumnarRowMaskStripeIndexRelationId returns relation id 
- * of columnar.columnar_row_mask_stripe_unique
+ * of bioseq.bioseq_row_mask_stripe_unique
  */
 static Oid
 ColumnarRowMaskStripeIndexRelationId(void)
@@ -2377,12 +2377,12 @@ ColumnarRowMaskStripeIndexRelationId(void)
 static Oid
 ColumnarNamespaceId(void)
 {
-	Oid nspace = get_namespace_oid("columnar_internal", true);
+	Oid nspace = get_namespace_oid("bioseq_internal", true);
 	JustLog("Check fetch columnar namespace");
 	/* if schema is earlier than 11.1-1 */
 	if (!OidIsValid(nspace))
 	{
-		nspace = get_namespace_oid("columnar", false);
+		nspace = get_namespace_oid("bioseq", false);
 	}
 	JustLog("Fetch columnar namespace done");
 	return nspace;
@@ -2422,11 +2422,11 @@ ColumnarMetadataNewStorageId()
 
 
 /*
- * columnar_relation_storageid returns storage id associated with the
+ * bioseq_relation_storageid returns storage id associated with the
  * given relation id, or -1 if there is no associated storage id yet.
  */
 Datum
-columnar_relation_storageid(PG_FUNCTION_ARGS)
+bioseq_relation_storageid(PG_FUNCTION_ARGS)
 {
 	Oid relationId = PG_GETARG_OID(0);
 	Relation relation = safe_relation_open(relationId, AccessShareLock);
@@ -2464,7 +2464,7 @@ create_table_row_mask(PG_FUNCTION_ARGS)
 	ScanKeyData scanKey[1];
 	StripeMetadata *stripeMetadata = NULL;
 
-	ScanKeyInit(&scanKey[0], Anum_columnar_stripe_storageid,
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
 
 	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
@@ -2502,7 +2502,7 @@ create_table_row_mask(PG_FUNCTION_ARGS)
 		if(!SaveEmptyRowMask(storageId, stripeMetadata->id,
 							 stripeMetadata->firstRowNumber, chunkGroupRowCount))
 		{
-			elog(WARNING, "relation \"%s\" already has columnar.row_mask populated.",
+			elog(WARNING, "relation \"%s\" already has bioseq.row_mask populated.",
 				 RelationGetRelationName(relation));
 			created = false;
 			break;
@@ -2593,17 +2593,17 @@ RewriteStripeMetadataRowWithNewValues(Relation rel, uint64 stripeId,
 {
 	uint64 storageId = ColumnarStorageGetStorageId(rel, false);
 
-	bool update[Natts_columnar_stripe] = { false };
-	update[Anum_columnar_stripe_file_offset - 1] = true;
-	update[Anum_columnar_stripe_data_length - 1] = true;
-	update[Anum_columnar_stripe_row_count - 1] = true;
-	update[Anum_columnar_stripe_chunk_count - 1] = true;
+	bool update[Natts_bioseq_stripe] = { false };
+	update[Anum_bioseq_stripe_file_offset - 1] = true;
+	update[Anum_bioseq_stripe_data_length - 1] = true;
+	update[Anum_bioseq_stripe_row_count - 1] = true;
+	update[Anum_bioseq_stripe_chunk_count - 1] = true;
 
-	Datum newValues[Natts_columnar_stripe] = { 0 };
-	newValues[Anum_columnar_stripe_file_offset - 1] = Int64GetDatum(fileOffset);
-	newValues[Anum_columnar_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
-	newValues[Anum_columnar_stripe_row_count - 1] = UInt64GetDatum(rowCount);
-	newValues[Anum_columnar_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
+	Datum newValues[Natts_bioseq_stripe] = { 0 };
+	newValues[Anum_bioseq_stripe_file_offset - 1] = Int64GetDatum(fileOffset);
+	newValues[Anum_bioseq_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
+	newValues[Anum_bioseq_stripe_row_count - 1] = UInt64GetDatum(rowCount);
+	newValues[Anum_bioseq_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
 
 	return UpdateStripeMetadataRow(storageId, stripeId, update, newValues);
 }

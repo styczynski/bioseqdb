@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_vector_execution.h
+ * bioseq_vector_execution.h
  *
  * Vectorization execution function
  *

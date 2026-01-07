@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_version_compat.h
+ * bioseq_version_compat.h
  *
  *  Compatibility macros for writing code agnostic to PostgreSQL versions
  *

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_metadata.h
+ * bioseq_metadata.h
  *
  * Type and function declarations for Columnar metadata.
  *
@@ -16,7 +16,7 @@
 
 /*
  * StripeMetadata represents information about a stripe. This information is
- * stored in the metadata table "columnar.stripe".
+ * stored in the metadata table "bioseq.stripe".
  */
 typedef struct StripeMetadata
 {

@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_read_state_cache.c
+ * bioseq_read_state_cache.c
  *
  * Copyright (c) Hydra, Inc.
  *

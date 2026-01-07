@@ -79,7 +79,7 @@ index_beginscan_internal(Relation indexRelation,
  * Caller must be holding suitable locks on the heap and the index.
  */
 static IndexScanDesc
-columnar_index_beginscan(Relation heapRelation,
+bioseq_index_beginscan(Relation heapRelation,
 						 Relation indexRelation,
 						 Snapshot snapshot,
 						 int nkeys, int norderbys,
@@ -97,7 +97,7 @@ columnar_index_beginscan(Relation heapRelation,
 	scan->xs_snapshot = snapshot;
 
 	/* prepare to fetch index matches from table */
-	scan->xs_heapfetch = columnar_index_fetch_begin_extended(heapRelation, attr_needed);
+	scan->xs_heapfetch = bioseq_index_fetch_begin_extended(heapRelation, attr_needed);
 
 	return scan;
 }
@@ -148,7 +148,7 @@ IndexNext(IndexScanState *node)
 			ColumnarAttrNeeded(&node->ss, ((IndexScan *) node->ss.ps.plan)->indexqualorig);
 
 		scandesc = 
-			columnar_index_beginscan(node->ss.ss_currentRelation,
+			bioseq_index_beginscan(node->ss.ss_currentRelation,
 									 node->iss_RelationDesc,
 									 estate->es_snapshot,
 									 node->iss_NumScanKeys,
@@ -251,7 +251,7 @@ IndexNextWithReorder(IndexScanState *node)
 			ColumnarAttrNeeded(&node->ss, ((IndexScan *) node->ss.ps.plan)->indexqualorig);
 
 		scandesc = 
-			columnar_index_beginscan(node->ss.ss_currentRelation,
+			bioseq_index_beginscan(node->ss.ss_currentRelation,
 									 node->iss_RelationDesc,
 									 estate->es_snapshot,
 									 node->iss_NumScanKeys,
@@ -664,12 +664,12 @@ static void ColumnarIndexScan_InitializeWorkerCustomScan(CustomScanState *node,
 														 shm_toc *toc,
 														 void *coordinate);
 static CustomScanMethods ColumnarIndexCustomScanMethods = {
-	"ColumnarIndexScan",			/* CustomName */
+	"BioseqIndexScan",			/* CustomName */
 	CreateColumnarIndexScanState,	/* CreateCustomScanState */
 };
 
 static CustomExecMethods ColumnarIndexScanExecMethods = {
-	.CustomName = "ColumnarIndexScan",
+	.CustomName = "BioseqIndexScan",
 
 	.BeginCustomScan = ColumnarIndexScan_BeginCustomScan,
 	.ExecCustomScan = ColumnarIndexScan_ExecCustomScan,
@@ -890,7 +890,7 @@ ColumnarIndexScan_InitializeWorkerCustomScan(CustomScanState *node,
 
 
 CustomScan *
-columnar_create_indexscan_node(void)
+bioseq_create_indexscan_node(void)
 {
 	CustomScan *cscan = (CustomScan *) makeNode(CustomScan);
 	cscan->methods = &ColumnarIndexCustomScanMethods;
@@ -899,7 +899,7 @@ columnar_create_indexscan_node(void)
 
 
 void
-columnar_register_indexscan_node(void)
+bioseq_register_indexscan_node(void)
 {
 	RegisterCustomScanMethods(&ColumnarIndexCustomScanMethods);
 }

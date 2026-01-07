@@ -43,15 +43,15 @@ typedef struct ColumnarScanDescData *ColumnarScanDesc;
 
 
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
-extern void columnar_tableam_init(void);
-extern TableScanDesc columnar_beginscan_extended(Relation relation, Snapshot snapshot,
+extern void bioseq_tableam_init(void);
+extern TableScanDesc bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 												 int nkeys, ScanKey key,
 												 ParallelTableScanDesc parallel_scan,
 												 uint32 flags, Bitmapset *attr_needed,
 												 List *scanQual,
 												 ParallelColumnarScan parallelColumnarScan,
 												 bool returnVectorResult);
-extern IndexFetchTableData * columnar_index_fetch_begin_extended(Relation rel,
+extern IndexFetchTableData * bioseq_index_fetch_begin_extended(Relation rel,
 																 Bitmapset *attr_neededs);
 extern int64 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);
 extern bool ColumnarSupportsIndexAM(char *indexAMName);

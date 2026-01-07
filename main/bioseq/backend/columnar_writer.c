@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_writer.c
+ * bioseq_writer.c
  *
  * This file contains function definitions for writing columnar tables. This
  * includes the logic for writing file level metadata, writing row stripes,

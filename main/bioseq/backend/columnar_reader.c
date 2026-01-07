@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * columnar_reader.c
+ * bioseq_reader.c
  *
  * This file contains function definitions for reading columnar tables. This
  * includes the logic for reading file level metadata, reading row stripes,
@@ -238,7 +238,7 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
 			/*
 			* When doing random access (i.e.: index scan), we don't need to flush
 			* pending writes until we need to read them.
-			* columnar_index_fetch_tuple would do so when needed.
+			* bioseq_index_fetch_tuple would do so when needed.
 			*/
 			ColumnarReadFlushPendingWrites(readState);
 		}
@@ -565,7 +565,7 @@ ReadStripeRowByRowNumber(ColumnarReadState *readState,
 			stripeMetadata->firstRowNumber +
 			stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
 
-		if (columnar_enable_dml)
+		if (bioseq_enable_dml)
 		{
 #if PG_VERSION_NUM >= PG_VERSION_16
 			RowMaskWriteStateEntry *rowMaskEntry = 
@@ -701,7 +701,7 @@ ColumnarEndRead(ColumnarReadState *readState)
 	if (readState->snapshotRegisteredByUs)
 	{
 		/*
-		 * init_columnar_read_state created a new snapshot and registered it,
+		 * init_bioseq_read_state created a new snapshot and registered it,
 		 * so now forget it.
 		 */
 		UnregisterSnapshot(readState->snapshot);
@@ -931,7 +931,7 @@ ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
 				stripeId
 				);
 			
-			if (columnar_enable_dml &&
+			if (bioseq_enable_dml &&
 				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
 			{
 				uint64 chunkFirstRowNumber = 
@@ -1886,7 +1886,7 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
 		{
 			ColumnChunkBuffers *chunkBuffers =
 				columnBuffers->chunkBuffersArray[chunkIndex];
-			bool shouldCache = columnar_enable_page_cache == true && chunkBuffers->valueCompressionType != COMPRESSION_NONE;
+			bool shouldCache = bioseq_enable_page_cache == true && chunkBuffers->valueCompressionType != COMPRESSION_NONE;
 
 			if (shouldCache)
 			{
@@ -2099,7 +2099,7 @@ ReadStripeNextVector(StripeReadState *stripeReadState, Datum *columnValues,
 			chunkFirstRowNumber = stripeFirstRowNumber +
 								  stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
 
-			if (columnar_enable_dml &&
+			if (bioseq_enable_dml &&
 				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
 			{
 #if PG_VERSION_NUM >= PG_VERSION_16
