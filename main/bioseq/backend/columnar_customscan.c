@@ -2509,10 +2509,8 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			else
 			{
 				
-				TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, slot->tts_ops);
-				ExecForceStoreMinimalTuple(ExecCopySlotMinimalTuple(slot),
-						  newSlot,
-						  true);
+				TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+				ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
 				//slot->
 				//ExecMaterializeSlot(slot);
 				buffer.push_back(newSlot);
