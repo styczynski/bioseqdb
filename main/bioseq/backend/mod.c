@@ -43,6 +43,11 @@ Datum testtest(PG_FUNCTION_ARGS) {
 CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
   // Nothing here
+  Oid t = get_fn_expr_argtype(fcinfo->flinfo, 0);
+  JustLog("t oid = {}", t);
+  if (t == INT4OID) {
+    return Int32GetDatum(((int32_t) PG_GETARG_INT32(0) + 10000)*100);
+  }
   return Int32GetDatum((int32_t) 999999);
 }
 
