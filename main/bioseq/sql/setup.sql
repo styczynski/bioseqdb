@@ -9,37 +9,40 @@ create database bioseq;
 
 SET columnar.logging = on;
 
-create table x ( a INT, seq TEXT ) using columnar;
+create table x ( a INT, seq TEXT, c INT ) using columnar;
 
 -- select testtest();
 
 INSERT INTO x VALUES (
-    23, 'TEST1'
+    23, 'TEST1', 1
 ), (
-    101, 'TEST2'
+    101, 'TEST2', 1
 ), (
-    69, 'HE'
+    69, 'HE', 2
 ), (
-    42, 'YO'
+    42, 'YO', 2
 );
 
-select
-    a, seq,
-    mmsearch(a, 'A')+1 AS heheszki,
-    mmsearch(a, 'A') AS lol
-from x; --where mmsearch(a, 'A');
 
-select
-    a, seq,
-    mmsearch(a, 'A')+1 AS heheszki,
-    mmsearch(a, 'A') AS lol
-from x;
+EXPLAIN (ANALYZE, BUFFERS) select sum(a), count(*) from x group by c;
 
-select
-    a, seq,
-    mmsearch(a, 'A')+1 AS heheszki,
-    mmsearch(a, 'A') AS lol
-from x;
+-- select
+--     a, seq,
+--     mmsearch(a, 'A')+1 AS heheszki,
+--     mmsearch(a, 'A') AS lol
+-- from x; --where mmsearch(a, 'A');
+
+-- select
+--     a, seq,
+--     mmsearch(a, 'A')+1 AS heheszki,
+--     mmsearch(a, 'A') AS lol
+-- from x;
+
+-- select
+--     a, seq,
+--     mmsearch(a, 'A')+1 AS heheszki,
+--     mmsearch(a, 'A') AS lol
+-- from x;
 
 -- EXPLAIN (ANALYZE, BUFFERS) select a, seq, mmsearch(a, 'A') from x; -- where mmsearch(a, 'A');
 

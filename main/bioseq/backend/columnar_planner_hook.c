@@ -166,6 +166,7 @@ PlanTreeMutator(Plan *node, void *context)
 	{
 		case T_CustomScan:
 		{
+			JustLog("Plan tree mutator encountered custom plan");
 			CustomScan *customScan = (CustomScan *) node;
 
 			if (customScan->methods == columnar_customscan_methods())
@@ -191,6 +192,7 @@ PlanTreeMutator(Plan *node, void *context)
 
 		case T_Agg:
 		{
+			JustLog("Plan tree mutator encountered aggregation");
 			Agg *aggNode = (Agg *) node;
 			Agg	*newAgg;
 			CustomScan *vectorizedAggNode;
@@ -200,8 +202,10 @@ PlanTreeMutator(Plan *node, void *context)
 
 			if (aggNode->plan.lefttree->type == T_CustomScan)
 			{
+				JustLog("With custom scan");
 				if (aggNode->aggstrategy == AGG_PLAIN)
 				{
+					JustLog("Agg plain");
 					vectorizedAggNode = columnar_create_aggregator_node();
 
 					FLATCOPY(newAgg, aggNode, Agg);

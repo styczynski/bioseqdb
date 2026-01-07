@@ -1460,7 +1460,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	cpath->methods = &ColumnarScanPathMethods;
 	// PAPIESZ: Do we support projections ????
-	cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	//cpath->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 
 	/*
 	 * populate generic path information
@@ -1810,6 +1810,8 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
 		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);
 
+		JustLog("Split qual for vectorization");
+
 		cscan->custom_exprs = lappend(cscan->custom_exprs, listDifference);
 
 		if (listDifference != NULL)
@@ -1818,6 +1820,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	}
 	else
 	{
+		JustLog("Do not split qual for vectorization (disabled)");
 		/* We still need to create third entry in custom_exprs */
 		cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
 	}
@@ -1968,8 +1971,13 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * NULL.
 	 */
 	JustLog("Examine custom exprs for vectorization");
-	if (lthird(cscan->custom_exprs) != NIL)
+	if (lthird(cscan->custom_exprs) != NIL) {
+		JustLog("Present");
+		for(auto n : PList<Node>(cscan->custom_exprs)) {
+			JustLog("Vectorized qual = [{}]", nodeStr(n));
+		}
 		columnarScanState->vectorization.vectorizedQualList =  (List*) lthird(cscan->custom_exprs);
+	}
 
 	JustLog("Iterate custom_private");
 	for(auto privateCustomData : PList<Const>(cscan->custom_private))
@@ -1978,6 +1986,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		JustLog("Next expr from custom private");
 		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
+			JustLog("Set vectorizationAggregate")
 			columnarScanState->vectorization.vectorizationAggregate =
 				privateCustomData->constvalue;
 		}
@@ -1993,7 +2002,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		(columnarScanState->vectorization.vectorizedQualList != NULL ||
 		 columnarScanState->vectorization.vectorizationAggregate);
 
-	JustLog("Check vectorizationAggregate");
+	JustLog("Begin scan check vectorizationAggregate columnar_enable_vectorization:{} vectorizedQualList!=NULL:{} vectorizationAggregate:{}", columnar_enable_vectorization, (columnarScanState->vectorization.vectorizedQualList != NULL), columnarScanState->vectorization.vectorizationAggregate);
 	if (columnarScanState->vectorization.vectorizationAggregate)
 	{
 		ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
