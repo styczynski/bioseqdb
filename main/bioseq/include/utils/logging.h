@@ -18,9 +18,9 @@ using namespace fmt::literals;
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 #define AT __FILE__ ":" TOSTRING(__LINE__)
-#define BMethod(NAME) if(enable_logging) { logd(". Function called '{}'", TOSTRING(NAME)); }
-#define EMethod(NAME) if(enable_logging) { logd(". Function exited '{}'", TOSTRING(NAME)); }
-#define JustLog(...) if(enable_logging) { logd(__VA_ARGS__); }
+#define BMethod(NAME) if(enable_logging) { logd(". Function called '{}'", TOSTRING(NAME)); fmtlog::poll();}
+#define EMethod(NAME) if(enable_logging) { logd(". Function exited '{}'", TOSTRING(NAME)); fmtlog::poll(); }
+#define JustLog(...) if(enable_logging) { logd(__VA_ARGS__); fmtlog::poll(); }
 
 extern bool enable_logging;
 

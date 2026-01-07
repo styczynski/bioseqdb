@@ -5,15 +5,21 @@ DROP DATABASE IF EXISTS bioseq;
 
 create database bioseq;
 
+drop table if exists x;
+
 SET columnar.logging = on;
 
-create table x ( a INT, seq TEXT ) using columnar;
+create table x ( a INT, b TEXT, c INT, d INT ) using columnar;
 
--- INSERT INTO x VALUES (
---     23, 'TEST1'
--- ), (
---     101, 'TEST2'
--- );
+INSERT INTO x VALUES (
+    23, 'ABC', 5, 6
+), (
+    101, 'DEF', 5, 1
+);
+
+--EXPLAIN (ANALYZE, BUFFERS) select sum(a) from x group by c;
+EXPLAIN (ANALYZE, BUFFERS) select c from x where d > 0;
+
 
 -- SET parallel_setup_cost = 0;
 -- SET parallel_tuple_cost = 0;

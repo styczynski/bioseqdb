@@ -10,6 +10,9 @@
  */
 
 #include "pg_version_compat.h"
+#include "utils/logging.h"
+
+#include <string>
 
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"
@@ -22,6 +25,7 @@
 bool
 CheckOpExprArgumentRules(List *args)
 {
+	JustLog("Check CheckOpExprArgumentRules()");
 	//ListCell *lcOpExprArgs;
 	bool invalidArgument = false;
 
@@ -33,8 +37,10 @@ CheckOpExprArgumentRules(List *args)
 	//foreach(lcOpExprArgs, args)
 	for(auto arg : PList<Expr>(args))
 	{
-		if (invalidArgument)
+		if (invalidArgument) {
+			JustLog("fail: invalid argument");
 			break;
+		}
 	
 		//Expr *arg = (Expr *) lfirst(lcOpExprArgs);
 		if (IsA(arg, Const))
@@ -42,6 +48,7 @@ CheckOpExprArgumentRules(List *args)
 			if (singleConstArgument)
 			{
 				invalidArgument = true;
+				JustLog("fail: invalid argument single const arg");
 				break;
 			}
 			singleConstArgument = true;
@@ -50,6 +57,7 @@ CheckOpExprArgumentRules(List *args)
 		{
 			if (singleVarArgument)
 			{
+				JustLog("fail: invalid argument single var arg");
 				invalidArgument = true;
 				break;
 			}
@@ -57,11 +65,13 @@ CheckOpExprArgumentRules(List *args)
 		}
 		else
 		{
+			JustLog("fail: some other argument?");
 			invalidArgument = true;
 			break;
 		}
 	}
 
+	JustLog("checked rules = {}", invalidArgument);
 	return invalidArgument;
 }
 
@@ -89,6 +99,7 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 	procedureForm = (Form_pg_proc) GETSTRUCT(procedureTuple);
 
 	int originalProcedureNameLen = strlen(NameStr(procedureForm->proname));
+	JustLog("Lookup vectorized for '{}'", std::string(NameStr(procedureForm->proname)));
 
 	char * vectorizedProcedureName =
 		make<char>(sizeof(char) * originalProcedureNameLen + 2);
@@ -101,6 +112,7 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 	
 	ReleaseSysCache(procedureTuple);
 
+	JustLog("VEC should be '{}'", std::string(vectorizedProcedureName));
 	funcNames = lappend(funcNames, makeString(vectorizedProcedureName));
 
 	argtypes = make<Oid>(sizeof(Oid) * procedureForm->pronargs);
@@ -131,8 +143,11 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 List *
 CreateVectorizedExprList(List *exprList)
 {
-	if (exprList == NULL)
+	JustLog("CreateVectorizedExprList()");
+	if (exprList == NULL) {
+		JustLog("ExprList is null so exit CreateVectorizedExprList()");
 		return exprList;
+	}
 
 	check_stack_depth();
 
@@ -148,6 +163,7 @@ CreateVectorizedExprList(List *exprList)
 		if (node == NULL)
 			return NULL;
 
+		JustLog("Iterate expr");
 		switch(nodeTag(node))
 		{
 			case T_OpExpr:
@@ -172,6 +188,7 @@ CreateVectorizedExprList(List *exprList)
 				if (CheckOpExprArgumentRules(opExprNode->args))
 				{
 					newQualList = lappend(newQualList, opExprNode);
+					JustLog("abandon rules not match");
 					break;
 				}
 
@@ -184,12 +201,14 @@ CreateVectorizedExprList(List *exprList)
 				if (!GetVectorizedProcedureOid(procedureOid, &vectorizedOid))
 				{
 					newQualList = lappend(newQualList, opExprNode);
+					JustLog("nullif no oid abandon");
 					break;
 				}
 
 				OpExpr *opExprNodeVector = copyObject(opExprNode);
 				opExprNodeVector->opfuncid = vectorizedOid;
 				newQualList = lappend(newQualList, opExprNodeVector);
+				JustLog("Found and used nullif");
 				
 				break;
 			}
@@ -216,10 +235,12 @@ CreateVectorizedExprList(List *exprList)
 						booleanClause = make_orclause(newBoolExprArgList);
 					}
 
+					JustLog("Boolean clause appended");
 					newQualList = lappend(newQualList, booleanClause);
 				}
 				else
 				{
+					JustLog("Empty list bool expr");
 					newQualList = lappend(newQualList, boolExpr);
 				}
 
@@ -227,12 +248,14 @@ CreateVectorizedExprList(List *exprList)
 			}
 			default:
 			{
+				JustLog("Default handler");
 				newQualList = lappend(newQualList, node);
 				break;
 			}
 		}
 	}
 
+	JustLog("Finished CreateVectorizedExprList()");
 	return newQualList;
 }
 

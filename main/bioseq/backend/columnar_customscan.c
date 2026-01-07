@@ -1249,7 +1249,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 													ColumnarTableStripeCount(rte->relid));
 
 		// FIXME: Fix this!!!
-		const bool force_parallel = true;
+		const bool force_parallel = false;
 		if (force_parallel) {
 			JustLog("PARA Override columnar_min_parallel_processes;");
 			columnar_min_parallel_process_running = columnar_min_parallel_processes;
@@ -1612,8 +1612,8 @@ AdjustColumnarParallelScanCost(Path *path)
 		path->total_cost /= parallel_divisor;
 
 		// FIXME: Remove
-		JustLog("PARA Set parallel cost to 0");
-		path->total_cost = 0;
+		//JustLog("PARA Set parallel cost to 0");
+		//path->total_cost = 0;
 
 		path->rows = clamp_row_est(path->rows / parallel_divisor);
 	}
@@ -1778,8 +1778,15 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	 */
 	if (columnar_enable_vectorization)
 	{
+		JustLog("try to append vectorized exprs?");
 		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
 		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);
+
+		for(auto q : PList<Node>(listDifference)) {
+			JustLog("Qual HAVE");
+		}
+		JustLog("All list diff iterated");
+		
 
 		cscan->custom_exprs = lappend(cscan->custom_exprs, listDifference);
 
@@ -1938,8 +1945,12 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * NULL.
 	 */
 	JustLog("Examine custom exprs for vectorization");
-	if (lthird(cscan->custom_exprs) != NIL)
+	if (lthird(cscan->custom_exprs) != NIL) {
+		JustLog("We have vectorizedQualList")
 		columnarScanState->vectorization.vectorizedQualList =  (List*) lthird(cscan->custom_exprs);
+	} else {
+		JustLog("We don't have vectorizedQualList");
+	}
 
 	JustLog("Iterate custom_private");
 	for(auto privateCustomData : PList<Const>(cscan->custom_private))
@@ -1947,6 +1958,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		JustLog("Next expr from custom private");
 		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
+			JustLog("SET vectorizationAggregate");
 			columnarScanState->vectorization.vectorizationAggregate =
 				privateCustomData->constvalue;
 		}
@@ -1962,9 +1974,13 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		(columnarScanState->vectorization.vectorizedQualList != NULL ||
 		 columnarScanState->vectorization.vectorizationAggregate);
 
+	JustLog("XVectorization.qual = {}", columnarScanState->vectorization.vectorizedQualList != NULL);
+	JustLog("XVectorization.aggr = {}", columnarScanState->vectorization.vectorizationAggregate);
+
 	JustLog("Check vectorizationAggregate");
 	if (columnarScanState->vectorization.vectorizationAggregate)
 	{
+		JustLog("XVectorization: YES {}", columnarScanState->vectorization.vectorizationAggregate);
 		ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
 
 		if (node->ps.ps_ProjInfo)
@@ -1977,12 +1993,17 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			columnarScanState->vectorization.resultVectorSlot =
 				CreateVectorTupleTableSlot(node->ps.ps_ResultTupleDesc);
 		}
+	} else {
+		JustLog("XVectorization: NO AGGREGATE");
 	}
 
 	if (columnarScanState->vectorization.vectorizationEnabled)
 	{
+		JustLog("XVectorization: ENABLED");
 		columnarScanState->vectorization.scanVectorSlot =
 			CreateVectorTupleTableSlot(cscanstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor);
+	} else {
+		JustLog("XVectorization: DISABLED");
 	}
 
 	columnarScanState->attrNeeded = 

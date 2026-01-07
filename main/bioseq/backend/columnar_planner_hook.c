@@ -127,11 +127,13 @@ ExpressionMutator(Node *node, void *context)
 
 		if (oldAggRefNode->aggdistinct)
 		{
+			JustLog("Vectorized aggregate with DISTINCT not supported.");
 			elog(ERROR, "Vectorized aggregate with DISTINCT not supported.");
 		}
 
 		if (oldAggRefNode->aggfilter)
 		{
+			JustLog("Vectorized aggregate with FILTER not supported");
 			elog(ERROR, "Vectorized aggregate with FILTER not supported");
 		}
 
@@ -141,11 +143,13 @@ ExpressionMutator(Node *node, void *context)
 		Oid vectorizedProcedureOid = 0;
 		if (!GetVectorizedProcedureOid(newAggRefNode->aggfnoid, &vectorizedProcedureOid))
 		{
+			JustLog("Vectorized aggregate not found.");
 			elog(ERROR, "Vectorized aggregate not found.");
 		}
 
 		newAggRefNode->aggfnoid = vectorizedProcedureOid;
 
+		JustLog("ExpressionMutator OK");
 		return (Node *) newAggRefNode;
 	}
 
@@ -168,14 +172,17 @@ PlanTreeMutator(Plan *node, void *context)
 		{
 			CustomScan *customScan = (CustomScan *) node;
 
+			JustLog("PROCESS CUSTOM SCAN HERE");
 			if (customScan->methods == columnar_customscan_methods())
 			{
+				JustLog("PLACE AGGREGATION");
 				PlanTreeMutatorContext *planTreeContext = (PlanTreeMutatorContext *) context;
 
 				Const * vectorizedAggregateExecution = makeNode(Const);
 
 				vectorizedAggregateExecution->constbyval = true;
 				vectorizedAggregateExecution->consttype = CUSTOM_SCAN_VECTORIZED_AGGREGATE;
+				JustLog("SET CONST :D");
 				vectorizedAggregateExecution->constvalue =  planTreeContext->vectorizedAggregation;
 				vectorizedAggregateExecution->constlen = sizeof(bool);
 
@@ -198,14 +205,18 @@ PlanTreeMutator(Plan *node, void *context)
 			if (!columnar_enable_vectorization)
 				return node;
 
+			JustLog("HOOK T_AGG...");
 			if (aggNode->plan.lefttree->type == T_CustomScan)
 			{
+				JustLog("HOOK with custom scan");
 				if (aggNode->aggstrategy == AGG_PLAIN)
 				{
+					JustLog("HOOK AGG PLAIN!");
 					vectorizedAggNode = columnar_create_aggregator_node();
 
 					FLATCOPY(newAgg, aggNode, Agg);
 
+					JustLog("Run ExpressionMutator");
 					newAgg->plan.targetlist = 
 						(List *) expression_tree_mutator((Node *) newAgg->plan.targetlist, ExpressionMutator, NULL);
 
@@ -225,6 +236,7 @@ PlanTreeMutator(Plan *node, void *context)
 					vectorizedAggNodePlan->plan_width = aggNode->plan.plan_width;
 
 
+					JustLog("HOOK VECTORIZE?");
 					PlanTreeMutatorContext *planTreeContext = (PlanTreeMutatorContext *) context;
 					planTreeContext->vectorizedAggregation = true;
 
