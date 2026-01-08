@@ -13,9 +13,8 @@
 #ifndef COLUMNAR_H
 #define COLUMNAR_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
-#include "columnar/columnar_compression.h"
 #include "columnar/columnar_metadata.h"
 #include "columnar/columnar_write_state_row_mask.h"
 
@@ -219,12 +218,13 @@ extern void CleanupReadStateCache(SubTransactionId currentSubXid);
 extern MemoryContext GetColumnarReadStateCache(void);
 
 /* bioseq_cache.c */
-extern void ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
-extern void ColumnarAddCacheEntry(uint64, uint64, uint64, uint32, void *);
-extern void *ColumnarRetrieveCache(uint64, uint64, uint64, uint32);
-extern void ColumnarResetCache(void);
-extern ColumnarCacheStatistics *ColumnarGetCacheStatistics(void);
-extern MemoryContext ColumnarCacheMemoryContext(void);
+// extern void ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
+// extern void ColumnarAddCacheEntry(uint64, uint64, uint64, uint32, void *);
+// extern void *ColumnarRetrieveCache(uint64, uint64, uint64, uint32);
+// extern void ColumnarResetCache(void);
+// extern ColumnarCacheStatistics *ColumnarGetCacheStatistics(void);
+// extern MemoryContext ColumnarCacheMemoryContext(void);
+
 
 
 #endif /* COLUMNAR_H */

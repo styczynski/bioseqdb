@@ -13,8 +13,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "pg_version_compat.h"
-#include "utils/logging.h"
+#include "common.h"
 
 #include <vector>
 
@@ -26,14 +25,14 @@
 #include "columnar/columnar_customscan.h"
 #include "columnar/columnar_metadata.h"
 #include "columnar/columnar_tableam.h"
-#include "columnar/utils/listutils.h"
 
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 
-#ifndef Abs
-#define Abs(x)			((x) >= 0 ? (x) : -(x))
-#endif
+#include "common.h"
+
+import storage_cache;
+import mlogging;
 
 static int32_t counter = 100;
 static List* newtargetlist = nullptr;

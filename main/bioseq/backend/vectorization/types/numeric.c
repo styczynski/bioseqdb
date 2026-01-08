@@ -8,7 +8,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/vectorization/types/numeric.h"
 #include "columnar/vectorization/types/types.h"

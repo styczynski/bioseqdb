@@ -8,14 +8,24 @@
  *
  *-------------------------------------------------------------------------
  */
+module;
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/columnar.h"
 
 #include <time.h>
 #include <unistd.h>
 
+// extern void ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
+// extern void ColumnarAddCacheEntry(uint64, uint64, uint64, uint32, void *);
+// extern void *ColumnarRetrieveCache(uint64, uint64, uint64, uint32);
+// extern void ColumnarResetCache(void);
+// extern ColumnarCacheStatistics *ColumnarGetCacheStatistics(void);
+// extern MemoryContext ColumnarCacheMemoryContext(void);
+
+
+export module storage_cache;
 
 /*
  * Main caching MemoryContext.
@@ -61,7 +71,7 @@ static uint64 totalAllocationLength = 0;
  *
  * Hits and misses, and general cache statistics.
  */
-static ColumnarCacheStatistics statistics = { 0 };
+export ColumnarCacheStatistics statistics = { 0 };
 
 /*
  * Housekeeping of current chunk in use - so they are not evicted.
@@ -82,7 +92,7 @@ static List * ChunkGroupsInUse = NIL;
  * as a child of TopMemoryContext if it does not exist, also clears any
  * statistics gathered.
  */
-MemoryContext
+export MemoryContext
 ColumnarCacheMemoryContext(void)
 {
 	if (columnarCacheContext == NULL)
@@ -105,7 +115,7 @@ ColumnarCacheMemoryContext(void)
 * Deletes the caching memory context and sets it to NULL, thus removing the
 * cache and all of its entries.
 */
-void
+export void
 ColumnarResetCache(void)
 {
 	if (columnarCacheContext != NULL)
@@ -253,7 +263,7 @@ EvictCache(uint64 size)
 	}
 }
 
-void
+export void
 ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
 {
 	bool found = false;
@@ -293,7 +303,7 @@ ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
  *
  * Adds a cache entry, or updates an existing entry.
  */
-void
+export void
 ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, 
 					  uint32 columnId, void *data)
 {
@@ -369,7 +379,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
  * Search for a cache entry, returning NULL if not found.	If found,
  * make a copy in the current memory context and return it.
  */
-void *
+export void*
 ColumnarRetrieveCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId)
 {
 	if (bioseq_enable_page_cache == false)
@@ -417,7 +427,7 @@ ColumnarCacheLength()
 	return count;
 }
 
-ColumnarCacheStatistics *
+export ColumnarCacheStatistics *
 ColumnarGetCacheStatistics(void)
 {
 	statistics.endingCacheSize = totalAllocationLength;
@@ -427,10 +437,10 @@ ColumnarGetCacheStatistics(void)
 }
 
 
-#define CACHE_NATTS 6
-extern "C" Datum cache_walk(PG_FUNCTION_ARGS);
+//define CACHE_NATTS 6
+// extern "C" Datum cache_walk(PG_FUNCTION_ARGS);
 
-CXX_PG_FUNCTION_INFO_V1(cache_walk);
+// CXX_PG_FUNCTION_INFO_V1(cache_walk);
 
 /*
  * Used for debugging, as this data is only available in a transaction
@@ -438,15 +448,15 @@ CXX_PG_FUNCTION_INFO_V1(cache_walk);
  */
 
 
-extern "C" Datum cache_evict(PG_FUNCTION_ARGS);
+//extern "C" Datum cache_evict(PG_FUNCTION_ARGS);
 
-CXX_PG_FUNCTION_INFO_V1(cache_evict);
+//CXX_PG_FUNCTION_INFO_V1(cache_evict);
 
 /*
  * Also used for debugging, with the same constraints that it would only
  * work in a transaction of if the clearing mechanism is explicitly disabled.
  */
-Datum cache_evict(PG_FUNCTION_ARGS)
+POSTGRES_FN(cache_evict)
 {
 	uint64 relId =PG_GETARG_INT64(0);
 	uint64 stripeId = PG_GETARG_INT64(1);

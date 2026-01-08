@@ -32,15 +32,35 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
-#include "utils/logging.h"
-#include "utils/debug.h"
+module;
+#include "common.h"
 
 #include "safe_lib.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_storage.h"
 #include "columnar/columnar_version_compat.h"
+#include "columnar/columnar_tableam.h"
+
+#include "common.h"
+export module storage_physical;
+import mlogging;
+
+export constexpr uint64 COLUMNAR_INVALID_ROW_NUMBER = ((uint64) 0);
+export constexpr uint64 COLUMNAR_FIRST_ROW_NUMBER = ((uint64) 1);
+export constexpr uint64 COLUMNAR_MAX_ROW_NUMBER = ((uint64) (COLUMNAR_FIRST_ROW_NUMBER + VALID_ITEMPOINTER_OFFSETS * VALID_BLOCKNUMBERS));
+
+
+/*
+ * Logical offsets never fall on the first two physical pages. See
+ * comments in bioseq_storage.c.
+ */
+export constexpr uint64 ColumnarInvalidLogicalOffset = 0;
+export constexpr uint64 ColumnarFirstLogicalOffset = ((BLCKSZ - SizeOfPageHeaderData) * 2);
+
+export template<typename T>
+inline auto ColumnarLogicalOffsetIsValid(T X) {
+	return ((X) >= ColumnarFirstLogicalOffset);
+};
 
 /*
  * Content of the first page in main fork, which stores metadata at file
@@ -99,9 +119,6 @@ typedef struct PhysicalAddr
 								  "version or run \"ALTER EXTENSION citus UPDATE\"."
 
 
-/* only for testing purposes */
-CXX_PG_FUNCTION_INFO_V1(test_bioseq_storage_write_new_page);
-
 
 /*
  * Map logical offsets to a physical page and offset where the data is kept.
@@ -148,7 +165,7 @@ static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapag
  *
  * Caller must hold AccessExclusiveLock on the relation.
  */
-void
+export void
 ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 {
 	JustLog("check smgr number of blocks");
@@ -236,7 +253,7 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
  * NB: caller must ensure that metapage already exists, which might not be the
  * case on 10.0.
  */
-void
+export void
 ColumnarStorageUpdateCurrent(Relation rel, bool upgrade, uint64 reservedStripeId,
 							 uint64 reservedRowNumber, uint64 reservedOffset)
 {
@@ -280,7 +297,7 @@ ColumnarStorageUpdateCurrent(Relation rel, bool upgrade, uint64 reservedStripeId
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
+export uint64
 ColumnarStorageGetVersionMajor(Relation rel, bool force)
 {
 	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
@@ -295,7 +312,7 @@ ColumnarStorageGetVersionMajor(Relation rel, bool force)
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
+export uint64
 ColumnarStorageGetVersionMinor(Relation rel, bool force)
 {
 	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
@@ -310,7 +327,7 @@ ColumnarStorageGetVersionMinor(Relation rel, bool force)
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
+export uint64
 ColumnarStorageGetStorageId(Relation rel, bool force)
 {
 	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
@@ -326,7 +343,7 @@ ColumnarStorageGetStorageId(Relation rel, bool force)
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
+export uint64
 ColumnarStorageGetReservedStripeId(Relation rel, bool force)
 {
 	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
@@ -342,7 +359,7 @@ ColumnarStorageGetReservedStripeId(Relation rel, bool force)
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
+export uint64
 ColumnarStorageGetReservedRowNumber(Relation rel, bool force)
 {
 	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
@@ -357,7 +374,7 @@ ColumnarStorageGetReservedRowNumber(Relation rel, bool force)
  * Throw an error if the metapage is not the current version, unless
  * 'force' is true.
  */
-uint64
+export uint64
 ColumnarStorageGetReservedOffset(Relation rel, bool force)
 {
 	ColumnarMetapage metapage = ColumnarMetapageRead(rel, force);
@@ -386,7 +403,7 @@ inline SMgrRelation RelationGetSmgr(Relation rel)
  * ColumnarStorageIsCurrent - return true if metapage exists and is not
  * the current version.
  */
-bool
+export bool
 ColumnarStorageIsCurrent(Relation rel)
 {
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
@@ -405,7 +422,7 @@ ColumnarStorageIsCurrent(Relation rel)
  * ColumnarStorageReserveRowNumber returns reservedRowNumber and advances
  * it for next row number reservation.
  */
-uint64
+export uint64
 ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows)
 {
 	LockRelationForExtension(rel, ExclusiveLock);
@@ -429,7 +446,7 @@ ColumnarStorageReserveRowNumber(Relation rel, uint64 nrows)
  * Note that this function doesn't handle row number reservation.
  * See ColumnarStorageReserveRowNumber function.
  */
-uint64
+export uint64
 ColumnarStorageReserveStripeId(Relation rel)
 {
 	LockRelationForExtension(rel, ExclusiveLock);
@@ -450,7 +467,7 @@ ColumnarStorageReserveStripeId(Relation rel)
 /*
  * ColumnarStorageReserveData - reserve logical data offsets for writing.
  */
-uint64
+export uint64
 ColumnarStorageReserveData(Relation rel, uint64 amount)
 {
 	if (amount == 0)
@@ -493,7 +510,7 @@ ColumnarStorageReserveData(Relation rel, uint64 amount)
  * ColumnarStorageRead - map the logical offset to a block and offset, then
  * read the buffer from multiple blocks if necessary.
  */
-void
+export void
 ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amount)
 {
 	/* if there's no work to do, succeed even with invalid offset */
@@ -529,7 +546,7 @@ ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amoun
  * ColumnarStorageWrite - map the logical offset to a block and offset, then
  * write the buffer across multiple blocks if necessary.
  */
-void
+export void
 ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amount)
 {
 	/* if there's no work to do, succeed even with invalid offset */
@@ -570,7 +587,7 @@ ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amou
  *
  * Returns true if pages were truncated; false otherwise.
  */
-bool
+export bool
 ColumnarStorageTruncate(Relation rel, uint64 newDataReservation)
 {
 	if (!ColumnarLogicalOffsetIsValid(newDataReservation))
@@ -868,8 +885,7 @@ ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage)
  * but the storage layer doesn't expose ColumnarMetapage to any other files,
  * so we define it here.
  */
-Datum
-test_bioseq_storage_write_new_page(PG_FUNCTION_ARGS)
+POSTGRES_FN(test_bioseq_storage_write_new_page)
 {
 	Oid relationId = PG_GETARG_OID(0);
 

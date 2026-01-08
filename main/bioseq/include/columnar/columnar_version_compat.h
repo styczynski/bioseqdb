@@ -12,6 +12,6 @@
 #ifndef COLUMNAR_COMPAT_H
 #define COLUMNAR_COMPAT_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #endif /* COLUMNAR_COMPAT_H */

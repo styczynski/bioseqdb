@@ -1,6 +1,6 @@
 #pragma once
 
-#include "pg_version_compat.h"
+#include "common.h"
 #include "config/config.h"
 
 

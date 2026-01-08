@@ -6,16 +6,36 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
+module;
+#include "common.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_storage.h"
 #include "columnar/columnar_version_compat.h"
 
-static void MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters);
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_store_memory_stats);
-CXX_PG_FUNCTION_INFO_V1(bioseq_storage_info);
+export module storage_debug;
+import storage_physical;
+
+/*
+ * MemoryContextTotals adds stats of the given memory context and its
+ * subtree to the given counters.
+ */
+static void
+MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters)
+{
+	if (context == NULL)
+	{
+		return;
+	}
+
+	MemoryContext child;
+	for (child = context->firstchild; child != NULL; child = child->nextchild)
+	{
+		MemoryContextTotals(child, counters);
+	}
+
+	context->methods->stats_compat(context, NULL, NULL, counters, true);
+}
 
 
 /*
@@ -23,8 +43,7 @@ CXX_PG_FUNCTION_INFO_V1(bioseq_storage_info);
  * TopMemoryContext, TopTransactionContext, , Write State context and
  * Row Mask context.
  */
-Datum
-bioseq_store_memory_stats(PG_FUNCTION_ARGS)
+POSTGRES_FN(bioseq_store_memory_stats)
 {
 	const int resultColumnCount = 3;
 
@@ -79,8 +98,7 @@ bioseq_store_memory_stats(PG_FUNCTION_ARGS)
  *    STRICT
  *    LANGUAGE c AS 'MODULE_PATHNAME', 'bioseq_storage_info';
  */
-Datum
-bioseq_storage_info(PG_FUNCTION_ARGS)
+POSTGRES_FN(bioseq_storage_info)
 {
 #define STORAGE_INFO_NATTS 6
 	Oid relid = PG_GETARG_OID(0);
@@ -129,24 +147,3 @@ bioseq_storage_info(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
-
-/*
- * MemoryContextTotals adds stats of the given memory context and its
- * subtree to the given counters.
- */
-static void
-MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters)
-{
-	if (context == NULL)
-	{
-		return;
-	}
-
-	MemoryContext child;
-	for (child = context->firstchild; child != NULL; child = child->nextchild)
-	{
-		MemoryContextTotals(child, counters);
-	}
-
-	context->methods->stats_compat(context, NULL, NULL, counters, true);
-}

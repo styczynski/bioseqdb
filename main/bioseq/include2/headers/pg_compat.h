@@ -1,15 +1,22 @@
-/*-------------------------------------------------------------------------
- *
- * pg_version_compat.h
- *	  Compatibility macros for writing code agnostic to PostgreSQL versions
- *
- * Copyright (c) Citus Data, Inc.
- *
- *-------------------------------------------------------------------------
- */
+#pragma once
 
-#ifndef PG_VERSION_COMPAT_H
-#define PG_VERSION_COMPAT_H
+#undef PG_VERSION_NUM
+#define PG_VERSION_NUM 170000
+
+#define DEPRECATED_PG_VERSION_13 160000
+#define DEPRECATED_PG_VERSION_14 160000
+#define DEPRECATED_PG_VERSION_15 160000
+
+
+#define PG_VERSION_16 160000
+#define PG_VERSION_17 170000
+#define PG_VERSION_18 180000
+#define PG_VERSION_19 190000
+
+#if PG_VERSION_NUM < PG_VERSION_17
+#error "Unsupported Postgres version lower than 17"
+#include notexisting.h
+#endif
 
 #ifdef __cplusplus
 #undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
@@ -29,6 +36,18 @@ CppConcat(pg_finfo_,funcname) (void) \
 extern "C" int no_such_variable
 
 
+#define POSTGRES_FN(funcname) \
+extern "C" PGDLLEXPORT const Pg_finfo_record * \
+CppConcat(pg_finfo_,funcname) (void) \
+{ \
+	static const Pg_finfo_record my_finfo = { 1 }; \
+	return &my_finfo; \
+} \
+extern "C" int no_such_variable; \
+extern "C" PGDLLEXPORT Datum funcname(PG_FUNCTION_ARGS)
+
+
+
 extern "C" {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wregister"
@@ -36,7 +55,6 @@ extern "C" {
 #include "c.h"
 #include "citus_version.h"
 #include "postgres.h"
-#include "pg_version_constants.h"
 #include "storage/relfilelocator.h"
 #include "utils/array.h"
 #include "optimizer/tlist.h"
@@ -152,7 +170,6 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "catalog/pg_type.h"
-#include "pg_version_constants.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"
@@ -274,7 +291,6 @@ extern "C" {
 #include "catalog/pg_am.h"
 #include "commands/defrem.h"
 #include "storage/smgr.h"
-#include "columnar/utils/listutils.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
@@ -935,9 +951,5 @@ getStxstattarget_compat(HeapTuple tup)
 
 // CUSTOM UTILS
 
-#include "utils.hpp"
+//include "utils.hpp"
 
-// DEBUG UTILS
-
-
-#endif   /* PG_VERSION_COMPAT_H */

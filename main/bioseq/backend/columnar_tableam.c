@@ -1,16 +1,12 @@
-#include "pg_version_compat.h"
-#include "utils/logging.h"
-#include "utils/debug.h"
+#include "common.h"
 
 #include <math.h>
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_customscan.h"
 #include "columnar/columnar_metadata.h"
-#include "columnar/columnar_storage.h"
 #include "columnar/columnar_tableam.h"
 #include "columnar/columnar_version_compat.h"
-#include "columnar/utils/listutils.h"
 
 #include "columnar/vectorization/columnar_vector_types.h"
 #include "columnar/columnar_metadata.h"
@@ -22,6 +18,11 @@
  */
 #define VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL 50       /* ms */
 #define VACUUM_TRUNCATE_LOCK_TIMEOUT 4500               /* ms */
+
+#include "common.h"
+import storage_cache;
+import storage_physical;
+import mlogging;
 
 /*
  * ColumnarScanDescData is the scan state passed between beginscan(),

@@ -1,7 +1,7 @@
 #ifndef COLUMNAR_TABLEAM_H
 #define COLUMNAR_TABLEAM_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/columnar.h"
 

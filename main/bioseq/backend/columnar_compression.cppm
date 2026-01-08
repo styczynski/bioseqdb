@@ -11,9 +11,11 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
+module;
 
-#include "columnar/columnar_compression.h"
+#include "common.h"
+
+#include "types.h"
 
 #if HAVE_CITUS_LIBLZ4
 #include <lz4.h>
@@ -22,6 +24,8 @@
 #if HAVE_LIBZSTD
 #include <zstd.h>
 #endif
+
+export module storage_compression;
 
 /*
  *	The information at the start of the compressed data. This decription is taken
@@ -51,7 +55,7 @@ typedef struct ColumnarCompressHeader
  * if compression is done, returns false if compression is not done.
  * outputBuffer is valid only if the function returns true.
  */
-bool
+export bool
 CompressBuffer(StringInfo inputBuffer,
 			   StringInfo outputBuffer,
 			   CompressionType compressionType,
@@ -154,7 +158,7 @@ CompressBuffer(StringInfo inputBuffer,
  * DecompressBuffer decompresses the given buffer with the given compression
  * type. This function returns the buffer as-is when no compression is applied.
  */
-StringInfo
+export StringInfo
 DecompressBuffer(StringInfo buffer,
 				 CompressionType compressionType,
 				 uint64 decompressedSize)

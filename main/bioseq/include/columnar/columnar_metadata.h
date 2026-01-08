@@ -12,7 +12,7 @@
 #ifndef COLUMNAR_METADATA_H
 #define COLUMNAR_METADATA_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 #include "types.h"
 
 extern List * StripesForRelfilenode(RelFileLocator relfilelocator, ScanDirection scanDirection);

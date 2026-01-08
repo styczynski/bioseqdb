@@ -9,7 +9,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"

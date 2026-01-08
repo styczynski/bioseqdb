@@ -1,7 +1,6 @@
-#ifndef BSEQ_DEBUG_H
-#define BSEQ_DEBUG_H
+#pragma once
 
-#include "logging.h"
+#include "common.h"
 
 __attribute__((always_inline))
 static inline Relation safe_relation_open(Oid relationId, LOCKMODE lockmode) {
@@ -19,4 +18,3 @@ static inline Relation try_safe_relation_open(Oid relationId, LOCKMODE lockmode)
 	return rel;
 }
 
-#endif

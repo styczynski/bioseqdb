@@ -12,7 +12,7 @@
 #ifndef COLUMNAR_WRITE_STATE_ROW_MASK_H
 #define COLUMNAR_WRITE_STATE_ROW_MASK_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 
 #endif

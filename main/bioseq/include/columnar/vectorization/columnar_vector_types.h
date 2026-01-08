@@ -12,7 +12,7 @@
 #ifndef COLUMNAR_VECTOR_TYPES_H
 #define COLUMNAR_VECTOR_TYPES_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 /* DEFAULT_CHUNK_ROW_COUNT */
 #define COLUMNAR_VECTOR_COLUMN_SIZE 10000

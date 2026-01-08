@@ -13,18 +13,21 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "safe_lib.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_storage.h"
 #include "columnar/columnar_tableam.h"
 #include "columnar/columnar_version_compat.h"
 
 #define UNEXPECTED_STRIPE_READ_ERR_MSG \
 	"attempted to read an unexpected stripe while reading columnar " \
 	"table %s, stripe with id=" UINT64_FORMAT " is not flushed"
+
+import storage_cache;
+import storage_compression;
+import storage_physical;
 
 typedef struct ChunkGroupReadState
 {

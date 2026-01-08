@@ -12,8 +12,7 @@
  *-------------------------------------------------------------------------
  */
 
-#include "pg_version_compat.h"
-#include "utils/logging.h"
+#include "common.h"
 
 #include <iostream>
 
@@ -37,6 +36,9 @@
 #define DEFAULT_COMPRESSION_TYPE COMPRESSION_PG_LZ
 #endif
 
+#include "common.h"
+import mlogging;
+
 static void bioseq_guc_init(void);
 
 int bioseq_compression = DEFAULT_COMPRESSION_TYPE;
@@ -50,8 +52,6 @@ bool bioseq_enable_dml = true;
 bool bioseq_enable_page_cache = false;
 int bioseq_page_cache_size = 200U;
 bool bioseq_index_scan = true;
-
-bool enable_logging = false;
 
 static const struct config_enum_entry bioseq_compression_options[] =
 {

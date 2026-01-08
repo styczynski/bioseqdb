@@ -18,19 +18,20 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
-#include "utils/logging.h"
-#include "utils/debug.h"
+#include "common.h"
 
 #include "safe_lib.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_metadata.h"
-#include "columnar/columnar_storage.h"
 #include "columnar/columnar_version_compat.h"
-#include "columnar/utils/listutils.h"
 
 #include <sys/stat.h>
+
+#include "common.h"
+
+import storage_physical;
+import mlogging;
 
 
 Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {

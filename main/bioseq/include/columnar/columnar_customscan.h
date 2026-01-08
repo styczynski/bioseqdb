@@ -13,7 +13,7 @@
 #ifndef COLUMNAR_CUSTOMSCAN_H
 #define COLUMNAR_CUSTOMSCAN_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 
 extern void bioseq_customscan_init(void);

@@ -9,12 +9,11 @@
  *-------------------------------------------------------------------------
  */
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/columnar.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 
-#include "columnar/utils/listutils.h"
 
 VectorColumn *
 BuildVectorColumn(int16 columnDimension, int16 columnTypeLen, 

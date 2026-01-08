@@ -10,13 +10,15 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
-#include "utils/logging.h"
+#include "common.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
+#include "common.h"
+
 import alignment;
+import mlogging;
 
 extern "C" {
 PG_MODULE_MAGIC;

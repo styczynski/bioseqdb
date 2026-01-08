@@ -13,7 +13,7 @@
 #ifndef COLUMNAR_AGGEREGATOR_NODE_H
 #define COLUMNAR_AGGEREGATOR_NODE_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 typedef struct VectorAggState
 {

@@ -12,7 +12,7 @@
 #ifndef COLUMNAR_TYPES_H
 #define COLUMNAR_TYPES_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/vectorization/columnar_vector_types.h"
 

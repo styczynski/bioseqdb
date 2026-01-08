@@ -13,7 +13,7 @@
 #ifndef COLUMNAR_INDEXSCAN_H
 #define COLUMNAR_INDEXSCAN_H
 
-#include "pg_version_compat.h"
+#include "common.h"
 
 
 extern CustomScan * bioseq_create_indexscan_node(void);

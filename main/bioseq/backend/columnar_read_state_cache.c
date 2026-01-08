@@ -13,7 +13,7 @@
  *
  *-------------------------------------------------------------------------
  */
-#include "pg_version_compat.h"
+#include "common.h"
 
 #include "columnar/columnar_tableam.h"
 
