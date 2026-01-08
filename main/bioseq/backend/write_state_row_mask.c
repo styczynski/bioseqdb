@@ -16,6 +16,8 @@
 
 #include "columnar/columnar_tableam.h"
 
+import storage_metadata;
+
 static RowMaskWriteStateEntry *InitRowMaskEntry(uint64 storageId,
 												bytea *rowMask);
 static void RowMaskFlushPendingWriteState(List *rowMaskWriteStateList);

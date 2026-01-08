@@ -12,7 +12,7 @@
  *
  *-------------------------------------------------------------------------
  */
-
+module;
 #include "common.h"
 
 #include <vector>
@@ -22,23 +22,25 @@
 #include <math.h>
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_customscan.h"
-#include "columnar/columnar_metadata.h"
 #include "columnar/columnar_tableam.h"
 
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 
-#include "common.h"
-
 import storage_cache;
 import mlogging;
+import storage_metadata;
+
+export module bioseq_scan;
 
 static int32_t counter = 100;
 static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
 static std::vector<TupleTableSlot*> buffer;
 static int buffer_pos = -1;
+
+export Bitmapset *
+ColumnarAttrNeeded(ScanState *ss, List *customList);
 
 /*
  * ColumnarScanState represents the state for a columnar scan. It's a
@@ -117,7 +119,7 @@ static void ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 
 static Plan * ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 											  RelOptInfo *rel,
-											  struct CustomPath *best_path,
+											  CustomPath *best_path,
 											  List *tlist,
 											  List *clauses,
 											  List *custom_plans);
@@ -172,18 +174,18 @@ static int ColumnarMaxCustomScanPaths = 64;
 static int ColumnarPlannerDebugLevel = DEBUG3;
 
 
-const struct CustomPathMethods ColumnarScanPathMethods = {
+const CustomPathMethods ColumnarScanPathMethods = {
 	.CustomName = "BioseqScan",
 	.PlanCustomPath = ColumnarScanPath_PlanCustomPath,
 	.ReparameterizeCustomPathByChild = ColumnarScanPath_ReparameterizeCustomPathByChild,
 };
 
-const struct CustomScanMethods ColumnarScanScanMethods = {
+const CustomScanMethods ColumnarScanScanMethods = {
 	.CustomName = "BioseqScan",
 	.CreateCustomScanState = ColumnarScan_CreateCustomScanState,
 };
 
-const struct CustomExecMethods ColumnarScanExecuteMethods = {
+const CustomExecMethods ColumnarScanExecuteMethods = {
 	.CustomName = "BioseqScan",
 
 	.BeginCustomScan = ColumnarScan_BeginCustomScan,
@@ -199,7 +201,7 @@ const struct CustomExecMethods ColumnarScanExecuteMethods = {
 	.InitializeWorkerCustomScan = Columnar_InitializeWorkerCustomScan
 };
 
-static const struct config_enum_entry debug_level_options[] = {
+static const config_enum_entry debug_level_options[] = {
 	{ "debug5", DEBUG5, false },
 	{ "debug4", DEBUG4, false },
 	{ "debug3", DEBUG3, false },
@@ -214,7 +216,7 @@ static const struct config_enum_entry debug_level_options[] = {
 };
 
 
-const CustomScanMethods *
+export const CustomScanMethods *
 bioseq_customscan_methods(void)
 {
 	return &ColumnarScanScanMethods;
@@ -225,7 +227,7 @@ bioseq_customscan_methods(void)
  * bioseq_customscan_init installs the hook required to intercept the postgres planner and
  * provide extra paths for columnar tables
  */
-void
+export void
 bioseq_customscan_init()
 {
 	PreviousSetRelPathlistHook = set_rel_pathlist_hook;
@@ -1804,7 +1806,7 @@ ColumnarTableStripeCount(Oid relationId)
 static Plan *
 ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 								RelOptInfo *rel,
-								struct CustomPath *best_path,
+								CustomPath *best_path,
 								List *tlist,
 								List *clauses,
 								List *custom_plans)
@@ -2141,7 +2143,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
  * Throws an error if finds a Var referencing to an attribute not supported
  * by ColumnarScan.
  */
-Bitmapset *
+export Bitmapset *
 ColumnarAttrNeeded(ScanState *ss, List *customList)
 {
 	TupleTableSlot *slot = ss->ss_ScanTupleSlot;

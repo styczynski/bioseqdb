@@ -19,7 +19,6 @@
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
-#include "columnar/columnar_version_compat.h"
 
 #define UNEXPECTED_STRIPE_READ_ERR_MSG \
 	"attempted to read an unexpected stripe while reading columnar " \
@@ -28,6 +27,7 @@
 import storage_cache;
 import storage_compression;
 import storage_physical;
+import storage_metadata;
 
 typedef struct ChunkGroupReadState
 {
@@ -1149,39 +1149,6 @@ CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowC
 }
 
 
-/*
- * FreeChunkData deallocates data buffers to keep deserialized exist and
- * value arrays for requested columns in columnMask.
- * ColumnChunkData->serializedValueBuffer lives in memory read/write context
- * so it is deallocated automatically when the context is deleted.
- */
-void
-FreeChunkData(ChunkData *chunkData)
-{
-	uint32 columnIndex = 0;
-
-	if (chunkData == NULL)
-	{
-		return;
-	}
-
-	for (columnIndex = 0; columnIndex < chunkData->columnCount; columnIndex++)
-	{
-		if (chunkData->existsArray[columnIndex] != NULL)
-		{
-			pfree(chunkData->existsArray[columnIndex]);
-		}
-
-		if (chunkData->valueArray[columnIndex] != NULL)
-		{
-			pfree(chunkData->valueArray[columnIndex]);
-		}
-	}
-
-	pfree(chunkData->existsArray);
-	pfree(chunkData->valueArray);
-	pfree(chunkData);
-}
 
 #if PG_VERSION_NUM < PG_VERSION_16
 static inline bool
@@ -1440,50 +1407,6 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 	return selectedChunkMask;
 }
 
-
-/*
- * GetFunctionInfoOrNull first resolves the operator for the given data type,
- * access method, and support procedure. The function then uses the resolved
- * operator's identifier to fill in a function manager object, and returns
- * this object. This function is based on a similar function from CitusDB's code.
- */
-FmgrInfo *
-GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId, int16 procedureId)
-{
-	FmgrInfo *functionInfo = NULL;
-
-	/* get default operator class from pg_opclass for datum type */
-	Oid operatorClassId = GetDefaultOpClass(typeId, accessMethodId);
-	if (operatorClassId == InvalidOid)
-	{
-		return NULL;
-	}
-
-	Oid operatorFamilyId = get_opclass_family(operatorClassId);
-	if (operatorFamilyId == InvalidOid)
-	{
-		return NULL;
-	}
-
-	Oid operatorId = get_opfamily_proc(operatorFamilyId, typeId, typeId, procedureId);
-
-	/* No operator for typeId, search for operator class type*/
-	if (operatorId == InvalidOid)
-	{
-		Oid opcintype = get_opclass_input_type(operatorClassId);
-		operatorId = get_opfamily_proc(operatorFamilyId, opcintype, opcintype, procedureId);
-	}
-
-	if (operatorId != InvalidOid)
-	{
-		functionInfo = make<FmgrInfo>();
-
-		/* fill in the FmgrInfo struct using the operatorId */
-		fmgr_info(operatorId, functionInfo);
-	}
-
-	return functionInfo;
-}
 
 
 /*

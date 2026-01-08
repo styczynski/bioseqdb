@@ -16,7 +16,6 @@
 #include "common.h"
 
 
-extern CustomScan * bioseq_create_indexscan_node(void);
-extern void bioseq_register_indexscan_node(void);
+// Nothing
 
 #endif

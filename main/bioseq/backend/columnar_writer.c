@@ -19,11 +19,16 @@
 
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_version_compat.h"
 
 #include "common.h"
 import storage_compression;
 import storage_physical;
+import storage_metadata;
+
+// trash
+extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
+										uint32 chunkGroupRowCount);
+
 
 struct ColumnarWriteState
 {

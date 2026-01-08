@@ -18,21 +18,156 @@
  *
  *-------------------------------------------------------------------------
  */
+module;
 #include "common.h"
+#include "types.h"
 
 #include "safe_lib.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_metadata.h"
-#include "columnar/columnar_version_compat.h"
 
 #include <sys/stat.h>
-
-#include "common.h"
 
 import storage_physical;
 import mlogging;
 
+export module storage_metadata;
+
+void InitColumnarOptions(Oid regclass);
+void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
+bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
+bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
+extern bool IsColumnarTableAmTable(Oid relationId);
+
+export FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
+										int16 procedureId);
+const char * CompressionTypeStr(CompressionType type);
+export ItemPointerData row_number_to_tid(uint64 rowNumber);
+export uint64 LookupStorageId(RelFileLocator relfilelocator);
+void DeleteMetadataRows(RelFileLocator relfilelocator);
+void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
+uint64 ColumnarMetadataNewStorageId(void);
+uint64 GetHighestUsedAddress(RelFileLocator relfilelocator);
+export EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64 columnCount,
+												   uint64 chunkGroupRowCount,
+												   uint64 stripeRowCount);
+export StripeMetadata * CompleteStripeReservation(Relation rel, uint64 stripeId,
+												  uint64 sizeBytes, uint64 rowCount,
+												  uint64 chunkCount);
+export void SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
+							   StripeSkipList *stripeSkipList,
+							   TupleDesc tupleDescriptor);
+export void SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
+							List *chunkGroupRowCounts);
+export void UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
+										uint32 chunkGroupId, uint32 deletedRowNumber);
+export StripeSkipList * ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
+										   TupleDesc tupleDescriptor,
+										   uint32 chunkCount,
+										   Snapshot snapshot);
+export StripeMetadata * FindNextStripeByRowNumber(Relation relation, uint64 rowNumber,
+												  Snapshot snapshot);
+export StripeMetadata * FindStripeByRowNumber(Relation relation, uint64 rowNumber,
+											  Snapshot snapshot);
+export StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
+															 uint64 rowNumber,
+															 Snapshot snapshot);
+export StripeMetadata *  FindNextStripeForParallelWorker(Relation relation,
+														 Snapshot snapshot,
+														 uint64 nextStripeId,
+														 uint64 * nextHigherStripeId);
+export StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
+export uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
+StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
+													   Snapshot snapshot);
+export bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
+							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
+export bool UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
+						  Snapshot snapshot, uint64 rowNumber);
+export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
+export bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
+								MemoryContext ctx,
+								uint64 stripeFirstRowNumber, int rowCount);
+EState * create_estate_for_relation(Relation rel);
+
+
+/*
+ * FreeChunkData deallocates data buffers to keep deserialized exist and
+ * value arrays for requested columns in columnMask.
+ * ColumnChunkData->serializedValueBuffer lives in memory read/write context
+ * so it is deallocated automatically when the context is deleted.
+ */
+export void
+FreeChunkData(ChunkData *chunkData)
+{
+	uint32 columnIndex = 0;
+
+	if (chunkData == NULL)
+	{
+		return;
+	}
+
+	for (columnIndex = 0; columnIndex < chunkData->columnCount; columnIndex++)
+	{
+		if (chunkData->existsArray[columnIndex] != NULL)
+		{
+			pfree(chunkData->existsArray[columnIndex]);
+		}
+
+		if (chunkData->valueArray[columnIndex] != NULL)
+		{
+			pfree(chunkData->valueArray[columnIndex]);
+		}
+	}
+
+	pfree(chunkData->existsArray);
+	pfree(chunkData->valueArray);
+	pfree(chunkData);
+}
+
+/*
+ * GetFunctionInfoOrNull first resolves the operator for the given data type,
+ * access method, and support procedure. The function then uses the resolved
+ * operator's identifier to fill in a function manager object, and returns
+ * this object. This function is based on a similar function from CitusDB's code.
+ */
+FmgrInfo *
+GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId, int16 procedureId)
+{
+	FmgrInfo *functionInfo = NULL;
+
+	/* get default operator class from pg_opclass for datum type */
+	Oid operatorClassId = GetDefaultOpClass(typeId, accessMethodId);
+	if (operatorClassId == InvalidOid)
+	{
+		return NULL;
+	}
+
+	Oid operatorFamilyId = get_opclass_family(operatorClassId);
+	if (operatorFamilyId == InvalidOid)
+	{
+		return NULL;
+	}
+
+	Oid operatorId = get_opfamily_proc(operatorFamilyId, typeId, typeId, procedureId);
+
+	/* No operator for typeId, search for operator class type*/
+	if (operatorId == InvalidOid)
+	{
+		Oid opcintype = get_opclass_input_type(operatorClassId);
+		operatorId = get_opfamily_proc(operatorFamilyId, opcintype, opcintype, procedureId);
+	}
+
+	if (operatorId != InvalidOid)
+	{
+		functionInfo = make<FmgrInfo>();
+
+		/* fill in the FmgrInfo struct using the operatorId */
+		fmgr_info(operatorId, functionInfo);
+	}
+
+	return functionInfo;
+}
 
 Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
 	//elog(NOTICE, "Columnar [safe_safe_get_relname_relid] " __FILE__ ":" TOSTRING(__LINE__) " => ");
@@ -122,8 +257,6 @@ static StripeMetadata * StripeMetadataLookupRowNumber(Relation relation, uint64 
 													  RowNumberLookupMode lookupMode);
 static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_relation_storageid);
-CXX_PG_FUNCTION_INFO_V1(create_table_row_mask);
 
 /* constants for bioseq.options */
 #define Natts_bioseq_options 5
@@ -548,7 +681,7 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
 /*
  * SaveEmptyRowMask saves the metadata for inserted rows in bioseq.mask_row
  */
-extern bool 
+bool 
 SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 				 uint64 stripeStartRowNumber, List *chunkGroupRowCounts)
 {
@@ -1498,7 +1631,7 @@ InsertEmptyStripeMetadataRow(uint64 storageId, uint64 stripeId, uint32 columnCou
  * StripesForRelfilenode returns a list of StripeMetadata for stripes
  * of the given relfilelocator.
  */
-List *
+export List *
 StripesForRelfilenode(RelFileLocator relfilelocator, ScanDirection scanDirection)
 {
 	uint64 storageId = LookupStorageId(relfilelocator);
@@ -1511,7 +1644,7 @@ StripesForRelfilenode(RelFileLocator relfilelocator, ScanDirection scanDirection
  * DeletedRowsForStripe returns number of deleted rows for stripe
  * of the given relfilelocator.
  */
-uint32
+export uint32
 DeletedRowsForStripe(RelFileLocator relfilelocator, uint32 chunkCount, uint64 stripeId)
 {
 	uint64 storageId = LookupStorageId(relfilelocator);
@@ -1541,7 +1674,7 @@ DeletedRowsForStripe(RelFileLocator relfilelocator, uint32 chunkCount, uint64 st
  * DecompressedLengthForStripe returns total size of all decompressed rows and chunk
  * for given stripe
  */
-Size
+export Size
 DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64 stripeId)
 {
 	HeapTuple heapTuple = NULL;
@@ -2426,8 +2559,7 @@ ColumnarMetadataNewStorageId()
  * bioseq_relation_storageid returns storage id associated with the
  * given relation id, or -1 if there is no associated storage id yet.
  */
-Datum
-bioseq_relation_storageid(PG_FUNCTION_ARGS)
+POSTGRES_FN(bioseq_relation_storageid)
 {
 	Oid relationId = PG_GETARG_OID(0);
 	Relation relation = safe_relation_open(relationId, AccessShareLock);
@@ -2447,8 +2579,7 @@ bioseq_relation_storageid(PG_FUNCTION_ARGS)
 /*
  * create_table_row_mask creates empty row mask for table
  */
-Datum
-create_table_row_mask(PG_FUNCTION_ARGS)
+POSTGRES_FN(create_table_row_mask)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
@@ -2522,7 +2653,7 @@ create_table_row_mask(PG_FUNCTION_ARGS)
  * ColumnarStorageUpdateIfNeeded - upgrade columnar storage to the current version by
  * using information from the metadata tables.
  */
-void
+export void
 ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade)
 {
 	BMethod(ColumnarStorageUpdateIfNeeded);
@@ -2588,7 +2719,7 @@ GetHighestUsedRowNumber(uint64 storageId)
  * This is used in the vacuum UDF to fill any existing holes
  * if possible.
  */
-StripeMetadata *
+export StripeMetadata *
 RewriteStripeMetadataRowWithNewValues(Relation rel, uint64 stripeId,
               uint64 sizeBytes, uint64 fileOffset, uint64 rowCount, uint64 chunkCount)
 {

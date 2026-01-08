@@ -15,7 +15,6 @@
 
 #include "common.h"
 
-#include "columnar/columnar_metadata.h"
 #include "columnar/columnar_write_state_row_mask.h"
 
 
@@ -89,72 +88,72 @@ extern bool ColumnarSetStripeReadState(ColumnarReadState *readState,
 									   StripeMetadata *startStripeMetadata);
 
 /* Function declarations for common functions */
-extern FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
-										int16 procedureId);
-extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
-										uint32 chunkGroupRowCount);
-extern void FreeChunkData(ChunkData *chunkData);
-extern void FreeChunkBufferValueArray(ChunkData *chunkData);
-extern uint64 ColumnarTableRowCount(Relation relation);
-extern const char * CompressionTypeStr(CompressionType type);
-extern ItemPointerData row_number_to_tid(uint64 rowNumber);
-extern uint64 LookupStorageId(RelFileLocator relfilelocator);
+// extern FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
+// 										int16 procedureId);
+// extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
+// 										uint32 chunkGroupRowCount);
+// extern void FreeChunkData(ChunkData *chunkData);
+// extern void FreeChunkBufferValueArray(ChunkData *chunkData);
+// extern uint64 ColumnarTableRowCount(Relation relation);
+// extern const char * CompressionTypeStr(CompressionType type);
+// extern ItemPointerData row_number_to_tid(uint64 rowNumber);
+// extern uint64 LookupStorageId(RelFileLocator relfilelocator);
 
 /* bioseq_metadata_tables.c */
-extern void InitColumnarOptions(Oid regclass);
-extern void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
-extern bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
-extern bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
-extern bool IsColumnarTableAmTable(Oid relationId);
+// extern void InitColumnarOptions(Oid regclass);
+// extern void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
+// extern bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
+// extern bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
+// extern bool IsColumnarTableAmTable(Oid relationId);
 
-/* bioseq_metadata_tables.c */
-extern void DeleteMetadataRows(RelFileLocator relfilelocator);
-extern void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
-extern uint64 ColumnarMetadataNewStorageId(void);
-extern uint64 GetHighestUsedAddress(RelFileLocator relfilelocator);
-extern EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64 columnCount,
-												   uint64 chunkGroupRowCount,
-												   uint64 stripeRowCount);
-extern StripeMetadata * CompleteStripeReservation(Relation rel, uint64 stripeId,
-												  uint64 sizeBytes, uint64 rowCount,
-												  uint64 chunkCount);
-extern void SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
-							   StripeSkipList *stripeSkipList,
-							   TupleDesc tupleDescriptor);
-extern void SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
-							List *chunkGroupRowCounts);
-extern void UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
-										uint32 chunkGroupId, uint32 deletedRowNumber);
-extern StripeSkipList * ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
-										   TupleDesc tupleDescriptor,
-										   uint32 chunkCount,
-										   Snapshot snapshot);
-extern StripeMetadata * FindNextStripeByRowNumber(Relation relation, uint64 rowNumber,
-												  Snapshot snapshot);
-extern StripeMetadata * FindStripeByRowNumber(Relation relation, uint64 rowNumber,
-											  Snapshot snapshot);
-extern StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
-															 uint64 rowNumber,
-															 Snapshot snapshot);
-extern StripeMetadata *  FindNextStripeForParallelWorker(Relation relation,
-														 Snapshot snapshot,
-														 uint64 nextStripeId,
-														 uint64 * nextHigherStripeId);
-extern StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
-extern uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
-extern StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
-													   Snapshot snapshot);
-extern "C" Datum bioseq_relation_storageid(PG_FUNCTION_ARGS);
-extern bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
-							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
-extern bool UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
-						  Snapshot snapshot, uint64 rowNumber);
-extern void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
-extern bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
-								MemoryContext ctx,
-								uint64 stripeFirstRowNumber, int rowCount);
-extern "C" Datum create_table_row_mask(PG_FUNCTION_ARGS);
-extern EState * create_estate_for_relation(Relation rel);
+// /* bioseq_metadata_tables.c */
+// extern void DeleteMetadataRows(RelFileLocator relfilelocator);
+// extern void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
+// extern uint64 ColumnarMetadataNewStorageId(void);
+// extern uint64 GetHighestUsedAddress(RelFileLocator relfilelocator);
+// extern EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64 columnCount,
+// 												   uint64 chunkGroupRowCount,
+// 												   uint64 stripeRowCount);
+// extern StripeMetadata * CompleteStripeReservation(Relation rel, uint64 stripeId,
+// 												  uint64 sizeBytes, uint64 rowCount,
+// 												  uint64 chunkCount);
+// extern void SaveStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
+// 							   StripeSkipList *stripeSkipList,
+// 							   TupleDesc tupleDescriptor);
+// extern void SaveChunkGroups(RelFileLocator relfilelocator, uint64 stripe,
+// 							List *chunkGroupRowCounts);
+// extern void UpdateChunkGroupDeletedRows(uint64 storageId, uint64 stripe,
+// 										uint32 chunkGroupId, uint32 deletedRowNumber);
+// extern StripeSkipList * ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe,
+// 										   TupleDesc tupleDescriptor,
+// 										   uint32 chunkCount,
+// 										   Snapshot snapshot);
+// extern StripeMetadata * FindNextStripeByRowNumber(Relation relation, uint64 rowNumber,
+// 												  Snapshot snapshot);
+// extern StripeMetadata * FindStripeByRowNumber(Relation relation, uint64 rowNumber,
+// 											  Snapshot snapshot);
+// extern StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
+// 															 uint64 rowNumber,
+// 															 Snapshot snapshot);
+// extern StripeMetadata *  FindNextStripeForParallelWorker(Relation relation,
+// 														 Snapshot snapshot,
+// 														 uint64 nextStripeId,
+// 														 uint64 * nextHigherStripeId);
+// extern StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
+// extern uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
+// extern StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
+// 													   Snapshot snapshot);
+// extern "C" Datum bioseq_relation_storageid(PG_FUNCTION_ARGS);
+// extern bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
+// 							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
+// extern bool UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
+// 						  Snapshot snapshot, uint64 rowNumber);
+// extern void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
+// extern bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
+// 								MemoryContext ctx,
+// 								uint64 stripeFirstRowNumber, int rowCount);
+// extern "C" Datum create_table_row_mask(PG_FUNCTION_ARGS);
+// extern EState * create_estate_for_relation(Relation rel);
 
 /* bioseq_planner_hook.c */
 extern void bioseq_planner_init(void);

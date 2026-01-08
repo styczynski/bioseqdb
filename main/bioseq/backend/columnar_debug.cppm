@@ -10,11 +10,11 @@ module;
 #include "common.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_version_compat.h"
 
 
 export module storage_debug;
 import storage_physical;
+import storage_metadata;
 
 /*
  * MemoryContextTotals adds stats of the given memory context and its

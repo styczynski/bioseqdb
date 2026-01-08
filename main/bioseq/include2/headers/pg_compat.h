@@ -94,6 +94,7 @@ extern "C" {
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/parsenodes.h"
+#include "nodes/pathnodes.h"
 #include "nodes/extensible.h"
 #include "port/atomics.h"
 #include "storage/bufpage.h"

@@ -3,13 +3,9 @@
 #include <math.h>
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_customscan.h"
-#include "columnar/columnar_metadata.h"
 #include "columnar/columnar_tableam.h"
-#include "columnar/columnar_version_compat.h"
 
 #include "columnar/vectorization/columnar_vector_types.h"
-#include "columnar/columnar_metadata.h"
 
 /*
  * Timing parameters for truncate locking heuristics.
@@ -23,6 +19,8 @@
 import storage_cache;
 import storage_physical;
 import mlogging;
+import bioseq_scan;
+import storage_metadata;
 
 /*
  * ColumnarScanDescData is the scan state passed between beginscan(),

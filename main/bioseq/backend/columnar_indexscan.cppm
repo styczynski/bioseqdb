@@ -1,8 +1,11 @@
+module;
 #include "common.h"
 
 #include "columnar/columnar_tableam.h"
-#include "columnar/columnar_indexscan.h"
-#include "columnar/columnar_customscan.h"
+
+export module bioseq_index_scan;
+import bioseq_scan;
+
 
 /*
  * When an ordering operator is used, tuples fetched from the index that
@@ -889,7 +892,7 @@ ColumnarIndexScan_InitializeWorkerCustomScan(CustomScanState *node,
 }
 
 
-CustomScan *
+export CustomScan *
 bioseq_create_indexscan_node(void)
 {
 	CustomScan *cscan = (CustomScan *) makeNode(CustomScan);
@@ -898,7 +901,7 @@ bioseq_create_indexscan_node(void)
 }
 
 
-void
+export void
 bioseq_register_indexscan_node(void)
 {
 	RegisterCustomScanMethods(&ColumnarIndexCustomScanMethods);

@@ -38,7 +38,6 @@ module;
 #include "safe_lib.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_version_compat.h"
 #include "columnar/columnar_tableam.h"
 
 #include "common.h"

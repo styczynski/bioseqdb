@@ -55,7 +55,7 @@ extern IndexFetchTableData * bioseq_index_fetch_begin_extended(Relation rel,
 																 Bitmapset *attr_neededs);
 extern int64 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);
 extern bool ColumnarSupportsIndexAM(char *indexAMName);
-extern bool IsColumnarTableAmTable(Oid relationId);
+//extern bool IsColumnarTableAmTable(Oid relationId);
 
 
 #endif /* COLUMNAR_TABLEAM_H */

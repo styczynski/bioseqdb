@@ -13,14 +13,14 @@
 #include "common.h"
 
 #include "columnar/columnar.h"
-#include "columnar/columnar_customscan.h"
-#include "columnar/columnar_indexscan.h"
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/nodes/columnar_aggregator_node.h"
 
 
 #include "common.h"
 import mlogging;
+import bioseq_index_scan;
+import bioseq_scan;
 
 static planner_hook_type PreviousPlannerHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;

@@ -4,10 +4,9 @@
 
 #include <math.h>
 
-#include "columnar/columnar_customscan.h"
 #include "columnar/columnar_tableam.h"
-#include "columnar/columnar_version_compat.h"
 
+import bioseq_scan;
 
 /*
  * Mapping from relfilenode to WriteStateMapEntry. This keeps write state for

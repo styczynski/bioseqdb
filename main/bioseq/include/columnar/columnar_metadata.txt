@@ -1,0 +1,19 @@
+/*-------------------------------------------------------------------------
+ *
+ * bioseq_metadata.h
+ *
+ * Type and function declarations for Columnar metadata.
+ *
+ * Copyright (c) Citus Data, Inc.
+ *
+ *-------------------------------------------------------------------------
+ */
+
+#ifndef COLUMNAR_METADATA_H
+#define COLUMNAR_METADATA_H
+
+#include "common.h"
+#include "types.h"
+
+
+#endif /* COLUMNAR_METADATA_H */
