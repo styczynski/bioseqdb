@@ -15,11 +15,6 @@
 
 #include "pg_version_compat.h"
 
-typedef struct ColumnarIndexScanState
-{
-	CustomScanState css;
-	IndexScanState *indexscan_state;
-} ColumnarIndexScanState;
 
 extern CustomScan * bioseq_create_indexscan_node(void);
 extern void bioseq_register_indexscan_node(void);

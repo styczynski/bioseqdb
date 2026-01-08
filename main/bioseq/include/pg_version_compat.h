@@ -397,6 +397,22 @@ extern "C" {
 
 // OLD COMPAT
 
+#define ColumnarProcessUtility_compat(a, b, c, d, e, f, g, h) \
+	ColumnarProcessUtility(a, b, c, d, e, f, g, h)
+#define PrevProcessUtilityHook_compat(a, b, c, d, e, f, g, h) \
+	PrevProcessUtilityHook(a, b, c, d, e, f, g, h)
+#define GetOldestNonRemovableTransactionId_compat(a, b) \
+	GetOldestNonRemovableTransactionId(a)
+#define ExecSimpleRelationInsert_compat(a, b, c) \
+	ExecSimpleRelationInsert(a, b, c)
+#define index_insert_compat(a, b, c, d, e, f, g, h) \
+	index_insert(a, b, c, d, e, f, g, h)
+
+#define ACLCHECK_OBJECT_TABLE OBJECT_TABLE
+
+#define ExplainPropertyLong(qlabel, value, es) \
+	ExplainPropertyInteger(qlabel, NULL, value, es)
+
 
 #define RelationPhysicalIdentifier_compat(a) ((a)->rd_locator)
 #define RelationTablespace_compat(a) (a.spcOid)

@@ -15,8 +15,6 @@
 
 #include "pg_version_compat.h"
 
-/* Flag to indicate is vectorized aggregate used in execution */
-#define CUSTOM_SCAN_VECTORIZED_AGGREGATE 1
 
 extern void bioseq_customscan_init(void);
 extern const CustomScanMethods * bioseq_customscan_methods(void);

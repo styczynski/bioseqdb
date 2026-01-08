@@ -20,6 +20,7 @@ PostgreSQL_add_extension(postgresql_bioseq
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
     "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
   LINKS

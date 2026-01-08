@@ -13,18 +13,7 @@
 #define COLUMNAR_COMPRESSION_H
 
 #include "pg_version_compat.h"
-
-/* Enumaration for columnar table's compression method */
-typedef enum
-{
-	COMPRESSION_TYPE_INVALID = -1,
-	COMPRESSION_NONE = 0,
-	COMPRESSION_PG_LZ = 1,
-	COMPRESSION_LZ4 = 2,
-	COMPRESSION_ZSTD = 3,
-
-	COMPRESSION_COUNT
-} CompressionType;
+#include "types.h"
 
 extern bool CompressBuffer(StringInfo inputBuffer,
 						   StringInfo outputBuffer,

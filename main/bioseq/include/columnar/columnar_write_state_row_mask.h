@@ -14,16 +14,5 @@
 
 #include "pg_version_compat.h"
 
-struct RowMaskWriteStateEntry
-{
-	uint64 id;
-	uint64 storageId;
-	uint64 stripeId;
-	uint32 chunkId;
-	int64 startRowNumber;
-	int64 endRowNumber;
-	int32 deletedRows;
-	bytea *mask;
-};
 
 #endif
