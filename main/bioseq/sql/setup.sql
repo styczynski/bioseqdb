@@ -27,9 +27,11 @@ INSERT INTO x VALUES (
     42, 'YO', 2
 );
 
-set bioseq.enable_custom_scan TO 'off';
-set enable_seqscan TO off;
-set seq_page_cost TO 10000000;
+set bioseq.enable_column_cache to on;
+
+--set bioseq.enable_custom_scan TO 'off';
+--set enable_seqscan TO off;
+--set seq_page_cost TO 10000000;
 
 --EXPLAIN (ANALYZE, BUFFERS) select sum(a) from x where c >= 2;
 -- EXPLAIN (ANALYZE, BUFFERS) select a, seq, mmsearch(seq, 'A') from x;
@@ -41,4 +43,4 @@ set seq_page_cost TO 10000000;
 --EXPLAIN (VERBOSE) SELECT a FROM x WHERE c > 1 ORDER BY c LIMIT 2;
 --EXPLAIN (VERBOSE) SELECT a, mmsearch(a, 'Y'), mmsearch(a, 'Z') from x;
 
-select a, mmsearch(a, 'X') from x;
+EXPLAIN (ANALYZE, BUFFERS) select a, mmsearch(a, 'X') from x where c > 1;

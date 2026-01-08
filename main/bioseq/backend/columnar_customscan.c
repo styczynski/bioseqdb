@@ -1467,7 +1467,7 @@ CostTestWalker(Node *node, Query *notUsed)
 			} else {
 				RangeTblEntry *rte = rt_fetch(varno, rtable);
 				RTEKind kind = rte->rtekind;
-				JustLog("RTE KIND DETECTED IS {}", (int)kind);
+				JustLog("RTE KIND DETECTED IS {} relid={}", (int)kind, (int)rte->relid);
 			}
 		}
 	}
@@ -2885,6 +2885,14 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 
 	if (bioseq_enable_page_cache)
 	{
+		ExplainOpenGroup("Cache", "Cache", true, es);
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str, "->  Cache\n");
+			es->indent += 3;
+		}
+		
 		ColumnarCacheStatistics *statistics = ColumnarGetCacheStatistics();
 
 		ExplainPropertyUInteger(
@@ -2929,6 +2937,11 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			statistics->entries,
 			es
 		);
+		ExplainCloseGroup("Cache", "Cache", true, es);
+		if (es->format == EXPLAIN_FORMAT_TEXT)
+		{
+			es->indent -= 3;
+		}
 	}
 }
 
