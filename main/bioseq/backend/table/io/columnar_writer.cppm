@@ -12,7 +12,7 @@
  *
  *-------------------------------------------------------------------------
  */
-
+module;
 #include "common.h"
 #include "types.h"
 
@@ -21,40 +21,31 @@
 
 #include "columnar/columnar.h"
 
+export module bioseq_table_io:writer;
+
 import storage_compression;
 import storage_physical;
 import storage_metadata;
-import bioseq_table_io;
+
+ChunkData *
+CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowCount);
+export ColumnarWriteState * ColumnarBeginWrite(RelFileLocator relfilelocator,
+											   ColumnarOptions options,
+											   TupleDesc tupleDescriptor);
+export uint64 ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
+							   bool *columnNulls);
+export void ColumnarFlushPendingWrites(ColumnarWriteState *state);
+export void ColumnarEndWrite(ColumnarWriteState *state);
+export bool ContainsPendingWrites(ColumnarWriteState *state);
+export MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *state);
+
+
+
 
 // // trash
 // extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
 // 										uint32 chunkGroupRowCount);
 
-
-struct ColumnarWriteState
-{
-	TupleDesc tupleDescriptor;
-	FmgrInfo **comparisonFunctionArray;
-	RelFileLocator relfilelocator;
-
-	MemoryContext stripeWriteContext;
-	MemoryContext perTupleContext;
-	StripeBuffers *stripeBuffers;
-	StripeSkipList *stripeSkipList;
-	EmptyStripeReservation *emptyStripeReservation;
-	ColumnarOptions options;
-	ChunkData *chunkData;
-
-	List *chunkGroupRowCounts;
-
-	/*
-	 * compressionBuffer buffer is used as temporary storage during
-	 * data value compression operation. It is kept here to minimize
-	 * memory allocations. It lives in stripeWriteContext and gets
-	 * deallocated when memory context is reset.
-	 */
-	StringInfo compressionBuffer;
-};
 
 static StripeBuffers * CreateEmptyStripeBuffers(uint32 stripeMaxRowCount,
 												uint32 chunkRowCount,

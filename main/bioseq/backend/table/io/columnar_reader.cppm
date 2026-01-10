@@ -33,6 +33,7 @@ import storage_compression;
 import storage_physical;
 import storage_metadata;
 
+
 // template<typename T> inline T* make1(uint32 size) {
 //     return static_cast<T*>(palloc0(size));
 // }

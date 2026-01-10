@@ -327,3 +327,29 @@ struct ColumnarReadState
 	/* Parallel exeuction */
 	ParallelColumnarScan parallelColumnarScan;
 };
+
+
+struct ColumnarWriteState
+{
+	TupleDesc tupleDescriptor;
+	FmgrInfo **comparisonFunctionArray;
+	RelFileLocator relfilelocator;
+
+	MemoryContext stripeWriteContext;
+	MemoryContext perTupleContext;
+	StripeBuffers *stripeBuffers;
+	StripeSkipList *stripeSkipList;
+	EmptyStripeReservation *emptyStripeReservation;
+	ColumnarOptions options;
+	ChunkData *chunkData;
+
+	List *chunkGroupRowCounts;
+
+	/*
+	 * compressionBuffer buffer is used as temporary storage during
+	 * data value compression operation. It is kept here to minimize
+	 * memory allocations. It lives in stripeWriteContext and gets
+	 * deallocated when memory context is reset.
+	 */
+	StringInfo compressionBuffer;
+};

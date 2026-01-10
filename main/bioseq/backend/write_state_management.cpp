@@ -8,6 +8,7 @@
 
 import bioseq_table;
 import storage_metadata;
+import bioseq_table_io;
 
 /*
  * Mapping from relfilenode to WriteStateMapEntry. This keeps write state for

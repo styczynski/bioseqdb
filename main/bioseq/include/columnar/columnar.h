@@ -41,15 +41,15 @@ typedef void (*ColumnarTableSetOptions_hook_type)(Oid relid, ColumnarOptions opt
 extern void bioseq_init(void);
 
 /* Function declarations for writing to a columnar table */
-extern ColumnarWriteState * ColumnarBeginWrite(RelFileLocator relfilelocator,
-											   ColumnarOptions options,
-											   TupleDesc tupleDescriptor);
-extern uint64 ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
-							   bool *columnNulls);
-extern void ColumnarFlushPendingWrites(ColumnarWriteState *state);
-extern void ColumnarEndWrite(ColumnarWriteState *state);
-extern bool ContainsPendingWrites(ColumnarWriteState *state);
-extern MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *state);
+// extern ColumnarWriteState * ColumnarBeginWrite(RelFileLocator relfilelocator,
+// 											   ColumnarOptions options,
+// 											   TupleDesc tupleDescriptor);
+// extern uint64 ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
+// 							   bool *columnNulls);
+// extern void ColumnarFlushPendingWrites(ColumnarWriteState *state);
+// extern void ColumnarEndWrite(ColumnarWriteState *state);
+// extern bool ContainsPendingWrites(ColumnarWriteState *state);
+// extern MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *state);
 
 /* Function declarations for reading from columnar table */
 
