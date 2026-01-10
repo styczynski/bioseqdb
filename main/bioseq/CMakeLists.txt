@@ -2,7 +2,7 @@
 # set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm/bin/clang++)
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
-file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
+file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
 file(GLOB_RECURSE SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm)
 message("SOURCES ${SRC_FILES}")
 

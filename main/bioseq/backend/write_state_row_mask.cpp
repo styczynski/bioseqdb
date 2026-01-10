@@ -143,7 +143,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 
 	if (stackEntry == NULL)
 	{
-		stackEntry = make<SubXidWriteState>();
+		stackEntry = make0<SubXidWriteState>();
 		stackEntry->subXid = currentSubXid;
 		stackEntry->next = hashEntry->writeStateStack;
 		stackEntry->lastRowMaskWriteStateEntry = NULL;
@@ -163,7 +163,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 static RowMaskWriteStateEntry *
 InitRowMaskEntry(uint64 storageId, bytea *mask)
 {
-	RowMaskWriteStateEntry *rowMask = make<RowMaskWriteStateEntry>();
+	RowMaskWriteStateEntry *rowMask = make0<RowMaskWriteStateEntry>();
 
 	rowMask->storageId = storageId;
 	rowMask->mask = (bytea *)palloc0(VARSIZE(mask) + VARHDRSZ);

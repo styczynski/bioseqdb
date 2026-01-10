@@ -40,8 +40,6 @@ typedef void (*ColumnarTableSetOptions_hook_type)(Oid relid, ColumnarOptions opt
 
 extern void bioseq_init(void);
 
-extern CompressionType ParseCompressionType(const char *compressionTypeString);
-
 /* Function declarations for writing to a columnar table */
 extern ColumnarWriteState * ColumnarBeginWrite(RelFileLocator relfilelocator,
 											   ColumnarOptions options,

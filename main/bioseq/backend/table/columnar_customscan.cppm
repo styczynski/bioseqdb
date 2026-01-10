@@ -27,56 +27,34 @@ module;
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 
+export module bioseq_table:custom_scan;
+
 import storage_cache;
 import mlogging;
 import storage_metadata;
+import bioseq_table_types;
 
-export module bioseq_scan;
+ItemPointerData row_number_to_tid(uint64 rowNumber);
+const TableAmRoutine * GetColumnarTableAmRoutine(void);
+uint64 ColumnarTableRowCount(Relation relation);
+bool IsColumnarTableAmTable(Oid relationId);
+Bitmapset* ColumnarAttrNeeded(ScanState *ss, List *customList);
+int64 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);
+IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed);
+TableScanDesc
+bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32 flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple);
+
 
 static int32_t counter = 100;
 static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
 static std::vector<TupleTableSlot*> buffer;
 static int buffer_pos = -1;
-
-export Bitmapset *
-ColumnarAttrNeeded(ScanState *ss, List *customList);
-
-/*
- * ColumnarScanState represents the state for a columnar scan. It's a
- * CustomScanState with additional fields specific to columnar scans.
- */
-typedef struct ColumnarScanState
-{
-	CustomScanState custom_scanstate; /* must be first field */
-	Bitmapset *attrNeeded;
-
-	ExprContext *css_RuntimeContext;
-	List *qual;
-
-	/* Parallel execution */
-	ParallelColumnarScan parallelColumnarScan;
-
-	/* Vectorization */
-	struct
-	{
-		bool vectorizationEnabled;
-		bool vectorizationAggregate;
-		TupleTableSlot *scanVectorSlot;
-		TupleTableSlot *resultVectorSlot;
-		uint32 vectorPendingRowNumber;
-		uint32 vectorRowIndex;
-		List *vectorizedQualList;
-		List *constructedVectorizedQualList;
-		List *attrNeededList;
-	} vectorization;
-
-	/* Scan snapshot*/
-	Snapshot snapshot;
-	bool snapshotRegisteredByUs;
-} ColumnarScanState;
-
-typedef bool (*PathPredicate)(Path *path);
 
 
 /* functions to cost paths in-place */
@@ -740,6 +718,27 @@ ExprReferencesRelid(Expr *expr, Index relid)
 	}
 
 	return false;
+}
+
+/* ColumnarTableRowCount returns the exact row count of a table using skiplists */
+uint64
+ColumnarTableRowCount(Relation relation)
+{
+	ListCell *stripeMetadataCell = NULL;
+	uint64 totalRowCount = 0;
+#if PG_VERSION_NUM >= PG_VERSION_16
+	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
+#else
+	List *stripeList = StripesForRelfilenode(relation->rd_node, ForwardScanDirection);
+#endif
+
+	foreach(stripeMetadataCell, stripeList)
+	{
+		StripeMetadata *stripeMetadata = (StripeMetadata *) lfirst(stripeMetadataCell);
+		totalRowCount += stripeMetadata->rowCount;
+	}
+
+	return totalRowCount;
 }
 
 
@@ -2135,63 +2134,6 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	JustLog("Scan initiazed sucesfully");
 	/* scan slot is already initialized */
 }
-
-
-/*
- * ColumnarAttrNeeded returns a list of AttrNumber's for the ones that are
- * needed during columnar custom scan.
- * Throws an error if finds a Var referencing to an attribute not supported
- * by ColumnarScan.
- */
-export Bitmapset *
-ColumnarAttrNeeded(ScanState *ss, List *customList)
-{
-	TupleTableSlot *slot = ss->ss_ScanTupleSlot;
-	int natts = slot->tts_tupleDescriptor->natts;
-	Bitmapset *attr_needed = NULL;
-	Plan *plan = ss->ps.plan;
-	int flags = PVC_RECURSE_AGGREGATES |
-				PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
-	List *vars = list_concat(pull_var_clause((Node *) plan->targetlist, flags),
-							 pull_var_clause((Node *) plan->qual, flags));
-
-	if (customList != NULL)
-		vars = list_concat(vars, pull_var_clause((Node *)customList, flags));
-
-	//ListCell *lc;
-	//foreach(lc, vars)
-	for(auto var : PList<Var>(vars))
-	{
-		//Var *var = lfirst(lc);
-
-		/* 
-		 * We support following special variables with update / delete.
-		 */
-		if (var->varattno == SelfItemPointerAttributeNumber ||
-			var->varattno == TableOidAttributeNumber)
-		{
-			continue;
-		}
-		else if (var->varattno < SelfItemPointerAttributeNumber)
-		{
-			ereport(ERROR, 
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("MIN / MAX TransactionID or CommandID not supported for BioseqScan")));
-		}
-
-		if (var->varattno == 0 )
-		{
-			/* all attributes are required, we don't need to add more so break*/
-			attr_needed = bms_add_range(attr_needed, 0, natts - 1);
-			break;
-		}
-
-		attr_needed = bms_add_member(attr_needed, var->varattno - 1);
-	}
-
-	return attr_needed;
-}
-
 
 /*
  * ExecScanFetch -- check interrupts & fetch next potential tuple

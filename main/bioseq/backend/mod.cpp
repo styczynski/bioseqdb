@@ -36,7 +36,7 @@ CXX_PG_FUNCTION_INFO_V1(testtest);
 Datum testtest(PG_FUNCTION_ARGS) {
   // Nothing here
   JustLog("TEST align?");
-  auto ez = make<ksw_extz_t>();
+  auto ez = make0<ksw_extz_t>();
   Aligner<ALIGN_ALGORITHM_KSW2>::z2(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0, 0, ez);
   JustLog("Align done :D");
   return BoolGetDatum(true);

@@ -286,7 +286,7 @@ ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
 
 	if (!found)
 	{
-		ColumarCacheChunkGroupInUse *newChunkGroupInUse = make<ColumarCacheChunkGroupInUse>();
+		ColumarCacheChunkGroupInUse *newChunkGroupInUse = make0<ColumarCacheChunkGroupInUse>();
 
 		newChunkGroupInUse->relId = relId;
 		newChunkGroupInUse->stripeId = stripeId;
@@ -316,7 +316,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 
 	if (head == NULL)
 	{
-		head = make<dlist_head>();
+		head = make0<dlist_head>();
 	}
 
 	ColumnarCacheEntry *entry = ColumnarFindInCache(relId, stripeId, chunkId, columnId);
@@ -336,7 +336,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 	}
 	else
 	{
-		entry = make<ColumnarCacheEntry>();
+		entry = make0<ColumnarCacheEntry>();
 
 		entry->relId = relId;
 		entry->stripeId = stripeId;

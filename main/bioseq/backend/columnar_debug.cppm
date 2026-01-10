@@ -15,6 +15,7 @@ module;
 export module storage_debug;
 import storage_physical;
 import storage_metadata;
+import bioseq_table;
 
 /*
  * MemoryContextTotals adds stats of the given memory context and its

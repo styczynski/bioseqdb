@@ -91,7 +91,7 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 	int originalProcedureNameLen = strlen(NameStr(procedureForm->proname));
 
 	char * vectorizedProcedureName =
-		make<char>(sizeof(char) * originalProcedureNameLen + 2);
+		make1<char>(sizeof(char) * originalProcedureNameLen + 2);
 	
 	vectorizedProcedureName[0] = 'v';
 
@@ -103,7 +103,7 @@ GetVectorizedProcedureOid(Oid procedureOid, Oid *vectorizedProcedureOid)
 
 	funcNames = lappend(funcNames, makeString(vectorizedProcedureName));
 
-	argtypes = make<Oid>(sizeof(Oid) * procedureForm->pronargs);
+	argtypes = make1<Oid>(sizeof(Oid) * procedureForm->pronargs);
 
 	for (i = 0; i < procedureForm->pronargs; i++)
 		argtypes[i] = procedureForm->proargtypes.values[i];
@@ -257,13 +257,13 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 				int argno = 0;
 				int nargs = list_length(opExprNode->args);
 
-				VectorQual *newVectorQual = make<VectorQual>();
+				VectorQual *newVectorQual = make0<VectorQual>();
 				newVectorQual->vectorQualType = VECTOR_QUAL_EXPR;
 
-				newVectorQual->u.expr.fmgrInfo = make<FmgrInfo>();
-				newVectorQual->u.expr.fcInfo  = make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(nargs));
+				newVectorQual->u.expr.fmgrInfo = make0<FmgrInfo>();
+				newVectorQual->u.expr.fcInfo  = make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(nargs));
 				newVectorQual->u.expr.vectorFnArguments = 
-					make<VectorFnArgument>(sizeof(VectorFnArgument) * nargs);
+					make1<VectorFnArgument>(sizeof(VectorFnArgument) * nargs);
 
 
 				fmgr_info(opExprNode->opfuncid, newVectorQual->u.expr.fmgrInfo);
@@ -316,7 +316,7 @@ ConstructVectorizedQualList(TupleTableSlot *slot, List *vectorizedQual)
 			{
 				BoolExpr *boolExpr = castNode(BoolExpr, node);
 
-				VectorQual *newVectorQual = make<VectorQual>();
+				VectorQual *newVectorQual = make0<VectorQual>();
 				newVectorQual->vectorQualType = VECTOR_QUAL_BOOL_EXPR;
 				
 				List *newQualExprArgList = 

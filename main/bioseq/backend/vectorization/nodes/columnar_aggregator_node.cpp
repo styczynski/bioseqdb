@@ -1578,9 +1578,9 @@ find_hash_columns(AggState *aggstate)
 		maxCols = bms_num_members(colnos) + perhash->numCols;
 
 		perhash->hashGrpColIdxInput =
-			make<AttrNumber>(maxCols * sizeof(AttrNumber));
+			make1<AttrNumber>(maxCols * sizeof(AttrNumber));
 		perhash->hashGrpColIdxHash =
-			make<AttrNumber>(perhash->numCols * sizeof(AttrNumber));
+			make1<AttrNumber>(perhash->numCols * sizeof(AttrNumber));
 
 		/* Add all the grouping columns to colnos */
 		for (i = 0; i < perhash->numCols; i++)
@@ -1843,7 +1843,7 @@ hash_agg_enter_spill_mode(AggState *aggstate)
 
 		aggstate->hash_tapeset = LogicalTapeSetCreate(true, NULL, -1);
 
-		aggstate->hash_spills = make<HashAggSpill>(sizeof(HashAggSpill) * aggstate->num_hashes);
+		aggstate->hash_spills = make1<HashAggSpill>(sizeof(HashAggSpill) * aggstate->num_hashes);
 
 		for (int setno = 0; setno < aggstate->num_hashes; setno++)
 		{
@@ -2875,9 +2875,9 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
 	npartitions = hash_choose_num_partitions(input_groups, hashentrysize,
 											 used_bits, &partition_bits);
 
-	spill->partitions = make<LogicalTape*>(sizeof(LogicalTape *) * npartitions);
-	spill->ntuples = make<int64>(sizeof(int64) * npartitions);
-	spill->hll_card = make<hyperLogLogState>(sizeof(hyperLogLogState) * npartitions);
+	spill->partitions = make1<LogicalTape*>(sizeof(LogicalTape *) * npartitions);
+	spill->ntuples = make1<int64>(sizeof(int64) * npartitions);
+	spill->hll_card = make1<hyperLogLogState>(sizeof(hyperLogLogState) * npartitions);
 
 	for (int i = 0; i < npartitions; i++)
 		spill->partitions[i] = LogicalTapeCreate(tapeset);
@@ -2966,7 +2966,7 @@ static HashAggBatch *
 hashagg_batch_new(LogicalTape *input_tape, int setno,
 				  int64 input_tuples, double input_card, int used_bits)
 {
-	HashAggBatch *batch = make<HashAggBatch>(sizeof(HashAggBatch));
+	HashAggBatch *batch = make1<HashAggBatch>(sizeof(HashAggBatch));
 
 	batch->setno = setno;
 	batch->used_bits = used_bits;
@@ -3008,7 +3008,7 @@ hashagg_batch_read(HashAggBatch *batch, uint32 *hashp)
 				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
 								 tape, sizeof(uint32), nread)));
 
-	tuple = make<MinimalTupleData>(t_len);
+	tuple = make1<MinimalTupleData>(t_len);
 	tuple->t_len = t_len;
 
 	nread = LogicalTapeRead(tape,
@@ -3238,7 +3238,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->numphases = numPhases;
 
 	aggstate->aggcontexts = (ExprContext **)
-		make<ExprContext*>(sizeof(ExprContext *) * numGroupingSets);
+		make1<ExprContext*>(sizeof(ExprContext *) * numGroupingSets);
 
 	/*
 	 * Create expression contexts.  We need three or more, one for
@@ -3361,15 +3361,15 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * For each phase, prepare grouping set data and fmgr lookup data for
 	 * compare functions.  Accumulate all_grouped_cols in passing.
 	 */
-	aggstate->phases = make<AggStatePerPhaseData>(numPhases * sizeof(AggStatePerPhaseData));
+	aggstate->phases = make1<AggStatePerPhaseData>(numPhases * sizeof(AggStatePerPhaseData));
 
 	aggstate->num_hashes = numHashes;
 	if (numHashes)
 	{
-		aggstate->perhash = make<AggStatePerHashData>(sizeof(AggStatePerHashData) * numHashes);
+		aggstate->perhash = make1<AggStatePerHashData>(sizeof(AggStatePerHashData) * numHashes);
 		aggstate->phases[0].numsets = 0;
-		aggstate->phases[0].gset_lengths = make<int>(numHashes * sizeof(int));
-		aggstate->phases[0].grouped_cols = make<Bitmapset*>(numHashes * sizeof(Bitmapset *));
+		aggstate->phases[0].gset_lengths = make1<int>(numHashes * sizeof(int));
+		aggstate->phases[0].grouped_cols = make1<Bitmapset*>(numHashes * sizeof(Bitmapset *));
 	}
 
 	phase = 0;
@@ -3428,8 +3428,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 			if (num_sets)
 			{
-				phasedata->gset_lengths = make<int>(num_sets * sizeof(int));
-				phasedata->grouped_cols = make<Bitmapset*>(num_sets * sizeof(Bitmapset *));
+				phasedata->gset_lengths = make1<int>(num_sets * sizeof(int));
+				phasedata->grouped_cols = make1<Bitmapset*>(num_sets * sizeof(Bitmapset *));
 
 				i = 0;
 				for(auto sublist : PList<List>(aggnode->groupingSets))
@@ -3472,7 +3472,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * need to be compared.
 				 */
 				phasedata->eqfunctions =
-					make<ExprState*>(aggnode->numCols * sizeof(ExprState *));
+					make1<ExprState*>(aggnode->numCols * sizeof(ExprState *));
 
 				/* for each grouping set */
 				for (i = 0; i < phasedata->numsets; i++)
@@ -3527,18 +3527,18 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * allocate my private per-agg working storage
 	 */
 	econtext = aggstate->ss.ps.ps_ExprContext;
-	econtext->ecxt_aggvalues = make<Datum>(sizeof(Datum) * numaggs);
-	econtext->ecxt_aggnulls = make<bool>(sizeof(bool) * numaggs);
+	econtext->ecxt_aggvalues = make1<Datum>(sizeof(Datum) * numaggs);
+	econtext->ecxt_aggnulls = make1<bool>(sizeof(bool) * numaggs);
 
-	peraggs = make<AggStatePerAggData>(sizeof(AggStatePerAggData) * numaggs);
-	pertransstates = make<AggStatePerTransData>(sizeof(AggStatePerTransData) * numtrans);
+	peraggs = make1<AggStatePerAggData>(sizeof(AggStatePerAggData) * numaggs);
+	pertransstates = make1<AggStatePerTransData>(sizeof(AggStatePerTransData) * numtrans);
 
 	aggstate->peragg = peraggs;
 	aggstate->pertrans = pertransstates;
 
 
 	aggstate->all_pergroups =
-		make<AggStatePerGroup>(sizeof(AggStatePerGroup)
+		make1<AggStatePerGroup>(sizeof(AggStatePerGroup)
 									 * (numGroupingSets + numHashes));
 	pergroups = aggstate->all_pergroups;
 
@@ -3546,7 +3546,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	{
 		for (i = 0; i < numGroupingSets; i++)
 		{
-			pergroups[i] = make<AggStatePerGroupData>(sizeof(AggStatePerGroupData)
+			pergroups[i] = make1<AggStatePerGroupData>(sizeof(AggStatePerGroupData)
 													  * numaggs);
 		}
 
@@ -4074,7 +4074,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 	fmgr_info(transfn_oid, &pertrans->transfn);
 	fmgr_info_set_expr((Node *) transfnexpr, &pertrans->transfn);
 
-	pertrans->transfn_fcinfo = make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(numTransArgs));
+	pertrans->transfn_fcinfo = make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(numTransArgs));
 	InitFunctionCallInfoData(*pertrans->transfn_fcinfo,
 							 &pertrans->transfn,
 							 numTransArgs,
@@ -4094,7 +4094,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		fmgr_info_set_expr((Node *) serialfnexpr, &pertrans->serialfn);
 
 		pertrans->serialfn_fcinfo =
-			make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
+			make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
 		InitFunctionCallInfoData(*pertrans->serialfn_fcinfo,
 								 &pertrans->serialfn,
 								 1,
@@ -4110,7 +4110,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		fmgr_info_set_expr((Node *) deserialfnexpr, &pertrans->deserialfn);
 
 		pertrans->deserialfn_fcinfo =
-			make<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
+			make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
 		InitFunctionCallInfoData(*pertrans->deserialfn_fcinfo,
 								 &pertrans->deserialfn,
 								 2,
@@ -4189,13 +4189,13 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 
 		/* Extract the sort information for use later */
 		pertrans->sortColIdx =
-			make<AttrNumber>(numSortCols * sizeof(AttrNumber));
+			make1<AttrNumber>(numSortCols * sizeof(AttrNumber));
 		pertrans->sortOperators =
-			make<Oid>(numSortCols * sizeof(Oid));
+			make1<Oid>(numSortCols * sizeof(Oid));
 		pertrans->sortCollations =
-			make<Oid>(numSortCols * sizeof(Oid));
+			make1<Oid>(numSortCols * sizeof(Oid));
 		pertrans->sortNullsFirst =
-			make<bool>(numSortCols * sizeof(bool));
+			make1<bool>(numSortCols * sizeof(bool));
 
 		i = 0;
 		for(auto sortcl : PList<SortGroupClause>(sortlist))
@@ -4222,7 +4222,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		Assert(numArguments > 0);
 		Assert(list_length(aggref->aggdistinct) == numDistinctCols);
 
-		ops = make<Oid>(numDistinctCols * sizeof(Oid));
+		ops = make1<Oid>(numDistinctCols * sizeof(Oid));
 
 		i = 0;
 		for(auto groupClause : PList<SortGroupClause>(aggref->aggdistinct)) {
@@ -4244,7 +4244,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 	}
 
 	pertrans->sortstates = 
-		make<Tuplesortstate*>(sizeof(Tuplesortstate *) * numGroupingSets);
+		make1<Tuplesortstate*>(sizeof(Tuplesortstate *) * numGroupingSets);
 }
 
 

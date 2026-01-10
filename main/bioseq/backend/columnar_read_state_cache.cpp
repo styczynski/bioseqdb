@@ -128,7 +128,7 @@ InitColumnarReadStateCache(Relation relation, SubTransactionId currentSubXid)
 
 	if (stackEntry == NULL)
 	{
-		stackEntry = make<SubXidWriteState>();
+		stackEntry = make0<SubXidWriteState>();
 		stackEntry->subXid = currentSubXid;
 		stackEntry->next = hashEntry->writeStateStack;
 		hashEntry->writeStateStack = stackEntry;

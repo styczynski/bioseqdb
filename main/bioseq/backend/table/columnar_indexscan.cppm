@@ -3,9 +3,9 @@ module;
 
 #include "columnar/columnar_tableam.h"
 
-export module bioseq_index_scan;
-import bioseq_scan;
+export module bioseq_table:index_scan;
 
+import bioseq_table_types;
 
 /*
  * When an ordering operator is used, tuples fetched from the index that
@@ -18,6 +18,11 @@ typedef struct
 	Datum	   *orderbyvals;
 	bool	   *orderbynulls;
 } ReorderTuple;
+
+bool IsColumnarTableAmTable(Oid relationId);
+Bitmapset* ColumnarAttrNeeded(ScanState *ss, List *customList);
+IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed);
+
 
 static TupleTableSlot *IndexNext(IndexScanState *node);
 static TupleTableSlot *IndexNextWithReorder(IndexScanState *node);
@@ -104,8 +109,6 @@ bioseq_index_beginscan(Relation heapRelation,
 
 	return scan;
 }
-
-#include "optimizer/optimizer.h"
 
 /* ----------------------------------------------------------------
  *		IndexNext
@@ -730,9 +733,6 @@ ColumnarIndexScan_EndCustomScan(CustomScanState *node)
 {
 	ExecEndIndexScan(((ColumnarIndexScanState *)node)->indexscan_state);
 }
-
-#include "utils/ruleutils.h"
-#include "nodes/makefuncs.h"
 
 /*
  * Show a generic expression

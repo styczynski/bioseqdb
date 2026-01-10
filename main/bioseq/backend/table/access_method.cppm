@@ -1,3 +1,4 @@
+module; 
 #include "common.h"
 
 #include <math.h>
@@ -15,58 +16,44 @@
 #define VACUUM_TRUNCATE_LOCK_WAIT_INTERVAL 50       /* ms */
 #define VACUUM_TRUNCATE_LOCK_TIMEOUT 4500               /* ms */
 
-#include "common.h"
+#include <signal.h>
+using sact = struct sigaction;
+
+export module bioseq_table:access_method;
+
 import storage_cache;
 import storage_physical;
 import mlogging;
-import bioseq_scan;
 import storage_metadata;
-
-/*
- * ColumnarScanDescData is the scan state passed between beginscan(),
- * getnextslot(), rescan(), and endscan() calls.
- */
-typedef struct ColumnarScanDescData
-{
-	TableScanDescData cs_base;
-	ColumnarReadState *cs_readState;
-
-	/*
-	 * We initialize cs_readState lazily in the first getnextslot() call. We
-	 * need the following for initialization. We save them in beginscan().
-	 */
-	MemoryContext scanContext;
-	Bitmapset *attr_needed;
-	List *scanQual;
-
-	/* Parallel Scan Data */
-	ParallelColumnarScan parallelColumnarScan;
-
-	/* Vectorization */
-	bool returnVectorizedTuple;
-} ColumnarScanDescData;
+import bioseq_table_types;
+import config;
 
 
 /*
- * IndexFetchColumnarData is the scan state passed between index_fetch_begin,
- * index_fetch_reset, index_fetch_end, index_fetch_tuple calls.
+ * This is a check whether we need to bail out of a vacuum, it is set by the
+ * signal handler, and checked by the vacuum UDF process.
  */
-typedef struct IndexFetchColumnarData
-{
-	IndexFetchTableData cs_base;
-	ColumnarReadState *cs_readState;
-	Bitmapset *attr_needed;
-	List *stripeMetadataList;
-	bool is_select_query; /* CustomIndexScan only gets planned with SELECT query */
+static bool need_to_bail = false;
+static int last_signal = 0;
+sact abt_action = {};
+sact int_action = {};
+sact trm_action = {};
+sact kil_action = {};
 
-	/*
-	 * We initialize cs_readState lazily in the first bioseq_index_fetch_tuple
-	 * call. However, we want to do memory allocations in a sub MemoryContext of
-	 * bioseq_index_fetch_begin. For this reason, we store scanContext in
-	 * bioseq_index_fetch_begin.
-	 */
-	MemoryContext scanContext;
-} IndexFetchColumnarData;
+uint64 ColumnarTableRowCount(Relation relation);
+void bioseq_customscan_init();
+const TableAmRoutine * GetColumnarTableAmRoutine(void);
+bool ColumnarSupportsIndexAM(char *indexAMName);
+bool IsColumnarTableAmTable(Oid relationId);
+ItemPointerData row_number_to_tid(uint64 rowNumber);
+
+TableScanDesc
+bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32 flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple);
 
 /* available to other extensions using find_rendezvous_variable() */
 static ColumnarTableSetOptions_hook_type ColumnarTableSetOptions_hook = NULL;
@@ -86,7 +73,7 @@ static void ColumnarProcessUtility(PlannedStmt *pstmt,
 								   bool readOnlyTree,
 								   ProcessUtilityContext context,
 								   ParamListInfo params,
-								   struct QueryEnvironment *queryEnv,
+								   QueryEnvironment *queryEnv,
 								   DestReceiver *dest,
 								   QueryCompletionCompat *completionTag);
 static bool ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode,
@@ -181,7 +168,7 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-	ColumnarScanDesc scan = make<ColumnarScanDescData>();
+	ColumnarScanDesc scan = make0<ColumnarScanDescData>();
 	scan->cs_base.rs_rd = relation;
 	scan->cs_base.rs_snapshot = snapshot;
 	scan->cs_base.rs_nkeys = nkeys;
@@ -216,6 +203,100 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 	MemoryContextSwitchTo(oldContext);
 
 	return ((TableScanDesc) scan);
+}
+
+/*
+ * bioseq_relation_storageid returns storage id associated with the
+ * given relation id, or -1 if there is no associated storage id yet.
+ */
+POSTGRES_FN(bioseq_relation_storageid)
+{
+	Oid relationId = PG_GETARG_OID(0);
+	Relation relation = safe_relation_open(relationId, AccessShareLock);
+	if (!IsColumnarTableAmTable(relationId))
+	{
+		elog(ERROR, "relation \"%s\" is not a columnar table",
+			 RelationGetRelationName(relation));
+	}
+
+	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
+
+	relation_close(relation, AccessShareLock);
+
+	PG_RETURN_INT64(storageId);
+}
+
+/*
+ * create_table_row_mask creates empty row mask for table
+ */
+POSTGRES_FN(create_table_row_mask)
+{
+	Oid relationId = PG_GETARG_OID(0);
+
+	Relation relation = safe_relation_open(relationId, AccessShareLock);
+
+	if (!IsColumnarTableAmTable(relationId))
+	{
+		elog(ERROR, "relation \"%s\" is not a columnar table",
+			 RelationGetRelationName(relation));
+	}
+
+	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
+
+	ScanKeyData scanKey[1];
+	StripeMetadata *stripeMetadata = NULL;
+
+	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
+				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
+
+	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
+	
+	Relation index = index_open(ColumnarStripePKeyIndexRelationId(),
+								AccessShareLock);
+
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
+															SnapshotSelf, 1, scanKey);
+
+	HeapTuple heapTuple = NULL;
+
+	bool created = true;
+
+	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
+																 ForwardScanDirection)))
+	{
+		stripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
+
+		List *chunkGroupRowCount = NIL;
+
+		int64 lastChunkRowCount = stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount ?
+									stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount :
+									stripeMetadata->chunkGroupRowCount;
+
+		for (int i = 0; i < stripeMetadata->chunkCount - 1; i++)
+		{
+			chunkGroupRowCount = 
+				lappend_int(chunkGroupRowCount, stripeMetadata->chunkGroupRowCount);
+		}
+
+		chunkGroupRowCount = 
+				lappend_int(chunkGroupRowCount, lastChunkRowCount);
+
+		if(!SaveEmptyRowMask(storageId, stripeMetadata->id,
+							 stripeMetadata->firstRowNumber, chunkGroupRowCount))
+		{
+			elog(WARNING, "relation \"%s\" already has bioseq.row_mask populated.",
+				 RelationGetRelationName(relation));
+			created = false;
+			break;
+		}
+	}
+
+	systable_endscan_ordered(scanDescriptor);
+	index_close(index, AccessShareLock);
+	table_close(columnarStripes, AccessShareLock);
+	relation_close(relation, AccessShareLock);
+
+	PG_RETURN_BOOL(created);
 }
 
 /*
@@ -451,7 +532,7 @@ bioseq_index_fetch_begin(Relation rel)
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-	IndexFetchColumnarData *scan = make<IndexFetchColumnarData>();
+	IndexFetchColumnarData *scan = make0<IndexFetchColumnarData>();
 	scan->cs_base.rel = rel;
 	scan->cs_readState = NULL;
 	scan->stripeMetadataList = NIL;
@@ -481,7 +562,7 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
 
-	IndexFetchColumnarData *scan = make<IndexFetchColumnarData>();
+	IndexFetchColumnarData *scan = make0<IndexFetchColumnarData>();
 	scan->cs_base.rel = rel;
 	scan->cs_readState = NULL;
 	scan->stripeMetadataList = NIL;
@@ -562,7 +643,7 @@ FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64 rowN
 
 
 static bool
-bioseq_index_fetch_tuple(struct IndexFetchTableData *sscan,
+bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 						   ItemPointer tid,
 						   Snapshot snapshot,
 						   TupleTableSlot *slot,
@@ -1306,8 +1387,8 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 															randomAccess,
 															NULL);
 
-	Datum *values = make<Datum>(sourceDesc->natts * sizeof(Datum));
-	bool *nulls = make<bool>(sourceDesc->natts * sizeof(bool));
+	Datum *values = make1<Datum>(sourceDesc->natts * sizeof(Datum));
+	bool *nulls = make1<bool>(sourceDesc->natts * sizeof(bool));
 
 	*num_tuples = 0;
 
@@ -1504,8 +1585,8 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	ColumnarSetStripeReadState(readState,
 							   static_cast<StripeMetadata*>(list_nth(stripeMetadataList, startingStripeListPosition - 1)));
 
-	Datum *values = make<Datum>(tupleDesc->natts * sizeof(Datum));
-	bool *nulls = make<bool>(tupleDesc->natts * sizeof(bool));
+	Datum *values = make1<Datum>(tupleDesc->natts * sizeof(Datum));
+	bool *nulls = make1<bool>(tupleDesc->natts * sizeof(bool));
 
 	/* we don't need to know rowNumber here */
 	while (ColumnarReadNextRow(readState, values, nulls, NULL))
@@ -1618,7 +1699,7 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 	List *indexList = RelationGetIndexList(rel);
 	int nindexes = list_length(indexList);
 
-	struct VacuumCutoffs cutoffs;
+	VacuumCutoffs cutoffs;
 	vacuum_get_cutoffs(rel, params, &cutoffs);
 
 	Assert(MultiXactIdPrecedesOrEquals(cutoffs.MultiXactCutoff, cutoffs.OldestMxact));
@@ -2520,7 +2601,7 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 
-void
+export void
 bioseq_tableam_init()
 {
 	BMethod(bioseq_tableam_init);
@@ -2709,7 +2790,7 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 					   bool readOnlyTree,
 					   ProcessUtilityContext context,
 					   ParamListInfo params,
-					   struct QueryEnvironment *queryEnv,
+					   QueryEnvironment *queryEnv,
 					   DestReceiver *dest,
 					   QueryCompletionCompat *completionTag)
 {
@@ -2764,32 +2845,32 @@ ColumnarSupportsIndexAM(char *indexAMName)
 }
 
 
-/*
- * IsColumnarTableAmTable returns true if relation has bioseq_tableam
- * access method. This can be called before extension creation.
- */
-bool
-IsColumnarTableAmTable(Oid relationId)
-{
-	BMethod(IsColumnarTableAmTable);
-	if (!OidIsValid(relationId))
-	{
-		return false;
-	}
+// /*
+//  * IsColumnarTableAmTable returns true if relation has bioseq_tableam
+//  * access method. This can be called before extension creation.
+//  */
+// bool
+// IsColumnarTableAmTable(Oid relationId)
+// {
+// 	BMethod(IsColumnarTableAmTable);
+// 	if (!OidIsValid(relationId))
+// 	{
+// 		return false;
+// 	}
 
-	/*
-	 * Lock relation to prevent it from being dropped &
-	 * avoid race conditions.
-	 */
-	Relation rel = safe_relation_open(relationId, AccessShareLock);
-	bool result = rel->rd_tableam == GetColumnarTableAmRoutine();
-	relation_close(rel, NoLock);
+// 	/*
+// 	 * Lock relation to prevent it from being dropped &
+// 	 * avoid race conditions.
+// 	 */
+// 	Relation rel = safe_relation_open(relationId, AccessShareLock);
+// 	bool result = rel->rd_tableam == GetColumnarTableAmRoutine();
+// 	relation_close(rel, NoLock);
 
-	return result;
-}
+// 	return result;
+// }
 
 
-static const TableAmRoutine bioseq_am_methods = {
+export const TableAmRoutine bioseq_am_methods = {
 	.type = T_TableAmRoutine,
 
 	.slot_callbacks = bioseq_slot_callbacks,
@@ -2856,9 +2937,7 @@ GetColumnarTableAmRoutine(void)
 	return &bioseq_am_methods;
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_handler);
-Datum
-bioseq_handler(PG_FUNCTION_ARGS)
+POSTGRES_FN(bioseq_handler)
 {
 	BMethod(bioseq_handler);
 	PG_RETURN_POINTER(&bioseq_am_methods);
@@ -2888,12 +2967,12 @@ detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
 			/* make a copy */
 			if (values == orig_values)
 			{
-				values = make<Datum>(sizeof(Datum) * natts);
+				values = make1<Datum>(sizeof(Datum) * natts);
 				memcpy(values, orig_values, sizeof(Datum) * natts);
 			}
 
 			/* will be freed when per-tuple context is reset */
-			struct varlena *new_value = (struct varlena *) DatumGetPointer(values[i]);
+			varlena *new_value = (varlena *) DatumGetPointer(values[i]);
 			new_value = detoast_attr(new_value);
 			values[i] = PointerGetDatum(new_value);
 		}
@@ -2956,9 +3035,7 @@ ColumnarCheckLogicalReplication(Relation rel)
  * arguments. Calling the argument with the NULL value will be interperted as not having
  * provided the argument.
  */
-CXX_PG_FUNCTION_INFO_V1(alter_bioseq_table_set);
-Datum
-alter_bioseq_table_set(PG_FUNCTION_ARGS)
+POSTGRES_FN(alter_bioseq_table_set)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
@@ -3081,9 +3158,7 @@ alter_bioseq_table_set(PG_FUNCTION_ARGS)
  *
  * All options set to true will be reset to the default system value.
  */
-CXX_PG_FUNCTION_INFO_V1(alter_bioseq_table_reset);
-Datum
-alter_bioseq_table_reset(PG_FUNCTION_ARGS)
+POSTGRES_FN(alter_bioseq_table_reset)
 {
 	Oid relationId = PG_GETARG_OID(0);
 
@@ -3166,9 +3241,7 @@ alter_bioseq_table_reset(PG_FUNCTION_ARGS)
  *     STRICT
  *     LANGUAGE c AS 'MODULE_PATHNAME', 'upgrade_bioseq_storage';
  */
-CXX_PG_FUNCTION_INFO_V1(upgrade_bioseq_storage);
-Datum
-upgrade_bioseq_storage(PG_FUNCTION_ARGS)
+POSTGRES_FN(upgrade_bioseq_storage)
 {
 	Oid relid = PG_GETARG_OID(0);
 
@@ -3202,9 +3275,7 @@ upgrade_bioseq_storage(PG_FUNCTION_ARGS)
  *     STRICT
  *     LANGUAGE c AS 'MODULE_PATHNAME', 'downgrade_bioseq_storage';
  */
-CXX_PG_FUNCTION_INFO_V1(downgrade_bioseq_storage);
-Datum
-downgrade_bioseq_storage(PG_FUNCTION_ARGS)
+POSTGRES_FN(downgrade_bioseq_storage)
 {
 	Oid relid = PG_GETARG_OID(0);
 
@@ -3264,7 +3335,7 @@ static List *HolesForRelation(Relation rel)
 			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
 			continue;
 		} else {
-			StripeHole * hole = make<StripeHole>();
+			StripeHole * hole = make0<StripeHole>();
 			hole->fileOffset = lastMinimalOffset;
 			hole->dataLength = stripeMetadata->fileOffset + stripeMetadata->dataLength - lastMinimalOffset;
 			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
@@ -3276,16 +3347,7 @@ static List *HolesForRelation(Relation rel)
 	return holes;
 }
 
-/*
- * This is a check whether we need to bail out of a vacuum, it is set by the
- * signal handler, and checked by the vacuum UDF process.
- */
-static bool need_to_bail = false;
-static int last_signal = 0;
-static struct sigaction abt_action;
-static struct sigaction int_action;
-static struct sigaction trm_action;
-static struct sigaction kil_action;
+
 
 /*
  * vacuum_signal_handler - catch any signals sent during the UDF vacuum, and
@@ -3312,9 +3374,7 @@ typedef struct StripeVacuumCandidate
 	StripeMetadata *stripeMetadata;
 } StripeVacuumCandidate;
 
-CXX_PG_FUNCTION_INFO_V1(vacuum_bioseq_table);
-Datum
-vacuum_bioseq_table(PG_FUNCTION_ARGS)
+POSTGRES_FN(vacuum_bioseq_table)
 {
 	Oid relid = PG_GETARG_OID(0);
 	Relation rel = RelationIdGetRelation(relid);
@@ -3323,7 +3383,7 @@ vacuum_bioseq_table(PG_FUNCTION_ARGS)
 	uint32 stripeCount = PG_GETARG_UINT32(1);
 	uint32 progress = 0;
 	bool completelyDone = false;
-	struct sigaction action;
+	sact action;
 
 	/* Capture the cache state and disable it for a vacuum. */
 	bool old_cache_mode = bioseq_enable_page_cache;
@@ -3439,7 +3499,7 @@ vacuum_bioseq_table(PG_FUNCTION_ARGS)
 			continue;
 		}
 
-		StripeVacuumCandidate *vacuumCandidate = make<StripeVacuumCandidate>();
+		StripeVacuumCandidate *vacuumCandidate = make0<StripeVacuumCandidate>();
 		vacuumCandidate->stripeMetadataIndex = stripeMetadataIndex;
 		vacuumCandidate->candidateTotalSize = stripeMetadata->rowCount - stripeDeletedRows;
 		vacuumCandidate->stripeMetadata = stripeMetadata;
@@ -3494,8 +3554,8 @@ vacuum_bioseq_table(PG_FUNCTION_ARGS)
 		ColumnarSetStripeReadState(readState,
 								vacuumCandidate->stripeMetadata);
 
-		Datum *values = make<Datum>(tupleDesc->natts * sizeof(Datum));
-		bool *nulls = make<bool>(tupleDesc->natts * sizeof(bool));
+		Datum *values = make1<Datum>(tupleDesc->natts * sizeof(Datum));
+		bool *nulls = make1<bool>(tupleDesc->natts * sizeof(bool));
 
 		int32 rowCount = 0;
 
@@ -3673,7 +3733,7 @@ vacuum_bioseq_table(PG_FUNCTION_ARGS)
 				if (hole->fileOffset && stripe->dataLength < hole->dataLength && stripe->fileOffset > hole->fileOffset)
 				{
 					/* Read a copy of the old row. */
-					char * data = make<char>(stripe->dataLength);
+					char * data = make1<char>(stripe->dataLength);
 					ColumnarStorageRead(rel, stripe->fileOffset, data, stripe->dataLength);
 
 					/* Write the data to the new offset. */
@@ -3745,9 +3805,7 @@ typedef struct ColumnarStats
 /* We return 6 columns. */
 #define STATS_INFO_NATTS 6
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_stats);
-Datum
-bioseq_stats(PG_FUNCTION_ARGS)
+POSTGRES_FN(bioseq_stats)
 {
 	FuncCallContext *funcctx;
 	int call_cntr;
@@ -3786,7 +3844,7 @@ bioseq_stats(PG_FUNCTION_ARGS)
 		funcctx->attinmeta = attinmeta;
 
 		/* Set up the stats. */
-		ColumnarStats *stats = make<ColumnarStats>(sizeof(ColumnarStats) * list_length(stripeMetadataList));
+		ColumnarStats *stats = make1<ColumnarStats>(sizeof(ColumnarStats) * list_length(stripeMetadataList));
 		funcctx->max_calls = list_length(stripeMetadataList);
 
 		/* Iterate through the stripes to get a copy of the important data. */
@@ -3849,3 +3907,4 @@ bioseq_stats(PG_FUNCTION_ARGS)
 		SRF_RETURN_DONE(funcctx);
 	}
 }
+

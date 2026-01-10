@@ -6,7 +6,8 @@
 
 #include "columnar/columnar_tableam.h"
 
-import bioseq_scan;
+import bioseq_table;
+import storage_metadata;
 
 /*
  * Mapping from relfilenode to WriteStateMapEntry. This keeps write state for
@@ -145,7 +146,7 @@ bioseq_init_write_state(Relation relation, TupleDesc tupdesc,
 	 */
 	ReadColumnarOptions(tupSlotRelationId, &columnarOptions);
 
-	SubXidWriteState *stackEntry = make<SubXidWriteState>();
+	SubXidWriteState *stackEntry = make0<SubXidWriteState>();
 	stackEntry->writeState = ColumnarBeginWrite(relation->rd_locator,
 
 												columnarOptions,

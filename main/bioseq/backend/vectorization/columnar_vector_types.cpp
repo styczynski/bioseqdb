@@ -21,10 +21,10 @@ BuildVectorColumn(int16 columnDimension, int16 columnTypeLen,
 {
 	VectorColumn *vectorColumn;
 
-	vectorColumn = make<VectorColumn>();
+	vectorColumn = make0<VectorColumn>();
 
 	vectorColumn->dimension = 0;
-	vectorColumn->value = make<Datum>(columnTypeLen * COLUMNAR_VECTOR_COLUMN_SIZE);
+	vectorColumn->value = make1<Datum>(columnTypeLen * COLUMNAR_VECTOR_COLUMN_SIZE);
 	vectorColumn->columnTypeLen = columnTypeLen;
 	vectorColumn->columnIsVal = columnIsVal;
 	vectorColumn->rowNumber = rowNumber;
@@ -136,7 +136,7 @@ WriteTupleToVectorSlot(TupleTableSlot *in, VectorTupleTableSlot *vectorSlot,
 
 				Datum *varLenTypeContainer = NULL;
 
-				varLenTypeContainer = make<Datum>(sizeof(int8) * data_length);
+				varLenTypeContainer = make1<Datum>(sizeof(int8) * data_length);
 				memcpy(varLenTypeContainer, val, data_length);
 
 				*(Datum *) ((int8 *) column->value + column->columnTypeLen * index) = 

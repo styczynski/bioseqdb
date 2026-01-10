@@ -46,6 +46,16 @@ CppConcat(pg_finfo_,funcname) (void) \
 extern "C" int no_such_variable; \
 extern "C" PGDLLEXPORT Datum funcname(PG_FUNCTION_ARGS)
 
+#define E_POSTGRES_FN(funcname) \
+extern "C" PGDLLEXPORT const Pg_finfo_record * \
+CppConcat(pg_finfo_,funcname) (void) \
+{ \
+	static const Pg_finfo_record my_finfo = { 1 }; \
+	return &my_finfo; \
+} \
+extern "C" int no_such_variable; \
+export extern "C" PGDLLEXPORT Datum funcname(PG_FUNCTION_ARGS)
+
 
 
 extern "C" {
@@ -171,6 +181,8 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "catalog/pg_type.h"
+#include "utils/ruleutils.h"
+#include "nodes/makefuncs.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
 #include "storage/smgr.h"

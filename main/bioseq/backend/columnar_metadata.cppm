@@ -30,24 +30,23 @@ module;
 
 import storage_physical;
 import mlogging;
+import config;
 
 export module storage_metadata;
 
-void InitColumnarOptions(Oid regclass);
-void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
-bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
-bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
-extern bool IsColumnarTableAmTable(Oid relationId);
+export void InitColumnarOptions(Oid regclass);
+export void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
+export bool DeleteColumnarTableOptions(Oid regclass, bool missingOk);
+export bool ReadColumnarOptions(Oid regclass, ColumnarOptions *options);
 
 export FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
 										int16 procedureId);
-const char * CompressionTypeStr(CompressionType type);
-export ItemPointerData row_number_to_tid(uint64 rowNumber);
+//export ItemPointerData row_number_to_tid(uint64 rowNumber);
 export uint64 LookupStorageId(RelFileLocator relfilelocator);
-void DeleteMetadataRows(RelFileLocator relfilelocator);
-void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
-uint64 ColumnarMetadataNewStorageId(void);
-uint64 GetHighestUsedAddress(RelFileLocator relfilelocator);
+export void DeleteMetadataRows(RelFileLocator relfilelocator);
+export void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64 stripeId);
+export uint64 ColumnarMetadataNewStorageId(void);
+export uint64 GetHighestUsedAddress(RelFileLocator relfilelocator);
 export EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64 columnCount,
 												   uint64 chunkGroupRowCount,
 												   uint64 stripeRowCount);
@@ -78,7 +77,7 @@ export StripeMetadata *  FindNextStripeForParallelWorker(Relation relation,
 														 uint64 * nextHigherStripeId);
 export StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
 export uint64 StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
-StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
+export StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
 													   Snapshot snapshot);
 export bool SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 							 uint64 stripeStartRowNumber, List *chunkGroupRowCounts);
@@ -88,7 +87,7 @@ export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
 export bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 								MemoryContext ctx,
 								uint64 stripeFirstRowNumber, int rowCount);
-EState * create_estate_for_relation(Relation rel);
+export EState * create_estate_for_relation(Relation rel);
 
 
 /*
@@ -160,7 +159,7 @@ GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId, int16 procedureId)
 
 	if (operatorId != InvalidOid)
 	{
-		functionInfo = make<FmgrInfo>();
+		functionInfo = make0<FmgrInfo>();
 
 		/* fill in the FmgrInfo struct using the operatorId */
 		fmgr_info(operatorId, functionInfo);
@@ -211,7 +210,7 @@ static StripeMetadata * UpdateStripeMetadataRow(uint64 storageId, uint64 stripeI
 												bool *update, Datum *newValues);
 static List * ReadDataFileStripeList(uint64 storageId, Snapshot snapshot,
 									 ScanDirection scanDirection);
-static StripeMetadata * BuildStripeMetadata(Relation columnarStripes,
+export StripeMetadata * BuildStripeMetadata(Relation columnarStripes,
 											HeapTuple heapTuple);
 static void ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe,
 									uint32 chunkGroupCount,
@@ -219,8 +218,8 @@ static void ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe,
 									uint32 **chunkGroupDeletedRows,
 									Snapshot snapshot);
 static Oid ColumnarStorageIdSequenceRelationId(void);
-static Oid ColumnarStripeRelationId(void);
-static Oid ColumnarStripePKeyIndexRelationId(void);
+export Oid ColumnarStripeRelationId(void);
+export Oid ColumnarStripePKeyIndexRelationId(void);
 static Oid ColumnarStripeFirstRowNumberIndexRelationId(void);
 static Oid ColumnarOptionsRelationId(void);
 static Oid ColumnarOptionsIndexRegclass(void);
@@ -258,14 +257,6 @@ static StripeMetadata * StripeMetadataLookupRowNumber(Relation relation, uint64 
 static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
 
 
-/* constants for bioseq.options */
-#define Natts_bioseq_options 5
-#define Anum_bioseq_options_regclass 1
-#define Anum_bioseq_options_chunk_group_row_limit 2
-#define Anum_bioseq_options_stripe_row_limit 3
-#define Anum_bioseq_options_compression_level 4
-#define Anum_bioseq_options_compression 5
-
 /* ----------------
  *		bioseq.options definition.
  * ----------------
@@ -283,54 +274,6 @@ typedef struct FormData_bioseq_options
 } FormData_bioseq_options;
 typedef FormData_bioseq_options *Form_bioseq_options;
 
-
-/* constants for bioseq.stripe */
-#define Natts_bioseq_stripe 9
-#define Anum_bioseq_stripe_storageid 1
-#define Anum_bioseq_stripe_stripe 2
-#define Anum_bioseq_stripe_file_offset 3
-#define Anum_bioseq_stripe_data_length 4
-#define Anum_bioseq_stripe_column_count 5
-#define Anum_bioseq_stripe_chunk_row_count 6
-#define Anum_bioseq_stripe_row_count 7
-#define Anum_bioseq_stripe_chunk_count 8
-#define Anum_bioseq_stripe_first_row_number 9
-
-/* constants for bioseq.chunk_group */
-#define Natts_bioseq_chunkgroup 5
-#define Anum_bioseq_chunkgroup_storageid 1
-#define Anum_bioseq_chunkgroup_stripe 2
-#define Anum_bioseq_chunkgroup_chunk 3
-#define Anum_bioseq_chunkgroup_row_count 4
-#define Anum_bioseq_chunkgroup_deleted_rows 5
-
-/* constants for bioseq.chunk */
-#define Natts_bioseq_chunk 14
-#define Anum_bioseq_chunk_storageid 1
-#define Anum_bioseq_chunk_stripe 2
-#define Anum_bioseq_chunk_attr 3
-#define Anum_bioseq_chunk_chunk 4
-#define Anum_bioseq_chunk_minimum_value 5
-#define Anum_bioseq_chunk_maximum_value 6
-#define Anum_bioseq_chunk_value_stream_offset 7
-#define Anum_bioseq_chunk_value_stream_length 8
-#define Anum_bioseq_chunk_exists_stream_offset 9
-#define Anum_bioseq_chunk_exists_stream_length 10
-#define Anum_bioseq_chunk_value_compression_type 11
-#define Anum_bioseq_chunk_value_compression_level 12
-#define Anum_bioseq_chunk_value_decompressed_size 13
-#define Anum_bioseq_chunk_value_count 14
-
-/* constants for bioseq.row_mask */
-#define Natts_bioseq_row_mask 8
-#define Anum_bioseq_row_mask_id 1
-#define Anum_bioseq_row_mask_storage_id 2
-#define Anum_bioseq_row_mask_stripe_id 3
-#define Anum_bioseq_row_mask_chunk_id 4
-#define Anum_bioseq_row_mask_start_row_number 5
-#define Anum_bioseq_row_mask_end_row_number 6
-#define Anum_bioseq_row_mask_deleted_rows 7
-#define Anum_bioseq_row_mask_mask 8
 
 
 /*
@@ -730,7 +673,7 @@ SaveEmptyRowMask(uint64 storageId, uint64 stripeId,
 				maskSize = COLUMNAR_ROW_MASK_CHUNK_SIZE / 8;
 			}
 
-			bytea *initialLookupRecord = make<bytea>(maskSize + VARHDRSZ);
+			bytea *initialLookupRecord = make1<bytea>(maskSize + VARHDRSZ);
 			SET_VARSIZE(initialLookupRecord, maskSize + VARHDRSZ);
 
 			int64 nextSeqId = nextval_internal(columnarRowMaskSeq, false);
@@ -812,14 +755,14 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
 															snapshot, 2, scanKey);
 
-	StripeSkipList *chunkList = make<StripeSkipList>();
+	StripeSkipList *chunkList = make0<StripeSkipList>();
 	chunkList->chunkCount = chunkCount;
 	chunkList->columnCount = columnCount;
-	chunkList->chunkSkipNodeArray = make<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
+	chunkList->chunkSkipNodeArray = make1<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		chunkList->chunkSkipNodeArray[columnIndex] =
-			make<ColumnChunkSkipNode>(chunkCount * sizeof(ColumnChunkSkipNode));
+			make1<ColumnChunkSkipNode>(chunkCount * sizeof(ColumnChunkSkipNode));
 	}
 
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
@@ -897,7 +840,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64 stripe, TupleDesc tuple
 							&chunkList->chunkGroupDeletedRows,
 							snapshot);
 
-	chunkList->chunkGroupRowOffset = make<uint32>(chunkCount * sizeof(uint32));
+	chunkList->chunkGroupRowOffset = make1<uint32>(chunkCount * sizeof(uint32));
 
 	for (chunkGroupIndex = 0; chunkGroupIndex < chunkCount; chunkGroupIndex++)
 	{
@@ -933,7 +876,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 			(rowCount / 8 + 1) :
 			(rowCount / 8);
 
-	bytea *chunkRowMaskBytea = make<bytea>(chunkMaskSize + VARHDRSZ);
+	bytea *chunkRowMaskBytea = make1<bytea>(chunkMaskSize + VARHDRSZ);
 	SET_VARSIZE(chunkRowMaskBytea, chunkMaskSize + VARHDRSZ);
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_row_mask_storage_id,
@@ -1483,8 +1426,8 @@ ReadChunkGroupRowCounts(uint64 storageId, uint64 stripe, uint32 chunkGroupCount,
 
 	HeapTuple heapTuple = NULL;
 
-	*chunkGroupRowCounts = make<uint32>(chunkGroupCount * sizeof(uint32));
-	*chunkGroupDeletedRows = make<uint32>(chunkGroupCount * sizeof(uint32));
+	*chunkGroupRowCounts = make1<uint32>(chunkGroupCount * sizeof(uint32));
+	*chunkGroupDeletedRows = make1<uint32>(chunkGroupCount * sizeof(uint32));
 
 	/*
 	 * Since we have now updates of `chunk_group`, there could be multiple tuples
@@ -1780,7 +1723,7 @@ EmptyStripeReservation *
 ReserveEmptyStripe(Relation rel, uint64 columnCount, uint64 chunkGroupRowCount,
 				   uint64 stripeRowCount)
 {
-	EmptyStripeReservation *stripeReservation = make<EmptyStripeReservation>();
+	EmptyStripeReservation *stripeReservation = make0<EmptyStripeReservation>();
 
 	uint64 storageId = ColumnarStorageGetStorageId(rel, false);
 
@@ -1946,7 +1889,7 @@ ReadDataFileStripeList(uint64 storageId, Snapshot snapshot, ScanDirection scanDi
  *
  * NB: heapTuple must be a proper heap tuple with MVCC fields.
  */
-static StripeMetadata *
+StripeMetadata *
 BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple)
 {
 	Assert(RelationGetRelid(columnarStripes) == ColumnarStripeRelationId());
@@ -1956,7 +1899,7 @@ BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple)
 	heap_deform_tuple(heapTuple, RelationGetDescr(columnarStripes),
 					  datumArray, isNullArray);
 
-	StripeMetadata *stripeMetadata = make<StripeMetadata>();
+	StripeMetadata *stripeMetadata = make0<StripeMetadata>();
 	stripeMetadata->id = DatumGetInt64(datumArray[Anum_bioseq_stripe_stripe - 1]);
 	stripeMetadata->fileOffset = DatumGetInt64(
 		datumArray[Anum_bioseq_stripe_file_offset - 1]);
@@ -2179,7 +2122,7 @@ StartModifyRelation(Relation rel)
 	/* ExecSimpleRelationInsert, ... require caller to open indexes */
 	ExecOpenIndices(resultRelInfo, false);
 
-	ModifyState *modifyState = make<ModifyState>();
+	ModifyState *modifyState = make0<ModifyState>();
 	modifyState->rel = rel;
 	modifyState->estate = estate;
 	modifyState->resultRelInfo = resultRelInfo;
@@ -2298,7 +2241,7 @@ static bytea *
 DatumToBytea(Datum value, Form_pg_attribute attrForm)
 {
 	int datumLength = att_addlength_datum(0, attrForm->attlen, value);
-	bytea *result = make<bytea>(datumLength + VARHDRSZ);
+	bytea *result = make1<bytea>(datumLength + VARHDRSZ);
 
 	SET_VARSIZE(result, datumLength + VARHDRSZ);
 
@@ -2335,7 +2278,7 @@ ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm)
 	 * We copy the data so the result of this function lives even
 	 * after the byteaDatum is freed.
 	 */
-	char *binaryDataCopy = make<char>(VARSIZE_ANY_EXHDR(bytes));
+	char *binaryDataCopy = make1<char>(VARSIZE_ANY_EXHDR(bytes));
 	memcpy(binaryDataCopy, /*VARSIZE_ANY_EXHDR(bytes),*/
 			 VARDATA_ANY(bytes), VARSIZE_ANY_EXHDR(bytes));
 
@@ -2358,7 +2301,7 @@ ColumnarStorageIdSequenceRelationId(void)
  * ColumnarStripeRelationId returns relation id of bioseq.stripe.
  * TODO: should we cache this similar to citus?
  */
-static Oid
+Oid
 ColumnarStripeRelationId(void)
 {
 	return safe_get_relname_relid("stripe", ColumnarNamespaceId());
@@ -2369,7 +2312,7 @@ ColumnarStripeRelationId(void)
  * ColumnarStripePKeyIndexRelationId returns relation id of bioseq.stripe_pkey.
  * TODO: should we cache this similar to citus?
  */
-static Oid
+Oid
 ColumnarStripePKeyIndexRelationId(void)
 {
 	return safe_get_relname_relid("stripe_pkey", ColumnarNamespaceId());
@@ -2554,100 +2497,6 @@ ColumnarMetadataNewStorageId()
 	return nextval_internal(ColumnarStorageIdSequenceRelationId(), false);
 }
 
-
-/*
- * bioseq_relation_storageid returns storage id associated with the
- * given relation id, or -1 if there is no associated storage id yet.
- */
-POSTGRES_FN(bioseq_relation_storageid)
-{
-	Oid relationId = PG_GETARG_OID(0);
-	Relation relation = safe_relation_open(relationId, AccessShareLock);
-	if (!IsColumnarTableAmTable(relationId))
-	{
-		elog(ERROR, "relation \"%s\" is not a columnar table",
-			 RelationGetRelationName(relation));
-	}
-
-	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
-
-	relation_close(relation, AccessShareLock);
-
-	PG_RETURN_INT64(storageId);
-}
-
-/*
- * create_table_row_mask creates empty row mask for table
- */
-POSTGRES_FN(create_table_row_mask)
-{
-	Oid relationId = PG_GETARG_OID(0);
-
-	Relation relation = safe_relation_open(relationId, AccessShareLock);
-
-	if (!IsColumnarTableAmTable(relationId))
-	{
-		elog(ERROR, "relation \"%s\" is not a columnar table",
-			 RelationGetRelationName(relation));
-	}
-
-	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
-
-	ScanKeyData scanKey[1];
-	StripeMetadata *stripeMetadata = NULL;
-
-	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
-
-	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
-	
-	Relation index = index_open(ColumnarStripePKeyIndexRelationId(),
-								AccessShareLock);
-
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
-															SnapshotSelf, 1, scanKey);
-
-	HeapTuple heapTuple = NULL;
-
-	bool created = true;
-
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
-																 ForwardScanDirection)))
-	{
-		stripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
-
-		List *chunkGroupRowCount = NIL;
-
-		int64 lastChunkRowCount = stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount ?
-									stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount :
-									stripeMetadata->chunkGroupRowCount;
-
-		for (int i = 0; i < stripeMetadata->chunkCount - 1; i++)
-		{
-			chunkGroupRowCount = 
-				lappend_int(chunkGroupRowCount, stripeMetadata->chunkGroupRowCount);
-		}
-
-		chunkGroupRowCount = 
-				lappend_int(chunkGroupRowCount, lastChunkRowCount);
-
-		if(!SaveEmptyRowMask(storageId, stripeMetadata->id,
-							 stripeMetadata->firstRowNumber, chunkGroupRowCount))
-		{
-			elog(WARNING, "relation \"%s\" already has bioseq.row_mask populated.",
-				 RelationGetRelationName(relation));
-			created = false;
-			break;
-		}
-	}
-
-	systable_endscan_ordered(scanDescriptor);
-	index_close(index, AccessShareLock);
-	table_close(columnarStripes, AccessShareLock);
-	relation_close(relation, AccessShareLock);
-
-	PG_RETURN_BOOL(created);
-}
 
 /*
  * ColumnarStorageUpdateIfNeeded - upgrade columnar storage to the current version by

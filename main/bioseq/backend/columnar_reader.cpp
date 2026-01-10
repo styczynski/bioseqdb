@@ -14,6 +14,7 @@
  *-------------------------------------------------------------------------
  */
 #include "common.h"
+#include "types.h"
 
 #include "safe_lib.h"
 
@@ -29,7 +30,17 @@ import storage_compression;
 import storage_physical;
 import storage_metadata;
 
-typedef struct ChunkGroupReadState
+// template<typename T> inline T* make1(uint32 size) {
+//     return static_cast<T*>(palloc0(size));
+// }
+
+// template<typename T> inline T* make0() {
+// 	return static_cast<T*>(palloc0(sizeof(T)));
+// }
+
+void FreeChunkBufferValueArray(ChunkData *chunkData);
+
+struct ChunkGroupReadState
 {
 	int64 currentRow;
 	int64 rowCount;
@@ -40,9 +51,9 @@ typedef struct ChunkGroupReadState
 	bool rowMaskCached; /* If rowMask metadata is cached and borrowed */
 	uint32 chunkStripeRowOffset; 
 	uint32 chunkGroupDeletedRows;
-} ChunkGroupReadState;
+};
 
-typedef struct StripeReadState
+struct StripeReadState
 {
 	int columnCount;
 	int64 rowCount;
@@ -55,7 +66,7 @@ typedef struct StripeReadState
 	StripeBuffers *stripeBuffers;   /* allocated in stripeReadContext */
 	List *projectedColumnList;      /* borrowed reference */
 	ChunkGroupReadState *chunkGroupReadState; /* owned */
-} StripeReadState;
+};
 
 struct ColumnarReadState
 {
@@ -198,7 +209,7 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
 	 */
 	MemoryContext stripeReadContext = CreateStripeReadMemoryContext();
 
-	ColumnarReadState *readState = make<ColumnarReadState>();
+	ColumnarReadState *readState = make0<ColumnarReadState>();
 	readState->relation = relation;
 	readState->projectedColumnList = projectedColumnList;
 	readState->whereClauseList = whereClauseList;
@@ -750,7 +761,7 @@ BeginStripeRead(StripeMetadata *stripeMetadata, Relation rel, TupleDesc tupleDes
 {
 	MemoryContext oldContext = MemoryContextSwitchTo(stripeReadContext);
 
-	StripeReadState *stripeReadState = make<StripeReadState>();
+	StripeReadState *stripeReadState = make0<StripeReadState>();
 
 	stripeReadState->relation = rel;
 	stripeReadState->tupleDescriptor = tupleDesc;
@@ -1008,7 +1019,7 @@ BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupl
 		stripeBuffers->selectedChunkGroupDeletedRows[chunkIndex];
 
 	MemoryContext oldContext = MemoryContextSwitchTo(cxt);
-	ChunkGroupReadState *chunkGroupReadState = make<ChunkGroupReadState>();
+	ChunkGroupReadState *chunkGroupReadState = make0<ChunkGroupReadState>();
 
 	chunkGroupReadState->currentRow = 0;
 	chunkGroupReadState->rowCount = chunkGroupRowCount;
@@ -1120,14 +1131,14 @@ CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowC
 {
 	uint32 columnIndex = 0;
 
-	ChunkData *chunkData = make<ChunkData>();
-	chunkData->existsArray = make<bool*>(columnCount * sizeof(bool *));
-	chunkData->valueArray = make<Datum*>(columnCount * sizeof(Datum *));
+	ChunkData *chunkData = make0<ChunkData>();
+	chunkData->existsArray = make1<bool*>(columnCount * sizeof(bool *));
+	chunkData->valueArray = make1<Datum*>(columnCount * sizeof(Datum *));
 #if PG_VERSION_NUM >= PG_VERSION_16
 	/* 'cache' member will be 'false' because of 'palloc0' */
-	chunkData->valueBufferArray = make<StringInfo>(columnCount * sizeof(cached_StringInfo));
+	chunkData->valueBufferArray = make1<StringInfo>(columnCount * sizeof(cached_StringInfo));
 #else
-	chunkData->valueBufferArray = make<StringInfo>(columnCount * sizeof(StringInfo));
+	chunkData->valueBufferArray = make1<StringInfo>(columnCount * sizeof(StringInfo));
 #endif
 	chunkData->columnCount = columnCount;
 	chunkData->rowCount = chunkGroupRowCount;
@@ -1137,9 +1148,9 @@ CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowC
 	{
 		if (columnMask[columnIndex])
 		{
-			chunkData->existsArray[columnIndex] = make<bool>(chunkGroupRowCount *
+			chunkData->existsArray[columnIndex] = make1<bool>(chunkGroupRowCount *
 														  sizeof(bool));
-			chunkData->valueArray[columnIndex] = make<Datum>(chunkGroupRowCount *
+			chunkData->valueArray[columnIndex] = make1<Datum>(chunkGroupRowCount *
 														 sizeof(Datum));
 			chunkData->valueBufferArray[columnIndex] = NULL;
 		}
@@ -1185,28 +1196,6 @@ void FreeChunkBufferValueArray(ChunkData *chunkData)
 }
 
 
-/* ColumnarTableRowCount returns the exact row count of a table using skiplists */
-uint64
-ColumnarTableRowCount(Relation relation)
-{
-	ListCell *stripeMetadataCell = NULL;
-	uint64 totalRowCount = 0;
-#if PG_VERSION_NUM >= PG_VERSION_16
-	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
-#else
-	List *stripeList = StripesForRelfilenode(relation->rd_node, ForwardScanDirection);
-#endif
-
-	foreach(stripeMetadataCell, stripeList)
-	{
-		StripeMetadata *stripeMetadata = (StripeMetadata *) lfirst(stripeMetadataCell);
-		totalRowCount += stripeMetadata->rowCount;
-	}
-
-	return totalRowCount;
-}
-
-
 /*
  * LoadFilteredStripeBuffers reads serialized stripe data from the given file.
  * The function skips over chunks whose rows are refuted by restriction qualifiers,
@@ -1244,7 +1233,7 @@ LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
 							  selectedChunkMask);
 
 	/* load column data for projected columns */
-	ColumnBuffers **columnBuffersArray = make<ColumnBuffers*>(columnCount * sizeof(ColumnBuffers *));
+	ColumnBuffers **columnBuffersArray = make1<ColumnBuffers*>(columnCount * sizeof(ColumnBuffers *));
 
 	for (columnIndex = 0; columnIndex < stripeMetadata->columnCount; columnIndex++)
 	{
@@ -1264,7 +1253,7 @@ LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
 		}
 	}
 
-	StripeBuffers *stripeBuffers = make<StripeBuffers>();
+	StripeBuffers *stripeBuffers = make0<StripeBuffers>();
 	stripeBuffers->columnCount = columnCount;
 	stripeBuffers->rowCount = StripeSkipListRowCount(selectedChunkSkipList);
 	stripeBuffers->columnBuffersArray = columnBuffersArray;
@@ -1292,11 +1281,11 @@ LoadColumnBuffers(Relation relation, ColumnChunkSkipNode *chunkSkipNodeArray,
 {
 	uint32 chunkIndex = 0;
 	ColumnChunkBuffers **chunkBuffersArray =
-		make<ColumnChunkBuffers*>(chunkCount * sizeof(ColumnChunkBuffers *));
+		make1<ColumnChunkBuffers*>(chunkCount * sizeof(ColumnChunkBuffers *));
 
 	for (chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++)
 	{
-		chunkBuffersArray[chunkIndex] = make<ColumnChunkBuffers>();
+		chunkBuffersArray[chunkIndex] = make0<ColumnChunkBuffers>();
 	}
 
 	/*
@@ -1337,7 +1326,7 @@ LoadColumnBuffers(Relation relation, ColumnChunkSkipNode *chunkSkipNodeArray,
 			chunkSkipNode->decompressedValueSize;
 	}
 
-	ColumnBuffers *columnBuffers = make<ColumnBuffers>();
+	ColumnBuffers *columnBuffers = make0<ColumnBuffers>();
 	columnBuffers->chunkBuffersArray = chunkBuffersArray;
 
 	return columnBuffers;
@@ -1356,7 +1345,7 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 	//ListCell *columnCell = NULL;
 	uint32 chunkIndex = 0;
 
-	bool *selectedChunkMask = make<bool>(stripeSkipList->chunkCount * sizeof(bool));
+	bool *selectedChunkMask = make1<bool>(stripeSkipList->chunkCount * sizeof(bool));
 	memset(selectedChunkMask, true, stripeSkipList->chunkCount * sizeof(bool));
 
 	//foreach(columnCell, whereClauseVars)
@@ -1444,7 +1433,7 @@ GetClauseVars(List *whereClauseList, int natts)
 	 */
 	int flags = 0;
 	List *vars = pull_var_clause((Node *) whereClauseList, flags);
-	Var **deduplicate = make<Var*>(sizeof(Var *) * natts);
+	Var **deduplicate = make1<Var*>(sizeof(Var *) * natts);
 
 	//ListCell *lc;
 	//foreach(lc, vars)
@@ -1599,7 +1588,7 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
 	}
 
 	ColumnChunkSkipNode **selectedChunkSkipNodeArray =
-		make<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
+		make1<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
 
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
@@ -1615,7 +1604,7 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
 
 		Assert(stripeSkipList->chunkSkipNodeArray[columnIndex] != NULL);
 
-		selectedChunkSkipNodeArray[columnIndex] = make<ColumnChunkSkipNode>(selectedChunkCount *
+		selectedChunkSkipNodeArray[columnIndex] = make1<ColumnChunkSkipNode>(selectedChunkCount *
 														  sizeof(ColumnChunkSkipNode));
 
 		for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
@@ -1630,9 +1619,9 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
 	}
 
 	selectedChunkIndex = 0;
-	uint32 *chunkGroupRowCounts = make<uint32>(selectedChunkCount * sizeof(uint32));
-	uint32 *chunkGroupRowOffset = make<uint32>(selectedChunkCount * sizeof(uint32));
-	uint32 *chunkGroupDeletedRows = make<uint32>(selectedChunkCount * sizeof(uint32));
+	uint32 *chunkGroupRowCounts = make1<uint32>(selectedChunkCount * sizeof(uint32));
+	uint32 *chunkGroupRowOffset = make1<uint32>(selectedChunkCount * sizeof(uint32));
+	uint32 *chunkGroupDeletedRows = make1<uint32>(selectedChunkCount * sizeof(uint32));
 
 	for (chunkIndex = 0; chunkIndex < stripeSkipList->chunkCount; chunkIndex++)
 	{
@@ -1648,7 +1637,7 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
 		}
 	}
 
-	StripeSkipList *selectedChunkSkipList = make<StripeSkipList>();
+	StripeSkipList *selectedChunkSkipList = make0<StripeSkipList>();
 	selectedChunkSkipList->chunkSkipNodeArray = selectedChunkSkipNodeArray;
 	selectedChunkSkipList->chunkCount = selectedChunkCount;
 	selectedChunkSkipList->columnCount = stripeSkipList->columnCount;
@@ -1689,7 +1678,7 @@ StripeSkipListRowCount(StripeSkipList *stripeSkipList)
 static bool *
 ProjectedColumnMask(uint32 columnCount, List *projectedColumnList)
 {
-	bool *projectedColumnMask = make<bool>(columnCount * sizeof(bool));
+	bool *projectedColumnMask = make1<bool>(columnCount * sizeof(bool));
 	int attno;
 
 	foreach_decl_int(attno, projectedColumnList)
@@ -2000,7 +1989,7 @@ ReadStripeNextVector(StripeReadState *stripeReadState, Datum *columnValues,
 		return false;
 	}
 
-	int32 *columnValueOffset = make<int32>(sizeof(int32) * stripeReadState->tupleDescriptor->natts);
+	int32 *columnValueOffset = make1<int32>(sizeof(int32) * stripeReadState->tupleDescriptor->natts);
 	memset(columnValueOffset, 0, sizeof(int32) * stripeReadState->tupleDescriptor->natts);
 
 	while (true)

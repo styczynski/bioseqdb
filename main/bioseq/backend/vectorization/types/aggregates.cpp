@@ -287,7 +287,7 @@ vint8acc(PG_FUNCTION_ARGS)
 	/* Create the state data on the first call */
 	if (state == NULL)
 	{
-		state = make<Int128AggState>();
+		state = make0<Int128AggState>();
 		state->calcSumX2 = false;
 	}
 

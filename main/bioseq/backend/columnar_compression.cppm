@@ -236,7 +236,7 @@ DecompressBuffer(StringInfo buffer,
 										  compressedDataSize, buffer->len)));
 			}
 
-			char *decompressedData = make<char>(decompressedDataSize);
+			char *decompressedData = make1<char>(decompressedDataSize);
 
 			int32 decompressedByteCount = pglz_decompress(COLUMNAR_COMPRESS_RAWDATA(
 															  buffer->data),
@@ -250,7 +250,7 @@ DecompressBuffer(StringInfo buffer,
 								errdetail("compressed data is corrupted")));
 			}
 
-			StringInfo decompressedBuffer = make<StringInfoData>();
+			StringInfo decompressedBuffer = make0<StringInfoData>();
 			decompressedBuffer->data = decompressedData;
 			decompressedBuffer->len = decompressedDataSize;
 			decompressedBuffer->maxlen = decompressedDataSize;

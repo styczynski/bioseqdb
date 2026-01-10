@@ -40,7 +40,6 @@ module;
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
-#include "common.h"
 export module storage_physical;
 import mlogging;
 

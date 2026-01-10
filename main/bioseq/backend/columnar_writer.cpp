@@ -14,13 +14,13 @@
  */
 
 #include "common.h"
+#include "types.h"
 
 #include "safe_lib.h"
 
 
 #include "columnar/columnar.h"
 
-#include "common.h"
 import storage_compression;
 import storage_physical;
 import storage_metadata;
@@ -87,7 +87,7 @@ ColumnarBeginWrite(RelFileLocator relfilelocator,
 {
 	/* get comparison function pointers for each of the columns */
 	uint32 columnCount = tupleDescriptor->natts;
-	FmgrInfo **comparisonFunctionArray = make<FmgrInfo*>(columnCount * sizeof(FmgrInfo *));
+	FmgrInfo **comparisonFunctionArray = make1<FmgrInfo*>(columnCount * sizeof(FmgrInfo *));
 	for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		FmgrInfo *comparisonFunction = NULL;
@@ -114,13 +114,13 @@ ColumnarBeginWrite(RelFileLocator relfilelocator,
 															 "Stripe Write Memory Context",
 															 ALLOCSET_DEFAULT_SIZES);
 
-	bool *columnMaskArray = make<bool>(columnCount * sizeof(bool));
+	bool *columnMaskArray = make1<bool>(columnCount * sizeof(bool));
 	memset(columnMaskArray, true, columnCount * sizeof(bool));
 
 	ChunkData *chunkData = CreateEmptyChunkData(columnCount, columnMaskArray,
 												options.chunkRowCount);
 
-	ColumnarWriteState *writeState = make<ColumnarWriteState>();
+	ColumnarWriteState *writeState = make0<ColumnarWriteState>();
 	writeState->relfilelocator = relfilelocator;
 	writeState->options = options;
 	writeState->tupleDescriptor = CreateTupleDescCopy(tupleDescriptor);
@@ -242,7 +242,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 		{
 #if PG_VERSION_NUM >= PG_VERSION_16
-			cached_StringInfo *value = make<cached_StringInfo>();
+			cached_StringInfo *value = make0<cached_StringInfo>();
 			initStringInfo(&value->data);
 			value->cached = false;
 			chunkData->valueBufferArray[columnIndex] = (StringInfo)value;
@@ -379,27 +379,27 @@ CreateEmptyStripeBuffers(uint32 stripeMaxRowCount, uint32 chunkRowCount,
 {
 	uint32 columnIndex = 0;
 	uint32 maxChunkCount = (stripeMaxRowCount / chunkRowCount) + 1;
-	ColumnBuffers **columnBuffersArray = make<ColumnBuffers*>(columnCount * sizeof(ColumnBuffers *));
+	ColumnBuffers **columnBuffersArray = make1<ColumnBuffers*>(columnCount * sizeof(ColumnBuffers *));
 
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		uint32 chunkIndex = 0;
 		ColumnChunkBuffers **chunkBuffersArray =
-			make<ColumnChunkBuffers*>(maxChunkCount * sizeof(ColumnChunkBuffers *));
+			make1<ColumnChunkBuffers*>(maxChunkCount * sizeof(ColumnChunkBuffers *));
 
 		for (chunkIndex = 0; chunkIndex < maxChunkCount; chunkIndex++)
 		{
-			chunkBuffersArray[chunkIndex] = make<ColumnChunkBuffers>();
+			chunkBuffersArray[chunkIndex] = make0<ColumnChunkBuffers>();
 			chunkBuffersArray[chunkIndex]->existsBuffer = NULL;
 			chunkBuffersArray[chunkIndex]->valueBuffer = NULL;
 			chunkBuffersArray[chunkIndex]->valueCompressionType = COMPRESSION_NONE;
 		}
 
-		columnBuffersArray[columnIndex] = make<ColumnBuffers>();
+		columnBuffersArray[columnIndex] = make0<ColumnBuffers>();
 		columnBuffersArray[columnIndex]->chunkBuffersArray = chunkBuffersArray;
 	}
 
-	StripeBuffers *stripeBuffers = make<StripeBuffers>();
+	StripeBuffers *stripeBuffers = make0<StripeBuffers>();
 	stripeBuffers->columnBuffersArray = columnBuffersArray;
 	stripeBuffers->columnCount = columnCount;
 	stripeBuffers->rowCount = 0;
@@ -421,14 +421,14 @@ CreateEmptyStripeSkipList(uint32 stripeMaxRowCount, uint32 chunkRowCount,
 	uint32 maxChunkCount = (stripeMaxRowCount / chunkRowCount) + 1;
 
 	ColumnChunkSkipNode **chunkSkipNodeArray =
-		make<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
+		make1<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		chunkSkipNodeArray[columnIndex] =
-			make<ColumnChunkSkipNode>(maxChunkCount * sizeof(ColumnChunkSkipNode));
+			make1<ColumnChunkSkipNode>(maxChunkCount * sizeof(ColumnChunkSkipNode));
 	}
 
-	StripeSkipList *stripeSkipList = make<StripeSkipList>();
+	StripeSkipList *stripeSkipList = make0<StripeSkipList>();
 	stripeSkipList->columnCount = columnCount;
 	stripeSkipList->chunkCount = 0;
 	stripeSkipList->chunkSkipNodeArray = chunkSkipNodeArray;
@@ -797,7 +797,7 @@ DatumCopy(Datum datum, bool datumTypeByValue, int datumTypeLength)
 	else
 	{
 		uint32 datumLength = att_addlength_datum(0, datumTypeLength, datum);
-		char *datumData = make<char>(datumLength);
+		char *datumData = make1<char>(datumLength);
 		memcpy(datumData, DatumGetPointer(datum), datumLength);
 
 		datumCopy = PointerGetDatum(datumData);
@@ -814,11 +814,11 @@ DatumCopy(Datum datum, bool datumTypeByValue, int datumTypeLength)
 static StringInfo
 CopyStringInfo(StringInfo sourceString)
 {
-	StringInfo targetString = make<StringInfoData>();
+	StringInfo targetString = make0<StringInfoData>();
 
 	if (sourceString->len > 0)
 	{
-		targetString->data = make<char>(sourceString->len);
+		targetString->data = make1<char>(sourceString->len);
 		targetString->len = sourceString->len;
 		targetString->maxlen = sourceString->len;
 		memcpy(targetString->data, sourceString->data, sourceString->len);

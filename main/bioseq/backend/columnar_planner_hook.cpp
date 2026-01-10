@@ -19,8 +19,7 @@
 
 #include "common.h"
 import mlogging;
-import bioseq_index_scan;
-import bioseq_scan;
+import bioseq_table;
 
 static planner_hook_type PreviousPlannerHook = NULL;
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;

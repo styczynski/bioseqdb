@@ -237,7 +237,7 @@ typedef struct NumericVar
  */
 
 #define digitbuf_alloc(ndigits)  \
-	(make<NumericDigit>((ndigits) * sizeof(NumericDigit)))
+	(make1<NumericDigit>((ndigits) * sizeof(NumericDigit)))
 #define digitbuf_free(buf)	\
 	do { \
 		 if ((buf) != NULL) \
@@ -362,7 +362,7 @@ make_numeric(const struct NumericVar *var)
 			  sign == NUMERIC_NINF))
 			elog(ERROR, "invalid numeric sign value 0x%x", sign);
 
-		result = make<NumericData>(NUMERIC_HDRSZ_SHORT);
+		result = make1<NumericData>(NUMERIC_HDRSZ_SHORT);
 
 		SET_VARSIZE(result, NUMERIC_HDRSZ_SHORT);
 		result->choice.n_header = sign;
@@ -395,7 +395,7 @@ make_numeric(const struct NumericVar *var)
 	if (NUMERIC_CAN_BE_SHORT(var->dscale, weight))
 	{
 		len = NUMERIC_HDRSZ_SHORT + n * sizeof(NumericDigit);
-		result = make<NumericData>(len);
+		result = make1<NumericData>(len);
 		SET_VARSIZE(result, len);
 		result->choice.n_short.n_header =
 			(sign == NUMERIC_NEG ? (NUMERIC_SHORT | NUMERIC_SHORT_SIGN_MASK)
@@ -407,7 +407,7 @@ make_numeric(const struct NumericVar *var)
 	else
 	{
 		len = NUMERIC_HDRSZ + n * sizeof(NumericDigit);
-		result = make<NumericData>(len);
+		result = make1<NumericData>(len);
 		SET_VARSIZE(result, len);
 		result->choice.n_long.n_sign_dscale =
 			sign | (var->dscale & NUMERIC_DSCALE_MASK);
