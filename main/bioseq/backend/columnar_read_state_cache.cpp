@@ -17,6 +17,8 @@
 
 #include "columnar/columnar_tableam.h"
 
+import bioseq_table_io;
+
 /*
  * Mapping from relfilelocator to RowMaskCacheMapEntry. This keeps deleted rows for
  * each relation.

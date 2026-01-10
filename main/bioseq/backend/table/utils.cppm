@@ -9,10 +9,8 @@ module;
 
 #include "columnar/vectorization/columnar_vector_types.h"
 
-#include "common.h"
-
 export module bioseq_table:utils;
-import storage_cache;
+import bioseq_table_io;
 import storage_physical;
 import mlogging;
 import storage_metadata;

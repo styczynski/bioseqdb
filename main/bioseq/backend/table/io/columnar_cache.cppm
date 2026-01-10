@@ -11,6 +11,7 @@
 module;
 
 #include "common.h"
+#include "types.h"
 
 #include "columnar/columnar.h"
 
@@ -24,8 +25,11 @@ module;
 // extern ColumnarCacheStatistics *ColumnarGetCacheStatistics(void);
 // extern MemoryContext ColumnarCacheMemoryContext(void);
 
+export module bioseq_table_io:cache;
 
-export module storage_cache;
+void ColumnarEndRead(ColumnarReadState *readState);
+void ColumnarResetRead(ColumnarReadState *readState);
+
 
 /*
  * Main caching MemoryContext.

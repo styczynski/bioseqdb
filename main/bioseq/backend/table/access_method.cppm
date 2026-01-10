@@ -21,13 +21,12 @@ using sact = struct sigaction;
 
 export module bioseq_table:access_method;
 
-import storage_cache;
 import storage_physical;
 import mlogging;
 import storage_metadata;
 import bioseq_table_types;
 import config;
-
+import bioseq_table_io;
 
 /*
  * This is a check whether we need to bail out of a vacuum, it is set by the

@@ -13,6 +13,7 @@
  *
  *-------------------------------------------------------------------------
  */
+module;
 #include "common.h"
 #include "types.h"
 
@@ -20,12 +21,14 @@
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
+#include "columnar/vectorization/columnar_vector_types.h"
 
 #define UNEXPECTED_STRIPE_READ_ERR_MSG \
 	"attempted to read an unexpected stripe while reading columnar " \
 	"table %s, stripe with id=" UINT64_FORMAT " is not flushed"
 
-import storage_cache;
+export module bioseq_table_io:reader;
+
 import storage_compression;
 import storage_physical;
 import storage_metadata;
@@ -37,70 +40,52 @@ import storage_metadata;
 // template<typename T> inline T* make0() {
 // 	return static_cast<T*>(palloc0(sizeof(T)));
 // }
-
+export ChunkData *
+CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowCount);
+export int64
+ColumnarReadChunkGroupsFiltered(ColumnarReadState *state);
+export bool
+ColumnarSetStripeReadState(ColumnarReadState *readState,
+						   StripeMetadata *startStripeMetadata);
+export bool
+ColumnarReadNextRow(ColumnarReadState *readState, Datum *columnValues, bool *columnNulls,
+					uint64 *rowNumber);
+export ColumnarReadState *
+ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
+				  List *projectedColumnList, List *whereClauseList,
+				  MemoryContext scanContext, Snapshot snapshot,
+				  bool randomAccess,
+				  ParallelColumnarScan parallelColumnarScan);
+export bool
+ColumnarReadNextVector(ColumnarReadState *readState,  Datum *columnValues,
+					   bool *columnNulls, uint64 *rowNumber, int *newVectorSize);
+export void
+ColumnarRescan(ColumnarReadState *readState, List *scanQual);
+export void
+ColumnarEndRead(ColumnarReadState *readState);
+void
+ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, 
+					  uint32 columnId, void *data);
+export void
+ColumnarReadRowByRowNumberOrError(ColumnarReadState *readState,
+								  uint64 rowNumber, Datum *columnValues,
+								  bool *columnNulls);
+MemoryContext
+ColumnarCacheMemoryContext(void);
+void*
+ColumnarRetrieveCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId);
 void FreeChunkBufferValueArray(ChunkData *chunkData);
+export void
+ColumnarReadFlushPendingWrites(ColumnarReadState *readState);
+export bool
+ColumnarReadRowByRowNumber(ColumnarReadState *readState,
+						   uint64 rowNumber, Datum *columnValues,
+						   bool *columnNulls);
+void
+ColumnarResetRead(ColumnarReadState *readState);
+void
+ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
 
-struct ChunkGroupReadState
-{
-	int64 currentRow;
-	int64 rowCount;
-	int columnCount;
-	List *projectedColumnList;  /* borrowed reference */
-	ChunkData *chunkGroupData;
-	bytea *rowMask;
-	bool rowMaskCached; /* If rowMask metadata is cached and borrowed */
-	uint32 chunkStripeRowOffset; 
-	uint32 chunkGroupDeletedRows;
-};
-
-struct StripeReadState
-{
-	int columnCount;
-	int64 rowCount;
-	int64 currentRow;
-	TupleDesc tupleDescriptor;
-	Relation relation;
-	int chunkGroupIndex;
-	int64 chunkGroupsFiltered;
-	MemoryContext stripeReadContext;
-	StripeBuffers *stripeBuffers;   /* allocated in stripeReadContext */
-	List *projectedColumnList;      /* borrowed reference */
-	ChunkGroupReadState *chunkGroupReadState; /* owned */
-};
-
-struct ColumnarReadState
-{
-	TupleDesc tupleDescriptor;
-	Relation relation;
-
-	StripeMetadata *currentStripeMetadata;
-	StripeReadState *stripeReadState;
-
-	/*
-	 * Integer list of attribute numbers (1-indexed) for columns needed by the
-	 * query.
-	 */
-	List *projectedColumnList;
-
-	List *whereClauseList;
-	List *whereClauseVars;
-
-	MemoryContext stripeReadContext;
-	int64 chunkGroupsFiltered;
-
-	/*
-	 * Memory context guaranteed to be not freed during scan so we can
-	 * safely use for any memory allocations regarding ColumnarReadState
-	 * itself.
-	 */
-	MemoryContext scanContext;
-
-	Snapshot snapshot;
-	bool snapshotRegisteredByUs;
-
-	/* Parallel exeuction */
-	ParallelColumnarScan parallelColumnarScan;
-};
 
 /* static function declarations */
 static MemoryContext CreateStripeReadMemoryContext(void);
@@ -1926,8 +1911,6 @@ ColumnDefaultValue(TupleConstr *tupleConstraints, Form_pg_attribute attributeFor
 }
 
 /* Vectorization */
-
-#include "columnar/vectorization/columnar_vector_types.h"
 
 bool
 ColumnarReadNextVector(ColumnarReadState *readState,  Datum *columnValues,

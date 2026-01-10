@@ -264,3 +264,66 @@ struct RowMaskWriteStateEntry
 	int32 deletedRows;
 	bytea *mask;
 };
+
+
+struct ChunkGroupReadState
+{
+	int64 currentRow;
+	int64 rowCount;
+	int columnCount;
+	List *projectedColumnList;  /* borrowed reference */
+	ChunkData *chunkGroupData;
+	bytea *rowMask;
+	bool rowMaskCached; /* If rowMask metadata is cached and borrowed */
+	uint32 chunkStripeRowOffset; 
+	uint32 chunkGroupDeletedRows;
+};
+
+struct StripeReadState
+{
+	int columnCount;
+	int64 rowCount;
+	int64 currentRow;
+	TupleDesc tupleDescriptor;
+	Relation relation;
+	int chunkGroupIndex;
+	int64 chunkGroupsFiltered;
+	MemoryContext stripeReadContext;
+	StripeBuffers *stripeBuffers;   /* allocated in stripeReadContext */
+	List *projectedColumnList;      /* borrowed reference */
+	ChunkGroupReadState *chunkGroupReadState; /* owned */
+};
+
+struct ColumnarReadState
+{
+	TupleDesc tupleDescriptor;
+	Relation relation;
+
+	StripeMetadata *currentStripeMetadata;
+	StripeReadState *stripeReadState;
+
+	/*
+	 * Integer list of attribute numbers (1-indexed) for columns needed by the
+	 * query.
+	 */
+	List *projectedColumnList;
+
+	List *whereClauseList;
+	List *whereClauseVars;
+
+	MemoryContext stripeReadContext;
+	int64 chunkGroupsFiltered;
+
+	/*
+	 * Memory context guaranteed to be not freed during scan so we can
+	 * safely use for any memory allocations regarding ColumnarReadState
+	 * itself.
+	 */
+	MemoryContext scanContext;
+
+	Snapshot snapshot;
+	bool snapshotRegisteredByUs;
+
+	/* Parallel exeuction */
+	ParallelColumnarScan parallelColumnarScan;
+};

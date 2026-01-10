@@ -29,7 +29,7 @@ module;
 
 export module bioseq_table:custom_scan;
 
-import storage_cache;
+import bioseq_table_io;
 import mlogging;
 import storage_metadata;
 import bioseq_table_types;
