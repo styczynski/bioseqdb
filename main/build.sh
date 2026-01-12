@@ -8,5 +8,6 @@ rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bi
 
 cd build && \
 cmake -G Ninja .. && cmake --build . && cmake --build . --target install && \
-psql -h localhost -p 5432 -a -f ../bioseq/sql/setup.sql
+./bioseq/bioseq_aligner 
+#psql -h localhost -p 5432 -a -f ../bioseq/sql/setup.sql
 

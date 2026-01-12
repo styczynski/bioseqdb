@@ -1,47 +1,84 @@
-# Add pg_regress binary
-find_program(PostgreSQL_REGRESS pg_regress
-  HINTS
-    "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/regress/"
-    "${PostgreSQL_BIN_DIR}"
+set(SUPPORTED_TARGET_TYPES
+  "POSTGRES_EXTENSION"
+  "EXEC"
 )
 
-# Add pg_validate_extupgrade binary
-find_program(PostgreSQL_VALIDATE_EXTUPGRADE pg_validate_extupgrade)
+# Allow forcing PostgreSQL version
+set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version major")
 
-# Add pgindent binary
-find_program(PostgreSQL_INDENT pgindent)
+# Find packages go here.
+find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
 # Helper command to add extensions
-function(PostgreSQL_add_extension LIBRARY_NAME)
+function(AddCommonTarget LIBRARY_NAME)
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
-  set(oneValueArgs NAME COMMENT VERSION COMPONENT CXX)
+  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX)
   set(multiValueArgs REQUIRES SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+  if(NOT EXTENSION_TYPE)
+    message(FATAL_ERROR "TYPE setting not given to the AddCommonTarget() function. Must be one of ${SUPPORTED_TARGET_TYPES}")
+  endif()
+
+  if (NOT "${EXTENSION_TYPE}" IN_LIST SUPPORTED_TARGET_TYPES)
+    message(FATAL_ERROR "TYPE setting was '${EXTENSION_TYPE}'. Must be one of ${SUPPORTED_TARGET_TYPES}")
+  else()
+    set("IS_${EXTENSION_TYPE}" 1)
+  endif()
+
+  set(HAS_SOURCES 1)
 
   # Default extension name to same as library name
   if(NOT EXTENSION_NAME)
     set(EXTENSION_NAME ${LIBRARY_NAME})
   endif()
 
-  # Allow extensions without sources
-  if(EXTENSION_SOURCES)
-    # Add extension as a dynamically linked library
-    add_library(${LIBRARY_NAME} MODULE ${EXTENSION_SOURCES})
+  # Executable target
+  if(IS_EXEC)
+    add_executable(${LIBRARY_NAME} ${EXTENSION_SOURCES})
+  endif()
 
-    # Link extension to PostgreSQL
-    target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::PostgreSQL)
+  # Generic setup postgres
+  if(IS_POSTGRES_EXTENSION)
+    # Add pg_regress binary
+    find_program(PostgreSQL_REGRESS pg_regress
+      HINTS
+        "${PostgreSQL_PKG_LIBRARY_DIR}/pgxs/src/test/regress/"
+        "${PostgreSQL_BIN_DIR}"
+    )
 
-    # Handle macOS specifics
-    if(APPLE)
-      # Fix apple missing symbols
-      set_target_properties(${LIBRARY_NAME} PROPERTIES LINK_FLAGS ${PostgreSQL_LINK_FLAGS})
+    # Add pg_validate_extupgrade binary
+    find_program(PostgreSQL_VALIDATE_EXTUPGRADE pg_validate_extupgrade)
 
-      # Since Postgres 16, the shared library extension on macOS is `dylib`, not `so`.
-      # Ref https://github.com/postgres/postgres/commit/b55f62abb2c2e07dfae99e19a2b3d7ca9e58dc1a
-      if (${PostgreSQL_VERSION_MAJOR} VERSION_GREATER_EQUAL "16")
-        set_target_properties (${LIBRARY_NAME} PROPERTIES SUFFIX ".dylib")
+    # Add pgindent binary
+    find_program(PostgreSQL_INDENT pgindent)
+
+    if(HAS_SOURCES)
+      # Add extension as a dynamically linked library
+      add_library(${LIBRARY_NAME} MODULE ${EXTENSION_SOURCES})
+
+      # Link extension to PostgreSQL
+      target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::PostgreSQL)
+
+      # Handle macOS specifics
+      if(APPLE)
+        # Fix apple missing symbols
+        set_target_properties(${LIBRARY_NAME} PROPERTIES LINK_FLAGS ${PostgreSQL_LINK_FLAGS})
+
+        # Since Postgres 16, the shared library extension on macOS is `dylib`, not `so`.
+        # Ref https://github.com/postgres/postgres/commit/b55f62abb2c2e07dfae99e19a2b3d7ca9e58dc1a
+        if (${PostgreSQL_VERSION_MAJOR} VERSION_GREATER_EQUAL "16")
+          set_target_properties (${LIBRARY_NAME} PROPERTIES SUFFIX ".dylib")
+        endif()
       endif()
     endif()
+  else()
+    target_compile_definitions(${LIBRARY_NAME} PUBLIC -DNO_POSTGRES=1)
+  endif() # End postgress setup
+
+  # Allow extensions without sources
+  if(HAS_SOURCES)
+    target_compile_definitions(${LIBRARY_NAME} PUBLIC -DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
     # Final touches on output file
     set_target_properties(${LIBRARY_NAME} PROPERTIES
@@ -53,7 +90,7 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
 
     # Support CXX
     if(EXTENSION_CXX)
-      message("PostgreSQL extension support C++ version ${EXTENSION_CXX}")
+      message("Target ${LIBRARY_NAME} support C++ version ${EXTENSION_CXX}")
       set_source_files_properties(${EXTENSION_SOURCES} PROPERTIES LANGUAGE CXX )
       set_property(TARGET ${LIBRARY_NAME} PROPERTY CXX_STANDARD ${EXTENSION_CXX})
     endif()
@@ -75,7 +112,7 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
       if(EXTENSION_CXX)
         # Modules enables
         if(EXTENSION_CXX_MOD_BASE_DIRS)
-          message("Enable CXX modules for the target PostgreSQL extension")
+          message("Enable CXX modules for the target ${LIBRARY_NAME}")
           set(PG_EXT_FILE_SET_NAME "${LIBRARY_NAME}_CXX_MODULES_FILE_SET")
           target_sources(
             ${LIBRARY_NAME} PRIVATE
@@ -84,12 +121,6 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
             BASE_DIRS ${EXTENSION_CXX_MOD_BASE_DIRS}
             FILES ${EXTENSION_CXX_MOD_FILES}
           )
-
-          #
-          #
-          # Enable modules in CMake
-          #
-
           # This is required to write your own modules in your project.
           if(CMAKE_VERSION VERSION_LESS "3.28.0")
             if(CMAKE_VERSION VERSION_LESS "3.27.0")
@@ -102,23 +133,6 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
             cmake_policy(VERSION 3.28)
           endif()
 
-          #
-          # Import the modules from libc++
-          #
-          # set(CMAKE_CXX_EXTENSIONS OFF)
-          # include(FetchContent)
-          # FetchContent_Declare(
-          #   std
-          #   URL "file://${LIBCXX_BUILD}/modules/c++/v1/"
-          #   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-          #   SYSTEM
-          # )
-          # FetchContent_MakeAvailable(std)
-          # add_dependencies(${LIBRARY_NAME} std.compat)
-          # target_link_libraries(${LIBRARY_NAME} std.compat)
-          # set(CMAKE_CXX_EXTENSIONS ON)
-          #set(CMAKE_CXX_MODULE_STD ON)
-          
           set_target_properties(
             ${LIBRARY_NAME} PROPERTIES
               CXX_MODULE_STD ON
@@ -131,48 +145,52 @@ function(PostgreSQL_add_extension LIBRARY_NAME)
         message("Cannot enable CXX modules, because EXTENSION_CXX setting is not provided. Please specify it like so: 'EXTENSION_CXX 20'")
       endif()
     endif()
-
-    # Install .so/.dll to pkglib-dir
-    install(
-      TARGETS ${LIBRARY_NAME}
-      LIBRARY DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
-      COMPONENT ${EXTENSION_COMPONENT}
-    )
   endif()
 
-  # Generate .control file
-  string(REPLACE ";" ", " EXTENSION_REQUIRES "${EXTENSION_REQUIRES}")
-  configure_file(
-    ${CMAKE_SOURCE_DIR}/cmake/control.in
-    ${EXTENSION_NAME}.control
-  )
-
-  # Generate .sql install file
-  set(EXTENSION_INSTALL ${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}--${EXTENSION_VERSION}.sql)
-  file(WRITE "${EXTENSION_INSTALL}.in" "")
-  foreach(file ${EXTENSION_INSTALLS})
-    file(READ ${file} CONTENTS)
-    file(APPEND "${EXTENSION_INSTALL}.in" "${CONTENTS}")
-  endforeach()
-  configure_file("${EXTENSION_INSTALL}.in" "${EXTENSION_INSTALL}" COPYONLY)
-
-  # Install everything else into share-dir
-  install(
-    FILES
-      ${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}.control
-      ${EXTENSION_INSTALL}
-      ${EXTENSION_UPDATES}
-    DESTINATION "${PostgreSQL_SHARE_DIR}/extension"
-    COMPONENT ${EXTENSION_COMPONENT}
-  )
-
-  # Setup auto-format
-  if(PostgreSQL_INDENT)
-    add_custom_target("format_${EXTENSION_NAME}"
-      COMMAND ${PostgreSQL_INDENT} ${EXTENSION_SOURCES}
-      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-      COMMENT "Formatting ${EXTENSION_NAME} sources"
+  if(IS_POSTGRES_EXTENSION)
+    
+    # Install .so/.dll to pkglib-dir
+    if(HAS_SOURCES)
+      install(
+        TARGETS ${LIBRARY_NAME}
+        LIBRARY DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
+        COMPONENT ${EXTENSION_COMPONENT}
+      )
+    endif()
+    # Generate .control file
+    string(REPLACE ";" ", " EXTENSION_REQUIRES "${EXTENSION_REQUIRES}")
+    configure_file(
+      ${CMAKE_SOURCE_DIR}/cmake/control.in
+      ${EXTENSION_NAME}.control
     )
-    add_dependencies(${LIBRARY_NAME} "format_${EXTENSION_NAME}")
+
+    # Generate .sql install file
+    set(EXTENSION_INSTALL ${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}--${EXTENSION_VERSION}.sql)
+    file(WRITE "${EXTENSION_INSTALL}.in" "")
+    foreach(file ${EXTENSION_INSTALLS})
+      file(READ ${file} CONTENTS)
+      file(APPEND "${EXTENSION_INSTALL}.in" "${CONTENTS}")
+    endforeach()
+    configure_file("${EXTENSION_INSTALL}.in" "${EXTENSION_INSTALL}" COPYONLY)
+
+    # Install everything else into share-dir
+    install(
+      FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}.control
+        ${EXTENSION_INSTALL}
+        ${EXTENSION_UPDATES}
+      DESTINATION "${PostgreSQL_SHARE_DIR}/extension"
+      COMPONENT ${EXTENSION_COMPONENT}
+    )
+
+    # Setup auto-format
+    if(PostgreSQL_INDENT)
+      add_custom_target("format_${EXTENSION_NAME}"
+        COMMAND ${PostgreSQL_INDENT} ${EXTENSION_SOURCES}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Formatting ${EXTENSION_NAME} sources"
+      )
+      add_dependencies(${LIBRARY_NAME} "format_${EXTENSION_NAME}")
+    endif()
   endif()
 endfunction()

@@ -1361,10 +1361,13 @@ template class fmtlogT<0>;
 export bool enable_logging = false;
 
 export inline void log_configure() {
+  #ifndef NO_POSTGRES
     fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", false);
+  #endif
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("main");
 }
+
 
 // template <typename>
 // struct pg_node_formatter {};

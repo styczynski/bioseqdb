@@ -320,7 +320,9 @@ static void *worker_pipeline(void *shared, int step, void *in)
         step_t *s;
 		if (p->sum_len > p->batch_size) return 0;
         s = (step_t*)calloc(1, sizeof(step_t));
+		fprintf(stderr, "! worker_pipeline read size =  %d\n", p->mini_batch_size);
 		s->seq = mm_bseq_read(p->fp, p->mini_batch_size, 0, &s->n_seq); // read a mini-batch
+		// verify
 		if (s->seq) {
 			uint32_t old_m, m;
 			assert((uint64_t)p->mi->n_seq + s->n_seq <= UINT32_MAX); // to prevent integer overflow
@@ -363,6 +365,11 @@ static void *worker_pipeline(void *shared, int step, void *in)
 				// update p->sum_len and p->mi->n_seq
 				p->sum_len += seq->len;
 				s->seq[i].rid = p->mi->n_seq++;
+				fprintf(stderr, "! print seq in index [");
+				for(int x=0;x<seq->len;++x) {
+					fprintf(stderr, "%c", ((char)((uint8_t)s->seq[i].seq[x])));
+				}
+				fprintf(stderr, "]\n");
 			}
 			return s;
 		} else free(s);

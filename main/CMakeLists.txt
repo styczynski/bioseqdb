@@ -74,15 +74,10 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "" FORCE)
 # (But usually don't do this, except maybe for C++ standard)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-# Allow forcing PostgreSQL version
-set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version major")
 
-# Find packages go here.
-find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED
-)
 include(AddPostgreSQLExtension)
 
-add_definitions(-DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
+# add_definitions(-DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
 # https://cliutils.gitlab.io/modern-cmake/chapters/testing.html
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)

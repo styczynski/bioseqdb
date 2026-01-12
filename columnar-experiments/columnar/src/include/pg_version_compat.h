@@ -52,7 +52,7 @@
 #include "utils/spccache.h"
 #include "utils/numeric.h"
 #include "lib/stringinfo.h"
-
+#include "nodes/supportnodes.h"
 
 #undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
 #define __builtin_types_compatible_p(a, b) (1)

@@ -10,7 +10,9 @@ message("MODULES? ${SRC_MOD_FILES}")
 
 find_package(Intl)
 
-PostgreSQL_add_extension(postgresql_bioseq
+AddCommonTarget(
+  postgresql_bioseq
+  TYPE POSTGRES_EXTENSION
   CXX 26
   RELOCATABLE
   NAME bioseq
@@ -37,34 +39,34 @@ PostgreSQL_add_extension(postgresql_bioseq
   INSTALLS
     sql/bioseq--1.0.sql
 )
-#target_compile_features(postgresql_bioseq PRIVATE cxx_std_17)
-# set_source_files_properties(${SRC_FILES} PROPERTIES LANGUAGE CXX )
-# set_property(TARGET postgresql_bioseq PROPERTY CXX_STANDARD 26)
 
-# configure
-#configure_file(src/config.h.in src/config.h)
+file(GLOB_RECURSE A_SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/aligner/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.cpp)
+file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm)
 
-# include
-# target_include_directories(postgresql_bioseq PRIVATE
-#   ${CMAKE_CURRENT_LIST_DIR}/../config
-#   ${CMAKE_CURRENT_LIST_DIR}/include
-#   ${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include
-# )
-
-# target_link_libraries(postgresql_bioseq PRIVATE safestring_static fmt)
-
-
-# include_directories(${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog)
-
-# safestring_shared
-
-# link
-# target_link_libraries(postgresql_h3 PRIVATE
-#   postgresql_h3_shared
-#   h3
-# )
-
-# test
-# if(BUILD_TESTING)
-#   add_subdirectory(test)
-# endif()
+AddCommonTarget(
+  bioseq_aligner
+  TYPE EXEC
+  CXX 26
+  RELOCATABLE
+  NAME bioseq_aligner
+  COMMENT "BioSeq Aligner"
+  VERSION ${INSTALL_VERSION}
+  COMPONENT ${PROJECT_NAME}
+  INCLUDE_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../config"
+    "${CMAKE_CURRENT_LIST_DIR}/include2"
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${CMAKE_CURRENT_LIST_DIR}/backend"
+    "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
+  LINKS
+    safestring_static
+    fmt
+  SOURCES
+    ${A_SRC_FILES}
+  SUPPORT_CXX_MODULES
+  CXX_MOD_BASE_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}"
+  CXX_MOD_FILES
+    ${A_SRC_MOD_FILES}
+)

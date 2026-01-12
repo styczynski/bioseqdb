@@ -74,37 +74,44 @@ static inline int tq_shift(tiny_queue_t *q)
  *               and strand indicates whether the minimizer comes from the top or the bottom strand.
  *               Callers may want to set "p->n = 0"; otherwise results are appended to p
  */
-void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, int is_hpc, mm128_v *p)
+void mm_sketch(void *km, const char *str, int len, int window, int kmer_len, uint32_t rid, int is_hpc, mm128_v *p)
 {
+	printf("! run mm_sketch()\n");
 	uint64_t shift1 = 2 * (k - 1), mask = (1ULL<<2*k) - 1, kmer[2] = {0,0};
 	int i, j, l, buf_pos, min_pos, kmer_span = 0;
 	mm128_t buf[256], min = { UINT64_MAX, UINT64_MAX };
 	tiny_queue_t tq;
 
-	assert(len > 0 && (w > 0 && w < 256) && (k > 0 && k <= 28)); // 56 bits for k-mer; could use long k-mers, but 28 enough in practice
-	memset(buf, 0xff, w * 16);
+	assert(len > 0 && (window > 0 && window < 256) && (kmer_len > 0 && kmer_len <= 28)); // 56 bits for k-mer; could use long k-mers, but 28 enough in practice
+	memset(buf, 0xff, window * 16);
 	memset(&tq, 0, sizeof(tiny_queue_t));
 	kv_resize(mm128_t, km, *p, p->n + len/w);
 
 	for (i = l = buf_pos = min_pos = 0; i < len; ++i) {
-		int c = seq_nt4_table[(uint8_t)str[i]];
+		int current_nucl = seq_nt4_table[(uint8_t)str[i]];
+		printf("! %c -> %d\n", str[i], current_nucl);
 		mm128_t info = { UINT64_MAX, UINT64_MAX };
-		if (c < 4) { // not an ambiguous base
+		if (current_nucl < 4) { // not an ambiguous base
 			int z;
-			if (is_hpc) {
-				int skip_len = 1;
-				if (i + 1 < len && seq_nt4_table[(uint8_t)str[i + 1]] == c) {
-					for (skip_len = 2; i + skip_len < len; ++skip_len)
-						if (seq_nt4_table[(uint8_t)str[i + skip_len]] != c)
-							break;
-					i += skip_len - 1; // put $i at the end of the current homopolymer run
-				}
-				tq_push(&tq, skip_len);
-				kmer_span += skip_len;
-				if (tq.count > k) kmer_span -= tq_shift(&tq);
-			} else kmer_span = l + 1 < k? l + 1 : k;
-			kmer[0] = (kmer[0] << 2 | c) & mask;           // forward k-mer
-			kmer[1] = (kmer[1] >> 2) | (3ULL^c) << shift1; // reverse k-mer
+			assert(!is_hpc);
+			// if (is_hpc) {
+			// 	printf("! hpc!\n");
+			// 	int skip_len = 1;
+			// 	if (i + 1 < len && seq_nt4_table[(uint8_t)str[i + 1]] == c) {
+			// 		for (skip_len = 2; i + skip_len < len; ++skip_len)
+			// 			if (seq_nt4_table[(uint8_t)str[i + skip_len]] != c)
+			// 				break;
+			// 		i += skip_len - 1; // put $i at the end of the current homopolymer run
+			// 	}
+			// 	tq_push(&tq, skip_len);
+			// 	kmer_span += skip_len;
+			// 	if (tq.count > k) kmer_span -= tq_shift(&tq);
+			// } else
+			
+			kmer_span = l + 1 < k? l + 1 : k;
+			printf("kmer span = %d\n", kmer_span);
+			kmer[0] = (kmer[0] << 2 | current_nucl) & mask;           // forward k-mer
+			kmer[1] = (kmer[1] >> 2) | (3ULL^current_nucl) << shift1; // reverse k-mer
 			if (kmer[0] == kmer[1]) continue; // skip "symmetric k-mers" as we don't know it strand
 			z = kmer[0] < kmer[1]? 0 : 1; // strand
 			++l;
@@ -121,10 +128,16 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 				if (min.x == buf[j].x && buf[j].y != min.y) kv_push(mm128_t, km, *p, buf[j]);
 		}
 		if (info.x <= min.x) { // a new minimum; then write the old min
-			if (l >= w + k && min.x != UINT64_MAX) kv_push(mm128_t, km, *p, min);
+			if (l >= w + k && min.x != UINT64_MAX) {
+				printf("! kv_push (%d) [cur_size=%d]\n", min, p->n);
+				kv_push(mm128_t, km, *p, min);
+			}
 			min = info, min_pos = buf_pos;
 		} else if (buf_pos == min_pos) { // old min has moved outside the window
-			if (l >= w + k - 1 && min.x != UINT64_MAX) kv_push(mm128_t, km, *p, min);
+			if (l >= w + k - 1 && min.x != UINT64_MAX) {
+				printf("! kv_push (%d) [cur_size=%d]\n", min, p->n);
+				kv_push(mm128_t, km, *p, min);
+			}
 			for (j = buf_pos + 1, min.x = UINT64_MAX; j < w; ++j) // the two loops are necessary when there are identical k-mers
 				if (min.x >= buf[j].x) min = buf[j], min_pos = j; // >= is important s.t. min is always the closest k-mer
 			for (j = 0; j <= buf_pos; ++j)
@@ -140,4 +153,6 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 	}
 	if (min.x != UINT64_MAX)
 		kv_push(mm128_t, km, *p, min);
+
+	printf("! kv_push (%d) [cur_size=%d]\n", min, p->n);
 }
