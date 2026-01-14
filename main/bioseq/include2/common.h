@@ -15,4 +15,6 @@
 #include "./trash.h"
 #endif
 
+#include "./minimap2stuff.h"
+
 #endif

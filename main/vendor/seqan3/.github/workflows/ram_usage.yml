@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: RAM-Usage
+
+on:
+  # Enables a manual trigger, may run on any branch
+  workflow_dispatch:
+    inputs:
+      compiler:
+        description: 'GCC version'
+        required: true
+        default: '13'
+      cxx_flags:
+        descriptions: 'CXXFLAGS to pass to compiler'
+
+concurrency:
+  group: ram-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SEQAN3_NO_VERSION_CHECK: 1
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eexuo pipefail {0}
+
+jobs:
+  build:
+    name: RAM-Usage gcc${{ github.event.inputs.compiler }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout SeqAn3
+        uses: actions/checkout@v6
+        with:
+          path: seqan3
+
+      - name: Setup compiler
+        uses: seqan/actions/setup-compiler@main
+        with:
+          compiler: gcc-${{ github.event.inputs.compiler }}
+
+      - name: Install CMake
+        uses: seqan/actions/setup-cmake@main
+        with:
+          cmake: 3.16.9
+
+      - name: Create gcc wrapper
+        run: |
+          cp ./seqan3/.github/workflows/scripts/g++_ram.sh g++.sh
+          sed -i "s/VERSION/${{ github.event.inputs.compiler }}/" g++.sh
+          chmod +x g++.sh
+
+      - name: Configure tests
+        env:
+          CXX: ${{ github.workspace }}/g++.sh
+        run: |
+          mkdir seqan3-build
+          cd seqan3-build
+          cmake ../seqan3/test/unit -DCMAKE_BUILD_TYPE=Release \
+                                    -DCMAKE_CXX_FLAGS="${{ github.event.inputs.cxx_flags }}"
+
+      - name: Update gcc wrapper
+        run: sed -i "s/DO_TIME=0/DO_TIME=1/" g++.sh
+
+      - name: Build tests
+        run: |
+          cd seqan3-build
+          make -k -j2
+
+      - name: Concatenate usages
+        continue-on-error: true
+        run: |
+          cd seqan3-build
+          find . -name "ram_usage.*" -exec cat {} + > ${{ github.workspace }}/ram_usage.txt
+
+      - name: Setup Python
+        continue-on-error: true
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Install Python dependencies
+        continue-on-error: true
+        run: pip install pandas
+
+      - name: Evaluate RAM-Usage
+        continue-on-error: true
+        run: python3 seqan3/.github/workflows/scripts/ram_usage.py ram_usage.txt ram_usage.csv
+
+      - name: Upload RAM-Usage
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: RAM-Usage
+          path: ram_usage.csv

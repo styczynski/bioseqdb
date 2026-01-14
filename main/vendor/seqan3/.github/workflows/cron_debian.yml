@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: Debian
+
+on:
+  schedule:
+    - cron: "0 1 * * THU"
+  workflow_dispatch:
+
+concurrency:
+  group: debian-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eeuxo pipefail {0}
+
+jobs:
+  build:
+    name: Debian
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch'
+    container:
+      image: debian:unstable
+    steps:
+      - name: Install Essentials
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential git cmake wget fakeroot ca-certificates
+
+      - name: Create Source Package
+        id: source_package
+        run: |
+          mkdir source && cd source
+          git clone --depth 1 --branch "${{ github.ref_name }}" https://github.com/${{ github.repository }}.git
+          mkdir package && cd package
+          cmake ../seqan3
+          make package_source
+          path=$(find "${PWD}" -maxdepth 1 -type f -name "*-Source.tar.xz")
+          echo "path=${path}" >> $GITHUB_OUTPUT
+
+      - name: Create Debian Repo
+        run: |
+          mkdir -p unstable/seqan3 && cd unstable
+          tar xf ${{ steps.source_package.outputs.path }} -C seqan3 --strip-components=1
+          cd seqan3
+          git init .
+          git remote add salsa https://salsa.debian.org/med-team/seqan3.git
+          git fetch --depth 1 salsa
+          git checkout salsa/debian/experimental -- debian
+
+      - name: Install Dependencies
+        working-directory: unstable/seqan3
+        run: apt-get build-dep --yes --no-install-recommends .
+
+      - name: Build
+        working-directory: unstable/seqan3
+        run: dpkg-buildpackage --unsigned-changes --unsigned-source --build=binary
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: debian-seqan3-artifacts
+          path: |
+            unstable/**/seqan3*.deb
+            unstable/**/libseqan3*.deb
+            unstable/**/seqan3*.changes
+            unstable/**/seqan3*.buildinfo

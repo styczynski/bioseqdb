@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: Coverage
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    types:
+      - unlabeled
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  SEQAN3_NO_VERSION_CHECK: 1
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eexuo pipefail {0}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: ${{ matrix.compiler }}
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch' || github.event.label.name == 'lint'
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: ["gcc-latest"]
+    container:
+      image: ghcr.io/seqan/${{ matrix.compiler }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup cache
+        uses: seqan/actions/setup-actions-cache@main
+
+      - name: Increase ccache size
+        run: echo "CCACHE_MAXSIZE=300M" >> "${GITHUB_ENV}"
+
+      - name: Configure tests
+        run: |
+          mkdir build && cd build
+          cmake ../test/coverage -DCMAKE_BUILD_TYPE=Coverage
+          make gtest_main
+
+      - name: Build tests
+        working-directory: build
+        run: |
+          ccache -z
+          make -k
+          ccache -svvx
+
+      - name: Run tests
+        working-directory: build
+        run: ctest . -j --output-on-failure --no-tests=error
+
+      - name: Generate coverage report
+        run: |
+          gcovr --root ${GITHUB_WORKSPACE}/test/coverage \
+                ${GITHUB_WORKSPACE}/build \
+                --filter ${GITHUB_WORKSPACE}/include/seqan3 \
+                --filter ${GITHUB_WORKSPACE}/test/include/seqan3/test \
+                --exclude ${GITHUB_WORKSPACE}/include/seqan3/contrib \
+                --exclude ${GITHUB_WORKSPACE}/include/seqan3/std \
+                --exclude-lines-by-pattern '^\s*}|^\s*};' \
+                --exclude-throw-branches \
+                --exclude-noncode-lines \
+                --exclude-unreachable-branches \
+                --merge-mode-functions separate \
+                -j \
+                --cobertura \
+                --output ${GITHUB_WORKSPACE}/build/coverage_report.xml
+
+      - name: Submit coverage build
+        uses: codecov/codecov-action@v5.5.2
+        with:
+          disable_search: true
+          fail_ci_if_error: false
+          files: build/coverage_report.xml
+          plugins: noop
+          token: ${{ secrets.CODECOV_TOKEN }}

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+# See https://docs.codecov.io/docs/codecovyml-reference
+codecov:
+  require_ci_to_pass: no  # codecov reports its results independent of whether CI passed
+  notify:
+    wait_for_ci: no       # codecov has not to wait until the CI is finished to post its results
+
+coverage:
+  status:
+    project:  # project is the overall code coverage of the whole codebase
+      default:
+        if_ci_failed: success # per default, codecov would fail if any CI fails
+        informational: true   # the codecov/project status is never "fail"
+    patch:  # patch is the code-coverage of the changed lines in the PR
+      default:
+        if_ci_failed: success # per default, codecov would fail if any CI fails
+        informational: true   # the codecov/patch status is never "fail"
+        only_pulls: true      # only post codecov/patch status on PRs
+
+parsers:
+  cobertura:
+    partials_as_hits: true

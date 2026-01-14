@@ -42,6 +42,10 @@ import std;
 
 #define KSW_SPSC_OFFSET  64
 
+#ifdef __ARM_NEON__
+#undef KSW2_BUILD_SSE_4_1
+#include "sse_neon.h"
+#endif
 #include "defs.hpp"
 
 #ifdef __ARM_NEON__

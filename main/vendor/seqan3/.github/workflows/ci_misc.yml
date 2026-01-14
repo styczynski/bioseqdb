@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: Linux
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    types:
+      - unlabeled
+  workflow_dispatch:
+
+concurrency:
+  group: misc-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  SEQAN3_NO_VERSION_CHECK: 1
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eeuxo pipefail {0}
+
+jobs:
+  build:
+    name: ${{ matrix.build }} ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch' || github.event.label.name == 'lint'
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: ["clang-latest", "gcc-latest", "gcc-third-latest", "intel"]
+        build: ["snippet", "performance", "header"]
+    container:
+      image: ghcr.io/seqan/${{ matrix.compiler }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup cache
+        uses: seqan/actions/setup-actions-cache@main
+
+      - name: Configure tests
+        run: |
+          mkdir build && cd build
+          cmake ../test/${{ matrix.build }} -DCMAKE_BUILD_TYPE=Release \
+                                            -DSEQAN3_BENCHMARK_MIN_TIME=0.01s
+          case "${{ matrix.build }}" in
+            snippet) make gtest_main;;
+            performance) make benchmark_main;;
+            header) make gtest_main benchmark_main;;
+          esac
+
+      - name: Build tests
+        working-directory: build
+        run: |
+          ccache -z
+          make -k
+          ccache -svvx
+
+      - name: Run tests
+        working-directory: build
+        run: ctest . -j${{ matrix.build == 'snippet' && '1' || '' }} --output-on-failure --no-tests=error

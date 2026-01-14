@@ -1,0 +1,27 @@
+<!-- SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+     SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+     SPDX-License-Identifier: CC0-1.0
+-->
+<!-- HTML footer for doxygen 1.9.8-->
+<!-- start footer part -->
+<!--BEGIN GENERATE_TREEVIEW-->
+<!--Doxygen adds <a href="doxygen_crawl.html"/>; which would overwrite version selector.-->
+<a href="doxygen_crawl.html"><div style="display: none;">Hide me</div></a>
+<script type="text/javascript" charset="utf-8" src="api-stability.js"></script>
+<div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
+  <ul>
+    <!-- li for version.js -->
+    <li id="list_bottom_right" class="footer" style="float:left; font-size: 12pt; color: var(--page-foreground-color); font-weight: normal;">Version: <li>
+    <script type="text/javascript" charset="utf-8" src="version.js"></script>
+    $navpath
+    <li class="footer">$generatedby <a href="https://www.doxygen.org/index.html"><img class="footer" src="$relpath^doxygen.svg" width="104" height="31" alt="doxygen"/></a> $doxygenversion </li>
+  </ul>
+</div>
+<!--END GENERATE_TREEVIEW-->
+<!--BEGIN !GENERATE_TREEVIEW-->
+<hr class="footer"/><address class="footer"><small>
+$generatedby&#160;<a href="https://www.doxygen.org/index.html"><img class="footer" src="$relpath^doxygen.svg" width="104" height="31" alt="doxygen"/></a> $doxygenversion
+</small></address>
+<!--END !GENERATE_TREEVIEW-->
+</body>
+</html>

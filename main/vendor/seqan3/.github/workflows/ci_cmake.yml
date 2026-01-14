@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: CMake
+
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+    types:
+      - unlabeled
+  workflow_dispatch:
+
+concurrency:
+  group: cmake-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  SEQAN3_NO_VERSION_CHECK: 1
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eexuo pipefail {0}
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch' || github.event.label.name == 'lint'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Non-cyclic tests"
+            compiler: "gcc-latest"
+            build: unit
+            use_include_dependencies: "ON"
+            cmake_depends_use_compiler: "OFF"
+
+          - name: "External project"
+            compiler: "gcc-latest"
+            build: external_project
+            use_include_dependencies: "OFF"
+            cmake_depends_use_compiler: "ON"
+    container:
+      image: ghcr.io/seqan/${{ matrix.compiler }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure tests
+        run: |
+          mkdir build && cd build
+          cmake ../test/${{ matrix.build }} -DCMAKE_BUILD_TYPE=Debug \
+                                            -DCMAKE_DEPENDS_USE_COMPILER="${{ matrix.cmake_depends_use_compiler }}" \
+                                            -DSEQAN3_USE_INCLUDE_DEPENDENCIES="${{ matrix.use_include_dependencies }}"
+          case "${{ matrix.build }}" in
+            unit) make gtest_main;;
+            external_project) make seqan3_test_prerequisite sharg_test_prerequisite;;
+          esac
+
+      - name: Build tests
+        working-directory: build
+        run: |
+          case "${{ matrix.build }}" in
+            unit) make -k all_dependencies; cmake .;;
+            external_project) make -k;;
+          esac
+

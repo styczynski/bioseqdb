@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: Lint
+
+on:
+  pull_request_target:
+
+env:
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eeuxo pipefail {0}
+
+jobs:
+  # Cancel other workflows that are dependent on this workflow by adding jobs that have the same concurrency group.
+  cancel_running_workflows:
+    name: Cancel ${{ matrix.workflow}}
+    strategy:
+      fail-fast: false
+      matrix:
+        workflow: ["linux", "macos", "misc", "coverage", "cmake", "documentation"]
+    concurrency:
+      group: ${{ matrix.workflow }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Cancel ${{ matrix.workflow }}"
+        run: echo "Cancelling ${{ matrix.workflow }}"
+  lint:
+    name: Lint
+    concurrency:
+      group: lint-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    needs: cancel_running_workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Run lint
+        uses: seqan/actions/lint@main
+        with:
+          clang_format: 18
+          token: ${{ secrets.SEQAN_ACTIONS_PAT }}
+          gpg_key: ${{ secrets.SEQAN_ACTIONS_GPG_KEY }}
+          gpg_passphrase: ${{ secrets.SEQAN_ACTIONS_GPG_PASSPHRASE }}

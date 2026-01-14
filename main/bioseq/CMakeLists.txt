@@ -9,6 +9,7 @@ message("SOURCES ${SRC_FILES}")
 message("MODULES? ${SRC_MOD_FILES}")
 
 find_package(Intl)
+find_package(ZLIB)
 
 AddCommonTarget(
   postgresql_bioseq
@@ -41,7 +42,7 @@ AddCommonTarget(
 )
 
 file(GLOB_RECURSE A_SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/aligner/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.cpp)
-file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm)
+file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/alignment/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm)
 
 AddCommonTarget(
   bioseq_aligner
@@ -59,9 +60,11 @@ AddCommonTarget(
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
+    "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
   LINKS
     safestring_static
     fmt
+    ZLIB::ZLIB
   SOURCES
     ${A_SRC_FILES}
   SUPPORT_CXX_MODULES

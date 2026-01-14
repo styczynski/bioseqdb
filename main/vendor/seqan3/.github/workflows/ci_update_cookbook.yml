@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: Cookbook
+
+on:
+  push:
+    branches:
+      - 'main'
+
+concurrency:
+  group: update-cookbook-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Europe/Berlin
+
+defaults:
+  run:
+    shell: bash -Eexuo pipefail {0}
+
+jobs:
+  update-cookbook:
+    name: Update Cookbook
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'seqan'
+    timeout-minutes: 15
+    steps:
+      - name: Checkout SeqAn3
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.SEQAN_ACTIONS_PAT }}
+
+      - name: Import GPG key
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.SEQAN_ACTIONS_GPG_KEY }}
+          passphrase: ${{ secrets.SEQAN_ACTIONS_GPG_PASSPHRASE }}
+          git_user_signingkey: true
+          git_commit_gpgsign: true
+
+      - name: Update cookbook
+        run: ./test/scripts/add_snippets_to_cookbook.sh .
+
+      - name: Commit changes
+        uses: EndBug/add-and-commit@v9
+        with:
+          add: ./doc/cookbook/index.md
+          author_name: seqan-actions[bot]
+          author_email: seqan-actions@users.noreply.github.com
+          message: '[MISC] Update cookbook'

@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: Latest Libraries
+
+on:
+  # Will always run on the default branch
+  schedule:
+    - cron: "0 4 * * SUN"
+  # Enables a manual trigger, may run on any branch
+  workflow_dispatch:
+
+concurrency:
+  group: libs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SEQAN3_NO_VERSION_CHECK: 1
+  TZ: Europe/Berlin
+  ISSUE: 2747 # Issue number to use for reporting failures
+
+defaults:
+  run:
+    shell: bash -Eexuo pipefail {0}
+
+jobs:
+  build:
+    name: ${{ matrix.build }} ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: ["clang-latest", "clang-second-latest", "clang-third-latest", "gcc-latest", "gcc-second-latest", "gcc-third-latest", "intel"]
+        build: [unit, snippet, performance, header]
+    container:
+      image: ghcr.io/seqan/${{ matrix.compiler }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Update dependencies
+        run: |
+          FILE="cmake/package-lock.cmake"
+          sed -i -E 's@(set \(SEQAN3_\S+_VERSION )[^\)]+\)@\1main)@g' $FILE
+          sed -i -E 's@VERSION( \$\{SEQAN3_\S+_VERSION\})@GIT_TAG\1@g' $FILE
+          sed -i -E '/GIT_TAG seqan-v/d' $FILE
+          sed -i -E 's@SEQAN3_CEREAL_VERSION main@SEQAN3_CEREAL_VERSION master@g' $FILE
+          cat $FILE
+
+      - name: Configure tests
+        run: |
+          mkdir build && cd build
+          cmake ../test/${{ matrix.build }} -DCMAKE_BUILD_TYPE=Release \
+                                            -DSEQAN3_BENCHMARK_MIN_TIME=0.01s
+          case "${{ matrix.build }}" in
+            unit) make gtest_main;;
+            snippet) make gtest_main;;
+            performance) make benchmark_main;;
+            header) make gtest_main benchmark_main;;
+          esac
+
+      - name: Build tests
+        working-directory: build
+        run: |
+          make -k 2>&1 | tee build.log
+
+      - name: Setup Python
+        if: ${{ failure() }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Process Log
+        if: ${{ failure() }}
+        run: |
+          FILE=".github/ISSUE_TEMPLATE/cron_comment_template.md"
+          python3 .github/workflows/scripts/process_compiler_error_log.py build/build.log >> $FILE
+
+      - name: Create comment body
+        if: always()
+        id: comment-body
+        run: |
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "body=Success ${{ matrix.build }} on ${{ matrix.compiler }}" >> $GITHUB_OUTPUT
+          else
+            FILE=".github/ISSUE_TEMPLATE/cron_comment_template.md"
+            URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            sed -i "s@{{ build }}@${{ matrix.build }}@" $FILE
+            sed -i "s@{{ compiler }}@${{ matrix.compiler }}@" $FILE
+            sed -i "s@{{ url }}@$URL@" $FILE
+            echo "body<<EOF" >> $GITHUB_OUTPUT
+            cat $FILE >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Reopen issue
+        if: failure() && github.repository_owner == 'seqan'
+        run: gh issue reopen ${{ env.ISSUE }}
+        env:
+          GH_TOKEN: ${{ secrets.SEQAN_ACTIONS_PAT }}
+          GH_REPO: ${{ github.repository }}
+
+      - name: Find Comment
+        if: always() && github.repository_owner == 'seqan'
+        uses: peter-evans/find-comment@v4
+        id: find_comment
+        with:
+          issue-number: ${{ env.ISSUE }}
+          body-includes: ${{ matrix.build }} on ${{ matrix.compiler }}
+
+      - name: Update comment
+        if: always() && github.repository_owner == 'seqan'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          issue-number: ${{ env.ISSUE }}
+          body: ${{ steps.comment-body.outputs.body }}
+          edit-mode: replace
+          token: ${{ secrets.SEQAN_ACTIONS_PAT }}

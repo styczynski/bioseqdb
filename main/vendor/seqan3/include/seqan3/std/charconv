@@ -1,0 +1,271 @@
+// SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+// SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+// SPDX-License-Identifier: BSD-3-Clause
+
+/*!\file
+ * \brief The [\<charconv\> header](https://en.cppreference.com/w/cpp/header/charconv) from C++17's standard library.
+ * \author Svenja Mehringer <svenja.mehringer AT fu-berlin.de>
+ */
+
+// File might be included from multiple libraries.
+#ifndef SEQAN_STD_CHARCONV_SHIM
+#define SEQAN_STD_CHARCONV_SHIM
+
+#include <charconv>
+#include <utility> // __cpp_lib_to_chars may be defined here as currently documented.
+#include <version> // From C++20 onwards, all feature macros should be defined here.
+
+/*!\defgroup std_charconv charconv
+ * \ingroup std
+ * \brief The [\<charconv\> header](https://en.cppreference.com/w/cpp/header/charconv) from C++17's standard library.
+ * \details
+ *
+ * The following table describes what implementation of std::to_chars and std::from_chars will be used
+ *
+ * | stdlib version | __cpp_lib_to_chars                               | chars_format   | to_chars_result | from_chars_result | to_chars (int) | from_chars (int) | to_chars (float)     | from_chars (float)   |
+ * | -------------- | ------------------------------------------------ | -------------- | --------------- | ----------------- | -------------- | ---------------- | -------------------- | -------------------- |
+ * | gcc 11         | undefined (or 201611) and `<charconv>` header    | stdlib         | stdlib          | stdlib            | stdlib         | stdlib           | stdlib               | stdlib               |
+ *
+ * Note: gcc 11 implements float too, but does not define __cpp_lib_to_chars
+ */
+
+// =========================================================================
+// If float implementation is missing, add our own shim-implementation
+// =========================================================================
+
+#if __cpp_lib_to_chars < 201611
+#    include <cassert>
+#    include <concepts>
+#    include <sstream>
+
+namespace seqan3::contrib::charconv_float
+{
+using ::std::chars_format;
+using ::std::from_chars_result;
+using ::std::to_chars_result;
+
+/*!\brief std::to_chars implementation for floating point via a std::stringstream for default base = 10.
+ * \ingroup std_charconv
+ */
+template <std::floating_point value_type>
+inline to_chars_result to_chars_floating_point(char * first, char * last, value_type value) noexcept
+{
+    assert(first != nullptr);
+    assert(last != nullptr);
+
+    std::ostringstream ss;
+    ss << value;
+    auto str = ss.str();
+
+    if (last - first < static_cast<std::ptrdiff_t>(str.size()))
+        return {last, std::errc::value_too_large};
+
+    std::copy(str.begin(), str.end(), first);
+
+    return {first + str.size(), std::errc{}};
+}
+
+/*!\brief Delegates to functions strto[d/f/ld] for floating point value extraction.
+ * \ingroup std_charconv
+ */
+template <std::floating_point value_type>
+inline from_chars_result from_chars_floating_point(char const * first,
+                                                   char const * last,
+                                                   value_type & value,
+                                                   chars_format fmt = chars_format::general) noexcept
+{
+    // The locale issue:
+    // std::from_chars is documented to be locale independent. The accepted patterns
+    // are identical to the one used by strtod in the defailt ("C") locale.
+    //
+    // The functions strto[d/f/ld] used here are locale dependent but
+    // setting the locale manually by std::setlocale is not thread safe.
+    // So for the time being this workaround is locale dependent.
+    if (*first == '+') // + is permitted in function strto[d/f/ld] but not in from_chars
+        return {last, std::errc::invalid_argument};
+
+    float tmp{};
+    constexpr ptrdiff_t buffer_size = 100;
+    char buffer[buffer_size];
+
+    if (fmt != chars_format::general)
+    {
+        bool exponent_is_present{false};
+        for (auto it = first; it != last; ++it)
+        {
+            if (*it == 'e' || *it == 'E')
+            {
+                exponent_is_present = true;
+                break;
+            }
+        }
+
+        if (fmt == chars_format::scientific && !exponent_is_present)
+            return {last, std::errc::invalid_argument};
+
+        if (fmt == chars_format::fixed && exponent_is_present)
+            return {last, std::errc::invalid_argument};
+    }
+
+    // In contrast to std::from_chars, std::strto[f/d/ld] does not treat the second
+    // parameter (str_end) as "end of the sequence to parse" but merely as an out
+    // parameter to indicate where the parsing ended. Therefore, if [last] does
+    // not point to the end of a null-terminated string, a buffer is needed to
+    // represent the truncated sequence and ensure correct from_chars functionality.
+    char * start;
+
+    if ((*last != '\0') || fmt == chars_format::hex)
+    {
+        // If hex format is explicitly expected, the 0x prefix is not allowed in the
+        // the original sequence according to the std::from_chars cppreference
+        // documentation.
+        // In order to use strto[f/d/ld], the prefix must be prepended to achieve
+        // correct parsing. This will also automatically lead to an error if the
+        // original sequence did contain a 0x prefix and thus reflect the correct
+        // requirements of std::from_chars.
+        ptrdiff_t offset{0};
+        if (fmt == chars_format::hex)
+        {
+            buffer[0] = '0';
+            buffer[1] = 'x';
+            offset = 2;
+        }
+
+        std::copy(first, last, &buffer[offset]);
+        buffer[std::min<ptrdiff_t>(buffer_size - offset, last - first)] = '\0';
+
+        start = &buffer[0];
+    }
+    else
+    {
+        start = const_cast<char *>(first);
+    }
+
+    char * end;
+
+    if constexpr (std::same_as<std::remove_reference_t<value_type>, float>)
+    {
+        tmp = strtof(start, &end);
+    }
+    if constexpr (std::same_as<std::remove_reference_t<value_type>, double>)
+    {
+        tmp = strtod(start, &end);
+    }
+    if constexpr (std::same_as<std::remove_reference_t<value_type>, long double>)
+    {
+        tmp = strtold(start, &end);
+    }
+
+    last = first + (end - start);
+
+    if (errno == ERANGE)
+    {
+        return {last, std::errc::result_out_of_range};
+    }
+    else if (tmp == 0 && end == start)
+    {
+        return {last, std::errc::invalid_argument};
+    }
+
+    // Success.
+    value = tmp;
+    return {last, {}};
+}
+
+} // namespace seqan3::contrib::charconv_float
+
+namespace seqan3::contrib::charconv_float
+{
+// -----------------------------------------------------------------------------
+// to_chars for floating point types
+// -----------------------------------------------------------------------------
+
+/*!\brief std::to_chars overload for floating point via a std::stringstream for default base = 10.
+ * \ingroup std_charconv
+ */
+template <std::floating_point floating_point_type>
+inline to_chars_result to_chars(char * first, char * last, floating_point_type value) noexcept
+{
+    return to_chars_floating_point(first, last, value);
+}
+
+// -----------------------------------------------------------------------------
+// from_chars for floating point types
+// -----------------------------------------------------------------------------
+
+/*!\brief Parse a char sequence into an floating point value.
+ * \ingroup std_charconv
+ * \tparam floating_point_type The type to parse the string into; Must model std::floating_point.
+ * \param[in]      first The start of the string to parse.
+ * \param[in]      last  The end of the string to parse.
+ * \param[in, out] value The value to store the parsed result in.
+ * \param[in]      fmt   The std::chars_format that alters the behaviour of parsing.
+ * \returns A std::from_char_result. See detail section return value for more information.
+ *
+ * \details
+ *
+ * Analyzes the character sequence [first,last) for a pattern described below.
+ * If no characters match the pattern or if the value obtained by parsing the
+ * matched characters is not representable in the type of value, value is
+ * unmodified, otherwise the characters matching the pattern are interpreted as
+ * a text representation of an arithmetic value, which is stored in value.
+ *
+ * Floating-point parsers: Expects the pattern identical to the one used by
+ * std::strtod in the default ("C") locale, except that:
+ *
+ * - the plus sign is not recognized outside of the exponent (only the minus
+ *   sign is permitted at the beginning)
+ * - if fmt has std::chars_format::scientific set but not std::chars_format::fixed,
+ *   the exponent part is required (otherwise it is optional)
+ * - if fmt has std::chars_format::fixed set but not std::chars_format::scientific,
+ *   the optional exponent is not permitted
+ * - if fmt is std::chars_format::hex, the prefix "0x" or "0X" is not permitted
+ *   (the string "0x123" parses as the value "0" with unparsed remainder "x123").
+ *
+ * \attention This implementation is a workaround until the function is supported
+ *            by the compiler. It falls back to use the functions strto[d/f/ld]
+ *            before checking the above limitations
+ *
+ * ### Return value
+ * This function is workaround until the function is supported
+ * by the compiler. It falls back to use the functions strto[d/f/ld] so the
+ * return value is NOT as documented here https://en.cppreference.com/w/cpp/utility/from_chars
+ * but:
+ *
+ * On success, std::from_chars_result::ec is value-initialized. On error,
+ * std::from_chars_result::ec is either an
+ * std::errc::invalid_argument if an illegal character or format has been
+ * encountered, or std::errc::out_of_range if parsing the value would cause an
+ * overflow. The std::from_chars_result::ptr value is always set to last.
+ *
+ * ### The locale issue
+ * std::from_chars is documented to be locale independent. The accepted patterns
+ * are identical to the one used by strtod in the defailt ("C") locale.
+ *
+ * The functions strto[d/f/ld] used here are locale dependent but
+ * setting the locale manually by std::setlocale is not thread safe.
+ * So for the time being this workaround is locale dependent.
+ *
+ * \sa https://en.cppreference.com/w/cpp/utility/from_chars
+ */
+template <std::floating_point floating_point_type>
+inline from_chars_result from_chars(char const * first,
+                                    char const * last,
+                                    floating_point_type & value,
+                                    chars_format fmt = chars_format::general) noexcept
+{
+    return from_chars_floating_point(first, last, value, fmt);
+}
+} // namespace seqan3::contrib::charconv_float
+
+namespace std
+{
+// gcc-11 also defines float versions, but they don't clash with ours, because they use explicit overloads for each
+// float type. That means the stdlib has a higher priority in overload resolution then our shim implementation.
+using ::seqan3::contrib::charconv_float::from_chars; // import our shim-float version
+using ::seqan3::contrib::charconv_float::to_chars;   // import our shim-float version
+} // namespace std
+
+#endif // __cpp_lib_to_chars < 201611
+
+#endif // SEQAN_STD_CHARCONV_SHIM

@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: 2006-2025 Knut Reinert & Freie Universität Berlin
+# SPDX-FileCopyrightText: 2016-2025 Knut Reinert & MPI für molekulare Genetik
+# SPDX-License-Identifier: CC0-1.0
+
+name: API-Stability
+
+on:
+  # Will always run on the default branch
+  schedule:
+    - cron: "0 1 * * SUN"
+  # Enables a manual trigger, may run on any branch
+  workflow_dispatch:
+
+concurrency:
+  group: api-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  SEQAN3_NO_VERSION_CHECK: 1
+  TZ: Europe/Berlin
+  ISSUE: 3280 # Issue number to use for reporting failures
+
+defaults:
+  run:
+    shell: bash -Eeuxo pipefail {0}
+
+jobs:
+  build:
+    name: API-Stability ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'seqan' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: ["gcc-latest", "gcc-second-latest", "gcc-third-latest"]
+    container:
+      image: ghcr.io/seqan/${{ matrix.compiler }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure tests
+        run: |
+          mkdir build && cd build
+          cmake ../test/api_stability -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        working-directory: build
+        run: make -k 2>&1 | tee build.log
+
+      - name: Create comment body
+        if: always()
+        id: comment-body
+        run: |
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "body=Success ${{ matrix.build }} on ${{ matrix.compiler }}" >> $GITHUB_OUTPUT
+          else
+            FILE=".github/ISSUE_TEMPLATE/cron_comment_template.md"
+            python3 .github/workflows/scripts/process_compiler_error_log.py build/build.log >> ${FILE}
+            URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            sed -i "s@{{ build }}@${{ matrix.build }}@" ${FILE}
+            sed -i "s@{{ compiler }}@${{ matrix.compiler }}@" ${FILE}
+            sed -i "s@{{ url }}@$URL@" ${FILE}
+            echo "body<<EOF" >> $GITHUB_OUTPUT
+            cat ${FILE} >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Reopen issue
+        if: failure() && github.repository_owner == 'seqan'
+        run: gh issue reopen ${{ env.ISSUE }}
+        env:
+          GH_TOKEN: ${{ secrets.SEQAN_ACTIONS_PAT }}
+          GH_REPO: ${{ github.repository }}
+
+      - name: Find Comment
+        if: always() && github.repository_owner == 'seqan'
+        uses: peter-evans/find-comment@v4
+        id: find_comment
+        with:
+          issue-number: ${{ env.ISSUE }}
+          body-includes: ${{ matrix.build }} on ${{ matrix.compiler }}
+
+      - name: Update comment
+        if: always() && github.repository_owner == 'seqan'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          issue-number: ${{ env.ISSUE }}
+          body: ${{ steps.comment-body.outputs.body }}
+          edit-mode: replace
+          token: ${{ secrets.SEQAN_ACTIONS_PAT }}
+
