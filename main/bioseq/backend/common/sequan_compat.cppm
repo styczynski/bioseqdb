@@ -1,0 +1,50 @@
+module;
+
+#include "common.h"
+
+#include <vector>
+#include <type_traits>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <string>
+#include <typeinfo>
+#include <charconv>
+#include <utility> // __cpp_lib_to_chars may be defined here as currently documented.
+#include <version> // From C++20 onwards, all feature macros should be defined here.
+#include <cassert>
+#include <concepts>
+#include <sstream>
+#include <ranges>
+#include <seqan3/contrib/sdsl-lite.hpp>
+
+export module sequan_compat;
+
+import mlogging;
+
+export {
+#include <seqan3/alphabet/adaptation/all.hpp>
+#include <seqan3/alphabet/alphabet_base.hpp>
+#include <seqan3/alphabet/nucleotide/all.hpp>
+#include <seqan3/alphabet/aminoacid/all.hpp>
+//include <seqan3/alphabet/cigar/all.hpp>
+}
+#include <seqan3/alphabet/concept.hpp>
+
+
+
+template <typename alphabet_type>
+    requires requires (alphabet_type const a) {
+        { seqan3::to_char(a) };
+    }
+struct fmt::formatter<alphabet_type>: formatter<std::string> {
+  // parse is inherited from formatter<string_view>.
+  template <typename FormatContext>
+  auto format(alphabet_type symbol, FormatContext& ctx) const {
+    return formatter<std::string>::format(std::string(1, symbol.to_char()), ctx);
+  }
+};
+
+
+export namespace seq = seqan3;
+

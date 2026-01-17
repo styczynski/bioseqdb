@@ -13,7 +13,7 @@ find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 function(AddCommonTarget LIBRARY_NAME)
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
   set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX)
-  set(multiValueArgs REQUIRES SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS)
+  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
   if(NOT EXTENSION_TYPE)
@@ -100,6 +100,15 @@ function(AddCommonTarget LIBRARY_NAME)
       target_include_directories(
         ${LIBRARY_NAME} PRIVATE ${EXTENSION_INCLUDE_DIRS}
       )
+    endif()
+
+    # Boost
+    if(EXTENSION_BOOST)
+      find_package(Boost 1.90.0 REQUIRED COMPONENTS ${EXTENSION_BOOST})
+      target_include_directories(
+        ${LIBRARY_NAME} PRIVATE ${Boost_INCLUDE_DIRS}
+      )
+      target_link_libraries(${LIBRARY_NAME} PRIVATE ${Boost_LIBRARIES})
     endif()
 
     # Link libraries

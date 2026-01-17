@@ -1,5 +1,8 @@
 #include "common.h"
 
+#include <ranges>
+#include <bitset>
+
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
@@ -11,6 +14,11 @@
 #include "mmpriv.h"
 #include "bseq.h"
 #include "khash.h"
+
+import mlogging;
+import sequan_compat;
+
+using namespace seq::literals;
 
 mm_tbuf_t *mm_tbuf_init(void)
 {
@@ -72,6 +80,290 @@ static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t 
 		sum += qlens[i], n = mv->n;
 	}
 }
+
+// template<uint32_t kmer_span_width>
+// class MinimapSketch {
+// 	static constexpr x_shift = kmer_span_width;
+
+// 	uint64_t hash;
+// 	uint64_t meta;
+
+// 	inline MinimapSketch(uint64_t kmer, ) {
+// 		info.x = hash64(kmer[z], mask) << 8 | kmer_span;
+// 		info.y = (uint64_t)rid<<32 | (uint32_t)i<<1 | z;
+// 	}
+// };
+
+//static_assert(std::is_standard_layout_v<MinimapSketch> == true);
+
+#include <boost/circular_buffer.hpp>
+/**
+ *  p->a[i].x = kMer<<8 | kmerSpan
+ *  p->a[i].y = rid<<32 | lastPos<<1 | strand
+ *  where lastPos is the position of the last base of the i-th minimizer,
+ *  and strand indicates whether the minimizer comes from the top or the bottom strand.
+ *  Callers may want to set "p->n = 0"; otherwise results are appended to p
+ */
+struct MinimapSketchData {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+	uint64_t span: 8;
+	uint64_t kmer: 56;
+#elif __BYTE_ORDER == __BIG_ENDIAN
+	uint64_t kmer: 56;
+	uint64_t span: 8;
+#endif
+	// uint64_t rid: 32;
+	// uint64_t last_pos: 31;
+	// uint64_t strand: 1;
+
+	uint64_t strand: 1;
+	uint64_t last_pos: 31;
+	uint64_t rid: 32;	
+
+	int : 0;
+
+};
+
+union MinimapSketch {
+	MinimapSketchData sketch;
+	uint64_t data[sizeof(MinimapSketchData) / 8];
+};
+
+static_assert(sizeof(MinimapSketch) == 16);
+
+
+std::string binary_to_str(uint64_t* data, const int n) {
+	std::string formatted = "";
+	for (auto i = 0; i < n; ++i) {
+		if (i != 0) {
+			formatted += " ; ";
+		}
+		formatted += std::bitset<64>(data[i]).to_string();
+	}
+	return "[" + formatted + "]";
+}
+
+template<
+    std::ranges::contiguous_range R,
+    typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+>
+requires (
+	std::ranges::sized_range<R>,
+	requires (T const a) {
+        { seqan3::to_rank(a) };
+    }
+)
+class CompressedSeqanView {
+private:
+	R& _seq;
+public:
+	CompressedSeqanView(R& seq): _seq(seq) {};
+
+	std::size_t size() const {
+		return _seq.size() / 32 + (_seq.size() % 32 != 0);
+	}
+
+	uint64_t get_chunk(std::size_t pos) const {
+		std::size_t first = pos * 32;
+		std::size_t last = std::min(first + 32, _seq.size());
+		uint64_t val = 0;
+		for(auto i = first; i < last; ++i) {
+			val = (val << 2) | (3 & _seq[i].to_rank());
+		}
+		return val;
+	}
+
+	uint64_t operator[](std::size_t pos) const {
+		return get_chunk(pos);
+	}
+
+	std::size_t begin() const {
+		return 0;
+	}
+
+	std::size_t end() const {
+		return size();
+	}
+
+	std::string str() const {
+		std::string formatted = "";
+		for (auto i = begin(); i < end(); ++i) {
+			if (i != begin()) {
+				formatted += " ; ";
+			}
+			formatted += std::bitset<64>(get_chunk(i)).to_string();
+		}
+		return "[" + formatted + "]";
+	}
+
+};
+
+static inline uint64_t hash64(uint64_t key, uint64_t mask)
+{
+	key = (~key + (key << 21)) & mask; // key = (key << 21) - key - 1;
+	key = key ^ key >> 24;
+	key = ((key + (key << 3)) + (key << 8)) & mask; // key * 265
+	key = key ^ key >> 14;
+	key = ((key + (key << 2)) + (key << 4)) & mask; // key * 21
+	key = key ^ key >> 28;
+	key = (key + (key << 31)) & mask;
+	return key;
+};
+
+
+template <typename T, size_t S>
+class circular_append_buffer {
+
+private:
+	T _buffer[S];
+	size_t _buf_pos;
+	size_t _prev_pos;
+	size_t _capacity;
+public:
+	circular_append_buffer(
+		size_t capacity
+	): _buf_pos(0), _prev_pos(0), _capacity(capacity) {
+
+	}
+	
+	void push_back(T&& value) {
+		_prev_pos = _buf_pos;
+		_buffer[_buf_pos] = value;
+		++_buf_pos;
+		if (_buf_pos == _capacity) {
+			_buf_pos = 0;
+		}
+	};
+
+	size_t last_write_pos() const {
+		return _prev_pos;
+	};
+
+	T& last() {
+		return _buffer[_prev_pos];
+	}
+
+	template<typename F>
+	inline void unsafe_filled_for_each_previous(F fn) {
+		for (auto j = _buf_pos; j < _capacity; ++j) {
+			fn(j, _buffer[j]);
+		}
+		for (auto j = 0; j < _buf_pos; ++j) {
+			fn(j, _buffer[j]);
+		}
+	}
+
+	template<typename F>
+	inline void unsafe_filled_for_each(F fn) {
+		for (auto j = _buf_pos; j < _capacity; ++j) {
+			fn(j, _buffer[j]);
+		}
+		for (auto j = 0; j <= _buf_pos; ++j) {
+			fn(j, _buffer[j]);
+		}
+	}
+};
+
+template<typename T>
+void bio_collect_minimizers(T&& seq) {
+	constexpr uint64_t w = 10, k = 15;
+	constexpr uint32_t rid = 0;
+
+	constexpr uint64_t mask = (1ULL<<2*k) - 1;
+	constexpr uint64_t shift1 = 2 * (k - 1);
+
+	uint64_t kmer[2] = {0,0};
+
+	circular_append_buffer<MinimapSketch, 256> buffer(w);
+	std::vector<MinimapSketch> results;
+
+	MinimapSketch current_min = {
+		.data {UINT64_MAX, UINT64_MAX}
+	};
+	size_t current_min_pos = 0;
+
+	size_t pos = 0;
+	for (auto& n : seq) {
+		const auto nucl = n.to_rank();
+		kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
+		kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
+
+		if (kmer[0] == kmer[1]) continue;
+		const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
+		const auto kmer_span = pos + 1 < k ? pos + 1 : k;
+		++pos;
+
+		if (pos >= k && kmer_span < 256) {
+			buffer.push_back({
+				.sketch {
+					.kmer = hash64(kmer[strand], mask),
+					.span = kmer_span,
+					.rid = rid,
+					.last_pos = pos-1,
+					.strand = (kmer[0] < kmer[1]? (uint64_t)0 : (uint64_t)1),
+				}
+			});
+		} else {
+			buffer.push_back({ .data {UINT64_MAX, UINT64_MAX} });
+		}
+
+		if (pos == w + k - 1 && current_min.data[0] != UINT64_MAX) { // special case for the first window - because identical k-mers are not stored yet
+			buffer.unsafe_filled_for_each_previous([&results, &current_min](const auto& _index, const auto& el) {
+				if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+					results.push_back(el);
+				}
+			});
+		}
+		if (buffer.last().data[0] <= current_min.data[0]) { // a new minimum; then write the old min
+			if (pos >= w + k && current_min.data[0] != UINT64_MAX) {
+				results.push_back(current_min);
+			}
+			current_min_pos = buffer.last_write_pos();
+			current_min = buffer.last();
+		} else if (buffer.last_write_pos() == current_min_pos) { 
+			if (pos >= w + k - 1 && current_min.data[0] != UINT64_MAX) {
+				results.push_back(current_min);
+			}
+
+			current_min.data[0] = UINT64_MAX;
+			buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el) {
+				if (current_min.data[0] >= el.data[0]) {
+					current_min = el;
+					current_min_pos = index;
+				}
+			});
+
+			if (pos >= w + k - 1 && current_min.data[0] != UINT64_MAX) { // write identical k-mers
+				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el) {
+					if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+						results.push_back(el);
+					}
+				});
+			}
+		}
+	}
+	if (current_min.data[0] != UINT64_MAX) {
+		JustLog("PUTMIN?");
+		results.push_back(current_min);
+	}
+
+	for(auto const& i : results) {
+		JustLog("{} {}", i.data[0], i.data[1]);
+	}
+}
+
+// A -> 00
+// C -> 01
+// G -> 10
+// T -> 11
+// template<
+//     std::ranges::contiguous_range R,
+//     typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+// >
+// requires std::ranges::sized_range<R>
+// static T bio_collect_minimizers(R&& r) {
+// 	return r[0];
+// }
 
 #include "ksort.h"
 #define heap_lt(a, b) ((a).x > (b).x)
@@ -248,6 +540,17 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	hash  = qname && !(opt->flag & MM_F_NO_HASH_NAME)? __ac_X31_hash_string(qname) : 0;
 	hash ^= __ac_Wang_hash(qlen_sum) + __ac_Wang_hash(opt->seed);
 	hash  = __ac_Wang_hash(hash);
+
+	std::vector<seq::dna4> FIXED_TARGET{"ACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGTCGTAGCTAGTCCGTAATCGTAGCTAGTCAAACTGTATCGTAGCTAGTCCGTAGCTACTGTAGCTGATCGTAGCTAGTCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCTCGTAGCTAGTCCGTAACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
+	std::vector<seq::dna4> FIXED_QUERY{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
+
+	// Compress
+	auto z = CompressedSeqanView(FIXED_QUERY);
+	JustLog("z = {}", z.str());
+
+	bio_collect_minimizers(FIXED_QUERY);
+	//bio_collect_minimizers(z);
+	//JustLog("X! = {}", FIXED_QUERY[0].to_rank());
 
 	collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);

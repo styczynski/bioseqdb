@@ -1,5 +1,8 @@
 #include "common.h"
 
+#include <ranges>
+#include <bitset>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -7,6 +10,8 @@
 #define __STDC_LIMIT_MACROS
 #include "kvec.h"
 #include "mmpriv.h"
+
+import mlogging;
 
 unsigned char seq_nt4_table[256] = {
 	0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
@@ -26,6 +31,18 @@ unsigned char seq_nt4_table[256] = {
 	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
 	4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4
 };
+
+
+static inline std::string binary_to_str(uint64_t* data, const int n) {
+	std::string formatted = "";
+	for (auto i = 0; i < n; ++i) {
+		if (i != 0) {
+			formatted += " ; ";
+		}
+		formatted += std::bitset<64>(data[i]).to_string();
+	}
+	return "[" + formatted + "]";
+}
 
 static inline uint64_t hash64(uint64_t key, uint64_t mask)
 {
@@ -59,6 +76,7 @@ static inline int tq_shift(tiny_queue_t *q)
 	return x;
 }
 
+
 /**
  * Find symmetric (w,k)-minimizers on a DNA sequence
  *
@@ -78,6 +96,7 @@ static inline int tq_shift(tiny_queue_t *q)
  */
 void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, int is_hpc, mm128_v *p)
 {
+	JustLog("Calling mm_sketch() w = {}, k = {}, rid = {}", w, k, rid);
 	uint64_t shift1 = 2 * (k - 1), mask = (1ULL<<2*k) - 1, kmer[2] = {0,0};
 	int i, j, l, buf_pos, min_pos, kmer_span = 0;
 	mm128_t buf[256], min = { UINT64_MAX, UINT64_MAX };
@@ -110,9 +129,12 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 			if (kmer[0] == kmer[1]) continue; // skip "symmetric k-mers" as we don't know it strand
 			z = kmer[0] < kmer[1]? 0 : 1; // strand
 			++l;
+			//JustLog("{}(l) == {}(i+1)", l, i+1);
+			assert(l == i + 1);
 			if (l >= k && kmer_span < 256) {
 				info.x = hash64(kmer[z], mask) << 8 | kmer_span;
 				info.y = (uint64_t)rid<<32 | (uint32_t)i<<1 | z;
+				//JustLog("OLD sketch = {}", binary_to_str( (uint64_t*)((void*)&info), 2 ));
 			}
 		} else l = 0, tq.count = tq.front = 0, kmer_span = 0;
 		buf[buf_pos] = info; // need to do this here as appropriate buf_pos and buf[buf_pos] are needed below
@@ -140,6 +162,17 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 		}
 		if (++buf_pos == w) buf_pos = 0;
 	}
-	if (min.x != UINT64_MAX)
+	if (min.x != UINT64_MAX) {
+		JustLog("Original push min!");
 		kv_push(mm128_t, km, *p, min);
+	} else {
+		JustLog("No original push min :0");
+	}
+
+	// Print all collected
+	JustLog("Dump all collected: {}", p->n);
+	for(int i=0;i<p->n;++i) {
+		JustLog("{} {}", p->a[i].x, p->a[i].y);
+	}
+	JustLog("--END--");
 }

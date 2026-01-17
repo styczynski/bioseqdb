@@ -8,6 +8,6 @@ rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bi
 
 cd build && \
 cmake -G Ninja .. && cmake --build . && cmake --build . --target install && \
-./bioseq/bioseq_aligner 
+./bioseq/bioseq_aligner ../data/target.fasta ../data/query.fasta
 #psql -h localhost -p 5432 -a -f ../bioseq/sql/setup.sql
 

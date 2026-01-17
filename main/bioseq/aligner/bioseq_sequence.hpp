@@ -14,12 +14,4 @@
 #include <ranges>
 #include <type_traits>
 
-#include <seqan3/alphabet/all.hpp>
-#include <seqan3/alphabet/detail/alphabet_proxy.hpp>
-#include <seqan3/alphabet/views/to_char.hpp>
-#include <seqan3/alphabet/views/to_rank.hpp>
-#include <seqan3/contrib/sdsl-lite.hpp>
-#include <seqan3/core/concept/cereal.hpp>
-#include <seqan3/core/range/detail/random_access_iterator.hpp>
-#include <seqan3/utility/math.hpp>
-#include <seqan3/utility/views/convert.hpp>
+

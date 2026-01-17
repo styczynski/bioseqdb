@@ -92,6 +92,6 @@
 #define AT __FILE__ ":" TOSTRING(__LINE__)
 #define BMethod(NAME) if(enable_logging) { logd(". Function called '{}'", TOSTRING(NAME)); fmtlog::poll(true); }
 #define EMethod(NAME) if(enable_logging) { logd(". Function exited '{}'", TOSTRING(NAME)); fmtlog::poll(true); }
-#define JustLog(...) if(enable_logging) { logd(__VA_ARGS__); fmtlog::poll(true); }
+#define JustLog(...) if(enable_logging) { logd(__VA_ARGS__); fmtlog::poll(true); fmtlog::poll(true); fmtlog::poll(true); }
 #define NJustLog(...) if(enable_logging) { elog(NOTICE, fmt::format(__VA_ARGS__).c_str()); }
 #define nodeStr(X) ""
