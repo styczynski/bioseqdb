@@ -124,13 +124,129 @@ struct MinimapSketchData {
 
 };
 
-union MinimapSketch {
-	MinimapSketchData sketch;
-	uint64_t data[sizeof(MinimapSketchData) / 8];
+#define GET_BIT_FIELD_WIDTH(T, f) \
+    []() constexpr -> unsigned int \
+    { \
+        T t{}; \
+        t.f = ~0; \
+        unsigned int bitCount = 0; \
+        while (t.f != 0) \
+        { \
+            t.f >>= 1; \
+            ++bitCount; \
+        } \
+        return bitCount; \
+    }()
+
+#define UNION_FIELD_WIDTH(T, union_field_name, property_name) \
+	GET_BIT_FIELD_WIDTH(decltype(std::declval<T>().union_field_name), property_name)
+
+template <typename S, typename T>
+struct sketch_type {
+
+	using sketch_union_t = union {
+		T sketch;
+		uint64_t data[sizeof(T) / 8];
+	};
+
+	sketch_union_t sketch;
+
+	///
+
+	// constexpr sketch_type(const T&& v): sketch(v) {}
+	// constexpr sketch_type(): sketch() {}
+
+	constexpr bool is_max() const {
+		return sketch.data[0] == UINT64_MAX;
+	}
+
+	void set_max() {
+		sketch.data[0] = UINT64_MAX;
+	}
+
+	auto operator<=>(const S& v) const {
+		return sketch.data[0] <=> v.sketch.data[0];
+	};
+
+	// template <uint8_t N = sizeof(T) / 8>
+	// static inline bool does_sketch_match(const S& sketch1, const S& sketch2) {
+	// 	return does_sketch_match<N-1>(sketch1, sketch2) && sketch1.sketch.data[N] != sketch2.sketch.data[N];
+	// }
+
+	// template <>
+	// static inline bool does_sketch_match<0>(const S& sketch1, const S& sketch2) {
+	// 	return sketch1.sketch.data[0] == sketch2.sketch.data[0];
+	// }
+
+	template <std::size_t... Is>
+    static inline bool _different_on_tail(const S& sketch1, const S& sketch2, std::index_sequence<Is...>) {
+		return ((sketch1.sketch.data[Is+1] != sketch2.sketch.data[Is+1]) && ...);
+	}
+
+	static inline bool does_sketch_match(const S& sketch1, const S& sketch2) {
+		return sketch1.sketch.data[0] == sketch2.sketch.data[0] && _different_on_tail(sketch1, sketch2, std::make_index_sequence<sizeof(T) / 8 - 1>{});
+	}
+
+	template <std::size_t>
+    static consteval uint64_t _max_init() { return UINT64_MAX; }
+    
+    template <std::size_t... Is>
+    static consteval S getMax(std::index_sequence<Is...>) {
+		return S({
+			.sketch {
+				.data {
+					_max_init<Is>()...
+				}
+			}
+		});
+	}
+
+	static consteval S getMax() {
+		return getMax(std::make_index_sequence<sizeof(T) / 8>{});
+	}
+
+
+	// static consteval S getMax() {
+	// 	return S({
+	// 			.sketch {
+	// 				.data {
+	// 					UINT64_MAX, UINT64_MAX
+	// 				}
+	// 			}
+	// 		});
+	// }
+
+	// S(uint64_t mmm): sketch({
+	// 	.data {
+	// 		mmm, mmm
+	// 	}
+	// }) {}
+
 };
 
-static_assert(sizeof(MinimapSketch) == 16);
+class MinimapSketch : public sketch_type<MinimapSketch, MinimapSketchData> {};
 
+static_assert(std::is_standard_layout_v<MinimapSketch> == true);
+
+
+// template <typename T>
+// class sketch_traits {
+// public:
+
+// 	template <uint8_t N = sizeof(MinimapSketch) / 8>
+// 	static inline bool does_sketch_match(const T& sketch1, const T& sketch2) {
+// 		return does_sketch_match<N-1>(sketch1, sketch2) && sketch1.data[N] != sketch2.data[N];
+// 	}
+
+// 	template <>
+// 	bool does_sketch_match<0>(const T& sketch1, const T& sketch2) {
+// 		return sketch1.data[0] == sketch2.data[0];
+// 	}
+// };
+
+
+static_assert(sizeof(MinimapSketch) == 16);
+//static_assert(GET_BIT_FIELD_WIDTH(decltype(std::declval<MinimapSketch>().sketch), span) == 8);
 
 std::string binary_to_str(uint64_t* data, const int n) {
 	std::string formatted = "";
@@ -266,6 +382,8 @@ public:
 
 template<typename T>
 void bio_collect_minimizers(T&& seq) {
+	constexpr uint64_t max_span = 1 << UNION_FIELD_WIDTH(MinimapSketch, sketch.sketch, span);
+
 	constexpr uint64_t w = 10, k = 15;
 	constexpr uint32_t rid = 0;
 
@@ -274,12 +392,13 @@ void bio_collect_minimizers(T&& seq) {
 
 	uint64_t kmer[2] = {0,0};
 
-	circular_append_buffer<MinimapSketch, 256> buffer(w);
+	circular_append_buffer<MinimapSketch, max_span> buffer(w);
 	std::vector<MinimapSketch> results;
 
-	MinimapSketch current_min = {
-		.data {UINT64_MAX, UINT64_MAX}
-	};
+	// MinimapSketch current_min = {
+	// 	.sketch { .data {UINT64_MAX, UINT64_MAX} }
+	// };
+	MinimapSketch current_min = MinimapSketch::getMax();
 	size_t current_min_pos = 0;
 
 	size_t pos = 0;
@@ -293,62 +412,63 @@ void bio_collect_minimizers(T&& seq) {
 		const auto kmer_span = pos + 1 < k ? pos + 1 : k;
 		++pos;
 
-		if (pos >= k && kmer_span < 256) {
-			buffer.push_back({
-				.sketch {
+		if (pos >= k && kmer_span < max_span) {
+			buffer.push_back(std::move(MinimapSketch({
+				.sketch { .sketch {
 					.kmer = hash64(kmer[strand], mask),
 					.span = kmer_span,
 					.rid = rid,
 					.last_pos = pos-1,
 					.strand = (kmer[0] < kmer[1]? (uint64_t)0 : (uint64_t)1),
-				}
-			});
+				} }
+			})));
 		} else {
-			buffer.push_back({ .data {UINT64_MAX, UINT64_MAX} });
+			buffer.push_back(MinimapSketch::getMax());
 		}
 
-		if (pos == w + k - 1 && current_min.data[0] != UINT64_MAX) { // special case for the first window - because identical k-mers are not stored yet
+		if (pos == w + k - 1 && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
 			buffer.unsafe_filled_for_each_previous([&results, &current_min](const auto& _index, const auto& el) {
-				if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+				//if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+				if (MinimapSketch::does_sketch_match(current_min, el)) {
 					results.push_back(el);
 				}
 			});
 		}
-		if (buffer.last().data[0] <= current_min.data[0]) { // a new minimum; then write the old min
-			if (pos >= w + k && current_min.data[0] != UINT64_MAX) {
+		if (buffer.last() <= current_min) { // a new minimum; then write the old min
+			if (pos >= w + k && !current_min.is_max()) {
 				results.push_back(current_min);
 			}
 			current_min_pos = buffer.last_write_pos();
 			current_min = buffer.last();
 		} else if (buffer.last_write_pos() == current_min_pos) { 
-			if (pos >= w + k - 1 && current_min.data[0] != UINT64_MAX) {
+			if (pos >= w + k - 1 && !current_min.is_max()) {
 				results.push_back(current_min);
 			}
 
-			current_min.data[0] = UINT64_MAX;
+			current_min.set_max();
 			buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el) {
-				if (current_min.data[0] >= el.data[0]) {
+				if (current_min >= el) {
 					current_min = el;
 					current_min_pos = index;
 				}
 			});
 
-			if (pos >= w + k - 1 && current_min.data[0] != UINT64_MAX) { // write identical k-mers
+			if (pos >= w + k - 1 && !current_min.is_max()) { // write identical k-mers
 				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el) {
-					if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+					if (MinimapSketch::does_sketch_match(current_min, el)) {
 						results.push_back(el);
 					}
 				});
 			}
 		}
 	}
-	if (current_min.data[0] != UINT64_MAX) {
+	if (!current_min.is_max()) {
 		JustLog("PUTMIN?");
 		results.push_back(current_min);
 	}
 
 	for(auto const& i : results) {
-		JustLog("{} {}", i.data[0], i.data[1]);
+		JustLog("{} {}", i.sketch.data[0], i.sketch.data[1]);
 	}
 }
 
