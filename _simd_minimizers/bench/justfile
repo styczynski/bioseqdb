@@ -1,0 +1,7 @@
+all: bench eval
+
+eval:
+    python eval.py
+
+bench:
+    cargo +nightly run -r
