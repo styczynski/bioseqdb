@@ -386,10 +386,37 @@ public:
 	}
 };
 
-template<typename T>
-void bio_collect_minimizers(T&& seq) {
-	auto start = std::chrono::high_resolution_clock::now();
+// // Delayed iterator
+
+// template<
+// 	std::ranges::contiguous_range R,
+// 	typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+// >
+// requires (
+// 	std::ranges::sized_range<R>
+// )
+
+// // end
+
+
+template<
+    std::ranges::contiguous_range R,
+    typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+>
+requires (
+	std::ranges::sized_range<R>,
+	requires (T const a) {
+        { seqan3::to_rank(a) };
+    },
+	requires () {
+        { seqan3::alphabet_size<T> };
+    }
+)
+void bio_collect_minimizers(R&& seq) {
+	
 	constexpr uint64_t max_span = 1 << UNION_FIELD_WIDTH(MinimapSketch, sketch.sketch, span);
+
+	constexpr uint64_t alphabet_size = seqan3::alphabet_size<T>;
 
 	constexpr uint64_t w = 10, k = 15;
 	constexpr uint32_t rid = 0;
@@ -409,34 +436,43 @@ void bio_collect_minimizers(T&& seq) {
 	size_t current_min_pos = 0;
 
 	size_t pos = 0;
+	size_t seq_pos = 0;
 	auto iter = seq.begin();
 
-
+	auto start = std::chrono::high_resolution_clock::now();
 	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
-		for(; iter != seq.end() && (pos < w + k || !IS_INIT); ++iter) {
+		for(; iter != seq.end() && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
 			const auto nucl = iter->to_rank();
-			kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
-			kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
 
-			if (kmer[0] == kmer[1]) continue;
-			const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
-			const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
-			++pos;
-
-			// We don't need to check: kmer_span < max_span
-			if ((pos >= k || !IS_INIT)) {
-			//if (kmer_span < max_span) {
-				buffer.push_back(std::move(MinimapSketch({
-					.sketch { .sketch {
-						.kmer = hash64(kmer[strand], mask),
-						.span = kmer_span,
-						.rid = rid,
-						.last_pos = pos-1,
-						.strand = (kmer[0] < kmer[1]? (uint64_t)0 : (uint64_t)1),
-					} }
-				})));
-			} else {
+			// Support ambigious?
+			if(alphabet_size > 4 && nucl >= 4) {
+				// fuck!
 				buffer.push_back(MinimapSketch::getMax());
+				pos = 0;
+			} else {
+				kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
+				kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
+
+				if (kmer[0] == kmer[1]) continue;
+				const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
+				const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
+				++pos;
+
+				// We don't need to check: kmer_span < max_span
+				if ((pos >= k || !IS_INIT)) {
+				//if (kmer_span < max_span) {
+					buffer.push_back(std::move(MinimapSketch({
+						.sketch { .sketch {
+							.kmer = hash64(kmer[strand], mask),
+							.span = kmer_span,
+							.rid = rid,
+							.last_pos = seq_pos,
+							.strand = (kmer[0] < kmer[1]? (uint64_t)0 : (uint64_t)1),
+						} }
+					})));
+				} else {
+					buffer.push_back(MinimapSketch::getMax());
+				}
 			}
 
 			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
@@ -488,6 +524,12 @@ void bio_collect_minimizers(T&& seq) {
 
 	auto stop = std::chrono::high_resolution_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+
+	// LELED
+	for ( const auto& minimiser : (seq | seqan3::views::minimiser_hash(seqan3::shape{seqan3::ungapped{k}}, seqan3::window_size{w+k-1}, seqan3::seed{0})) ) {
+		// EH?
+		JustLog("hey {}", 42);
+	}
 
 	JustLog("Dump all collected (runtime = {})", duration);
 
