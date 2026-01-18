@@ -2,6 +2,7 @@
 
 #include <ranges>
 #include <bitset>
+#include <chrono>
 
 #include <stdlib.h>
 #include <string.h>
@@ -76,7 +77,12 @@ static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t 
 		for (j = n; j < mv->n; ++j)
 			mv->a[j].y += sum << 1;
 		if (opt->sdust_thres > 0) // mask low-complexity minimizers
+		{
+			JustLog("Filter mm_dust_minier! {}", opt->sdust_thres);
 			mv->n = n + mm_dust_minier(km, mv->n - n, mv->a + n, qlens[i], seqs[i], opt->sdust_thres);
+		} else {
+			JustLog("Filter not required.")
+		}
 		sum += qlens[i], n = mv->n;
 	}
 }
@@ -382,6 +388,7 @@ public:
 
 template<typename T>
 void bio_collect_minimizers(T&& seq) {
+	auto start = std::chrono::high_resolution_clock::now();
 	constexpr uint64_t max_span = 1 << UNION_FIELD_WIDTH(MinimapSketch, sketch.sketch, span);
 
 	constexpr uint64_t w = 10, k = 15;
@@ -402,70 +409,87 @@ void bio_collect_minimizers(T&& seq) {
 	size_t current_min_pos = 0;
 
 	size_t pos = 0;
-	for (auto& n : seq) {
-		const auto nucl = n.to_rank();
-		kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
-		kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
+	auto iter = seq.begin();
 
-		if (kmer[0] == kmer[1]) continue;
-		const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
-		const auto kmer_span = pos + 1 < k ? pos + 1 : k;
-		++pos;
 
-		if (pos >= k && kmer_span < max_span) {
-			buffer.push_back(std::move(MinimapSketch({
-				.sketch { .sketch {
-					.kmer = hash64(kmer[strand], mask),
-					.span = kmer_span,
-					.rid = rid,
-					.last_pos = pos-1,
-					.strand = (kmer[0] < kmer[1]? (uint64_t)0 : (uint64_t)1),
-				} }
-			})));
-		} else {
-			buffer.push_back(MinimapSketch::getMax());
-		}
+	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
+		for(; iter != seq.end() && (pos < w + k || !IS_INIT); ++iter) {
+			const auto nucl = iter->to_rank();
+			kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
+			kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
 
-		if (pos == w + k - 1 && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
-			buffer.unsafe_filled_for_each_previous([&results, &current_min](const auto& _index, const auto& el) {
-				//if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
-				if (MinimapSketch::does_sketch_match(current_min, el)) {
-					results.push_back(el);
-				}
-			});
-		}
-		if (buffer.last() <= current_min) { // a new minimum; then write the old min
-			if (pos >= w + k && !current_min.is_max()) {
-				results.push_back(current_min);
-			}
-			current_min_pos = buffer.last_write_pos();
-			current_min = buffer.last();
-		} else if (buffer.last_write_pos() == current_min_pos) { 
-			if (pos >= w + k - 1 && !current_min.is_max()) {
-				results.push_back(current_min);
+			if (kmer[0] == kmer[1]) continue;
+			const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
+			const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
+			++pos;
+
+			// We don't need to check: kmer_span < max_span
+			if ((pos >= k || !IS_INIT)) {
+			//if (kmer_span < max_span) {
+				buffer.push_back(std::move(MinimapSketch({
+					.sketch { .sketch {
+						.kmer = hash64(kmer[strand], mask),
+						.span = kmer_span,
+						.rid = rid,
+						.last_pos = pos-1,
+						.strand = (kmer[0] < kmer[1]? (uint64_t)0 : (uint64_t)1),
+					} }
+				})));
+			} else {
+				buffer.push_back(MinimapSketch::getMax());
 			}
 
-			current_min.set_max();
-			buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el) {
-				if (current_min >= el) {
-					current_min = el;
-					current_min_pos = index;
-				}
-			});
-
-			if (pos >= w + k - 1 && !current_min.is_max()) { // write identical k-mers
-				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el) {
+			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
+				buffer.unsafe_filled_for_each_previous([&results, &current_min](const auto& _index, const auto& el) {
+					//if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
 					if (MinimapSketch::does_sketch_match(current_min, el)) {
 						results.push_back(el);
 					}
 				});
 			}
+			if (buffer.last() <= current_min) { // a new minimum; then write the old min
+				if ((pos >= w + k || !IS_INIT) && !current_min.is_max()) {
+					results.push_back(current_min);
+				}
+				current_min_pos = buffer.last_write_pos();
+				current_min = buffer.last();
+			} else if (buffer.last_write_pos() == current_min_pos) { 
+				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) {
+					results.push_back(current_min);
+				}
+
+				current_min.set_max();
+				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el) {
+					if (current_min >= el) {
+						current_min = el;
+						current_min_pos = index;
+					}
+				});
+
+				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) { // write identical k-mers
+					buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el) {
+						if (MinimapSketch::does_sketch_match(current_min, el)) {
+							results.push_back(el);
+						}
+					});
+				}
+			}
 		}
-	}
+	};
+
+	// First kmers
+	handler(std::bool_constant<true>{});
+	assert(pos == w+k);
+	handler(std::bool_constant<false>{});
+
 	if (!current_min.is_max()) {
-		JustLog("PUTMIN?");
 		results.push_back(current_min);
 	}
+
+	auto stop = std::chrono::high_resolution_clock::now();
+	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+
+	JustLog("Dump all collected (runtime = {})", duration);
 
 	for(auto const& i : results) {
 		JustLog("{} {}", i.sketch.data[0], i.sketch.data[1]);

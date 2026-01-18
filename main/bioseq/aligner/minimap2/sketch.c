@@ -11,6 +11,8 @@
 #include "kvec.h"
 #include "mmpriv.h"
 
+#include <chrono>
+
 import mlogging;
 
 unsigned char seq_nt4_table[256] = {
@@ -97,6 +99,9 @@ static inline int tq_shift(tiny_queue_t *q)
 void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, int is_hpc, mm128_v *p)
 {
 	JustLog("Calling mm_sketch() w = {}, k = {}, rid = {}", w, k, rid);
+
+	auto start = std::chrono::high_resolution_clock::now();
+
 	uint64_t shift1 = 2 * (k - 1), mask = (1ULL<<2*k) - 1, kmer[2] = {0,0};
 	int i, j, l, buf_pos, min_pos, kmer_span = 0;
 	mm128_t buf[256], min = { UINT64_MAX, UINT64_MAX };
@@ -163,14 +168,14 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 		if (++buf_pos == w) buf_pos = 0;
 	}
 	if (min.x != UINT64_MAX) {
-		JustLog("Original push min!");
 		kv_push(mm128_t, km, *p, min);
-	} else {
-		JustLog("No original push min :0");
 	}
 
+	auto stop = std::chrono::high_resolution_clock::now();
+	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+
 	// Print all collected
-	JustLog("Dump all collected: {}", p->n);
+	JustLog("Dump all collected: {} (runtime = {})", p->n, duration);
 	for(int i=0;i<p->n;++i) {
 		JustLog("{} {}", p->a[i].x, p->a[i].y);
 	}
