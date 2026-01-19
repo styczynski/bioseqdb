@@ -76,4 +76,5 @@ AddCommonTarget(
     ${A_SRC_MOD_FILES}
   BOOST
     program_options regex
+  HWY 1.3.0
 )

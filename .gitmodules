@@ -1,0 +1,3 @@
+[submodule "main/vendor/simd-highway"]
+	path = main/vendor/simd-highway
+	url = https://github.com/google/highway.git

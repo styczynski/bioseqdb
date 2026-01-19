@@ -12,7 +12,7 @@ find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 # Helper command to add extensions
 function(AddCommonTarget LIBRARY_NAME)
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
-  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX)
+  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY)
   set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
@@ -109,6 +109,19 @@ function(AddCommonTarget LIBRARY_NAME)
         ${LIBRARY_NAME} PRIVATE ${Boost_INCLUDE_DIRS}
       )
       target_link_libraries(${LIBRARY_NAME} PRIVATE ${Boost_LIBRARIES})
+    endif()
+
+    # Google highway
+    if(EXTENSION_HWY)
+      find_package(HWY ${EXTENSION_HWY} REQUIRED NO_MODULE)
+      target_link_libraries(${LIBRARY_NAME} PRIVATE hwy::hwy)
+      target_include_directories(
+        ${LIBRARY_NAME} PRIVATE ${HWY_INCLUDE_DIRS}
+      )
+      # target_link_libraries(${LIBRARY_NAME} PRIVATE hwy)
+      # target_include_directories(
+      #   ${LIBRARY_NAME} PRIVATE $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+      # )
     endif()
 
     # Link libraries

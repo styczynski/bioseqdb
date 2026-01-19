@@ -51,6 +51,7 @@ pub fn minimizers_seq_scalar<'s>(
 /// Split the windows of the sequence into 8 chunks of equal length ~len/8.
 /// Then return the positions of the minimizers of each of them in parallel using SIMD,
 /// and return the remaining few using the second iterator.
+// PAPIESZ
 #[inline(always)]
 pub fn minimizers_seq_simd<'s>(
     seq: impl Seq<'s>,

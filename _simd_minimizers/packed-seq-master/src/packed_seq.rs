@@ -702,15 +702,18 @@ where
             (this.len + o).saturating_sub(context - 1)
         };
         // without +o, since we don't need them in the stride.
-        let num_kmers_stride = this.len.saturating_sub(context - 1);
-        let n = num_kmers_stride.div_ceil(L).next_multiple_of(Self::C8);
+
+        // Sequence has seq, len, offset
+
+        let num_kmers_stride = this.len.saturating_sub(context - 1); // num_kmers_stride = len - context + 1
+        let n = num_kmers_stride.div_ceil(L).next_multiple_of(Self::C8); // n = num_kmers_stride/L round to C8
         let bytes_per_chunk = n / Self::C8;
         let padding = Self::C8 * L * bytes_per_chunk - num_kmers_stride;
 
         let offsets: [usize; 8] = from_fn(|l| l * bytes_per_chunk);
         let mut cur = S::ZERO;
 
-        let par_len = if num_kmers == 0 {
+        let par_len = if num_kmers == 0 { // n + context - 1 <- lengtth of the window, makes sense. O is offset?
             0
         } else {
             n + context + o - 1
@@ -736,6 +739,7 @@ where
                                     )
                                 },
                             );
+                            // PAPIESZ transpose data when reading
                             *buf = transpose(data);
                         }
                         cur = buf[(i % Self::C256) / Self::C32];
@@ -772,6 +776,7 @@ where
         self.par_iter_bp_delayed_with_factor_and_buf(context, delay, 1, buf)
     }
 
+    // PAPIESZ: !important Core concept of iteration 
     #[inline(always)]
     pub fn par_iter_bp_delayed_with_factor_and_buf<BUF: DerefMut<Target = Vec<S>>>(
         self,

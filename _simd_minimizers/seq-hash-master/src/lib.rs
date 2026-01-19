@@ -165,6 +165,7 @@ pub trait KmerHasher {
 
     /// A SIMD-parallel iterator over all k-mer hashes in `seq`.
     #[inline(always)]
+    // PAPIESZ
     fn hash_kmers_simd<'s>(&self, seq: impl Seq<'s>, context: usize) -> PaddedIt<impl ChunkIt<S>> {
         let k = self.k();
         let delay = self.delay();
@@ -228,6 +229,7 @@ pub trait KmerHasher {
         let mut ambiguity_it = nseq
             .ambiguous
             .par_iter_kmer_ambiguity(k, context + k - 1, 0);
+        // PAPIESZ iterate the sequence here
         nseq.seq
             .par_iter_bp_delayed_with_factor(context + k - 1, delay, 2)
             .map(
