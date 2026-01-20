@@ -719,7 +719,16 @@ namespace hn = hwy::HWY_NAMESPACE;
 // template <class D, class VecT>
 // std::string hwyStr(const D& d, const VecT& v);
 
-template <class D, class VecT = hn::Vec<D>>
+template <typename T, typename InfoT, typename I = void>
+struct HWYVectorStringPrinter {
+	static inline std::string formatBlock(const InfoT info, const void* ptr) {
+		char str[100];
+		ToString(info, ptr, str);
+		return std::string(str);
+	}
+};
+
+template <class D, typename I = void, class VecT = hn::Vec<D>>
 auto hwyStr(const D& d, const VecT& v) {
 	constexpr size_t lane_u = 0;
 	constexpr size_t max_lanes = 16;
@@ -755,8 +764,9 @@ auto hwyStr(const D& d, const VecT& v) {
 	// 		static_cast<int>(begin));
 	for (size_t i = begin; i < end; ++i) {
 		const void* ptr = array_bytes + i * info.sizeof_t;
-		char str[100];
-		ToString(info, ptr, str);
+		//char str[100];
+		//ToString(info, ptr, str);
+		const auto str = HWYVectorStringPrinter<T, decltype(info), I>::formatBlock(info, ptr);
 		if (i == end-1) {
 			buf += fmt::format("{}", str);
 		} else {
@@ -817,80 +827,82 @@ public:
 			const VecT t0 = InterleaveLower(d, v0, v1); // B D
 			matrix[0] = t0;
 			matrix[1] = t1;
-		} else if (hn::Lanes(d) == 4) {
-			const hn::RepartitionToWide<D> dw;
-
-			const VecT v0 = matrix[0];
-			const VecT v1 = matrix[1];
-			const VecT v2 = matrix[2];
-			const VecT v3 = matrix[3];
-
-			const VecT t0 = InterleaveLower(d, v0, v1);
-			const VecT t1 = InterleaveLower(d, v2, v3);
-			const VecT t2 = InterleaveUpper(d, v0, v1);
-			const VecT t3 = InterleaveUpper(d, v2, v3);
-
-			matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-		} else if (hn::Lanes(d) == 8) {
-			const hn::RepartitionToWide<D> dw;
-			
-			const VecT v0 = matrix[0];
-			const VecT v1 = matrix[1];
-			const VecT v2 = matrix[2];
-			const VecT v3 = matrix[3];
-
-			const VecT v4 = matrix[4];
-			const VecT v5 = matrix[5];
-			const VecT v6 = matrix[6];
-			const VecT v7 = matrix[7];
-
-			const VecT t0 = InterleaveLower(d, v0, v1);
-			const VecT t1 = InterleaveLower(d, v2, v3);
-			const VecT t2 = InterleaveLower(d, v4, v5);
-			const VecT t3 = InterleaveLower(d, v6, v7); 
-
-			const VecT t4 = InterleaveUpper(d, v0, v1);
-			const VecT t5 = InterleaveUpper(d, v2, v3);
-			const VecT t6 = InterleaveUpper(d, v4, v5);
-			const VecT t7 = InterleaveUpper(d, v6, v7);
-			
-			const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			
-			const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
-			const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
-			const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
-			const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
-
-			const hn::RepartitionToWideX2<D> dww;
-
-			matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
-			matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
-			
-			matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
-			matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
-
-			matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
-			matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
-
-			matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
-			matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
-			
 		}
 	}
+	// 	} else if (hn::Lanes(d) == 4) {
+	// 		const hn::RepartitionToWide<D> dw;
+
+	// 		const VecT v0 = matrix[0];
+	// 		const VecT v1 = matrix[1];
+	// 		const VecT v2 = matrix[2];
+	// 		const VecT v3 = matrix[3];
+
+	// 		const VecT t0 = InterleaveLower(d, v0, v1);
+	// 		const VecT t1 = InterleaveLower(d, v2, v3);
+	// 		const VecT t2 = InterleaveUpper(d, v0, v1);
+	// 		const VecT t3 = InterleaveUpper(d, v2, v3);
+
+	// 		matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+	// 		matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
+	// 		matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
+	// 		matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+	// 	} else if (hn::Lanes(d) == 8) {
+	// 		const hn::RepartitionToWide<D> dw;
+			
+	// 		const VecT v0 = matrix[0];
+	// 		const VecT v1 = matrix[1];
+	// 		const VecT v2 = matrix[2];
+	// 		const VecT v3 = matrix[3];
+
+	// 		const VecT v4 = matrix[4];
+	// 		const VecT v5 = matrix[5];
+	// 		const VecT v6 = matrix[6];
+	// 		const VecT v7 = matrix[7];
+
+	// 		const VecT t0 = InterleaveLower(d, v0, v1);
+	// 		const VecT t1 = InterleaveLower(d, v2, v3);
+	// 		const VecT t2 = InterleaveLower(d, v4, v5);
+	// 		const VecT t3 = InterleaveLower(d, v6, v7); 
+
+	// 		const VecT t4 = InterleaveUpper(d, v0, v1);
+	// 		const VecT t5 = InterleaveUpper(d, v2, v3);
+	// 		const VecT t6 = InterleaveUpper(d, v4, v5);
+	// 		const VecT t7 = InterleaveUpper(d, v6, v7);
+			
+	// 		const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+	// 		const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
+	// 		const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
+	// 		const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+			
+	// 		const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
+	// 		const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
+	// 		const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
+	// 		const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
+
+	// 		const hn::RepartitionToWideX2<D> dww;
+
+	// 		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
+	// 		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
+			
+	// 		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
+	// 		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
+
+	// 		matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
+	// 		matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
+
+	// 		matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
+	// 		matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
+			
+	// 	}
+	// }
 };
 
-template <class D, class VecT = hn::Vec<D>>
+template <class D, typename I = void, class VecT = hn::Vec<D>>
 auto hwyStr(const D& d, const LaneMatrix<D, VecT>& v) {
 	const size_t dim = hn::Lanes(d);
 	std::string buf = fmt::format("Matrix [{} x {}] [", dim, dim);
 	for(size_t i = 0; i < dim; ++i) {
-		buf += "\n" + fmt::format("  {}: {}", i, hwyStr(d, v.matrix[i]));
+		buf += "\n" + fmt::format("  {}: {}", i, hwyStr<D, I, VecT>(d, v.matrix[i]));
 	}
 	buf += "\n]";
 	return buf;
@@ -908,65 +920,149 @@ auto hwyStr(const D& d, const LaneMatrix<D, VecT>& v) {
 // }
 
 
+// template <class D, class I, class VecT = hn::Vec<D>>
+// requires (
+// 	requires (I const a) {
+//         { seqan3::to_rank(a) };
+//     }
+// )
+// auto hwyStr(const D& d, const VecT& v) {
+// 	// const size_t dim = hn::Lanes(d);
+// 	// const T val = ExtractLane(v, dim-1);
+// 	// std::string ret = "single_bp_vec(";
+// 	// return A().assign_rank(val).to_char();
+// 	// return ret + " " + hwyStr(d, v);
+// }
+
+
+template <typename T, typename A>
+std::string decode_compressed_seq_el(const T& val)  {
+	constexpr size_t bps_count = sizeof(T) * 8 / seqan3::detail::ceil_log2(A::alphabet_size);
+	std::string ret(bps_count, '*');
+	T buf = val;
+	for(auto i = 0; i < bps_count; ++i) {
+		ret[bps_count - i - 1] = A().assign_rank(buf & 3).to_char();
+		buf >>= 2;
+	}
+	return ret;
+}
+
+template <typename T, typename InfoT, typename I>
+requires (
+	requires (I const a) {
+        { seqan3::to_rank(a) };
+    }
+)
+struct HWYVectorStringPrinter<T, InfoT, I> {
+	static inline std::string formatBlock(const InfoT info, const void* ptr) {
+		return decode_compressed_seq_el<T, I>(*((T*)ptr));
+	}
+};
+
 static inline void check_simd_packed_seq() {
-	using ChunkT = uint16_t;
+	using ChunkT = uint64_t;
+
+	constexpr size_t bp_bit_width = 2;
+	constexpr ChunkT bp_bitmask = (1 << bp_bit_width) - 1; // S::new([(1 << B) - 1; 8]);
+	constexpr size_t bp_per_unit = sizeof(ChunkT) * 8 / bp_bit_width;
 
 	const hn::ScalableTag<ChunkT> d;
 	using VecT = hn::Vec<decltype(d)>;
 
-	const hn::RepartitionToWide<decltype(d)> dw;
+	const VecT bp_bitmask_vec = hn::Set(d, bp_bitmask);
 
-    std::vector<seq::dna4> FIXED_TARGET{"ACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGTCGTAGCTAGTCCGTAATCGTAGCTAGTCAAACTGTATCGTAGCTAGTCCGTAGCTACTGTAGCTGATCGTAGCTAGTCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCTCGTAGCTAGTCCGTAACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
+    std::vector<seq::dna4> FIXED_TARGET{
+		"\
+ACTGTAGCTGATCGTAGCTAGTCACTGTAGCT\
+GTCGTAGCTAGTCCGTAATCGTAGCTAGTCAA\
+ACTGTATCGTAGCTAGTCCGTAGCTACTGTAG\
+CTGATCGTAGCTAGTCACTGTAGGATCGTAGC\
+TAGTCCGTACTGTAGCTGATCGTAGCCCTAGT\
+CACTGTAGCTGATCGTAGCTAGTCACTGTAGC\
+TGATCGTAGCTAGTCTCGTAGCTAGTCCGTAA\
+CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
+ATCGTAGCTAGTC\
+"_dna4};
 	auto seq = CompressedSeqanView(FIXED_TARGET);
 	const int len = seq.size();
 	uint64_t chunks[len];
     for (auto i = seq.begin(); i < seq.end(); ++i) {
 		chunks[i] = seq.get_chunk(i);
     }
+	std::vector<uint64_t> chunks_vec(&chunks[0], &chunks[seq.size()]);
+	JustLog("input = {} (lanes = {})", chunks_vec, hn::Lanes(d));
 
+	JustLog("seq input = {}", decode_compressed_seq_el<ChunkT, seq::dna4>(chunks_vec[0]));
 
-	// Now iterate
-	//VecT x = hn::LoadU(d, chunks);
-
-	//ChunkT bb[2][2] = { { 2137, 69420 }, { 420, 66666 } };
-	//ChunkT bb[4][4] = { { 2137, 69420, 11, 9090 }, { 420, 66666, 3222, 121212 }, { 69, 6911, 1169, 555 }, {10, 12, 13, 14} };
-	ChunkT bb[8][8] = {
-		{1,2,3,4,5,6,7,8},
-		{11,12,13,14,15,16,17,18},
-		{21,22,23,24,25,26,27,28},
-		{31,32,33,34,35,36,37,38},
-
-		{41,42,43,44,45,46,47,48},
-		{51,52,53,54,55,56,57,58},
-		{61,62,63,64,65,66,67,68},
-		{71,72,73,74,75,76,77,78},
-	};
-
-	// VecT v0 = hn::LoadU(d, bb[0]); // A B |> A C 
-	// VecT v1 = hn::LoadU(d, bb[1]); // C D |> B D
-
-	// hn::Print(d, "v0 = ", v0);
-	// hn::Print(d, "v1 = ", v1);
-	
-
-	// const VecT t1 = InterleaveUpper(d, v0, v1); // A C
-	// const VecT t0 = InterleaveLower(d, v0, v1); // B D
-
-	// hn::Print(d, "t0 = ", t0);
-	// hn::Print(d, "t1 = ", t1);
 
 	LaneMatrix x(d);
 	x.fill(d, [&](const auto index, const auto lanes) -> auto {
-		return bb[index];
+		return (const ChunkT*) (chunks + index*lanes);
 	});
-	// x[0] = hn::LoadU(d, bb[0]);
-	// x[1] = hn::LoadU(d, bb[1]);
-	// x[2] = hn::LoadU(d, bb[2]);
-	// x[3] = hn::LoadU(d, bb[3]);
-	JustLog("mat = {}", hwyStr(d, x));
-
 	x.transpose(d);
 	JustLog("mat = {}", hwyStr(d, x));
+
+
+	// Iterate each vector of loaded matrix of size [lanes x lanes]
+	for (size_t chunk_index = 0; chunk_index < hn::Lanes(d); ++chunk_index) {
+		// Iterate every bp of lane
+		auto& chunk = x.matrix[chunk_index];
+		for (size_t bp_index = 0; bp_index < bp_per_unit; ++bp_index) {
+			// S::new([(1 << B) - 1; 8]);
+			
+			const VecT vec_bp = hn::And(chunk, bp_bitmask_vec);
+			const VecT shifted = hn::ShiftRightSame(chunk, bp_bit_width);
+			x.matrix[chunk_index] = shifted;
+			JustLog("next bp vec = {}", hwyStr<decltype(d), seq::dna4>(d, vec_bp));
+			//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
+		}
+		JustLog("NEXT CHUNK ~");
+	}
+
+
+
+	// // Now iterate
+	// //VecT x = hn::LoadU(d, chunks);
+
+	// //ChunkT bb[2][2] = { { 2137, 69420 }, { 420, 66666 } };
+	// //ChunkT bb[4][4] = { { 2137, 69420, 11, 9090 }, { 420, 66666, 3222, 121212 }, { 69, 6911, 1169, 555 }, {10, 12, 13, 14} };
+	// ChunkT bb[8][8] = {
+	// 	{1,2,3,4,5,6,7,8},
+	// 	{11,12,13,14,15,16,17,18},
+	// 	{21,22,23,24,25,26,27,28},
+	// 	{31,32,33,34,35,36,37,38},
+
+	// 	{41,42,43,44,45,46,47,48},
+	// 	{51,52,53,54,55,56,57,58},
+	// 	{61,62,63,64,65,66,67,68},
+	// 	{71,72,73,74,75,76,77,78},
+	// };
+
+	// // VecT v0 = hn::LoadU(d, bb[0]); // A B |> A C 
+	// // VecT v1 = hn::LoadU(d, bb[1]); // C D |> B D
+
+	// // hn::Print(d, "v0 = ", v0);
+	// // hn::Print(d, "v1 = ", v1);
+	
+
+	// // const VecT t1 = InterleaveUpper(d, v0, v1); // A C
+	// // const VecT t0 = InterleaveLower(d, v0, v1); // B D
+
+	// // hn::Print(d, "t0 = ", t0);
+	// // hn::Print(d, "t1 = ", t1);
+
+	// LaneMatrix x(d);
+	// x.fill(d, [&](const auto index, const auto lanes) -> auto {
+	// 	return bb[index];
+	// });
+	// // x[0] = hn::LoadU(d, bb[0]);
+	// // x[1] = hn::LoadU(d, bb[1]);
+	// // x[2] = hn::LoadU(d, bb[2]);
+	// // x[3] = hn::LoadU(d, bb[3]);
+	// JustLog("mat = {}", hwyStr(d, x));
+
+	// x.transpose(d);
+	// JustLog("mat = {}", hwyStr(d, x));
 	
 
     JustLog("Check check_simd_packed_seq() lanes = {}", hn::Lanes(d));

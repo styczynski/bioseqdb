@@ -16,7 +16,12 @@ module;
 #include <concepts>
 #include <sstream>
 #include <ranges>
+#include <bit>
+#include <cassert>
+#include <cmath>
+#include <stdexcept>
 #include <seqan3/contrib/sdsl-lite.hpp>
+
 
 export module sequan_compat;
 
@@ -28,6 +33,7 @@ export {
 #include <seqan3/alphabet/nucleotide/all.hpp>
 #include <seqan3/alphabet/aminoacid/all.hpp>
 
+#include <seqan3/utility/math.hpp>
 
 //include <seqan3/core/debug_stream.hpp>
 #include <seqan3/search/views/minimiser_hash.hpp>
