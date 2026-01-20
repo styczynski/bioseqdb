@@ -22,6 +22,7 @@
 
 import mlogging;
 import sequan_compat;
+import bioseq_sequences;
 
 using namespace seq::literals;
 
@@ -983,6 +984,9 @@ TGATCGTAGCTAGTCTCGTAGCTAGTCCGTAA\
 CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
 ATCGTAGCTAGTC\
 "_dna4};
+
+	JustLog("TESTETST = <{}>", physical_alphabet_storage<decltype(FIXED_TARGET)>::to_string(FIXED_TARGET.begin(), FIXED_TARGET.end()))
+
 	auto seq = CompressedSeqanView(FIXED_TARGET);
 	const int len = seq.size();
 	uint64_t chunks[len];
@@ -1002,7 +1006,7 @@ ATCGTAGCTAGTC\
 	x.transpose(d);
 	JustLog("mat = {}", hwyStr(d, x));
 
-
+	
 	// Iterate each vector of loaded matrix of size [lanes x lanes]
 	for (size_t chunk_index = 0; chunk_index < hn::Lanes(d); ++chunk_index) {
 		// Iterate every bp of lane
@@ -1014,6 +1018,8 @@ ATCGTAGCTAGTC\
 			const VecT shifted = hn::ShiftRightSame(chunk, bp_bit_width);
 			x.matrix[chunk_index] = shifted;
 			JustLog("next bp vec = {}", hwyStr<decltype(d), seq::dna4>(d, vec_bp));
+
+			//const VecT hash = 
 			//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
 		}
 		JustLog("NEXT CHUNK ~");

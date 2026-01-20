@@ -43,7 +43,7 @@ find_package(ZLIB)
 # )
 
 file(GLOB_RECURSE A_SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/aligner/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.cpp)
-file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/alignment/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm)
+file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/alignment/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm)
 
 AddCommonTarget(
   bioseq_aligner
