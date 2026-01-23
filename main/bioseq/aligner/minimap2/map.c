@@ -985,7 +985,11 @@ CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
 ATCGTAGCTAGTC\
 "_dna4};
 
-	JustLog("TESTETST = <{}>", physical_alphabet_storage<decltype(FIXED_TARGET)>::to_string(FIXED_TARGET.begin(), FIXED_TARGET.end()))
+	//JustLog("TESTETST = <{}>", physical_alphabet_storage<decltype(FIXED_TARGET)>::to_string(FIXED_TARGET.begin(), FIXED_TARGET.end()))
+
+	auto testtest = compact_sequence_range<seq::dna4>(FIXED_TARGET);
+	//testtest.to_string();
+	JustLog("heheszke = {}", testtest);
 
 	auto seq = CompressedSeqanView(FIXED_TARGET);
 	const int len = seq.size();
