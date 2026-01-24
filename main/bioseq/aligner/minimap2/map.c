@@ -985,11 +985,28 @@ CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
 ATCGTAGCTAGTC\
 "_dna4};
 
+std::vector<seq::dna5> FIXED_TARGET5{
+	"\
+NCTGTAGCTGATCGTAGCTAGTCACTGTAGCT\
+GTCGTAGCTAGTCCGTAATCGTAGCTAGTCAA\
+ACTGTATCGTAGCTAGTCCGTAGCTACTGTAG\
+CTGATCGTAGCTAGTCACTGTAGGATCGTAGC\
+TAGTCCGTACTGTAGCTGATCGTAGCCCTAGT\
+CACTGTAGCTGATCGTAGCTAGTCACTGTAGC\
+TGATCGTAGCTAGTCTCGTAGCTAGTCCGTAA\
+CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
+ATCGTAGCTAGTC\
+"_dna5};
+
 	//JustLog("TESTETST = <{}>", physical_alphabet_storage<decltype(FIXED_TARGET)>::to_string(FIXED_TARGET.begin(), FIXED_TARGET.end()))
 
-	auto testtest = compact_sequence_range<seq::dna4>(FIXED_TARGET);
-	//testtest.to_string();
+	auto testtest = compact_sequence_range<seq::dna5>(FIXED_TARGET5);
+	auto testtest2 = compact_sequence_range<decltype(FIXED_TARGET5)>(FIXED_TARGET5);
+	
+
+	//testtest2.to_string();
 	JustLog("heheszke = {}", testtest);
+	JustLog("heheszke = {}", testtest2);
 
 	auto seq = CompressedSeqanView(FIXED_TARGET);
 	const int len = seq.size();

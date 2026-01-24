@@ -18,6 +18,7 @@ module;
 #include <boost/integer.hpp>
 #include <boost/iterator/iterator_adaptor.hpp>
 
+
 export module bioseq_sequences:concepts;
 
 import mlogging;
@@ -55,7 +56,6 @@ template<
     typename alphabet_t,
     typename storage_unit_t,
     size_t p_letter_bit_width
-    // typename iterator_type
 >
 struct compact_sequence_range_base {
 
@@ -63,12 +63,7 @@ struct compact_sequence_range_base {
         using alphabet_type = alphabet_t;
         using storage_unit = storage_unit_t;
 
-        // using iterator = typename derived_t::iterator_impl;
-        // using const_iterator = typename derived_t::iterator_impl;
-
-        // using iterator = iterator_t;
-        // using const_iterator = iterator_t;
-        static constexpr size_t bits_per_char = (p_letter_bit_width <= 0) ? sizeof(storage_unit) : p_letter_bit_width;
+        static constexpr size_t bits_per_char = (p_letter_bit_width <= 0) ? (sizeof(storage_unit) * 8) : p_letter_bit_width;
         static constexpr size_t unit_width = sizeof(storage_unit) * 8;
         static constexpr size_t letters_per_unit = unit_width / bits_per_char;
         static constexpr size_t unit_used_bits = letters_per_unit * bits_per_char;
@@ -80,6 +75,10 @@ struct compact_sequence_range_base {
     };
 
     using derived_range_t = derived_t;
+
+    template<size_t N> static constexpr bool has_valid_padding = true;
+    template<> static constexpr bool has_valid_padding<1> = (derived_range_t::padding() == 0);
+
 
     template<typename I>
     struct is_valid_derived_iter {
@@ -95,36 +94,50 @@ struct compact_sequence_range_base {
     struct is_valid_derived_iter<I> {
         static constexpr bool value = true;
     };
-    
+
+    inline constexpr derived_range_t* super() {
+        return static_cast<derived_range_t*>(this);
+    };
+
+    // forward bp iterator
+
+
     template<typename I, typename F>
     requires (is_valid_derived_iter<I>::value == true)
     constexpr inline void for_each_bp_scalar(I&& begin, I&& end, F&& fn) {
-        if (end == ((derived_t*)this)->end()) {
-            if (begin == end) {
-                return;
+        static_assert(has_valid_padding<traits::letters_per_unit> == true);
+        if (traits::letters_per_unit == 1) {
+            for (auto it = begin; it != end; ++it) {
+                fn(*it);
             }
-            // special case
-            const size_t last_size = traits::letters_per_unit - ((derived_t*)this)->padding();
-            auto it = begin;
-            for (; it != end - 1; ++it) {
+        } else {
+            if (end == super()->end()) {
+                if (begin == end) {
+                    return;
+                }
+                // Special case
+                const size_t last_size = traits::letters_per_unit - super()->padding();
+                auto it = begin;
+                for (; it != end - 1; ++it) {
+                    typename traits::storage_unit buf = *it;
+                    for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
+                        fn(buf & traits::char_mask);
+                        buf >>= traits::bits_per_char;
+                    }
+                }
                 typename traits::storage_unit buf = *it;
-                for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
+                for (auto bit_no = 0; bit_no < last_size; ++bit_no) {
                     fn(buf & traits::char_mask);
                     buf >>= traits::bits_per_char;
                 }
-            }
-            typename traits::storage_unit buf = *it;
-            for (auto bit_no = 0; bit_no < last_size; ++bit_no) {
-                fn(buf & traits::char_mask);
-                buf >>= traits::bits_per_char;
-            }
-        } else {
-            // Plain iteration
-            for (auto it = begin; it != end; ++it) {
-                typename traits::storage_unit buf = *it;
-                for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
-                    fn(buf & traits::char_mask);
-                    buf >>= traits::bits_per_char;
+            } else {
+                // Plain iteration
+                for (auto it = begin; it != end; ++it) {
+                    typename traits::storage_unit buf = *it;
+                    for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
+                        fn(buf & traits::char_mask);
+                        buf >>= traits::bits_per_char;
+                    }
                 }
             }
         }
@@ -152,7 +165,11 @@ struct compact_sequence_range_base {
     }
 
     constexpr std::string to_string() {
-        return to_string(((derived_t*)this)->cbegin(), ((derived_t*)this)->cend());
+        return to_string(super()->cbegin(), super()->cend());
+    }
+
+    constexpr size_t bp_size() const {
+        return super()->size() * traits::letters_per_unit - super()->padding();
     }
 };
 
@@ -169,16 +186,11 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
     0
 > {
     using traits = compact_sequence_range<R>::compact_sequence_range_base::traits;
-    // using alphabet_type = std::remove_reference_t<std::ranges::range_reference_t<R>>;
-    // using storage_unit = boost::int_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_type>)>::least;
     using base_iterator_type = decltype(std::declval<R>().cbegin());
-
-    // static constexpr size_t unit_width = sizeof(storage_unit) * 8;
-    // static constexpr size_t letters_per_unit = 1;
 
     const R& _data;
 
-    constexpr size_t padding() const {
+    static constexpr size_t padding() {
         return 0;
     }
 
@@ -208,8 +220,6 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
 
         explicit iterator_impl(base_iterator_type const& it)
             : super_t(it) {}
-
-        // auto operator++() { super_t::operator++(); return *this; }
 
         auto operator <=>(const iterator_impl&) const = default;
 
@@ -248,19 +258,6 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
         return static_cast<traits::storage_unit>(seqan3::to_rank(_data[index]));
     }
 
-    // constexpr static std::string to_string(iterator_impl&& begin, iterator_impl&& end) {
-    //     std::string result;
-    //     result.reserve(end - begin);
-    //     for (auto it = begin; it != end; ++it) {
-    //         result += it.base()->to_char();
-    //     }
-    //     return result;
-    // }
-
-    // constexpr std::string to_string() const {
-    //     return to_string(begin(), end());
-    // }
-
     constexpr size_t size() const {
         return _data.size();
     }
@@ -274,26 +271,13 @@ struct compact_sequence_range<A> : compact_sequence_range_base<
     A,
     typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<A>)>::least,
     seqan3::detail::ceil_log2(seqan3::alphabet_size<A>)
-    //typename std::vector<typename traits::storage_unit>::const_iterator
-    //std::vector<storage_unit_t>::const_iterator
 > {
 public:
     using traits = compact_sequence_range<A>::compact_sequence_range_base::traits;
 
-    // using storage_unit_t = boost::int_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<A>)>::least;
     using base_container = std::vector<typename traits::storage_unit>;
-
     using iterator = std::vector<typename traits::storage_unit>::const_iterator;
-    // using alphabet_type = A;
-    // using storage_unit = storage_unit_t;
 
-    // using iterator = base_container::iterator;
-    // using const_iterator = base_container::const_iterator;
-
-    //static constexpr size_t bits_per_char = seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_type>);
-    //static constexpr size_t unit_width = sizeof(storage_unit) * 8;
-    // static constexpr size_t letters_per_unit = unit_width / bits_per_char;
-    // static constexpr storage_unit char_mask = (static_cast<storage_unit>(1) << bits_per_char) - 1;
 
 public:
     base_container _data;
@@ -326,17 +310,8 @@ public:
         if (bit_count != 0) {
             data[write_pos] = buf >> (traits::bits_per_char * bit_count);
         }
-        JustLog("E = {}", data.size());
-        JustLog("X = {} <{}> <{}> <{}> ({})", data, input_seq.size(), traits::letters_per_unit, traits::used_storage_mask, bit_count);
         return std::make_pair(data, bit_count);
     }
-
-    // template <typename R>
-    // requires (
-    //     std::ranges::sized_range<R> && \
-    //     std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, A> == true
-    // )
-    // compact_sequence_range(R&& input_seq): _data(std::move(_convert(std::move(input_seq)))) {}
 
     template <typename R>
     requires (
@@ -364,29 +339,6 @@ public:
 
     auto operator <=>(const compact_sequence_range<A>&) const = default;
 
-    // constexpr static std::string to_string(const_iterator&& begin, const_iterator&& end) {
-    //     std::string result((end - begin) * letters_per_unit, '.');
-    //     size_t read_pos = 0;
-    //     storage_unit buf;
-    //     size_t bit_count = 0;
-    //     auto it = begin;
-    //     while(true) {
-    //         if (bit_count == 0) {
-    //             bit_count = letters_per_unit;
-    //             if (it == end) {
-    //                 break;
-    //             }
-    //             buf = *it; 
-    //             ++it;
-    //         }
-            
-    //     }
-    //     return result;
-    // }
-
-    // constexpr std::string to_string() const {
-    //     return to_string(begin(), end());
-    // }
 };
 
 static_assert(std::is_standard_layout_v<compact_sequence_range<seq::dna4>>);
