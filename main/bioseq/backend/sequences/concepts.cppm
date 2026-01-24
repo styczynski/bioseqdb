@@ -51,6 +51,11 @@ template<
 >
 struct compact_sequence_range {};
 
+enum IteratorMode {
+    BP,
+    SYMBOL
+};
+
 template<
     typename derived_t,
     typename alphabet_t,
@@ -79,7 +84,6 @@ struct compact_sequence_range_base {
     template<size_t N> static constexpr bool has_valid_padding = true;
     template<> static constexpr bool has_valid_padding<1> = (derived_range_t::padding() == 0);
 
-
     template<typename I>
     struct is_valid_derived_iter {
         static constexpr bool value = false;
@@ -95,62 +99,196 @@ struct compact_sequence_range_base {
         static constexpr bool value = true;
     };
 
-    inline constexpr derived_range_t* super() {
-        return static_cast<derived_range_t*>(this);
+    inline constexpr derived_range_t const* super() const {
+        return static_cast<derived_range_t const*>(this);
     };
 
     // forward bp iterator
 
+    template<IteratorMode M>
+    struct iterator_traits {
+        using dereference_t = void;
+    };
 
-    template<typename I, typename F>
-    requires (is_valid_derived_iter<I>::value == true)
-    constexpr inline void for_each_bp_scalar(I&& begin, I&& end, F&& fn) {
-        static_assert(has_valid_padding<traits::letters_per_unit> == true);
-        if (traits::letters_per_unit == 1) {
-            for (auto it = begin; it != end; ++it) {
-                fn(*it);
-            }
-        } else {
-            if (end == super()->end()) {
-                if (begin == end) {
-                    return;
-                }
-                // Special case
-                const size_t last_size = traits::letters_per_unit - super()->padding();
-                auto it = begin;
-                for (; it != end - 1; ++it) {
-                    typename traits::storage_unit buf = *it;
-                    for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
-                        fn(buf & traits::char_mask);
-                        buf >>= traits::bits_per_char;
-                    }
-                }
-                typename traits::storage_unit buf = *it;
-                for (auto bit_no = 0; bit_no < last_size; ++bit_no) {
-                    fn(buf & traits::char_mask);
-                    buf >>= traits::bits_per_char;
-                }
+    template<>
+    struct iterator_traits<BP> {
+        using dereference_t = traits::storage_unit;
+    };
+
+    template<>
+    struct iterator_traits<SYMBOL> {
+        using dereference_t = traits::alphabet_type;
+    };
+
+    template<
+        typename base_iterator_t,
+        IteratorMode p_iterator_mode
+    >
+    class bp_scalar_iter : public boost::iterator_adaptor<
+        bp_scalar_iter<base_iterator_t, p_iterator_mode>,
+        base_iterator_t,
+        typename iterator_traits<p_iterator_mode>::dereference_t,
+        boost::use_default,
+        typename iterator_traits<p_iterator_mode>::dereference_t
+    > {
+    private:
+        typedef boost::iterator_adaptor<
+            bp_scalar_iter<base_iterator_t, p_iterator_mode>,
+            base_iterator_t,
+            typename iterator_traits<p_iterator_mode>::dereference_t,
+            boost::use_default,
+            typename iterator_traits<p_iterator_mode>::dereference_t
+        > super_t;
+
+        // using dereference_t = std::conditional_t<p_iterator_mode == BP, traits::storage_unit,
+        //     std::conditional_t<p_iterator_mode == SYMBOL, traits::alphabet_type,
+        //         void
+        //     >
+        // >;
+
+        static constexpr IteratorMode iterator_mode = p_iterator_mode;
+
+        size_t _bit_no;
+        typename traits::storage_unit _current_unit;
+
+    public:
+        friend class boost::iterator_core_access;
+        friend class compact_sequence_range_base;
+
+        bp_scalar_iter() = default;
+
+        explicit bp_scalar_iter(
+            base_iterator_t it,
+            const size_t bit_no,
+            typename traits::storage_unit current_unit
+        ) : super_t(it), _bit_no(bit_no), _current_unit(current_unit) {}
+
+        constexpr size_t bit_no() const {
+            return _bit_no;
+        }
+
+        constexpr std::strong_ordering operator<=>(const bp_scalar_iter& other) const {
+            if constexpr (traits::letters_per_unit == 1) {
+                return (this->base() <=> other.base());
             } else {
-                // Plain iteration
-                for (auto it = begin; it != end; ++it) {
-                    typename traits::storage_unit buf = *it;
-                    for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
-                        fn(buf & traits::char_mask);
-                        buf >>= traits::bits_per_char;
-                    }
-                }
+                if (auto cmp = this->base() <=> other.base(); cmp != 0) { return cmp; }
+                return (_bit_no <=> other._bit_no);
             }
         }
-    }
 
-    template<typename I, typename F>
-    requires (is_valid_derived_iter<I>::value == true)
-    constexpr inline void for_each_bp(I&& begin, I&& end, F&& fn) {
-        for_each_bp_scalar(std::move(begin), std::move(end), [&](const auto& rank){
+        constexpr bool operator==(const bp_scalar_iter& other) const {
+            if constexpr (traits::letters_per_unit == 1) {
+                return (this->base() == other.base());
+            } else {
+                return (this->base() == other.base()) && (this->_bit_no == other._bit_no);
+            }
+        }
+
+        template<IteratorMode M>
+        typename iterator_traits<M>::dereference_t _dereference() const;
+
+
+        template<> iterator_traits<BP>::dereference_t _dereference<BP>() const {
+            if constexpr (traits::letters_per_unit == 1) {
+                return *this->base();
+            } else {
+                return _current_unit & traits::char_mask;
+            }
+        }
+
+        template<> iterator_traits<SYMBOL>::dereference_t _dereference<SYMBOL>() const {
             typename traits::alphabet_type alph;
-            fn(alph.assign_rank(rank));
-        });
-    }
+            return alph.assign_rank(_dereference<BP>());
+        }
+
+        auto dereference() const {
+            return _dereference<p_iterator_mode>();
+        }
+
+        void increment() {
+            if constexpr (traits::letters_per_unit == 1) {
+                ++this->base_reference();
+            } else if (_bit_no == traits::letters_per_unit - 1) {
+                // Need to increment
+                ++this->base_reference();
+                _current_unit = *this->base();
+                _bit_no = 0;
+            } else {
+                ++_bit_no;
+                _current_unit >>= traits::bits_per_char;
+            }
+        }
+
+        // _bit_no(0), _current_unit(current_unit)
+        bool equal(const bp_scalar_iter& other) const {
+            if constexpr (traits::letters_per_unit == 1) {
+                return this->base() == other.base();
+            } else {
+                return this->base() == other.base() && _bit_no == other._bit_no;
+            }
+        }
+    };
+
+    template<IteratorMode M, typename I>
+    requires (is_valid_derived_iter<I>::value == true)
+    constexpr inline bp_scalar_iter<I, M> iter(const I& it) {
+        if constexpr (traits::letters_per_unit == 1) {
+            return bp_scalar_iter<I, M>(it, 0, *it);
+        } else if (super()->end() == it && super()->begin() != it && super()->padding() != 0) {
+            return bp_scalar_iter<I, M>(it-1, traits::letters_per_unit - super()->padding(), 0);
+        }
+        return bp_scalar_iter<I, M>(it, 0, *it);
+    };
+
+    // template<typename I, typename F>
+    // requires (is_valid_derived_iter<I>::value == true)
+    // constexpr inline void for_each_bp_scalar(I&& begin, I&& end, F&& fn) {
+    //     static_assert(has_valid_padding<traits::letters_per_unit> == true);
+    //     if (traits::letters_per_unit == 1) {
+    //         for (auto it = begin; it != end; ++it) {
+    //             fn(*it);
+    //         }
+    //     } else {
+    //         if (end == super()->end()) {
+    //             if (begin == end) {
+    //                 return;
+    //             }
+    //             // Special case
+    //             const size_t last_size = traits::letters_per_unit - super()->padding();
+    //             auto it = begin;
+    //             for (; it != end - 1; ++it) {
+    //                 typename traits::storage_unit buf = *it;
+    //                 for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
+    //                     fn(buf & traits::char_mask);
+    //                     buf >>= traits::bits_per_char;
+    //                 }
+    //             }
+    //             typename traits::storage_unit buf = *it;
+    //             for (auto bit_no = 0; bit_no < last_size; ++bit_no) {
+    //                 fn(buf & traits::char_mask);
+    //                 buf >>= traits::bits_per_char;
+    //             }
+    //         } else {
+    //             // Plain iteration
+    //             for (auto it = begin; it != end; ++it) {
+    //                 typename traits::storage_unit buf = *it;
+    //                 for (auto bit_no = 0; bit_no < traits::letters_per_unit; ++bit_no) {
+    //                     fn(buf & traits::char_mask);
+    //                     buf >>= traits::bits_per_char;
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
+
+    // template<typename I, typename F>
+    // requires (is_valid_derived_iter<I>::value == true)
+    // constexpr inline void for_each_bp(I&& begin, I&& end, F&& fn) {
+    //     for_each_bp_scalar(std::move(begin), std::move(end), [&](const auto& rank){
+    //         typename traits::alphabet_type alph;
+    //         fn(alph.assign_rank(rank));
+    //     });
+    // }
 
     template<typename I>
     requires (is_valid_derived_iter<I>::value == true)
@@ -158,9 +296,14 @@ struct compact_sequence_range_base {
         std::string result;
         typename traits::alphabet_type alph;
         result.reserve((end - begin) * traits::letters_per_unit);
-        for_each_bp(begin, end, [&](const auto& alph){
-            result += alph.to_char();
-        });
+        const auto _begin = iter<SYMBOL, I>(begin);
+        const auto _end = iter<SYMBOL, I>(end);
+        for(auto letter = _begin; letter != _end; ++letter) {
+            // if (letter.bit_no() == 0) {
+            //     result += "|";
+            // }
+            result += letter->to_char();
+        }
         return result;
     }
 
@@ -170,6 +313,10 @@ struct compact_sequence_range_base {
 
     constexpr size_t bp_size() const {
         return super()->size() * traits::letters_per_unit - super()->padding();
+    }
+
+    constexpr size_t byte_size() const {
+        return super()->size() * sizeof(typename traits::storage_unit) + sizeof(derived_range_t);
     }
 };
 
@@ -185,6 +332,7 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
     >)>::least,
     0
 > {
+public:
     using traits = compact_sequence_range<R>::compact_sequence_range_base::traits;
     using base_iterator_type = decltype(std::declval<R>().cbegin());
 
@@ -261,6 +409,13 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
     constexpr size_t size() const {
         return _data.size();
     }
+
+    friend inline constexpr bool operator==(
+        const compact_sequence_range<R>& a,
+        const compact_sequence_range<R>& b
+    ) {
+        return a._data == b._data;
+    }
 };
 
 template<
@@ -302,12 +457,14 @@ public:
             if (--bit_count == 0) {
                 bit_count = traits::letters_per_unit;
                 data[write_pos++] = buf;
-                if (traits::unit_leftover_bits > 0 || true) {
+                if (traits::unit_leftover_bits > 0) {
                     buf = 0;
                 }
             }
         }
-        if (bit_count != 0) {
+        if (bit_count == traits::letters_per_unit) {
+            bit_count = 0;
+        } else {
             data[write_pos] = buf >> (traits::bits_per_char * bit_count);
         }
         return std::make_pair(data, bit_count);
@@ -338,8 +495,29 @@ public:
     auto constexpr size() const { return _data.size(); }
 
     auto operator <=>(const compact_sequence_range<A>&) const = default;
-
+    bool constexpr operator==(const compact_sequence_range<A>&) const = default;
 };
+
+// // sequence operators
+template<typename T1, typename T2, std::enable_if_t<std::is_same_v<T1, T2> == false, bool> = true>
+requires (
+    requires (compact_sequence_range<T1>& a, compact_sequence_range<T2>& b) {
+        {
+            *(a.template iter<SYMBOL>(a.begin())) == *(b.template iter<SYMBOL>(b.begin()))
+        };
+    }
+)
+inline constexpr bool operator==(
+    compact_sequence_range<T1>& a,
+    compact_sequence_range<T2>& b
+) {
+    return std::equal(
+        a.template iter<SYMBOL>(a.begin()),
+        a.template iter<SYMBOL>(a.end()),
+        b.template iter<SYMBOL>(b.begin()),
+        b.template iter<SYMBOL>(b.end())
+    );
+}
 
 static_assert(std::is_standard_layout_v<compact_sequence_range<seq::dna4>>);
 
@@ -357,7 +535,7 @@ struct formatter<compact_sequence_range<R>>: formatter<std::string> {
     using T = compact_sequence_range<R>;
     template <typename FormatContext>
     auto format(compact_sequence_range<R> seq, FormatContext& ctx) const {
-      return formatter<std::string>::format(fmt::format("sequence<size={}>({}->b{})[{}]", seq.size(), T::traits::letters_per_unit, T::traits::unit_width, seq.to_string()), ctx);
+      return formatter<std::string>::format(fmt::format("sequence<size={}|B{}>({}->b{} +{})[{}]", seq.bp_size(), seq.byte_size(), T::traits::letters_per_unit, T::traits::unit_width, seq.padding(), seq.to_string()), ctx);
     }
 };
 

@@ -1007,6 +1007,15 @@ ATCGTAGCTAGTC\
 	//testtest2.to_string();
 	JustLog("heheszke = {}", testtest);
 	JustLog("heheszke = {}", testtest2);
+	auto xxxeq = testtest2 == testtest2;
+	JustLog("eq? {}", xxxeq);
+
+	// auto e = testtest.iter<SYMBOL>(testtest.begin());
+	// auto f = testtest.iter<SYMBOL>(testtest.end());
+	// JustLog("biutno = {}, {}, {}", f.bit_no(), testtest.padding(), decltype(testtest)::traits::letters_per_unit);
+	// for(auto j=testtest.iter<SYMBOL>(testtest.begin()); j!=testtest.iter<SYMBOL>(testtest.end()); ++j) {
+	// 	JustLog("---> {} ({})", *j, testtest.iter<SYMBOL>(testtest.end()).bit_no());
+	// }
 
 	auto seq = CompressedSeqanView(FIXED_TARGET);
 	const int len = seq.size();
