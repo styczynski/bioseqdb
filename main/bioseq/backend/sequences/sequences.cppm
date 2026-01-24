@@ -19,7 +19,7 @@ module;
 #include <boost/iterator/iterator_adaptor.hpp>
 
 
-export module bioseq_sequences:concepts;
+export module bioseq_sequences:sequences;
 
 import mlogging;
 import sequan_compat;
@@ -43,7 +43,21 @@ template<typename R>
 concept supports_compact_sequence_range = \
     sequence_proper_container<R> || \
     sequence_alphabet<R>;
-    
+
+template <typename T, typename A>
+std::string decode_compressed_seq_el(const T& val)  {
+    // FIXME: This is very wrong
+    constexpr size_t bps_count = sizeof(T) * 8 / seqan3::detail::ceil_log2(A::alphabet_size);
+    std::string ret(bps_count, '*');
+    T buf = val;
+    for(auto i = 0; i < bps_count; ++i) {
+        // reverse with: bps_count - i - 1
+        ret[i] = A().assign_rank(buf & 3).to_char();
+        buf >>= 2;
+    }
+    return ret;
+}
+
 // New impl
 
 template<
@@ -139,12 +153,6 @@ struct compact_sequence_range_base {
             boost::use_default,
             typename iterator_traits<p_iterator_mode>::dereference_t
         > super_t;
-
-        // using dereference_t = std::conditional_t<p_iterator_mode == BP, traits::storage_unit,
-        //     std::conditional_t<p_iterator_mode == SYMBOL, traits::alphabet_type,
-        //         void
-        //     >
-        // >;
 
         static constexpr IteratorMode iterator_mode = p_iterator_mode;
 
@@ -299,9 +307,9 @@ struct compact_sequence_range_base {
         const auto _begin = iter<SYMBOL, I>(begin);
         const auto _end = iter<SYMBOL, I>(end);
         for(auto letter = _begin; letter != _end; ++letter) {
-            // if (letter.bit_no() == 0) {
-            //     result += "|";
-            // }
+            if (letter.bit_no() == 0) {
+                result += "|";
+            }
             result.push_back(letter->to_char());
         }
         return result;
@@ -363,7 +371,7 @@ public:
     public:
         friend class boost::iterator_core_access;
         friend class compact_sequence_range<R>;
-    
+
         iterator_impl() = default;
 
         explicit iterator_impl(base_iterator_type const& it)
@@ -543,26 +551,4 @@ struct formatter<compact_sequence_range<R>>: formatter<std::string> {
 };
 
 static_assert(fmt::has_formatter<compact_sequence_range<std::vector<seq::dna4>>, char>());
-
-using namespace seq::literals;
-int test() {
-    std::vector<seq::dna4> FIXED_TARGET{
-		"\
-ACTGTAGCTGATCGTAGCTAGTCACTGTAGCT\
-GTCGTAGCTAGTCCGTAATCGTAGCTAGTCAA\
-ACTGTATCGTAGCTAGTCCGTAGCTACTGTAG\
-CTGATCGTAGCTAGTCACTGTAGGATCGTAGC\
-TAGTCCGTACTGTAGCTGATCGTAGCCCTAGT\
-CACTGTAGCTGATCGTAGCTAGTCACTGTAGC\
-TGATCGTAGCTAGTCTCGTAGCTAGTCCGTAA\
-CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
-ATCGTAGCTAGTC\
-"_dna4};
-
-	//JustLog("TESTETST = <{}>", physical_alphabet_storage<decltype(FIXED_TARGET)>::to_string(FIXED_TARGET.begin(), FIXED_TARGET.end()))
-
-	compact_sequence_range<decltype(FIXED_TARGET)> testtest(FIXED_TARGET);
-	JustLog("heheszke = {}", testtest);
-    
-}
 

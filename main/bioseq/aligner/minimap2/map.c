@@ -23,6 +23,7 @@
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_sequences.simd;
 
 using namespace seq::literals;
 
@@ -717,248 +718,6 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// template <class D, class VecT>
-// std::string hwyStr(const D& d, const VecT& v);
-
-template <typename T, typename InfoT, typename I = void>
-struct HWYVectorStringPrinter {
-	static inline std::string formatBlock(const InfoT info, const void* ptr) {
-		char str[100];
-		ToString(info, ptr, str);
-		return std::string(str);
-	}
-};
-
-template <class D, typename I = void, class VecT = hn::Vec<D>>
-auto hwyStr(const D& d, const VecT& v) {
-	constexpr size_t lane_u = 0;
-	constexpr size_t max_lanes = 16;
-
-	const size_t N = hn::Lanes(d);
-
-	using T = hn::TFromD<D>;
-	#if HWY_TARGET == HWY_RVV
-	auto storage = hn::AllocateAligned<T>(N);
-	T* HWY_RESTRICT lanes = storage.get();
-	#else
-	// This works around an SVE compile error on GCC 11 and 12. Calling
-	// AllocateAligned here would seem to require it be marked with HWY_ATTR.
-	HWY_ALIGN T lanes[hn::MaxLanes(d)];
-	#endif
-	Store(v, d, lanes);
-
-	const auto info = hwy::detail::MakeTypeInfo<T>();
-	//hwy::detail::PrintArray(info, caption, lanes, N, lane_u, max_lanes);
-
-	const uint8_t* array_bytes = reinterpret_cast<const uint8_t*>(lanes);
-
-	char type_name[100];
-	TypeName(info, N, type_name);
-
-	const intptr_t lane = intptr_t(lane_u);
-	const size_t begin = static_cast<size_t>(HWY_MAX(0, lane - 2));
-	const size_t end = HWY_MIN(begin + max_lanes, N);
-
-	std::string buf = fmt::format("hwy::{} [{}+ ->]: [ ", type_name, static_cast<int>(begin));
-
-	// fprintf(stderr, "%s %s [%d+ ->]:\n  ", type_name, caption,
-	// 		static_cast<int>(begin));
-	for (size_t i = begin; i < end; ++i) {
-		const void* ptr = array_bytes + i * info.sizeof_t;
-		//char str[100];
-		//ToString(info, ptr, str);
-		const auto str = HWYVectorStringPrinter<T, decltype(info), I>::formatBlock(info, ptr);
-		if (i == end-1) {
-			buf += fmt::format("{}", str);
-		} else {
-			buf += fmt::format("{}, ", str);
-		}
-	}
-	if (begin >= end) {
-		buf += " (out of bounds)";
-	}
-	buf += " ]";
-
-	return buf;
-}
-
-} // namespace BPCells::simd::HWY_NAMESPACE
-HWY_AFTER_NAMESPACE();
-
-// template <class D>
-// struct fmt::formatter<typename bioseq::simd::HWY_NAMESPACE::hwy_formatter<D>::C> : bioseq::simd::HWY_NAMESPACE::hwy_formatter<D> {};
-
-
-// weoweo
-
-HWY_BEFORE_NAMESPACE();
-
-namespace bioseq::simd::HWY_NAMESPACE {
-namespace hn = hwy::HWY_NAMESPACE;
-
-
-template <class D, class VecT = hn::Vec<D>>
-class LaneMatrix {
-public:
-	using MatT = hwy::AlignedFreeUniquePtr<VecT[]>;
-
-	MatT matrix;
-
-	LaneMatrix(const D& d) : matrix(hwy::AllocateAligned<VecT>(hn::Lanes(d))) {};
-
-	template<typename Functor> 
-	inline void fill(const D& d, Functor fn) {
-		for(size_t i = 0; i < hn::Lanes(d); ++i) {
-			matrix[i] = hn::LoadU(d, fn(i, hn::Lanes(d)));
-		}
-	}
-
-	inline VecT& operator[](const size_t&& index) const {
-		return matrix[index];
-	}
-
-	inline void transpose(const D& d) {
-		// For size = 2
-		if (hn::Lanes(d) == 1) {
-			// No-op
-		} else if (hn::Lanes(d) == 2) {
-			const VecT v0 = matrix[0]; // A B
-			const VecT v1 = matrix[1]; // C D
-			const VecT t1 = InterleaveUpper(d, v0, v1); // A C
-			const VecT t0 = InterleaveLower(d, v0, v1); // B D
-			matrix[0] = t0;
-			matrix[1] = t1;
-		}
-	}
-	// 	} else if (hn::Lanes(d) == 4) {
-	// 		const hn::RepartitionToWide<D> dw;
-
-	// 		const VecT v0 = matrix[0];
-	// 		const VecT v1 = matrix[1];
-	// 		const VecT v2 = matrix[2];
-	// 		const VecT v3 = matrix[3];
-
-	// 		const VecT t0 = InterleaveLower(d, v0, v1);
-	// 		const VecT t1 = InterleaveLower(d, v2, v3);
-	// 		const VecT t2 = InterleaveUpper(d, v0, v1);
-	// 		const VecT t3 = InterleaveUpper(d, v2, v3);
-
-	// 		matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-	// 		matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-	// 		matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-	// 		matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-	// 	} else if (hn::Lanes(d) == 8) {
-	// 		const hn::RepartitionToWide<D> dw;
-			
-	// 		const VecT v0 = matrix[0];
-	// 		const VecT v1 = matrix[1];
-	// 		const VecT v2 = matrix[2];
-	// 		const VecT v3 = matrix[3];
-
-	// 		const VecT v4 = matrix[4];
-	// 		const VecT v5 = matrix[5];
-	// 		const VecT v6 = matrix[6];
-	// 		const VecT v7 = matrix[7];
-
-	// 		const VecT t0 = InterleaveLower(d, v0, v1);
-	// 		const VecT t1 = InterleaveLower(d, v2, v3);
-	// 		const VecT t2 = InterleaveLower(d, v4, v5);
-	// 		const VecT t3 = InterleaveLower(d, v6, v7); 
-
-	// 		const VecT t4 = InterleaveUpper(d, v0, v1);
-	// 		const VecT t5 = InterleaveUpper(d, v2, v3);
-	// 		const VecT t6 = InterleaveUpper(d, v4, v5);
-	// 		const VecT t7 = InterleaveUpper(d, v6, v7);
-			
-	// 		const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-	// 		const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-	// 		const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-	// 		const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			
-	// 		const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
-	// 		const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
-	// 		const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
-	// 		const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
-
-	// 		const hn::RepartitionToWideX2<D> dww;
-
-	// 		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
-	// 		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
-			
-	// 		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
-	// 		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
-
-	// 		matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
-	// 		matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
-
-	// 		matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
-	// 		matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
-			
-	// 	}
-	// }
-};
-
-template <class D, typename I = void, class VecT = hn::Vec<D>>
-auto hwyStr(const D& d, const LaneMatrix<D, VecT>& v) {
-	const size_t dim = hn::Lanes(d);
-	std::string buf = fmt::format("Matrix [{} x {}] [", dim, dim);
-	for(size_t i = 0; i < dim; ++i) {
-		buf += "\n" + fmt::format("  {}: {}", i, hwyStr<D, I, VecT>(d, v.matrix[i]));
-	}
-	buf += "\n]";
-	return buf;
-}
-
-// template <class D>
-// static inline auto dupen(D d) {
-// 	std::conditional<hn::Lanes(d) == 2, >
-// 	if (hn::Lanes(d) == 2) {
-// 		return LaneMatrix<D, 2>();
-// 	} else if (hn::Lanes(d) == 4) {
-// 		return LaneMatrix<D, 4>();
-// 	}
-// 	// Crash?
-// }
-
-
-// template <class D, class I, class VecT = hn::Vec<D>>
-// requires (
-// 	requires (I const a) {
-//         { seqan3::to_rank(a) };
-//     }
-// )
-// auto hwyStr(const D& d, const VecT& v) {
-// 	// const size_t dim = hn::Lanes(d);
-// 	// const T val = ExtractLane(v, dim-1);
-// 	// std::string ret = "single_bp_vec(";
-// 	// return A().assign_rank(val).to_char();
-// 	// return ret + " " + hwyStr(d, v);
-// }
-
-
-template <typename T, typename A>
-std::string decode_compressed_seq_el(const T& val)  {
-	constexpr size_t bps_count = sizeof(T) * 8 / seqan3::detail::ceil_log2(A::alphabet_size);
-	std::string ret(bps_count, '*');
-	T buf = val;
-	for(auto i = 0; i < bps_count; ++i) {
-		ret[bps_count - i - 1] = A().assign_rank(buf & 3).to_char();
-		buf >>= 2;
-	}
-	return ret;
-}
-
-template <typename T, typename InfoT, typename I>
-requires (
-	requires (I const a) {
-        { seqan3::to_rank(a) };
-    }
-)
-struct HWYVectorStringPrinter<T, InfoT, I> {
-	static inline std::string formatBlock(const InfoT info, const void* ptr) {
-		return decode_compressed_seq_el<T, I>(*((T*)ptr));
-	}
-};
 
 static inline void check_simd_packed_seq() {
 	using ChunkT = uint64_t;
@@ -985,9 +744,9 @@ CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
 ATCGTAGCTAGTC\
 "_dna4};
 
-std::vector<seq::dna5> FIXED_TARGET5{
+std::vector<seq::dna4> FIXED_TARGET5{
 	"\
-NCTGTAGCTGATCGTAGCTAGTCACTGTAGCT\
+ACTGTAGCTGATCGTAGCTAGTCACTGTAGCT\
 GTCGTAGCTAGTCCGTAATCGTAGCTAGTCAA\
 ACTGTATCGTAGCTAGTCCGTAGCTACTGTAG\
 CTGATCGTAGCTAGTCACTGTAGGATCGTAGC\
@@ -996,64 +755,67 @@ CACTGTAGCTGATCGTAGCTAGTCACTGTAGC\
 TGATCGTAGCTAGTCTCGTAGCTAGTCCGTAA\
 CTGTAGCTGATCGTAGCTAGTCACTGTAGCTG\
 ATCGTAGCTAGTC\
-"_dna5};
+"_dna4};
 
 	//JustLog("TESTETST = <{}>", physical_alphabet_storage<decltype(FIXED_TARGET)>::to_string(FIXED_TARGET.begin(), FIXED_TARGET.end()))
 
-	auto testtest = compact_sequence_range<seq::dna5>(FIXED_TARGET5);
+	auto testtest = compact_sequence_range<seq::dna4>(FIXED_TARGET5);
 	auto testtest2 = compact_sequence_range<decltype(FIXED_TARGET5)>(FIXED_TARGET5);
 	
 
 	//testtest2.to_string();
 	JustLog("heheszke = {}", testtest);
 	JustLog("heheszke = {}", testtest2);
+	
 	auto xxxeq = testtest2 == testtest2;
 	JustLog("eq? {}", xxxeq);
+	
+	papiesz(testtest, testtest.begin(), testtest.end());
 
-	// auto e = testtest.iter<SYMBOL>(testtest.begin());
-	// auto f = testtest.iter<SYMBOL>(testtest.end());
-	// JustLog("biutno = {}, {}, {}", f.bit_no(), testtest.padding(), decltype(testtest)::traits::letters_per_unit);
-	// for(auto j=testtest.iter<SYMBOL>(testtest.begin()); j!=testtest.iter<SYMBOL>(testtest.end()); ++j) {
-	// 	JustLog("---> {} ({})", *j, testtest.iter<SYMBOL>(testtest.end()).bit_no());
-	// }
+	// // auto e = testtest.iter<SYMBOL>(testtest.begin());
+	// // auto f = testtest.iter<SYMBOL>(testtest.end());
+	// // JustLog("biutno = {}, {}, {}", f.bit_no(), testtest.padding(), decltype(testtest)::traits::letters_per_unit);
+	// // for(auto j=testtest.iter<SYMBOL>(testtest.begin()); j!=testtest.iter<SYMBOL>(testtest.end()); ++j) {
+	// // 	JustLog("---> {} ({})", *j, testtest.iter<SYMBOL>(testtest.end()).bit_no());
+	// // }
 
-	auto seq = CompressedSeqanView(FIXED_TARGET);
-	const int len = seq.size();
-	uint64_t chunks[len];
-    for (auto i = seq.begin(); i < seq.end(); ++i) {
-		chunks[i] = seq.get_chunk(i);
-    }
-	std::vector<uint64_t> chunks_vec(&chunks[0], &chunks[seq.size()]);
-	JustLog("input = {} (lanes = {})", chunks_vec, hn::Lanes(d));
+	// auto seq = CompressedSeqanView(FIXED_TARGET);
+	// const int len = seq.size();
+	// uint64_t chunks[len];
+    // for (auto i = seq.begin(); i < seq.end(); ++i) {
+	// 	chunks[i] = seq.get_chunk(i);
+    // }
+	// std::vector<uint64_t> chunks_vec(&chunks[0], &chunks[seq.size()]);
+	// JustLog("input = {} (lanes = {})", chunks_vec, hn::Lanes(d));
 
-	JustLog("seq input = {}", decode_compressed_seq_el<ChunkT, seq::dna4>(chunks_vec[0]));
+	// JustLog("seq input = {}", decode_compressed_seq_el<ChunkT, seq::dna4>(chunks_vec[0]));
 
 
-	LaneMatrix x(d);
-	x.fill(d, [&](const auto index, const auto lanes) -> auto {
-		return (const ChunkT*) (chunks + index*lanes);
-	});
-	x.transpose(d);
-	JustLog("mat = {}", hwyStr(d, x));
+	// LaneMatrix x(d);
+	// x.fill(d, [&](const auto index, const auto lanes) -> auto {
+	// 	return (const ChunkT*) (chunks + index*lanes);
+	// });
+	// x.transpose(d);
+	// JustLog("mat = {}", hwy_str(d, x));
 
 	
-	// Iterate each vector of loaded matrix of size [lanes x lanes]
-	for (size_t chunk_index = 0; chunk_index < hn::Lanes(d); ++chunk_index) {
-		// Iterate every bp of lane
-		auto& chunk = x.matrix[chunk_index];
-		for (size_t bp_index = 0; bp_index < bp_per_unit; ++bp_index) {
-			// S::new([(1 << B) - 1; 8]);
+	// // Iterate each vector of loaded matrix of size [lanes x lanes]
+	// for (size_t chunk_index = 0; chunk_index < hn::Lanes(d); ++chunk_index) {
+	// 	// Iterate every bp of lane
+	// 	auto& chunk = x.matrix[chunk_index];
+	// 	for (size_t bp_index = 0; bp_index < bp_per_unit; ++bp_index) {
+	// 		// S::new([(1 << B) - 1; 8]);
 			
-			const VecT vec_bp = hn::And(chunk, bp_bitmask_vec);
-			const VecT shifted = hn::ShiftRightSame(chunk, bp_bit_width);
-			x.matrix[chunk_index] = shifted;
-			JustLog("next bp vec = {}", hwyStr<decltype(d), seq::dna4>(d, vec_bp));
+	// 		const VecT vec_bp = hn::And(chunk, bp_bitmask_vec);
+	// 		const VecT shifted = hn::ShiftRightSame(chunk, bp_bit_width);
+	// 		x.matrix[chunk_index] = shifted;
+	// 		JustLog("next bp vec = {}", hwy_str<decltype(d), seq::dna4>(d, vec_bp));
 
-			//const VecT hash = 
-			//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
-		}
-		JustLog("NEXT CHUNK ~");
-	}
+	// 		//const VecT hash = 
+	// 		//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
+	// 	}
+	// 	JustLog("NEXT CHUNK ~");
+	// }
 
 
 
@@ -1101,7 +863,7 @@ ATCGTAGCTAGTC\
 	// JustLog("mat = {}", hwyStr(d, x));
 	
 
-    JustLog("Check check_simd_packed_seq() lanes = {}", hn::Lanes(d));
+    // JustLog("Check check_simd_packed_seq() lanes = {}", hn::Lanes(d));
 }
 
 } // namespace BPCells::simd::HWY_NAMESPACE
