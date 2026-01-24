@@ -302,7 +302,7 @@ struct compact_sequence_range_base {
             // if (letter.bit_no() == 0) {
             //     result += "|";
             // }
-            result += letter->to_char();
+            result.push_back(letter->to_char());
         }
         return result;
     }

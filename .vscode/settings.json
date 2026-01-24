@@ -1,4 +1,15 @@
 {
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.path": "/opt/homebrew/opt/llvm@20/bin/clangd",
+    "clangd.arguments": [
+        "--clang-tidy",
+        "--all-scopes-completion",
+        "--header-insertion-decorators",
+        "-pretty", 
+        "--background-index",
+        "--experimental-modules-support",
+        "--compile-commands-dir=/Users/styczynski/Code/bioseqdb/main/build/"
+    ],
     "C_Cpp.intelliSenseCacheSize": 9120,
     "C_Cpp.intelliSenseMemoryLimit": 6096,
     "files.associations": {

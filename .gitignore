@@ -7,3 +7,6 @@ paradedb-experiments/target/
 
 *.log
 **/*.log
+
+**/.cache
+**/target/
