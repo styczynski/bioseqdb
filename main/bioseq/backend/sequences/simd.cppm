@@ -33,7 +33,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 // };
 
 template<
-	size_t delay1,
+	size_t... p_delays,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin())
 >
@@ -43,10 +43,11 @@ inline void papiesz(
 	const I& end
 ) {
     using seq_traits = compact_sequence_range<R>::traits;
-
+	
 	const hn::ScalableTag<typename seq_traits::storage_unit> d;
 	using VecT = hn::Vec<decltype(d)>;
 	using matrix = square_lane_matrix<decltype(d)>;
+	
 
 	const VecT bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
 
@@ -62,16 +63,23 @@ inline void papiesz(
 
 	// data buffer
 
-	constexpr size_t buffer_size = (delay1 / seq_traits::letters_per_unit) + hn::MaxLanes(d) + 1;
+	constexpr size_t max_delay = std::max({ p_delays... });
+	constexpr size_t buffer_size = (max_delay / seq_traits::letters_per_unit) + hn::MaxLanes(d) + 1;
 	JustLog("buffer size is {}", buffer_size);
 
-	circular_append_buffer<VecT, buffer_size, true, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator> buffer;
+	using buffer_t = circular_append_buffer<VecT, buffer_size, true, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator>;
+	buffer_t buffer;
+
+	std::array<std::tuple<typename buffer_t::iterator, size_t, const size_t, VecT>, sizeof...(p_delays)> delays_state{
+		(std::make_tuple(buffer.get_begin(), p_delays, seq_traits::letters_per_unit - 1, hn::Zero(d)))...
+	};
 
 	auto buffer_write_pos = buffer.get_begin();
 
-	auto delay_read_pos1 = buffer.get_begin();
-	size_t delay_counter1 = delay1;
-	VecT delay_chunk1 = hn::Zero(d);
+	// auto delay_read_pos1 = buffer.get_begin();
+	// size_t delay_counter1 = delay1;
+	// VecT delay_chunk1 = hn::Zero(d);
+
 
 	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
 	mat.partial_fill(d, end-begin, [&](const auto index, const auto lanes) -> auto {
@@ -97,17 +105,20 @@ inline void papiesz(
 			JustLog("next bp vec = {}", hwy_str<decltype(d), seq::dna4>(d, vec_bp));
 
 			// Check delayed
-			if (delay_counter1 == 0) {
-				delay_chunk1 = buffer.get_value_iter(delay_read_pos1);
-				delay_counter1 = delay1 - 1;
-				buffer.increment_iter(delay_read_pos1);
-			} else {
-				--delay_counter1;
+			for(auto delay_no = 0; delay_no < sizeof...(p_delays); ++delay_no) {
+				auto& [ read_pos, counter, delay, delayed_buffer ] = delays_state[delay_no];
+				if (counter == 0) [[unlikely]] {
+					delayed_buffer = buffer.get_value_iter(read_pos);
+					counter = delay;
+					buffer.increment_iter(read_pos);
+				} else {
+					--counter;
+				}
+				// The same
+				const VecT delayed_bp = hn::And(delayed_buffer, bp_bitmask_vec);
+				delayed_buffer = hn::ShiftRightSame(delayed_buffer, seq_traits::bits_per_char);
+				JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
 			}
-			// The same
-			const VecT delay_vec_bp1 = hn::And(delay_chunk1, bp_bitmask_vec);
-			delay_chunk1 = hn::ShiftRightSame(delay_chunk1, seq_traits::bits_per_char);
-			JustLog("next (-{})bp vec = {}", delay1, hwy_str<decltype(d), seq::dna4>(d, delay_vec_bp1));
 
 			//const VecT hash = 
 			//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
