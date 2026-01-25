@@ -13,37 +13,59 @@ export {
 
 BOOST_STRONG_TYPEDEF(size_t, circular_append_buffer_iter);
 
-template <typename T, size_t S, bool p_fixed_capacity = false>
+template<typename T, typename B>
+struct empty_circular_append_buffer_allocator {};
+
+template <typename T, size_t S, bool p_fixed_capacity = false, typename base_array_type = void, template<typename Tt, typename Bt> typename circular_append_buffer_allocator = empty_circular_append_buffer_allocator>
 class circular_append_buffer {
 public:
     using iterator = circular_append_buffer_iter;
-    static constexpr size_t real_size = seqan3::detail::ceil_log2(S);
+    static constexpr size_t real_size = 1 << seqan3::detail::ceil_log2(S);
 
-    static constexpr size_t size_mask = (1 << real_size) - 1;
+    static constexpr size_t size_mask = real_size - 1;
 private:
-	T _buffer[real_size];
-	iterator _buf_pos;
-	iterator _prev_pos;
+    std::conditional_t<std::is_same_v<base_array_type, void>, T[real_size], base_array_type> _buffer;
+	
+    //T _buffer[real_size];
+	
+    iterator _buf_pos;
+	[[indeterminate]] iterator _prev_pos;
 	//size_t _capacity;
 
     [[no_unique_address]] std::conditional_t<p_fixed_capacity, std::monostate, iterator> _capacity;
     
 public:
 
-    explicit constexpr circular_append_buffer(
-        size_t capacity
-    ) requires (p_fixed_capacity) : _buf_pos(0), _prev_pos(0) {}
+    explicit constexpr circular_append_buffer() requires (p_fixed_capacity && std::is_same_v<base_array_type, void>) : _buf_pos(0) {}
 
 	explicit constexpr circular_append_buffer(
 		size_t capacity
-	) requires (!p_fixed_capacity) : _buf_pos(0), _prev_pos(0), _capacity(capacity) {}
+	) requires (!p_fixed_capacity && std::is_same_v<base_array_type, void>) : _buf_pos(0), _capacity(capacity) {}
 
-    static constexpr iterator get_begin() {
+    explicit constexpr circular_append_buffer() requires (p_fixed_capacity && !std::is_same_v<base_array_type, void>) :
+        _buf_pos(0),
+        _buffer((circular_append_buffer_allocator<T, base_array_type>::allocate(real_size))) {}
+
+	explicit constexpr circular_append_buffer(
+		size_t capacity
+	) requires (!p_fixed_capacity && !std::is_same_v<base_array_type, void>) : _buf_pos(0), _capacity(capacity),
+    _buffer(std::move(circular_append_buffer_allocator<T, base_array_type>::allocate(capacity))) {}
+
+
+    [[nodiscard]] static constexpr iterator get_begin() {
         return iterator(0);
     }
 
+    [[nodiscard]] constexpr T& get_value_iter(const iterator& iter) const {
+        return _buffer[iter];
+    }
+
+    [[nodiscard]] constexpr T* get_ptr_iter(const iterator& iter) const {
+        return &_buffer[iter];
+    }
+
     constexpr void increment_iter(iterator& iter) requires (!p_fixed_capacity) {
-        if (++iter == _capacity) {
+        if (++iter == _capacity) [[unlikely]] {
             iter = 0;
         }
     }
@@ -58,16 +80,17 @@ public:
 		increment_iter(_buf_pos);
 	};
 
-	iterator last_write_pos() const {
+	[[nodiscard]] iterator last_write_pos() const {
 		return _prev_pos;
 	};
 
-	T& last() {
+	[[nodiscard]] T& last() {
 		return _buffer[_prev_pos];
 	}
 
 	template<typename F>
 	inline void unsafe_filled_for_each_previous(F fn) requires (!p_fixed_capacity) {
+        [[assume( _buf_pos <= _capacity )]];
 		for (auto j = _buf_pos; j < _capacity; ++j) {
 			fn(j, _buffer[j]);
 		}
@@ -78,7 +101,8 @@ public:
 
 	template<typename F>
 	inline void unsafe_filled_for_each(F fn) requires (!p_fixed_capacity) {
-		for (auto j = _buf_pos; j < _capacity; ++j) {
+		[[assume( _buf_pos <= _capacity )]];
+        for (auto j = _buf_pos; j < _capacity; ++j) {
 			fn(j, _buffer[j]);
 		}
 		for (auto j = get_begin(); j <= _buf_pos; ++j) {

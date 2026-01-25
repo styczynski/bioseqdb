@@ -771,7 +771,7 @@ ATCGTAGCTAGTC\
 	auto xxxeq = testtest2 == testtest2;
 	JustLog("eq? {}", xxxeq);
 	
-	papiesz(testtest, testtest.begin(), testtest.end());
+	papiesz<4>(testtest, testtest.begin(), testtest.end());
 
 	// // auto e = testtest.iter<SYMBOL>(testtest.begin());
 	// // auto f = testtest.iter<SYMBOL>(testtest.end());

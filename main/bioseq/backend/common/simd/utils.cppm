@@ -18,6 +18,14 @@ namespace hn = hwy::HWY_NAMESPACE;
 // template <class D, class VecT>
 // std::string hwy_str(const D& d, const VecT& v);
 
+template<typename T, typename B>
+struct simd_array_allocator {
+	static B allocate(const size_t& len) {
+		JustLog("simd alloc {}", len);
+		return hwy::AllocateAligned<T>(len);
+	}
+};
+
 template <typename T, typename InfoT, typename I = void>
 struct hwy_vector_string_printer {
 	static inline std::string format_block(const InfoT info, const void* ptr) {
@@ -29,11 +37,11 @@ struct hwy_vector_string_printer {
 
 template <class D, typename I = void, class VecT = hn::Vec<D>>
 requires (
-    requires (const D& d, const VecT& v) {
+    requires (D& d, const VecT& v) {
         { Store(v, d, nullptr) };
     }
 )
-auto hwy_str(const D& d, const VecT& v) {
+auto hwy_str(D& d, const VecT& v) {
 	constexpr size_t lane_u = 0;
 	constexpr size_t max_lanes = 16;
 
@@ -85,25 +93,136 @@ auto hwy_str(const D& d, const VecT& v) {
 	return buf;
 }
 
+template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
+class square_lane_matrix {
+public:
+	using vec_t = VecT;
+	using matrix_t = p_matrix_t;
+
+	p_matrix_t& matrix;
+
+	explicit square_lane_matrix(p_matrix_t&& p_matrix): matrix(p_matrix) {}
+
+	template<typename Functor> 
+	constexpr void partial_fill(
+		D& d, const size_t data_available, Functor fn
+	) {
+        const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
+        const size_t rows_to_load = data_available_cap / hn::Lanes(d);
+        const size_t last_row_lanes = data_available_cap % hn::Lanes(d);
+        size_t i = 0;
+		for(; i < rows_to_load; ++i) {
+			matrix[i] = hn::LoadU(d, fn(i, hn::Lanes(d)));
+		}
+        if (last_row_lanes > 0 && i < hn::Lanes(d)) {
+            matrix[i] = hn::LoadN(d, fn(i, hn::Lanes(d)), last_row_lanes);
+            ++i;
+        }
+        for(; i < hn::Lanes(d); ++i) {
+			matrix[i] = Zero(d);
+		}
+	}
+
+	inline constexpr void transpose(
+		D& d
+	) {
+		// For size = 2
+		if (hn::Lanes(d) == 1) {
+			// No-op
+		} else if (hn::Lanes(d) == 2) {
+			const VecT v0 = matrix[0]; // A B
+			const VecT v1 = matrix[1]; // C D
+			const VecT t1 = InterleaveUpper(d, v0, v1); // A C
+			const VecT t0 = InterleaveLower(d, v0, v1); // B D
+			matrix[0] = t0;
+			matrix[1] = t1;
+		} else if (hn::Lanes(d) == 4) {
+			const hn::RepartitionToWide<D> dw;
+
+			const VecT v0 = matrix[0];
+			const VecT v1 = matrix[1];
+			const VecT v2 = matrix[2];
+			const VecT v3 = matrix[3];
+
+			const VecT t0 = InterleaveLower(d, v0, v1);
+			const VecT t1 = InterleaveLower(d, v2, v3);
+			const VecT t2 = InterleaveUpper(d, v0, v1);
+			const VecT t3 = InterleaveUpper(d, v2, v3);
+
+			matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+			matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
+			matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
+			matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+		} else if (hn::Lanes(d) == 8) {
+			const hn::RepartitionToWide<D> dw;
+			
+			const VecT v0 = matrix[0];
+			const VecT v1 = matrix[1];
+			const VecT v2 = matrix[2];
+			const VecT v3 = matrix[3];
+
+			const VecT v4 = matrix[4];
+			const VecT v5 = matrix[5];
+			const VecT v6 = matrix[6];
+			const VecT v7 = matrix[7];
+
+			const VecT t0 = InterleaveLower(d, v0, v1);
+			const VecT t1 = InterleaveLower(d, v2, v3);
+			const VecT t2 = InterleaveLower(d, v4, v5);
+			const VecT t3 = InterleaveLower(d, v6, v7); 
+
+			const VecT t4 = InterleaveUpper(d, v0, v1);
+			const VecT t5 = InterleaveUpper(d, v2, v3);
+			const VecT t6 = InterleaveUpper(d, v4, v5);
+			const VecT t7 = InterleaveUpper(d, v6, v7);
+			
+			const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+			const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
+			const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
+			const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+			
+			const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
+			const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
+			const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
+			const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
+
+			const hn::RepartitionToWideX2<D> dww;
+
+			matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
+			matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
+			
+			matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
+			matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
+
+			matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
+			matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
+
+			matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
+			matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
+			
+		}
+	}
+};
 
 template <class D, class VecT = hn::Vec<D>>
 class LaneMatrix {
 public:
 	using MatT = hwy::AlignedFreeUniquePtr<VecT[]>;
+	using vec_t = VecT;
 
 	MatT matrix;
 
-	LaneMatrix(const D& d) : matrix(hwy::AllocateAligned<VecT>(hn::Lanes(d))) {};
+	LaneMatrix(D& d) : matrix(hwy::AllocateAligned<VecT>(hn::Lanes(d))) {};
 
 	template<typename Functor> 
-	inline void fill(const D& d, Functor fn) {
+	inline void fill(D& d, Functor fn) {
 		for(size_t i = 0; i < hn::Lanes(d); ++i) {
 			matrix[i] = hn::LoadU(d, fn(i, hn::Lanes(d)));
 		}
 	}
 
     template<typename Functor> 
-	inline void partial_fill(const D& d, const size_t data_available, Functor fn) {
+	inline void partial_fill(D& d, const size_t data_available, Functor fn) {
         const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
         const size_t rows_to_load = data_available_cap / hn::Lanes(d);
         const size_t last_row_lanes = data_available_cap % hn::Lanes(d);
@@ -125,7 +244,7 @@ public:
 		return matrix[index];
 	}
 
-	inline void transpose(const D& d) {
+	inline void transpose(D& d) {
 		// For size = 2
 		if (hn::Lanes(d) == 1) {
 			// No-op
@@ -207,7 +326,7 @@ public:
 };
 
 template <class D, typename I = void, class VecT = hn::Vec<D>>
-auto hwy_str(const D& d, const LaneMatrix<D, VecT>& v) {
+auto hwy_str(D& d, const LaneMatrix<D, VecT>& v) {
 	const size_t dim = hn::Lanes(d);
 	std::string buf = fmt::format("Matrix [{} x {}] [", dim, dim);
 	for(size_t i = 0; i < dim; ++i) {
@@ -217,8 +336,19 @@ auto hwy_str(const D& d, const LaneMatrix<D, VecT>& v) {
 	return buf;
 }
 
+template <class D, typename I = void, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
+auto hwy_str(D& d, const square_lane_matrix<D, VecT, p_matrix_t>& v) {
+	const size_t dim = hn::Lanes(d);
+	std::string buf = fmt::format("LMatrix [{} x {}] [", dim, dim);
+	for(size_t i = 0; i < dim; ++i) {
+		buf += "\n" + fmt::format("  {}: {}", i, hwy_str<D, I, VecT>(d, v.matrix[i]));
+	}
+	buf += "\n]";
+	return buf;
+}
+
 template <typename I, typename D, typename ValT>
-auto hwy_str_as(const D& d, const ValT& v) {
+auto hwy_str_as(D& d, const ValT& v) {
 	return hwy_str<D, I>(d, v);
 }
 
