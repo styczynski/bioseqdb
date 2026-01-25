@@ -76,5 +76,6 @@
         "*.inc": "cpp",
         "regex": "cpp",
         "future": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "/Users/styczynski/Code/bioseqdb/main"
 }

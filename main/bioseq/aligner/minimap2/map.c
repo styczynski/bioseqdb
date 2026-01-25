@@ -24,6 +24,7 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.simd;
+import algo.circular_append_buffer;
 
 using namespace seq::literals;
 
@@ -340,58 +341,58 @@ static inline uint64_t hash64(uint64_t key, uint64_t mask)
 };
 
 
-template <typename T, size_t S>
-class circular_append_buffer {
+// template <typename T, size_t S>
+// class circular_append_buffer {
 
-private:
-	T _buffer[S];
-	size_t _buf_pos;
-	size_t _prev_pos;
-	size_t _capacity;
-public:
-	circular_append_buffer(
-		size_t capacity
-	): _buf_pos(0), _prev_pos(0), _capacity(capacity) {
+// private:
+// 	T _buffer[S];
+// 	size_t _buf_pos;
+// 	size_t _prev_pos;
+// 	size_t _capacity;
+// public:
+// 	circular_append_buffer(
+// 		size_t capacity
+// 	): _buf_pos(0), _prev_pos(0), _capacity(capacity) {
 
-	}
+// 	}
 	
-	void push_back(T&& value) {
-		_prev_pos = _buf_pos;
-		_buffer[_buf_pos] = value;
-		++_buf_pos;
-		if (_buf_pos == _capacity) {
-			_buf_pos = 0;
-		}
-	};
+// 	void push_back(T&& value) {
+// 		_prev_pos = _buf_pos;
+// 		_buffer[_buf_pos] = value;
+// 		++_buf_pos;
+// 		if (_buf_pos == _capacity) {
+// 			_buf_pos = 0;
+// 		}
+// 	};
 
-	size_t last_write_pos() const {
-		return _prev_pos;
-	};
+// 	size_t last_write_pos() const {
+// 		return _prev_pos;
+// 	};
 
-	T& last() {
-		return _buffer[_prev_pos];
-	}
+// 	T& last() {
+// 		return _buffer[_prev_pos];
+// 	}
 
-	template<typename F>
-	inline void unsafe_filled_for_each_previous(F fn) {
-		for (auto j = _buf_pos; j < _capacity; ++j) {
-			fn(j, _buffer[j]);
-		}
-		for (auto j = 0; j < _buf_pos; ++j) {
-			fn(j, _buffer[j]);
-		}
-	}
+// 	template<typename F>
+// 	inline void unsafe_filled_for_each_previous(F fn) {
+// 		for (auto j = _buf_pos; j < _capacity; ++j) {
+// 			fn(j, _buffer[j]);
+// 		}
+// 		for (auto j = 0; j < _buf_pos; ++j) {
+// 			fn(j, _buffer[j]);
+// 		}
+// 	}
 
-	template<typename F>
-	inline void unsafe_filled_for_each(F fn) {
-		for (auto j = _buf_pos; j < _capacity; ++j) {
-			fn(j, _buffer[j]);
-		}
-		for (auto j = 0; j <= _buf_pos; ++j) {
-			fn(j, _buffer[j]);
-		}
-	}
-};
+// 	template<typename F>
+// 	inline void unsafe_filled_for_each(F fn) {
+// 		for (auto j = _buf_pos; j < _capacity; ++j) {
+// 			fn(j, _buffer[j]);
+// 		}
+// 		for (auto j = 0; j <= _buf_pos; ++j) {
+// 			fn(j, _buffer[j]);
+// 		}
+// 	}
+// };
 
 // // Delayed iterator
 
@@ -440,7 +441,7 @@ void bio_collect_minimizers(R&& seq) {
 	// 	.sketch { .data {UINT64_MAX, UINT64_MAX} }
 	// };
 	MinimapSketch current_min = MinimapSketch::getMax();
-	size_t current_min_pos = 0;
+	auto current_min_pos = buffer.get_begin();
 
 	size_t pos = 0;
 	size_t seq_pos = 0;
