@@ -421,7 +421,8 @@ requires (
     }
 )
 void bio_collect_minimizers(R&& seq) {
-	
+	JustLog("bio_collect_minimizers()");
+
 	constexpr uint64_t max_span = 1 << UNION_FIELD_WIDTH(MinimapSketch, sketch.sketch, span);
 
 	constexpr uint64_t alphabet_size = seqan3::alphabet_size<T>;
@@ -526,6 +527,7 @@ void bio_collect_minimizers(R&& seq) {
 	assert(pos == w+k);
 	handler(std::bool_constant<false>{});
 
+	JustLog("is_max?");
 	if (!current_min.is_max()) {
 		results.push_back(current_min);
 	}
@@ -534,13 +536,13 @@ void bio_collect_minimizers(R&& seq) {
 	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
 
 	// LELED
-	for ( const auto& minimiser : (seq | seqan3::views::minimiser_hash(seqan3::shape{seqan3::ungapped{k}}, seqan3::window_size{w+k-1}, seqan3::seed{0})) ) {
-		// EH?
-		JustLog("hey {}", 42);
-	}
+	// for ( const auto& minimiser : (seq | seqan3::views::minimiser_hash(seqan3::shape{seqan3::ungapped{k}}, seqan3::window_size{w+k-1}, seqan3::seed{0})) ) {
+	// 	// EH?
+	// 	JustLog("hey {}", 42);
+	// }
 
+	JustLog("end?");
 	JustLog("Dump all collected (runtime = {})", duration);
-
 	for(auto const& i : results) {
 		JustLog("{} {}", i.sketch.data[0], i.sketch.data[1]);
 	}
@@ -771,7 +773,7 @@ ATCGTAGCTAGTC\
 	auto xxxeq = testtest2 == testtest2;
 	JustLog("eq? {}", xxxeq);
 	
-	papiesz<1>(testtest, testtest.begin(), testtest.end());
+	papiesz(testtest, testtest.begin(), testtest.end(), 1);
 
 	// // auto e = testtest.iter<SYMBOL>(testtest.begin());
 	// // auto f = testtest.iter<SYMBOL>(testtest.end());
@@ -900,18 +902,28 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	std::vector<seq::dna4> FIXED_TARGET{"ACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGTCGTAGCTAGTCCGTAATCGTAGCTAGTCAAACTGTATCGTAGCTAGTCCGTAGCTACTGTAGCTGATCGTAGCTAGTCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCTCGTAGCTAGTCCGTAACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
 	std::vector<seq::dna4> FIXED_QUERY{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
 
-	bioseq::simd::HWY_NAMESPACE::check_simd_packed_seq();
-	throw std::exception();
+	// Uncomment for test
+	if constexpr (false) {
+		bioseq::simd::HWY_NAMESPACE::check_simd_packed_seq();
+	}
+	
+	
+	//throw std::exception();
 
 	// Compress
-	auto z = CompressedSeqanView(FIXED_QUERY);
-	JustLog("z = {}", z.str());
+	//auto z = CompressedSeqanView(FIXED_QUERY);
+	//JustLog("z = {}", z.str());
 
 	bio_collect_minimizers(FIXED_QUERY);
+
 	//bio_collect_minimizers(z);
 	//JustLog("X! = {}", FIXED_QUERY[0].to_rank());
 
 	collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
+	
+	JustLog("TERMINATE");
+	throw std::exception();
+	
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);
 	if (opt->flag & MM_F_HEAP_SORT) a = collect_seed_hits_heap(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);
 	else a = collect_seed_hits(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);

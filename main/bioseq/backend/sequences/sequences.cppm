@@ -14,6 +14,7 @@ module;
 #include <string>
 #include <valarray>
 #include <vector>
+#include <limits>
 
 #include <boost/integer.hpp>
 #include <boost/iterator/iterator_adaptor.hpp>
@@ -91,6 +92,17 @@ struct compact_sequence_range_base {
         static constexpr storage_unit char_mask = (static_cast<storage_unit>(1) << bits_per_char) - 1;
         static constexpr size_t rev_char_mask = char_mask << (bits_per_char * (letters_per_unit - 1));
         static constexpr storage_unit used_storage_mask = (static_cast<storage_unit>(1) << unit_used_bits) - 1;
+
+        template<typename other_storage_unit>
+        [[always_inline]] static constexpr other_storage_unit kmer_mask(const size_t& length) noexcept {
+            constexpr size_t max_length = sizeof(other_storage_unit) * 8 / bits_per_char;
+            if (length > max_length) {
+                return std::numeric_limits<other_storage_unit>::max(); //static_cast<other_storage_unit>(-1);
+            }
+            return (static_cast<other_storage_unit>(1) << (length * bits_per_char));
+        };
+
+        
     };
 
     using derived_range_t = derived_t;

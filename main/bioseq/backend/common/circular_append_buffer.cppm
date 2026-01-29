@@ -65,7 +65,9 @@ public:
     }
 
     constexpr void increment_iter(iterator& iter) requires (!p_fixed_capacity) {
-        if (++iter == _capacity) [[unlikely]] {
+        static_assert(std::is_same_v<decltype(_capacity), iterator>);
+        ++iter;
+        if (iter == _capacity) [[unlikely]] {
             iter = 0;
         }
     }
