@@ -1,6 +1,7 @@
 {
   "dependencies": [
+    "highway",
     "reflectcpp",
-    "highway"
+    "libassert"
   ]
 }

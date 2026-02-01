@@ -1,0 +1,423 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.2.1/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/zstd-arm64-osx-1.5.7-5b578e50-9852-433b-9b80-a66b7feca2fb",
+  "name": "zstd:arm64-osx@1.5.7 2bf7d696a7ed54174f3cc80b275ee30a975d767da82901a823ee2fe97c846348",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2025-12-16-2025.12.16"
+    ],
+    "created": "2026-02-01T20:13:47Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-3"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-4"
+    },
+    {
+      "spdxElementId": "SPDXRef-port-file-4",
+      "relationshipType": "DEPENDENCY_MANIFEST_OF",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-5"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-3"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-4"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-5"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-6"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-7"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-8"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-9"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-10"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-11"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-12"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-13"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-14"
+    }
+  ],
+  "packages": [
+    {
+      "name": "zstd",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "1.5.7",
+      "downloadLocation": "git+https://github.com/microsoft/vcpkg@31b7320fab13790c6861cb3c2d50dc8f60ca3602",
+      "homepage": "https://facebook.github.io/zstd/",
+      "licenseConcluded": "(BSD-3-Clause OR GPL-2.0-only)",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "Zstandard - Fast real-time compression algorithm",
+      "comment": "This is the port (recipe) consumed by vcpkg."
+    },
+    {
+      "name": "zstd:arm64-osx",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "2bf7d696a7ed54174f3cc80b275ee30a975d767da82901a823ee2fe97c846348",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "(BSD-3-Clause OR GPL-2.0-only)",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-0",
+      "name": "facebook/zstd",
+      "downloadLocation": "git+https://github.com/facebook/zstd@v1.5.7",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "26e441267305f6e58080460f96ab98645219a90d290a533410b1b0b1d2f870721c95f8384e342ee647c5e968385a5b7e30c2d04340c37f59b3e6d86762c3260c"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./fix-emscripten-and-clang-cl.patch",
+      "SPDXID": "SPDXRef-port-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "eed141d2f80da0c549481ae928ea1a4ad226fb7dc90c16217a5fc4ea4b560cf0"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./usage",
+      "SPDXID": "SPDXRef-port-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dd373e885aea14820e812e58de22d2e8d83f42248d695d6877fe17bd0f3ff455"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./portfile.cmake",
+      "SPDXID": "SPDXRef-port-file-2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b348bd1c831dcda55e55f2b251178c0e9414161a2474dab58e76be639e870575"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./no-static-suffix.patch",
+      "SPDXID": "SPDXRef-port-file-3",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "639fedd3fc4cf634e4ae63ad0077e547a91d3fef1dd26a59f0e817378c5cc434"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./vcpkg.json",
+      "SPDXID": "SPDXRef-port-file-4",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1d6262377eaee174cc4934c4cc9cf13d0f679b26d129fb4b5707f49bf876d20a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./fix-windows-rc-compile.patch",
+      "SPDXID": "SPDXRef-port-file-5",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "24080a83a9d7b19b431fc499972f404e86fa96b188315d3fb8bca932da88fe66"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/zdict.h",
+      "SPDXID": "SPDXRef-binary-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "abacadb94e3f79e591f4b1648e839b0160fbf4291211fd01bdba1380269b245c"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/zstd_errors.h",
+      "SPDXID": "SPDXRef-binary-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "66a8c3f71d12ea6e797e4f622f31f3f8f81c41b36f48cad4f5de7d8bfb6aac0a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/zstd.h",
+      "SPDXID": "SPDXRef-binary-file-2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9b4bc8245565c98ccfc61c07749928b57e7c0f6fddb0530c4f6aa1971893d88b"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./BUILD_INFO",
+      "SPDXID": "SPDXRef-binary-file-3",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b17d8abcb0fd6454b3c1ec6556988d624863978121b87c51af8b1b6d937db69a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./lib/pkgconfig/libzstd.pc",
+      "SPDXID": "SPDXRef-binary-file-4",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9ed302d12b4a368b99be7bd1e32444ae280bde4e70acf384d68b97504af712b7"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./lib/libzstd.a",
+      "SPDXID": "SPDXRef-binary-file-5",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "aa1702bf34950b2f69ef213f99824c94dcb87cc3d5804f206b4e7d41a6e937c8"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./debug/lib/pkgconfig/libzstd.pc",
+      "SPDXID": "SPDXRef-binary-file-6",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "758601f176b1a7014da9775e3372b12fd49bd8f500f9b0a21dcf5d71f0284bc1"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./debug/lib/libzstd.a",
+      "SPDXID": "SPDXRef-binary-file-7",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1015d91920d46fe64ccb7623ceb09eae0f33ebaf6aa0fedbee3a9dc8abd3fb93"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/zstdConfigVersion.cmake",
+      "SPDXID": "SPDXRef-binary-file-8",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f79742115e59cd99594b5007817d19056ee9dbc338ce32728a61223f489d6965"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/usage",
+      "SPDXID": "SPDXRef-binary-file-9",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dd373e885aea14820e812e58de22d2e8d83f42248d695d6877fe17bd0f3ff455"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/zstdTargets.cmake",
+      "SPDXID": "SPDXRef-binary-file-10",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "e2507e0a9f9bb3710b339703082eb0b827107ac7258c30eae51374480e1459bc"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/zstdTargets-debug.cmake",
+      "SPDXID": "SPDXRef-binary-file-11",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "46168d72d5e72c9ef06b7c61005d9c07472fe08bc384cd7536e61c4e3647ba42"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/copyright",
+      "SPDXID": "SPDXRef-binary-file-12",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "ae73833b0ceb843626baec97a749ebc5c4df2bd4c09c3866a62ef263ce666a22"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/zstdConfig.cmake",
+      "SPDXID": "SPDXRef-binary-file-13",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "299af8ea4109ebaf169abfaf103ecc0d1de332939a4dcf5ca0fd03744e0e0fa8"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/zstd/zstdTargets-release.cmake",
+      "SPDXID": "SPDXRef-binary-file-14",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "2e284ae61caa37a4f41422d91211a3fe7cdb371f09c1f651758eed58ce44f272"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    }
+  ]
+}

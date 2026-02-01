@@ -17,4 +17,6 @@
 
 #include "./minimap2stuff.h"
 
+#include <libassert/assert.hpp>
+
 #endif

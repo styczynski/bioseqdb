@@ -76,6 +76,12 @@ public:
         iter = (iter + 1) & size_mask;
     }
 
+	// void push_back(const T value) {
+	// 	_prev_pos = _buf_pos;
+	// 	_buffer[_buf_pos] = value;
+	// 	increment_iter(_buf_pos);
+	// };
+
     void push_back(T&& value) {
 		_prev_pos = _buf_pos;
 		_buffer[_buf_pos] = value;

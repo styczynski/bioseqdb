@@ -1,0 +1,270 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.2.1/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/yyjson-arm64-osx-0.12.0-ffd3ff5e-920f-4d0a-90be-9545bdf7b504",
+  "name": "yyjson:arm64-osx@0.12.0 c79602bb0bcc6b8d9e1a45cfd3f6c7efdf3b4c595cc4b496a3cbf8d0dc0b62a1",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2025-12-16-44bb3ce006467fc13ba37ca099f64077b8bbf84d"
+    ],
+    "created": "2026-01-30T17:34:11Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-port-file-1",
+      "relationshipType": "DEPENDENCY_MANIFEST_OF",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-3"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-4"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-5"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-6"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-7"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-8"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-9"
+    }
+  ],
+  "packages": [
+    {
+      "name": "yyjson",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "0.12.0",
+      "downloadLocation": "git+https://github.com/microsoft/vcpkg@8636d55ac220c4a4e109cc8b461316830e4096a7",
+      "homepage": "https://github.com/ibireme/yyjson",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "A high performance JSON library written in ANSI C",
+      "comment": "This is the port (recipe) consumed by vcpkg."
+    },
+    {
+      "name": "yyjson:arm64-osx",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "c79602bb0bcc6b8d9e1a45cfd3f6c7efdf3b4c595cc4b496a3cbf8d0dc0b62a1",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-0",
+      "name": "ibireme/yyjson",
+      "downloadLocation": "git+https://github.com/ibireme/yyjson@0.12.0",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "a468477544f40a13595eb0afa74857b669b0cf0bf3258678541368863cc3a27fa6f43cc2ef1f4c6103c81b798cea2f67cc14268789de3965e1315a44972c713f"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./portfile.cmake",
+      "SPDXID": "SPDXRef-port-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "0e09221e01534284b3fc1ff0ae89f28d6b6fd0cce51eb98160eebd1f5934483e"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./vcpkg.json",
+      "SPDXID": "SPDXRef-port-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1c67125a3929f16fdf856bbd730320cecc162327a198f455b0c8397b88477b49"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/yyjson.h",
+      "SPDXID": "SPDXRef-binary-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "175867c5493a5df648cec566717fa1c29aa2f6096f5f0cf1efad0b65e1f6d7b3"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./BUILD_INFO",
+      "SPDXID": "SPDXRef-binary-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b17d8abcb0fd6454b3c1ec6556988d624863978121b87c51af8b1b6d937db69a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./lib/pkgconfig/yyjson.pc",
+      "SPDXID": "SPDXRef-binary-file-2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "49d853d867461dc37c584e95b582ed6dd0a53498b633b1a25ae75376dcd84384"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./lib/libyyjson.a",
+      "SPDXID": "SPDXRef-binary-file-3",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1b2b3a525ed3db790b706e844650fdb4313d4d9c8ecfc6d8b435c111c8da6e44"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./debug/lib/pkgconfig/yyjson.pc",
+      "SPDXID": "SPDXRef-binary-file-4",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "139b9fa4a113476571a8cfa7488e8fd2f605a926da7f130fa88321e68af73fc4"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./debug/lib/libyyjson.a",
+      "SPDXID": "SPDXRef-binary-file-5",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1152eced91c3e7a8d4b00c0ba00addb4d770e12a31c7cc7062542a50153d6a77"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/yyjson/yyjson-config-release.cmake",
+      "SPDXID": "SPDXRef-binary-file-6",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "6572e20ba5680ee29f4fcc4c7cf8396dbc1299b9f65444c18d1093c5d9d5beb5"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/yyjson/copyright",
+      "SPDXID": "SPDXRef-binary-file-7",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "45e384d3d52c73cba3a64d6e6c25d47cd738cd8a55c30629e3201046eda62947"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/yyjson/yyjson-config.cmake",
+      "SPDXID": "SPDXRef-binary-file-8",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "33e5358e091d9af3ff73f0aea358b573caab89042e94f61ae35f929e72536a93"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/yyjson/yyjson-config-debug.cmake",
+      "SPDXID": "SPDXRef-binary-file-9",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "6917a98de683aa26938c1415e9630fb6f5214e766b520c210b5278bf903061d4"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    }
+  ]
+}

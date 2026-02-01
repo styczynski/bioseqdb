@@ -1,0 +1,508 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.2.1/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.2",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/cpptrace-arm64-osx-1.0.4-2c12f6a8-0d63-4e27-9b1c-6978319ae7db",
+  "name": "cpptrace:arm64-osx@1.0.4 7b49e72bf7f9874bc81ea2eed4522593ab9d0af5c2a2887d5f6165b391780de6",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2025-12-16-2025.12.16"
+    ],
+    "created": "2026-02-01T20:14:10Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-port-file-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-port-file-2",
+      "relationshipType": "DEPENDENCY_MANIFEST_OF",
+      "relatedSpdxElement": "SPDXRef-port"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-0"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-1"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-2"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-3"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-4"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-5"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-6"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-7"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-8"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-9"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-10"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-11"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-12"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-13"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-14"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-15"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-16"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-17"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-18"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-19"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-20"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-21"
+    },
+    {
+      "spdxElementId": "SPDXRef-binary",
+      "relationshipType": "CONTAINS",
+      "relatedSpdxElement": "SPDXRef-binary-file-22"
+    }
+  ],
+  "packages": [
+    {
+      "name": "cpptrace",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "1.0.4",
+      "downloadLocation": "git+https://github.com/microsoft/vcpkg@6e7a21fc6361f3fbad277cdedc41f5b877c3e0db",
+      "homepage": "https://github.com/jeremy-rifkin/cpptrace",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "Simple, portable, and self-contained stacktrace library for C++11 and newer",
+      "comment": "This is the port (recipe) consumed by vcpkg."
+    },
+    {
+      "name": "cpptrace:arm64-osx",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "7b49e72bf7f9874bc81ea2eed4522593ab9d0af5c2a2887d5f6165b391780de6",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-0",
+      "name": "jeremy-rifkin/cpptrace",
+      "downloadLocation": "git+https://github.com/jeremy-rifkin/cpptrace@v1.0.4",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "e88edddbcdd423d49ed3adb02cf70580ee3a56065db4d81ca69d3f9f6d9b64ac27734842ca3b6d8ff45a548c25900a88f979e39d777af422a153e586d26ac5b5"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "fileName": "./usage",
+      "SPDXID": "SPDXRef-port-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "27ac883d5781b7a4f414cb92dd489ee1624ff3abeaccc2744e734c7f65756b9f"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./portfile.cmake",
+      "SPDXID": "SPDXRef-port-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "39d93b5f283a173e673aec6cf874a53d2df25f857e2efc30575712d0fa53a637"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./vcpkg.json",
+      "SPDXID": "SPDXRef-port-file-2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9160260208e96cc2a9101f997c7f2fc46a1e5b9689e5402806c0945d2a4051d2"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/ctrace/ctrace.h",
+      "SPDXID": "SPDXRef-binary-file-0",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dea3dbfe4b3c30db094e7f7ea0a8bef86c6d94f4ca643d27a36da8e381836924"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/from_current.hpp",
+      "SPDXID": "SPDXRef-binary-file-1",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "5ba4d5f73130a238f8fe682a202be30243f694b62e8c966c602935950a57fedb"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/from_current_macros.hpp",
+      "SPDXID": "SPDXRef-binary-file-2",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9fe4c3541d30035f0e22481aa0882f006d836192d248e60254d0662aa372057a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/formatting.hpp",
+      "SPDXID": "SPDXRef-binary-file-3",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "4e361be3707486137465fe2accbab67caf53fe750375b646a83176c2794461ee"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/gdb_jit.hpp",
+      "SPDXID": "SPDXRef-binary-file-4",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "e695deb5ec104556ff876342d8f046f40d7b334c61480ef38b31a13ce76d177c"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/io.hpp",
+      "SPDXID": "SPDXRef-binary-file-5",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b3a6a4a43d3c985c1a7876e96c93225c8928a11952abd6fdfbc84581efcef89b"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/forward.hpp",
+      "SPDXID": "SPDXRef-binary-file-6",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b8624c70350076415c3793cf8df53ed879a439fe3a9f4de8c9f85399a7d0ce4b"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/version.hpp",
+      "SPDXID": "SPDXRef-binary-file-7",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "21182a45be20c723dc6ecd8d99fa969328ab46d5efe1e9bd75b39bbf7c511194"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/exceptions_macros.hpp",
+      "SPDXID": "SPDXRef-binary-file-8",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "561224e7e0c9df280d235b887f659325afff18f0ed1a0c5253ee1f42bf47a262"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/cpptrace.hpp",
+      "SPDXID": "SPDXRef-binary-file-9",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "3f8ec8a06cf946b61ff8ed7399ef0756fb824b70dea9aed8bf6ede555fee1e3b"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/exceptions.hpp",
+      "SPDXID": "SPDXRef-binary-file-10",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dbaeaa3c3ab5d3bafd6c2243ac772eda8c36775c2a1f4a3c2dc7822d5ac89810"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/utils.hpp",
+      "SPDXID": "SPDXRef-binary-file-11",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "adc32290e392ede2f14810d7f50cef5d14defc1dfff535df6d18ef9307afd24b"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./include/cpptrace/basic.hpp",
+      "SPDXID": "SPDXRef-binary-file-12",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "5a8d5d16ccf3d08f09b07f527aefbab5e32ab2dbb54608e2ce5d35b7823b15b3"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./BUILD_INFO",
+      "SPDXID": "SPDXRef-binary-file-13",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b17d8abcb0fd6454b3c1ec6556988d624863978121b87c51af8b1b6d937db69a"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./lib/libcpptrace.a",
+      "SPDXID": "SPDXRef-binary-file-14",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "dbf729fe6345c6a9fc1b6a63ecd96027535036564f2bf6aa1ff504ae85384074"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./debug/lib/libcpptrace.a",
+      "SPDXID": "SPDXRef-binary-file-15",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f8da0c02c26297763036460e281dbceee171975a0ffb78e980856c9585ca22e0"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/usage",
+      "SPDXID": "SPDXRef-binary-file-16",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "27ac883d5781b7a4f414cb92dd489ee1624ff3abeaccc2744e734c7f65756b9f"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/cpptrace-targets.cmake",
+      "SPDXID": "SPDXRef-binary-file-17",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "3024b7ff0bcf89337c6101942cf0ee0536e71afb9910aa07f52b3ea67a2356fa"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/cpptrace-config-version.cmake",
+      "SPDXID": "SPDXRef-binary-file-18",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "548d1a01662647a7466baa72e1b498529baf6c81477dc45e8016a70633d5e750"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/cpptrace-targets-release.cmake",
+      "SPDXID": "SPDXRef-binary-file-19",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "40f25e915d29e2b5863d243f55bf3350c6197ac162562dd1b80a81541573f4ba"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/cpptrace-config.cmake",
+      "SPDXID": "SPDXRef-binary-file-20",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "cfe3ef1466c75e80a5de83ca3366f8b92339f56cc0a0e5886ab603aaa9f59f31"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/cpptrace-targets-debug.cmake",
+      "SPDXID": "SPDXRef-binary-file-21",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "71f6a99a27dff418018ac720199e298614562f6c68c589be0682b5e1da753e19"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "fileName": "./share/cpptrace/copyright",
+      "SPDXID": "SPDXRef-binary-file-22",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "8ac69cb836d165edd51212074441c1794b1f6712783d59014b773eeed133d4d3"
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    }
+  ]
+}

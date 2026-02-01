@@ -26,6 +26,7 @@ import bioseq_sequences;
 import bioseq_sequences.simd;
 import algo.circular_append_buffer;
 
+
 using namespace seq::literals;
 
 mm_tbuf_t *mm_tbuf_init(void)
@@ -495,8 +496,25 @@ inline void bio_collect_minimizers2(
 			}
 
 			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
+				//&results, &current_min, current_min_pos
 				buffer.unsafe_filled_for_each_previous([&results, &current_min](const auto& _index, const auto& el) {
-					//if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+					// const auto xxx = current_min;
+					// const auto xxx2 = xxx.sketch.sketch.last_pos;
+					// const auto zzz = el.sketch.sketch.last_pos;
+					// //if (current_min.data[0] == el.data[0] && current_min.data[1] != el.data[1]) {
+					// DEBUG_ASSERT(
+					// 	MinimapSketch::does_sketch_match(current_min, el) == (false),
+					// 	"require current min pos to match response from does_sketch_match",
+					// 	current_min_pos, _index, xxx2, zzz,
+					// 	el.sketch.sketch.span,
+					// 	xxx.sketch.sketch.span,
+					// 	el.sketch.sketch.kmer,
+					// 	xxx.sketch.sketch.kmer,
+					// 	el.sketch.sketch.strand,
+					// 	xxx.sketch.sketch.strand,
+					// 	el.sketch.sketch.last_pos,
+					// 	xxx.sketch.sketch.last_pos
+					// );
 					if (MinimapSketch::does_sketch_match(current_min, el)) {
 						results.push_back(el);
 					}
@@ -786,15 +804,99 @@ ATCGTAGCTAGTC\
 	VecT state_forward = hn::Zero(d);
 	VecT state_reverse_compl = hn::Zero(d);
 
-
-	using outp_d_t = hn::ScalableTag<typename decltype(testtest)::traits::storage_unit>;
+	using traits = decltype(testtest)::traits;
+	using outp_d_t = hn::ScalableTag<traits::storage_unit>;
 	outp_d_t dd;
-	lexic_hasher<seq::dna4, decltype(testtest)::traits::storage_unit>::simd_hash<outp_d_t> hhh(dd, 3);
+	lexic_hasher<seq::dna4, traits::storage_unit>::simd_hash<outp_d_t> hhh(dd, 3);
+	
+	size_t pos = 0;
+	const size_t w = 10;
+	const size_t k = 4;
+	using hash_vec_t = hn::Vec<outp_d_t>;
+	using hash_mask_t = hn::Mask<outp_d_t>;
+	circular_append_buffer<hash_vec_t, 256> buffer(w);
+
+	constexpr hash_vec_t max_vec = hn::Set(dd, static_cast<traits::storage_unit>(-1));
+	hash_vec_t current_min = hn::Set(dd, static_cast<traits::storage_unit>(-1));
+	hash_vec_t current_min_pos = hn::Set(dd, static_cast<traits::storage_unit>(buffer.get_begin()));
+
+	constexpr bool IS_INIT = true;
 	iterate_sequence_bp_simd(testtest, testtest.begin(), testtest.end(), [&](auto& d, auto&& incoming, auto&& outgoing){ //auto&& bp_del1
 		JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, incoming), hwy_str_as<seq::dna4>(d, outgoing));
-		hhh.next(d, incoming, outgoing);
+		hash_vec_t hash_vec = hhh.next(d, incoming, outgoing);
+
+		++pos;
+		// We don't need to check: kmer_span < max_span
+		if ((pos >= k || !IS_INIT)) {
+		//if (kmer_span < max_span) {
+			buffer.push_back(std::move(hash_vec));
+		} else {
+			buffer.push_back(std::move(hash_vec_t(max_vec)));
+		}
+
+		if ((pos == w + k - 1 && IS_INIT)) { // special case for the first window - because identical k-mers are not stored yet
+			buffer.unsafe_filled_for_each_previous([&](const auto& _index, const auto& el) {
+				
+			});
+		}
+		hash_mask_t new_min_mask = hn::Le(buffer.last(), current_min);
+		hash_vec_t new_min_pos_val = hn::Set(d, static_cast<traits::storage_unit>(buffer.last_write_pos()));
+		// buffer.last()
+
+		current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
+		current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
+
+		JustLog("  . val         (<==) = {}", hwy_str(d, buffer.last()))
+		JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
+		JustLog("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
+
+		// Check if we need to update min
+		hash_vec_t last_write_pos = hn::Set(d, static_cast<traits::storage_unit>(buffer.last_write_pos()));
+		hash_mask_t has_elapsed_min = hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos));
+		const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
+
+		JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
+		JustLog("  . need_to_rescan    = {}", need_to_rescan);
+
+		if (need_to_rescan) {
+			current_min = max_vec;
+			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el) {
+				hash_mask_t new_min_mask = hn::Le(el, current_min);
+				hash_vec_t new_min_pos_val = hn::Set(d, static_cast<traits::storage_unit>(index));
+				current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
+				current_min = hn::IfThenElse(new_min_mask, el, current_min);
+			});
+		}
+
+		// if (hn::Le(buffer.last(), current_min)) { // a new minimum; then write the old min
+		// 	if ((pos >= w + k || !IS_INIT) && !current_min.is_max()) {
+		// 		results.push_back(current_min);
+		// 	}
+		// 	current_min_pos = buffer.last_write_pos();
+		// 	current_min = buffer.last();
+		// } else if (buffer.last_write_pos() == current_min_pos) { 
+		// 	if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) {
+		// 		results.push_back(current_min);
+		// 	}
+
+		// 	current_min.set_max();
+		// 	buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el) {
+		// 		if (current_min >= el) {
+		// 			current_min = el;
+		// 			current_min_pos = index;
+		// 		}
+		// 	});
+
+		// 	if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) { // write identical k-mers
+		// 		buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el) {
+		// 			if (MinimapSketch::does_sketch_match(current_min, el)) {
+		// 				results.push_back(el);
+		// 			}
+		// 		});
+		// 	}
+		// }
 		//JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, bp));
-	}, 1);
+	}, k-1);
 
 	// // auto e = testtest.iter<SYMBOL>(testtest.begin());
 	// // auto f = testtest.iter<SYMBOL>(testtest.end());

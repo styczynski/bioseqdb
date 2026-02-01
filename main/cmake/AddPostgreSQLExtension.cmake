@@ -76,6 +76,15 @@ function(AddCommonTarget LIBRARY_NAME)
     target_compile_definitions(${LIBRARY_NAME} PUBLIC -DNO_POSTGRES=1)
   endif() # End postgress setup
 
+  # Debug
+  if(APPLE)
+    add_custom_command(
+      TARGET ${LIBRARY_NAME}
+      POST_BUILD
+      COMMAND dsymutil $<TARGET_FILE:${LIBRARY_NAME}>
+    )
+  endif()
+
   # Allow extensions without sources
   if(HAS_SOURCES)
     target_compile_definitions(${LIBRARY_NAME} PUBLIC -DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})

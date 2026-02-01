@@ -14,6 +14,7 @@ message("MODULES? ${SRC_MOD_FILES}")
 find_package(Intl)
 find_package(ZLIB)
 find_package(reflectcpp CONFIG REQUIRED)
+find_package(libassert CONFIG REQUIRED)
 
 # AddCommonTarget(
 #   postgresql_bioseq
@@ -72,6 +73,7 @@ AddCommonTarget(
     fmt
     ZLIB::ZLIB
     reflectcpp::reflectcpp
+    libassert::assert
   SOURCES
     ${A_SRC_FILES}
   SUPPORT_CXX_MODULES
