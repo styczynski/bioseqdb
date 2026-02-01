@@ -35,6 +35,10 @@ module;
 #include <limits>
 #include <ios>
 
+// For generic serialization
+#include <rfl/json.hpp>
+#include <rfl.hpp>
+
 // FMT LOGIC
 #define FMT_MODULE
 
@@ -1496,6 +1500,48 @@ void fmtlogT<_>::stopPollingThread() noexcept {
 
 template class fmtlogT<0>;
 
+
+
+export {
+namespace fmt {
+  
+// template<typename T>
+// struct default_serializer_format {
+//   static constexpr bool value = false;
+// };
+
+template<typename T>
+requires (
+  //default_serializer_format<T>::value && 
+  requires (const T& value) {
+     { rfl::enum_to_string(value) } -> std::convertible_to<std::string>;
+  }
+)
+struct formatter<T>: formatter<std::string> {
+    template <typename FormatContext>
+    auto format(const T& value, FormatContext& ctx) const {
+      return formatter<std::string>::format(rfl::enum_to_string(value), ctx);
+    }
+};
+
+
+template<typename T>
+requires (
+  //default_serializer_format<T>::value && 
+  requires (const T& value) {
+     { value.to_debug_string() } -> std::convertible_to<std::string>;
+  }
+)
+struct formatter<T>: formatter<std::string> {
+    template <typename FormatContext>
+    auto format(const T& value, FormatContext& ctx) const {
+      return formatter<std::string>::format(value.to_debug_string(), ctx);
+    }
+};
+
+}
+}
+
 //fmt::format(
 export bool enable_logging = false;
 
@@ -1516,3 +1562,4 @@ export inline void log_configure() {
 // auto format(T obj, FormatContext& ctx) {
 //   return format(&obj);
 // }
+

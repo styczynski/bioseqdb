@@ -93,13 +93,17 @@ struct compact_sequence_range_base {
         static constexpr size_t rev_char_mask = char_mask << (bits_per_char * (letters_per_unit - 1));
         static constexpr storage_unit used_storage_mask = (static_cast<storage_unit>(1) << unit_used_bits) - 1;
 
+        [[always_inline]] static constexpr storage_unit letter_complement(const storage_unit& letter) noexcept {
+            return seqan3::complement(std::move((typename traits::alphabet_type()).assign_rank(letter))).to_rank();
+        };
+
         template<typename other_storage_unit>
         [[always_inline]] static constexpr other_storage_unit kmer_mask(const size_t& length) noexcept {
             constexpr size_t max_length = sizeof(other_storage_unit) * 8 / bits_per_char;
             if (length > max_length) {
                 return std::numeric_limits<other_storage_unit>::max(); //static_cast<other_storage_unit>(-1);
             }
-            return (static_cast<other_storage_unit>(1) << (length * bits_per_char));
+            return (static_cast<other_storage_unit>(1) << (length * bits_per_char)) - 1;
         };
 
         
@@ -540,6 +544,50 @@ inline constexpr bool operator==(
 }
 
 static_assert(std::is_standard_layout_v<compact_sequence_range<seq::dna4>>);
+
+enum sequence_strand_mode : uint8_t {
+    SEQUENCE_STRAND_FORWARD = 0,
+    SEQUENCE_STRAND_REVERSE_COMPLEMENT = 1,
+    SEQUENCE_STRAND_EQUAL = 2
+};
+
+// hasher
+template<
+    typename p_derived_t,
+    sequence_alphabet p_alphabet_t,
+    typename p_input_t,
+    typename p_output_t
+>
+struct hasher_base {
+    struct traits : public compact_sequence_range<p_alphabet_t>::compact_sequence_range_base::traits {
+        using output_t = p_output_t;
+        using input_t = p_input_t;
+
+        using hasher_return_t = std::pair<output_t, sequence_strand_mode>;
+
+        template <typename output_t_like>
+        [[always_inline]] static constexpr hasher_return_t select_min_hash_strand(
+            const output_t_like forward, 
+            const output_t_like reverse_complement
+        ) noexcept {
+            if (forward == reverse_complement) [[unlikely]] {
+                return std::make_pair(static_cast<output_t>(forward), SEQUENCE_STRAND_EQUAL);
+            } else if (forward < reverse_complement) {
+                return std::make_pair(static_cast<output_t>(forward), SEQUENCE_STRAND_FORWARD);
+            } else {
+                return std::make_pair(static_cast<output_t>(reverse_complement), SEQUENCE_STRAND_REVERSE_COMPLEMENT);
+            }
+        }
+
+
+    };
+};
+
+
+template<template<typename H_A, typename H_O> typename H, typename A, typename O = uint64_t, typename I = uint64_t, typename hasher_t = H<A, O>::template scalar_hash<I>>
+concept supports_scalar_hash = sequence_alphabet<A> && requires (hasher_t& hasher, I&& incoming) {
+	{ hasher.next(std::move(incoming), std::move(incoming)) } -> std::same_as<typename hasher_t::traits::hasher_return_t>;
+};
 
 };
 

@@ -7,7 +7,7 @@ rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bi
 rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bioseq--1.0.sql 2>/dev/null >/dev/null
 
 cd build && \
-cmake -G Ninja .. && cmake --build . && cmake --build . --target install && \
+cmake --preset dev .. && cmake --build . && cmake --build . --target install && \
 ./bioseq/bioseq_aligner ../data/target.fasta ../data/query.fasta
 #psql -h localhost -p 5432 -a -f ../bioseq/sql/setup.sql
 

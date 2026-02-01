@@ -408,32 +408,37 @@ static inline uint64_t hash64(uint64_t key, uint64_t mask)
 
 
 template<
-    std::ranges::contiguous_range R,
-    typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+	template<typename H_A, typename H_O> typename scalar_hash_t,
+	supports_compact_sequence_range R,
+	typename I = decltype(compact_sequence_range<R>().begin())
 >
 requires (
-	std::ranges::sized_range<R>,
-	requires (T const a) {
-        { seqan3::to_rank(a) };
-    },
-	requires () {
-        { seqan3::alphabet_size<T> };
-    }
+	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
-void bio_collect_minimizers(R&& seq) {
-	JustLog("bio_collect_minimizers()");
+inline void bio_collect_minimizers2(
+	compact_sequence_range<R>& seq,
+	const I& seq_begin,
+	const I& seq_end,
+	const size_t w,
+	const size_t k
+) {
+	using seq_traits = compact_sequence_range<R>::traits;
+	using hasher_t = scalar_hash_t<typename seq_traits::alphabet_type, uint64_t>::template scalar_hash<typename seq_traits::storage_unit>;
+	JustLog("bio_collect_minimizers2()");
 
 	constexpr uint64_t max_span = 1 << UNION_FIELD_WIDTH(MinimapSketch, sketch.sketch, span);
 
-	constexpr uint64_t alphabet_size = seqan3::alphabet_size<T>;
+	//constexpr uint64_t alphabet_size = seqan3::alphabet_size<T>;
 
-	constexpr uint64_t w = 10, k = 15;
+	//constexpr uint64_t w = 10, k = 15;
 	constexpr uint32_t rid = 0;
 
-	constexpr uint64_t mask = (1ULL<<2*k) - 1;
-	constexpr uint64_t shift1 = 2 * (k - 1);
+	const uint64_t mask = (1ULL<<2*k) - 1;
+	const uint64_t shift1 = 2 * (k - 1);
 
 	uint64_t kmer[2] = {0,0};
+
+	hasher_t hasher(k);
 
 	circular_append_buffer<MinimapSketch, max_span> buffer(w);
 	std::vector<MinimapSketch> results;
@@ -446,15 +451,16 @@ void bio_collect_minimizers(R&& seq) {
 
 	size_t pos = 0;
 	size_t seq_pos = 0;
-	auto iter = seq.begin();
+	auto iter = seq.template iter<BP>(seq_begin);
+	const auto end = seq.template iter<BP>(seq_end);
 
 	auto start = std::chrono::high_resolution_clock::now();
 	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
-		for(; iter != seq.end() && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
-			const auto nucl = iter->to_rank();
+		for(; iter != end && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
+			const auto nucl = *iter;
 
 			// Support ambigious?
-			if(alphabet_size > 4 && nucl >= 4) {
+			if(seq_traits::bits_per_char > 2 && nucl >= 4) {
 				// fuck!
 				buffer.push_back(MinimapSketch::getMax());
 				pos = 0;
@@ -462,8 +468,12 @@ void bio_collect_minimizers(R&& seq) {
 				kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
 				kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
 
-				if (kmer[0] == kmer[1]) continue;
+				const auto [c_hash, c_strand] = hasher.next(*iter, *iter);
+				
+
+				if (c_strand == SEQUENCE_STRAND_EQUAL) continue;
 				const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
+				JustLog("should: {}/{} was: {}/{}", kmer[strand], strand, c_hash, c_strand);
 				const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
 				++pos;
 
@@ -773,7 +783,18 @@ ATCGTAGCTAGTC\
 	auto xxxeq = testtest2 == testtest2;
 	JustLog("eq? {}", xxxeq);
 	
-	papiesz(testtest, testtest.begin(), testtest.end(), 1);
+	VecT state_forward = hn::Zero(d);
+	VecT state_reverse_compl = hn::Zero(d);
+
+
+	using outp_d_t = hn::ScalableTag<typename decltype(testtest)::traits::storage_unit>;
+	outp_d_t dd;
+	lexic_hasher<seq::dna4, decltype(testtest)::traits::storage_unit>::simd_hash<outp_d_t> hhh(dd, 3);
+	iterate_sequence_bp_simd(testtest, testtest.begin(), testtest.end(), [&](auto& d, auto&& incoming, auto&& outgoing){ //auto&& bp_del1
+		JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, incoming), hwy_str_as<seq::dna4>(d, outgoing));
+		hhh.next(d, incoming, outgoing);
+		//JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, bp));
+	}, 1);
 
 	// // auto e = testtest.iter<SYMBOL>(testtest.begin());
 	// // auto f = testtest.iter<SYMBOL>(testtest.end());
@@ -903,8 +924,9 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	std::vector<seq::dna4> FIXED_QUERY{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
 
 	// Uncomment for test
-	if constexpr (false) {
+	if constexpr (true) {
 		bioseq::simd::HWY_NAMESPACE::check_simd_packed_seq();
+		throw std::exception();
 	}
 	
 	
@@ -914,7 +936,14 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	//auto z = CompressedSeqanView(FIXED_QUERY);
 	//JustLog("z = {}", z.str());
 
-	bio_collect_minimizers(FIXED_QUERY);
+	auto query_compact = compact_sequence_range<seq::dna4>(FIXED_QUERY);
+	bio_collect_minimizers2<bioseq::simd::N_NEON::lexic_hasher>(
+		query_compact,
+		query_compact.begin(),
+		query_compact.end(),
+		10,
+		15
+	);
 
 	//bio_collect_minimizers(z);
 	//JustLog("X! = {}", FIXED_QUERY[0].to_rank());

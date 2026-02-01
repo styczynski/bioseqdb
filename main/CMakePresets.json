@@ -1,0 +1,14 @@
+{
+    "version": 3,
+    "configurePresets": [
+      {
+        "name": "dev",
+        "displayName": "Default development config",
+         "description": "Default build using Ninja generator",
+        "generator": "Ninja",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        }
+      }
+    ]
+  }

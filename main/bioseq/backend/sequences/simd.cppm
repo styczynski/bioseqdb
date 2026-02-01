@@ -5,6 +5,7 @@ module;
 
 #include "common.h"
 #include <string>
+#include <functional>
 
 export module bioseq_sequences.simd;
 
@@ -34,42 +35,6 @@ namespace hn = hwy::HWY_NAMESPACE;
 // kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
 // kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
 
-template<sequence_alphabet A, typename O>
-struct hasher {
-public:
-	using traits = compact_sequence_range<A>::compact_sequence_range_base::traits;
-	using alphabet_type = A;
-
-	// scalar
-	template<typename I>
-	class scalar_hash {
-	public:
-		using output_t = O;
-		using input_t = I;
-	private:
-		output_t mask;
-		size_t rev_shift;
-		output_t state_forward;
-		output_t state_reverse_compl;
-	public:
-		explicit scalar_hash(
-			const size_t& kmer_length
-		): mask(traits::template kmer_mask<output_t>(kmer_length)), state_forward(0), state_reverse_compl(0), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
-
-		constexpr output_t next(input_t&& incoming, input_t&& outgoing) {
-			// rc = ((rc << self.b as u32) & S::splat(self.mask)) ^ (r ^ S::splat(2));
-			state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
-			state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (A::rank_complement(outgoing)) << rev_shift;
-			return static_cast<output_t>(std::min(state_forward, state_reverse_compl));
-		}
-
-	};
-
-	// kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
-	// kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
-
-
-};
 
 // template<typename F, typename D>
 // concept is_simd_hash_function = requires (const D& d, hn::Vec<D>&& incoming, hn::Vec<D>&& outcoming, const F&& fn) {
@@ -116,16 +81,113 @@ public:
 //     }
 // };
 
+// hasher
+template<
+    typename p_derived_t,
+    sequence_alphabet p_alphabet_t,
+    typename p_input_t,
+    typename p_output_t
+>
+struct simd_hasher_base : hasher_base<p_derived_t, p_alphabet_t, p_input_t, p_output_t> {
+    struct traits : public simd_hasher_base<p_derived_t, p_alphabet_t, p_input_t, p_output_t>::hasher_base::traits {
+        using input_d_t = p_input_t;
+		using output_d_t = hn::ScalableTag<p_output_t>;
+		using input_vec_t = hn::Vec<input_d_t>;
+		using output_vec_t = hn::Vec<p_input_t>;
+		using hasher_return_t = output_vec_t;
+    };
+};
+
+template<sequence_alphabet alphabet_t, typename output_t>
+struct lexic_hasher {
+public:
+	//using traits = compact_sequence_range<alphabet_t>::compact_sequence_range_base::traits;
+
+	// scalar
+	template<typename input_t>
+	class scalar_hash : public hasher_base<
+        scalar_hash<input_t>,
+        alphabet_t,
+        input_t,
+        output_t
+    >{
+	public:
+        using traits = scalar_hash<input_t>::hasher_base::traits;
+	private:
+		output_t mask;
+		size_t rev_shift;
+		output_t state_forward;
+		output_t state_reverse_compl;
+	public:
+		explicit scalar_hash(
+			const size_t& kmer_length
+		): mask(traits::template kmer_mask<output_t>(kmer_length)), state_forward(0), state_reverse_compl(0), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
+
+		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
+			state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
+			state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (traits::letter_complement(outgoing)) << rev_shift;
+            return traits::select_min_hash_strand(state_forward, state_reverse_compl);
+		}
+	};
+
+	template<typename input_t>
+	class simd_hash : public simd_hasher_base<
+        simd_hash<input_t>,
+        alphabet_t,
+        input_t,
+        output_t
+    >{
+	public:
+        using traits = simd_hash<input_t>::simd_hasher_base::traits;
+	private:
+		traits::output_vec_t mask;
+		size_t rev_shift;
+		traits::output_vec_t state_forward;
+		traits::output_vec_t state_reverse_compl;
+	public:
+		explicit simd_hash(
+			const traits::input_d_t& d,
+			const size_t& kmer_length
+		): mask(hn::Set(d, traits::template kmer_mask<output_t>(kmer_length))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
+
+		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
+			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
+			// FIXME: complement!
+			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(hn::Xor(outgoing, hn::Set(d, -1)), rev_shift);
+			state_reverse_compl = hn::Or(hn::ShiftRight<traits::bits_per_char>(state_reverse_compl), new_vec);
+
+			//state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
+			//state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (traits::letter_complement(outgoing)) << rev_shift;
+
+			// We need to set bit to mark strand
+            // return hn::Min(
+			// 	hn::ShiftRight<1>(state_forward, ),
+			// 	hn::And() state_reverse_compl
+			// );
+			return hn::Min(state_forward, state_reverse_compl);
+		}
+        
+
+	};
+
+	// kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
+	// kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
+
+
+};
+
 template<
 	typename... delays_ts,
 	supports_compact_sequence_range R,
+	typename handler_fn_t,
 	typename I = decltype(compact_sequence_range<R>().begin()),
 	size_t max_delay = 256
 >
-inline void papiesz(
+inline void iterate_sequence_bp_simd(
 	const compact_sequence_range<R>& seq,
 	const I& begin,
 	const I& end,
+	handler_fn_t&& handler_fn,
 	delays_ts... delays
 ) {
     using seq_traits = compact_sequence_range<R>::traits;
@@ -186,11 +248,13 @@ inline void papiesz(
 		for (size_t bp_index = 0; bp_index < seq_traits::letters_per_unit; ++bp_index) {
 			// S::new([(1 << B) - 1; 8]);
 			
-			const VecT vec_bp = hn::And(chunk, bp_bitmask_vec);
+			std::array<VecT, sizeof...(delays)> all_bp_vecs;
+			VecT base_bp_vec = hn::And(chunk, bp_bitmask_vec);
 			chunk = hn::ShiftRightSame(chunk, seq_traits::bits_per_char);
 			//x.matrix[chunk_index] = shifted;
 			//buffer.push_back(shifted);
-			JustLog("next bp vec = {}", hwy_str<decltype(d), seq::dna4>(d, vec_bp));
+
+			//JustLog("next bp vec = {}", hwy_str<decltype(d), seq::dna4>(d, vec_bp));
 
 			// Check delayed
 			for(auto delay_no = 0; delay_no < sizeof...(delays); ++delay_no) {
@@ -203,15 +267,18 @@ inline void papiesz(
 					--counter;
 				}
 				// The same
-				const VecT delayed_bp = hn::And(delayed_buffer, bp_bitmask_vec);
+				all_bp_vecs[delay_no] = hn::And(delayed_buffer, bp_bitmask_vec);
 				delayed_buffer = hn::ShiftRightSame(delayed_buffer, seq_traits::bits_per_char);
-				JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
+				//JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
 			}
+			//std::apply(std::bind(handler_fn, d, base_bp_vec), all_bp_vecs);
+			//std::bind(handler_fn, d, base_bp_vec)();
+			std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(d, base_bp_vec), all_bp_vecs));
 
 			//const VecT hash = 
 			//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
 		}
-		JustLog("NEXT CHUNK ~");
+		//JustLog("NEXT CHUNK ~");
 		buffer.increment_iter(buffer_write_pos);
 	}
 }
