@@ -497,7 +497,7 @@ inline void bio_collect_minimizers2(
 
 			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
 				//&results, &current_min, current_min_pos
-				buffer.unsafe_filled_for_each_previous([&results, &current_min](const auto& _index, const auto& el) {
+				buffer.unsafe_filled_for_each([&results, &current_min](const auto& _index, const auto& el, const auto& _distance) {
 					// const auto xxx = current_min;
 					// const auto xxx2 = xxx.sketch.sketch.last_pos;
 					// const auto zzz = el.sketch.sketch.last_pos;
@@ -532,7 +532,7 @@ inline void bio_collect_minimizers2(
 				}
 
 				current_min.set_max();
-				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el) {
+				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& index, const auto& el, const auto& _distance) {
 					if (current_min >= el) {
 						current_min = el;
 						current_min_pos = index;
@@ -540,7 +540,7 @@ inline void bio_collect_minimizers2(
 				});
 
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) { // write identical k-mers
-					buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el) {
+					buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el, const auto& _distance) {
 						if (MinimapSketch::does_sketch_match(current_min, el)) {
 							results.push_back(el);
 						}
@@ -816,11 +816,20 @@ ATCGTAGCTAGTC\
 	using hash_mask_t = hn::Mask<outp_d_t>;
 	circular_append_buffer<hash_vec_t, 256> buffer(w);
 
-	constexpr hash_vec_t max_vec = hn::Set(dd, static_cast<traits::storage_unit>(-1));
-	hash_vec_t current_min = hn::Set(dd, static_cast<traits::storage_unit>(-1));
+	constexpr auto max_val = static_cast<traits::storage_unit>(-1);
+	const hash_vec_t max_vec = hn::Set(dd, max_val);
+	hash_vec_t current_min = hn::Set(dd, max_val);
 	hash_vec_t current_min_pos = hn::Set(dd, static_cast<traits::storage_unit>(buffer.get_begin()));
 
+	size_t output_size = 0;
+	traits::storage_unit output_vals[256];
+	size_t output_pos[256];
+
+	traits::storage_unit temp_buffer1[32];
+	traits::storage_unit temp_buffer2[32];
+
 	constexpr bool IS_INIT = true;
+	
 	iterate_sequence_bp_simd(testtest, testtest.begin(), testtest.end(), [&](auto& d, auto&& incoming, auto&& outgoing){ //auto&& bp_del1
 		JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, incoming), hwy_str_as<seq::dna4>(d, outgoing));
 		hash_vec_t hash_vec = hhh.next(d, incoming, outgoing);
@@ -835,8 +844,21 @@ ATCGTAGCTAGTC\
 		}
 
 		if ((pos == w + k - 1 && IS_INIT)) { // special case for the first window - because identical k-mers are not stored yet
-			buffer.unsafe_filled_for_each_previous([&](const auto& _index, const auto& el) {
-				
+			// Copied code here
+			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& distance) {
+				// Check if hash is the same, but position different
+				hash_mask_t values_to_append_mask = hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<traits::storage_unit>(index)), current_min_pos));
+				if (!hn::AllFalse(d, values_to_append_mask)) {
+					///
+					size_t write_i = output_size;
+					hn::StoreU(current_min, d, temp_buffer1);
+					hn::StoreU(hn::VecFromMask(d,values_to_append_mask), d, temp_buffer2);
+					for(size_t i=0; i<hn::Lanes(d); ++i) {
+						if (temp_buffer2[i]) {
+							JustLog("  . push_min rescan     {} (pos {})", temp_buffer1[i], pos+i*hn::Lanes(d)-distance);
+						}
+					}
+				}
 			});
 		}
 		hash_mask_t new_min_mask = hn::Le(buffer.last(), current_min);
@@ -845,10 +867,13 @@ ATCGTAGCTAGTC\
 
 		current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
 		current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
+		
+		const bool need_to_push_current_min = (pos >= k) && !hn::AllFalse(d, new_min_mask);
 
 		JustLog("  . val         (<==) = {}", hwy_str(d, buffer.last()))
 		JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
 		JustLog("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
+		JustLog("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
 
 		// Check if we need to update min
 		hash_vec_t last_write_pos = hn::Set(d, static_cast<traits::storage_unit>(buffer.last_write_pos()));
@@ -858,13 +883,48 @@ ATCGTAGCTAGTC\
 		JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
 		JustLog("  . need_to_rescan    = {}", need_to_rescan);
 
+		// Push current min
+		if (need_to_rescan || need_to_push_current_min) {
+			size_t write_i = output_size;
+
+			hn::StoreU(current_min, d, temp_buffer1);
+			hn::StoreU(hn::VecFromMask(d,new_min_mask), d, temp_buffer2);
+			for(size_t i=0; i<hn::Lanes(d); ++i) {
+				if (temp_buffer2[i]) {
+					JustLog("  . push_min            {} (pos {})", temp_buffer1[i], pos+i*hn::Lanes(d));
+				}
+			}
+
+			// const auto write_len = hn::CompressBlendedStore(current_min, new_min_mask, d, &output_vals[output_size]);
+			// output_size += write_len;
+			// for(; write_i < output_size; ++write_i) {
+			// 	output_pos[write_i] = ;
+			// }
+		}
+
 		if (need_to_rescan) {
 			current_min = max_vec;
-			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el) {
+			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& _distance) {
 				hash_mask_t new_min_mask = hn::Le(el, current_min);
 				hash_vec_t new_min_pos_val = hn::Set(d, static_cast<traits::storage_unit>(index));
 				current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
 				current_min = hn::IfThenElse(new_min_mask, el, current_min);
+			});
+			// Need to push any value equal to new min
+			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& distance) {
+				// Check if hash is the same, but position different
+				hash_mask_t values_to_append_mask = hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<traits::storage_unit>(index)), current_min_pos));
+				if (!hn::AllFalse(d, values_to_append_mask)) {
+					///
+					size_t write_i = output_size;
+					hn::StoreU(current_min, d, temp_buffer1);
+					hn::StoreU(hn::VecFromMask(d,values_to_append_mask), d, temp_buffer2);
+					for(size_t i=0; i<hn::Lanes(d); ++i) {
+						if (temp_buffer2[i]) {
+							JustLog("  . push_min rescan     {} (pos {})", temp_buffer1[i], pos+i*hn::Lanes(d)-distance);
+						}
+					}
+				}
 			});
 		}
 

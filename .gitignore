@@ -10,3 +10,4 @@ paradedb-experiments/target/
 
 **/.cache
 **/target/
+**/vcpkg_installed/

@@ -97,26 +97,28 @@ public:
 	}
 
 	template<typename F>
-	inline void unsafe_filled_for_each_previous(F fn) requires (!p_fixed_capacity) {
-        [[assume( _buf_pos <= _capacity )]];
-		for (auto j = _buf_pos; j < _capacity; ++j) {
-			fn(j, _buffer[j]);
+	inline void unsafe_filled_for_each(F fn) requires (!p_fixed_capacity) {
+		size_t distance = _capacity - 1;
+        [[assume( _buf_pos < _capacity )]];
+		for (auto j = _buf_pos; j < _capacity; ++j, --distance) {
+			fn(j, _buffer[j], distance);
 		}
-		for (auto j = get_begin(); j < _buf_pos; ++j) {
-			fn(j, _buffer[j]);
+		for (auto j = get_begin(); j < _buf_pos; ++j, --distance) {
+			fn(j, _buffer[j], distance);
 		}
 	}
 
-	template<typename F>
-	inline void unsafe_filled_for_each(F fn) requires (!p_fixed_capacity) {
-		[[assume( _buf_pos <= _capacity )]];
-        for (auto j = _buf_pos; j < _capacity; ++j) {
-			fn(j, _buffer[j]);
-		}
-		for (auto j = get_begin(); j <= _buf_pos; ++j) {
-			fn(j, _buffer[j]);
-		}
-	}
+	// template<typename F>
+	// inline void unsafe_filled_for_each(F fn) requires (!p_fixed_capacity) {
+	// 	size_t distance = _capacity - 1;
+	// 	[[assume( _buf_pos < _capacity )]];
+    //     for (auto j = _buf_pos; j < _capacity; ++j, --distance) {
+	// 		fn(j, _buffer[j], distance);
+	// 	}
+	// 	for (auto j = get_begin(); j <= _buf_pos; ++j, --distance) {
+	// 		fn(j, _buffer[j], distance);
+	// 	}
+	// }
 };
 
 
