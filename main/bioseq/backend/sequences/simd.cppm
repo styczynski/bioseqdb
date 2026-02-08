@@ -23,6 +23,12 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+template <typename T>
+inline constexpr std::pair<T, T> int_div_ceil(const T& val, const T& div) {
+	const T a = (val + div - 1) / div;
+	return std::make_pair(a, a * div - val);
+}
+
 // let mut fw: u32 = 0;
 // let mut rc: u32 = 0;
 // move |(a, r)| {
@@ -181,18 +187,19 @@ template<
 	supports_compact_sequence_range R,
 	typename handler_fn_t,
 	typename I = decltype(compact_sequence_range<R>().begin()),
-	size_t max_delay = 256
+	size_t max_delay_bound = 256
 >
 inline void iterate_sequence_bp_simd(
 	const compact_sequence_range<R>& seq,
 	const I& begin,
 	const I& end,
 	handler_fn_t&& handler_fn,
+	const size_t context,
 	delays_ts... delays
 ) {
     using seq_traits = compact_sequence_range<R>::traits;
-	
-	assert(max_delay >= std::max({ delays... }));
+	const size_t max_delay = std::max({ delays... });
+	assert(max_delay <= max_delay_bound);
 
 	const hn::ScalableTag<typename seq_traits::storage_unit> d;
 	using VecT = hn::Vec<decltype(d)>;
@@ -214,11 +221,20 @@ inline void iterate_sequence_bp_simd(
 	// data buffer
 
 	//constexpr size_t max_delay = std::max({ delays... });
-	constexpr size_t buffer_size = (max_delay / seq_traits::letters_per_unit) + hn::MaxLanes(d) + 1;
-	JustLog("buffer size is {}", buffer_size);
 
-	using buffer_t = circular_append_buffer<VecT, buffer_size, true, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator>;
-	buffer_t buffer;
+	const size_t matrix_size = hn::Lanes(d) * hn::Lanes(d);
+	constexpr size_t matrix_size_bound = hn::MaxLanes(d) * hn::MaxLanes(d);
+
+	const size_t buffer_size = (int_div_ceil(max_delay / seq_traits::letters_per_unit, matrix_size).first + 1) * matrix_size;
+	constexpr size_t buffer_size_bound = (int_div_ceil(max_delay_bound / seq_traits::letters_per_unit, matrix_size_bound).first + 1) * matrix_size_bound;
+
+	const auto& [chunks_count, chunks_count_mod] = int_div_ceil(seq.size()-context, matrix_size-context); 
+	const size_t full_chunks_count = chunks_count-1;
+	const size_t last_chunk_units = chunks_count_mod + context;
+	JustLog("buffer size is {} / max {} (chunks_count={} / last chunk {})", buffer_size, buffer_size_bound, chunks_count, last_chunk_units);
+
+	using buffer_t = circular_append_buffer<VecT, buffer_size_bound, 0, false, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator>;
+	buffer_t buffer(buffer_size);
 
 	std::array<std::tuple<typename buffer_t::iterator, size_t, const size_t, VecT>, sizeof...(delays)> delays_state{
 		(std::make_tuple(buffer.get_begin(), delays, seq_traits::letters_per_unit - 1, hn::Zero(d)))...
@@ -230,27 +246,16 @@ inline void iterate_sequence_bp_simd(
 	// size_t delay_counter1 = delay1;
 	// VecT delay_chunk1 = hn::Zero(d);
 
-
-	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
-	mat.partial_fill(d, end-begin, [&](const auto index, const auto lanes) -> auto {
-		const auto iter_ptr = static_cast<const typename seq_traits::storage_unit*>(&(*iter));
-		return &(iter_ptr[index * lanes]);
-	});
-	JustLog("xmat = {}", hwy_str_as<seq::dna4>(d, mat));
-
-
-	// auto delayed_iter = buffer.get_begin();
-    // Iterate each vector of loaded matrix of size [lanes x lanes]
-	for (size_t chunk_index = 0; chunk_index < hn::Lanes(d); ++chunk_index) {
+	auto handle_row = [&buffer_write_pos, &buffer, &handler_fn](){
 		// Iterate every bp of lane
 		//matrix read_matrix(buffer.get_ptr_iter(buffer_write_pos));
-		VecT chunk = buffer.get_value_iter(buffer_write_pos);
+		VecT row = buffer.get_value_iter(buffer_write_pos);
 		for (size_t bp_index = 0; bp_index < seq_traits::letters_per_unit; ++bp_index) {
 			// S::new([(1 << B) - 1; 8]);
 			
 			std::array<VecT, sizeof...(delays)> all_bp_vecs;
-			VecT base_bp_vec = hn::And(chunk, bp_bitmask_vec);
-			chunk = hn::ShiftRightSame(chunk, seq_traits::bits_per_char);
+			VecT base_bp_vec = hn::And(row, bp_bitmask_vec);
+			row = hn::ShiftRightSame(row, seq_traits::bits_per_char);
 			//x.matrix[chunk_index] = shifted;
 			//buffer.push_back(shifted);
 
@@ -280,7 +285,47 @@ inline void iterate_sequence_bp_simd(
 		}
 		//JustLog("NEXT CHUNK ~");
 		buffer.increment_iter(buffer_write_pos);
+	};
+
+	for(size_t chunk_no=0; chunk_no<full_chunks_count; ++chunk_no) {
+		matrix mat(buffer.get_ptr_iter(buffer_write_pos));
+
+		// We read only full matrices
+		assert(buffer.get_forward_capacity() >= matrix_size);
+		iter += mat.fill(d, context,static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+		mat.transpose(d);
+		assert(buffer.get_forward_capacity() >= matrix_size);
+		// } else {
+		// 	assert(buffer.get_forward_capacity() >= partial_matrix_size);
+		// 	mat.partial_fill(d, end-begin, [&](const auto index, const auto lanes) -> auto {
+		// 		const auto iter_ptr = static_cast<const typename seq_traits::storage_unit*>(&(*iter));
+		// 		return &(iter_ptr[index * lanes]);
+		// 	});
+		// };
+
+		// mat.partial_fill(d, end-begin, [&](const auto index, const auto lanes) -> auto {
+		// 	const auto iter_ptr = static_cast<const typename seq_traits::storage_unit*>(&(*iter));
+		// 	return &(iter_ptr[index * lanes]);
+		// });
+		JustLog("xmat = {}", hwy_str_as<seq::dna4>(d, mat));
+
+
+		// auto delayed_iter = buffer.get_begin();
+		// Iterate each vector of loaded matrix of size [lanes x lanes]
+		for (size_t row_index = 0; row_index < hn::Lanes(d); ++row_index) {
+			handle_row();
+		}
 	}
+	// Handle reminder
+	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
+	// We read only full matrices
+	assert(buffer.get_forward_capacity() >= last_chunk_units);
+	assert(static_cast<size_t>(end - iter) == last_chunk_units);
+	mat.partial_fill(d, last_chunk_units, static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+	for (size_t row_index = 0; row_index < hn::Lanes(d); ++row_index) {
+		handle_row();
+	}
+
 }
 
 

@@ -16,7 +16,7 @@ BOOST_STRONG_TYPEDEF(size_t, circular_append_buffer_iter);
 template<typename T, typename B>
 struct empty_circular_append_buffer_allocator {};
 
-template <typename T, size_t S, bool p_fixed_capacity = false, typename base_array_type = void, template<typename Tt, typename Bt> typename circular_append_buffer_allocator = empty_circular_append_buffer_allocator>
+template <typename T, size_t S, size_t alignment = 16, bool p_fixed_capacity = false, typename base_array_type = void, template<typename Tt, typename Bt> typename circular_append_buffer_allocator = empty_circular_append_buffer_allocator>
 class circular_append_buffer {
 public:
     using iterator = circular_append_buffer_iter;
@@ -24,7 +24,7 @@ public:
 
     static constexpr size_t size_mask = real_size - 1;
 private:
-    std::conditional_t<std::is_same_v<base_array_type, void>, T[real_size], base_array_type> _buffer;
+	alignas(alignment) std::conditional_t<std::is_same_v<base_array_type, void>, T[real_size], base_array_type> _buffer;
 	
     //T _buffer[real_size];
 	
@@ -64,16 +64,20 @@ public:
         return &_buffer[iter];
     }
 
-    constexpr void increment_iter(iterator& iter) requires (!p_fixed_capacity) {
+	[[nodiscard]] constexpr size_t get_forward_capacity() const {
+		return _capacity - _buf_pos;
+	}
+
+    constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (!p_fixed_capacity) {
         static_assert(std::is_same_v<decltype(_capacity), iterator>);
-        ++iter;
-        if (iter == _capacity) [[unlikely]] {
-            iter = 0;
+        iter += increment;
+        while (iter >= _capacity) {
+            iter-= _capacity;
         }
     }
 
-    constexpr void increment_iter(iterator& iter) requires (p_fixed_capacity) {
-        iter = (iter + 1) & size_mask;
+    constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (p_fixed_capacity) {
+        iter = (iter + increment) & size_mask;
     }
 
 	// void push_back(const T value) {

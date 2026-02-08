@@ -814,7 +814,7 @@ ATCGTAGCTAGTC\
 	const size_t k = 4;
 	using hash_vec_t = hn::Vec<outp_d_t>;
 	using hash_mask_t = hn::Mask<outp_d_t>;
-	circular_append_buffer<hash_vec_t, 256> buffer(w);
+	circular_append_buffer<hash_vec_t, 256, HWY_MAX_BYTES> buffer(w);
 
 	constexpr auto max_val = static_cast<traits::storage_unit>(-1);
 	const hash_vec_t max_vec = hn::Set(dd, max_val);
@@ -822,14 +822,13 @@ ATCGTAGCTAGTC\
 	hash_vec_t current_min_pos = hn::Set(dd, static_cast<traits::storage_unit>(buffer.get_begin()));
 
 	size_t output_size = 0;
-	traits::storage_unit output_vals[256];
+	HWY_ALIGN traits::storage_unit output_vals[256];
 	size_t output_pos[256];
 
-	traits::storage_unit temp_buffer1[32];
-	traits::storage_unit temp_buffer2[32];
+	HWY_ALIGN traits::storage_unit temp_buffer1[32];
+	HWY_ALIGN traits::storage_unit temp_buffer2[32];
 
 	constexpr bool IS_INIT = true;
-	
 	iterate_sequence_bp_simd(testtest, testtest.begin(), testtest.end(), [&](auto& d, auto&& incoming, auto&& outgoing){ //auto&& bp_del1
 		JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, incoming), hwy_str_as<seq::dna4>(d, outgoing));
 		hash_vec_t hash_vec = hhh.next(d, incoming, outgoing);

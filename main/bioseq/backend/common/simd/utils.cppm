@@ -93,6 +93,11 @@ auto hwy_str(D& d, const VecT& v) {
 	return buf;
 }
 
+template <typename T>
+inline constexpr std::pair<T, T> int_div_floor(const T& val, const T& div) {
+	return std::make_pair(val / div, val % div);
+}
+
 template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
 class square_lane_matrix {
 public:
@@ -103,23 +108,59 @@ public:
 
 	explicit square_lane_matrix(p_matrix_t&& p_matrix): matrix(p_matrix) {}
 
-	template<typename Functor> 
-	constexpr void partial_fill(
-		D& d, const size_t data_available, Functor fn
+	// template<typename T>
+	// constexpr std::vector<std::vector<T>> to_vectors(D& d) const {
+	// 	std::vector<std::vector<T>> ret;
+	// 	const size_t rows = hn::Lanes(d);
+	// 	ret.resize(rows);
+	// 	for(size_t i = 0; i < rows; ++i) {
+	// 		hn::Store();
+	// 		ret[i] = ;
+	// 	}
+	// }
+
+	template<typename T> 
+	constexpr size_t fill(
+		D& d, const size_t context, const T* data
 	) {
-        const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
-        const size_t rows_to_load = data_available_cap / hn::Lanes(d);
-        const size_t last_row_lanes = data_available_cap % hn::Lanes(d);
-        size_t i = 0;
-		for(; i < rows_to_load; ++i) {
-			matrix[i] = hn::LoadU(d, fn(i, hn::Lanes(d)));
+		const size_t rows_to_load = hn::Lanes(d);
+		const size_t row_offset = rows_to_load - context;
+		for(size_t i = 0; i < rows_to_load; ++i) {
+			matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
 		}
-        if (last_row_lanes > 0 && i < hn::Lanes(d)) {
-            matrix[i] = hn::LoadN(d, fn(i, hn::Lanes(d)), last_row_lanes);
-            ++i;
-        }
-        for(; i < hn::Lanes(d); ++i) {
-			matrix[i] = Zero(d);
+		return rows_to_load * row_offset;
+	}
+
+	template<typename T>
+	constexpr size_t partial_fill(
+		D& d, const size_t data_available, const size_t context, const T* data
+	) {
+		assert(context <= hn::Lanes(d));
+
+		if (data_available < context) [[unlikely]] {
+			const size_t loaded_units = std::min(data_available, hn::Lanes(d));
+			matrix[0] = hn::LoadN(d, data, loaded_units);
+			for(size_t i = 1; i < hn::Lanes(d); ++i) {
+				matrix[i] = Zero(d);
+			}
+			return data_available;
+		} else {
+			//const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
+			const size_t row_offset = hn::Lanes(d) - context;
+			const auto& [full_rows_count, last_row_lanes] = int_div_floor(data_available-context, row_offset);
+			const size_t rows_to_load = 1+full_rows_count; //data_available_cap / hn::Lanes(d);
+			size_t i = 0;
+			for(; i < rows_to_load; ++i) {
+				matrix[i] = hn::LoadU(d, &(data[i * rows_to_load]));
+			}
+			if (last_row_lanes > 0 && i < hn::Lanes(d)) {
+				matrix[i] = hn::LoadN(d, &(data[i * rows_to_load]), last_row_lanes);
+				++i;
+			}
+			for(; i < hn::Lanes(d); ++i) {
+				matrix[i] = Zero(d);
+			}
+			return rows_to_load * row_offset + last_row_lanes;
 		}
 	}
 
