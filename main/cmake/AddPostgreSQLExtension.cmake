@@ -10,11 +10,36 @@ set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version
 find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
 # Helper command to add extensions
-function(AddCommonTarget LIBRARY_NAME)
+function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
+  message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
-  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY)
-  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS)
+  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN)
+  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}>")
+
+  set(EXTENSION_X_INTERNAL_TESTS ${EXTENSION_TESTS})
+
+  if(ENABLE_TEST_TARGETS STREQUAL "OFF")
+    unset(EXTENSION_X_INTERNAL_TESTS)
+  endif()
+
+  if(EXTENSION_X_INTERNAL_TESTS)
+    if(EXTENSION_TYPE STREQUAL "EXEC")
+      if(NOT EXTENSION_MAIN)
+        message("You need to specify MAIN argument (name of the source file containing main function) when you use TESTS for TYPE EXEC")
+      endif()
+    endif()
+    set(EXTENSION_TYPE "EXEC")
+    list(APPEND EXTENSION_SOURCES ${EXTENSION_X_INTERNAL_TESTS})
+    message("Source exclude '${EXTENSION_MAIN}' from '${EXTENSION_SOURCES}'")
+    list(FILTER EXTENSION_SOURCES EXCLUDE REGEX ${EXTENSION_MAIN})
+  endif()
+    # else()
+  #   if(EXTENSION_TYPE STREQUAL "EXEC")
+  #   list(APPEND EXTENSION_SOURCES ${EXTENSION_MAIN})
+  #   endif()
+  # endif()
 
   if(NOT EXTENSION_TYPE)
     message(FATAL_ERROR "TYPE setting not given to the AddCommonTarget() function. Must be one of ${SUPPORTED_TARGET_TYPES}")
@@ -32,6 +57,13 @@ function(AddCommonTarget LIBRARY_NAME)
   if(NOT EXTENSION_NAME)
     set(EXTENSION_NAME ${LIBRARY_NAME})
   endif()
+
+  # Override tests target name
+  if(EXTENSION_X_INTERNAL_TESTS)
+    set(EXTENSION_NAME ${LIBRARY_NAME})
+  endif()
+
+  message("Adding target '${EXTENSION_NAME}' (library name: '${LIBRARY_NAME}') (${EXTENSION_X_INTERNAL_TESTS}) <${EXTENSION_SOURCES}>")
 
   # Executable target
   if(IS_EXEC)
@@ -111,6 +143,12 @@ function(AddCommonTarget LIBRARY_NAME)
       )
     endif()
 
+    # Tests
+    if(EXTENSION_X_INTERNAL_TESTS)
+      find_package(Catch2 3 REQUIRED)
+      target_link_libraries(${LIBRARY_NAME} PRIVATE Catch2::Catch2WithMain)
+    endif()
+
     # Boost
     if(EXTENSION_BOOST)
       find_package(Boost 1.90.0 REQUIRED COMPONENTS ${EXTENSION_BOOST})
@@ -145,6 +183,7 @@ function(AddCommonTarget LIBRARY_NAME)
         if(EXTENSION_CXX_MOD_BASE_DIRS)
           message("Enable CXX modules for the target ${LIBRARY_NAME}")
           set(PG_EXT_FILE_SET_NAME "${LIBRARY_NAME}_CXX_MODULES_FILE_SET")
+          message("%%%% CHECKING CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
           target_sources(
             ${LIBRARY_NAME} PRIVATE
             FILE_SET "${PG_EXT_FILE_SET_NAME}"
@@ -224,4 +263,25 @@ function(AddCommonTarget LIBRARY_NAME)
       add_dependencies(${LIBRARY_NAME} "format_${EXTENSION_NAME}")
     endif()
   endif()
+
+  message("Added target ${EXTENSION_NAME}")
+endfunction()
+
+function(AddCommonTargetX LIBRARY_NAME)
+  set(SUBARGS ${ARGN})
+  set(options)
+  set(oneValueArgs)
+  set(multiValueArgs TESTS)
+  cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  message("TESTEESTSTSTS ${EXTENSION_TESTS}")
+  if(EXTENSION_TESTS)
+   AddCommonTarget("${LIBRARY_NAME}_tests_exec" "ON" ${SUBARGS})
+   add_custom_target(
+      "test_${LIBRARY_NAME}"
+      COMMAND "./${LIBRARY_NAME}_tests_exec"
+      DEPENDS "${LIBRARY_NAME}_tests_exec"
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+  endif()
+  AddCommonTarget("${LIBRARY_NAME}" "OFF" ${SUBARGS})
 endfunction()

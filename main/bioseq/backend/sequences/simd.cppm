@@ -194,9 +194,12 @@ inline void iterate_sequence_bp_simd(
 	const I& begin,
 	const I& end,
 	handler_fn_t&& handler_fn,
-	const size_t context,
+	//const size_t context,
 	delays_ts... delays
 ) {
+	// Remove later
+	constexpr size_t context = 1;
+
     using seq_traits = compact_sequence_range<R>::traits;
 	const size_t max_delay = std::max({ delays... });
 	assert(max_delay <= max_delay_bound);
@@ -246,7 +249,7 @@ inline void iterate_sequence_bp_simd(
 	// size_t delay_counter1 = delay1;
 	// VecT delay_chunk1 = hn::Zero(d);
 
-	auto handle_row = [&buffer_write_pos, &buffer, &handler_fn](){
+	auto handle_row = [&](){ //[&buffer_write_pos, &buffer, &handler_fn, &d](){
 		// Iterate every bp of lane
 		//matrix read_matrix(buffer.get_ptr_iter(buffer_write_pos));
 		VecT row = buffer.get_value_iter(buffer_write_pos);
@@ -321,7 +324,7 @@ inline void iterate_sequence_bp_simd(
 	// We read only full matrices
 	assert(buffer.get_forward_capacity() >= last_chunk_units);
 	assert(static_cast<size_t>(end - iter) == last_chunk_units);
-	mat.partial_fill(d, last_chunk_units, static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+	mat.partial_fill(d, last_chunk_units, context, static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
 	for (size_t row_index = 0; row_index < hn::Lanes(d); ++row_index) {
 		handle_row();
 	}

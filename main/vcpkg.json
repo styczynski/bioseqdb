@@ -1,7 +1,8 @@
 {
   "dependencies": [
     "highway",
+    "libassert",
     "reflectcpp",
-    "libassert"
+    "catch2"
   ]
 }
