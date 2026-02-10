@@ -117,6 +117,16 @@ inline constexpr std::pair<T, T> int_div_floor(const T& val, const T& div) {
 	return std::make_pair(val / div, val % div);
 }
 
+template<typename D>
+concept d_simd_resizeable_x3 = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>>>) <= 8;
+
+template<typename D>
+concept d_simd_resizeable_x2 = sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>>) <= 8;
+
+template<typename D>
+concept d_simd_resizeable_x1 = sizeof(hwy::MakeWide<hn::TFromD<D>>) <= 8;
+
+
 template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
 class square_lane_matrix {
 public:
@@ -181,10 +191,10 @@ public:
 			const size_t rows_to_load = 1+full_rows_count; //data_available_cap / hn::Lanes(d);
 			size_t i = 0;
 			for(; i < rows_to_load; ++i) {
-				matrix[i] = hn::LoadU(d, &(data[i * rows_to_load]));
+				matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
 			}
 			if (last_row_lanes > 0 && i < hn::Lanes(d)) {
-				matrix[i] = hn::LoadN(d, &(data[i * rows_to_load]), last_row_lanes);
+				matrix[i] = hn::LoadN(d, &(data[i * row_offset]), context+last_row_lanes);
 				++i;
 			}
 			for(; i < hn::Lanes(d); ++i) {
@@ -194,83 +204,156 @@ public:
 		}
 	}
 
+	static constexpr void transpose1(D& d, p_matrix_t& matrix) {};
+
+	static constexpr void transpose2(D& d, p_matrix_t& matrix) {
+		const VecT v0 = matrix[0]; // A B
+		const VecT v1 = matrix[1]; // C D
+		const VecT t1 = InterleaveUpper(d, v0, v1); // A C
+		const VecT t0 = InterleaveLower(d, v0, v1); // B D
+		matrix[0] = t0;
+		matrix[1] = t1;
+	};
+
+	static constexpr void transpose4(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x1<D>) {
+		ASSERT(false);
+	}
+
+	static constexpr void transpose4(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x1<D>) {
+		const hn::RepartitionToWide<D> dw;
+
+		const VecT v0 = matrix[0];
+		const VecT v1 = matrix[1];
+		const VecT v2 = matrix[2];
+		const VecT v3 = matrix[3];
+
+		const VecT t0 = InterleaveLower(d, v0, v1);
+		const VecT t1 = InterleaveLower(d, v2, v3);
+		const VecT t2 = InterleaveUpper(d, v0, v1);
+		const VecT t3 = InterleaveUpper(d, v2, v3);
+
+		matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+		matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
+		matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
+		matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+	};
+
+	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x2<D>) {
+		ASSERT(false);
+	}
+
+	static constexpr void transpose8(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x2<D>) {
+		const hn::RepartitionToWide<D> dw;
+		
+		const VecT v0 = matrix[0];
+		const VecT v1 = matrix[1];
+		const VecT v2 = matrix[2];
+		const VecT v3 = matrix[3];
+
+		const VecT v4 = matrix[4];
+		const VecT v5 = matrix[5];
+		const VecT v6 = matrix[6];
+		const VecT v7 = matrix[7];
+
+		const VecT t0 = InterleaveLower(d, v0, v1);
+		const VecT t1 = InterleaveLower(d, v2, v3);
+		const VecT t2 = InterleaveLower(d, v4, v5);
+		const VecT t3 = InterleaveLower(d, v6, v7); 
+
+		const VecT t4 = InterleaveUpper(d, v0, v1);
+		const VecT t5 = InterleaveUpper(d, v2, v3);
+		const VecT t6 = InterleaveUpper(d, v4, v5);
+		const VecT t7 = InterleaveUpper(d, v6, v7);
+		
+		const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+		const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
+		const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
+		const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+		
+		const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
+		const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
+		const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
+		const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
+
+		const hn::RepartitionToWideX2<D> dww;
+
+		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
+		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
+		
+		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
+		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
+
+		matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
+		matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
+
+		matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
+		matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
+	};
+
+	static constexpr void transpose16(D& d, p_matrix_t& matrix) requires (!d_simd_resizeable_x3<D>) {
+		ASSERT(false);
+	}
+
+	static constexpr void transpose16(D& d, p_matrix_t& matrix) requires (d_simd_resizeable_x3<D>) {
+		auto matrix_lower = &matrix[8];
+		transpose8(d, matrix);
+		transpose8(d, matrix_lower);
+
+		const VecT e0 = matrix[0];
+		const VecT e1 = matrix[1];
+		const VecT e2 = matrix[2];
+		const VecT e3 = matrix[3];
+		const VecT e4 = matrix[4];
+		const VecT e5 = matrix[5];
+		const VecT e6 = matrix[6];
+		const VecT e7 = matrix[7];
+
+		const VecT e8 = matrix[8];
+		const VecT e9 = matrix[9];
+		const VecT e10 = matrix[10];
+		const VecT e11 = matrix[11];
+		const VecT e12 = matrix[12];
+		const VecT e13 = matrix[13];
+		const VecT e14 = matrix[14];
+		const VecT e15 = matrix[15];
+
+		const hn::RepartitionToWideX3<D> dww;
+		
+		matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e8)));
+		matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e8)));
+		matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e9)));
+		matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e9)));
+		matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e2), BitCast(dww, e10)));
+		matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e2), BitCast(dww, e10)));
+		matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e3), BitCast(dww, e11)));
+		matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e3), BitCast(dww, e11)));
+
+		matrix[8] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e12)));
+		matrix[9] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e12)));
+		matrix[10] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e13)));
+		matrix[11] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e13)));
+		matrix[12] = BitCast(d, InterleaveLower(dww, BitCast(dww, e6), BitCast(dww, e14)));
+		matrix[13] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e6), BitCast(dww, e14)));
+		matrix[14] = BitCast(d, InterleaveLower(dww, BitCast(dww, e7), BitCast(dww, e15)));
+		matrix[15] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e7), BitCast(dww, e15)));
+	};
+
 	inline constexpr void transpose(
 		D& d
 	) {
 		// For size = 2
 		if (hn::Lanes(d) == 1) {
-			// No-op
+			transpose1(d, matrix);
 		} else if (hn::Lanes(d) == 2) {
-			const VecT v0 = matrix[0]; // A B
-			const VecT v1 = matrix[1]; // C D
-			const VecT t1 = InterleaveUpper(d, v0, v1); // A C
-			const VecT t0 = InterleaveLower(d, v0, v1); // B D
-			matrix[0] = t0;
-			matrix[1] = t1;
+			transpose2(d, matrix);
 		} else if (hn::Lanes(d) == 4) {
-			const hn::RepartitionToWide<D> dw;
-
-			const VecT v0 = matrix[0];
-			const VecT v1 = matrix[1];
-			const VecT v2 = matrix[2];
-			const VecT v3 = matrix[3];
-
-			const VecT t0 = InterleaveLower(d, v0, v1);
-			const VecT t1 = InterleaveLower(d, v2, v3);
-			const VecT t2 = InterleaveUpper(d, v0, v1);
-			const VecT t3 = InterleaveUpper(d, v2, v3);
-
-			matrix[0] = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			matrix[1] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			matrix[2] = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			matrix[3] = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
+			transpose4(d, matrix);
 		} else if (hn::Lanes(d) == 8) {
-			const hn::RepartitionToWide<D> dw;
-			
-			const VecT v0 = matrix[0];
-			const VecT v1 = matrix[1];
-			const VecT v2 = matrix[2];
-			const VecT v3 = matrix[3];
-
-			const VecT v4 = matrix[4];
-			const VecT v5 = matrix[5];
-			const VecT v6 = matrix[6];
-			const VecT v7 = matrix[7];
-
-			const VecT t0 = InterleaveLower(d, v0, v1);
-			const VecT t1 = InterleaveLower(d, v2, v3);
-			const VecT t2 = InterleaveLower(d, v4, v5);
-			const VecT t3 = InterleaveLower(d, v6, v7); 
-
-			const VecT t4 = InterleaveUpper(d, v0, v1);
-			const VecT t5 = InterleaveUpper(d, v2, v3);
-			const VecT t6 = InterleaveUpper(d, v4, v5);
-			const VecT t7 = InterleaveUpper(d, v6, v7);
-			
-			const VecT e0 = BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			const VecT e1 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t0), BitCast(dw, t1)));
-			const VecT e2 = BitCast(d, InterleaveLower(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			const VecT e3 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t2), BitCast(dw, t3)));
-			
-			const VecT e4 = BitCast(d, InterleaveLower(dw, BitCast(dw, t4), BitCast(dw, t5)));
-			const VecT e5 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t4), BitCast(dw, t5)));
-			const VecT e6 = BitCast(d, InterleaveLower(dw, BitCast(dw, t6), BitCast(dw, t7)));
-			const VecT e7 = BitCast(d, InterleaveUpper(dw, BitCast(dw, t6), BitCast(dw, t7)));
-
-			const hn::RepartitionToWideX2<D> dww;
-
-			matrix[0] = BitCast(d, InterleaveLower(dww, BitCast(dww, e0), BitCast(dww, e2)));
-			matrix[1] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e0), BitCast(dww, e2)));
-			
-			matrix[2] = BitCast(d, InterleaveLower(dww, BitCast(dww, e1), BitCast(dww, e3)));
-			matrix[3] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e1), BitCast(dww, e3)));
-
-			matrix[4] = BitCast(d, InterleaveLower(dww, BitCast(dww, e4), BitCast(dww, e6)));
-			matrix[5] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e4), BitCast(dww, e6)));
-
-			matrix[6] = BitCast(d, InterleaveLower(dww, BitCast(dww, e5), BitCast(dww, e7)));
-			matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
-			
+			transpose8(d, matrix);
+		} else if (hn::Lanes(d) == 16) {
+			transpose16(d, matrix);
+		} else {
+			ASSERT(false, fmt::format("square_lane_matrix does not support transpose() for lane number: {}", hn::Lanes(d)));
 		}
 	}
 };
