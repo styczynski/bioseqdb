@@ -1545,12 +1545,18 @@ struct formatter<T>: formatter<std::string> {
 //fmt::format(
 export bool enable_logging = false;
 
-export inline void log_configure() {
+export inline void log_configure(const bool is_testing_mode = false) {
+  if (is_testing_mode) {
+    enable_logging = true;
+    fmtlog::setLogLevel(fmtlog::DBG);
+    fmtlog::setThreadName("test-main");
+  } else {
   #ifndef NO_POSTGRES
     fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", false);
   #endif
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("main");
+  }
 }
 
 //export namespace fmto = fmt;

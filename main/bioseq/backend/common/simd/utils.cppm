@@ -35,6 +35,25 @@ struct hwy_vector_string_printer {
 	}
 };
 
+template <class D, typename T, class VecT = hn::Vec<D>>
+std::vector<T> hwy_to_vector(D& d, const VecT& v) {
+	constexpr size_t lane_u = 0;
+	constexpr size_t max_lanes = 16;
+
+	const size_t N = hn::Lanes(d);
+	#if HWY_TARGET == HWY_RVV
+	auto storage = hn::AllocateAligned<T>(N);
+	T* HWY_RESTRICT lanes = storage.get();
+	#else
+	// This works around an SVE compile error on GCC 11 and 12. Calling
+	// AllocateAligned here would seem to require it be marked with HWY_ATTR.
+	HWY_ALIGN T lanes[hn::MaxLanes(d)];
+	#endif
+	Store(v, d, lanes);
+
+	return std::vector<T>(lanes, lanes+N);
+};
+
 template <class D, typename I = void, class VecT = hn::Vec<D>>
 requires (
     requires (D& d, const VecT& v) {
@@ -118,6 +137,17 @@ public:
 	// 		ret[i] = ;
 	// 	}
 	// }
+
+	template<typename T>
+	std::vector<std::vector<T>> to_scalar_2d(D& d) const {
+		std::vector<std::vector<T>> data;
+		const size_t rows_to_load = hn::Lanes(d);
+		data.resize(rows_to_load);
+		for(size_t i = 0; i < rows_to_load; ++i) {
+			data[i] = hwy_to_vector<D, T, VecT>(d, matrix[i]);
+		}
+		return data;
+	}
 
 	template<typename T> 
 	constexpr size_t fill(
@@ -242,6 +272,28 @@ public:
 			matrix[7] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e5), BitCast(dww, e7)));
 			
 		}
+	}
+};
+
+template<typename D, typename T, typename VecT = hn::Vec<D>>
+class simd_from_vector {
+private:
+	hwy::AlignedFreeUniquePtr<VecT[]> storage;
+public:
+	explicit simd_from_vector(
+		const D& d,
+		std::vector<T> data
+	) {
+		const int units_size = data.size() / hn::Lanes(d);
+    	storage = hwy::AllocateAligned<T>(units_size);
+		T const* write_iter = static_cast<T const*>(data.data());
+    	for(size_t i=0; i<units_size; ++i) {
+			storage[i] = hn::Load(d, &write_iter[i*hn::Lanes(d)]);
+		}
+	}
+
+	VecT* data() const {
+		return *storage;
 	}
 };
 

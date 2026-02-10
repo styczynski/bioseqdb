@@ -278,7 +278,7 @@ function(AddCommonTargetX LIBRARY_NAME)
    AddCommonTarget("${LIBRARY_NAME}_tests_exec" "ON" ${SUBARGS})
    add_custom_target(
       "test_${LIBRARY_NAME}"
-      COMMAND "./${LIBRARY_NAME}_tests_exec"
+      COMMAND "./${LIBRARY_NAME}_tests_exec" "--reporter" "console::out=-::colour-mode=ansi"
       DEPENDS "${LIBRARY_NAME}_tests_exec"
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
