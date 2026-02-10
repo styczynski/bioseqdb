@@ -1,14 +1,7 @@
-#include <hwy/highway.h>
-#include <hwy/print-inl.h>
-#include <hwy/aligned_allocator.h>
-#include <catch2/catch_test_macros.hpp>
-#include <catch2/catch_template_test_macros.hpp>
-#include <catch2/generators/catch_generators.hpp>
-#include <libassert/assert-catch2.hpp>
-
+#include "common_simd.h"
+#include "common_tests.h"
 #include "common.h"
 
-#include <ranges>
 
 import bioseq_simd.utils;
 import testing;
@@ -51,9 +44,7 @@ TEMPLATE_TEST_CASE("SIMD matrix transpose() produces transposed matrix", "[simd]
     square_lane_matrix<d_t> simd_matrix(buf);
     simd_matrix.fill(d, 0, flat_matrix.data());
 
-    JustLog("mat = {}", hwy_str(d, simd_matrix));
     simd_matrix.transpose(d);
-    JustLog("mat = {}", hwy_str(d, simd_matrix));
     auto transposed = simd_matrix.template to_scalar_2d<unit_t>(d);
 
     std::vector<std::vector<unit_t>> expected_transposed;

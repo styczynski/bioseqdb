@@ -6,6 +6,7 @@ rm /Applications/Postgres.app/Contents/Versions/17/lib/postgresql/bioseq.dylib 2
 rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bioseq.control 2>/dev/null >/dev/null                                                                                                                                                                                                                                        
 rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bioseq--1.0.sql 2>/dev/null >/dev/null
 
+export CMAKE_EXPORT_COMPILE_COMMANDS=1 && \
 cd build && \
 cmake --preset dev .. && cmake --build . && \
 cmake --build . --target test_bioseq_aligner && \

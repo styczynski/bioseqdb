@@ -129,81 +129,7 @@ concept d_simd_resizeable_x1 = sizeof(hwy::MakeWide<hn::TFromD<D>>) <= 8;
 
 template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
 class square_lane_matrix {
-public:
-	using vec_t = VecT;
-	using matrix_t = p_matrix_t;
-
-	p_matrix_t& matrix;
-
-	explicit square_lane_matrix(p_matrix_t&& p_matrix): matrix(p_matrix) {}
-
-	// template<typename T>
-	// constexpr std::vector<std::vector<T>> to_vectors(D& d) const {
-	// 	std::vector<std::vector<T>> ret;
-	// 	const size_t rows = hn::Lanes(d);
-	// 	ret.resize(rows);
-	// 	for(size_t i = 0; i < rows; ++i) {
-	// 		hn::Store();
-	// 		ret[i] = ;
-	// 	}
-	// }
-
-	template<typename T>
-	std::vector<std::vector<T>> to_scalar_2d(D& d) const {
-		std::vector<std::vector<T>> data;
-		const size_t rows_to_load = hn::Lanes(d);
-		data.resize(rows_to_load);
-		for(size_t i = 0; i < rows_to_load; ++i) {
-			data[i] = hwy_to_vector<D, T, VecT>(d, matrix[i]);
-		}
-		return data;
-	}
-
-	template<typename T> 
-	constexpr size_t fill(
-		D& d, const size_t context, const T* data
-	) {
-		const size_t rows_to_load = hn::Lanes(d);
-		const size_t row_offset = rows_to_load - context;
-		for(size_t i = 0; i < rows_to_load; ++i) {
-			matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
-		}
-		return rows_to_load * row_offset;
-	}
-
-	template<typename T>
-	constexpr size_t partial_fill(
-		D& d, const size_t data_available, const size_t context, const T* data
-	) {
-		assert(context <= hn::Lanes(d));
-
-		if (data_available < context) [[unlikely]] {
-			const size_t loaded_units = std::min(data_available, hn::Lanes(d));
-			matrix[0] = hn::LoadN(d, data, loaded_units);
-			for(size_t i = 1; i < hn::Lanes(d); ++i) {
-				matrix[i] = Zero(d);
-			}
-			return data_available;
-		} else {
-			//const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
-			const size_t row_offset = hn::Lanes(d) - context;
-			const auto& [full_rows_count, last_row_lanes] = int_div_floor(data_available-context, row_offset);
-			const size_t rows_to_load = 1+full_rows_count; //data_available_cap / hn::Lanes(d);
-			size_t i = 0;
-			for(; i < rows_to_load; ++i) {
-				matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
-			}
-			if (last_row_lanes > 0 && i < hn::Lanes(d)) {
-				matrix[i] = hn::LoadN(d, &(data[i * row_offset]), context+last_row_lanes);
-				++i;
-			}
-			for(; i < hn::Lanes(d); ++i) {
-				matrix[i] = Zero(d);
-			}
-			return rows_to_load * row_offset + last_row_lanes;
-		}
-	}
-
+private:
 	static constexpr void transpose1(D& d, p_matrix_t& matrix) {};
 
 	static constexpr void transpose2(D& d, p_matrix_t& matrix) {
@@ -337,6 +263,80 @@ public:
 		matrix[14] = BitCast(d, InterleaveLower(dww, BitCast(dww, e7), BitCast(dww, e15)));
 		matrix[15] = BitCast(d, InterleaveUpper(dww, BitCast(dww, e7), BitCast(dww, e15)));
 	};
+public:
+	using vec_t = VecT;
+	using matrix_t = p_matrix_t;
+
+	p_matrix_t& matrix;
+
+	explicit square_lane_matrix(p_matrix_t&& p_matrix): matrix(p_matrix) {}
+
+	// template<typename T>
+	// constexpr std::vector<std::vector<T>> to_vectors(D& d) const {
+	// 	std::vector<std::vector<T>> ret;
+	// 	const size_t rows = hn::Lanes(d);
+	// 	ret.resize(rows);
+	// 	for(size_t i = 0; i < rows; ++i) {
+	// 		hn::Store();
+	// 		ret[i] = ;
+	// 	}
+	// }
+
+	template<typename T>
+	std::vector<std::vector<T>> to_scalar_2d(D& d) const {
+		std::vector<std::vector<T>> data;
+		const size_t rows_to_load = hn::Lanes(d);
+		data.resize(rows_to_load);
+		for(size_t i = 0; i < rows_to_load; ++i) {
+			data[i] = hwy_to_vector<D, T, VecT>(d, matrix[i]);
+		}
+		return data;
+	}
+
+	template<typename T> 
+	constexpr size_t fill(
+		D& d, const size_t context, const T* data
+	) {
+		const size_t rows_to_load = hn::Lanes(d);
+		const size_t row_offset = rows_to_load - context;
+		for(size_t i = 0; i < rows_to_load; ++i) {
+			matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
+		}
+		return rows_to_load * row_offset;
+	}
+
+	template<typename T>
+	constexpr size_t partial_fill(
+		D& d, const size_t data_available, const size_t context, const T* data
+	) {
+		assert(context <= hn::Lanes(d));
+
+		if (data_available < context) [[unlikely]] {
+			const size_t loaded_units = std::min(data_available, hn::Lanes(d));
+			matrix[0] = hn::LoadN(d, data, loaded_units);
+			for(size_t i = 1; i < hn::Lanes(d); ++i) {
+				matrix[i] = Zero(d);
+			}
+			return data_available;
+		} else {
+			//const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
+			const size_t row_offset = hn::Lanes(d) - context;
+			const auto& [full_rows_count, last_row_lanes] = int_div_floor(data_available-context, row_offset);
+			const size_t rows_to_load = 1+full_rows_count; //data_available_cap / hn::Lanes(d);
+			size_t i = 0;
+			for(; i < rows_to_load; ++i) {
+				matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
+			}
+			if (last_row_lanes > 0 && i < hn::Lanes(d)) {
+				matrix[i] = hn::LoadN(d, &(data[i * row_offset]), context+last_row_lanes);
+				++i;
+			}
+			for(; i < hn::Lanes(d); ++i) {
+				matrix[i] = Zero(d);
+			}
+			return rows_to_load * row_offset + last_row_lanes;
+		}
+	}
 
 	inline constexpr void transpose(
 		D& d
