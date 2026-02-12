@@ -20,11 +20,11 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
 
   set(EXTENSION_X_INTERNAL_TESTS ${EXTENSION_TESTS})
 
-  if(ENABLE_TEST_TARGETS STREQUAL "OFF")
+  if("${ENABLE_TEST_TARGET}" STREQUAL "OFF" OR "${ENABLE_TEST_TARGET}" STREQUAL "NEVER")
     unset(EXTENSION_X_INTERNAL_TESTS)
   endif()
 
-  if(EXTENSION_X_INTERNAL_TESTS)
+  if("${ENABLE_TEST_TARGET}" STREQUAL "ON")
     if(EXTENSION_TYPE STREQUAL "EXEC")
       if(NOT EXTENSION_MAIN)
         message("You need to specify MAIN argument (name of the source file containing main function) when you use TESTS for TYPE EXEC")
@@ -59,7 +59,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   endif()
 
   # Override tests target name
-  if(EXTENSION_X_INTERNAL_TESTS)
+  if("${ENABLE_TEST_TARGET}" STREQUAL "ON")
     set(EXTENSION_NAME ${LIBRARY_NAME})
   endif()
 
@@ -144,7 +144,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
     endif()
 
     # Tests
-    if(EXTENSION_X_INTERNAL_TESTS)
+    if(NOT "${ENABLE_TEST_TARGET}" STREQUAL "NEVER")
       find_package(Catch2 3 REQUIRED)
       target_link_libraries(${LIBRARY_NAME} PRIVATE Catch2::Catch2WithMain)
     endif()
@@ -282,6 +282,8 @@ function(AddCommonTargetX LIBRARY_NAME)
       DEPENDS "${LIBRARY_NAME}_tests_exec"
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
+    AddCommonTarget("${LIBRARY_NAME}" "OFF" ${SUBARGS})
+  else()
+    AddCommonTarget("${LIBRARY_NAME}" "NEVER" ${SUBARGS})
   endif()
-  AddCommonTarget("${LIBRARY_NAME}" "OFF" ${SUBARGS})
 endfunction()

@@ -49,7 +49,7 @@ find_package(libassert CONFIG REQUIRED)
 
 file(GLOB_RECURSE A_SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/aligner/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.cpp)
 file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/alignment/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm)
-file(GLOB_RECURSE A_SRC_TESTS ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/test_*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/test_*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/test_*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/test_*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/test_*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/test_*.cpp)
+file(GLOB_RECURSE A_SRC_TESTS ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/*_test.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*_test.c ${CMAKE_CURRENT_LIST_DIR}/aligner/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*_test.cpp)
 
 list (APPEND A_SRC_TESTS ${A_SRC_FILES})
 
