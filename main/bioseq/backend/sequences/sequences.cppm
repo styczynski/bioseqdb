@@ -53,6 +53,7 @@ std::string decode_compressed_seq_el(const T& val)  {
     T buf = val;
     for(auto i = 0; i < bps_count; ++i) {
         // reverse with: bps_count - i - 1
+        // FIXME: 3 here cannot be hardcoded
         ret[i] = A().assign_rank(buf & 3).to_char();
         buf >>= 2;
     }
@@ -95,6 +96,14 @@ struct compact_sequence_range_base {
 
         [[always_inline]] static constexpr storage_unit letter_complement(const storage_unit& letter) noexcept {
             return seqan3::complement(std::move((typename traits::alphabet_type()).assign_rank(letter))).to_rank();
+        };
+
+        [[always_inline]] static constexpr alphabet_type letter_to_symbol(const storage_unit& letter) noexcept {
+            return (alphabet_type()).assign_rank(letter & char_mask);
+        };
+
+        [[always_inline]] static constexpr char letter_to_char(const storage_unit& letter) noexcept {
+            return letter_to_symbol(letter).to_char();
         };
 
         template<typename other_storage_unit>
@@ -212,7 +221,7 @@ struct compact_sequence_range_base {
         typename iterator_traits<M>::dereference_t _dereference() const;
 
 
-        template<> iterator_traits<BP>::dereference_t _dereference<BP>() const {
+        template<> inline iterator_traits<BP>::dereference_t _dereference<BP>() const {
             if constexpr (traits::letters_per_unit == 1) {
                 return *this->base();
             } else {
@@ -220,7 +229,7 @@ struct compact_sequence_range_base {
             }
         }
 
-        template<> iterator_traits<SYMBOL>::dereference_t _dereference<SYMBOL>() const {
+        template<> inline iterator_traits<SYMBOL>::dereference_t _dereference<SYMBOL>() const {
             typename traits::alphabet_type alph;
             return alph.assign_rank(_dereference<BP>());
         }
@@ -340,7 +349,7 @@ struct compact_sequence_range_base {
     }
 
     constexpr size_t byte_size() const {
-        return super()->size() * sizeof(typename traits::storage_unit) + sizeof(derived_range_t);
+        return super()->size() * sizeof(typename traits::storage_unit); //+ sizeof(derived_range_t);
     }
 };
 

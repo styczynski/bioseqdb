@@ -5,6 +5,8 @@ module;
 
 #include "common.h"
 
+#include <tuple>
+
 export module bioseq_simd.utils;
 import mlogging;
 
@@ -49,7 +51,7 @@ std::vector<T> hwy_to_vector(D& d, const VecT& v) {
 	// AllocateAligned here would seem to require it be marked with HWY_ATTR.
 	HWY_ALIGN T lanes[hn::MaxLanes(d)];
 	#endif
-	Store(v, d, lanes);
+	hn::Store(v, d, lanes);
 
 	return std::vector<T>(lanes, lanes+N);
 };
@@ -306,7 +308,7 @@ public:
 	}
 
 	template<typename T>
-	constexpr size_t partial_fill(
+	constexpr std::pair<size_t, size_t> partial_fill(
 		D& d, const size_t data_available, const size_t context, const T* data
 	) {
 		assert(context <= hn::Lanes(d));
@@ -317,24 +319,28 @@ public:
 			for(size_t i = 1; i < hn::Lanes(d); ++i) {
 				matrix[i] = Zero(d);
 			}
-			return data_available;
+			const size_t loaded_rows = 0;
+			return std::make_pair(loaded_rows, loaded_units);
 		} else {
 			//const size_t data_available_cap = std::min(data_available, hn::Lanes(d) * hn::Lanes(d));
 			const size_t row_offset = hn::Lanes(d) - context;
 			const auto& [full_rows_count, last_row_lanes] = int_div_floor(data_available-context, row_offset);
 			const size_t rows_to_load = 1+full_rows_count; //data_available_cap / hn::Lanes(d);
+			size_t partial_filled_rows = 0;
 			size_t i = 0;
 			for(; i < rows_to_load; ++i) {
 				matrix[i] = hn::LoadU(d, &(data[i * row_offset]));
 			}
 			if (last_row_lanes > 0 && i < hn::Lanes(d)) {
-				matrix[i] = hn::LoadN(d, &(data[i * row_offset]), context+last_row_lanes);
+				partial_filled_rows = context+last_row_lanes;
+				matrix[i] = hn::LoadN(d, &(data[i * row_offset]), partial_filled_rows);
 				++i;
 			}
 			for(; i < hn::Lanes(d); ++i) {
 				matrix[i] = Zero(d);
 			}
-			return rows_to_load * row_offset + last_row_lanes;
+			return std::make_pair(full_rows_count, partial_filled_rows);
+			//rows_to_load * row_offset + last_row_lanes;
 		}
 	}
 
