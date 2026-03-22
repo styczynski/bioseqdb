@@ -60,6 +60,16 @@ std::string decode_compressed_seq_el(const T& val)  {
     return ret;
 }
 
+template<sequence_alphabet alphabet_t>
+constexpr std::string symbols_vector_to_string(const std::vector<alphabet_t>& substr) {
+    std::string result;
+    result.reserve(substr.size());
+    for(const auto& letter : substr) {
+        result.push_back(letter.to_char());
+    }
+    return result;
+}
+
 // New impl
 
 template<
@@ -325,14 +335,27 @@ struct compact_sequence_range_base {
 
     template<typename I>
     requires (is_valid_derived_iter<I>::value == true)
-    constexpr std::string to_string(I begin, I end) {
+    constexpr std::optional<size_t> slow_find_symbols_left(I begin, I end, std::vector<typename traits::alphabet_type> sub_seq, size_t start_symbol_pos = 0) {
+        const auto& seq_str = to_string(begin, end);
+        const auto& sub_str = symbols_vector_to_string(sub_seq);
+        const auto pos = seq_str.find(sub_str, start_symbol_pos);
+        //JustLog("FIND <{}> in <{}> -> {} [skip = start_symbol_pos]", seq_str, sub_str, pos);
+        if (pos == std::string::npos) {
+            return std::nullopt;
+        }
+        return pos;
+    }
+
+    template<typename I>
+    requires (is_valid_derived_iter<I>::value == true)
+    constexpr std::string to_string(I begin, I end, bool split_units = false) {
         std::string result;
         typename traits::alphabet_type alph;
         result.reserve((end - begin) * traits::letters_per_unit);
         const auto _begin = iter<SYMBOL, I>(begin);
         const auto _end = iter<SYMBOL, I>(end);
         for(auto letter = _begin; letter != _end; ++letter) {
-            if (letter.bit_no() == 0) {
+            if (letter.bit_no() == 0 && split_units) {
                 result += "|";
             }
             result.push_back(letter->to_char());
@@ -340,8 +363,8 @@ struct compact_sequence_range_base {
         return result;
     }
 
-    constexpr std::string to_string() {
-        return to_string(super()->cbegin(), super()->cend());
+    constexpr std::string to_string(bool split_units = false) {
+        return to_string(super()->cbegin(), super()->cend(), split_units);
     }
 
     constexpr size_t bp_size() const {
@@ -612,7 +635,7 @@ struct formatter<compact_sequence_range<R>>: formatter<std::string> {
     using T = compact_sequence_range<R>;
     template <typename FormatContext>
     auto format(compact_sequence_range<R> seq, FormatContext& ctx) const {
-      return formatter<std::string>::format(fmt::format("sequence<size={}|B{}>({}->b{} +{})[{}]", seq.bp_size(), seq.byte_size(), T::traits::letters_per_unit, T::traits::unit_width, seq.padding(), seq.to_string()), ctx);
+      return formatter<std::string>::format(fmt::format("sequence<size={}|B{}>({}->b{} +{})[{}]", seq.bp_size(), seq.byte_size(), T::traits::letters_per_unit, T::traits::unit_width, seq.padding(), seq.to_string(true)), ctx);
     }
 };
 

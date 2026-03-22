@@ -806,7 +806,7 @@ where
         // without +o, since we don't need them in the stride.
         let num_kmers_stride = this.len.saturating_sub(context - 1);
         let n = num_kmers_stride
-            .div_ceil(L)
+            .div_ceil(L) // 8
             .next_multiple_of(factor * Self::C8);
         let bytes_per_chunk = n / Self::C8;
         let padding = Self::C8 * L * bytes_per_chunk - num_kmers_stride;

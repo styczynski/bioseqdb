@@ -295,10 +295,82 @@ public:
 		return data;
 	}
 
+	template<typename T, size_t K> 
+	constexpr size_t fill_with_offsets(
+		D& d, const std::array<size_t, K> offsets, const T* data
+	) {
+		assert(K >= hn::Lanes(d));
+		assert(std::is_sorted(offsets));
+		
+		const size_t rows_to_load = hn::Lanes(d);
+		for(size_t i = 0; i < rows_to_load; ++i) {
+			matrix[i] = hn::LoadU(d, &(data[offsets[i]]));
+		}
+		return rows_to_load;
+	}
+
+	template<typename T, size_t K>
+	constexpr std::pair<size_t, size_t> partial_fill_with_offsets(
+		D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
+	) {
+		assert(K >= hn::Lanes(d));
+		assert(std::is_sorted(offsets));
+
+		const size_t rows_to_load = hn::Lanes(d);
+		size_t data_p = 0;
+		size_t partial_filled_rows = 0;
+		size_t full_rows_count = 0;
+		for(size_t i = 0; i < rows_to_load; ++i) {
+			data_p = offsets[i];
+			if (data_p + rows_to_load > data_available) {
+				// We cannot load entire row
+				matrix[i] = hn::LoadN(d, &(data[data_p]), data_available);
+				partial_filled_rows = data_available;
+			} else {
+				matrix[i] = hn::LoadU(d, &(data[data_p]));
+				++full_rows_count;
+			}
+		}
+		return std::make_pair(full_rows_count, partial_filled_rows);
+	}
+
+	// OLD IMPL
+	// template<typename T, size_t K>
+	// constexpr std::pair<size_t, size_t> partial_fill_with_offsets(
+	// 	D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
+	// ) {
+	// 	assert(K >= hn::Lanes(d));
+	// 	assert(std::is_sorted(offsets));
+
+	// 	const size_t rows_to_load = hn::Lanes(d);
+	// 	size_t i = 0;
+	// 	size_t data_p = 0;
+	// 	size_t partial_filled_rows = 0;
+	// 	for(; i < rows_to_load; ++i) {
+	// 		data_p = offsets[i];
+	// 		if (data_p + rows_to_load > data_available) {
+	// 			// We cannot load entire row
+	// 			partial_filled_rows = data_p + rows_to_load - data_available;
+	// 			break;
+	// 		}
+	// 		matrix[i] = hn::LoadU(d, &(data[data_p]));
+	// 	}
+	// 	const size_t full_rows_count = i;
+	// 	if (i < rows_to_load && partial_filled_rows > 0) {
+	// 		matrix[i] = hn::LoadN(d, &(data[data_p]), partial_filled_rows);
+	// 		++i;
+	// 	}
+	// 	for(; i < hn::Lanes(d); ++i) {
+	// 		matrix[i] = Zero(d);
+	// 	}
+	// 	return std::make_pair(full_rows_count, partial_filled_rows);
+	// }
+
 	template<typename T> 
 	constexpr size_t fill(
 		D& d, const size_t context, const T* data
 	) {
+		assert(context <= hn::Lanes(d));
 		const size_t rows_to_load = hn::Lanes(d);
 		const size_t row_offset = rows_to_load - context;
 		for(size_t i = 0; i < rows_to_load; ++i) {

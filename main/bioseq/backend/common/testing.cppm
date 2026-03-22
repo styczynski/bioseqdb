@@ -19,6 +19,13 @@ std::vector<T> increasing_vector(size_t length, T start = 0) {
     return v; 
 }
 
+template<typename T, size_t L>
+std::vector<T> increasing_array(T start = 0) {
+    std::array<T, L> v(L);
+    std::iota(v.begin(), v.end(), start);
+    return v; 
+}
+
 template<typename T>
 std::vector<std::vector<T>> vector_increasing_matrix_2d(size_t dim_rows, size_t dim_cols, T start = 0) {
     std::vector<std::vector<T>> v(dim_cols);

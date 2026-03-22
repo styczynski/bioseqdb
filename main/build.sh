@@ -9,7 +9,7 @@ rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bi
 export CMAKE_EXPORT_COMPILE_COMMANDS=1 && \
 cd build && \
 cmake --preset dev .. && cmake --build . && \
-./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[sequences]" #cmake --build . --target test_bioseq_aligner && \
+./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[simd-new-x]" #cmake --build . --target test_bioseq_aligner && \
 exit 0 && \
 cmake --build . --target install && \
 ./bioseq/bioseq_aligner ../data/target.fasta ../data/query.fasta

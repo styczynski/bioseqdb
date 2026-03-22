@@ -50,7 +50,7 @@ fn test_on_inputs(mut f: impl FnMut(usize, usize, &[u8], AsciiSeq, PackedSeq)) {
     }
 }
 
-#[cfg(not(debug_assertions))]
+//[cfg(not(debug_assertions))]
 #[test]
 fn minimizers_fwd() {
     fn f<H: KmerHasher>(hasher: impl Fn(usize) -> H) {
