@@ -267,17 +267,22 @@ void test_sequence(T testtest) {
 //     assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
 // };
 
-TEST_CASE("Sequence SIMD full itreration for short sequence DNA4", "[simd-new-x]") {
-    test_sequence(compact_sequence_range<seq::dna4>(DNA4_SEQ_SHORT));
+TEMPLATE_TEST_CASE("Sequence SIMD full itreration for short sequence DNA4", "[simd-new-x]", seq::dna4, std::vector<seq::dna4>) {
+    test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_SHORT));
 };
 
-TEST_CASE("Sequence SIMD full itreration for short sequence DNA5", "[simd-new-x]") {
-    test_sequence(compact_sequence_range<seq::dna5>(DNA5_SEQ_SHORT));
+TEMPLATE_TEST_CASE("Sequence SIMD full itreration for short sequence DNA5", "[simd-new-x]", seq::dna5, std::vector<seq::dna5>) {
+    test_sequence(compact_sequence_range<TestType>(DNA5_SEQ_SHORT));
 };
 
-TEST_CASE("Sequence SIMD full itreration for medium sequence DNA4", "[simd-new-x]") {
-    test_sequence(compact_sequence_range<seq::dna4>(DNA4_SEQ_MEDIUM));
+TEMPLATE_TEST_CASE("Sequence SIMD full itreration for medium sequence DNA4", "[simd-new-x]", seq::dna4, std::vector<seq::dna4>) {
+    test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_MEDIUM));
 };
+
+// TEMPLATE_TEST_CASE("LOLTEST", "[simd-new-x]", std::vector<seq::dna4>) {
+//     test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_SHORT));
+// };
+
 
 // TEMPLATE_TEST_CASE("Sequence SIMD itreration", "[sequences][simd]", uint8_t) {
 //     std::vector<seq::dna4> FIXED_TARGET5{

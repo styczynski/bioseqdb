@@ -373,7 +373,8 @@ inline void iterate_sequence_bp_simd_offsets(
 
 		// We read only full matrices
 		assert(buffer.get_forward_capacity() >= matrix_size);
-		iter += mat.fill_with_offsets(d, offsets,static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+		// iter += mat.fill_with_offsets(d, offsets,static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+		iter += mat.fill_with_offsets(d, offsets, seq.read_cptr(iter));
 		mat.transpose(d);
 		assert(buffer.get_forward_capacity() >= matrix_size);
 		// } else {
@@ -410,7 +411,8 @@ inline void iterate_sequence_bp_simd_offsets(
 	// JustLog("ASSERT HERE = {} === {} <{}>", static_cast<size_t>(end - iter) * seq_traits::letters_per_unit - seq.padding(), offsets[hn::Lanes(d)-1] * seq_traits::letters_per_unit + bps_last_lane_extra + bps_last_chunk, seq.size());
 	// JustLog("ASSERT HERE2! = {} === {} <{}>", static_cast<size_t>(end - iter) * seq_traits::letters_per_unit - seq.padding(), offsets[hn::Lanes(d)-1] * seq_traits::letters_per_unit + bps_last_chunk, seq.size());
 	// JustLog("XXX {}", static_cast<size_t>(end - iter) * seq_traits::letters_per_unit - offsets[hn::Lanes(d)-1] * seq_traits::letters_per_unit);
-	// JustLog("YYY {}", bps_last_chunk);
+
+	//JustLog("YYY dicst={} lperunit={} {} ({})", static_cast<size_t>(end - iter), seq_traits::letters_per_unit, bps_last_chunk);
 
 	DEBUG_ASSERT(
 		static_cast<size_t>(end - iter) * seq_traits::letters_per_unit - offsets[hn::Lanes(d)-1] * seq_traits::letters_per_unit \
@@ -430,7 +432,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	
 	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
 	const auto& [present_columns_left_count, present_rows_last_left] = mat.partial_fill_with_offsets(
-		d, end - iter, offsets, static_cast<const typename seq_traits::storage_unit*>(&(*iter))
+		d, end - iter, offsets, seq.read_cptr(iter) //static_cast<const typename seq_traits::storage_unit*>(&(*iter))
 	);
 	mat.transpose(d);
 	JustLog("mat partial = {}, {} ({})", present_columns_left_count, present_rows_last_left, end - iter);
@@ -458,8 +460,10 @@ inline void iterate_sequence_bp_simd_offsets(
 		return;
 	}
 
-	DEBUG_ASSERT(main_counter_none > 1, "None counter cannot be less than 1.");
-	DEBUG_ASSERT(main_counter_only_left > 1, "Only-left counter cannot be less than 1.");
+	//JustLog("UMCA UMCA :DDD counter_none={} counmter_left={} <lchunk={}>", main_counter_none, main_counter_only_left, bps_last_chunk);
+
+	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
+	DEBUG_ASSERT(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
 	DEBUG_ASSERT(main_counter_none <= seq.size(), "Sanity check. If this fails, there's probably size_t overflow");
 

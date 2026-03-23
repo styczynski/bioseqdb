@@ -420,6 +420,8 @@ public:
         friend class boost::iterator_core_access;
         friend class compact_sequence_range<R>;
 
+        template <typename R2> friend class compact_sequence_range<R2>::iterator_impl;
+
         iterator_impl() = default;
 
         explicit iterator_impl(base_iterator_type const& it)
@@ -429,7 +431,28 @@ public:
 
         traits::storage_unit dereference() const {
             return static_cast<traits::storage_unit>(seqan3::to_rank(*this->base()));
-        }
+        };
+
+        // template <
+        //     class OtherDerived, class OtherIterator, class OtherVal, class OtherCat, class OtherRef, class OtherDiff
+        // >
+        // // (iterator_impl const& other) const {
+        // typename traits::storage_unit distance_to(boost::iterator_adaptor<OtherDerived, OtherIterator, OtherVal, OtherCat, OtherRef, OtherDiff> const& other) const {
+        //     return 0; //std::distance(this->base(), other.base());
+        // };
+
+        // template <
+        //     class OtherDerived, class OtherIterator, class OtherVal, class OtherCat, class OtherRef, class OtherDiff
+        // >
+        // typename traits::storage_unit operator-(boost::iterator_adaptor<OtherDerived, OtherIterator, OtherVal, OtherCat, OtherRef, OtherDiff> const& other) const {
+        //     return std::distance(this->base(), other.base());
+        // };
+
+        size_t operator-(iterator_impl const& other) const {
+            // JustLog("operator- {} {} = {}", (int64_t)&(*(this->base())), (int64_t)&(*other.base()), static_cast<size_t>(this->base() - other.base()));
+            return static_cast<size_t>(this->base() - other.base());
+            //return std::distance(this->base(), other.base());
+        };
     };
 
     iterator_impl begin() {
@@ -472,6 +495,14 @@ public:
     ) {
         return a._data == b._data;
     }
+
+    constexpr static const typename traits::storage_unit* read_cptr(const iterator_impl& it) {
+        // This is required to cast pointer
+        static_assert(sizeof(typename traits::alphabet_type) == sizeof(typename traits::storage_unit));
+        static_assert(std::is_standard_layout<typename traits::alphabet_type>::value);
+
+        return (const typename traits::storage_unit*)(&(*(it.base())));
+    };
 };
 
 template<
@@ -552,6 +583,10 @@ public:
 
     auto operator <=>(const compact_sequence_range<A>&) const = default;
     bool constexpr operator==(const compact_sequence_range<A>&) const = default;
+
+    constexpr static const typename traits::storage_unit* read_cptr(const iterator& it) {
+        return static_cast<const typename traits::storage_unit*>(&(*it));
+    };
 };
 
 // // sequence operators
