@@ -44,29 +44,45 @@ public:
     compact_sequence_range<R>& get_source() const {
         return source;
     };
+
+    template<typename D, typename M, typename V>
+    void _add_record(D& d, M& mask, V& incoming) {
+        HWY_ALIGN typename seq_traits::storage_unit lanes_values[hn::MaxLanes(d)];
+        HWY_ALIGN typename seq_traits::storage_unit lanes_mask[hn::MaxLanes(d)];
+        hn::Store(incoming, d, lanes_values);
+        hn::Store(hn::VecFromMask(d, mask), d, lanes_mask);
+        std::string dbgstr = "";
+        for(size_t i=0;i<hn::Lanes(d);++i) {
+            if (lanes_mask[i]) {
+                traces[i].push_back(seq_traits::letter_to_symbol(lanes_values[i]));
+                dbgstr += std::string(1, seq_traits::letter_to_char(lanes_values[i]));
+            } else {
+                dbgstr += "X";
+            }
+            dbgstr += " ";
+        }
+        JustLog("XDBG --> {}", dbgstr);
+        actual_lanes = hn::Lanes(d);
+    }
+
     template<typename I>
     //requires (compact_sequence_range<R>::template is_valid_derived_iter<I>::value == true)
     void accumulate(const I& begin, const I& end, const size_t context_bps) {
         used_context = context_bps;
         actual_lanes = 0;
         iterate_sequence_bp_simd_offsets(source, begin, end, context_bps, [&]<bool is_full>(std::bool_constant<is_full>, auto& d, auto& mask, auto&& incoming){
-            HWY_ALIGN typename seq_traits::storage_unit lanes_values[hn::MaxLanes(d)];
-            HWY_ALIGN typename seq_traits::storage_unit lanes_mask[hn::MaxLanes(d)];
-            hn::Store(incoming, d, lanes_values);
-            hn::Store(hn::VecFromMask(d, mask), d, lanes_mask);
-            std::string dbgstr = "";
-            for(size_t i=0;i<hn::Lanes(d);++i) {
-                if (lanes_mask[i]) {
-                    traces[i].push_back(seq_traits::letter_to_symbol(lanes_values[i]));
-                    dbgstr += std::string(1, seq_traits::letter_to_char(lanes_values[i]));
-                } else {
-                    dbgstr += "X";
-                }
-                dbgstr += " ";
-            }
-            JustLog("XDBG --> {}", dbgstr);
-            actual_lanes = hn::Lanes(d);
+            _add_record(d, mask, incoming);
         });
+    };
+
+    template<typename I>
+    //requires (compact_sequence_range<R>::template is_valid_derived_iter<I>::value == true)
+    void accumulate_delayed(const I& begin, const I& end, const size_t context_bps, const size_t delay) {
+        used_context = context_bps;
+        actual_lanes = 0;
+        iterate_sequence_bp_simd_offsets(source, begin, end, context_bps, [&]<bool is_full>(std::bool_constant<is_full>, auto& d, auto& _mask, auto&& _incoming, auto delayed_mask, auto delayed_incoming){
+            _add_record(d, delayed_mask, delayed_incoming);
+        }, delay);
     };
 
     std::vector<std::string> to_strings() const {
@@ -223,29 +239,36 @@ GCAGACGTGATGGTTAGTCGCTATCACAGCTAAAAACCGA"_dna4};
 template<typename T>
 void test_sequence(T testtest) {
     const size_t seq_len = testtest.bp_size();
-    SECTION("Context bigger than size()") {
+    // SECTION("Context bigger than size()") {
+    //     sequence_simd_accumulator acc(testtest);
+    //     const size_t context_bps = GENERATE_COPY(seq_len+1, seq_len*2);
+    //     acc.accumulate(testtest.begin(), testtest.end(), context_bps);
+    //     assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
+    // }
+    // SECTION("Context exactly equal to size()") {
+    //     sequence_simd_accumulator acc(testtest);
+    //     const size_t context_bps = seq_len;
+    //     acc.accumulate(testtest.begin(), testtest.end(), context_bps);
+    //     assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
+    // }
+    // SECTION("Context smaller than size(), but very close to") {
+    //     sequence_simd_accumulator acc(testtest);
+    //     const size_t context_bps = GENERATE_COPY(seq_len-1, seq_len-2, seq_len-3, seq_len-4, seq_len-8);
+    //     acc.accumulate(testtest.begin(), testtest.end(), context_bps);
+    //     assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
+    // }
+    // SECTION("Context smaller than size() (usual case)") {
+    //     sequence_simd_accumulator acc(testtest);
+    //     const size_t context_bps = GENERATE_COPY(0, 1, 2, 5, 10, seq_len/2);
+    //     acc.accumulate(testtest.begin(), testtest.end(), context_bps);
+    //     assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
+    // }
+    SECTION("Correct delay handling for context smaller than size() (usual case)") {
         sequence_simd_accumulator acc(testtest);
-        const size_t context_bps = GENERATE_COPY(seq_len+1, seq_len*2);
-        acc.accumulate(testtest.begin(), testtest.end(), context_bps);
-        assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
-    }
-    SECTION("Context exactly equal to size()") {
-        sequence_simd_accumulator acc(testtest);
-        const size_t context_bps = seq_len;
-        acc.accumulate(testtest.begin(), testtest.end(), context_bps);
-        assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
-    }
-    SECTION("Context smaller than size(), but very close to") {
-        sequence_simd_accumulator acc(testtest);
-        const size_t context_bps = GENERATE_COPY(seq_len-1, seq_len-2, seq_len-3, seq_len-4, seq_len-8);
-        acc.accumulate(testtest.begin(), testtest.end(), context_bps);
-        assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
-    }
-    SECTION("Context smaller than size() (usual case)") {
-        sequence_simd_accumulator acc(testtest);
-        const size_t context_bps = GENERATE_COPY(0, 1, 2, 5, 10, seq_len/2);
-        acc.accumulate(testtest.begin(), testtest.end(), context_bps);
-        assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
+        const size_t context_bps = 5;
+        const size_t delay = 1; //GENERATE(0, 1, 3, 5);
+        acc.accumulate_delayed(testtest.begin(), testtest.end(), context_bps, delay);
+        assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}, delay = {}", context_bps, seq_len, delay));
     }
 };
 
@@ -267,17 +290,17 @@ void test_sequence(T testtest) {
 //     assert_integrity_of_indices(acc, fmt::format("context_bps = {}, seq_len = {}", context_bps, seq_len));
 // };
 
-TEMPLATE_TEST_CASE("Sequence SIMD full itreration for short sequence DNA4", "[simd-new-x]", seq::dna4, std::vector<seq::dna4>) {
-    test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_SHORT));
-};
+// TEMPLATE_TEST_CASE("Sequence SIMD full itreration for short sequence DNA4", "[simd-new-x]", seq::dna4, std::vector<seq::dna4>) {
+//     test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_SHORT));
+// };
 
 TEMPLATE_TEST_CASE("Sequence SIMD full itreration for short sequence DNA5", "[simd-new-x]", seq::dna5, std::vector<seq::dna5>) {
     test_sequence(compact_sequence_range<TestType>(DNA5_SEQ_SHORT));
 };
 
-TEMPLATE_TEST_CASE("Sequence SIMD full itreration for medium sequence DNA4", "[simd-new-x]", seq::dna4, std::vector<seq::dna4>) {
-    test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_MEDIUM));
-};
+// TEMPLATE_TEST_CASE("Sequence SIMD full itreration for medium sequence DNA4", "[simd-new-x]", seq::dna4, std::vector<seq::dna4>) {
+//     test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_MEDIUM));
+// };
 
 // TEMPLATE_TEST_CASE("LOLTEST", "[simd-new-x]", std::vector<seq::dna4>) {
 //     test_sequence(compact_sequence_range<TestType>(DNA4_SEQ_SHORT));

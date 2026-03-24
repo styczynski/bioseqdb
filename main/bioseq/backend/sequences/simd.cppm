@@ -259,7 +259,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	}
 
 	const size_t max_delay = std::max<size_t>({ static_cast<size_t>(0), delays... });
-	assert(max_delay <= max_delay_bound);
+	DEBUG_ASSERT(max_delay <= max_delay_bound, "Delay used cannot exceed manimum delay bound defined by max_delay_bound");
 
 	const hn::ScalableTag<typename seq_traits::storage_unit> d;
 	using VecT = hn::Vec<decltype(d)>;
@@ -329,7 +329,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	using buffer_t = circular_append_buffer<VecT, buffer_size_bound, 0, false, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator>;
 	buffer_t buffer(buffer_size);
 
-	std::array<std::tuple<typename buffer_t::iterator, size_t, const size_t, VecT>, delays_count> delays_state{
+	typename std::conditional<delays_count == 0, std::monostate, std::array<std::tuple<typename buffer_t::iterator, size_t, const size_t, VecT>, delays_count>>::type delays_state{
 		(std::make_tuple(buffer.get_begin(), delays, seq_traits::letters_per_unit - 1, hn::Zero(d)))...
 	};
 
@@ -339,8 +339,13 @@ inline void iterate_sequence_bp_simd_offsets(
 	// size_t delay_counter1 = delay1;
 	// VecT delay_chunk1 = hn::Zero(d);
 
-	const vec_mask_t dummy_mask = hn::FirstN(d, hn::Lanes(d));
-	const std::array<vec_mask_t, delays_count> all_dummy_masks = {};
+	const vec_mask_t full_mask = hn::FirstN(d, hn::Lanes(d));
+	const vec_mask_t none_mask = hn::MaskFalse(d);
+	//const vec_mask_t dummy_mask = hn::FirstN(d, hn::Lanes(d));
+	typename std::conditional<delays_count == 0, std::monostate, std::array<vec_mask_t, delays_count>>::type delays_masks;
+	if constexpr (delays_count > 0) {
+		delays_masks.fill(none_mask);
+	}
 	VecT row;
 
 	auto handle_row_bp = [&]() {
@@ -355,6 +360,7 @@ inline void iterate_sequence_bp_simd_offsets(
 					delayed_buffer = buffer.get_value_iter(read_pos);
 					counter = delay;
 					buffer.increment_iter(read_pos);
+					delays_masks[delay_no] = full_mask;
 				} else {
 					--counter;
 				}
@@ -364,7 +370,7 @@ inline void iterate_sequence_bp_simd_offsets(
 				//JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
 			}
 		}
-		std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<true>{}, d, dummy_mask, base_bp_vec), all_bp_vecs, all_dummy_masks));
+		std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<true>{}, d, full_mask, base_bp_vec), delays_masks, all_bp_vecs));
 		JustLog("next (-{})bp vec = {}", 0, hwy_str<decltype(d), seq::dna4>(d, base_bp_vec));
 	};
 
@@ -440,16 +446,9 @@ inline void iterate_sequence_bp_simd_offsets(
 	// how many in left? bps_last_chunk;
     // how many in the right? bps_last_chunk + bps_last_lane_extra
 
-	const vec_mask_t full_mask = hn::FirstN(d, hn::Lanes(d));
-	const vec_mask_t none_mask = hn::MaskFalse(d);
 	const vec_mask_t left_mask = offsets[0] == offsets[hn::Lanes(d)-1] ? hn::MaskFalse(d) : hn::FirstN(d, hn::Lanes(d)-1);
-
-	std::array<vec_mask_t, delays_count> delays_masks = {};
-	std::array<int32_t, delays_count> delays_counters = { -static_cast<int32_t>(delays)... };
-
-	delays_masks.fill(full_mask);
+	typename std::conditional<delays_count == 0, std::monostate, std::array<int32_t, delays_count>>::type delays_counters = { -static_cast<int32_t>(delays)... };
 	vec_mask_t main_mask = full_mask;
-
 	int32_t main_counter = 0;
 
 	DEBUG_ASSERT(bps_last_chunk >= seq.padding(), "Sanity check. This should never fail as we should have more basses than are padded, otherwise all calculations are wrong.");
@@ -487,6 +486,9 @@ inline void iterate_sequence_bp_simd_offsets(
 						delayed_buffer = buffer.get_value_iter(read_pos);
 						counter = delay;
 						buffer.increment_iter(read_pos);
+						if (delays_counters[delay_no] < main_counter_only_left) {
+							delays_masks[delay_no] = full_mask;
+						}
 					} else {
 						--counter;
 					}
@@ -494,7 +496,13 @@ inline void iterate_sequence_bp_simd_offsets(
 					all_bp_vecs[delay_no] = hn::And(delayed_buffer, bp_bitmask_vec);
 					delayed_buffer = hn::ShiftRightSame(delayed_buffer, seq_traits::bits_per_char);
 					//JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
+				}
+			}
+			std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, d, main_mask, base_bp_vec), delays_masks, all_bp_vecs));
 
+			if constexpr (delays_count > 0) {
+				for(auto delay_no = 0; delay_no < delays_count; ++delay_no) {
+					auto& [ read_pos, counter, delay, delayed_buffer ] = delays_state[delay_no];
 					++delays_counters[delay_no];
 					if (delays_counters[delay_no] == main_counter_none) {
 						delays_masks[delay_no] = none_mask;
@@ -507,7 +515,6 @@ inline void iterate_sequence_bp_simd_offsets(
 					}
 				}
 			}
-			std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, d, main_mask, base_bp_vec), all_bp_vecs, delays_masks));
 
 			++main_counter;
 			if (main_counter == main_counter_none) {
