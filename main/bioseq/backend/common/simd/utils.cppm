@@ -23,7 +23,7 @@ namespace hn = hwy::HWY_NAMESPACE;
 template<typename T, typename B>
 struct simd_array_allocator {
 	static B allocate(const size_t& len) {
-		JustLog("simd alloc {}", len);
+		// JustLog("simd alloc {}", len);
 		return hwy::AllocateAligned<T>(len);
 	}
 };

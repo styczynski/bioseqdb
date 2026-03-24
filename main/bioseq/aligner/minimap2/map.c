@@ -829,7 +829,7 @@ ATCGTAGCTAGTC\
 	HWY_ALIGN traits::storage_unit temp_buffer2[32];
 
 	constexpr bool IS_INIT = true;
-	iterate_sequence_bp_simd(testtest, testtest.begin(), testtest.end(), [&]<bool is_full>(std::bool_constant<is_full>, auto& d, auto& mask, auto&& incoming, auto&& outgoing){ //auto&& bp_del1
+	iterate_sequence_bp_simd_offsets(testtest, testtest.begin(), testtest.end(), 5, [&]<bool is_full>(std::bool_constant<is_full>, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
 		JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, incoming), hwy_str_as<seq::dna4>(d, outgoing));
 		hash_vec_t hash_vec = hhh.next(d, incoming, outgoing);
 

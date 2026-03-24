@@ -888,6 +888,220 @@ struct hwy_vector_string_printer<T, InfoT, I> {
 	}
 };
 
+// Old version
+
+
+template<
+	typename... delays_ts,
+	supports_compact_sequence_range R,
+	typename handler_fn_t,
+	typename I = decltype(compact_sequence_range<R>().begin()),
+	size_t max_delay_bound = 256
+>
+inline void iterate_sequence_bp_simd(
+	const compact_sequence_range<R>& seq,
+	const I& begin,
+	const I& end,
+	handler_fn_t&& handler_fn,
+	//const size_t context,
+	delays_ts... delays
+) {
+	// Remove later
+	constexpr size_t context = 1;
+
+    using seq_traits = compact_sequence_range<R>::traits;
+
+	constexpr size_t delays_count = sizeof...(delays);
+
+	const size_t max_delay = std::max<size_t>({ static_cast<size_t>(0), delays... });
+	assert(max_delay <= max_delay_bound);
+
+	const hn::ScalableTag<typename seq_traits::storage_unit> d;
+	using VecT = hn::Vec<decltype(d)>;
+	using vec_mask_t = hn::Mask<decltype(d)>;
+	using matrix = square_lane_matrix<decltype(d)>;
+	
+
+	const VecT bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
+
+    auto iter = begin;
+
+    // LaneMatrix x(d);
+	// x.partial_fill(d, end - begin, [&](const auto index, const auto lanes) -> auto {
+    //     const auto iter_ptr = static_cast<const typename seq_traits::storage_unit*>(&(*iter));
+    //     return &(iter_ptr[index * lanes]);
+	// });
+    // x.transpose(d);
+	// JustLog("mat = {}", hwy_str_as<typename seq_traits::alphabet_type>(d, x));
+
+	// data buffer
+
+	//constexpr size_t max_delay = std::max({ delays... });
+
+	const size_t matrix_size = hn::Lanes(d) * hn::Lanes(d);
+	constexpr size_t matrix_size_bound = hn::MaxLanes(d) * hn::MaxLanes(d);
+
+	const size_t buffer_size = (int_div_ceil(max_delay / seq_traits::letters_per_unit, matrix_size).first + 1) * matrix_size;
+	constexpr size_t buffer_size_bound = (int_div_ceil(max_delay_bound / seq_traits::letters_per_unit, matrix_size_bound).first + 1) * matrix_size_bound;
+
+	const auto& [full_chunks_count, chunks_count_mod] = int_div_floor(seq.size()-context, matrix_size-context); 
+	//const size_t full_chunks_count = chunks_count-1;
+	const size_t last_chunk_units = chunks_count_mod + context;
+	JustLog("seq size is {} / buffer size is {} / max {} (chunks_count={} / last chunk {})", seq.size(), buffer_size, buffer_size_bound, full_chunks_count, last_chunk_units);
+
+	using buffer_t = circular_append_buffer<VecT, buffer_size_bound, 0, false, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator>;
+	buffer_t buffer(buffer_size);
+
+	std::array<std::tuple<typename buffer_t::iterator, size_t, const size_t, VecT>, delays_count> delays_state{
+		(std::make_tuple(buffer.get_begin(), delays, seq_traits::letters_per_unit - 1, hn::Zero(d)))...
+	};
+
+	auto buffer_write_pos = buffer.get_begin();
+
+	// auto delay_read_pos1 = buffer.get_begin();
+	// size_t delay_counter1 = delay1;
+	// VecT delay_chunk1 = hn::Zero(d);
+
+	auto handle_row = [&]<simd_bp_iteration_type mode>(const vec_mask_t& lanes_mask_valid, const vec_mask_t& lanes_mask_invalid){ //[&buffer_write_pos, &buffer, &handler_fn, &d](){
+		// Iterate every bp of lane
+		//matrix read_matrix(buffer.get_ptr_iter(buffer_write_pos));
+		VecT row = buffer.get_value_iter(buffer_write_pos);
+		const size_t valid_letters = seq_traits::letters_per_unit - seq.padding();
+		for (size_t bp_index = 0; bp_index < seq_traits::letters_per_unit; ++bp_index) {
+			// S::new([(1 << B) - 1; 8]);
+			
+			std::array<VecT, delays_count> all_bp_vecs;
+			VecT base_bp_vec = hn::And(row, bp_bitmask_vec);
+			row = hn::ShiftRightSame(row, seq_traits::bits_per_char);
+			//x.matrix[chunk_index] = shifted;
+			//buffer.push_back(shifted);
+
+			//JustLog("next bp vec = {}", hwy_str<decltype(d), seq::dna4>(d, vec_bp));
+
+			// Check delayed
+			if constexpr (delays_count > 0) {
+				for(auto delay_no = 0; delay_no < delays_count; ++delay_no) {
+					auto& [ read_pos, counter, delay, delayed_buffer ] = delays_state[delay_no];
+					if (counter == 0) [[unlikely]] {
+						delayed_buffer = buffer.get_value_iter(read_pos);
+						counter = delay;
+						buffer.increment_iter(read_pos);
+					} else {
+						--counter;
+					}
+					// The same
+					all_bp_vecs[delay_no] = hn::And(delayed_buffer, bp_bitmask_vec);
+					delayed_buffer = hn::ShiftRightSame(delayed_buffer, seq_traits::bits_per_char);
+					//JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
+				}
+			}
+			//std::apply(std::bind(handler_fn, d, base_bp_vec), all_bp_vecs);
+			//std::bind(handler_fn, d, base_bp_vec)();
+			if (mode == PARTIAL_VALID_LEFT_PADDING && bp_index >= valid_letters) {
+				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, d, lanes_mask_invalid, base_bp_vec), all_bp_vecs));
+			} else if constexpr (mode == FULL_MATRIX) {
+				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<true>{}, d, lanes_mask_valid, base_bp_vec), all_bp_vecs));
+			} else {
+				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, d, lanes_mask_valid, base_bp_vec), all_bp_vecs));
+			}
+
+			//const VecT hash = 
+			//JustLog("next bp = {} ({})", decode_single_bp_vec<ChunkT, seq::dna4, decltype(d), VecT>(d, vec_bp), hwyStr(d, vec_bp));
+		}
+		//JustLog("NEXT CHUNK ~");
+		buffer.increment_iter(buffer_write_pos);
+	};
+
+	const vec_mask_t dummy_mask = hn::MaskFalse(d);
+	for(size_t chunk_no=0; chunk_no<full_chunks_count; ++chunk_no) {
+		matrix mat(buffer.get_ptr_iter(buffer_write_pos));
+
+		// We read only full matrices
+		assert(buffer.get_forward_capacity() >= matrix_size);
+		iter += mat.fill(d, context,static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+		mat.transpose(d);
+		assert(buffer.get_forward_capacity() >= matrix_size);
+		// } else {
+		// 	assert(buffer.get_forward_capacity() >= partial_matrix_size);
+		// 	mat.partial_fill(d, end-begin, [&](const auto index, const auto lanes) -> auto {
+		// 		const auto iter_ptr = static_cast<const typename seq_traits::storage_unit*>(&(*iter));
+		// 		return &(iter_ptr[index * lanes]);
+		// 	});
+		// };
+
+		// mat.partial_fill(d, end-begin, [&](const auto index, const auto lanes) -> auto {
+		// 	const auto iter_ptr = static_cast<const typename seq_traits::storage_unit*>(&(*iter));
+		// 	return &(iter_ptr[index * lanes]);
+		// });
+		JustLog("xmat = {}", hwy_str_as<seq::dna4>(d, mat));
+
+
+		// auto delayed_iter = buffer.get_begin();
+		// Iterate each vector of loaded matrix of size [lanes x lanes]
+		for (size_t row_index = 0; row_index < hn::Lanes(d); ++row_index) {
+			handle_row.template operator()<FULL_MATRIX>(dummy_mask, dummy_mask);
+		}
+		// context change
+	}
+	// Handle reminder
+	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
+	// We read only full matrices
+	assert(buffer.get_forward_capacity() >= last_chunk_units);
+	assert(static_cast<size_t>(end - iter) == last_chunk_units);
+	JustLog("ASSERT HERE = {} === {} <{}>", static_cast<size_t>(end - iter), last_chunk_units, seq.size());
+
+	
+	//const auto& [remove_right_columns_count, right_row_removed_offset] = int_div_floor(hn::Lanes(d)*hn::Lanes(d)-last_chunk_units, hn::Lanes(d)); 
+
+
+	const auto& [present_columns_left_count, present_rows_last_left] = mat.partial_fill(d, last_chunk_units, context, static_cast<const typename seq_traits::storage_unit*>(&(*iter)));
+	mat.transpose(d);
+
+	const vec_mask_t right_invalid_mask = hn::FirstN(d, present_columns_left_count);
+	const size_t right_row_valid_counter = present_rows_last_left; //hn::Lanes(d) - right_row_removed_offset;
+	size_t row_index = 0;
+
+	if (right_row_valid_counter > 0) {
+		const vec_mask_t right_valid_mask = hn::FirstN(d, present_columns_left_count + 1);
+		if (end == seq.end()) {
+			++row_index;
+			for (; row_index < right_row_valid_counter; ++row_index) {
+				JustLog("Remainder still valid right {} (left cols {})", row_index, present_columns_left_count);
+				handle_row.template operator()<PARTIAL_VALID_LEFT>(right_valid_mask, dummy_mask);
+			}
+			handle_row.template operator()<PARTIAL_VALID_LEFT_PADDING>(right_valid_mask, right_invalid_mask);
+		} else {
+			for (; row_index < right_row_valid_counter; ++row_index) {
+				JustLog("Remainder still valid right {} (left cols {})", row_index, present_columns_left_count);
+				handle_row.template operator()<PARTIAL_VALID_LEFT>(right_valid_mask, dummy_mask);
+			}
+		}
+	}
+	for (; row_index < hn::Lanes(d); ++row_index) {
+		JustLog("Remainder invalid right {}", row_index);
+		handle_row.template operator()<PARTIAL_INVALID_LEFT>(right_invalid_mask, dummy_mask);
+	}
+
+	// There are no rows to iterate, but we need to flush delayed iterators
+	// for (size_t delay_flush = 0; delay_flush < max_delay; ++delay_flush) {
+	// 	for(auto delay_no = 0; delay_no < delays_count; ++delay_no) {
+	// 		auto& [ read_pos, counter, delay, delayed_buffer ] = delays_state[delay_no];
+	// 		if (counter == 0) [[unlikely]] {
+	// 			delayed_buffer = buffer.get_value_iter(read_pos);
+	// 			counter = delay;
+	// 			buffer.increment_iter(read_pos);
+	// 		} else {
+	// 			--counter;
+	// 		}
+	// 		// The same
+	// 		all_bp_vecs[delay_no] = hn::And(delayed_buffer, bp_bitmask_vec);
+	// 		delayed_buffer = hn::ShiftRightSame(delayed_buffer, seq_traits::bits_per_char);
+	// 		//JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
+	// 	}
+	// }
+}
+
+
 }
 HWY_AFTER_NAMESPACE();
 
