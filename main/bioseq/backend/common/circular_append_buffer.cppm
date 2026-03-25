@@ -52,23 +52,23 @@ public:
     _buffer(std::move(circular_append_buffer_allocator<T, base_array_type>::allocate(capacity))) {}
 
 
-    [[nodiscard]] static constexpr iterator get_begin() {
+    [[always_inline]] [[nodiscard]] static constexpr iterator get_begin() {
         return iterator(0);
     }
 
-    [[nodiscard]] constexpr T& get_value_iter(const iterator& iter) const {
+    [[always_inline]] [[nodiscard]] constexpr T& get_value_iter(const iterator& iter) const {
         return _buffer[iter];
     }
 
-    [[nodiscard]] constexpr T* get_ptr_iter(const iterator& iter) const {
+    [[always_inline]] [[nodiscard]] constexpr T* get_ptr_iter(const iterator& iter) const {
         return &_buffer[iter];
     }
 
-	[[nodiscard]] constexpr size_t get_forward_capacity() const {
+	[[always_inline]] [[nodiscard]] constexpr size_t get_forward_capacity() const {
 		return _capacity - _buf_pos;
 	}
 
-    constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (!p_fixed_capacity) {
+    [[always_inline]] constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (!p_fixed_capacity) {
         static_assert(std::is_same_v<decltype(_capacity), iterator>);
         iter += increment;
         while (iter >= _capacity) {
@@ -76,7 +76,7 @@ public:
         }
     }
 
-    constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (p_fixed_capacity) {
+    [[always_inline]] constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (p_fixed_capacity) {
         iter = (iter + increment) & size_mask;
     }
 
@@ -92,16 +92,16 @@ public:
 		increment_iter(_buf_pos);
 	};
 
-	[[nodiscard]] iterator last_write_pos() const {
+	[[always_inline]] [[nodiscard]] iterator last_write_pos() const {
 		return _prev_pos;
 	};
 
-	[[nodiscard]] T& last() {
+	[[always_inline]] [[nodiscard]] T& last() {
 		return _buffer[_prev_pos];
 	}
 
 	template<typename F>
-	inline void unsafe_filled_for_each(F fn) requires (!p_fixed_capacity) {
+	[[always_inline]] inline void unsafe_filled_for_each(F fn) requires (!p_fixed_capacity) {
 		size_t distance = _capacity - 1;
         [[assume( _buf_pos < _capacity )]];
 		for (auto j = _buf_pos; j < _capacity; ++j, --distance) {

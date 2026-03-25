@@ -119,6 +119,18 @@ inline constexpr std::pair<T, T> int_div_floor(const T& val, const T& div) {
 	return std::make_pair(val / div, val % div);
 }
 
+template<typename D_IN, typename D_OUT>
+concept d_simd_cmp_3x = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D_IN>>>>) == sizeof(hn::TFromD<D_OUT>);
+
+template<typename D_IN, typename D_OUT>
+concept d_simd_cmp_2x = sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<D_IN>>>) == sizeof(hn::TFromD<D_OUT>);
+
+template<typename D_IN, typename D_OUT>
+concept d_simd_cmp_1x = sizeof(hwy::MakeWide<hn::TFromD<D_IN>>) == sizeof(hn::TFromD<D_OUT>);
+
+template<typename D_IN, typename D_OUT>
+concept d_simd_cmp = sizeof(hn::TFromD<D_IN>) == sizeof(hn::TFromD<D_OUT>);
+
 template<typename D>
 concept d_simd_resizeable_x3 = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>>>) <= 8;
 
@@ -127,7 +139,6 @@ concept d_simd_resizeable_x2 = sizeof(hwy::MakeWide<hwy::MakeWide<hn::TFromD<D>>
 
 template<typename D>
 concept d_simd_resizeable_x1 = sizeof(hwy::MakeWide<hn::TFromD<D>>) <= 8;
-
 
 template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
 class square_lane_matrix {
@@ -475,6 +486,167 @@ auto hwy_str_as(D& d, const ValT& v) {
 }
 
 
+template <class D_IN, class vec_in_t = hn::Vec<D_IN>>
+struct vector_upscaler {
+public:
+	// using x1_upscaled_t = std::array<hn::RepartitionToWide<D_IN>, 2>;
+	// using x2_upscaled_t = std::array<hn::RepartitionToWide<hn::RepartitionToWide<D_IN>>, 4>;
+private:
+	// static constexpr x1_upscaled_t upscale1(D_IN& d_in, vec_in_t v) requires (!d_simd_resizeable_x1<D_IN>) {
+	// 	std::unreachable();
+	// };
+
+	// static constexpr x1_upscaled_t upscale1(D_IN& d_in, vec_in_t v) requires (d_simd_resizeable_x1<D_IN>) {
+	// 	const hn::RepartitionToWide<D_IN> d_out;
+	// 	vec_in_t z0 = Zero(d_in);
+	// 	return x1_upscaled_t{
+	// 		BitCast(d_out, InterleaveLower(d_in, v, z0)),
+	// 		BitCast(d_out, InterleaveUpper(d_in, v, z0)),
+	// 	};
+	// };
+
+	// static constexpr x2_upscaled_t upscale2(D_IN& d_in, vec_in_t v) requires (!d_simd_resizeable_x2<D_IN>) {
+	// 	std::unreachable();
+	// };
+
+	// static constexpr x2_upscaled_t upscale2(D_IN& d_in, vec_in_t v) requires (d_simd_resizeable_x2<D_IN>) {
+	// 	const hn::RepartitionToWide<D_IN> dw;
+	// 	const hn::RepartitionToWideX2<D_IN> dww;
+	// 	using vec_dw = hn::Vec<decltype(dw)>;
+	// 	vec_in_t z0 = Zero(d_in);
+	// 	vec_dw v0 = Zero(dw);
+	// 	vec_dw v1 = BitCast(dw, InterleaveLower(d_in, v, z0));
+	// 	vec_dw v2 = BitCast(dw, InterleaveUpper(d_in, v, z0));
+	// 	return x2_upscaled_t{
+	// 		BitCast(dww, InterleaveLower(dw, v1, v0)),
+	// 		BitCast(dww, InterleaveUpper(dw, v1, v0)),
+	// 		BitCast(dww, InterleaveLower(dw, v2, v0)),
+	// 		BitCast(dww, InterleaveUpper(dw, v2, v0)),
+	// 	};
+	// };
+public:
+
+	template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+	struct rescaled_type { using type = void; };
+
+	template <class D_OUT> requires (d_simd_cmp<D_IN, D_OUT>)
+	struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 1>; };
+
+	template <class D_OUT> requires (d_simd_cmp_1x<D_IN, D_OUT>)
+	struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 2>; };
+
+	template <class D_OUT> requires (d_simd_cmp_2x<D_IN, D_OUT>)
+	struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 4>; };
+
+	template <class D_OUT> requires (d_simd_cmp_3x<D_IN, D_OUT>)
+	struct rescaled_type<D_OUT> { using type = std::array<hn::Vec<D_OUT>, 8>; };
+
+	template <class D_OUT>
+	using rescaled_t = rescaled_type<D_OUT>::type;
+
+	template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+	[[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+		D_IN& d_in,
+		D_OUT& d_out,
+		vec_in_t v
+	) requires (d_simd_cmp<D_IN, D_OUT>) {
+		return {v};
+	};
+
+	template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+	[[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+		D_IN& d_in,
+		D_OUT& d_out,
+		vec_in_t v
+	) requires (d_simd_cmp_1x<D_IN, D_OUT>) {
+		vec_in_t z0 = Zero(d_in);
+		return {
+			BitCast(d_out, InterleaveLower(d_in, v, z0)),
+			BitCast(d_out, InterleaveUpper(d_in, v, z0)),
+		};
+	};
+
+	template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+	[[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+		D_IN& d_in,
+		D_OUT& d_out,
+		vec_in_t v
+	) requires (d_simd_cmp_2x<D_IN, D_OUT>) {
+		const hn::RepartitionToWide<D_IN> dw;
+		//const hn::RepartitionToWideX2<D_IN> dww;
+		using vec_dw = hn::Vec<decltype(dw)>;
+		vec_in_t z0 = Zero(d_in);
+		vec_dw v0 = Zero(dw);
+		vec_dw v1 = BitCast(dw, InterleaveLower(d_in, v, z0));
+		vec_dw v2 = BitCast(dw, InterleaveUpper(d_in, v, z0));
+		return {
+			BitCast(d_out, InterleaveLower(dw, v1, v0)),
+			BitCast(d_out, InterleaveUpper(dw, v1, v0)),
+			BitCast(d_out, InterleaveLower(dw, v2, v0)),
+			BitCast(d_out, InterleaveUpper(dw, v2, v0)),
+		};
+	};
+
+	template <class D_OUT, class vec_out_t = hn::Vec<D_OUT>>
+	[[always_inline]] static constexpr rescaled_t<D_OUT> upscale(
+		D_IN& d_in,
+		D_OUT& d_out,
+		vec_in_t v
+	) requires (d_simd_cmp_3x<D_IN, D_OUT>) {
+		const hn::RepartitionToWide<D_IN> dw;
+		using vec_dw = hn::Vec<decltype(dw)>;
+		const hn::RepartitionToWideX2<D_IN> dww;
+		using vec_dww = hn::Vec<decltype(dww)>;
+		vec_in_t z0 = Zero(d_in);
+		vec_dw v0 = Zero(dw);
+		vec_dw v1 = BitCast(dw, InterleaveLower(d_in, v, z0));
+		vec_dw v2 = BitCast(dw, InterleaveUpper(d_in, v, z0));
+		vec_dww t0 = Zero(dww);
+		vec_dww t1 = BitCast(dww, InterleaveLower(dw, v1, v0));
+		vec_dww t2 = BitCast(dww, InterleaveUpper(dw, v1, v0));
+		vec_dww t3 = BitCast(dww, InterleaveLower(dw, v2, v0));
+		vec_dww t4 = BitCast(dww, InterleaveUpper(dw, v2, v0));
+		return {
+			BitCast(d_out, InterleaveLower(dww, t1, t0)),
+			BitCast(d_out, InterleaveUpper(dww, t1, t0)),
+			BitCast(d_out, InterleaveLower(dww, t2, t0)),
+			BitCast(d_out, InterleaveUpper(dww, t2, t0)),
+			BitCast(d_out, InterleaveLower(dww, t3, t0)),
+			BitCast(d_out, InterleaveUpper(dww, t3, t0)),
+			BitCast(d_out, InterleaveLower(dww, t4, t0)),
+			BitCast(d_out, InterleaveUpper(dww, t4, t0)),
+		};
+	};
+};
+
+void dosomething() {
+	const hn::ScalableTag<uint8_t> d_in;
+	using D_IN = decltype(d_in);
+
+	const hn::ScalableTag<uint64_t> d_out;
+	using D_OUT = decltype(d_out);
+
+    using vec_in_t = hn::Vec<D_IN>;
+	using vec_out_t = hn::Vec<D_OUT>;
+
+	uint8_t data[36] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36};
+	vec_in_t v = hn::LoadU(d_in, &(data[0]));
+
+	typename vector_upscaler<D_IN>::rescaled_t<D_OUT> outp = vector_upscaler<D_IN>::upscale(d_in, d_out, v);
+	JustLog("this is innput   => {}", hwy_str<D_IN, void, vec_in_t>(d_in, v));
+	for (auto& heheszki : outp) {
+		JustLog("this is upscaled => {}", hwy_str<D_OUT, void, vec_out_t>(d_out, heheszki));
+	}
+
+	// JustLog("HELLO! :DDDDD dosomething() = {}", hwy_str<D_IN, void, vec_in_t>(d_in, v));
+
+	// vec_in_t zeros = Zero(d_in);
+	// vec_out_t v1 = BitCast(d_out, InterleaveLower(d_in, v, zeros));
+	// vec_out_t v2 = BitCast(d_out, InterleaveUpper(d_in, v, zeros));
+
+	// JustLog("HELLO! :DDDDD dosomething() = {} / {}", hwy_str<D_OUT, void, vec_out_t>(d_out, v1), hwy_str<D_OUT, void, vec_out_t>(d_out, v2));
+	// // BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+}
 
 }
 HWY_AFTER_NAMESPACE();

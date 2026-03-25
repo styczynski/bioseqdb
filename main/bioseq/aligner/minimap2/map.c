@@ -443,6 +443,7 @@ inline void bio_collect_minimizers2(
 
 	circular_append_buffer<MinimapSketch, max_span> buffer(w);
 	std::vector<MinimapSketch> results;
+	results.reserve(10000);
 
 	// MinimapSketch current_min = {
 	// 	.sketch { .data {UINT64_MAX, UINT64_MAX} }
@@ -456,7 +457,11 @@ inline void bio_collect_minimizers2(
 	const auto end = seq.template iter<BP>(seq_end);
 
 	auto start = std::chrono::high_resolution_clock::now();
+
 	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
+		// auto stopx = std::chrono::high_resolution_clock::now();
+		// JustLog("runtime_to_first {}", std::chrono::duration_cast<std::chrono::nanoseconds>(stopx - start));
+
 		for(; iter != end && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
 			const auto nucl = *iter;
 
@@ -464,6 +469,7 @@ inline void bio_collect_minimizers2(
 			if(seq_traits::bits_per_char > 2 && nucl >= 4) {
 				// fuck!
 				buffer.push_back(MinimapSketch::getMax());
+				//megadata[megadatai++] = MinimapSketch::getMax();
 				pos = 0;
 			} else {
 				kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
@@ -474,7 +480,7 @@ inline void bio_collect_minimizers2(
 
 				if (c_strand == SEQUENCE_STRAND_EQUAL) continue;
 				const auto strand = kmer[0] < kmer[1]? 0 : 1; // strand
-				JustLog("should: {}/{} was: {}/{}", kmer[strand], strand, c_hash, c_strand);
+				//JustLog("should: {}/{} was: {}/{}", kmer[strand], strand, c_hash, c_strand);
 				const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
 				++pos;
 
@@ -492,12 +498,13 @@ inline void bio_collect_minimizers2(
 					})));
 				} else {
 					buffer.push_back(MinimapSketch::getMax());
+					//megadata[megadatai++] = MinimapSketch::getMax();
 				}
 			}
 
 			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
 				//&results, &current_min, current_min_pos
-				buffer.unsafe_filled_for_each([&results, &current_min](const auto& _index, const auto& el, const auto& _distance) {
+				buffer.unsafe_filled_for_each([&](const auto& _index, const auto& el, const auto& _distance) {
 					// const auto xxx = current_min;
 					// const auto xxx2 = xxx.sketch.sketch.last_pos;
 					// const auto zzz = el.sketch.sketch.last_pos;
@@ -517,18 +524,21 @@ inline void bio_collect_minimizers2(
 					// );
 					if (MinimapSketch::does_sketch_match(current_min, el)) {
 						results.push_back(el);
+						//megadata[megadatai++] = el;
 					}
 				});
 			}
 			if (buffer.last() <= current_min) { // a new minimum; then write the old min
 				if ((pos >= w + k || !IS_INIT) && !current_min.is_max()) {
 					results.push_back(current_min);
+					//megadata[megadatai++] = current_min;
 				}
 				current_min_pos = buffer.last_write_pos();
 				current_min = buffer.last();
 			} else if (buffer.last_write_pos() == current_min_pos) { 
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) {
 					results.push_back(current_min);
+					//megadata[megadatai++] = current_min;
 				}
 
 				current_min.set_max();
@@ -540,9 +550,10 @@ inline void bio_collect_minimizers2(
 				});
 
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) { // write identical k-mers
-					buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos](const auto& _index, const auto& el, const auto& _distance) {
+					buffer.unsafe_filled_for_each([&](const auto& _index, const auto& el, const auto& _distance) {
 						if (MinimapSketch::does_sketch_match(current_min, el)) {
 							results.push_back(el);
+							//megadata[megadatai++] = el;
 						}
 					});
 				}
@@ -550,14 +561,16 @@ inline void bio_collect_minimizers2(
 		}
 	};
 
+	
 	// First kmers
 	handler(std::bool_constant<true>{});
 	assert(pos == w+k);
 	handler(std::bool_constant<false>{});
 
-	JustLog("is_max?");
+	//JustLog("is_max?");
 	if (!current_min.is_max()) {
 		results.push_back(current_min);
+		//megadata[megadatai++] = current_min;
 	}
 
 	auto stop = std::chrono::high_resolution_clock::now();
@@ -571,6 +584,9 @@ inline void bio_collect_minimizers2(
 
 	JustLog("end?");
 	JustLog("Dump all collected (runtime = {})", duration);
+	// for(size_t i = 0; i<megadatai; ++i) {
+	// 	JustLog("mega {} {}", megadata[i].sketch.data[0], megadata[i].sketch.data[1]);
+	// }
 	for(auto const& i : results) {
 		JustLog("{} {}", i.sketch.data[0], i.sketch.data[1]);
 	}
@@ -1085,7 +1101,7 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	std::vector<seq::dna4> FIXED_QUERY{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
 
 	// Uncomment for test
-	if constexpr (true) {
+	if constexpr (false) {
 		bioseq::simd::HWY_NAMESPACE::check_simd_packed_seq();
 		throw std::exception();
 	}

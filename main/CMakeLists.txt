@@ -24,6 +24,9 @@ cmake_minimum_required(VERSION 3.20..3.24)
 set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
 set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
 
+set(CMAKE_CXX_FLAGS_DEBUG "-g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+
 # Suport CXX modules
 set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
 message("CMAKE is ${CMAKE_VERSION}")

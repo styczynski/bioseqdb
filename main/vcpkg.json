@@ -1,8 +1,9 @@
 {
   "dependencies": [
+    "catch2",
     "highway",
     "libassert",
     "reflectcpp",
-    "catch2"
+    "foonathan-memory"
   ]
 }

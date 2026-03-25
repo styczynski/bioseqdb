@@ -11,6 +11,33 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+TEMPLATE_TEST_CASE("Correct upscaling of the vector", "[simd]", uint8_t, uint16_t, uint32_t, uint64_t) {
+    using unit_t = TestType;
+    using output_t = uint64_t;
+
+    const hn::ScalableTag<unit_t> d_in;
+	using D_IN = decltype(d_in);
+
+	const hn::ScalableTag<output_t> d_out;
+	using D_OUT = decltype(d_out);
+
+    using vec_in_t = hn::Vec<D_IN>;
+	using vec_out_t = hn::Vec<D_OUT>;
+
+	auto data = increasing_vector<unit_t>(hn::Lanes(d_in), unit_t{1});
+	vec_in_t v = hn::LoadU(d_in, data.data());
+
+    const size_t output_lanes = hn::Lanes(d_out);
+    size_t offset = 0;
+
+	typename vector_upscaler<D_IN>::template rescaled_t<D_OUT> out_vectors = vector_upscaler<D_IN>::upscale(d_in, d_out, v);
+	for (auto& single_vec : out_vectors) {
+        std::vector<output_t> vec_data = hwy_to_vector<D_OUT, output_t, vec_out_t>(d_out, single_vec);
+        std::vector<output_t> vec_input(data.begin() + offset, data.begin() + offset + output_lanes);
+		ASSERT(vec_input == vec_data );
+        offset += output_lanes;
+	}
+};
 
 TEMPLATE_TEST_CASE("SIMD matrix is correctly loaded via .fill() context=0", "[simd]", uint8_t, uint16_t, uint32_t, uint64_t) {
     using unit_t = TestType;
