@@ -622,27 +622,25 @@ enum sequence_strand_mode : uint8_t {
 template<
     typename p_derived_t,
     sequence_alphabet p_alphabet_t,
-    typename p_input_t,
-    typename p_output_t
+    typename p_input_t
 >
 struct hasher_base {
     struct traits : public compact_sequence_range<p_alphabet_t>::compact_sequence_range_base::traits {
-        using output_t = p_output_t;
         using input_t = p_input_t;
 
-        using hasher_return_t = std::pair<output_t, sequence_strand_mode>;
+        using hasher_return_t = std::pair<input_t, sequence_strand_mode>;
 
-        template <typename output_t_like>
+        template <typename input_t_like>
         [[always_inline]] static constexpr hasher_return_t select_min_hash_strand(
-            const output_t_like forward, 
-            const output_t_like reverse_complement
+            const input_t_like&& forward, 
+            const input_t_like&& reverse_complement
         ) noexcept {
             if (forward == reverse_complement) [[unlikely]] {
-                return std::make_pair(static_cast<output_t>(forward), SEQUENCE_STRAND_EQUAL);
+                return std::make_pair(static_cast<input_t>(forward), SEQUENCE_STRAND_EQUAL);
             } else if (forward < reverse_complement) {
-                return std::make_pair(static_cast<output_t>(forward), SEQUENCE_STRAND_FORWARD);
+                return std::make_pair(static_cast<input_t>(forward), SEQUENCE_STRAND_FORWARD);
             } else {
-                return std::make_pair(static_cast<output_t>(reverse_complement), SEQUENCE_STRAND_REVERSE_COMPLEMENT);
+                return std::make_pair(static_cast<input_t>(reverse_complement), SEQUENCE_STRAND_REVERSE_COMPLEMENT);
             }
         }
 
@@ -651,7 +649,7 @@ struct hasher_base {
 };
 
 
-template<template<typename H_A, typename H_O> typename H, typename A, typename O = uint64_t, typename I = uint64_t, typename hasher_t = H<A, O>::template scalar_hash<I>>
+template<template<typename H_A> typename H, typename A, typename I = uint64_t, typename hasher_t = H<A>::template scalar_hash<I>>
 concept supports_scalar_hash = sequence_alphabet<A> && requires (hasher_t& hasher, I&& incoming) {
 	{ hasher.next(std::move(incoming), std::move(incoming)) } -> std::same_as<typename hasher_t::traits::hasher_return_t>;
 };

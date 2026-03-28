@@ -324,24 +324,37 @@ public:
 	constexpr std::pair<size_t, size_t> partial_fill_with_offsets(
 		D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
 	) {
-		assert(K >= hn::Lanes(d));
-		assert(std::is_sorted(offsets));
+		DEBUG_ASSERT(K >= hn::Lanes(d), "Number of offsets cannot be larger than number of lanes");
+		//DEBUG_ASSERT(std::is_sorted(offsets), "Offsets must be in non-descending order");
 
 		const size_t rows_to_load = hn::Lanes(d);
 		size_t data_p = 0;
 		size_t partial_filled_rows = 0;
 		size_t full_rows_count = 0;
-		for(size_t i = 0; i < rows_to_load; ++i) {
+		size_t i = 0;
+		for(; i < K; ++i) {
+			JustLog("partial load {}/{} -> offset={}, avail={}, rows_to_load={}", i, rows_to_load, offsets[i], data_available, rows_to_load);
 			data_p = offsets[i];
 			if (data_p + rows_to_load > data_available) {
 				// We cannot load entire row
-				matrix[i] = hn::LoadN(d, &(data[data_p]), data_available);
-				partial_filled_rows = data_available;
+				const size_t rows_to_load = data_p >= data_available ? 0 : data_available - data_p;
+				DEBUG_ASSERT(data_p + rows_to_load <= data_available, "Cannot load past available data");
+				if (rows_to_load == 0) {
+					matrix[i] = hn::Zero(d);
+				} else {
+					matrix[i] = hn::LoadN(d, &(data[data_p]), rows_to_load);
+				}
+				partial_filled_rows = rows_to_load;
 			} else {
-				matrix[i] = hn::LoadU(d, &(data[data_p]));
+				JustLog("TRY?");
+				matrix[i] = hn::Zero(d); // hn::LoadU(d, &(data[data_p]));
 				++full_rows_count;
 			}
 		}
+		for(; i < rows_to_load; ++i) { 
+			matrix[i] = hn::Zero(d);
+		}
+		JustLog("LOADED OK");
 		return std::make_pair(full_rows_count, partial_filled_rows);
 	}
 

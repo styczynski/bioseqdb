@@ -42,24 +42,27 @@ inline constexpr std::pair<T, T> int_div_ceil(const T& val, const T& div) {
 	return std::make_pair(a, a * div - val);
 }
 
+template<template<typename H_A> typename H, typename A, typename I = uint64_t, typename D = hn::ScalableTag<I>, typename hasher_t = H<A>::template simd_hash<I, D>>
+concept supports_simd_hash = sequence_alphabet<A> && requires (hasher_t& hasher, D& d, hn::Vec<D>&& incoming) {
+	{ hasher.next(d, std::move(incoming), std::move(incoming)) } -> std::same_as<typename hasher_t::traits::hasher_return_t>;
+};
+
 // hasher
 template<
     typename p_derived_t,
     sequence_alphabet p_alphabet_t,
     typename p_input_t,
-    typename p_output_t
+	typename p_d_t
 >
-struct simd_hasher_base : hasher_base<p_derived_t, p_alphabet_t, p_input_t, p_output_t> {
-    struct traits : public simd_hasher_base<p_derived_t, p_alphabet_t, p_input_t, p_output_t>::hasher_base::traits {
-        using input_d_t = p_input_t;
-		using output_d_t = hn::ScalableTag<p_output_t>;
+struct simd_hasher_base : hasher_base<p_derived_t, p_alphabet_t, p_input_t> {
+    struct traits : public simd_hasher_base<p_derived_t, p_alphabet_t, p_input_t, p_d_t>::hasher_base::traits {
+        using input_d_t = p_d_t;
 		using input_vec_t = hn::Vec<input_d_t>;
-		using output_vec_t = hn::Vec<p_input_t>;
-		using hasher_return_t = output_vec_t;
+		using hasher_return_t = input_vec_t;
     };
 };
 
-template<sequence_alphabet alphabet_t, typename output_t>
+template<sequence_alphabet alphabet_t>
 struct lexic_hasher {
 public:
 	//using traits = compact_sequence_range<alphabet_t>::compact_sequence_range_base::traits;
@@ -69,47 +72,46 @@ public:
 	class scalar_hash : public hasher_base<
         scalar_hash<input_t>,
         alphabet_t,
-        input_t,
-        output_t
+        input_t
     >{
 	public:
         using traits = scalar_hash<input_t>::hasher_base::traits;
 	private:
-		output_t mask;
+		input_t mask;
 		size_t rev_shift;
-		output_t state_forward;
-		output_t state_reverse_compl;
+		input_t state_forward;
+		input_t state_reverse_compl;
 	public:
 		explicit scalar_hash(
 			const size_t& kmer_length
-		): mask(traits::template kmer_mask<output_t>(kmer_length)), state_forward(0), state_reverse_compl(0), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
+		): mask(traits::template kmer_mask<input_t>(kmer_length)), state_forward(0), state_reverse_compl(0), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
 
 		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
 			state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
 			state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (traits::letter_complement(outgoing)) << rev_shift;
-            return traits::select_min_hash_strand(state_forward, state_reverse_compl);
+            return traits::select_min_hash_strand(std::move(state_forward), std::move(state_reverse_compl));
 		}
 	};
 
-	template<typename input_t>
+	template<typename input_t, typename d_t>
 	class simd_hash : public simd_hasher_base<
-        simd_hash<input_t>,
+        simd_hash<input_t, d_t>,
         alphabet_t,
         input_t,
-        output_t
+		d_t
     >{
 	public:
-        using traits = simd_hash<input_t>::simd_hasher_base::traits;
+        using traits = simd_hash<input_t, d_t>::simd_hasher_base::traits;
 	private:
-		traits::output_vec_t mask;
+		traits::input_vec_t mask;
 		size_t rev_shift;
-		traits::output_vec_t state_forward;
-		traits::output_vec_t state_reverse_compl;
+		traits::input_vec_t state_forward;
+		traits::input_vec_t state_reverse_compl;
 	public:
 		explicit simd_hash(
 			const traits::input_d_t& d,
 			const size_t& kmer_length
-		): mask(hn::Set(d, traits::template kmer_mask<output_t>(kmer_length))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
+		): mask(hn::Set(d, traits::template kmer_mask<input_t>(kmer_length))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
 
 		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
 			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
@@ -136,6 +138,8 @@ public:
 
 
 };
+static_assert(supports_scalar_hash<lexic_hasher, seq::dna4>);
+static_assert(supports_simd_hash<lexic_hasher, seq::dna4>);
 
 // deprecated
 enum simd_bp_iteration_type {
@@ -197,6 +201,7 @@ inline void iterate_sequence_bp_simd_offsets(
     using seq_traits = compact_sequence_range<R>::traits;
 
 	// Remove this
+	JustLog("iterate_sequence_bp_simd_offsets() context_bps={}, delays={}, seq_traits::letters_per_unit={}, seq.size={}", context_bps, std::vector<size_t>({delays...}), seq_traits::letters_per_unit, seq.size());
 	const auto& [context_units, _] = int_div_ceil(context_bps, seq_traits::letters_per_unit);
 	constexpr size_t delays_count = sizeof...(delays);
 
@@ -264,6 +269,8 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	HWY_ALIGN std::array<VecT, delays_count> all_bp_vecs;
 	VecT base_bp_vec;
+
+	JustLog("Check here: {}, buffer_size={}, seq={}, full_chunks_count={}", offsets, buffer_size, seq, full_chunks_count);
 
 	auto handle_row_bp = [&]<simd_bp_iteration_part mode>(VecT row) -> bool {
 		for (size_t bp_index = 0; bp_index < seq_traits::letters_per_unit; ++bp_index) {
@@ -357,6 +364,8 @@ inline void iterate_sequence_bp_simd_offsets(
 	);
 
 	DEBUG_ASSERT(buffer.get_forward_capacity() >= bps_last_chunk / seq_traits::letters_per_unit, "Demand correct capacity in the buffer when loading last (partial) chunk");
+	
+	JustLog("LOAD {} VALUES PARTIAL", static_cast<uint32_t>(end - iter));
 	
 	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
 	const auto& [present_columns_left_count, present_rows_last_left] = mat.partial_fill_with_offsets(
