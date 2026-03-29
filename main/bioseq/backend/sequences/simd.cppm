@@ -84,7 +84,7 @@ public:
 	public:
 		explicit scalar_hash(
 			const size_t& kmer_length
-		): mask(traits::template kmer_mask<input_t>(kmer_length)), state_forward(0), state_reverse_compl(0), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
+		): mask(traits::template kmer_mask<input_t>(std::min(kmer_length, traits::max_kmer_length))), state_forward(0), state_reverse_compl(0), rev_shift(traits::bits_per_char * (std::min(kmer_length, traits::max_kmer_length)-1)) {};
 
 		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
 			state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
@@ -111,13 +111,26 @@ public:
 		explicit simd_hash(
 			const traits::input_d_t& d,
 			const size_t& kmer_length
-		): mask(hn::Set(d, traits::template kmer_mask<input_t>(kmer_length))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (kmer_length-1)) {};
+		): mask(hn::Set(d, traits::template kmer_mask<input_t>(std::min(kmer_length, traits::max_kmer_length)))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (std::min(kmer_length, traits::max_kmer_length)-1)) {};
 
 		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
+			JustLog("hasher in      <- {}", hwy_str(d, incoming));
+			JustLog("hasher out     -> {}", hwy_str(d, outgoing));
+			JustLog("hasher state F <- {}", hwy_str(d, state_forward));
+			JustLog("hasher state R <- {}", hwy_str(d, state_reverse_compl));
+			
+
 			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
 			// FIXME: complement!
 			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(hn::Xor(outgoing, hn::Set(d, -1)), rev_shift);
 			state_reverse_compl = hn::Or(hn::ShiftRight<traits::bits_per_char>(state_reverse_compl), new_vec);
+
+			JustLog("hasher rev_shift  {}", rev_shift);
+			JustLog("hasher xor     <- {}", hwy_str(d, hn::Xor(outgoing, hn::Set(d, -1))));
+			JustLog("hasher new_vec <- {}", hwy_str(d, new_vec));
+
+			JustLog("hasher new   F <- {}", hwy_str(d, state_forward));
+			JustLog("hasher new   R <- {}", hwy_str(d, state_reverse_compl));
 
 			//state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
 			//state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (traits::letter_complement(outgoing)) << rev_shift;
@@ -217,6 +230,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	const hn::ScalableTag<typename seq_traits::storage_unit> d;
 	using VecT = hn::Vec<decltype(d)>;
 	using vec_mask_t = hn::Mask<decltype(d)>;
+	// template <class D, class VecT = hn::Vec<D>, typename p_matrix_t = VecT*>
 	using matrix = square_lane_matrix<decltype(d)>;
 	
 
@@ -297,9 +311,9 @@ inline void iterate_sequence_bp_simd_offsets(
 				}
 			}
 			if constexpr (mode == ITER_FULL_MATRIX) {
-				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<true>{}, d, full_mask, base_bp_vec), delays_masks, all_bp_vecs));
+				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<true>{}, offsets, d, full_mask, base_bp_vec), delays_masks, all_bp_vecs));
 			} else if constexpr (mode == ITER_PARTIAL_MATRIX) {
-				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, d, main_mask, base_bp_vec), delays_masks, all_bp_vecs));
+				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, offsets, d, main_mask, base_bp_vec), delays_masks, all_bp_vecs));
 			}
 			// JustLog("next (-{})bp vec = {}", 0, hwy_str<decltype(d), seq::dna4>(d, base_bp_vec));
 
@@ -365,8 +379,9 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	DEBUG_ASSERT(buffer.get_forward_capacity() >= bps_last_chunk / seq_traits::letters_per_unit, "Demand correct capacity in the buffer when loading last (partial) chunk");
 	
-	JustLog("LOAD {} VALUES PARTIAL", static_cast<uint32_t>(end - iter));
-	
+	//JustLog("LOAD {} VALUES PARTIAL cap={}", static_cast<uint32_t>(end - iter), buffer.get_forward_capacity());
+
+	buffer.print_ptrs();
 	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
 	const auto& [present_columns_left_count, present_rows_last_left] = mat.partial_fill_with_offsets(
 		d, end - iter, offsets, seq.read_cptr(iter) //static_cast<const typename seq_traits::storage_unit*>(&(*iter))
@@ -380,7 +395,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
-	DEBUG_ASSERT(main_counter_none <= seq.size(), "Sanity check. If this fails, there's probably size_t overflow");
+	DEBUG_ASSERT(main_counter_none <= seq.bp_size(), "Sanity check. If this fails, there's probably size_t overflow");
 
 
 	while(true) {

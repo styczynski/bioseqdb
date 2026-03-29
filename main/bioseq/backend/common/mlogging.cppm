@@ -1550,6 +1550,8 @@ export inline void log_configure(const bool is_testing_mode = false) {
     enable_logging = true;
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("test-main");
+    fmtlog::setFlushDelay(0);
+    fmtlog::setLogFile(stderr, false);
   } else {
   #ifndef NO_POSTGRES
     fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", false);

@@ -280,9 +280,9 @@ public:
 	using vec_t = VecT;
 	using matrix_t = p_matrix_t;
 
-	p_matrix_t& matrix;
+	p_matrix_t matrix;
 
-	explicit square_lane_matrix(p_matrix_t&& p_matrix): matrix(p_matrix) {}
+	explicit square_lane_matrix(p_matrix_t p_matrix): matrix(p_matrix) {}
 
 	// template<typename T>
 	// constexpr std::vector<std::vector<T>> to_vectors(D& d) const {
@@ -325,36 +325,31 @@ public:
 		D& d, const size_t data_available, const std::array<size_t, K> offsets, const T* data
 	) {
 		DEBUG_ASSERT(K >= hn::Lanes(d), "Number of offsets cannot be larger than number of lanes");
-		//DEBUG_ASSERT(std::is_sorted(offsets), "Offsets must be in non-descending order");
 
 		const size_t rows_to_load = hn::Lanes(d);
-		size_t data_p = 0;
 		size_t partial_filled_rows = 0;
 		size_t full_rows_count = 0;
 		size_t i = 0;
 		for(; i < K; ++i) {
-			JustLog("partial load {}/{} -> offset={}, avail={}, rows_to_load={}", i, rows_to_load, offsets[i], data_available, rows_to_load);
-			data_p = offsets[i];
-			if (data_p + rows_to_load > data_available) {
+			const size_t offset = offsets[i];
+			if (offset + rows_to_load > data_available) [[unlikely]] {
 				// We cannot load entire row
-				const size_t rows_to_load = data_p >= data_available ? 0 : data_available - data_p;
-				DEBUG_ASSERT(data_p + rows_to_load <= data_available, "Cannot load past available data");
-				if (rows_to_load == 0) {
+				if (offset >= data_available) [[unlikely]] {
 					matrix[i] = hn::Zero(d);
 				} else {
-					matrix[i] = hn::LoadN(d, &(data[data_p]), rows_to_load);
+					const size_t rows_to_load = data_available - offset;
+					DEBUG_ASSERT(offset + rows_to_load <= data_available, "Cannot load past available data");
+					matrix[i] = hn::LoadN(d, &(data[offset]), rows_to_load);
+					partial_filled_rows = rows_to_load;
 				}
-				partial_filled_rows = rows_to_load;
 			} else {
-				JustLog("TRY?");
-				matrix[i] = hn::Zero(d); // hn::LoadU(d, &(data[data_p]));
+				matrix[i] = hn::LoadU(d, &(data[offset]));
 				++full_rows_count;
 			}
 		}
 		for(; i < rows_to_load; ++i) { 
 			matrix[i] = hn::Zero(d);
 		}
-		JustLog("LOADED OK");
 		return std::make_pair(full_rows_count, partial_filled_rows);
 	}
 

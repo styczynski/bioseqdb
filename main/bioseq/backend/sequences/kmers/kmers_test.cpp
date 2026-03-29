@@ -18,19 +18,20 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 TEST_CASE("HEHESZKI", "[heheszki-2]") {
-    std::vector<seq::dna4> FIXED_TARGET{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCAAA"_dna4};
+    std::vector<seq::dna4> FIXED_TARGET{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
     //std::vector<seq::dna4> FIXED_TARGET{"ACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGTCGTAGCTAGTCCGTAATCGTAGCTAGTCAAACTGTATCGTAGCTAGTCCGTAGCTACTGTAGCTGATCGTAGCTAGTCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCTCGTAGCTAGTCCGTAACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
 	
-    // auto query_compact = compact_sequence_range<seq::dna4>(FIXED_TARGET);
-    // collect_minimizers<bioseq::simd::N_NEON::lexic_hasher>(
-	// 	query_compact,
-	// 	query_compact.begin(),
-	// 	query_compact.end(),
-	// 	10,
-	// 	15
-	// );
+    auto query_compact = compact_sequence_range<seq::dna4>(FIXED_TARGET);
+    collect_minimizers<bioseq::simd::N_NEON::lexic_hasher>(
+		query_compact,
+		query_compact.begin(),
+		query_compact.end(),
+		10,
+		15
+	);
+    return;
 
-    auto query_compact2 = compact_sequence_range<seq::dna4>(FIXED_TARGET);
+    auto query_compact2 = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint64_t>>(FIXED_TARGET);
     bioseq::simd::N_NEON::collect_minimizers_simd<bioseq::simd::N_NEON::lexic_hasher>(
 		query_compact2,
 		query_compact2.begin(),
@@ -38,6 +39,7 @@ TEST_CASE("HEHESZKI", "[heheszki-2]") {
 		10,
 		15
 	);
+    JustLog("DUMP SEQ {}", query_compact2);
 };
 
 };

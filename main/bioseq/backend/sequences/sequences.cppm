@@ -27,12 +27,38 @@ import sequan_compat;
 
 export {
 
+template<typename T, template<typename...> typename U>
+inline constexpr bool is_instance_of_v = std::false_type{};
+
+template<template<typename...> typename U, typename... Vs>
+inline constexpr bool is_instance_of_v<U<Vs...>,U> = std::true_type{};
+
 template<typename A>
 concept sequence_alphabet = \
     requires (A const a) {
         { seqan3::to_rank(a) };
         { seqan3::alphabet_size<A> };
     };
+
+template<
+    sequence_alphabet alphabet_t,
+    typename storage_unit_t = typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_t>)>::least,
+    size_t p_letter_bit_width = seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_t>)
+>
+struct sequence_custom_alphabet {
+static_assert(p_letter_bit_width <= sizeof(storage_unit_t) * 8);
+static_assert(p_letter_bit_width > 0);
+static_assert(sizeof(storage_unit_t) > 0);
+
+public:
+    using alphabet_type = alphabet_t;
+    using storage_unit = storage_unit_t;
+    static constexpr size_t letter_bit_width = p_letter_bit_width;
+    static constexpr bool is_valid_sequence_custom_alphabet = true;
+};
+
+template <typename T>
+concept is_sequence_custom_alphabet = T::is_valid_sequence_custom_alphabet == true;
 
 template<typename R>
 concept sequence_proper_container = \
@@ -42,11 +68,12 @@ concept sequence_proper_container = \
 
 template<typename R>
 concept supports_compact_sequence_range = \
+    is_sequence_custom_alphabet<R> || \
     sequence_proper_container<R> || \
     sequence_alphabet<R>;
 
 template <typename T, typename A>
-std::string decode_compressed_seq_el(const T& val)  {
+std::string decode_compressed_seq_el(const T& val, bool complement = false, bool reverse = false)  {
     // FIXME: This is very wrong
     constexpr size_t bps_count = sizeof(T) * 8 / seqan3::detail::ceil_log2(A::alphabet_size);
     std::string ret(bps_count, '*');
@@ -54,8 +81,15 @@ std::string decode_compressed_seq_el(const T& val)  {
     for(auto i = 0; i < bps_count; ++i) {
         // reverse with: bps_count - i - 1
         // FIXME: 3 here cannot be hardcoded
-        ret[i] = A().assign_rank(buf & 3).to_char();
+        if (complement) {
+            ret[i] = A().assign_rank((3 ^ buf) & 3).to_char();
+        } else {
+            ret[i] = A().assign_rank(buf & 3).to_char();
+        }
         buf >>= 2;
+    }
+    if (reverse) {
+        std::reverse(ret.begin(), ret.end());
     }
     return ret;
 }
@@ -69,6 +103,9 @@ constexpr std::string symbols_vector_to_string(const std::vector<alphabet_t>& su
     }
     return result;
 }
+
+
+    
 
 // New impl
 
@@ -506,16 +543,19 @@ public:
 };
 
 template<
-    sequence_alphabet A
+    typename C
 >
-struct compact_sequence_range<A> : compact_sequence_range_base<
-    compact_sequence_range<A>,
-    A,
-    typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<A>)>::least,
-    seqan3::detail::ceil_log2(seqan3::alphabet_size<A>)
+requires (is_sequence_custom_alphabet<C>)
+struct compact_sequence_range<C> : compact_sequence_range_base<
+    compact_sequence_range<C>,
+    typename C::alphabet_type,
+    typename C::storage_unit,
+    C::letter_bit_width
+    //typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<C::alphabet_type>)>::least,
+    //seqan3::detail::ceil_log2(seqan3::alphabet_size<C::alphabet_type>)
 > {
 public:
-    using traits = compact_sequence_range<A>::compact_sequence_range_base::traits;
+    using traits = compact_sequence_range<C>::compact_sequence_range_base::traits;
 
     using base_container = std::vector<typename traits::storage_unit>;
     using iterator = std::vector<typename traits::storage_unit>::const_iterator;
@@ -530,7 +570,7 @@ public:
     template <typename R>
     requires (
         std::ranges::sized_range<R> && \
-        std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, A> == true
+        std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, typename C::alphabet_type> == true
     )
     static constexpr std::pair<base_container, size_t> _convert(R&& input_seq) {
         const size_t f_len = input_seq.size() / traits::letters_per_unit + (input_seq.size() % traits::letters_per_unit != 0);
@@ -540,7 +580,7 @@ public:
         size_t write_pos = 0;
         for(const auto& letter : input_seq) {
             buf >>= traits::bits_per_char;
-            buf |= letter.to_rank() << (traits::unit_used_bits - traits::bits_per_char);
+            buf |= static_cast<typename traits::storage_unit>(letter.to_rank()) << (traits::unit_used_bits - traits::bits_per_char);
             if (--bit_count == 0) {
                 bit_count = traits::letters_per_unit;
                 data[write_pos++] = buf;
@@ -560,7 +600,7 @@ public:
     template <typename R>
     requires (
         std::ranges::sized_range<R> && \
-        std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, A> == true
+        std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, typename C::alphabet_type> == true
     )
     compact_sequence_range(R&& input_seq) {
         auto z = _convert(std::move(input_seq));
@@ -581,12 +621,31 @@ public:
 
     auto constexpr size() const { return _data.size(); }
 
-    auto operator <=>(const compact_sequence_range<A>&) const = default;
-    bool constexpr operator==(const compact_sequence_range<A>&) const = default;
+    auto operator <=>(const compact_sequence_range<C>&) const = default;
+    bool constexpr operator==(const compact_sequence_range<C>&) const = default;
 
     constexpr static const typename traits::storage_unit* read_cptr(const iterator& it) {
         return static_cast<const typename traits::storage_unit*>(&(*it));
     };
+};
+
+template<
+    sequence_alphabet A
+>
+//template<sequence_alphabet alphabet_t, typename storage_unit_t, size_t p_letter_bit_width>
+struct compact_sequence_range<A> : compact_sequence_range<sequence_custom_alphabet<A>> {
+public:
+    using parent = compact_sequence_range<sequence_custom_alphabet<A>>;
+    using traits = compact_sequence_range<A>::parent::traits;
+    using base_container = compact_sequence_range<A>::parent::base_container;
+    using iterator = compact_sequence_range<A>::parent::iterator;
+
+    // template <typename R>
+    // requires (
+    //     std::ranges::sized_range<R> && \
+    //     std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, A> == true
+    // )
+    // compact_sequence_range(R&& input_seq): parent(input_seq) {};
 };
 
 // // sequence operators
@@ -630,6 +689,8 @@ struct hasher_base {
 
         using hasher_return_t = std::pair<input_t, sequence_strand_mode>;
 
+        static constexpr size_t max_kmer_length = sizeof(p_input_t) * 8 / compact_sequence_range<p_alphabet_t>::compact_sequence_range_base::traits::bits_per_char;
+
         template <typename input_t_like>
         [[always_inline]] static constexpr hasher_return_t select_min_hash_strand(
             const input_t_like&& forward, 
@@ -668,7 +729,7 @@ struct formatter<compact_sequence_range<R>>: formatter<std::string> {
     using T = compact_sequence_range<R>;
     template <typename FormatContext>
     auto format(compact_sequence_range<R> seq, FormatContext& ctx) const {
-      return formatter<std::string>::format(fmt::format("sequence<size={}|B{}>({}->b{} +{})[{}]", seq.bp_size(), seq.byte_size(), T::traits::letters_per_unit, T::traits::unit_width, seq.padding(), seq.to_string(true)), ctx);
+      return formatter<std::string>::format(fmt::format("sequence<bps={}|size={}|total={}B>({}->b{} +{})[{}]", seq.bp_size(), seq.size(), seq.byte_size(), T::traits::letters_per_unit, T::traits::unit_width, seq.padding(), seq.to_string(true)), ctx);
     }
 };
 

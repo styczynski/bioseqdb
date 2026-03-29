@@ -8,7 +8,7 @@ rm /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bi
 
 export CMAKE_EXPORT_COMPILE_COMMANDS=1 && \
 cd build && \
-cmake --preset dev .. && cmake --build . && \
+cmake --preset dev-opt .. && cmake --build . && \
 ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[heheszki-2]" #"[simd-new-x]" #cmake --build . --target test_bioseq_aligner && \
 exit 0 && \
 cmake --build . --target install && \
@@ -22,3 +22,5 @@ cmake --build . --target install && \
 
 #psql -h localhost -p 5432 -a -f ../bioseq/sql/setup.sql
 
+# DEBUG COMMAND:
+# gdb -ex=r --args ./build/bioseq/bioseq_aligner_tests_exec "--args" "--reporter" "console::out=-::colour-mode=ansi" "[heheszki-2]"

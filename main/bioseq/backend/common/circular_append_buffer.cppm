@@ -68,6 +68,12 @@ public:
 		return _capacity - _buf_pos;
 	}
 
+	[[nodiscard]] void print_ptrs() const {
+		JustLog("print_ptrs():");
+		JustLog("current buffer pointer = (base)={}, cur={}, next={}", (uint64_t)(_buffer.get()), (uint64_t)(&_buffer[_buf_pos]), (uint64_t)(&_buffer[_buf_pos+1]));
+		JustLog("END");
+	}
+
     [[always_inline]] constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (!p_fixed_capacity) {
         static_assert(std::is_same_v<decltype(_capacity), iterator>);
         iter += increment;
