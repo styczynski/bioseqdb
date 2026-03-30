@@ -52,6 +52,10 @@ public:
     _buffer(std::move(circular_append_buffer_allocator<T, base_array_type>::allocate(capacity))) {}
 
 
+	[[always_inline]] [[nodiscard]] constexpr size_t capacity() const {
+        return _capacity;
+    }
+
     [[always_inline]] [[nodiscard]] static constexpr iterator get_begin() {
         return iterator(0);
     }

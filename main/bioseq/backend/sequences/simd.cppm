@@ -89,6 +89,10 @@ public:
 		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
 			state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
 			state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (traits::letter_complement(outgoing)) << rev_shift;
+
+			JustLog("HASHER_NEW_F {}", state_forward);
+			JustLog("HASHER_NEW_R {}", state_reverse_compl);
+
             return traits::select_min_hash_strand(std::move(state_forward), std::move(state_reverse_compl));
 		}
 	};
@@ -107,22 +111,25 @@ public:
 		size_t rev_shift;
 		traits::input_vec_t state_forward;
 		traits::input_vec_t state_reverse_compl;
+		const traits::input_vec_t compl_mask;
 	public:
 		explicit simd_hash(
 			const traits::input_d_t& d,
 			const size_t& kmer_length
-		): mask(hn::Set(d, traits::template kmer_mask<input_t>(std::min(kmer_length, traits::max_kmer_length)))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (std::min(kmer_length, traits::max_kmer_length)-1)) {};
+		): mask(hn::Set(d, traits::template kmer_mask<input_t>(std::min(kmer_length, traits::max_kmer_length)))), state_forward(hn::Zero(d)), state_reverse_compl(hn::Zero(d)), rev_shift(traits::bits_per_char * (std::min(kmer_length, traits::max_kmer_length)-1)), compl_mask(hn::Set(d, traits::char_mask)) {};
 
 		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
 			JustLog("hasher in      <- {}", hwy_str(d, incoming));
 			JustLog("hasher out     -> {}", hwy_str(d, outgoing));
 			JustLog("hasher state F <- {}", hwy_str(d, state_forward));
+			JustLog("hasher compl_mask {}", hwy_str(d, compl_mask));
 			JustLog("hasher state R <- {}", hwy_str(d, state_reverse_compl));
 			
 
 			state_forward = hn::And(hn::Or(hn::ShiftLeft<traits::bits_per_char>(state_forward), incoming), mask);
 			// FIXME: complement!
-			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(hn::Xor(outgoing, hn::Set(d, -1)), rev_shift);
+			const typename traits::input_vec_t new_vec = hn::ShiftLeftSame(hn::Xor(outgoing, compl_mask), rev_shift);
+			JustLog("hasher new_vec    {}", hwy_str(d, new_vec));
 			state_reverse_compl = hn::Or(hn::ShiftRight<traits::bits_per_char>(state_reverse_compl), new_vec);
 
 			JustLog("hasher rev_shift  {}", rev_shift);
@@ -131,6 +138,15 @@ public:
 
 			JustLog("hasher new   F <- {}", hwy_str(d, state_forward));
 			JustLog("hasher new   R <- {}", hwy_str(d, state_reverse_compl));
+
+			// Dump first
+			if (true) {
+				HWY_ALIGN typename traits::input_t temp_buffer1[32];
+                hn::StoreU(state_forward, d, temp_buffer1);
+				JustLog("HASHER_NEW_F {}", temp_buffer1[0]);
+				hn::StoreU(state_reverse_compl, d, temp_buffer1);
+				JustLog("HASHER_NEW_R {}", temp_buffer1[0]);
+			}
 
 			//state_forward = (state_forward << traits::bits_per_char | incoming) & mask;
 			//state_reverse_compl = (state_reverse_compl >> traits::bits_per_char) | (traits::letter_complement(outgoing)) << rev_shift;

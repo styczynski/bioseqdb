@@ -212,6 +212,8 @@ inline void collect_minimizers(
 				const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
 				++pos;
 
+                DEBUG_ASSERT(kmer[strand] == c_hash && ((int)c_strand)+1 == strand, "Check if algo behaves in the same way");
+
 				// We don't need to check: kmer_span < max_span
 				if ((pos >= k || !IS_INIT)) {
 				//if (kmer_span < max_span) {
@@ -377,7 +379,36 @@ inline void collect_minimizers_simd(
 
 	HWY_ALIGN storage_unit temp_buffer1[32];
 	HWY_ALIGN storage_unit temp_buffer2[32];
+    HWY_ALIGN storage_unit temp_buffer3[32];
     std::vector<std::pair<uint64_t, uint64_t>> temp_positions;
+    size_t last_pushed_position = 0;
+
+    auto submit_results = [&]<bool ignore_distance>(const dd_t& d, auto const& offsets, const size_t distance, const hash_mask_t& min_mask){
+        hn::StoreU(current_min, d, temp_buffer1);
+        hn::StoreU(hn::VecFromMask(d, min_mask), d, temp_buffer2);
+        if constexpr (ignore_distance) {
+            hn::StoreU(current_min_pos, d, temp_buffer3);
+        }
+        for(size_t i=0; i<hn::Lanes(d); ++i) {
+            if (temp_buffer2[i]) {
+                if constexpr (ignore_distance) {
+                    const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
+                    const size_t distance = (current_pos >= temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
+                    const size_t real_pos = pos + offsets[i] - distance;
+                    if (last_pushed_position != real_pos) {
+                        temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
+                        last_pushed_position = real_pos;
+                    }
+                } else {
+                    const size_t real_pos = pos + offsets[i] - distance;
+                    if (last_pushed_position != real_pos) {
+                        temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
+                        last_pushed_position = real_pos;
+                    }
+                }
+            }
+        }
+    };
 
 	constexpr bool IS_INIT = true;
 	iterate_sequence_bp_simd_offsets(seq, seq_begin, seq_end, k+w-1, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
@@ -385,10 +416,18 @@ inline void collect_minimizers_simd(
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
         JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
 
-		++pos;
 		// We don't need to check: kmer_span < max_span
 		if ((pos >= k || !IS_INIT)) {
 		//if (kmer_span < max_span) {
+            // Print all
+            if (true) {
+                size_t write_i = output_size;
+                hn::StoreU(hash_vec, d, temp_buffer1);
+                for(size_t i=0; i<hn::Lanes(d); ++i) {
+                    JustLog("  ~ {} {} {}", pos, decode_compressed_seq_el<uint64_t, seq::dna4>(temp_buffer1[i], true), 0);
+                }
+            }
+
 			buffer.push_back(std::move(hash_vec)); // std::move???
 		} else {
 			buffer.push_back(std::move(hash_vec_t(max_vec)));
@@ -400,16 +439,17 @@ inline void collect_minimizers_simd(
 				// Check if hash is the same, but position different
 				hash_mask_t values_to_append_mask = hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos));
 				if (!hn::AllFalse(d, values_to_append_mask)) {
-					///
-					size_t write_i = output_size;
-					hn::StoreU(current_min, d, temp_buffer1);
-					hn::StoreU(hn::VecFromMask(d,values_to_append_mask), d, temp_buffer2);
-					for(size_t i=0; i<hn::Lanes(d); ++i) {
-						if (temp_buffer2[i]) {
-							JustLog("  . push_min rescan     {} (pos {})", temp_buffer1[i], pos+offsets[i]-distance); // pos+i*hn::Lanes(d)-distance
-                            temp_positions.push_back(std::make_pair(pos+offsets[i]-distance, temp_buffer1[i]));
-                        }
-					}
+                    submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask);
+                    ///
+					// size_t write_i = output_size;
+					// hn::StoreU(current_min, d, temp_buffer1);
+					// hn::StoreU(hn::VecFromMask(d,values_to_append_mask), d, temp_buffer2);
+					// for(size_t i=0; i<hn::Lanes(d); ++i) {
+					// 	if (temp_buffer2[i]) {
+					// 		JustLog("A! PUSH {} (pos {}) on {}", temp_buffer1[i], pos+offsets[i]-distance, pos); // pos+i*hn::Lanes(d)-distance
+                    //         temp_positions.push_back(std::make_pair(pos+offsets[i]-distance, temp_buffer1[i]));
+                    //     }
+					// }
 				}
 			});
 		}
@@ -417,14 +457,13 @@ inline void collect_minimizers_simd(
 		hash_vec_t new_min_pos_val = hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos()));
 		// buffer.last()
 
-		current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
-		current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
-		
+
 		const bool need_to_push_current_min = (pos >= w + k || !IS_INIT) && !hn::AllFalse(d, new_min_mask);
 
 		JustLog("  . val         ({})  = {}", pos, hwy_str(d, buffer.last()));
 		JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
 		JustLog("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
+        JustLog("  . pos         (pos) = {}", hwy_str(d, new_min_pos_val));
 		JustLog("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
 
 		// Check if we need to update min
@@ -436,19 +475,9 @@ inline void collect_minimizers_simd(
 		JustLog("  . need_to_rescan    = {}", need_to_rescan);
 
 		// Push current min
-		if (need_to_push_current_min) {
-            size_t write_i = output_size;
-
-            hn::StoreU(current_min, d, temp_buffer1);
-            hn::StoreU(hn::VecFromMask(d,new_min_mask), d, temp_buffer2);
-            for(size_t i=0; i<hn::Lanes(d); ++i) {
-                if (temp_buffer2[i]) {
-                    JustLog("  . push_min            {} (pos {})", temp_buffer1[i], pos+offsets[i]); // pos+i*hn::Lanes(d)
-                    //temp_positions.push_back(pos+offsets[i]);
-                    temp_positions.push_back(std::make_pair(pos+offsets[i], temp_buffer1[i]));
-                }
-            }
-
+		if (need_to_push_current_min) [[unlikely]] {
+            //submit_results(true, d, offsets, new_min_mask);
+            submit_results.template operator()<true>(d, offsets, 0, new_min_mask);
             // const auto write_len = hn::CompressBlendedStore(current_min, new_min_mask, d, &output_vals[output_size]);
             // output_size += write_len;
             // for(; write_i < output_size; ++write_i) {
@@ -456,19 +485,23 @@ inline void collect_minimizers_simd(
             // }
 		}
 
-		if (need_to_rescan) {
+		if (need_to_rescan) [[unlikely]] {
 
             if ((pos >= w + k - 1 || !IS_INIT)) {
-                size_t write_i = output_size;
-                hn::StoreU(current_min, d, temp_buffer1);
-                hn::StoreU(hn::VecFromMask(d,new_min_mask), d, temp_buffer2);
-                for(size_t i=0; i<hn::Lanes(d); ++i) {
-                    if (temp_buffer2[i]) {
-                        JustLog("  . push_min            {} (pos {})", temp_buffer1[i], pos+offsets[i]); // pos+i*hn::Lanes(d)
-                        //temp_positions.push_back(pos+offsets[i]);
-                        temp_positions.push_back(std::make_pair(pos+offsets[i], temp_buffer1[i]));
-                    }
-                }
+                //submit_results(false, d, offsets, buffer.capacity(), has_elapsed_min);
+                submit_results.template operator()<false>(d, offsets, buffer.capacity(), has_elapsed_min);
+                // size_t write_i = output_size;
+                // hn::StoreU(current_min, d, temp_buffer1);
+                // hn::StoreU(hn::VecFromMask(d,has_elapsed_min), d, temp_buffer2);
+                // //const hash_vec_t min_positions = hn::Sub(new_min_pos_val, current_min_pos);
+                // //hn::StoreU(min_positions, d, temp_buffer3);
+                // for(size_t i=0; i<hn::Lanes(d); ++i) {
+                //     if (temp_buffer2[i]) {
+                //         const size_t real_pos = pos + offsets[i] - buffer.capacity(); //temp_buffer3[i];
+                //         JustLog("C! PUSH {} (pos {}) on {}", temp_buffer1[i], real_pos, pos); // pos+i*hn::Lanes(d)
+                //         temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
+                //     }
+                // }
             }
 
 			current_min = max_vec;
@@ -484,21 +517,26 @@ inline void collect_minimizers_simd(
                     // Check if hash is the same, but position different
                     hash_mask_t values_to_append_mask = hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos));
                     if (!hn::AllFalse(d, values_to_append_mask)) {
+                        //submit_results(false, d, offsets, distance, values_to_append_mask);
+                        submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask);
                         ///
-                        size_t write_i = output_size;
-                        hn::StoreU(current_min, d, temp_buffer1);
-                        hn::StoreU(hn::VecFromMask(d,values_to_append_mask), d, temp_buffer2);
-                        for(size_t i=0; i<hn::Lanes(d); ++i) {
-                            if (temp_buffer2[i]) {
-                                JustLog("  . push_min rescan     {} (pos {})", temp_buffer1[i], pos+offsets[i]-distance); // pos+i*hn::Lanes(d)-distance
-                                //temp_positions.push_back(pos+offsets[i]-distance);
-                                temp_positions.push_back(std::make_pair(pos+offsets[i]-distance, temp_buffer1[i]));
-                            }
-                        }
+                        // size_t write_i = output_size;
+                        // hn::StoreU(current_min, d, temp_buffer1);
+                        // hn::StoreU(hn::VecFromMask(d,values_to_append_mask), d, temp_buffer2);
+                        // for(size_t i=0; i<hn::Lanes(d); ++i) {
+                        //     if (temp_buffer2[i]) {
+                        //         JustLog("D! PUSH {} (pos {}) on", temp_buffer1[i], pos+offsets[i]-distance, pos); // pos+i*hn::Lanes(d)-distance
+                        //         //temp_positions.push_back(pos+offsets[i]-distance);
+                        //         temp_positions.push_back(std::make_pair(pos+offsets[i]-distance, temp_buffer1[i]));
+                        //     }
+                        // }
                     }
                 });
             }
-		}
+		} else {
+            current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
+            current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);          
+        }
 
 		// if (hn::Le(buffer.last(), current_min)) { // a new minimum; then write the old min
 		// 	if ((pos >= w + k || !IS_INIT) && !current_min.is_max()) {
@@ -528,7 +566,8 @@ inline void collect_minimizers_simd(
 		// 	}
 		// }
 		//JustLog("got vec: {} {}", hwy_str_as<seq::dna4>(d, bp));
-	}, k-1);
+        ++pos;
+	}, 0); //k-1);
 
     for (auto& p : temp_positions) {
         JustLog("pos={}, kmer={}", p.first, decode_compressed_seq_el<uint64_t, seq::dna4>(p.second, true, true));
