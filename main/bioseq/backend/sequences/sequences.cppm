@@ -127,6 +127,8 @@ template<
 >
 struct compact_sequence_range_base {
 
+    using self_t = compact_sequence_range_base<derived_t, alphabet_t, storage_unit_t, p_letter_bit_width>;
+
     struct traits {
         using alphabet_type = alphabet_t;
         using storage_unit = storage_unit_t;
@@ -235,6 +237,8 @@ struct compact_sequence_range_base {
         friend class boost::iterator_core_access;
         friend class compact_sequence_range_base;
 
+        using iterator_t = base_iterator_t;
+
         bp_scalar_iter() = default;
 
         explicit bp_scalar_iter(
@@ -309,6 +313,27 @@ struct compact_sequence_range_base {
         }
     };
 
+    template<typename T>
+    struct sequence_iterator_capture {
+    private:
+        T _begin;
+        T _end;
+
+    public:
+        sequence_iterator_capture(
+            T begin_it,
+            T end_it
+        ): _begin(begin_it), _end(end_it) {}
+
+        T const& begin() {
+            return _begin;
+        }
+
+        T const& end() {
+            return _end;
+        }
+    };
+
     template<IteratorMode M, typename I>
     requires (is_valid_derived_iter<I>::value == true)
     constexpr inline bp_scalar_iter<I, M> iter(const I& it) {
@@ -318,6 +343,25 @@ struct compact_sequence_range_base {
             return bp_scalar_iter<I, M>(it-1, traits::letters_per_unit - super()->padding(), 0);
         }
         return bp_scalar_iter<I, M>(it, 0, *it);
+    };
+
+    // template<IteratorMode M, typename I>
+    // requires (is_valid_derived_iter<I>::value == true)
+    // constexpr inline sequence_iterator_capture<M, I> to_iter(const I& begin, const I& end) {
+    //     return sequence_iterator_capture<M, I>(
+    //         template iter<M, I>(begin),
+    //         template iter<M, I>(end)
+    //     );
+    // };
+
+
+    // typename I = decltype(std::declval<self_t>().iter<M>(std::declval<self_t>().super()->cbegin()))::iterator_type
+    template<IteratorMode M>
+    constexpr inline auto iterable() {
+        return sequence_iterator_capture(
+            iter<M>(super()->cbegin()),
+            iter<M>(super()->cend())
+        );
     };
 
     // template<typename I, typename F>
@@ -675,44 +719,6 @@ enum sequence_strand_mode : uint8_t {
     SEQUENCE_STRAND_FORWARD = 0,
     SEQUENCE_STRAND_REVERSE_COMPLEMENT = 1,
     SEQUENCE_STRAND_EQUAL = 2
-};
-
-// hasher
-template<
-    typename p_derived_t,
-    sequence_alphabet p_alphabet_t,
-    typename p_input_t
->
-struct hasher_base {
-    struct traits : public compact_sequence_range<p_alphabet_t>::compact_sequence_range_base::traits {
-        using input_t = p_input_t;
-
-        using hasher_return_t = std::pair<input_t, sequence_strand_mode>;
-
-        static constexpr size_t max_kmer_length = sizeof(p_input_t) * 8 / compact_sequence_range<p_alphabet_t>::compact_sequence_range_base::traits::bits_per_char;
-
-        template <typename input_t_like>
-        [[always_inline]] static constexpr hasher_return_t select_min_hash_strand(
-            const input_t_like&& forward, 
-            const input_t_like&& reverse_complement
-        ) noexcept {
-            if (forward == reverse_complement) [[unlikely]] {
-                return std::make_pair(static_cast<input_t>(forward), SEQUENCE_STRAND_EQUAL);
-            } else if (forward < reverse_complement) {
-                return std::make_pair(static_cast<input_t>(forward), SEQUENCE_STRAND_FORWARD);
-            } else {
-                return std::make_pair(static_cast<input_t>(reverse_complement), SEQUENCE_STRAND_REVERSE_COMPLEMENT);
-            }
-        }
-
-
-    };
-};
-
-
-template<template<typename H_A> typename H, typename A, typename I = uint64_t, typename hasher_t = H<A>::template scalar_hash<I>>
-concept supports_scalar_hash = sequence_alphabet<A> && requires (hasher_t& hasher, I&& incoming) {
-	{ hasher.next(std::move(incoming), std::move(incoming)) } -> std::same_as<typename hasher_t::traits::hasher_return_t>;
 };
 
 };

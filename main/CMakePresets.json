@@ -18,8 +18,8 @@
         "generator": "Ninja",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
-          "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-          "CMAKE_CXX_FLAGS": "-fno-omit-frame-pointer -fsanitize=address -g",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O2 -fno-omit-frame-pointer -fsanitize=address -g",
           "CMAKE_LINKER_FLAGS": "-fno-omit-frame-pointer -fsanitize=address -g"
         }
       },
