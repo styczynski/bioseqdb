@@ -87,6 +87,7 @@ template<
 	typename... delays_ts,
 	supports_compact_sequence_range R,
 	typename handler_fn_t,
+	typename finish_fn_t,
 	typename I = decltype(compact_sequence_range<R>().begin()),
 	size_t max_delay_bound = 256
 >
@@ -96,6 +97,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	const I& end,
 	const size_t context_bps,
 	handler_fn_t&& handler_fn,
+	finish_fn_t&& finish_fn,
 	//const size_t context,
 	delays_ts... delays
 ) {
@@ -285,15 +287,18 @@ inline void iterate_sequence_bp_simd_offsets(
 	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
 	DEBUG_ASSERT(main_counter_none <= seq.bp_size(), "Sanity check. If this fails, there's probably size_t overflow");
 
+	JustLog("CTR main_counter_none={} main_counter_only_left={} (bps_per_lane={}, (bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit)={}) (context_units={}, units_per_lane={})", main_counter_none, main_counter_only_left, bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit, context_units, units_per_lane);
 
 	while(true) {
 		// todo: break condition
 		//row = buffer.get_value_iter(buffer_write_pos);
 		if(handle_row_bp.template operator()<ITER_PARTIAL_MATRIX>(buffer.get_value_iter(buffer_write_pos))) {
+			finish_fn(offsets, d, left_mask);
 			return;
 		}
 		buffer.increment_iter(buffer_write_pos);
 	}
+	finish_fn(offsets, d, left_mask);
 	return;
 }
 

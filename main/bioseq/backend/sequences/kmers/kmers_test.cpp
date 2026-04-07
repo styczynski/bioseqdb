@@ -19,6 +19,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 TEST_CASE("HEHESZKI", "[heheszki-2]") {
+    sketch_collector collector;
     std::vector<seq::dna4> FIXED_TARGET{"GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
     //std::vector<seq::dna4> FIXED_TARGET{"ACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGTCGTAGCTAGTCCGTAATCGTAGCTAGTCAAACTGTATCGTAGCTAGTCCGTAGCTACTGTAGCTGATCGTAGCTAGTCACTGTAGGATCGTAGCTAGTCCGTACTGTAGCTGATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTCTCGTAGCTAGTCCGTAACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4};
 	
@@ -33,24 +34,30 @@ TEST_CASE("HEHESZKI", "[heheszki-2]") {
 
     auto query_compact = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint32_t>>(FIXED_TARGET);
     collect_minimizers<bioseq::simd::N_NEON::minimap_int_hasher>(
+        collector,
 		query_compact,
 		query_compact.begin(),
 		query_compact.end(),
 		10,
 		15
 	);
+    auto pairs_scalar = collector.extract_pairs();
     // minimap_int_hasher
     //return;
 
+    collector.clear();
     auto query_compact2 = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint32_t>>(FIXED_TARGET);
     bioseq::simd::N_NEON::collect_minimizers_simd<bioseq::simd::N_NEON::minimap_int_hasher>(
+        collector,
 		query_compact2,
 		query_compact2.begin(),
 		query_compact2.end(),
 		10,
 		15
 	);
-    JustLog("DUMP SEQ {}", query_compact2);
+    auto pairs_simd = collector.extract_pairs();
+    
+    ASSERT(pairs_scalar == pairs_simd, "SIMD should return exact same sketches as scalar version");
 };
 
 };

@@ -112,7 +112,7 @@ auto run_all_hashers_on_sequence(
             }
         }
         ++pos;
-    }, 0);
+    }, [](auto const& _offsets, auto& d, auto& mask){}, 0);
 
     std::sort(ret_simd.begin(), ret_simd.end());
     //ret_simd.erase(std::unique(ret_simd.begin(), ret_simd.end()), ret_simd.end());

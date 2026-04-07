@@ -72,7 +72,7 @@ public:
         actual_lanes = 0;
         iterate_sequence_bp_simd_offsets(source, begin, end, context_bps, [&]<bool is_full>(std::bool_constant<is_full>, auto const& _offsets, auto& d, auto& mask, auto&& incoming){
             _add_record(d, mask, incoming);
-        });
+        }, [](auto const& _offsets, auto& d, auto& mask){});
     };
 
     template<typename I>
@@ -82,7 +82,7 @@ public:
         actual_lanes = 0;
         iterate_sequence_bp_simd_offsets(source, begin, end, context_bps, [&]<bool is_full>(std::bool_constant<is_full>, auto const& _offsets, auto& d, auto& _mask, auto&& _incoming, auto delayed_mask, auto delayed_incoming){
             _add_record(d, delayed_mask, delayed_incoming);
-        }, delay);
+        }, [](auto const& _offsets, auto& d, auto& mask){}, delay);
     };
 
     std::vector<std::string> to_strings() const {

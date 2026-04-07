@@ -6,6 +6,7 @@ module;
 #include "common.h"
 
 #include <chrono>
+#include <ranges>
 
 export module bioseq_sequences.kmers;
 
@@ -36,7 +37,6 @@ import algo.circular_append_buffer;
 
 #define UNION_FIELD_WIDTH(T, union_field_name, property_name) \
     GET_BIT_FIELD_WIDTH(decltype(std::declval<T>().union_field_name), property_name)
-
 
 static inline uint64_t hash64(uint64_t key, uint64_t mask)
 {
@@ -139,6 +139,37 @@ class MinimapSketch : public sketch_type<MinimapSketch, MinimapSketchData> {};
 static_assert(std::is_standard_layout_v<MinimapSketch> == true);
 static_assert(sizeof(MinimapSketch) == 16);
 
+struct sketch_collector {
+private:
+    std::vector<MinimapSketch> sketches;
+public:
+    sketch_collector() : sketches() {
+        sketches.reserve(10000);
+    };
+
+    [[always_inline]] constexpr void collect(MinimapSketch&& sketch) {
+        sketches.push_back(std::move(sketch));
+    }
+
+    [[always_inline]] constexpr void collect(const MinimapSketch& sketch) {
+        sketches.push_back(sketch);
+    }
+
+    constexpr auto extract_pairs() const {
+        auto pairs = sketches 
+               | std::ranges::views::transform([](const MinimapSketch& el) -> std::pair<size_t, uint64_t> { return std::make_pair(el.sketch.sketch.last_pos, el.sketch.sketch.kmer); })
+               | std::ranges::to<std::vector>();
+        std::ranges::sort(pairs);
+        auto n = std::unique(pairs.begin(), pairs.end()) - pairs.begin();
+        pairs.resize(n);
+        return pairs;
+    }
+
+    [[always_inline]] constexpr void clear() {
+        sketches.clear();
+    }
+};
+
 template<
 	template<typename H_A> typename scalar_hash_t,
 	supports_compact_sequence_range R,
@@ -149,6 +180,7 @@ requires (
 	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>
 )
 inline void collect_minimizers(
+    sketch_collector& collector,
 	compact_sequence_range<R>& seq,
 	const I& seq_begin,
 	const I& seq_end,
@@ -172,8 +204,6 @@ inline void collect_minimizers(
 	hasher_t hasher(k);
 
 	circular_append_buffer<MinimapSketch, max_span> buffer(w);
-	std::vector<MinimapSketch> results;
-    results.reserve(10000);
 
 	MinimapSketch current_min = MinimapSketch::getMax();
 	auto current_min_pos = buffer.get_begin();
@@ -190,7 +220,7 @@ inline void collect_minimizers(
             // dump everything
             if (pos >= w+k) {
                 JustLog("Next step {}", pos);
-                buffer.unsafe_filled_for_each([&results, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
+                buffer.unsafe_filled_for_each([&collector, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
 					JustLog("| {}: pos={} kmer={}", static_cast<int64_t>(_index), el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
 				});
             }
@@ -227,9 +257,9 @@ inline void collect_minimizers(
 
 			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
 				//&results, &current_min, current_min_pos
-				buffer.unsafe_filled_for_each([&results, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
+				buffer.unsafe_filled_for_each([&collector, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
 					if (MinimapSketch::does_sketch_match(current_min, el)) {
-						results.push_back(el);
+						collector.collect(el);
                         const size_t x = el.sketch.sketch.last_pos;
                         JustLog("A! push_min {} on {}", x, seq_pos);
 					}
@@ -237,7 +267,7 @@ inline void collect_minimizers(
 			}
 			if (buffer.last() <= current_min) { // a new minimum; then write the old min
 				if ((pos >= w + k || !IS_INIT) && !current_min.is_max()) {
-					results.push_back(current_min);
+					collector.collect(current_min);
                     const size_t x = current_min.sketch.sketch.last_pos;
                     JustLog("B! push_min {} on {}", x, seq_pos);
 				}
@@ -245,13 +275,13 @@ inline void collect_minimizers(
 				current_min = buffer.last();
 			} else if (buffer.last_write_pos() == current_min_pos) { 
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) {
-					results.push_back(current_min);
+					collector.collect(current_min);
                     const size_t x = current_min.sketch.sketch.last_pos;
                     JustLog("C! push_min {} on {}", x, seq_pos);
 				}
 
 				current_min.set_max();
-				buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos, seq_pos](const auto& index, const auto& el, const auto& _distance) {
+				buffer.unsafe_filled_for_each([&collector, &current_min, &current_min_pos, seq_pos](const auto& index, const auto& el, const auto& _distance) {
 					if (current_min >= el) {
 						current_min = el;
 						current_min_pos = index;
@@ -259,9 +289,9 @@ inline void collect_minimizers(
 				});
 
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) { // write identical k-mers
-					buffer.unsafe_filled_for_each([&results, &current_min, &current_min_pos, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
+					buffer.unsafe_filled_for_each([&collector, &current_min, &current_min_pos, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
 						if (MinimapSketch::does_sketch_match(current_min, el)) {
-							results.push_back(el);
+							collector.collect(el);
                             const size_t x = el.sketch.sketch.last_pos;
                             JustLog("D! push_min {} on {}", x, seq_pos);
 						}
@@ -279,15 +309,15 @@ inline void collect_minimizers(
 
 	//JustLog("is_max?");
 	if (!current_min.is_max()) {
-		results.push_back(current_min);
+		collector.collect(current_min);
 	}
 
 	auto stop = std::chrono::high_resolution_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
 
-    for (auto const& el : results) {
-        JustLog("{} -> {}", el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
-    }
+    // for (auto const& el : results) {
+    //     JustLog("{} -> {}", el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
+    // }
 }
 
 template<
@@ -300,6 +330,7 @@ requires (
 	supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
 inline void collect_minimizers_simd(
+    sketch_collector& collector,
 	compact_sequence_range<R>& seq,
 	const I& seq_begin,
 	const I& seq_end,
@@ -335,7 +366,6 @@ inline void collect_minimizers_simd(
 	HWY_ALIGN storage_unit temp_buffer1[32];
 	HWY_ALIGN storage_unit temp_buffer2[32];
     HWY_ALIGN storage_unit temp_buffer3[32];
-    std::vector<std::pair<uint64_t, uint64_t>> temp_positions;
     size_t last_pushed_position = 0;
 
     auto submit_results = [&]<bool ignore_distance>(const dd_t& d, auto const& offsets, const size_t distance, const hash_mask_t& min_mask){
@@ -350,14 +380,33 @@ inline void collect_minimizers_simd(
                     const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
                     const size_t distance = (current_pos >= temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
+                    JustLog("% pushmin {} pos={}, off={}, dist={}", real_pos, pos, offsets[i] * seq_traits::letters_per_unit, distance);
                     if (last_pushed_position != real_pos) {
-                        temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
+                        collector.collect(std::move(MinimapSketch({
+                            .sketch { .sketch {
+                                .kmer = temp_buffer1[i],
+                                .span = k,
+                                .rid = 0,
+                                .last_pos = real_pos,
+                                .strand = 0,
+                            } }
+                        })));
+                        //temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
                         last_pushed_position = real_pos;
                     }
                 } else {
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
                     if (last_pushed_position != real_pos) {
-                        temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
+                        collector.collect(std::move(MinimapSketch({
+                            .sketch { .sketch {
+                                .kmer = temp_buffer1[i],
+                                .span = k,
+                                .rid = 0,
+                                .last_pos = real_pos,
+                                .strand = 0,
+                            } }
+                        })));
+                        //temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
                         last_pushed_position = real_pos;
                     }
                 }
@@ -371,14 +420,17 @@ inline void collect_minimizers_simd(
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
         //JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
 
+        JustLog("BASE STEP {} (offsets={}, lpu={})", pos, offsets, seq_traits::letters_per_unit);
+
         // dump everything
         if (pos >= w+k) {
             JustLog("Next step {}", pos);
             buffer.unsafe_filled_for_each([&](const auto& _index, const auto& el, const auto& distance) {
                 HWY_ALIGN storage_unit temp_buffer4[32];
+                size_t lane_index = hn::Lanes(d)-1;
                 hn::StoreU(el, d, temp_buffer4);
-                const size_t real_pos = pos + offsets[0] * seq_traits::letters_per_unit - distance;
-                JustLog("| {}: pos={} kmer={}", static_cast<int64_t>(_index), real_pos, temp_buffer4[0]);
+                const size_t real_pos = pos + offsets[lane_index] * seq_traits::letters_per_unit - distance;
+                JustLog("| {}: pos={} kmer={} <top={}>", static_cast<int64_t>(_index), real_pos, temp_buffer4[lane_index], (pos + offsets[lane_index] * seq_traits::letters_per_unit));
             });
         }
 
@@ -454,12 +506,16 @@ inline void collect_minimizers_simd(
         }
 
         ++pos;
-	}, 0); //k-1);
+	}, [&](auto const& offsets, auto& d, auto& mask){
+        hash_mask_t new_min_mask = hn::Not(hn::FirstN(d, hn::Lanes(d)-1));
+        --pos;
+        submit_results.template operator()<true>(d, offsets, 0, new_min_mask);
+    }, 0); //k-1);
 
 
-    for (auto& pos : temp_positions) {
-        JustLog("{} -> {}", pos.first, pos.second);
-    }
+    // for (auto& pos : temp_positions) {
+    //     JustLog("{} -> {}", pos.first, pos.second);
+    // }
 }
 
 } // bioseq::simd::HWY_NAMESPACE
