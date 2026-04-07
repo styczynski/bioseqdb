@@ -336,7 +336,7 @@ struct compact_sequence_range_base {
 
     template<IteratorMode M, typename I>
     requires (is_valid_derived_iter<I>::value == true)
-    constexpr inline bp_scalar_iter<I, M> iter(const I& it) {
+    constexpr inline bp_scalar_iter<I, M> iter(const I& it) const {
         if constexpr (traits::letters_per_unit == 1) {
             return bp_scalar_iter<I, M>(it, 0, *it);
         } else if (super()->end() == it && super()->begin() != it && super()->padding() != 0) {
@@ -357,7 +357,7 @@ struct compact_sequence_range_base {
 
     // typename I = decltype(std::declval<self_t>().iter<M>(std::declval<self_t>().super()->cbegin()))::iterator_type
     template<IteratorMode M>
-    constexpr inline auto iterable() {
+    constexpr inline auto iterable() const {
         return sequence_iterator_capture(
             iter<M>(super()->cbegin()),
             iter<M>(super()->cend())

@@ -3,6 +3,7 @@ module;
 #include <numeric>
 #include <ranges>
 #include <iostream>
+#include <algorithm>
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
@@ -11,6 +12,44 @@ export module testing;
 export import mlogging;
 
 export {
+
+template<
+	std::ranges::contiguous_range R,
+	typename T = std::remove_reference_t<std::ranges::range_reference_t<R>>
+>
+requires (
+	std::ranges::sized_range<R>
+)
+bool assert_range_set_equality(const R& expected, const R& actual) {
+    std::set<T> expected_set = std::ranges::to<std::set>(expected); //(expected.begin(), expected.end());
+    std::set<T> actual_set = std::ranges::to<std::set>(actual);
+
+    std::vector<T> els_not_present;
+    std::vector<T> els_extra;
+    std::vector<T> els_common;
+
+    std::ranges::set_difference(expected_set, actual_set, std::back_inserter(els_not_present));
+    std::ranges::set_difference(actual_set, expected_set, std::back_inserter(els_extra));
+    std::ranges::set_intersection(actual_set, expected_set, std::back_inserter(els_common));
+
+    const size_t expected_size = expected_set.size();
+    const size_t actual_size = actual_set.size();
+
+    ASSERT(
+        els_not_present.size() == 0 && els_extra.size() == 0 && els_common.size() == expected_set.size(),
+        fmt::format(
+            "assert_range_set_equality: Expect ranges to be equal (as sets). Two sets of size (expected) {} and (actual) {} have {} common element, while there are {} missing and {} extra. ",
+            expected_size, actual_size,
+            els_common.size(), els_not_present.size(), els_extra.size()
+        ),
+        els_not_present,
+        els_extra,
+        expected_set,
+        actual_set
+    );
+
+    return true;
+}
 
 template<typename T>
 std::vector<T> increasing_vector(size_t length, T start = 0) {
@@ -59,7 +98,7 @@ struct flatten_t {
 template<typename T>
 auto operator |(T && t, flatten_t f) {
     return f(std::forward<T>(t));
-}
+};
 
 constexpr flatten_t flatten;
 
@@ -69,6 +108,7 @@ public:
 
     void testRunStarting(Catch::TestRunInfo const&) override {
         log_configure(true);
+        libassert::set_diff_highlighting(true);
     }
 };
 

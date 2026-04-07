@@ -143,7 +143,7 @@ template<
 	template<typename H_A> typename scalar_hash_t,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin()),
-    typename hash_val_t = uint64_t
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
 >
 requires (
 	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>
@@ -186,6 +186,14 @@ inline void collect_minimizers(
 	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
 		for(; iter != end && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
 			const auto nucl = *iter;
+
+            // dump everything
+            if (pos >= w+k) {
+                JustLog("Next step {}", pos);
+                buffer.unsafe_filled_for_each([&results, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
+					JustLog("| {}: pos={} kmer={}", static_cast<int64_t>(_index), el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
+				});
+            }
 
 			// Support ambigious?
 			if(seq_traits::bits_per_char > 2 && nucl >= 4) {
@@ -276,13 +284,17 @@ inline void collect_minimizers(
 
 	auto stop = std::chrono::high_resolution_clock::now();
 	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
+
+    for (auto const& el : results) {
+        JustLog("{} -> {}", el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
+    }
 }
 
 template<
 	template<typename H_A> typename simd_hash_t,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin()),
-    typename hash_val_t = uint64_t
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
 >
 requires (
 	supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
@@ -337,13 +349,13 @@ inline void collect_minimizers_simd(
                 if constexpr (ignore_distance) {
                     const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
                     const size_t distance = (current_pos >= temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
-                    const size_t real_pos = pos + offsets[i] - distance;
+                    const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
                     if (last_pushed_position != real_pos) {
                         temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
                         last_pushed_position = real_pos;
                     }
                 } else {
-                    const size_t real_pos = pos + offsets[i] - distance;
+                    const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
                     if (last_pushed_position != real_pos) {
                         temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
                         last_pushed_position = real_pos;
@@ -355,9 +367,20 @@ inline void collect_minimizers_simd(
 
 	constexpr bool IS_INIT = true;
 	iterate_sequence_bp_simd_offsets(seq, seq_begin, seq_end, k+w-1, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
-        JustLog("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
+        //JustLog("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
-        JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
+        //JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
+
+        // dump everything
+        if (pos >= w+k) {
+            JustLog("Next step {}", pos);
+            buffer.unsafe_filled_for_each([&](const auto& _index, const auto& el, const auto& distance) {
+                HWY_ALIGN storage_unit temp_buffer4[32];
+                hn::StoreU(el, d, temp_buffer4);
+                const size_t real_pos = pos + offsets[0] * seq_traits::letters_per_unit - distance;
+                JustLog("| {}: pos={} kmer={}", static_cast<int64_t>(_index), real_pos, temp_buffer4[0]);
+            });
+        }
 
 		// We don't need to check: kmer_span < max_span
 		if ((pos >= k || !IS_INIT)) {
@@ -383,19 +406,19 @@ inline void collect_minimizers_simd(
 
 		const bool need_to_push_current_min = (pos >= w + k || !IS_INIT) && !hn::AllFalse(d, new_min_mask);
 
-		JustLog("  . val         ({})  = {}", pos, hwy_str(d, buffer.last()));
-		JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
-		JustLog("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
-        JustLog("  . pos         (pos) = {}", hwy_str(d, new_min_pos_val));
-		JustLog("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
+		// JustLog("  . val         ({})  = {}", pos, hwy_str(d, buffer.last()));
+		// JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
+		// JustLog("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
+        // JustLog("  . pos         (pos) = {}", hwy_str(d, new_min_pos_val));
+		// JustLog("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
 
 		// Check if we need to update min
 		hash_vec_t last_write_pos = hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos()));
 		hash_mask_t has_elapsed_min = hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos));
 		const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
 
-		JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
-		JustLog("  . need_to_rescan    = {}", need_to_rescan);
+		// JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
+		// JustLog("  . need_to_rescan    = {}", need_to_rescan);
 
 		// Push current min
 		if (need_to_push_current_min) [[unlikely]] {
@@ -435,7 +458,7 @@ inline void collect_minimizers_simd(
 
 
     for (auto& pos : temp_positions) {
-        JustLog("{}", pos.first);
+        JustLog("{} -> {}", pos.first, pos.second);
     }
 }
 

@@ -47,18 +47,24 @@ public:
 			const size_t& kmer_length
 		): base_hasher(kmer_length) {};
 
+		template<size_t offset>
+        static constexpr size_t shift = std::min(offset, sizeof(input_t) * 8 - 1);
+
 		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
 			auto [key, base_strand] = base_hasher.next(std::move(incoming), std::move(outgoing));
+			auto rr = std::make_pair(static_cast<input_t>(key), base_strand);
 
-			key = (~key + (key << 21));
-			key = key ^ key >> 24;
-			key = ((key + (key << 3)) + (key << 8));
-			key = key ^ key >> 14;
-			key = ((key + (key << 2)) + (key << 4));
-			key = key ^ key >> 28;
-			key = (key + (key << 31));
+			key = (~key + (key << shift<21>));
+			key = key ^ key >> shift<24>;
+			key = ((key + (key << shift<3>)) + (key << shift<8>));
+			key = key ^ key >> shift<14>;
+			key = ((key + (key << shift<2>)) + (key << shift<4>));
+			key = key ^ key >> shift<28>;
+			key = (key + (key << shift<31>));
 
-			return std::make_pair(static_cast<input_t>(key), base_strand);
+			JustLog("{} -> {}", rr.first, key);
+			return std::make_pair(key, base_strand);
+			//return std::make_pair(static_cast<input_t>(key), base_strand);
 		}
 	};
 
@@ -79,16 +85,22 @@ public:
 			const size_t& kmer_length
 		): base_hasher(d, kmer_length) {};
 
+		template<size_t offset>
+        static constexpr size_t shift = std::min(offset, sizeof(input_t) * 8 - 1);
+
 		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
 			auto key = base_hasher.next(d, std::move(incoming), std::move(outgoing));
+			const auto rr = key;
 
-			key = hn::Add(hn::Not(key), hn::ShiftLeft<21>(key));
-			key = hn::Xor(key, hn::ShiftRight<24>(key));
-			key = hn::Add(hn::Add(key, hn::ShiftLeft<3>(key)), hn::ShiftLeft<8>(key));
-			key = hn::Xor(key, hn::ShiftRight<14>(key));
-			key = hn::Add(hn::Add(key, hn::ShiftLeft<2>(key)), hn::ShiftLeft<4>(key));
-			key = hn::Xor(key, hn::ShiftRight<28>(key));
-			key = hn::Add(key, hn::ShiftLeft<31>(key));
+			key = hn::Add(hn::Not(key), hn::ShiftLeft<shift<21>>(key));
+			key = hn::Xor(key, hn::ShiftRight<shift<24>>(key));
+			key = hn::Add(hn::Add(key, hn::ShiftLeft<shift<3>>(key)), hn::ShiftLeft<shift<8>>(key));
+			key = hn::Xor(key, hn::ShiftRight<shift<14>>(key));
+			key = hn::Add(hn::Add(key, hn::ShiftLeft<shift<2>>(key)), hn::ShiftLeft<shift<4>>(key));
+			key = hn::Xor(key, hn::ShiftRight<shift<28>>(key));
+			key = hn::Add(key, hn::ShiftLeft<shift<31>>(key));
+
+			JustLog("{} -> {}", extract_lanes<input_t>(d, rr)[0], extract_lanes<input_t>(d, key)[0]);
 
 			return key;
 		}

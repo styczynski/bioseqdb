@@ -12,6 +12,7 @@ export module bioseq_sequences.kmers.hashers.base;
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_sequences.simd;
 import algo.circular_append_buffer;
 import bioseq_simd.utils;
 
@@ -70,43 +71,59 @@ template<
     template<typename H_A> typename H,
     supports_compact_sequence_range R
 >
-void run_fall_hashers_on_sequence(
+auto run_all_hashers_on_sequence(
     const compact_sequence_range<R>& seq,
     const size_t kmer_length
 ) {
     using seq_traits = compact_sequence_range<R>::traits;
     hn::ScalableTag<I> d;
-    typename H<typename seq_traits::alphabet_t>::template scalar_hash<I> h_scalar(kmer_length);
-    typename H<typename seq_traits::alphabet_t>::template simd_hash<I, decltype(d)> h_simd(d, kmer_length);
+    typename H<typename seq_traits::alphabet_type>::template scalar_hash<I> h_scalar(kmer_length);
+    typename H<typename seq_traits::alphabet_type>::template simd_hash<I, decltype(d)> h_simd(d, kmer_length);
     
-    std::vector<I> ret_scalar;
+    std::vector<std::pair<size_t, I>> ret_scalar;
     std::vector<std::pair<size_t, I>> ret_simd;
 
     ret_scalar.reserve(seq.bp_size());
     ret_simd.reserve(seq.bp_size());
 
-    for (auto& nucl : seq.template iterable<BP>()) {
+    size_t pos = 0;
+    for (auto const& nucl : seq.template iterable<BP>()) {
         const auto& [hash_val, _] = h_scalar.next(static_cast<I>(nucl), static_cast<I>(nucl));
-        ret_scalar.push_back(hash_val);
+        //JustLog("pos = {} / {}", pos, seq.bp_size());
+        if (pos >= kmer_length) {
+            ret_scalar.push_back(std::make_pair(pos, hash_val));
+        }
+        ++pos;
     }
 
-    size_t pos = 0;
+    pos = 0;
     iterate_sequence_bp_simd_offsets(seq, seq.begin(), seq.end(), kmer_length, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
-        const auto hash_val = h_simd.next(incoming, outgoing);
-        const auto& values = extract_lanes(d, hash_val);
-        size_t index = 0;
-        for (auto& value : values) {
-            ret_simd.push_back(std::make_pair(offsets[index] + pos, value));
-            ++index;
+        const auto hash_val = h_simd.next(d, incoming, outgoing);
+        if (pos >= kmer_length) {
+            const auto& values = extract_lanes<I>(d, hash_val);
+            const auto& mask_values = extract_lanes<I>(d, mask);
+            size_t index = 0;
+            for (auto& value : values) {
+                // JustLog("--> pos={} offsets[{}]={} <{}> -> {}", pos, index, offsets[index] * seq_traits::letters_per_unit, mask_values[index] != 0, offsets[index] * seq_traits::letters_per_unit + pos);
+                if (mask_values[index]) {
+                    ret_simd.push_back(std::make_pair(offsets[index] * seq_traits::letters_per_unit + pos, value));
+                }
+                ++index;
+            }
         }
         ++pos;
     }, 0);
 
     std::sort(ret_simd.begin(), ret_simd.end());
-    ret_simd.erase(std::unique(ret_simd.begin(), ret_simd.end()), ret_simd.end());
+    //ret_simd.erase(std::unique(ret_simd.begin(), ret_simd.end()), ret_simd.end());
 
-    JustLog("SCALAR = {}", ret_scalar);
-    JustLog("SIMD = {}", ret_simd);
+    // JustLog("simd = {}", ret_simd);
+    // JustLog("scalar = {}", ret_scalar);
+
+    return std::make_tuple(
+        ret_simd,
+        ret_scalar
+    );
 };
 
 // hasher

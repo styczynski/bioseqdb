@@ -20,6 +20,20 @@ namespace hn = hwy::HWY_NAMESPACE;
 // template <class D, class VecT>
 // std::string hwy_str(const D& d, const VecT& v);
 
+template <typename T, typename D>
+inline constexpr std::vector<T> extract_lanes(const D& d, const hn::Vec<D>& input) {
+	HWY_ALIGN T storage_buffer[hn::MaxLanes(d)];
+	hn::StoreU(input, d, storage_buffer);
+	const size_t lanes_no = hn::Lanes(d);
+	//DEBUG_ASSERT(lane_no < hn::Lanes(d), "Lane no within bounds");
+	return std::vector<T>(storage_buffer, storage_buffer + lanes_no);
+}
+
+template <typename T, typename D>
+inline constexpr std::vector<T> extract_lanes(const D& d, const hn::Mask<D>& input) {
+	return extract_lanes<T>(d, hn::VecFromMask(d, input));
+}
+
 template<typename T, typename B>
 struct simd_array_allocator {
 	static B allocate(const size_t& len) {

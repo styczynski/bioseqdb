@@ -42,15 +42,6 @@ inline constexpr std::pair<T, T> int_div_ceil(const T& val, const T& div) {
 	return std::make_pair(a, a * div - val);
 }
 
-template <typename T, typename D, typename vec_t = hn::Vec<D>>
-inline constexpr std::vector<T> extract_lanes(const D& d, const vec_t& input) {
-	HWY_ALIGN T storage_buffer[hn::MaxLanes(d)];
-	hn::StoreU(input, d, storage_buffer);
-	const size_t lanes_no = hn::Lanes(d);
-	//DEBUG_ASSERT(lane_no < hn::Lanes(d), "Lane no within bounds");
-	return std::vector<T>(storage_buffer, storage_buffer + lanes_no);
-}
-
 // deprecated
 enum simd_bp_iteration_type {
     FULL_MATRIX = 0,
