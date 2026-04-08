@@ -1,0 +1,2 @@
+1. May 01, 2019
+We added the option "-Xcompiler -ansi" in Makefile to make it compatible with current G++ compilers

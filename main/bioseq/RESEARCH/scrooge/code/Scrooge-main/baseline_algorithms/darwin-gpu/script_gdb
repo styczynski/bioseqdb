@@ -1,0 +1,26 @@
+#set cuda memcheck on
+#break filter.c:2162
+#break filter.c:2183
+#break cuda_host.cu:100
+#break cuda_host.cu:392
+#break cuda_host.cu:236
+#break cuda_device.cu:120
+#break cuda_device.cu:199
+#break cuda_device.cu:1965
+#break cuda_device.cu:122
+#break align.c:1029 if c==169 && y=87
+#set breakpoint pending on
+#watch *0xb04b40433
+#break cuda_header.h:326 if (maxXY_y == 154 && maxXY_x == 171)
+#break cuda_header.h:367 if (tid == 1075 && maxXY_y == 154 && maxXY_x == 171 && i_steps == 160)
+
+#run sacCer3.fa reads.fa 1 4
+run reference.fasta reads.fasta 1 64 64
+
+set $p = 17
+
+while $p-- > 0
+#	c
+#	print y
+end
+

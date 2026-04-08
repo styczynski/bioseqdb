@@ -1,0 +1,153 @@
+\subsection{Evaluation Methodology}
+We demonstrate the benefits of Scrooge (along with each of our three algorithmic improvements) using both CPU and GPU implementations by comparing it to the recent  WFA lm~\citep{Eizenga2022wfalm}, WFA~\citep{wfa_algorithm}, KSW2~\citep{ksw2_a} (the state-of-the-art aligner used in minimap2~\citep{ksw2_b}), Edlib~\citep{edlib} (the state-of-the-art implementation of Myers' bitvector algorithm~\citep{myers_algorithm_1999} used in Medaka~\citep{medaka} and Dysgu \citep{cleal2022dysgu}), CUDASW++3.0~\citep{liu2013cudasw++}, Darwin-GPU~\citep{ahmed2020darwin_gpu}, and our CPU and GPU implementations of the GenASM algorithm.
+
+We evaluate the throughput and accuracy of Scrooge via three classes of experiments. First, we compare the throughputs of all evaluated tools and show that Scrooge outperforms state-of-the-art aligners. Second, we evaluate the throughput benefits of \toolname's algorithmic improvements and its sensitivity to different choices for \var{W} and \var{O}. Third, we evaluate \toolname's accuracy. %
+We define throughput as the number of pairwise sequence alignments per second for a given dataset.
+
+
+We run all CPU evaluations on a dual-socket Intel Xeon Gold 5118 (2\x~12 physical cores, 2\x~24 logical cores)~\citep{xeon_gold_5118} at 3.2GHz with 196GiB DDR4 RAM. We run all GPU evaluations on an NVIDIA A6000~\citep{A6000}. We repeat all CPU and GPU experiments 10 times and 5 times, respectively, and average the results.
+
+\subsubsection{Datasets}
+We simulate 115,240 PacBio reads from the human genome using PBSIM2~\citep{pbsim2}, each of length 10 kilobases and with a target error rate of 5\%. We obtain the ground truth location in the reference genome, and the alignment (CIGAR string) of each read from PBSIM2, thus obtaining 115,240 candidate pairs for our \defn{long read groundtruth} dataset. We map 500 of the simulated PacBio reads to the human genome using minimap2~\citep{ksw2_b} and obtain all chains (candidate locations) it generates using the \texttt{-P} flag, 138,929 locations in total. This constitutes our \defn{long read} dataset. We map 100,000 Illumina short reads from the dataset with accession number SRR13278681 to the human genome using minimap2~\citep{ksw2_b} and obtain all chains (candidate locations) it generates using the \texttt{-P} flag, 9,612,222 locations in total. This constitutes our \defn{short read} dataset.
+We show further statistics of the datasets in \S2 of the supplementary materials, including error, error rate, and sequence length distributions. The exact datasets and command lines that produced all our results, including those in the supplementary materials, are available at our GitHub repository: \gitrepo.
+
+
+\subsection{Throughput}\label{sec:throughput}
+We run the CPU-based tools using 48 threads. We set the band width (i.e., the edit distance threshold) of Edlib and KSW2 to 15\% of the read length. We configure WFA-adaptive as recommended by its authors. We take the fastest configuration from a parameter sweep for Darwin-GPU. For a meaningful comparison, we ensure that Darwin-GPU's alignment component fully aligns all sequence pairs. We explain our changes to Darwin-GPU in \S7 of the supplementary materials. We empirically configure \toolname's CPU and GPU implementations with \var{W}=64, \var{O}=33 for the long read dataset and \var{W}=32, \var{O}=17 for the short read dataset, and enable the combinations of improvements that yield the best throughput. The exact function calls and parameters we used for each tool can be found in our GitHub repository and in \S7 of the supplementary materials. \figref{performance_bars} shows that \toolname significantly speeds up the alignment of long and short reads over \emph{all} baselines. In particular, the CPU implementation of \toolname has \cpuoptspeedup higher throughput (i.e., pairwise sequence alignments per second) than our CPU implementation of GenASM for long reads and 3.8\x higher throughput for short reads. The GPU implementation of \toolname has \gpuoptspeedup higher throughput than our GPU implementation of GenASM for long reads and 2.4\x higher throughput for short reads. The CPU and GPU speedups over GenASM are entirely due to \toolname's algorithmic improvements (i.e., SENE, DENT, ET) since our \toolname and GenASM implementations are similarly optimized.
+
+Note that WFA, KSW2, CUDASW++3.0, and Darwin solve a more general formulation of the alignment problem with affine gap scores~\citep{gotoh1982improved}. This puts them at a performance disadvantage. In contrast, Edlib~\citep{edlib}, GenASM~\citep{cali2020genasm}, and \toolname solve a less general but more efficient formulation of the alignment problem with unit costs (edit distance or Levenshtein distance~\citep{levenshtein1966binary}). We list the capabilities of each tool in \S6 of the supplementary materials.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/performance_bars_both.pdf}
+    \caption{\toolname's alignment throughput relative to various CPU and GPU baselines.}
+    \label{fig:performance_bars}
+\end{figure}
+
+\subsection{Thread Scaling}\label{sec:threadscaling}
+We explore the scaling of each CPU tool as the number of CPU threads increases. For each evaluated CPU tool, we sweep the number of CPU threads and measure the throughput on the long read and short read datasets. \figref{thread_scaling} shows the results normalized to each tool's throughput with 4 threads (for readability). We make three key observations. First, most tools scale almost linearly up to 24 threads for both datasets, but do not scale significantly from 24 to 48 threads. The system we perform our experiments on has 24 physical cores and 48 logical cores~\citep{xeon_gold_5118}, thus we hypothesize that the tools do not benefit from simultaneous multithreading (\defn{Hyper-Threading} in Intel terminology)~\citep{hyperthreading} due to the low latencies of simple arithmetic and bitwise instructions~\citep{agner_instructiontables}, which is what the underlying alignment algorithms of the tools primarily consist of. Second, we observe that Edlib's performance \emph{decreases} from 16 to 20 threads in the long read dataset. Since this does not occur in the short read dataset, we hypothesize that Edlib suffers from cache thrashing in the long read dataset and that the data fits into the cache for the short read dataset. Third, we observe that both evaluated functions of KSW2 do not scale at all past 24 threads in the long read dataset. We hypothesize that KSW2 is bandwidth-bound in this case.
+
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/baselines_threads.pdf}
+    \caption{Speedup of each CPU tool as the number of CPU threads increases.}
+    \label{fig:thread_scaling}
+\end{figure}
+
+\subsection{Sensitivity Analysis}\label{sec:sensitivity}
+We explore the throughput benefits of our algorithmic improvements in parameter sweeps over (1)~the number of GPU and CPU threads, (2)~the window size (\var{W}) parameter, and (3)~the window overlap (\var{O}) parameter.
+
+\textbf{GPU threads.} First, we run a scaling experiment on a GPU for GenASM, \toolname with the SENE improvement, \toolname with the DENT improvement, and \toolname with all three proposed improvements, with the DP table placed in either shared memory (\figref[a]{gpu_threadblocks}) or global memory (\figref[b]{gpu_threadblocks}).
+Based on \figref{gpu_threadblocks}, we make five observations. First, we observe that SENE and DENT individually improve performance when the DP table is placed in either shared or global memory. Second, we observe that SENE, DENT, and Early Termination can be combined for greater benefits. Third, we observe that placing the DP table in shared  (on-chip) memory achieves the best performance, but only when both proposed memory footprint improvements (i.e., SENE and DENT) are applied. This is because only with SENE and DENT is the memory footprint small enough to keep sufficiently many problem instances in the shared memory to utilize the the compute resources in each SM (see \secref{memory_footprint}) well. Fourth, in configurations where the memory footprint is not reduced sufficiently (e.g., with only DENT or SENE), using global (off-chip) memory can be faster than using shared memory, because global memory has sufficient capacity to fit many problem instances, utilizing compute resources better than shared memory despite the global memory's limited bandwidth. Finally, we observe that the baseline GenASM algorithm cannot run using shared memory at all, although we showed in \secref{memory_footprint} that a single instance of the baseline DP table has a footprint of 98.5KiB and thus should use fit into the 99KiB of shared memory. This is because our implementation requires some additional memory, such as for communication between processing elements. Thus, we cannot fit even a single instance into shared memory with GenASM.
+
+We ran the experiment for all seven possible combinations of our three improvements (i.e., SENE, DENT, and Early Termination). Full results are shown in \S11 of the the supplementary materials. In particular, we observe no significant benefits for GPUs from Early Termination, which is why we omit it in \figref{gpu_threadblocks} for readability.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/pbsim_chained_gpu_threadblocks.pdf}
+    \caption{Scaling experiments of our GPU implementation with \var{W}=64, \var{O}=33, when the DP table placed in (a) shared memory and (b) global memory.}
+    \label{fig:gpu_threadblocks}
+\end{figure}
+
+\textbf{CPU threads.} We run a similar scaling experiment on a CPU for
+GenASM, \toolname with the SENE improvement, \toolname with the Early Termination (ET)
+improvement, and \toolname with the SENE and Early Termination improvements. From \figref[a]{cpu_threads_WO}, we make three observations: First, we observe that Early~Termination improves performance significantly. This contrasts with our GPU implementation, where Early Termination did not show significant benefits. This is because our CPU implementation builds the DP table \var{R} row-wise, while our GPU implementation builds \var{R} diagonal-wise (see \secref{early_termination}). Second, SENE improves performance consistently, but less significantly than in the GPU case. This is because modern CPUs have relatively large on-chip cache capacities (e.g., 1MiB L2 cache per core on the Xeon Gold 5118 we evaluated on~\citep{xeon_gold_5118}). Thus, the DP table easily fits into the L2 cache even without \toolname's algorithmic improvements, and hence reducing the memory footprint is not as important. Third, \toolname scales linearly up to 24 threads but does not scale at all from 24 to 48 threads, a trend we observe for all evaluated tools (see \secref{threadscaling}).
+
+We ran the experiment for all seven possible combinations of our three improvements (i.e., SENE, DENT, and Early Termination). Full results are shown in \S12 of the the supplementary materials. In particular, we observe no significant benefits for CPUs from DENT, and in some cases even a slowdown, which is why we omit it in \figref{cpu_threads_WO} for readability.
+
+The three key takeaways from these experiments are that (1)~the SENE and DENT memory improvements yield significant benefits if performance is limited by memory bandwidth or capacity (e.g., in the GPU experiment), (2)~some of the algorithmic improvements can cause slight performance loss in practice (e.g., DENT in the CPU experiment), and (3)~the ideal combination of improvements depends on the computation platform (e.g., the available on-chip cache capacity) and the exact implementation (e.g., row-wise or diagonal-wise).
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/pbsim_chained_cpu_threads_WO.pdf}
+    \caption{(a) Scaling and (b) sensitivity to window size of our CPU implementation. }
+    \label{fig:cpu_threads_WO}
+\end{figure}
+
+\textbf{Window size (\var{W}) and overlap (\var{O}).}
+We explore the sensitivity of \toolname's throughput to the window size parameter \var{W} (\secref{windowing}) on CPUs. We vary \var{W} and set \var{O}=\var{W}//2+1. Note that larger \var{W} improves accuracy (\secref{windowing}).
+
+From the CPU results in \figref[b]{cpu_threads_WO} we make two observations: First, we observe that performance generally reduces as \var{W} increases. This is because the number of calculated bits per window increases cubically with increasing \var{W}. Second, we observe a sudden throughput dropoff when \var{W} increases past 64. This is because the word size of the Xeon Gold 5118 CPU is 64 bits; thus, if \var{W}$>$64, each bitvector operation has to be emulated using multiple word-sized machine instructions. This emulation is conceptually simple (e.g., carry over shifted bits) but requires several additional instructions, causing the performance dropoff.
+For example, in our implementation, a single 65-bit left shift is performed using two 64-bit left shifts, a 64-bit right shift, and a bitwise or operation.
+
+We repeat the same study on a GPU and observe the same trends: Increasing \var{W} reduces performance, and if the bitvectors are longer than the machine word (32 bits on the evaluated GPU), bit operations become significantly more expensive. We plot the GPU results and give detailed explanations in \S4 of the supplementary materials.
+
+We repeat a similar study for the window overlap (\var{O}) in \S5 of the supplementary materials. We observe that as \var{O} increases, performance generally reduces. However, with \toolname's optimizations, larger values of \var{O} can sometimes \emph{increase} performance. \var{O}=33 gives the best result. Thus, we choose it as the default operating point of \toolname\ for CPUs and GPUs.
+
+
+
+
+
+
+
+
+
+
+\subsection{Area \& Power Consumption of an ASIC Implementation} \label{sec:hw_benefits}
+The GenASM ASIC designed in \citep{cali2020genasm} uses a large on-chip scratchpad to store bitvectors for traceback. This scratchpad alone accounts for 0.256$mm^2$ (76\%) of silicon area and $0.055W$ (54\%) of power out of a total of 0.334$mm^2$ and $0.101W$ per accelerator core. Our proposed algorithmic improvements can be applied to that ASIC design through minor modifications. We estimate the area and power cost of such an ASIC implementation of \toolname analytically as follows:
+\begin{enumerate}
+    \item We start with the DC-logic, DC-SRAM, and TB-logic area and power numbers reported in \citep{cali2020genasm}
+    \item We estimate \toolname's TB-SRAM area and power cost with CACTI~7~\citep{balasubramonian2017cacti}, as in \citep{cali2020genasm}, but with \toolname's reduced memory footprint and data movement numbers.
+    \item We account for the logic overhead of SENE by adding the area and power of a single DC processing element~\citep{cali2020genasm} to the traceback (TB) logic cost, which accounts for recomputing edges during traceback. We assume no overhead for SENE during the construction of R, since the ANDed bitvectors are already computed.
+    \item We assume no overheads for applying DENT since it simply masks out bits when storing the bitvectors, which is trivial in hardware.
+\end{enumerate}
+
+
+\tabref{asic_numbers} lists the area and power breakdowns obtained with this methodology, and the breakdown of \citep{cali2020genasm} as a comparison point. In particular, we observe a 3.6\x reduction in chip area and a 2.1\x reduction in chip power consumption, while maintaining the same throughput. These improvements come from (1)~the reduced TB SRAM capacity, and (2)~the reduced TB SRAM bandwidth. 
+
+The key takeaway from this estimate is that \toolname's algorithmic improvements (1)~are directly applicable to and (2)~yield significant benefits over an ASIC implementation of GenASM.
+
+
+\begin{table}[h]
+\caption{Estimated area and power of a \toolname ASIC with \var{W=64} \var{O=33}.}
+\label{table:asic_numbers}
+\resizebox{\columnwidth}{!}{%
+\setlength\tabcolsep{1.5pt}
+\begin{tabular}{|l|rrrrr|rrrrr|}
+    \hline
+    & \multicolumn{5}{c|}{Area ($mm^2$)} & \multicolumn{5}{c|}{Power ($W$)} \\
+    \textbf{ASIC Implementation} & \textbf{DC Logic} & \textbf{TB Logic} & \textbf{DC SRAM} & \textbf{TB SRAM} & \textbf{total} & \textbf{DC Logic} & \textbf{TB Logic} & \textbf{DC SRAM} & \textbf{TB SRAM} & \textbf{total} \\ \hline
+    \citep{cali2020genasm} & 0.049 & 0.016 & 0.013 & 0.256 & 0.334 & 0.033 & 0.004 & 0.009 & 0.055 & 0.101 \\ \hline
+    \toolname & 0.049 & 0.016 & 0.013 & 0.014 & 0.093 & 0.033 & 0.004 & 0.009 & 0.003 & 0.049 \\ \hline 
+\end{tabular}}
+\end{table}
+
+\subsection{Accuracy} \label{sec:accuracy}
+The GenASM algorithm~\citep{cali2020genasm}, which \toolname is based on, is a greedy heuristic algorithm, as explained in \secref{genasm_algo}. Our improvements do \emph{not} introduce additional inaccuracy. In fact, \toolname's default operating point of \var{W}=64 \var{O}=33 \emph{increases} accuracy (see \secref{windowing}) over GenASM's default operating point of \var{W}=64 \var{O}=24~\citep{cali2020genasm}. The following analysis explores the accuracy of both \toolname and GenASM across different operating points. At any given operating point, \toolname produces the same alignments (and hence accuracy) as GenASM at that operating point. We run three types of experiments. First, we evaluate the alignment quality of \toolname compared to all evaluated baseline tools. Second, we explore in detail the sensitivity of accuracy to the window size \var{W}. Third, we explore in detail the sensitivity of accuracy to the window overlap \var{O}.
+
+\textbf{Alignment quality compared to baseline tools.}
+We explore the quality of the alignments (CIGAR strings) generated by \toolname, compared to the baseline tools. To measure alignment quality, we count the number of correctly aligned bases according to the ground truth alignments reported by the PBSIM2 simulator for the long read groundtruth dataset. For \toolname we repeat the evaluation for multiple values of \var{W} and set \var{O}=\var{W}//2+1. We make three observations from \figref{matching_bases}. First, the number of bases correctly aligned by \toolname increases as the window size \var{W} increases. Second, \toolname correctly aligns approximately the same number of bases as all of the baselines if \var{W}$\geq$64. Third, no tool can consistently produce the exact ground truth alignment. By manually inspecting such misalignments of each tool, we determine this is because of two reasons. First, indels in homopolymers are ambiguous and cannot reliably be retrieved with any aligner. Second, sometimes the ground truth alignment is sub-optimal in terms of alignment score and/or edit distance. In these cases, the aligners' goal of finding the optimal scoring alignment produces high-scoring but wrong alignments.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/matching_bases.pdf}
+    \caption{Fraction of correctly aligned bases according to the ground truth alignments in the long read groundtruth dataset.}
+    \label{fig:matching_bases}
+\end{figure}
+
+We explore the sensitivity of \toolname's accuracy to the window size parameter \var{W} (\secref{windowing}). We analyze the accuracy compared to optimal edit distance solutions, such as Edlib~\citep{edlib}. We evaluate the generated alignments based on minimap2's default affine gap scoring model. We vary \var{W} and set \var{O}=\var{W}//2+1. For each experiment, we record the 0.5, 0.1, 0.01, and 0.001 percentile alignment scores (i.e., for a dataset of 1000 pairs, the 0.5 percentile would be the 500th worst alignment score, the 0.01 percentile would be the 10th worst alignment score) of \toolname\ and GenASM (which produce the same results for the same choice of \var{W} and \var{O}) and compare to Edlib as an ideal upper bound.
+
+\textbf{Sensitivity to window size (\var{W}).}
+From \figref{accuracy_sweep_WO}, we make three observations: First, accuracy depends on the dataset. Second, small window sizes are sufficient for \toolname and GenASM to find the optimal edit distance alignment for \emph{most} of the sequence pairs. For example, the median alignment score is already optimal at \var{W}=32 for the long read groundtruth dataset and at \var{W}=8 for the short read dataset. Third, to find the optimal alignment for a few worst-case pairs, large window sizes are required: For example, the optimal alignment for the 0.001 percentile in the long read groundtruth dataset is only found for \var{W}$\geq$80. We manually inspect several of these "difficult" sequence pairs to find the reason for their apparent difficulty. We observe sequence pairs are aligned poorly if they contain extremely noisy and repetitive sub-sequences. However, these pairs \emph{will} be aligned optimally if the window size is larger than the length of the noisy sub-sequences. We illustrate this observation with an example sequence pair from the long read groundtruth dataset in \S13 of the supplementary materials.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/accuracy_sweep_WO_both.pdf}
+    \caption{Sensitivity of \toolname's accuracy to \var{W}. We show the achieved alignment score of the 0.001, 0.01, 0.1, and 0.5 (median) quantiles, and compare to Edlib as an upper bound for the accuracy achievable with the edit distance metric.}
+    \label{fig:accuracy_sweep_WO}
+\end{figure}
+
+\textbf{Sensitivity to window overlap (\var{O}).}
+We explore the sensitivity of \toolname's accuracy to the window overlap parameter \var{O} (\secref{windowing}). We sweep over \var{O} and run experiments for each $\var{W}\in\{32,64,96,128\}$. For each experiment, we record the 0.01 percentile alignment score of \toolname/GenASM and compare to Edlib as an ideal upper bound.
+
+From \figref{accuracy_sweep_O}, we make two observations: First, accuracy improves as \var{O} increases. Second, we observe that \var{W} and \var{O} need to be \emph{balanced} to achieve good accuracy. For example, the accuracy loss of a too small \var{W}=32 for the long read groundtruth dataset cannot be overcome with even large \var{O}=30. Similarly, choosing \var{O} close to 0 hurts accuracy for both datasets, even when \var{W} is large.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=\columnwidth,keepaspectratio]{figures/accuracy_sweep_O_both.pdf}
+    \caption{Sensitivity of accuracy to \var{O}, reporting the 1st percentile (worst 1\%) alignment score for each configuration. Edlib is an upper bound for the scores achievable with the edit distance metric.}
+    \label{fig:accuracy_sweep_O}
+\end{figure}
+
+The two key takeaways from these experiments are that (1)~\var{W} and \var{O} need to be chosen per dataset, and (2)~\var{W} and \var{O} should be increased or reduced together for the best accuracy.
