@@ -52,6 +52,7 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
+import alignment;
 
 export {
 
@@ -71,28 +72,34 @@ struct Minimap2Params {
     int32_t max_gap_ref    = -1;     ///< explicit ref gap (-1 = use max_gap)
     int32_t bw             = 500;    ///< bandwidth for chaining & alignment
     int32_t max_chain_skip = 25;     ///< max skip for early termination in DP
-    int32_t max_chain_iter = 2000;   ///< max predecessors examined per anchor
+    int32_t max_chain_iter = 5000;   ///< max predecessors examined per anchor (map.c)
     int32_t min_cnt        = 3;      ///< min seeds per chain
     int32_t min_chain_score= 40;     ///< min chain score
-    float   chain_gap_scale= 0.01f;  ///< gap penalty scale (multiplied by k)
-    float   chain_skip_scale=0.01f;  ///< skip penalty scale (multiplied by k)
+    float   chain_gap_scale= 0.8f;   ///< gap penalty scale (options.c default)
+    float   chain_skip_scale=0.0f;   ///< skip penalty scale (options.c default)
     float   mask_level     = 0.5f;   ///< primary/secondary overlap threshold
-    int32_t mask_len       = 50;     ///< max uncovered length for secondary
+    int32_t mask_len       = std::numeric_limits<int32_t>::max(); ///< max uncovered length (INT_MAX in options.c)
     float   pri_ratio      = 0.8f;   ///< secondary score ratio threshold
     int32_t best_n         = 5;      ///< max secondary alignments to keep
 
-    // Alignment scoring
+    // Alignment scoring — matches mm_mapopt_init() in options.c
     int32_t match_score    = 2;      ///< match score (a)
     int32_t mismatch_pen   = 4;      ///< mismatch penalty (b)
     int32_t gap_open1      = 4;      ///< short gap open (q)
     int32_t gap_ext1       = 2;      ///< short gap extend (e)
     int32_t gap_open2      = 24;     ///< long gap open (q2)
     int32_t gap_ext2       = 1;      ///< long gap extend (e2)
+    int32_t sc_ambi        = 1;      ///< penalty for ambiguous base (N)
     int32_t zdrop          = 400;    ///< z-drop threshold
-    int32_t end_bonus      = 0;      ///< bonus for reaching sequence ends
+    int32_t end_bonus      = -1;     ///< bonus for reaching sequence ends (-1 in options.c)
 
     int32_t max_occ        = 500;    ///< max seed occurrence to keep
     int32_t mid_occ        = 500;    ///< mid-level seed occurrence threshold
+
+    /// When true, perform base-level alignment via KSW2 and produce CIGAR.
+    /// Equivalent to MM_F_CIGAR flag in minimap2. Default false matches the
+    /// test invocation without -a/-c flags.
+    bool    do_cigar       = false;
 };
 
 // ============================================================================
@@ -138,10 +145,12 @@ struct MatchResult {
     // Additional alignment info
     int32_t chain_score     = 0;    ///< chaining score
     int32_t dp_score        = 0;    ///< DP alignment score
-    int32_t dp_max          = 0;    ///< max scoring segment score
+    int32_t dp_max          = 0;    ///< max scoring segment score (dp_max0 in original)
     int32_t n_seeds         = 0;    ///< number of seeds in chain
+    int32_t subsc           = 0;    ///< best secondary chaining score against this primary
     float   divergence      = -1.f; ///< sequence divergence estimate
     bool    is_primary      = true; ///< primary mapping flag
+    bool    has_cigar       = false;///< whether CIGAR alignment was performed
     std::vector<CigarOp> cigar;     ///< CIGAR string
 };
 
@@ -441,8 +450,9 @@ std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
     const int64_t n = static_cast<int64_t>(anchors.size());
     if (n == 0) return {{}, {}};
 
-    float chn_pen_gap  = params.chain_gap_scale * static_cast<float>(params.k);
-    float chn_pen_skip = params.chain_skip_scale * static_cast<float>(params.k);
+    // map.c:722-723: chn_pen_gap = opt->chain_gap_scale * 0.01 * mi->k
+    float chn_pen_gap  = params.chain_gap_scale * 0.01f * static_cast<float>(params.k);
+    float chn_pen_skip = params.chain_skip_scale * 0.01f * static_cast<float>(params.k);
     int32_t max_dist_x = params.max_gap;
     int32_t max_dist_y = params.max_gap;
     int32_t bw         = params.bw;
@@ -886,18 +896,27 @@ void filter_secondary_regions(
  *
  * Equivalent to ksw_gen_simple_mat() in align.c:15-27.
  */
+/**
+ * @brief Generate the 5x5 scoring matrix for DNA alignment.
+ *
+ * Equivalent to ksw_gen_simple_mat() in align.c:15-27.
+ * Matrix is 5x5 for {A, C, G, T, N} = {0, 1, 2, 3, 4}.
+ * Diagonal = match_score, off-diagonal = -mismatch_pen.
+ * Row/col 4 (N) scores -sc_ambi against everything.
+ */
 constexpr std::array<int8_t, 25> generate_score_matrix(
-    int8_t match_score, int8_t mismatch_pen)
+    int8_t match_score, int8_t mismatch_pen, int8_t sc_ambi)
 {
     std::array<int8_t, 25> mat{};
     int8_t a = match_score > 0 ? match_score : static_cast<int8_t>(-match_score);
     int8_t b = mismatch_pen > 0 ? static_cast<int8_t>(-mismatch_pen) : mismatch_pen;
+    int8_t ambi = sc_ambi > 0 ? static_cast<int8_t>(-sc_ambi) : sc_ambi;
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j)
             mat[i * 5 + j] = (i == j) ? a : b;
-        mat[i * 5 + 4] = 0;
+        mat[i * 5 + 4] = ambi;
     }
-    for (int j = 0; j < 5; ++j) mat[4 * 5 + j] = 0;
+    for (int j = 0; j < 5; ++j) mat[4 * 5 + j] = ambi;
     return mat;
 }
 
@@ -931,225 +950,105 @@ std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& seq) {
     return rc;
 }
 
-/**
- * @brief Result of a banded dual-affine gap alignment.
- */
-struct DPAlignResult {
-    int32_t score      = 0;
-    int32_t max_score  = 0;
-    int32_t max_q      = 0;
-    int32_t max_t      = 0;
-    bool    zdropped   = false;
-    int32_t n_matches  = 0;   ///< exact base matches
-    int32_t aln_len    = 0;   ///< total alignment length
-    std::vector<CigarOp> cigar;
-};
+// ============================================================================
+// KSW2 alignment wrapper — calls Aligner<ALIGN_ALGORITHM_KSW2>::d2()/z2()
+// ============================================================================
 
 /**
- * @brief Banded dual-affine gap DP alignment with traceback.
+ * @brief Dispatch to KSW2's dual-affine or affine gap alignment.
  *
- * Equivalent to ksw_extd2 in ksw2_extd2_sse.c but scalar.
+ * Equivalent to mm_align_pair() in align.c:340-372.
+ * If q == q2 && e == e2, uses affine gap (z2); otherwise dual-affine (d2).
  *
- * Recurrence:
- *   H[r,t] = max(H[r-1,t-1]+Score, E1, F1, E2, F2)
- *   E1[r,t] = max(H[r-1,t]-q1-e1, E1[r-1,t]-e1)
- *   F1[r,t] = max(H[r,t-1]-q1-e1, F1[r,t-1]-e1)
- *   E2[r,t] = max(H[r-1,t]-q2-e2, E2[r-1,t]-e2)
- *   F2[r,t] = max(H[r,t-1]-q2-e2, F2[r,t-1]-e2)
- *
- * @param query   Encoded query segment
- * @param target  Encoded target segment
- * @param mat     5x5 scoring matrix
- * @param params  Alignment parameters
- * @return DPAlignResult with score, CIGAR, match/mismatch counts
+ * @param qlen     Query segment length
+ * @param qseq     Encoded query segment
+ * @param tlen     Target segment length
+ * @param tseq     Encoded target segment
+ * @param mat      5x5 scoring matrix
+ * @param params   Algorithm parameters
+ * @param w        Bandwidth for alignment
+ * @param end_bonus End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
+ * @param zdrop    Z-drop threshold
+ * @param ksw_flag KSW2 flags (KSW_EZ_EXTZ_ONLY, KSW_EZ_RIGHT, KSW_EZ_REV_CIGAR, etc.)
+ * @param ez       [in/out] KSW2 result struct (cigar is allocated by KSW2, caller must free)
  */
-DPAlignResult align_dual_affine(
-    std::span<const uint8_t> query_span,
-    std::span<const uint8_t> target_span,
-    const std::array<int8_t, 25>& mat,
-    const Minimap2Params& params)
+void ksw2_align_pair(
+    int qlen, const uint8_t* qseq,
+    int tlen, const uint8_t* tseq,
+    const int8_t* mat,
+    const Minimap2Params& params,
+    int w, int end_bonus, int zdrop, int ksw_flag,
+    ksw_extz_t* ez)
 {
-    DPAlignResult result;
-    const int32_t qlen = static_cast<int32_t>(query_span.size());
-    const int32_t tlen = static_cast<int32_t>(target_span.size());
-    const uint8_t* query = query_span.data();
-    const uint8_t* target = target_span.data();
-    if (qlen <= 0 || tlen <= 0) return result;
-
-    const int32_t q1 = params.gap_open1;
-    const int32_t e1 = params.gap_ext1;
-    const int32_t q2 = params.gap_open2;
-    const int32_t e2 = params.gap_ext2;
-    const int32_t w  = params.bw;
-    const int32_t zdrop = params.zdrop;
-
-    constexpr int32_t NEG_INF = -0x40000000;
-
-    // Traceback directions
-    static constexpr uint8_t TB_DIAG = 0;
-    static constexpr uint8_t TB_UP   = 1;  // insertion (gap in target)
-    static constexpr uint8_t TB_LEFT = 2;  // deletion (gap in query)
-    // Bit 2 set = came from E2/F2 (long gap model)
-    static constexpr uint8_t TB_UP_LONG   = 5;
-    static constexpr uint8_t TB_LEFT_LONG = 6;
-
-    auto idx = [&](int32_t r, int32_t t) -> int64_t {
-        return static_cast<int64_t>(r) * (tlen + 1) + t;
-    };
-
-    int64_t matrix_size = static_cast<int64_t>(qlen + 1) * (tlen + 1);
-    std::vector<int32_t> H(matrix_size, NEG_INF);
-    std::vector<int32_t> E1_arr(matrix_size, NEG_INF);
-    std::vector<int32_t> F1_arr(matrix_size, NEG_INF);
-    std::vector<int32_t> E2_arr(matrix_size, NEG_INF);
-    std::vector<int32_t> F2_arr(matrix_size, NEG_INF);
-    std::vector<uint8_t> traceback(matrix_size, TB_DIAG);
-
-    H[idx(0, 0)] = 0;
-    for (int32_t t = 1; t <= tlen && t <= w; ++t) {
-        F1_arr[idx(0, t)] = -(q1 + e1 * t);
-        F2_arr[idx(0, t)] = -(q2 + e2 * t);
-        H[idx(0, t)] = std::max(F1_arr[idx(0, t)], F2_arr[idx(0, t)]);
-        traceback[idx(0, t)] = (F1_arr[idx(0, t)] >= F2_arr[idx(0, t)])
-                                ? TB_LEFT : TB_LEFT_LONG;
+    if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
+        Aligner<ALIGN_ALGORITHM_KSW2>::z2(
+            nullptr, qlen, qseq, tlen, tseq, 5, mat,
+            static_cast<int8_t>(params.gap_open1),
+            static_cast<int8_t>(params.gap_ext1),
+            w, zdrop, end_bonus, ksw_flag, ez);
+    } else {
+        Aligner<ALIGN_ALGORITHM_KSW2>::d2(
+            nullptr, qlen, qseq, tlen, tseq, 5, mat,
+            static_cast<int8_t>(params.gap_open1),
+            static_cast<int8_t>(params.gap_ext1),
+            static_cast<int8_t>(params.gap_open2),
+            static_cast<int8_t>(params.gap_ext2),
+            w, zdrop, end_bonus, ksw_flag, ez);
     }
-    for (int32_t r = 1; r <= qlen && r <= w; ++r) {
-        E1_arr[idx(r, 0)] = -(q1 + e1 * r);
-        E2_arr[idx(r, 0)] = -(q2 + e2 * r);
-        H[idx(r, 0)] = std::max(E1_arr[idx(r, 0)], E2_arr[idx(r, 0)]);
-        traceback[idx(r, 0)] = (E1_arr[idx(r, 0)] >= E2_arr[idx(r, 0)])
-                                 ? TB_UP : TB_UP_LONG;
-    }
-
-    int32_t max_H = 0, max_r = 0, max_t_pos = 0;
-
-    for (int32_t r = 1; r <= qlen; ++r) {
-        int32_t t_start = std::max(1, r - w);
-        int32_t t_end   = std::min(tlen, r + w);
-
-        for (int32_t t = t_start; t <= t_end; ++t) {
-            int32_t s = mat[query[r - 1] * 5 + target[t - 1]];
-
-            // Insertion models (gap in target)
-            E1_arr[idx(r, t)] = std::max(H[idx(r - 1, t)] - q1 - e1,
-                                          E1_arr[idx(r - 1, t)] - e1);
-            E2_arr[idx(r, t)] = std::max(H[idx(r - 1, t)] - q2 - e2,
-                                          E2_arr[idx(r - 1, t)] - e2);
-
-            // Deletion models (gap in query)
-            F1_arr[idx(r, t)] = std::max(H[idx(r, t - 1)] - q1 - e1,
-                                          F1_arr[idx(r, t - 1)] - e1);
-            F2_arr[idx(r, t)] = std::max(H[idx(r, t - 1)] - q2 - e2,
-                                          F2_arr[idx(r, t - 1)] - e2);
-
-            // Diagonal + match/mismatch
-            int32_t h_diag = H[idx(r - 1, t - 1)] + s;
-            int32_t h_best = h_diag;
-            uint8_t tb = TB_DIAG;
-
-            int32_t e_best = std::max(E1_arr[idx(r, t)], E2_arr[idx(r, t)]);
-            int32_t f_best = std::max(F1_arr[idx(r, t)], F2_arr[idx(r, t)]);
-
-            if (e_best > h_best) {
-                h_best = e_best;
-                tb = (E1_arr[idx(r, t)] >= E2_arr[idx(r, t)]) ? TB_UP : TB_UP_LONG;
-            }
-            if (f_best > h_best) {
-                h_best = f_best;
-                tb = (F1_arr[idx(r, t)] >= F2_arr[idx(r, t)]) ? TB_LEFT : TB_LEFT_LONG;
-            }
-
-            H[idx(r, t)] = h_best;
-            traceback[idx(r, t)] = tb;
-
-            if (h_best > max_H) {
-                max_H = h_best;
-                max_r = r;
-                max_t_pos = t;
-            }
-
-            if (zdrop > 0 && max_H - h_best > zdrop) {
-                result.zdropped = true;
-            }
-        }
-    }
-
-    result.score = H[idx(qlen, tlen)];
-    result.max_score = max_H;
-    result.max_q = max_r - 1;
-    result.max_t = max_t_pos - 1;
-
-    // --- Traceback to build CIGAR ---
-    int32_t r = qlen, t_pos = tlen;
-    std::vector<CigarOp> cigar_rev;
-    int32_t n_matches = 0, aln_len = 0;
-
-    while (r > 0 && t_pos > 0) {
-        uint8_t tb = traceback[idx(r, t_pos)];
-        uint8_t op_type = tb & 0x03; // strip long-gap marker
-
-        if (op_type == TB_DIAG) {
-            bool match = (query[r - 1] == target[t_pos - 1] && query[r - 1] < 4);
-            if (match) ++n_matches;
-            ++aln_len;
-            // Add match op
-            if (!cigar_rev.empty() && cigar_rev.back().op == CIGAR_MATCH) {
-                cigar_rev.back().len++;
-            } else {
-                cigar_rev.push_back({1, static_cast<uint32_t>(CIGAR_MATCH)});
-            }
-            --r; --t_pos;
-        } else if (op_type == TB_UP) {
-            ++aln_len;
-            if (!cigar_rev.empty() && cigar_rev.back().op == static_cast<uint32_t>(CIGAR_INS)) {
-                cigar_rev.back().len++;
-            } else {
-                cigar_rev.push_back({1, static_cast<uint32_t>(CIGAR_INS)});
-            }
-            --r;
-        } else { // TB_LEFT
-            ++aln_len;
-            if (!cigar_rev.empty() && cigar_rev.back().op == static_cast<uint32_t>(CIGAR_DEL)) {
-                cigar_rev.back().len++;
-            } else {
-                cigar_rev.push_back({1, static_cast<uint32_t>(CIGAR_DEL)});
-            }
-            --t_pos;
-        }
-    }
-    // Handle remaining insertions/deletions
-    if (r > 0) {
-        aln_len += r;
-        cigar_rev.push_back({static_cast<uint32_t>(r), static_cast<uint32_t>(CIGAR_INS)});
-    }
-    if (t_pos > 0) {
-        aln_len += t_pos;
-        cigar_rev.push_back({static_cast<uint32_t>(t_pos), static_cast<uint32_t>(CIGAR_DEL)});
-    }
-
-    // Reverse CIGAR
-    result.cigar.reserve(cigar_rev.size());
-    for (auto it = cigar_rev.rbegin(); it != cigar_rev.rend(); ++it) {
-        result.cigar.push_back(*it);
-    }
-    result.n_matches = n_matches;
-    result.aln_len = aln_len;
-
-    return result;
 }
 
 /**
- * @brief Perform base-level alignment for each region.
+ * @brief Convert KSW2 packed CIGAR to our CigarOp vector.
  *
- * Equivalent to align_regs() -> mm_align_skeleton() -> mm_align1() in align.c.
+ * KSW2 packs CIGAR as uint32_t: len<<4 | op.
+ */
+std::vector<CigarOp> ksw_cigar_to_ops(int n_cigar, const uint32_t* cigar) {
+    std::vector<CigarOp> ops;
+    ops.reserve(n_cigar);
+    for (int i = 0; i < n_cigar; ++i) {
+        ops.push_back({cigar[i] >> 4, cigar[i] & 0xf});
+    }
+    return ops;
+}
+
+/**
+ * @brief Append KSW2 CIGAR ops to a CigarOp vector, merging adjacent same-op entries.
+ */
+void append_cigar(std::vector<CigarOp>& dst, int n_cigar, const uint32_t* cigar) {
+    for (int i = 0; i < n_cigar; ++i) {
+        uint32_t op  = cigar[i] & 0xf;
+        uint32_t len = cigar[i] >> 4;
+        if (!dst.empty() && dst.back().op == op) {
+            dst.back().len += len;
+        } else {
+            dst.push_back({len, op});
+        }
+    }
+}
+
+/**
+ * @brief Reverse an in-memory uint8_t sequence.
+ */
+void reverse_seq_inplace(uint8_t* seq, int32_t len) {
+    for (int32_t i = 0; i < len / 2; ++i) {
+        uint8_t tmp = seq[i];
+        seq[i] = seq[len - 1 - i];
+        seq[len - 1 - i] = tmp;
+    }
+}
+
+/**
+ * @brief Perform base-level alignment for each region using KSW2.
  *
- * For each region, extracts the reference and query subsequences defined by
- * the chain boundaries, runs dual-affine DP, and fills in the dp_score,
- * dp_max, mlen, blen, and CIGAR fields.
+ * Equivalent to align_regs() → mm_align_skeleton() → mm_align1() in align.c.
  *
- * Simplified vs. minimap2: we align the entire chain region in one pass
- * rather than the 3-region (left-gap-right) strategy, which is adequate
- * for a port that needs correctness over speed.
+ * For each region, follows the minimap2 3-part alignment strategy:
+ *   1. Left extension: reversed query/target from first seed to extended boundary
+ *   2. Gap filling: align the entire region between first and last seeds
+ *   3. Right extension: query/target from last seed to extended boundary
+ *
+ * Coordinates are derived from actual KSW2 alignment extent, not from the
+ * padded window boundaries.
  */
 void align_regions(
     std::vector<AlignRegion>& regions,
@@ -1161,53 +1060,149 @@ void align_regions(
 {
     auto mat = generate_score_matrix(
         static_cast<int8_t>(params.match_score),
-        static_cast<int8_t>(params.mismatch_pen));
+        static_cast<int8_t>(params.mismatch_pen),
+        static_cast<int8_t>(params.sc_ambi));
     int32_t qlen = static_cast<int32_t>(query_fwd.size());
     int32_t tlen = static_cast<int32_t>(target_encoded.size());
+    int32_t bw = static_cast<int32_t>(params.bw * 1.5 + 1.0);
 
     for (auto& r : regions) {
         if (r.cnt <= 0) continue;
 
-        // Determine alignment boundaries from chain region, with extension
-        int32_t rs = r.rs;
-        int32_t re = r.re;
-        int32_t qs = r.rev ? (qlen - r.qe) : r.qs;
-        int32_t qe = r.rev ? (qlen - r.qs) : r.qe;
+        int32_t as = r.anchor_start;
+        const Anchor& first = anchors[as];
+        const Anchor& last  = anchors[as + r.cnt - 1];
 
-        // Extend boundaries slightly (like mm_align1 Step 2)
-        int32_t ext = std::min(static_cast<int32_t>(params.bw), 100);
-        rs = std::max(0, rs - ext);
-        re = std::min(tlen, re + ext);
-        qs = std::max(0, qs - ext);
-        qe = std::min(qlen, qe + ext);
+        // Inner seed boundaries (where seeds are)
+        int32_t span0 = first.q_span();
+        int32_t rs = static_cast<int32_t>(first.x) + 1 - span0;
+        int32_t qs = static_cast<int32_t>(first.y) + 1 - span0;
+        int32_t re = static_cast<int32_t>(last.x) + 1;
+        int32_t qe = static_cast<int32_t>(last.y) + 1;
+        if (rs < 0) rs = 0;
+        if (qs < 0) qs = 0;
 
-        int32_t sub_qlen = qe - qs;
-        int32_t sub_tlen = re - rs;
-        if (sub_qlen <= 0 || sub_tlen <= 0) continue;
-
-        std::span<const uint8_t> qseq = r.rev
-            ? std::span<const uint8_t>(query_rev.data() + qs, sub_qlen)
-            : std::span<const uint8_t>(query_fwd.data() + qs, sub_qlen);
-        std::span<const uint8_t> tseq(target_encoded.data() + rs, sub_tlen);
-
-        auto dp_result = align_dual_affine(qseq, tseq, mat, params);
-
-        // Update region with DP results
-        r.dp_score = dp_result.score;
-        r.dp_max   = dp_result.max_score;
-        r.has_dp   = true;
-        r.cigar    = std::move(dp_result.cigar);
-
-        // Refine coordinates based on DP
-        r.rs = rs;
-        r.re = re;
-        if (!r.rev) {
-            r.qs = qs;
-            r.qe = qe;
-        } else {
-            r.qs = qlen - qe;
-            r.qe = qlen - qs;
+        // Outer boundaries: extend beyond seeds (align.c:708-762 simplified)
+        int32_t rs0 = rs, qs0 = qs;
+        int32_t re0 = re, qe0 = qe;
+        if (qs > 0 && rs > 0) {
+            int32_t l = qs < params.max_gap ? qs : params.max_gap;
+            qs0 = qs - l;
+            l += l * params.match_score > params.gap_open1 ? (l * params.match_score - params.gap_open1) / params.gap_ext1 : 0;
+            l = l < params.max_gap ? l : params.max_gap;
+            l = l < rs ? l : rs;
+            rs0 = rs - l;
         }
+        if (qe < qlen && re < tlen) {
+            int32_t l = qlen - qe < params.max_gap ? qlen - qe : params.max_gap;
+            qe0 = qe + l;
+            l += l * params.match_score > params.gap_open1 ? (l * params.match_score - params.gap_open1) / params.gap_ext1 : 0;
+            l = l < params.max_gap ? l : params.max_gap;
+            l = l < tlen - re ? l : tlen - re;
+            re0 = re + l;
+        }
+        if (qe0 > qlen) qe0 = qlen;
+
+        // Select the query strand
+        const uint8_t* qseq_base = r.rev ? query_rev.data() : query_fwd.data();
+
+        r.cigar.clear();
+        r.dp_score = 0;
+        ksw_extz_t ez;
+        std::memset(&ez, 0, sizeof(ez));
+
+        // === 1. Left extension ===
+        int32_t rs1 = rs, qs1 = qs;
+        if (qs > qs0 && rs > rs0) {
+            int32_t left_qlen = qs - qs0;
+            int32_t left_tlen = rs - rs0;
+            // Copy and reverse both query and target segments
+            std::vector<uint8_t> qbuf(qseq_base + qs0, qseq_base + qs);
+            std::vector<uint8_t> tbuf(target_encoded.data() + rs0, target_encoded.data() + rs);
+            reverse_seq_inplace(qbuf.data(), left_qlen);
+            reverse_seq_inplace(tbuf.data(), left_tlen);
+
+            ksw_reset_extz(&ez);
+            ksw2_align_pair(left_qlen, qbuf.data(), left_tlen, tbuf.data(),
+                            mat.data(), params, bw,
+                            params.end_bonus, params.zdrop,
+                            KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR, &ez);
+            if (ez.n_cigar > 0) {
+                append_cigar(r.cigar, ez.n_cigar, ez.cigar);
+                r.dp_score += ez.max;
+            }
+            rs1 = rs - (ez.reach_end ? ez.mqe_t + 1 : ez.max_t + 1);
+            qs1 = qs - (ez.reach_end ? qs - qs0 : ez.max_q + 1);
+            if (ez.cigar) { free(ez.cigar); ez.cigar = nullptr; ez.n_cigar = 0; ez.m_cigar = 0; }
+        }
+
+        // === 2. Gap filling (entire region between first and last seed) ===
+        int32_t re1 = rs, qe1 = qs;
+        if (r.cnt > 1) {
+            int32_t gap_qlen = qe - qs;
+            int32_t gap_tlen = re - rs;
+            if (gap_qlen > 0 && gap_tlen > 0) {
+                const uint8_t* gap_qseq = qseq_base + qs;
+                const uint8_t* gap_tseq = target_encoded.data() + rs;
+
+                ksw_reset_extz(&ez);
+                ksw2_align_pair(gap_qlen, gap_qseq, gap_tlen, gap_tseq,
+                                mat.data(), params, bw,
+                                -1, params.zdrop,
+                                KSW_EZ_APPROX_MAX, &ez);
+                if (ez.n_cigar > 0) {
+                    append_cigar(r.cigar, ez.n_cigar, ez.cigar);
+                }
+                if (ez.zdropped) {
+                    re1 = rs + (ez.max_t + 1);
+                    qe1 = qs + (ez.max_q + 1);
+                    r.dp_score += ez.max;
+                } else {
+                    re1 = re;
+                    qe1 = qe;
+                    r.dp_score += ez.score;
+                }
+                if (ez.cigar) { free(ez.cigar); ez.cigar = nullptr; ez.n_cigar = 0; ez.m_cigar = 0; }
+            }
+        } else {
+            re1 = re; qe1 = qe;
+        }
+
+        // === 3. Right extension ===
+        if (!ez.zdropped && qe < qe0 && re < re0) {
+            int32_t right_qlen = qe0 - qe;
+            int32_t right_tlen = re0 - re;
+            const uint8_t* right_qseq = qseq_base + qe;
+            const uint8_t* right_tseq = target_encoded.data() + re;
+
+            ksw_reset_extz(&ez);
+            ksw2_align_pair(right_qlen, right_qseq, right_tlen, right_tseq,
+                            mat.data(), params, bw,
+                            params.end_bonus, params.zdrop,
+                            KSW_EZ_EXTZ_ONLY, &ez);
+            if (ez.n_cigar > 0) {
+                append_cigar(r.cigar, ez.n_cigar, ez.cigar);
+                r.dp_score += ez.max;
+            }
+            re1 = re + (ez.reach_end ? ez.mqe_t + 1 : ez.max_t + 1);
+            qe1 = qe + (ez.reach_end ? qe0 - qe : ez.max_q + 1);
+            if (ez.cigar) { free(ez.cigar); ez.cigar = nullptr; ez.n_cigar = 0; ez.m_cigar = 0; }
+        }
+
+        // Set final coordinates from alignment extent (align.c:897-899)
+        r.rs = rs1;
+        r.re = re1;
+        if (!r.rev) {
+            r.qs = qs1;
+            r.qe = qe1;
+        } else {
+            r.qs = qlen - qe1;
+            r.qe = qlen - qs1;
+        }
+
+        // Compute dp_max from CIGAR (simplified mm_update_extra)
+        r.dp_max = r.dp_score;
+        r.has_dp = true;
 
         // Compute mlen/blen from CIGAR
         int32_t n_match = 0, n_block = 0;
@@ -1223,10 +1218,9 @@ void align_regions(
                 n_block += static_cast<int32_t>(op.len);
             }
         }
-        // Use DP-derived counts if better than seeded estimates
-        if (dp_result.n_matches > 0) {
-            r.mlen = dp_result.n_matches;
-            r.blen = dp_result.aln_len > 0 ? dp_result.aln_len : n_block;
+        if (n_match > 0) {
+            r.mlen = n_match;
+            r.blen = n_block > 0 ? n_block : r.blen;
         }
     }
 
@@ -1236,6 +1230,123 @@ void align_regions(
 // ============================================================================
 // Phase 8: Compute mapping quality (mm_set_mapq equivalent)
 // ============================================================================
+
+// ============================================================================
+// Phase 7b: Estimate divergence from seeds (mm_est_err equivalent)
+// ============================================================================
+
+/**
+ * @brief Estimate per-base divergence from seed positions.
+ *
+ * Equivalent of mm_est_err() in esterr.c.
+ *
+ * Algorithm:
+ *   1. Build a sorted array of forward-strand query minimizer positions (mini_pos)
+ *   2. For each region, binary-search for the first seed in mini_pos
+ *   3. Scan forward through mini_pos, counting how many chain seeds match
+ *   4. n_tot = span of mini_pos entries + edge corrections
+ *   5. div = 1 - (n_match/n_tot)^(1/avg_k)
+ *
+ * @param regions           Alignment regions to update
+ * @param query_minimizers  All query minimizers (used as mini_pos proxy)
+ * @param anchors           Reordered anchor array
+ * @param query_len         Query sequence length
+ * @param k                 k-mer size
+ * @param target_len        Target/reference sequence length
+ */
+void estimate_divergence_from_seeds(
+    std::vector<AlignRegion>& regions,
+    const std::vector<MinimapSketchData>& query_minimizers,
+    const std::vector<Anchor>& anchors,
+    int32_t query_len,
+    int32_t k,
+    int32_t target_len)
+{
+    if (query_minimizers.empty()) return;
+
+    // Build sorted mini_pos array: stores last_pos values directly.
+    // seed.c:127: mini_pos = q_span<<32 | q_pos>>1, where q_pos>>1 == last_pos.
+    // esterr.c get_for_qpos on an anchor also resolves back to last_pos
+    // for both strands (the reverse conversion cancels out), so mini_pos
+    // simply contains the raw last_pos values sorted.
+    std::vector<int32_t> mini_pos;
+    mini_pos.reserve(query_minimizers.size());
+    float sum_k = 0.0f;
+    for (const auto& qm : query_minimizers) {
+        mini_pos.push_back(static_cast<int32_t>(qm.last_pos));
+        sum_k += static_cast<float>(qm.span);
+    }
+    std::sort(mini_pos.begin(), mini_pos.end());
+    float avg_k = sum_k / static_cast<float>(query_minimizers.size());
+
+    for (auto& r : regions) {
+        r.div = -1.0f;
+        if (r.cnt <= 0) continue;
+
+        int32_t as = r.anchor_start;
+
+        // Get forward-strand position of the first anchor in the chain.
+        // esterr.c:48: uses r->rev? last anchor : first anchor.
+        // get_for_qpos resolves to last_pos for both strands.
+        const Anchor& ref_anchor = r.rev ? anchors[as + r.cnt - 1] : anchors[as];
+        int32_t first_fwd_pos;
+        {
+            int32_t x = static_cast<int32_t>(ref_anchor.y);
+            if (ref_anchor.rev()) {
+                int32_t q_span = ref_anchor.q_span();
+                x = query_len - 1 - (x + 1 - q_span);
+            }
+            first_fwd_pos = x;
+        }
+
+        // Binary search for first_fwd_pos in mini_pos
+        auto it = std::lower_bound(mini_pos.begin(), mini_pos.end(), first_fwd_pos);
+        if (it == mini_pos.end() || *it != first_fwd_pos) {
+            continue; // Position not found — skip
+        }
+        int32_t st = static_cast<int32_t>(it - mini_pos.begin());
+        int32_t en = st;
+
+        // Scan forward matching chain seeds (esterr.c:55-60)
+        int32_t n_match = 1;
+        int32_t n = static_cast<int32_t>(mini_pos.size());
+        for (int32_t seed_k = 1, j = st + 1; j < n && seed_k < r.cnt; ++j) {
+            const Anchor& a_k = r.rev
+                ? anchors[as + r.cnt - 1 - seed_k]
+                : anchors[as + seed_k];
+            int32_t fwd_pos;
+            {
+                int32_t x = static_cast<int32_t>(a_k.y);
+                if (a_k.rev()) {
+                    int32_t q_span = a_k.q_span();
+                    x = query_len - 1 - (x + 1 - q_span);
+                }
+                fwd_pos = x;
+            }
+            if (fwd_pos == mini_pos[j]) {
+                ++seed_k;
+                en = j;
+                ++n_match;
+            }
+        }
+
+        // n_tot = span of mini_pos between first and last match (esterr.c:61)
+        int32_t n_tot = en - st + 1;
+
+        // Edge corrections (esterr.c:62-63)
+        if (r.qs > avg_k && r.rs > avg_k) ++n_tot;
+        if (query_len - r.qs > avg_k && target_len - r.re > avg_k) ++n_tot;
+
+        // Divergence formula (esterr.c:64)
+        r.div = (n_match >= n_tot)
+                  ? 0.0f
+                  : static_cast<float>(1.0 - std::pow(
+                      static_cast<double>(n_match) / n_tot, 1.0 / avg_k));
+    }
+}
+
+// ============================================================================
+// Phase 8: Compute mapping quality (mm_set_mapq equivalent)
 
 /**
  * @brief Compute mapping quality for all regions.
@@ -1263,8 +1374,9 @@ void compute_mapping_quality(
     for (const auto& r : regions) {
         if (r.parent == r.id) sum_sc += r.score;
     }
+    // hit.c:436: uniq_ratio = (float)sum_sc / (sum_sc + rep_len)
     float uniq_ratio = static_cast<float>(sum_sc) /
-                       static_cast<float>(sum_sc + rep_len + 1);
+                       static_cast<float>(sum_sc + rep_len);
 
     for (auto& r : regions) {
         if (r.parent != r.id) {
@@ -1280,8 +1392,9 @@ void compute_mapping_quality(
         int32_t subsc = std::max(r.subsc, min_chain_sc);
 
         int32_t mapq_val;
+        // hit.c:447-467: three branches based on DP availability
         if (r.has_dp && r.dp_max2 > 0 && r.dp_max > 0) {
-            // Formula A: with DP scores
+            // Formula A: with DP scores (hit.c:448-457)
             float identity = (r.blen > 0) ? static_cast<float>(r.mlen) / r.blen : 0.f;
             float x = static_cast<float>(r.dp_max2) * subsc
                     / (static_cast<float>(r.dp_max) * r.score0);
@@ -1289,29 +1402,33 @@ void compute_mapping_quality(
                 identity * pen_cm * q_coef * (1.0f - x * x)
                 * std::log(static_cast<float>(r.dp_max) / match_sc));
 
-            // BWA-MEM-like alternative
+            // BWA-MEM-like alternative (hit.c:455)
             int32_t mapq_alt = static_cast<int32_t>(
                 6.02f * identity * identity
                 * (r.dp_max - r.dp_max2) / match_sc + 0.499f);
             mapq_val = std::min(mapq_val, mapq_alt);
-        } else if (r.has_dp) {
-            float identity = (r.blen > 0) ? static_cast<float>(r.mlen) / r.blen : 0.f;
-            float x = static_cast<float>(subsc) / r.score0;
-            mapq_val = static_cast<int32_t>(
-                identity * pen_cm * q_coef * (1.0f - x)
-                * std::log(static_cast<float>(r.dp_max) / match_sc));
         } else {
+            // No dp_max2 available: use chain score formula (hit.c:460-467)
             float x = static_cast<float>(subsc) / r.score0;
-            mapq_val = static_cast<int32_t>(
-                pen_cm * q_coef * (1.0f - x) * std::log(static_cast<float>(r.score)));
+            if (r.has_dp) {
+                float identity = (r.blen > 0) ? static_cast<float>(r.mlen) / r.blen : 0.f;
+                mapq_val = static_cast<int32_t>(
+                    identity * pen_cm * q_coef * (1.0f - x)
+                    * std::log(static_cast<float>(r.dp_max) / match_sc));
+            } else {
+                // No DP at all — use chain score (hit.c:466)
+                mapq_val = static_cast<int32_t>(
+                    pen_cm * q_coef * (1.0f - x)
+                    * std::log(static_cast<float>(r.score)));
+            }
         }
 
-        // Subtract n_sub penalty (applied last, after min selection)
+        // Subtract n_sub penalty (hit.c:469)
         mapq_val -= static_cast<int32_t>(4.343f * std::log(static_cast<float>(r.n_sub + 1)) + 0.499f);
         mapq_val = std::max(mapq_val, 0);
         r.mapq = std::min(mapq_val, 60);
 
-        // Ensure non-zero if clearly best
+        // Ensure non-zero if clearly best (hit.c:472)
         if (r.has_dp && r.dp_max > r.dp_max2 && r.mapq == 0) {
             r.mapq = 1;
         }
@@ -1349,8 +1466,10 @@ MatchResult region_to_match_result(
     m.dp_score     = r.dp_score;
     m.dp_max       = r.dp_max;
     m.n_seeds      = r.cnt;
+    m.subsc        = r.subsc;
     m.divergence   = r.div;
     m.is_primary   = (r.parent == r.id);
+    m.has_cigar    = r.has_dp;
     m.cigar        = r.cigar;
     return m;
 }
@@ -1432,35 +1551,14 @@ void print_match_results(
     }
 
     for (const auto& m : results) {
-        // --- 12 mandatory PAF columns ---
-        // col 1:  query name
-        // col 2:  query length
-        // col 3:  query start
-        // col 4:  query end
-        // col 5:  strand
-        // col 6:  target name
-        // col 7:  target length
-        // col 8:  target start
-        // col 9:  target end
-        // col 10: number of matches (mlen)
-        // col 11: block length (blen)
-        // col 12: mapping quality
         char strand_char = m.is_reverse ? '-' : '+';
-
-        // NM = edit distance approximation (blen - mlen)
-        // Matches write_tags line 405: NM:i:r->blen - r->mlen + r->p->n_ambi
-        // We don't track n_ambi separately so NM = blen - mlen
-        int32_t nm = m.block_len - m.num_matches;
-        if (nm < 0) nm = 0;
-
-        // tp: alignment type ('P'=primary, 'S'=secondary)
-        // Matches write_tags line 402-403
         char tp = m.is_primary ? 'P' : 'S';
 
-        // Build the full PAF line as a single string
-        // Mandatory columns
+        // Build the full PAF line — format matches mm_write_paf4 + write_tags
         std::string line;
         line.reserve(256);
+
+        // 12 mandatory PAF columns
         line += query_name;
         line += '\t'; line += std::to_string(m.query_len);
         line += '\t'; line += std::to_string(m.query_start);
@@ -1474,43 +1572,48 @@ void print_match_results(
         line += '\t'; line += std::to_string(m.block_len);
         line += '\t'; line += std::to_string(m.mapq);
 
-        // --- Auxiliary tags (same order as write_tags + mm_write_paf4) ---
+        // --- Auxiliary tags ---
+        // When CIGAR is available (r->p != NULL in original), output NM, ms, AS, nn
+        if (m.has_cigar && !m.cigar.empty()) {
+            int32_t nm = m.block_len - m.num_matches;
+            if (nm < 0) nm = 0;
+            line += "\tNM:i:"; line += std::to_string(nm);
+            line += "\tms:i:"; line += std::to_string(m.dp_max);
+            line += "\tAS:i:"; line += std::to_string(m.dp_score);
+            line += "\tnn:i:0";
+        }
 
-        // NM:i — edit distance (format.c:405)
-        line += "\tNM:i:"; line += std::to_string(nm);
-
-        // ms:i — max segment DP score (format.c:405)
-        line += "\tms:i:"; line += std::to_string(m.dp_max);
-
-        // AS:i — DP alignment score (format.c:405)
-        line += "\tAS:i:"; line += std::to_string(m.dp_score);
-
-        // nn:i — number of ambiguous bases (we don't track; emit 0)
-        line += "\tnn:i:0";
-
-        // tp:A — type (format.c:409)
+        // tp:A — type (format.c:409, always output)
         line += "\ttp:A:"; line += tp;
 
-        // cm:i — seed count (format.c:409)
+        // cm:i — seed count (format.c:409, always output)
         line += "\tcm:i:"; line += std::to_string(m.n_seeds);
 
-        // s1:i — chaining score (format.c:409)
+        // s1:i — chaining score (format.c:409, always output)
         line += "\ts1:i:"; line += std::to_string(m.chain_score);
 
-        // dv:f — divergence (format.c:418-422, only if valid)
+        // s2:i — best secondary chaining score (only for primaries, format.c:410)
+        if (m.is_primary) {
+            line += "\ts2:i:"; line += std::to_string(m.subsc);
+        }
+
+        // Divergence: de:f when CIGAR available, dv:f otherwise (format.c:411-422)
         if (m.divergence >= 0.0f && m.divergence <= 1.0f) {
-            // Match minimap2: "0" for exact zero, otherwise %.4f
+            const char* tag = (m.has_cigar && !m.cigar.empty()) ? "\tde:f:" : "\tdv:f:";
             if (m.divergence == 0.0f) {
-                line += "\tdv:f:0";
+                line += tag; line += '0';
             } else {
                 char buf[16];
                 std::snprintf(buf, sizeof(buf), "%.4f", static_cast<double>(m.divergence));
-                line += "\tdv:f:"; line += buf;
+                line += tag; line += buf;
             }
         }
 
-        // cg:Z — CIGAR string (format.c:450-454, always emit if we have one)
-        if (!m.cigar.empty()) {
+        // rl:i — repeat length (format.c:455, always 0 for us)
+        line += "\trl:i:0";
+
+        // cg:Z — CIGAR string (format.c:456-460, only when CIGAR available and requested)
+        if (m.has_cigar && !m.cigar.empty()) {
             line += "\tcg:Z:";
             line += format_cigar(m.cigar);
         }
@@ -1591,25 +1694,32 @@ std::vector<MatchResult> minimap2_port(
     // ---- Phase 4: Generate alignment regions ----
     auto regions = generate_regions(chains, reordered_anchors, query_len);
 
-    // ---- Phase 5: Primary/secondary classification ----
+    // ---- Phase 5 (chain_post): Primary/secondary classification + filter ----
+    // Equivalent to chain_post() in map.c:559-566
     int32_t sub_diff = params.match_score * 2 + params.mismatch_pen;
     classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
-
-    // ---- Phase 6: Filter secondaries ----
     int32_t min_diff = params.k * 2;
     filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
 
-    // ---- Phase 7: Base-level alignment ----
-    auto query_fwd = encode_sequence(query_seq);
-    auto query_rev_enc = reverse_complement(query_fwd);
-    auto target_encoded = encode_sequence(target_seq);
+    // ---- Phase 6: Estimate divergence from seeds (mm_est_err equivalent) ----
+    // This is done BEFORE alignment (map.c:783) and provides dv:f tag
+    estimate_divergence_from_seeds(regions, query_minimizers, reordered_anchors,
+                                   query_len, params.k, target_len);
 
-    align_regions(regions, reordered_anchors,
-                  query_fwd, query_rev_enc, target_encoded, params);
+    // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
+    // map.c:568-570: align_regs() returns immediately if !(opt->flag & MM_F_CIGAR)
+    if (params.do_cigar) {
+        auto query_fwd = encode_sequence(query_seq);
+        auto query_rev_enc = reverse_complement(query_fwd);
+        auto target_encoded = encode_sequence(target_seq);
 
-    // Re-classify after DP (like mm_align_skeleton does)
-    classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
-    filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
+        align_regions(regions, reordered_anchors,
+                      query_fwd, query_rev_enc, target_encoded, params);
+
+        // Re-classify after DP (like align_regs does in map.c:572-574)
+        classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
+        filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
+    }
 
     // ---- Phase 8: Compute MAPQ ----
     compute_mapping_quality(regions, params, 0);
