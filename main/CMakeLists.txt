@@ -21,11 +21,6 @@
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
 
-# Override arch
-set(CMAKE_OSX_ARCHITECTURES "arm64")
-
-
-
 #set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
 #set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
 

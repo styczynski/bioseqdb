@@ -11,8 +11,8 @@ message("SOURCES ${SRC_FILES}")
 
 message("MODULES? ${SRC_MOD_FILES}")
 
-find_package(Intl)
-find_package(ZLIB)
+find_package(Intl REQUIRED)
+find_package(ZLIB REQUIRED)
 find_package(reflectcpp CONFIG REQUIRED)
 find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)

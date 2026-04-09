@@ -49,6 +49,7 @@ module;
 export module bioseq_sequences.minimap_port;
 
 import mlogging;
+import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 
@@ -98,11 +99,11 @@ struct Minimap2Params {
 // CIGAR operation codes — same as minimap2 (minimap.h)
 // ============================================================================
 
-static constexpr int32_t CIGAR_MATCH     = 0;
-static constexpr int32_t CIGAR_INS       = 1;
-static constexpr int32_t CIGAR_DEL       = 2;
-static constexpr int32_t CIGAR_EQ        = 7;
-static constexpr int32_t CIGAR_X         = 8;
+constexpr int32_t CIGAR_MATCH     = 0;
+constexpr int32_t CIGAR_INS       = 1;
+constexpr int32_t CIGAR_DEL       = 2;
+constexpr int32_t CIGAR_EQ        = 7;
+constexpr int32_t CIGAR_X         = 8;
 
 // ============================================================================
 // Result structures
@@ -228,7 +229,7 @@ struct AlignRegion {
  * Accurate to ~3 significant figures for x >= 2.
  * Matches minimap2 mg_log2() used in gap penalty computation.
  */
-static inline float fast_log2(float x) {
+inline float fast_log2(float x) {
     uint32_t zi = std::bit_cast<uint32_t>(x);
     float log_2 = static_cast<float>(((zi >> 23) & 255) - 128);
     zi &= ~(255u << 23);
@@ -321,7 +322,7 @@ struct TargetIndex {
  * @param max_occ          Max occurrences to keep (filter high-frequency seeds)
  * @return Sorted vector of anchors
  */
-static std::vector<Anchor> collect_seed_hits(
+std::vector<Anchor> collect_seed_hits(
     const std::vector<MinimapSketchData>& query_minimizers,
     const TargetIndex& target_index,
     int32_t query_len,
@@ -387,7 +388,7 @@ static std::vector<Anchor> collect_seed_hits(
  *
  * Returns INT32_MIN if the pair is invalid (too far, wrong order, etc.)
  */
-static inline int32_t compute_chaining_score(
+inline int32_t compute_chaining_score(
     const Anchor& ai, const Anchor& aj,
     int32_t max_dist_x, int32_t max_dist_y, int32_t bw,
     float chn_pen_gap, float chn_pen_skip)
@@ -433,7 +434,7 @@ static inline int32_t compute_chaining_score(
  * @param params   Minimap2 parameters
  * @return Vector of chains with scores and anchor ranges
  */
-static std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
+std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
     std::vector<Anchor>& anchors,
     const Minimap2Params& params)
 {
@@ -604,7 +605,7 @@ static std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
  * mlen: approximate number of matching bases in seeded regions
  * blen: approximate total aligned length in seeded regions
  */
-static void compute_fuzzy_lengths(AlignRegion& r, const std::vector<Anchor>& anchors) {
+void compute_fuzzy_lengths(AlignRegion& r, const std::vector<Anchor>& anchors) {
     r.mlen = 0;
     r.blen = 0;
     if (r.cnt <= 0) return;
@@ -627,7 +628,7 @@ static void compute_fuzzy_lengths(AlignRegion& r, const std::vector<Anchor>& anc
  * Equivalent to mm_reg_set_coor() in hit.c.
  * Derives qs, qe, rs, re from first and last anchor in the chain.
  */
-static void set_region_coordinates(
+void set_region_coordinates(
     AlignRegion& r,
     const std::vector<Anchor>& anchors,
     int32_t query_len)
@@ -670,7 +671,7 @@ static void set_region_coordinates(
  * Sorts chains by score (descending) and creates AlignRegion records
  * with coordinates derived from the anchor positions.
  */
-static std::vector<AlignRegion> generate_regions(
+std::vector<AlignRegion> generate_regions(
     std::vector<Chain>& chains,
     const std::vector<Anchor>& anchors,
     int32_t query_len)
@@ -713,7 +714,7 @@ static std::vector<AlignRegion> generate_regions(
  * Criterion: (overlap/min_interval) - (uncov/max_interval) > mask_level
  *            AND uncov <= mask_len
  */
-static void classify_primary_secondary(
+void classify_primary_secondary(
     std::vector<AlignRegion>& regions,
     float mask_level,
     int32_t mask_len,
@@ -818,7 +819,7 @@ static void classify_primary_secondary(
  *   - score + min_diff >= parent.score
  *   - up to best_n secondaries total
  */
-static void filter_secondary_regions(
+void filter_secondary_regions(
     std::vector<AlignRegion>& regions,
     float pri_ratio,
     int32_t min_diff,
@@ -885,7 +886,7 @@ static void filter_secondary_regions(
  *
  * Equivalent to ksw_gen_simple_mat() in align.c:15-27.
  */
-static constexpr std::array<int8_t, 25> generate_score_matrix(
+constexpr std::array<int8_t, 25> generate_score_matrix(
     int8_t match_score, int8_t mismatch_pen)
 {
     std::array<int8_t, 25> mat{};
@@ -903,14 +904,14 @@ static constexpr std::array<int8_t, 25> generate_score_matrix(
 /**
  * @brief Convert a dna4 base to 4-bit encoding (0=A, 1=C, 2=G, 3=T).
  */
-static inline uint8_t dna4_to_nt4(seq::dna4 base) {
+inline uint8_t dna4_to_nt4(seq::dna4 base) {
     return static_cast<uint8_t>(base.to_rank());
 }
 
 /**
  * @brief Encode a dna4 sequence to uint8_t array.
  */
-static std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& seq) {
+std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& seq) {
     std::vector<uint8_t> encoded(seq.size());
     for (size_t i = 0; i < seq.size(); ++i) {
         encoded[i] = dna4_to_nt4(seq[i]);
@@ -921,7 +922,7 @@ static std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& seq) {
 /**
  * @brief Reverse complement an encoded sequence.
  */
-static std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& seq) {
+std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& seq) {
     std::vector<uint8_t> rc(seq.size());
     for (size_t i = 0; i < seq.size(); ++i) {
         uint8_t c = seq[seq.size() - 1 - i];
@@ -962,7 +963,7 @@ struct DPAlignResult {
  * @param params  Alignment parameters
  * @return DPAlignResult with score, CIGAR, match/mismatch counts
  */
-static DPAlignResult align_dual_affine(
+DPAlignResult align_dual_affine(
     std::span<const uint8_t> query_span,
     std::span<const uint8_t> target_span,
     const std::array<int8_t, 25>& mat,
@@ -1150,7 +1151,7 @@ static DPAlignResult align_dual_affine(
  * rather than the 3-region (left-gap-right) strategy, which is adequate
  * for a port that needs correctness over speed.
  */
-static void align_regions(
+void align_regions(
     std::vector<AlignRegion>& regions,
     const std::vector<Anchor>& anchors,
     const std::vector<uint8_t>& query_fwd,
@@ -1248,7 +1249,7 @@ static void align_regions(
  *
  * Where x = dp_max2 * subsc / (dp_max * score0)
  */
-static void compute_mapping_quality(
+void compute_mapping_quality(
     std::vector<AlignRegion>& regions,
     const Minimap2Params& params,
     int32_t rep_len)
@@ -1328,7 +1329,7 @@ static void compute_mapping_quality(
  *
  * Fields map to PAF columns as documented in mm_write_paf4() (format.c:427-460).
  */
-static MatchResult region_to_match_result(
+MatchResult region_to_match_result(
     const AlignRegion& r,
     int32_t query_len,
     int32_t target_len)
@@ -1359,7 +1360,7 @@ static MatchResult region_to_match_result(
 // ============================================================================
 
 /// CIGAR operation code to character, matching MM_CIGAR_STR "MIDNSHP=XB"
-static constexpr std::array<char, 10> CIGAR_OP_CHAR = {
+constexpr std::array<char, 10> CIGAR_OP_CHAR = {
     'M', 'I', 'D', 'N', 'S', 'H', 'P', '=', 'X', 'B'
 };
 
@@ -1369,7 +1370,7 @@ static constexpr std::array<char, 10> CIGAR_OP_CHAR = {
  * Each op is printed as "{length}{op_char}" using the same encoding as
  * minimap2's MM_CIGAR_STR (index 0='M', 1='I', 2='D', 7='=', 8='X', etc.).
  */
-static std::string format_cigar(const std::vector<CigarOp>& cigar) {
+std::string format_cigar(const std::vector<CigarOp>& cigar) {
     std::string s;
     s.reserve(cigar.size() * 5);
     for (const auto& op : cigar) {

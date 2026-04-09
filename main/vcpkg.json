@@ -1,5 +1,6 @@
 {
   "dependencies": [
+    "boost-iterator",
     "boost-program-options",
     "boost-regex",
     "boost-serialization",
@@ -9,6 +10,6 @@
     "highway",
     "libassert",
     "reflectcpp",
-    "boost-iterator"
+    "zlib"
   ]
 }
