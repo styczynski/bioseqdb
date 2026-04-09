@@ -15,7 +15,7 @@
  *   6. Filter secondary mappings (mm_select_sub equivalent)
  *   7. Perform base-level alignment using dual-affine gap DP (KSW2 equivalent)
  *   8. Compute mapping quality (mm_set_mapq equivalent)
- *   9. Return results as MatchResults (PAF-like records)
+ *   9. Return results as MatchResult (PAF-like records)
  *
  * The implementation follows the original minimap2 C code as documented in
  * MINIMAP2_DETAILS_1.md, translating to modern C++20 with:
@@ -66,14 +66,14 @@ namespace hn = hwy::HWY_NAMESPACE;
 // ============================================================================
 
 struct Minimap2Params {
-    int32_t k              = 15;     ///< k-mer size
-    int32_t w              = 10;     ///< minimizer window
+    int32_t kmer_size      = 15;     ///< k-mer size
+    int32_t window_size    = 10;     ///< minimizer window
     int32_t max_gap        = 5000;   ///< max reference gap in chaining
     int32_t max_gap_ref    = -1;     ///< explicit ref gap (-1 = use max_gap)
-    int32_t bw             = 500;    ///< bandwidth for chaining & alignment
+    int32_t bandwidth      = 500;    ///< bandwidth for chaining & alignment
     int32_t max_chain_skip = 25;     ///< max skip for early termination in DP
     int32_t max_chain_iter = 5000;   ///< max predecessors examined per anchor (map.c)
-    int32_t min_cnt        = 3;      ///< min seeds per chain
+    int32_t min_seed_count = 3;      ///< min seeds per chain
     int32_t min_chain_score= 40;     ///< min chain score
     float   chain_gap_scale= 0.8f;   ///< gap penalty scale (options.c default)
     float   chain_skip_scale=0.0f;   ///< skip penalty scale (options.c default)
@@ -106,22 +106,22 @@ struct Minimap2Params {
 // CIGAR operation codes — same as minimap2 (minimap.h)
 // ============================================================================
 
-constexpr int32_t CIGAR_MATCH     = 0;
-constexpr int32_t CIGAR_INS       = 1;
-constexpr int32_t CIGAR_DEL       = 2;
-constexpr int32_t CIGAR_EQ        = 7;
-constexpr int32_t CIGAR_X         = 8;
+constexpr uint32_t CIGAR_MATCH     = 0;
+constexpr uint32_t CIGAR_INS       = 1;
+constexpr uint32_t CIGAR_DEL       = 2;
+constexpr uint32_t CIGAR_EQ        = 7;
+constexpr uint32_t CIGAR_X         = 8;
 
 // ============================================================================
 // Result structures
 // ============================================================================
 
 /**
- * @brief Single CIGAR operation: (length << 4) | op_code.
+ * @brief Single CIGAR operation: length + operation code.
  */
 struct CigarOp {
-    uint32_t len;
-    uint32_t op;
+    uint32_t length;
+    uint32_t opcode;
 };
 
 /**
@@ -131,27 +131,27 @@ struct CigarOp {
  */
 struct MatchResult {
     // PAF mandatory columns
-    int32_t query_len       = 0;    ///< col 2: query sequence length
-    int32_t query_start     = 0;    ///< col 3: query start (0-based, closed)
-    int32_t query_end       = 0;    ///< col 4: query end (0-based, open)
-    bool    is_reverse      = false;///< col 5: '+' or '-'
-    int32_t target_len      = 0;    ///< col 7: target sequence length
-    int32_t target_start    = 0;    ///< col 8: target start on original strand
-    int32_t target_end      = 0;    ///< col 9: target end on original strand
-    int32_t num_matches     = 0;    ///< col 10: number of residue matches (mlen)
-    int32_t block_len       = 0;    ///< col 11: alignment block length (blen)
-    int32_t mapq            = 0;    ///< col 12: mapping quality (0-255)
+    int32_t query_len              = 0;    ///< col 2: query sequence length
+    int32_t query_start            = 0;    ///< col 3: query start (0-based, closed)
+    int32_t query_end              = 0;    ///< col 4: query end (0-based, open)
+    bool    is_reverse             = false;///< col 5: '+' or '-'
+    int32_t target_len             = 0;    ///< col 7: target sequence length
+    int32_t target_start           = 0;    ///< col 8: target start on original strand
+    int32_t target_end             = 0;    ///< col 9: target end on original strand
+    int32_t num_matches            = 0;    ///< col 10: number of residue matches (mlen)
+    int32_t block_length           = 0;    ///< col 11: alignment block length (blen)
+    int32_t mapq                   = 0;    ///< col 12: mapping quality (0-255)
 
     // Additional alignment info
-    int32_t chain_score     = 0;    ///< chaining score
-    int32_t dp_score        = 0;    ///< DP alignment score
-    int32_t dp_max          = 0;    ///< max scoring segment score (dp_max0 in original)
-    int32_t n_seeds         = 0;    ///< number of seeds in chain
-    int32_t subsc           = 0;    ///< best secondary chaining score against this primary
-    float   divergence      = -1.f; ///< sequence divergence estimate
-    bool    is_primary      = true; ///< primary mapping flag
-    bool    has_cigar       = false;///< whether CIGAR alignment was performed
-    std::vector<CigarOp> cigar;     ///< CIGAR string
+    int32_t chain_score            = 0;    ///< chaining score
+    int32_t dp_score               = 0;    ///< DP alignment score
+    int32_t dp_max_score           = 0;    ///< max scoring segment score (dp_max0 in original)
+    int32_t seed_count             = 0;    ///< number of seeds in chain
+    int32_t secondary_chain_score  = 0;    ///< best secondary chaining score against this primary
+    float   divergence             = -1.f; ///< sequence divergence estimate
+    bool    is_primary             = true; ///< primary mapping flag
+    bool    has_cigar              = false;///< whether CIGAR alignment was performed
+    std::vector<CigarOp> cigar;            ///< CIGAR string
 };
 
 // ============================================================================
@@ -159,27 +159,69 @@ struct MatchResult {
 // ============================================================================
 
 /**
+ * @brief Bitfield data for anchor reference (x) component.
+ *
+ * Layout mirrors minimap2 mm128_t.x conventions:
+ *   x: is_reverse<<63 | reference_id<<32 | ref_position
+ *
+ * For our single-target case, reference_id is always 0.
+ */
+struct AnchorRefFields {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+    uint64_t ref_position: 32;    ///< lower 32 bits: reference position
+    uint64_t reference_id: 31;    ///< bits 32-62: reference sequence ID
+    uint64_t is_reverse: 1;       ///< bit 63: reverse strand flag
+#elif __BYTE_ORDER == __BIG_ENDIAN
+    uint64_t is_reverse: 1;
+    uint64_t reference_id: 31;
+    uint64_t ref_position: 32;
+#endif
+    int : 0;
+};
+
+/**
+ * @brief Bitfield data for anchor query (y) component.
+ *
+ * Layout mirrors minimap2 mm128_t.y conventions:
+ *   y: segment_id<<48 | flags<<40 | query_span<<32 | query_position
+ */
+struct AnchorQueryFields {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+    uint64_t query_position: 32;  ///< lower 32 bits: query position
+    uint64_t query_span: 8;       ///< bits 32-39: query k-mer span
+    uint64_t flags: 8;            ///< bits 40-47: flags
+    uint64_t segment_id: 16;      ///< bits 48-63: segment ID
+#elif __BYTE_ORDER == __BIG_ENDIAN
+    uint64_t segment_id: 16;
+    uint64_t flags: 8;
+    uint64_t query_span: 8;
+    uint64_t query_position: 32;
+#endif
+    int : 0;
+};
+
+/**
  * @brief Anchor for chaining. Equivalent to mm128_t in collect_seed_hits output.
  *
- * Layout mirrors minimap2 conventions:
- *   x: rev<<63 | rid<<32 | rpos
- *   y: seg_id<<48 | flags<<40 | q_span<<32 | qpos
+ * Uses unions to provide both clean bitfield access (ref/query structs) and
+ * raw uint64_t access (ref_bits/query_bits) for sorting and arithmetic.
  *
- * For our single-target case, rid is always 0.
+ * Bitfield access examples:
+ *   anchor.ref.ref_position   (was: static_cast<int32_t>(x))
+ *   anchor.ref.reference_id   (was: (x << 1) >> 33)
+ *   anchor.ref.is_reverse     (was: x >> 63)
+ *   anchor.query.query_span   (was: (y >> 32) & 0xff)
+ *   anchor.query.query_position (was: static_cast<int32_t>(y))
  */
 struct Anchor {
-    uint64_t x = 0;
-    uint64_t y = 0;
-
-    [[nodiscard]] constexpr int32_t rpos() const { return static_cast<int32_t>(x); }
-    [[nodiscard]] constexpr int32_t qpos() const { return static_cast<int32_t>(y); }
-    [[nodiscard]] constexpr int32_t q_span() const {
-        return static_cast<int32_t>((y >> 32) & 0xff);
-    }
-    [[nodiscard]] constexpr uint32_t rid() const {
-        return static_cast<uint32_t>((x << 1) >> 33);
-    }
-    [[nodiscard]] constexpr bool rev() const { return (x >> 63) != 0; }
+    union {
+        AnchorRefFields ref;
+        uint64_t ref_bits = 0;    ///< Raw value for sorting/arithmetic on reference data
+    };
+    union {
+        AnchorQueryFields query;
+        uint64_t query_bits = 0;  ///< Raw value for sorting/arithmetic on query data
+    };
 };
 
 /**
@@ -188,9 +230,9 @@ struct Anchor {
  * Equivalent to one entry in the u[] array after chaining.
  */
 struct Chain {
-    int32_t score       = 0;    ///< chain score (upper 32 bits of u[])
-    int32_t n_anchors   = 0;    ///< anchor count (lower 32 bits of u[])
-    int32_t anchor_start= 0;    ///< start index in the reordered anchor array
+    int32_t score        = 0;    ///< chain score (upper 32 bits of u[])
+    int32_t anchor_count = 0;    ///< anchor count (lower 32 bits of u[])
+    int32_t anchor_start = 0;    ///< start index in the reordered anchor array
 };
 
 /**
@@ -199,31 +241,33 @@ struct Chain {
  * Produced after mm_gen_regs, enriched through the pipeline.
  */
 struct AlignRegion {
-    int32_t id          = 0;
-    int32_t parent      = -1;   ///< parent id (-1 = unset, ==id => primary)
-    int32_t score       = 0;    ///< chain score
-    int32_t score0      = 0;    ///< initial chain score (before merging)
-    int32_t cnt         = 0;    ///< number of seeds
-    int32_t anchor_start= 0;    ///< offset in anchor array
+    int32_t region_id       = 0;
+    int32_t parent          = -1;   ///< parent id (-1 = unset, ==region_id => primary)
+    int32_t score           = 0;    ///< chain score
+    int32_t original_score  = 0;    ///< initial chain score (before merging)
+    int32_t seed_count      = 0;    ///< number of seeds
+    int32_t anchor_start    = 0;    ///< offset in anchor array
 
-    int32_t qs = 0, qe = 0;    ///< query start/end
-    int32_t rs = 0, re = 0;    ///< reference start/end
-    int32_t rid         = 0;    ///< reference sequence id (0 in our case)
-    bool    rev         = false;///< reverse strand
+    int32_t query_start     = 0;    ///< query start position
+    int32_t query_end       = 0;    ///< query end position
+    int32_t ref_start       = 0;    ///< reference start position
+    int32_t ref_end         = 0;    ///< reference end position
+    int32_t reference_id    = 0;    ///< reference sequence id (0 in our case)
+    bool    is_reverse      = false;///< reverse strand
 
-    int32_t mlen        = 0;    ///< seeded exact match length
-    int32_t blen        = 0;    ///< seeded alignment block length
-    int32_t subsc       = 0;    ///< best secondary score against this primary
-    int32_t n_sub       = 0;    ///< number of suboptimal mappings
+    int32_t match_length    = 0;    ///< seeded exact match length
+    int32_t block_length    = 0;    ///< seeded alignment block length
+    int32_t secondary_score = 0;    ///< best secondary score against this primary
+    int32_t secondary_count = 0;    ///< number of suboptimal mappings
 
     // DP alignment results (filled after alignment phase)
-    int32_t dp_score    = 0;
-    int32_t dp_max      = 0;    ///< max scoring segment
-    int32_t dp_max2     = 0;    ///< best secondary DP score
-    bool    has_dp      = false;///< whether DP alignment was performed
-    float   div         = -1.f; ///< divergence estimate
+    int32_t dp_score            = 0;
+    int32_t dp_max_score        = 0;    ///< max scoring segment
+    int32_t secondary_dp_max    = 0;    ///< best secondary DP score
+    bool    has_alignment       = false;///< whether DP alignment was performed
+    float   divergence          = -1.f; ///< divergence estimate
 
-    int32_t mapq        = 0;
+    int32_t mapq            = 0;
 
     std::vector<CigarOp> cigar;
 };
@@ -238,14 +282,14 @@ struct AlignRegion {
  * Accurate to ~3 significant figures for x >= 2.
  * Matches minimap2 mg_log2() used in gap penalty computation.
  */
-inline float fast_log2(float x) {
-    uint32_t zi = std::bit_cast<uint32_t>(x);
-    float log_2 = static_cast<float>(((zi >> 23) & 255) - 128);
-    zi &= ~(255u << 23);
-    zi += 127u << 23;
-    float zf = std::bit_cast<float>(zi);
-    log_2 += (-0.34484843f * zf + 2.02466578f) * zf - 0.67487759f;
-    return log_2;
+[[nodiscard]] inline float fast_log2(float input) {
+    uint32_t float_bits = std::bit_cast<uint32_t>(input);
+    float log_result = static_cast<float>(((float_bits >> 23) & 255) - 128);
+    float_bits &= ~(255u << 23);
+    float_bits += 127u << 23;
+    const float mantissa_approx = std::bit_cast<float>(float_bits);
+    log_result += (-0.34484843f * mantissa_approx + 2.02466578f) * mantissa_approx - 0.67487759f;
+    return log_result;
 }
 
 // ============================================================================
@@ -274,18 +318,18 @@ struct TargetIndex {
      * by the k-mer hash (upper 56 bits of MinimapSketchData.x).
      */
     void build(const std::vector<MinimapSketchData>& target_minimizers,
-               int32_t tlen) {
-        target_len = tlen;
+               int32_t target_length) {
+        target_len = target_length;
         table.clear();
         table.reserve(target_minimizers.size());
-        for (const auto& m : target_minimizers) {
-            uint64_t hash_key = m.kmer;
+        for (const auto& minimizer : target_minimizers) {
+            const uint64_t hash_key = minimizer.kmer;
             // Encode position as: (rid << 32) | (last_pos << 1) | strand
             // rid = 0 for single target
-            uint64_t pos_enc = (static_cast<uint64_t>(0) << 32)
-                             | (static_cast<uint64_t>(m.last_pos) << 1)
-                             | static_cast<uint64_t>(m.strand);
-            table[hash_key].push_back(pos_enc);
+            const uint64_t encoded_position =
+                (static_cast<uint64_t>(minimizer.last_pos) << 1)
+                | static_cast<uint64_t>(minimizer.strand);
+            table[hash_key].push_back(encoded_position);
         }
         JustLog("[minimap_port] Built target index: {} distinct minimizers from {} total",
                 table.size(), target_minimizers.size());
@@ -300,9 +344,11 @@ struct TargetIndex {
      * @return Span of positions (empty if not found)
      */
     [[nodiscard]] std::span<const uint64_t> lookup(uint64_t kmer_hash) const {
-        auto it = table.find(kmer_hash);
-        if (it == table.end()) return {};
-        return std::span<const uint64_t>(it->second);
+        auto iter = table.find(kmer_hash);
+        if (iter == table.end()) {
+            return {};
+        }
+        return std::span<const uint64_t>(iter->second);
     }
 };
 
@@ -319,11 +365,11 @@ struct TargetIndex {
  * hit, create an anchor encoding both reference and query positions.
  *
  * Anchor encoding (same as minimap2):
- *   a.x = rev<<63 | rid<<32 | rpos
- *   a.y = q_span<<32 | qpos
+ *   ref_bits: is_reverse<<63 | reference_id<<32 | ref_position
+ *   query_bits: query_span<<32 | query_position
  *
- * Where for forward strand: rpos = target_pos, qpos = query_pos
- * For reverse strand: set rev bit, adjust qpos for reverse complement.
+ * Where for forward strand: ref_position = target_pos, query_position = query_pos
+ * For reverse strand: set is_reverse bit, adjust query_position for reverse complement.
  *
  * @param query_minimizers Pre-computed query minimizers
  * @param target_index     Target index to search
@@ -331,7 +377,7 @@ struct TargetIndex {
  * @param max_occ          Max occurrences to keep (filter high-frequency seeds)
  * @return Sorted vector of anchors
  */
-std::vector<Anchor> collect_seed_hits(
+[[nodiscard]] std::vector<Anchor> collect_seed_hits(
     const std::vector<MinimapSketchData>& query_minimizers,
     const TargetIndex& target_index,
     int32_t query_len,
@@ -340,40 +386,55 @@ std::vector<Anchor> collect_seed_hits(
     std::vector<Anchor> anchors;
     anchors.reserve(query_minimizers.size() * 2);
 
-    for (const auto& qm : query_minimizers) {
-        auto hits = target_index.lookup(qm.kmer);
-        if (hits.empty() || static_cast<int32_t>(hits.size()) > max_occ) continue;
+    for (const auto& query_minimizer : query_minimizers) {
+        const auto target_hits = target_index.lookup(query_minimizer.kmer);
+        if (target_hits.empty() || static_cast<int32_t>(target_hits.size()) > max_occ) {
+            continue;
+        }
 
-        uint32_t q_pos_enc  = static_cast<uint32_t>((qm.last_pos << 1) | qm.strand);
-        uint32_t q_span_val = static_cast<uint32_t>(qm.span);
+        const uint32_t query_pos_encoded = static_cast<uint32_t>(
+            (query_minimizer.last_pos << 1) | query_minimizer.strand);
+        const uint32_t query_span_value = static_cast<uint32_t>(query_minimizer.span);
 
-        for (uint64_t r : hits) {
-            int32_t rpos = static_cast<int32_t>(static_cast<uint32_t>(r) >> 1);
-            Anchor a;
+        for (const uint64_t target_hit : target_hits) {
+            const int32_t ref_position = static_cast<int32_t>(
+                static_cast<uint32_t>(target_hit) >> 1);
+            const uint32_t target_reference_id = static_cast<uint32_t>(target_hit >> 32);
 
-            bool same_strand = ((r & 1) == (q_pos_enc & 1));
-            if (same_strand) {
-                // Forward strand hit
-                a.x = (r & 0xFFFFFFFF00000000ULL) | static_cast<uint32_t>(rpos);
-                a.y = (static_cast<uint64_t>(q_span_val) << 32)
-                    | static_cast<uint32_t>(q_pos_enc >> 1);
+            Anchor anchor;
+            const bool strands_match = ((target_hit & 1) == (query_pos_encoded & 1));
+
+            if (strands_match) {
+                // Forward strand hit — set reference fields via bitfields
+                anchor.ref.ref_position = static_cast<uint32_t>(ref_position);
+                anchor.ref.reference_id = target_reference_id;
+                anchor.ref.is_reverse = 0;
+                anchor.query.query_position = query_pos_encoded >> 1;
+                anchor.query.query_span = query_span_value;
+                anchor.query.flags = 0;
+                anchor.query.segment_id = 0;
             } else {
                 // Reverse strand hit
-                a.x = (1ULL << 63) | (r & 0xFFFFFFFF00000000ULL)
-                     | static_cast<uint32_t>(rpos);
-                int32_t fwd_qpos = static_cast<int32_t>(q_pos_enc >> 1);
-                int32_t rev_qpos = query_len - (fwd_qpos + 1 - static_cast<int32_t>(q_span_val)) - 1;
-                a.y = (static_cast<uint64_t>(q_span_val) << 32)
-                    | static_cast<uint32_t>(rev_qpos);
+                anchor.ref.ref_position = static_cast<uint32_t>(ref_position);
+                anchor.ref.reference_id = target_reference_id;
+                anchor.ref.is_reverse = 1;
+                const int32_t forward_query_pos = static_cast<int32_t>(query_pos_encoded >> 1);
+                const int32_t reverse_query_pos = query_len
+                    - (forward_query_pos + 1 - static_cast<int32_t>(query_span_value)) - 1;
+                anchor.query.query_position = static_cast<uint32_t>(reverse_query_pos);
+                anchor.query.query_span = query_span_value;
+                anchor.query.flags = 0;
+                anchor.query.segment_id = 0;
             }
-            anchors.push_back(a);
+            anchors.push_back(anchor);
         }
     }
 
-    // Sort by reference position (x field), same as radix_sort_128x
+    // Sort by reference position (ref_bits field), same as radix_sort_128x
     std::sort(anchors.begin(), anchors.end(),
-              [](const Anchor& a, const Anchor& b) {
-                  return a.x < b.x || (a.x == b.x && a.y < b.y);
+              [](const Anchor& left, const Anchor& right) {
+                  return left.ref_bits < right.ref_bits
+                      || (left.ref_bits == right.ref_bits && left.query_bits < right.query_bits);
               });
 
     JustLog("[minimap_port] Collected {} seed anchors from {} query minimizers",
@@ -390,38 +451,50 @@ std::vector<Anchor> collect_seed_hits(
  *
  * Equivalent to comput_sc() in lchain.c:115-140.
  *
- * The score is: min(q_span_j, min(dr, dq)) minus gap penalties.
- * Gap penalty = lin_pen + 0.5 * log_pen, where:
- *   lin_pen = chn_pen_gap * |dr-dq| + chn_pen_skip * min(dr,dq)
- *   log_pen = log2(|dr-dq| + 1)
+ * The score is: min(predecessor_span, min(ref_distance, query_distance)) minus gap penalties.
+ * Gap penalty = linear_penalty + 0.5 * log_penalty, where:
+ *   linear_penalty = chain_gap_penalty * |ref_distance - query_distance|
+ *                  + chain_skip_penalty * min(ref_distance, query_distance)
+ *   log_penalty = log2(|ref_distance - query_distance| + 1)
  *
  * Returns INT32_MIN if the pair is invalid (too far, wrong order, etc.)
  */
-inline int32_t compute_chaining_score(
-    const Anchor& ai, const Anchor& aj,
-    int32_t max_dist_x, int32_t max_dist_y, int32_t bw,
-    float chn_pen_gap, float chn_pen_skip)
+[[nodiscard]] inline int32_t compute_chaining_score(
+    const Anchor& current_anchor, const Anchor& predecessor_anchor,
+    int32_t max_dist_x, int32_t max_dist_y, int32_t chain_bandwidth,
+    float chain_gap_penalty, float chain_skip_penalty)
 {
-    int32_t dq = ai.qpos() - aj.qpos();
-    if (dq <= 0 || dq > max_dist_x) return std::numeric_limits<int32_t>::min();
-
-    int32_t dr = static_cast<int32_t>(ai.x - aj.x);
-    if (dr == 0 || dq > max_dist_y) return std::numeric_limits<int32_t>::min();
-
-    int32_t dd = dr > dq ? dr - dq : dq - dr;
-    if (dd > bw) return std::numeric_limits<int32_t>::min();
-
-    int32_t dg = dr < dq ? dr : dq;
-    int32_t q_span = aj.q_span();
-    int32_t sc = q_span < dg ? q_span : dg;
-
-    if (dd != 0 || dg > q_span) {
-        float lin_pen = chn_pen_gap * static_cast<float>(dd)
-                      + chn_pen_skip * static_cast<float>(dg);
-        float log_pen = (dd >= 1) ? fast_log2(static_cast<float>(dd + 1)) : 0.0f;
-        sc -= static_cast<int32_t>(lin_pen + 0.5f * log_pen);
+    const int32_t query_distance = static_cast<int32_t>(current_anchor.query.query_position)
+                                 - static_cast<int32_t>(predecessor_anchor.query.query_position);
+    if (query_distance <= 0 || query_distance > max_dist_x) {
+        return std::numeric_limits<int32_t>::min();
     }
-    return sc;
+
+    const int32_t ref_distance = static_cast<int32_t>(current_anchor.ref_bits - predecessor_anchor.ref_bits);
+    if (ref_distance == 0 || query_distance > max_dist_y) {
+        return std::numeric_limits<int32_t>::min();
+    }
+
+    const int32_t distance_difference = (ref_distance > query_distance)
+        ? ref_distance - query_distance
+        : query_distance - ref_distance;
+    if (distance_difference > chain_bandwidth) {
+        return std::numeric_limits<int32_t>::min();
+    }
+
+    const int32_t min_distance = (ref_distance < query_distance) ? ref_distance : query_distance;
+    const int32_t predecessor_span = static_cast<int32_t>(predecessor_anchor.query.query_span);
+    int32_t score = (predecessor_span < min_distance) ? predecessor_span : min_distance;
+
+    if (distance_difference != 0 || min_distance > predecessor_span) {
+        const float linear_penalty = chain_gap_penalty * static_cast<float>(distance_difference)
+                                   + chain_skip_penalty * static_cast<float>(min_distance);
+        const float log_penalty = (distance_difference >= 1)
+            ? fast_log2(static_cast<float>(distance_difference + 1))
+            : 0.0f;
+        score -= static_cast<int32_t>(linear_penalty + 0.5f * log_penalty);
+    }
+    return score;
 }
 
 /**
@@ -430,12 +503,12 @@ inline int32_t compute_chaining_score(
  * Equivalent to mg_lchain_dp() in lchain.c:150-219.
  *
  * Algorithm:
- *   For each anchor i (sorted by ref position):
- *     1. Search backwards through prior anchors j in [st, i-1]
- *     2. Compute chaining score: comput_sc(i, j) + f[j]
+ *   For each anchor (sorted by ref position):
+ *     1. Search backwards through prior anchors in [window_start, current-1]
+ *     2. Compute chaining score: pair_score(current, candidate) + best_scores[candidate]
  *     3. Track best predecessor and score
  *     4. Apply max_skip early termination
- *     5. Try the globally best anchor (max_ii) as fallback
+ *     5. Try the globally best anchor (global_best_idx) as fallback
  *
  *   Backtrack from highest-scoring anchors to extract chains.
  *
@@ -443,163 +516,201 @@ inline int32_t compute_chaining_score(
  * @param params   Minimap2 parameters
  * @return Vector of chains with scores and anchor ranges
  */
-std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
+[[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
     std::vector<Anchor>& anchors,
     const Minimap2Params& params)
 {
-    const int64_t n = static_cast<int64_t>(anchors.size());
-    if (n == 0) return {{}, {}};
+    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
+    if (anchor_count == 0) {
+        return {{}, {}};
+    }
 
-    // map.c:722-723: chn_pen_gap = opt->chain_gap_scale * 0.01 * mi->k
-    float chn_pen_gap  = params.chain_gap_scale * 0.01f * static_cast<float>(params.k);
-    float chn_pen_skip = params.chain_skip_scale * 0.01f * static_cast<float>(params.k);
+    // map.c:722-723: chain_gap_penalty = opt->chain_gap_scale * 0.01 * mi->k
+    const float chain_gap_penalty = params.chain_gap_scale * 0.01f
+                                  * static_cast<float>(params.kmer_size);
+    const float chain_skip_penalty = params.chain_skip_scale * 0.01f
+                                   * static_cast<float>(params.kmer_size);
     int32_t max_dist_x = params.max_gap;
     int32_t max_dist_y = params.max_gap;
-    int32_t bw         = params.bw;
-    int32_t max_skip   = params.max_chain_skip;
-    int32_t max_iter   = params.max_chain_iter;
-    int32_t min_cnt    = params.min_cnt;
-    int32_t min_sc     = params.min_chain_score;
-    int32_t max_drop   = bw;
+    const int32_t chain_bandwidth = params.bandwidth;
+    const int32_t max_skip = params.max_chain_skip;
+    const int32_t max_iter = params.max_chain_iter;
+    const int32_t min_seed_count = params.min_seed_count;
+    const int32_t min_score = params.min_chain_score;
+    const int32_t max_drop = chain_bandwidth;
 
-    if (max_dist_x < bw) max_dist_x = bw;
-    if (max_dist_y < bw) max_dist_y = bw;
+    if (max_dist_x < chain_bandwidth) { max_dist_x = chain_bandwidth; }
+    if (max_dist_y < chain_bandwidth) { max_dist_y = chain_bandwidth; }
 
     // DP arrays
-    std::vector<int32_t> f(n);      // best score ending at anchor i
-    std::vector<int64_t> p(n, -1);  // predecessor index
-    std::vector<int32_t> v(n);      // peak score
-    std::vector<int32_t> t(n, 0);   // visited marker
+    std::vector<int32_t> best_scores(anchor_count);       // best score ending at anchor
+    std::vector<int64_t> predecessors(anchor_count, -1);   // predecessor index
+    std::vector<int32_t> peak_scores(anchor_count);        // peak score seen along chain
+    std::vector<int32_t> visited(anchor_count, 0);         // visited marker
 
-    int64_t st = 0;
-    int64_t max_ii = -1;
+    int64_t window_start = 0;
+    int64_t global_best_idx = -1;
 
     // --- Forward DP pass ---
     // Equivalent to lchain.c lines 171-206
-    for (int64_t i = 0; i < n; ++i) {
-        int64_t max_j = -1;
-        int32_t max_f = anchors[i].q_span();
-        int32_t n_skip_cnt = 0;
+    for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
+        int64_t best_predecessor_idx = -1;
+        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
+        int32_t skip_count = 0;
 
         // Advance window start: skip anchors on different chromosomes or too far
-        while (st < i && (anchors[i].x >> 32 != anchors[st].x >> 32 ||
-               anchors[i].x > anchors[st].x + static_cast<uint64_t>(max_dist_x))) {
-            ++st;
+        while (window_start < current_idx &&
+               (anchors[current_idx].ref_bits >> 32 != anchors[window_start].ref_bits >> 32 ||
+                anchors[current_idx].ref_bits > anchors[window_start].ref_bits
+                    + static_cast<uint64_t>(max_dist_x)))
+        {
+            ++window_start;
         }
-        if (i - st > max_iter) st = i - max_iter;
+        if (current_idx - window_start > max_iter) {
+            window_start = current_idx - max_iter;
+        }
 
-        int64_t end_j = st;
+        int64_t search_end = window_start;
 
         // Search backwards for best predecessor
-        for (int64_t j = i - 1; j >= st; --j) {
-            int32_t sc = compute_chaining_score(
-                anchors[i], anchors[j],
-                max_dist_x, max_dist_y, bw,
-                chn_pen_gap, chn_pen_skip);
-            if (sc == std::numeric_limits<int32_t>::min()) continue;
+        for (int64_t candidate_idx = current_idx - 1; candidate_idx >= window_start; --candidate_idx) {
+            const int32_t pair_score = compute_chaining_score(
+                anchors[current_idx], anchors[candidate_idx],
+                max_dist_x, max_dist_y, chain_bandwidth,
+                chain_gap_penalty, chain_skip_penalty);
+            if (pair_score == std::numeric_limits<int32_t>::min()) {
+                continue;
+            }
 
-            sc += f[j];
-            if (sc > max_f) {
-                max_f = sc;
-                max_j = j;
-                if (n_skip_cnt > 0) --n_skip_cnt;
-            } else if (t[j] == static_cast<int32_t>(i)) {
-                if (++n_skip_cnt > max_skip) {
-                    end_j = j;
+            const int32_t total_score = pair_score + best_scores[candidate_idx];
+            if (total_score > best_score) {
+                best_score = total_score;
+                best_predecessor_idx = candidate_idx;
+                if (skip_count > 0) {
+                    --skip_count;
+                }
+            } else if (visited[candidate_idx] == static_cast<int32_t>(current_idx)) {
+                if (++skip_count > max_skip) {
+                    search_end = candidate_idx;
                     break;
                 }
             }
-            if (p[j] >= 0) t[p[j]] = static_cast<int32_t>(i);
-        }
-
-        // Try the globally best anchor in the window (max_ii optimization)
-        if (max_ii < 0 ||
-            anchors[i].x - anchors[max_ii].x > static_cast<uint64_t>(max_dist_x)) {
-            int32_t best = std::numeric_limits<int32_t>::min();
-            max_ii = -1;
-            for (int64_t j = i - 1; j >= st; --j) {
-                if (best < f[j]) { best = f[j]; max_ii = j; }
-            }
-        }
-        if (max_ii >= 0 && max_ii < end_j) {
-            int32_t tmp = compute_chaining_score(
-                anchors[i], anchors[max_ii],
-                max_dist_x, max_dist_y, bw,
-                chn_pen_gap, chn_pen_skip);
-            if (tmp != std::numeric_limits<int32_t>::min() && max_f < tmp + f[max_ii]) {
-                max_f = tmp + f[max_ii];
-                max_j = max_ii;
+            if (predecessors[candidate_idx] >= 0) {
+                visited[predecessors[candidate_idx]] = static_cast<int32_t>(current_idx);
             }
         }
 
-        f[i] = max_f;
-        p[i] = max_j;
-        v[i] = (max_j >= 0 && v[max_j] > max_f) ? v[max_j] : max_f;
+        // Try the globally best anchor in the window (global_best_idx optimization)
+        if (global_best_idx < 0 ||
+            anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
+                > static_cast<uint64_t>(max_dist_x))
+        {
+            int32_t best_global = std::numeric_limits<int32_t>::min();
+            global_best_idx = -1;
+            for (int64_t scan_idx = current_idx - 1; scan_idx >= window_start; --scan_idx) {
+                if (best_global < best_scores[scan_idx]) {
+                    best_global = best_scores[scan_idx];
+                    global_best_idx = scan_idx;
+                }
+            }
+        }
+        if (global_best_idx >= 0 && global_best_idx < search_end) {
+            const int32_t global_pair_score = compute_chaining_score(
+                anchors[current_idx], anchors[global_best_idx],
+                max_dist_x, max_dist_y, chain_bandwidth,
+                chain_gap_penalty, chain_skip_penalty);
+            if (global_pair_score != std::numeric_limits<int32_t>::min()
+                && best_score < global_pair_score + best_scores[global_best_idx])
+            {
+                best_score = global_pair_score + best_scores[global_best_idx];
+                best_predecessor_idx = global_best_idx;
+            }
+        }
 
-        if (max_ii < 0 ||
-            (anchors[i].x - anchors[max_ii].x <= static_cast<uint64_t>(max_dist_x) &&
-             f[max_ii] < f[i])) {
-            max_ii = i;
+        best_scores[current_idx] = best_score;
+        predecessors[current_idx] = best_predecessor_idx;
+        const bool predecessor_has_higher_peak = best_predecessor_idx >= 0
+            && peak_scores[best_predecessor_idx] > best_score;
+        peak_scores[current_idx] = predecessor_has_higher_peak
+            ? peak_scores[best_predecessor_idx]
+            : best_score;
+
+        if (global_best_idx < 0 ||
+            (anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
+                <= static_cast<uint64_t>(max_dist_x)
+             && best_scores[global_best_idx] < best_scores[current_idx]))
+        {
+            global_best_idx = current_idx;
         }
     }
 
     // --- Backtracking ---
     // Equivalent to mg_chain_backtrack() in lchain.c:29-78
-    struct ScoredIdx {
+    struct ScoredAnchorIndex {
         int32_t score;
-        int64_t idx;
+        int64_t anchor_index;
     };
-    std::vector<ScoredIdx> z;
-    z.reserve(n);
-    for (int64_t i = 0; i < n; ++i) {
-        if (f[i] >= min_sc)
-            z.push_back({f[i], i});
+    std::vector<ScoredAnchorIndex> scored_indices;
+    scored_indices.reserve(anchor_count);
+    for (int64_t anchor_idx = 0; anchor_idx < anchor_count; ++anchor_idx) {
+        if (best_scores[anchor_idx] >= min_score) {
+            scored_indices.push_back({best_scores[anchor_idx], anchor_idx});
+        }
     }
 
-    std::sort(z.begin(), z.end(),
-              [](const ScoredIdx& a, const ScoredIdx& b) { return a.score < b.score; });
+    std::sort(scored_indices.begin(), scored_indices.end(),
+              [](const ScoredAnchorIndex& left, const ScoredAnchorIndex& right) {
+                  return left.score < right.score;
+              });
 
-    std::fill(t.begin(), t.end(), 0);
+    std::fill(visited.begin(), visited.end(), 0);
 
     std::vector<Chain> chains;
     std::vector<Anchor> reordered_anchors;
     std::vector<int64_t> chain_anchor_indices;
 
-    for (int64_t k = static_cast<int64_t>(z.size()) - 1; k >= 0; --k) {
-        if (t[z[k].idx] != 0) continue;
-
-        chain_anchor_indices.clear();
-        int64_t i;
-        for (i = z[k].idx; i >= 0 && t[i] == 0; i = p[i]) {
-            chain_anchor_indices.push_back(i);
-            t[i] = 1;
+    for (int64_t rank_idx = static_cast<int64_t>(scored_indices.size()) - 1; rank_idx >= 0; --rank_idx) {
+        if (visited[scored_indices[rank_idx].anchor_index] != 0) {
+            continue;
         }
 
-        int32_t sc = (i < 0) ? z[k].score : z[k].score - f[i];
-        int32_t count = static_cast<int32_t>(chain_anchor_indices.size());
+        chain_anchor_indices.clear();
+        int64_t trace_idx;
+        for (trace_idx = scored_indices[rank_idx].anchor_index;
+             trace_idx >= 0 && visited[trace_idx] == 0;
+             trace_idx = predecessors[trace_idx])
+        {
+            chain_anchor_indices.push_back(trace_idx);
+            visited[trace_idx] = 1;
+        }
 
-        if (sc >= min_sc && count >= min_cnt) {
+        const int32_t chain_score = (trace_idx < 0)
+            ? scored_indices[rank_idx].score
+            : scored_indices[rank_idx].score - best_scores[trace_idx];
+        const int32_t chain_length = static_cast<int32_t>(chain_anchor_indices.size());
+
+        if (chain_score >= min_score && chain_length >= min_seed_count) {
             // Reverse to forward order
             std::reverse(chain_anchor_indices.begin(), chain_anchor_indices.end());
 
-            Chain c;
-            c.score = sc;
-            c.n_anchors = count;
-            c.anchor_start = static_cast<int32_t>(reordered_anchors.size());
-            chains.push_back(c);
+            Chain chain;
+            chain.score = chain_score;
+            chain.anchor_count = chain_length;
+            chain.anchor_start = static_cast<int32_t>(reordered_anchors.size());
+            chains.push_back(chain);
 
-            for (int64_t idx : chain_anchor_indices) {
-                reordered_anchors.push_back(anchors[idx]);
+            for (const int64_t anchor_idx : chain_anchor_indices) {
+                reordered_anchors.push_back(anchors[anchor_idx]);
             }
         } else {
             // Unmark rejected chain
-            for (int64_t idx : chain_anchor_indices) {
-                t[idx] = 0;
+            for (const int64_t anchor_idx : chain_anchor_indices) {
+                visited[anchor_idx] = 0;
             }
         }
     }
 
-    JustLog("[minimap_port] Chaining: {} chains from {} anchors", chains.size(), n);
+    JustLog("[minimap_port] Chaining: {} chains from {} anchors", chains.size(), anchor_count);
     return {std::move(chains), std::move(reordered_anchors)};
 }
 
@@ -608,27 +719,39 @@ std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
 // ============================================================================
 
 /**
- * @brief Compute seeded match length (mlen) and block length (blen) for a region.
+ * @brief Compute seeded match length and block length for a region.
  *
  * Equivalent to mm_cal_fuzzy_len() in hit.c.
  *
- * mlen: approximate number of matching bases in seeded regions
- * blen: approximate total aligned length in seeded regions
+ * match_length: approximate number of matching bases in seeded regions
+ * block_length: approximate total aligned length in seeded regions
  */
-void compute_fuzzy_lengths(AlignRegion& r, const std::vector<Anchor>& anchors) {
-    r.mlen = 0;
-    r.blen = 0;
-    if (r.cnt <= 0) return;
+void compute_fuzzy_lengths(AlignRegion& region, const std::vector<Anchor>& anchors) {
+    region.match_length = 0;
+    region.block_length = 0;
+    if (region.seed_count <= 0) {
+        return;
+    }
 
-    int32_t as = r.anchor_start;
-    r.mlen = r.blen = anchors[as].q_span();
+    const int32_t anchor_begin = region.anchor_start;
+    region.match_length = static_cast<int32_t>(anchors[anchor_begin].query.query_span);
+    region.block_length = region.match_length;
 
-    for (int32_t i = as + 1; i < as + r.cnt; ++i) {
-        int32_t span = anchors[i].q_span();
-        int32_t tl = static_cast<int32_t>(anchors[i].x) - static_cast<int32_t>(anchors[i-1].x);
-        int32_t ql = static_cast<int32_t>(anchors[i].y) - static_cast<int32_t>(anchors[i-1].y);
-        r.blen += (tl > ql) ? tl : ql;
-        r.mlen += (tl > span && ql > span) ? span : ((tl < ql) ? tl : ql);
+    for (int32_t anchor_idx = anchor_begin + 1;
+         anchor_idx < anchor_begin + region.seed_count;
+         ++anchor_idx)
+    {
+        const int32_t span = static_cast<int32_t>(anchors[anchor_idx].query.query_span);
+        const int32_t target_gap = static_cast<int32_t>(anchors[anchor_idx].ref.ref_position)
+                                 - static_cast<int32_t>(anchors[anchor_idx - 1].ref.ref_position);
+        const int32_t query_gap = static_cast<int32_t>(anchors[anchor_idx].query.query_position)
+                                - static_cast<int32_t>(anchors[anchor_idx - 1].query.query_position);
+        const int32_t max_gap = (target_gap > query_gap) ? target_gap : query_gap;
+        region.block_length += max_gap;
+        const bool both_gaps_exceed_span = (target_gap > span && query_gap > span);
+        const int32_t min_gap = (target_gap < query_gap) ? target_gap : query_gap;
+        const int32_t match_increment = both_gaps_exceed_span ? span : min_gap;
+        region.match_length += match_increment;
     }
 }
 
@@ -636,41 +759,48 @@ void compute_fuzzy_lengths(AlignRegion& r, const std::vector<Anchor>& anchors) {
  * @brief Set alignment coordinates from seed positions.
  *
  * Equivalent to mm_reg_set_coor() in hit.c.
- * Derives qs, qe, rs, re from first and last anchor in the chain.
+ * Derives query_start, query_end, ref_start, ref_end from first and last anchor.
  */
 void set_region_coordinates(
-    AlignRegion& r,
+    AlignRegion& region,
     const std::vector<Anchor>& anchors,
     int32_t query_len)
 {
-    if (r.cnt <= 0) return;
-    int32_t as = r.anchor_start;
-    const Anchor& first = anchors[as];
-    const Anchor& last  = anchors[as + r.cnt - 1];
+    if (region.seed_count <= 0) {
+        return;
+    }
+    const int32_t anchor_begin = region.anchor_start;
+    const Anchor& first_anchor = anchors[anchor_begin];
+    const Anchor& last_anchor = anchors[anchor_begin + region.seed_count - 1];
 
-    r.rev = first.rev();
-    r.rid = static_cast<int32_t>(first.rid());
+    region.is_reverse = first_anchor.ref.is_reverse != 0;
+    region.reference_id = static_cast<int32_t>(first_anchor.ref.reference_id);
 
     // Reference coordinates
-    int32_t span0 = first.q_span();
-    r.rs = static_cast<int32_t>(first.x) + 1 - span0;
-    r.re = static_cast<int32_t>(last.x) + 1;
-    if (r.rs < 0) r.rs = 0;
-
-    // Query coordinates
-    int32_t qs_raw = static_cast<int32_t>(first.y) + 1 - span0;
-    int32_t qe_raw = static_cast<int32_t>(last.y) + 1;
-    if (qs_raw < 0) qs_raw = 0;
-
-    if (!r.rev) {
-        r.qs = qs_raw;
-        r.qe = qe_raw;
-    } else {
-        r.qs = query_len - qe_raw;
-        r.qe = query_len - qs_raw;
+    const int32_t first_span = static_cast<int32_t>(first_anchor.query.query_span);
+    region.ref_start = static_cast<int32_t>(first_anchor.ref.ref_position) + 1 - first_span;
+    region.ref_end = static_cast<int32_t>(last_anchor.ref.ref_position) + 1;
+    if (region.ref_start < 0) {
+        region.ref_start = 0;
     }
 
-    compute_fuzzy_lengths(r, anchors);
+    // Query coordinates
+    int32_t raw_query_start = static_cast<int32_t>(first_anchor.query.query_position)
+                            + 1 - first_span;
+    const int32_t raw_query_end = static_cast<int32_t>(last_anchor.query.query_position) + 1;
+    if (raw_query_start < 0) {
+        raw_query_start = 0;
+    }
+
+    if (!region.is_reverse) {
+        region.query_start = raw_query_start;
+        region.query_end = raw_query_end;
+    } else {
+        region.query_start = query_len - raw_query_end;
+        region.query_end = query_len - raw_query_start;
+    }
+
+    compute_fuzzy_lengths(region, anchors);
 }
 
 /**
@@ -681,28 +811,31 @@ void set_region_coordinates(
  * Sorts chains by score (descending) and creates AlignRegion records
  * with coordinates derived from the anchor positions.
  */
-std::vector<AlignRegion> generate_regions(
+[[nodiscard]] std::vector<AlignRegion> generate_regions(
     std::vector<Chain>& chains,
     const std::vector<Anchor>& anchors,
     int32_t query_len)
 {
-    if (chains.empty()) return {};
+    if (chains.empty()) {
+        return {};
+    }
 
     // Sort chains by score descending
     std::sort(chains.begin(), chains.end(),
-              [](const Chain& a, const Chain& b) { return a.score > b.score; });
+              [](const Chain& left, const Chain& right) { return left.score > right.score; });
 
     std::vector<AlignRegion> regions(chains.size());
-    for (size_t i = 0; i < chains.size(); ++i) {
-        AlignRegion& r = regions[i];
-        r.id = static_cast<int32_t>(i);
-        r.parent = -1; // unset
-        r.score = chains[i].score;
-        r.score0 = chains[i].score;
-        r.cnt = chains[i].n_anchors;
-        r.anchor_start = chains[i].anchor_start;
-        r.div = -1.0f;
-        set_region_coordinates(r, anchors, query_len);
+    for (size_t region_idx = 0; region_idx < chains.size(); ++region_idx) {
+        regions[region_idx] = AlignRegion{
+            .region_id      = static_cast<int32_t>(region_idx),
+            .parent         = -1,
+            .score          = chains[region_idx].score,
+            .original_score = chains[region_idx].score,
+            .seed_count     = chains[region_idx].anchor_count,
+            .anchor_start   = chains[region_idx].anchor_start,
+            .divergence     = -1.0f,
+        };
+        set_region_coordinates(regions[region_idx], anchors, query_len);
     }
 
     JustLog("[minimap_port] Generated {} alignment regions", regions.size());
@@ -730,74 +863,106 @@ void classify_primary_secondary(
     int32_t mask_len,
     int32_t sub_diff)
 {
-    int32_t n = static_cast<int32_t>(regions.size());
-    if (n <= 0) return;
+    const size_t region_count = regions.size();
+    if (region_count == 0) {
+        return;
+    }
 
-    for (int32_t i = 0; i < n; ++i) regions[i].id = i;
+    for (size_t region_idx = 0; region_idx < region_count; ++region_idx) {
+        regions[region_idx].region_id = static_cast<int32_t>(region_idx);
+    }
 
-    // w[] holds indices of primary alignments
-    std::vector<int32_t> primaries;
-    primaries.push_back(0);
+    // primary_indices holds indices of primary alignments
+    std::vector<size_t> primary_indices;
+    primary_indices.push_back(0);
     regions[0].parent = 0;
 
-    std::vector<uint64_t> cov_intervals;
+    std::vector<uint64_t> coverage_intervals;
 
-    for (int32_t i = 1; i < n; ++i) {
-        AlignRegion& ri = regions[i];
-        int32_t si = ri.qs, ei = ri.qe;
-        int32_t uncov_len = 0;
+    for (size_t region_idx = 1; region_idx < region_count; ++region_idx) {
+        AlignRegion& current_region = regions[region_idx];
+        const int32_t current_query_start = current_region.query_start;
+        const int32_t current_query_end = current_region.query_end;
+        int32_t uncovered_length = 0;
 
         // Compute coverage from existing primaries
-        cov_intervals.clear();
-        for (int32_t w_idx : primaries) {
-            const AlignRegion& rp = regions[w_idx];
-            int32_t sj = rp.qs, ej = rp.qe;
-            if (ej <= si || sj >= ei) continue;
-            sj = std::max(sj, si);
-            ej = std::min(ej, ei);
-            cov_intervals.push_back(
-                (static_cast<uint64_t>(sj) << 32) | static_cast<uint32_t>(ej));
+        coverage_intervals.clear();
+        for (const size_t primary_idx : primary_indices) {
+            const AlignRegion& primary_region = regions[primary_idx];
+            int32_t primary_query_start = primary_region.query_start;
+            int32_t primary_query_end = primary_region.query_end;
+            if (primary_query_end <= current_query_start
+                || primary_query_start >= current_query_end)
+            {
+                continue;
+            }
+            primary_query_start = std::max(primary_query_start, current_query_start);
+            primary_query_end = std::min(primary_query_end, current_query_end);
+            coverage_intervals.push_back(
+                (static_cast<uint64_t>(primary_query_start) << 32)
+                | static_cast<uint32_t>(primary_query_end));
         }
 
-        if (!cov_intervals.empty()) {
-            std::sort(cov_intervals.begin(), cov_intervals.end());
-            int32_t x = si;
-            for (uint64_t c : cov_intervals) {
-                int32_t cs = static_cast<int32_t>(c >> 32);
-                int32_t ce = static_cast<int32_t>(c);
-                if (cs > x) uncov_len += cs - x;
-                x = std::max(x, ce);
+        if (!coverage_intervals.empty()) {
+            std::sort(coverage_intervals.begin(), coverage_intervals.end());
+            int32_t coverage_pos = current_query_start;
+            for (const uint64_t interval : coverage_intervals) {
+                const int32_t interval_start = static_cast<int32_t>(interval >> 32);
+                const int32_t interval_end = static_cast<int32_t>(interval);
+                if (interval_start > coverage_pos) {
+                    uncovered_length += interval_start - coverage_pos;
+                }
+                coverage_pos = std::max(coverage_pos, interval_end);
             }
-            if (ei > x) uncov_len += ei - x;
+            if (current_query_end > coverage_pos) {
+                uncovered_length += current_query_end - coverage_pos;
+            }
         }
 
         // Test against each primary
         bool is_secondary = false;
-        for (int32_t w_idx : primaries) {
-            AlignRegion& rp = regions[w_idx];
-            int32_t sj = rp.qs, ej = rp.qe;
-            if (ej <= si || sj >= ei) continue;
+        for (const size_t primary_idx : primary_indices) {
+            AlignRegion& primary_region = regions[primary_idx];
+            const int32_t primary_query_start = primary_region.query_start;
+            const int32_t primary_query_end = primary_region.query_end;
+            if (primary_query_end <= current_query_start
+                || primary_query_start >= current_query_end)
+            {
+                continue;
+            }
 
-            int32_t min_span = std::min(ej - sj, ei - si);
-            int32_t max_span = std::max(ej - sj, ei - si);
-            int32_t ol = std::max(0, std::min(ei, ej) - std::max(si, sj));
+            const int32_t min_span = std::min(primary_query_end - primary_query_start,
+                                              current_query_end - current_query_start);
+            const int32_t max_span = std::max(primary_query_end - primary_query_start,
+                                              current_query_end - current_query_start);
+            const int32_t overlap_length = std::max(0,
+                std::min(current_query_end, primary_query_end)
+                - std::max(current_query_start, primary_query_start));
 
             if (min_span > 0 && max_span > 0 &&
-                (static_cast<float>(ol) / min_span -
-                 static_cast<float>(uncov_len) / max_span) > mask_level &&
-                uncov_len <= mask_len)
+                (static_cast<float>(overlap_length) / min_span -
+                 static_cast<float>(uncovered_length) / max_span) > mask_level &&
+                uncovered_length <= mask_len)
             {
-                ri.parent = rp.parent >= 0 ? rp.parent : rp.id;
-                rp.subsc = std::max(rp.subsc, ri.score);
-                // Update dp_max2 for MAPQ (equivalent to hit.c:176)
-                if (ri.has_dp && rp.has_dp &&
-                    (rp.rid != ri.rid || rp.rs != ri.rs || rp.re != ri.re || ol != min_span)) {
-                    rp.dp_max2 = std::max(rp.dp_max2, ri.dp_max);
-                    if (rp.dp_max - ri.dp_max <= sub_diff) {
-                        ++rp.n_sub;
+                const int32_t resolved_parent = (primary_region.parent >= 0)
+                    ? primary_region.parent : primary_region.region_id;
+                current_region.parent = resolved_parent;
+                primary_region.secondary_score = std::max(
+                    primary_region.secondary_score, current_region.score);
+                // Update secondary_dp_max for MAPQ (equivalent to hit.c:176)
+                if (current_region.has_alignment && primary_region.has_alignment &&
+                    (primary_region.reference_id != current_region.reference_id
+                     || primary_region.ref_start != current_region.ref_start
+                     || primary_region.ref_end != current_region.ref_end
+                     || overlap_length != min_span))
+                {
+                    primary_region.secondary_dp_max = std::max(
+                        primary_region.secondary_dp_max, current_region.dp_max_score);
+                    if (primary_region.dp_max_score - current_region.dp_max_score <= sub_diff) {
+                        ++primary_region.secondary_count;
                     }
-                } else if (ri.cnt >= rp.cnt) {
-                    ++rp.n_sub;
+                } else if (current_region.seed_count >= primary_region.seed_count) {
+                    ++primary_region.secondary_count;
                 }
                 is_secondary = true;
                 break;
@@ -805,14 +970,14 @@ void classify_primary_secondary(
         }
 
         if (!is_secondary) {
-            primaries.push_back(i);
-            ri.parent = i;
-            ri.n_sub = 0;
+            primary_indices.push_back(region_idx);
+            current_region.parent = static_cast<int32_t>(region_idx);
+            current_region.secondary_count = 0;
         }
     }
 
     JustLog("[minimap_port] Classification: {} primary, {} secondary",
-            primaries.size(), n - static_cast<int32_t>(primaries.size()));
+            primary_indices.size(), region_count - primary_indices.size());
 }
 
 // ============================================================================
@@ -835,49 +1000,58 @@ void filter_secondary_regions(
     int32_t min_diff,
     int32_t best_n)
 {
-    if (regions.empty() || pri_ratio <= 0.0f) return;
+    if (regions.empty() || pri_ratio <= 0.0f) {
+        return;
+    }
 
     // Use index-based filtering to avoid reading from moved-from objects.
     // Mark each region as kept (true) or removed (false), then compact.
-    int32_t n = static_cast<int32_t>(regions.size());
-    int32_t n_2nd = 0;
-    std::vector<bool> keep(n, false);
+    const size_t region_count = regions.size();
+    size_t secondary_kept_count = 0;
+    std::vector<bool> keep(region_count, false);
 
-    for (int32_t i = 0; i < n; ++i) {
-        const auto& r = regions[i];
-        int32_t p_idx = r.parent;
-        if (p_idx == r.id) {
-            // Primary -- always keep
-            keep[i] = true;
-        } else if (p_idx >= 0 && p_idx < n) {
-            const auto& parent = regions[p_idx];
-            if ((r.score >= static_cast<int32_t>(parent.score * pri_ratio) ||
-                 r.score + min_diff >= parent.score) && n_2nd < best_n)
+    for (size_t region_idx = 0; region_idx < region_count; ++region_idx) {
+        const auto& region = regions[region_idx];
+        const int32_t parent_idx = region.parent;
+        if (parent_idx == region.region_id) {
+            // Primary — always keep
+            keep[region_idx] = true;
+        } else if (parent_idx >= 0 && parent_idx < static_cast<int32_t>(region_count)) {
+            const auto& parent_region = regions[parent_idx];
+            if ((region.score >= static_cast<int32_t>(parent_region.score * pri_ratio) ||
+                 region.score + min_diff >= parent_region.score)
+                && static_cast<int32_t>(secondary_kept_count) < best_n)
             {
                 // Not identical coordinates
-                if (!(r.qs == parent.qs && r.qe == parent.qe &&
-                      r.rid == parent.rid && r.rs == parent.rs && r.re == parent.re))
-                {
-                    keep[i] = true;
-                    ++n_2nd;
+                const bool is_duplicate =
+                    region.query_start == parent_region.query_start
+                    && region.query_end == parent_region.query_end
+                    && region.reference_id == parent_region.reference_id
+                    && region.ref_start == parent_region.ref_start
+                    && region.ref_end == parent_region.ref_end;
+                if (!is_duplicate) {
+                    keep[region_idx] = true;
+                    ++secondary_kept_count;
                 }
             }
         }
     }
 
     // Compact: move kept regions to front
-    int32_t k = 0;
-    for (int32_t i = 0; i < n; ++i) {
-        if (keep[i]) {
-            if (k < i) regions[k] = std::move(regions[i]);
-            ++k;
+    size_t write_pos = 0;
+    for (size_t region_idx = 0; region_idx < region_count; ++region_idx) {
+        if (keep[region_idx]) {
+            if (write_pos < region_idx) {
+                regions[write_pos] = std::move(regions[region_idx]);
+            }
+            ++write_pos;
         }
     }
-    regions.resize(k);
+    regions.resize(write_pos);
 
     // Re-index
-    for (int32_t i = 0; i < static_cast<int32_t>(regions.size()); ++i) {
-        regions[i].id = i;
+    for (size_t region_idx = 0; region_idx < regions.size(); ++region_idx) {
+        regions[region_idx].region_id = static_cast<int32_t>(region_idx);
     }
 
     JustLog("[minimap_port] After secondary filtering: {} regions remain", regions.size());
@@ -890,15 +1064,6 @@ void filter_secondary_regions(
 /**
  * @brief Generate the 5x5 scoring matrix for DNA alignment.
  *
- * Matrix is 5x5 for {A, C, G, T, N} = {0, 1, 2, 3, 4}.
- * Diagonal = match_score, off-diagonal = -mismatch_pen.
- * Row/col 4 (N) scores 0 against everything.
- *
- * Equivalent to ksw_gen_simple_mat() in align.c:15-27.
- */
-/**
- * @brief Generate the 5x5 scoring matrix for DNA alignment.
- *
  * Equivalent to ksw_gen_simple_mat() in align.c:15-27.
  * Matrix is 5x5 for {A, C, G, T, N} = {0, 1, 2, 3, 4}.
  * Diagonal = match_score, off-diagonal = -mismatch_pen.
@@ -907,33 +1072,41 @@ void filter_secondary_regions(
 constexpr std::array<int8_t, 25> generate_score_matrix(
     int8_t match_score, int8_t mismatch_pen, int8_t sc_ambi)
 {
-    std::array<int8_t, 25> mat{};
-    int8_t a = match_score > 0 ? match_score : static_cast<int8_t>(-match_score);
-    int8_t b = mismatch_pen > 0 ? static_cast<int8_t>(-mismatch_pen) : mismatch_pen;
-    int8_t ambi = sc_ambi > 0 ? static_cast<int8_t>(-sc_ambi) : sc_ambi;
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j)
-            mat[i * 5 + j] = (i == j) ? a : b;
-        mat[i * 5 + 4] = ambi;
+    std::array<int8_t, 25> matrix{};
+    const int8_t positive_match = match_score > 0
+        ? match_score : static_cast<int8_t>(-match_score);
+    const int8_t negative_mismatch = mismatch_pen > 0
+        ? static_cast<int8_t>(-mismatch_pen) : mismatch_pen;
+    const int8_t ambiguity_penalty = sc_ambi > 0
+        ? static_cast<int8_t>(-sc_ambi) : sc_ambi;
+    for (int32_t matrix_row = 0; matrix_row < 4; ++matrix_row) {
+        for (int32_t matrix_col = 0; matrix_col < 4; ++matrix_col) {
+            const int8_t cell_score = (matrix_row == matrix_col)
+                ? positive_match : negative_mismatch;
+            matrix[matrix_row * 5 + matrix_col] = cell_score;
+        }
+        matrix[matrix_row * 5 + 4] = ambiguity_penalty;
     }
-    for (int j = 0; j < 5; ++j) mat[4 * 5 + j] = ambi;
-    return mat;
+    for (int32_t matrix_col = 0; matrix_col < 5; ++matrix_col) {
+        matrix[4 * 5 + matrix_col] = ambiguity_penalty;
+    }
+    return matrix;
 }
 
 /**
  * @brief Convert a dna4 base to 4-bit encoding (0=A, 1=C, 2=G, 3=T).
  */
-inline uint8_t dna4_to_nt4(seq::dna4 base) {
+[[nodiscard]] inline uint8_t dna4_to_nt4(seq::dna4 base) {
     return static_cast<uint8_t>(base.to_rank());
 }
 
 /**
  * @brief Encode a dna4 sequence to uint8_t array.
  */
-std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& seq) {
-    std::vector<uint8_t> encoded(seq.size());
-    for (size_t i = 0; i < seq.size(); ++i) {
-        encoded[i] = dna4_to_nt4(seq[i]);
+[[nodiscard]] std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& sequence) {
+    std::vector<uint8_t> encoded(sequence.size());
+    for (size_t nucleotide_pos = 0; nucleotide_pos < sequence.size(); ++nucleotide_pos) {
+        encoded[nucleotide_pos] = dna4_to_nt4(sequence[nucleotide_pos]);
     }
     return encoded;
 }
@@ -941,13 +1114,15 @@ std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& seq) {
 /**
  * @brief Reverse complement an encoded sequence.
  */
-std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& seq) {
-    std::vector<uint8_t> rc(seq.size());
-    for (size_t i = 0; i < seq.size(); ++i) {
-        uint8_t c = seq[seq.size() - 1 - i];
-        rc[i] = (c < 4) ? static_cast<uint8_t>(3 - c) : static_cast<uint8_t>(4);
+[[nodiscard]] std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& sequence) {
+    std::vector<uint8_t> rev_comp(sequence.size());
+    for (size_t nucleotide_pos = 0; nucleotide_pos < sequence.size(); ++nucleotide_pos) {
+        const uint8_t base = sequence[sequence.size() - 1 - nucleotide_pos];
+        rev_comp[nucleotide_pos] = (base < 4)
+            ? static_cast<uint8_t>(3 - base)
+            : static_cast<uint8_t>(4);
     }
-    return rc;
+    return rev_comp;
 }
 
 // ============================================================================
@@ -960,68 +1135,54 @@ std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& seq) {
  * Equivalent to mm_align_pair() in align.c:340-372.
  * If q == q2 && e == e2, uses affine gap (z2); otherwise dual-affine (d2).
  *
- * @param qlen     Query segment length
- * @param qseq     Encoded query segment
- * @param tlen     Target segment length
- * @param tseq     Encoded target segment
- * @param mat      5x5 scoring matrix
- * @param params   Algorithm parameters
- * @param w        Bandwidth for alignment
- * @param end_bonus End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
- * @param zdrop    Z-drop threshold
- * @param ksw_flag KSW2 flags (KSW_EZ_EXTZ_ONLY, KSW_EZ_RIGHT, KSW_EZ_REV_CIGAR, etc.)
- * @param ez       [in/out] KSW2 result struct (cigar is allocated by KSW2, caller must free)
+ * @param query_length   Query segment length
+ * @param query_seq      Encoded query segment
+ * @param target_length  Target segment length
+ * @param target_seq     Encoded target segment
+ * @param score_matrix   5x5 scoring matrix
+ * @param params         Algorithm parameters
+ * @param align_bandwidth Bandwidth for alignment
+ * @param end_bonus      End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
+ * @param zdrop          Z-drop threshold
+ * @param ksw_flag       KSW2 flags (KSW_EZ_EXTZ_ONLY, KSW_EZ_RIGHT, KSW_EZ_REV_CIGAR, etc.)
+ * @param result         [in/out] KSW2 result struct
  */
 void ksw2_align_pair(
-    int qlen, const uint8_t* qseq,
-    int tlen, const uint8_t* tseq,
-    const int8_t* mat,
+    int query_length, const uint8_t* query_seq,
+    int target_length, const uint8_t* target_seq,
+    const int8_t* score_matrix,
     const Minimap2Params& params,
-    int w, int end_bonus, int zdrop, int ksw_flag,
-    ksw_extz_t* ez)
+    int align_bandwidth, int end_bonus, int zdrop, int ksw_flag,
+    ksw_extz_t* result)
 {
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         Aligner<ALIGN_ALGORITHM_KSW2>::z2(
-            nullptr, qlen, qseq, tlen, tseq, 5, mat,
+            nullptr, query_length, query_seq, target_length, target_seq, 5, score_matrix,
             static_cast<int8_t>(params.gap_open1),
             static_cast<int8_t>(params.gap_ext1),
-            w, zdrop, end_bonus, ksw_flag, ez);
+            align_bandwidth, zdrop, end_bonus, ksw_flag, result);
     } else {
         Aligner<ALIGN_ALGORITHM_KSW2>::d2(
-            nullptr, qlen, qseq, tlen, tseq, 5, mat,
+            nullptr, query_length, query_seq, target_length, target_seq, 5, score_matrix,
             static_cast<int8_t>(params.gap_open1),
             static_cast<int8_t>(params.gap_ext1),
             static_cast<int8_t>(params.gap_open2),
             static_cast<int8_t>(params.gap_ext2),
-            w, zdrop, end_bonus, ksw_flag, ez);
+            align_bandwidth, zdrop, end_bonus, ksw_flag, result);
     }
-}
-
-/**
- * @brief Convert KSW2 packed CIGAR to our CigarOp vector.
- *
- * KSW2 packs CIGAR as uint32_t: len<<4 | op.
- */
-std::vector<CigarOp> ksw_cigar_to_ops(int n_cigar, const uint32_t* cigar) {
-    std::vector<CigarOp> ops;
-    ops.reserve(n_cigar);
-    for (int i = 0; i < n_cigar; ++i) {
-        ops.push_back({cigar[i] >> 4, cigar[i] & 0xf});
-    }
-    return ops;
 }
 
 /**
  * @brief Append KSW2 CIGAR ops to a CigarOp vector, merging adjacent same-op entries.
  */
-void append_cigar(std::vector<CigarOp>& dst, int n_cigar, const uint32_t* cigar) {
-    for (int i = 0; i < n_cigar; ++i) {
-        uint32_t op  = cigar[i] & 0xf;
-        uint32_t len = cigar[i] >> 4;
-        if (!dst.empty() && dst.back().op == op) {
-            dst.back().len += len;
+void append_cigar(std::vector<CigarOp>& destination, int cigar_count, const uint32_t* cigar) {
+    for (int cigar_idx = 0; cigar_idx < cigar_count; ++cigar_idx) {
+        const uint32_t opcode = cigar[cigar_idx] & 0xf;
+        const uint32_t op_length = cigar[cigar_idx] >> 4;
+        if (!destination.empty() && destination.back().opcode == opcode) {
+            destination.back().length += op_length;
         } else {
-            dst.push_back({len, op});
+            destination.push_back({op_length, opcode});
         }
     }
 }
@@ -1029,18 +1190,14 @@ void append_cigar(std::vector<CigarOp>& dst, int n_cigar, const uint32_t* cigar)
 /**
  * @brief Reverse an in-memory uint8_t sequence.
  */
-void reverse_seq_inplace(uint8_t* seq, int32_t len) {
-    for (int32_t i = 0; i < len / 2; ++i) {
-        uint8_t tmp = seq[i];
-        seq[i] = seq[len - 1 - i];
-        seq[len - 1 - i] = tmp;
-    }
+void reverse_seq_inplace(uint8_t* sequence, int32_t seq_length) {
+    std::reverse(sequence, sequence + seq_length);
 }
 
 /**
  * @brief Perform base-level alignment for each region using KSW2.
  *
- * Equivalent to align_regs() → mm_align_skeleton() → mm_align1() in align.c.
+ * Equivalent to align_regs() -> mm_align_skeleton() -> mm_align1() in align.c.
  *
  * For each region, follows the minimap2 3-part alignment strategy:
  *   1. Left extension: reversed query/target from first seed to extended boundary
@@ -1058,169 +1215,224 @@ void align_regions(
     const std::vector<uint8_t>& target_encoded,
     const Minimap2Params& params)
 {
-    auto mat = generate_score_matrix(
+    const auto score_matrix = generate_score_matrix(
         static_cast<int8_t>(params.match_score),
         static_cast<int8_t>(params.mismatch_pen),
         static_cast<int8_t>(params.sc_ambi));
-    int32_t qlen = static_cast<int32_t>(query_fwd.size());
-    int32_t tlen = static_cast<int32_t>(target_encoded.size());
-    int32_t bw = static_cast<int32_t>(params.bw * 1.5 + 1.0);
+    const int32_t query_length = static_cast<int32_t>(query_fwd.size());
+    const int32_t target_length = static_cast<int32_t>(target_encoded.size());
+    const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
 
-    for (auto& r : regions) {
-        if (r.cnt <= 0) continue;
+    for (auto& region : regions) {
+        if (region.seed_count <= 0) {
+            continue;
+        }
 
-        int32_t as = r.anchor_start;
-        const Anchor& first = anchors[as];
-        const Anchor& last  = anchors[as + r.cnt - 1];
+        const int32_t anchor_begin = region.anchor_start;
+        const Anchor& first_anchor = anchors[anchor_begin];
+        const Anchor& last_anchor = anchors[anchor_begin + region.seed_count - 1];
 
         // Inner seed boundaries (where seeds are)
-        int32_t span0 = first.q_span();
-        int32_t rs = static_cast<int32_t>(first.x) + 1 - span0;
-        int32_t qs = static_cast<int32_t>(first.y) + 1 - span0;
-        int32_t re = static_cast<int32_t>(last.x) + 1;
-        int32_t qe = static_cast<int32_t>(last.y) + 1;
-        if (rs < 0) rs = 0;
-        if (qs < 0) qs = 0;
+        const int32_t first_span = static_cast<int32_t>(first_anchor.query.query_span);
+        int32_t seed_ref_start = static_cast<int32_t>(first_anchor.ref.ref_position)
+                               + 1 - first_span;
+        int32_t seed_query_start = static_cast<int32_t>(first_anchor.query.query_position)
+                                 + 1 - first_span;
+        const int32_t seed_ref_end = static_cast<int32_t>(last_anchor.ref.ref_position) + 1;
+        const int32_t seed_query_end = static_cast<int32_t>(last_anchor.query.query_position) + 1;
+        if (seed_ref_start < 0) { seed_ref_start = 0; }
+        if (seed_query_start < 0) { seed_query_start = 0; }
 
         // Outer boundaries: extend beyond seeds (align.c:708-762 simplified)
-        int32_t rs0 = rs, qs0 = qs;
-        int32_t re0 = re, qe0 = qe;
-        if (qs > 0 && rs > 0) {
-            int32_t l = qs < params.max_gap ? qs : params.max_gap;
-            qs0 = qs - l;
-            l += l * params.match_score > params.gap_open1 ? (l * params.match_score - params.gap_open1) / params.gap_ext1 : 0;
-            l = l < params.max_gap ? l : params.max_gap;
-            l = l < rs ? l : rs;
-            rs0 = rs - l;
+        int32_t outer_ref_start = seed_ref_start;
+        int32_t outer_query_start = seed_query_start;
+        int32_t outer_ref_end = seed_ref_end;
+        int32_t outer_query_end = seed_query_end;
+
+        if (seed_query_start > 0 && seed_ref_start > 0) {
+            int32_t extension_len = std::min(seed_query_start, params.max_gap);
+            outer_query_start = seed_query_start - extension_len;
+            const int32_t bonus_extension =
+                (extension_len * params.match_score > params.gap_open1)
+                    ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
+                    : 0;
+            extension_len += bonus_extension;
+            extension_len = std::min(extension_len, params.max_gap);
+            extension_len = std::min(extension_len, seed_ref_start);
+            outer_ref_start = seed_ref_start - extension_len;
         }
-        if (qe < qlen && re < tlen) {
-            int32_t l = qlen - qe < params.max_gap ? qlen - qe : params.max_gap;
-            qe0 = qe + l;
-            l += l * params.match_score > params.gap_open1 ? (l * params.match_score - params.gap_open1) / params.gap_ext1 : 0;
-            l = l < params.max_gap ? l : params.max_gap;
-            l = l < tlen - re ? l : tlen - re;
-            re0 = re + l;
+        if (seed_query_end < query_length && seed_ref_end < target_length) {
+            int32_t extension_len = std::min(query_length - seed_query_end, params.max_gap);
+            outer_query_end = seed_query_end + extension_len;
+            const int32_t bonus_extension =
+                (extension_len * params.match_score > params.gap_open1)
+                    ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
+                    : 0;
+            extension_len += bonus_extension;
+            extension_len = std::min(extension_len, params.max_gap);
+            extension_len = std::min(extension_len, target_length - seed_ref_end);
+            outer_ref_end = seed_ref_end + extension_len;
         }
-        if (qe0 > qlen) qe0 = qlen;
+        if (outer_query_end > query_length) {
+            outer_query_end = query_length;
+        }
 
         // Select the query strand
-        const uint8_t* qseq_base = r.rev ? query_rev.data() : query_fwd.data();
+        const uint8_t* query_strand_base = region.is_reverse
+            ? query_rev.data() : query_fwd.data();
 
-        r.cigar.clear();
-        r.dp_score = 0;
-        ksw_extz_t ez;
-        std::memset(&ez, 0, sizeof(ez));
+        region.cigar.clear();
+        region.dp_score = 0;
+        ksw_extz_t ksw_result;
+        std::memset(&ksw_result, 0, sizeof(ksw_result));
 
         // === 1. Left extension ===
-        int32_t rs1 = rs, qs1 = qs;
-        if (qs > qs0 && rs > rs0) {
-            int32_t left_qlen = qs - qs0;
-            int32_t left_tlen = rs - rs0;
+        int32_t final_ref_start = seed_ref_start;
+        int32_t final_query_start = seed_query_start;
+        if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
+            const int32_t left_query_len = seed_query_start - outer_query_start;
+            const int32_t left_target_len = seed_ref_start - outer_ref_start;
             // Copy and reverse both query and target segments
-            std::vector<uint8_t> qbuf(qseq_base + qs0, qseq_base + qs);
-            std::vector<uint8_t> tbuf(target_encoded.data() + rs0, target_encoded.data() + rs);
-            reverse_seq_inplace(qbuf.data(), left_qlen);
-            reverse_seq_inplace(tbuf.data(), left_tlen);
+            std::vector<uint8_t> query_buf(query_strand_base + outer_query_start,
+                                           query_strand_base + seed_query_start);
+            std::vector<uint8_t> target_buf(target_encoded.data() + outer_ref_start,
+                                            target_encoded.data() + seed_ref_start);
+            reverse_seq_inplace(query_buf.data(), left_query_len);
+            reverse_seq_inplace(target_buf.data(), left_target_len);
 
-            ksw_reset_extz(&ez);
-            ksw2_align_pair(left_qlen, qbuf.data(), left_tlen, tbuf.data(),
-                            mat.data(), params, bw,
+            ksw_reset_extz(&ksw_result);
+            ksw2_align_pair(left_query_len, query_buf.data(),
+                            left_target_len, target_buf.data(),
+                            score_matrix.data(), params, align_bandwidth,
                             params.end_bonus, params.zdrop,
-                            KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR, &ez);
-            if (ez.n_cigar > 0) {
-                append_cigar(r.cigar, ez.n_cigar, ez.cigar);
-                r.dp_score += ez.max;
+                            KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR,
+                            &ksw_result);
+            if (ksw_result.n_cigar > 0) {
+                append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
+                region.dp_score += ksw_result.max;
             }
-            rs1 = rs - (ez.reach_end ? ez.mqe_t + 1 : ez.max_t + 1);
-            qs1 = qs - (ez.reach_end ? qs - qs0 : ez.max_q + 1);
-            if (ez.cigar) { free(ez.cigar); ez.cigar = nullptr; ez.n_cigar = 0; ez.m_cigar = 0; }
+            const int32_t left_ref_offset = ksw_result.reach_end
+                ? ksw_result.mqe_t + 1 : ksw_result.max_t + 1;
+            final_ref_start = seed_ref_start - left_ref_offset;
+            const int32_t left_query_offset = ksw_result.reach_end
+                ? seed_query_start - outer_query_start : ksw_result.max_q + 1;
+            final_query_start = seed_query_start - left_query_offset;
+            if (ksw_result.cigar) {
+                free(ksw_result.cigar);
+                ksw_result.cigar = nullptr;
+                ksw_result.n_cigar = 0;
+                ksw_result.m_cigar = 0;
+            }
         }
 
         // === 2. Gap filling (entire region between first and last seed) ===
-        int32_t re1 = rs, qe1 = qs;
-        if (r.cnt > 1) {
-            int32_t gap_qlen = qe - qs;
-            int32_t gap_tlen = re - rs;
-            if (gap_qlen > 0 && gap_tlen > 0) {
-                const uint8_t* gap_qseq = qseq_base + qs;
-                const uint8_t* gap_tseq = target_encoded.data() + rs;
+        int32_t final_ref_end = seed_ref_start;
+        int32_t final_query_end = seed_query_start;
+        if (region.seed_count > 1) {
+            const int32_t gap_query_len = seed_query_end - seed_query_start;
+            const int32_t gap_target_len = seed_ref_end - seed_ref_start;
+            if (gap_query_len > 0 && gap_target_len > 0) {
+                const uint8_t* gap_query_seq = query_strand_base + seed_query_start;
+                const uint8_t* gap_target_seq = target_encoded.data() + seed_ref_start;
 
-                ksw_reset_extz(&ez);
-                ksw2_align_pair(gap_qlen, gap_qseq, gap_tlen, gap_tseq,
-                                mat.data(), params, bw,
+                ksw_reset_extz(&ksw_result);
+                ksw2_align_pair(gap_query_len, gap_query_seq,
+                                gap_target_len, gap_target_seq,
+                                score_matrix.data(), params, align_bandwidth,
                                 -1, params.zdrop,
-                                KSW_EZ_APPROX_MAX, &ez);
-                if (ez.n_cigar > 0) {
-                    append_cigar(r.cigar, ez.n_cigar, ez.cigar);
+                                KSW_EZ_APPROX_MAX, &ksw_result);
+                if (ksw_result.n_cigar > 0) {
+                    append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
                 }
-                if (ez.zdropped) {
-                    re1 = rs + (ez.max_t + 1);
-                    qe1 = qs + (ez.max_q + 1);
-                    r.dp_score += ez.max;
+                if (ksw_result.zdropped) {
+                    final_ref_end = seed_ref_start + (ksw_result.max_t + 1);
+                    final_query_end = seed_query_start + (ksw_result.max_q + 1);
+                    region.dp_score += ksw_result.max;
                 } else {
-                    re1 = re;
-                    qe1 = qe;
-                    r.dp_score += ez.score;
+                    final_ref_end = seed_ref_end;
+                    final_query_end = seed_query_end;
+                    region.dp_score += ksw_result.score;
                 }
-                if (ez.cigar) { free(ez.cigar); ez.cigar = nullptr; ez.n_cigar = 0; ez.m_cigar = 0; }
+                if (ksw_result.cigar) {
+                    free(ksw_result.cigar);
+                    ksw_result.cigar = nullptr;
+                    ksw_result.n_cigar = 0;
+                    ksw_result.m_cigar = 0;
+                }
             }
         } else {
-            re1 = re; qe1 = qe;
+            final_ref_end = seed_ref_end;
+            final_query_end = seed_query_end;
         }
 
         // === 3. Right extension ===
-        if (!ez.zdropped && qe < qe0 && re < re0) {
-            int32_t right_qlen = qe0 - qe;
-            int32_t right_tlen = re0 - re;
-            const uint8_t* right_qseq = qseq_base + qe;
-            const uint8_t* right_tseq = target_encoded.data() + re;
+        if (!ksw_result.zdropped
+            && seed_query_end < outer_query_end
+            && seed_ref_end < outer_ref_end)
+        {
+            const int32_t right_query_len = outer_query_end - seed_query_end;
+            const int32_t right_target_len = outer_ref_end - seed_ref_end;
+            const uint8_t* right_query_seq = query_strand_base + seed_query_end;
+            const uint8_t* right_target_seq = target_encoded.data() + seed_ref_end;
 
-            ksw_reset_extz(&ez);
-            ksw2_align_pair(right_qlen, right_qseq, right_tlen, right_tseq,
-                            mat.data(), params, bw,
+            ksw_reset_extz(&ksw_result);
+            ksw2_align_pair(right_query_len, right_query_seq,
+                            right_target_len, right_target_seq,
+                            score_matrix.data(), params, align_bandwidth,
                             params.end_bonus, params.zdrop,
-                            KSW_EZ_EXTZ_ONLY, &ez);
-            if (ez.n_cigar > 0) {
-                append_cigar(r.cigar, ez.n_cigar, ez.cigar);
-                r.dp_score += ez.max;
+                            KSW_EZ_EXTZ_ONLY, &ksw_result);
+            if (ksw_result.n_cigar > 0) {
+                append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
+                region.dp_score += ksw_result.max;
             }
-            re1 = re + (ez.reach_end ? ez.mqe_t + 1 : ez.max_t + 1);
-            qe1 = qe + (ez.reach_end ? qe0 - qe : ez.max_q + 1);
-            if (ez.cigar) { free(ez.cigar); ez.cigar = nullptr; ez.n_cigar = 0; ez.m_cigar = 0; }
+            const int32_t right_ref_offset = ksw_result.reach_end
+                ? ksw_result.mqe_t + 1 : ksw_result.max_t + 1;
+            final_ref_end = seed_ref_end + right_ref_offset;
+            const int32_t right_query_offset = ksw_result.reach_end
+                ? outer_query_end - seed_query_end : ksw_result.max_q + 1;
+            final_query_end = seed_query_end + right_query_offset;
+            if (ksw_result.cigar) {
+                free(ksw_result.cigar);
+                ksw_result.cigar = nullptr;
+                ksw_result.n_cigar = 0;
+                ksw_result.m_cigar = 0;
+            }
         }
 
         // Set final coordinates from alignment extent (align.c:897-899)
-        r.rs = rs1;
-        r.re = re1;
-        if (!r.rev) {
-            r.qs = qs1;
-            r.qe = qe1;
+        region.ref_start = final_ref_start;
+        region.ref_end = final_ref_end;
+        if (!region.is_reverse) {
+            region.query_start = final_query_start;
+            region.query_end = final_query_end;
         } else {
-            r.qs = qlen - qe1;
-            r.qe = qlen - qs1;
+            region.query_start = query_length - final_query_end;
+            region.query_end = query_length - final_query_start;
         }
 
-        // Compute dp_max from CIGAR (simplified mm_update_extra)
-        r.dp_max = r.dp_score;
-        r.has_dp = true;
+        // Compute dp_max_score from CIGAR (simplified mm_update_extra)
+        region.dp_max_score = region.dp_score;
+        region.has_alignment = true;
 
-        // Compute mlen/blen from CIGAR
-        int32_t n_match = 0, n_block = 0;
-        for (const auto& op : r.cigar) {
-            if (op.op == static_cast<uint32_t>(CIGAR_MATCH) ||
-                op.op == static_cast<uint32_t>(CIGAR_EQ)) {
-                n_match += static_cast<int32_t>(op.len);
-                n_block += static_cast<int32_t>(op.len);
-            } else if (op.op == static_cast<uint32_t>(CIGAR_X)) {
-                n_block += static_cast<int32_t>(op.len);
-            } else if (op.op == static_cast<uint32_t>(CIGAR_INS) ||
-                       op.op == static_cast<uint32_t>(CIGAR_DEL)) {
-                n_block += static_cast<int32_t>(op.len);
+        // Compute match_length/block_length from CIGAR
+        int32_t cigar_match_count = 0;
+        int32_t cigar_block_count = 0;
+        for (const auto& cigar_op : region.cigar) {
+            const int32_t op_len = static_cast<int32_t>(cigar_op.length);
+            if (cigar_op.opcode == CIGAR_MATCH || cigar_op.opcode == CIGAR_EQ) {
+                cigar_match_count += op_len;
+                cigar_block_count += op_len;
+            } else if (cigar_op.opcode == CIGAR_X) {
+                cigar_block_count += op_len;
+            } else if (cigar_op.opcode == CIGAR_INS || cigar_op.opcode == CIGAR_DEL) {
+                cigar_block_count += op_len;
             }
         }
-        if (n_match > 0) {
-            r.mlen = n_match;
-            r.blen = n_block > 0 ? n_block : r.blen;
+        if (cigar_match_count > 0) {
+            region.match_length = cigar_match_count;
+            const int32_t effective_block = (cigar_block_count > 0)
+                ? cigar_block_count : region.block_length;
+            region.block_length = effective_block;
         }
     }
 
@@ -1251,7 +1463,7 @@ void align_regions(
  * @param query_minimizers  All query minimizers (used as mini_pos proxy)
  * @param anchors           Reordered anchor array
  * @param query_len         Query sequence length
- * @param k                 k-mer size
+ * @param kmer_size         k-mer size
  * @param target_len        Target/reference sequence length
  */
 void estimate_divergence_from_seeds(
@@ -1259,89 +1471,107 @@ void estimate_divergence_from_seeds(
     const std::vector<MinimapSketchData>& query_minimizers,
     const std::vector<Anchor>& anchors,
     int32_t query_len,
-    int32_t k,
+    int32_t kmer_size,
     int32_t target_len)
 {
-    if (query_minimizers.empty()) return;
+    if (query_minimizers.empty()) {
+        return;
+    }
 
     // Build sorted mini_pos array: stores last_pos values directly.
     // seed.c:127: mini_pos = q_span<<32 | q_pos>>1, where q_pos>>1 == last_pos.
     // esterr.c get_for_qpos on an anchor also resolves back to last_pos
     // for both strands (the reverse conversion cancels out), so mini_pos
     // simply contains the raw last_pos values sorted.
-    std::vector<int32_t> mini_pos;
-    mini_pos.reserve(query_minimizers.size());
-    float sum_k = 0.0f;
-    for (const auto& qm : query_minimizers) {
-        mini_pos.push_back(static_cast<int32_t>(qm.last_pos));
-        sum_k += static_cast<float>(qm.span);
+    std::vector<int32_t> minimizer_positions;
+    minimizer_positions.reserve(query_minimizers.size());
+    float span_sum = 0.0f;
+    for (const auto& query_min : query_minimizers) {
+        minimizer_positions.push_back(static_cast<int32_t>(query_min.last_pos));
+        span_sum += static_cast<float>(query_min.span);
     }
-    std::sort(mini_pos.begin(), mini_pos.end());
-    float avg_k = sum_k / static_cast<float>(query_minimizers.size());
+    std::sort(minimizer_positions.begin(), minimizer_positions.end());
+    const float avg_kmer_span = span_sum / static_cast<float>(query_minimizers.size());
 
-    for (auto& r : regions) {
-        r.div = -1.0f;
-        if (r.cnt <= 0) continue;
+    for (auto& region : regions) {
+        region.divergence = -1.0f;
+        if (region.seed_count <= 0) {
+            continue;
+        }
 
-        int32_t as = r.anchor_start;
+        const int32_t anchor_begin = region.anchor_start;
 
         // Get forward-strand position of the first anchor in the chain.
         // esterr.c:48: uses r->rev? last anchor : first anchor.
         // get_for_qpos resolves to last_pos for both strands.
-        const Anchor& ref_anchor = r.rev ? anchors[as + r.cnt - 1] : anchors[as];
-        int32_t first_fwd_pos;
-        {
-            int32_t x = static_cast<int32_t>(ref_anchor.y);
-            if (ref_anchor.rev()) {
-                int32_t q_span = ref_anchor.q_span();
-                x = query_len - 1 - (x + 1 - q_span);
-            }
-            first_fwd_pos = x;
+        const Anchor& reference_anchor = region.is_reverse
+            ? anchors[anchor_begin + region.seed_count - 1]
+            : anchors[anchor_begin];
+
+        // Compute forward-strand position without nested block scope
+        int32_t first_forward_pos = static_cast<int32_t>(reference_anchor.query.query_position);
+        if (reference_anchor.ref.is_reverse) {
+            const int32_t anchor_span = static_cast<int32_t>(reference_anchor.query.query_span);
+            first_forward_pos = query_len - 1 - (first_forward_pos + 1 - anchor_span);
         }
 
-        // Binary search for first_fwd_pos in mini_pos
-        auto it = std::lower_bound(mini_pos.begin(), mini_pos.end(), first_fwd_pos);
-        if (it == mini_pos.end() || *it != first_fwd_pos) {
+        // Binary search for first_forward_pos in minimizer_positions
+        auto search_iter = std::lower_bound(
+            minimizer_positions.begin(), minimizer_positions.end(), first_forward_pos);
+        if (search_iter == minimizer_positions.end() || *search_iter != first_forward_pos) {
             continue; // Position not found — skip
         }
-        int32_t st = static_cast<int32_t>(it - mini_pos.begin());
-        int32_t en = st;
+        const int32_t match_start_idx = static_cast<int32_t>(
+            search_iter - minimizer_positions.begin());
+        int32_t match_end_idx = match_start_idx;
 
         // Scan forward matching chain seeds (esterr.c:55-60)
-        int32_t n_match = 1;
-        int32_t n = static_cast<int32_t>(mini_pos.size());
-        for (int32_t seed_k = 1, j = st + 1; j < n && seed_k < r.cnt; ++j) {
-            const Anchor& a_k = r.rev
-                ? anchors[as + r.cnt - 1 - seed_k]
-                : anchors[as + seed_k];
-            int32_t fwd_pos;
-            {
-                int32_t x = static_cast<int32_t>(a_k.y);
-                if (a_k.rev()) {
-                    int32_t q_span = a_k.q_span();
-                    x = query_len - 1 - (x + 1 - q_span);
-                }
-                fwd_pos = x;
+        int32_t seed_match_count = 1;
+        const int32_t minimizer_count = static_cast<int32_t>(minimizer_positions.size());
+        for (int32_t seed_idx = 1, minimizer_idx = match_start_idx + 1;
+             minimizer_idx < minimizer_count && seed_idx < region.seed_count;
+             ++minimizer_idx)
+        {
+            const Anchor& chain_anchor = region.is_reverse
+                ? anchors[anchor_begin + region.seed_count - 1 - seed_idx]
+                : anchors[anchor_begin + seed_idx];
+
+            // Compute forward-strand position for this anchor
+            int32_t forward_pos = static_cast<int32_t>(chain_anchor.query.query_position);
+            if (chain_anchor.ref.is_reverse) {
+                const int32_t anchor_span = static_cast<int32_t>(chain_anchor.query.query_span);
+                forward_pos = query_len - 1 - (forward_pos + 1 - anchor_span);
             }
-            if (fwd_pos == mini_pos[j]) {
-                ++seed_k;
-                en = j;
-                ++n_match;
+
+            if (forward_pos == minimizer_positions[minimizer_idx]) {
+                ++seed_idx;
+                match_end_idx = minimizer_idx;
+                ++seed_match_count;
             }
         }
 
-        // n_tot = span of mini_pos between first and last match (esterr.c:61)
-        int32_t n_tot = en - st + 1;
+        // n_tot = span of minimizer_positions between first and last match (esterr.c:61)
+        int32_t total_minimizer_span = match_end_idx - match_start_idx + 1;
 
         // Edge corrections (esterr.c:62-63)
-        if (r.qs > avg_k && r.rs > avg_k) ++n_tot;
-        if (query_len - r.qs > avg_k && target_len - r.re > avg_k) ++n_tot;
+        if (region.query_start > avg_kmer_span && region.ref_start > avg_kmer_span) {
+            ++total_minimizer_span;
+        }
+        if (query_len - region.query_start > avg_kmer_span
+            && target_len - region.ref_end > avg_kmer_span)
+        {
+            ++total_minimizer_span;
+        }
 
         // Divergence formula (esterr.c:64)
-        r.div = (n_match >= n_tot)
-                  ? 0.0f
-                  : static_cast<float>(1.0 - std::pow(
-                      static_cast<double>(n_match) / n_tot, 1.0 / avg_k));
+        if (seed_match_count >= total_minimizer_span) {
+            region.divergence = 0.0f;
+        } else {
+            const double match_ratio = static_cast<double>(seed_match_count)
+                                     / total_minimizer_span;
+            region.divergence = static_cast<float>(
+                1.0 - std::pow(match_ratio, 1.0 / avg_kmer_span));
+        }
     }
 }
 
@@ -1354,83 +1584,102 @@ void estimate_divergence_from_seeds(
  * Equivalent to mm_set_mapq2() in hit.c:423-476.
  *
  * MAPQ formula (primary with DP scores):
- *   mapq = identity * pen_cm * 40 * (1 - x^2) * ln(dp_max / match_sc)
- *   mapq -= 4.343 * ln(n_sub + 1)
+ *   mapq = identity * pen_cm * 40 * (1 - ratio^2) * ln(dp_max_score / match_sc)
+ *   mapq -= 4.343 * ln(secondary_count + 1)
  *   mapq = clamp(mapq, 0, 60)
  *
- * Where x = dp_max2 * subsc / (dp_max * score0)
+ * Where ratio = secondary_dp_max * secondary_chain_score / (dp_max_score * original_score)
  */
 void compute_mapping_quality(
     std::vector<AlignRegion>& regions,
     const Minimap2Params& params,
     int32_t rep_len)
 {
-    constexpr float q_coef = 40.0f;
-    int32_t match_sc = params.match_score;
-    int32_t min_chain_sc = params.min_chain_score;
+    constexpr float quality_coefficient = 40.0f;
+    const int32_t match_sc = params.match_score;
+    const int32_t min_chain_sc = params.min_chain_score;
 
     // Compute uniqueness ratio
-    int64_t sum_sc = 0;
-    for (const auto& r : regions) {
-        if (r.parent == r.id) sum_sc += r.score;
+    int64_t primary_score_sum = 0;
+    for (const auto& region : regions) {
+        if (region.parent == region.region_id) {
+            primary_score_sum += region.score;
+        }
     }
     // hit.c:436: uniq_ratio = (float)sum_sc / (sum_sc + rep_len)
-    float uniq_ratio = static_cast<float>(sum_sc) /
-                       static_cast<float>(sum_sc + rep_len);
+    const float uniqueness_ratio = static_cast<float>(primary_score_sum) /
+                                   static_cast<float>(primary_score_sum + rep_len);
 
-    for (auto& r : regions) {
-        if (r.parent != r.id) {
-            r.mapq = 0; // secondaries get 0
+    for (auto& region : regions) {
+        if (region.parent != region.region_id) {
+            region.mapq = 0; // secondaries get 0
             continue;
         }
 
         // Primary mapping
-        float pen_s1 = (r.score > 100 ? 1.0f : 0.01f * r.score) * uniq_ratio;
-        float pen_cm = r.cnt > 10 ? 1.0f : 0.1f * r.cnt;
-        pen_cm = std::min(pen_s1, pen_cm);
+        const float score_factor = (region.score > 100) ? 1.0f : 0.01f * region.score;
+        const float score_penalty = score_factor * uniqueness_ratio;
+        const float raw_seed_penalty = (region.seed_count > 10)
+            ? 1.0f : 0.1f * region.seed_count;
+        const float seed_count_penalty = std::min(score_penalty, raw_seed_penalty);
 
-        int32_t subsc = std::max(r.subsc, min_chain_sc);
+        const int32_t effective_secondary_score = std::max(
+            region.secondary_score, min_chain_sc);
 
-        int32_t mapq_val;
+        int32_t quality_value;
         // hit.c:447-467: three branches based on DP availability
-        if (r.has_dp && r.dp_max2 > 0 && r.dp_max > 0) {
+        if (region.has_alignment && region.secondary_dp_max > 0
+            && region.dp_max_score > 0)
+        {
             // Formula A: with DP scores (hit.c:448-457)
-            float identity = (r.blen > 0) ? static_cast<float>(r.mlen) / r.blen : 0.f;
-            float x = static_cast<float>(r.dp_max2) * subsc
-                    / (static_cast<float>(r.dp_max) * r.score0);
-            mapq_val = static_cast<int32_t>(
-                identity * pen_cm * q_coef * (1.0f - x * x)
-                * std::log(static_cast<float>(r.dp_max) / match_sc));
+            const float identity = (region.block_length > 0)
+                ? static_cast<float>(region.match_length) / region.block_length
+                : 0.f;
+            const float score_ratio =
+                static_cast<float>(region.secondary_dp_max) * effective_secondary_score
+                / (static_cast<float>(region.dp_max_score) * region.original_score);
+            quality_value = static_cast<int32_t>(
+                identity * seed_count_penalty * quality_coefficient
+                * (1.0f - score_ratio * score_ratio)
+                * std::log(static_cast<float>(region.dp_max_score) / match_sc));
 
             // BWA-MEM-like alternative (hit.c:455)
-            int32_t mapq_alt = static_cast<int32_t>(
+            const int32_t quality_alt = static_cast<int32_t>(
                 6.02f * identity * identity
-                * (r.dp_max - r.dp_max2) / match_sc + 0.499f);
-            mapq_val = std::min(mapq_val, mapq_alt);
+                * (region.dp_max_score - region.secondary_dp_max) / match_sc + 0.499f);
+            quality_value = std::min(quality_value, quality_alt);
         } else {
-            // No dp_max2 available: use chain score formula (hit.c:460-467)
-            float x = static_cast<float>(subsc) / r.score0;
-            if (r.has_dp) {
-                float identity = (r.blen > 0) ? static_cast<float>(r.mlen) / r.blen : 0.f;
-                mapq_val = static_cast<int32_t>(
-                    identity * pen_cm * q_coef * (1.0f - x)
-                    * std::log(static_cast<float>(r.dp_max) / match_sc));
+            // No secondary_dp_max available: use chain score formula (hit.c:460-467)
+            const float score_ratio = static_cast<float>(effective_secondary_score)
+                                    / region.original_score;
+            if (region.has_alignment) {
+                const float identity = (region.block_length > 0)
+                    ? static_cast<float>(region.match_length) / region.block_length
+                    : 0.f;
+                quality_value = static_cast<int32_t>(
+                    identity * seed_count_penalty * quality_coefficient
+                    * (1.0f - score_ratio)
+                    * std::log(static_cast<float>(region.dp_max_score) / match_sc));
             } else {
                 // No DP at all — use chain score (hit.c:466)
-                mapq_val = static_cast<int32_t>(
-                    pen_cm * q_coef * (1.0f - x)
-                    * std::log(static_cast<float>(r.score)));
+                quality_value = static_cast<int32_t>(
+                    seed_count_penalty * quality_coefficient
+                    * (1.0f - score_ratio)
+                    * std::log(static_cast<float>(region.score)));
             }
         }
 
-        // Subtract n_sub penalty (hit.c:469)
-        mapq_val -= static_cast<int32_t>(4.343f * std::log(static_cast<float>(r.n_sub + 1)) + 0.499f);
-        mapq_val = std::max(mapq_val, 0);
-        r.mapq = std::min(mapq_val, 60);
+        // Subtract secondary_count penalty (hit.c:469)
+        quality_value -= static_cast<int32_t>(
+            4.343f * std::log(static_cast<float>(region.secondary_count + 1)) + 0.499f);
+        quality_value = std::max(quality_value, 0);
+        region.mapq = std::min(quality_value, 60);
 
         // Ensure non-zero if clearly best (hit.c:472)
-        if (r.has_dp && r.dp_max > r.dp_max2 && r.mapq == 0) {
-            r.mapq = 1;
+        if (region.has_alignment && region.dp_max_score > region.secondary_dp_max
+            && region.mapq == 0)
+        {
+            region.mapq = 1;
         }
     }
 
@@ -1446,36 +1695,36 @@ void compute_mapping_quality(
  *
  * Fields map to PAF columns as documented in mm_write_paf4() (format.c:427-460).
  */
-MatchResult region_to_match_result(
-    const AlignRegion& r,
+[[nodiscard]] MatchResult region_to_match_result(
+    const AlignRegion& region,
     int32_t query_len,
     int32_t target_len)
 {
-    MatchResult m;
-    m.query_len    = query_len;
-    m.query_start  = r.qs;
-    m.query_end    = r.qe;
-    m.is_reverse   = r.rev;
-    m.target_len   = target_len;
-    m.target_start = r.rs;
-    m.target_end   = r.re;
-    m.num_matches  = r.mlen;
-    m.block_len    = r.blen;
-    m.mapq         = r.mapq;
-    m.chain_score  = r.score;
-    m.dp_score     = r.dp_score;
-    m.dp_max       = r.dp_max;
-    m.n_seeds      = r.cnt;
-    m.subsc        = r.subsc;
-    m.divergence   = r.div;
-    m.is_primary   = (r.parent == r.id);
-    m.has_cigar    = r.has_dp;
-    m.cigar        = r.cigar;
-    return m;
+    return MatchResult{
+        .query_len             = query_len,
+        .query_start           = region.query_start,
+        .query_end             = region.query_end,
+        .is_reverse            = region.is_reverse,
+        .target_len            = target_len,
+        .target_start          = region.ref_start,
+        .target_end            = region.ref_end,
+        .num_matches           = region.match_length,
+        .block_length          = region.block_length,
+        .mapq                  = region.mapq,
+        .chain_score           = region.score,
+        .dp_score              = region.dp_score,
+        .dp_max_score          = region.dp_max_score,
+        .seed_count            = region.seed_count,
+        .secondary_chain_score = region.secondary_score,
+        .divergence            = region.divergence,
+        .is_primary            = (region.parent == region.region_id),
+        .has_cigar             = region.has_alignment,
+        .cigar                 = region.cigar,
+    };
 }
 
 // ============================================================================
-// PAF output — print_match_results
+// PAF output — MatchResultCollection
 // ============================================================================
 
 /// CIGAR operation code to character, matching MM_CIGAR_STR "MIDNSHP=XB"
@@ -1489,137 +1738,135 @@ constexpr std::array<char, 10> CIGAR_OP_CHAR = {
  * Each op is printed as "{length}{op_char}" using the same encoding as
  * minimap2's MM_CIGAR_STR (index 0='M', 1='I', 2='D', 7='=', 8='X', etc.).
  */
-std::string format_cigar(const std::vector<CigarOp>& cigar) {
-    std::string s;
-    s.reserve(cigar.size() * 5);
-    for (const auto& op : cigar) {
-        s += std::to_string(op.len);
-        if (op.op < CIGAR_OP_CHAR.size()) {
-            s += CIGAR_OP_CHAR[op.op];
+[[nodiscard]] std::string format_cigar(const std::vector<CigarOp>& cigar) {
+    std::string cigar_string;
+    cigar_string.reserve(cigar.size() * 5);
+    for (const auto& cigar_op : cigar) {
+        cigar_string += std::to_string(cigar_op.length);
+        if (cigar_op.opcode < CIGAR_OP_CHAR.size()) {
+            cigar_string += CIGAR_OP_CHAR[cigar_op.opcode];
         } else {
-            s += '?';
+            cigar_string += '?';
         }
     }
-    return s;
+    return cigar_string;
 }
+
+/**
+ * @brief Wrapper around std::vector<MatchResult> providing PAF output formatting.
+ *
+ * Provides a print() method that outputs results in exact minimap2 PAF format,
+ * reproducing mm_write_paf4() (format.c:427-460) with auxiliary tags from
+ * write_tags() (format.c:399-425).
+ */
+struct MatchResultCollection {
+    std::span<const MatchResult> results;
+
+    /**
+     * @brief Print alignment results in exact minimap2 PAF format.
+     *
+     * PAF line format (tab-separated):
+     *   col 1:  query name             — user-provided
+     *   col 2:  query sequence length
+     *   col 3:  query start (0-based, closed)
+     *   col 4:  query end   (0-based, open)
+     *   col 5:  relative strand '+' or '-'
+     *   col 6:  target name            — user-provided
+     *   col 7:  target sequence length
+     *   col 8:  target start on original strand (0-based)
+     *   col 9:  target end   on original strand (0-based)
+     *   col 10: number of residue matches  (match_length)
+     *   col 11: alignment block length     (block_length)
+     *   col 12: mapping quality (0-255)
+     *
+     * Auxiliary tags: NM, ms, AS, nn, tp, cm, s1, s2, de/dv, rl, cg
+     *
+     * @param query_name  Query sequence name (col 1)
+     * @param target_name Target sequence name (col 6)
+     */
+    void print(const std::string& query_name  = "query",
+               const std::string& target_name = "target") const
+    {
+        if (results.empty()) {
+            // Unmapped line: mimic mm_write_paf4 with r==NULL
+            JustLog("{}\t0\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", query_name);
+            return;
+        }
+
+        for (const auto& match : results) {
+            const char strand_char = match.is_reverse ? '-' : '+';
+            const char type_char = match.is_primary ? 'P' : 'S';
+
+            // 12 mandatory PAF columns
+            std::string line = fmt::format(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                query_name, match.query_len, match.query_start, match.query_end,
+                strand_char, target_name, match.target_len, match.target_start,
+                match.target_end, match.num_matches, match.block_length, match.mapq);
+
+            // --- Auxiliary tags ---
+            // When CIGAR is available (r->p != NULL in original), output NM, ms, AS, nn
+            if (match.has_cigar && !match.cigar.empty()) {
+                const int32_t edit_distance = std::max(0,
+                    match.block_length - match.num_matches);
+                line += fmt::format("\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:0",
+                    edit_distance, match.dp_max_score, match.dp_score);
+            }
+
+            // tp:A — type (format.c:409, always output)
+            line += fmt::format("\ttp:A:{}", type_char);
+
+            // cm:i — seed count (format.c:409, always output)
+            line += fmt::format("\tcm:i:{}", match.seed_count);
+
+            // s1:i — chaining score (format.c:409, always output)
+            line += fmt::format("\ts1:i:{}", match.chain_score);
+
+            // s2:i — best secondary chaining score (only for primaries, format.c:410)
+            if (match.is_primary) {
+                line += fmt::format("\ts2:i:{}", match.secondary_chain_score);
+            }
+
+            // Divergence: de:f when CIGAR available, dv:f otherwise (format.c:411-422)
+            if (match.divergence >= 0.0f && match.divergence <= 1.0f) {
+                const char* divergence_tag = (match.has_cigar && !match.cigar.empty())
+                    ? "\tde:f:" : "\tdv:f:";
+                if (match.divergence == 0.0f) {
+                    line += divergence_tag;
+                    line += '0';
+                } else {
+                    line += fmt::format("{}{:.4f}", divergence_tag,
+                        static_cast<double>(match.divergence));
+                }
+            }
+
+            // rl:i — repeat length (format.c:455, always 0 for us)
+            line += "\trl:i:0";
+
+            // cg:Z — CIGAR string (format.c:456-460, only when CIGAR available)
+            if (match.has_cigar && !match.cigar.empty()) {
+                line += "\tcg:Z:";
+                line += format_cigar(match.cigar);
+            }
+
+            JustLog("{}", line);
+        }
+    }
+};
 
 /**
  * @brief Print alignment results in exact minimap2 PAF format.
  *
- * Reproduces the output of mm_write_paf4() (format.c:427-460) together with
- * the auxiliary tags from write_tags() (format.c:399-425).
- *
- * PAF line format (tab-separated):
- *   col 1:  query name             — we use "query" as placeholder
- *   col 2:  query sequence length
- *   col 3:  query start (0-based, closed)
- *   col 4:  query end   (0-based, open)
- *   col 5:  relative strand '+' or '-'
- *   col 6:  target name            — we use "target" as placeholder
- *   col 7:  target sequence length
- *   col 8:  target start on original strand (0-based)
- *   col 9:  target end   on original strand (0-based)
- *   col 10: number of residue matches  (mlen)
- *   col 11: alignment block length     (blen)
- *   col 12: mapping quality (0-255)
- *
- * Auxiliary tags (same key-value pairs as minimap2):
- *   NM:i  — edit distance (blen - mlen, approximation without n_ambi)
- *   ms:i  — max scoring segment DP score (dp_max)
- *   AS:i  — DP alignment score (dp_score)
- *   tp:A  — alignment type: 'P' = primary, 'S' = secondary
- *   cm:i  — number of minimizer/seed hits on the chain
- *   s1:i  — chaining score
- *   s2:i  — best secondary chaining score (only for primary hits)
- *   dv:f  — approximate per-base sequence divergence
- *   cg:Z  — CIGAR string (if alignment was performed)
- *
- * @param results         Vector of alignment results to print
- * @param query_name      Query sequence name (col 1), defaults to "query"
- * @param target_name     Target sequence name (col 6), defaults to "target"
+ * Free function wrapper for backwards compatibility. Delegates to
+ * MatchResultCollection::print().
  */
 void print_match_results(
     const std::vector<MatchResult>& results,
     const std::string& query_name  = "query",
     const std::string& target_name = "target")
 {
-    if (results.empty()) {
-        // Unmapped line: mimic mm_write_paf4 with r==NULL
-        // Format: qname\tqlen\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0
-        JustLog("{}\t0\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", query_name);
-        return;
-    }
-
-    for (const auto& m : results) {
-        char strand_char = m.is_reverse ? '-' : '+';
-        char tp = m.is_primary ? 'P' : 'S';
-
-        // Build the full PAF line — format matches mm_write_paf4 + write_tags
-        std::string line;
-        line.reserve(256);
-
-        // 12 mandatory PAF columns
-        line += query_name;
-        line += '\t'; line += std::to_string(m.query_len);
-        line += '\t'; line += std::to_string(m.query_start);
-        line += '\t'; line += std::to_string(m.query_end);
-        line += '\t'; line += strand_char;
-        line += '\t'; line += target_name;
-        line += '\t'; line += std::to_string(m.target_len);
-        line += '\t'; line += std::to_string(m.target_start);
-        line += '\t'; line += std::to_string(m.target_end);
-        line += '\t'; line += std::to_string(m.num_matches);
-        line += '\t'; line += std::to_string(m.block_len);
-        line += '\t'; line += std::to_string(m.mapq);
-
-        // --- Auxiliary tags ---
-        // When CIGAR is available (r->p != NULL in original), output NM, ms, AS, nn
-        if (m.has_cigar && !m.cigar.empty()) {
-            int32_t nm = m.block_len - m.num_matches;
-            if (nm < 0) nm = 0;
-            line += "\tNM:i:"; line += std::to_string(nm);
-            line += "\tms:i:"; line += std::to_string(m.dp_max);
-            line += "\tAS:i:"; line += std::to_string(m.dp_score);
-            line += "\tnn:i:0";
-        }
-
-        // tp:A — type (format.c:409, always output)
-        line += "\ttp:A:"; line += tp;
-
-        // cm:i — seed count (format.c:409, always output)
-        line += "\tcm:i:"; line += std::to_string(m.n_seeds);
-
-        // s1:i — chaining score (format.c:409, always output)
-        line += "\ts1:i:"; line += std::to_string(m.chain_score);
-
-        // s2:i — best secondary chaining score (only for primaries, format.c:410)
-        if (m.is_primary) {
-            line += "\ts2:i:"; line += std::to_string(m.subsc);
-        }
-
-        // Divergence: de:f when CIGAR available, dv:f otherwise (format.c:411-422)
-        if (m.divergence >= 0.0f && m.divergence <= 1.0f) {
-            const char* tag = (m.has_cigar && !m.cigar.empty()) ? "\tde:f:" : "\tdv:f:";
-            if (m.divergence == 0.0f) {
-                line += tag; line += '0';
-            } else {
-                char buf[16];
-                std::snprintf(buf, sizeof(buf), "%.4f", static_cast<double>(m.divergence));
-                line += tag; line += buf;
-            }
-        }
-
-        // rl:i — repeat length (format.c:455, always 0 for us)
-        line += "\trl:i:0";
-
-        // cg:Z — CIGAR string (format.c:456-460, only when CIGAR available and requested)
-        if (m.has_cigar && !m.cigar.empty()) {
-            line += "\tcg:Z:";
-            line += format_cigar(m.cigar);
-        }
-
-        JustLog("{}", line);
-    }
+    const MatchResultCollection collection{std::span<const MatchResult>(results)};
+    collection.print(query_name, target_name);
 }
 
 // ============================================================================
@@ -1651,15 +1898,15 @@ void print_match_results(
  * @param params              Algorithm parameters (defaults match minimap2)
  * @return Vector of PAF-like alignment results
  */
-std::vector<MatchResult> minimap2_port(
+[[nodiscard]] std::vector<MatchResult> minimap2_port(
     const std::vector<seq::dna4>& query_seq,
     const std::vector<seq::dna4>& target_seq,
     const std::vector<MinimapSketchData>& query_minimizers,
     const std::vector<MinimapSketchData>& target_minimizers,
     const Minimap2Params& params = Minimap2Params{})
 {
-    int32_t query_len  = static_cast<int32_t>(query_seq.size());
-    int32_t target_len = static_cast<int32_t>(target_seq.size());
+    const int32_t query_len  = static_cast<int32_t>(query_seq.size());
+    const int32_t target_len = static_cast<int32_t>(target_seq.size());
 
     JustLog("[minimap_port] Starting minimap2_port: query_len={}, target_len={}, "
             "query_minimizers={}, target_minimizers={}",
@@ -1696,15 +1943,15 @@ std::vector<MatchResult> minimap2_port(
 
     // ---- Phase 5 (chain_post): Primary/secondary classification + filter ----
     // Equivalent to chain_post() in map.c:559-566
-    int32_t sub_diff = params.match_score * 2 + params.mismatch_pen;
+    const int32_t sub_diff = params.match_score * 2 + params.mismatch_pen;
     classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
-    int32_t min_diff = params.k * 2;
+    const int32_t min_diff = params.kmer_size * 2;
     filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
 
     // ---- Phase 6: Estimate divergence from seeds (mm_est_err equivalent) ----
     // This is done BEFORE alignment (map.c:783) and provides dv:f tag
     estimate_divergence_from_seeds(regions, query_minimizers, reordered_anchors,
-                                   query_len, params.k, target_len);
+                                   query_len, params.kmer_size, target_len);
 
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
     // map.c:568-570: align_regs() returns immediately if !(opt->flag & MM_F_CIGAR)
@@ -1727,8 +1974,8 @@ std::vector<MatchResult> minimap2_port(
     // ---- Phase 9: Convert to MatchResult ----
     std::vector<MatchResult> results;
     results.reserve(regions.size());
-    for (const auto& r : regions) {
-        results.push_back(region_to_match_result(r, query_len, target_len));
+    for (const auto& region : regions) {
+        results.push_back(region_to_match_result(region, query_len, target_len));
     }
 
     JustLog("[minimap_port] Pipeline complete: {} alignment results", results.size());
