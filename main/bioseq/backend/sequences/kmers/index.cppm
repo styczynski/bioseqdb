@@ -78,7 +78,7 @@ struct MinimapSketchData {
 
     uint64_t strand: 1;
     uint64_t last_pos: 31;
-    uint64_t rid: 32;	
+    uint64_t rid: 32;
 
     int : 0;
 
@@ -117,7 +117,7 @@ struct sketch_type {
 
     template <std::size_t>
     static consteval uint64_t _max_init() { return UINT64_MAX; }
-    
+
     template <std::size_t... Is>
     static consteval S getMax(std::index_sequence<Is...>) {
         return S({
@@ -133,9 +133,17 @@ struct sketch_type {
         return getMax(std::make_index_sequence<sizeof(T) / 8>{});
     }
 };
-    
+
+// template <typename S, typename T>
+// struct fmt::formatter<sketch_type<S, T>>: fmt::formatter<std::string> {
+//     template <typename FormatContext>
+//     auto format(sketch_type<S, T> sketch, FormatContext& ctx) const {
+//       return formatter<std::string>::format(fmt::format("sketch<{}, {}>", sketch.sketch.data[0], sketch.sketch.data[1]), ctx);
+//     }
+// };
+
 class MinimapSketch : public sketch_type<MinimapSketch, MinimapSketchData> {};
-    
+
 static_assert(std::is_standard_layout_v<MinimapSketch> == true);
 static_assert(sizeof(MinimapSketch) == 16);
 
@@ -155,8 +163,20 @@ public:
         sketches.push_back(sketch);
     }
 
+    constexpr std::vector<MinimapSketch> extract_sketches() const {
+        return sketches;
+    }
+
+    constexpr std::vector<MinimapSketchData> extract_sketches_data() const {
+        std::vector<MinimapSketchData> data;
+        for (auto el : sketches) {
+            data.push_back(el.sketch.sketch);
+        }
+        return data;
+    }
+
     constexpr auto extract_pairs() const {
-        auto pairs = sketches 
+        auto pairs = sketches
                | std::ranges::views::transform([](const MinimapSketch& el) -> std::pair<size_t, uint64_t> { return std::make_pair(el.sketch.sketch.last_pos, el.sketch.sketch.kmer); })
                | std::ranges::to<std::vector>();
         std::ranges::sort(pairs);
@@ -232,7 +252,7 @@ inline void collect_minimizers(
 				pos = 0;
 			} else {
 				const auto [c_hash, c_strand] = hasher.next(static_cast<hash_val_t>(*iter), static_cast<hash_val_t>(*iter));
-				
+
 
 				if (c_strand == SEQUENCE_STRAND_EQUAL) continue;
 				const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
@@ -273,7 +293,7 @@ inline void collect_minimizers(
 				}
 				current_min_pos = buffer.last_write_pos();
 				current_min = buffer.last();
-			} else if (buffer.last_write_pos() == current_min_pos) { 
+			} else if (buffer.last_write_pos() == current_min_pos) {
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) {
 					collector.collect(current_min);
                     const size_t x = current_min.sketch.sketch.last_pos;
@@ -346,7 +366,7 @@ inline void collect_minimizers_simd(
 
 	using outp_d_t = hn::ScalableTag<storage_unit>;
 	using hasher_t = simd_hash_t<typename seq_traits::alphabet_type>::template simd_hash<storage_unit, dd_t>;
-	
+
     hasher_t hasher(dd, k);
 
 	size_t pos = 0;
@@ -502,7 +522,7 @@ inline void collect_minimizers_simd(
             }
 		} else {
             current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
-            current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);          
+            current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
         }
 
         ++pos;

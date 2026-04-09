@@ -25,7 +25,10 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.simd;
 import algo.circular_append_buffer;
-
+import bioseq_sequences.kmers;
+import bioseq_sequences.kmers.hashers.minimap_int;
+import bioseq_sequences.kmers.hashers.lexic;
+import bioseq_sequences.minimap_port;
 
 using namespace seq::literals;
 
@@ -75,7 +78,7 @@ static int mm_dust_minier(void *km, int n, mm128_t *a, int l_seq, const char *se
 	return k; // the new size
 }
 
-static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int n_segs, const int *qlens, const char **seqs, mm128_v *mv)
+static void base_collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int n_segs, const int *qlens, const char **seqs, mm128_v *mv)
 {
 	int i, n, sum = 0;
 	mv->n = 0;
@@ -630,10 +633,69 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	//bio_collect_minimizers(z);
 	//JustLog("X! = {}", FIXED_QUERY[0].to_rank());
 
-	collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
+	// NEW!!!
 
-	JustLog("TERMINATE");
-	throw std::exception();
+	bioseq::simd::N_NEON::sketch_collector collector;
+
+	auto target_compact = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint64_t>>(FIXED_TARGET);
+    bioseq::simd::N_NEON::collect_minimizers<bioseq::simd::N_NEON::minimap_int_hasher>(
+        collector,
+		target_compact,
+		target_compact.begin(),
+		target_compact.end(),
+		10, // w
+		15  // k
+	);
+    const auto target_sketches = collector.extract_sketches();
+	const auto target_sketches_data = collector.extract_sketches_data();
+	JustLog("target_sketches: ");
+	for (auto sketch : target_sketches) {
+		uint64_t kmer = sketch.sketch.sketch.kmer;
+		uint64_t kmerSpan = sketch.sketch.sketch.span;
+		uint64_t rid = sketch.sketch.sketch.rid;
+		uint64_t lastPos = sketch.sketch.sketch.last_pos;
+		uint64_t strand = sketch.sketch.sketch.strand;
+		JustLog("kmer={}, kmerSpan={}, rid={}, lastPos={}, strand={}", kmer, kmerSpan, rid, lastPos, strand);
+		//JustLog("sketch<{}, {}>", sketch.sketch.data[0], sketch.sketch.data[1]);
+	}
+
+
+	collector.clear();
+	auto query_compact = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint64_t>>(FIXED_QUERY);
+    bioseq::simd::N_NEON::collect_minimizers<bioseq::simd::N_NEON::minimap_int_hasher>(
+        collector,
+		query_compact,
+		query_compact.begin(),
+		query_compact.end(),
+		10, // w
+		15  // k
+	);
+    const auto query_sketches = collector.extract_sketches();
+	const auto query_sketches_data = collector.extract_sketches_data();
+	JustLog("query_sketches: ");
+	for (auto sketch : query_sketches) {
+		uint64_t kmer = sketch.sketch.sketch.kmer;
+		uint64_t kmerSpan = sketch.sketch.sketch.span;
+		uint64_t rid = sketch.sketch.sketch.rid;
+		uint64_t lastPos = sketch.sketch.sketch.last_pos;
+		uint64_t strand = sketch.sketch.sketch.strand;
+		JustLog("kmer={}, kmerSpan={}, rid={}, lastPos={}, strand={}", kmer, kmerSpan, rid, lastPos, strand);
+		//JustLog("sketch<{}, {}>", sketch.sketch.data[0], sketch.sketch.data[1]);
+	}
+
+
+	auto new_results = minimap2_port(
+		FIXED_QUERY,
+		FIXED_TARGET,
+		query_sketches_data,
+		target_sketches_data
+	);
+	print_match_results(new_results);
+
+	base_collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
+
+	// JustLog("TERMINATE");
+	// throw std::exception();
 
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);
 	if (opt->flag & MM_F_HEAP_SORT) a = collect_seed_hits_heap(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);

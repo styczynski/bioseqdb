@@ -136,7 +136,7 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 			++l;
 			//JustLog("{}(l) == {}(i+1)", l, i+1);
 			assert(l == i + 1);
-			if (l >= k && kmer_span < 256) {
+			if (l >= k && kmer_span < 256) { // hash64(kmer[z], mask)
 				info.x = hash64(kmer[z], mask) << 8 | kmer_span;
 				info.y = (uint64_t)rid<<32 | (uint32_t)i<<1 | z;
 				//JustLog("OLD sketch = {}", binary_to_str( (uint64_t*)((void*)&info), 2 ));
@@ -175,9 +175,16 @@ void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, i
 	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
 
 	// Print all collected
-	JustLog("Dump all collected: {} (runtime = {})", p->n, duration);
+	JustLog("(BASE mm_sketch) Dump all collected: {} (runtime = {})", p->n, duration);
 	for(int i=0;i<p->n;++i) {
-		JustLog("{} {}", p->a[i].x, p->a[i].y);
+		// p->a[i].x = kMer<<8 | kmerSpan
+ 		// p->a[i].y = rid<<32 | lastPos<<1 | strand
+		uint64_t kmer = p->a[i].x >> 8;
+		uint64_t kmerSpan = p->a[i].x & 255;
+		uint64_t rid = p->a[i].y >> 32;
+		uint64_t lastPos = (p->a[i].y & 4294967294) >> 1;
+		uint64_t strand = p->a[i].y & 1;
+		JustLog("kmer={}, kmerSpan={}, rid={}, lastPos={}, strand={}", kmer, kmerSpan, rid, lastPos, strand);
 	}
 	JustLog("--END--");
 }
