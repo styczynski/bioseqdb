@@ -1,9 +1,14 @@
 {
   "dependencies": [
+    "boost-program-options",
+    "boost-regex",
+    "boost-serialization",
+    "boost-system",
     "catch2",
+    "foonathan-memory",
     "highway",
     "libassert",
     "reflectcpp",
-    "foonathan-memory"
+    "boost-iterator"
   ]
 }

@@ -219,7 +219,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   endif()
 
   if(IS_POSTGRES_EXTENSION)
-    
+
     # Install .so/.dll to pkglib-dir
     if(HAS_SOURCES)
       install(

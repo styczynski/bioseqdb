@@ -110,7 +110,7 @@ static void collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t 
 
 //static_assert(std::is_standard_layout_v<MinimapSketch> == true);
 
-#include <boost/circular_buffer.hpp>
+//include <boost/circular_buffer.hpp>
 /**
  *  p->a[i].x = kMer<<8 | kmerSpan
  *  p->a[i].y = rid<<32 | lastPos<<1 | strand
@@ -132,7 +132,7 @@ struct MinimapSketchData {
 
 	uint64_t strand: 1;
 	uint64_t last_pos: 31;
-	uint64_t rid: 32;	
+	uint64_t rid: 32;
 
 	int : 0;
 
@@ -203,7 +203,7 @@ struct sketch_type {
 
 	template <std::size_t>
     static consteval uint64_t _max_init() { return UINT64_MAX; }
-    
+
     template <std::size_t... Is>
     static consteval S getMax(std::index_sequence<Is...>) {
 		return S({
@@ -356,7 +356,7 @@ static inline uint64_t hash64(uint64_t key, uint64_t mask)
 // 	): _buf_pos(0), _prev_pos(0), _capacity(capacity) {
 
 // 	}
-	
+
 // 	void push_back(T&& value) {
 // 		_prev_pos = _buf_pos;
 // 		_buffer[_buf_pos] = value;
@@ -608,8 +608,8 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 		// bioseq::simd::HWY_NAMESPACE::check_simd_packed_seq();
 		throw std::exception();
 	}
-	
-	
+
+
 	//throw std::exception();
 
 	// Compress
@@ -631,10 +631,10 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 	//JustLog("X! = {}", FIXED_QUERY[0].to_rank());
 
 	collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
-	
+
 	JustLog("TERMINATE");
 	throw std::exception();
-	
+
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);
 	if (opt->flag & MM_F_HEAP_SORT) a = collect_seed_hits_heap(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);
 	else a = collect_seed_hits(b->km, opt, opt->mid_occ, mi, qname, &mv, qlen_sum, &n_a, &rep_len, &n_mini_pos, &mini_pos);

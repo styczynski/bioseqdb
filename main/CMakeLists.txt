@@ -1,11 +1,11 @@
 # Copyright 2022 Zacharias Knudsen
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #     http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,14 +21,25 @@
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
 
-set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
-set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
+# Override arch
+set(CMAKE_OSX_ARCHITECTURES "arm64")
+
+
+
+#set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
+#set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
+
+set(CMAKE_C_COMPILER /usr/local/opt/llvm@21/bin/clang)
+set(CMAKE_CXX_COMPILER /usr/local/opt/llvm@21/bin/clang++)
 
 set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 # Suport CXX modules
-set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+# 4.2.1
+# set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+# 4.3.1
+set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
 message("CMAKE is ${CMAKE_VERSION}")
 set(CMAKE_CXX_MODULE_STD ON)
 set(CMAKE_CXX_STANDARD 26)
@@ -46,6 +57,10 @@ endif()
 
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${SDKROOT}")
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${SDKROOT}")
+
+# Native build
+#set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 
 set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON")
 

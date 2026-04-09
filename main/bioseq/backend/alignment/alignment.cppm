@@ -5,9 +5,9 @@ module;
 #import <string.h>
 
 export module alignment;
-import std;
+//import std;
 
-#define assert(X) 
+#define assert(X)
 
 #define kmalloc(km, size) malloc((size))
 #define kcalloc(km, count, size) calloc((count), (size))

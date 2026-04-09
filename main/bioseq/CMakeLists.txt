@@ -90,6 +90,6 @@ AddCommonTargetX(
   CXX_MOD_FILES
     ${A_SRC_MOD_FILES}
   BOOST
-    program_options regex
+    program_options regex serialization iterator integer
   HWY 1.3.0
 )
