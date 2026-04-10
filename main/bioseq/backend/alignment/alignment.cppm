@@ -1,8 +1,18 @@
 module;
 
-#import <stdlib.h>
-#import <cstdint>
-#import <string.h>
+#include <stdlib.h>
+#include <cstdint>
+#include <string.h>
+
+#ifdef __ARM_NEON__
+#undef KSW2_BUILD_SSE_4_1
+#include "sse_neon.h"
+#endif
+
+#ifdef __SSE2__
+#undef KSW2_BUILD_SSE_4_1
+#include <emmintrin.h>
+#endif
 
 /**
  * Include the real kalloc allocator so that the alignment module uses the
@@ -150,15 +160,11 @@ constexpr int KSW_CIGAR_N_SKIP = 3;  /**< Skipped region / intron (N). */
 /** @brief Offset applied to splice scores stored in the junction array. */
 constexpr int KSW_SPSC_OFFSET  = 64;
 
-#ifdef __ARM_NEON__
-#undef KSW2_BUILD_SSE_4_1
-#include "sse_neon.h"
-#endif
+
 #include "defs.hpp"
 
 #ifdef __ARM_NEON__
 #undef KSW2_BUILD_SSE_4_1
-#include "sse_neon.h"
 namespace ksw2_sse_neon {
 	#include "ksw2_extd2_sse.hpp"
 	#include "ksw2_exts2_sse.hpp"
@@ -171,7 +177,6 @@ namespace ksw2_sse_neon {
 
 #ifdef __SSE2__
 #undef KSW2_BUILD_SSE_4_1
-#include <emmintrin.h>
 namespace ksw2_sse2 {
 	#include "ksw2_extd2_sse.hpp"
 	#include "ksw2_exts2_sse.hpp"
