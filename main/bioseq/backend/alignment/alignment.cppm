@@ -4,24 +4,39 @@ module;
 #import <cstdint>
 #import <string.h>
 
+/**
+ * Include the real kalloc allocator so that the alignment module uses the
+ * same memory pool as the calling C code (minimap2's align.c).  Without
+ * this, the module allocates via stdlib realloc() while the caller frees
+ * via kalloc's kfree(), causing a heap-buffer-overflow.
+ *
+ * minimap2stuff.h also defines KSW_* preprocessor constants that would
+ * clash with the constexpr definitions in the module purview, so we
+ * undef them immediately after inclusion.
+ */
+#include "minimap2stuff.h"
+
+#undef KSW_NEG_INF
+#undef KSW_EZ_SCORE_ONLY
+#undef KSW_EZ_RIGHT
+#undef KSW_EZ_GENERIC_SC
+#undef KSW_EZ_APPROX_MAX
+#undef KSW_EZ_APPROX_DROP
+#undef KSW_EZ_EXTZ_ONLY
+#undef KSW_EZ_REV_CIGAR
+#undef KSW_EZ_SPLICE_FOR
+#undef KSW_EZ_SPLICE_REV
+#undef KSW_EZ_SPLICE_FLANK
+#undef KSW_EZ_SPLICE_CMPLX
+#undef KSW_EZ_SPLICE_SCORE
+#undef KSW_CIGAR_MATCH
+#undef KSW_CIGAR_INS
+#undef KSW_CIGAR_DEL
+#undef KSW_CIGAR_N_SKIP
+#undef KSW_SPSC_OFFSET
+
 export module alignment;
 //import std;
-
-#define assert(X)
-
-/**
- * @brief Memory allocation macros wrapping the standard C allocator.
- *
- * These macros provide a KSW2-compatible memory interface. The first
- * parameter @c km is a memory-pool handle that is unused here (always
- * NULL) but kept for ABI compatibility with the upstream KSW2 code.
- * @{
- */
-#define kmalloc(km, size) malloc((size))
-#define kcalloc(km, count, size) calloc((count), (size))
-#define krealloc(km, ptr, size) realloc((ptr), (size))
-#define kfree(km, ptr) free((ptr))
-/** @} */
 
 /**
  * @brief Macro for the common parameter list of single-affine-gap alignment (z2).
