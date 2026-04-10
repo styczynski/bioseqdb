@@ -53,6 +53,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 import alignment;
+import alignment_hwy;
 
 export {
 
@@ -97,9 +98,8 @@ struct Minimap2Params {
     int32_t mid_occ        = 500;    ///< mid-level seed occurrence threshold
 
     /// When true, perform base-level alignment via KSW2 and produce CIGAR.
-    /// Equivalent to MM_F_CIGAR flag in minimap2. Default false matches the
-    /// test invocation without -a/-c flags.
-    bool    do_cigar       = false;
+    /// Equivalent to MM_F_CIGAR flag in minimap2. By default we use -c in build.sh
+    bool    do_cigar       = true;
 };
 
 // ============================================================================
@@ -1142,14 +1142,16 @@ void ksw2_align_pair(
 {
     const int8_t matrix_dim_i8 = static_cast<int8_t>(score_matrix_dimension);
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
-        Aligner<ALIGN_ALGORITHM_KSW2>::z2(
+        JustLog("[minimap_port] Run KSW2 z2 align");
+        HwyKsw2Aligner::z2(
             nullptr, query_length, query_seq, target_length, target_seq,
             matrix_dim_i8, score_matrix,
             static_cast<int8_t>(params.gap_open1),
             static_cast<int8_t>(params.gap_ext1),
             align_bandwidth, zdrop, end_bonus, ksw_flag, result);
     } else {
-        Aligner<ALIGN_ALGORITHM_KSW2>::d2(
+        JustLog("[minimap_port] Run KSW2 d2 align");
+        HwyKsw2Aligner::d2(
             nullptr, query_length, query_seq, target_length, target_seq,
             matrix_dim_i8, score_matrix,
             static_cast<int8_t>(params.gap_open1),
@@ -1281,6 +1283,8 @@ void align_regions(
         ksw_extz_t ksw_result;
         std::memset(&ksw_result, 0, sizeof(ksw_result));
 
+        JustLog("[minimap_port] Align regions. Determine actions.");
+
         // === 1. Left extension ===
         int32_t final_ref_start = seed_ref_start;
         int32_t final_query_start = seed_query_start;
@@ -1318,6 +1322,8 @@ void align_regions(
                 ksw_result.n_cigar = 0;
                 ksw_result.m_cigar = 0;
             }
+        } else {
+            JustLog("[minimap_port] Skip left extension: seed_query_start={} > outer_query_start={} && seed_ref_start={} > outer_ref_start={}", seed_query_start, outer_query_start, seed_ref_start, outer_ref_start);
         }
 
         // === 2. Gap filling (entire region between first and last seed) ===
@@ -1356,6 +1362,7 @@ void align_regions(
                 }
             }
         } else {
+            JustLog("[minimap_port] Skip gap filling: region.seed_count={} > 1", region.seed_count);
             final_ref_end = seed_ref_end;
             final_query_end = seed_query_end;
         }
@@ -1392,6 +1399,8 @@ void align_regions(
                 ksw_result.n_cigar = 0;
                 ksw_result.m_cigar = 0;
             }
+        } else {
+            JustLog("[minimap_port] Skip right extension: !ksw_result.zdropped={} && seed_query_end={} < outer_query_end={} && seed_ref_end={} < outer_ref_end={}", !ksw_result.zdropped, seed_query_end, outer_query_end, seed_ref_end, outer_ref_end);
         }
 
         // Set final coordinates from alignment extent (align.c:897-899)
