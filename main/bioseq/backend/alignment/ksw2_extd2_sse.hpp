@@ -1,3 +1,31 @@
+/**
+ * @brief Dual-affine-gap banded extension alignment using SSE intrinsics.
+ *
+ * Implements the KSW2 "extd2" algorithm: banded dynamic programming in
+ * anti-diagonal (rotated) coordinates with two affine gap penalty
+ * functions. The DP selects min(q + k*e, q2 + k*e2) for a gap of
+ * length k, allowing efficient handling of both short and long gaps.
+ *
+ * Uses 8-bit SIMD arithmetic. The two gap penalty pairs are normalized
+ * so that q + e <= q2 + e2 (swapped internally if needed).
+ *
+ * @param km         Memory pool handle (may be NULL for standard malloc).
+ * @param qlen       Length of the query sequence.
+ * @param query      Query sequence as alphabet-index array.
+ * @param tlen       Length of the target sequence.
+ * @param target     Target sequence as alphabet-index array.
+ * @param m          Alphabet size (number of distinct symbols).
+ * @param mat        Flat m-by-m scoring matrix (row-major order).
+ * @param q          First gap open penalty.
+ * @param e          First gap extension penalty.
+ * @param q2         Second gap open penalty (for long gaps).
+ * @param e2         Second gap extension penalty (for long gaps).
+ * @param w          Band width (-1 for full DP width).
+ * @param zdrop      Z-drop threshold for early termination (-1 to disable).
+ * @param end_bonus  Bonus added when alignment reaches the query end.
+ * @param flag       Bitwise OR of KSW_EZ_* flags.
+ * @param ez         [out] Result structure populated with scores and CIGAR.
+ */
 void align_d2(void *km, int qlen, const uint8_t *query, int tlen, const uint8_t *target, int8_t m, const int8_t *mat,
 				   int8_t q, int8_t e, int8_t q2, int8_t e2, int w, int zdrop, int end_bonus, int flag, ksw_extz_t *ez)
 {

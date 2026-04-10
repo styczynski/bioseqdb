@@ -685,12 +685,12 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 
 
 	auto new_results = minimap2_port(
-		FIXED_QUERY,
-		FIXED_TARGET,
+		query_compact,
+		target_compact,
 		query_sketches_data,
 		target_sketches_data
 	);
-	print_match_results(new_results);
+	new_results.print();
 
 	base_collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
 

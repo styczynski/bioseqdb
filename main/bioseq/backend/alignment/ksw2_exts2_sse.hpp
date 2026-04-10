@@ -1,3 +1,35 @@
+/**
+ * @brief Splice-aware banded extension alignment using SSE intrinsics.
+ *
+ * Implements the KSW2 "exts2" algorithm: banded dynamic programming in
+ * anti-diagonal (rotated) coordinates with splice-site awareness for
+ * RNA-to-genome alignment. Uses an affine gap penalty (q + k*e) for
+ * regular gaps and a separate intron open penalty (q2) for splice
+ * junctions, with donor/acceptor scoring derived from dinucleotide
+ * patterns (GT-AG, GC-AG, AT-AC and their reverse complements).
+ *
+ * The junction annotation array @c junc can optionally provide
+ * pre-computed splice scores when KSW_EZ_SPLICE_SCORE is set.
+ *
+ * @param km          Memory pool handle (may be NULL for standard malloc).
+ * @param qlen        Length of the query sequence.
+ * @param query       Query sequence as alphabet-index array.
+ * @param tlen        Length of the target sequence.
+ * @param target      Target sequence as alphabet-index array (0/1/2/3 encoding).
+ * @param m           Alphabet size (number of distinct symbols).
+ * @param mat         Flat m-by-m scoring matrix (row-major order).
+ * @param q           Gap open penalty.
+ * @param e           Gap extension penalty.
+ * @param q2          Intron open penalty (must be > q + e).
+ * @param noncan      Non-canonical splice site penalty.
+ * @param zdrop       Z-drop threshold for early termination (-1 to disable).
+ * @param end_bonus   Bonus added when alignment reaches the query end.
+ * @param junc_bonus  Bonus for annotated splice junctions.
+ * @param junc_pen    Penalty for unknown junction splice scores.
+ * @param flag        Bitwise OR of KSW_EZ_* flags.
+ * @param junc        Optional junction annotation array (length tlen; may be NULL).
+ * @param ez          [out] Result structure populated with scores and CIGAR.
+ */
 void align_s2(void *km, int qlen, const uint8_t *query, int tlen, const uint8_t *target, int8_t m, const int8_t *mat,
 				   int8_t q, int8_t e, int8_t q2, int8_t noncan, int zdrop, int end_bonus, int8_t junc_bonus, int8_t junc_pen, int flag, const uint8_t *junc, ksw_extz_t *ez)
 {

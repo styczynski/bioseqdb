@@ -105,7 +105,7 @@ constexpr std::string symbols_vector_to_string(const std::vector<alphabet_t>& su
 }
 
 
-    
+
 
 // New impl
 
@@ -164,7 +164,7 @@ struct compact_sequence_range_base {
             return (static_cast<other_storage_unit>(1) << (length * bits_per_char)) - 1;
         };
 
-        
+
     };
 
     using derived_range_t = derived_t;
@@ -325,11 +325,11 @@ struct compact_sequence_range_base {
             T end_it
         ): _begin(begin_it), _end(end_it) {}
 
-        T const& begin() {
+        T const& begin() const {
             return _begin;
         }
 
-        T const& end() {
+        T const& end() const {
             return _end;
         }
     };
@@ -455,6 +455,60 @@ struct compact_sequence_range_base {
     constexpr size_t byte_size() const {
         return super()->size() * sizeof(typename traits::storage_unit); //+ sizeof(derived_range_t);
     }
+
+    /**
+     * @brief Get the compile-time alphabet cardinality (number of distinct symbols).
+     *
+     * For dna4 this returns 4, for dna5 this returns 5, etc.
+     */
+    static constexpr size_t alphabet_cardinality() {
+        return seqan3::alphabet_size<alphabet_t>;
+    }
+
+    /**
+     * @brief Extract all base-pair rank values to a vector of uint8_t.
+     *
+     * Each element in the returned vector is the rank value (0..alphabet_size-1)
+     * of one nucleotide in left-to-right order. This is the format required by
+     * algorithms like KSW2 that operate on raw rank arrays.
+     *
+     * For compact_sequence_range<std::vector<seq::dna4>>, the ranks are:
+     *   A=0, C=1, G=2, T=3 (matching seqan3::to_rank).
+     *
+     * @return Vector of uint8_t rank values, one per nucleotide
+     */
+    [[nodiscard]] std::vector<uint8_t> to_encoded_vector() const {
+        const size_t sequence_length = bp_size();
+        std::vector<uint8_t> encoded_ranks;
+        encoded_ranks.reserve(sequence_length);
+        for (const auto& base_pair_rank : iterable<BP>()) {
+            encoded_ranks.push_back(static_cast<uint8_t>(base_pair_rank));
+        }
+        return encoded_ranks;
+    }
+
+    /**
+     * @brief Extract reverse-complement base-pair rank values to a vector of uint8_t.
+     *
+     * Iterates the sequence left-to-right, complements each nucleotide using
+     * the alphabet's complement operation (e.g. A<->T, C<->G for DNA), and
+     * writes into the result vector in reverse order.
+     *
+     * Requires the alphabet to support seqan3::complement (nucleotide alphabets).
+     *
+     * @return Vector of uint8_t rank values representing the reverse complement
+     */
+    [[nodiscard]] std::vector<uint8_t> to_reverse_complement_encoded_vector() const {
+        const size_t sequence_length = bp_size();
+        std::vector<uint8_t> reverse_complement_ranks(sequence_length);
+        size_t write_position = sequence_length;
+        for (const auto& base_pair_rank : iterable<BP>()) {
+            --write_position;
+            reverse_complement_ranks[write_position] = static_cast<uint8_t>(
+                traits::letter_complement(static_cast<storage_unit_t>(base_pair_rank)));
+        }
+        return reverse_complement_ranks;
+    }
 };
 
 template<typename R>
@@ -465,7 +519,7 @@ struct compact_sequence_range<R> : public compact_sequence_range_base<
     compact_sequence_range<R>,
     std::remove_reference_t<std::ranges::range_reference_t<R>>,
     typename boost::uint_t<seqan3::detail::ceil_log2(seqan3::alphabet_size<
-        std::remove_reference_t<std::ranges::range_reference_t<R>>    
+        std::remove_reference_t<std::ranges::range_reference_t<R>>
     >)>::least,
     0
 > {

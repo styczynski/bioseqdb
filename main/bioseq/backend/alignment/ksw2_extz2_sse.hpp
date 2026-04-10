@@ -1,4 +1,30 @@
-
+/**
+ * @brief Single-affine-gap banded extension alignment using SSE intrinsics.
+ *
+ * Implements the KSW2 "extz2" algorithm: banded dynamic programming in
+ * anti-diagonal (rotated) coordinates with a single affine gap penalty
+ * model, cost(k) = q + k*e for a gap of length k. Uses 8-bit SIMD
+ * arithmetic with a score offset to keep values unsigned.
+ *
+ * When KSW2_BUILD_SSE_4_1 is defined, SSE4.1 intrinsics (_mm_max_epi8,
+ * _mm_blendv_epi8) are used; otherwise, SSE2-compatible emulation is
+ * applied.
+ *
+ * @param km         Memory pool handle (may be NULL for standard malloc).
+ * @param qlen       Length of the query sequence.
+ * @param query      Query sequence as alphabet-index array.
+ * @param tlen       Length of the target sequence.
+ * @param target     Target sequence as alphabet-index array.
+ * @param m          Alphabet size (number of distinct symbols).
+ * @param mat        Flat m-by-m scoring matrix (row-major order).
+ * @param q          Gap open penalty.
+ * @param e          Gap extension penalty.
+ * @param w          Band width (-1 for full DP width).
+ * @param zdrop      Z-drop threshold for early termination (-1 to disable).
+ * @param end_bonus  Bonus added when alignment reaches the query end.
+ * @param flag       Bitwise OR of KSW_EZ_* flags.
+ * @param ez         [out] Result structure populated with scores and CIGAR.
+ */
 void align_z2(void *km, int qlen, const uint8_t *query, int tlen, const uint8_t *target, int8_t m, const int8_t *mat, int8_t q, int8_t e, int w, int zdrop, int end_bonus, int flag, ksw_extz_t *ez)
 {
 #define __dp_code_block1 \

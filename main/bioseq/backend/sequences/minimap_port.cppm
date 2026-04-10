@@ -1062,68 +1062,52 @@ void filter_secondary_regions(
 // ============================================================================
 
 /**
- * @brief Generate the 5x5 scoring matrix for DNA alignment.
+ * @brief Generate a scoring matrix for sequence alignment, abstracted over alphabet size.
  *
- * Equivalent to ksw_gen_simple_mat() in align.c:15-27.
- * Matrix is 5x5 for {A, C, G, T, N} = {0, 1, 2, 3, 4}.
- * Diagonal = match_score, off-diagonal = -mismatch_pen.
- * Row/col 4 (N) scores -sc_ambi against everything.
+ * Creates an (AlphabetSize+1) x (AlphabetSize+1) matrix where:
+ *   - Diagonal entries (i==j, i < AlphabetSize) = +match_score
+ *   - Off-diagonal entries (i!=j, both < AlphabetSize) = -mismatch_pen
+ *   - Last row/column (ambiguity/wildcard) = -sc_ambi
+ *
+ * For dna4 (AlphabetSize=4), this produces the standard 5x5 minimap2 matrix
+ * for {A=0, C=1, G=2, T=3, wildcard=4}. The matrix dimension (AlphabetSize+1)
+ * matches KSW2's 'm' parameter.
+ *
+ * @tparam AlphabetSize  Number of regular symbols (e.g. 4 for DNA without ambiguity)
+ * @param match_score    Score for matching bases (positive value)
+ * @param mismatch_pen   Penalty for mismatches (positive value, negated internally)
+ * @param sc_ambi        Penalty for ambiguous bases (positive value, negated internally)
+ * @return std::array of size (AlphabetSize+1)^2 with scoring values
  */
-constexpr std::array<int8_t, 25> generate_score_matrix(
+template<size_t AlphabetSize>
+constexpr auto generate_score_matrix(
     int8_t match_score, int8_t mismatch_pen, int8_t sc_ambi)
 {
-    std::array<int8_t, 25> matrix{};
+    constexpr size_t matrix_dimension = AlphabetSize + 1;
+    std::array<int8_t, matrix_dimension * matrix_dimension> matrix{};
     const int8_t positive_match = match_score > 0
         ? match_score : static_cast<int8_t>(-match_score);
     const int8_t negative_mismatch = mismatch_pen > 0
         ? static_cast<int8_t>(-mismatch_pen) : mismatch_pen;
     const int8_t ambiguity_penalty = sc_ambi > 0
         ? static_cast<int8_t>(-sc_ambi) : sc_ambi;
-    for (int32_t matrix_row = 0; matrix_row < 4; ++matrix_row) {
-        for (int32_t matrix_col = 0; matrix_col < 4; ++matrix_col) {
+    for (size_t matrix_row = 0; matrix_row < AlphabetSize; ++matrix_row) {
+        for (size_t matrix_col = 0; matrix_col < AlphabetSize; ++matrix_col) {
             const int8_t cell_score = (matrix_row == matrix_col)
                 ? positive_match : negative_mismatch;
-            matrix[matrix_row * 5 + matrix_col] = cell_score;
+            matrix[matrix_row * matrix_dimension + matrix_col] = cell_score;
         }
-        matrix[matrix_row * 5 + 4] = ambiguity_penalty;
+        matrix[matrix_row * matrix_dimension + AlphabetSize] = ambiguity_penalty;
     }
-    for (int32_t matrix_col = 0; matrix_col < 5; ++matrix_col) {
-        matrix[4 * 5 + matrix_col] = ambiguity_penalty;
+    for (size_t matrix_col = 0; matrix_col <= AlphabetSize; ++matrix_col) {
+        matrix[AlphabetSize * matrix_dimension + matrix_col] = ambiguity_penalty;
     }
     return matrix;
 }
 
-/**
- * @brief Convert a dna4 base to 4-bit encoding (0=A, 1=C, 2=G, 3=T).
- */
-[[nodiscard]] inline uint8_t dna4_to_nt4(seq::dna4 base) {
-    return static_cast<uint8_t>(base.to_rank());
-}
-
-/**
- * @brief Encode a dna4 sequence to uint8_t array.
- */
-[[nodiscard]] std::vector<uint8_t> encode_sequence(const std::vector<seq::dna4>& sequence) {
-    std::vector<uint8_t> encoded(sequence.size());
-    for (size_t nucleotide_pos = 0; nucleotide_pos < sequence.size(); ++nucleotide_pos) {
-        encoded[nucleotide_pos] = dna4_to_nt4(sequence[nucleotide_pos]);
-    }
-    return encoded;
-}
-
-/**
- * @brief Reverse complement an encoded sequence.
- */
-[[nodiscard]] std::vector<uint8_t> reverse_complement(const std::vector<uint8_t>& sequence) {
-    std::vector<uint8_t> rev_comp(sequence.size());
-    for (size_t nucleotide_pos = 0; nucleotide_pos < sequence.size(); ++nucleotide_pos) {
-        const uint8_t base = sequence[sequence.size() - 1 - nucleotide_pos];
-        rev_comp[nucleotide_pos] = (base < 4)
-            ? static_cast<uint8_t>(3 - base)
-            : static_cast<uint8_t>(4);
-    }
-    return rev_comp;
-}
+// encode_sequence() and reverse_complement() removed:
+// Use compact_sequence_range::to_encoded_vector() and
+// compact_sequence_range::to_reverse_complement_encoded_vector() instead.
 
 // ============================================================================
 // KSW2 alignment wrapper — calls Aligner<ALIGN_ALGORITHM_KSW2>::d2()/z2()
@@ -1135,35 +1119,39 @@ constexpr std::array<int8_t, 25> generate_score_matrix(
  * Equivalent to mm_align_pair() in align.c:340-372.
  * If q == q2 && e == e2, uses affine gap (z2); otherwise dual-affine (d2).
  *
- * @param query_length   Query segment length
- * @param query_seq      Encoded query segment
- * @param target_length  Target segment length
- * @param target_seq     Encoded target segment
- * @param score_matrix   5x5 scoring matrix
- * @param params         Algorithm parameters
- * @param align_bandwidth Bandwidth for alignment
- * @param end_bonus      End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
- * @param zdrop          Z-drop threshold
- * @param ksw_flag       KSW2 flags (KSW_EZ_EXTZ_ONLY, KSW_EZ_RIGHT, KSW_EZ_REV_CIGAR, etc.)
- * @param result         [in/out] KSW2 result struct
+ * @param query_length            Query segment length
+ * @param query_seq               Encoded query segment
+ * @param target_length           Target segment length
+ * @param target_seq              Encoded target segment
+ * @param score_matrix_dimension  Alphabet dimension of the scoring matrix (e.g. 5 for dna4+wildcard)
+ * @param score_matrix            Flattened scoring matrix of size dimension^2
+ * @param params                  Algorithm parameters
+ * @param align_bandwidth         Bandwidth for alignment
+ * @param end_bonus               End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
+ * @param zdrop                   Z-drop threshold
+ * @param ksw_flag                KSW2 flags (KSW_EZ_EXTZ_ONLY, KSW_EZ_RIGHT, KSW_EZ_REV_CIGAR, etc.)
+ * @param result                  [in/out] KSW2 result struct
  */
 void ksw2_align_pair(
     int query_length, const uint8_t* query_seq,
     int target_length, const uint8_t* target_seq,
-    const int8_t* score_matrix,
+    int score_matrix_dimension, const int8_t* score_matrix,
     const Minimap2Params& params,
     int align_bandwidth, int end_bonus, int zdrop, int ksw_flag,
     ksw_extz_t* result)
 {
+    const int8_t matrix_dim_i8 = static_cast<int8_t>(score_matrix_dimension);
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         Aligner<ALIGN_ALGORITHM_KSW2>::z2(
-            nullptr, query_length, query_seq, target_length, target_seq, 5, score_matrix,
+            nullptr, query_length, query_seq, target_length, target_seq,
+            matrix_dim_i8, score_matrix,
             static_cast<int8_t>(params.gap_open1),
             static_cast<int8_t>(params.gap_ext1),
             align_bandwidth, zdrop, end_bonus, ksw_flag, result);
     } else {
         Aligner<ALIGN_ALGORITHM_KSW2>::d2(
-            nullptr, query_length, query_seq, target_length, target_seq, 5, score_matrix,
+            nullptr, query_length, query_seq, target_length, target_seq,
+            matrix_dim_i8, score_matrix,
             static_cast<int8_t>(params.gap_open1),
             static_cast<int8_t>(params.gap_ext1),
             static_cast<int8_t>(params.gap_open2),
@@ -1206,6 +1194,15 @@ void reverse_seq_inplace(uint8_t* sequence, int32_t seq_length) {
  *
  * Coordinates are derived from actual KSW2 alignment extent, not from the
  * padded window boundaries.
+ *
+ * @param regions                     Alignment regions to fill with DP results
+ * @param anchors                     Reordered anchor array
+ * @param query_fwd                   Forward-strand query encoded as rank values
+ * @param query_rev                   Reverse-complement query encoded as rank values
+ * @param target_encoded              Target sequence encoded as rank values
+ * @param score_matrix                Flattened scoring matrix (dimension^2 elements)
+ * @param score_matrix_dimension      Matrix dimension (alphabet_size + 1)
+ * @param params                      Minimap2 parameters
  */
 void align_regions(
     std::vector<AlignRegion>& regions,
@@ -1213,12 +1210,10 @@ void align_regions(
     const std::vector<uint8_t>& query_fwd,
     const std::vector<uint8_t>& query_rev,
     const std::vector<uint8_t>& target_encoded,
+    const int8_t* score_matrix,
+    int32_t score_matrix_dimension,
     const Minimap2Params& params)
 {
-    const auto score_matrix = generate_score_matrix(
-        static_cast<int8_t>(params.match_score),
-        static_cast<int8_t>(params.mismatch_pen),
-        static_cast<int8_t>(params.sc_ambi));
     const int32_t query_length = static_cast<int32_t>(query_fwd.size());
     const int32_t target_length = static_cast<int32_t>(target_encoded.size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
@@ -1303,8 +1298,8 @@ void align_regions(
             ksw_reset_extz(&ksw_result);
             ksw2_align_pair(left_query_len, query_buf.data(),
                             left_target_len, target_buf.data(),
-                            score_matrix.data(), params, align_bandwidth,
-                            params.end_bonus, params.zdrop,
+                            score_matrix_dimension, score_matrix, params,
+                            align_bandwidth, params.end_bonus, params.zdrop,
                             KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR,
                             &ksw_result);
             if (ksw_result.n_cigar > 0) {
@@ -1338,8 +1333,8 @@ void align_regions(
                 ksw_reset_extz(&ksw_result);
                 ksw2_align_pair(gap_query_len, gap_query_seq,
                                 gap_target_len, gap_target_seq,
-                                score_matrix.data(), params, align_bandwidth,
-                                -1, params.zdrop,
+                                score_matrix_dimension, score_matrix, params,
+                                align_bandwidth, -1, params.zdrop,
                                 KSW_EZ_APPROX_MAX, &ksw_result);
                 if (ksw_result.n_cigar > 0) {
                     append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
@@ -1378,8 +1373,8 @@ void align_regions(
             ksw_reset_extz(&ksw_result);
             ksw2_align_pair(right_query_len, right_query_seq,
                             right_target_len, right_target_seq,
-                            score_matrix.data(), params, align_bandwidth,
-                            params.end_bonus, params.zdrop,
+                            score_matrix_dimension, score_matrix, params,
+                            align_bandwidth, params.end_bonus, params.zdrop,
                             KSW_EZ_EXTZ_ONLY, &ksw_result);
             if (ksw_result.n_cigar > 0) {
                 append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
@@ -1696,7 +1691,7 @@ void compute_mapping_quality(
  * Fields map to PAF columns as documented in mm_write_paf4() (format.c:427-460).
  */
 [[nodiscard]] MatchResult region_to_match_result(
-    const AlignRegion& region,
+    AlignRegion&& region,
     int32_t query_len,
     int32_t target_len)
 {
@@ -1719,7 +1714,7 @@ void compute_mapping_quality(
         .divergence            = region.divergence,
         .is_primary            = (region.parent == region.region_id),
         .has_cigar             = region.has_alignment,
-        .cigar                 = region.cigar,
+        .cigar                 = std::move(region.cigar),
     };
 }
 
@@ -1753,25 +1748,36 @@ constexpr std::array<char, 10> CIGAR_OP_CHAR = {
 }
 
 /**
- * @brief Wrapper around std::vector<MatchResult> providing PAF output formatting.
+ * @brief Owning container of alignment results with PAF output formatting.
  *
- * Provides a print() method that outputs results in exact minimap2 PAF format,
- * reproducing mm_write_paf4() (format.c:427-460) with auxiliary tags from
- * write_tags() (format.c:399-425).
+ * Wraps a std::vector<MatchResult> and provides a print() method that outputs
+ * results in exact minimap2 PAF format, reproducing mm_write_paf4()
+ * (format.c:427-460) with auxiliary tags from write_tags() (format.c:399-425).
  */
 struct MatchResultCollection {
-    std::span<const MatchResult> results;
+    std::vector<MatchResult> results;
+
+    MatchResultCollection() = default;
+    explicit MatchResultCollection(std::vector<MatchResult>&& results_vec)
+        : results(std::move(results_vec)) {}
+
+    [[nodiscard]] size_t size() const { return results.size(); }
+    [[nodiscard]] bool empty() const { return results.empty(); }
+
+    [[nodiscard]] std::span<const MatchResult> view() const {
+        return std::span<const MatchResult>(results);
+    }
 
     /**
      * @brief Print alignment results in exact minimap2 PAF format.
      *
      * PAF line format (tab-separated):
-     *   col 1:  query name             — user-provided
+     *   col 1:  query name             -- user-provided
      *   col 2:  query sequence length
      *   col 3:  query start (0-based, closed)
      *   col 4:  query end   (0-based, open)
      *   col 5:  relative strand '+' or '-'
-     *   col 6:  target name            — user-provided
+     *   col 6:  target name            -- user-provided
      *   col 7:  target sequence length
      *   col 8:  target start on original strand (0-based)
      *   col 9:  target end   on original strand (0-based)
@@ -1788,7 +1794,6 @@ struct MatchResultCollection {
                const std::string& target_name = "target") const
     {
         if (results.empty()) {
-            // Unmapped line: mimic mm_write_paf4 with r==NULL
             JustLog("{}\t0\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", query_name);
             return;
         }
@@ -1797,15 +1802,12 @@ struct MatchResultCollection {
             const char strand_char = match.is_reverse ? '-' : '+';
             const char type_char = match.is_primary ? 'P' : 'S';
 
-            // 12 mandatory PAF columns
             std::string line = fmt::format(
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 query_name, match.query_len, match.query_start, match.query_end,
                 strand_char, target_name, match.target_len, match.target_start,
                 match.target_end, match.num_matches, match.block_length, match.mapq);
 
-            // --- Auxiliary tags ---
-            // When CIGAR is available (r->p != NULL in original), output NM, ms, AS, nn
             if (match.has_cigar && !match.cigar.empty()) {
                 const int32_t edit_distance = std::max(0,
                     match.block_length - match.num_matches);
@@ -1813,21 +1815,14 @@ struct MatchResultCollection {
                     edit_distance, match.dp_max_score, match.dp_score);
             }
 
-            // tp:A — type (format.c:409, always output)
             line += fmt::format("\ttp:A:{}", type_char);
-
-            // cm:i — seed count (format.c:409, always output)
             line += fmt::format("\tcm:i:{}", match.seed_count);
-
-            // s1:i — chaining score (format.c:409, always output)
             line += fmt::format("\ts1:i:{}", match.chain_score);
 
-            // s2:i — best secondary chaining score (only for primaries, format.c:410)
             if (match.is_primary) {
                 line += fmt::format("\ts2:i:{}", match.secondary_chain_score);
             }
 
-            // Divergence: de:f when CIGAR available, dv:f otherwise (format.c:411-422)
             if (match.divergence >= 0.0f && match.divergence <= 1.0f) {
                 const char* divergence_tag = (match.has_cigar && !match.cigar.empty())
                     ? "\tde:f:" : "\tdv:f:";
@@ -1840,10 +1835,8 @@ struct MatchResultCollection {
                 }
             }
 
-            // rl:i — repeat length (format.c:455, always 0 for us)
             line += "\trl:i:0";
 
-            // cg:Z — CIGAR string (format.c:456-460, only when CIGAR available)
             if (match.has_cigar && !match.cigar.empty()) {
                 line += "\tcg:Z:";
                 line += format_cigar(match.cigar);
@@ -1861,11 +1854,10 @@ struct MatchResultCollection {
  * MatchResultCollection::print().
  */
 void print_match_results(
-    const std::vector<MatchResult>& results,
+    const MatchResultCollection& collection,
     const std::string& query_name  = "query",
     const std::string& target_name = "target")
 {
-    const MatchResultCollection collection{std::span<const MatchResult>(results)};
     collection.print(query_name, target_name);
 }
 
@@ -1891,30 +1883,42 @@ void print_match_results(
  *   8. Compute mapping quality (mm_set_mapq2)
  *   9. Convert to PAF-like MatchResult records
  *
- * @param query_seq           Query DNA sequence
- * @param target_seq          Target DNA sequence
+ * @tparam QueryRange   compact_sequence_range type for query (e.g. sequence_custom_alphabet<seq::dna4, uint64_t>)
+ * @tparam TargetRange  compact_sequence_range type for target
+ * @param query_seq           Query sequence as compact_sequence_range
+ * @param target_seq          Target sequence as compact_sequence_range
  * @param query_minimizers    Pre-computed minimizers for the query
  * @param target_minimizers   Pre-computed minimizers for the target
  * @param params              Algorithm parameters (defaults match minimap2)
- * @return Vector of PAF-like alignment results
+ * @return MatchResultCollection containing PAF-like alignment results
  */
-[[nodiscard]] std::vector<MatchResult> minimap2_port(
-    const std::vector<seq::dna4>& query_seq,
-    const std::vector<seq::dna4>& target_seq,
+template<supports_compact_sequence_range QueryRange, supports_compact_sequence_range TargetRange>
+[[nodiscard]] MatchResultCollection minimap2_port(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
     const std::vector<MinimapSketchData>& query_minimizers,
     const std::vector<MinimapSketchData>& target_minimizers,
     const Minimap2Params& params = Minimap2Params{})
 {
-    const int32_t query_len  = static_cast<int32_t>(query_seq.size());
-    const int32_t target_len = static_cast<int32_t>(target_seq.size());
+    using query_traits = typename compact_sequence_range<QueryRange>::traits;
+    using target_traits = typename compact_sequence_range<TargetRange>::traits;
+    static_assert(
+        std::is_same_v<typename query_traits::alphabet_type, typename target_traits::alphabet_type>,
+        "Query and target sequences must use the same alphabet type");
+
+    constexpr size_t alphabet_size = seqan3::alphabet_size<typename query_traits::alphabet_type>;
+
+    const int32_t query_len  = static_cast<int32_t>(query_seq.bp_size());
+    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
 
     JustLog("[minimap_port] Starting minimap2_port: query_len={}, target_len={}, "
-            "query_minimizers={}, target_minimizers={}",
-            query_len, target_len, query_minimizers.size(), target_minimizers.size());
+            "query_minimizers={}, target_minimizers={}, alphabet_size={}",
+            query_len, target_len, query_minimizers.size(), target_minimizers.size(),
+            alphabet_size);
 
     if (query_len == 0 || target_len == 0) {
         JustLog("[minimap_port] Empty input — returning no results");
-        return {};
+        return MatchResultCollection{};
     }
 
     // ---- Phase 1: Build target index ----
@@ -1927,7 +1931,7 @@ void print_match_results(
 
     if (anchors.empty()) {
         JustLog("[minimap_port] No seed hits found — returning no results");
-        return {};
+        return MatchResultCollection{};
     }
 
     // ---- Phase 3: Chain seeds ----
@@ -1935,7 +1939,7 @@ void print_match_results(
 
     if (chains.empty()) {
         JustLog("[minimap_port] No chains formed — returning no results");
-        return {};
+        return MatchResultCollection{};
     }
 
     // ---- Phase 4: Generate alignment regions ----
@@ -1956,12 +1960,23 @@ void print_match_results(
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
     // map.c:568-570: align_regs() returns immediately if !(opt->flag & MM_F_CIGAR)
     if (params.do_cigar) {
-        auto query_fwd = encode_sequence(query_seq);
-        auto query_rev_enc = reverse_complement(query_fwd);
-        auto target_encoded = encode_sequence(target_seq);
+        // Extract encoded rank arrays directly from compact sequences —
+        // replaces the old encode_sequence() / reverse_complement() free functions
+        auto query_fwd = query_seq.to_encoded_vector();
+        auto query_rev_enc = query_seq.to_reverse_complement_encoded_vector();
+        auto target_encoded = target_seq.to_encoded_vector();
+
+        // Build score matrix from alphabet size
+        constexpr size_t matrix_dimension = alphabet_size + 1;
+        const auto score_matrix = generate_score_matrix<alphabet_size>(
+            static_cast<int8_t>(params.match_score),
+            static_cast<int8_t>(params.mismatch_pen),
+            static_cast<int8_t>(params.sc_ambi));
 
         align_regions(regions, reordered_anchors,
-                      query_fwd, query_rev_enc, target_encoded, params);
+                      query_fwd, query_rev_enc, target_encoded,
+                      score_matrix.data(), static_cast<int32_t>(matrix_dimension),
+                      params);
 
         // Re-classify after DP (like align_regs does in map.c:572-574)
         classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
@@ -1974,12 +1989,12 @@ void print_match_results(
     // ---- Phase 9: Convert to MatchResult ----
     std::vector<MatchResult> results;
     results.reserve(regions.size());
-    for (const auto& region : regions) {
-        results.push_back(region_to_match_result(region, query_len, target_len));
+    for (auto& region : regions) {
+        results.push_back(region_to_match_result(std::move(region), query_len, target_len));
     }
 
     JustLog("[minimap_port] Pipeline complete: {} alignment results", results.size());
-    return results;
+    return MatchResultCollection(std::move(results));
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE
