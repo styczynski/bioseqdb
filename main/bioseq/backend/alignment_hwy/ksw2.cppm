@@ -60,7 +60,10 @@ module;
 
 export module alignment_hwy;
 
-import alignment;
+// NOTE: this module is intentionally self-contained — it deliberately does NOT
+// import the legacy `alignment` module. Everything the KSW2 port needs (result
+// struct, flag bitfield, Z-drop helper, CIGAR traceback) is defined below so
+// downstream callers can drop the `alignment` dependency as well.
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
@@ -71,6 +74,21 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+// =============================================================================
+// Self-contained KSW2 constants and CIGAR opcodes.
+// -----------------------------------------------------------------------------
+// Ported from the legacy `alignment` module so `ksw2.cppm` has no cross-module
+// coupling. `kKswNegInf` matches the `KSW_NEG_INF` sentinel the original KSW2
+// C code used; the CIGAR opcodes mirror the lowest four bits that the backtrack
+// writer emits (M/I/D/N).
+// =============================================================================
+
+constexpr int32_t  kKswNegInf      = -0x40000000;
+constexpr uint32_t kKswCigarMatch  = 0;  ///< `M` operation (match or mismatch)
+constexpr uint32_t kKswCigarIns    = 1;  ///< `I` operation (insertion into reference)
+constexpr uint32_t kKswCigarDel    = 2;  ///< `D` operation (deletion from reference)
+constexpr uint32_t kKswCigarNSkip  = 3;  ///< `N` operation (skipped reference region / intron)
 
 // =============================================================================
 // SIMD tag selection — byte lanes for the DP kernels.
@@ -220,6 +238,40 @@ struct KswScoringMatrix {
 };
 
 // =============================================================================
+// Flag bitfield — replaces the `flags & KSW_EZ_*` pattern with named booleans.
+// -----------------------------------------------------------------------------
+// The legacy KSW2 API packs its behaviour switches into a single `int` and
+// then tests individual bits via `(flags & KSW_EZ_SCORE_ONLY)` etc. Following
+// the bit-field layout used by `MinimapSketchData`, we expose each switch as
+// its own one-bit member so call sites read as
+// `params.flags.score_only` / `params.flags.right_align` / ... — no bitmask
+// arithmetic at the use sites and no risk of flag-bit typos.
+//
+// The splice-aware `s2` flags are intentionally omitted because the `s2`
+// variant is not yet ported to Highway.
+// =============================================================================
+
+/**
+ * @brief Per-alignment behaviour flags for the KSW2 kernels.
+ *
+ * One bit per toggle, initialised to `false`. Designated-initialiser
+ * construction at call sites gives the clearest semantics, e.g.:
+ * `.flags = {.extz_only = true, .right_align = true, .reverse_cigar = true}`.
+ */
+struct KswFlags {
+    bool score_only    : 1 = false;  ///< skip CIGAR computation (equivalent `KSW_EZ_SCORE_ONLY`)
+    bool right_align   : 1 = false;  ///< right-align gaps on ties (`KSW_EZ_RIGHT`)
+    bool generic_score : 1 = false;  ///< use the full `m*m` scoring matrix (`KSW_EZ_GENERIC_SC`)
+    bool approx_max    : 1 = false;  ///< approximate max tracking (`KSW_EZ_APPROX_MAX`)
+    bool approx_zdrop  : 1 = false;  ///< approximate Z-drop check (`KSW_EZ_APPROX_DROP`)
+    bool extz_only     : 1 = false;  ///< extension-only mode (`KSW_EZ_EXTZ_ONLY`)
+    bool reverse_cigar : 1 = false;  ///< output CIGAR already reversed (`KSW_EZ_REV_CIGAR`)
+    bool reserved      : 1 = false;  ///< padding to round out to a full byte
+};
+static_assert(sizeof(KswFlags) == 1,
+    "KswFlags should fit into a single byte so Params structs stay compact.");
+
+// =============================================================================
 // Parameters — grouped penalty/flag structs for readability.
 // =============================================================================
 
@@ -231,12 +283,12 @@ struct KswScoringMatrix {
  * `KswZ2Params{.gap_open = 2, .gap_extend = 1, .band_width = 500}`.
  */
 struct KswZ2Params {
-    int8_t gap_open         = 0;   ///< `q` — gap open penalty (positive)
-    int8_t gap_extend       = 0;   ///< `e` — gap extension penalty (positive)
-    int    band_width       = -1;  ///< `w` — band half-width, negative disables banding
-    int    z_drop           = -1;  ///< z-drop threshold, negative disables
-    int    end_bonus        = 0;   ///< bonus for reaching query end in extension mode
-    int    flags            = 0;   ///< `KSW_EZ_*` flag bitmask
+    int8_t    gap_open   = 0;   ///< `q` — gap open penalty (positive)
+    int8_t    gap_extend = 0;   ///< `e` — gap extension penalty (positive)
+    int       band_width = -1;  ///< `w` — band half-width, negative disables banding
+    int       z_drop     = -1;  ///< z-drop threshold, negative disables
+    int       end_bonus  = 0;   ///< bonus for reaching query end in extension mode
+    KswFlags  flags      = {};  ///< behaviour toggles
 };
 
 /**
@@ -247,14 +299,14 @@ struct KswZ2Params {
  * initializer construction at call sites for readability.
  */
 struct KswD2Params {
-    int8_t gap_open_short   = 0;   ///< `q` — short-gap open penalty
-    int8_t gap_extend_short = 0;   ///< `e` — short-gap extension penalty
-    int8_t gap_open_long    = 0;   ///< `q2` — long-gap open penalty
-    int8_t gap_extend_long  = 0;   ///< `e2` — long-gap extension penalty
-    int    band_width       = -1;
-    int    z_drop           = -1;
-    int    end_bonus        = 0;
-    int    flags            = 0;
+    int8_t    gap_open_short   = 0;   ///< `q` — short-gap open penalty
+    int8_t    gap_extend_short = 0;   ///< `e` — short-gap extension penalty
+    int8_t    gap_open_long    = 0;   ///< `q2` — long-gap open penalty
+    int8_t    gap_extend_long  = 0;   ///< `e2` — long-gap extension penalty
+    int       band_width       = -1;
+    int       z_drop           = -1;
+    int       end_bonus        = 0;
+    KswFlags  flags            = {};
 };
 
 // =============================================================================
@@ -267,8 +319,8 @@ struct KswD2Params {
  * The DP kernels randomly access query/target positions within an anti-
  * diagonal and therefore need a linear byte buffer. This view abstracts the
  * legacy `(const uint8_t*, int length)` pair into a lightweight struct.
- * `length` is an `int32_t` to interop cleanly with the `ksw_extz_t`
- * coordinates (which are all `int`).
+ * `length` is an `int32_t` so it interoperates cleanly with the signed
+ * coordinates carried by `KswAlignResult`.
  */
 struct KswSequenceView {
     const uint8_t* bytes = nullptr;  ///< pointer to first rank byte (may be null if empty)
@@ -316,38 +368,108 @@ template<supports_compact_sequence_range R>
 }
 
 // =============================================================================
-// ksw_extz_t cleanup helper — RAII guard for the C-allocated CIGAR buffer.
+// KswAlignResult — self-contained replacement for the legacy `ksw_extz_t`.
+// -----------------------------------------------------------------------------
+// The legacy C struct packed `max:31, zdropped:1` into a word and allocated
+// the CIGAR with raw `malloc`/`realloc` behind a `uint32_t*` / capacity pair.
+// `KswAlignResult` uses:
+//   - a signed 32-bit `max` plus a separate `bool zdropped` (no bit-packing
+//     gymnastics and no risk of accidentally sign-extending the flag bit)
+//   - `bool reach_end` instead of the int-as-bool `reach_end`
+//   - an owning `std::vector<uint32_t>` CIGAR so there is no manual free on
+//     any callsite — the former `KswCigarGuard` RAII helper can disappear.
+// Each CIGAR entry still encodes `(length << 4) | opcode` to match the
+// `kKswCigar*` opcodes above, so downstream CIGAR unpackers don't need to
+// learn a new layout.
 // =============================================================================
 
 /**
- * @brief RAII helper that `free()`s `ksw_extz_t::cigar` on scope exit.
+ * @brief KSW2 extension-alignment result.
  *
- * KSW2 allocates the CIGAR via `kmalloc`/`krealloc`; when `memory_pool` is
- * null (our usage), the upstream helper falls back to plain `malloc`/`free`.
- * This guard hides the three-phase cleanup ritual that `align_regions` in
- * `minimap_port` would otherwise need to repeat at every exit path.
+ * All score fields are signed 32-bit so that max-tracking comparisons in the
+ * DP kernels can use native `int32_t` arithmetic without bit-field masking.
+ * Sentinel values follow the legacy semantics: `kKswNegInf` for "not yet
+ * observed" scores and `-1` for "not yet observed" coordinates.
  */
-class KswCigarGuard {
-public:
-    explicit KswCigarGuard(ksw_extz_t& result) noexcept : result_(&result) {}
+struct KswAlignResult {
+    int32_t max       = 0;            ///< best score observed during the DP
+    int32_t score     = kKswNegInf;   ///< score reaching both query/target ends
+    int32_t mqe       = kKswNegInf;   ///< best score reaching the query end
+    int32_t mte       = kKswNegInf;   ///< best score reaching the target end
+    int32_t max_q     = -1;           ///< query coord of `max`
+    int32_t max_t     = -1;           ///< target coord of `max`
+    int32_t mqe_t     = -1;           ///< target coord of `mqe`
+    int32_t mte_q     = -1;           ///< query coord of `mte`
+    bool    zdropped  = false;        ///< set when the DP terminated via Z-drop
+    bool    reach_end = false;        ///< set when extension reached the query end
+    std::vector<uint32_t> cigar;      ///< owned CIGAR, `(length << 4) | opcode` each
+};
 
-    KswCigarGuard(const KswCigarGuard&)            = delete;
-    KswCigarGuard& operator=(const KswCigarGuard&) = delete;
-    KswCigarGuard(KswCigarGuard&&)                 = delete;
-    KswCigarGuard& operator=(KswCigarGuard&&)      = delete;
+// =============================================================================
+// apply_zdrop_heuristic — inline port of `ksw_apply_zdrop`.
+// -----------------------------------------------------------------------------
+// Deciding when to abandon a DP extension. Matches the legacy semantics
+// byte-for-byte (same comparisons, same update order) so the DP kernels keep
+// producing identical coordinates. The result is returned as a `bool` instead
+// of an `int` to match modern style; the return value is only meaningful when
+// the caller wants to break out of the DP loop.
+// =============================================================================
 
-    ~KswCigarGuard() noexcept {
-        if (result_ && result_->cigar) {
-            std::free(result_->cigar);
-            result_->cigar = nullptr;
-            result_->n_cigar = 0;
-            result_->m_cigar = 0;
+/**
+ * @brief Update `result.max`/`max_q`/`max_t` and decide whether to Z-drop.
+ *
+ * @param result                   In/out: best-score tracking state.
+ * @param use_rotated_coords       True when the DP uses anti-diagonal
+ *                                 coordinates (`is_rot` in the legacy API).
+ * @param current_score            DP cell score to evaluate.
+ * @param first_coord              `anti_diagonal` if rotated, `row` otherwise.
+ * @param second_coord             `target_position` if rotated, `col` otherwise.
+ * @param zdrop_threshold          Z-drop threshold; negative disables the check.
+ * @param gap_extension_penalty    Gap-extend used in the distance adjustment.
+ * @return `true` if the DP should terminate due to the Z-drop heuristic.
+ */
+[[nodiscard]] inline bool apply_zdrop_heuristic(
+    KswAlignResult& result,
+    bool use_rotated_coords,
+    int32_t current_score,
+    int first_coord,
+    int second_coord,
+    int zdrop_threshold,
+    int8_t gap_extension_penalty) noexcept
+{
+    int anti_diagonal;
+    int target_position;
+    if (use_rotated_coords) {
+        anti_diagonal   = first_coord;
+        target_position = second_coord;
+    } else {
+        anti_diagonal   = first_coord + second_coord;
+        target_position = first_coord;
+    }
+    if (current_score > result.max) {
+        result.max   = current_score;
+        result.max_t = target_position;
+        result.max_q = anti_diagonal - target_position;
+        return false;
+    }
+    if (target_position >= result.max_t
+        && anti_diagonal - target_position >= result.max_q)
+    {
+        const int target_distance = target_position - result.max_t;
+        const int query_distance  = (anti_diagonal - target_position) - result.max_q;
+        const int coordinate_difference = target_distance > query_distance
+            ? target_distance - query_distance
+            : query_distance - target_distance;
+        if (zdrop_threshold >= 0
+            && result.max - current_score
+               > zdrop_threshold + coordinate_difference * gap_extension_penalty)
+        {
+            result.zdropped = true;
+            return true;
         }
     }
-
-private:
-    ksw_extz_t* result_;
-};
+    return false;
+}
 
 // =============================================================================
 // DP arena — owns the aligned scratch storage used by the z2/d2 kernels.
@@ -497,61 +619,259 @@ private:
     hwy::AlignedFreeUniquePtr<int8_t[]> storage_;
 };
 
-/**
- * @brief Aligned backtrack matrix + offset arrays for the DP kernels.
- *
- * Only allocated when the caller requests a CIGAR; wraps the three separate
- * allocations that used to live as loose variables inside the kernels.
- */
-struct KswBacktrackStorage {
-    hwy::AlignedFreeUniquePtr<int8_t[]> matrix_bytes;  ///< backtrack directions
-    std::vector<int>                    band_starts;   ///< anti-diagonal band start per r
-    std::vector<int>                    band_ends;     ///< anti-diagonal band end per r
+// =============================================================================
+// KswBacktrackMatrix — typed wrapper around the DP backtrack matrix storage.
+// -----------------------------------------------------------------------------
+// The backtrack matrix is a 2D array indexed by (anti_diagonal, band_vector).
+// Each logical "slot" holds one SIMD vector worth of direction/continuation
+// flags that the DP kernel writes via `hn::Store` and the traceback reader
+// consumes a byte at a time.
+//
+// We keep the underlying allocation as `hwy::AlignedFreeUniquePtr<int8_t[]>`
+// because the backtrack matrix is *write-only* during the DP loop — there is
+// no `hn::Load` followed by `hn::Store` for this data, so there is no
+// redundant store/load cycle to collapse. Reinterpreting the memory as an
+// array of `hn::Vec<KswByteTag>` would still go through `hn::Store` via a
+// raw pointer anyway (Highway's API takes element-typed pointers, not
+// Vec-typed ones), and `hn::Vec<Tag>` is not guaranteed to be a
+// standard-layout type on scalable-vector targets — so the current
+// byte-addressed layout is both the most portable *and* the layout that
+// yields the minimum number of memory operations.
+//
+// The wrapper exists to stop callers from hand-rolling
+// `base + anti_diagonal * cols * 16 + local_vec * 16` every time they need
+// a vector slot: `matrix.vec_slot_bytes(r, local)` computes the same byte
+// offset with explicit vector semantics so the pointer arithmetic is
+// obviously correct and the "slot stores one vector" invariant is visible
+// at call sites. It also keeps the per-anti-diagonal `band_starts` /
+// `band_ends` arrays colocated with the matrix they describe.
+// =============================================================================
 
-    /** Raw pointer to the backtrack matrix bytes (may be null when disabled). */
-    [[nodiscard]] int8_t* matrix_ptr() noexcept { return matrix_bytes.get(); }
+class KswBacktrackMatrix {
+public:
+    KswBacktrackMatrix() noexcept = default;
 
-    /** Pointer view of `band_starts` for the C-style `ksw_backtrack` API. */
-    [[nodiscard]] int* band_start_ptr() noexcept { return band_starts.data(); }
+    /**
+     * @brief Allocate matrix + band-boundary arrays sized for an alignment.
+     *
+     * @param anti_diagonal_count  Number of anti-diagonals (`qlen + tlen - 1`).
+     * @param band_vec_capacity    Number of SIMD vectors per anti-diagonal row.
+     *                             The matrix stores `band_vec_capacity` vectors
+     *                             for every anti-diagonal, plus one trailing
+     *                             slack vector that keeps wide loads in the
+     *                             scoring path from touching foreign memory.
+     */
+    void allocate(int anti_diagonal_count, int band_vec_capacity) {
+        DEBUG_ASSERT(anti_diagonal_count > 0,
+            "backtrack matrix needs at least one anti-diagonal row", anti_diagonal_count);
+        DEBUG_ASSERT(band_vec_capacity > 0,
+            "backtrack matrix needs at least one vector per row", band_vec_capacity);
+        cols_in_vectors_ = band_vec_capacity;
+        byte_cols_per_row_ = band_vec_capacity * kKswVecBytes;
+        total_vector_slots_ =
+            static_cast<size_t>(anti_diagonal_count) * cols_in_vectors_ + 1;
+        const size_t total_bytes = total_vector_slots_ * kKswVecBytes;
+        storage_ = hwy::AllocateAligned<int8_t>(total_bytes);
+        std::memset(storage_.get(), 0, total_bytes);
+        band_starts_.assign(static_cast<size_t>(anti_diagonal_count), 0);
+        band_ends_.assign(static_cast<size_t>(anti_diagonal_count), 0);
+    }
 
-    /** Pointer view of `band_ends` for the C-style `ksw_backtrack` API. */
-    [[nodiscard]] int* band_end_ptr() noexcept { return band_ends.data(); }
+    /** `true` once `allocate()` has produced real storage. */
+    [[nodiscard]] bool is_allocated() const noexcept { return storage_ != nullptr; }
+
+    /**
+     * @brief Byte pointer for the `(anti_diagonal, local_band_vec)` slot.
+     *
+     * `local_band_vec` is `band_vec_index - band_start_vec` — the 0-based
+     * vector offset inside the band on this anti-diagonal. The returned
+     * pointer is 16-byte aligned (inherited from `AllocateAligned`) so it
+     * feeds straight into `hn::Store(vec, tag, ptr)`.
+     */
+    [[nodiscard]] int8_t* vec_slot_bytes(int anti_diagonal, int local_band_vec) noexcept {
+        DEBUG_ASSERT(local_band_vec >= 0 && local_band_vec < cols_in_vectors_,
+            "local band vector index out of range", local_band_vec);
+        const size_t slot =
+            static_cast<size_t>(anti_diagonal) * cols_in_vectors_
+            + static_cast<size_t>(local_band_vec);
+        DEBUG_ASSERT(slot < total_vector_slots_,
+            "backtrack vector slot beyond allocation", slot);
+        return storage_.get() + slot * kKswVecBytes;
+    }
+
+    /**
+     * @brief Byte view used by the scalar CIGAR traceback.
+     *
+     * The traceback reads single bytes via the
+     * `p[r * n_col + (i - off[r])]` pattern, so it needs a flat
+     * `const uint8_t*` base. `byte_cols_per_row()` returns the `n_col`
+     * multiplier that pairs with it.
+     */
+    [[nodiscard]] const uint8_t* bytes() const noexcept {
+        return reinterpret_cast<const uint8_t*>(storage_.get());
+    }
+
+    /** Row stride (in bytes) for the traceback reader's index math. */
+    [[nodiscard]] int byte_cols_per_row() const noexcept { return byte_cols_per_row_; }
+
+    /** Mutable band-start array — indexed by anti-diagonal. */
+    [[nodiscard]] std::span<int> band_starts() noexcept { return band_starts_; }
+    /** Mutable band-end array — indexed by anti-diagonal. */
+    [[nodiscard]] std::span<int> band_ends()   noexcept { return band_ends_;   }
+    /** Immutable band-start view (for the traceback reader). */
+    [[nodiscard]] std::span<const int> band_starts() const noexcept { return band_starts_; }
+    /** Immutable band-end view (for the traceback reader). */
+    [[nodiscard]] std::span<const int> band_ends()   const noexcept { return band_ends_;   }
+
+private:
+    hwy::AlignedFreeUniquePtr<int8_t[]> storage_;
+    std::vector<int> band_starts_;
+    std::vector<int> band_ends_;
+    int    cols_in_vectors_    = 0;
+    int    byte_cols_per_row_  = 0;
+    size_t total_vector_slots_ = 0;
 };
 
-/**
- * @brief Allocate backtrack storage for an alignment with `query_len` + `target_len` anti-diagonals.
- */
-inline KswBacktrackStorage make_backtrack_storage(int query_len, int target_len,
-                                                   int band_vec_capacity, int vec_bytes)
-{
-    KswBacktrackStorage storage;
-    const int anti_diagonal_count = query_len + target_len - 1;
-    const size_t matrix_bytes_count =
-        (static_cast<size_t>(anti_diagonal_count) * band_vec_capacity + 1)
-        * vec_bytes;
-    storage.matrix_bytes = hwy::AllocateAligned<int8_t>(matrix_bytes_count);
-    std::memset(storage.matrix_bytes.get(), 0, matrix_bytes_count);
-    storage.band_starts.assign(static_cast<size_t>(anti_diagonal_count), 0);
-    storage.band_ends.assign(static_cast<size_t>(anti_diagonal_count), 0);
-    return storage;
-}
-
 // =============================================================================
-// ksw_extz_t helpers.
+// ksw_backtrack_cigar — inline port of the legacy `ksw_backtrack`.
+// -----------------------------------------------------------------------------
+// Walks the backtrack matrix from `(start_row, start_col)` backwards and
+// emits CIGAR operations into `out_cigar`. This is a direct port of
+// `ksw_backtrack` from `alignment/defs.hpp`, rewritten around
+// `KswBacktrackMatrix` / `std::vector<uint32_t>` and with the continuous
+// `off_end` check always enabled (the Highway port always populates both
+// bound arrays).
+//
+// Backtrack byte layout (matches the legacy KSW2 encoding):
+//   - bits 0-2: DP state that achieves the cell max
+//     0 = H (match/mismatch), 1 = E, 2 = F, 3 = E-tilde, 4 = F-tilde
+//   - bit  0x08: continuation on the E state
+//   - bit  0x10: continuation on the F state
+//   - bit  0x20: continuation on the E-tilde state
+//   - bit  0x40: continuation on the F-tilde state
 // =============================================================================
 
 /**
- * @brief Produce a zeroed `ksw_extz_t` via the upstream reset helper.
+ * @brief Emit CIGAR operations for a completed DP by walking the backtrack matrix.
  *
- * `ksw_reset_extz` only rewrites the fields it cares about, so we start
- * from a value-initialized struct to make sure the `cigar` pointer and any
- * padding are zero. The `{}` initializer is sufficient — no explicit
- * memset required.
+ * @param matrix              Matrix written by the DP kernel — both the byte
+ *                            storage and band bounds are read from it.
+ * @param use_rotated_coords  True for anti-diagonal coordinate systems (z2/d2).
+ * @param output_reversed     If true the CIGAR is left in traceback order;
+ *                            otherwise it is reversed to emit from 5' to 3'.
+ * @param min_intron_length   Treat long E-tilde runs ≥ this as `N` (splice);
+ *                            set to 0 for normal extension/global alignment.
+ * @param start_row           Starting row coordinate (target-side).
+ * @param start_col           Starting column coordinate (query-side).
+ * @param out_cigar           Output CIGAR buffer — cleared before writing.
  */
-[[nodiscard]] inline ksw_extz_t make_empty_extz() noexcept {
-    ksw_extz_t result{};
-    ksw_reset_extz(&result);
-    return result;
+inline void ksw_backtrack_cigar(
+    const KswBacktrackMatrix& matrix,
+    bool use_rotated_coords,
+    bool output_reversed,
+    int min_intron_length,
+    int start_row,
+    int start_col,
+    std::vector<uint32_t>& out_cigar)
+{
+    DEBUG_ASSERT(matrix.is_allocated(),
+        "ksw_backtrack_cigar requires an allocated backtrack matrix", 0);
+    out_cigar.clear();
+
+    const uint8_t* backtrack_bytes = matrix.bytes();
+    const std::span<const int> band_starts = matrix.band_starts();
+    const std::span<const int> band_ends   = matrix.band_ends();
+    const int byte_cols_per_row = matrix.byte_cols_per_row();
+
+    auto push_cigar_op = [&](uint32_t opcode, uint32_t length) {
+        if (!out_cigar.empty() && (out_cigar.back() & 0xfU) == opcode) {
+            out_cigar.back() += length << 4;
+        } else {
+            out_cigar.push_back((length << 4) | opcode);
+        }
+    };
+
+    int row_position = start_row;
+    int col_position = start_col;
+    int traceback_state = 0;
+
+    while (row_position >= 0 && col_position >= 0) {
+        int force_state = -1;
+        uint32_t backtrack_byte = 0;
+        if (use_rotated_coords) {
+            const int anti_diagonal = row_position + col_position;
+            if (row_position < band_starts[static_cast<size_t>(anti_diagonal)]) {
+                force_state = 2;
+            }
+            if (row_position > band_ends[static_cast<size_t>(anti_diagonal)]) {
+                force_state = 1;
+            }
+            if (force_state < 0) {
+                const size_t offset_in_row =
+                    static_cast<size_t>(row_position
+                        - band_starts[static_cast<size_t>(anti_diagonal)]);
+                backtrack_byte = backtrack_bytes[
+                    static_cast<size_t>(anti_diagonal) * byte_cols_per_row
+                    + offset_in_row];
+            }
+        } else {
+            if (col_position < band_starts[static_cast<size_t>(row_position)]) {
+                force_state = 2;
+            }
+            if (col_position > band_ends[static_cast<size_t>(row_position)]) {
+                force_state = 1;
+            }
+            if (force_state < 0) {
+                const size_t offset_in_row =
+                    static_cast<size_t>(col_position
+                        - band_starts[static_cast<size_t>(row_position)]);
+                backtrack_byte = backtrack_bytes[
+                    static_cast<size_t>(row_position) * byte_cols_per_row
+                    + offset_in_row];
+            }
+        }
+
+        if (traceback_state == 0) {
+            traceback_state = static_cast<int>(backtrack_byte & 7U);
+        } else if (!((backtrack_byte >> (traceback_state + 2)) & 1U)) {
+            traceback_state = 0;
+        }
+        if (traceback_state == 0) {
+            traceback_state = static_cast<int>(backtrack_byte & 7U);
+        }
+        if (force_state >= 0) {
+            traceback_state = force_state;
+        }
+
+        if (traceback_state == 0) {
+            push_cigar_op(kKswCigarMatch, 1);
+            --row_position;
+            --col_position;
+        } else if (traceback_state == 1
+                   || (traceback_state == 3 && min_intron_length <= 0)) {
+            push_cigar_op(kKswCigarDel, 1);
+            --row_position;
+        } else if (traceback_state == 3 && min_intron_length > 0) {
+            push_cigar_op(kKswCigarNSkip, 1);
+            --row_position;
+        } else {
+            push_cigar_op(kKswCigarIns, 1);
+            --col_position;
+        }
+    }
+
+    if (row_position >= 0) {
+        const uint32_t skip_op =
+            (min_intron_length > 0 && row_position >= min_intron_length)
+            ? kKswCigarNSkip : kKswCigarDel;
+        push_cigar_op(skip_op, static_cast<uint32_t>(row_position + 1));
+    }
+    if (col_position >= 0) {
+        push_cigar_op(kKswCigarIns, static_cast<uint32_t>(col_position + 1));
+    }
+    if (!output_reversed) {
+        std::reverse(out_cigar.begin(), out_cigar.end());
+    }
 }
 
 // =============================================================================
@@ -582,10 +902,10 @@ inline KswBacktrackStorage make_backtrack_storage(int query_len, int target_len,
  * @param  target          Target sequence (encoded as rank bytes).
  * @param  scoring_matrix  Compile-time sized scoring matrix.
  * @param  params          Penalty/flag parameters (see `KswZ2Params`).
- * @return Populated `ksw_extz_t` result.
+ * @return Populated `KswAlignResult` — owns its CIGAR vector.
  */
 template<int AlphabetDim>
-[[nodiscard]] ksw_extz_t hwy_align_z2(
+[[nodiscard]] KswAlignResult hwy_align_z2(
     KswSequenceView query,
     KswSequenceView target,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
@@ -596,7 +916,7 @@ template<int AlphabetDim>
     KswByteTag  byte_tag;
     KswScoreTag score_tag;
 
-    ksw_extz_t result = make_empty_extz();
+    KswAlignResult result;
     if (query.empty() || target.empty()) {
         return result;
     }
@@ -606,9 +926,9 @@ template<int AlphabetDim>
     const int8_t gap_open        = params.gap_open;
     const int8_t gap_extend      = params.gap_extend;
     const int    gap_open_plus_extend = gap_open + gap_extend;
-    const int    raw_flags       = params.flags;
-    const bool   compute_cigar   = (raw_flags & KSW_EZ_SCORE_ONLY) == 0;
-    const bool   use_approx_max  = (raw_flags & KSW_EZ_APPROX_MAX) != 0;
+    const KswFlags flags         = params.flags;
+    const bool   compute_cigar   = !flags.score_only;
+    const bool   use_approx_max  = flags.approx_max;
 
     // --- SIMD constant vectors -------------------------------------------
     const auto zero_vec                = hn::Zero(byte_tag);
@@ -675,21 +995,20 @@ template<int AlphabetDim>
     int32_t* exact_score_row = nullptr;
     if (!use_approx_max) {
         exact_score_row_storage.assign(
-            static_cast<size_t>(arena.target_vec_count()) * kVecBytes, KSW_NEG_INF);
+            static_cast<size_t>(arena.target_vec_count()) * kVecBytes, kKswNegInf);
         exact_score_row = exact_score_row_storage.data();
     }
 
     // --- Backtrack storage ----------------------------------------------
-    KswBacktrackStorage backtrack;
-    int8_t* backtrack_matrix = nullptr;
-    int*    anti_diag_band_start_ptr = nullptr;
-    int*    anti_diag_band_end_ptr   = nullptr;
+    // The DP loop writes one SIMD vector per (anti_diagonal, local_band_vec)
+    // slot; the matrix is read byte-by-byte later by `ksw_backtrack_cigar`.
+    KswBacktrackMatrix backtrack;
+    std::span<int> anti_diag_band_start{};
+    std::span<int> anti_diag_band_end{};
     if (compute_cigar) {
-        backtrack = make_backtrack_storage(query_len, target_len,
-                                           band_vec_capacity, kVecBytes);
-        backtrack_matrix         = backtrack.matrix_ptr();
-        anti_diag_band_start_ptr = backtrack.band_start_ptr();
-        anti_diag_band_end_ptr   = backtrack.band_end_ptr();
+        backtrack.allocate(query_len + target_len - 1, band_vec_capacity);
+        anti_diag_band_start = backtrack.band_starts();
+        anti_diag_band_end   = backtrack.band_ends();
     }
 
     // --- Prepare target copy and reversed query --------------------------
@@ -725,7 +1044,7 @@ template<int AlphabetDim>
             band_end = (anti_diagonal + left_band) >> 1;
         }
         if (band_start > band_end) {
-            result.zdropped = 1;
+            result.zdropped = true;
             break;
         }
         const int band_start_raw = band_start;
@@ -767,7 +1086,7 @@ template<int AlphabetDim>
         }
 
         // --- Compute per-cell match/mismatch scores for this anti-diag --
-        if (!(raw_flags & KSW_EZ_GENERIC_SC)) {
+        if (!flags.generic_score) {
             for (int target_position = band_start_raw;
                  target_position <= band_end_raw;
                  target_position += kVecBytes)
@@ -849,17 +1168,15 @@ template<int AlphabetDim>
                 hn::Store(hn::Max(vert_chain_sum, zero_vec), byte_tag,
                           gap_f_offset_base + band_vec_index * kVecBytes);
             }
-        } else if (!(raw_flags & KSW_EZ_RIGHT)) {
+        } else if (!flags.right_align) {
             // --- CIGAR path, gap left-alignment -------------------------
-            // The backtrack matrix row for this anti-diagonal starts at
-            // `anti_diagonal * band_vec_capacity * kVecBytes`. Per-vector
-            // writes land at `(band_vec_index - band_start_vec)` within
-            // that row; we keep the subtraction local so the intermediate
-            // pointer never goes below the allocation base.
-            const size_t anti_diag_row_base =
-                static_cast<size_t>(anti_diagonal) * band_vec_capacity * kVecBytes;
-            anti_diag_band_start_ptr[anti_diagonal] = band_start;
-            anti_diag_band_end_ptr[anti_diagonal] = band_end;
+            // Each `hn::Store` into the backtrack matrix writes one SIMD
+            // vector into slot `(anti_diagonal, band_vec_index - band_start_vec)`.
+            // `vec_slot_bytes()` hides the byte math so the "one vector per
+            // slot" invariant is visible at the call site; the generated
+            // machine code is a single aligned vector store per iteration.
+            anti_diag_band_start[static_cast<size_t>(anti_diagonal)] = band_start;
+            anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int band_vec_index = band_start_vec;
                  band_vec_index <= band_end_vec;
                  ++band_vec_index)
@@ -911,15 +1228,13 @@ template<int AlphabetDim>
                     hn::IfThenElseZero(vert_positive_mask, backtrack_flag_f_cont));
 
                 hn::Store(direction_vec, byte_tag,
-                    backtrack_matrix + anti_diag_row_base
-                    + static_cast<size_t>(band_vec_index - band_start_vec) * kVecBytes);
+                    backtrack.vec_slot_bytes(anti_diagonal,
+                                             band_vec_index - band_start_vec));
             }
         } else {
             // --- CIGAR path, gap right-alignment ------------------------
-            const size_t anti_diag_row_base =
-                static_cast<size_t>(anti_diagonal) * band_vec_capacity * kVecBytes;
-            anti_diag_band_start_ptr[anti_diagonal] = band_start;
-            anti_diag_band_end_ptr[anti_diagonal] = band_end;
+            anti_diag_band_start[static_cast<size_t>(anti_diagonal)] = band_start;
+            anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int band_vec_index = band_start_vec;
                  band_vec_index <= band_end_vec;
                  ++band_vec_index)
@@ -971,8 +1286,8 @@ template<int AlphabetDim>
                     hn::IfThenZeroElse(vert_non_positive_mask, backtrack_flag_f_cont));
 
                 hn::Store(direction_vec, byte_tag,
-                    backtrack_matrix + anti_diag_row_base
-                    + static_cast<size_t>(band_vec_index - band_start_vec) * kVecBytes);
+                    backtrack.vec_slot_bytes(anti_diagonal,
+                                             band_vec_index - band_start_vec));
             }
         }
 
@@ -1055,10 +1370,10 @@ template<int AlphabetDim>
                 result.mqe = exact_score_row[band_start_raw];
                 result.mqe_t = band_start_raw;
             }
-            if (ksw_apply_zdrop(&result, 1,
-                                anti_diag_max_score, anti_diagonal,
-                                anti_diag_max_target_pos,
-                                params.z_drop, gap_extend))
+            if (apply_zdrop_heuristic(result, /*use_rotated_coords=*/true,
+                                      anti_diag_max_score, anti_diagonal,
+                                      anti_diag_max_target_pos,
+                                      params.z_drop, gap_extend))
             {
                 break;
             }
@@ -1093,11 +1408,11 @@ template<int AlphabetDim>
                     approx_score += static_cast<int32_t>(diff_up_bytes[approx_score_target_pos])
                         - gap_open_plus_extend;
                 }
-                if ((raw_flags & KSW_EZ_APPROX_DROP)
-                    && ksw_apply_zdrop(&result, 1,
-                                       approx_score, anti_diagonal,
-                                       approx_score_target_pos,
-                                       params.z_drop, gap_extend))
+                if (flags.approx_zdrop
+                    && apply_zdrop_heuristic(result, /*use_rotated_coords=*/true,
+                                             approx_score, anti_diagonal,
+                                             approx_score_target_pos,
+                                             params.z_drop, gap_extend))
                 {
                     break;
                 }
@@ -1118,28 +1433,25 @@ template<int AlphabetDim>
     // Backtrack — produce CIGAR when requested
     // ====================================================================
     if (compute_cigar) {
-        const int cigar_reversed = (raw_flags & KSW_EZ_REV_CIGAR) != 0 ? 1 : 0;
-        if (!result.zdropped && !(raw_flags & KSW_EZ_EXTZ_ONLY)) {
-            ksw_backtrack(nullptr, 1, cigar_reversed, 0,
-                reinterpret_cast<uint8_t*>(backtrack_matrix),
-                anti_diag_band_start_ptr, anti_diag_band_end_ptr,
-                band_vec_capacity * kVecBytes, target_len - 1, query_len - 1,
-                &result.m_cigar, &result.n_cigar, &result.cigar);
-        } else if (!result.zdropped && (raw_flags & KSW_EZ_EXTZ_ONLY)
-                   && result.mqe + params.end_bonus > static_cast<int>(result.max))
+        const bool output_reversed = flags.reverse_cigar;
+        if (!result.zdropped && !flags.extz_only) {
+            ksw_backtrack_cigar(backtrack,
+                /*use_rotated_coords=*/true, output_reversed,
+                /*min_intron_length=*/0,
+                target_len - 1, query_len - 1, result.cigar);
+        } else if (!result.zdropped && flags.extz_only
+                   && result.mqe + params.end_bonus > result.max)
         {
-            result.reach_end = 1;
-            ksw_backtrack(nullptr, 1, cigar_reversed, 0,
-                reinterpret_cast<uint8_t*>(backtrack_matrix),
-                anti_diag_band_start_ptr, anti_diag_band_end_ptr,
-                band_vec_capacity * kVecBytes, result.mqe_t, query_len - 1,
-                &result.m_cigar, &result.n_cigar, &result.cigar);
+            result.reach_end = true;
+            ksw_backtrack_cigar(backtrack,
+                /*use_rotated_coords=*/true, output_reversed,
+                /*min_intron_length=*/0,
+                result.mqe_t, query_len - 1, result.cigar);
         } else if (result.max_t >= 0 && result.max_q >= 0) {
-            ksw_backtrack(nullptr, 1, cigar_reversed, 0,
-                reinterpret_cast<uint8_t*>(backtrack_matrix),
-                anti_diag_band_start_ptr, anti_diag_band_end_ptr,
-                band_vec_capacity * kVecBytes, result.max_t, result.max_q,
-                &result.m_cigar, &result.n_cigar, &result.cigar);
+            ksw_backtrack_cigar(backtrack,
+                /*use_rotated_coords=*/true, output_reversed,
+                /*min_intron_length=*/0,
+                result.max_t, result.max_q, result.cigar);
         }
     }
 
@@ -1171,10 +1483,10 @@ template<int AlphabetDim>
  * @param  target          Target sequence (encoded as rank bytes).
  * @param  scoring_matrix  Compile-time sized scoring matrix.
  * @param  params          Penalty/flag parameters (see `KswD2Params`).
- * @return Populated `ksw_extz_t` result.
+ * @return Populated `KswAlignResult` — owns its CIGAR vector.
  */
 template<int AlphabetDim>
-[[nodiscard]] ksw_extz_t hwy_align_d2(
+[[nodiscard]] KswAlignResult hwy_align_d2(
     KswSequenceView query,
     KswSequenceView target,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
@@ -1185,7 +1497,7 @@ template<int AlphabetDim>
     KswByteTag  byte_tag;
     KswScoreTag score_tag;
 
-    ksw_extz_t result = make_empty_extz();
+    KswAlignResult result;
     if (query.empty() || target.empty() || AlphabetDim <= 1) {
         return result;
     }
@@ -1205,9 +1517,9 @@ template<int AlphabetDim>
     const int8_t gap_open_long    = params.gap_open_long;
     const int8_t gap_extend_long  = params.gap_extend_long;
     const int    gap_open_plus_extend = gap_open_short + gap_extend_short;
-    const int    raw_flags       = params.flags;
-    const bool   compute_cigar   = (raw_flags & KSW_EZ_SCORE_ONLY) == 0;
-    const bool   use_approx_max  = (raw_flags & KSW_EZ_APPROX_MAX) != 0;
+    const KswFlags flags         = params.flags;
+    const bool   compute_cigar   = !flags.score_only;
+    const bool   use_approx_max  = flags.approx_max;
 
     // --- SIMD constant vectors -------------------------------------------
     const auto zero_vec                = hn::Zero(byte_tag);
@@ -1304,21 +1616,20 @@ template<int AlphabetDim>
     int32_t* exact_score_row = nullptr;
     if (!use_approx_max) {
         exact_score_row_storage.assign(
-            static_cast<size_t>(arena.target_vec_count()) * kVecBytes, KSW_NEG_INF);
+            static_cast<size_t>(arena.target_vec_count()) * kVecBytes, kKswNegInf);
         exact_score_row = exact_score_row_storage.data();
     }
 
     // --- Backtrack storage ----------------------------------------------
-    KswBacktrackStorage backtrack;
-    int8_t* backtrack_matrix = nullptr;
-    int*    anti_diag_band_start_ptr = nullptr;
-    int*    anti_diag_band_end_ptr   = nullptr;
+    // See the z2 variant for the rationale behind the byte-addressed
+    // matrix; the d2 kernel uses exactly the same write pattern.
+    KswBacktrackMatrix backtrack;
+    std::span<int> anti_diag_band_start{};
+    std::span<int> anti_diag_band_end{};
     if (compute_cigar) {
-        backtrack = make_backtrack_storage(query_len, target_len,
-                                           band_vec_capacity, kVecBytes);
-        backtrack_matrix         = backtrack.matrix_ptr();
-        anti_diag_band_start_ptr = backtrack.band_start_ptr();
-        anti_diag_band_end_ptr   = backtrack.band_end_ptr();
+        backtrack.allocate(query_len + target_len - 1, band_vec_capacity);
+        anti_diag_band_start = backtrack.band_starts();
+        anti_diag_band_end   = backtrack.band_ends();
     }
 
     // --- Prepare sequences ----------------------------------------------
@@ -1354,7 +1665,7 @@ template<int AlphabetDim>
             band_end = (anti_diagonal + left_band) >> 1;
         }
         if (band_start > band_end) {
-            result.zdropped = 1;
+            result.zdropped = true;
             break;
         }
         const int band_start_raw = band_start;
@@ -1408,7 +1719,7 @@ template<int AlphabetDim>
         }
 
         // --- Compute scores -----------------------------------------
-        if (!(raw_flags & KSW_EZ_GENERIC_SC)) {
+        if (!flags.generic_score) {
             for (int target_position = band_start_raw;
                  target_position <= band_end_raw;
                  target_position += kVecBytes)
@@ -1506,12 +1817,10 @@ template<int AlphabetDim>
                 hn::Store(hn::Sub(hn::Max(vert_chain_sum2, zero_vec), long_gap_cost_vec),
                           byte_tag, gap_f2_offset_base + band_vec_index * kVecBytes);
             }
-        } else if (!(raw_flags & KSW_EZ_RIGHT)) {
+        } else if (!flags.right_align) {
             // --- CIGAR, gap left-alignment ----------------------
-            const size_t anti_diag_row_base =
-                static_cast<size_t>(anti_diagonal) * band_vec_capacity * kVecBytes;
-            anti_diag_band_start_ptr[anti_diagonal] = band_start;
-            anti_diag_band_end_ptr[anti_diagonal] = band_end;
+            anti_diag_band_start[static_cast<size_t>(anti_diagonal)] = band_start;
+            anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int band_vec_index = band_start_vec;
                  band_vec_index <= band_end_vec;
                  ++band_vec_index)
@@ -1593,15 +1902,13 @@ template<int AlphabetDim>
                     hn::IfThenElseZero(vert2_positive_mask, backtrack_f2_cont));
 
                 hn::Store(direction_vec, byte_tag,
-                    backtrack_matrix + anti_diag_row_base
-                    + static_cast<size_t>(band_vec_index - band_start_vec) * kVecBytes);
+                    backtrack.vec_slot_bytes(anti_diagonal,
+                                             band_vec_index - band_start_vec));
             }
         } else {
             // --- CIGAR, gap right-alignment ---------------------
-            const size_t anti_diag_row_base =
-                static_cast<size_t>(anti_diagonal) * band_vec_capacity * kVecBytes;
-            anti_diag_band_start_ptr[anti_diagonal] = band_start;
-            anti_diag_band_end_ptr[anti_diagonal] = band_end;
+            anti_diag_band_start[static_cast<size_t>(anti_diagonal)] = band_start;
+            anti_diag_band_end  [static_cast<size_t>(anti_diagonal)] = band_end;
             for (int band_vec_index = band_start_vec;
                  band_vec_index <= band_end_vec;
                  ++band_vec_index)
@@ -1683,8 +1990,8 @@ template<int AlphabetDim>
                     hn::IfThenZeroElse(vert2_non_positive_mask, backtrack_f2_cont));
 
                 hn::Store(direction_vec, byte_tag,
-                    backtrack_matrix + anti_diag_row_base
-                    + static_cast<size_t>(band_vec_index - band_start_vec) * kVecBytes);
+                    backtrack.vec_slot_bytes(anti_diagonal,
+                                             band_vec_index - band_start_vec));
             }
         }
 
@@ -1763,10 +2070,10 @@ template<int AlphabetDim>
                 result.mqe_t = band_start_raw;
             }
             // d2 uses e2 for Z-drop (not e)
-            if (ksw_apply_zdrop(&result, 1,
-                                anti_diag_max_score, anti_diagonal,
-                                anti_diag_max_target_pos,
-                                params.z_drop, gap_extend_long))
+            if (apply_zdrop_heuristic(result, /*use_rotated_coords=*/true,
+                                      anti_diag_max_score, anti_diagonal,
+                                      anti_diag_max_target_pos,
+                                      params.z_drop, gap_extend_long))
             {
                 break;
             }
@@ -1804,11 +2111,11 @@ template<int AlphabetDim>
                     - gap_open_plus_extend;
                 approx_score_target_pos = 0;
             }
-            if ((raw_flags & KSW_EZ_APPROX_DROP)
-                && ksw_apply_zdrop(&result, 1,
-                                   approx_score, anti_diagonal,
-                                   approx_score_target_pos,
-                                   params.z_drop, gap_extend_long))
+            if (flags.approx_zdrop
+                && apply_zdrop_heuristic(result, /*use_rotated_coords=*/true,
+                                         approx_score, anti_diagonal,
+                                         approx_score_target_pos,
+                                         params.z_drop, gap_extend_long))
             {
                 break;
             }
@@ -1824,28 +2131,25 @@ template<int AlphabetDim>
     // Backtrack
     // ====================================================================
     if (compute_cigar) {
-        const int cigar_reversed = (raw_flags & KSW_EZ_REV_CIGAR) != 0 ? 1 : 0;
-        if (!result.zdropped && !(raw_flags & KSW_EZ_EXTZ_ONLY)) {
-            ksw_backtrack(nullptr, 1, cigar_reversed, 0,
-                reinterpret_cast<uint8_t*>(backtrack_matrix),
-                anti_diag_band_start_ptr, anti_diag_band_end_ptr,
-                band_vec_capacity * kVecBytes, target_len - 1, query_len - 1,
-                &result.m_cigar, &result.n_cigar, &result.cigar);
-        } else if (!result.zdropped && (raw_flags & KSW_EZ_EXTZ_ONLY)
-                   && result.mqe + params.end_bonus > static_cast<int>(result.max))
+        const bool output_reversed = flags.reverse_cigar;
+        if (!result.zdropped && !flags.extz_only) {
+            ksw_backtrack_cigar(backtrack,
+                /*use_rotated_coords=*/true, output_reversed,
+                /*min_intron_length=*/0,
+                target_len - 1, query_len - 1, result.cigar);
+        } else if (!result.zdropped && flags.extz_only
+                   && result.mqe + params.end_bonus > result.max)
         {
-            result.reach_end = 1;
-            ksw_backtrack(nullptr, 1, cigar_reversed, 0,
-                reinterpret_cast<uint8_t*>(backtrack_matrix),
-                anti_diag_band_start_ptr, anti_diag_band_end_ptr,
-                band_vec_capacity * kVecBytes, result.mqe_t, query_len - 1,
-                &result.m_cigar, &result.n_cigar, &result.cigar);
+            result.reach_end = true;
+            ksw_backtrack_cigar(backtrack,
+                /*use_rotated_coords=*/true, output_reversed,
+                /*min_intron_length=*/0,
+                result.mqe_t, query_len - 1, result.cigar);
         } else if (result.max_t >= 0 && result.max_q >= 0) {
-            ksw_backtrack(nullptr, 1, cigar_reversed, 0,
-                reinterpret_cast<uint8_t*>(backtrack_matrix),
-                anti_diag_band_start_ptr, anti_diag_band_end_ptr,
-                band_vec_capacity * kVecBytes, result.max_t, result.max_q,
-                &result.m_cigar, &result.n_cigar, &result.cigar);
+            ksw_backtrack_cigar(backtrack,
+                /*use_rotated_coords=*/true, output_reversed,
+                /*min_intron_length=*/0,
+                result.max_t, result.max_q, result.cigar);
         }
     }
 
@@ -1881,7 +2185,7 @@ public:
      * @brief Single-affine-gap extension alignment (byte views).
      */
     template<int AlphabetDim>
-    [[nodiscard]] static ksw_extz_t z2_align(
+    [[nodiscard]] static KswAlignResult z2_align(
         KswSequenceView query,
         KswSequenceView target,
         const KswScoringMatrix<AlphabetDim>& scoring_matrix,
@@ -1895,7 +2199,7 @@ public:
      * @brief Dual-affine-gap extension alignment (byte views).
      */
     template<int AlphabetDim>
-    [[nodiscard]] static ksw_extz_t d2_align(
+    [[nodiscard]] static KswAlignResult d2_align(
         KswSequenceView query,
         KswSequenceView target,
         const KswScoringMatrix<AlphabetDim>& scoring_matrix,
@@ -1925,7 +2229,7 @@ public:
         supports_compact_sequence_range TargetRange,
         int AlphabetDim = static_cast<int>(
             seqan3::alphabet_size<typename compact_sequence_range<QueryRange>::traits::alphabet_type>) + 1>
-    [[nodiscard]] static ksw_extz_t z2_align(
+    [[nodiscard]] static KswAlignResult z2_align(
         const compact_sequence_range<QueryRange>& query,
         const compact_sequence_range<TargetRange>& target,
         const KswScoringMatrix<AlphabetDim>& scoring_matrix,
@@ -1955,7 +2259,7 @@ public:
         supports_compact_sequence_range TargetRange,
         int AlphabetDim = static_cast<int>(
             seqan3::alphabet_size<typename compact_sequence_range<QueryRange>::traits::alphabet_type>) + 1>
-    [[nodiscard]] static ksw_extz_t d2_align(
+    [[nodiscard]] static KswAlignResult d2_align(
         const compact_sequence_range<QueryRange>& query,
         const compact_sequence_range<TargetRange>& target,
         const KswScoringMatrix<AlphabetDim>& scoring_matrix,

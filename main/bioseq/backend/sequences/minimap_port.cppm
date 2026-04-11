@@ -52,7 +52,9 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
-import alignment;
+// NOTE: intentionally no `import alignment;` — everything KSW2-related now
+// comes from the self-contained `alignment_hwy` module (KswAlignResult,
+// KswFlags, the align kernels, etc.).
 import alignment_hwy;
 
 export {
@@ -1119,10 +1121,9 @@ constexpr auto generate_score_matrix(
  * Equivalent to mm_align_pair() in align.c:340-372.
  * If q == q2 && e == e2, uses affine gap (z2); otherwise dual-affine (d2).
  *
- * Returns a freshly populated `ksw_extz_t` instead of mutating an out-
- * parameter, and accepts the scoring matrix as a compile-time sized
- * `KswScoringMatrix<AlphabetDim>` wrapper so the kernel can inline
- * reads.
+ * Returns a fresh `KswAlignResult` that owns its CIGAR vector (no manual
+ * cleanup required).  Accepts the scoring matrix as a compile-time sized
+ * `KswScoringMatrix<AlphabetDim>` wrapper so the kernel can inline reads.
  *
  * @tparam AlphabetDim             Alphabet dimension (alphabet_size + 1)
  * @param query_view               Encoded query segment
@@ -1132,16 +1133,16 @@ constexpr auto generate_score_matrix(
  * @param align_bandwidth          Bandwidth for alignment
  * @param end_bonus                End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
  * @param zdrop                    Z-drop threshold
- * @param ksw_flag                 KSW2 flags (KSW_EZ_EXTZ_ONLY, KSW_EZ_RIGHT, KSW_EZ_REV_CIGAR, etc.)
- * @return Populated `ksw_extz_t` result
+ * @param ksw_flags                KSW2 behaviour toggles (see `KswFlags`)
+ * @return Populated `KswAlignResult`
  */
 template<int AlphabetDim>
-[[nodiscard]] ksw_extz_t ksw2_align_pair(
+[[nodiscard]] KswAlignResult ksw2_align_pair(
     KswSequenceView query_view,
     KswSequenceView target_view,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
     const Minimap2Params& params,
-    int align_bandwidth, int end_bonus, int zdrop, int ksw_flag)
+    int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags)
 {
     if (params.gap_open1 == params.gap_open2 && params.gap_ext1 == params.gap_ext2) {
         const KswZ2Params z2_params{
@@ -1150,7 +1151,7 @@ template<int AlphabetDim>
             .band_width = align_bandwidth,
             .z_drop     = zdrop,
             .end_bonus  = end_bonus,
-            .flags      = ksw_flag,
+            .flags      = ksw_flags,
         };
         return HwyKsw2Aligner::z2_align<AlphabetDim>(
             query_view, target_view, scoring_matrix, z2_params);
@@ -1163,19 +1164,22 @@ template<int AlphabetDim>
         .band_width       = align_bandwidth,
         .z_drop           = zdrop,
         .end_bonus        = end_bonus,
-        .flags            = ksw_flag,
+        .flags            = ksw_flags,
     };
     return HwyKsw2Aligner::d2_align<AlphabetDim>(
         query_view, target_view, scoring_matrix, d2_params);
 }
 
 /**
- * @brief Append KSW2 CIGAR ops to a CigarOp vector, merging adjacent same-op entries.
+ * @brief Append KSW2 CIGAR ops to a `CigarOp` vector, merging adjacent same-op entries.
+ *
+ * `source` is the owning CIGAR from `KswAlignResult::cigar`, with each entry
+ * encoded as `(length << 4) | opcode`.
  */
-void append_cigar(std::vector<CigarOp>& destination, int cigar_count, const uint32_t* cigar) {
-    for (int cigar_idx = 0; cigar_idx < cigar_count; ++cigar_idx) {
-        const uint32_t opcode = cigar[cigar_idx] & 0xf;
-        const uint32_t op_length = cigar[cigar_idx] >> 4;
+void append_cigar(std::vector<CigarOp>& destination, const std::vector<uint32_t>& source) {
+    for (uint32_t entry : source) {
+        const uint32_t opcode    = entry & 0xfU;
+        const uint32_t op_length = entry >> 4;
         if (!destination.empty() && destination.back().opcode == opcode) {
             destination.back().length += op_length;
         } else {
@@ -1285,7 +1289,9 @@ void align_regions(
 
         region.cigar.clear();
         region.dp_score = 0;
-        ksw_extz_t ksw_result{};
+        // Tracks the zdropped state across the left/gap-fill/right phases so
+        // the right-extension path can skip when a prior phase bailed out.
+        bool prior_phase_zdropped = false;
 
         JustLog("[minimap_port] Align regions. Determine actions.");
 
@@ -1293,8 +1299,6 @@ void align_regions(
         int32_t final_ref_start = seed_ref_start;
         int32_t final_query_start = seed_query_start;
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-            const int32_t left_query_len = seed_query_start - outer_query_start;
-            const int32_t left_target_len = seed_ref_start - outer_ref_start;
             // Copy and reverse both query and target segments
             std::vector<uint8_t> query_buf(query_strand_base + outer_query_start,
                                            query_strand_base + seed_query_start);
@@ -1303,25 +1307,23 @@ void align_regions(
             std::reverse(query_buf.begin(), query_buf.end());
             std::reverse(target_buf.begin(), target_buf.end());
 
-            {
-                ksw_result = ksw2_align_pair<AlphabetDim>(
-                    KswSequenceView(query_buf),
-                    KswSequenceView(target_buf),
-                    scoring_matrix, params,
-                    align_bandwidth, params.end_bonus, params.zdrop,
-                    KSW_EZ_EXTZ_ONLY | KSW_EZ_RIGHT | KSW_EZ_REV_CIGAR);
-                KswCigarGuard cigar_guard(ksw_result);
-                if (ksw_result.n_cigar > 0) {
-                    append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
-                    region.dp_score += ksw_result.max;
-                }
-                const int32_t left_ref_offset = ksw_result.reach_end
-                    ? ksw_result.mqe_t + 1 : ksw_result.max_t + 1;
-                final_ref_start = seed_ref_start - left_ref_offset;
-                const int32_t left_query_offset = ksw_result.reach_end
-                    ? seed_query_start - outer_query_start : ksw_result.max_q + 1;
-                final_query_start = seed_query_start - left_query_offset;
+            const KswAlignResult left_result = ksw2_align_pair<AlphabetDim>(
+                KswSequenceView(query_buf),
+                KswSequenceView(target_buf),
+                scoring_matrix, params,
+                align_bandwidth, params.end_bonus, params.zdrop,
+                KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
+            if (!left_result.cigar.empty()) {
+                append_cigar(region.cigar, left_result.cigar);
+                region.dp_score += left_result.max;
             }
+            const int32_t left_ref_offset = left_result.reach_end
+                ? left_result.mqe_t + 1 : left_result.max_t + 1;
+            final_ref_start = seed_ref_start - left_ref_offset;
+            const int32_t left_query_offset = left_result.reach_end
+                ? seed_query_start - outer_query_start : left_result.max_q + 1;
+            final_query_start = seed_query_start - left_query_offset;
+            prior_phase_zdropped = left_result.zdropped;
         } else {
             JustLog("[minimap_port] Skip left extension: seed_query_start={} > outer_query_start={} && seed_ref_start={} > outer_ref_start={}", seed_query_start, outer_query_start, seed_ref_start, outer_ref_start);
         }
@@ -1336,25 +1338,25 @@ void align_regions(
                 const uint8_t* gap_query_seq = query_strand_base + seed_query_start;
                 const uint8_t* gap_target_seq = target_encoded.data() + seed_ref_start;
 
-                ksw_result = ksw2_align_pair<AlphabetDim>(
+                const KswAlignResult fill_result = ksw2_align_pair<AlphabetDim>(
                     KswSequenceView(gap_query_seq, gap_query_len),
                     KswSequenceView(gap_target_seq, gap_target_len),
                     scoring_matrix, params,
                     align_bandwidth, -1, params.zdrop,
-                    KSW_EZ_APPROX_MAX);
-                KswCigarGuard cigar_guard(ksw_result);
-                if (ksw_result.n_cigar > 0) {
-                    append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
+                    KswFlags{.approx_max = true});
+                if (!fill_result.cigar.empty()) {
+                    append_cigar(region.cigar, fill_result.cigar);
                 }
-                if (ksw_result.zdropped) {
-                    final_ref_end = seed_ref_start + (ksw_result.max_t + 1);
-                    final_query_end = seed_query_start + (ksw_result.max_q + 1);
-                    region.dp_score += ksw_result.max;
+                if (fill_result.zdropped) {
+                    final_ref_end = seed_ref_start + (fill_result.max_t + 1);
+                    final_query_end = seed_query_start + (fill_result.max_q + 1);
+                    region.dp_score += fill_result.max;
                 } else {
                     final_ref_end = seed_ref_end;
                     final_query_end = seed_query_end;
-                    region.dp_score += ksw_result.score;
+                    region.dp_score += fill_result.score;
                 }
+                prior_phase_zdropped = fill_result.zdropped;
             }
         } else {
             JustLog("[minimap_port] Skip gap filling: region.seed_count={} > 1", region.seed_count);
@@ -1363,7 +1365,7 @@ void align_regions(
         }
 
         // === 3. Right extension ===
-        if (!ksw_result.zdropped
+        if (!prior_phase_zdropped
             && seed_query_end < outer_query_end
             && seed_ref_end < outer_ref_end)
         {
@@ -1372,25 +1374,24 @@ void align_regions(
             const uint8_t* right_query_seq = query_strand_base + seed_query_end;
             const uint8_t* right_target_seq = target_encoded.data() + seed_ref_end;
 
-            ksw_result = ksw2_align_pair<AlphabetDim>(
+            const KswAlignResult right_result = ksw2_align_pair<AlphabetDim>(
                 KswSequenceView(right_query_seq, right_query_len),
                 KswSequenceView(right_target_seq, right_target_len),
                 scoring_matrix, params,
                 align_bandwidth, params.end_bonus, params.zdrop,
-                KSW_EZ_EXTZ_ONLY);
-            KswCigarGuard cigar_guard(ksw_result);
-            if (ksw_result.n_cigar > 0) {
-                append_cigar(region.cigar, ksw_result.n_cigar, ksw_result.cigar);
-                region.dp_score += ksw_result.max;
+                KswFlags{.extz_only = true});
+            if (!right_result.cigar.empty()) {
+                append_cigar(region.cigar, right_result.cigar);
+                region.dp_score += right_result.max;
             }
-            const int32_t right_ref_offset = ksw_result.reach_end
-                ? ksw_result.mqe_t + 1 : ksw_result.max_t + 1;
+            const int32_t right_ref_offset = right_result.reach_end
+                ? right_result.mqe_t + 1 : right_result.max_t + 1;
             final_ref_end = seed_ref_end + right_ref_offset;
-            const int32_t right_query_offset = ksw_result.reach_end
-                ? outer_query_end - seed_query_end : ksw_result.max_q + 1;
+            const int32_t right_query_offset = right_result.reach_end
+                ? outer_query_end - seed_query_end : right_result.max_q + 1;
             final_query_end = seed_query_end + right_query_offset;
         } else {
-            JustLog("[minimap_port] Skip right extension: !ksw_result.zdropped={} && seed_query_end={} < outer_query_end={} && seed_ref_end={} < outer_ref_end={}", !ksw_result.zdropped, seed_query_end, outer_query_end, seed_ref_end, outer_ref_end);
+            JustLog("[minimap_port] Skip right extension: !prior_phase_zdropped={} && seed_query_end={} < outer_query_end={} && seed_ref_end={} < outer_ref_end={}", !prior_phase_zdropped, seed_query_end, outer_query_end, seed_ref_end, outer_ref_end);
         }
 
         // Set final coordinates from alignment extent (align.c:897-899)
