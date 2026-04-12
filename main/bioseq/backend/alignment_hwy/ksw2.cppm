@@ -1720,10 +1720,12 @@ template<int AlphabetDim>
 
         // --- Compute scores -----------------------------------------
         if (!flags.generic_score) {
+            JustLog("[ksw2] [calc-score] Iterate from {}..{} on anti_diagonal={}", band_start_raw, band_end_raw, anti_diagonal);
             for (int target_position = band_start_raw;
                  target_position <= band_end_raw;
                  target_position += kVecBytes)
             {
+                JustLog("   - iterate step = {}", target_position);
                 auto target_lanes = hn::LoadU(byte_tag,
                     reinterpret_cast<const int8_t*>(&target_bytes[target_position]));
                 auto query_lanes = hn::LoadU(byte_tag,
@@ -1739,6 +1741,7 @@ template<int AlphabetDim>
                 hn::StoreU(cell_scores, byte_tag, diag_score_base + target_position);
             }
         } else {
+            JustLog("[ksw2] [calc-score] Generic score: Iterate from {}..{} on anti_diagonal={}", band_start_raw, band_end_raw, anti_diagonal);
             for (int target_position = band_start_raw;
                  target_position <= band_end_raw;
                  ++target_position)
