@@ -1126,8 +1126,8 @@ constexpr auto generate_score_matrix(
  * `KswScoringMatrix<AlphabetDim>` wrapper so the kernel can inline reads.
  *
  * @tparam AlphabetDim             Alphabet dimension (alphabet_size + 1)
- * @param query_view               Encoded query segment
- * @param target_view              Encoded target segment
+ * @param query_view               Encoded query segment (byte span)
+ * @param target_view              Encoded target segment (byte span)
  * @param scoring_matrix           Scoring matrix wrapper
  * @param params                   Algorithm parameters
  * @param align_bandwidth          Bandwidth for alignment
@@ -1138,8 +1138,8 @@ constexpr auto generate_score_matrix(
  */
 template<int AlphabetDim>
 [[nodiscard]] KswAlignResult ksw2_align_pair(
-    KswSequenceView query_view,
-    KswSequenceView target_view,
+    std::span<const uint8_t> query_view,
+    std::span<const uint8_t> target_view,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
     const Minimap2Params& params,
     int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags)
@@ -1203,8 +1203,8 @@ void append_cigar(std::vector<CigarOp>& destination, const std::vector<uint32_t>
  *
  * The scoring matrix is passed as a compile-time-sized
  * `KswScoringMatrix<AlphabetDim>` so the KSW2 kernels can inline scoring
- * matrix reads. Sequence segments are wrapped in `KswSequenceView` views
- * before being forwarded to `ksw2_align_pair`.
+ * matrix reads. Sequence segments are passed as `std::span<const uint8_t>`
+ * views to `ksw2_align_pair`.
  *
  * @tparam AlphabetDim             Scoring matrix dimension (alphabet_size + 1)
  * @param regions                     Alignment regions to fill with DP results
@@ -1308,8 +1308,8 @@ void align_regions(
             std::reverse(target_buf.begin(), target_buf.end());
 
             const KswAlignResult left_result = ksw2_align_pair<AlphabetDim>(
-                KswSequenceView(query_buf),
-                KswSequenceView(target_buf),
+                std::span<const uint8_t>(query_buf),
+                std::span<const uint8_t>(target_buf),
                 scoring_matrix, params,
                 align_bandwidth, params.end_bonus, params.zdrop,
                 KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
@@ -1339,8 +1339,8 @@ void align_regions(
                 const uint8_t* gap_target_seq = target_encoded.data() + seed_ref_start;
 
                 const KswAlignResult fill_result = ksw2_align_pair<AlphabetDim>(
-                    KswSequenceView(gap_query_seq, gap_query_len),
-                    KswSequenceView(gap_target_seq, gap_target_len),
+                    std::span<const uint8_t>(gap_query_seq, static_cast<size_t>(gap_query_len)),
+                    std::span<const uint8_t>(gap_target_seq, static_cast<size_t>(gap_target_len)),
                     scoring_matrix, params,
                     align_bandwidth, -1, params.zdrop,
                     KswFlags{.approx_max = true});
@@ -1375,8 +1375,8 @@ void align_regions(
             const uint8_t* right_target_seq = target_encoded.data() + seed_ref_end;
 
             const KswAlignResult right_result = ksw2_align_pair<AlphabetDim>(
-                KswSequenceView(right_query_seq, right_query_len),
-                KswSequenceView(right_target_seq, right_target_len),
+                std::span<const uint8_t>(right_query_seq, static_cast<size_t>(right_query_len)),
+                std::span<const uint8_t>(right_target_seq, static_cast<size_t>(right_target_len)),
                 scoring_matrix, params,
                 align_bandwidth, params.end_bonus, params.zdrop,
                 KswFlags{.extz_only = true});
@@ -1963,8 +1963,8 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         // Extract encoded rank arrays directly from compact sequences —
         // replaces the old encode_sequence() / reverse_complement() free functions.
         // These byte buffers are needed for the slice + in-place-reverse flow
-        // used by the left-extension phase; KSW2 itself receives thin
-        // KswSequenceView wrappers pointing into them.
+        // used by the left-extension phase; KSW2 receives std::span views
+        // pointing into them.
         auto query_fwd = query_seq.to_encoded_vector();
         auto query_rev_enc = query_seq.to_reverse_complement_encoded_vector();
         auto target_encoded = target_seq.to_encoded_vector();
