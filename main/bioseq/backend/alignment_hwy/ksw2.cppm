@@ -466,12 +466,19 @@ inline void ksw_backtrack_cigar(
 
 template<
     KswAlignerMode mode,
+    bool is_reversed,
     int AlphabetDim,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
     typename partial_score_t = int8_t,
     typename full_score_t    = int32_t>
 [[nodiscard]] KswAlignResult ksw2_core_align(
-    std::span<const uint8_t> query_bytes,
-    std::span<const uint8_t> target_bytes_in,
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    size_t query_start,
+    size_t query_end,
+    size_t target_start,
+    size_t target_end,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
     int8_t gap_open,
     int8_t gap_extend,
@@ -499,8 +506,8 @@ template<
         return result;
     }
 
-    const size_t query_len  = query_bytes.size();
-    const size_t target_len = target_bytes_in.size();
+    const size_t query_len  = query_end - query_start;
+    const size_t target_len = target_end - target_start;
     if (query_len == 0 || target_len == 0) return result;
 
     const int qlen = static_cast<int>(query_len);
@@ -623,9 +630,24 @@ template<
     }
 
     // --- Prepare sequences -------------------------------------------------
-    for (size_t i = 0; i < query_len; ++i)
-        state.query_reversed[i] = query_bytes[query_len - 1 - i];
-    std::memcpy(state.target_bytes, target_bytes_in.data(), target_len);
+    // Encode only the needed sub-regions from compact_sequence_range.
+    // is_reversed controls whether the query uses reverse-complement encoding.
+    auto query_enc = query_seq.template to_encoded_vector<is_reversed>(query_start, query_end);
+    auto target_enc = target_seq.template to_encoded_vector<false>(target_start, target_end);
+
+    if (flags.reverse_cigar) {
+        // Left extension: caller previously reversed both slices before passing
+        // to ksw2. The algorithm always reverses the query, so the double-reversal
+        // cancels out — copy query forward.  Target needs single reversal.
+        std::memcpy(state.query_reversed, query_enc.data(), query_len);
+        for (size_t i = 0; i < target_len; ++i)
+            state.target_bytes[i] = target_enc[target_len - 1 - i];
+    } else {
+        // Normal: algorithm reverses query, target stays forward.
+        for (size_t i = 0; i < query_len; ++i)
+            state.query_reversed[i] = query_enc[query_len - 1 - i];
+        std::memcpy(state.target_bytes, target_enc.data(), target_len);
+    }
 
     // --- Approximate max tracking ------------------------------------------
     full_score_t approx_score = 0;
@@ -1247,77 +1269,24 @@ template<
 }
 
 // =============================================================================
-// Thin wrappers that convert Z2/D2 params to core_align calls.
-// =============================================================================
-
-template<int AlphabetDim>
-[[nodiscard]] KswAlignResult hwy_align_z2(
-    std::span<const uint8_t> query,
-    std::span<const uint8_t> target,
-    const KswScoringMatrix<AlphabetDim>& scoring_matrix,
-    const KswZ2Params& params)
-{
-    return ksw2_core_align<KswAlignerMode::SINGLE_AFFINE, AlphabetDim>(
-        query, target, scoring_matrix,
-        params.gap_open, params.gap_extend,
-        params.gap_open, params.gap_extend,
-        params.band_width, params.z_drop, params.end_bonus, params.flags);
-}
-
-template<int AlphabetDim>
-[[nodiscard]] KswAlignResult hwy_align_d2(
-    std::span<const uint8_t> query,
-    std::span<const uint8_t> target,
-    const KswScoringMatrix<AlphabetDim>& scoring_matrix,
-    KswD2Params params)
-{
-    if (params.gap_open_long + params.gap_extend_long
-        < params.gap_open_short + params.gap_extend_short)
-    {
-        std::swap(params.gap_open_short, params.gap_open_long);
-        std::swap(params.gap_extend_short, params.gap_extend_long);
-    }
-    return ksw2_core_align<KswAlignerMode::DUAL_AFFINE, AlphabetDim>(
-        query, target, scoring_matrix,
-        params.gap_open_short, params.gap_extend_short,
-        params.gap_open_long, params.gap_extend_long,
-        params.band_width, params.z_drop, params.end_bonus, params.flags);
-}
-
-// =============================================================================
 // HwyKsw2Aligner — public API
 // =============================================================================
 
 class HwyKsw2Aligner {
 public:
-    template<int AlphabetDim>
-    [[nodiscard]] static KswAlignResult z2_align(
-        std::span<const uint8_t> query,
-        std::span<const uint8_t> target,
-        const KswScoringMatrix<AlphabetDim>& scoring_matrix,
-        const KswZ2Params& params)
-    {
-        return hwy_align_z2<AlphabetDim>(query, target, scoring_matrix, params);
-    }
-
-    template<int AlphabetDim>
-    [[nodiscard]] static KswAlignResult d2_align(
-        std::span<const uint8_t> query,
-        std::span<const uint8_t> target,
-        const KswScoringMatrix<AlphabetDim>& scoring_matrix,
-        const KswD2Params& params)
-    {
-        return hwy_align_d2<AlphabetDim>(query, target, scoring_matrix, params);
-    }
-
     template<
+        bool is_reversed,
         supports_compact_sequence_range QueryRange,
         supports_compact_sequence_range TargetRange,
         int AlphabetDim = static_cast<int>(
-            seqan3::alphabet_size<typename compact_sequence_range<QueryRange>::traits::alphabet_type>) + 1>
+            compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
     [[nodiscard]] static KswAlignResult z2_align(
         const compact_sequence_range<QueryRange>& query,
         const compact_sequence_range<TargetRange>& target,
+        size_t query_start,
+        size_t query_end,
+        size_t target_start,
+        size_t target_end,
         const KswScoringMatrix<AlphabetDim>& scoring_matrix,
         const KswZ2Params& params)
     {
@@ -1325,35 +1294,46 @@ public:
             typename compact_sequence_range<QueryRange>::traits::alphabet_type,
             typename compact_sequence_range<TargetRange>::traits::alphabet_type>,
             "KSW2 requires query and target to share the same alphabet type.");
-        auto qb = query.to_encoded_vector();
-        auto tb = target.to_encoded_vector();
-        return hwy_align_z2<AlphabetDim>(
-            std::span<const uint8_t>(qb),
-            std::span<const uint8_t>(tb),
-            scoring_matrix, params);
+        return ksw2_core_align<KswAlignerMode::SINGLE_AFFINE, is_reversed, AlphabetDim>(
+            query, target, query_start, query_end, target_start, target_end,
+            scoring_matrix,
+            params.gap_open, params.gap_extend,
+            params.gap_open, params.gap_extend,
+            params.band_width, params.z_drop, params.end_bonus, params.flags);
     }
 
     template<
+        bool is_reversed,
         supports_compact_sequence_range QueryRange,
         supports_compact_sequence_range TargetRange,
         int AlphabetDim = static_cast<int>(
-            seqan3::alphabet_size<typename compact_sequence_range<QueryRange>::traits::alphabet_type>) + 1>
+            compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
     [[nodiscard]] static KswAlignResult d2_align(
         const compact_sequence_range<QueryRange>& query,
         const compact_sequence_range<TargetRange>& target,
+        size_t query_start,
+        size_t query_end,
+        size_t target_start,
+        size_t target_end,
         const KswScoringMatrix<AlphabetDim>& scoring_matrix,
-        const KswD2Params& params)
+        KswD2Params params)
     {
         static_assert(std::is_same_v<
             typename compact_sequence_range<QueryRange>::traits::alphabet_type,
             typename compact_sequence_range<TargetRange>::traits::alphabet_type>,
             "KSW2 requires query and target to share the same alphabet type.");
-        auto qb = query.to_encoded_vector();
-        auto tb = target.to_encoded_vector();
-        return hwy_align_d2<AlphabetDim>(
-            std::span<const uint8_t>(qb),
-            std::span<const uint8_t>(tb),
-            scoring_matrix, params);
+        if (params.gap_open_long + params.gap_extend_long
+            < params.gap_open_short + params.gap_extend_short)
+        {
+            std::swap(params.gap_open_short, params.gap_open_long);
+            std::swap(params.gap_extend_short, params.gap_extend_long);
+        }
+        return ksw2_core_align<KswAlignerMode::DUAL_AFFINE, is_reversed, AlphabetDim>(
+            query, target, query_start, query_end, target_start, target_end,
+            scoring_matrix,
+            params.gap_open_short, params.gap_extend_short,
+            params.gap_open_long, params.gap_extend_long,
+            params.band_width, params.z_drop, params.end_bonus, params.flags);
     }
 };
 

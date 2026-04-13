@@ -497,6 +497,55 @@ struct compact_sequence_range_base {
     }
 
     /**
+     * @brief Extract a sub-region of the sequence as rank values, with optional
+     *        reverse-complement transformation.
+     *
+     * @tparam is_reversed  When false, encodes [bp_from, bp_to) in forward order.
+     *                      When true, produces the same result as slicing the full
+     *                      reverse-complement encoding at [bp_from, bp_to).
+     * @param bp_from  Start position (inclusive, 0-based)
+     * @param bp_to    End position (exclusive, 0-based)
+     * @return Vector of uint8_t rank values for the requested region
+     */
+    template<bool is_reversed>
+    [[nodiscard]] std::vector<uint8_t> to_encoded_vector(size_t bp_from, size_t bp_to) const {
+        if (bp_from >= bp_to) return {};
+        const size_t region_length = bp_to - bp_from;
+        std::vector<uint8_t> encoded_ranks(region_length);
+
+        if constexpr (!is_reversed) {
+            size_t write_pos = 0;
+            size_t pos = 0;
+            for (const auto& bp_rank : iterable<BP>()) {
+                if (pos >= bp_to) break;
+                if (pos >= bp_from) {
+                    encoded_ranks[write_pos++] = static_cast<uint8_t>(bp_rank);
+                }
+                ++pos;
+            }
+        } else {
+            // Reverse-complement: revcomp[i] = complement(original[L-1-i])
+            // So revcomp[bp_from..bp_to) maps to original[L-bp_to..L-bp_from)
+            // read forward, complemented, written in reverse order.
+            const size_t L = bp_size();
+            const size_t orig_from = L - bp_to;
+            const size_t orig_to = L - bp_from;
+            size_t write_pos = region_length;
+            size_t pos = 0;
+            for (const auto& bp_rank : iterable<BP>()) {
+                if (pos >= orig_to) break;
+                if (pos >= orig_from) {
+                    --write_pos;
+                    encoded_ranks[write_pos] = static_cast<uint8_t>(
+                        traits::letter_complement(static_cast<storage_unit_t>(bp_rank)));
+                }
+                ++pos;
+            }
+        }
+        return encoded_ranks;
+    }
+
+    /**
      * @brief Extract reverse-complement base-pair rank values to a vector of uint8_t.
      *
      * Iterates the sequence left-to-right, complements each nucleotide using

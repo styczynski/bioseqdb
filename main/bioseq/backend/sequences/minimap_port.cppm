@@ -1107,12 +1107,8 @@ constexpr auto generate_score_matrix(
     return matrix;
 }
 
-// encode_sequence() and reverse_complement() removed:
-// Use compact_sequence_range::to_encoded_vector() and
-// compact_sequence_range::to_reverse_complement_encoded_vector() instead.
-
 // ============================================================================
-// KSW2 alignment wrapper — calls Aligner<ALIGN_ALGORITHM_KSW2>::d2()/z2()
+// KSW2 alignment wrapper
 // ============================================================================
 
 /**
@@ -1121,25 +1117,27 @@ constexpr auto generate_score_matrix(
  * Equivalent to mm_align_pair() in align.c:340-372.
  * If q == q2 && e == e2, uses affine gap (z2); otherwise dual-affine (d2).
  *
- * Returns a fresh `KswAlignResult` that owns its CIGAR vector (no manual
- * cleanup required).  Accepts the scoring matrix as a compile-time sized
- * `KswScoringMatrix<AlphabetDim>` wrapper so the kernel can inline reads.
+ * Accepts compact_sequence_range directly with sub-region indices so that
+ * sequence encoding happens only inside the KSW2 core kernel.
  *
- * @tparam AlphabetDim             Alphabet dimension (alphabet_size + 1)
- * @param query_view               Encoded query segment (byte span)
- * @param target_view              Encoded target segment (byte span)
- * @param scoring_matrix           Scoring matrix wrapper
- * @param params                   Algorithm parameters
- * @param align_bandwidth          Bandwidth for alignment
- * @param end_bonus                End bonus (typically -1 for gap filling, opt->end_bonus for extensions)
- * @param zdrop                    Z-drop threshold
- * @param ksw_flags                KSW2 behaviour toggles (see `KswFlags`)
- * @return Populated `KswAlignResult`
+ * @tparam is_reversed  True for reverse-complement query strand
+ * @tparam QueryRange   compact_sequence_range type for query
+ * @tparam TargetRange  compact_sequence_range type for target
+ * @tparam AlphabetDim  Scoring matrix dimension (default: alphabet_size + 1)
  */
-template<int AlphabetDim>
+template<
+    bool is_reversed,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    int AlphabetDim = static_cast<int>(
+        compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
 [[nodiscard]] KswAlignResult ksw2_align_pair(
-    std::span<const uint8_t> query_view,
-    std::span<const uint8_t> target_view,
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    size_t query_start,
+    size_t query_end,
+    size_t target_start,
+    size_t target_end,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
     const Minimap2Params& params,
     int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags)
@@ -1153,8 +1151,10 @@ template<int AlphabetDim>
             .end_bonus  = end_bonus,
             .flags      = ksw_flags,
         };
-        return HwyKsw2Aligner::z2_align<AlphabetDim>(
-            query_view, target_view, scoring_matrix, z2_params);
+        return HwyKsw2Aligner::z2_align<is_reversed>(
+            query_seq, target_seq,
+            query_start, query_end, target_start, target_end,
+            scoring_matrix, z2_params);
     }
     const KswD2Params d2_params{
         .gap_open_short   = static_cast<int8_t>(params.gap_open1),
@@ -1166,8 +1166,10 @@ template<int AlphabetDim>
         .end_bonus        = end_bonus,
         .flags            = ksw_flags,
     };
-    return HwyKsw2Aligner::d2_align<AlphabetDim>(
-        query_view, target_view, scoring_matrix, d2_params);
+    return HwyKsw2Aligner::d2_align<is_reversed>(
+        query_seq, target_seq,
+        query_start, query_end, target_start, target_end,
+        scoring_matrix, d2_params);
 }
 
 /**
@@ -1198,35 +1200,29 @@ void append_cigar(std::vector<CigarOp>& destination, const std::vector<uint32_t>
  *   2. Gap filling: align the entire region between first and last seeds
  *   3. Right extension: query/target from last seed to extended boundary
  *
- * Coordinates are derived from actual KSW2 alignment extent, not from the
- * padded window boundaries.
+ * Sequences are passed as compact_sequence_range references with sub-region
+ * indices — no pre-encoding into uint8_t vectors is needed. The KSW2 core
+ * kernel handles encoding of the specific regions it needs.
  *
- * The scoring matrix is passed as a compile-time-sized
- * `KswScoringMatrix<AlphabetDim>` so the KSW2 kernels can inline scoring
- * matrix reads. Sequence segments are passed as `std::span<const uint8_t>`
- * views to `ksw2_align_pair`.
- *
- * @tparam AlphabetDim             Scoring matrix dimension (alphabet_size + 1)
- * @param regions                     Alignment regions to fill with DP results
- * @param anchors                     Reordered anchor array
- * @param query_fwd                   Forward-strand query encoded as rank values
- * @param query_rev                   Reverse-complement query encoded as rank values
- * @param target_encoded              Target sequence encoded as rank values
- * @param scoring_matrix              KSW2 scoring matrix wrapper
- * @param params                      Minimap2 parameters
+ * @tparam QueryRange   compact_sequence_range type for query
+ * @tparam TargetRange  compact_sequence_range type for target
+ * @tparam AlphabetDim  Scoring matrix dimension (default: alphabet_size + 1)
  */
-template<int AlphabetDim>
+template<
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    int AlphabetDim = static_cast<int>(
+        compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
 void align_regions(
     std::vector<AlignRegion>& regions,
     const std::vector<Anchor>& anchors,
-    const std::vector<uint8_t>& query_fwd,
-    const std::vector<uint8_t>& query_rev,
-    const std::vector<uint8_t>& target_encoded,
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
     const KswScoringMatrix<AlphabetDim>& scoring_matrix,
     const Minimap2Params& params)
 {
-    const int32_t query_length = static_cast<int32_t>(query_fwd.size());
-    const int32_t target_length = static_cast<int32_t>(target_encoded.size());
+    const int32_t query_length = static_cast<int32_t>(query_seq.bp_size());
+    const int32_t target_length = static_cast<int32_t>(target_seq.bp_size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
 
     for (auto& region : regions) {
@@ -1283,126 +1279,125 @@ void align_regions(
             outer_query_end = query_length;
         }
 
-        // Select the query strand
-        const uint8_t* query_strand_base = region.is_reverse
-            ? query_rev.data() : query_fwd.data();
-
         region.cigar.clear();
         region.dp_score = 0;
-        // Tracks the zdropped state across the left/gap-fill/right phases so
-        // the right-extension path can skip when a prior phase bailed out.
         bool prior_phase_zdropped = false;
 
         JustLog("[minimap_port] Align regions. Determine actions.");
 
-        // === 1. Left extension ===
-        int32_t final_ref_start = seed_ref_start;
-        int32_t final_query_start = seed_query_start;
-        if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-            // Copy and reverse both query and target segments
-            std::vector<uint8_t> query_buf(query_strand_base + outer_query_start,
-                                           query_strand_base + seed_query_start);
-            std::vector<uint8_t> target_buf(target_encoded.data() + outer_ref_start,
-                                            target_encoded.data() + seed_ref_start);
-            std::reverse(query_buf.begin(), query_buf.end());
-            std::reverse(target_buf.begin(), target_buf.end());
-
-            const KswAlignResult left_result = ksw2_align_pair<AlphabetDim>(
-                std::span<const uint8_t>(query_buf),
-                std::span<const uint8_t>(target_buf),
-                scoring_matrix, params,
-                align_bandwidth, params.end_bonus, params.zdrop,
-                KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
-            if (!left_result.cigar.empty()) {
-                append_cigar(region.cigar, left_result.cigar);
-                region.dp_score += left_result.max;
-            }
-            const int32_t left_ref_offset = left_result.reach_end
-                ? left_result.mqe_t + 1 : left_result.max_t + 1;
-            final_ref_start = seed_ref_start - left_ref_offset;
-            const int32_t left_query_offset = left_result.reach_end
-                ? seed_query_start - outer_query_start : left_result.max_q + 1;
-            final_query_start = seed_query_start - left_query_offset;
-            prior_phase_zdropped = left_result.zdropped;
-        } else {
-            JustLog("[minimap_port] Skip left extension: seed_query_start={} > outer_query_start={} && seed_ref_start={} > outer_ref_start={}", seed_query_start, outer_query_start, seed_ref_start, outer_ref_start);
-        }
-
-        // === 2. Gap filling (entire region between first and last seed) ===
-        int32_t final_ref_end = seed_ref_start;
-        int32_t final_query_end = seed_query_start;
-        if (region.seed_count > 1) {
-            const int32_t gap_query_len = seed_query_end - seed_query_start;
-            const int32_t gap_target_len = seed_ref_end - seed_ref_start;
-            if (gap_query_len > 0 && gap_target_len > 0) {
-                const uint8_t* gap_query_seq = query_strand_base + seed_query_start;
-                const uint8_t* gap_target_seq = target_encoded.data() + seed_ref_start;
-
-                const KswAlignResult fill_result = ksw2_align_pair<AlphabetDim>(
-                    std::span<const uint8_t>(gap_query_seq, static_cast<size_t>(gap_query_len)),
-                    std::span<const uint8_t>(gap_target_seq, static_cast<size_t>(gap_target_len)),
+        // Dispatch the three alignment phases based on strand orientation.
+        // The is_reversed template parameter selects reverse-complement query
+        // encoding; left-extension reversal is handled inside ksw2_core_align
+        // via the reverse_cigar flag.
+        auto do_align = [&]<bool strand_reversed>() {
+            // === 1. Left extension ===
+            int32_t final_ref_start = seed_ref_start;
+            int32_t final_query_start = seed_query_start;
+            if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
+                const KswAlignResult left_result = ksw2_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(outer_query_start),
+                    static_cast<size_t>(seed_query_start),
+                    static_cast<size_t>(outer_ref_start),
+                    static_cast<size_t>(seed_ref_start),
                     scoring_matrix, params,
-                    align_bandwidth, -1, params.zdrop,
-                    KswFlags{.approx_max = true});
-                if (!fill_result.cigar.empty()) {
-                    append_cigar(region.cigar, fill_result.cigar);
+                    align_bandwidth, params.end_bonus, params.zdrop,
+                    KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
+                if (!left_result.cigar.empty()) {
+                    append_cigar(region.cigar, left_result.cigar);
+                    region.dp_score += left_result.max;
                 }
-                if (fill_result.zdropped) {
-                    final_ref_end = seed_ref_start + (fill_result.max_t + 1);
-                    final_query_end = seed_query_start + (fill_result.max_q + 1);
-                    region.dp_score += fill_result.max;
-                } else {
-                    final_ref_end = seed_ref_end;
-                    final_query_end = seed_query_end;
-                    region.dp_score += fill_result.score;
+                const int32_t left_ref_offset = left_result.reach_end
+                    ? left_result.mqe_t + 1 : left_result.max_t + 1;
+                final_ref_start = seed_ref_start - left_ref_offset;
+                const int32_t left_query_offset = left_result.reach_end
+                    ? seed_query_start - outer_query_start : left_result.max_q + 1;
+                final_query_start = seed_query_start - left_query_offset;
+                prior_phase_zdropped = left_result.zdropped;
+            } else {
+                JustLog("[minimap_port] Skip left extension: seed_query_start={} > outer_query_start={} && seed_ref_start={} > outer_ref_start={}", seed_query_start, outer_query_start, seed_ref_start, outer_ref_start);
+            }
+
+            // === 2. Gap filling (entire region between first and last seed) ===
+            int32_t final_ref_end = seed_ref_start;
+            int32_t final_query_end = seed_query_start;
+            if (region.seed_count > 1) {
+                const int32_t gap_query_len = seed_query_end - seed_query_start;
+                const int32_t gap_target_len = seed_ref_end - seed_ref_start;
+                if (gap_query_len > 0 && gap_target_len > 0) {
+                    const KswAlignResult fill_result = ksw2_align_pair<strand_reversed>(
+                        query_seq, target_seq,
+                        static_cast<size_t>(seed_query_start),
+                        static_cast<size_t>(seed_query_end),
+                        static_cast<size_t>(seed_ref_start),
+                        static_cast<size_t>(seed_ref_end),
+                        scoring_matrix, params,
+                        align_bandwidth, -1, params.zdrop,
+                        KswFlags{.approx_max = true});
+                    if (!fill_result.cigar.empty()) {
+                        append_cigar(region.cigar, fill_result.cigar);
+                    }
+                    if (fill_result.zdropped) {
+                        final_ref_end = seed_ref_start + (fill_result.max_t + 1);
+                        final_query_end = seed_query_start + (fill_result.max_q + 1);
+                        region.dp_score += fill_result.max;
+                    } else {
+                        final_ref_end = seed_ref_end;
+                        final_query_end = seed_query_end;
+                        region.dp_score += fill_result.score;
+                    }
+                    prior_phase_zdropped = fill_result.zdropped;
                 }
-                prior_phase_zdropped = fill_result.zdropped;
+            } else {
+                JustLog("[minimap_port] Skip gap filling: region.seed_count={} > 1", region.seed_count);
+                final_ref_end = seed_ref_end;
+                final_query_end = seed_query_end;
             }
-        } else {
-            JustLog("[minimap_port] Skip gap filling: region.seed_count={} > 1", region.seed_count);
-            final_ref_end = seed_ref_end;
-            final_query_end = seed_query_end;
-        }
 
-        // === 3. Right extension ===
-        if (!prior_phase_zdropped
-            && seed_query_end < outer_query_end
-            && seed_ref_end < outer_ref_end)
-        {
-            const int32_t right_query_len = outer_query_end - seed_query_end;
-            const int32_t right_target_len = outer_ref_end - seed_ref_end;
-            const uint8_t* right_query_seq = query_strand_base + seed_query_end;
-            const uint8_t* right_target_seq = target_encoded.data() + seed_ref_end;
-
-            const KswAlignResult right_result = ksw2_align_pair<AlphabetDim>(
-                std::span<const uint8_t>(right_query_seq, static_cast<size_t>(right_query_len)),
-                std::span<const uint8_t>(right_target_seq, static_cast<size_t>(right_target_len)),
-                scoring_matrix, params,
-                align_bandwidth, params.end_bonus, params.zdrop,
-                KswFlags{.extz_only = true});
-            if (!right_result.cigar.empty()) {
-                append_cigar(region.cigar, right_result.cigar);
-                region.dp_score += right_result.max;
+            // === 3. Right extension ===
+            if (!prior_phase_zdropped
+                && seed_query_end < outer_query_end
+                && seed_ref_end < outer_ref_end)
+            {
+                const KswAlignResult right_result = ksw2_align_pair<strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<size_t>(seed_query_end),
+                    static_cast<size_t>(outer_query_end),
+                    static_cast<size_t>(seed_ref_end),
+                    static_cast<size_t>(outer_ref_end),
+                    scoring_matrix, params,
+                    align_bandwidth, params.end_bonus, params.zdrop,
+                    KswFlags{.extz_only = true});
+                if (!right_result.cigar.empty()) {
+                    append_cigar(region.cigar, right_result.cigar);
+                    region.dp_score += right_result.max;
+                }
+                const int32_t right_ref_offset = right_result.reach_end
+                    ? right_result.mqe_t + 1 : right_result.max_t + 1;
+                final_ref_end = seed_ref_end + right_ref_offset;
+                const int32_t right_query_offset = right_result.reach_end
+                    ? outer_query_end - seed_query_end : right_result.max_q + 1;
+                final_query_end = seed_query_end + right_query_offset;
+            } else {
+                JustLog("[minimap_port] Skip right extension: !prior_phase_zdropped={} && seed_query_end={} < outer_query_end={} && seed_ref_end={} < outer_ref_end={}", !prior_phase_zdropped, seed_query_end, outer_query_end, seed_ref_end, outer_ref_end);
             }
-            const int32_t right_ref_offset = right_result.reach_end
-                ? right_result.mqe_t + 1 : right_result.max_t + 1;
-            final_ref_end = seed_ref_end + right_ref_offset;
-            const int32_t right_query_offset = right_result.reach_end
-                ? outer_query_end - seed_query_end : right_result.max_q + 1;
-            final_query_end = seed_query_end + right_query_offset;
-        } else {
-            JustLog("[minimap_port] Skip right extension: !prior_phase_zdropped={} && seed_query_end={} < outer_query_end={} && seed_ref_end={} < outer_ref_end={}", !prior_phase_zdropped, seed_query_end, outer_query_end, seed_ref_end, outer_ref_end);
-        }
 
-        // Set final coordinates from alignment extent (align.c:897-899)
-        region.ref_start = final_ref_start;
-        region.ref_end = final_ref_end;
-        if (!region.is_reverse) {
-            region.query_start = final_query_start;
-            region.query_end = final_query_end;
+            // Set final coordinates from alignment extent (align.c:897-899)
+            region.ref_start = final_ref_start;
+            region.ref_end = final_ref_end;
+            if (!region.is_reverse) {
+                region.query_start = final_query_start;
+                region.query_end = final_query_end;
+            } else {
+                region.query_start = query_length - final_query_end;
+                region.query_end = query_length - final_query_start;
+            }
+        };
+
+        if (region.is_reverse) {
+            do_align.template operator()<true>();
         } else {
-            region.query_start = query_length - final_query_end;
-            region.query_end = query_length - final_query_start;
+            do_align.template operator()<false>();
         }
 
         // Compute dp_max_score from CIGAR (simplified mm_update_extra)
@@ -1960,25 +1955,17 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
     // map.c:568-570: align_regs() returns immediately if !(opt->flag & MM_F_CIGAR)
     if (params.do_cigar) {
-        // Extract encoded rank arrays directly from compact sequences —
-        // replaces the old encode_sequence() / reverse_complement() free functions.
-        // These byte buffers are needed for the slice + in-place-reverse flow
-        // used by the left-extension phase; KSW2 receives std::span views
-        // pointing into them.
-        auto query_fwd = query_seq.to_encoded_vector();
-        auto query_rev_enc = query_seq.to_reverse_complement_encoded_vector();
-        auto target_encoded = target_seq.to_encoded_vector();
-
         // Build compile-time sized scoring matrix wrapper for the KSW2 kernels.
-        constexpr int matrix_dimension = static_cast<int>(alphabet_size) + 1;
         const auto scoring_matrix = generate_score_matrix<alphabet_size>(
             static_cast<int8_t>(params.match_score),
             static_cast<int8_t>(params.mismatch_pen),
             static_cast<int8_t>(params.sc_ambi));
 
-        align_regions<matrix_dimension>(regions, reordered_anchors,
-                                         query_fwd, query_rev_enc, target_encoded,
-                                         scoring_matrix, params);
+        // Sequences are passed directly — encoding of specific sub-regions
+        // happens lazily inside the KSW2 core kernel.
+        align_regions(regions, reordered_anchors,
+                      query_seq, target_seq,
+                      scoring_matrix, params);
 
         // Re-classify after DP (like align_regs does in map.c:572-574)
         classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
