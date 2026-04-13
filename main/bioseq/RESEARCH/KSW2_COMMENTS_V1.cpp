@@ -30,36 +30,23 @@
  supports_compact_sequence_range R,
  int AlphabetDim = compact_sequence_range<R>::traits::alphabet_size + 1,
  typename partial_score_t = int8_t,
- typename score_t = int32_t
+ typename score_t = int32_t,
 >
 [[nodiscard]] KswAlignResult hwy_align_d2_new(
+// AI Note: I want you to accept here both sequences as parameters without using KswSequenceView (KswSequenceView should be removed as it does nothing).
+// Instead of doing:
+// auto query_fwd = query_seq.to_encoded_vector();
+// auto query_rev_enc = query_seq.to_reverse_complement_encoded_vector();
+// in minimap2_port.cppm you should remove it and instead encode sequence here in this function!
  const compact_sequence_range<R>& query,
  const compact_sequence_range<R>& target,
+ const size_t outer_query_start, // AI Note: passed from align_regions() instead of passing KswSequenceView
+ const size_t seed_query_start,  // AI Note: passed from align_regions() instead of passing KswSequenceView
  const KswScoringMatrix<AlphabetDim>& scoring_matrix,
  const KswD2Params& params
 ) {
  // AI Note: I dissalow usage of global tags - KswByteTag/KswByteTagU/KswScoreTag and KswByteVec/KswScoreVe and kKswVecBytes/kKswScoreLanes
  // Everything should be parametrized by some template type eiter as external input (score_t and partial_score_t) or relying on some sequence properties like typename seq_traits::letter_unit
- 
- /*
-     using KswByteTag   = hn::ScalableTag<int8_t>;
-     using KswByteTagU  = hn::ScalableTag<uint8_t>;
-     using KswScoreTag  = hn::Full128<int32_t>;  // exact-max inner loop (4 lanes)
-
-     inline constexpr int kKswVecBytes = static_cast<int>(hn::MaxLanes(KswByteTag{}));
-     inline constexpr int kKswScoreLanes = static_cast<int>(hn::MaxLanes(KswScoreTag{}));
-
-     static_assert(kKswVecBytes == 16,
-         "KSW2 bit-exact output is validated only for 16-byte SIMD vectors. "
-         "Wider SIMD targets need validation before this assertion is relaxed.");
-     static_assert(kKswScoreLanes == 4,
-         "KSW2 exact-max inner loop processes 4 int32 lanes per step; widening "
-         "KswScoreTag would require re-validating the score-block max extraction.");
-
-     using KswByteVec   = hn::Vec<KswByteTag>;
-     using KswScoreVec  = hn::Vec<KswScoreTag>;
-     static constexpr int kVecBytes = kKswVecBytes;
- */
   using seq_traits = compact_sequence_range<R>::traits;
   // AI Note: We might thing that we can use scalable tag parameterized by letter unit, this is the smallest type that can hold single letter of the sequence
   // but for alphabet of size 1 or 2 this will break
@@ -340,12 +327,6 @@
                target_position <= band_end_raw;
                target_position += kVecBytes)
           {
-             // AI Note: Okay this is interesting
-             // We need to load some type that is traits::letter_type but the sqeuence is encoded on traits::storage_unit. We need to extract individual bits of the elements of the sequence.
-             // Previously we had here encode_sequence() to do that and later we just used hn::Load from uint8_t* 
-             // I hate it because why we have to translate entire sequence at once 
-             // encode_sequence() should not be used
-             // 
               auto target_lanes = hn::LoadU(byte_tag,
                   reinterpret_cast<const int8_t*>(&target_bytes[target_position]));
               auto query_lanes = hn::LoadU(byte_tag,
