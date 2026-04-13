@@ -144,6 +144,7 @@ struct compact_sequence_range_base {
         static constexpr storage_unit used_storage_mask = (static_cast<storage_unit>(1) << unit_used_bits) - 1;
 
         static constexpr size_t alphabet_size = seqan3::alphabet_size<alphabet_t>;
+        static constexpr size_t alphabet_size_n = alphabet_size + 1;
 
         using letter_unit = typename boost::uint_t<seqan3::detail::ceil_log2(alphabet_size)>::least; // smallest type to hold single letter of this alphabet. This is useful when you want to hold each letter separately for processing
         static constexpr size_t bits_per_char_unit = sizeof(letter_unit) * 8; // width in bits of letter_unit. bits_per_char_unit should always be greater or equal to bits_per_char
