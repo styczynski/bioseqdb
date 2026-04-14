@@ -56,6 +56,7 @@ import bioseq_sequences.kmers;
 // comes from the self-contained `alignment_hwy` module (KswAlignResult,
 // KswFlags, the align kernels, etc.).
 import alignment_hwy;
+import block_aligner_hwy;
 
 export {
 
@@ -102,6 +103,12 @@ struct Minimap2Params {
     /// When true, perform base-level alignment via KSW2 and produce CIGAR.
     /// Equivalent to MM_F_CIGAR flag in minimap2. By default we use -c in build.sh
     bool    do_cigar       = true;
+
+    /// When true, use block aligner instead of KSW2 for gap-filling alignment.
+    /// Block aligner supports only single-affine gaps; extensions still use KSW2.
+    bool    use_block_aligner = true;
+    size_t  block_min_size    = 32;
+    size_t  block_max_size    = 256;
 };
 
 // ============================================================================
@@ -1173,6 +1180,46 @@ template<
 }
 
 /**
+ * @brief Dispatch to block aligner for single-affine gap alignment.
+ *
+ * Uses the first gap penalty pair (gap_open1, gap_ext1) only.
+ * Block aligner does not support dual-affine gaps.
+ */
+template<
+    bool is_reversed,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    int AlphabetDim = static_cast<int>(
+        compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
+[[nodiscard]] KswAlignResult block_aligner_align_pair(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    size_t query_start,
+    size_t query_end,
+    size_t target_start,
+    size_t target_end,
+    const KswScoringMatrix<AlphabetDim>& scoring_matrix,
+    const Minimap2Params& params,
+    [[maybe_unused]] int align_bandwidth,
+    [[maybe_unused]] int end_bonus,
+    int zdrop,
+    KswFlags ksw_flags)
+{
+    BlockAlignerParams ba_params{
+        .gap_open   = static_cast<int8_t>(params.gap_open1),
+        .gap_extend = static_cast<int8_t>(params.gap_ext1),
+        .min_size   = params.block_min_size,
+        .max_size   = params.block_max_size,
+        .x_drop     = ksw_flags.extz_only ? zdrop : -1,
+        .flags      = ksw_flags,
+    };
+    return HwyBlockAligner::align<is_reversed>(
+        query_seq, target_seq,
+        query_start, query_end, target_start, target_end,
+        scoring_matrix, ba_params);
+}
+
+/**
  * @brief Append KSW2 CIGAR ops to a `CigarOp` vector, merging adjacent same-op entries.
  *
  * `source` is the owning CIGAR from `KswAlignResult::cigar`, with each entry
@@ -1325,15 +1372,25 @@ void align_regions(
                 const int32_t gap_query_len = seed_query_end - seed_query_start;
                 const int32_t gap_target_len = seed_ref_end - seed_ref_start;
                 if (gap_query_len > 0 && gap_target_len > 0) {
-                    const KswAlignResult fill_result = ksw2_align_pair<strand_reversed>(
-                        query_seq, target_seq,
-                        static_cast<size_t>(seed_query_start),
-                        static_cast<size_t>(seed_query_end),
-                        static_cast<size_t>(seed_ref_start),
-                        static_cast<size_t>(seed_ref_end),
-                        scoring_matrix, params,
-                        align_bandwidth, -1, params.zdrop,
-                        KswFlags{.approx_max = true});
+                    const KswAlignResult fill_result = params.use_block_aligner
+                        ? block_aligner_align_pair<strand_reversed>(
+                            query_seq, target_seq,
+                            static_cast<size_t>(seed_query_start),
+                            static_cast<size_t>(seed_query_end),
+                            static_cast<size_t>(seed_ref_start),
+                            static_cast<size_t>(seed_ref_end),
+                            scoring_matrix, params,
+                            align_bandwidth, -1, params.zdrop,
+                            KswFlags{.approx_max = true})
+                        : ksw2_align_pair<strand_reversed>(
+                            query_seq, target_seq,
+                            static_cast<size_t>(seed_query_start),
+                            static_cast<size_t>(seed_query_end),
+                            static_cast<size_t>(seed_ref_start),
+                            static_cast<size_t>(seed_ref_end),
+                            scoring_matrix, params,
+                            align_bandwidth, -1, params.zdrop,
+                            KswFlags{.approx_max = true});
                     if (!fill_result.cigar.empty()) {
                         append_cigar(region.cigar, fill_result.cigar);
                     }
