@@ -35,6 +35,7 @@ export module block_aligner_hwy;
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_simd.utils;
 import alignment_hwy;
 
 export {
@@ -84,64 +85,6 @@ constexpr size_t ba_div_ceil(size_t n, size_t d) {
 // =============================================================================
 // SIMD helpers — all templated on tag D
 // =============================================================================
-
-/// Broadcast the last (highest-index) lane to all lanes.
-template<class D>
-HWY_INLINE hn::Vec<D> ba_broadcast_last(D d, hn::Vec<D> v) {
-    HWY_ALIGN typename hn::TFromD<D> tmp[hn::MaxLanes(d)];
-    hn::Store(v, d, tmp);
-    return hn::Set(d, tmp[hn::Lanes(d) - 1]);
-}
-
-/// Extract the last lane as a scalar.
-template<class D>
-HWY_INLINE typename hn::TFromD<D> ba_extract_last(D d, hn::Vec<D> v) {
-    HWY_ALIGN typename hn::TFromD<D> tmp[hn::MaxLanes(d)];
-    hn::Store(v, d, tmp);
-    return tmp[hn::Lanes(d) - 1];
-}
-
-/// Replace lane 0 with val, keeping all other lanes.
-template<class D>
-HWY_INLINE hn::Vec<D> ba_insert_first(D d, hn::Vec<D> v, typename hn::TFromD<D> val) {
-    return hn::IfThenElse(hn::FirstN(d, 1), hn::Set(d, val), v);
-}
-
-/// Extract lane at runtime index.
-template<class D>
-HWY_INLINE typename hn::TFromD<D> ba_slow_extract(D d, hn::Vec<D> v, size_t lane) {
-    HWY_ALIGN typename hn::TFromD<D> tmp[hn::MaxLanes(d)];
-    hn::Store(v, d, tmp);
-    return tmp[lane];
-}
-
-/// Find the first lane equal to max_val. Returns lane index.
-template<class D>
-HWY_INLINE size_t ba_hargmax(D d, hn::Vec<D> v, typename hn::TFromD<D> max_val) {
-    const auto idx = hn::FindFirstTrue(d, hn::Eq(v, hn::Set(d, max_val)));
-    DEBUG_ASSERT(idx >= 0, "ba_hargmax: max_val must exist in vector");
-    return static_cast<size_t>(idx >= 0 ? idx : 0);
-}
-
-/// Lane-independent left shift by N i16 positions.
-/// Each 128-bit sub-lane shifts independently; low positions fill with zero.
-/// Maps to _mm256_bslli_epi128 on AVX2.
-template<size_t N, class D>
-HWY_INLINE hn::Vec<D> ba_shift_left_zero(D d, hn::Vec<D> v) {
-    return hn::ShiftLeftBytes<N * sizeof(typename hn::TFromD<D>)>(d, v);
-}
-
-/// Shift vector `a` left by 1 lane, borrowing the last lane from `b`.
-/// Result[0] = b[L-1], Result[i>0] = a[i-1].
-template<class D>
-HWY_INLINE hn::Vec<D> ba_shift_left_1_borrow(D d, hn::Vec<D> a, hn::Vec<D> b) {
-    auto shifted = hn::SlideUpLanes(d, a, 1);
-    HWY_ALIGN typename hn::TFromD<D> tmp[hn::MaxLanes(d)];
-    hn::Store(b, d, tmp);
-    return hn::IfThenElse(hn::FirstN(d, 1),
-                          hn::Set(d, tmp[hn::Lanes(d) - 1]),
-                          shifted);
-}
 
 /// ConcatLowerUpper: result = [b_hi | a_lo].
 /// On AVX2 shifts by L/2 = STEP lanes.
@@ -593,11 +536,11 @@ auto ba_get_prefix_scan_consts(D d, hn::Vec<D> gap_extend)
     -> std::pair<hn::Vec<D>, hn::Vec<D>>
 {
     const size_t L = hn::Lanes(d);
-    auto shift1 = ba_shift_left_zero<1>(d, gap_extend);
+    auto shift1 = lanes_shift_left_zero<1>(d, gap_extend);
     shift1 = hn::SaturatedAdd(shift1, gap_extend);
-    auto shift2 = ba_shift_left_zero<2>(d, shift1);
+    auto shift2 = lanes_shift_left_zero<2>(d, shift1);
     shift2 = hn::SaturatedAdd(shift2, shift1);
-    auto shift4 = ba_shift_left_zero<4>(d, shift2);
+    auto shift4 = lanes_shift_left_zero<4>(d, shift2);
     shift4 = hn::SaturatedAdd(shift4, shift2);
 
     if (L > 8) {
@@ -622,17 +565,17 @@ HWY_INLINE hn::Vec<D> ba_prefix_scan(
     D d, hn::Vec<D> input, hn::Vec<D> gap_cost, hn::Vec<D> lane_consts)
 {
     const size_t L = hn::Lanes(d);
-    auto shift1 = ba_shift_left_zero<1>(d, input);
+    auto shift1 = lanes_shift_left_zero<1>(d, input);
     shift1 = hn::SaturatedAdd(shift1, gap_cost);
     shift1 = hn::Max(input, shift1);
 
     auto gap2 = hn::ShiftLeft<1>(gap_cost);
-    auto shift2 = ba_shift_left_zero<2>(d, shift1);
+    auto shift2 = lanes_shift_left_zero<2>(d, shift1);
     shift2 = hn::SaturatedAdd(shift2, gap2);
     shift2 = hn::Max(shift1, shift2);
 
     auto gap4 = hn::ShiftLeft<2>(gap_cost);
-    auto shift4 = ba_shift_left_zero<4>(d, shift2);
+    auto shift4 = lanes_shift_left_zero<4>(d, shift2);
     shift4 = hn::SaturatedAdd(shift4, gap4);
     shift4 = hn::Max(shift2, shift4);
 
@@ -684,7 +627,7 @@ HWY_INLINE void ba_record_trace(
     }
 
     auto temp_trace_R = hn::VecFromMask(d, hn::Eq(R11, D11_open));
-    auto trace_R_shifted = ba_shift_left_1_borrow(d, temp_trace_R, prev_trace_R);
+    auto trace_R_shifted = lanes_shift_left_1_borrow(d, temp_trace_R, prev_trace_R);
     auto trace_C_open = hn::VecFromMask(d, hn::Eq(C11, C11_open));
 
     HWY_ALIGN int16_t co_arr[hn::MaxLanes(d)], tr_arr[hn::MaxLanes(d)];
@@ -760,7 +703,7 @@ HWY_INLINE auto ba_place_block(
             auto C10 = hn::Load(d, C_col + i);
 
             // Diagonal: shift D10 left by 1, borrow from D_corner
-            auto D00 = ba_shift_left_1_borrow(d, D10, D_corner);
+            auto D00 = lanes_shift_left_1_borrow(d, D10, D_corner);
             D_corner = D10;
 
             // Score lookup
@@ -771,7 +714,7 @@ HWY_INLINE auto ba_place_block(
 
             // Origin cell: insert relative_zero at lane 0
             if (start_i + i == 0 && start_j + j == 0) {
-                D11 = ba_insert_first(d, D11, relative_zero);
+                D11 = insert_first(d, D11, relative_zero);
             }
 
             // Column gap: C[i][j] = max(C[i][j-1] + ext, D[i][j-1] + open)
@@ -785,7 +728,7 @@ HWY_INLINE auto ba_place_block(
 
             // Cross-vector R dependency
             R11 = hn::Max(R11, hn::SaturatedAdd(
-                ba_broadcast_last(d, R01), gap_extend_all));
+                broadcast_last(d, R01), gap_extend_all));
             D11 = hn::Max(D11, R11);
             R01 = R11;
 
@@ -813,8 +756,8 @@ HWY_INLINE auto ba_place_block(
 
         // End of column — update bottom border
         D_corner = hn::Set(d, BA_MIN);
-        D_row[j] = ba_extract_last(d, D11);
-        R_row[j] = ba_extract_last(d, R11);
+        D_row[j] = extract_last(d, D11);
+        R_row[j] = extract_last(d, R11);
 
         // Early exit past both sequence ends (global alignment only)
         if constexpr (!X_DROP) {
@@ -1107,9 +1050,9 @@ void ba_align_core(
             if constexpr (X_DROP) {
                 // Track argmax position
                 int16_t lane_max = D_max_max;
-                size_t arg_lane = ba_hargmax(d, D_max, lane_max);
-                int16_t arg_i = ba_slow_extract(d, D_argmax_i, arg_lane);
-                int16_t arg_j = ba_slow_extract(d, D_argmax_j, arg_lane);
+                size_t arg_lane = lane_hargmax(d, D_max, lane_max);
+                int16_t arg_i = extract_lane(d, D_argmax_i, arg_lane);
+                int16_t arg_j = extract_lane(d, D_argmax_j, arg_lane);
                 switch (dir) {
                 case BlockDirection::Right:
                     best_argmax_i = state_i + static_cast<size_t>(arg_i) + arg_lane;

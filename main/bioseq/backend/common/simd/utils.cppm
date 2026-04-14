@@ -17,6 +17,59 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+template<class D, size_t index = 0, typename stored_type = hn::TFromD<D>>
+inline constexpr stored_type extract_last(D d, hn::Vec<D> v) {
+    HWY_ALIGN stored_type tmp[hn::MaxLanes(d)];
+    hn::Store(v, d, tmp);
+    return tmp[hn::Lanes(d) - 1 - index];
+}
+
+template<typename D, size_t index = 0>
+inline constexpr hn::Vec<D> broadcast_last(D d, hn::Vec<D> v) {
+    return hn::Set(d, extract_last<D, index>(d, v));
+}
+
+template<class D, size_t first_count = 1, typename stored_type = hn::TFromD<D>>
+inline constexpr hn::Vec<D> insert_first(D d, hn::Vec<D> v, stored_type val) {
+    return hn::IfThenElse(hn::FirstN(d, first_count), hn::Set(d, val), v);
+}
+
+/// Extract lane at runtime index.
+template<class D, typename stored_type = hn::TFromD<D>>
+HWY_INLINE stored_type extract_lane(D d, hn::Vec<D> v, size_t lane) {
+    HWY_ALIGN stored_type tmp[hn::MaxLanes(d)];
+    hn::Store(v, d, tmp);
+    return tmp[lane];
+}
+
+/// Find the first lane equal to max_val. Returns lane index.
+template<class D, typename stored_type = hn::TFromD<D>>
+HWY_INLINE size_t lane_hargmax(D d, hn::Vec<D> v, stored_type max_val) {
+    const auto idx = hn::FindFirstTrue(d, hn::Eq(v, hn::Set(d, max_val)));
+    DEBUG_ASSERT(idx >= 0, "ba_hargmax: max_val must exist in vector");
+    return static_cast<size_t>(idx >= 0 ? idx : 0);
+}
+
+/// Lane-independent left shift by N i16 positions.
+/// Each 128-bit sub-lane shifts independently; low positions fill with zero.
+/// Maps to _mm256_bslli_epi128 on AVX2.
+template<size_t N, class D>
+HWY_INLINE hn::Vec<D> lanes_shift_left_zero(D d, hn::Vec<D> v) {
+    return hn::ShiftLeftBytes<N * sizeof(typename hn::TFromD<D>)>(d, v);
+}
+
+/// Shift vector `a` left by 1 lane, borrowing the last lane from `b`.
+/// Result[0] = b[L-1], Result[i>0] = a[i-1].
+template<class D, typename stored_type = hn::TFromD<D>>
+HWY_INLINE hn::Vec<D> lanes_shift_left_1_borrow(D d, hn::Vec<D> a, hn::Vec<D> b) {
+    auto shifted = hn::SlideUpLanes(d, a, 1);
+    HWY_ALIGN stored_type tmp[hn::MaxLanes(d)];
+    hn::Store(b, d, tmp);
+    return hn::IfThenElse(hn::FirstN(d, 1),
+                          hn::Set(d, tmp[hn::Lanes(d) - 1]),
+                          shifted);
+}
+
 // template <class D, class VecT>
 // std::string hwy_str(const D& d, const VecT& v);
 
