@@ -52,10 +52,9 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
-// NOTE: intentionally no `import alignment;` — everything KSW2-related now
-// comes from the self-contained `alignment_hwy` module (KswAlignResult,
-// KswFlags, the align kernels, etc.).
+import bioseq_cigar;
 import alignment_hwy;
+import alignment_hwy_utils;
 import block_aligner_hwy;
 
 export {
@@ -111,27 +110,7 @@ struct Minimap2Params {
     size_t  block_max_size    = 256;
 };
 
-// ============================================================================
-// CIGAR operation codes — same as minimap2 (minimap.h)
-// ============================================================================
-
-constexpr uint32_t CIGAR_MATCH     = 0;
-constexpr uint32_t CIGAR_INS       = 1;
-constexpr uint32_t CIGAR_DEL       = 2;
-constexpr uint32_t CIGAR_EQ        = 7;
-constexpr uint32_t CIGAR_X         = 8;
-
-// ============================================================================
-// Result structures
-// ============================================================================
-
-/**
- * @brief Single CIGAR operation: length + operation code.
- */
-struct CigarOp {
-    uint32_t length;
-    uint32_t opcode;
-};
+// CIGAR opcodes and CigarOp are imported from bioseq_cigar module.
 
 /**
  * @brief PAF-like alignment result.
@@ -1070,49 +1049,7 @@ void filter_secondary_regions(
 // Phase 7: Base-level alignment — dual-affine gap DP (KSW2 equivalent)
 // ============================================================================
 
-/**
- * @brief Generate a scoring matrix for sequence alignment, abstracted over alphabet size.
- *
- * Creates an (AlphabetSize+1) x (AlphabetSize+1) matrix where:
- *   - Diagonal entries (i==j, i < AlphabetSize) = +match_score
- *   - Off-diagonal entries (i!=j, both < AlphabetSize) = -mismatch_pen
- *   - Last row/column (ambiguity/wildcard) = -sc_ambi
- *
- * For dna4 (AlphabetSize=4), this produces the standard 5x5 minimap2 matrix
- * for {A=0, C=1, G=2, T=3, wildcard=4}. The matrix dimension (AlphabetSize+1)
- * matches KSW2's 'm' parameter and is wrapped in a templated
- * `KswScoringMatrix` so the KSW2 kernels can inline array reads.
- *
- * @tparam AlphabetSize  Number of regular symbols (e.g. 4 for DNA without ambiguity)
- * @param match_score    Score for matching bases (positive value)
- * @param mismatch_pen   Penalty for mismatches (positive value, negated internally)
- * @param sc_ambi        Penalty for ambiguous bases (positive value, negated internally)
- * @return KswScoringMatrix<AlphabetSize + 1> ready to hand to KSW2
- */
-template<size_t AlphabetSize>
-constexpr auto generate_score_matrix(
-    int8_t match_score, int8_t mismatch_pen, int8_t sc_ambi)
-{
-    constexpr int matrix_dimension = static_cast<int>(AlphabetSize) + 1;
-    KswScoringMatrix<matrix_dimension> matrix{};
-    const int8_t positive_match = match_score > 0
-        ? match_score : static_cast<int8_t>(-match_score);
-    const int8_t negative_mismatch = mismatch_pen > 0
-        ? static_cast<int8_t>(-mismatch_pen) : mismatch_pen;
-    const int8_t ambiguity_penalty = sc_ambi > 0
-        ? static_cast<int8_t>(-sc_ambi) : sc_ambi;
-    for (int matrix_row = 0; matrix_row < static_cast<int>(AlphabetSize); ++matrix_row) {
-        for (int matrix_col = 0; matrix_col < static_cast<int>(AlphabetSize); ++matrix_col) {
-            matrix.at(matrix_row, matrix_col) = (matrix_row == matrix_col)
-                ? positive_match : negative_mismatch;
-        }
-        matrix.at(matrix_row, static_cast<int>(AlphabetSize)) = ambiguity_penalty;
-    }
-    for (int matrix_col = 0; matrix_col <= static_cast<int>(AlphabetSize); ++matrix_col) {
-        matrix.at(static_cast<int>(AlphabetSize), matrix_col) = ambiguity_penalty;
-    }
-    return matrix;
-}
+// generate_score_matrix is now ScoringMatrix<R>::generate in alignment_hwy_utils.
 
 // ============================================================================
 // KSW2 alignment wrapper
@@ -1135,9 +1072,7 @@ constexpr auto generate_score_matrix(
 template<
     bool is_reversed,
     supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    int AlphabetDim = static_cast<int>(
-        compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
+    supports_compact_sequence_range TargetRange>
 [[nodiscard]] KswAlignResult ksw2_align_pair(
     const compact_sequence_range<QueryRange>& query_seq,
     const compact_sequence_range<TargetRange>& target_seq,
@@ -1145,7 +1080,7 @@ template<
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const KswScoringMatrix<AlphabetDim>& scoring_matrix,
+    const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params,
     int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags)
 {
@@ -1188,9 +1123,7 @@ template<
 template<
     bool is_reversed,
     supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    int AlphabetDim = static_cast<int>(
-        compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
+    supports_compact_sequence_range TargetRange>
 [[nodiscard]] KswAlignResult block_aligner_align_pair(
     const compact_sequence_range<QueryRange>& query_seq,
     const compact_sequence_range<TargetRange>& target_seq,
@@ -1198,7 +1131,7 @@ template<
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const KswScoringMatrix<AlphabetDim>& scoring_matrix,
+    const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params,
     [[maybe_unused]] int align_bandwidth,
     [[maybe_unused]] int end_bonus,
@@ -1219,23 +1152,7 @@ template<
         scoring_matrix, ba_params);
 }
 
-/**
- * @brief Append KSW2 CIGAR ops to a `CigarOp` vector, merging adjacent same-op entries.
- *
- * `source` is the owning CIGAR from `KswAlignResult::cigar`, with each entry
- * encoded as `(length << 4) | opcode`.
- */
-void append_cigar(std::vector<CigarOp>& destination, const std::vector<uint32_t>& source) {
-    for (uint32_t entry : source) {
-        const uint32_t opcode    = entry & 0xfU;
-        const uint32_t op_length = entry >> 4;
-        if (!destination.empty() && destination.back().opcode == opcode) {
-            destination.back().length += op_length;
-        } else {
-            destination.push_back({op_length, opcode});
-        }
-    }
-}
+// append_cigar is now in bioseq_cigar module.
 
 /**
  * @brief Perform base-level alignment for each region using KSW2.
@@ -1257,15 +1174,13 @@ void append_cigar(std::vector<CigarOp>& destination, const std::vector<uint32_t>
  */
 template<
     supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    int AlphabetDim = static_cast<int>(
-        compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
+    supports_compact_sequence_range TargetRange>
 void align_regions(
     std::vector<AlignRegion>& regions,
     const std::vector<Anchor>& anchors,
     const compact_sequence_range<QueryRange>& query_seq,
     const compact_sequence_range<TargetRange>& target_seq,
-    const KswScoringMatrix<AlphabetDim>& scoring_matrix,
+    const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params)
 {
     const int32_t query_length = static_cast<int32_t>(query_seq.bp_size());
@@ -1774,30 +1689,7 @@ void compute_mapping_quality(
 // PAF output — MatchResultCollection
 // ============================================================================
 
-/// CIGAR operation code to character, matching MM_CIGAR_STR "MIDNSHP=XB"
-constexpr std::array<char, 10> CIGAR_OP_CHAR = {
-    'M', 'I', 'D', 'N', 'S', 'H', 'P', '=', 'X', 'B'
-};
-
-/**
- * @brief Format a single CIGAR string from CigarOp vector.
- *
- * Each op is printed as "{length}{op_char}" using the same encoding as
- * minimap2's MM_CIGAR_STR (index 0='M', 1='I', 2='D', 7='=', 8='X', etc.).
- */
-[[nodiscard]] std::string format_cigar(const std::vector<CigarOp>& cigar) {
-    std::string cigar_string;
-    cigar_string.reserve(cigar.size() * 5);
-    for (const auto& cigar_op : cigar) {
-        cigar_string += std::to_string(cigar_op.length);
-        if (cigar_op.opcode < CIGAR_OP_CHAR.size()) {
-            cigar_string += CIGAR_OP_CHAR[cigar_op.opcode];
-        } else {
-            cigar_string += '?';
-        }
-    }
-    return cigar_string;
-}
+// CIGAR_OP_CHAR and format_cigar are now in bioseq_cigar module.
 
 /**
  * @brief Owning container of alignment results with PAF output formatting.
@@ -2012,8 +1904,8 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
     // map.c:568-570: align_regs() returns immediately if !(opt->flag & MM_F_CIGAR)
     if (params.do_cigar) {
-        // Build compile-time sized scoring matrix wrapper for the KSW2 kernels.
-        const auto scoring_matrix = generate_score_matrix<alphabet_size>(
+        // Build unified scoring matrix for KSW2 and block aligner.
+        const auto scoring_matrix = ScoringMatrix<QueryRange>::generate(
             static_cast<int8_t>(params.match_score),
             static_cast<int8_t>(params.mismatch_pen),
             static_cast<int8_t>(params.sc_ambi));

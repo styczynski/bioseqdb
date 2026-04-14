@@ -36,7 +36,9 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_simd.utils;
+import bioseq_cigar;
 import alignment_hwy;
+import alignment_hwy_utils;
 
 export {
 
@@ -170,50 +172,7 @@ private:
     size_t capacity_ = 0;
 };
 
-// =============================================================================
-// BlockSIMDMatrix — SIMD-friendly scoring matrix
-// =============================================================================
-
-/// Scoring matrix with 16-byte-aligned rows for PSHUFB lookup.
-/// Built from KswScoringMatrix. Row AlphabetDim is the NULL/padding row
-/// with all entries set to INT8_MIN.
-template<int AlphabetDim>
-struct BlockSIMDMatrix {
-    static constexpr size_t ROWS = static_cast<size_t>(AlphabetDim) + 1;
-    static constexpr size_t COLS = 16;
-    static constexpr uint8_t NULL_BYTE = static_cast<uint8_t>(AlphabetDim);
-
-    HWY_ALIGN int8_t scores[ROWS * COLS] = {};
-
-    static BlockSIMDMatrix from_ksw(const KswScoringMatrix<AlphabetDim>& ksw) {
-        BlockSIMDMatrix m;
-        for (auto& s : m.scores) s = INT8_MIN;
-        for (int i = 0; i < AlphabetDim; ++i) {
-            for (int j = 0; j < AlphabetDim; ++j) {
-                m.scores[static_cast<size_t>(i) * COLS + j] = ksw.at(i, j);
-            }
-        }
-        return m;
-    }
-
-    [[nodiscard]] const int8_t* row_ptr(size_t i) const {
-        return scores + i * COLS;
-    }
-
-    /// Score lookup: for reference char c and L query chars at query_ptr,
-    /// return L i16 scores. Uses scalar loop (PSHUFB optimization TODO).
-    template<class D>
-    HWY_INLINE hn::Vec<D> get_scores(D d, uint8_t c,
-                                      const uint8_t* query_ptr) const {
-        const size_t L = hn::Lanes(d);
-        const int8_t* row = row_ptr(c);
-        HWY_ALIGN int16_t result[hn::MaxLanes(d)];
-        for (size_t i = 0; i < L; ++i) {
-            result[i] = static_cast<int16_t>(row[query_ptr[i]]);
-        }
-        return hn::Load(d, result);
-    }
-};
+// BlockSIMDMatrix is replaced by ScoringMatrix from alignment_hwy_utils.
 
 // =============================================================================
 // BlockAlignedBuf — SIMD-aligned i16 buffer
@@ -258,73 +217,7 @@ private:
     size_t capacity_ = 0;
 };
 
-// =============================================================================
-// Block CIGAR
-// =============================================================================
-
-enum class BlockCigarOp : uint8_t {
-    Sentinel = 0, M = 1, Eq = 2, X = 3, I = 4, D = 5
-};
-
-struct BlockCigarEntry {
-    BlockCigarOp op = BlockCigarOp::Sentinel;
-    size_t len = 0;
-};
-
-/// Run-length-encoded CIGAR. Operations added in reverse during traceback,
-/// then reversed at the end.
-class BlockCigar {
-public:
-    BlockCigar() = default;
-
-    explicit BlockCigar(size_t max_len)
-        : ops_(max_len + 5, BlockCigarEntry{BlockCigarOp::Sentinel, 0})
-        , idx_(1) {}
-
-    void clear() {
-        std::fill(ops_.begin(), ops_.end(),
-                  BlockCigarEntry{BlockCigarOp::Sentinel, 0});
-        idx_ = 1;
-    }
-
-    void add(BlockCigarOp op) {
-        const size_t add = (op != ops_[idx_ - 1].op) ? 1 : 0;
-        idx_ += add;
-        ops_[idx_ - 1].op = op;
-        ops_[idx_ - 1].len += 1;
-    }
-
-    void reverse() {
-        std::reverse(ops_.begin() + 1,
-                     ops_.begin() + static_cast<ptrdiff_t>(idx_));
-    }
-
-    [[nodiscard]] size_t len() const { return idx_ - 1; }
-
-    /// Convert to KSW2-compatible CIGAR: vector of (length << 4 | opcode).
-    [[nodiscard]] std::vector<uint32_t> to_ksw2_cigar() const {
-        std::vector<uint32_t> result;
-        result.reserve(len());
-        for (size_t k = 1; k < idx_; ++k) {
-            const auto& entry = ops_[k];
-            uint32_t opcode = 0;
-            switch (entry.op) {
-                case BlockCigarOp::M:
-                case BlockCigarOp::Eq:
-                case BlockCigarOp::X:  opcode = 0; break;
-                case BlockCigarOp::I:  opcode = 1; break;
-                case BlockCigarOp::D:  opcode = 2; break;
-                default: continue;
-            }
-            result.push_back((static_cast<uint32_t>(entry.len) << 4) | opcode);
-        }
-        return result;
-    }
-
-private:
-    std::vector<BlockCigarEntry> ops_;
-    size_t idx_ = 1;
-};
+// BlockCigarOp, BlockCigarEntry, BlockCigar are now in bioseq_cigar module.
 
 // =============================================================================
 // BlockTrace — trace data for CIGAR generation
@@ -650,10 +543,11 @@ HWY_INLINE void ba_record_trace(
 /// Compute a width x height rectangle of the DP matrix.
 /// For DOWN shifts, the caller swaps query<->ref and the border buffers.
 /// Returns (D_max, D_argmax_i, D_argmax_j) per lane.
-template<bool TRACE, bool X_DROP, int AlphabetDim, class D>
+template<bool TRACE, bool X_DROP, supports_compact_sequence_range R, class D,
+         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
 HWY_INLINE auto ba_place_block(
     D d,
-    const BlockSIMDMatrix<AlphabetDim>& matrix,
+    const ScoringMatrix<R>& matrix,
     int8_t gap_open_neg,
     int8_t gap_extend_neg,
     const BlockPaddedBytes& query,
@@ -864,14 +758,15 @@ HWY_INLINE int16_t ba_suffix_max(D d, const int16_t* buf, size_t buf_len) {
 
 enum class BlockDirection : uint8_t { Right, Down, Grow };
 
-template<bool TRACE, bool X_DROP, int AlphabetDim, class D>
+template<bool TRACE, bool X_DROP, supports_compact_sequence_range R, class D,
+         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
 void ba_align_core(
     D d,
     int32_t& out_score,
     size_t& out_query_idx,
     size_t& out_ref_idx,
     BlockAlignerScratch& alloc,
-    const BlockSIMDMatrix<AlphabetDim>& matrix,
+    const ScoringMatrix<R>& matrix,
     int8_t gap_open_neg,
     int8_t gap_extend_neg,
     const BlockPaddedBytes& query,
@@ -928,7 +823,7 @@ void ba_align_core(
                 ? hn::SaturatedAdd(D_corner, off_add) : hn::Set(d, BA_MIN);
 
             std::tie(D_max, D_argmax_i, D_argmax_j) =
-                ba_place_block<TRACE, X_DROP, AlphabetDim>(
+                ba_place_block<TRACE, X_DROP, R>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     query, reference, alloc.trace,
                     state_i, state_j + block_size - BA_STEP,
@@ -961,7 +856,7 @@ void ba_align_core(
 
             // Query/ref SWAPPED, D_row<->D_col, R_row<->C_col
             std::tie(D_max, D_argmax_i, D_argmax_j) =
-                ba_place_block<TRACE, X_DROP, AlphabetDim>(
+                ba_place_block<TRACE, X_DROP, R>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     reference, query, alloc.trace,
                     state_j, state_i + block_size - BA_STEP,
@@ -990,7 +885,7 @@ void ba_align_core(
             // Grow DOWN: prev_size cols x grow_step rows
             hn::Vec<D> D_max1, ai1, aj1;
             std::tie(D_max1, ai1, aj1) =
-                ba_place_block<TRACE, X_DROP, AlphabetDim>(
+                ba_place_block<TRACE, X_DROP, R>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     reference, query, alloc.trace,
                     state_j, state_i + prev_size,
@@ -1008,7 +903,7 @@ void ba_align_core(
             // Grow RIGHT: grow_step cols x block_size rows
             hn::Vec<D> D_max2, ai2, aj2;
             std::tie(D_max2, ai2, aj2) =
-                ba_place_block<TRACE, X_DROP, AlphabetDim>(
+                ba_place_block<TRACE, X_DROP, R>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     query, reference, alloc.trace,
                     state_i, state_j + prev_size,
@@ -1322,8 +1217,7 @@ public:
         bool is_reversed,
         supports_compact_sequence_range QueryRange,
         supports_compact_sequence_range TargetRange,
-        int AlphabetDim = static_cast<int>(
-            compact_sequence_range<QueryRange>::traits::alphabet_size_n)>
+        size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n>
     [[nodiscard]] static KswAlignResult align(
         const compact_sequence_range<QueryRange>& query_seq,
         const compact_sequence_range<TargetRange>& target_seq,
@@ -1331,7 +1225,7 @@ public:
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const KswScoringMatrix<AlphabetDim>& scoring_matrix,
+        const ScoringMatrix<QueryRange>& scoring_matrix,
         const BlockAlignerParams& params)
     {
         KswAlignResult result;
@@ -1359,16 +1253,13 @@ public:
             -(static_cast<int>(params.gap_open) + params.gap_extend));
         const int8_t gap_extend_neg = static_cast<int8_t>(-params.gap_extend);
 
-        // Build SIMD scoring matrix
-        auto simd_matrix = BlockSIMDMatrix<AlphabetDim>::from_ksw(scoring_matrix);
-
         // Build padded byte sequences
         auto query_enc = query_seq.template to_encoded_vector<is_reversed>(
             query_start, query_end);
         auto target_enc = target_seq.template to_encoded_vector<false>(
             target_start, target_end);
 
-        const uint8_t null_byte = BlockSIMDMatrix<AlphabetDim>::NULL_BYTE;
+        const uint8_t null_byte = ScoringMatrix<QueryRange>::NULL_BYTE;
 
         BlockPaddedBytes query_padded, ref_padded;
         if (params.flags.reverse_cigar) {
@@ -1396,26 +1287,26 @@ public:
 
         // Dispatch based on TRACE and X_DROP combinations
         if (do_trace && use_xdrop) {
-            ba_align_core<true, true, AlphabetDim>(
+            ba_align_core<true, true, QueryRange>(
                 d, score, out_qi, out_ri, scratch,
-                simd_matrix, gap_open_neg, gap_extend_neg,
+                scoring_matrix, gap_open_neg, gap_extend_neg,
                 query_padded, ref_padded, min_size, max_size,
                 params.x_drop);
         } else if (do_trace && !use_xdrop) {
-            ba_align_core<true, false, AlphabetDim>(
+            ba_align_core<true, false, QueryRange>(
                 d, score, out_qi, out_ri, scratch,
-                simd_matrix, gap_open_neg, gap_extend_neg,
+                scoring_matrix, gap_open_neg, gap_extend_neg,
                 query_padded, ref_padded, min_size, max_size, 0);
         } else if (!do_trace && use_xdrop) {
-            ba_align_core<false, true, AlphabetDim>(
+            ba_align_core<false, true, QueryRange>(
                 d, score, out_qi, out_ri, scratch,
-                simd_matrix, gap_open_neg, gap_extend_neg,
+                scoring_matrix, gap_open_neg, gap_extend_neg,
                 query_padded, ref_padded, min_size, max_size,
                 params.x_drop);
         } else {
-            ba_align_core<false, false, AlphabetDim>(
+            ba_align_core<false, false, QueryRange>(
                 d, score, out_qi, out_ri, scratch,
-                simd_matrix, gap_open_neg, gap_extend_neg,
+                scoring_matrix, gap_open_neg, gap_extend_neg,
                 query_padded, ref_padded, min_size, max_size, 0);
         }
 
@@ -1424,7 +1315,7 @@ public:
             BlockCigar cigar(query_len + target_len);
             ba_cigar_core(scratch.trace, query_padded, ref_padded,
                           out_qi, out_ri, cigar);
-            result.cigar = cigar.to_ksw2_cigar();
+            result.cigar = cigar.to_packed_cigar();
             if (params.flags.reverse_cigar) {
                 std::reverse(result.cigar.begin(), result.cigar.end());
             }
