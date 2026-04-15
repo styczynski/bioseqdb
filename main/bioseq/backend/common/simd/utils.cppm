@@ -723,6 +723,56 @@ void dosomething() {
 	// // BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
 }
 
+/// Vectorized fast_log2 approximation using IEEE 754 bit tricks.
+///
+/// Computes an approximate log2 for each int32 lane by:
+///   1. Converting int32 -> float
+///   2. Extracting the IEEE 754 exponent as the integer part
+///   3. Normalizing the mantissa to [1, 2)
+///   4. Evaluating a degree-2 polynomial for the fractional part
+///
+/// Polynomial coefficients: log2(x) ~ exponent + (-0.34484843*m + 2.02466578)*m - 0.67487759
+/// Accurate to ~3 significant figures for input >= 2.
+///
+/// Matches minimap2's mg_log2() and TAL's mg_log2_avx2().
+///
+/// @tparam D_I  Highway int32 tag type
+/// @tparam D_F  Highway float32 tag type (must have same lane count as D_I)
+/// @param d_int    Highway int32 tag
+/// @param d_float  Highway float32 tag
+/// @param input_int  Vector of int32 values (must be >= 2 for accuracy)
+/// @return Vector of float32 log2 approximations
+template<class D_I, class D_F>
+HWY_INLINE hn::Vec<D_F> vectorized_fast_log2(
+    D_I d_int, D_F d_float, hn::Vec<D_I> input_int)
+{
+    const auto input_as_float = hn::ConvertTo(d_float, input_int);
+    const auto float_as_int_bits = hn::BitCast(d_int, input_as_float);
+
+    // Extract exponent: ((bits >> 23) & 255) - 128
+    const auto raw_exponent = hn::And(hn::ShiftRight<23>(float_as_int_bits), hn::Set(d_int, 255));
+    const auto biased_exponent = hn::Sub(raw_exponent, hn::Set(d_int, 128));
+    const auto exponent_as_float = hn::ConvertTo(d_float, biased_exponent);
+
+    // Isolate mantissa and normalize to [1, 2)
+    const auto exponent_clear_mask = hn::Set(d_int, ~(255 << 23));
+    const auto exponent_rebias = hn::Set(d_int, 127 << 23);
+    const auto mantissa_bits = hn::Add(
+        hn::And(float_as_int_bits, exponent_clear_mask), exponent_rebias);
+    const auto normalized_mantissa = hn::BitCast(d_float, mantissa_bits);
+
+    // Polynomial: (-0.34484843 * m + 2.02466578) * m - 0.67487759
+    constexpr float poly_c1 = -0.34484843f;
+    constexpr float poly_c2 =  2.02466578f;
+    constexpr float poly_c3 =  0.67487759f;
+
+    const auto inner_term = hn::MulAdd(
+        hn::Set(d_float, poly_c1), normalized_mantissa, hn::Set(d_float, poly_c2));
+    const auto fractional_part = hn::MulSub(inner_term, normalized_mantissa, hn::Set(d_float, poly_c3));
+
+    return hn::Add(exponent_as_float, fractional_part);
+}
+
 }
 HWY_AFTER_NAMESPACE();
 

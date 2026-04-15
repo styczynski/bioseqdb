@@ -56,6 +56,10 @@ import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
 import block_aligner_hwy;
+import bioseq_sequences.chaining.utils;
+import bioseq_sequences.chaining.scalar;
+import bioseq_sequences.chaining.simd;
+import bioseq_sequences.chaining.rmq;
 
 export {
 
@@ -63,6 +67,18 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+// Import chaining types from the shared chaining module
+using bioseq::chaining::Anchor;
+using bioseq::chaining::AnchorRefFields;
+using bioseq::chaining::AnchorQueryFields;
+using bioseq::chaining::Chain;
+using bioseq::chaining::ChainingMode;
+using bioseq::chaining::ChainingParams;
+using bioseq::chaining::compute_chaining_score;
+using bioseq::chaining::chain_anchors_scalar;
+using bioseq::chaining::chain_anchors_rmq;
+using bioseq::chaining::backtrack_chains;
 
 // ============================================================================
 // Constants — mirrors minimap2 defaults from mm_mapopt_t
@@ -108,6 +124,29 @@ struct Minimap2Params {
     bool    use_block_aligner = true;
     size_t  block_min_size    = 32;
     size_t  block_max_size    = 256;
+
+    /// Algorithm selection for chaining. Default: SCALAR_DP for backwards compatibility.
+    ChainingMode chaining_mode = ChainingMode::SCALAR_DP;
+    int32_t bandwidth_long  = 0;  ///< Long-join bandwidth (0 = disabled)
+
+    /// Build ChainingParams from this Minimap2Params.
+    ///
+    /// Extracts only the chaining-relevant subset and precomputes derived values.
+    [[nodiscard]] ChainingParams to_chaining_params() const {
+        ChainingParams cp;
+        cp.kmer_size        = kmer_size;
+        cp.max_gap          = max_gap;
+        cp.bandwidth        = bandwidth;
+        cp.max_chain_skip   = max_chain_skip;
+        cp.max_chain_iter   = max_chain_iter;
+        cp.min_seed_count   = min_seed_count;
+        cp.min_chain_score  = min_chain_score;
+        cp.chain_gap_scale  = chain_gap_scale;
+        cp.chain_skip_scale = chain_skip_scale;
+        cp.chaining_mode    = chaining_mode;
+        cp.prepare();
+        return cp;
+    }
 };
 
 // CIGAR opcodes and CigarOp are imported from bioseq_cigar module.
@@ -145,83 +184,8 @@ struct MatchResult {
 // ============================================================================
 // Internal data structures
 // ============================================================================
-
-/**
- * @brief Bitfield data for anchor reference (x) component.
- *
- * Layout mirrors minimap2 mm128_t.x conventions:
- *   x: is_reverse<<63 | reference_id<<32 | ref_position
- *
- * For our single-target case, reference_id is always 0.
- */
-struct AnchorRefFields {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-    uint64_t ref_position: 32;    ///< lower 32 bits: reference position
-    uint64_t reference_id: 31;    ///< bits 32-62: reference sequence ID
-    uint64_t is_reverse: 1;       ///< bit 63: reverse strand flag
-#elif __BYTE_ORDER == __BIG_ENDIAN
-    uint64_t is_reverse: 1;
-    uint64_t reference_id: 31;
-    uint64_t ref_position: 32;
-#endif
-    int : 0;
-};
-
-/**
- * @brief Bitfield data for anchor query (y) component.
- *
- * Layout mirrors minimap2 mm128_t.y conventions:
- *   y: segment_id<<48 | flags<<40 | query_span<<32 | query_position
- */
-struct AnchorQueryFields {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-    uint64_t query_position: 32;  ///< lower 32 bits: query position
-    uint64_t query_span: 8;       ///< bits 32-39: query k-mer span
-    uint64_t flags: 8;            ///< bits 40-47: flags
-    uint64_t segment_id: 16;      ///< bits 48-63: segment ID
-#elif __BYTE_ORDER == __BIG_ENDIAN
-    uint64_t segment_id: 16;
-    uint64_t flags: 8;
-    uint64_t query_span: 8;
-    uint64_t query_position: 32;
-#endif
-    int : 0;
-};
-
-/**
- * @brief Anchor for chaining. Equivalent to mm128_t in collect_seed_hits output.
- *
- * Uses unions to provide both clean bitfield access (ref/query structs) and
- * raw uint64_t access (ref_bits/query_bits) for sorting and arithmetic.
- *
- * Bitfield access examples:
- *   anchor.ref.ref_position   (was: static_cast<int32_t>(x))
- *   anchor.ref.reference_id   (was: (x << 1) >> 33)
- *   anchor.ref.is_reverse     (was: x >> 63)
- *   anchor.query.query_span   (was: (y >> 32) & 0xff)
- *   anchor.query.query_position (was: static_cast<int32_t>(y))
- */
-struct Anchor {
-    union {
-        AnchorRefFields ref;
-        uint64_t ref_bits = 0;    ///< Raw value for sorting/arithmetic on reference data
-    };
-    union {
-        AnchorQueryFields query;
-        uint64_t query_bits = 0;  ///< Raw value for sorting/arithmetic on query data
-    };
-};
-
-/**
- * @brief One chain of anchors, with metadata.
- *
- * Equivalent to one entry in the u[] array after chaining.
- */
-struct Chain {
-    int32_t score        = 0;    ///< chain score (upper 32 bits of u[])
-    int32_t anchor_count = 0;    ///< anchor count (lower 32 bits of u[])
-    int32_t anchor_start = 0;    ///< start index in the reordered anchor array
-};
+// Anchor, AnchorRefFields, AnchorQueryFields, Chain are now imported from
+// bioseq_sequences.chaining.utils via 'using' declarations above.
 
 /**
  * @brief Alignment region — equivalent to mm_reg1_t.
@@ -260,25 +224,7 @@ struct AlignRegion {
     std::vector<CigarOp> cigar;
 };
 
-// ============================================================================
-// Fast approximate log2 — matches minimap2's mg_log2 (mmpriv.h:139-147)
-// ============================================================================
-
-/**
- * @brief Fast log2 approximation using IEEE 754 float bit tricks.
- *
- * Accurate to ~3 significant figures for x >= 2.
- * Matches minimap2 mg_log2() used in gap penalty computation.
- */
-[[nodiscard]] inline float fast_log2(float input) {
-    uint32_t float_bits = std::bit_cast<uint32_t>(input);
-    float log_result = static_cast<float>(((float_bits >> 23) & 255) - 128);
-    float_bits &= ~(255u << 23);
-    float_bits += 127u << 23;
-    const float mantissa_approx = std::bit_cast<float>(float_bits);
-    log_result += (-0.34484843f * mantissa_approx + 2.02466578f) * mantissa_approx - 0.67487759f;
-    return log_result;
-}
+// fast_log2 is now in bioseq_sequences.chaining.utils
 
 // ============================================================================
 // Phase 1: Build target index from target minimizers
@@ -431,276 +377,12 @@ struct TargetIndex {
 }
 
 // ============================================================================
-// Phase 3: Chaining — DP-based (mg_lchain_dp equivalent)
+// Phase 3: Chaining — now delegated to chaining modules
 // ============================================================================
-
-/**
- * @brief Compute chaining score between two anchors.
- *
- * Equivalent to comput_sc() in lchain.c:115-140.
- *
- * The score is: min(predecessor_span, min(ref_distance, query_distance)) minus gap penalties.
- * Gap penalty = linear_penalty + 0.5 * log_penalty, where:
- *   linear_penalty = chain_gap_penalty * |ref_distance - query_distance|
- *                  + chain_skip_penalty * min(ref_distance, query_distance)
- *   log_penalty = log2(|ref_distance - query_distance| + 1)
- *
- * Returns INT32_MIN if the pair is invalid (too far, wrong order, etc.)
- */
-[[nodiscard]] inline int32_t compute_chaining_score(
-    const Anchor& current_anchor, const Anchor& predecessor_anchor,
-    int32_t max_dist_x, int32_t max_dist_y, int32_t chain_bandwidth,
-    float chain_gap_penalty, float chain_skip_penalty)
-{
-    const int32_t query_distance = static_cast<int32_t>(current_anchor.query.query_position)
-                                 - static_cast<int32_t>(predecessor_anchor.query.query_position);
-    if (query_distance <= 0 || query_distance > max_dist_x) {
-        return std::numeric_limits<int32_t>::min();
-    }
-
-    const int32_t ref_distance = static_cast<int32_t>(current_anchor.ref_bits - predecessor_anchor.ref_bits);
-    if (ref_distance == 0 || query_distance > max_dist_y) {
-        return std::numeric_limits<int32_t>::min();
-    }
-
-    const int32_t distance_difference = (ref_distance > query_distance)
-        ? ref_distance - query_distance
-        : query_distance - ref_distance;
-    if (distance_difference > chain_bandwidth) {
-        return std::numeric_limits<int32_t>::min();
-    }
-
-    const int32_t min_distance = (ref_distance < query_distance) ? ref_distance : query_distance;
-    const int32_t predecessor_span = static_cast<int32_t>(predecessor_anchor.query.query_span);
-    int32_t score = (predecessor_span < min_distance) ? predecessor_span : min_distance;
-
-    if (distance_difference != 0 || min_distance > predecessor_span) {
-        const float linear_penalty = chain_gap_penalty * static_cast<float>(distance_difference)
-                                   + chain_skip_penalty * static_cast<float>(min_distance);
-        const float log_penalty = (distance_difference >= 1)
-            ? fast_log2(static_cast<float>(distance_difference + 1))
-            : 0.0f;
-        score -= static_cast<int32_t>(linear_penalty + 0.5f * log_penalty);
-    }
-    return score;
-}
-
-/**
- * @brief Chain anchors using dynamic programming.
- *
- * Equivalent to mg_lchain_dp() in lchain.c:150-219.
- *
- * Algorithm:
- *   For each anchor (sorted by ref position):
- *     1. Search backwards through prior anchors in [window_start, current-1]
- *     2. Compute chaining score: pair_score(current, candidate) + best_scores[candidate]
- *     3. Track best predecessor and score
- *     4. Apply max_skip early termination
- *     5. Try the globally best anchor (global_best_idx) as fallback
- *
- *   Backtrack from highest-scoring anchors to extract chains.
- *
- * @param anchors  Sorted anchor array (modified: reordered on output)
- * @param params   Minimap2 parameters
- * @return Vector of chains with scores and anchor ranges
- */
-[[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_dp(
-    std::vector<Anchor>& anchors,
-    const Minimap2Params& params)
-{
-    const int64_t anchor_count = static_cast<int64_t>(anchors.size());
-    if (anchor_count == 0) {
-        return {{}, {}};
-    }
-
-    // map.c:722-723: chain_gap_penalty = opt->chain_gap_scale * 0.01 * mi->k
-    const float chain_gap_penalty = params.chain_gap_scale * 0.01f
-                                  * static_cast<float>(params.kmer_size);
-    const float chain_skip_penalty = params.chain_skip_scale * 0.01f
-                                   * static_cast<float>(params.kmer_size);
-    int32_t max_dist_x = params.max_gap;
-    int32_t max_dist_y = params.max_gap;
-    const int32_t chain_bandwidth = params.bandwidth;
-    const int32_t max_skip = params.max_chain_skip;
-    const int32_t max_iter = params.max_chain_iter;
-    const int32_t min_seed_count = params.min_seed_count;
-    const int32_t min_score = params.min_chain_score;
-    const int32_t max_drop = chain_bandwidth;
-
-    if (max_dist_x < chain_bandwidth) { max_dist_x = chain_bandwidth; }
-    if (max_dist_y < chain_bandwidth) { max_dist_y = chain_bandwidth; }
-
-    // DP arrays
-    std::vector<int32_t> best_scores(anchor_count);       // best score ending at anchor
-    std::vector<int64_t> predecessors(anchor_count, -1);   // predecessor index
-    std::vector<int32_t> peak_scores(anchor_count);        // peak score seen along chain
-    std::vector<int32_t> visited(anchor_count, 0);         // visited marker
-
-    int64_t window_start = 0;
-    int64_t global_best_idx = -1;
-
-    // --- Forward DP pass ---
-    // Equivalent to lchain.c lines 171-206
-    for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
-        int64_t best_predecessor_idx = -1;
-        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
-        int32_t skip_count = 0;
-
-        // Advance window start: skip anchors on different chromosomes or too far
-        while (window_start < current_idx &&
-               (anchors[current_idx].ref_bits >> 32 != anchors[window_start].ref_bits >> 32 ||
-                anchors[current_idx].ref_bits > anchors[window_start].ref_bits
-                    + static_cast<uint64_t>(max_dist_x)))
-        {
-            ++window_start;
-        }
-        if (current_idx - window_start > max_iter) {
-            window_start = current_idx - max_iter;
-        }
-
-        int64_t search_end = window_start;
-
-        // Search backwards for best predecessor
-        for (int64_t candidate_idx = current_idx - 1; candidate_idx >= window_start; --candidate_idx) {
-            const int32_t pair_score = compute_chaining_score(
-                anchors[current_idx], anchors[candidate_idx],
-                max_dist_x, max_dist_y, chain_bandwidth,
-                chain_gap_penalty, chain_skip_penalty);
-            if (pair_score == std::numeric_limits<int32_t>::min()) {
-                continue;
-            }
-
-            const int32_t total_score = pair_score + best_scores[candidate_idx];
-            if (total_score > best_score) {
-                best_score = total_score;
-                best_predecessor_idx = candidate_idx;
-                if (skip_count > 0) {
-                    --skip_count;
-                }
-            } else if (visited[candidate_idx] == static_cast<int32_t>(current_idx)) {
-                if (++skip_count > max_skip) {
-                    search_end = candidate_idx;
-                    break;
-                }
-            }
-            if (predecessors[candidate_idx] >= 0) {
-                visited[predecessors[candidate_idx]] = static_cast<int32_t>(current_idx);
-            }
-        }
-
-        // Try the globally best anchor in the window (global_best_idx optimization)
-        if (global_best_idx < 0 ||
-            anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
-                > static_cast<uint64_t>(max_dist_x))
-        {
-            int32_t best_global = std::numeric_limits<int32_t>::min();
-            global_best_idx = -1;
-            for (int64_t scan_idx = current_idx - 1; scan_idx >= window_start; --scan_idx) {
-                if (best_global < best_scores[scan_idx]) {
-                    best_global = best_scores[scan_idx];
-                    global_best_idx = scan_idx;
-                }
-            }
-        }
-        if (global_best_idx >= 0 && global_best_idx < search_end) {
-            const int32_t global_pair_score = compute_chaining_score(
-                anchors[current_idx], anchors[global_best_idx],
-                max_dist_x, max_dist_y, chain_bandwidth,
-                chain_gap_penalty, chain_skip_penalty);
-            if (global_pair_score != std::numeric_limits<int32_t>::min()
-                && best_score < global_pair_score + best_scores[global_best_idx])
-            {
-                best_score = global_pair_score + best_scores[global_best_idx];
-                best_predecessor_idx = global_best_idx;
-            }
-        }
-
-        best_scores[current_idx] = best_score;
-        predecessors[current_idx] = best_predecessor_idx;
-        const bool predecessor_has_higher_peak = best_predecessor_idx >= 0
-            && peak_scores[best_predecessor_idx] > best_score;
-        peak_scores[current_idx] = predecessor_has_higher_peak
-            ? peak_scores[best_predecessor_idx]
-            : best_score;
-
-        if (global_best_idx < 0 ||
-            (anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
-                <= static_cast<uint64_t>(max_dist_x)
-             && best_scores[global_best_idx] < best_scores[current_idx]))
-        {
-            global_best_idx = current_idx;
-        }
-    }
-
-    // --- Backtracking ---
-    // Equivalent to mg_chain_backtrack() in lchain.c:29-78
-    struct ScoredAnchorIndex {
-        int32_t score;
-        int64_t anchor_index;
-    };
-    std::vector<ScoredAnchorIndex> scored_indices;
-    scored_indices.reserve(anchor_count);
-    for (int64_t anchor_idx = 0; anchor_idx < anchor_count; ++anchor_idx) {
-        if (best_scores[anchor_idx] >= min_score) {
-            scored_indices.push_back({best_scores[anchor_idx], anchor_idx});
-        }
-    }
-
-    std::sort(scored_indices.begin(), scored_indices.end(),
-              [](const ScoredAnchorIndex& left, const ScoredAnchorIndex& right) {
-                  return left.score < right.score;
-              });
-
-    std::fill(visited.begin(), visited.end(), 0);
-
-    std::vector<Chain> chains;
-    std::vector<Anchor> reordered_anchors;
-    std::vector<int64_t> chain_anchor_indices;
-
-    for (int64_t rank_idx = static_cast<int64_t>(scored_indices.size()) - 1; rank_idx >= 0; --rank_idx) {
-        if (visited[scored_indices[rank_idx].anchor_index] != 0) {
-            continue;
-        }
-
-        chain_anchor_indices.clear();
-        int64_t trace_idx;
-        for (trace_idx = scored_indices[rank_idx].anchor_index;
-             trace_idx >= 0 && visited[trace_idx] == 0;
-             trace_idx = predecessors[trace_idx])
-        {
-            chain_anchor_indices.push_back(trace_idx);
-            visited[trace_idx] = 1;
-        }
-
-        const int32_t chain_score = (trace_idx < 0)
-            ? scored_indices[rank_idx].score
-            : scored_indices[rank_idx].score - best_scores[trace_idx];
-        const int32_t chain_length = static_cast<int32_t>(chain_anchor_indices.size());
-
-        if (chain_score >= min_score && chain_length >= min_seed_count) {
-            // Reverse to forward order
-            std::reverse(chain_anchor_indices.begin(), chain_anchor_indices.end());
-
-            Chain chain;
-            chain.score = chain_score;
-            chain.anchor_count = chain_length;
-            chain.anchor_start = static_cast<int32_t>(reordered_anchors.size());
-            chains.push_back(chain);
-
-            for (const int64_t anchor_idx : chain_anchor_indices) {
-                reordered_anchors.push_back(anchors[anchor_idx]);
-            }
-        } else {
-            // Unmark rejected chain
-            for (const int64_t anchor_idx : chain_anchor_indices) {
-                visited[anchor_idx] = 0;
-            }
-        }
-    }
-
-    JustLog("[minimap_port] Chaining: {} chains from {} anchors", chains.size(), anchor_count);
-    return {std::move(chains), std::move(reordered_anchors)};
-}
+// compute_chaining_score is imported from bioseq_sequences.chaining.utils
+// chain_anchors_scalar is imported from bioseq_sequences.chaining.scalar
+// chain_anchors_simd is imported from bioseq_sequences.chaining.simd (in bioseq::simd::HWY_NAMESPACE)
+// chain_anchors_rmq is imported from bioseq_sequences.chaining.rmq
 
 // ============================================================================
 // Phase 4: Convert chains to alignment regions (mm_gen_regs equivalent)
@@ -1879,7 +1561,22 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     }
 
     // ---- Phase 3: Chain seeds ----
-    auto [chains, reordered_anchors] = chain_anchors_dp(anchors, params);
+    // Build chaining params and dispatch to the selected algorithm
+    const auto chaining_params = params.to_chaining_params();
+
+    auto [chains, reordered_anchors] = [&]()
+        -> std::pair<std::vector<Chain>, std::vector<Anchor>>
+    {
+        switch (chaining_params.chaining_mode) {
+            case ChainingMode::SIMD_DP:
+                return chain_anchors_simd(anchors, chaining_params);
+            case ChainingMode::RMQ:
+                return chain_anchors_rmq(anchors, chaining_params);
+            case ChainingMode::SCALAR_DP:
+            default:
+                return chain_anchors_scalar(anchors, chaining_params);
+        }
+    }();
 
     if (chains.empty()) {
         JustLog("[minimap_port] No chains formed — returning no results");
