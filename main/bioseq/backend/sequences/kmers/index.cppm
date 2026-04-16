@@ -207,6 +207,7 @@ inline void collect_minimizers(
 	const size_t w,
 	const size_t k
 ) {
+    EASY_BLOCK("mm_sketch");
 
     context::context ctx;
 
@@ -357,6 +358,7 @@ inline void collect_minimizers_simd(
 	const size_t w,
 	const size_t k
 ) {
+    EASY_BLOCK("mm_sketch_simd");
 
     using seq_traits = compact_sequence_range<R>::traits;
     using storage_unit = typename seq_traits::storage_unit;

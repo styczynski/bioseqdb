@@ -477,6 +477,7 @@ void simd_dp_forward_pass(
     std::vector<Anchor>& anchors,
     const ChainingParams& params)
 {
+    EASY_BLOCK("mg_lchain_simd");
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
     if (anchor_count == 0) return {{}, {}};
 
@@ -487,7 +488,12 @@ void simd_dp_forward_pass(
         "Use chain_anchors_scalar for non-zero chain_skip_scale.");
 
     hn::ScalableTag<int32_t> d_int;
-    const auto soa = create_soa_anchors(d_int, anchors);
+
+    SoaAnchors soa;
+    {
+        EASY_BLOCK("mg_lchain_simd_aos_to_soa");
+        soa = create_soa_anchors(d_int, anchors);
+    }
 
     // Allocate padded best_scores array (f[]).
     // SIMD loads access best_scores[j-(L-1)] which can be negative, so we
@@ -501,8 +507,11 @@ void simd_dp_forward_pass(
     std::vector<int64_t> predecessors(anchor_count, -1);
     std::vector<int32_t> peak_scores(anchor_count, 0);
 
-    simd_dp_forward_pass(d_int, anchors, soa,
-        padded_best_scores, predecessors, peak_scores, params);
+    {
+        EASY_BLOCK("mg_lchain_simd_forward");
+        simd_dp_forward_pass(d_int, anchors, soa,
+            padded_best_scores, predecessors, peak_scores, params);
+    }
 
     // Copy padded array to std::vector for backtrack_chains
     const std::vector<int32_t> best_scores(
@@ -510,6 +519,7 @@ void simd_dp_forward_pass(
 
     JustLog("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
 
+    EASY_BLOCK("backtrack_chains");
     return backtrack_chains(anchors, best_scores, predecessors, peak_scores,
                            params.min_chain_score, params.min_seed_count);
 }

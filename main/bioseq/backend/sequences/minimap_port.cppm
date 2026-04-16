@@ -52,6 +52,7 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
+import bioseq_sequences.kmers.hashers.minimap_int;
 import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
@@ -253,6 +254,7 @@ struct TargetIndex {
      */
     void build(const std::vector<MinimapSketchData>& target_minimizers,
                int32_t target_length) {
+        EASY_BLOCK("target_index_build");
         target_len = target_length;
         table.clear();
         table.reserve(target_minimizers.size());
@@ -317,9 +319,14 @@ struct TargetIndex {
     int32_t query_len,
     int32_t max_occ)
 {
+    EASY_BLOCK("collect_seed_hits");
     std::vector<Anchor> anchors;
     anchors.reserve(query_minimizers.size() * 2);
 
+    // Target-index lookup is the hot per-minimizer operation. We wrap the
+    // whole loop (not each lookup) to avoid profiler overhead dominating
+    // the measurement; the loop body also classifies/sorts anchors.
+    EASY_BLOCK("target_index_lookup");
     for (const auto& query_minimizer : query_minimizers) {
         const auto target_hits = target_index.lookup(query_minimizer.kmer);
         if (target_hits.empty() || static_cast<int32_t>(target_hits.size()) > max_occ) {
@@ -363,8 +370,10 @@ struct TargetIndex {
             anchors.push_back(anchor);
         }
     }
+    EASY_END_BLOCK;  // target_index_lookup
 
     // Sort by reference position (ref_bits field), same as radix_sort_128x
+    EASY_BLOCK("collect_seed_hits_sort");
     std::sort(anchors.begin(), anchors.end(),
               [](const Anchor& left, const Anchor& right) {
                   return left.ref_bits < right.ref_bits
@@ -486,6 +495,7 @@ void set_region_coordinates(
     const std::vector<Anchor>& anchors,
     int32_t query_len)
 {
+    EASY_BLOCK("mm_gen_regs");
     if (chains.empty()) {
         return {};
     }
@@ -533,6 +543,7 @@ void classify_primary_secondary(
     int32_t mask_len,
     int32_t sub_diff)
 {
+    EASY_BLOCK("mm_set_parent");
     const size_t region_count = regions.size();
     if (region_count == 0) {
         return;
@@ -670,6 +681,7 @@ void filter_secondary_regions(
     int32_t min_diff,
     int32_t best_n)
 {
+    EASY_BLOCK("mm_select_sub");
     if (regions.empty() || pri_ratio <= 0.0f) {
         return;
     }
@@ -865,6 +877,7 @@ void align_regions(
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params)
 {
+    EASY_BLOCK("mm_align_skeleton");
     const int32_t query_length = static_cast<int32_t>(query_seq.bp_size());
     const int32_t target_length = static_cast<int32_t>(target_seq.bp_size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
@@ -1118,6 +1131,7 @@ void estimate_divergence_from_seeds(
     int32_t kmer_size,
     int32_t target_len)
 {
+    EASY_BLOCK("mm_est_err");
     if (query_minimizers.empty()) {
         return;
     }
@@ -1239,6 +1253,7 @@ void compute_mapping_quality(
     const Minimap2Params& params,
     int32_t rep_len)
 {
+    EASY_BLOCK("mm_set_mapq");
     constexpr float quality_coefficient = 40.0f;
     const int32_t match_sc = params.match_score;
     const int32_t min_chain_sc = params.min_chain_score;
@@ -1526,7 +1541,7 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const std::vector<MinimapSketchData>& target_minimizers,
     const Minimap2Params& params = Minimap2Params{})
 {
-    EASY_BLOCK("minimap_port");
+    EASY_BLOCK("minimap2_port");
     using query_traits = typename compact_sequence_range<QueryRange>::traits;
     using target_traits = typename compact_sequence_range<TargetRange>::traits;
     static_assert(
@@ -1549,10 +1564,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     }
 
     // ---- Phase 1: Build target index ----
+    // target_index.build has its own EASY_BLOCK("target_index_build").
     TargetIndex target_index;
     target_index.build(target_minimizers, target_len);
 
     // ---- Phase 2: Collect seed hits ----
+    // collect_seed_hits has its own EASY_BLOCK("collect_seed_hits").
     auto anchors = collect_seed_hits(
         query_minimizers, target_index, query_len, params.max_occ);
 
@@ -1562,9 +1579,10 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     }
 
     // ---- Phase 3: Chain seeds ----
-    // Build chaining params and dispatch to the selected algorithm
+    // Each chain_anchors_* function has its own EASY_BLOCK covering the
+    // full body (mg_lchain_dp / mg_lchain_rmq / mg_lchain_simd) plus
+    // sub-blocks for forward-pass and backtracking.
     const auto chaining_params = params.to_chaining_params();
-
     auto [chains, reordered_anchors] = [&]()
         -> std::pair<std::vector<Chain>, std::vector<Anchor>>
     {
@@ -1584,23 +1602,24 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         return MatchResultCollection{};
     }
 
-    // ---- Phase 4: Generate alignment regions ----
+    // ---- Phase 4: Generate alignment regions (EASY_BLOCK inside the fn) ----
     auto regions = generate_regions(chains, reordered_anchors, query_len);
 
     // ---- Phase 5 (chain_post): Primary/secondary classification + filter ----
-    // Equivalent to chain_post() in map.c:559-566
+    // classify_primary_secondary and filter_secondary_regions have
+    // EASY_BLOCK annotations inside them.
     const int32_t sub_diff = params.match_score * 2 + params.mismatch_pen;
     classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
     const int32_t min_diff = params.kmer_size * 2;
     filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
 
     // ---- Phase 6: Estimate divergence from seeds (mm_est_err equivalent) ----
-    // This is done BEFORE alignment (map.c:783) and provides dv:f tag
+    // estimate_divergence_from_seeds has EASY_BLOCK("mm_est_err") inside.
     estimate_divergence_from_seeds(regions, query_minimizers, reordered_anchors,
                                    query_len, params.kmer_size, target_len);
 
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
-    // map.c:568-570: align_regs() returns immediately if !(opt->flag & MM_F_CIGAR)
+    // align_regions has EASY_BLOCK("mm_align_skeleton") inside.
     if (params.do_cigar) {
         // Build unified scoring matrix for KSW2 and block aligner.
         const auto scoring_matrix = ScoringMatrix<QueryRange>::generate(
@@ -1619,7 +1638,7 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
     }
 
-    // ---- Phase 8: Compute MAPQ ----
+    // ---- Phase 8: Compute MAPQ (EASY_BLOCK inside the fn) ----
     compute_mapping_quality(regions, params, 0);
 
     // ---- Phase 9: Convert to MatchResult ----
@@ -1631,6 +1650,67 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
 
     JustLog("[minimap_port] Pipeline complete: {} alignment results", results.size());
     return MatchResultCollection(std::move(results));
+}
+
+/**
+ * @brief Top-level entry point for our C++ minimap2 port.
+ *
+ * Unlike `minimap2_port`, this function is given the raw query/target sequences
+ * (no pre-computed minimizers) and performs the full pipeline:
+ *   1. Minimizer extraction for target  (mm_sketch equivalent)
+ *   2. Minimizer extraction for query   (mm_sketch equivalent)
+ *   3. Delegates to `minimap2_port` for the remainder of the pipeline.
+ *
+ * The function is annotated with EASY_BLOCK markers so the profiler can
+ * attribute time to each pipeline stage. The minimizer extraction stages share
+ * the `mm_sketch` block name with the corresponding minimap2 C function, which
+ * makes the profile comparable side-by-side between the two implementations.
+ *
+ * @tparam QueryRange   compact_sequence_range type for query
+ * @tparam TargetRange  compact_sequence_range type for target
+ * @param query_seq     Query sequence as compact_sequence_range
+ * @param target_seq    Target sequence as compact_sequence_range
+ * @param params        Algorithm parameters (defaults match minimap2)
+ * @return MatchResultCollection containing PAF-like alignment results
+ */
+template<supports_compact_sequence_range QueryRange, supports_compact_sequence_range TargetRange>
+[[nodiscard]] MatchResultCollection minimap_port(
+    compact_sequence_range<QueryRange>& query_seq,
+    compact_sequence_range<TargetRange>& target_seq,
+    const Minimap2Params& params = Minimap2Params{})
+{
+    EASY_BLOCK("minimap_port");
+
+    const size_t w = static_cast<size_t>(params.window_size);
+    const size_t k = static_cast<size_t>(params.kmer_size);
+
+    // ---- Minimizer extraction: target (same block name as minimap2 mm_sketch) ----
+    sketch_collector target_collector;
+    {
+        EASY_BLOCK("mm_sketch");
+        collect_minimizers<minimap_int_hasher>(
+            target_collector, target_seq,
+            target_seq.begin(), target_seq.end(),
+            w, k);
+    }
+    const auto target_minimizers = target_collector.extract_sketches_data();
+    JustLog("[minimap_port] target_minimizers: {}", target_minimizers.size());
+
+    // ---- Minimizer extraction: query ----
+    sketch_collector query_collector;
+    {
+        EASY_BLOCK("mm_sketch");
+        collect_minimizers<minimap_int_hasher>(
+            query_collector, query_seq,
+            query_seq.begin(), query_seq.end(),
+            w, k);
+    }
+    const auto query_minimizers = query_collector.extract_sketches_data();
+    JustLog("[minimap_port] query_minimizers: {}", query_minimizers.size());
+
+    // ---- Remainder of the pipeline: target index, chaining, alignment, MAPQ ----
+    return minimap2_port(query_seq, target_seq,
+                         query_minimizers, target_minimizers, params);
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

@@ -13,7 +13,10 @@ cmake --build . --target install && \
 ./bioseq/bioseq_aligner -c ../data/target.fasta ../data/query.fasta
 
 # Convert prof file
-./build/vcpkg_installed/arm64-osx/tools/easy-profiler/profiler_converter ./build/bioseq.prof ./build/prof.json
+# NOTE: this runs from inside ./build (see `cd build` above), so the paths are
+# relative to the build directory. The profiler converter produces prof.json
+# which can be fed to flamegraph / speedscope / chrome trace tooling.
+./vcpkg_installed/arm64-osx/tools/easy-profiler/profiler_converter ./bioseq.prof ./prof.json
 
 # ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[heheszki-2]" #"[simd-new-x]" #cmake --build . --target test_bioseq_aligner && \
 #exit 0

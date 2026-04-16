@@ -53,6 +53,7 @@ static inline uint64_t hash64(uint64_t key)
 
 mm_reg1_t *mm_gen_regs(void *km, uint32_t hash, int qlen, int n_u, uint64_t *u, mm128_t *a, int is_qstrand) // convert chains to hits
 {
+	EASY_BLOCK("mm_gen_regs");
 	mm128_t *z, tmp;
 	mm_reg1_t *r;
 	int i, k;
@@ -126,6 +127,7 @@ void mm_split_reg(mm_reg1_t *r, mm_reg1_t *r2, int n, int qlen, mm128_t *a, int 
 
 void mm_set_parent(void *km, float mask_level, int mask_len, int n, mm_reg1_t *r, int sub_diff, int hard_mask_level, float alt_diff_frac) // and compute mm_reg1_t::subsc
 {
+	EASY_BLOCK("mm_set_parent");
 	int i, j, k, *w;
 	uint64_t *cov;
 	if (n <= 0) return;
@@ -256,6 +258,7 @@ void mm_sync_regs(void *km, int n_regs, mm_reg1_t *regs) // keep mm_reg1_t::{id,
 
 void mm_select_sub(void *km, float pri_ratio, int min_diff, int best_n, int check_strand, int min_strand_sc, int *n_, mm_reg1_t *r)
 {
+	EASY_BLOCK("mm_select_sub");
 	if (pri_ratio > 0.0f && *n_ > 0) {
 		int i, k, n = *n_, n_2nd = 0;
 		for (i = k = 0; i < n; ++i) {
@@ -422,6 +425,7 @@ static void mm_set_inv_mapq(void *km, int n_regs, mm_reg1_t *regs)
 
 void mm_set_mapq2(void *km, int n_regs, mm_reg1_t *regs, int min_chain_sc, int match_sc, int rep_len, int is_sr, int is_splice)
 {
+	EASY_BLOCK("mm_set_mapq");
 	static const float q_coef = 40.0f;
 	int64_t sum_sc = 0;
 	float uniq_ratio;

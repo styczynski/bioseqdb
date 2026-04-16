@@ -98,6 +98,7 @@ static inline int tq_shift(tiny_queue_t *q)
  */
 void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, int is_hpc, mm128_v *p)
 {
+	EASY_BLOCK("mm_sketch");
 	JustLog("Calling mm_sketch() w = {}, k = {}, rid = {}", w, k, rid);
 
 	auto start = std::chrono::high_resolution_clock::now();

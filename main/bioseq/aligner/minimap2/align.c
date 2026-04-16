@@ -1051,6 +1051,7 @@ void mm_update_dp_max(int qlen, int n_regs, mm_reg1_t *regs, float frac, int a, 
 
 mm_reg1_t *mm_align_skeleton(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int qlen, const char *qstr, int *n_regs_, mm_reg1_t *regs, mm128_t *a)
 {
+	EASY_BLOCK("mm_align_skeleton");
 	extern unsigned char seq_nt4_table[256];
 	int32_t i, n_regs = *n_regs_, n_a;
 	uint8_t *qseq0[2];

@@ -621,6 +621,7 @@ struct RmqTree {
     int32_t max_dist_inner = 0,
     int32_t cap_rmq_size = 100000)
 {
+    EASY_BLOCK("mg_lchain_rmq");
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
     if (anchor_count == 0) return {{}, {}};
 
@@ -654,6 +655,7 @@ struct RmqTree {
     std::vector<RmqNode*> primary_nodes(anchor_count, nullptr);
     std::vector<RmqNode*> inner_nodes(anchor_count, nullptr);
 
+    EASY_BLOCK("mg_lchain_rmq_forward");
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
         int64_t best_predecessor = -1;
@@ -812,8 +814,10 @@ struct RmqTree {
             ? peak_scores[best_predecessor] : best_score;
     }
 
+    EASY_END_BLOCK;
     JustLog("[chaining_rmq] RMQ chaining pass complete for {} anchors", anchor_count);
 
+    EASY_BLOCK("backtrack_chains");
     return backtrack_chains(anchors, best_scores, predecessors, peak_scores,
                            params.min_chain_score, params.min_seed_count);
 }
