@@ -16,6 +16,7 @@ find_package(ZLIB REQUIRED)
 find_package(reflectcpp CONFIG REQUIRED)
 find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)
+find_package(easy_profiler REQUIRED)
 
 # AddCommonTarget(
 #   postgresql_bioseq
@@ -82,6 +83,7 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
+    easy_profiler
   SOURCES
     ${A_SRC_FILES}
   SUPPORT_CXX_MODULES

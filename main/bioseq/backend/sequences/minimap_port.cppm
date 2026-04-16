@@ -1526,6 +1526,7 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const std::vector<MinimapSketchData>& target_minimizers,
     const Minimap2Params& params = Minimap2Params{})
 {
+    EASY_BLOCK("minimap_port");
     using query_traits = typename compact_sequence_range<QueryRange>::traits;
     using target_traits = typename compact_sequence_range<TargetRange>::traits;
     static_assert(

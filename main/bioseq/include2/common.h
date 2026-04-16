@@ -18,5 +18,6 @@
 #include "./minimap2stuff.h"
 
 #include <libassert/assert.hpp>
+#include <easy/profiler.h>
 
 #endif

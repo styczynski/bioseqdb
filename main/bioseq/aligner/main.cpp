@@ -11,7 +11,10 @@ int k;
 
 int main(int argc, char *argv[]) {
     log_configure();
+    EASY_PROFILER_ENABLE;
     enable_logging = true;
     JustLog("Hello {}", "world :0");
-    return call_main(argc, argv);
+    auto status = call_main(argc, argv);
+    profiler::dumpBlocksToFile("bioseq.prof");
+    return status;
 }
