@@ -23,6 +23,7 @@ module;
 
 #include <cstdint>
 #include <vector>
+#include <span>
 #include <limits>
 #include <algorithm>
 #include <cstring>
@@ -31,6 +32,7 @@ export module bioseq_sequences.chaining.rmq;
 
 import mlogging;
 import bioseq_sequences.chaining.utils;
+import context;
 
 export {
 namespace bioseq::chaining {
@@ -631,10 +633,18 @@ struct RmqTree {
         max_dist_inner = 0;
     }
 
-    // DP arrays
-    std::vector<int32_t> best_scores(anchor_count, 0);
-    std::vector<int64_t> predecessors(anchor_count, -1);
-    std::vector<int32_t> peak_scores(anchor_count, 0);
+    // DP arrays — chain arena (SPEC §5.2).
+    auto dp_scope = context::current().push<context::Arena::Chain>();
+    auto& dp_ctx = context::current();
+    auto best_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
+    auto predecessors_v = dp_ctx.make_chain_vector<int64_t>(anchor_count);
+    auto peak_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
+    best_scores_v.assign(anchor_count, 0);
+    predecessors_v.assign(anchor_count, -1);
+    peak_scores_v.assign(anchor_count, 0);
+    auto best_scores  = std::span<int32_t>(best_scores_v);
+    auto predecessors = std::span<int64_t>(predecessors_v);
+    auto peak_scores  = std::span<int32_t>(peak_scores_v);
 
     // Allocate trees
     RmqTree primary_tree;
@@ -645,15 +655,17 @@ struct RmqTree {
     }
 
     // Track which anchors are in the trees for pruning
-    // We store the anchor indices that are currently in each tree
     int64_t group_start = 0;
     int64_t prune_start = 0;
     int64_t prune_start_inner = 0;
 
-    // We need to track inserted nodes to erase them during pruning.
-    // Store per-anchor node pointers for the primary and inner trees.
-    std::vector<RmqNode*> primary_nodes(anchor_count, nullptr);
-    std::vector<RmqNode*> inner_nodes(anchor_count, nullptr);
+    // Per-anchor node pointers (chain arena).
+    auto primary_nodes_v = dp_ctx.make_chain_vector<RmqNode*>(anchor_count);
+    auto inner_nodes_v   = dp_ctx.make_chain_vector<RmqNode*>(anchor_count);
+    primary_nodes_v.assign(anchor_count, nullptr);
+    inner_nodes_v.assign(anchor_count, nullptr);
+    auto primary_nodes = std::span<RmqNode*>(primary_nodes_v);
+    auto inner_nodes   = std::span<RmqNode*>(inner_nodes_v);
 
     EASY_BLOCK("mg_lchain_rmq_forward");
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
@@ -818,8 +830,11 @@ struct RmqTree {
     JustLog("[chaining_rmq] RMQ chaining pass complete for {} anchors", anchor_count);
 
     EASY_BLOCK("backtrack_chains");
-    return backtrack_chains(anchors, best_scores, predecessors, peak_scores,
-                           params.min_chain_score, params.min_seed_count);
+    return backtrack_chains(anchors,
+        std::span<const int32_t>(best_scores_v),
+        std::span<const int64_t>(predecessors_v),
+        std::span<const int32_t>(peak_scores_v),
+        params.min_chain_score, params.min_seed_count);
 }
 
 }  // namespace bioseq::chaining

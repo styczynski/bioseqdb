@@ -19,6 +19,7 @@ module;
 #include <cstdint>
 #include <cmath>
 #include <bit>
+#include <span>
 #include <vector>
 #include <algorithm>
 #include <limits>
@@ -294,12 +295,13 @@ struct ChainingParams {
 /// @return Pair of (chains, reordered_anchors)
 [[nodiscard]] inline std::pair<std::vector<Chain>, std::vector<Anchor>> backtrack_chains(
     const std::vector<Anchor>& anchors,
-    const std::vector<int32_t>& best_scores,
-    const std::vector<int64_t>& predecessors,
-    const std::vector<int32_t>& peak_scores,
+    std::span<const int32_t> best_scores,
+    std::span<const int64_t> predecessors,
+    std::span<const int32_t> peak_scores,
     int32_t min_score,
     int32_t min_seed_count)
 {
+    (void)peak_scores;  // upstream keeps it for parity with lchain.c; unused here
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
 
     // Build scored index array, filter by min_score

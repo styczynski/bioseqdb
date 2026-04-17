@@ -209,8 +209,6 @@ inline void collect_minimizers(
 ) {
     EASY_BLOCK("mm_sketch");
 
-    context::context ctx;
-
 	using seq_traits = compact_sequence_range<R>::traits;
 	using hasher_t = scalar_hash_t<typename seq_traits::alphabet_type>::template scalar_hash<hash_val_t>;
 	JustLog("bio_collect_minimizers2()");

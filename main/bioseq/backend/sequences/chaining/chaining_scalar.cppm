@@ -25,6 +25,7 @@ export module bioseq_sequences.chaining.scalar;
 
 import mlogging;
 import bioseq_sequences.chaining.utils;
+import context;
 
 export {
 namespace bioseq::chaining {
@@ -65,11 +66,22 @@ namespace bioseq::chaining {
     const int32_t max_skip = params.max_chain_skip;
     const int32_t max_iter = params.max_chain_iter;
 
-    // DP arrays
-    std::vector<int32_t> best_scores(anchor_count);
-    std::vector<int64_t> predecessors(anchor_count, -1);
-    std::vector<int32_t> peak_scores(anchor_count);
-    std::vector<int32_t> visited(anchor_count, 0);
+    // DP arrays — chain arena (SPEC §5.2). All four die at function exit,
+    // so the scope-anchored arena recycles them for every chaining call.
+    auto dp_scope = context::current().push<context::Arena::Chain>();
+    auto& dp_ctx = context::current();
+    auto best_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
+    auto predecessors_v = dp_ctx.make_chain_vector<int64_t>(anchor_count);
+    auto peak_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
+    auto visited_v      = dp_ctx.make_chain_vector<int32_t>(anchor_count);
+    best_scores_v.resize(anchor_count);
+    predecessors_v.assign(anchor_count, -1);
+    peak_scores_v.resize(anchor_count);
+    visited_v.assign(anchor_count, 0);
+    auto best_scores  = std::span<int32_t>(best_scores_v);
+    auto predecessors = std::span<int64_t>(predecessors_v);
+    auto peak_scores  = std::span<int32_t>(peak_scores_v);
+    auto visited      = std::span<int32_t>(visited_v);
 
     int64_t window_start = 0;
     int64_t global_best_idx = -1;

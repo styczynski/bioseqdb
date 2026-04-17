@@ -61,6 +61,7 @@ import bioseq_sequences.chaining.utils;
 import bioseq_sequences.chaining.scalar;
 import bioseq_sequences.chaining.simd;
 import bioseq_sequences.chaining.rmq;
+import context;
 
 export {
 
@@ -1542,6 +1543,17 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const Minimap2Params& params = Minimap2Params{})
 {
     EASY_BLOCK("minimap2_port");
+
+    // Install a per-pipeline memory context if the caller hasn't already
+    // (the outer minimap_port overload does install one). Nested callers
+    // observe the outermost context's arenas.
+    std::optional<context::context> owned_context;
+    std::optional<context::installed_context_scope> context_install;
+    if (context::current_or_null() == nullptr) {
+        owned_context.emplace();
+        context_install.emplace(*owned_context);
+    }
+
     using query_traits = typename compact_sequence_range<QueryRange>::traits;
     using target_traits = typename compact_sequence_range<TargetRange>::traits;
     static_assert(
@@ -1680,6 +1692,13 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const Minimap2Params& params = Minimap2Params{})
 {
     EASY_BLOCK("minimap_port");
+
+    // Install a per-query memory context. Every downstream allocation
+    // site (KSW2 state, backtrack matrix, chaining DP arrays, anchors,
+    // regions) reaches it through context::current(). See
+    // RESEARCH/SPEC_MEMORY_ALLOCATORS.md §5.
+    context::context pipeline_context;
+    context::installed_context_scope context_install(pipeline_context);
 
     const size_t w = static_cast<size_t>(params.window_size);
     const size_t k = static_cast<size_t>(params.kmer_size);

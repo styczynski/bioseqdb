@@ -26,6 +26,7 @@ module;
 
 #include <cstdint>
 #include <vector>
+#include <span>
 #include <cstring>
 #include <limits>
 
@@ -34,6 +35,7 @@ export module bioseq_sequences.chaining.simd;
 import mlogging;
 import bioseq_sequences.chaining.utils;
 import bioseq_simd.utils;
+import context;
 
 export {
 
@@ -54,27 +56,28 @@ using bioseq::chaining::backtrack_chains;
 
 /// Structure-of-Arrays layout for SIMD chaining.
 ///
-/// Memory layout: each array has (padding + anchor_count) elements.
-/// The padding (= MaxLanes) is prepended so that backward SIMD loads
-/// from index j-(L-1) never read before the allocation.
+/// Memory layout: one contiguous align-arena allocation (SPEC §6.3) sliced
+/// into three (padding + anchor_count)-element regions. The leading
+/// padding (= MaxLanes) is zero so backward SIMD loads from index j-(L-1)
+/// never read before the region.
 ///
 /// Why 32-bit truncation is safe: The scoring function only uses the lower
 /// 32 bits of ref_bits (ref_position) and query_bits (query_position).
 /// Upper bits are used only for window-start advancement, which remains scalar.
 /// This matches TAL: anchor_r[i] = (num_bits_t)anc[i].r.
 struct SoaAnchors {
-    hwy::AlignedFreeUniquePtr<uint32_t[]> ref_positions;
-    hwy::AlignedFreeUniquePtr<uint32_t[]> query_positions;
-    hwy::AlignedFreeUniquePtr<uint32_t[]> query_spans;
+    uint32_t* ref_positions   = nullptr;
+    uint32_t* query_positions = nullptr;
+    uint32_t* query_spans     = nullptr;
     size_t padding = 0;
     size_t count   = 0;
 
-    [[nodiscard]] uint32_t* ref_data()   { return ref_positions.get() + padding; }
-    [[nodiscard]] uint32_t* query_data() { return query_positions.get() + padding; }
-    [[nodiscard]] uint32_t* span_data()  { return query_spans.get() + padding; }
-    [[nodiscard]] const uint32_t* ref_data()   const { return ref_positions.get() + padding; }
-    [[nodiscard]] const uint32_t* query_data() const { return query_positions.get() + padding; }
-    [[nodiscard]] const uint32_t* span_data()  const { return query_spans.get() + padding; }
+    [[nodiscard]] uint32_t* ref_data()   { return ref_positions + padding; }
+    [[nodiscard]] uint32_t* query_data() { return query_positions + padding; }
+    [[nodiscard]] uint32_t* span_data()  { return query_spans + padding; }
+    [[nodiscard]] const uint32_t* ref_data()   const { return ref_positions + padding; }
+    [[nodiscard]] const uint32_t* query_data() const { return query_positions + padding; }
+    [[nodiscard]] const uint32_t* span_data()  const { return query_spans + padding; }
 };
 
 /// Convert AoS anchor array to SoA layout with SIMD padding.
@@ -94,17 +97,19 @@ template<class D>
     const size_t anchor_count = anchors.size();
     const size_t total_size = max_lanes + anchor_count;
 
+    // One contiguous chain-arena allocation for all three arrays (SPEC §6.3).
+    auto combined = context::current().alloc_chain_array<uint32_t, 64>(3 * total_size);
     SoaAnchors soa;
-    soa.ref_positions   = hwy::AllocateAligned<uint32_t>(total_size);
-    soa.query_positions = hwy::AllocateAligned<uint32_t>(total_size);
-    soa.query_spans     = hwy::AllocateAligned<uint32_t>(total_size);
+    soa.ref_positions   = combined.data();
+    soa.query_positions = combined.data() + total_size;
+    soa.query_spans     = combined.data() + 2 * total_size;
     soa.padding = max_lanes;
     soa.count   = anchor_count;
 
-    // Zero-fill padding region
-    std::memset(soa.ref_positions.get(),   0, max_lanes * sizeof(uint32_t));
-    std::memset(soa.query_positions.get(), 0, max_lanes * sizeof(uint32_t));
-    std::memset(soa.query_spans.get(),     0, max_lanes * sizeof(uint32_t));
+    // Zero-fill padding region for each of the three slices
+    std::memset(soa.ref_positions,   0, max_lanes * sizeof(uint32_t));
+    std::memset(soa.query_positions, 0, max_lanes * sizeof(uint32_t));
+    std::memset(soa.query_spans,     0, max_lanes * sizeof(uint32_t));
 
     // Convert AoS -> SoA (single pass, no redundant copies)
     uint32_t* HWY_RESTRICT ref_out   = soa.ref_data();
@@ -252,8 +257,8 @@ void simd_dp_forward_pass(
     const std::vector<Anchor>& anchors,
     const SoaAnchors& soa,
     int32_t* HWY_RESTRICT best_scores,
-    std::vector<int64_t>& predecessors,
-    std::vector<int32_t>& peak_scores,
+    std::span<int64_t> predecessors,
+    std::span<int32_t> peak_scores,
     const ChainingParams& params)
 {
     using D_F = hn::RebindToFloat<D>;
@@ -489,39 +494,43 @@ void simd_dp_forward_pass(
 
     hn::ScalableTag<int32_t> d_int;
 
+    auto chain_scope = context::current().push<context::Arena::Chain>();
+
     SoaAnchors soa;
     {
         EASY_BLOCK("mg_lchain_simd_aos_to_soa");
         soa = create_soa_anchors(d_int, anchors);
     }
 
-    // Allocate padded best_scores array (f[]).
+    // Allocate padded best_scores array (f[]) from the chain arena.
     // SIMD loads access best_scores[j-(L-1)] which can be negative, so we
-    // prepend MaxLanes zero-filled elements as safe padding.
+    // prepend MaxLanes zero-filled elements as safe padding (SPEC §5.2).
     const size_t max_lane_count = hn::MaxLanes(d_int);
-    auto score_storage = hwy::AllocateAligned<int32_t>(max_lane_count + anchor_count);
-    std::memset(score_storage.get(), 0,
-        (max_lane_count + anchor_count) * sizeof(int32_t));
-    int32_t* padded_best_scores = score_storage.get() + max_lane_count;
+    auto score_storage_span = context::current().alloc_chain_array<int32_t, 64>(
+        max_lane_count + anchor_count);
+    std::memset(score_storage_span.data(), 0,
+        score_storage_span.size() * sizeof(int32_t));
+    int32_t* padded_best_scores = score_storage_span.data() + max_lane_count;
 
-    std::vector<int64_t> predecessors(anchor_count, -1);
-    std::vector<int32_t> peak_scores(anchor_count, 0);
+    auto predecessors_v = context::current().make_chain_vector<int64_t>(anchor_count);
+    auto peak_scores_v  = context::current().make_chain_vector<int32_t>(anchor_count);
+    predecessors_v.assign(anchor_count, -1);
+    peak_scores_v.resize(anchor_count);
 
     {
         EASY_BLOCK("mg_lchain_simd_forward");
         simd_dp_forward_pass(d_int, anchors, soa,
-            padded_best_scores, predecessors, peak_scores, params);
+            padded_best_scores, predecessors_v, peak_scores_v, params);
     }
-
-    // Copy padded array to std::vector for backtrack_chains
-    const std::vector<int32_t> best_scores(
-        padded_best_scores, padded_best_scores + anchor_count);
 
     JustLog("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
 
     EASY_BLOCK("backtrack_chains");
-    return backtrack_chains(anchors, best_scores, predecessors, peak_scores,
-                           params.min_chain_score, params.min_seed_count);
+    return backtrack_chains(anchors,
+        std::span<const int32_t>(padded_best_scores, anchor_count),
+        std::span<const int64_t>(predecessors_v),
+        std::span<const int32_t>(peak_scores_v),
+        params.min_chain_score, params.min_seed_count);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

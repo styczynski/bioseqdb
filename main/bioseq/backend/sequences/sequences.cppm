@@ -10,6 +10,7 @@ module;
 #include <list>
 #include <ranges>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <valarray>
@@ -543,6 +544,50 @@ struct compact_sequence_range_base {
             }
         }
         return encoded_ranks;
+    }
+
+    /**
+     * @brief Encode a sub-region directly into caller-provided storage.
+     *
+     * Same output as `to_encoded_vector<is_reversed>(bp_from, bp_to)` but
+     * writes into a span owned by the caller. Used by KSW2 to skip the
+     * per-call std::vector allocation (SPEC §6.7) — the caller allocates
+     * the destination from its own align arena and passes the span in.
+     *
+     * The destination span must be at least `bp_to - bp_from` bytes.
+     */
+    template<bool is_reversed>
+    void to_encoded_into(std::span<uint8_t> dst, size_t bp_from, size_t bp_to) const {
+        if (bp_from >= bp_to) return;
+        const size_t region_length = bp_to - bp_from;
+        if (dst.size() < region_length) return;
+
+        if constexpr (!is_reversed) {
+            size_t write_pos = 0;
+            size_t pos = 0;
+            for (const auto& bp_rank : iterable<BP>()) {
+                if (pos >= bp_to) break;
+                if (pos >= bp_from) {
+                    dst[write_pos++] = static_cast<uint8_t>(bp_rank);
+                }
+                ++pos;
+            }
+        } else {
+            const size_t L = bp_size();
+            const size_t orig_from = L - bp_to;
+            const size_t orig_to = L - bp_from;
+            size_t write_pos = region_length;
+            size_t pos = 0;
+            for (const auto& bp_rank : iterable<BP>()) {
+                if (pos >= orig_to) break;
+                if (pos >= orig_from) {
+                    --write_pos;
+                    dst[write_pos] = static_cast<uint8_t>(
+                        traits::letter_complement(static_cast<storage_unit_t>(bp_rank)));
+                }
+                ++pos;
+            }
+        }
     }
 
     /**

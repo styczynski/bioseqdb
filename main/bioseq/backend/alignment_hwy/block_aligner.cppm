@@ -39,6 +39,7 @@ import bioseq_simd.utils;
 import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
+import context;
 
 export {
 
@@ -103,6 +104,9 @@ HWY_INLINE hn::Vec<D> ba_simd_step(D d, hn::Vec<D> a, hn::Vec<D> b) {
 /// The 1-byte prefix prevents underread in shift_left_1_borrow.
 /// The suffix prevents SIMD overread.
 /// Bytes are stored as alphabet rank values (0-based).
+///
+/// Storage is non-owning: it points into the current align arena (SPEC §5.2,
+/// §6.23). Instances must not outlive the enclosing align-scope.
 class BlockPaddedBytes {
 public:
     BlockPaddedBytes() = default;
@@ -114,15 +118,12 @@ public:
               size_t bp_from, size_t bp_to, size_t block_size) {
         len_ = bp_to - bp_from;
         const size_t total = 1 + len_ + block_size;
-        if (total > capacity_) {
-            data_ = hwy::AllocateAligned<uint8_t>(total + 64);
-            capacity_ = total + 64;
-        }
+        data_ = context::current().alloc_align_array<uint8_t, 64>(total + 64);
         const uint8_t null_byte = static_cast<uint8_t>(AlphabetDim);
         data_[0] = null_byte;
-        auto enc = seq.template to_encoded_vector<is_reversed>(bp_from, bp_to);
-        std::memcpy(data_.get() + 1, enc.data(), len_);
-        std::memset(data_.get() + 1 + len_, null_byte, block_size);
+        seq.template to_encoded_into<is_reversed>(
+            data_.subspan(1, len_), bp_from, bp_to);
+        std::memset(data_.data() + 1 + len_, null_byte, block_size);
     }
 
     /// Build from pre-encoded bytes (already rank values).
@@ -130,13 +131,10 @@ public:
                            size_t block_size, uint8_t null_byte) {
         len_ = len;
         const size_t total = 1 + len_ + block_size;
-        if (total > capacity_) {
-            data_ = hwy::AllocateAligned<uint8_t>(total + 64);
-            capacity_ = total + 64;
-        }
+        data_ = context::current().alloc_align_array<uint8_t, 64>(total + 64);
         data_[0] = null_byte;
-        std::memcpy(data_.get() + 1, bytes, len_);
-        std::memset(data_.get() + 1 + len_, null_byte, block_size);
+        std::memcpy(data_.data() + 1, bytes, len_);
+        std::memset(data_.data() + 1 + len_, null_byte, block_size);
     }
 
     /// Build reversed from pre-encoded bytes.
@@ -144,15 +142,12 @@ public:
                                     size_t block_size, uint8_t null_byte) {
         len_ = len;
         const size_t total = 1 + len_ + block_size;
-        if (total > capacity_) {
-            data_ = hwy::AllocateAligned<uint8_t>(total + 64);
-            capacity_ = total + 64;
-        }
+        data_ = context::current().alloc_align_array<uint8_t, 64>(total + 64);
         data_[0] = null_byte;
         for (size_t i = 0; i < len_; ++i) {
             data_[1 + i] = bytes[len_ - 1 - i];
         }
-        std::memset(data_.get() + 1 + len_, null_byte, block_size);
+        std::memset(data_.data() + 1 + len_, null_byte, block_size);
     }
 
     /// Get byte at 1-based padded index. get(0) = prefix NULL.
@@ -160,16 +155,15 @@ public:
 
     /// Pointer for SIMD loads at position i in padded buffer.
     [[nodiscard]] const uint8_t* ptr_at(size_t i) const {
-        return data_.get() + i;
+        return data_.data() + i;
     }
 
     /// Original (unpadded) sequence length.
     [[nodiscard]] size_t len() const { return len_; }
 
 private:
-    hwy::AlignedFreeUniquePtr<uint8_t[]> data_;
+    std::span<uint8_t> data_;
     size_t len_ = 0;
-    size_t capacity_ = 0;
 };
 
 // BlockSIMDMatrix is replaced by ScoringMatrix from alignment_hwy_utils.
@@ -178,22 +172,24 @@ private:
 // BlockAlignedBuf — SIMD-aligned i16 buffer
 // =============================================================================
 
+/// SIMD-aligned i16 scratch buffer. Storage lives in the current align
+/// arena (SPEC §5.2) — the buffer must not outlive the enclosing
+/// align-scope. The ctor skips the former explicit zero-fill: every
+/// caller invokes clear(d, count) before use.
 class BlockAlignedBuf {
 public:
     BlockAlignedBuf() = default;
 
     explicit BlockAlignedBuf(size_t capacity)
-        : storage_(hwy::AllocateAligned<int16_t>(capacity))
-        , capacity_(capacity) {
-        std::memset(storage_.get(), 0, capacity * sizeof(int16_t));
-    }
+        : storage_(context::current().alloc_align_array<int16_t, 64>(capacity))
+        , capacity_(capacity) {}
 
     template<class D>
     void clear(D d, size_t count) {
         const auto min_vec = hn::Set(d, BA_MIN);
         const size_t L = hn::Lanes(d);
         for (size_t i = 0; i < count; i += L) {
-            hn::Store(min_vec, d, storage_.get() + i);
+            hn::Store(min_vec, d, storage_.data() + i);
         }
     }
 
@@ -207,13 +203,13 @@ public:
         hn::Store(hn::Load(d, data() + src), d, data() + dst);
     }
 
-    [[nodiscard]] int16_t get(size_t i) const { return storage_.get()[i]; }
-    void set(size_t i, int16_t v) { storage_.get()[i] = v; }
-    [[nodiscard]] int16_t* data() { return storage_.get(); }
-    [[nodiscard]] const int16_t* data() const { return storage_.get(); }
+    [[nodiscard]] int16_t get(size_t i) const { return storage_[i]; }
+    void set(size_t i, int16_t v) { storage_[i] = v; }
+    [[nodiscard]] int16_t* data() { return storage_.data(); }
+    [[nodiscard]] const int16_t* data() const { return storage_.data(); }
 
 private:
-    hwy::AlignedFreeUniquePtr<int16_t[]> storage_;
+    std::span<int16_t> storage_;
     size_t capacity_ = 0;
 };
 
@@ -223,6 +219,14 @@ private:
 // BlockTrace — trace data for CIGAR generation
 // =============================================================================
 
+/// CIGAR trace buffer. Five parallel arrays — the `trace_` / `trace2_`
+/// pair can reach multi-MiB for long fill alignments.
+///
+/// Storage is non-owning: it points into the current align arena
+/// (SPEC §6.69 — the former std::vector::resize(n, 0) was multi-MiB of
+/// wasted zero-fill because the DP writes every cell before traceback).
+/// The ctor only zeros `right_`; the other four arrays are always
+/// written-before-read by the DP.
 class BlockTrace {
 public:
     using TraceType = uint32_t;
@@ -234,15 +238,19 @@ public:
         const size_t len = query_len + ref_len + 2;
         const size_t L = hn::Lanes(hn::ScalableTag<int16_t>{});
         const size_t trace_cap = (max_size / L) * (len + max_size * 2) + 64;
-        trace_.resize(trace_cap, 0);
-        trace2_.resize(trace_cap, 0);
-        right_.resize(ba_div_ceil(len * 2, 64), 0);
-        block_start_.resize(len * 4, 0);
-        block_size_.resize(len * 4, 0);
+        const size_t right_cap = ba_div_ceil(len * 2, 64);
+        const size_t block_cap = len * 4;
+        auto& ctx = context::current();
+        trace_       = ctx.alloc_align_array<TraceType>(trace_cap);
+        trace2_      = ctx.alloc_align_array<TraceType>(trace_cap);
+        right_       = ctx.alloc_align_array<uint64_t>(right_cap);
+        block_start_ = ctx.alloc_align_array<uint32_t>(block_cap);
+        block_size_  = ctx.alloc_align_array<uint16_t>(block_cap);
+        std::memset(right_.data(), 0, right_cap * sizeof(uint64_t));
     }
 
     void clear(size_t qlen, size_t rlen) {
-        std::fill(right_.begin(), right_.end(), 0ULL);
+        std::memset(right_.data(), 0, right_.size() * sizeof(uint64_t));
         trace_idx_ = 0;
         block_idx_ = 0;
         ckpt_trace_idx_ = 0;
@@ -279,22 +287,22 @@ public:
     void save_ckpt() { ckpt_trace_idx_ = trace_idx_; ckpt_block_idx_ = block_idx_; }
     void restore_ckpt() { trace_idx_ = ckpt_trace_idx_; block_idx_ = ckpt_block_idx_; }
 
-    [[nodiscard]] const std::vector<TraceType>& trace_data() const { return trace_; }
-    [[nodiscard]] const std::vector<TraceType>& trace2_data() const { return trace2_; }
-    [[nodiscard]] const std::vector<uint64_t>& right_data() const { return right_; }
-    [[nodiscard]] const std::vector<uint32_t>& block_start_data() const { return block_start_; }
-    [[nodiscard]] const std::vector<uint16_t>& block_size_data() const { return block_size_; }
+    [[nodiscard]] std::span<const TraceType> trace_data() const { return trace_; }
+    [[nodiscard]] std::span<const TraceType> trace2_data() const { return trace2_; }
+    [[nodiscard]] std::span<const uint64_t>  right_data() const { return right_; }
+    [[nodiscard]] std::span<const uint32_t>  block_start_data() const { return block_start_; }
+    [[nodiscard]] std::span<const uint16_t>  block_size_data() const { return block_size_; }
     [[nodiscard]] size_t trace_idx() const { return trace_idx_; }
     [[nodiscard]] size_t block_idx() const { return block_idx_; }
     [[nodiscard]] size_t query_len() const { return query_len_; }
     [[nodiscard]] size_t ref_len() const { return ref_len_; }
 
 private:
-    std::vector<TraceType> trace_;
-    std::vector<TraceType> trace2_;
-    std::vector<uint64_t>  right_;
-    std::vector<uint32_t>  block_start_;
-    std::vector<uint16_t>  block_size_;
+    std::span<TraceType> trace_;
+    std::span<TraceType> trace2_;
+    std::span<uint64_t>  right_;
+    std::span<uint32_t>  block_start_;
+    std::span<uint16_t>  block_size_;
     size_t trace_idx_ = 0, block_idx_ = 0;
     size_t ckpt_trace_idx_ = 0, ckpt_block_idx_ = 0;
     size_t query_len_ = 0, ref_len_ = 0;
@@ -1234,6 +1242,11 @@ public:
         const size_t target_len = target_end - target_start;
         if (query_len == 0 || target_len == 0) return result;
 
+        // Every arena-backed buffer below (BlockPaddedBytes, BlockAlignedBuf,
+        // BlockTrace, scratch encoded-sequence spans) dies here. The CIGAR
+        // output lives on result's own vector so it survives the unwind.
+        auto align_scope = context::current().push<context::Arena::Align>();
+
         const hn::ScalableTag<int16_t> d;
         const size_t L = hn::Lanes(d);
 
@@ -1253,11 +1266,14 @@ public:
             -(static_cast<int>(params.gap_open) + params.gap_extend));
         const int8_t gap_extend_neg = static_cast<int8_t>(-params.gap_extend);
 
-        // Build padded byte sequences
-        auto query_enc = query_seq.template to_encoded_vector<is_reversed>(
-            query_start, query_end);
-        auto target_enc = target_seq.template to_encoded_vector<false>(
-            target_start, target_end);
+        // Build encoded byte sequences into align-arena spans (SPEC §6.7).
+        auto& enc_ctx = context::current();
+        auto query_enc  = enc_ctx.alloc_align_array<uint8_t>(query_len);
+        auto target_enc = enc_ctx.alloc_align_array<uint8_t>(target_len);
+        query_seq.template to_encoded_into<is_reversed>(
+            query_enc, query_start, query_end);
+        target_seq.template to_encoded_into<false>(
+            target_enc, target_start, target_end);
 
         const uint8_t null_byte = ScoringMatrix<QueryRange>::NULL_BYTE;
 

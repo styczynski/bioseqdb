@@ -44,6 +44,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_cigar;
 import alignment_hwy_utils;
+import context;
 
 export {
 
@@ -238,6 +239,10 @@ public:
     }
 
 protected:
+    // Storage comes from the per-phase align arena (SPEC §5.2). We only
+    // zero the DP-state prefix of the slab; target_bytes / query_reversed
+    // are immediately overwritten by the encode step, so skipping the
+    // zero-fill there (SPEC §6.44) saves ~20 KiB of writes per region.
     KswDpState(size_t target_len, size_t query_len, size_t vec_bytes, int state_count)
         : target_vec_count_(static_cast<int>((target_len + vec_bytes - 1) / vec_bytes))
         , query_vec_count_(static_cast<int>((query_len + vec_bytes - 1) / vec_bytes))
@@ -246,29 +251,36 @@ protected:
         const size_t stride = static_cast<size_t>(target_vec_count_) * vec_bytes;
         const size_t total  = (static_cast<size_t>(state_count + 1) * target_vec_count_
                               + static_cast<size_t>(query_vec_count_) + 1) * vec_bytes;
-        storage_ = hwy::AllocateAligned<int8_t>(total);
-        std::memset(storage_.get(), 0, total);
+        storage_ = context::current().alloc_align_array<int8_t, 64>(total);
+        const size_t dp_bytes = static_cast<size_t>(state_count) * stride;
+        std::memset(storage_.data(), 0, dp_bytes);
+        // Wipe the single extra byte that diag_score_base writes read just
+        // past the DP-state arrays to keep the boundary deterministic.
+        if (storage_.size() > dp_bytes) {
+            storage_[dp_bytes] = 0;
+        }
 
-        diff_up_base      = storage_.get();
+        int8_t* base = storage_.data();
+        diff_up_base      = base;
         diff_left_base    = diff_up_base      + stride;
         gap_e_offset_base = diff_left_base    + stride;
         gap_f_offset_base = gap_e_offset_base + stride;
-        diag_score_base   = storage_.get() + static_cast<size_t>(state_count - 1) * stride;
+        diag_score_base   = base + static_cast<size_t>(state_count - 1) * stride;
         target_bytes      = reinterpret_cast<uint8_t*>(
-            storage_.get() + static_cast<size_t>(state_count) * stride);
+            base + static_cast<size_t>(state_count) * stride);
         query_reversed    = reinterpret_cast<uint8_t*>(
-            storage_.get() + static_cast<size_t>(state_count + 1) * stride);
+            base + static_cast<size_t>(state_count + 1) * stride);
     }
 
     [[nodiscard]] int8_t* array_ptr(int index) noexcept {
-        return storage_.get()
+        return storage_.data()
             + static_cast<size_t>(index) * target_vec_count_ * vec_bytes_;
     }
 
     int target_vec_count_ = 0;
     int query_vec_count_  = 0;
     size_t vec_bytes_     = 0;
-    hwy::AlignedFreeUniquePtr<int8_t[]> storage_;
+    std::span<int8_t> storage_;
 };
 
 class KswDpStateDual : public KswDpState {
@@ -300,6 +312,10 @@ class KswBacktrackMatrix {
 public:
     KswBacktrackMatrix() noexcept = default;
 
+    // Storage and band metadata all come from the align arena (SPEC §5.2).
+    // The DP forward pass writes every in-band slot before traceback reads
+    // it, so we skip the old `memset(0, total_bytes)` (SPEC §6.52) — for
+    // a 10 kbp × 10 kbp alignment that saves ~15 MiB of writes per phase.
     void allocate(int anti_diagonal_count, int band_vec_capacity, size_t vec_bytes) {
         vec_bytes_ = vec_bytes;
         cols_in_vectors_ = band_vec_capacity;
@@ -307,34 +323,42 @@ public:
         total_vector_slots_ =
             static_cast<size_t>(anti_diagonal_count) * cols_in_vectors_ + 1;
         const size_t total_bytes = total_vector_slots_ * vec_bytes;
-        storage_ = hwy::AllocateAligned<int8_t>(total_bytes);
-        std::memset(storage_.get(), 0, total_bytes);
-        band_starts_.assign(static_cast<size_t>(anti_diagonal_count), 0);
-        band_ends_.assign(static_cast<size_t>(anti_diagonal_count), 0);
+        auto& ctx = context::current();
+        storage_ = ctx.alloc_align_array<int8_t, 64>(total_bytes);
+        band_range_ = ctx.alloc_align_array<int32_t>(
+            2 * static_cast<size_t>(anti_diagonal_count));
     }
 
-    [[nodiscard]] bool is_allocated() const noexcept { return storage_ != nullptr; }
+    [[nodiscard]] bool is_allocated() const noexcept { return !storage_.empty(); }
 
     [[nodiscard]] int8_t* vec_slot_bytes(int anti_diagonal, int local_band_vec) noexcept {
         const size_t slot =
             static_cast<size_t>(anti_diagonal) * cols_in_vectors_
             + static_cast<size_t>(local_band_vec);
-        return storage_.get() + slot * vec_bytes_;
+        return storage_.data() + slot * vec_bytes_;
     }
 
     [[nodiscard]] const uint8_t* bytes() const noexcept {
-        return reinterpret_cast<const uint8_t*>(storage_.get());
+        return reinterpret_cast<const uint8_t*>(storage_.data());
     }
     [[nodiscard]] int byte_cols_per_row() const noexcept { return byte_cols_per_row_; }
-    [[nodiscard]] std::span<int> band_starts() noexcept { return band_starts_; }
-    [[nodiscard]] std::span<int> band_ends()   noexcept { return band_ends_;   }
-    [[nodiscard]] std::span<const int> band_starts() const noexcept { return band_starts_; }
-    [[nodiscard]] std::span<const int> band_ends()   const noexcept { return band_ends_;   }
+    [[nodiscard]] std::span<int32_t> band_starts() noexcept {
+        return band_range_.subspan(0, band_range_.size() / 2);
+    }
+    [[nodiscard]] std::span<int32_t> band_ends() noexcept {
+        return band_range_.subspan(band_range_.size() / 2);
+    }
+    [[nodiscard]] std::span<const int32_t> band_starts() const noexcept {
+        return std::span<const int32_t>(band_range_.data(), band_range_.size() / 2);
+    }
+    [[nodiscard]] std::span<const int32_t> band_ends() const noexcept {
+        return std::span<const int32_t>(band_range_.data() + band_range_.size() / 2,
+                                        band_range_.size() / 2);
+    }
 
 private:
-    hwy::AlignedFreeUniquePtr<int8_t[]> storage_;
-    std::vector<int> band_starts_;
-    std::vector<int> band_ends_;
+    std::span<int8_t>  storage_;
+    std::span<int32_t> band_range_;
     size_t vec_bytes_          = 0;
     int    cols_in_vectors_    = 0;
     int    byte_cols_per_row_  = 0;
@@ -357,8 +381,8 @@ inline void ksw_backtrack_cigar(
     out_cigar.clear();
 
     const uint8_t* bt = matrix.bytes();
-    const std::span<const int> off = matrix.band_starts();
-    const std::span<const int> off_end = matrix.band_ends();
+    const std::span<const int32_t> off = matrix.band_starts();
+    const std::span<const int32_t> off_end = matrix.band_ends();
     const int n_col = matrix.byte_cols_per_row();
 
     int i = start_row, k = start_col, state = 0;
@@ -601,6 +625,12 @@ template<
     const size_t score_lanes = hn::Lanes(fst);
     constexpr size_t score_lanes_max = hn::MaxLanes(hn::ScalableTag<full_score_t>{});
 
+    // Every internal buffer (DP state, backtrack matrix, exact-score row,
+    // encoded sequences) lives in this scope. The CIGAR output lives on
+    // the result struct's own vector (heap) and is built BEFORE the scope
+    // unwinds, so the dangling-span hazard is contained here.
+    auto align_scope = context::current().push<context::Arena::Align>();
+
     KswAlignResult result;
 
     if constexpr (AlphabetDim <= 1) {
@@ -709,18 +739,22 @@ template<
     }
 
     // --- Exact max tracking ------------------------------------------------
-    std::vector<full_score_t> exact_score_row_storage;
+    // Exact-score row goes in the align arena; it's re-read every anti-
+    // diagonal but never survives the call.
     full_score_t* exact_score_row = nullptr;
     if (!use_approx_max) {
-        exact_score_row_storage.assign(
-            static_cast<size_t>(state.target_vec_count()) * byte_lanes, kKswNegInf);
-        exact_score_row = exact_score_row_storage.data();
+        const size_t exact_row_len = static_cast<size_t>(state.target_vec_count()) * byte_lanes;
+        auto exact_row_span =
+            context::current().alloc_align_array<full_score_t>(exact_row_len);
+        std::fill(exact_row_span.begin(), exact_row_span.end(),
+                  static_cast<full_score_t>(kKswNegInf));
+        exact_score_row = exact_row_span.data();
     }
 
     // --- Backtrack storage -------------------------------------------------
     KswBacktrackMatrix backtrack;
-    std::span<int> anti_diag_band_start{};
-    std::span<int> anti_diag_band_end{};
+    std::span<int32_t> anti_diag_band_start{};
+    std::span<int32_t> anti_diag_band_end{};
     if (compute_cigar) {
         backtrack.allocate(qlen + tlen - 1, band_vec_capacity, byte_lanes);
         anti_diag_band_start = backtrack.band_starts();
@@ -728,8 +762,15 @@ template<
     }
 
     // --- Prepare sequences -------------------------------------------------
-    auto query_enc = query_seq.template to_encoded_vector<is_reversed>(query_start, query_end);
-    auto target_enc = target_seq.template to_encoded_vector<false>(target_start, target_end);
+    // Encode directly into caller-provided spans (SPEC §6.7). The
+    // scratch query/target buffers are short-lived, so they live in the
+    // align arena alongside the DP state, avoiding two system mallocs
+    // per phase.
+    auto& encode_ctx = context::current();
+    auto query_enc  = encode_ctx.alloc_align_array<uint8_t>(query_len);
+    auto target_enc = encode_ctx.alloc_align_array<uint8_t>(target_len);
+    query_seq.template to_encoded_into<is_reversed>(query_enc, query_start, query_end);
+    target_seq.template to_encoded_into<false>(target_enc, target_start, target_end);
 
     if (flags.reverse_cigar) {
         std::memcpy(state.query_reversed, query_enc.data(), query_len);
