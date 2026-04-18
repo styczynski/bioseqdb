@@ -531,7 +531,7 @@ ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amoun
 	{
 		PhysicalAddr addr = LogicalToPhysical(logicalOffset + read);
 
-		uint32 to_read = Min(amount - read, BLCKSZ - addr.offset);
+		uint32 to_read = PGMin(amount - read, BLCKSZ - addr.offset);
 		ReadFromBlock(rel, addr.blockno, addr.offset, data + read, to_read,
 					  false);
 
@@ -567,7 +567,7 @@ ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amou
 	{
 		PhysicalAddr addr = LogicalToPhysical(logicalOffset + written);
 
-		uint64 to_write = Min(amount - written, BLCKSZ - addr.offset);
+		uint64 to_write = PGMin(amount - written, BLCKSZ - addr.offset);
 		WriteToBlock(rel, addr.blockno, addr.offset, data + written, to_write,
 					 false);
 

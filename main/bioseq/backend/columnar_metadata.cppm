@@ -1708,8 +1708,8 @@ GetHighestUsedAddressAndId(uint64 storageId,
 	{
 		//StripeMetadata *stripe = lfirst(stripeMetadataCell);
 		uint64 lastByte = stripe->fileOffset + stripe->dataLength - 1;
-		*highestUsedAddress = Max(*highestUsedAddress, lastByte);
-		*highestUsedId = Max(*highestUsedId, stripe->id);
+		*highestUsedAddress = PGMax(*highestUsedAddress, lastByte);
+		*highestUsedId = PGMax(*highestUsedId, stripe->id);
 	}
 }
 
@@ -2553,7 +2553,7 @@ GetHighestUsedRowNumber(uint64 storageId)
 	//foreach_decl_ptr(stripeMetadata, stripeMetadataList)
 	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
-		highestRowNumber = Max(highestRowNumber,
+		highestRowNumber = PGMax(highestRowNumber,
 							   StripeGetHighestRowNumber(stripeMetadata));
 	}
 

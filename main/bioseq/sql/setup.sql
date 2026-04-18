@@ -28,6 +28,7 @@ INSERT INTO x VALUES (
 );
 
 set bioseq.enable_column_cache to on;
+set bioseq.enable_vectorization to off;
 
 --set bioseq.enable_custom_scan TO 'off';
 --set enable_seqscan TO off;
@@ -44,3 +45,4 @@ set bioseq.enable_column_cache to on;
 --EXPLAIN (VERBOSE) SELECT a, mmsearch(a, 'Y'), mmsearch(a, 'Z') from x;
 
 EXPLAIN (ANALYZE, BUFFERS) select a, mmsearch(a, 'X') from x where c > 1;
+select a, c, mmsearch(a, 'X') from x where c = 2;

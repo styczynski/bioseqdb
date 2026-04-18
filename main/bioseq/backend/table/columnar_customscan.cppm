@@ -582,7 +582,7 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 														   minStripeReadCount);
 
 	/* even in the best case, we will read a single stripe */
-	estimatedStripeReadCount = Max(estimatedStripeReadCount, 1.0);
+	estimatedStripeReadCount = PGMax(estimatedStripeReadCount, 1.0);
 
 	Cost scanCost = perStripeCost * estimatedStripeReadCount;
 
@@ -1105,7 +1105,7 @@ Combinations(int n, int k)
 	 * (e.g. Combinations(500, 500)). Use formula (5) to choose the smaller,
 	 * but equivalent, k.
 	 */
-	k = Min(k, n - k);
+	k = PGMin(k, n - k);
 
 	/* calculate numerator of formula (2) first */
 	for (int i = n; i >= n - k + 1; i--)
@@ -1245,7 +1245,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			elog(DEBUG1, "bioseq.min_parallel_proceses is set higher than max_parallel_workers.");
 			elog(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
 			bioseq_min_parallel_process_running = 
-				Min(max_parallel_workers, bioseq_min_parallel_processes);
+				PGMin(max_parallel_workers, bioseq_min_parallel_processes);
 		}
 
 		if (parallel_leader_participation)
@@ -1255,7 +1255,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		 * We know how many workers are we going to run. Since workers are using single stripe
 		 * probably it doesn't have much sense to spawn more workers than stripes in table.
 		 */
-		bioseq_min_parallel_process_running = Min(bioseq_min_parallel_process_running,
+		bioseq_min_parallel_process_running = PGMin(bioseq_min_parallel_process_running,
 													parallel_leader_participation ?
 													ColumnarTableStripeCount(rte->relid) - 1 :
 													ColumnarTableStripeCount(rte->relid));
@@ -1725,7 +1725,7 @@ CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	 * we can apply the selectivity directly to the number of stripes.
 	 */
 	double stripesToRead = clauseSel * ColumnarTableStripeCount(relationId);
-	stripesToRead = Max(stripesToRead, 1.0);
+	stripesToRead = PGMax(stripesToRead, 1.0);
 
 	path->rows = rel->tuples;
 	path->startup_cost = 0;
@@ -1751,7 +1751,7 @@ ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId, int numberOfColumnsRe
 	for(auto stripeMetadata : PList<StripeMetadata>(stripeList))
 	{
 		totalStripeSize += stripeMetadata->dataLength;
-		maxColumnCount = Max(maxColumnCount, stripeMetadata->columnCount);
+		maxColumnCount = PGMax(maxColumnCount, stripeMetadata->columnCount);
 	}
 
 	/*

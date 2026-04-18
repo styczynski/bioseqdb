@@ -1555,6 +1555,7 @@ export inline void log_configure(const bool is_testing_mode = false) {
   } else {
   #ifndef NO_POSTGRES
     fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", false);
+    fmtlog::setFlushDelay(0);
   #endif
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("main");

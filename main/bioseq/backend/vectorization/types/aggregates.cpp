@@ -103,10 +103,10 @@ Datum vint2larger(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Max(result, vectorValue[i]);
+		result = PGMax(result, vectorValue[i]);
 	}
 
-	maxValue = Max(maxValue, result);
+	maxValue = PGMax(maxValue, result);
 
 	PG_RETURN_INT16(maxValue);
 }
@@ -126,10 +126,10 @@ Datum vint2smaller(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Min(result, vectorValue[i]);
+		result = PGMin(result, vectorValue[i]);
 	}
 
-	minValue = Min(minValue, result);
+	minValue = PGMin(minValue, result);
 
 	PG_RETURN_INT16(minValue);
 }
@@ -205,10 +205,10 @@ Datum vint4larger(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Max(result, vectorValue[i]);
+		result = PGMax(result, vectorValue[i]);
 	}
 
-	maxValue = Max(maxValue, result);
+	maxValue = PGMax(maxValue, result);
 
 	PG_RETURN_INT32(maxValue);
 }
@@ -228,10 +228,10 @@ Datum vint4smaller(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Min(result, vectorValue[i]);
+		result = PGMin(result, vectorValue[i]);
 	}
 
-	minValue = Min(minValue, result);
+	minValue = PGMin(minValue, result);
 
 	PG_RETURN_INT32(minValue);
 }
@@ -359,10 +359,10 @@ Datum vint8larger(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Max(maxValue, vectorValue[i]);
+		result = PGMax(maxValue, vectorValue[i]);
 	}
 
-	maxValue = Max(maxValue, result);
+	maxValue = PGMax(maxValue, result);
 
 	PG_RETURN_INT64(maxValue);
 }
@@ -382,10 +382,10 @@ Datum vint8smaller(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Min(result, vectorValue[i]);
+		result = PGMin(result, vectorValue[i]);
 	}
 
-	minValue = Min(minValue, result);
+	minValue = PGMin(minValue, result);
 
 	PG_RETURN_INT64(minValue);
 }
@@ -407,10 +407,10 @@ Datum vdatelarger(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Max(result, vectorValue[i]);
+		result = PGMax(result, vectorValue[i]);
 	}
 
-	maxValue = Max(maxValue, result);
+	maxValue = PGMax(maxValue, result);
 
 	PG_RETURN_INT32(maxValue);
 }
@@ -430,10 +430,10 @@ Datum vdatesmaller(PG_FUNCTION_ARGS)
 		if (arg2->isnull[i])
 			continue;
 
-		result = Min(result, vectorValue[i]);
+		result = PGMin(result, vectorValue[i]);
 	}
 
-	minValue = Min(minValue, result);
+	minValue = PGMin(minValue, result);
 
 	PG_RETURN_INT32(minValue);
 }

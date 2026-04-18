@@ -966,3 +966,8 @@ getStxstattarget_compat(HeapTuple tup)
 
 //include "utils.hpp"
 
+// This macros from Postgres pollute global namespace
+#define PGMax(x, y) ((x) > (y) ? (x) : (y))
+#define PGMin(x, y) ((x) < (y) ? (x) : (y))
+#undef Min
+#undef Max

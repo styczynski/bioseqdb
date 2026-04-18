@@ -646,7 +646,7 @@ initialize_aggregates(AggState *aggstate,
 					  int numReset)
 {
 	int			transno;
-	int			numGroupingSets = Max(aggstate->phase->numsets, 1);
+	int			numGroupingSets = PGMax(aggstate->phase->numsets, 1);
 	int			setno = 0;
 	int			numTrans = aggstate->numtrans;
 	AggStatePerTrans transstates = aggstate->pertrans;
@@ -1617,7 +1617,7 @@ find_hash_columns(AggState *aggstate)
 
 			hashTlist = lappend(hashTlist, list_nth(outerTlist, varNumber));
 			perhash->largestGrpColIdx =
-				Max(varNumber + 1, perhash->largestGrpColIdx);
+				PGMax(varNumber + 1, perhash->largestGrpColIdx);
 		}
 
 		hashDesc = ExecTypeFromTL(hashTlist);
@@ -1929,7 +1929,7 @@ hash_choose_num_buckets(double hashentrysize, long ngroups, Size memory)
 	if (nbuckets > max_nbuckets)
 		nbuckets = max_nbuckets;
 
-	return Max(nbuckets, 1);
+	return PGMax(nbuckets, 1);
 }
 
 /*
@@ -2154,7 +2154,7 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 	TupleTableSlot *firstSlot;
 	TupleTableSlot *result;
 	bool		hasGroupingSets = aggstate->phase->numsets > 0;
-	int			numGroupingSets = Max(aggstate->phase->numsets, 1);
+	int			numGroupingSets = PGMax(aggstate->phase->numsets, 1);
 	int			currentSet;
 	int			nextSetSize;
 	int			numReset;
@@ -2232,7 +2232,7 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 				initialize_phase(aggstate, aggstate->current_phase + 1);
 				aggstate->input_done = false;
 				aggstate->projected_set = -1;
-				numGroupingSets = Max(aggstate->phase->numsets, 1);
+				numGroupingSets = PGMax(aggstate->phase->numsets, 1);
 				node = aggstate->phase->aggnode;
 				numReset = numGroupingSets;
 			}
@@ -3220,7 +3220,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		{
 			//Agg		   *agg = lfirst(l);
 
-			numGroupingSets = Max(numGroupingSets,
+			numGroupingSets = PGMax(numGroupingSets,
 								  list_length(agg->groupingSets));
 
 			/*
@@ -3351,8 +3351,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	{
 		//Aggref	   *aggref = (Aggref *) lfirst(l);
 
-		max_aggno = Max(max_aggno, aggref->aggno);
-		max_transno = Max(max_transno, aggref->aggtransno);
+		max_aggno = PGMax(max_aggno, aggref->aggno);
+		max_transno = PGMax(max_transno, aggref->aggtransno);
 	}
 	numaggs = max_aggno + 1;
 	numtrans = max_transno + 1;
@@ -4022,7 +4022,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 						  Datum initValue, bool initValueIsNull,
 						  Oid *inputTypes, int numArguments)
 {
-	int			numGroupingSets = Max(aggstate->maxsets, 1);
+	int			numGroupingSets = PGMax(aggstate->maxsets, 1);
 	Expr	   *transfnexpr;
 	int			numTransArgs;
 	Expr	   *serialfnexpr = NULL;
@@ -4269,7 +4269,7 @@ ExecEndAgg(AggState *node)
 {
 	PlanState  *outerPlan;
 	int			transno;
-	int			numGroupingSets = Max(node->maxsets, 1);
+	int			numGroupingSets = PGMax(node->maxsets, 1);
 	int			setno;
 
 	/*
@@ -4334,7 +4334,7 @@ ExecReScanAgg(AggState *node)
 	PlanState  *outerPlan = outerPlanState(node);
 	Agg		   *aggnode = (Agg *) node->ss.ps.plan;
 	int			transno;
-	int			numGroupingSets = Max(node->maxsets, 1);
+	int			numGroupingSets = PGMax(node->maxsets, 1);
 	int			setno;
 
 	node->agg_done = false;

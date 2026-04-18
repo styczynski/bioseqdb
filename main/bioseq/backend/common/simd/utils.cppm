@@ -152,7 +152,7 @@ auto hwy_str(D& d, const VecT& v) {
 	const uint8_t* array_bytes = reinterpret_cast<const uint8_t*>(lanes);
 
 	char type_name[100];
-	TypeName(info, N, type_name);
+	hwy::detail::TypeName(info, N, type_name);
 
 	const intptr_t lane = intptr_t(lane_u);
 	const size_t begin = static_cast<size_t>(HWY_MAX(0, lane - 2));

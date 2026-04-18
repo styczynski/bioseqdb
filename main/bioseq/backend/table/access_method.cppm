@@ -1725,7 +1725,7 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 
 	pgstat_report_vacuum(RelationGetRelid(rel),
 							rel->rd_rel->relisshared,
-							Max(new_live_tuples, 0),
+							PGMax(new_live_tuples, 0),
 							0);
 	pgstat_progress_end_command();
 
@@ -1920,10 +1920,10 @@ TruncateColumnar(Relation rel, int elevel)
 		* we're truncating.
 		*/
 #if PG_VERSION_NUM >= PG_VERSION_16
-		uint64 newDataReservation = Max(GetHighestUsedAddress(rel->rd_locator) + 1,
+		uint64 newDataReservation = PGMax(GetHighestUsedAddress(rel->rd_locator) + 1,
 										ColumnarFirstLogicalOffset);
 #else
-		uint64 newDataReservation = Max(GetHighestUsedAddress(rel->rd_node) + 1,
+		uint64 newDataReservation = PGMax(GetHighestUsedAddress(rel->rd_node) + 1,
 										ColumnarFirstLogicalOffset);
 #endif
 
