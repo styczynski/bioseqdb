@@ -42,7 +42,6 @@ import bioseq_table_types;
 import config;
 import bioseq_table_io;
 import pg_utils;
-import pg_utils.lists;
 
 /*
  * This is a check whether we need to bail out of a vacuum, it is set by the
@@ -94,7 +93,7 @@ static void ColumnarProcessUtility(PlannedStmt *pstmt,
 static bool ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode,
 											   int timeout, int retryInterval,
 											   bool acquire);
-static List * NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed);
+[[nodiscard]] static List * NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed);
 static void LogRelationStats(Relation rel, int elevel);
 static void TruncateColumnar(Relation rel, int elevel);
 static bool TruncateAndCombineColumnarStripes(Relation rel, int elevel);
@@ -126,7 +125,18 @@ static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSor
 /* Custom tuple slot ops used for bioseq. Initialized in bioseq_tableam_init(). */
 static TupleTableSlotOps TTSOpsColumnar;
 
-/* Previous cache enabled state. */
+/*
+ * File-static holder for the page-cache flag value captured when a
+ * scan/DML callback first disables the cache. Not convertible to a
+ * PageCacheDisableScope guard because the save and restore happen in
+ * *different* TableAM callbacks (begin/end for scans; insert/complete
+ * for speculative inserts), so the lifetime cannot be expressed as a
+ * single C++ scope. The global slot means concurrent scans in the same
+ * backend would overwrite each other's saved state -- currently the
+ * executor serialises these callbacks per-backend so that is fine, but
+ * adding a second slot would require threading the previous value
+ * through the per-scan descriptor.
+ */
 static bool previousCacheEnabledState = false;
 
 static const TupleTableSlotOps *
@@ -147,7 +157,7 @@ bioseq_beginscan(Relation relation, Snapshot snapshot,
 	int natts = relation->rd_att->natts;
 
 	/* attr_needed represents 0-indexed attribute numbers */
-	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+	PBitmapset attr_needed = PBitmapset::full_range(natts);
 
 	TableScanDesc scandesc = bioseq_beginscan_extended(relation, snapshot, nkeys, key,
 														 parallel_scan,
@@ -155,7 +165,7 @@ bioseq_beginscan(Relation relation, Snapshot snapshot,
 														 NULL,
 														 false);
 
-	bms_free(attr_needed);
+	attr_needed.free();
 
 	return scandesc;
 }
@@ -213,7 +223,7 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 
 	MemoryContextSwitchTo(oldContext);
 
-	return ((TableScanDesc) scan);
+	return reinterpret_cast<TableScanDesc>(scan);
 }
 
 /*
@@ -349,7 +359,7 @@ init_bioseq_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_nee
 static void
 bioseq_endscan(TableScanDesc sscan)
 {
-	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
+	ColumnarScanDesc scan = reinterpret_cast<ColumnarScanDesc>(sscan);
 	if (scan->cs_readState != NULL)
 	{
 		ColumnarEndRead(scan->cs_readState);
@@ -377,10 +387,10 @@ static void
 bioseq_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 				bool allow_strat, bool allow_sync, bool allow_pagemode)
 {
-	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
+	ColumnarScanDesc scan = reinterpret_cast<ColumnarScanDesc>(sscan);
 
 	/* XXX: hack to pass in new quals that aren't actually scan keys */
-	List *scanQual = (List *) key;
+	List *scanQual = reinterpret_cast<List *>(key);
 
 	if (scan->cs_readState != NULL)
 	{
@@ -392,7 +402,7 @@ bioseq_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 static bool
 bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
 {
-	ColumnarScanDesc scan = (ColumnarScanDesc) sscan;
+	ColumnarScanDesc scan = reinterpret_cast<ColumnarScanDesc>(sscan);
 
 	/*
 	 * if this is the first row, initialize read state.
@@ -412,7 +422,7 @@ bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot 
 
 	if (scan->returnVectorizedTuple)
 	{
-		VectorTupleTableSlot * vectorTTS = (VectorTupleTableSlot *) slot;
+		VectorTupleTableSlot * vectorTTS = reinterpret_cast<VectorTupleTableSlot *>(slot);
 
 		int newVectorSize = 0;
 
@@ -592,14 +602,14 @@ bioseq_index_fetch_end(IndexFetchTableData *sscan)
 {
 	bioseq_index_fetch_reset(sscan);
 
-	IndexFetchColumnarData *scan = (IndexFetchColumnarData *) sscan;
+	IndexFetchColumnarData *scan = reinterpret_cast<IndexFetchColumnarData *>(sscan);
 	if (scan->cs_readState)
 	{
 		ColumnarEndRead(scan->cs_readState);
 		scan->cs_readState = NULL;
 	}
 
-	bms_free(scan->attr_needed);
+	scan->attr_needed.free();
 
 	/* clean up any caches. */
 	if (bioseq_enable_page_cache == true)
@@ -615,14 +625,14 @@ FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64 rowN
 {
 	ListCell *lc = NULL;
 
-	int high = scan->stripeMetadataList->length - 1;
+	int high = scan->stripeMetadataList.length() - 1;
 	int low = 0;
 
 	while(low <= high)
 	{
 		int mid = low + (high - low) / 2;
 
-		lc = list_nth_cell(scan->stripeMetadataList, mid);
+		lc = list_nth_cell(scan->stripeMetadataList.ptr(), mid);
 
 		StripeMetadata *stripeMetadata = static_cast<StripeMetadata*>(lc->ptr_value);
 
@@ -669,7 +679,7 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 
 	ExecClearTuple(slot);
 
-	IndexFetchColumnarData *scan = (IndexFetchColumnarData *) sscan;
+	IndexFetchColumnarData *scan = reinterpret_cast<IndexFetchColumnarData *>(sscan);
 	Relation columnarRelation = scan->cs_base.rel;
 
 	/* initialize read state for the first row */
@@ -678,12 +688,12 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 		/* no quals for index scan */
 		List *scanQual = NIL;
 
-		if (bms_is_empty(scan->attr_needed))
+		if (scan->attr_needed.empty())
 		{
 			/* we need all columns */
 			int natts = columnarRelation->rd_att->natts;
-			bms_free(scan->attr_needed);
-			scan->attr_needed = bms_add_range(NULL, 0, natts - 1);
+			scan->attr_needed.free();
+			scan->attr_needed = PBitmapset::full_range(natts);
 		}
 
 		bool randomAccess = true;
@@ -830,7 +840,7 @@ bioseq_fetch_row_version(Relation relation,
 		readState = InitColumnarReadStateCache(relation, GetCurrentSubTransactionId());
 
 		int natts = relation->rd_att->natts;
-		Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+		PBitmapset attr_needed = PBitmapset::full_range(natts);
 
 		List *scanQual = NIL;
 
@@ -1131,7 +1141,7 @@ bioseq_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 	ColumnarReadState *readState = NULL;
 
 	int natts = relation->rd_att->natts;
-	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+	PBitmapset attr_needed = PBitmapset::full_range(natts);
 
 	List *scanQual = NIL;
 
@@ -1317,7 +1327,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 														targetDesc);
 	/* we need all columns */
 	int natts = OldHeap->rd_att->natts;
-	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+	PBitmapset attr_needed = PBitmapset::full_range(natts);
 
 	/* no quals for table rewrite */
 	List *scanQual = NIL;
@@ -1357,10 +1367,10 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
  * NeededColumnsList returns a list of AttrNumber's for the columns that
  * are not dropped and specified by attr_needed.
  */
-static List *
-NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed)
+[[nodiscard]] static List *
+NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed)
 {
-	List *columnList = NIL;
+	PIntList columnList;
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -1370,14 +1380,14 @@ NeededColumnsList(TupleDesc tupdesc, Bitmapset *attr_needed)
 		}
 
 		/* attr_needed is 0-indexed but columnList is 1-indexed */
-		if (bms_is_member(i, attr_needed))
+		if (attr_needed.contains(i))
 		{
 			AttrNumber varattno = i + 1;
-			columnList = lappend_int(columnList, varattno);
+			columnList.append(varattno);
 		}
 	}
 
-	return columnList;
+	return columnList.release();
 }
 
 /*
@@ -1501,7 +1511,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 
 	/* we need all columns */
 	int natts = rel->rd_att->natts;
-	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+	PBitmapset attr_needed = PBitmapset::full_range(natts);
 
 	/* no quals for table rewrite */
 	List *scanQual = NIL;
@@ -1581,9 +1591,8 @@ static void
 bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 					BufferAccessStrategy bstrategy)
 {
-	/* Capture the cache state and disable it for a vacuum. */
-	bool old_cache_mode = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
+	/* Disable the page cache for the duration of the vacuum. */
+	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
 
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
  									RelationGetRelid(rel));
@@ -1651,9 +1660,6 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 							std::max<int64>(new_live_tuples, 0),
 							0);
 	pgstat_progress_end_command();
-
-	/* Reenable the cache state. */
-	bioseq_enable_page_cache = old_cache_mode;
 }
 
 
@@ -1922,9 +1928,8 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 								 double *liverows, double *deadrows,
 								 TupleTableSlot *slot)
 {
-	/* Capture the cache state and disable it for a vacuum. */
-	bool old_cache_mode = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
+	/* Disable the page cache while ANALYZE collects sample rows. */
+	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
 
 	/*
 	 * Currently we don't do anything smart to reduce number of rows returned
@@ -1940,15 +1945,8 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 	if (bioseq_getnextslot(scan, ForwardScanDirection, slot))
 	{
 		(*liverows)++;
-
-		/* Reset cache to previous state. */
-		bioseq_enable_page_cache = old_cache_mode;
-
 		return true;
 	}
-
-	/* Reset cache to previous state. */
-	bioseq_enable_page_cache = old_cache_mode;
 
 	return false;
 }
@@ -1985,9 +1983,8 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 		elog(ERROR, "parallel scans on columnar are not supported");
 	}
 
-	/* Disable the page cache for the index build. */
-	bool old_cache_mode = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
+	/* Disable the page cache for the duration of the index build. */
+	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
 
 	/*
 	 * In a normal index build, we use SnapshotAny to retrieve all tuples. In
@@ -2061,9 +2058,6 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 	FreeExecutorState(estate);
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
-
-	/* Reset the cache mode. */
-	bioseq_enable_page_cache = old_cache_mode;
 
 	return reltuples;
 }
@@ -2512,8 +2506,8 @@ bioseq_tableam_init()
 {
 	JustLog("[bioseq] pg: bioseq_tableam_init() entered");
 	ColumnarTableSetOptions_hook_type **ColumnarTableSetOptions_hook_ptr =
-		(ColumnarTableSetOptions_hook_type **) find_rendezvous_variable(
-			COLUMNAR_SETOPTIONS_HOOK_SYM);
+		reinterpret_cast<ColumnarTableSetOptions_hook_type **>(find_rendezvous_variable(
+			COLUMNAR_SETOPTIONS_HOOK_SYM));
 	*ColumnarTableSetOptions_hook_ptr = &ColumnarTableSetOptions_hook;
 
 	RegisterXactCallback(ColumnarXactCallback, NULL);
@@ -2701,7 +2695,7 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 
 	if (IsA(parsetree, IndexStmt))
 	{
-		IndexStmt *indexStmt = (IndexStmt *) parsetree;
+		IndexStmt *indexStmt = reinterpret_cast<IndexStmt *>(parsetree);
 
 		Relation rel = relation_openrv(indexStmt->relation,
 									   indexStmt->concurrent ? ShareUpdateExclusiveLock :
@@ -2866,7 +2860,7 @@ detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
 			}
 
 			/* will be freed when per-tuple context is reset */
-			varlena *new_value = (varlena *) DatumGetPointer(values[i]);
+			varlena *new_value = reinterpret_cast<varlena *>(DatumGetPointer(values[i]));
 			new_value = detoast_attr(new_value);
 			values[i] = PointerGetDatum(new_value);
 		}
@@ -3264,9 +3258,13 @@ POSTGRES_FN(vacuum_bioseq_table)
 	bool completelyDone = false;
 	sact action;
 
-	/* Capture the cache state and disable it for a vacuum. */
-	bool old_cache_mode = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
+	/*
+	 * Disable the page cache for the duration of the vacuum. The guard
+	 * restores the previous state on every exit path — including the
+	 * early PG_RETURN_* returns scattered through the signal-handling
+	 * branches below — so individual restore calls are no longer needed.
+	 */
+	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
 
 	/*
 	 * Set up signal handlers for any incoming signals during the vacuum,
@@ -3298,10 +3296,6 @@ POSTGRES_FN(vacuum_bioseq_table)
 						RelationGetRelationName(rel))));
 
 		MemoryContextSwitchTo(oldcontext);
-
-		/* Reset cache to previous state. */
-		bioseq_enable_page_cache = old_cache_mode;
-
 		PG_RETURN_VOID();
 	}
 
@@ -3326,14 +3320,9 @@ POSTGRES_FN(vacuum_bioseq_table)
 		RelationClose(rel);
 
 		MemoryContextSwitchTo(oldcontext);
-
-		/* Reset cache to previous state. */
-		bioseq_enable_page_cache = old_cache_mode;
-
 		PG_RETURN_VOID();
 	}
 
-	// ListCell *lc = NULL;
 
 	int stripeMetadataIndex = 0;
 
@@ -3378,7 +3367,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 
 	/* We need all columns. */
 	int natts = rel->rd_att->natts;
-	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
+	PBitmapset attr_needed = PBitmapset::full_range(natts);
 
 	/* No quals for table rewrite */
 	List *scanQual = NIL;
@@ -3460,10 +3449,6 @@ POSTGRES_FN(vacuum_bioseq_table)
 			{
 				kil_action.sa_handler(SIGKILL);
 			}
-
-			/* Reset cache to previous state. */
-			bioseq_enable_page_cache = old_cache_mode;
-
 			PG_RETURN_NULL();
 		}
 
@@ -3489,10 +3474,6 @@ POSTGRES_FN(vacuum_bioseq_table)
 		relation_close(rel, NoLock);
 		TruncateColumnar(rel, DEBUG3);
 		UnlockRelation(rel, ExclusiveLock);
-
-		/* Reset cache to previous state. */
-		bioseq_enable_page_cache = old_cache_mode;
-
 		PG_RETURN_UINT32(progress);
 	}
 
@@ -3540,10 +3521,6 @@ POSTGRES_FN(vacuum_bioseq_table)
 			{
 				kil_action.sa_handler(SIGKILL);
 			}
-
-			/* Reset cache to previous state. */
-			bioseq_enable_page_cache = old_cache_mode;
-
 			PG_RETURN_NULL();
 		}
 
@@ -3626,10 +3603,6 @@ POSTGRES_FN(vacuum_bioseq_table)
 	sigaction(SIGTERM, &trm_action, NULL);
 	sigaction(SIGABRT, &abt_action, NULL);
 	sigaction(SIGKILL, &kil_action, NULL);
-
-	/* Reset cache to previous state. */
-	bioseq_enable_page_cache = old_cache_mode;
-
 	PG_RETURN_UINT32(progress + relocationProgress);
 }
 

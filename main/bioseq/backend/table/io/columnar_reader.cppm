@@ -26,7 +26,6 @@ import storage_compression;
 import storage_physical;
 import storage_metadata;
 import pg_utils;
-import pg_utils.lists;
 
 /*
  * printf-style format string used by ereport() when a stripe is unflushed
@@ -1337,7 +1336,7 @@ BuildBaseConstraint(Var *variable)
 	OpExpr *lessThanExpr = MakeOpExpression(variable, BTLessEqualStrategyNumber);
 	OpExpr *greaterThanExpr = MakeOpExpression(variable, BTGreaterEqualStrategyNumber);
 
-	Node *baseConstraint = make_and_qual((Node *) lessThanExpr, (Node *) greaterThanExpr);
+	Node *baseConstraint = make_and_qual(reinterpret_cast<Node *>(lessThanExpr), reinterpret_cast<Node *>(greaterThanExpr));
 
 	return baseConstraint;
 }
@@ -1421,12 +1420,12 @@ MakeOpExpression(Var *variable, int16 strategyNumber)
 	Const *constantValue = makeNullConst(typeId, typeModId, collationId);
 
 	/* Now make the expression with the given variable and a null constant */
-	OpExpr *expression = (OpExpr *) make_opclause(operatorId,
+	OpExpr *expression = reinterpret_cast<OpExpr *>(make_opclause(operatorId,
 												  InvalidOid, /* no result type yet */
 												  false, /* no return set */
-												  (Expr *) variable,
-												  (Expr *) constantValue,
-												  InvalidOid, collationId);
+												  reinterpret_cast<Expr *>(variable),
+												  reinterpret_cast<Expr *>(constantValue),
+												  InvalidOid, collationId));
 
 	/* Set implementing function id and result type */
 	expression->opfuncid = get_opcode(operatorId);
@@ -1464,18 +1463,18 @@ GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumber)
 static void
 UpdateConstraint(Node *baseConstraint, Datum minValue, Datum maxValue)
 {
-	BoolExpr *andExpr = (BoolExpr *) baseConstraint;
-	Node *lessThanExpr = (Node *) linitial(andExpr->args);
-	Node *greaterThanExpr = (Node *) lsecond(andExpr->args);
+	BoolExpr *andExpr = reinterpret_cast<BoolExpr *>(baseConstraint);
+	Node *lessThanExpr = reinterpret_cast<Node *>(linitial(andExpr->args));
+	Node *greaterThanExpr = reinterpret_cast<Node *>(lsecond(andExpr->args));
 
-	Node *minNode = get_rightop((Expr *) greaterThanExpr);
-	Node *maxNode = get_rightop((Expr *) lessThanExpr);
+	Node *minNode = get_rightop(reinterpret_cast<Expr *>(greaterThanExpr));
+	Node *maxNode = get_rightop(reinterpret_cast<Expr *>(lessThanExpr));
 
 	Assert(IsA(minNode, Const));
 	Assert(IsA(maxNode, Const));
 
-	Const *minConstant = (Const *) minNode;
-	Const *maxConstant = (Const *) maxNode;
+	Const *minConstant = reinterpret_cast<Const *>(minNode);
+	Const *maxConstant = reinterpret_cast<Const *>(maxNode);
 
 	minConstant->constvalue = minValue;
 	maxConstant->constvalue = maxValue;
@@ -1831,7 +1830,7 @@ ColumnDefaultValue(TupleConstr *tupleConstraints, Form_pg_attribute attributeFor
 	defaultValueNode = eval_const_expressions(NULL, defaultValueNode);
 	if (IsA(defaultValueNode, Const))
 	{
-		Const *constNode = (Const *) defaultValueNode;
+		Const *constNode = reinterpret_cast<Const *>(defaultValueNode);
 		return constNode->constvalue;
 	}
 	else
@@ -2034,7 +2033,7 @@ ReadChunkGroupNextVector(ChunkGroupReadState *chunkGroupReadState, Datum *column
 			/* attno is 1-indexed; existsArray is 0-indexed */
 			const uint32 columnIndex = attno - 1;
 
-			VectorColumn* vectorColumn = (VectorColumn*) columnValues[columnIndex];
+			VectorColumn* vectorColumn = reinterpret_cast<VectorColumn*>(columnValues[columnIndex]);
 
 			if (chunkGroupData->existsArray[columnIndex][rowIndex])
 			{

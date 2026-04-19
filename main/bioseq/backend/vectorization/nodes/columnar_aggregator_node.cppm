@@ -312,7 +312,6 @@ struct FindColsContext
 export module bioseq_aggregator_node;
 
 import pg_utils;
-import pg_utils.lists;
 
 extern "C" {
 
@@ -1033,7 +1032,7 @@ finalize_aggregate(AggState *aggstate,
 		InitFunctionCallInfoData(*fcinfo, &peragg->finalfn,
 								 numFinalArgs,
 								 pertrans->aggCollation,
-								 static_cast<Node*>((void*)aggstate), NULL);
+								 reinterpret_cast<Node*>(aggstate), NULL);
 
 		/* Fill in the transition state value */
 		fcinfo->args[0].value =
@@ -1319,7 +1318,7 @@ project_aggregates(AggState *aggstate)
 static void
 find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 {
-	Agg		   *agg = (Agg *) aggstate->ss.ps.plan;
+	Agg		   *agg = reinterpret_cast<Agg *>(aggstate->ss.ps.plan);
 	FindColsContext context;
 
 	context.is_aggref = false;
@@ -1327,8 +1326,8 @@ find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 	context.unaggregated = NULL;
 
 	/* Examine tlist and quals */
-	(void) find_cols_walker((Node *) agg->plan.targetlist, &context);
-	(void) find_cols_walker((Node *) agg->plan.qual, &context);
+	(void) find_cols_walker(reinterpret_cast<Node *>(agg->plan.targetlist), &context);
+	(void) find_cols_walker(reinterpret_cast<Node *>(agg->plan.qual), &context);
 
 	/* In some cases, grouping columns will not appear in the tlist */
 	for (int i = 0; i < agg->numCols; i++)
@@ -1346,7 +1345,7 @@ find_cols_walker(Node *node, FindColsContext *context)
 		return false;
 	if (IsA(node, Var))
 	{
-		Var		   *var = (Var *) node;
+		Var		   *var = reinterpret_cast<Var *>(node);
 
 		/* setrefs.c should have set the varno to OUTER_VAR */
 		Assert(var->varno == OUTER_VAR);
@@ -1363,12 +1362,12 @@ find_cols_walker(Node *node, FindColsContext *context)
 	{
 		Assert(!context->is_aggref);
 		context->is_aggref = true;
-		expression_tree_walker(node, find_cols_walker, (void *) context);
+		expression_tree_walker(node, find_cols_walker, static_cast<void *>(context));
 		context->is_aggref = false;
 		return false;
 	}
 	return expression_tree_walker(node, find_cols_walker,
-								  (void *) context);
+								  static_cast<void *>(context));
 }
 
 /*
@@ -2081,7 +2080,7 @@ lookup_hash_entries(AggState *aggstate)
 static TupleTableSlot *
 ExecAgg(PlanState *pstate)
 {
-	VectorAggState *vectoraggstate = (VectorAggState *) pstate;
+	VectorAggState *vectoraggstate = reinterpret_cast<VectorAggState *>(pstate);
 	AggState *node = vectoraggstate->aggstate;
 	TupleTableSlot *result = NULL;
 
@@ -2397,7 +2396,7 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 						// Should handle COUNT(*)
 						if (pertrans->aggref->aggstar)
 						{
-							int slotDim = ((VectorTupleTableSlot *)outerslot)->dimension;
+							int slotDim = reinterpret_cast<VectorTupleTableSlot *>(outerslot)->dimension;
 							pergroupstate->transValue += slotDim;
 						}
 					}
@@ -2918,10 +2917,10 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 
 	tape = spill->partitions[partition];
 
-	LogicalTapeWrite(tape, (void *) &hash, sizeof(uint32));
+	LogicalTapeWrite(tape, static_cast<const void *>(&hash), sizeof(uint32));
 	total_written += sizeof(uint32);
 
-	LogicalTapeWrite(tape, (void *) tuple, tuple->t_len);
+	LogicalTapeWrite(tape, static_cast<const void *>(tuple), tuple->t_len);
 	total_written += tuple->t_len;
 
 	if (shouldFree)
@@ -3152,7 +3151,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * create state structure
 	 */
 	aggstate = makeNode(AggState);
-	aggstate->ss.ps.plan = (Plan *) node;
+	aggstate->ss.ps.plan = reinterpret_cast<Plan *>(node);
 	aggstate->ss.ps.state = estate;
 	aggstate->ss.ps.ExecProcNode = ExecAgg;
 
@@ -3211,8 +3210,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->maxsets = numGroupingSets;
 	aggstate->numphases = numPhases;
 
-	aggstate->aggcontexts = (ExprContext **)
-		make1<ExprContext*>(sizeof(ExprContext *) * numGroupingSets);
+	aggstate->aggcontexts = reinterpret_cast<ExprContext **>(
+		make1<ExprContext*>(sizeof(ExprContext *) * numGroupingSets));
 
 	/*
 	 * Create expression contexts.  We need three or more, one for
@@ -3313,7 +3312,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * during ExecAssignProjectionInfo, above.
 	 */
 	aggstate->ss.ps.qual =
-		ExecInitQual(node->plan.qual, (PlanState *) aggstate);
+		ExecInitQual(node->plan.qual, reinterpret_cast<PlanState *>(aggstate));
 
 	/*
 	 * We should now have found all Aggrefs in the targetlist and quals.
@@ -3467,7 +3466,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 											   aggnode->grpColIdx,
 											   aggnode->grpOperators,
 											   aggnode->grpCollations,
-											   (PlanState *) aggstate);
+											   reinterpret_cast<PlanState *>(aggstate));
 				}
 
 				/* and for all grouped columns, unless already computed */
@@ -3479,7 +3478,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 											   aggnode->grpColIdx,
 											   aggnode->grpOperators,
 											   aggnode->grpCollations,
-											   (PlanState *) aggstate);
+											   reinterpret_cast<PlanState *>(aggstate));
 				}
 			}
 
@@ -3753,7 +3752,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 		/* Initialize any direct-argument expressions */
 		peragg->aggdirectargs = ExecInitExprList(aggref->aggdirectargs,
-												 (PlanState *) aggstate);
+												 reinterpret_cast<PlanState *>(aggstate));
 
 		/*
 		 * build expression trees using actual argument & result types for the
@@ -3769,7 +3768,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 										 finalfn_oid,
 										 &finalfnexpr);
 			fmgr_info(finalfn_oid, &peragg->finalfn);
-			fmgr_info_set_expr((Node *) finalfnexpr, &peragg->finalfn);
+			fmgr_info_set_expr(reinterpret_cast<Node *>(finalfnexpr), &peragg->finalfn);
 		}
 
 		/* get info about the output value's datatype */
@@ -4046,14 +4045,14 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 								 NULL);
 
 	fmgr_info(transfn_oid, &pertrans->transfn);
-	fmgr_info_set_expr((Node *) transfnexpr, &pertrans->transfn);
+	fmgr_info_set_expr(reinterpret_cast<Node *>(transfnexpr), &pertrans->transfn);
 
 	pertrans->transfn_fcinfo = make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(numTransArgs));
 	InitFunctionCallInfoData(*pertrans->transfn_fcinfo,
 							 &pertrans->transfn,
 							 numTransArgs,
 							 pertrans->aggCollation,
-							 static_cast<Node*>((void*)aggstate), NULL);
+							 reinterpret_cast<Node*>(aggstate), NULL);
 
 	/* get info about the state value's datatype */
 	get_typlenbyval(aggtranstype,
@@ -4065,7 +4064,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		build_aggregate_serialfn_expr(aggserialfn,
 									  &serialfnexpr);
 		fmgr_info(aggserialfn, &pertrans->serialfn);
-		fmgr_info_set_expr((Node *) serialfnexpr, &pertrans->serialfn);
+		fmgr_info_set_expr(reinterpret_cast<Node *>(serialfnexpr), &pertrans->serialfn);
 
 		pertrans->serialfn_fcinfo =
 			make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(1));
@@ -4073,7 +4072,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 								 &pertrans->serialfn,
 								 1,
 								 InvalidOid,
-								 static_cast<Node*>((void*)aggstate), NULL);
+								 reinterpret_cast<Node*>(aggstate), NULL);
 	}
 
 	if (OidIsValid(aggdeserialfn))
@@ -4081,7 +4080,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		build_aggregate_deserialfn_expr(aggdeserialfn,
 										&deserialfnexpr);
 		fmgr_info(aggdeserialfn, &pertrans->deserialfn);
-		fmgr_info_set_expr((Node *) deserialfnexpr, &pertrans->deserialfn);
+		fmgr_info_set_expr(reinterpret_cast<Node *>(deserialfnexpr), &pertrans->deserialfn);
 
 		pertrans->deserialfn_fcinfo =
 			make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(2));
@@ -4089,7 +4088,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 								 &pertrans->deserialfn,
 								 2,
 								 InvalidOid,
-								 static_cast<Node*>((void*)aggstate), NULL);
+								 reinterpret_cast<Node*>(aggstate), NULL);
 	}
 
 	/*
@@ -4182,7 +4181,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 
 			pertrans->sortColIdx[i] = tle->resno;
 			pertrans->sortOperators[i] = sortcl->sortop;
-			pertrans->sortCollations[i] = exprCollation((Node *) tle->expr);
+			pertrans->sortCollations[i] = exprCollation(reinterpret_cast<Node *>(tle->expr));
 			pertrans->sortNullsFirst[i] = sortcl->nulls_first;
 			i++;
 		}
@@ -4306,7 +4305,7 @@ ExecReScanAgg(AggState *node)
 {
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	PlanState  *outerPlan = outerPlanState(node);
-	Agg		   *aggnode = (Agg *) node->ss.ps.plan;
+	Agg		   *aggnode = reinterpret_cast<Agg *>(node->ss.ps.plan);
 	int			transno;
 	int			numGroupingSets = std::max(node->maxsets, 1);
 	int			setno;
@@ -4455,7 +4454,7 @@ AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 	{
 		if (aggcontext)
 		{
-			AggState   *aggstate = ((AggState *) fcinfo->context);
+			AggState   *aggstate = reinterpret_cast<AggState *>(fcinfo->context);
 			ExprContext *cxt = aggstate->curaggcontext;
 
 			*aggcontext = cxt->ecxt_per_tuple_memory;
@@ -4465,7 +4464,7 @@ AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 	if (fcinfo->context && IsA(fcinfo->context, WindowAggState))
 	{
 		if (aggcontext)
-			*aggcontext = ((WindowAggState *) fcinfo->context)->curaggcontext;
+			*aggcontext = reinterpret_cast<WindowAggState *>(fcinfo->context)->curaggcontext;
 		return AGG_CONTEXT_WINDOW;
 	}
 
@@ -4497,7 +4496,7 @@ AggGetAggref(FunctionCallInfo fcinfo)
 {
 	if (fcinfo->context && IsA(fcinfo->context, AggState))
 	{
-		AggState   *aggstate = (AggState *) fcinfo->context;
+		AggState   *aggstate = reinterpret_cast<AggState *>(fcinfo->context);
 		AggStatePerAgg curperagg;
 		AggStatePerTrans curpertrans;
 
@@ -4535,7 +4534,7 @@ AggStateIsShared(FunctionCallInfo fcinfo)
 {
 	if (fcinfo->context && IsA(fcinfo->context, AggState))
 	{
-		AggState   *aggstate = (AggState *) fcinfo->context;
+		AggState   *aggstate = reinterpret_cast<AggState *>(fcinfo->context);
 		AggStatePerAgg curperagg;
 		AggStatePerTrans curpertrans;
 
@@ -4631,22 +4630,22 @@ static CustomExecMethods VectorAggNodeExecMethods = {
 static Node *
 CreateVectorAggState(CustomScan *custom_plan)
 {
-	VectorAggState *vas = (VectorAggState *) newNode(
-		sizeof(VectorAggState), T_CustomScanState);
+	VectorAggState *vas = reinterpret_cast<VectorAggState *>(newNode(
+		sizeof(VectorAggState), T_CustomScanState));
 
 	CustomScanState *cscanstate = &vas->css;
 	cscanstate->methods = &VectorAggNodeExecMethods;
 
-	return (Node *) cscanstate;
+	return reinterpret_cast<Node *>(cscanstate);
 }
 
 
 static void
 BeginVectorAgg(CustomScanState *css, EState *estate, int eflags)
 {
-	VectorAggState *vas = (VectorAggState*) css;
-	CustomScan  *cscan = (CustomScan *)css->ss.ps.plan;
-	Agg	*aggNode = (Agg *)linitial(cscan->custom_plans);
+	VectorAggState *vas = reinterpret_cast<VectorAggState *>(css);
+	CustomScan  *cscan = reinterpret_cast<CustomScan *>(css->ss.ps.plan);
+	Agg	*aggNode = reinterpret_cast<Agg *>(linitial(cscan->custom_plans));
 
 	/* Clean out the tuple table */
 	ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
@@ -4668,14 +4667,14 @@ BeginVectorAgg(CustomScanState *css, EState *estate, int eflags)
 static TupleTableSlot *
 ExecVectorAgg(CustomScanState *node)
 {
-	return ExecAgg((PlanState *)node);
+	return ExecAgg(reinterpret_cast<PlanState *>(node));
 }
 
 
 static void
 EndVectorAgg(CustomScanState *node)
 {
-	ExecEndAgg(((VectorAggState *)node)->aggstate);
+	ExecEndAgg(reinterpret_cast<VectorAggState *>(node)->aggstate);
 }
 
 
@@ -4689,7 +4688,7 @@ extern "C++" {
 CustomScan *
 bioseq_create_aggregator_node(void)
 {
-	CustomScan *cscan = (CustomScan *) makeNode(CustomScan);
+	CustomScan *cscan = reinterpret_cast<CustomScan *>(makeNode(CustomScan));
 	cscan->methods = &VectorAggNodeMethods;
 	return cscan;
 }

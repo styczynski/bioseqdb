@@ -55,9 +55,9 @@ export constexpr uint64 ColumnarInvalidLogicalOffset = 0;
 export constexpr uint64 ColumnarFirstLogicalOffset = ((BLCKSZ - SizeOfPageHeaderData) * 2);
 
 export template<typename T>
-inline auto ColumnarLogicalOffsetIsValid(T X) {
-	return ((X) >= ColumnarFirstLogicalOffset);
-};
+[[nodiscard]] inline constexpr bool ColumnarLogicalOffsetIsValid(T logical_offset) {
+	return logical_offset >= ColumnarFirstLogicalOffset;
+}
 
 /*
  * Content of the first page in main fork, which stores metadata at file

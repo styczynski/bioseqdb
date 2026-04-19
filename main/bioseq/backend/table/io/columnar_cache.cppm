@@ -23,7 +23,6 @@ module;
 export module bioseq_table_io:cache;
 
 import pg_utils;
-import pg_utils.lists;
 
 void ColumnarEndRead(ColumnarReadState *readState);
 void ColumnarResetRead(ColumnarReadState *readState);

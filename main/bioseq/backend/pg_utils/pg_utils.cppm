@@ -24,7 +24,42 @@ module;
 
 export module pg_utils;
 
-import pg_utils.lists;
+export import pg_utils.lists;
+export import pg_utils.bitmapset;
+
+/*
+ * PageCacheDisableScope temporarily forces bioseq_enable_page_cache to
+ * false for the lifetime of the scope, restoring the previous value on
+ * destruction. Replaces the hand-rolled
+ *   bool old_cache_mode = bioseq_enable_page_cache;
+ *   bioseq_enable_page_cache = false;
+ *   ...
+ *   bioseq_enable_page_cache = old_cache_mode;
+ * pattern that previously needed a restore on every early return.
+ *
+ * The underlying GUC lives in columnar.cppm; the guard takes a reference
+ * to it so the header does not need a forward declaration here.
+ */
+export class PageCacheDisableScope {
+private:
+    bool& target_flag;
+    bool previous_value;
+
+public:
+    explicit PageCacheDisableScope(bool& target)
+        : target_flag(target), previous_value(target) {
+        target_flag = false;
+    }
+
+    ~PageCacheDisableScope() {
+        target_flag = previous_value;
+    }
+
+    PageCacheDisableScope(const PageCacheDisableScope&) = delete;
+    PageCacheDisableScope& operator=(const PageCacheDisableScope&) = delete;
+    PageCacheDisableScope(PageCacheDisableScope&&) = delete;
+    PageCacheDisableScope& operator=(PageCacheDisableScope&&) = delete;
+};
 
 /*
  * make0<T>() returns a pointer to a zero-initialised T allocated in the

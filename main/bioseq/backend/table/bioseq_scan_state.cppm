@@ -34,6 +34,9 @@ module;
 
 export module bioseq_scan_state;
 
+import pg_utils.lists;
+import pg_utils.bitmapset;
+
 /*
  * Vectorization-related per-scan state. Kept as a nested struct so that
  * callers can clearly tell vectorization metadata apart from the rest of
@@ -47,9 +50,9 @@ export struct BioseqScanVectorizationState
     TupleTableSlot* resultVectorSlot;
     uint32 vectorPendingRowNumber;
     uint32 vectorRowIndex;
-    List* vectorizedQualList;
-    List* constructedVectorizedQualList;
-    List* attrNeededList;
+    PList<Node> vectorizedQualList;
+    PList<Node> constructedVectorizedQualList;
+    PIntList attrNeededList;
 };
 
 /*
@@ -60,10 +63,10 @@ export struct BioseqScanVectorizationState
 export struct BioseqScanState
 {
     CustomScanState custom_scanstate;
-    Bitmapset* attrNeeded;
+    PBitmapset attrNeeded;
 
     ExprContext* css_RuntimeContext;
-    List* qual;
+    PList<Node> qual;
 
     ParallelColumnarScan parallelColumnarScan;
 
@@ -119,6 +122,15 @@ export struct BioseqScanState
     [[nodiscard]] Relation current_relation() {
         return custom_scanstate.ss.ss_currentRelation;
     }
+
+    /*
+     * Returns the CustomScan plan node that this state was built from.
+     * Centralises the `reinterpret_cast<CustomScan*>(ss.ps.plan)` cast
+     * that call sites would otherwise duplicate.
+     */
+    [[nodiscard]] CustomScan* custom_scan_plan() {
+        return reinterpret_cast<CustomScan*>(custom_scanstate.ss.ps.plan);
+    }
 };
 
 /*
@@ -157,6 +169,25 @@ export struct BioseqIndexScanState
 
     [[nodiscard]] PlanState* plan_state() {
         return &css.ss.ps;
+    }
+
+    /*
+     * Returns the CustomScan plan node that wraps the inner IndexScan
+     * so call sites don't have to spell out the reinterpret_cast.
+     */
+    [[nodiscard]] CustomScan* custom_scan_plan() {
+        return reinterpret_cast<CustomScan*>(css.ss.ps.plan);
+    }
+
+    /*
+     * Returns the inner IndexScan plan node that we wrapped. The plan
+     * is stored as the first (and only) entry of the outer CustomScan's
+     * custom_plans list, so this centralises the PList indexing +
+     * reinterpret_cast sequence that call sites would otherwise repeat.
+     */
+    [[nodiscard]] IndexScan* inner_index_scan_plan() {
+        return reinterpret_cast<IndexScan*>(
+            PList<Plan>(custom_scan_plan()->custom_plans).first());
     }
 };
 

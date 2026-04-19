@@ -25,7 +25,6 @@ export module bioseq_planner_hook;
 import mlogging;
 import bioseq_table;
 import pg_utils;
-import pg_utils.lists;
 
 extern "C++" {
 

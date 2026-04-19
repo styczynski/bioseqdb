@@ -37,7 +37,6 @@ import storage_physical;
 import mlogging;
 import config;
 import pg_utils;
-import pg_utils.lists;
 
 export void InitColumnarOptions(Oid regclass);
 export void SetColumnarOptions(Oid regclass, ColumnarOptions *options);

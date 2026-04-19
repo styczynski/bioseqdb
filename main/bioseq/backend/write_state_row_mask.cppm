@@ -23,12 +23,11 @@ export module bioseq_write_state_row_mask;
 import mlogging;
 import storage_metadata;
 import pg_utils;
-import pg_utils.lists;
 
 extern "C++" {
 
 static RowMaskWriteStateEntry* InitRowMaskEntry(uint64 storage_id, bytea* row_mask);
-static void RowMaskFlushPendingWriteState(List* row_mask_write_state_list);
+static void RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list);
 
 /*
  * Per-subtransaction node. rowMaskWriteStateEntryList accumulates the
@@ -38,7 +37,7 @@ static void RowMaskFlushPendingWriteState(List* row_mask_write_state_list);
 struct RowMaskSubXidWriteFrame
 {
 	SubTransactionId subXid;
-	List* rowMaskWriteStateEntryList;
+	PList<RowMaskWriteStateEntry> rowMaskWriteStateEntryList;
 	RowMaskWriteStateEntry* lastRowMaskWriteStateEntry;
 	RowMaskSubXidWriteFrame* next;
 };
@@ -107,8 +106,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 	{
 		MemoryContextScope context_guard(RowMaskStateCache.context());
 		row_mask_write_state = InitRowMaskEntry(storage_id, row_mask);
-		stack_entry->rowMaskWriteStateEntryList =
-			lappend(stack_entry->rowMaskWriteStateEntryList, row_mask_write_state);
+		stack_entry->rowMaskWriteStateEntryList.append(row_mask_write_state);
 	}
 
 	return row_mask_write_state;
@@ -138,9 +136,9 @@ InitRowMaskEntry(uint64 storage_id, bytea* mask)
  * counters so query planning stays in sync.
  */
 static void
-RowMaskFlushPendingWriteState(List* row_mask_write_state_list)
+RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list)
 {
-	for (auto* row_mask_cache : PList<RowMaskWriteStateEntry>(row_mask_write_state_list))
+	for (auto* row_mask_cache : row_mask_write_state_list)
 	{
 		FlushRowMaskCache(row_mask_cache);
 		UpdateChunkGroupDeletedRows(row_mask_cache->storageId, row_mask_cache->stripeId,
@@ -167,8 +165,7 @@ void RowMaskFlushWriteStateForRelfilenode(Oid relfilelocator,
 		if (stack_entry->subXid == current_sub_xid)
 		{
 			RowMaskFlushPendingWriteState(stack_entry->rowMaskWriteStateEntryList);
-			list_free(stack_entry->rowMaskWriteStateEntryList);
-			stack_entry->rowMaskWriteStateEntryList = NIL;
+			stack_entry->rowMaskWriteStateEntryList.clear();
 		}
 	}
 }
@@ -202,7 +199,7 @@ RowMaskFindWriteState(Oid relfilelocator, SubTransactionId current_sub_xid,
 			return stack_frame->lastRowMaskWriteStateEntry;
 		}
 
-		for (auto* row_mask : PList<RowMaskWriteStateEntry>(stack_frame->rowMaskWriteStateEntryList))
+		for (auto* row_mask : stack_frame->rowMaskWriteStateEntryList)
 		{
 			if (row_mask->startRowNumber <= row_id && row_mask->endRowNumber >= row_id)
 			{
@@ -303,7 +300,7 @@ RowMaskPendingWritesInUpperTransactions(Oid relfilelocator, SubTransactionId cur
 	for (auto* stack_entry : IntrusiveList<RowMaskSubXidWriteFrame>(entry->writeStateStack))
 	{
 		if (stack_entry->subXid != current_sub_xid &&
-			list_length(stack_entry->rowMaskWriteStateEntryList))
+			!stack_entry->rowMaskWriteStateEntryList.empty())
 		{
 			return true;
 		}

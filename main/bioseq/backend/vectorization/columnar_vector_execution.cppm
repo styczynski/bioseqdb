@@ -23,7 +23,6 @@ module;
 export module bioseq_vector_execution;
 
 import pg_utils;
-import pg_utils.lists;
 
 extern "C++" {
 

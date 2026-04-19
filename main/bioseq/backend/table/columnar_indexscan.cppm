@@ -21,6 +21,7 @@ export module bioseq_table:index_scan;
 import bioseq_table_types;
 import bioseq_scan_state;
 import pg_utils.lists;
+import pg_utils.bitmapset;
 
 /*
  * When an ordering operator is used, tuples fetched from the index that
@@ -149,7 +150,7 @@ IndexNext(IndexScanState* node)
          * We reach here if the index scan is not parallel, or if we're
          * serially executing an index scan that was planned to be parallel.
          */
-        Bitmapset* attr_needed =
+        PBitmapset attr_needed =
             ColumnarAttrNeeded(&node->ss, (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
 
         scandesc = bioseq_index_beginscan(node->ss.ss_currentRelation,
@@ -159,7 +160,7 @@ IndexNext(IndexScanState* node)
                                           node->iss_NumOrderByKeys,
                                           attr_needed);
 
-        bms_free(attr_needed);
+        attr_needed.free();
 
         node->iss_ScanDesc = scandesc;
 
@@ -232,7 +233,7 @@ IndexNextWithReorder(IndexScanState* node)
 
     if (scandesc == nullptr)
     {
-        Bitmapset* attr_needed =
+        PBitmapset attr_needed =
             ColumnarAttrNeeded(&node->ss, (reinterpret_cast<IndexScan*>(node->ss.ps.plan))->indexqualorig);
 
         scandesc = bioseq_index_beginscan(node->ss.ss_currentRelation,
@@ -242,7 +243,7 @@ IndexNextWithReorder(IndexScanState* node)
                                           node->iss_NumOrderByKeys,
                                           attr_needed);
 
-        bms_free(attr_needed);
+        attr_needed.free();
 
         node->iss_ScanDesc = scandesc;
 
@@ -593,15 +594,12 @@ static void
 BioseqIndexScan_BeginCustomScan(CustomScanState* css, EState* estate, int eflags)
 {
     BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(css);
-    CustomScan* cscan = reinterpret_cast<CustomScan*>(css->ss.ps.plan);
-    PList<Plan> custom_plan_list(cscan->custom_plans);
-    IndexScan* inner_index_scan = reinterpret_cast<IndexScan*>(custom_plan_list.first());
 
     /* Clean out the tuple table */
     ExecClearTuple(css->ss.ps.ps_ResultTupleSlot);
     ExecClearTuple(css->ss.ss_ScanTupleSlot);
 
-    index_state->indexscan_state = ExecInitIndexScan(inner_index_scan, estate, eflags);
+    index_state->indexscan_state = ExecInitIndexScan(index_state->inner_index_scan_plan(), estate, eflags);
 
     /* Initialize result type and projection. */
     ExecInitResultTypeTL(&index_state->css.ss.ps);
@@ -682,9 +680,7 @@ static void
 BioseqIndexScan_ExplainCustomScan(CustomScanState* node, List* ancestors, ExplainState* es)
 {
     BioseqIndexScanState* index_state = BioseqIndexScanState::from_custom_scan_state(node);
-    CustomScan* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
-    PList<Plan> custom_plan_list(cscan->custom_plans);
-    IndexScan* inner_index_scan = reinterpret_cast<IndexScan*>(custom_plan_list.first());
+    IndexScan* inner_index_scan = index_state->inner_index_scan_plan();
 
     const char* indexname = get_rel_name(inner_index_scan->indexid);
 

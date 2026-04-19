@@ -7,6 +7,11 @@
  * by the write-state caches. Lets call sites use range-based for loops
  * instead of hand-rolling ListCell or `frame->next` walks.
  *
+ * PList<T> is layout-compatible with a raw List* field (same size,
+ * standard-layout) so it can be embedded directly into structs shared
+ * with PostgreSQL's C code without changing the ABI footprint. See the
+ * static_assert block at the bottom of the file for the invariants.
+ *
  *-------------------------------------------------------------------------
  */
 module;
@@ -72,19 +77,44 @@ public:
 /*
  * Range view over a PostgreSQL List* of T* elements. Supports begin()/end(),
  * random access via operator[](size_t) and named accessors first()/second().
+ *
+ * Holds a non-const List* internally so mutating helpers (append, prepend,
+ * clear) can update the stored pointer in place. The empty list (NIL) is
+ * represented by a null pointer, matching the underlying PG convention.
  */
 export template <typename T>
 class PList {
 private:
-    const List* list;
+    List* list;
 
 public:
-    explicit PList(const List* target_list) : list(target_list) {}
+    PList() : list(nullptr) {}
+    /*
+     * Implicit construction from a raw List* lets call sites that still
+     * hand us a bare PG pointer keep compiling, and also lets
+     * `some_struct.list_field = lappend(...)` continue to work when
+     * `list_field` has type PList<T>.
+     */
+    PList(List* target_list) : list(target_list) {}
 
     [[nodiscard]] p_list_iterator<T> begin() const { return p_list_iterator<T>(list); }
     [[nodiscard]] p_list_iterator<T> end() const { return p_list_iterator<T>(); }
 
-    [[nodiscard]] const List* ptr() const { return list; }
+    /* Raw pointer accessor for passing through to the PG C API. */
+    [[nodiscard]] List* ptr() const { return list; }
+
+    /*
+     * Implicit conversion to List* so legacy call sites that still hand
+     * the field off to pull_var_clause / lappend / copyObject / ... keep
+     * compiling. All such functions are NIL-safe.
+     */
+    [[nodiscard]] operator List*() const { return list; }
+
+    /* Length in elements (list_length handles NIL as 0). */
+    [[nodiscard]] int length() const { return list_length(list); }
+
+    /* True when the list is NIL / contains no cells. */
+    [[nodiscard]] bool empty() const { return list == nullptr; }
 
     [[nodiscard]] T* operator[](size_t element_index) {
         return static_cast<T*>(list_nth(list, element_index));
@@ -101,7 +131,46 @@ public:
 
     [[nodiscard]] T* third() { return static_cast<T*>(list_nth(list, 2)); }
     [[nodiscard]] const T* third() const { return static_cast<T*>(list_nth(list, 2)); }
+
+    /*
+     * Appends the given element; updates the stored pointer because
+     * lappend may reallocate the backing ListCell array. Returns *this
+     * so call sites can chain.
+     */
+    PList& append(T* element)
+    {
+        list = lappend(list, element);
+        return *this;
+    }
+
+    /* Clears the list via list_free and resets the stored pointer to NIL. */
+    void clear()
+    {
+        list_free(list);
+        list = nullptr;
+    }
+
+    /* Releases ownership of the raw pointer, resetting to NIL. */
+    [[nodiscard]] List* release()
+    {
+        List* released = list;
+        list = nullptr;
+        return released;
+    }
 };
+
+/*
+ * Layout invariants: PList<T> is embedded into state structs shared with
+ * PostgreSQL C code. A single List* field is what the original struct
+ * member was; PList<T> must be the same size/alignment and
+ * standard-layout so embedding does not change the struct's ABI.
+ */
+static_assert(sizeof(PList<void>) == sizeof(List*),
+              "PList<T> must match the memory footprint of List*");
+static_assert(alignof(PList<void>) == alignof(List*),
+              "PList<T> must match the alignment of List*");
+static_assert(std::is_standard_layout_v<PList<void>>,
+              "PList<T> must remain standard-layout so embedding inside ABI-shared structs stays safe");
 
 /*
  * Forward iterator over a PostgreSQL List* of integer values
@@ -145,18 +214,53 @@ public:
 /*
  * Range view over a PostgreSQL List* of int values; replaces the
  * `foreach_int(var, list)` macro with a typed range-based for loop.
+ *
+ * Also standard-layout and pointer-sized so it can be embedded directly
+ * into structs that expose an int-valued List* field.
  */
 export class PIntList
 {
 private:
-    const List* list;
+    List* list;
 
 public:
-    explicit PIntList(const List* target_list) : list(target_list) {}
+    PIntList() : list(nullptr) {}
+    PIntList(List* target_list) : list(target_list) {}
 
     [[nodiscard]] p_list_int_iterator begin() const { return p_list_int_iterator(list); }
     [[nodiscard]] p_list_int_iterator end() const { return p_list_int_iterator(); }
+
+    [[nodiscard]] List* ptr() const { return list; }
+    [[nodiscard]] operator List*() const { return list; }
+    [[nodiscard]] int length() const { return list_length(list); }
+    [[nodiscard]] bool empty() const { return list == nullptr; }
+
+    PIntList& append(int element)
+    {
+        list = lappend_int(list, element);
+        return *this;
+    }
+
+    void clear()
+    {
+        list_free(list);
+        list = nullptr;
+    }
+
+    [[nodiscard]] List* release()
+    {
+        List* released = list;
+        list = nullptr;
+        return released;
+    }
 };
+
+static_assert(sizeof(PIntList) == sizeof(List*),
+              "PIntList must match the memory footprint of List*");
+static_assert(alignof(PIntList) == alignof(List*),
+              "PIntList must match the alignment of List*");
+static_assert(std::is_standard_layout_v<PIntList>,
+              "PIntList must remain standard-layout so embedding inside ABI-shared structs stays safe");
 
 /*
  * Forward iterator over an intrusively linked list of Node*, where each

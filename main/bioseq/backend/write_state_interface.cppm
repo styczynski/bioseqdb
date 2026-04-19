@@ -30,9 +30,12 @@ extern "C++" {
 
 /*
  * FlushWriteStateWithNewSnapshot flushes pending writes for the given
- * relfilenode in the current subtransaction. If the caller supplied an MVCC
- * snapshot, it is replaced with a copy whose curcid equals the current
- * command id so the just-flushed rows are visible to subsequent reads.
+ * relfilenode in the current subtransaction. If the caller supplied an
+ * MVCC snapshot, it is replaced with a copy whose curcid equals the
+ * current command id so the just-flushed rows are visible to subsequent
+ * reads. Uses output parameters rather than a return struct because the
+ * function is declared with a matching C prototype in columnar.h that
+ * external callers depend on.
  */
 void
 FlushWriteStateWithNewSnapshot(Oid relfilenode,

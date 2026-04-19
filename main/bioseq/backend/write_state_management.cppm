@@ -26,7 +26,6 @@ import bioseq_table;
 import storage_metadata;
 import bioseq_table_io;
 import pg_utils;
-import pg_utils.lists;
 import mlogging;
 
 extern "C++" {

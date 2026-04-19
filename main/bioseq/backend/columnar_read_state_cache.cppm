@@ -24,7 +24,6 @@ export module bioseq_read_state_cache;
 import mlogging;
 import bioseq_table_io;
 import pg_utils;
-import pg_utils.lists;
 
 extern "C++" {
 

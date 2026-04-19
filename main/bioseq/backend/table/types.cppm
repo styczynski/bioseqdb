@@ -20,6 +20,7 @@ module;
 #include "common.h"
 
 #include <math.h>
+#include <type_traits>
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
@@ -29,6 +30,8 @@ module;
 export module bioseq_table_types;
 
 export import bioseq_scan_state;
+import pg_utils.lists;
+import pg_utils.bitmapset;
 
 /*
  * ColumnarScanDescData is the scan descriptor handed back to the executor
@@ -46,13 +49,16 @@ export struct ColumnarScanDescData
      * during beginscan() so the lazy init has the inputs it needs.
      */
     MemoryContext scanContext;
-    Bitmapset* attr_needed;
-    List* scanQual;
+    PBitmapset attr_needed;
+    PList<Node> scanQual;
 
     ParallelColumnarScan parallelColumnarScan;
 
     bool returnVectorizedTuple;
 };
+
+static_assert(std::is_standard_layout_v<ColumnarScanDescData>,
+              "ColumnarScanDescData must stay standard-layout (round-trips through TableScanDesc).");
 
 export using ColumnarScanDesc = ColumnarScanDescData*;
 
@@ -65,8 +71,8 @@ export struct IndexFetchColumnarData
 {
     IndexFetchTableData cs_base;
     ColumnarReadState* cs_readState;
-    Bitmapset* attr_needed;
-    List* stripeMetadataList;
+    PBitmapset attr_needed;
+    PList<StripeMetadata> stripeMetadataList;
     bool is_select_query;
 
     /*
@@ -76,5 +82,8 @@ export struct IndexFetchColumnarData
      */
     MemoryContext scanContext;
 };
+
+static_assert(std::is_standard_layout_v<IndexFetchColumnarData>,
+              "IndexFetchColumnarData must stay standard-layout (round-trips through IndexFetchTableData).");
 
 export using PathPredicate = bool (*)(Path* path);
