@@ -962,12 +962,8 @@ getStxstattarget_compat(HeapTuple tup)
 #pragma GCC diagnostic pop
 }
 
-// CUSTOM UTILS
-
-//include "utils.hpp"
-
-// This macros from Postgres pollute global namespace
-#define PGMax(x, y) ((x) > (y) ? (x) : (y))
-#define PGMin(x, y) ((x) < (y) ? (x) : (y))
+// These Min/Max macros from Postgres pollute global namespace and collide
+// with std::min / std::max; undef them so modern C++ code can use the
+// standard algorithms without qualification.
 #undef Min
 #undef Max

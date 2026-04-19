@@ -32,15 +32,10 @@ export module bioseq_table_io:reader;
 import storage_compression;
 import storage_physical;
 import storage_metadata;
+import pg_utils;
+import pg_utils.lists;
 
 
-// template<typename T> inline T* make1(uint32 size) {
-//     return static_cast<T*>(palloc0(size));
-// }
-
-// template<typename T> inline T* make0() {
-// 	return static_cast<T*>(palloc0(sizeof(T)));
-// }
 export ChunkData *
 CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowCount);
 export int64
@@ -1071,8 +1066,7 @@ ReadChunkGroupNextRow(ChunkGroupReadState *chunkGroupReadState, Datum *columnVal
 			}
 		}
 
-		int attno;
-		foreach_decl_int(attno, chunkGroupReadState->projectedColumnList)
+		foreach_int(attno, chunkGroupReadState->projectedColumnList)
 		{
 			const ChunkData *chunkGroupData = chunkGroupReadState->chunkGroupData;
 			const int rowIndex = chunkGroupReadState->currentRow;
@@ -1665,9 +1659,8 @@ static bool *
 ProjectedColumnMask(uint32 columnCount, List *projectedColumnList)
 {
 	bool *projectedColumnMask = make1<bool>(columnCount * sizeof(bool));
-	int attno;
 
-	foreach_decl_int(attno, projectedColumnList)
+	foreach_int(attno, projectedColumnList)
 	{
 		/* attno is 1-indexed; projectedColumnMask is 0-indexed */
 		int columnIndex = attno - 1;
@@ -2103,8 +2096,7 @@ ReadChunkGroupNextVector(ChunkGroupReadState *chunkGroupReadState, Datum *column
 			}
 		}
 
-		int attno;
-		foreach_decl_int(attno, chunkGroupReadState->projectedColumnList)
+		foreach_int(attno, chunkGroupReadState->projectedColumnList)
 		{
 			const ChunkData *chunkGroupData = chunkGroupReadState->chunkGroupData;
 			const int rowIndex = chunkGroupReadState->currentRow;

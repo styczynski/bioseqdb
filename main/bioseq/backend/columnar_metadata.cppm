@@ -27,12 +27,15 @@ module;
 #include "columnar/columnar.h"
 
 #include <sys/stat.h>
+#include <algorithm>
+
+export module storage_metadata;
 
 import storage_physical;
 import mlogging;
 import config;
-
-export module storage_metadata;
+import pg_utils;
+import pg_utils.lists;
 
 export void InitColumnarOptions(Oid regclass);
 export void SetColumnarOptions(Oid regclass, ColumnarOptions *options);
@@ -1708,8 +1711,8 @@ GetHighestUsedAddressAndId(uint64 storageId,
 	{
 		//StripeMetadata *stripe = lfirst(stripeMetadataCell);
 		uint64 lastByte = stripe->fileOffset + stripe->dataLength - 1;
-		*highestUsedAddress = PGMax(*highestUsedAddress, lastByte);
-		*highestUsedId = PGMax(*highestUsedId, stripe->id);
+		*highestUsedAddress = std::max(*highestUsedAddress, lastByte);
+		*highestUsedId = std::max(*highestUsedId, stripe->id);
 	}
 }
 
@@ -2348,7 +2351,7 @@ ColumnarOptionsRelationId(void)
 static Oid
 ColumnarOptionsIndexRegclass(void)
 {
-	BMethod(ColumnarOptionsIndexRegclass);
+	JustLog("[bioseq] pg: ColumnarOptionsIndexRegclass() entered");
 	return safe_get_relname_relid("options_pkey", ColumnarNamespaceId());
 }
 
@@ -2360,7 +2363,7 @@ ColumnarOptionsIndexRegclass(void)
 static Oid
 ColumnarChunkRelationId(void)
 {
-	BMethod(ColumnarChunkRelationId);
+	JustLog("[bioseq] pg: ColumnarChunkRelationId() entered");
 	return safe_get_relname_relid("chunk", ColumnarNamespaceId());
 }
 
@@ -2372,7 +2375,7 @@ ColumnarChunkRelationId(void)
 static Oid
 ColumnarChunkGroupRelationId(void)
 {
-	BMethod(ColumnarChunkGroupRelationId);
+	JustLog("[bioseq] pg: ColumnarChunkGroupRelationId() entered");
 	return safe_get_relname_relid("chunk_group", ColumnarNamespaceId());
 }
 
@@ -2383,7 +2386,7 @@ ColumnarChunkGroupRelationId(void)
 static Oid
 ColumnarRowMaskRelationId(void)
 {
-	BMethod(ColumnarRowMaskRelationId);
+	JustLog("[bioseq] pg: ColumnarRowMaskRelationId() entered");
 	return safe_get_relname_relid("row_mask", ColumnarNamespaceId());
 }
 
@@ -2394,7 +2397,7 @@ ColumnarRowMaskRelationId(void)
 static Oid
 ColumnarRowMaskSeqId(void)
 {
-	BMethod(ColumnarRowMaskSeqId);
+	JustLog("[bioseq] pg: ColumnarRowMaskSeqId() entered");
 	return safe_get_relname_relid("row_mask_seq", ColumnarNamespaceId());
 }
 
@@ -2407,7 +2410,7 @@ ColumnarRowMaskSeqId(void)
 static Oid
 ColumnarChunkIndexRelationId(void)
 {
-	BMethod(ColumnarChunkIndexRelationId);
+	JustLog("[bioseq] pg: ColumnarChunkIndexRelationId() entered");
 	return safe_get_relname_relid("chunk_pkey", ColumnarNamespaceId());
 }
 
@@ -2419,7 +2422,7 @@ ColumnarChunkIndexRelationId(void)
 static Oid
 ColumnarChunkGroupIndexRelationId(void)
 {
-	BMethod(ColumnarChunkGroupIndexRelationId);
+	JustLog("[bioseq] pg: ColumnarChunkGroupIndexRelationId() entered");
 	return safe_get_relname_relid("chunk_group_pkey", ColumnarNamespaceId());
 }
 
@@ -2431,7 +2434,7 @@ ColumnarChunkGroupIndexRelationId(void)
 static Oid
 ColumnarRowMaskIndexRelationId(void)
 {
-	BMethod(ColumnarRowMaskIndexRelationId);
+	JustLog("[bioseq] pg: ColumnarRowMaskIndexRelationId() entered");
 	return safe_get_relname_relid("row_mask_pkey", ColumnarNamespaceId());
 }
 
@@ -2442,7 +2445,7 @@ ColumnarRowMaskIndexRelationId(void)
 static Oid
 ColumnarRowMaskStripeIndexRelationId(void)
 {
-	BMethod(ColumnarRowMaskStripeIndexRelationId);
+	JustLog("[bioseq] pg: ColumnarRowMaskStripeIndexRelationId() entered");
 	return safe_get_relname_relid("row_mask_stripe_unique", ColumnarNamespaceId());
 }
 
@@ -2473,7 +2476,7 @@ ColumnarNamespaceId(void)
 uint64
 LookupStorageId(RelFileLocator relfilelocator)
 {
-	BMethod(LookupStorageId);
+	JustLog("[bioseq] pg: LookupStorageId() entered");
 	Oid relationId = RelidByRelfilenumber(RelationTablespace_compat(relfilelocator),
 										  RelationPhysicalIdentifierNumber_compat(
 											  relfilelocator));
@@ -2493,7 +2496,7 @@ LookupStorageId(RelFileLocator relfilelocator)
 uint64
 ColumnarMetadataNewStorageId()
 {
-	BMethod(ColumnarMetadataNewStorageId);
+	JustLog("[bioseq] pg: ColumnarMetadataNewStorageId() entered");
 	return nextval_internal(ColumnarStorageIdSequenceRelationId(), false);
 }
 
@@ -2505,7 +2508,7 @@ ColumnarMetadataNewStorageId()
 export void
 ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade)
 {
-	BMethod(ColumnarStorageUpdateIfNeeded);
+	JustLog("[bioseq] pg: ColumnarStorageUpdateIfNeeded() entered");
 	if (ColumnarStorageIsCurrent(rel))
 	{
 		return;
@@ -2553,7 +2556,7 @@ GetHighestUsedRowNumber(uint64 storageId)
 	//foreach_decl_ptr(stripeMetadata, stripeMetadataList)
 	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
-		highestRowNumber = PGMax(highestRowNumber,
+		highestRowNumber = std::max(highestRowNumber,
 							   StripeGetHighestRowNumber(stripeMetadata));
 	}
 

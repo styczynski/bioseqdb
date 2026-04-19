@@ -1,46 +1,42 @@
 /*-------------------------------------------------------------------------
  *
- * columnar.c
+ * columnar.cppm
  *
- * This file contains...
- *
- * Copyright (c) 2016, Citus Data, Inc.
- * Copyright (c) Hydra, Inc.
- *
- * $Id$
+ * Module entry point for the bioseq columnar extension. Registers the GUC
+ * variables that steer compression, stripe layout, parallel execution and
+ * column caching, then hands control off to the table-access-method and
+ * planner-hook initialisers.
  *
  *-------------------------------------------------------------------------
  */
+module;
 
 #include "common.h"
-
-#include <iostream>
-
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include "safe_lib.h"
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
-/* Default values for option parameters */
-#define DEFAULT_STRIPE_ROW_COUNT 150000
-#define DEFAULT_CHUNK_ROW_COUNT 10000
-
-#if HAVE_LIBZSTD
-#define DEFAULT_COMPRESSION_TYPE COMPRESSION_ZSTD
-#elif HAVE_CITUS_LIBLZ4
-#define DEFAULT_COMPRESSION_TYPE COMPRESSION_LZ4
-#else
-#define DEFAULT_COMPRESSION_TYPE COMPRESSION_PG_LZ
-#endif
+export module bioseq_columnar;
 
 import mlogging;
 import bioseq_table;
 import config;
 
-static void bioseq_guc_init(void);
+extern "C++" {
+
+/* Default values for option parameters */
+constexpr int DEFAULT_STRIPE_ROW_COUNT = 150000;
+constexpr int DEFAULT_CHUNK_ROW_COUNT = 10000;
+
+#if HAVE_LIBZSTD
+constexpr int DEFAULT_COMPRESSION_TYPE = COMPRESSION_ZSTD;
+#elif HAVE_CITUS_LIBLZ4
+constexpr int DEFAULT_COMPRESSION_TYPE = COMPRESSION_LZ4;
+#else
+constexpr int DEFAULT_COMPRESSION_TYPE = COMPRESSION_PG_LZ;
+#endif
+
+static void bioseq_guc_init();
 
 int bioseq_compression = DEFAULT_COMPRESSION_TYPE;
 int bioseq_stripe_row_limit = DEFAULT_STRIPE_ROW_COUNT;
@@ -54,20 +50,30 @@ bool bioseq_enable_page_cache = false;
 int bioseq_page_cache_size = 200U;
 bool bioseq_index_scan = true;
 
+/*
+ * bioseq_init is the module's top-level initialiser. It wires up the GUC
+ * variables, installs the bioseq table access method handler and registers
+ * the planner hooks that route queries through the columnar custom scan.
+ */
 void
-bioseq_init(void)
+bioseq_init()
 {
-	BMethod(bioseq_init);
+	JustLog("[bioseq] pg: bioseq_init() entered");
 	bioseq_guc_init();
 	bioseq_tableam_init();
 	bioseq_planner_init();
 }
 
 
+/*
+ * bioseq_guc_init registers all bioseq.* GUC variables with the PostgreSQL
+ * configuration machinery. Keeps variable defaults and bounds in one place
+ * so tuning is auditable.
+ */
 static void
 bioseq_guc_init()
 {
-	// Enable logging
+	JustLog("[bioseq] pg: bioseq_guc_init() entered");
 	DefineCustomBoolVariable(
 		"bioseq.logging",
 		"Enable dedicated extension logging",
@@ -136,8 +142,8 @@ bioseq_guc_init()
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, 
-							 NULL, 
+							 NULL,
+							 NULL,
 							 NULL);
 
 	DefineCustomIntVariable("bioseq.min_parallel_processes",
@@ -160,8 +166,8 @@ bioseq_guc_init()
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, 
-							 NULL, 
+							 NULL,
+							 NULL,
 							 NULL);
 
 	DefineCustomBoolVariable("bioseq.enable_dml",
@@ -171,8 +177,8 @@ bioseq_guc_init()
 							true,
 							PGC_USERSET,
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							NULL, 
-							NULL, 
+							NULL,
+							NULL,
 							NULL);
 
 	DefineCustomBoolVariable("bioseq.enable_column_cache",
@@ -206,8 +212,9 @@ bioseq_guc_init()
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, 
-							 NULL, 
+							 NULL,
+							 NULL,
 							 NULL);
 }
 
+}

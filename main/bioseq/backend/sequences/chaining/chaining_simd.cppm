@@ -176,10 +176,7 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
     // Distance computations
     const auto query_distance_vec = hn::Sub(current_query_pos_vec, predecessor_query_pos_vec);
     const auto ref_distance_vec = hn::Sub(current_ref_pos_vec, predecessor_ref_pos_vec);
-    // Compute |ref_distance - query_distance| without using hn::Abs (conflicts with Abs macro in math.h)
-    const auto ref_minus_query = hn::Sub(ref_distance_vec, query_distance_vec);
-    const auto neg_ref_minus_query = hn::Sub(hn::Zero(d_int), ref_minus_query);
-    const auto diagonal_deviation_vec = hn::Max(ref_minus_query, neg_ref_minus_query);
+    const auto diagonal_deviation_vec = hn::Abs(hn::Sub(ref_distance_vec, query_distance_vec));
     const auto gap_length_vec = hn::Min(ref_distance_vec, query_distance_vec);
 
     // Validity masks (true = INVALID pair)

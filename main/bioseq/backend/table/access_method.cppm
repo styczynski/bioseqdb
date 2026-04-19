@@ -1,7 +1,8 @@
-module; 
+module;
 #include "common.h"
 
-#include <math.h>
+#include <cmath>
+#include <algorithm>
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
@@ -27,6 +28,8 @@ import storage_metadata;
 import bioseq_table_types;
 import config;
 import bioseq_table_io;
+import pg_utils;
+import pg_utils.lists;
 
 /*
  * This is a check whether we need to bail out of a vacuum, it is set by the
@@ -1725,7 +1728,7 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 
 	pgstat_report_vacuum(RelationGetRelid(rel),
 							rel->rd_rel->relisshared,
-							PGMax(new_live_tuples, 0),
+							std::max<int64>(new_live_tuples, 0),
 							0);
 	pgstat_progress_end_command();
 
@@ -1920,10 +1923,10 @@ TruncateColumnar(Relation rel, int elevel)
 		* we're truncating.
 		*/
 #if PG_VERSION_NUM >= PG_VERSION_16
-		uint64 newDataReservation = PGMax(GetHighestUsedAddress(rel->rd_locator) + 1,
+		uint64 newDataReservation = std::max<uint64>(GetHighestUsedAddress(rel->rd_locator) + 1,
 										ColumnarFirstLogicalOffset);
 #else
-		uint64 newDataReservation = PGMax(GetHighestUsedAddress(rel->rd_node) + 1,
+		uint64 newDataReservation = std::max<uint64>(GetHighestUsedAddress(rel->rd_node) + 1,
 										ColumnarFirstLogicalOffset);
 #endif
 
@@ -2603,7 +2606,7 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 export void
 bioseq_tableam_init()
 {
-	BMethod(bioseq_tableam_init);
+	JustLog("[bioseq] pg: bioseq_tableam_init() entered");
 	ColumnarTableSetOptions_hook_type **ColumnarTableSetOptions_hook_ptr =
 		(ColumnarTableSetOptions_hook_type **) find_rendezvous_variable(
 			COLUMNAR_SETOPTIONS_HOOK_SYM);
@@ -2653,7 +2656,7 @@ ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc)
 static HeapTuple
 ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 {
-	BMethod(ColumnarSlotCopyHeapTuple);
+	JustLog("[bioseq] pg: ColumnarSlotCopyHeapTuple() entered");
 	Assert(!TTS_EMPTY(slot));
 
 	HeapTuple tuple = heap_form_tuple(slot->tts_tupleDescriptor,
@@ -2675,7 +2678,7 @@ ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 static void
 ColumnarTableDropHook(Oid relid)
 {
-	BMethod(ColumnarTableDropHook);
+	JustLog("[bioseq] pg: ColumnarTableDropHook() entered");
 	/*
 	 * Lock relation to prevent it from being dropped and to avoid
 	 * race conditions in the next if block.
@@ -2714,7 +2717,7 @@ ColumnarTableDropHook(Oid relid)
 static void
 ColumnarTriggerCreateHook(Oid tgid)
 {
-	BMethod(ColumnarTriggerCreateHook);
+	JustLog("[bioseq] pg: ColumnarTriggerCreateHook() entered");
 	/*
 	 * Fetch the pg_trigger tuple by the Oid of the trigger
 	 */
@@ -2834,7 +2837,7 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 bool
 ColumnarSupportsIndexAM(char *indexAMName)
 {
-	BMethod(ColumnarSupportsIndexAM);
+	JustLog("[bioseq] pg: ColumnarSupportsIndexAM() entered");
 	return strncmp(indexAMName, "btree", NAMEDATALEN) == 0 ||
 				strncmp(indexAMName, "hash", NAMEDATALEN) == 0 ||
 				strncmp(indexAMName, "gin", NAMEDATALEN) == 0 ||
@@ -2851,7 +2854,7 @@ ColumnarSupportsIndexAM(char *indexAMName)
 // bool
 // IsColumnarTableAmTable(Oid relationId)
 // {
-// 	BMethod(IsColumnarTableAmTable);
+// 	JustLog("[bioseq] pg: IsColumnarTableAmTable() entered");
 // 	if (!OidIsValid(relationId))
 // 	{
 // 		return false;
@@ -2932,13 +2935,13 @@ export const TableAmRoutine bioseq_am_methods = {
 const TableAmRoutine *
 GetColumnarTableAmRoutine(void)
 {
-	BMethod(GetColumnarTableAmRoutine);
+	JustLog("[bioseq] pg: GetColumnarTableAmRoutine() entered");
 	return &bioseq_am_methods;
 }
 
 POSTGRES_FN(bioseq_handler)
 {
-	BMethod(bioseq_handler);
+	JustLog("[bioseq] pg: bioseq_handler() entered");
 	PG_RETURN_POINTER(&bioseq_am_methods);
 }
 

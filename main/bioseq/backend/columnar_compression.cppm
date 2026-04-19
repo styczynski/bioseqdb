@@ -27,15 +27,17 @@ module;
 
 export module storage_compression;
 
+import pg_utils;
+
 /*
  *	The information at the start of the compressed data. This decription is taken
  *	from pg_lzcompress in pre-9.5 version of PostgreSQL.
  */
-typedef struct ColumnarCompressHeader
+struct ColumnarCompressHeader
 {
 	int32 vl_len_;              /* varlena header (do not touch directly!) */
 	int32 rawsize;
-} ColumnarCompressHeader;
+};
 
 /*
  * Utilities for manipulation of header information for compressed data

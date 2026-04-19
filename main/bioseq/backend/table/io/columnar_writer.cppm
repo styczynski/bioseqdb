@@ -26,6 +26,7 @@ export module bioseq_table_io:writer;
 import storage_compression;
 import storage_physical;
 import storage_metadata;
+import pg_utils;
 
 ChunkData *
 CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowCount);

@@ -37,11 +37,14 @@ module;
 
 #include "safe_lib.h"
 
+#include <algorithm>
+
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
 export module storage_physical;
 import mlogging;
+import pg_utils;
 
 export constexpr uint64 COLUMNAR_INVALID_ROW_NUMBER = ((uint64) 0);
 export constexpr uint64 COLUMNAR_FIRST_ROW_NUMBER = ((uint64) 1);
@@ -531,7 +534,7 @@ ColumnarStorageRead(Relation rel, uint64 logicalOffset, char *data, uint32 amoun
 	{
 		PhysicalAddr addr = LogicalToPhysical(logicalOffset + read);
 
-		uint32 to_read = PGMin(amount - read, BLCKSZ - addr.offset);
+		uint32 to_read = std::min<uint64>(amount - read, BLCKSZ - addr.offset);
 		ReadFromBlock(rel, addr.blockno, addr.offset, data + read, to_read,
 					  false);
 
@@ -567,7 +570,7 @@ ColumnarStorageWrite(Relation rel, uint64 logicalOffset, char *data, uint32 amou
 	{
 		PhysicalAddr addr = LogicalToPhysical(logicalOffset + written);
 
-		uint64 to_write = PGMin(amount - written, BLCKSZ - addr.offset);
+		uint64 to_write = std::min<uint64>(amount - written, BLCKSZ - addr.offset);
 		WriteToBlock(rel, addr.blockno, addr.offset, data + written, to_write,
 					 false);
 

@@ -2,7 +2,7 @@ module;
 
 #include "common.h"
 
-#include <math.h>
+#include <cmath>
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
@@ -15,6 +15,8 @@ import storage_physical;
 import mlogging;
 import storage_metadata;
 import bioseq_table_types;
+import pg_utils;
+import pg_utils.lists;
 
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
 
@@ -25,7 +27,7 @@ const TableAmRoutine * GetColumnarTableAmRoutine(void);
 export bool
 IsColumnarTableAmTable(Oid relationId)
 {
-	BMethod(IsColumnarTableAmTable);
+	JustLog("[bioseq] pg: IsColumnarTableAmTable() entered");
 	if (!OidIsValid(relationId))
 	{
 		return false;

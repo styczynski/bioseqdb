@@ -1,10 +1,24 @@
-#include "common.h"
-
-
 /*-------------------------------------------------------------------------
  *
- * nodeAgg.c
- *	  Routines to handle aggregate nodes.
+ * vectorization/nodes/columnar_aggregator_node.cppm
+ *
+ * Custom scan node that replaces nodeAgg.c for columnar+vectorised queries.
+ * This is a lightly adapted port of the PostgreSQL aggregate executor
+ * (see src/backend/executor/nodeAgg.c in the upstream tree). The node
+ * consumes VectorTupleTableSlots produced by the columnar custom scan,
+ * advances the aggregate transition functions in a batched manner and
+ * materialises final-value tuples through the standard nodeAgg machinery.
+ *
+ *-------------------------------------------------------------------------
+ */
+module;
+
+#include "common.h"
+
+#include <algorithm>
+
+/*
+ *  nodeAgg.c (from PostgreSQL core) — original header preserved below.
  *
  *	  ExecAgg normally evaluates each aggregate in the following steps:
  *
@@ -253,60 +267,23 @@
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/nodes/columnar_aggregator_node.h"
 
-/*
- * Control how many partitions are created when spilling HashAgg to
- * disk.
- *
- * HASHAGG_PARTITION_FACTOR is multiplied by the estimated number of
- * partitions needed such that each partition will fit in memory. The factor
- * is set higher than one because there's not a high cost to having a few too
- * many partitions, and it makes it less likely that a partition will need to
- * be spilled recursively. Another benefit of having more, smaller partitions
- * is that small hash tables may perform better than large ones due to memory
- * caching effects.
- *
- * We also specify a min and max number of partitions per spill. Too few might
- * mean a lot of wasted I/O from repeated spilling of the same tuples. Too
- * many will result in lots of memory wasted buffering the spill files (which
- * could instead be spent on a larger hash table).
- */
 #define HASHAGG_PARTITION_FACTOR 1.50
 #define HASHAGG_MIN_PARTITIONS 4
 #define HASHAGG_MAX_PARTITIONS 1024
 
-/*
- * For reading from tapes, the buffer size must be a multiple of
- * BLCKSZ. Larger values help when reading from multiple tapes concurrently,
- * but that doesn't happen in HashAgg, so we simply use BLCKSZ. Writing to a
- * tape always uses a buffer of size BLCKSZ.
- */
 #define HASHAGG_READ_BUFFER_SIZE BLCKSZ
 #define HASHAGG_WRITE_BUFFER_SIZE BLCKSZ
 
-/*
- * HyperLogLog is used for estimating the cardinality of the spilled tuples in
- * a given partition. 5 bits corresponds to a size of about 32 bytes and a
- * worst-case error of around 18%. That's effective enough to choose a
- * reasonable number of partitions when recursing.
- */
 #define HASHAGG_HLL_BIT_WIDTH 5
 
-/*
- * Estimate chunk overhead as a constant 16 bytes. XXX: should this be
- * improved?
- */
 #define CHUNKHDRSZ 16
 
 /*
- * Represents partitioned spill data for a single hashtable. Contains the
- * necessary information to route tuples to the correct partition, and to
- * transform the spilled data into new batches.
- *
- * The high bits are used for partition selection (when recursing, we ignore
- * the bits that have already been used for partition selection at an earlier
- * level).
+ * PostgreSQL forward-declares HashAggSpill in execnodes.h; we fill in the
+ * body here in the global module fragment so the full layout shares linkage
+ * with PG's internal declaration.
  */
-typedef struct HashAggSpill
+struct HashAggSpill
 {
 	int			npartitions;	/* number of partitions */
 	LogicalTape **partitions;	/* spill partition tapes */
@@ -314,33 +291,30 @@ typedef struct HashAggSpill
 	uint32		mask;			/* mask to find partition from hash value */
 	int			shift;			/* after masking, shift by this amount */
 	hyperLogLogState *hll_card; /* cardinality estimate for contents */
-} HashAggSpill;
+};
 
-/*
- * Represents work to be done for one pass of hash aggregation (with only one
- * grouping set).
- *
- * Also tracks the bits of the hash already used for partition selection by
- * earlier iterations, so that this batch can use new bits. If all bits have
- * already been used, no partitioning will be done (any spilled data will go
- * to a single output tape).
- */
-typedef struct HashAggBatch
+struct HashAggBatch
 {
 	int			setno;			/* grouping set */
 	int			used_bits;		/* number of bits of hash already used */
 	LogicalTape *input_tape;	/* input partition tape */
 	int64		input_tuples;	/* number of tuples in this batch */
 	double		input_card;		/* estimated group cardinality */
-} HashAggBatch;
+};
 
-/* used to find referenced colnos */
-typedef struct FindColsContext
+struct FindColsContext
 {
 	bool		is_aggref;		/* is under an aggref */
 	Bitmapset  *aggregated;		/* column references under an aggref */
 	Bitmapset  *unaggregated;	/* other column references */
-} FindColsContext;
+};
+
+export module bioseq_aggregator_node;
+
+import pg_utils;
+import pg_utils.lists;
+
+extern "C" {
 
 static void select_current_set(AggState *aggstate, int setno, bool is_hash);
 static void initialize_phase(AggState *aggstate, int newphase);
@@ -646,7 +620,7 @@ initialize_aggregates(AggState *aggstate,
 					  int numReset)
 {
 	int			transno;
-	int			numGroupingSets = PGMax(aggstate->phase->numsets, 1);
+	int			numGroupingSets = std::max(aggstate->phase->numsets, 1);
 	int			setno = 0;
 	int			numTrans = aggstate->numtrans;
 	AggStatePerTrans transstates = aggstate->pertrans;
@@ -1617,7 +1591,7 @@ find_hash_columns(AggState *aggstate)
 
 			hashTlist = lappend(hashTlist, list_nth(outerTlist, varNumber));
 			perhash->largestGrpColIdx =
-				PGMax(varNumber + 1, perhash->largestGrpColIdx);
+				std::max(varNumber + 1, perhash->largestGrpColIdx);
 		}
 
 		hashDesc = ExecTypeFromTL(hashTlist);
@@ -1929,7 +1903,7 @@ hash_choose_num_buckets(double hashentrysize, long ngroups, Size memory)
 	if (nbuckets > max_nbuckets)
 		nbuckets = max_nbuckets;
 
-	return PGMax(nbuckets, 1);
+	return std::max<long>(nbuckets, 1);
 }
 
 /*
@@ -2154,7 +2128,7 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 	TupleTableSlot *firstSlot;
 	TupleTableSlot *result;
 	bool		hasGroupingSets = aggstate->phase->numsets > 0;
-	int			numGroupingSets = PGMax(aggstate->phase->numsets, 1);
+	int			numGroupingSets = std::max(aggstate->phase->numsets, 1);
 	int			currentSet;
 	int			nextSetSize;
 	int			numReset;
@@ -2232,7 +2206,7 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 				initialize_phase(aggstate, aggstate->current_phase + 1);
 				aggstate->input_done = false;
 				aggstate->projected_set = -1;
-				numGroupingSets = PGMax(aggstate->phase->numsets, 1);
+				numGroupingSets = std::max(aggstate->phase->numsets, 1);
 				node = aggstate->phase->aggnode;
 				numReset = numGroupingSets;
 			}
@@ -3220,7 +3194,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		{
 			//Agg		   *agg = lfirst(l);
 
-			numGroupingSets = PGMax(numGroupingSets,
+			numGroupingSets = std::max(numGroupingSets,
 								  list_length(agg->groupingSets));
 
 			/*
@@ -3351,8 +3325,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	{
 		//Aggref	   *aggref = (Aggref *) lfirst(l);
 
-		max_aggno = PGMax(max_aggno, aggref->aggno);
-		max_transno = PGMax(max_transno, aggref->aggtransno);
+		max_aggno = std::max(max_aggno, aggref->aggno);
+		max_transno = std::max(max_transno, aggref->aggtransno);
 	}
 	numaggs = max_aggno + 1;
 	numtrans = max_transno + 1;
@@ -4022,7 +3996,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 						  Datum initValue, bool initValueIsNull,
 						  Oid *inputTypes, int numArguments)
 {
-	int			numGroupingSets = PGMax(aggstate->maxsets, 1);
+	int			numGroupingSets = std::max(aggstate->maxsets, 1);
 	Expr	   *transfnexpr;
 	int			numTransArgs;
 	Expr	   *serialfnexpr = NULL;
@@ -4269,7 +4243,7 @@ ExecEndAgg(AggState *node)
 {
 	PlanState  *outerPlan;
 	int			transno;
-	int			numGroupingSets = PGMax(node->maxsets, 1);
+	int			numGroupingSets = std::max(node->maxsets, 1);
 	int			setno;
 
 	/*
@@ -4334,7 +4308,7 @@ ExecReScanAgg(AggState *node)
 	PlanState  *outerPlan = outerPlanState(node);
 	Agg		   *aggnode = (Agg *) node->ss.ps.plan;
 	int			transno;
-	int			numGroupingSets = PGMax(node->maxsets, 1);
+	int			numGroupingSets = std::max(node->maxsets, 1);
 	int			setno;
 
 	node->agg_done = false;
@@ -4711,7 +4685,7 @@ ExplainAggNode(CustomScanState *node, List *ancestors, ExplainState *es)
 
 }
 
-
+extern "C++" {
 CustomScan *
 bioseq_create_aggregator_node(void)
 {
@@ -4726,5 +4700,6 @@ bioseq_register_aggregator_node(void)
 {
 	RegisterCustomScanMethods(&VectorAggNodeMethods);
 }
+}
 
-
+}  /* close outer extern "C" */

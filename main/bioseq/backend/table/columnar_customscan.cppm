@@ -16,10 +16,8 @@ module;
 #include "common.h"
 
 #include <vector>
-
-#include "custom_scan_builder.h"
-
-#include <math.h>
+#include <algorithm>
+#include <cmath>
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
@@ -33,6 +31,8 @@ import bioseq_table_io;
 import mlogging;
 import storage_metadata;
 import bioseq_table_types;
+import pg_utils;
+import pg_utils.lists;
 
 ItemPointerData row_number_to_tid(uint64 rowNumber);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
@@ -564,7 +564,7 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 	 * "anti-correlated" (-1) since both help us avoiding from reading the
 	 * same stripe again and again.
 	 */
-	double absIndexCorrelation = Abs(indexCorrelation);
+	double absIndexCorrelation = std::abs(indexCorrelation);
 
 	/*
 	 * To estimate the number of stripes that we need to read, we do linear
@@ -582,7 +582,7 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 														   minStripeReadCount);
 
 	/* even in the best case, we will read a single stripe */
-	estimatedStripeReadCount = PGMax(estimatedStripeReadCount, 1.0);
+	estimatedStripeReadCount = std::max(estimatedStripeReadCount, 1.0);
 
 	Cost scanCost = perStripeCost * estimatedStripeReadCount;
 
@@ -680,7 +680,7 @@ CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation
 	 * If the Var is not highly correlated, then the chunk's min/max bounds
 	 * will be nearly useless.
 	 */
-	if (Abs(varCorrelation) < ColumnarQualPushdownCorrelationThreshold)
+	if (std::abs(varCorrelation) < ColumnarQualPushdownCorrelationThreshold)
 	{
 		if (absVarCorrelation)
 		{
@@ -688,7 +688,7 @@ CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation
 			 * Report absVarCorrelation if caller wants to know why given
 			 * var is rejected.
 			 */
-			*absVarCorrelation = Abs(varCorrelation);
+			*absVarCorrelation = std::abs(varCorrelation);
 		}
 		return false;
 	}
@@ -1105,7 +1105,7 @@ Combinations(int n, int k)
 	 * (e.g. Combinations(500, 500)). Use formula (5) to choose the smaller,
 	 * but equivalent, k.
 	 */
-	k = PGMin(k, n - k);
+	k = std::min(k, n - k);
 
 	/* calculate numerator of formula (2) first */
 	for (int i = n; i >= n - k + 1; i--)
@@ -1245,7 +1245,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			elog(DEBUG1, "bioseq.min_parallel_proceses is set higher than max_parallel_workers.");
 			elog(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
 			bioseq_min_parallel_process_running = 
-				PGMin(max_parallel_workers, bioseq_min_parallel_processes);
+				std::min(max_parallel_workers, bioseq_min_parallel_processes);
 		}
 
 		if (parallel_leader_participation)
@@ -1255,7 +1255,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		 * We know how many workers are we going to run. Since workers are using single stripe
 		 * probably it doesn't have much sense to spawn more workers than stripes in table.
 		 */
-		bioseq_min_parallel_process_running = PGMin(bioseq_min_parallel_process_running,
+		bioseq_min_parallel_process_running = std::min<int64>(bioseq_min_parallel_process_running,
 													parallel_leader_participation ?
 													ColumnarTableStripeCount(rte->relid) - 1 :
 													ColumnarTableStripeCount(rte->relid));
@@ -1725,7 +1725,7 @@ CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	 * we can apply the selectivity directly to the number of stripes.
 	 */
 	double stripesToRead = clauseSel * ColumnarTableStripeCount(relationId);
-	stripesToRead = PGMax(stripesToRead, 1.0);
+	stripesToRead = std::max(stripesToRead, 1.0);
 
 	path->rows = rel->tuples;
 	path->startup_cost = 0;
@@ -1751,7 +1751,7 @@ ColumnarPerStripeScanCost(RelOptInfo *rel, Oid relationId, int numberOfColumnsRe
 	for(auto stripeMetadata : PList<StripeMetadata>(stripeList))
 	{
 		totalStripeSize += stripeMetadata->dataLength;
-		maxColumnCount = PGMax(maxColumnCount, stripeMetadata->columnCount);
+		maxColumnCount = std::max(maxColumnCount, stripeMetadata->columnCount);
 	}
 
 	/*
@@ -2675,8 +2675,7 @@ ColumnarScanNext(ColumnarScanState *columnarScanState)
 	if (vectorizationEnabled)
 	{
 		VectorTupleTableSlot *vectorSlot = (VectorTupleTableSlot *) slot;
-		int attrIndex = -1;
-		foreach_decl_int(attrIndex, columnarScanState->vectorization.attrNeededList)
+		foreach_int(attrIndex, columnarScanState->vectorization.attrNeededList)
 		{
 			VectorColumn *column = (VectorColumn *) vectorSlot->tts.tts_values[attrIndex];
 			memset(column->isnull, true, COLUMNAR_VECTOR_COLUMN_SIZE);
