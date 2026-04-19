@@ -46,3 +46,9 @@ set bioseq.enable_vectorization to off;
 
 EXPLAIN (ANALYZE, BUFFERS) select a, mmsearch(a, 'X') from x where c > 1;
 select a, c, mmsearch(a, 'X') from x where c = 2;
+
+select * from x;
+select * from x where c = 1;
+set bioseq.enable_vectorization to on;
+select * from x;
+select * from x where c = 1;

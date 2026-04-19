@@ -34,6 +34,68 @@ import bioseq_table_types;
 import pg_utils;
 import pg_utils.lists;
 
+// This is class that stores tuples until enough accumulate so we can later launch alignment algorithm in parallel
+class TupleDispatchBuffer {
+private:
+	std::vector<TupleTableSlot*> buffer;
+	int buffer_pos = -1;
+
+	// [[always_inline]] static constexpr TupleTableSlot* save_slot(TupleTableSlot* slot) {
+	// 	TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+	// 	ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
+	// 	return newSlot;
+	// }
+
+public:
+	TupleDispatchBuffer(const size_t estimated_tuples_count) {
+		buffer.reserve(estimated_tuples_count*2);
+	}
+
+	[[always_inline]] constexpr void submit(TupleTableSlot *slot) {
+		TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+		ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
+		buffer.push_back(newSlot);
+	}
+
+	// [[always_inline]] constexpr void submit_replace(TupleTableSlot *slot) {
+	// 	if (buffer.size() > 0) {
+	// 		buffer[buffer.size() - 1] = save_slot(slot);
+	// 	} else {
+	// 		submit(slot);
+	// 	}
+	// }
+
+	[[always_inline]] constexpr void clear() {
+		JustLog("buffer.CLEAR");
+		buffer.clear();
+		buffer_pos = -1;
+	}
+
+	[[always_inline]] constexpr TupleTableSlot* finish_writing() {
+		buffer_pos++;
+		if (buffer_pos < buffer.size()) {
+			return buffer[buffer_pos++];
+		} else {
+			return nullptr;
+		}
+	}
+
+	[[always_inline]] constexpr bool has_finished_writing() const {
+		return buffer_pos >= 0;
+	}
+
+	[[always_inline]] constexpr TupleTableSlot* read_next() {
+		JustLog("Fetching buf_pos={} size={}", buffer_pos, buffer.size());
+		if (buffer_pos < buffer.size()) {
+			auto mtup = buffer[buffer_pos];
+			buffer_pos++;
+			return mtup;
+		} else {
+			return nullptr;
+		}
+	}
+};
+
 ItemPointerData row_number_to_tid(uint64 rowNumber);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
 uint64 ColumnarTableRowCount(Relation relation);
@@ -53,9 +115,7 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 static int32_t counter = 100;
 static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
-static std::vector<TupleTableSlot*> buffer;
-static int buffer_pos = -1;
-
+static TupleDispatchBuffer buffer(1000);
 
 /* functions to cost paths in-place */
 static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId);
@@ -2265,7 +2325,6 @@ VarInjectorMutator(Node *node, void* context)
 }
 
 
-
 static TupleTableSlot *
 Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
@@ -2330,6 +2389,11 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 
 		TupleTableSlot *slot = NULL;
 
+		if (buffer.has_finished_writing()) {
+			JustLog("CC from buffer");
+			return buffer.read_next();
+		}
+
 		if (columnarScanState->vectorization.vectorizationEnabled && 
 			columnarScanState->vectorization.vectorPendingRowNumber == 0 &&
 			resultVectorTupleSlotIdx > 0)
@@ -2367,19 +2431,6 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		 */
 		if (!columnarScanState->vectorization.vectorizationEnabled)
 		{
-			JustLog("Fetching buf_pos={} size={}", buffer_pos, buffer.size());
-
-			if (buffer_pos >= 0) {
-				JustLog("CC from buffer");
-				if (buffer_pos < buffer.size()) {
-					auto mtup = buffer[buffer_pos];
-					buffer_pos++;
-					return mtup;
-				} else {
-					return nullptr;
-				}
-			}
-
 
 			JustLog("CC exec scan fetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
@@ -2395,12 +2446,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			if (TupIsNull(slot))
 			{
 				JustLog("CC discovered null tuple slot");
-				buffer_pos++;
-				if (buffer_pos < buffer.size()) {
-					return buffer[buffer_pos];
-				} else {
-					return nullptr;
-				}
+				return buffer.finish_writing();
 				// if (projInfo)
 				// 	return ExecClearTuple(projInfo->pi_state.resultslot);
 				// else
@@ -2425,10 +2471,13 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			 */
 			if (TupIsNull(slot))
 			{
-				if (projInfo)
-					return ExecClearTuple(projInfo->pi_state.resultslot);
-				else
-					return slot;
+				// ????
+				if (projInfo) {
+					JustLog("buffer.SUBMIT X3");
+					//buffer.submit(ExecClearTuple(projInfo->pi_state.resultslot));
+				}
+				JustLog("buffer.FINISH_WRITING");
+				return buffer.finish_writing();
 			}
 
 			if (columnarScanState->vectorization.vectorizedQualList != NULL)
@@ -2456,7 +2505,10 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			else if (!qual && !projInfo && columnarScanState->vectorization.vectorizationAggregate)
 			{
 				columnarScanState->vectorization.vectorPendingRowNumber = 0;
-				return slot;
+				JustLog("buffer.SUBMIT X1");
+				buffer.submit(slot);
+				continue;
+				//return slot;
 			}
 		}
 
@@ -2544,11 +2596,13 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			{
 				JustLog("CC pushback");
 
-				TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
-				ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
+				// TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+				// ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
+				JustLog("buffer.SUBMIT X2");
+				buffer.submit(slot);
 				//slot->
 				//ExecMaterializeSlot(slot);
-				buffer.push_back(newSlot);
+				//buffer.push_back(newSlot);
 				//return slot;
 			}
 		}
@@ -2604,7 +2658,6 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 			true
 		);
 		buffer.clear();
-		buffer_pos = -1;
 
 		newtargetlist = (List*)VarInjectorMutator((Node*)targetlist, (void*) const_score_node);
 		//counter = 10;
