@@ -1,14 +1,12 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_writer.c
+ * table/io/columnar_writer.cppm
  *
- * This file contains function definitions for writing columnar tables. This
- * includes the logic for writing file level metadata, writing row stripes,
- * and calculating chunk skip nodes.
- *
- * Copyright (c) 2016, Citus Data, Inc.
- *
- * $Id$
+ * Writer side of the bioseq columnar table format. Owns the
+ * ColumnarWriteState lifecycle: in-memory chunk accumulation, chunk
+ * compression, stripe assembly, file-level metadata writes (skip nodes,
+ * chunk-group summaries) and the WAL-emitting flush path. The reader
+ * side lives in columnar_reader.cppm.
  *
  *-------------------------------------------------------------------------
  */
@@ -215,13 +213,8 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		writeState->stripeSkipList = stripeSkipList;
 		writeState->compressionBuffer = makeStringInfo();
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 		Oid relationId = RelidByRelfilenumber(writeState->relfilelocator.spcOid,
 											  writeState->relfilelocator.relNumber);
-#else
-		Oid relationId = RelidByRelfilenode(writeState->relfilelocator.spcNode,
-											writeState->relfilelocator.relNode);
-#endif
 		Relation relation = safe_relation_open(relationId, NoLock);
 		writeState->emptyStripeReservation =
 			ReserveEmptyStripe(relation, columnCount, chunkRowCount,
@@ -234,14 +227,10 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		 */
 		for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 		{
-#if PG_VERSION_NUM >= PG_VERSION_16
 			cached_StringInfo *value = make0<cached_StringInfo>();
 			initStringInfo(&value->data);
 			value->cached = false;
-			chunkData->valueBufferArray[columnIndex] = (StringInfo)value;
-#else
-			chunkData->valueBufferArray[columnIndex] = makeStringInfo();
-#endif
+			chunkData->valueBufferArray[columnIndex] = reinterpret_cast<StringInfo>(value);
 		}
 	}
 
@@ -455,13 +444,8 @@ FlushStripe(ColumnarWriteState *writeState)
 
 	elog(DEBUG1, "Flushing Stripe of size %d", stripeBuffers->rowCount);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relationId = RelidByRelfilenumber(writeState->relfilelocator.spcOid,
 										  writeState->relfilelocator.relNumber);
-#else
-	Oid relationId = RelidByRelfilenode(writeState->relfilelocator.spcNode,
-										writeState->relfilelocator.relNode);
-#endif
 
 	Relation relation = safe_relation_open(relationId, NoLock);
 

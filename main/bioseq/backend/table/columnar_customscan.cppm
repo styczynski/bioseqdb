@@ -1,21 +1,21 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_customscan.c
+ * table/columnar_customscan.cppm
  *
- * This file contains the implementation of a postgres custom scan that
- * we use to push down the projections into the table access methods.
- *
- * Copyright (c) Citus Data, Inc.
- * Copyright (c) Hydra, Inc.
- *
- * $Id$
+ * Bioseq columnar CustomScan node. The planner_hook injects a CustomPath
+ * pointing at this node ahead of postgres' default seq/index path; at
+ * plan time it materializes a CustomScan, and at execution time we drive
+ * the bioseq columnar reader through the CustomScanState helpers
+ * defined here. The state object is BioseqScanState (defined in
+ * table/bioseq_scan_state.cppm), which embeds CustomScanState as its
+ * first field so PostgreSQL's reinterpret_cast across the C ABI stays
+ * sound.
  *
  *-------------------------------------------------------------------------
  */
 module;
 #include "common.h"
 
-#include <vector>
 #include <algorithm>
 #include <cmath>
 
@@ -31,70 +31,10 @@ import bioseq_table_io;
 import mlogging;
 import storage_metadata;
 import bioseq_table_types;
+import bioseq_scan_state;
 import pg_utils;
 import pg_utils.lists;
-
-// This is class that stores tuples until enough accumulate so we can later launch alignment algorithm in parallel
-class TupleDispatchBuffer {
-private:
-	std::vector<TupleTableSlot*> buffer;
-	int buffer_pos = -1;
-
-	// [[always_inline]] static constexpr TupleTableSlot* save_slot(TupleTableSlot* slot) {
-	// 	TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
-	// 	ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
-	// 	return newSlot;
-	// }
-
-public:
-	TupleDispatchBuffer(const size_t estimated_tuples_count) {
-		buffer.reserve(estimated_tuples_count*2);
-	}
-
-	[[always_inline]] constexpr void submit(TupleTableSlot *slot) {
-		TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
-		ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
-		buffer.push_back(newSlot);
-	}
-
-	// [[always_inline]] constexpr void submit_replace(TupleTableSlot *slot) {
-	// 	if (buffer.size() > 0) {
-	// 		buffer[buffer.size() - 1] = save_slot(slot);
-	// 	} else {
-	// 		submit(slot);
-	// 	}
-	// }
-
-	[[always_inline]] constexpr void clear() {
-		JustLog("buffer.CLEAR");
-		buffer.clear();
-		buffer_pos = -1;
-	}
-
-	[[always_inline]] constexpr TupleTableSlot* finish_writing() {
-		buffer_pos++;
-		if (buffer_pos < buffer.size()) {
-			return buffer[buffer_pos++];
-		} else {
-			return nullptr;
-		}
-	}
-
-	[[always_inline]] constexpr bool has_finished_writing() const {
-		return buffer_pos >= 0;
-	}
-
-	[[always_inline]] constexpr TupleTableSlot* read_next() {
-		JustLog("Fetching buf_pos={} size={}", buffer_pos, buffer.size());
-		if (buffer_pos < buffer.size()) {
-			auto mtup = buffer[buffer_pos];
-			buffer_pos++;
-			return mtup;
-		} else {
-			return nullptr;
-		}
-	}
-};
+import bioseq_scheduler.dispatch_buffer;
 
 ItemPointerData row_number_to_tid(uint64 rowNumber);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
@@ -169,7 +109,7 @@ static Node * ColumnarScan_CreateCustomScanState(CustomScan *cscan);
 static void ColumnarScan_BeginCustomScan(CustomScanState *node, EState *estate,
 										 int eflags);
 
-static TupleTableSlot * CustomExecScan(ColumnarScanState *node,
+static TupleTableSlot * CustomExecScan(BioseqScanState *node,
 									   ExecScanAccessMtd accessMtd,
 									   ExecScanRecheckMtd recheckMtd);
 static TupleTableSlot * ColumnarScan_ExecCustomScan(CustomScanState *node);
@@ -193,13 +133,11 @@ static void Columnar_InitializeWorkerCustomScan(CustomScanState *node,
 static const char * ColumnarPushdownClausesStr(List *context, List *clauses);
 static const char * ColumnarProjectedColumnsStr(List *context,
 												List *projectedColumns);
-#if PG_VERSION_NUM >= 130000
 static List * set_deparse_context_planstate(List *dpcontext, Node *node,
 											List *ancestors);
-#endif
 
 /* other helpers */
-static List * ColumnarVarNeeded(ColumnarScanState *columnarScanState);
+static List * ColumnarVarNeeded(BioseqScanState *columnarScanState);
 
 /* saved hook value in case of unload */
 static set_rel_pathlist_hook_type PreviousSetRelPathlistHook = NULL;
@@ -341,7 +279,7 @@ static void
 ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						   RangeTblEntry *rte)
 {
-	JustLog("ColumnarSetRelPathlistHook()");
+	JustLog("[bioseq] pg: ColumnarSetRelPathlistHook() entered");
 	/* call into previous hook if assigned */
 	if (PreviousSetRelPathlistHook)
 	{
@@ -403,7 +341,7 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			AddColumnarScanPaths(root, rel, rte);
 		}
 	}
-	JustLog("RelationClose()");
+	JustLog("[bioseq] pg: ColumnarSetRelPathlistHook() relation_close");
 	RelationClose(relation);
 }
 
@@ -412,7 +350,7 @@ static void
 ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 							bool inhparent, RelOptInfo *rel)
 {
-	JustLog("ColumnarGetRelationInfoHook()");
+	JustLog("[bioseq] pg: ColumnarGetRelationInfoHook() entered");
 	if (PreviousGetRelationInfoHook)
 	{
 		PreviousGetRelationInfoHook(root, relationObjectId, inhparent, rel);
@@ -427,10 +365,6 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 		for(auto indexOptInfo : PList<IndexOptInfo>(rel->indexlist)) {
 			memset(indexOptInfo->canreturn, false, indexOptInfo->ncolumns * sizeof(bool));
 		}
-		// foreach_decl_ptr(indexOptInfo, rel->indexlist)
-		// {
-		// 	memset(indexOptInfo->canreturn, false, indexOptInfo->ncolumns * sizeof(bool));
-		// }
 	}
 }
 
@@ -442,7 +376,7 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 static void
 RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 {
-	JustLog("RemovePathsByPredicate()");
+	JustLog("[bioseq] pg: RemovePathsByPredicate() entered");
 	List *filteredPathList = NIL;
 	List *filteredPartialPathList = NIL;
 
@@ -485,7 +419,7 @@ IsNotIndexPath(Path *path)
 static Path *
 CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
-	JustLog("CreateColumnarSeqScanPath()");
+	JustLog("[bioseq] pg: CreateColumnarSeqScanPath() entered");
 	/* columnar doesn't support parallel scan */
 	int parallelWorkers = 0;
 
@@ -503,7 +437,7 @@ CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 static void
 CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
-	JustLog("CostColumnarPaths");
+	JustLog("[bioseq] pg: CostColumnarPaths() entered");
 	for(auto path : PList<Path>(rel->pathlist))
 	{
 		if (IsA(path, IndexPath))
@@ -535,7 +469,7 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 {
 	if (!enable_indexscan)
 	{
-		JustLog("BISC Cannot estimate, disabled via enable_indexscan");
+		JustLog("[bioseq] pg: CostColumnarIndexPath() skipped (enable_indexscan=false)");
 		/* costs are already set to disable_cost, don't adjust them */
 		return;
 	}
@@ -553,13 +487,13 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	
 	if (!bioseq_index_scan)
 	{
-		JustLog("BISC Cannot estimate, disabled normally");
+		JustLog("[bioseq] pg: CostColumnarIndexPath() bioseq_index_scan disabled, adding columnar cost");
 		Cost columnarIndexScanCost = ColumnarIndexScanAdditionalCost(root, rel, relationId,
 																	indexPath);
 		indexPath->path.total_cost += columnarIndexScanCost;
 	}
 
-	JustLog("BISC columnar index path done cost");
+	JustLog("[bioseq] pg: CostColumnarIndexPath() cost computation complete");
 
 	ereport(DEBUG4, (errmsg("columnar table index scan costs re-estimated "
 							"by columnarAM (including indexAM costs): "
@@ -577,7 +511,7 @@ static Cost
 ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 								Oid relationId, IndexPath *indexPath)
 {
-	JustLog("ColumnarIndexScanAdditionalCost");
+	JustLog("[bioseq] pg: ColumnarIndexScanAdditionalCost() entered");
 	int numberOfColumnsRead = RelationIdGetNumberOfAttributes(relationId);
 	Cost perStripeCost = ColumnarPerStripeScanCost(rel, relationId, numberOfColumnsRead);
 
@@ -709,7 +643,7 @@ RelationIdGetNumberOfAttributes(Oid relationId)
 static bool
 CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float4 *absVarCorrelation)
 {
-	JustLog("CheckVarStats");
+	JustLog("[bioseq] pg: CheckVarStats() entered");
 	/*
 	 * Collect isunique, ndistinct, and varCorrelation.
 	 */
@@ -765,18 +699,15 @@ static bool
 ExprReferencesRelid(Expr *expr, Index relid)
 {
 	List *exprVars = pull_var_clause(
-		(Node *) expr, PVC_RECURSE_AGGREGATES |
+		reinterpret_cast<Node *>(expr), PVC_RECURSE_AGGREGATES |
 		PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS);
-	ListCell *lc;
-	foreach(lc, exprVars)
+	for (auto var : PList<Var>(exprVars))
 	{
-		Var *var = (Var *) lfirst(lc);
 		if (var->varno == relid)
 		{
 			return true;
 		}
 	}
-
 	return false;
 }
 
@@ -784,17 +715,11 @@ ExprReferencesRelid(Expr *expr, Index relid)
 uint64
 ColumnarTableRowCount(Relation relation)
 {
-	ListCell *stripeMetadataCell = NULL;
 	uint64 totalRowCount = 0;
-#if PG_VERSION_NUM >= PG_VERSION_16
 	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
-#else
-	List *stripeList = StripesForRelfilenode(relation->rd_node, ForwardScanDirection);
-#endif
 
-	foreach(stripeMetadataCell, stripeList)
+	for (auto stripeMetadata : PList<StripeMetadata>(stripeList))
 	{
-		StripeMetadata *stripeMetadata = (StripeMetadata *) lfirst(stripeMetadataCell);
 		totalRowCount += stripeMetadata->rowCount;
 	}
 
@@ -912,7 +837,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		}
 		else if (npushdownableArgs == 1)
 		{
-			return (Expr *) linitial(pushdownableArgs);
+			return PList<Expr>(pushdownableArgs).first();
 		}
 
 		if (boolExpr->boolop == AND_EXPR)
@@ -1042,11 +967,8 @@ static List *
 FilterPushdownClauses(PlannerInfo *root, RelOptInfo *rel, List *inputClauses)
 {
 	List *filteredClauses = NIL;
-	ListCell *lc;
-	foreach(lc, inputClauses)
+	for (auto rinfo : PList<RestrictInfo>(inputClauses))
 	{
-		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
-
 		/*
 		 * Ignore clauses that don't refer to this rel, and pseudoconstants.
 		 *
@@ -1060,7 +982,7 @@ FilterPushdownClauses(PlannerInfo *root, RelOptInfo *rel, List *inputClauses)
 			continue;
 		}
 
-		Expr *pushdownableExpr = ExtractPushdownClause(root, rel, (Node *) rinfo->clause);
+		Expr *pushdownableExpr = ExtractPushdownClause(root, rel, reinterpret_cast<Node *>(rinfo->clause));
 		if (!pushdownableExpr)
 		{
 			continue;
@@ -1126,20 +1048,15 @@ static Relids
 FindCandidateRelids(PlannerInfo *root, RelOptInfo *rel, List *joinClauses)
 {
 	Relids candidateRelids = NULL;
-	ListCell *lc;
-	foreach(lc, joinClauses)
+	for (auto rinfo : PList<RestrictInfo>(joinClauses))
 	{
-		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
-
 		candidateRelids = bms_add_members(candidateRelids,
 										  rinfo->required_relids);
 	}
 
 	candidateRelids = bms_del_members(candidateRelids, rel->relids);
 	candidateRelids = bms_del_members(candidateRelids, rel->lateral_relids);
-#if PG_VERSION_NUM >= PG_VERSION_16
 	candidateRelids = bms_del_members(candidateRelids, root->outer_join_rels);
-#endif
 	return candidateRelids;
 }
 
@@ -1232,7 +1149,7 @@ ChooseDepthLimit(int nCandidates)
 static void
 AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
-	JustLog("AddColumnarScanPaths");
+	JustLog("[bioseq] pg: AddColumnarScanPaths() entered");
 	List *joinClauses = FindPushdownJoinClauses(root, rel);
 	Relids candidateRelids = FindCandidateRelids(root, rel, joinClauses);
 
@@ -1244,7 +1161,7 @@ AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	AddColumnarScanPathsRec(root, rel, rte, paramRelids, candidateRelids,
 							depthLimit);
 
-	JustLog("Terminate AddColumnarScanPaths()");
+	JustLog("[bioseq] pg: AddColumnarScanPaths() returning");
 }
 
 
@@ -1323,14 +1240,14 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		// FIXME: Fix this!!!
 		const bool force_parallel = true;
 		if (force_parallel) {
-			JustLog("PARA Override bioseq_min_parallel_processes;");
+			JustLog("[bioseq] pg: AddColumnarScanPathsRec() force_parallel override active");
 			bioseq_min_parallel_process_running = bioseq_min_parallel_processes;
 		}
 
 		if (force_parallel || (rel->consider_parallel && rel->lateral_relids == NULL && 
 			bioseq_min_parallel_process_running > 0))
 		{
-			JustLog("PARA Append");
+			JustLog("[bioseq] pg: AddColumnarScanPathsRec() add_partial_path for parallel scan");
 			/*
 			 * Passing NULL for JOIN quals in parallel execution.
 			 */
@@ -1345,7 +1262,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		}
 	}
 
-	JustLog("recurse for all candidateRelids, unless we hit the depth limit");
+	JustLog("[bioseq] pg: AddColumnarScanPathsRec() recursing into candidate relids");
 
 	/* recurse for all candidateRelids, unless we hit the depth limit */
 	Assert(depthLimit >= 0);
@@ -1359,7 +1276,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * generate paths of greater parameterization (and hopefully lower
 	 * cost).
 	 */
-	JustLog("Iterate through parameter combinations depth-first");
+	JustLog("[bioseq] pg: AddColumnarScanPathsRec() iterating parameter combinations depth-first");
 	Relids tmpCandidateRelids = bms_copy(candidateRelids);
 	int relid = -1;
 	while ((relid = bms_next_member(candidateRelids, relid)) >= 0)
@@ -1443,8 +1360,6 @@ ContainsExecParams(Node *node, void *notUsed)
 	return expression_tree_walker(node, ContainsExecParams, NULL);
 }
 
-#if PG_VERSION_NUM >= PG_VERSION_16
-
 /*
  * fixup_inherited_columns
  *
@@ -1501,34 +1416,30 @@ fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
 
 	return result;
 }
-#endif
 
 static bool
 CostTestWalker(Node *node, Query *notUsed)
 {
-	JustLog("CHECK THE QUERY?");
-	for(auto g : PList<Node>(notUsed->targetList)) {
-		JustLog("Query targetlist item is {}", nodeStr(g));
+	JustLog("[bioseq] pg: CostTestWalker() entered");
+	for (auto target_entry : PList<Node>(notUsed->targetList)) {
+		JustLog("[bioseq] pg: CostTestWalker() targetlist node=[{}]", nodeStr(target_entry));
 	}
 	if (node == NULL)
 	{
 		return false;
 	}
-	JustLog("CESTIMATE ptarget WALK {}", nodeStr(node));
-	if(IsA(node, Var)) {
-		Var* v = (Var*) node; 
-		auto varno = v->varno;
-		List* rtable = notUsed->rtable;
-		if (rtable == nullptr) {
-			JustLog("CESTIMATE ptarget VAR rtable is null");
+	JustLog("[bioseq] pg: CostTestWalker() walking node=[{}]", nodeStr(node));
+	if (IsA(node, Var)) {
+		Var* var_node = reinterpret_cast<Var*>(node);
+		const auto var_no = var_node->varno;
+		List* range_table = notUsed->rtable;
+		if (range_table == nullptr) {
+			JustLog("[bioseq] pg: CostTestWalker() var rtable is null");
+		} else if (var_no == 0 || var_no > list_length(range_table)) {
+			JustLog("[bioseq] pg: CostTestWalker() var varno out of bounds varno={} rtable_len={}", var_no, list_length(range_table));
 		} else {
-			if (varno == 0 || varno > list_length(rtable)) {
-				JustLog("Varno out of bounds? {} / {}", varno, list_length(rtable));
-			} else {
-				RangeTblEntry *rte = rt_fetch(varno, rtable);
-				RTEKind kind = rte->rtekind;
-				JustLog("RTE KIND DETECTED IS {} relid={}", (int)kind, (int)rte->relid);
-			}
+			RangeTblEntry* rte = rt_fetch(var_no, range_table);
+			JustLog("[bioseq] pg: CostTestWalker() rte_kind={} relid={}", static_cast<int>(rte->rtekind), static_cast<int>(rte->relid));
 		}
 	}
 	
@@ -1545,7 +1456,7 @@ static Path *
 AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 					Relids paramRelids)
 {
-	JustLog("AddColumnarScanPath()");
+	JustLog("[bioseq] pg: AddColumnarScanPath() entered");
 	/*
 	 * Must return a CustomPath, not a larger structure containing a
 	 * CustomPath as the first field. Otherwise, nodeToString() will fail to
@@ -1570,13 +1481,13 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	bool wehavemagic = false;
 	int wehavemagic_cnt = 0;
-	JustLog("CESTIMATE mmsearch_oid = {}", mmsearch_oid);
+	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={}", mmsearch_oid);
 	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
 		if (IsA(tgt->expr, FuncExpr)) {
 			FuncExpr* fe = (FuncExpr*) tgt->expr;
-			JustLog("CESTIMATE targetlist has funcexpr : {}", nodeStr(fe));
+			JustLog("[bioseq] pg: AddColumnarScanPath() targetlist funcexpr=[{}]", nodeStr(fe));
 			if (fe->funcid == mmsearch_oid) {
-				JustLog("WE FOUND IT :DDDDD");
+				JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr in targetlist");
 				// Magic?
 				//if (!wehavemagic) lappend(path->pathtarget->exprs, tgt->expr);
 				//path->pathtarget->cost
@@ -1586,13 +1497,12 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		}
 	}
 
-	JustLog("CESTIMATE ptarget START");
+	JustLog("[bioseq] pg: AddColumnarScanPath() walking pathtarget expressions");
 	for (auto expr : PList<Node>(path->pathtarget->exprs)) {
-		JustLog("CESTIMATE ptarget");
-		// Iterate expressions?
+		JustLog("[bioseq] pg: AddColumnarScanPath() pathtarget expression");
 		CostTestWalker(expr, root->parse);
 	}
-	JustLog("CESTIMATE ptarget END");
+	JustLog("[bioseq] pg: AddColumnarScanPath() pathtarget walk complete");
 
 	/* columnar scans are not parallel-aware, but they are parallel-safe */
 	path->parallel_safe = rel->consider_parallel;
@@ -1609,13 +1519,10 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		allClauses = list_concat(allClauses, path->param_info->ppi_clauses);
 	}
 
-	JustLog("   ===> AddColumnarScanPath iterate");
-	ListCell *lcz;
-	foreach(lcz, allClauses)
+	JustLog("[bioseq] pg: AddColumnarScanPath() iterating allClauses (no-op pass for tracing)");
+	for (auto restrict_info : PList<RestrictInfo>(allClauses))
 	{
-		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lcz);
-		// LogNode(rinfo, "   ===> AddColumnarScanPath restrict node");
-		//JustLog("===> AddColumnarScanPath restrict node {}", nodeStr(rinfo))
+		(void) restrict_info;
 	}
 
 	allClauses = FilterPushdownClauses(root, rel, allClauses);
@@ -1631,12 +1538,10 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * therefore it won't be a plain clause.
 	 */
 	List *plainClauses = NIL;
-	ListCell *lc;
-	foreach(lc, allClauses)
+	for (auto rinfo : PList<RestrictInfo>(allClauses))
 	{
-		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 		if (bms_is_subset(rinfo->required_relids, rel->relids) &&
-			!ContainsExecParams((Node *) rinfo->clause, NULL))
+			!ContainsExecParams(reinterpret_cast<Node *>(rinfo->clause), nullptr))
 		{
 			plainClauses = lappend(plainClauses, rinfo);
 		}
@@ -1661,7 +1566,6 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	// cpath->custom_private = custom_path_data.ptr();
 
 	int numberOfColumnsRead = 0;
-#if PG_VERSION_NUM >= PG_VERSION_16
 	if (rte->perminfoindex > 0)
 	{
 		/*
@@ -1693,9 +1597,6 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 																	  perminfo->
 																	  selectedCols));
 	}
-#else
-	numberOfColumnsRead = bms_num_members(rte->selectedCols);
-#endif
 	int numberOfClausesPushed = list_length(allClauses);
 
 	/* Queries that contain only aggregate with STAR doesn't have any
@@ -1712,7 +1613,9 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		//(&cpath->path)->total_cost -= 90000;
 		PathTarget* pt = (&cpath->path)->pathtarget;
 		//auto curcost = pt->cost.per_tuple;
-		JustLog("CESTIMATE reduce mmsearch cost <p.total>={} <p.startup>={} pertuple={}, startup={} startupparent={} totalparent={}", path->total_cost, path->startup_cost, pt->cost.per_tuple, pt->cost.startup, (&cpath->path)->startup_cost, (&cpath->path)->total_cost);
+		JustLog("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={}",
+			path->total_cost, path->startup_cost, pt->cost.per_tuple, pt->cost.startup,
+			(&cpath->path)->startup_cost, (&cpath->path)->total_cost);
 		cpath->path.total_cost = -100000 * wehavemagic_cnt;
 		cpath->path.startup_cost = -100000 * wehavemagic_cnt;
 	}
@@ -1775,7 +1678,7 @@ CostColumnarScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 {
 	Path *path = &cpath->path;
 
-	List *allClauses = PList<List>(cpath->custom_private).second(); //lsecond(cpath->custom_private);
+	List *allClauses = PList<List>(cpath->custom_private).second();
 	Selectivity clauseSel = clauselist_selectivity(
 		root, allClauses, rel->relid, JOIN_INNER, NULL);
 
@@ -1870,7 +1773,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 								List *clauses,
 								List *custom_plans)
 {
-	JustLog("ColumnarScanPath_PlanCustomPath()");
+	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() entered");
 	// PAPIESZ: ADD HERE
 	/*
 	 * Must return a CustomScan, not a larger structure containing a
@@ -1899,10 +1802,11 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 		 * fix this by processing the quals more completely and using
 		 * ScanKeys.
 		 */
-		List *plainClauses = (List*)extract_actual_clauses(
-			(List*)linitial(best_path->custom_private), false /* no pseudoconstants */);
-		List *allClauses = (List*)extract_actual_clauses(
-			(List*)lsecond(best_path->custom_private), false /* no pseudoconstants */);
+		PList<List> private_lists(best_path->custom_private);
+		List *plainClauses = extract_actual_clauses(
+			private_lists.first(), false /* no pseudoconstants */);
+		List *allClauses = extract_actual_clauses(
+			private_lists.second(), false /* no pseudoconstants */);
 		cscan->custom_exprs = copyObject(list_make2(plainClauses, allClauses));
 	}
 	else
@@ -1918,14 +1822,14 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	//ColumnarScanPath_PlanCustomPath tlist member => [{TARGETENTRY :expr {FUNCEXPR :funcid 535007 :funcresulttype 16 :funcretset false :funcvariadic false :funcformat 0 :funccollid 0 :inputcollid 100 :args ({VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location 24} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 27 :constvalue 5 [ 20 0 0 0 65 ]}) :location 15} :resno 3 :resname mmsearch :ressortgroupref 0 :resorigtbl 0 :resorigcol 0 :resjunk false}]
 
 	for(auto n : PList<TargetEntry>(root->processed_tlist)) {
-		JustLog("ColumnarScanPath_PlanCustomPath tlist member => [{}]", nodeStr(n));
+		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() processed_tlist node=[{}]", nodeStr(n));
 		if(IsA(n->expr, FuncExpr)) {
 			tlist = lappend(tlist, flatCopyTargetEntry(n));
 		}
 	}
-	JustLog("ALSO VAR: {}", tlist == nullptr);
+	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist_is_null={}", tlist == nullptr);
 	for(auto n : PList<TargetEntry>(tlist)) {
-		JustLog("ColumnarScanPath_PlanCustomPath tlist(direct) member => [{}]", nodeStr(n));
+		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist node=[{}]", nodeStr(n));
 	}
 
 
@@ -1943,7 +1847,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
 		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);
 
-		JustLog("Split qual for vectorization");
+		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() splitting qual list for vectorization");
 
 		cscan->custom_exprs = lappend(cscan->custom_exprs, listDifference);
 
@@ -1953,12 +1857,12 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	}
 	else
 	{
-		JustLog("Do not split qual for vectorization (disabled)");
+		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() vectorization disabled, qual not split");
 		/* We still need to create third entry in custom_exprs */
 		cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
 	}
 
-	JustLog("ColumnarScanPath_PlanCustomPath EXIT ()");
+	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() returning");
 	return (Plan *) cscan;
 }
 
@@ -2027,15 +1931,11 @@ static Node *
 ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 {
 	const_score_node = nullptr;
-	JustLog("ColumnarScan_CreateCustomScanState()");
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) newNode(
-		sizeof(ColumnarScanState), T_CustomScanState);
-
-	CustomScanState *cscanstate = &columnarScanState->custom_scanstate;
-	cscanstate->methods = &ColumnarScanExecuteMethods;
-	
-	JustLog("ColumnarScan_CreateCustomScanState EXIT ()");
-	return (Node *) cscanstate;
+	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() entered");
+	BioseqScanState* bioseq_scan_state = BioseqScanState::allocate();
+	bioseq_scan_state->as_custom_scan_state()->methods = &ColumnarScanExecuteMethods;
+	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() returning");
+	return bioseq_scan_state->as_node();
 }
 
 
@@ -2081,9 +1981,9 @@ EvalParamsMutator(Node *node, ExprContext *econtext)
 static void
 ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int eflags)
 {
-	JustLog("ColumnarScan_BeginCustomScan()");
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() entered");
 	CustomScan *cscan = (CustomScan *) cscanstate->ss.ps.plan;
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) cscanstate;
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(cscanstate);
 	ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
 
 	/*
@@ -2095,36 +1995,36 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	cscanstate->ss.ps.ps_ExprContext = stdecontext;
 
 	ResetExprContext(columnarScanState->css_RuntimeContext);
-	List *plainClauses = (List*)linitial(cscan->custom_exprs);
-	columnarScanState->qual = (List *) EvalParamsMutator(
-		(Node *) plainClauses, columnarScanState->css_RuntimeContext);
+	PList<List> custom_exprs(cscan->custom_exprs);
+	List *plainClauses = custom_exprs.first();
+	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
+		reinterpret_cast<Node *>(plainClauses), columnarScanState->css_RuntimeContext));
 
 	/*
 	 * Third list in custom_exprs should contain vectorized qual list if not 
 	 * NULL.
 	 */
-	JustLog("Examine custom exprs for vectorization");
-	if (lthird(cscan->custom_exprs) != NIL) {
-		JustLog("Present");
-		for(auto n : PList<Node>(cscan->custom_exprs)) {
-			JustLog("Vectorized qual = [{}]", nodeStr(n));
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() examining custom_exprs for vectorized qual");
+	List* vectorized_qual_list = custom_exprs.third();
+	if (vectorized_qual_list != NIL) {
+		JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() vectorized qual list present");
+		for (auto qual_node : PList<Node>(cscan->custom_exprs)) {
+			JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() vectorized qual=[{}]", nodeStr(qual_node));
 		}
-		columnarScanState->vectorization.vectorizedQualList =  (List*) lthird(cscan->custom_exprs);
+		columnarScanState->vectorization.vectorizedQualList = vectorized_qual_list;
 	}
 
-	JustLog("Iterate custom_private");
-	for(auto privateCustomData : PList<Const>(cscan->custom_private))
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() iterating custom_private");
+	for (auto private_const_node : PList<Const>(cscan->custom_private))
 	{
-		JustLog("Beginscan custom private node: [{}]", nodeStr((Node*)privateCustomData))
-		JustLog("Next expr from custom private");
-		if (privateCustomData->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
+		JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() custom_private node=[{}]", nodeStr(reinterpret_cast<Node*>(private_const_node)));
+		if (private_const_node->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
-			JustLog("Set vectorizationAggregate")
-			columnarScanState->vectorization.vectorizationAggregate =
-				privateCustomData->constvalue;
+			JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() setting vectorizationAggregate");
+			columnarScanState->vectorization.vectorizationAggregate = private_const_node->constvalue;
 		}
 	}
-	JustLog("Iterate custom_private END");
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() custom_private iteration complete");
 
 	/*
 	 * Vectorization is enabled if global variable is set and there is at least one
@@ -2135,7 +2035,10 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		(columnarScanState->vectorization.vectorizedQualList != NULL ||
 		 columnarScanState->vectorization.vectorizationAggregate);
 
-	JustLog("Begin scan check vectorizationAggregate bioseq_enable_vectorization:{} vectorizedQualList!=NULL:{} vectorizationAggregate:{}", bioseq_enable_vectorization, (columnarScanState->vectorization.vectorizedQualList != NULL), columnarScanState->vectorization.vectorizationAggregate);
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() guc_vec={} has_vec_qual={} vec_aggregate={}",
+		bioseq_enable_vectorization,
+		columnarScanState->vectorization.vectorizedQualList != NULL,
+		columnarScanState->vectorization.vectorizationAggregate);
 	if (columnarScanState->vectorization.vectorizationAggregate)
 	{
 		ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
@@ -2161,7 +2064,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	columnarScanState->attrNeeded = 
 		ColumnarAttrNeeded(&cscanstate->ss, columnarScanState->vectorization.vectorizedQualList);
 
-	JustLog("Iterate BMS members");
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() iterating attrNeeded bitmap members");
 	int bmsMember = -1;
 	while ((bmsMember = bms_next_member(columnarScanState->attrNeeded, bmsMember)) >= 0)
 	{
@@ -2176,13 +2079,9 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 */
 	columnarScanState->snapshot = estate->es_snapshot;
 	columnarScanState->snapshotRegisteredByUs = false;
-#if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
-#else
-	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_node.relNode;
-#endif
 
-	JustLog("Check parallel mode");
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() checking parallel mode");
 	if(!IsInParallelMode())
 	{
 		RowMaskFlushWriteStateForRelfilenode(relationOid, GetCurrentSubTransactionId());
@@ -2191,7 +2090,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 									   &columnarScanState->snapshotRegisteredByUs);
 	}
 
-	JustLog("Scan initiazed sucesfully");
+	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
 }
 
@@ -2207,7 +2106,7 @@ ExecScanFetch(ScanState *node,
 			  ExecScanAccessMtd accessMtd,
 			  ExecScanRecheckMtd recheckMtd)
 {
-	JustLog("ExecScanFetch()");
+	JustLog("[bioseq] pg: ExecScanFetch() entered");
 	EState	   *estate = node->ps.state;
 
 	CHECK_FOR_INTERRUPTS();
@@ -2308,7 +2207,7 @@ ExecScanFetch(ScanState *node,
 static Node *
 VarInjectorMutator(Node *node, void* context)
 {
-	JustLog("VarInjectorMutator");
+	JustLog("[bioseq] pg: VarInjectorMutator() entered");
 	if (node == NULL)
 	{
 		return NULL;
@@ -2316,7 +2215,7 @@ VarInjectorMutator(Node *node, void* context)
 	if (IsA(node, FuncExpr)) {
 		auto funcExpr = (FuncExpr*)(node);
 		Oid oid = funcExpr->funcid;
-		JustLog("FUNCOID present in targetlist := {}", oid);
+		JustLog("[bioseq] pg: VarInjectorMutator() funcid={}", oid);
 		return (Node*)context;
 		// replace?
 
@@ -2326,12 +2225,12 @@ VarInjectorMutator(Node *node, void* context)
 
 
 static TupleTableSlot *
-Inner_CustomExecScan(ColumnarScanState *columnarScanState,
+Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
 	bool rec = false;
-	JustLog("CustomExecScan()");
+	JustLog("[bioseq] pg: Inner_CustomExecScan() entered");
 	ExprContext *econtext;
 	ExprState  *qual;
 	ProjectionInfo *projInfo;
@@ -2345,12 +2244,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 	projInfo = node->ps.ps_ProjInfo;
 	econtext = node->ps.ps_ExprContext;
 
-	if (projInfo == nullptr) {
-		JustLog("Check porjection? null");
-	} else {
-		JustLog("Check projection? {}", "");
-	}
-	JustLog("HEERE");
+	JustLog("[bioseq] pg: Inner_CustomExecScan() projection_info_is_null={}", projInfo == nullptr);
 
 	/* interrupt checks are in ExecScanFetch */
 
@@ -2390,7 +2284,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		TupleTableSlot *slot = NULL;
 
 		if (buffer.has_finished_writing()) {
-			JustLog("CC from buffer");
+			JustLog("[bioseq] pg: Inner_CustomExecScan() draining buffered slot");
 			return buffer.read_next();
 		}
 
@@ -2398,7 +2292,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			columnarScanState->vectorization.vectorPendingRowNumber == 0 &&
 			resultVectorTupleSlotIdx > 0)
 		{
-			JustLog("CC vectorized quick exit");
+			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fast-exit returning result vector slot");
 			((VectorTupleTableSlot *) columnarScanState->vectorization.resultVectorSlot)->dimension = resultVectorTupleSlotIdx;
 			ExecStoreVirtualTuple(columnarScanState->vectorization.resultVectorSlot);
 			resultVectorTupleSlotIdx = 0;
@@ -2408,7 +2302,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
         // Fake proj here
 		const_score_node->constvalue = counter++;
 		const_score_node->constisnull = false;
-		JustLog("CC Counter increased to {}", counter);
+		JustLog("[bioseq] pg: Inner_CustomExecScan() advance const_score counter to {}", counter);
 
 		auto newProj = ExecBuildProjectionInfo(
 			newtargetlist,
@@ -2417,11 +2311,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			&(node->ps),
 			node->ss_ScanTupleSlot->tts_tupleDescriptor
 		);
-		if (projInfo == nullptr) {
-			JustLog("ProjInfo is null so its okay :D");
-		} else {
-			JustLog("Non null projection what now? :0")
-		}
+		JustLog("[bioseq] pg: Inner_CustomExecScan() existing_projInfo_null={} replacing with built projection", projInfo == nullptr);
 		projInfo = newProj;
 
 		//JustLog("NEW PROJECTION [{}]", nodeStr(newProj));
@@ -2432,7 +2322,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		if (!columnarScanState->vectorization.vectorizationEnabled)
 		{
 
-			JustLog("CC exec scan fetch");
+			JustLog("[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 			resultVectorTupleSlotIdx = 0;
@@ -2445,7 +2335,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			 */
 			if (TupIsNull(slot))
 			{
-				JustLog("CC discovered null tuple slot");
+				JustLog("[bioseq] pg: Inner_CustomExecScan() source slot null, finishing dispatch buffer");
 				return buffer.finish_writing();
 				// if (projInfo)
 				// 	return ExecClearTuple(projInfo->pi_state.resultslot);
@@ -2460,7 +2350,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		else if (columnarScanState->vectorization.vectorizationEnabled &&
 				 columnarScanState->vectorization.vectorPendingRowNumber == 0)
 		{
-			JustLog("CC vectorized fetch 1");
+			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 			/*
@@ -2472,11 +2362,8 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			if (TupIsNull(slot))
 			{
 				// ????
-				if (projInfo) {
-					JustLog("buffer.SUBMIT X3");
-					//buffer.submit(ExecClearTuple(projInfo->pi_state.resultslot));
-				}
-				JustLog("buffer.FINISH_WRITING");
+				JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted projInfo_present={} finalizing buffer",
+					projInfo != nullptr);
 				return buffer.finish_writing();
 			}
 
@@ -2505,7 +2392,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			else if (!qual && !projInfo && columnarScanState->vectorization.vectorizationAggregate)
 			{
 				columnarScanState->vectorization.vectorPendingRowNumber = 0;
-				JustLog("buffer.SUBMIT X1");
+				JustLog("[bioseq] pg: Inner_CustomExecScan() submit vectorized aggregate slot to dispatch buffer");
 				buffer.submit(slot);
 				continue;
 				//return slot;
@@ -2520,7 +2407,7 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		 */
 		if (columnarScanState->vectorization.vectorizationEnabled)
 		{
-			JustLog("CC vectorized fetch 2");
+			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (post-qual extraction)");
 			VectorTupleTableSlot *vectorSlot = 
 				(VectorTupleTableSlot *) columnarScanState->vectorization.scanVectorSlot;
 
@@ -2563,10 +2450,10 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 		 * when the qual is null ... saves only a few cycles, but they add up
 		 * ... 
 		 */
-		JustLog("CC qual");
+		JustLog("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			JustLog("CC simple fetch");
+			JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed, projecting tuple");
 			
 			//slot = ExecProject(newProj);
 			
@@ -2594,16 +2481,8 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 			}		
 			else
 			{
-				JustLog("CC pushback");
-
-				// TupleTableSlot* newSlot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
-				// ExecStoreMinimalTuple(ExecCopySlotMinimalTuple(slot), newSlot, true);
-				JustLog("buffer.SUBMIT X2");
+				JustLog("[bioseq] pg: Inner_CustomExecScan() submit projected slot to dispatch buffer");
 				buffer.submit(slot);
-				//slot->
-				//ExecMaterializeSlot(slot);
-				//buffer.push_back(newSlot);
-				//return slot;
 			}
 		}
 		else
@@ -2618,36 +2497,31 @@ Inner_CustomExecScan(ColumnarScanState *columnarScanState,
 
 
 static TupleTableSlot *
-CustomExecScan(ColumnarScanState *columnarScanState,
+CustomExecScan(BioseqScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd) {
 
 	// Testing custom exec scan
-	JustLog("Wrapping CustomExecScan() start");
+	JustLog("[bioseq] pg: CustomExecScan() entered");
 
 	ScanState *node = (ScanState *) &columnarScanState->custom_scanstate.ss;
 	PlanState ps = node->ps;
 	auto context = ps.ps_ExprContext;
 	
-	JustLog("Get targetlist");
+	JustLog("[bioseq] pg: CustomExecScan() reading plan targetlist");
 	auto targetlist = ps.plan->targetlist;
-
-	JustLog("iterate targetlist");
-	if (targetlist != nullptr) {
-		JustLog("TARGETLIST IS NOT NULL!");
-	}
-	for(auto tgt : PList<Node>(targetlist)) {
-		JustLog("NEXT!");
+	JustLog("[bioseq] pg: CustomExecScan() targetlist_is_null={}", targetlist == nullptr);
+	for (auto tgt : PList<Node>(targetlist)) {
 		if (tgt == nullptr) {
-			JustLog("TARGETLIST NULL NODE");
+			JustLog("[bioseq] pg: CustomExecScan() targetlist contained null node");
 		} else {
-			JustLog("Targetlist node = [{}]", nodeStr(tgt));
+			JustLog("[bioseq] pg: CustomExecScan() targetlist node=[{}]", nodeStr(tgt));
 		}
 	}
-	JustLog("END iterate targetlist");
+	JustLog("[bioseq] pg: CustomExecScan() targetlist iteration complete");
 
 	if (const_score_node == nullptr) {
-		JustLog("INIT CONST SCORE");
+		JustLog("[bioseq] pg: CustomExecScan() initialising const_score node");
 		const_score_node = makeConst(
 			INT4OID,
 			-1,
@@ -2665,7 +2539,7 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 	}
 
 
-	JustLog("Start inner");
+	JustLog("[bioseq] pg: CustomExecScan() dispatching to Inner_CustomExecScan");
 
 	auto tupleSlot = Inner_CustomExecScan(columnarScanState, accessMtd, recheckMtd);
 
@@ -2682,10 +2556,10 @@ CustomExecScan(ColumnarScanState *columnarScanState,
 
 
 static TupleTableSlot *
-ColumnarScanNext(ColumnarScanState *columnarScanState)
+ColumnarScanNext(BioseqScanState *columnarScanState)
 {
-	JustLog("ColumnarScanNext()");
-	CustomScanState *node = (CustomScanState *) columnarScanState;
+	JustLog("[bioseq] pg: ColumnarScanNext() entered");
+	CustomScanState *node = columnarScanState->as_custom_scan_state();
 
 	/*
 	 * get information from the estate and scan state
@@ -2695,7 +2569,7 @@ ColumnarScanNext(ColumnarScanState *columnarScanState)
 	ScanDirection direction = estate->es_direction;
 	bool vectorizationEnabled = columnarScanState->vectorization.vectorizationEnabled;
 
-	TupleTableSlot *slot = NULL;
+	TupleTableSlot *slot = nullptr;
 
 	if (vectorizationEnabled)
 		slot = columnarScanState->vectorization.scanVectorSlot;
@@ -2727,10 +2601,10 @@ ColumnarScanNext(ColumnarScanState *columnarScanState)
 	 */
 	if (vectorizationEnabled)
 	{
-		VectorTupleTableSlot *vectorSlot = (VectorTupleTableSlot *) slot;
-		foreach_int(attrIndex, columnarScanState->vectorization.attrNeededList)
+		VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(slot);
+		for (int attrIndex : PIntList(columnarScanState->vectorization.attrNeededList))
 		{
-			VectorColumn *column = (VectorColumn *) vectorSlot->tts.tts_values[attrIndex];
+			VectorColumn *column = reinterpret_cast<VectorColumn *>(vectorSlot->tts.tts_values[attrIndex]);
 			memset(column->isnull, true, COLUMNAR_VECTOR_COLUMN_SIZE);
 			column->dimension = 0;
 		}
@@ -2760,7 +2634,7 @@ ColumnarScanNext(ColumnarScanState *columnarScanState)
  * SeqRecheck -- access method routine to recheck a tuple in EvalPlanQual
  */
 static bool
-ColumnarScanRecheck(ColumnarScanState *node, TupleTableSlot *slot)
+ColumnarScanRecheck(BioseqScanState *node, TupleTableSlot *slot)
 {
 	return true;
 }
@@ -2769,9 +2643,9 @@ ColumnarScanRecheck(ColumnarScanState *node, TupleTableSlot *slot)
 static TupleTableSlot *
 ColumnarScan_ExecCustomScan(CustomScanState *node)
 {
-	return CustomExecScan((ColumnarScanState *) node,
-						  (ExecScanAccessMtd) ColumnarScanNext,
-						  (ExecScanRecheckMtd) ColumnarScanRecheck);
+	return CustomExecScan(BioseqScanState::from_custom_scan_state(node),
+						  reinterpret_cast<ExecScanAccessMtd>(ColumnarScanNext),
+						  reinterpret_cast<ExecScanRecheckMtd>(ColumnarScanRecheck));
 }
 
 
@@ -2779,12 +2653,12 @@ static void
 ColumnarScan_EndCustomScan(CustomScanState *node)
 {
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 
 	/*
 	 * Cleanup BMS of selected scan attributes
 	 */
-	bms_free(((ColumnarScanState *)node)->attrNeeded);
+	bms_free(columnarScanState->attrNeeded);
 
 	/*
 	 * clean out the tuple table
@@ -2814,13 +2688,13 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 static void
 ColumnarScan_ReScanCustomScan(CustomScanState *node)
 {
-	CustomScan *cscan = (CustomScan *) node->ss.ps.plan;
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	CustomScan *cscan = reinterpret_cast<CustomScan *>(node->ss.ps.plan);
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 
 	ResetExprContext(columnarScanState->css_RuntimeContext);
-	List *allClauses = (List*) lsecond(cscan->custom_exprs);
-	columnarScanState->qual = (List *) EvalParamsMutator(
-		(Node *) allClauses, columnarScanState->css_RuntimeContext);
+	List *allClauses = PList<List>(cscan->custom_exprs).second();
+	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
+		reinterpret_cast<Node *>(allClauses), columnarScanState->css_RuntimeContext));
 
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
 
@@ -2838,8 +2712,8 @@ static void
 ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							   ExplainState *es)
 {
-	JustLog("ColumnarScan_ExplainCustomScan()");
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	JustLog("[bioseq] pg: ColumnarScan_ExplainCustomScan() entered");
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 
 	List *context = set_deparse_context_planstate(
 		es->deparse_cxt, (Node *) &node->ss.ps, ancestors);
@@ -2851,7 +2725,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						projectedColumnsStr, es);
 
 	CustomScan *cscan = castNode(CustomScan, node->ss.ps.plan);
-	List *chunkGroupFilter = (List*) lsecond(cscan->custom_exprs);
+	List *chunkGroupFilter = PList<List>(cscan->custom_exprs).second();
 	if (chunkGroupFilter != NULL)
 	{
 		const char *pushdownClausesStr = ColumnarPushdownClausesStr(
@@ -2949,7 +2823,7 @@ Columnar_EstimateDSMCustomScan(CustomScanState *node,
 {
 	Size nbytes;
 
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 
 	nbytes = offsetof(ParallelColumnarScanData, snapshotData);
 	nbytes = add_size(nbytes, EstimateSnapshotSpace(columnarScanState->snapshot));
@@ -2965,7 +2839,7 @@ Columnar_InitializeDSMCustomScan(CustomScanState *node,
 								 void *coordinate)
 {
 	ParallelColumnarScan pscan = (ParallelColumnarScan) coordinate;
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 	
 	/* 
 	 * Serialize scan snapshot for workers so they see changes
@@ -2992,7 +2866,7 @@ Columnar_ReinitializeDSMCustomScan(CustomScanState *node,
 								   void *coordinate)
 {
 	ParallelColumnarScan pscan = (ParallelColumnarScan) coordinate;
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 
 	/* Reset atomic nextStripeId to initial value */
 	pg_atomic_init_u64(&pscan->nextStripeId, 1);
@@ -3009,7 +2883,7 @@ Columnar_InitializeWorkerCustomScan(CustomScanState *node,
 									shm_toc *toc,
 									void *coordinate)
 {
-	ColumnarScanState *columnarScanState = (ColumnarScanState *) node;
+	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 	ParallelColumnarScan pscan = (ParallelColumnarScan) coordinate;
 	columnarScanState->parallelColumnarScan = pscan;
 	columnarScanState->snapshot = RestoreSnapshot(pscan->snapshotData);
@@ -3028,7 +2902,7 @@ ColumnarPushdownClausesStr(List *context, List *clauses)
 
 	if (list_length(clauses) == 1)
 	{
-		conjunction = (Expr *) linitial(clauses);
+		conjunction = PList<Expr>(clauses).first();
 	}
 	else
 	{
@@ -3068,7 +2942,7 @@ ColumnarProjectedColumnsStr(List *context, List *projectedColumns)
  * by ColumnarScan.
  */
 static List *
-ColumnarVarNeeded(ColumnarScanState *columnarScanState)
+ColumnarVarNeeded(BioseqScanState *columnarScanState)
 {
 	ScanState *scanState = &columnarScanState->custom_scanstate.ss;
 
@@ -3116,8 +2990,7 @@ ColumnarVarNeeded(ColumnarScanState *columnarScanState)
 		 */
 		Index varlevelsup = 0;
 
-		CustomScanState *customScanState = (CustomScanState *) columnarScanState;
-		CustomScan *customScan = (CustomScan *) customScanState->ss.ps.plan;
+		CustomScan *customScan = reinterpret_cast<CustomScan *>(columnarScanState->plan_state()->plan);
 		Index scanrelid = customScan->scan.scanrelid;
 		Var *var = makeVar(scanrelid, columnForm->attnum, columnForm->atttypid,
 						   columnForm->atttypmod, columnForm->attcollation,
@@ -3129,17 +3002,13 @@ ColumnarVarNeeded(ColumnarScanState *columnarScanState)
 }
 
 
-#if PG_VERSION_NUM >= 130000
-
 /*
- * set_deparse_context_planstate is a compatibility wrapper for versions 13+.
+ * set_deparse_context_planstate forwards to set_deparse_context_plan, going
+ * through the PlanState* indirection that the EXPLAIN code already holds.
  */
 static List *
 set_deparse_context_planstate(List *dpcontext, Node *node, List *ancestors)
 {
-	PlanState *ps = (PlanState *) node;
+	PlanState *ps = reinterpret_cast<PlanState *>(node);
 	return set_deparse_context_plan(dpcontext, ps->plan, ancestors);
 }
-
-
-#endif

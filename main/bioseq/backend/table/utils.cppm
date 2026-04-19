@@ -1,3 +1,15 @@
+/*-------------------------------------------------------------------------
+ *
+ * table/utils.cppm
+ *
+ * Small helpers shared between the bioseq custom scan, index scan and
+ * table access method modules. IsColumnarTableAmTable identifies bioseq
+ * tables by their TableAmRoutine pointer; ColumnarAttrNeeded scans a
+ * plan node's targetlist+qual to compute the bitmap of attributes that
+ * the columnar reader actually has to materialise.
+ *
+ *-------------------------------------------------------------------------
+ */
 module;
 
 #include "common.h"
@@ -66,13 +78,9 @@ ColumnarAttrNeeded(ScanState *ss, List *customList)
 	if (customList != NULL)
 		vars = list_concat(vars, pull_var_clause((Node *)customList, flags));
 
-	//ListCell *lc;
-	//foreach(lc, vars)
-	for(auto var : PList<Var>(vars))
+	for (auto var : PList<Var>(vars))
 	{
-		//Var *var = lfirst(lc);
-
-		/* 
+		/*
 		 * We support following special variables with update / delete.
 		 */
 		if (var->varattno == SelfItemPointerAttributeNumber ||

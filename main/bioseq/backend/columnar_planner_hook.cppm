@@ -71,9 +71,20 @@ bioseq_index_table(Oid index_oid, Oid columnar_tableam_oid)
 	JustLog("[bioseq] pg: bioseq_index_table() index_oid={} columnar_tableam_oid={}", index_oid, columnar_tableam_oid);
 
 	HeapTuple index_tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
+	if (!HeapTupleIsValid(index_tuple))
+	{
+		JustLog("[bioseq] pg: bioseq_index_table() index syscache miss for oid={}", index_oid);
+		return false;
+	}
 	Form_pg_index index_record = reinterpret_cast<Form_pg_index>(GETSTRUCT(index_tuple));
 
 	HeapTuple table_tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(index_record->indrelid));
+	if (!HeapTupleIsValid(table_tuple))
+	{
+		ReleaseSysCache(index_tuple);
+		JustLog("[bioseq] pg: bioseq_index_table() table syscache miss for indrelid={}", index_record->indrelid);
+		return false;
+	}
 	Form_pg_class table_record = reinterpret_cast<Form_pg_class>(GETSTRUCT(table_tuple));
 
 	const bool index_on_columnar = table_record->relam == columnar_tableam_oid;
@@ -205,7 +216,7 @@ PlanTreeMutator(Plan* node, void* context)
 
 				vectorized_aggregate_execution->constbyval = true;
 				vectorized_aggregate_execution->consttype = CUSTOM_SCAN_VECTORIZED_AGGREGATE;
-				vectorized_aggregate_execution->constvalue = plan_tree_context->vectorizedAggregation;
+				vectorized_aggregate_execution->constvalue = BoolGetDatum(plan_tree_context->vectorizedAggregation);
 				vectorized_aggregate_execution->constlen = sizeof(bool);
 
 				custom_scan->custom_private = lappend(custom_scan->custom_private, vectorized_aggregate_execution);
@@ -254,8 +265,16 @@ PlanTreeMutator(Plan* node, void* context)
 					PlanTreeMutatorContext* plan_tree_context = static_cast<PlanTreeMutatorContext*>(context);
 					plan_tree_context->vectorizedAggregation = true;
 
-					PlanTreeMutator(node->lefttree, context);
-					PlanTreeMutator(node->righttree, context);
+					/*
+					 * PlanTreeMutator is a *replacing* mutator: when it
+					 * encounters an IndexScan or CustomScan it returns a
+					 * new node that needs to take the place of the input.
+					 * We therefore must reassign lefttree / righttree
+					 * with the result so any nested rewrites land in the
+					 * vectorized aggregator's children.
+					 */
+					node->lefttree = PlanTreeMutator(node->lefttree, context);
+					node->righttree = PlanTreeMutator(node->righttree, context);
 
 					vectorized_agg_node->scan.plan.lefttree = node->lefttree;
 					vectorized_agg_node->scan.plan.righttree = node->righttree;

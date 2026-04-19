@@ -1,8 +1,11 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_debug.c
+ * columnar_debug.cppm
  *
- * Helper functions to debug column store.
+ * Diagnostic SQL functions for the bioseq columnar extension. Exposes
+ * runtime memory usage of the per-context HTABs (write state, row mask,
+ * top transaction) and a per-relation storage info SRF that surfaces the
+ * metapage version, storage id and reservation counters.
  *
  *-------------------------------------------------------------------------
  */
@@ -46,17 +49,17 @@ MemoryContextTotals(MemoryContext context, MemoryContextCounters *counters)
  */
 POSTGRES_FN(bioseq_store_memory_stats)
 {
-	const int resultColumnCount = 3;
+	constexpr int resultColumnCount = 4;
 
 	TupleDesc tupleDescriptor = CreateTemplateTupleDesc(resultColumnCount);
 
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 1, "TopMemoryContext",
+	TupleDescInitEntry(tupleDescriptor, static_cast<AttrNumber>(1), "TopMemoryContext",
 					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 2, "TopTransactionContext",
+	TupleDescInitEntry(tupleDescriptor, static_cast<AttrNumber>(2), "TopTransactionContext",
 					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 3, "WriteStateContext",
+	TupleDescInitEntry(tupleDescriptor, static_cast<AttrNumber>(3), "WriteStateContext",
 					   INT8OID, -1, 0);
-	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 4, "RowMaskWriteStateContext",
+	TupleDescInitEntry(tupleDescriptor, static_cast<AttrNumber>(4), "RowMaskWriteStateContext",
 					   INT8OID, -1, 0);
 
 	tupleDescriptor = BlessTupleDesc(tupleDescriptor);
@@ -101,7 +104,7 @@ POSTGRES_FN(bioseq_store_memory_stats)
  */
 POSTGRES_FN(bioseq_storage_info)
 {
-#define STORAGE_INFO_NATTS 6
+	constexpr int STORAGE_INFO_NATTS = 6;
 	Oid relid = PG_GETARG_OID(0);
 	TupleDesc tupdesc;
 

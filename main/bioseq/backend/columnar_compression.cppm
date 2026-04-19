@@ -1,13 +1,12 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_compression.c
+ * columnar_compression.cppm
  *
- * This file contains compression/decompression functions definitions
- * used for columnar.
- *
- * Copyright (c) 2016, Citus Data, Inc.
- *
- * $Id$
+ * Compression / decompression dispatch over the configured compression
+ * algorithms (none, pglz, optional lz4, optional zstd). The pglz path
+ * also serialises a small header (raw size + varlena) at the start of
+ * the compressed buffer so the decompressor can size the output without
+ * a separate sidecar.
  *
  *-------------------------------------------------------------------------
  */
@@ -30,8 +29,9 @@ export module storage_compression;
 import pg_utils;
 
 /*
- *	The information at the start of the compressed data. This decription is taken
- *	from pg_lzcompress in pre-9.5 version of PostgreSQL.
+ * Header prepended to a pglz-compressed buffer; combines the standard
+ * varlena length header with a separate rawsize field so decompression
+ * can allocate the right output buffer without external metadata.
  */
 struct ColumnarCompressHeader
 {
@@ -39,16 +39,29 @@ struct ColumnarCompressHeader
 	int32 rawsize;
 };
 
-/*
- * Utilities for manipulation of header information for compressed data
- */
+/* Inline helpers replacing the original token-pasting macros. They accept
+ * the raw varlena byte pointer (typically StringInfo->data) and reinterpret
+ * its prefix as ColumnarCompressHeader. */
 
-#define COLUMNAR_COMPRESS_HDRSZ ((int32) sizeof(ColumnarCompressHeader))
-#define COLUMNAR_COMPRESS_RAWSIZE(ptr) (((ColumnarCompressHeader *) (ptr))->rawsize)
-#define COLUMNAR_COMPRESS_RAWDATA(ptr) (((char *) (ptr)) + COLUMNAR_COMPRESS_HDRSZ)
-#define COLUMNAR_COMPRESS_SET_RAWSIZE(ptr, \
-									  len) (((ColumnarCompressHeader *) (ptr))->rawsize = \
-												(len))
+[[gnu::always_inline]] inline int32 columnar_compress_hdrsz()
+{
+	return static_cast<int32>(sizeof(ColumnarCompressHeader));
+}
+
+[[gnu::always_inline]] [[nodiscard]] inline int32 columnar_compress_rawsize(const char* compressed_buffer)
+{
+	return reinterpret_cast<const ColumnarCompressHeader *>(compressed_buffer)->rawsize;
+}
+
+[[gnu::always_inline]] [[nodiscard]] inline char* columnar_compress_rawdata(char* compressed_buffer)
+{
+	return compressed_buffer + columnar_compress_hdrsz();
+}
+
+[[gnu::always_inline]] inline void columnar_compress_set_rawsize(char* compressed_buffer, int32 raw_size)
+{
+	reinterpret_cast<ColumnarCompressHeader *>(compressed_buffer)->rawsize = raw_size;
+}
 
 
 /*
@@ -121,22 +134,21 @@ CompressBuffer(StringInfo inputBuffer,
 		case COMPRESSION_PG_LZ:
 		{
 			uint64 maximumLength = PGLZ_MAX_OUTPUT(inputBuffer->len) +
-								   COLUMNAR_COMPRESS_HDRSZ;
+								   columnar_compress_hdrsz();
 			bool compressionResult = false;
 
 			resetStringInfo(outputBuffer);
 			enlargeStringInfo(outputBuffer, maximumLength);
 
-			int32 compressedByteCount = pglz_compress((const char *) inputBuffer->data,
+			int32 compressedByteCount = pglz_compress(inputBuffer->data,
 													  inputBuffer->len,
-													  COLUMNAR_COMPRESS_RAWDATA(
-														  outputBuffer->data),
+													  columnar_compress_rawdata(outputBuffer->data),
 													  PGLZ_strategy_always);
 			if (compressedByteCount >= 0)
 			{
-				COLUMNAR_COMPRESS_SET_RAWSIZE(outputBuffer->data, inputBuffer->len);
+				columnar_compress_set_rawsize(outputBuffer->data, inputBuffer->len);
 				SET_VARSIZE_COMPRESSED(outputBuffer->data,
-									   compressedByteCount + COLUMNAR_COMPRESS_HDRSZ);
+									   compressedByteCount + columnar_compress_hdrsz());
 				compressionResult = true;
 			}
 
@@ -228,10 +240,10 @@ DecompressBuffer(StringInfo buffer,
 
 		case COMPRESSION_PG_LZ:
 		{
-			uint32 compressedDataSize = VARSIZE(buffer->data) - COLUMNAR_COMPRESS_HDRSZ;
-			uint32 decompressedDataSize = COLUMNAR_COMPRESS_RAWSIZE(buffer->data);
+			uint32 compressedDataSize = VARSIZE(buffer->data) - columnar_compress_hdrsz();
+			uint32 decompressedDataSize = columnar_compress_rawsize(buffer->data);
 
-			if (compressedDataSize + COLUMNAR_COMPRESS_HDRSZ != buffer->len)
+			if (compressedDataSize + columnar_compress_hdrsz() != buffer->len)
 			{
 				ereport(ERROR, (errmsg("cannot decompress the buffer"),
 								errdetail("Expected %u bytes, but received %u bytes",
@@ -240,8 +252,7 @@ DecompressBuffer(StringInfo buffer,
 
 			char *decompressedData = make1<char>(decompressedDataSize);
 
-			int32 decompressedByteCount = pglz_decompress(COLUMNAR_COMPRESS_RAWDATA(
-															  buffer->data),
+			int32 decompressedByteCount = pglz_decompress(columnar_compress_rawdata(buffer->data),
 														  compressedDataSize,
 														  decompressedData,
 														  decompressedDataSize, true);

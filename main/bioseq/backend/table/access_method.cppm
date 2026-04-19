@@ -1,3 +1,16 @@
+/*-------------------------------------------------------------------------
+ *
+ * table/access_method.cppm
+ *
+ * Bioseq table access method (TAM) implementation. Provides the
+ * TableAmRoutine entry points (beginscan/endscan/getnextslot, tuple
+ * insert/update/delete, index_fetch_*, vacuum, analyze, etc.) that
+ * PostgreSQL needs to treat a bioseq columnar relation like any other
+ * table. Internally this routes the work to the columnar reader/
+ * writer/metadata modules and the in-memory column cache.
+ *
+ *-------------------------------------------------------------------------
+ */
 module;
 #include "common.h"
 
@@ -157,11 +170,7 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							bool returnVectorizedTuple)
 {
 	previousCacheEnabledState = bioseq_enable_page_cache;
-#if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilelocator = relation->rd_locator.relNumber;
-#else
-	Oid relfilelocator = relation->rd_node.relNode;
-#endif
 	/*
 	 * A memory context to use for scan-wide data, including the lazily
 	 * initialized read state. We assume that beginscan is called in a
@@ -519,11 +528,7 @@ bioseq_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 static IndexFetchTableData *
 bioseq_index_fetch_begin(Relation rel)
 {
-#if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilelocator = rel->rd_locator.relNumber;
-#else
-	Oid relfilelocator = rel->rd_node.relNode;
-#endif
 	if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
@@ -549,11 +554,7 @@ bioseq_index_fetch_begin(Relation rel)
 IndexFetchTableData *
 bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 {
-#if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilenode = rel->rd_locator.relNumber;
-#else
-	Oid relfilenode = rel->rd_node.relNode;
-#endif
 	if (PendingWritesInUpperTransactions(relfilenode, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
@@ -693,13 +694,8 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 													  snapshot, randomAccess,
 													  NULL);
 		if (scan->is_select_query)
-#if PG_VERSION_NUM >= PG_VERSION_16
 			scan->stripeMetadataList =
 				StripesForRelfilenode(columnarRelation->rd_locator, ForwardScanDirection);
-#else
-			scan->stripeMetadataList =
-				StripesForRelfilenode(columnarRelation->rd_node, ForwardScanDirection);
-#endif
 
 	}
 
@@ -998,17 +994,9 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 	Datum *values = detoast_values(slot->tts_tupleDescriptor,
 								   slot->tts_values, slot->tts_isnull);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	uint64 storageId = LookupStorageId(relation->rd_locator);
-#else
-	uint64 storageId = LookupStorageId(relation->rd_node);
-#endif
 	uint64 writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
-#if PG_VERSION_NUM >= PG_VERSION_16
 	UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
-#else
-	UpdateRowMask(relation->rd_node, storageId,  NULL, writtenRowNumber);
-#endif
 	slot->tts_tid = row_number_to_tid(writtenRowNumber);
 
 	MemoryContextSwitchTo(oldContext);
@@ -1022,11 +1010,7 @@ static void
 bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 									uint32 specToken, bool succeeded)
 {
-#if PG_VERSION_NUM >= PG_VERSION_16
 	uint64 storageId = LookupStorageId(relation->rd_locator);
-#else
-	uint64 storageId = LookupStorageId(relation->rd_node);
-#endif
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64) storageId));
@@ -1096,20 +1080,12 @@ bioseq_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 					  TM_FailureData *tmfd, bool changingPart)
 {
 	uint64 rowNumber = tid_to_row_number(*tid);
-#if PG_VERSION_NUM >= PG_VERSION_16
 	uint64 storageId = LookupStorageId(relation->rd_locator);
-#else
-	uint64 storageId = LookupStorageId(relation->rd_node);
-#endif
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64) storageId));
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	if (!UpdateRowMask(relation->rd_locator, storageId,  snapshot, rowNumber))
-#else
-	if (!UpdateRowMask(relation->rd_node, storageId,  snapshot, rowNumber))
-#endif
 		return TM_Deleted;
 
 	pgstat_count_heap_delete(relation);
@@ -1118,49 +1094,29 @@ bioseq_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 }
 
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 static TM_Result
 bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 					  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
 					  bool wait, TM_FailureData *tmfd,
 					  LockTupleMode *lockmode, TU_UpdateIndexes *update_indexes)
-#else
-static TM_Result
-bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
-					  CommandId cid, Snapshot snapshot, Snapshot crosscheck,
-					  bool wait, TM_FailureData *tmfd,
-					  LockTupleMode *lockmode, bool *update_indexes)
-#endif
 {
 
 	
 	uint64 rowNumber = tid_to_row_number(*otid);
-#if PG_VERSION_NUM >= PG_VERSION_16
 	uint64 storageId = LookupStorageId(relation->rd_locator);
-#else
-	uint64 storageId = LookupStorageId(relation->rd_node);
-#endif
 
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
 						Int64GetDatum((int64) storageId));
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	if (!UpdateRowMask(relation->rd_locator, storageId, snapshot, rowNumber))
-#else
-	if (!UpdateRowMask(relation->rd_node, storageId, snapshot, rowNumber))
-#endif
 		return TM_Deleted;
 
 	bioseq_tuple_insert(relation, slot, cid, 0, NULL);
 
 	*update_indexes = (TU_UpdateIndexes) true;
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	pgstat_count_heap_update(relation, false, false);
-#else
-	pgstat_count_heap_update(relation, false);
-#endif
 	return TM_Ok;
 }
 
@@ -1241,9 +1197,9 @@ bioseq_relation_set_new_filenode(Relation rel,
 	*minmulti = GetOldestMultiXactId();
 	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
 
-	JustLog("bioseq_relation_set_new_filenode init columnar storage");
+	JustLog("[bioseq] pg: bioseq_relation_set_new_filenode() initialising columnar storage");
 	ColumnarStorageInit(srel, ColumnarMetadataNewStorageId());
-	JustLog("bioseq_relation_set_new_filenode init columnar options");
+	JustLog("[bioseq] pg: bioseq_relation_set_new_filenode() initialising columnar options");
 	InitColumnarOptions(rel->rd_id);
 
 	smgrclose(srel);
@@ -1255,15 +1211,9 @@ bioseq_relation_set_new_filenode(Relation rel,
 static void
 bioseq_relation_nontransactional_truncate(Relation rel)
 {
-#if PG_VERSION_NUM >= PG_VERSION_16
 	RelFileLocator relfilelocator = rel->rd_locator;
 
 	NonTransactionDropWriteState(relfilelocator.relNumber);
-#else
-	RelFileLocator relfilelocator = rel->rd_node;
-
-	NonTransactionDropWriteState(relfilelocator.relNode);
-#endif
 	/* Delete old relfilelocator metadata */
 	DeleteMetadataRows(relfilelocator);
 
@@ -1276,7 +1226,7 @@ bioseq_relation_nontransactional_truncate(Relation rel)
 	 */
 	RelationTruncate(rel, 0);
 
-	JustLog("bioseq_relation_nontransactional_truncate init columnar storage");
+	JustLog("[bioseq] pg: bioseq_relation_nontransactional_truncate() initialising columnar storage");
 	uint64 storageId = ColumnarMetadataNewStorageId();
 
 	ColumnarStorageInit(RelationGetSmgr(rel), storageId);
@@ -1362,15 +1312,9 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	ColumnarOptions columnarOptions = { 0 };
 	ReadColumnarOptions(OldHeap->rd_id, &columnarOptions);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	ColumnarWriteState *writeState = ColumnarBeginWrite(NewHeap->rd_locator,
 														columnarOptions,
 														targetDesc);
-#else
-	ColumnarWriteState *writeState = ColumnarBeginWrite(NewHeap->rd_node,
-														columnarOptions,
-														targetDesc);
-#endif
 	/* we need all columns */
 	int natts = OldHeap->rd_att->natts;
 	Bitmapset *attr_needed = bms_add_range(NULL, 0, natts - 1);
@@ -1463,11 +1407,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	ReadColumnarOptions(rel->rd_id, &columnarOptions);
 
 	/* Get all stripes in reverse order */
-#if PG_VERSION_NUM >= PG_VERSION_16
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, BackwardScanDirection);
-#else
-	List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, BackwardScanDirection);
-#endif
 	/* Empty table nothing to do */
 	if (stripeMetadataList == NIL)
 	{
@@ -1483,23 +1423,13 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 
 	Size totalDecompressedStripeLength = 0;
 
-	//foreach(lc, stripeMetadataList)
-	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
+	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
-		//StripeMetadata * stripeMetadata = lfirst(lc);
-#if PG_VERSION_NUM >= PG_VERSION_16
 		lastStripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
 													 stripeMetadata->chunkCount,
 													 stripeMetadata->id);
-		totalDecompressedStripeLength += 
+		totalDecompressedStripeLength +=
 			DecompressedLengthForStripe(rel->rd_locator, stripeMetadata->id);
-#else
-		lastStripeDeletedRows = DeletedRowsForStripe(rel->rd_node,
-													 stripeMetadata->chunkCount,
-													 stripeMetadata->id);
-		totalDecompressedStripeLength += 
-			DecompressedLengthForStripe(rel->rd_node, stripeMetadata->id);
-#endif
 
 		if (totalDecompressedStripeLength >= 1024000000)
 		{
@@ -1618,11 +1548,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	for (int i = 0; i < startingStripeListPosition; i++)
 	{
 		StripeMetadata *metadata = static_cast<StripeMetadata*>(list_nth(stripeMetadataList, i));
-#if PG_VERSION_NUM >= PG_VERSION_16
 		DeleteMetadataRowsForStripeId(rel->rd_locator, metadata->id);
-#else
-		DeleteMetadataRowsForStripeId(rel->rd_node, metadata->id);
-#endif
 	}
 
 	PopActiveSnapshot();
@@ -1637,16 +1563,10 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 static uint64
 ColumnarTableTupleCount(Relation relation)
 {
-#if PG_VERSION_NUM >= PG_VERSION_16
 	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
-#else
-	List *stripeList = StripesForRelfilenode(relation->rd_node, ForwardScanDirection);
-#endif
 	uint64 tupleCount = 0;
 
-	//ListCell *lc = NULL;
-	//foreach(lc, stripeList)
-	for(auto stripe : PList<StripeMetadata>(stripeList))
+	for (auto stripe : PList<StripeMetadata>(stripeList))
 	{
 		tupleCount += stripe->rowCount;
 	}
@@ -1744,11 +1664,7 @@ static void
 LogRelationStats(Relation rel, int elevel)
 {
 	ListCell *stripeMetadataCell = NULL;
-#if PG_VERSION_NUM >= PG_VERSION_16
 	RelFileLocator relfilelocator = rel->rd_locator;
-#else
-	RelFileLocator relfilelocator = rel->rd_node;
-#endif
 	StringInfo infoBuf = makeStringInfo();
 
 	int compressionStats[COMPRESSION_COUNT] = { 0 };
@@ -1768,10 +1684,8 @@ LogRelationStats(Relation rel, int elevel)
 
 	MemoryContext oldcontext = MemoryContextSwitchTo(relation_stats_ctx);
 
-	//foreach(stripeMetadataCell, stripeList)
-	for(auto stripe : PList<StripeMetadata>(stripeList))
+	for (auto stripe : PList<StripeMetadata>(stripeList))
 	{
-		//StripeMetadata *stripe = lfirst(stripeMetadataCell);
 		StripeSkipList *skiplist = ReadStripeSkipList(relfilelocator, stripe->id,
 													  RelationGetDescr(rel),
 													  stripe->chunkCount,
@@ -1922,13 +1836,8 @@ TruncateColumnar(Relation rel, int elevel)
 		* new stripes be added beyond highestPhysicalAddress while
 		* we're truncating.
 		*/
-#if PG_VERSION_NUM >= PG_VERSION_16
 		uint64 newDataReservation = std::max<uint64>(GetHighestUsedAddress(rel->rd_locator) + 1,
 										ColumnarFirstLogicalOffset);
-#else
-		uint64 newDataReservation = std::max<uint64>(GetHighestUsedAddress(rel->rd_node) + 1,
-										ColumnarFirstLogicalOffset);
-#endif
 
 		BlockNumber old_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 
@@ -1996,12 +1905,7 @@ ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode, int timeout,
 
 static bool
 bioseq_scan_analyze_next_block(TableScanDesc scan,
-#if PG_VERSION_NUM >= PG_VERSION_17
 								 ReadStream *stream)
-#else
-								 BlockNumber blockno,
-								 BufferAccessStrategy bstrategy)
-#endif
 {
 	/*
 	 * Our access method is not pages based, i.e. tuples are not confined
@@ -2692,18 +2596,10 @@ ColumnarTableDropHook(Oid relid)
 		 * tableam tables storage is managed by postgres.
 		 */
 		Relation rel = table_open(relid, AccessExclusiveLock);
-#if PG_VERSION_NUM >= PG_VERSION_16
 		RelFileLocator relfilelocator = rel->rd_locator;
-#else
-		RelFileLocator relfilelocator = rel->rd_node;
-#endif
 		DeleteMetadataRows(relfilelocator);
 		DeleteColumnarTableOptions(rel->rd_id, true);
-#if PG_VERSION_NUM >= PG_VERSION_16
 		MarkRelfilenodeDropped(relfilelocator.relNumber, GetCurrentSubTransactionId());
-#else
-		MarkRelfilenodeDropped(relfilelocator.relNode, GetCurrentSubTransactionId());
-#endif
 
 		/* keep the lock since we did physical changes to the relation */
 		table_close(rel, NoLock);
@@ -2906,11 +2802,7 @@ export const TableAmRoutine bioseq_am_methods = {
 	.tuple_lock = bioseq_tuple_lock,
 	.finish_bulk_insert = bioseq_finish_bulk_insert,
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	.relation_set_new_filelocator = bioseq_relation_set_new_filenode,
-#else
-	.relation_set_new_filenode = bioseq_relation_set_new_filenode,
-#endif
 	.relation_nontransactional_truncate = bioseq_relation_nontransactional_truncate,
 	.relation_copy_data = bioseq_relation_copy_data,
 	.relation_copy_for_cluster = bioseq_relation_copy_for_cluster,
@@ -3047,11 +2939,7 @@ POSTGRES_FN(alter_bioseq_table_set)
 		ereport(ERROR, (errmsg("table %s is not a columnar table",
 							   quote_identifier(RelationGetRelationName(rel)))));
 	}
-#if PG_VERSION_NUM >= PG_VERSION_16
 	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
-#else
-	if (!pg_class_ownercheck(relationId, GetUserId()))
-#endif
 	{
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   get_rel_name(relationId));
@@ -3171,11 +3059,7 @@ POSTGRES_FN(alter_bioseq_table_reset)
 							   quote_identifier(RelationGetRelationName(rel)))));
 	}
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
-#else
-	if (!pg_class_ownercheck(relationId, GetUserId()))
-#endif
 	{
 		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
 					   get_rel_name(relationId));
@@ -3300,11 +3184,11 @@ POSTGRES_FN(downgrade_bioseq_storage)
 	PG_RETURN_VOID();
 }
 
-typedef struct StripeHole
+struct StripeHole
 {
 	uint64 fileOffset;
 	uint64 dataLength;
-} StripeHole;
+};
 
 /*
  * HolesForRelation returns a list of holes in the Relation id in the current
@@ -3320,18 +3204,11 @@ static List *HolesForRelation(Relation rel)
 
 	ListCell *lc = NULL;
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-#else
-	List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
-#endif
 	uint64 lastMinimalOffset = ColumnarFirstLogicalOffset;
 
-	//foreach(lc, stripeMetadataList)
-	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
+	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
-		//StripeMetadata * stripeMetadata = lfirst(lc);
-
 		/* Arbitrary check to see if the offset will be large enough, 10000 bytes is what was chosen. */
 		if (stripeMetadata->fileOffset == lastMinimalOffset || stripeMetadata->fileOffset - lastMinimalOffset < 10000) {
 			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
@@ -3367,14 +3244,14 @@ static void vacuum_signal_handler(int signal)
 /*
  * vacuum_bioseq_table
  */
-typedef struct StripeVacuumCandidate
+struct StripeVacuumCandidate
 {
 	uint64 stripeId;
 	int32 stripeMetadataIndex;
 	uint32 candidateTotalSize;
 	uint32 activeRows;
 	StripeMetadata *stripeMetadata;
-} StripeVacuumCandidate;
+};
 
 POSTGRES_FN(vacuum_bioseq_table)
 {
@@ -3435,11 +3312,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	ReadColumnarOptions(rel->rd_id, &columnarOptions);
 
 	/* Get all stripes in order. */
-#if PG_VERSION_NUM >= PG_VERSION_16
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-#else
-	List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
-#endif
 	List *vacuumCandidatesStripeList = NIL;
 
 	/* Empty table nothing to do */
@@ -3469,8 +3342,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	/*
 	 * Get a list of all stripes that can be combined into larger stripes.
 	 */
-	//foreach(lc, stripeMetadataList)
-	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
+	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
 		/* We should not consider the last stripe. */
 		if (stripeMetadata == static_cast<StripeMetadata*>(llast(stripeMetadataList)))
@@ -3478,15 +3350,9 @@ POSTGRES_FN(vacuum_bioseq_table)
 			break;
 		}
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 		uint32 stripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
 												 		stripeMetadata->chunkCount,
 														stripeMetadata->id);
-#else
-		uint32 stripeDeletedRows = DeletedRowsForStripe(rel->rd_node,
-												 		stripeMetadata->chunkCount,
-														stripeMetadata->id);
-#endif
 		float percentageOfDeleteRows =
 			(float)stripeDeletedRows / (float)(stripeMetadata->rowCount);
 
@@ -3523,25 +3389,16 @@ POSTGRES_FN(vacuum_bioseq_table)
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
 	bool randomAccess = true;
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_locator,
 											columnarOptions,
 											tupleDesc);
-#else
-	ColumnarWriteState *writeState = ColumnarBeginWrite(rel->rd_node,
-											columnarOptions,
-											tupleDesc);
-#endif
 
 	/*
 	 * Combine the vacuum candidates into their own stripes appended to the rel, this
 	 * should clear out any space from partial stripes to make space to move stripes into.
 	 */
-	//foreach(lc, vacuumCandidatesStripeList)
-	for(auto vacuumCandidate : PList<StripeVacuumCandidate>(vacuumCandidatesStripeList))
+	for (auto vacuumCandidate : PList<StripeVacuumCandidate>(vacuumCandidatesStripeList))
 	{
-		//StripeVacuumCandidate *vacuumCandidate = lfirst(lc);
-
 		MemoryContext combineContext = AllocSetContextCreate(CurrentMemoryContext,
 						"Stripe Combine Context", ALLOCSET_DEFAULT_SIZES);
 		MemoryContext previousContext = MemoryContextSwitchTo(combineContext);
@@ -3567,11 +3424,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 			rowCount++;
 		}
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 		DeleteMetadataRowsForStripeId(rel->rd_locator, vacuumCandidate->stripeMetadata->id);
-#else
-		DeleteMetadataRowsForStripeId(rel->rd_node, vacuumCandidate->stripeMetadata->id);
-#endif
 		ColumnarEndRead(readState);
 
 		pfree(values);
@@ -3708,23 +3561,12 @@ POSTGRES_FN(vacuum_bioseq_table)
 		/*
 		 * Iterate through the holes, moving later slices into the holes.
 		 */
-		//foreach(lc, holes)
-		for(auto hole : PList<StripeHole>(holes))
+		for (auto hole : PList<StripeHole>(holes))
 		{
-			//StripeHole *hole = static_cast<StripeHole*>(lfirst(lc));
-
-			ListCell *stripeLc = NULL;
-
 			/* Reload the metadata. */
-#if PG_VERSION_NUM >= PG_VERSION_16
 			stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-#else
-			stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
-#endif
-			foreach(stripeLc, stripeMetadataList)
+			for (auto stripe : PList<StripeMetadata>(stripeMetadataList))
 			{
-				StripeMetadata *stripe = static_cast<StripeMetadata*>(lfirst(stripeLc));
-
 				/* If we are marked done, we should simply drop out. */
 				if (done)
 				{
@@ -3794,7 +3636,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 /*
  * Data storage for columnar stats.
  */
-typedef struct ColumnarStats
+struct ColumnarStats
 {
 	uint64 stripeId;
 	uint64 fileOffset;
@@ -3802,10 +3644,10 @@ typedef struct ColumnarStats
 	uint32 deletedRows;
 	uint32 chunkCount;
 	uint32 dataLength;
-} ColumnarStats;
+};
 
 /* We return 6 columns. */
-#define STATS_INFO_NATTS 6
+constexpr int STATS_INFO_NATTS = 6;
 
 POSTGRES_FN(bioseq_stats)
 {
@@ -3831,11 +3673,7 @@ POSTGRES_FN(bioseq_stats)
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
 		/* Retrieve the stripe metadata. */
-#if PG_VERSION_NUM >= PG_VERSION_16
 		List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-#else
-		List *stripeMetadataList = StripesForRelfilenode(rel->rd_node, ForwardScanDirection);
-#endif
 		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 				ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -3859,15 +3697,9 @@ POSTGRES_FN(bioseq_stats)
 			stats[i].rowCount = data->rowCount;
 			stats[i].chunkCount = data->chunkCount;
 			stats[i].dataLength = data->dataLength;
-#if PG_VERSION_NUM >= PG_VERSION_16
 			stats[i].deletedRows = DeletedRowsForStripe(rel->rd_locator,
 												 		data->chunkCount,
 														data->id);
-#else
-			stats[i].deletedRows = DeletedRowsForStripe(rel->rd_node,
-												 		data->chunkCount,
-														data->id);
-#endif
 		}
 
 		funcctx->user_fctx = stats;

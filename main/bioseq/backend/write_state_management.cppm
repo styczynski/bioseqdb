@@ -26,6 +26,7 @@ import bioseq_table;
 import storage_metadata;
 import bioseq_table_io;
 import pg_utils;
+import pg_utils.lists;
 import mlogging;
 
 extern "C++" {
@@ -100,11 +101,13 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 	 */
 	ReadColumnarOptions(tuple_slot_relation_id, &columnar_options);
 
-	MemoryContext old_context = MemoryContextSwitchTo(WriteStateCache.context());
-	ColumnarWriteState* fresh_write_state = ColumnarBeginWrite(relation->rd_locator,
-												 columnar_options,
-												 tuple_descriptor);
-	MemoryContextSwitchTo(old_context);
+	ColumnarWriteState* fresh_write_state = nullptr;
+	{
+		MemoryContextScope context_guard(WriteStateCache.context());
+		fresh_write_state = ColumnarBeginWrite(relation->rd_locator,
+											   columnar_options,
+											   tuple_descriptor);
+	}
 
 	ColumnarSubXidWriteFrame* stack_entry = WriteStateCache.alloc_in_context<ColumnarSubXidWriteFrame>();
 	stack_entry->writeState = fresh_write_state;
@@ -230,9 +233,7 @@ ColumnarPendingWritesInUpperTransactions(Oid relfilenode, SubTransactionId curre
 		return false;
 	}
 
-	for (ColumnarSubXidWriteFrame* stack_entry = entry->writeStateStack;
-		 stack_entry != nullptr;
-		 stack_entry = stack_entry->next)
+	for (auto* stack_entry : IntrusiveList<ColumnarSubXidWriteFrame>(entry->writeStateStack))
 	{
 		if (stack_entry->subXid != current_sub_xid &&
 			ContainsPendingWrites(stack_entry->writeState))

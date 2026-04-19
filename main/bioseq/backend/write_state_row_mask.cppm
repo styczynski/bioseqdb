@@ -23,6 +23,7 @@ export module bioseq_write_state_row_mask;
 import mlogging;
 import storage_metadata;
 import pg_utils;
+import pg_utils.lists;
 
 extern "C++" {
 
@@ -93,23 +94,22 @@ RowMaskInitWriteState(Oid relfilelocator,
 		stack_entry = hash_entry->writeStateStack;
 	}
 
-	MemoryContext old_context = MemoryContextSwitchTo(RowMaskStateCache.context());
-
 	if (stack_entry == nullptr)
 	{
-		stack_entry = make0<RowMaskSubXidWriteFrame>();
+		stack_entry = RowMaskStateCache.alloc_in_context<RowMaskSubXidWriteFrame>();
 		stack_entry->subXid = current_sub_xid;
 		stack_entry->next = hash_entry->writeStateStack;
 		stack_entry->lastRowMaskWriteStateEntry = nullptr;
 		hash_entry->writeStateStack = stack_entry;
 	}
 
-	RowMaskWriteStateEntry* row_mask_write_state = InitRowMaskEntry(storage_id, row_mask);
-
-	stack_entry->rowMaskWriteStateEntryList =
-		lappend(stack_entry->rowMaskWriteStateEntryList, row_mask_write_state);
-
-	MemoryContextSwitchTo(old_context);
+	RowMaskWriteStateEntry* row_mask_write_state = nullptr;
+	{
+		MemoryContextScope context_guard(RowMaskStateCache.context());
+		row_mask_write_state = InitRowMaskEntry(storage_id, row_mask);
+		stack_entry->rowMaskWriteStateEntryList =
+			lappend(stack_entry->rowMaskWriteStateEntryList, row_mask_write_state);
+	}
 
 	return row_mask_write_state;
 }
@@ -140,10 +140,8 @@ InitRowMaskEntry(uint64 storage_id, bytea* mask)
 static void
 RowMaskFlushPendingWriteState(List* row_mask_write_state_list)
 {
-	ListCell* list_cell;
-	foreach (list_cell, row_mask_write_state_list)
+	for (auto* row_mask_cache : PList<RowMaskWriteStateEntry>(row_mask_write_state_list))
 	{
-		RowMaskWriteStateEntry* row_mask_cache = reinterpret_cast<RowMaskWriteStateEntry*>(lfirst(list_cell));
 		FlushRowMaskCache(row_mask_cache);
 		UpdateChunkGroupDeletedRows(row_mask_cache->storageId, row_mask_cache->stripeId,
 									row_mask_cache->chunkId, row_mask_cache->deletedRows);
@@ -191,29 +189,24 @@ RowMaskFindWriteState(Oid relfilelocator, SubTransactionId current_sub_xid,
 		return nullptr;
 	}
 
-	for (RowMaskSubXidWriteFrame* stack_head = hash_entry->writeStateStack;
-		 stack_head != nullptr;
-		 stack_head = stack_head->next)
+	for (auto* stack_frame : IntrusiveList<RowMaskSubXidWriteFrame>(hash_entry->writeStateStack))
 	{
-		if (stack_head->subXid != current_sub_xid)
+		if (stack_frame->subXid != current_sub_xid)
 		{
 			continue;
 		}
-		if (stack_head->lastRowMaskWriteStateEntry != nullptr &&
-			stack_head->lastRowMaskWriteStateEntry->startRowNumber <= row_id &&
-			stack_head->lastRowMaskWriteStateEntry->endRowNumber >= row_id)
+		if (stack_frame->lastRowMaskWriteStateEntry != nullptr &&
+			stack_frame->lastRowMaskWriteStateEntry->startRowNumber <= row_id &&
+			stack_frame->lastRowMaskWriteStateEntry->endRowNumber >= row_id)
 		{
-			return stack_head->lastRowMaskWriteStateEntry;
+			return stack_frame->lastRowMaskWriteStateEntry;
 		}
 
-		ListCell* list_cell;
-		foreach (list_cell, stack_head->rowMaskWriteStateEntryList)
+		for (auto* row_mask : PList<RowMaskWriteStateEntry>(stack_frame->rowMaskWriteStateEntryList))
 		{
-			RowMaskWriteStateEntry* row_mask = reinterpret_cast<RowMaskWriteStateEntry*>(lfirst(list_cell));
-
 			if (row_mask->startRowNumber <= row_id && row_mask->endRowNumber >= row_id)
 			{
-				stack_head->lastRowMaskWriteStateEntry = row_mask;
+				stack_frame->lastRowMaskWriteStateEntry = row_mask;
 				return row_mask;
 			}
 		}
@@ -307,9 +300,7 @@ RowMaskPendingWritesInUpperTransactions(Oid relfilelocator, SubTransactionId cur
 		return false;
 	}
 
-	for (RowMaskSubXidWriteFrame* stack_entry = entry->writeStateStack;
-		 stack_entry != nullptr;
-		 stack_entry = stack_entry->next)
+	for (auto* stack_entry : IntrusiveList<RowMaskSubXidWriteFrame>(entry->writeStateStack))
 	{
 		if (stack_entry->subXid != current_sub_xid &&
 			list_length(stack_entry->rowMaskWriteStateEntryList))

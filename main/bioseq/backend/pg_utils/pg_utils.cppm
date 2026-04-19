@@ -24,6 +24,8 @@ module;
 
 export module pg_utils;
 
+import pg_utils.lists;
+
 /*
  * make0<T>() returns a pointer to a zero-initialised T allocated in the
  * current PostgreSQL memory context. Equivalent to palloc0(sizeof(T)) with
@@ -43,6 +45,46 @@ export template<typename T>
 [[nodiscard]] inline T* make1(size_t byte_count) {
     return static_cast<T*>(palloc0(byte_count));
 }
+
+/*
+ * make_array<T>(element_count) returns a zero-initialised T[element_count]
+ * allocated in the current memory context. Prefer this over make1 when the
+ * count of elements (rather than raw byte count) is the natural unit, so
+ * the multiplication by sizeof(T) is centralised here.
+ */
+export template<typename T>
+[[nodiscard]] inline T* make_array(size_t element_count) {
+    return static_cast<T*>(palloc0(element_count * sizeof(T)));
+}
+
+/*
+ * MemoryContextScope swaps the current memory context on construction and
+ * restores it on destruction. Replaces the manual
+ *   MemoryContext old = MemoryContextSwitchTo(target);
+ *   ...
+ *   MemoryContextSwitchTo(old);
+ * pattern with an RAII guard that survives early returns and PG_CATCH.
+ *
+ * Note: PG memory contexts are not thread-local; this is a save-and-
+ * restore guard intended for the calling backend.
+ */
+export class MemoryContextScope {
+private:
+    MemoryContext previous_context;
+
+public:
+    explicit MemoryContextScope(MemoryContext target_context)
+        : previous_context(MemoryContextSwitchTo(target_context)) {}
+
+    ~MemoryContextScope() {
+        MemoryContextSwitchTo(previous_context);
+    }
+
+    MemoryContextScope(const MemoryContextScope&) = delete;
+    MemoryContextScope& operator=(const MemoryContextScope&) = delete;
+    MemoryContextScope(MemoryContextScope&&) = delete;
+    MemoryContextScope& operator=(MemoryContextScope&&) = delete;
+};
 
 /*
  * safe_relation_open wraps relation_open. It exists so that all callers in
@@ -85,12 +127,8 @@ export inline void CopyPlanCosts(Plan* destination, const Plan* source) {
  */
 export inline List* CustomBuildTargetList(List* source_tlist, Index target_var_no) {
     List* rebuilt_tlist = NIL;
-    ListCell* cell;
-
-    foreach (cell, source_tlist)
+    for (auto* source_entry : PList<TargetEntry>(source_tlist))
     {
-        TargetEntry* source_entry = static_cast<TargetEntry*>(lfirst(cell));
-
         Var* projected_var = makeVar(target_var_no,
                                      source_entry->resno,
                                      exprType(reinterpret_cast<Node*>(source_entry->expr)),
@@ -105,7 +143,6 @@ export inline List* CustomBuildTargetList(List* source_tlist, Index target_var_n
 
         rebuilt_tlist = lappend(rebuilt_tlist, rebuilt_entry);
     }
-
     return rebuilt_tlist;
 }
 
@@ -239,9 +276,7 @@ public:
      */
     template<typename Frame>
     [[nodiscard]] Frame* alloc_in_context() {
-        MemoryContext old_context = MemoryContextSwitchTo(context_);
-        Frame* frame = make0<Frame>();
-        MemoryContextSwitchTo(old_context);
-        return frame;
+        MemoryContextScope context_guard(context_);
+        return make0<Frame>();
     }
 };

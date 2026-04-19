@@ -1,15 +1,12 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_reader.c
+ * table/io/columnar_reader.cppm
  *
- * This file contains function definitions for reading columnar tables. This
- * includes the logic for reading file level metadata, reading row stripes,
- * and skipping unrelated row chunks and columns.
- *
- * Copyright (c) 2016, Citus Data, Inc.
- * Copyright (c) Hydra, Inc.
- *
- * $Id$
+ * Reader side of the bioseq columnar table format. Owns the
+ * ColumnarReadState lifecycle: locating stripes via the metadata
+ * tables, decompressing chunk groups, applying chunk-group filter
+ * pushdowns, and yielding tuples (or vectorised slots) to the
+ * executor. Pairs with columnar_writer.cppm.
  *
  *-------------------------------------------------------------------------
  */
@@ -23,10 +20,6 @@ module;
 #include "columnar/columnar_tableam.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 
-#define UNEXPECTED_STRIPE_READ_ERR_MSG \
-	"attempted to read an unexpected stripe while reading columnar " \
-	"table %s, stripe with id=" UINT64_FORMAT " is not flushed"
-
 export module bioseq_table_io:reader;
 
 import storage_compression;
@@ -34,6 +27,15 @@ import storage_physical;
 import storage_metadata;
 import pg_utils;
 import pg_utils.lists;
+
+/*
+ * printf-style format string used by ereport() when a stripe is unflushed
+ * yet the read path tries to consume it. Kept as a `const char*` rather
+ * than an inline string so call sites use the same wording.
+ */
+static constexpr const char* UNEXPECTED_STRIPE_READ_ERR_MSG =
+	"attempted to read an unexpected stripe while reading columnar "
+	"table %s, stripe with id=" UINT64_FORMAT " is not flushed";
 
 
 export ChunkData *
@@ -222,13 +224,8 @@ ColumnarBeginRead(Relation relation, TupleDesc tupleDescriptor,
 			* Flush any pending in-memory changes to row_mask metadata
 			* for next scan.
 			*/
-#if PG_VERSION_NUM >= PG_VERSION_16
 			RowMaskFlushWriteStateForRelfilenode(readState->relation->rd_locator.relNumber,
 												 GetCurrentSubTransactionId());
-#else
-			RowMaskFlushWriteStateForRelfilenode(readState->relation->rd_node.relNode,
-												 GetCurrentSubTransactionId());
-#endif
 
 			/*
 			* When doing random access (i.e.: index scan), we don't need to flush
@@ -277,11 +274,7 @@ ColumnarReadFlushPendingWrites(ColumnarReadState *readState)
 {
 	Assert(!readState->snapshotRegisteredByUs);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	Oid relfilelocator = readState->relation->rd_locator.relNumber;
-#else
-	Oid relfilelocator = readState->relation->rd_node.relNode;
-#endif
 
 	FlushWriteStateWithNewSnapshot(relfilelocator, &readState->snapshot,
 								   &readState->snapshotRegisteredByUs);
@@ -562,15 +555,9 @@ ReadStripeRowByRowNumber(ColumnarReadState *readState,
 
 		if (bioseq_enable_dml)
 		{
-#if PG_VERSION_NUM >= PG_VERSION_16
 			RowMaskWriteStateEntry *rowMaskEntry = 
 				RowMaskFindWriteState(stripeReadState->relation->rd_locator.relNumber,
 									  GetCurrentSubTransactionId(), rowNumber);
-#else
-			RowMaskWriteStateEntry *rowMaskEntry = 
-				RowMaskFindWriteState(stripeReadState->relation->rd_node.relNode,
-									  GetCurrentSubTransactionId(), rowNumber);
-#endif
 			if (rowMaskEntry != NULL)
 			{
 				stripeReadState->chunkGroupReadState->rowMask = rowMaskEntry->mask;
@@ -578,21 +565,12 @@ ReadStripeRowByRowNumber(ColumnarReadState *readState,
 			}
 			else if (stripeReadState->chunkGroupReadState->chunkGroupDeletedRows > 0)
 			{
-#if PG_VERSION_NUM >= PG_VERSION_16
 				stripeReadState->chunkGroupReadState->rowMask =
 					ReadChunkRowMask(stripeReadState->relation->rd_locator,
 										readState->snapshot,
 										stripeReadState->stripeReadContext,
 										chunkFirstRowNumber,
 										stripeReadState->chunkGroupReadState->rowCount);
-#else
-				stripeReadState->chunkGroupReadState->rowMask =
-					ReadChunkRowMask(stripeReadState->relation->rd_node,
-										readState->snapshot,
-										stripeReadState->stripeReadContext,
-										chunkFirstRowNumber,
-										stripeReadState->chunkGroupReadState->rowCount);
-#endif
 				stripeReadState->chunkGroupReadState->rowMaskCached = false;
 			}
 		}
@@ -932,21 +910,12 @@ ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
 				uint64 chunkFirstRowNumber = 
 					stripeFirstRowNumber + 
 					stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
-#if PG_VERSION_NUM >= PG_VERSION_16
 				stripeReadState->chunkGroupReadState->rowMask = 
 					ReadChunkRowMask(stripeReadState->relation->rd_locator,
 									 snapshot,
 									 stripeReadState->stripeReadContext,
 									 chunkFirstRowNumber,
 									 stripeReadState->chunkGroupReadState->rowCount);
-#else
-				stripeReadState->chunkGroupReadState->rowMask = 
-					ReadChunkRowMask(stripeReadState->relation->rd_node,
-									 snapshot,
-									 stripeReadState->stripeReadContext,
-									 chunkFirstRowNumber,
-									 stripeReadState->chunkGroupReadState->rowCount);
-#endif
 				stripeReadState->chunkGroupReadState->rowMaskCached = false;
 			}
 			else
@@ -1114,12 +1083,8 @@ CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowC
 	ChunkData *chunkData = make0<ChunkData>();
 	chunkData->existsArray = make1<bool*>(columnCount * sizeof(bool *));
 	chunkData->valueArray = make1<Datum*>(columnCount * sizeof(Datum *));
-#if PG_VERSION_NUM >= PG_VERSION_16
 	/* 'cache' member will be 'false' because of 'palloc0' */
 	chunkData->valueBufferArray = make1<StringInfo>(columnCount * sizeof(cached_StringInfo));
-#else
-	chunkData->valueBufferArray = make1<StringInfo>(columnCount * sizeof(StringInfo));
-#endif
 	chunkData->columnCount = columnCount;
 	chunkData->rowCount = chunkGroupRowCount;
 
@@ -1141,19 +1106,11 @@ CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowC
 
 
 
-#if PG_VERSION_NUM < PG_VERSION_16
-static inline bool
-CachedStringInfo(StringInfo *info)
-{
-	return MemoryContextContains(ColumnarCacheMemoryContext(), (void *)info);
-}
-#else
 static inline bool
 CachedStringInfo(StringInfo info)
 {
 	return ((cached_StringInfo *)info)->cached;
 }
-#endif
 
 /* FreeChunkValueArrayBuffer relase valueBufferArray memory. */
 void FreeChunkBufferValueArray(ChunkData *chunkData)
@@ -1192,19 +1149,11 @@ LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
 
 	bool *projectedColumnMask = ProjectedColumnMask(columnCount, projectedColumnList);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	StripeSkipList *stripeSkipList = ReadStripeSkipList(relation->rd_locator,
 														stripeMetadata->id,
 														tupleDescriptor,
 														stripeMetadata->chunkCount,
 														snapshot);
-#else
-	StripeSkipList *stripeSkipList = ReadStripeSkipList(relation->rd_node,
-														stripeMetadata->id,
-														tupleDescriptor,
-														stripeMetadata->chunkCount,
-														snapshot);
-#endif
 	bool *selectedChunkMask = SelectedChunkMask(stripeSkipList, whereClauseList,
 												whereClauseVars, chunkGroupsFiltered);
 
@@ -1322,16 +1271,13 @@ static bool *
 SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 				  List *whereClauseVars, int64 *chunkGroupsFiltered)
 {
-	//ListCell *columnCell = NULL;
 	uint32 chunkIndex = 0;
 
-	bool *selectedChunkMask = make1<bool>(stripeSkipList->chunkCount * sizeof(bool));
+	bool *selectedChunkMask = make_array<bool>(stripeSkipList->chunkCount);
 	memset(selectedChunkMask, true, stripeSkipList->chunkCount * sizeof(bool));
 
-	//foreach(columnCell, whereClauseVars)
-	for(auto column : PList<Var>(whereClauseVars))
+	for (auto column : PList<Var>(whereClauseVars))
 	{
-		//Var *column = lfirst(columnCell);
 		uint32 columnIndex = column->varattno - 1;
 
 		/* if this column's data type doesn't have a comparator, skip it */
@@ -1412,17 +1358,14 @@ GetClauseVars(List *whereClauseList, int natts)
 	 * constraints that can be refuted.
 	 */
 	int flags = 0;
-	List *vars = pull_var_clause((Node *) whereClauseList, flags);
-	Var **deduplicate = make1<Var*>(sizeof(Var *) * natts);
+	List *vars = pull_var_clause(reinterpret_cast<Node *>(whereClauseList), flags);
+	Var **deduplicate = make_array<Var *>(natts);
 
-	//ListCell *lc;
-	//foreach(lc, vars)
-	for(auto node : PList<Node>(vars))
+	for (auto node : PList<Node>(vars))
 	{
-		//Node *node = lfirst(lc);
 		Assert(IsA(node, Var));
 
-		Var *var = (Var *) node;
+		Var *var = reinterpret_cast<Var *>(node);
 		int idx = var->varattno - 1;
 
 		if (deduplicate[idx] != NULL)
@@ -1807,17 +1750,13 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64 chunkIndex,
 								 chunkBuffers->valueCompressionType,
 								 chunkBuffers->decompressedValueSize);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 				valueBuffer = static_cast<StringInfo>(repalloc(valueBuffer, sizeof(cached_StringInfo)));
 				((cached_StringInfo *)valueBuffer)->cached = false;
-#endif
 
 				if (shouldCache)
 				{
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 					((cached_StringInfo *)valueBuffer)->cached = true;
-#endif
 
 					ColumnarAddCacheEntry(state->relation->rd_id, stripeId, chunkIndex, columnIndex, valueBuffer);
 					MemoryContextSwitchTo(oldMemoryContext);
@@ -1994,21 +1933,12 @@ ReadStripeNextVector(StripeReadState *stripeReadState, Datum *columnValues,
 			if (bioseq_enable_dml &&
 				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
 			{
-#if PG_VERSION_NUM >= PG_VERSION_16
 				stripeReadState->chunkGroupReadState->rowMask =
 					ReadChunkRowMask(stripeReadState->relation->rd_locator,
 									 snapshot,
 									 stripeReadState->stripeReadContext,
 									 chunkFirstRowNumber,
 									 stripeReadState->chunkGroupReadState->rowCount);
-#else
-				stripeReadState->chunkGroupReadState->rowMask =
-					ReadChunkRowMask(stripeReadState->relation->rd_node,
-									 snapshot,
-									 stripeReadState->stripeReadContext,
-									 chunkFirstRowNumber,
-									 stripeReadState->chunkGroupReadState->rowCount);
-#endif
 			}
 			else
 			{

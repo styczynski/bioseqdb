@@ -1,10 +1,12 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_cache.c
+ * table/io/columnar_cache.cppm
  *
- * Storage and management of cached data.
- *
- * Copyright (c) Hydra, Inc.
+ * In-memory cache of decompressed column chunks. Entries are keyed by
+ * (relid, stripeId, chunkId, columnId) and live in a dedicated memory
+ * context (see ColumnarCacheMemoryContext) so eviction and reset are
+ * quick. The cache also tracks "in use" chunk groups so concurrent
+ * scans don't evict each other's working set.
  *
  *-------------------------------------------------------------------------
  */
@@ -18,16 +20,10 @@ module;
 #include <time.h>
 #include <unistd.h>
 
-// extern void ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId);
-// extern void ColumnarAddCacheEntry(uint64, uint64, uint64, uint32, void *);
-// extern void *ColumnarRetrieveCache(uint64, uint64, uint64, uint32);
-// extern void ColumnarResetCache(void);
-// extern ColumnarCacheStatistics *ColumnarGetCacheStatistics(void);
-// extern MemoryContext ColumnarCacheMemoryContext(void);
-
 export module bioseq_table_io:cache;
 
 import pg_utils;
+import pg_utils.lists;
 
 void ColumnarEndRead(ColumnarReadState *readState);
 void ColumnarResetRead(ColumnarReadState *readState);
@@ -42,12 +38,10 @@ void ColumnarResetRead(ColumnarReadState *readState);
 static MemoryContext columnarCacheContext = NULL;
 
 /*
- * Cache entry.
- *
- * An entry for caching a column.
+ * Cache entry. dlist_node must remain the first field because the
+ * intrusive doubly-linked-list helpers (dlist_*) cast pointers between
+ * `dlist_node*` and `ColumnarCacheEntry*` via dlist_container.
  */
-typedef struct ColumnarCacheEntry ColumnarCacheEntry;
-
 struct ColumnarCacheEntry
 {
 	dlist_node list_node;
@@ -82,12 +76,12 @@ export ColumnarCacheStatistics statistics = { 0 };
 /*
  * Housekeeping of current chunk in use - so they are not evicted.
  */
-typedef struct ColumarCacheChunkGroupInUse
+struct ColumarCacheChunkGroupInUse
 {
 	uint64 relId;
 	uint64 stripeId;
 	uint64 chunkId;
-} ColumarCacheChunkGroupInUse;
+};
 
 static List * ChunkGroupsInUse = NIL;
 
@@ -168,19 +162,21 @@ ColumnarFindInCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 column
 }
 
 /*
- * ColumnarInvalidateCacheEntry
- *
- * Searches for a cache entry for a relation ID and a chunk ID.
- * If found, removes the cache entry, and frees memory associated with
- * it. If not found, nothing is done.
- *
- * Returns boolean.
+ * ColumnarInvalidateCacheEntry searches for a cache entry by
+ * (relId, stripeId, chunkId, columnId). On a hit it unlinks the entry,
+ * pfrees the backing store + the entry itself, updates the running size
+ * counter and the eviction stat, and returns true. Returns false when
+ * no matching entry exists.
  */
 static bool
 ColumnarInvalidateCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId)
 {
-	dlist_mutable_iter miter;
+	if (head == nullptr)
+	{
+		return false;
+	}
 
+	dlist_mutable_iter miter;
 	dlist_foreach_modify(miter, head)
 	{
 		ColumnarCacheEntry *entry = dlist_container(ColumnarCacheEntry, list_node, miter.cur);
@@ -193,11 +189,19 @@ ColumnarInvalidateCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, uint
 			totalAllocationLength -= entry->length;
 			statistics.evictions++;
 
+			StringInfo store = static_cast<StringInfo>(entry->store);
+			if (store->data)
+			{
+				pfree(store->data);
+			}
+			pfree(store);
+			pfree(entry);
+
 			return true;
 		}
 	}
 
-	return true;
+	return false;
 }
 
 static void
@@ -222,12 +226,8 @@ EvictCache(uint64 size)
 			if (entry->readCount == lastCount)
 			{
 				bool skipCacheEntry = false;
-				ListCell *lc;
-				foreach(lc, ChunkGroupsInUse)
+				for (auto* chunkGroupInUse : PList<ColumarCacheChunkGroupInUse>(ChunkGroupsInUse))
 				{
-					ColumarCacheChunkGroupInUse *chunkGroupInUse =
-						(ColumarCacheChunkGroupInUse *) lfirst(lc);
-
 					if (chunkGroupInUse->relId == entry->relId &&
 						chunkGroupInUse->stripeId == entry->stripeId &&
 						chunkGroupInUse->chunkId == entry->chunkId)
@@ -273,15 +273,10 @@ export void
 ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
 {
 	bool found = false;
-	ListCell *lc;
-
 	MemoryContext ctx = MemoryContextSwitchTo(ColumnarCacheMemoryContext());
 
-	foreach(lc, ChunkGroupsInUse)
+	for (auto* chunkGroupInUse : PList<ColumarCacheChunkGroupInUse>(ChunkGroupsInUse))
 	{
-		ColumarCacheChunkGroupInUse *chunkGroupInUse =
-			(ColumarCacheChunkGroupInUse *) lfirst(lc);
-
 		if (chunkGroupInUse->relId == relId)
 		{
 			chunkGroupInUse->stripeId = stripeId;
@@ -443,24 +438,11 @@ ColumnarGetCacheStatistics(void)
 }
 
 
-//define CACHE_NATTS 6
-// extern "C" Datum cache_walk(PG_FUNCTION_ARGS);
-
-// CXX_PG_FUNCTION_INFO_V1(cache_walk);
-
 /*
- * Used for debugging, as this data is only available in a transaction
- * or if clearing the cache is specifically disabled.
- */
-
-
-//extern "C" Datum cache_evict(PG_FUNCTION_ARGS);
-
-//CXX_PG_FUNCTION_INFO_V1(cache_evict);
-
-/*
- * Also used for debugging, with the same constraints that it would only
- * work in a transaction of if the clearing mechanism is explicitly disabled.
+ * cache_evict is a debug SQL function that drops a single cache entry by
+ * (relid, stripeId, chunkId, columnId). Only useful when called inside an
+ * already-active transaction, or when automatic cache clearing has been
+ * disabled.
  */
 POSTGRES_FN(cache_evict)
 {

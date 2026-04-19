@@ -1,34 +1,30 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_storage.c
+ * columnar_storage_physical.cppm
  *
- * Copyright (c) Citus Data, Inc.
- *
- * Low-level storage layer for columnar.
- *   - Translates columnar read/write operations on logical offsets into operations on pages/blocks.
+ * Low-level storage layer for the bioseq columnar table format.
+ *   - Translates columnar read/write operations on logical offsets into
+ *     operations on pages/blocks.
  *   - Emits WAL.
  *   - Reads/writes the columnar metapage.
  *   - Reserves data offsets, stripe numbers, and row offsets.
  *   - Truncation.
  *
  * Higher-level columnar operations deal with logical offsets and large
- * contiguous buffers of data that need to be stored. But the buffer manager
- * and WAL depend on formatted pages with headers, so these large buffers need
- * to be written across many pages. This module translates the contiguous
- * buffers into individual block reads/writes, and performs WAL when
- * necessary.
+ * contiguous buffers of data that need to be stored. But the buffer
+ * manager and WAL depend on formatted pages with headers, so these
+ * large buffers need to be written across many pages. This module
+ * translates the contiguous buffers into individual block reads/writes,
+ * and performs WAL when necessary.
  *
- * Storage layout: a metapage in block 0, followed by an empty page in block
- * 1, followed by logical data starting at the first byte after the page
- * header in block 2 (having logical offset ColumnarFirstLogicalOffset). (XXX:
- * Block 1 is left empty for no particular reason. Reconsider?). A columnar
- * table should always have at least 2 blocks.
+ * Storage layout: metapage in block 0, empty page in block 1, logical
+ * data starting at the first byte after the page header in block 2
+ * (logical offset ColumnarFirstLogicalOffset). A columnar table always
+ * has at least 2 blocks.
  *
- * Reservation is done with a relation extension lock, and designed for
- * concurrency, so the callers only need an ordinary lock on the
- * relation. Initializing the metapage or truncating the relation require that
- * the caller holds an AccessExclusiveLock. (XXX: New reservations of data are
- * aligned onto a new page for no particular reason. Reconsider?).
+ * Reservation uses a relation extension lock and is concurrency-safe,
+ * so callers only need an ordinary lock on the relation. Initializing
+ * the metapage or truncating the relation requires AccessExclusiveLock.
  *
  *-------------------------------------------------------------------------
  */
@@ -67,7 +63,7 @@ inline auto ColumnarLogicalOffsetIsValid(T X) {
  * Content of the first page in main fork, which stores metadata at file
  * level.
  */
-typedef struct ColumnarMetapage
+struct ColumnarMetapage
 {
 	/*
 	 * Store version of file format used, so we can detect files from
@@ -99,25 +95,30 @@ typedef struct ColumnarMetapage
 	 * XXX: Not used yet; reserved field for later support for UNLOGGED.
 	 */
 	bool unloggedReset;
-} ColumnarMetapage;
+};
 
 
 /* represents a "physical" block+offset address */
-typedef struct PhysicalAddr
+struct PhysicalAddr
 {
 	BlockNumber blockno;
 	uint32 offset;
-} PhysicalAddr;
+};
 
 
-#define COLUMNAR_METAPAGE_BLOCKNO 0
-#define COLUMNAR_EMPTY_BLOCKNO 1
-#define COLUMNAR_INVALID_STRIPE_ID 0
-#define COLUMNAR_FIRST_STRIPE_ID 1
+/*
+ * Layout constants for the metapage and the first data page. The metapage
+ * always lives at block 0; block 1 is reserved (empty) and logical data
+ * starts at block 2 (see ColumnarFirstLogicalOffset).
+ */
+inline constexpr BlockNumber COLUMNAR_METAPAGE_BLOCKNO = 0;
+inline constexpr BlockNumber COLUMNAR_EMPTY_BLOCKNO = 1;
+inline constexpr uint64 COLUMNAR_INVALID_STRIPE_ID = 0;
+inline constexpr uint64 COLUMNAR_FIRST_STRIPE_ID = 1;
 
-
-#define OLD_METAPAGE_VERSION_HINT "Use \"VACUUM\" to upgrade the columnar table format " \
-								  "version or run \"ALTER EXTENSION citus UPDATE\"."
+inline constexpr const char* OLD_METAPAGE_VERSION_HINT =
+	"Use \"VACUUM\" to upgrade the columnar table format "
+	"version or run \"ALTER EXTENSION citus UPDATE\".";
 
 
 
@@ -169,10 +170,10 @@ static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapag
 export void
 ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 {
-	JustLog("check smgr number of blocks");
+	JustLog("[bioseq] pg: ColumnarStorageInit() entered storage_id={}", storageId);
 	BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
 
-	JustLog("Check init storage blocks > 0");
+	JustLog("[bioseq] pg: ColumnarStorageInit() existing_blocks={}", nblocks);
 	if (nblocks > 0)
 	{
 		elog(ERROR,
@@ -180,19 +181,13 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 			 nblocks);
 	}
 
-
 	/* create two pages */
-#if PG_VERSION_NUM >= PG_VERSION_16
 	PGIOAlignedBlock block;
-#else
-	PGAlignedBlock block;
-#endif
 	Page page = block.data;
 
-	/* write metapage */
-	JustLog("Init page");
+	JustLog("[bioseq] pg: ColumnarStorageInit() initialising metapage");
 	PageInit(page, BLCKSZ, 0);
-	PageHeader phdr = (PageHeader) page;
+	PageHeader phdr = reinterpret_cast<PageHeader>(page);
 
 	ColumnarMetapage metapage = { 0 };
 	metapage.storageId = storageId;
@@ -203,36 +198,23 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 	metapage.reservedOffset = ColumnarFirstLogicalOffset;
 	metapage.unloggedReset = false;
 	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower,
-			 (char *) &metapage, sizeof(ColumnarMetapage));
+			 reinterpret_cast<char *>(&metapage), sizeof(ColumnarMetapage));
 	phdr->pd_lower += sizeof(ColumnarMetapage);
-#if PG_VERSION_NUM >= PG_VERSION_16
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
 				COLUMNAR_METAPAGE_BLOCKNO, page, true);
-#else
-	log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
-				COLUMNAR_METAPAGE_BLOCKNO, page, true);
-#endif
 
-	JustLog("Page checksum inplace");
+	JustLog("[bioseq] pg: ColumnarStorageInit() flushing metapage to disk");
 	PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
 
-	JustLog("Init page");
-	/* write empty page */
+	JustLog("[bioseq] pg: ColumnarStorageInit() initialising empty page");
 	PageInit(page, BLCKSZ, 0);
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
 				COLUMNAR_EMPTY_BLOCKNO, page, true);
-#else
-	log_newpage(&srel->smgr_rnode.node, MAIN_FORKNUM,
-				COLUMNAR_EMPTY_BLOCKNO, page, true);
-#endif
 
-	JustLog("Page checksum inplace");
+	JustLog("[bioseq] pg: ColumnarStorageInit() flushing empty page to disk");
 	PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
-
-	JustLog("smgr extend");
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
 
 	/*
@@ -240,7 +222,7 @@ ColumnarStorageInit(SMgrRelation srel, uint64 storageId)
 	 * write did not go through shared_buffers and therefore a concurrent
 	 * checkpoint may have moved the redo pointer past our xlog record.
 	 */
-	JustLog("Immediate sync");
+	JustLog("[bioseq] pg: ColumnarStorageInit() requesting smgr immediate sync");
 	smgrimmedsync(srel, MAIN_FORKNUM);
 }
 
@@ -265,16 +247,19 @@ ColumnarStorageUpdateCurrent(Relation rel, bool upgrade, uint64 reservedStripeId
 	if (ColumnarMetapageIsCurrent(&metapage))
 	{
 		/* nothing to do */
+		UnlockRelationForExtension(rel, ExclusiveLock);
 		return;
 	}
 
 	if (upgrade && ColumnarMetapageIsNewer(&metapage))
 	{
+		UnlockRelationForExtension(rel, ExclusiveLock);
 		elog(ERROR, "found newer columnar metapage while upgrading");
 	}
 
 	if (!upgrade && ColumnarMetapageIsOlder(&metapage))
 	{
+		UnlockRelationForExtension(rel, ExclusiveLock);
 		elog(ERROR, "found older columnar metapage while downgrading");
 	}
 
@@ -382,23 +367,6 @@ ColumnarStorageGetReservedOffset(Relation rel, bool force)
 
 	return metapage.reservedOffset;
 }
-
-/*
- * RelationGetSmgr got backported in 13.10 and 14.7 so redefining it for any
- * version higher causes compilation errors due to redefining of the function.
- * We want to use it in all versions. So we backport it ourselves in earlier
- * versions, and rely on the Postgres provided version in the later versions.
- */
-#if PG_VERSION_NUM < 140007
-inline SMgrRelation RelationGetSmgr(Relation rel)
-{
-	if (unlikely(rel->rd_smgr == NULL))
-	{
-		smgrsetowner(&(rel->rd_smgr), smgropen(rel->rd_node, rel->rd_backend));
-	}
-	return rel->rd_smgr;
-}
-#endif
 
 /*
  * ColumnarStorageIsCurrent - return true if metapage exists and is not
@@ -659,7 +627,7 @@ ColumnarOverwriteMetapage(Relation relation, ColumnarMetapage columnarMetapage)
 	/* clear metapage because we are overwriting */
 	bool clear = true;
 	WriteToBlock(relation, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				 (char *) &columnarMetapage, sizeof(ColumnarMetapage), clear);
+				 reinterpret_cast<char *>(&columnarMetapage), sizeof(ColumnarMetapage), clear);
 }
 
 
@@ -700,7 +668,7 @@ ColumnarMetapageRead(Relation rel, bool force)
 	bool forceReadBlock = true;
 	ColumnarMetapage metapage;
 	ReadFromBlock(rel, COLUMNAR_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				  (char *) &metapage, sizeof(ColumnarMetapage), forceReadBlock);
+				  reinterpret_cast<char *>(&metapage), sizeof(ColumnarMetapage), forceReadBlock);
 
 	if (!force)
 	{
@@ -723,7 +691,7 @@ ReadFromBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
 	Buffer buffer = ReadBuffer(rel, blockno);
 	LockBuffer(buffer, BUFFER_LOCK_SHARE);
 	Page page = BufferGetPage(buffer);
-	PageHeader phdr = (PageHeader) page;
+	PageHeader phdr = reinterpret_cast<PageHeader>(page);
 
 	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
 	{
@@ -755,7 +723,7 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32 offset, char *buf,
 
 	Page page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
 
-	PageHeader phdr = (PageHeader) page;
+	PageHeader phdr = reinterpret_cast<PageHeader>(page);
 	if (PageIsNew(page) || clear)
 	{
 		PageInit(page, BLCKSZ, 0);

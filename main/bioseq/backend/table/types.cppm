@@ -1,4 +1,22 @@
-module; 
+/*-------------------------------------------------------------------------
+ *
+ * table/types.cppm
+ *
+ * Plain-old-data state objects shared between the bioseq table-access
+ * method, the columnar custom scan, and the columnar index scan. None of
+ * these structs own any non-trivial members; they exist purely as state
+ * blobs passed across the PostgreSQL C ABI.
+ *
+ * Note: BioseqScanState (the CustomScanState wrapper for the bioseq
+ * custom scan) and BioseqIndexScanState live in bioseq_scan_state.cppm
+ * so their helper methods can be defined alongside the layout
+ * invariants. Re-export them here for the convenience of callers that
+ * import bioseq_table_types.
+ *
+ *-------------------------------------------------------------------------
+ */
+module;
+
 #include "common.h"
 
 #include <math.h>
@@ -10,86 +28,53 @@ module;
 
 export module bioseq_table_types;
 
-/*
- * ColumnarScanDescData is the scan state passed between beginscan(),
- * getnextslot(), rescan(), and endscan() calls.
- */
-export typedef struct ColumnarScanDescData
-{
-	TableScanDescData cs_base;
-	ColumnarReadState *cs_readState;
-
-	/*
-	 * We initialize cs_readState lazily in the first getnextslot() call. We
-	 * need the following for initialization. We save them in beginscan().
-	 */
-	MemoryContext scanContext;
-	Bitmapset *attr_needed;
-	List *scanQual;
-
-	/* Parallel Scan Data */
-	ParallelColumnarScan parallelColumnarScan;
-
-	/* Vectorization */
-	bool returnVectorizedTuple;
-} ColumnarScanDescData;
-
-export typedef struct ColumnarScanDescData *ColumnarScanDesc;
+export import bioseq_scan_state;
 
 /*
- * IndexFetchColumnarData is the scan state passed between index_fetch_begin,
- * index_fetch_reset, index_fetch_end, index_fetch_tuple calls.
+ * ColumnarScanDescData is the scan descriptor handed back to the executor
+ * from beginscan(); subsequent getnextslot()/rescan()/endscan() calls
+ * receive it via the TableScanDesc base pointer.
  */
-export typedef struct IndexFetchColumnarData
+export struct ColumnarScanDescData
 {
-	IndexFetchTableData cs_base;
-	ColumnarReadState *cs_readState;
-	Bitmapset *attr_needed;
-	List *stripeMetadataList;
-	bool is_select_query; /* CustomIndexScan only gets planned with SELECT query */
+    TableScanDescData cs_base;
+    ColumnarReadState* cs_readState;
 
-	/*
-	 * We initialize cs_readState lazily in the first bioseq_index_fetch_tuple
-	 * call. However, we want to do memory allocations in a sub MemoryContext of
-	 * bioseq_index_fetch_begin. For this reason, we store scanContext in
-	 * bioseq_index_fetch_begin.
-	 */
-	MemoryContext scanContext;
-} IndexFetchColumnarData;
+    /*
+     * cs_readState is initialised lazily on the first getnextslot() call;
+     * the scanContext / attr_needed / scanQual fields below are captured
+     * during beginscan() so the lazy init has the inputs it needs.
+     */
+    MemoryContext scanContext;
+    Bitmapset* attr_needed;
+    List* scanQual;
+
+    ParallelColumnarScan parallelColumnarScan;
+
+    bool returnVectorizedTuple;
+};
+
+export using ColumnarScanDesc = ColumnarScanDescData*;
 
 /*
- * ColumnarScanState represents the state for a columnar scan. It's a
- * CustomScanState with additional fields specific to columnar scans.
+ * IndexFetchColumnarData is the per-fetch state for index_fetch_begin /
+ * index_fetch_reset / index_fetch_end / index_fetch_tuple. Lazy-init of
+ * cs_readState mirrors ColumnarScanDescData.
  */
-export typedef struct ColumnarScanState
+export struct IndexFetchColumnarData
 {
-	CustomScanState custom_scanstate; /* must be first field */
-	Bitmapset *attrNeeded;
+    IndexFetchTableData cs_base;
+    ColumnarReadState* cs_readState;
+    Bitmapset* attr_needed;
+    List* stripeMetadataList;
+    bool is_select_query;
 
-	ExprContext *css_RuntimeContext;
-	List *qual;
+    /*
+     * scanContext is captured in bioseq_index_fetch_begin so the lazy
+     * cs_readState allocation in bioseq_index_fetch_tuple lands in a
+     * sub-context of the begin call rather than the per-tuple context.
+     */
+    MemoryContext scanContext;
+};
 
-	/* Parallel execution */
-	ParallelColumnarScan parallelColumnarScan;
-
-	/* Vectorization */
-	struct
-	{
-		bool vectorizationEnabled;
-		bool vectorizationAggregate;
-		TupleTableSlot *scanVectorSlot;
-		TupleTableSlot *resultVectorSlot;
-		uint32 vectorPendingRowNumber;
-		uint32 vectorRowIndex;
-		List *vectorizedQualList;
-		List *constructedVectorizedQualList;
-		List *attrNeededList;
-	} vectorization;
-
-	/* Scan snapshot*/
-	Snapshot snapshot;
-	bool snapshotRegisteredByUs;
-} ColumnarScanState;
-
-
-export typedef bool (*PathPredicate)(Path *path);
+export using PathPredicate = bool (*)(Path* path);

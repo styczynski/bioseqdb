@@ -24,6 +24,7 @@ export module bioseq_read_state_cache;
 import mlogging;
 import bioseq_table_io;
 import pg_utils;
+import pg_utils.lists;
 
 extern "C++" {
 
@@ -102,13 +103,11 @@ FindReadStateCache(Relation relation, SubTransactionId current_sub_xid)
 		return nullptr;
 	}
 
-	for (ColumnarSubXidReadFrame* stack_head = hash_entry->readStateStack;
-		 stack_head != nullptr;
-		 stack_head = stack_head->next)
+	for (auto* stack_frame : IntrusiveList<ColumnarSubXidReadFrame>(hash_entry->readStateStack))
 	{
-		if (stack_head->subXid == current_sub_xid)
+		if (stack_frame->subXid == current_sub_xid)
 		{
-			return &stack_head->readState;
+			return &stack_frame->readState;
 		}
 	}
 

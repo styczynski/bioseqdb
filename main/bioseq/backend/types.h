@@ -77,13 +77,11 @@ typedef struct StripeSkipList
 } StripeSkipList;
 
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 typedef struct cached_StringInfo
 {
 	StringInfoData data;
 	bool cached;
 } cached_StringInfo;
-#endif
 
 /*
  * ChunkData represents a chunk of data for multiple columns. valueArray stores
@@ -209,11 +207,11 @@ typedef struct ColumnarCacheStatistics
 	uint64 entries;
 } ColumnarCacheStatistics;
 
-typedef struct ColumnarIndexScanState
-{
-	CustomScanState css;
-	IndexScanState *indexscan_state;
-} ColumnarIndexScanState;
+/*
+ * BioseqIndexScanState (the CustomScanState wrapper for the bioseq
+ * IndexScan custom node) lives in bioseq/backend/table/bioseq_scan_state.cppm
+ * along with its layout invariants and helper methods.
+ */
 
 
 /*

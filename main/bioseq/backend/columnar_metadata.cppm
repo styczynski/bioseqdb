@@ -1,12 +1,9 @@
 /*-------------------------------------------------------------------------
  *
- * bioseq_metadata.c
+ * columnar_metadata.cppm
  *
- * Copyright (c) Citus Data, Inc.
- * Copyright (c) Hydra, Inc.
- *
- * Manages metadata for columnar relations in separate, shared metadata tables
- * in the "columnar" schema.
+ * Manages metadata for columnar relations in separate, shared metadata
+ * tables in the "bioseq" catalog schema.
  *
  *   * holds basic stripe information including data size and row counts
  *   * holds basic chunk and chunk group information like data offsets and
@@ -15,6 +12,11 @@
  *   * useful for stats/costing
  *   * maps logical row numbers to stripe IDs
  *   * TODO: visibility information
+ *
+ * Each metadata table is opened by oid through the per-call helpers in
+ * the "bioseq.foo_relid" family further down. Lookups go through index
+ * scans (systable_beginscan_ordered) so they're transactional and
+ * MVCC-safe.
  *
  *-------------------------------------------------------------------------
  */
@@ -181,15 +183,15 @@ Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
 
 
 
-typedef struct
+struct ModifyState
 {
 	Relation rel;
 	EState *estate;
 	ResultRelInfo *resultRelInfo;
-} ModifyState;
+};
 
 /* RowNumberLookupMode to be used in StripeMetadataLookupRowNumber */
-typedef enum RowNumberLookupMode
+enum RowNumberLookupMode
 {
 	/*
 	 * Find the stripe whose firstRowNumber is less than or equal to given
@@ -201,7 +203,7 @@ typedef enum RowNumberLookupMode
 	 * Find the stripe whose firstRowNumber is greater than input rowNumber.
 	 */
 	FIND_GREATER
-} RowNumberLookupMode;
+};
 
 static void InsertEmptyStripeMetadataRow(uint64 storageId, uint64 stripeId,
 										 uint32 columnCount, uint32 chunkGroupRowCount,
@@ -264,7 +266,7 @@ static void CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata);
  *		bioseq.options definition.
  * ----------------
  */
-typedef struct FormData_bioseq_options
+struct FormData_bioseq_options
 {
 	Oid regclass;
 	int32 chunk_group_row_limit;
@@ -274,8 +276,8 @@ typedef struct FormData_bioseq_options
 
 #ifdef CATALOG_VARLEN           /* variable-length fields start here */
 #endif
-} FormData_bioseq_options;
-typedef FormData_bioseq_options *Form_bioseq_options;
+};
+using Form_bioseq_options = FormData_bioseq_options *;
 
 
 
@@ -926,13 +928,8 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
 {
 	bytea *rowMask = NULL;
 
-#if PG_VERSION_NUM >= PG_VERSION_16
 	RowMaskWriteStateEntry *rowMaskEntry = 
 		RowMaskFindWriteState(relfilelocator.relNumber, GetCurrentSubTransactionId(), rowNumber);
-#else
-	RowMaskWriteStateEntry *rowMaskEntry = 
-		RowMaskFindWriteState(relfilelocator.relNode, GetCurrentSubTransactionId(), rowNumber);
-#endif
 
 	if (rowMaskEntry == NULL)
 	{
@@ -966,17 +963,10 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64 storageId,
 					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_mask,
 								tupleDescriptor, &isnull);
 		
-#if PG_VERSION_NUM >= PG_VERSION_16
 			rowMaskEntry = RowMaskInitWriteState(relfilelocator.relNumber,
 												 storageId,
 												 GetCurrentSubTransactionId(),
 												 DatumGetByteaP(mask));
-#else
-			rowMaskEntry = RowMaskInitWriteState(relfilelocator.relNode,
-												 storageId,
-												 GetCurrentSubTransactionId(),
-												 DatumGetByteaP(mask));
-#endif
 			/* 
 			 * Populate row mask cache with values from heap table
 			 */
@@ -1706,10 +1696,8 @@ GetHighestUsedAddressAndId(uint64 storageId,
 	/* file starts with metapage */
 	*highestUsedAddress = COLUMNAR_BYTES_PER_PAGE;
 
-	//foreach(stripeMetadataCell, stripeMetadataList)
-	for(auto stripe : PList<StripeMetadata>(stripeMetadataList))
+	for (auto stripe : PList<StripeMetadata>(stripeMetadataList))
 	{
-		//StripeMetadata *stripe = lfirst(stripeMetadataCell);
 		uint64 lastByte = stripe->fileOffset + stripe->dataLength - 1;
 		*highestUsedAddress = std::max(*highestUsedAddress, lastByte);
 		*highestUsedId = std::max(*highestUsedId, stripe->id);
@@ -2458,13 +2446,13 @@ static Oid
 ColumnarNamespaceId(void)
 {
 	Oid nspace = get_namespace_oid("bioseq_internal", true);
-	JustLog("Check fetch columnar namespace");
+	JustLog("[bioseq] pg: ColumnarNamespaceId() looking up bioseq namespace");
 	/* if schema is earlier than 11.1-1 */
 	if (!OidIsValid(nspace))
 	{
 		nspace = get_namespace_oid("bioseq", false);
 	}
-	JustLog("Fetch columnar namespace done");
+	JustLog("[bioseq] pg: ColumnarNamespaceId() returning oid");
 	return nspace;
 }
 
@@ -2515,7 +2503,7 @@ ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade)
 	}
 
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
-	JustLog("ColumnarStorageUpdateIfNeeded Check nblocks < 2");
+	JustLog("[bioseq] pg: ColumnarStorageUpdateIfNeeded() checking nblocks<2");
 	if (nblocks < 2)
 	{
 		ColumnarStorageInit(rel->rd_smgr, ColumnarMetadataNewStorageId());
@@ -2552,9 +2540,7 @@ GetHighestUsedRowNumber(uint64 storageId)
 	List *stripeMetadataList = ReadDataFileStripeList(storageId,
 													  GetTransactionSnapshot(),
 													  ForwardScanDirection);
-	//StripeMetadata *stripeMetadata = NULL;
-	//foreach_decl_ptr(stripeMetadata, stripeMetadataList)
-	for(auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
+	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
 		highestRowNumber = std::max(highestRowNumber,
 							   StripeGetHighestRowNumber(stripeMetadata));
