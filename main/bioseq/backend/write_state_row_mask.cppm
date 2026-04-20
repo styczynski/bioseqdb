@@ -26,7 +26,7 @@ import pg_utils;
 
 extern "C++" {
 
-static RowMaskWriteStateEntry* InitRowMaskEntry(uint64 storage_id, bytea* row_mask);
+static RowMaskWriteStateEntry* InitRowMaskEntry(uint64_t storage_id, bytea* row_mask);
 static void RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list);
 
 /*
@@ -119,7 +119,7 @@ RowMaskInitWriteState(Oid relfilelocator,
  * startRowNumber/endRowNumber/chunkId/stripeId/deletedRows.
  */
 static RowMaskWriteStateEntry*
-InitRowMaskEntry(uint64 storage_id, bytea* mask)
+InitRowMaskEntry(uint64_t storage_id, bytea* mask)
 {
 	RowMaskWriteStateEntry* row_mask = make0<RowMaskWriteStateEntry>();
 

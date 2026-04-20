@@ -54,18 +54,18 @@ sact int_action = {};
 sact trm_action = {};
 sact kil_action = {};
 
-uint64 ColumnarTableRowCount(Relation relation);
+uint64_t ColumnarTableRowCount(Relation relation);
 void bioseq_customscan_init();
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
 bool ColumnarSupportsIndexAM(char *indexAMName);
 bool IsColumnarTableAmTable(Oid relationId);
-ItemPointerData row_number_to_tid(uint64 rowNumber);
+ItemPointerData row_number_to_tid(uint64_t rowNumber);
 
 TableScanDesc
 bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
-							uint32 flags, Bitmapset *attr_needed, List *scanQual,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple);
 
@@ -100,8 +100,8 @@ static bool TruncateAndCombineColumnarStripes(Relation rel, int elevel);
 static HeapTuple ColumnarSlotCopyHeapTuple(TupleTableSlot *slot);
 static void ColumnarCheckLogicalReplication(Relation rel);
 static Datum * detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull);
-static uint64 tid_to_row_number(ItemPointerData tid);
-static void ErrorIfInvalidRowNumber(uint64 rowNumber);
+static uint64_t tid_to_row_number(ItemPointerData tid);
+static void ErrorIfInvalidRowNumber(uint64_t rowNumber);
 static void ColumnarReportTotalVirtualBlocks(Relation relation, Snapshot snapshot,
 											 int progressArrIndex);
 static BlockNumber ColumnarGetNumberOfVirtualBlocks(Relation relation, Snapshot snapshot);
@@ -150,7 +150,7 @@ static TableScanDesc
 bioseq_beginscan(Relation relation, Snapshot snapshot,
 				   int nkeys, ScanKey key,
 				   ParallelTableScanDesc parallel_scan,
-				   uint32 flags)
+				   uint32_t flags)
 {
 	previousCacheEnabledState = bioseq_enable_page_cache;
 
@@ -175,7 +175,7 @@ TableScanDesc
 bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
-							uint32 flags, Bitmapset *attr_needed, List *scanQual,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple)
 {
@@ -187,41 +187,42 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 	 * context that will last until end of scan.
 	 */
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
-	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
-
-	ColumnarScanDesc scan = make0<ColumnarScanDescData>();
-	scan->cs_base.rs_rd = relation;
-	scan->cs_base.rs_snapshot = snapshot;
-	scan->cs_base.rs_nkeys = nkeys;
-	scan->cs_base.rs_key = key;
-	scan->cs_base.rs_flags = flags;
-	scan->cs_base.rs_parallel = parallel_scan;
-
-	/*
-	 * We will initialize this lazily in first tuple, where we have the actual
-	 * tuple descriptor to use for reading. In some cases like ALTER TABLE ...
-	 * ALTER COLUMN ... TYPE, the tuple descriptor of relation doesn't match
-	 * the storage which we are reading, so we need to use the tuple descriptor
-	 * of "slot" in first read.
-	 */
-	scan->cs_readState = NULL;
-	scan->attr_needed = bms_copy(attr_needed);
-	scan->scanQual = copyObject(scanQual);
-	scan->scanContext = scanContext;
-
-	/* Parallel execution scan data */;
-	scan->parallelColumnarScan = parallelColumnarScan;
-
-	/* Vectorized result */
-	scan->returnVectorizedTuple = returnVectorizedTuple;
-
-	if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
+	ColumnarScanDesc scan;
 	{
-		elog(ERROR,
-			 "cannot read from table when there is unflushed data in upper transactions");
-	}
+		MemoryContextScope ctx_guard{scanContext};
 
-	MemoryContextSwitchTo(oldContext);
+		scan = make0<ColumnarScanDescData>();
+		scan->cs_base.rs_rd = relation;
+		scan->cs_base.rs_snapshot = snapshot;
+		scan->cs_base.rs_nkeys = nkeys;
+		scan->cs_base.rs_key = key;
+		scan->cs_base.rs_flags = flags;
+		scan->cs_base.rs_parallel = parallel_scan;
+
+		/*
+		 * We will initialize this lazily in first tuple, where we have the actual
+		 * tuple descriptor to use for reading. In some cases like ALTER TABLE ...
+		 * ALTER COLUMN ... TYPE, the tuple descriptor of relation doesn't match
+		 * the storage which we are reading, so we need to use the tuple descriptor
+		 * of "slot" in first read.
+		 */
+		scan->cs_readState = NULL;
+		scan->attr_needed = bms_copy(attr_needed);
+		scan->scanQual = copyObject(scanQual);
+		scan->scanContext = scanContext;
+
+		/* Parallel execution scan data */;
+		scan->parallelColumnarScan = parallelColumnarScan;
+
+		/* Vectorized result */
+		scan->returnVectorizedTuple = returnVectorizedTuple;
+
+		if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
+		{
+			pg_log(ERROR,
+				 "cannot read from table when there is unflushed data in upper transactions");
+		}
+	}
 
 	return reinterpret_cast<TableScanDesc>(scan);
 }
@@ -236,11 +237,11 @@ POSTGRES_FN(bioseq_relation_storageid)
 	Relation relation = safe_relation_open(relationId, AccessShareLock);
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		elog(ERROR, "relation \"%s\" is not a columnar table",
+		pg_log(ERROR, "relation \"{}\" is not a columnar table",
 			 RelationGetRelationName(relation));
 	}
 
-	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
+	uint64_t storageId = ColumnarStorageGetStorageId(relation, false);
 
 	relation_close(relation, AccessShareLock);
 
@@ -258,11 +259,11 @@ POSTGRES_FN(create_table_row_mask)
 
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		elog(ERROR, "relation \"%s\" is not a columnar table",
+		pg_log(ERROR, "relation \"{}\" is not a columnar table",
 			 RelationGetRelationName(relation));
 	}
 
-	uint64 storageId = ColumnarStorageGetStorageId(relation, false);
+	uint64_t storageId = ColumnarStorageGetStorageId(relation, false);
 
 	ScanKeyData scanKey[1];
 	StripeMetadata *stripeMetadata = NULL;
@@ -289,7 +290,7 @@ POSTGRES_FN(create_table_row_mask)
 
 		List *chunkGroupRowCount = NIL;
 
-		int64 lastChunkRowCount = stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount ?
+		int64_t lastChunkRowCount = stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount ?
 									stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount :
 									stripeMetadata->chunkGroupRowCount;
 
@@ -305,7 +306,7 @@ POSTGRES_FN(create_table_row_mask)
 		if(!SaveEmptyRowMask(storageId, stripeMetadata->id,
 							 stripeMetadata->firstRowNumber, chunkGroupRowCount))
 		{
-			elog(WARNING, "relation \"%s\" already has bioseq.row_mask populated.",
+			pg_log(WARNING, "relation \"{}\" already has bioseq.row_mask populated.",
 				 RelationGetRelationName(relation));
 			created = false;
 			break;
@@ -342,15 +343,13 @@ init_bioseq_read_state(Relation relation, TupleDesc tupdesc, Bitmapset *attr_nee
 						 bool randomAccess,
 						 ParallelColumnarScan parallelColumnarScan)
 {
-	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
+	MemoryContextScope ctx_guard{scanContext};
 
 	List *neededColumnList = NeededColumnsList(tupdesc, attr_needed);
 	ColumnarReadState *readState = ColumnarBeginRead(relation, tupdesc, neededColumnList,
 													 scanQual, scanContext, snapshot,
 													 randomAccess,
 													 parallelColumnarScan);
-
-	MemoryContextSwitchTo(oldContext);
 
 	return readState;
 }
@@ -443,7 +442,7 @@ bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot 
 	}
 	else
 	{
-		uint64 rowNumber;
+		uint64_t rowNumber;
 		bool nextRowFound = ColumnarReadNextRow(scan->cs_readState, slot->tts_values,
 												slot->tts_isnull, &rowNumber);
 
@@ -464,7 +463,7 @@ bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot 
  * row_number_to_tid maps given rowNumber to ItemPointerData.
  */
 ItemPointerData
-row_number_to_tid(uint64 rowNumber)
+row_number_to_tid(uint64_t rowNumber)
 {
 	ErrorIfInvalidRowNumber(rowNumber);
 
@@ -479,10 +478,10 @@ row_number_to_tid(uint64 rowNumber)
 /*
  * tid_to_row_number maps given ItemPointerData to rowNumber.
  */
-static uint64
+static uint64_t
 tid_to_row_number(ItemPointerData tid)
 {
-	uint64 rowNumber = ItemPointerGetBlockNumber(&tid) * VALID_ITEMPOINTER_OFFSETS +
+	uint64_t rowNumber = ItemPointerGetBlockNumber(&tid) * VALID_ITEMPOINTER_OFFSETS +
 					   ItemPointerGetOffsetNumber(&tid) - FirstOffsetNumber;
 
 	ErrorIfInvalidRowNumber(rowNumber);
@@ -495,21 +494,20 @@ tid_to_row_number(ItemPointerData tid)
  * ErrorIfInvalidRowNumber errors out if given rowNumber is invalid.
  */
 static void
-ErrorIfInvalidRowNumber(uint64 rowNumber)
+ErrorIfInvalidRowNumber(uint64_t rowNumber)
 {
 	if (rowNumber == COLUMNAR_INVALID_ROW_NUMBER)
 	{
 		/* not expected but be on the safe side */
-		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-						errmsg("unexpected row number for columnar table")));
+		PgReport(ERROR).code(ERRCODE_INTERNAL_ERROR)
+			.msg("unexpected row number for columnar table");
 	}
 	else if (rowNumber > COLUMNAR_MAX_ROW_NUMBER)
 	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("columnar tables can't have row numbers "
-							   "greater than " UINT64_FORMAT,
-							   (uint64) COLUMNAR_MAX_ROW_NUMBER),
-						errhint("Consider using VACUUM FULL for your table")));
+		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.msg("columnar tables can't have row numbers greater than {}",
+				 static_cast<uint64_t>(COLUMNAR_MAX_ROW_NUMBER))
+			.hint("Consider using VACUUM FULL for your table");
 	}
 }
 
@@ -517,21 +515,21 @@ ErrorIfInvalidRowNumber(uint64 rowNumber)
 static Size
 bioseq_parallelscan_estimate(Relation rel)
 {
-	elog(ERROR, "bioseq_parallelscan_estimate not implemented");
+	pg_log(ERROR, "bioseq_parallelscan_estimate not implemented");
 }
 
 
 static Size
 bioseq_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	elog(ERROR, "bioseq_parallelscan_initialize not implemented");
+	pg_log(ERROR, "bioseq_parallelscan_initialize not implemented");
 }
 
 
 static void
 bioseq_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	elog(ERROR, "bioseq_parallelscan_reinitialize not implemented");
+	pg_log(ERROR, "bioseq_parallelscan_reinitialize not implemented");
 }
 
 
@@ -542,21 +540,22 @@ bioseq_index_fetch_begin(Relation rel)
 	if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
-		elog(ERROR, "cannot read from index when there is unflushed data in "
+		pg_log(ERROR, "cannot read from index when there is unflushed data in "
 					"upper transactions");
 	}
 
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
-	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
+	IndexFetchColumnarData *scan;
+	{
+		MemoryContextScope ctx_guard{scanContext};
 
-	IndexFetchColumnarData *scan = make0<IndexFetchColumnarData>();
-	scan->cs_base.rel = rel;
-	scan->cs_readState = NULL;
-	scan->stripeMetadataList = NIL;
-	scan->scanContext = scanContext;
-	scan->is_select_query = false;
-
-	MemoryContextSwitchTo(oldContext);
+		scan = make0<IndexFetchColumnarData>();
+		scan->cs_base.rel = rel;
+		scan->cs_readState = NULL;
+		scan->stripeMetadataList = NIL;
+		scan->scanContext = scanContext;
+		scan->is_select_query = false;
+	}
 
 	return &scan->cs_base;
 }
@@ -568,23 +567,24 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 	if (PendingWritesInUpperTransactions(relfilenode, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
-		elog(ERROR, "cannot read from index when there is unflushed data in "
+		pg_log(ERROR, "cannot read from index when there is unflushed data in "
 					"upper transactions");
 	}
 
 	MemoryContext scanContext = CreateColumnarScanMemoryContext();
-	MemoryContext oldContext = MemoryContextSwitchTo(scanContext);
+	IndexFetchColumnarData *scan;
+	{
+		MemoryContextScope ctx_guard{scanContext};
 
-	IndexFetchColumnarData *scan = make0<IndexFetchColumnarData>();
-	scan->cs_base.rel = rel;
-	scan->cs_readState = NULL;
-	scan->stripeMetadataList = NIL;
-	scan->scanContext = scanContext;
+		scan = make0<IndexFetchColumnarData>();
+		scan->cs_base.rel = rel;
+		scan->cs_readState = NULL;
+		scan->stripeMetadataList = NIL;
+		scan->scanContext = scanContext;
 
-	scan->attr_needed = bms_copy(attr_needed);
-	scan->is_select_query = true;
-
-	MemoryContextSwitchTo(oldContext);
+		scan->attr_needed = bms_copy(attr_needed);
+		scan->is_select_query = true;
+	}
 
 	return &scan->cs_base;
 }
@@ -621,7 +621,7 @@ bioseq_index_fetch_end(IndexFetchTableData *sscan)
 }
 
 static StripeMetadata *
-FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64 rowNumber)
+FindStripeMetadataFromListBinarySearch(IndexFetchColumnarData *scan, uint64_t rowNumber)
 {
 	ListCell *lc = NULL;
 
@@ -709,7 +709,7 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 
 	}
 
-	uint64 rowNumber = tid_to_row_number(*tid);
+	uint64_t rowNumber = tid_to_row_number(*tid);
 
 	StripeMetadata *stripeMetadata = NULL;
 	
@@ -831,7 +831,7 @@ bioseq_fetch_row_version(Relation relation,
 						   Snapshot snapshot,
 						   TupleTableSlot *slot)
 {
-	uint64 rowNumber = tid_to_row_number(*tid);
+	uint64_t rowNumber = tid_to_row_number(*tid);
 	ColumnarReadState **readState =
 		FindReadStateCache(relation, GetCurrentSubTransactionId());
 
@@ -854,10 +854,11 @@ bioseq_fetch_row_version(Relation relation,
 											  NULL);
 	}
 
-	MemoryContext oldContext = MemoryContextSwitchTo(GetColumnarReadStateCache());
-	ColumnarReadRowByRowNumber(*readState, rowNumber,
-							   slot->tts_values, slot->tts_isnull);
-	MemoryContextSwitchTo(oldContext);
+	{
+		MemoryContextScope ctx_guard{GetColumnarReadStateCache()};
+		ColumnarReadRowByRowNumber(*readState, rowNumber,
+								   slot->tts_values, slot->tts_isnull);
+	}
 
 	slot->tts_tableOid = RelationGetRelid(relation);
 	slot->tts_tid = *tid;
@@ -873,14 +874,14 @@ static void
 bioseq_get_latest_tid(TableScanDesc sscan,
 						ItemPointer tid)
 {
-	elog(ERROR, "bioseq_get_latest_tid not implemented");
+	pg_log(ERROR, "bioseq_get_latest_tid not implemented");
 }
 
 
 static bool
 bioseq_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
 {
-	elog(ERROR, "bioseq_tuple_tid_valid not implemented");
+	pg_log(ERROR, "bioseq_tuple_tid_valid not implemented");
 }
 
 
@@ -888,7 +889,7 @@ static bool
 bioseq_tuple_satisfies_snapshot(Relation rel, TupleTableSlot *slot,
 								  Snapshot snapshot)
 {
-	uint64 rowNumber = tid_to_row_number(slot->tts_tid);
+	uint64_t rowNumber = tid_to_row_number(slot->tts_tid);
 	StripeMetadata *stripeMetadata = FindStripeByRowNumber(rel, rowNumber, snapshot);
 	return stripeMetadata != NULL;
 }
@@ -938,7 +939,7 @@ bioseq_index_delete_tuples(Relation rel,
 		 * simple deletion of index tuples. But let's throw an error to be on
 		 * the safe side.
 		 */
-		elog(ERROR, "bioseq_index_delete_tuples not implemented for simple deletion");
+		pg_log(ERROR, "bioseq_index_delete_tuples not implemented for simple deletion");
 	}
 }
 
@@ -958,20 +959,19 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 															   RelationGetDescr(relation),
 																 slot->tts_tableOid,
 															   GetCurrentSubTransactionId());
-	MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
-														 writeState));
+	{
+		MemoryContextScope ctx_guard{ColumnarWritePerTupleContext(writeState)};
 
-	ColumnarCheckLogicalReplication(relation);
+		ColumnarCheckLogicalReplication(relation);
 
-	slot_getallattrs(slot);
+		slot_getallattrs(slot);
 
-	Datum *values = detoast_values(slot->tts_tupleDescriptor,
-								   slot->tts_values, slot->tts_isnull);
+		Datum *values = detoast_values(slot->tts_tupleDescriptor,
+									   slot->tts_values, slot->tts_isnull);
 
-	uint64 writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
-	slot->tts_tid = row_number_to_tid(writtenRowNumber);
-
-	MemoryContextSwitchTo(oldContext);
+		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
+		slot->tts_tid = row_number_to_tid(writtenRowNumber);
+	}
 	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
 
 	pgstat_count_heap_insert(relation, 1);
@@ -981,7 +981,7 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 static void
 bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 								  CommandId cid, int options,
-								  BulkInsertState bistate, uint32 specToken)
+								  BulkInsertState bistate, uint32_t specToken)
 {
 	previousCacheEnabledState = bioseq_enable_page_cache;
 	bioseq_enable_page_cache = false;
@@ -994,22 +994,21 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 															   RelationGetDescr(relation),
 																 slot->tts_tableOid,
 															   GetCurrentSubTransactionId());
-	MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
-														 writeState));
+	{
+		MemoryContextScope ctx_guard{ColumnarWritePerTupleContext(writeState)};
 
-	ColumnarCheckLogicalReplication(relation);
+		ColumnarCheckLogicalReplication(relation);
 
-	slot_getallattrs(slot);
+		slot_getallattrs(slot);
 
-	Datum *values = detoast_values(slot->tts_tupleDescriptor,
-								   slot->tts_values, slot->tts_isnull);
+		Datum *values = detoast_values(slot->tts_tupleDescriptor,
+									   slot->tts_values, slot->tts_isnull);
 
-	uint64 storageId = LookupStorageId(relation->rd_locator);
-	uint64 writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
-	UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
-	slot->tts_tid = row_number_to_tid(writtenRowNumber);
-
-	MemoryContextSwitchTo(oldContext);
+		uint64_t storageId = LookupStorageId(relation->rd_locator);
+		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
+		UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
+		slot->tts_tid = row_number_to_tid(writtenRowNumber);
+	}
 	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
 
 	pgstat_count_heap_insert(relation, 1);
@@ -1018,12 +1017,12 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 static void
 bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
-									uint32 specToken, bool succeeded)
+									uint32_t specToken, bool succeeded)
 {
-	uint64 storageId = LookupStorageId(relation->rd_locator);
+	uint64_t storageId = LookupStorageId(relation->rd_locator);
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
-						Int64GetDatum((int64) storageId));
+						Int64GetDatum((int64_t) storageId));
 
 	bioseq_enable_page_cache = previousCacheEnabledState;
 }
@@ -1039,46 +1038,45 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 	ColumnarCheckLogicalReplication(relation);
 
-	MemoryContext oldContext = MemoryContextSwitchTo(ColumnarWritePerTupleContext(
-														 writeState));
-
-	for (int i = 0; i < ntuples; i++)
 	{
-		TupleTableSlot *tupleSlot = slots[i];
+		MemoryContextScope ctx_guard{ColumnarWritePerTupleContext(writeState)};
 
-		slot_getallattrs(tupleSlot);
+		for (int i = 0; i < ntuples; i++)
+		{
+			TupleTableSlot *tupleSlot = slots[i];
 
-		Datum *values = detoast_values(tupleSlot->tts_tupleDescriptor,
-									   tupleSlot->tts_values, tupleSlot->tts_isnull);
+			slot_getallattrs(tupleSlot);
 
-		uint64 writtenRowNumber = ColumnarWriteRow(writeState, values,
-												   tupleSlot->tts_isnull);
+			Datum *values = detoast_values(tupleSlot->tts_tupleDescriptor,
+										   tupleSlot->tts_values, tupleSlot->tts_isnull);
 
-		EState *estate = create_estate_for_relation(relation);
+			uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values,
+													   tupleSlot->tts_isnull);
 
-		ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
-		InitResultRelInfo(resultRelInfo, relation, 1, NULL, 0);
+			EState *estate = create_estate_for_relation(relation);
 
-		ExecOpenIndices(resultRelInfo, false);
+			ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
+			InitResultRelInfo(resultRelInfo, relation, 1, NULL, 0);
 
-		if (relation->rd_att->constr)
-			ExecConstraints(resultRelInfo, tupleSlot, estate);
+			ExecOpenIndices(resultRelInfo, false);
 
-		ExecCloseIndices(resultRelInfo);
+			if (relation->rd_att->constr)
+				ExecConstraints(resultRelInfo, tupleSlot, estate);
 
-		AfterTriggerEndQuery(estate);
-		ExecCloseResultRelations(estate);
-		ExecCloseRangeTableRelations(estate);
+			ExecCloseIndices(resultRelInfo);
 
-		ExecResetTupleTable(estate->es_tupleTable, false);
-		FreeExecutorState(estate);
+			AfterTriggerEndQuery(estate);
+			ExecCloseResultRelations(estate);
+			ExecCloseRangeTableRelations(estate);
 
-		tupleSlot->tts_tid = row_number_to_tid(writtenRowNumber);
+			ExecResetTupleTable(estate->es_tupleTable, false);
+			FreeExecutorState(estate);
 
-		MemoryContextReset(ColumnarWritePerTupleContext(writeState));
+			tupleSlot->tts_tid = row_number_to_tid(writtenRowNumber);
+
+			MemoryContextReset(ColumnarWritePerTupleContext(writeState));
+		}
 	}
-
-	MemoryContextSwitchTo(oldContext);
 
 	pgstat_count_heap_insert(relation, ntuples);
 }
@@ -1089,11 +1087,11 @@ bioseq_tuple_delete(Relation relation, ItemPointer tid, CommandId cid,
 					  Snapshot snapshot, Snapshot crosscheck, bool wait,
 					  TM_FailureData *tmfd, bool changingPart)
 {
-	uint64 rowNumber = tid_to_row_number(*tid);
-	uint64 storageId = LookupStorageId(relation->rd_locator);
+	uint64_t rowNumber = tid_to_row_number(*tid);
+	uint64_t storageId = LookupStorageId(relation->rd_locator);
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
-						Int64GetDatum((int64) storageId));
+						Int64GetDatum((int64_t) storageId));
 
 	if (!UpdateRowMask(relation->rd_locator, storageId,  snapshot, rowNumber))
 		return TM_Deleted;
@@ -1112,12 +1110,12 @@ bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 {
 
 	
-	uint64 rowNumber = tid_to_row_number(*otid);
-	uint64 storageId = LookupStorageId(relation->rd_locator);
+	uint64_t rowNumber = tid_to_row_number(*otid);
+	uint64_t storageId = LookupStorageId(relation->rd_locator);
 
 	/* Set lock for relation until transaction ends */
 	DirectFunctionCall1(pg_advisory_xact_lock_int8,
-						Int64GetDatum((int64) storageId));
+						Int64GetDatum((int64_t) storageId));
 
 	if (!UpdateRowMask(relation->rd_locator, storageId, snapshot, rowNumber))
 		return TM_Deleted;
@@ -1134,10 +1132,10 @@ bioseq_tuple_update(Relation relation, ItemPointer otid, TupleTableSlot *slot,
 static TM_Result
 bioseq_tuple_lock(Relation relation, ItemPointer tid, Snapshot snapshot,
 					TupleTableSlot *slot, CommandId cid, LockTupleMode mode,
-					LockWaitPolicy wait_policy, uint8 flags,
+					LockWaitPolicy wait_policy, uint8_t flags,
 					TM_FailureData *tmfd)
 {
-	uint64 rowNumber = tid_to_row_number(*tid);
+	uint64_t rowNumber = tid_to_row_number(*tid);
 	ColumnarReadState *readState = NULL;
 
 	int natts = relation->rd_att->natts;
@@ -1187,8 +1185,8 @@ bioseq_relation_set_new_filenode(Relation rel,
 {
 	if (persistence == RELPERSISTENCE_UNLOGGED)
 	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("unlogged columnar tables are not supported")));
+		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.msg("unlogged columnar tables are not supported");
 	}
 
 	/*
@@ -1237,7 +1235,7 @@ bioseq_relation_nontransactional_truncate(Relation rel)
 	RelationTruncate(rel, 0);
 
 	JustLog("[bioseq] pg: bioseq_relation_nontransactional_truncate() initialising columnar storage");
-	uint64 storageId = ColumnarMetadataNewStorageId();
+	uint64_t storageId = ColumnarMetadataNewStorageId();
 
 	ColumnarStorageInit(RelationGetSmgr(rel), storageId);
 }
@@ -1306,9 +1304,8 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	if (OldIndex != NULL || use_sort)
 	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("clustering columnar tables using indexes is "
-							   "not supported")));
+		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.msg("clustering columnar tables using indexes is not supported");
 	}
 
 	/*
@@ -1343,8 +1340,8 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 															randomAccess,
 															NULL);
 
-	Datum *values = make1<Datum>(sourceDesc->natts * sizeof(Datum));
-	bool *nulls = make1<bool>(sourceDesc->natts * sizeof(bool));
+	Datum *values = make_array<Datum>(sourceDesc->natts);
+	bool *nulls = make_array<bool>(sourceDesc->natts);
 
 	*num_tuples = 0;
 
@@ -1399,16 +1396,15 @@ NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed)
 static bool
 TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 {
-	uint64 totalRowNumberCount = 0;
-	uint32 startingStripeListPosition = 0;
+	uint64_t totalRowNumberCount = 0;
+	uint32_t startingStripeListPosition = 0;
 
 	TupleDesc tupleDesc = RelationGetDescr(rel);
 
 	if (tupleDesc->natts == 0)
 	{
-		ereport(elevel,
-				(errmsg("\"%s\": stopping vacuum due to zero column table",
-						RelationGetRelationName(rel))));
+		pg_log(elevel, "\"{}\": stopping vacuum due to zero column table",
+			   RelationGetRelationName(rel));
 		return false;
 	}
 
@@ -1421,15 +1417,14 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	/* Empty table nothing to do */
 	if (stripeMetadataList == NIL)
 	{
-		ereport(elevel,
-				(errmsg("\"%s\": stopping vacuum due to empty table",
-						RelationGetRelationName(rel))));
+		pg_log(elevel, "\"{}\": stopping vacuum due to empty table",
+			   RelationGetRelationName(rel));
 		return false;
 	}
 
 	//ListCell *lc = NULL;
 
-	uint32 lastStripeDeletedRows = 0;
+	uint32_t lastStripeDeletedRows = 0;
 
 	Size totalDecompressedStripeLength = 0;
 
@@ -1446,7 +1441,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 			break;
 		}
 
-		uint64 stripeRowCount = stripeMetadata->rowCount - lastStripeDeletedRows;
+		uint64_t stripeRowCount = stripeMetadata->rowCount - lastStripeDeletedRows;
 
 		if ((totalRowNumberCount + stripeRowCount >= columnarOptions.stripeRowCount))
 		{
@@ -1527,8 +1522,8 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	ColumnarSetStripeReadState(readState,
 							   static_cast<StripeMetadata*>(list_nth(stripeMetadataList, startingStripeListPosition - 1)));
 
-	Datum *values = make1<Datum>(tupleDesc->natts * sizeof(Datum));
-	bool *nulls = make1<bool>(tupleDesc->natts * sizeof(bool));
+	Datum *values = make_array<Datum>(tupleDesc->natts);
+	bool *nulls = make_array<bool>(tupleDesc->natts);
 
 	/* we don't need to know rowNumber here */
 	while (ColumnarReadNextRow(readState, values, nulls, NULL))
@@ -1536,7 +1531,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 		ColumnarWriteRow(writeState, values, nulls);
 	}
 
-	uint64 newDataReservation;
+	uint64_t newDataReservation;
 
 	if (list_length(stripeMetadataList) > startingStripeListPosition)
 	{
@@ -1570,11 +1565,11 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
  * ColumnarTableTupleCount returns the number of tuples that columnar
  * table with relationId has by using stripe metadata.
  */
-static uint64
+static uint64_t
 ColumnarTableTupleCount(Relation relation)
 {
 	List *stripeList = StripesForRelfilenode(relation->rd_locator, ForwardScanDirection);
-	uint64 tupleCount = 0;
+	uint64_t tupleCount = 0;
 
 	for (auto stripe : PList<StripeMetadata>(stripeList))
 	{
@@ -1657,7 +1652,7 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 
 	pgstat_report_vacuum(RelationGetRelid(rel),
 							rel->rd_rel->relisshared,
-							std::max<int64>(new_live_tuples, 0),
+							std::max<int64_t>(new_live_tuples, 0),
 							0);
 	pgstat_progress_end_command();
 }
@@ -1674,12 +1669,12 @@ LogRelationStats(Relation rel, int elevel)
 	StringInfo infoBuf = makeStringInfo();
 
 	int compressionStats[COMPRESSION_COUNT] = { 0 };
-	uint64 totalStripeLength = 0;
-	uint64 tupleCount = 0;
-	uint64 chunkCount = 0;
+	uint64_t totalStripeLength = 0;
+	uint64_t tupleCount = 0;
+	uint64_t chunkCount = 0;
 	TupleDesc tupdesc = RelationGetDescr(rel);
-	uint64 droppedChunksWithData = 0;
-	uint64 totalDecompressedLength = 0;
+	uint64_t droppedChunksWithData = 0;
+	uint64_t totalDecompressedLength = 0;
 
 	List *stripeList = StripesForRelfilenode(relfilelocator, ForwardScanDirection);
 	int stripeCount = list_length(stripeList);
@@ -1688,52 +1683,52 @@ LogRelationStats(Relation rel, int elevel)
 		AllocSetContextCreate(CurrentMemoryContext, "Vacuum Relation Stats Context",
 							  ALLOCSET_SMALL_SIZES);
 
-	MemoryContext oldcontext = MemoryContextSwitchTo(relation_stats_ctx);
-
-	for (auto stripe : PList<StripeMetadata>(stripeList))
 	{
-		StripeSkipList *skiplist = ReadStripeSkipList(relfilelocator, stripe->id,
-													  RelationGetDescr(rel),
-													  stripe->chunkCount,
-													  GetTransactionSnapshot());
-		for (uint32 column = 0; column < skiplist->columnCount; column++)
+		MemoryContextScope ctx_guard{relation_stats_ctx};
+
+		for (auto stripe : PList<StripeMetadata>(stripeList))
 		{
-			bool attrDropped = tupdesc->attrs[column].attisdropped;
-			for (uint32 chunk = 0; chunk < skiplist->chunkCount; chunk++)
+			StripeSkipList *skiplist = ReadStripeSkipList(relfilelocator, stripe->id,
+														  RelationGetDescr(rel),
+														  stripe->chunkCount,
+														  GetTransactionSnapshot());
+			for (uint32_t column = 0; column < skiplist->columnCount; column++)
 			{
-				ColumnChunkSkipNode *skipnode =
-					&skiplist->chunkSkipNodeArray[column][chunk];
-
-				/* ignore zero length chunks for dropped attributes */
-				if (skipnode->valueLength > 0)
+				bool attrDropped = tupdesc->attrs[column].attisdropped;
+				for (uint32_t chunk = 0; chunk < skiplist->chunkCount; chunk++)
 				{
-					compressionStats[skipnode->valueCompressionType]++;
-					chunkCount++;
+					ColumnChunkSkipNode *skipnode =
+						&skiplist->chunkSkipNodeArray[column][chunk];
 
-					if (attrDropped)
+					/* ignore zero length chunks for dropped attributes */
+					if (skipnode->valueLength > 0)
 					{
-						droppedChunksWithData++;
+						compressionStats[skipnode->valueCompressionType]++;
+						chunkCount++;
+
+						if (attrDropped)
+						{
+							droppedChunksWithData++;
+						}
 					}
+
+					/*
+					 * We don't compress exists buffer, so its compressed & decompressed
+					 * lengths are the same.
+					 */
+					totalDecompressedLength += skipnode->existsLength;
+					totalDecompressedLength += skipnode->decompressedValueSize;
 				}
-
-				/*
-				 * We don't compress exists buffer, so its compressed & decompressed
-				 * lengths are the same.
-				 */
-				totalDecompressedLength += skipnode->existsLength;
-				totalDecompressedLength += skipnode->decompressedValueSize;
 			}
+
+			tupleCount += stripe->rowCount;
+			totalStripeLength += stripe->dataLength;
+
+			MemoryContextReset(relation_stats_ctx);
 		}
-
-		tupleCount += stripe->rowCount;
-		totalStripeLength += stripe->dataLength;
-
-		MemoryContextReset(relation_stats_ctx);
 	}
 
-	MemoryContextSwitchTo(oldcontext);
-
-	uint64 relPages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
+	uint64_t relPages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	RelationCloseSmgr(rel);
 
 	Datum storageId = DirectFunctionCall1(bioseq_relation_storageid,
@@ -1779,8 +1774,8 @@ LogRelationStats(Relation rel, int elevel)
 	}
 	appendStringInfoString(infoBuf, "\n");
 
-	ereport(elevel, (errmsg("statistics for \"%s\":\n%s", RelationGetRelationName(rel),
-							infoBuf->data)));
+	pg_log(elevel, "statistics for \"{}\":\n{}", RelationGetRelationName(rel),
+		   infoBuf->data);
 }
 
 
@@ -1822,9 +1817,8 @@ TruncateColumnar(Relation rel, int elevel)
 		 * We failed to establish the lock in the specified number of
 		 * retries. This means we give up truncating.
 		 */
-		ereport(elevel,
-				(errmsg("\"%s\": stopping truncate due to conflicting lock request",
-						RelationGetRelationName(rel))));
+		pg_log(elevel, "\"{}\": stopping truncate due to conflicting lock request",
+			   RelationGetRelationName(rel));
 		return;
 	}
 
@@ -1842,7 +1836,7 @@ TruncateColumnar(Relation rel, int elevel)
 		* new stripes be added beyond highestPhysicalAddress while
 		* we're truncating.
 		*/
-		uint64 newDataReservation = std::max<uint64>(GetHighestUsedAddress(rel->rd_locator) + 1,
+		uint64_t newDataReservation = std::max<uint64_t>(GetHighestUsedAddress(rel->rd_locator) + 1,
 										ColumnarFirstLogicalOffset);
 
 		BlockNumber old_rel_pages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
@@ -1855,11 +1849,11 @@ TruncateColumnar(Relation rel, int elevel)
 
 		BlockNumber new_rel_pages = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
 
-		ereport(elevel,
-		(errmsg("\"%s\": truncated %u to %u pages",
-				RelationGetRelationName(rel),
-				old_rel_pages, new_rel_pages),
-			errdetail_internal("%s", pg_rusage_show(&ru0))));
+		PgReport(elevel)
+			.msg("\"{}\": truncated {} to {} pages",
+				 RelationGetRelationName(rel),
+				 old_rel_pages, new_rel_pages)
+			.detail("{}", pg_rusage_show(&ru0));
 	}
 
 	/*
@@ -1971,7 +1965,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 		 * Columnar utility hook already errors out for BRIN indexes on columnar
 		 * tables, but be on the safe side.
 		 */
-		ereport(ERROR, (errmsg("BRIN indexes on columnar tables are not supported")));
+		pg_log(ERROR, "BRIN indexes on columnar tables are not supported");
 	}
 
 	if (scan)
@@ -1980,7 +1974,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 		 * Parallel scans on columnar tables are already discardad by
 		 * ColumnarGetRelationInfoHook but be on the safe side.
 		 */
-		elog(ERROR, "parallel scans on columnar are not supported");
+		pg_log(ERROR, "parallel scans on columnar are not supported");
 	}
 
 	/* Disable the page cache for the duration of the index build. */
@@ -2133,7 +2127,7 @@ ColumnarGetHighestItemPointer(Relation relation, Snapshot snapshot)
 		return invalidItemPtr;
 	}
 
-	uint64 highestRowNumber = StripeGetHighestRowNumber(stripeWithHighestRowNumber);
+	uint64_t highestRowNumber = StripeGetHighestRowNumber(stripeWithHighestRowNumber);
 	return row_number_to_tid(highestRowNumber);
 }
 
@@ -2406,7 +2400,7 @@ bioseq_relation_needs_toast_table(Relation rel)
 
 
 static void
-bioseq_estimate_rel_size(Relation rel, int32 *attr_widths,
+bioseq_estimate_rel_size(Relation rel, int32_t *attr_widths,
 						   BlockNumber *pages, double *tuples,
 						   double *allvisfrac)
 {
@@ -2426,7 +2420,7 @@ bioseq_estimate_rel_size(Relation rel, int32 *attr_widths,
 static bool
 bioseq_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 {
-	elog(ERROR, "bioseq_scan_sample_next_block not implemented");
+	pg_log(ERROR, "bioseq_scan_sample_next_block not implemented");
 }
 
 
@@ -2434,7 +2428,7 @@ static bool
 bioseq_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 								TupleTableSlot *slot)
 {
-	elog(ERROR, "bioseq_scan_sample_next_tuple not implemented");
+	pg_log(ERROR, "bioseq_scan_sample_next_tuple not implemented");
 }
 
 
@@ -2531,7 +2525,7 @@ bioseq_tableam_init()
 /*
  * Get the number of chunks filtered out during the given scan.
  */
-int64
+int64_t
 ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc)
 {
 	ColumnarReadState *readState = columnarScanDesc->cs_readState;
@@ -2630,10 +2624,10 @@ ColumnarTriggerCreateHook(Oid tgid)
 		return;
 	}
 
-	Form_pg_trigger tgrec = (Form_pg_trigger) GETSTRUCT(tgtup);
+	Form_pg_trigger tgrec = reinterpret_cast<Form_pg_trigger>(GETSTRUCT(tgtup));
 
 	Oid tgrelid = tgrec->tgrelid;
-	int16 tgtype = tgrec->tgtype;
+	int16_t tgtype = tgrec->tgtype;
 
 	systable_endscan(tgscan);
 	table_close(tgrel, AccessShareLock);
@@ -2641,10 +2635,9 @@ ColumnarTriggerCreateHook(Oid tgid)
 	if (TRIGGER_FOR_ROW(tgtype) && TRIGGER_FOR_AFTER(tgtype) &&
 		IsColumnarTableAmTable(tgrelid))
 	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg(
-							"Foreign keys and AFTER ROW triggers are not supported for columnar tables"),
-						errhint("Consider an AFTER STATEMENT trigger instead.")));
+		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.msg("Foreign keys and AFTER ROW triggers are not supported for columnar tables")
+			.hint("Consider an AFTER STATEMENT trigger instead.");
 	}
 }
 
@@ -2705,10 +2698,9 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 		{
 			if (!ColumnarSupportsIndexAM(indexStmt->accessMethod))
 			{
-				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("unsupported access method for the "
-									   "index on columnar table %s (%s)",
-									   RelationGetRelationName(rel), indexStmt->accessMethod)));
+				PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+					.msg("unsupported access method for the index on columnar table {} ({})",
+						 RelationGetRelationName(rel), indexStmt->accessMethod);
 			}
 		}
 
@@ -2855,7 +2847,7 @@ detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
 			/* make a copy */
 			if (values == orig_values)
 			{
-				values = make1<Datum>(sizeof(Datum) * natts);
+				values = make_array<Datum>(natts);
 				memcpy(values, orig_values, sizeof(Datum) * natts);
 			}
 
@@ -2896,9 +2888,8 @@ ColumnarCheckLogicalReplication(Relation rel)
 
 	if (pubActionInsert)
 	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg(
-							"cannot insert into columnar table that is a part of a publication")));
+		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.msg("cannot insert into columnar table that is a part of a publication");
 	}
 }
 
@@ -2930,8 +2921,8 @@ POSTGRES_FN(alter_bioseq_table_set)
 	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		ereport(ERROR, (errmsg("table %s is not a columnar table",
-							   quote_identifier(RelationGetRelationName(rel)))));
+		pg_log(ERROR, "table {} is not a columnar table",
+			   quote_identifier(RelationGetRelationName(rel)));
 	}
 	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
 	{
@@ -2942,7 +2933,7 @@ POSTGRES_FN(alter_bioseq_table_set)
 	ColumnarOptions options = { 0 };
 	if (!ReadColumnarOptions(relationId, &options))
 	{
-		ereport(ERROR, (errmsg("unable to read current options for table")));
+		pg_log(ERROR, "unable to read current options for table");
 	}
 
 	/* chunk_group_row_limit => not null */
@@ -2952,14 +2943,13 @@ POSTGRES_FN(alter_bioseq_table_set)
 		if (options.chunkRowCount < CHUNK_ROW_COUNT_MINIMUM ||
 			options.chunkRowCount > CHUNK_ROW_COUNT_MAXIMUM)
 		{
-			ereport(ERROR, (errmsg("chunk group row count limit out of range"),
-							errhint("chunk group row count limit must be between "
-									UINT64_FORMAT " and " UINT64_FORMAT,
-									(uint64) CHUNK_ROW_COUNT_MINIMUM,
-									(uint64) CHUNK_ROW_COUNT_MAXIMUM)));
+			PgReport(ERROR)
+				.msg("chunk group row count limit out of range")
+				.hint("chunk group row count limit must be between {} and {}",
+					  static_cast<uint64_t>(CHUNK_ROW_COUNT_MINIMUM),
+					  static_cast<uint64_t>(CHUNK_ROW_COUNT_MAXIMUM));
 		}
-		ereport(DEBUG1,
-				(errmsg("updating chunk row count to %d", options.chunkRowCount)));
+		pg_log(DEBUG1, "updating chunk row count to {}", options.chunkRowCount);
 	}
 
 	/* stripe_row_limit => not null */
@@ -2969,15 +2959,13 @@ POSTGRES_FN(alter_bioseq_table_set)
 		if (options.stripeRowCount < STRIPE_ROW_COUNT_MINIMUM ||
 			options.stripeRowCount > STRIPE_ROW_COUNT_MAXIMUM)
 		{
-			ereport(ERROR, (errmsg("stripe row count limit out of range"),
-							errhint("stripe row count limit must be between "
-									UINT64_FORMAT " and " UINT64_FORMAT,
-									(uint64) STRIPE_ROW_COUNT_MINIMUM,
-									(uint64) STRIPE_ROW_COUNT_MAXIMUM)));
+			PgReport(ERROR)
+				.msg("stripe row count limit out of range")
+				.hint("stripe row count limit must be between {} and {}",
+					  static_cast<uint64_t>(STRIPE_ROW_COUNT_MINIMUM),
+					  static_cast<uint64_t>(STRIPE_ROW_COUNT_MAXIMUM));
 		}
-		ereport(DEBUG1, (errmsg(
-							 "updating stripe row count to " UINT64_FORMAT,
-							 options.stripeRowCount)));
+		pg_log(DEBUG1, "updating stripe row count to {}", options.stripeRowCount);
 	}
 
 	/* compression => not null */
@@ -2987,11 +2975,11 @@ POSTGRES_FN(alter_bioseq_table_set)
 		options.compressionType = ParseCompressionType(NameStr(*compressionName));
 		if (options.compressionType == COMPRESSION_TYPE_INVALID)
 		{
-			ereport(ERROR, (errmsg("unknown compression type for columnar table: %s",
-								   quote_identifier(NameStr(*compressionName)))));
+			pg_log(ERROR, "unknown compression type for columnar table: {}",
+				   quote_identifier(NameStr(*compressionName)));
 		}
-		ereport(DEBUG1, (errmsg("updating compression to %s",
-								CompressionTypeStr(options.compressionType))));
+		pg_log(DEBUG1, "updating compression to {}",
+			   CompressionTypeStr(options.compressionType));
 	}
 
 	/* compression_level => not null */
@@ -3001,14 +2989,14 @@ POSTGRES_FN(alter_bioseq_table_set)
 		if (options.compressionLevel < COMPRESSION_LEVEL_MIN ||
 			options.compressionLevel > COMPRESSION_LEVEL_MAX)
 		{
-			ereport(ERROR, (errmsg("compression level out of range"),
-							errhint("compression level must be between %d and %d",
-									COMPRESSION_LEVEL_MIN,
-									COMPRESSION_LEVEL_MAX)));
+			PgReport(ERROR)
+				.msg("compression level out of range")
+				.hint("compression level must be between {} and {}",
+					  COMPRESSION_LEVEL_MIN,
+					  COMPRESSION_LEVEL_MAX);
 		}
 
-		ereport(DEBUG1, (errmsg("updating compression level to %d",
-								options.compressionLevel)));
+		pg_log(DEBUG1, "updating compression level to {}", options.compressionLevel);
 	}
 
 	if (ColumnarTableSetOptions_hook != NULL)
@@ -3049,8 +3037,8 @@ POSTGRES_FN(alter_bioseq_table_reset)
 	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		ereport(ERROR, (errmsg("table %s is not a columnar table",
-							   quote_identifier(RelationGetRelationName(rel)))));
+		pg_log(ERROR, "table {} is not a columnar table",
+			   quote_identifier(RelationGetRelationName(rel)));
 	}
 
 	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
@@ -3062,40 +3050,36 @@ POSTGRES_FN(alter_bioseq_table_reset)
 	ColumnarOptions options = { 0 };
 	if (!ReadColumnarOptions(relationId, &options))
 	{
-		ereport(ERROR, (errmsg("unable to read current options for table")));
+		pg_log(ERROR, "unable to read current options for table");
 	}
 
 	/* chunk_group_row_limit => true */
 	if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1))
 	{
 		options.chunkRowCount = bioseq_chunk_group_row_limit;
-		ereport(DEBUG1,
-				(errmsg("resetting chunk row count to %d", options.chunkRowCount)));
+		pg_log(DEBUG1, "resetting chunk row count to {}", options.chunkRowCount);
 	}
 
 	/* stripe_row_limit => true */
 	if (!PG_ARGISNULL(2) && PG_GETARG_BOOL(2))
 	{
 		options.stripeRowCount = bioseq_stripe_row_limit;
-		ereport(DEBUG1,
-				(errmsg("resetting stripe row count to " UINT64_FORMAT,
-						options.stripeRowCount)));
+		pg_log(DEBUG1, "resetting stripe row count to {}", options.stripeRowCount);
 	}
 
 	/* compression => true */
 	if (!PG_ARGISNULL(3) && PG_GETARG_BOOL(3))
 	{
 		options.compressionType = static_cast<CompressionType>(bioseq_compression);
-		ereport(DEBUG1, (errmsg("resetting compression to %s",
-								CompressionTypeStr(options.compressionType))));
+		pg_log(DEBUG1, "resetting compression to {}",
+			   CompressionTypeStr(options.compressionType));
 	}
 
 	/* compression_level => true */
 	if (!PG_ARGISNULL(4) && PG_GETARG_BOOL(4))
 	{
 		options.compressionLevel = bioseq_compression_level;
-		ereport(DEBUG1, (errmsg("reseting compression level to %d",
-								bioseq_compression_level)));
+		pg_log(DEBUG1, "reseting compression level to {}", bioseq_compression_level);
 	}
 
 	if (ColumnarTableSetOptions_hook != NULL)
@@ -3134,8 +3118,8 @@ POSTGRES_FN(upgrade_bioseq_storage)
 	Relation rel = table_open(relid, AccessExclusiveLock);
 	if (!IsColumnarTableAmTable(relid))
 	{
-		ereport(ERROR, (errmsg("table %s is not a columnar table",
-							   quote_identifier(RelationGetRelationName(rel)))));
+		pg_log(ERROR, "table {} is not a columnar table",
+			   quote_identifier(RelationGetRelationName(rel)));
 	}
 
 	ColumnarStorageUpdateIfNeeded(rel, true);
@@ -3168,8 +3152,8 @@ POSTGRES_FN(downgrade_bioseq_storage)
 	Relation rel = table_open(relid, AccessExclusiveLock);
 	if (!IsColumnarTableAmTable(relid))
 	{
-		ereport(ERROR, (errmsg("table %s is not a columnar table",
-							   quote_identifier(RelationGetRelationName(rel)))));
+		pg_log(ERROR, "table {} is not a columnar table",
+			   quote_identifier(RelationGetRelationName(rel)));
 	}
 
 	ColumnarStorageUpdateIfNeeded(rel, false);
@@ -3180,8 +3164,8 @@ POSTGRES_FN(downgrade_bioseq_storage)
 
 struct StripeHole
 {
-	uint64 fileOffset;
-	uint64 dataLength;
+	uint64_t fileOffset;
+	uint64_t dataLength;
 };
 
 /*
@@ -3199,7 +3183,7 @@ static List *HolesForRelation(Relation rel)
 	ListCell *lc = NULL;
 
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-	uint64 lastMinimalOffset = ColumnarFirstLogicalOffset;
+	uint64_t lastMinimalOffset = ColumnarFirstLogicalOffset;
 
 	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
 	{
@@ -3228,7 +3212,7 @@ static List *HolesForRelation(Relation rel)
  */
 static void vacuum_signal_handler(int signal)
 {
-	elog(DEBUG3, "Received signal %d during a vacuum request", signal);
+	pg_log(DEBUG3, "Received signal {} during a vacuum request", signal);
 
 	/* Set up the ability to bail from the vacuum, with needed information. */
 	need_to_bail = true;
@@ -3240,10 +3224,10 @@ static void vacuum_signal_handler(int signal)
  */
 struct StripeVacuumCandidate
 {
-	uint64 stripeId;
-	int32 stripeMetadataIndex;
-	uint32 candidateTotalSize;
-	uint32 activeRows;
+	uint64_t stripeId;
+	int32_t stripeMetadataIndex;
+	uint32_t candidateTotalSize;
+	uint32_t activeRows;
 	StripeMetadata *stripeMetadata;
 };
 
@@ -3253,8 +3237,8 @@ POSTGRES_FN(vacuum_bioseq_table)
 	Relation rel = RelationIdGetRelation(relid);
 	TupleDesc tupleDesc = RelationGetDescr(rel);
 	MemoryContext oldcontext = CurrentMemoryContext;
-	uint32 stripeCount = PG_GETARG_UINT32(1);
-	uint32 progress = 0;
+	uint32_t stripeCount = PG_GETARG_UINT32(1);
+	uint32_t progress = 0;
 	bool completelyDone = false;
 	sact action;
 
@@ -3291,9 +3275,8 @@ POSTGRES_FN(vacuum_bioseq_table)
 
 	if (tupleDesc->natts == 0)
 	{
-		ereport(INFO,
-				(errmsg("\"%s\": stopping vacuum due to zero column table",
-						RelationGetRelationName(rel))));
+		pg_log(INFO, "\"{}\": stopping vacuum due to zero column table",
+			   RelationGetRelationName(rel));
 
 		MemoryContextSwitchTo(oldcontext);
 		PG_RETURN_VOID();
@@ -3312,9 +3295,8 @@ POSTGRES_FN(vacuum_bioseq_table)
 	/* Empty table nothing to do */
 	if (stripeMetadataList == NIL)
 	{
-		ereport(INFO,
-				(errmsg("\"%s\": stopping vacuum due to empty table",
-						RelationGetRelationName(rel))));
+		pg_log(INFO, "\"{}\": stopping vacuum due to empty table",
+			   RelationGetRelationName(rel));
 
 		/* Close the relation as we are done with it */
 		RelationClose(rel);
@@ -3326,7 +3308,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 
 	int stripeMetadataIndex = 0;
 
-	elog(DEBUG3, "Beginning combination of stripes");
+	pg_log(DEBUG3, "Beginning combination of stripes");
 
 	/*
 	 * Get a list of all stripes that can be combined into larger stripes.
@@ -3339,7 +3321,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 			break;
 		}
 
-		uint32 stripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
+		uint32_t stripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
 												 		stripeMetadata->chunkCount,
 														stripeMetadata->id);
 		float percentageOfDeleteRows =
@@ -3402,10 +3384,10 @@ POSTGRES_FN(vacuum_bioseq_table)
 		ColumnarSetStripeReadState(readState,
 								vacuumCandidate->stripeMetadata);
 
-		Datum *values = make1<Datum>(tupleDesc->natts * sizeof(Datum));
-		bool *nulls = make1<bool>(tupleDesc->natts * sizeof(bool));
+		Datum *values = make_array<Datum>(tupleDesc->natts);
+		bool *nulls = make_array<bool>(tupleDesc->natts);
 
-		int32 rowCount = 0;
+		int32_t rowCount = 0;
 
 		while (rowCount < vacuumCandidate->activeRows && ColumnarReadNextRow(readState, values, nulls, NULL))
 		{
@@ -3467,7 +3449,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	 */
 	ColumnarEndWrite(writeState);
 
-	elog(DEBUG3, "Combined %d stripes", progress);
+	pg_log(DEBUG3, "Combined {} stripes", progress);
 
 	if (completelyDone)
 	{
@@ -3477,14 +3459,14 @@ POSTGRES_FN(vacuum_bioseq_table)
 		PG_RETURN_UINT32(progress);
 	}
 
-	elog(DEBUG3, "Beginning reorganization");
+	pg_log(DEBUG3, "Beginning reorganization");
 	/*
 	 * Continually iterate through the holes, finding where we can place
 	 * old stripes.
 	 */
 	bool done = false;
 
-	uint32 relocationProgress = 0;
+	uint32_t relocationProgress = 0;
 
 	while (!done)
 	{
@@ -3589,7 +3571,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 		MemoryContextDelete(rewriteContext);
 	}
 
-	elog(DEBUG3, "Ending reorganization");
+	pg_log(DEBUG3, "Ending reorganization");
 
 	relation_close(rel, NoLock);
 
@@ -3611,12 +3593,12 @@ POSTGRES_FN(vacuum_bioseq_table)
  */
 struct ColumnarStats
 {
-	uint64 stripeId;
-	uint64 fileOffset;
-	uint32 rowCount;
-	uint32 deletedRows;
-	uint32 chunkCount;
-	uint32 dataLength;
+	uint64_t stripeId;
+	uint64_t fileOffset;
+	uint32_t rowCount;
+	uint32_t deletedRows;
+	uint32_t chunkCount;
+	uint32_t dataLength;
 };
 
 /* We return 6 columns. */
@@ -3648,16 +3630,15 @@ POSTGRES_FN(bioseq_stats)
 		/* Retrieve the stripe metadata. */
 		List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
 		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-				ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									errmsg("function returning record called in context "
-												"that cannot accept type record")));
+				PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+					.msg("function returning record called in context "
+						 "that cannot accept type record");
 
 		attinmeta = TupleDescGetAttInMetadata(tupdesc);
 		funcctx->attinmeta = attinmeta;
 
 		/* Set up the stats. */
-		ColumnarStats *stats = make1<ColumnarStats>(sizeof(ColumnarStats) * list_length(stripeMetadataList));
+		ColumnarStats *stats = make_array<ColumnarStats>(list_length(stripeMetadataList));
 		funcctx->max_calls = list_length(stripeMetadataList);
 
 		/* Iterate through the stripes to get a copy of the important data. */

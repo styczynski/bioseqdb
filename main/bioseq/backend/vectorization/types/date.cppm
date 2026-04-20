@@ -17,6 +17,8 @@ module;
 
 export module bioseq_vector_types_date;
 
+import pg_utils;
+
 extern "C" {
 
 // date (int32)

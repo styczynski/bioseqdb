@@ -87,7 +87,7 @@ GetVectorizedProcedureOid(Oid procedure_oid, Oid* vectorized_procedure_oid)
 
 	const int original_procedure_name_length = strlen(NameStr(procedure_form->proname));
 
-	char* vectorized_procedure_name = make1<char>(sizeof(char) * original_procedure_name_length + 2);
+	char* vectorized_procedure_name = make_array<char>(original_procedure_name_length + 2);
 
 	vectorized_procedure_name[0] = 'v';
 
@@ -97,10 +97,9 @@ GetVectorizedProcedureOid(Oid procedure_oid, Oid* vectorized_procedure_oid)
 
 	ReleaseSysCache(procedure_tuple);
 
-	List* function_names = NIL;
-	function_names = lappend(function_names, makeString(vectorized_procedure_name));
+	auto function_names = PList<void>::of(makeString(vectorized_procedure_name));
 
-	Oid* argument_types = make1<Oid>(sizeof(Oid) * procedure_form->pronargs);
+	Oid* argument_types = make_array<Oid>(procedure_form->pronargs);
 
 	for (int argument_index = 0; argument_index < procedure_form->pronargs; argument_index++)
 		argument_types[argument_index] = procedure_form->proargtypes.values[argument_index];
@@ -262,7 +261,7 @@ ConstructVectorizedQualList(TupleTableSlot* slot, List* vectorized_qual)
 				new_vector_qual->u.expr.fmgrInfo = make0<FmgrInfo>();
 				new_vector_qual->u.expr.fcInfo = make1<FunctionCallInfoBaseData>(SizeForFunctionCallInfo(argument_count));
 				new_vector_qual->u.expr.vectorFnArguments =
-					make1<VectorFnArgument>(sizeof(VectorFnArgument) * argument_count);
+					make_array<VectorFnArgument>(argument_count);
 
 
 				fmgr_info(op_expr_node->opfuncid, new_vector_qual->u.expr.fmgrInfo);
@@ -369,10 +368,12 @@ vectorizedOr(bool* left, bool* right, int dimension)
 static bool*
 executeVectorizedExpr(VectorQual* vector_qual, ExprContext* expression_context)
 {
-	MemoryContext old_context = MemoryContextSwitchTo(expression_context->ecxt_per_tuple_memory);
-	VectorColumn* evaluation_result =
-		reinterpret_cast<VectorColumn*>(vector_qual->u.expr.fmgrInfo->fn_addr(vector_qual->u.expr.fcInfo));
-	MemoryContextSwitchTo(old_context);
+	VectorColumn* evaluation_result;
+	{
+		MemoryContextScope ctx_guard{expression_context->ecxt_per_tuple_memory};
+		evaluation_result =
+			reinterpret_cast<VectorColumn*>(vector_qual->u.expr.fmgrInfo->fn_addr(vector_qual->u.expr.fcInfo));
+	}
 
 	return reinterpret_cast<bool*>(evaluation_result->value);
 }

@@ -35,20 +35,20 @@ import pg_utils;
  */
 struct ColumnarCompressHeader
 {
-	int32 vl_len_;              /* varlena header (do not touch directly!) */
-	int32 rawsize;
+	int32_t vl_len_;              /* varlena header (do not touch directly!) */
+	int32_t rawsize;
 };
 
 /* Inline helpers replacing the original token-pasting macros. They accept
  * the raw varlena byte pointer (typically StringInfo->data) and reinterpret
  * its prefix as ColumnarCompressHeader. */
 
-[[gnu::always_inline]] inline int32 columnar_compress_hdrsz()
+[[gnu::always_inline]] inline int32_t columnar_compress_hdrsz()
 {
-	return static_cast<int32>(sizeof(ColumnarCompressHeader));
+	return static_cast<int32_t>(sizeof(ColumnarCompressHeader));
 }
 
-[[gnu::always_inline]] [[nodiscard]] inline int32 columnar_compress_rawsize(const char* compressed_buffer)
+[[gnu::always_inline]] [[nodiscard]] inline int32_t columnar_compress_rawsize(const char* compressed_buffer)
 {
 	return reinterpret_cast<const ColumnarCompressHeader *>(compressed_buffer)->rawsize;
 }
@@ -58,7 +58,7 @@ struct ColumnarCompressHeader
 	return compressed_buffer + columnar_compress_hdrsz();
 }
 
-[[gnu::always_inline]] inline void columnar_compress_set_rawsize(char* compressed_buffer, int32 raw_size)
+[[gnu::always_inline]] inline void columnar_compress_set_rawsize(char* compressed_buffer, int32_t raw_size)
 {
 	reinterpret_cast<ColumnarCompressHeader *>(compressed_buffer)->rawsize = raw_size;
 }
@@ -91,13 +91,13 @@ CompressBuffer(StringInfo inputBuffer,
 													  inputBuffer->len, maximumLength);
 			if (compressedSize <= 0)
 			{
-				elog(DEBUG1,
-					 "failure in LZ4_compress_default, input size=%d, output size=%d",
+				pg_log(DEBUG1,
+					 "failure in LZ4_compress_default, input size={}, output size={}",
 					 inputBuffer->len, maximumLength);
 				return false;
 			}
 
-			elog(DEBUG1, "compressed %d bytes to %d bytes", inputBuffer->len,
+			pg_log(DEBUG1, "compressed {} bytes to {} bytes", inputBuffer->len,
 				 compressedSize);
 
 			outputBuffer->len = compressedSize;
@@ -121,8 +121,7 @@ CompressBuffer(StringInfo inputBuffer,
 
 			if (ZSTD_isError(compressedSize))
 			{
-				ereport(WARNING, (errmsg("zstd compression failed"),
-								  (errdetail("%s", ZSTD_getErrorName(compressedSize)))));
+				PgReport(WARNING).msg("zstd compression failed").detail("{}", ZSTD_getErrorName(compressedSize));
 				return false;
 			}
 
@@ -133,14 +132,14 @@ CompressBuffer(StringInfo inputBuffer,
 
 		case COMPRESSION_PG_LZ:
 		{
-			uint64 maximumLength = PGLZ_MAX_OUTPUT(inputBuffer->len) +
+			uint64_t maximumLength = PGLZ_MAX_OUTPUT(inputBuffer->len) +
 								   columnar_compress_hdrsz();
 			bool compressionResult = false;
 
 			resetStringInfo(outputBuffer);
 			enlargeStringInfo(outputBuffer, maximumLength);
 
-			int32 compressedByteCount = pglz_compress(inputBuffer->data,
+			int32_t compressedByteCount = pglz_compress(inputBuffer->data,
 													  inputBuffer->len,
 													  columnar_compress_rawdata(outputBuffer->data),
 													  PGLZ_strategy_always);
@@ -175,7 +174,7 @@ CompressBuffer(StringInfo inputBuffer,
 export StringInfo
 DecompressBuffer(StringInfo buffer,
 				 CompressionType compressionType,
-				 uint64 decompressedSize)
+				 uint64_t decompressedSize)
 {
 	switch (compressionType)
 	{
@@ -197,9 +196,7 @@ DecompressBuffer(StringInfo buffer,
 
 			if (lz4DecompressSize != decompressedSize)
 			{
-				ereport(ERROR, (errmsg("cannot decompress the buffer"),
-								errdetail("Expected %lu bytes, but received %d bytes",
-										  decompressedSize, lz4DecompressSize)));
+				PgReport(ERROR).msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", decompressedSize, lz4DecompressSize);
 			}
 
 			decompressedBuffer->len = decompressedSize;
@@ -220,16 +217,12 @@ DecompressBuffer(StringInfo buffer,
 														buffer->len);
 			if (ZSTD_isError(zstdDecompressSize))
 			{
-				ereport(ERROR, (errmsg("zstd decompression failed"),
-								(errdetail("%s", ZSTD_getErrorName(
-											   zstdDecompressSize)))));
+				PgReport(ERROR).msg("zstd decompression failed").detail("{}", ZSTD_getErrorName(zstdDecompressSize));
 			}
 
 			if (zstdDecompressSize != decompressedSize)
 			{
-				ereport(ERROR, (errmsg("unexpected decompressed size"),
-								errdetail("Expected %ld, received %ld", decompressedSize,
-										  zstdDecompressSize)));
+				PgReport(ERROR).msg("unexpected decompressed size").detail("Expected {}, received {}", decompressedSize, zstdDecompressSize);
 			}
 
 			decompressedBuffer->len = decompressedSize;
@@ -240,27 +233,24 @@ DecompressBuffer(StringInfo buffer,
 
 		case COMPRESSION_PG_LZ:
 		{
-			uint32 compressedDataSize = VARSIZE(buffer->data) - columnar_compress_hdrsz();
-			uint32 decompressedDataSize = columnar_compress_rawsize(buffer->data);
+			uint32_t compressedDataSize = VARSIZE(buffer->data) - columnar_compress_hdrsz();
+			uint32_t decompressedDataSize = columnar_compress_rawsize(buffer->data);
 
 			if (compressedDataSize + columnar_compress_hdrsz() != buffer->len)
 			{
-				ereport(ERROR, (errmsg("cannot decompress the buffer"),
-								errdetail("Expected %u bytes, but received %u bytes",
-										  compressedDataSize, buffer->len)));
+				PgReport(ERROR).msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", compressedDataSize, buffer->len);
 			}
 
 			char *decompressedData = make1<char>(decompressedDataSize);
 
-			int32 decompressedByteCount = pglz_decompress(columnar_compress_rawdata(buffer->data),
+			int32_t decompressedByteCount = pglz_decompress(columnar_compress_rawdata(buffer->data),
 														  compressedDataSize,
 														  decompressedData,
 														  decompressedDataSize, true);
 
 			if (decompressedByteCount < 0)
 			{
-				ereport(ERROR, (errmsg("cannot decompress the buffer"),
-								errdetail("compressed data is corrupted")));
+				PgReport(ERROR).msg("cannot decompress the buffer").detail("compressed data is corrupted");
 			}
 
 			StringInfo decompressedBuffer = make0<StringInfoData>();
@@ -273,7 +263,7 @@ DecompressBuffer(StringInfo buffer,
 
 		default:
 		{
-			ereport(ERROR, (errmsg("unexpected compression type: %d", compressionType)));
+			pg_log(ERROR, "unexpected compression type: {}", compressionType);
 		}
 	}
 }

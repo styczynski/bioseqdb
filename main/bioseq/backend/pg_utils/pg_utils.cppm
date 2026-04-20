@@ -26,6 +26,7 @@ export module pg_utils;
 
 export import pg_utils.lists;
 export import pg_utils.bitmapset;
+export import pg_utils.logging;
 
 /*
  * PageCacheDisableScope temporarily forces bioseq_enable_page_cache to

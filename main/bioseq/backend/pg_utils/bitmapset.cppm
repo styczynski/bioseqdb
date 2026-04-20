@@ -113,9 +113,10 @@ public:
      * Implicit conversion to Bitmapset* so legacy call sites that still
      * hand off to bms_* / bioseq_* functions taking a raw pointer keep
      * compiling. All such functions are NULL-safe, matching the empty-set
-     * convention already baked into the PG API.
+     * convention already baked into the PG API. Not [[nodiscard]] so the
+     * wrapper can be passed transparently as an argument.
      */
-    [[nodiscard]] operator Bitmapset*() const { return set; }
+    operator Bitmapset*() const { return set; }
 
     /* True when the set contains no members (empty set == NULL). */
     [[nodiscard]] bool empty() const { return set == nullptr; }

@@ -21,6 +21,7 @@ export module bioseq_columnar;
 import mlogging;
 import bioseq_table;
 import config;
+import pg_utils;
 
 extern "C++" {
 

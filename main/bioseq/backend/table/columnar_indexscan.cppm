@@ -18,6 +18,7 @@ module;
 
 export module bioseq_table:index_scan;
 
+import pg_utils;
 import bioseq_table_types;
 import bioseq_scan_state;
 import pg_utils.lists;
@@ -68,7 +69,7 @@ static HeapTuple reorderqueue_pop(IndexScanState* node);
 #define CHECK_REL_PROCEDURE(pname) \
     do { \
         if (indexRelation->rd_indam->pname == NULL) \
-            elog(ERROR, "function \"%s\" is not defined for index \"%s\"", \
+            pg_log(ERROR, "function \"{}\" is not defined for index \"{}\"", \
                  CppAsString(pname), RelationGetRelationName(indexRelation)); \
     } while(0)
 
@@ -326,7 +327,7 @@ IndexNextWithReorder(IndexScanState* node)
                                       scandesc->xs_orderbynulls,
                                       node);
             if (cmp < 0)
-                elog(ERROR, "index returned tuples in wrong order");
+                pg_log(ERROR, "index returned tuples in wrong order");
             else if (cmp == 0)
                 was_exact = true;
             else
@@ -364,7 +365,7 @@ IndexNextWithReorder(IndexScanState* node)
 static void
 EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
 {
-    MemoryContext oldContext = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+    MemoryContextScope ctx_guard{econtext->ecxt_per_tuple_memory};
 
     int orderby_index = 0;
     for (auto orderby_state : PList<ExprState>(node->indexorderbyorig))
@@ -374,8 +375,6 @@ EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
                                                               &node->iss_OrderByNulls[orderby_index]);
         orderby_index++;
     }
-
-    MemoryContextSwitchTo(oldContext);
 }
 
 /* IndexRecheck -- access method routine to recheck a tuple in EvalPlanQual */
@@ -429,12 +428,12 @@ reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
 {
     IndexScanDesc scandesc = node->iss_ScanDesc;
     EState* estate = node->ss.ps.state;
-    MemoryContext oldContext = MemoryContextSwitchTo(estate->es_query_cxt);
+    MemoryContextScope ctx_guard{estate->es_query_cxt};
 
-    ReorderTuple* rt = static_cast<ReorderTuple*>(palloc(sizeof(ReorderTuple)));
+    ReorderTuple* rt = make0<ReorderTuple>();
     rt->htup = ExecCopySlotHeapTuple(slot);
-    rt->orderbyvals = static_cast<Datum*>(palloc(sizeof(Datum) * scandesc->numberOfOrderBys));
-    rt->orderbynulls = static_cast<bool*>(palloc(sizeof(bool) * scandesc->numberOfOrderBys));
+    rt->orderbyvals = make_array<Datum>(scandesc->numberOfOrderBys);
+    rt->orderbynulls = make_array<bool>(scandesc->numberOfOrderBys);
     for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
     {
         if (!orderbynulls[orderby_index])
@@ -446,8 +445,6 @@ reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
         rt->orderbynulls[orderby_index] = orderbynulls[orderby_index];
     }
     pairingheap_add(node->iss_ReorderQueue, &rt->ph_node);
-
-    MemoryContextSwitchTo(oldContext);
 }
 
 /* Helper function to pop the next tuple from the reorder queue. */

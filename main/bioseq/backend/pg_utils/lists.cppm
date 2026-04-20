@@ -106,9 +106,10 @@ public:
     /*
      * Implicit conversion to List* so legacy call sites that still hand
      * the field off to pull_var_clause / lappend / copyObject / ... keep
-     * compiling. All such functions are NIL-safe.
+     * compiling. All such functions are NIL-safe. Not [[nodiscard]] so
+     * the wrapper can be passed transparently as an argument.
      */
-    [[nodiscard]] operator List*() const { return list; }
+    operator List*() const { return list; }
 
     /* Length in elements (list_length handles NIL as 0). */
     [[nodiscard]] int length() const { return list_length(list); }
@@ -132,6 +133,10 @@ public:
     [[nodiscard]] T* third() { return static_cast<T*>(list_nth(list, 2)); }
     [[nodiscard]] const T* third() const { return static_cast<T*>(list_nth(list, 2)); }
 
+    /* Last element via llast(); requires the list to be non-empty. */
+    [[nodiscard]] T* last() { return static_cast<T*>(llast(list)); }
+    [[nodiscard]] const T* last() const { return static_cast<T*>(llast(list)); }
+
     /*
      * Appends the given element; updates the stored pointer because
      * lappend may reallocate the backing ListCell array. Returns *this
@@ -141,6 +146,96 @@ public:
     {
         list = lappend(list, element);
         return *this;
+    }
+
+    /*
+     * Prepends the given element via lcons; updates the stored pointer
+     * because lcons may reallocate the backing ListCell array.
+     */
+    PList& prepend(T* element)
+    {
+        list = lcons(element, list);
+        return *this;
+    }
+
+    /*
+     * Mutating concat: appends the cells of the other list onto this one
+     * via list_concat. The other list is consumed (its cells are
+     * transferred), matching the underlying PG convention.
+     */
+    PList& concat(List* other)
+    {
+        list = list_concat(list, other);
+        return *this;
+    }
+
+    PList& concat(const PList& other)
+    {
+        list = list_concat(list, other.list);
+        return *this;
+    }
+
+    /*
+     * Non-mutating concat: returns a fresh PList that is the concatenation
+     * of *this and other; neither input list is modified. Wraps
+     * list_concat_copy.
+     */
+    [[nodiscard]] PList concat_copy(List* other) const
+    {
+        return PList{ list_concat_copy(list, other) };
+    }
+
+    [[nodiscard]] PList concat_copy(const PList& other) const
+    {
+        return PList{ list_concat_copy(list, other.list) };
+    }
+
+    /*
+     * Returns a fresh PList holding the intersection of *this and other,
+     * computed via list_intersection (pointer-equality semantics for the
+     * default PG List of pointers).
+     */
+    [[nodiscard]] PList intersection(const PList& other) const
+    {
+        return PList{ list_intersection(list, other.list) };
+    }
+
+    /*
+     * Returns a fresh PList holding the elements of *this that are not in
+     * other; computed via list_difference (pointer-equality semantics).
+     */
+    [[nodiscard]] PList difference(const PList& other) const
+    {
+        return PList{ list_difference(list, other.list) };
+    }
+
+    /*
+     * Removes and returns the first element via list_delete_first,
+     * yielding the popped pointer and updating the stored list head.
+     */
+    T* pop_front()
+    {
+        T* head_element = first();
+        list = list_delete_first(list);
+        return head_element;
+    }
+
+    /*
+     * Membership test using pointer equality (list_member_ptr). Use the
+     * generic equal()-based variant only when explicitly required.
+     */
+    [[nodiscard]] bool contains(const T* element) const
+    {
+        return list_member_ptr(list, element);
+    }
+
+    /*
+     * Static factory mirroring list_make1: returns a fresh single-element
+     * PList holding the given pointer.
+     */
+    [[nodiscard]] static PList of(T* element)
+    {
+        return PList{ list_make1(element) };
     }
 
     /* Clears the list via list_free and resets the stored pointer to NIL. */
@@ -231,7 +326,7 @@ public:
     [[nodiscard]] p_list_int_iterator end() const { return p_list_int_iterator(); }
 
     [[nodiscard]] List* ptr() const { return list; }
-    [[nodiscard]] operator List*() const { return list; }
+    operator List*() const { return list; }
     [[nodiscard]] int length() const { return list_length(list); }
     [[nodiscard]] bool empty() const { return list == nullptr; }
 
@@ -240,6 +335,39 @@ public:
         list = lappend_int(list, element);
         return *this;
     }
+
+    /* Mutating concat over int lists; see PList::concat. */
+    PIntList& concat(List* other)
+    {
+        list = list_concat(list, other);
+        return *this;
+    }
+
+    PIntList& concat(const PIntList& other)
+    {
+        list = list_concat(list, other.list);
+        return *this;
+    }
+
+    /* Non-mutating concat returning a fresh PIntList. */
+    [[nodiscard]] PIntList concat_copy(List* other) const
+    {
+        return PIntList{ list_concat_copy(list, other) };
+    }
+
+    [[nodiscard]] PIntList concat_copy(const PIntList& other) const
+    {
+        return PIntList{ list_concat_copy(list, other.list) };
+    }
+
+    /* Last value via llast_int(); requires the list to be non-empty. */
+    [[nodiscard]] int last() const { return llast_int(list); }
+
+    /* Pointer-equality membership test; mirrors list_member_int. */
+    [[nodiscard]] bool contains(int value) const { return list_member_int(list, value); }
+
+    /* Static factory mirroring list_make1_int. */
+    [[nodiscard]] static PIntList of(int value) { return PIntList{ list_make1_int(value) }; }
 
     void clear()
     {

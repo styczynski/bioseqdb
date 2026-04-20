@@ -114,10 +114,10 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 		OpExpr* op_expr_node = reinterpret_cast<OpExpr*>(node);
 
 		if (list_length(op_expr_node->args) != 2)
-			elog(ERROR, "Aggregation vectorization works only on two arguments.");
+			pg_log(ERROR, "Aggregation vectorization works only on two arguments.");
 
 		if (CheckOpExprArgumentRules(op_expr_node->args))
-			elog(ERROR, "Unsupported aggregate argument combination.");
+			pg_log(ERROR, "Unsupported aggregate argument combination.");
 
 		HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
 		Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
@@ -126,7 +126,7 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 
 		Oid vectorized_procedure_oid;
 		if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_procedure_oid))
-			elog(ERROR, "Vectorized aggregate not found.");
+			pg_log(ERROR, "Vectorized aggregate not found.");
 
 		op_expr_node->opfuncid = vectorized_procedure_oid;
 
@@ -135,7 +135,7 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 
 	/* This should handle aggregates that have non var(column) as argument*/
 	if (previous_node != NULL && IsA(previous_node, TargetEntry) && !IsA(node, Var))
-		elog(ERROR, "Vectorized Aggregates accept only valid column argument");
+		pg_log(ERROR, "Vectorized Aggregates accept only valid column argument");
 
 	return expression_tree_mutator(node, AggRefArgsExpressionMutator, static_cast<void*>(node));
 }
@@ -159,12 +159,12 @@ ExpressionMutator(Node* node, void* context)
 
 		if (old_aggref_node->aggdistinct)
 		{
-			elog(ERROR, "Vectorized aggregate with DISTINCT not supported.");
+			pg_log(ERROR, "Vectorized aggregate with DISTINCT not supported.");
 		}
 
 		if (old_aggref_node->aggfilter)
 		{
-			elog(ERROR, "Vectorized aggregate with FILTER not supported");
+			pg_log(ERROR, "Vectorized aggregate with FILTER not supported");
 		}
 
 		new_aggref_node->args = reinterpret_cast<List*>(
@@ -173,7 +173,7 @@ ExpressionMutator(Node* node, void* context)
 		Oid vectorized_procedure_oid = 0;
 		if (!GetVectorizedProcedureOid(new_aggref_node->aggfnoid, &vectorized_procedure_oid))
 		{
-			elog(ERROR, "Vectorized aggregate not found.");
+			pg_log(ERROR, "Vectorized aggregate not found.");
 		}
 
 		new_aggref_node->aggfnoid = vectorized_procedure_oid;
@@ -222,7 +222,7 @@ PlanTreeMutator(Plan* node, void* context)
 			}
 			else
 			{
-				elog(ERROR, "Custom Scan type is not ColumnarScan.");
+				pg_log(ERROR, "Custom Scan type is not ColumnarScan.");
 			}
 
 			break;
@@ -463,10 +463,10 @@ ColumnarPlannerHook(Query* parse,
 
 		ErrorData* error_data = CopyErrorData();
 		FlushErrorState();
-		ereport(DEBUG1,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-					errmsg("Query can't be vectorized. Falling back to original execution."),
-					errdetail("%s", error_data->message)));
+		PgReport(DEBUG1)
+			.code(ERRCODE_INTERNAL_ERROR)
+			.msg("Query can't be vectorized. Falling back to original execution.")
+			.detail("{}", error_data->message);
 		stmt->planTree = saved_plan_tree;
 		stmt->subplans = saved_subplans;
 		JustLog("[bioseq] pg: ColumnarPlannerHook() caught PG_TRY exception, reverted plan");

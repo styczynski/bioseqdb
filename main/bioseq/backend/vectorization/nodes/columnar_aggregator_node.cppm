@@ -287,8 +287,8 @@ struct HashAggSpill
 {
 	int			npartitions;	/* number of partitions */
 	LogicalTape **partitions;	/* spill partition tapes */
-	int64	   *ntuples;		/* number of tuples in each partition */
-	uint32		mask;			/* mask to find partition from hash value */
+	int64_t	   *ntuples;		/* number of tuples in each partition */
+	uint32_t	mask;			/* mask to find partition from hash value */
 	int			shift;			/* after masking, shift by this amount */
 	hyperLogLogState *hll_card; /* cardinality estimate for contents */
 };
@@ -298,7 +298,7 @@ struct HashAggBatch
 	int			setno;			/* grouping set */
 	int			used_bits;		/* number of bits of hash already used */
 	LogicalTape *input_tape;	/* input partition tape */
-	int64		input_tuples;	/* number of tuples in this batch */
+	int64_t		input_tuples;	/* number of tuples in this batch */
 	double		input_card;		/* estimated group cardinality */
 };
 
@@ -379,14 +379,14 @@ static void hash_agg_update_metrics(AggState *aggstate, bool from_tape,
 static void hashagg_finish_initial_spills(AggState *aggstate);
 static void hashagg_reset_spill_state(AggState *aggstate);
 static HashAggBatch *hashagg_batch_new(LogicalTape *input_tape, int setno,
-									   int64 input_tuples, double input_card,
+									   int64_t input_tuples, double input_card,
 									   int used_bits);
-static MinimalTuple hashagg_batch_read(HashAggBatch *batch, uint32 *hashp);
+static MinimalTuple hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp);
 static void hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *lts,
 							   int used_bits, double input_groups,
 							   double hashentrysize);
 static Size hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
-								TupleTableSlot *slot, uint32 hash);
+								TupleTableSlot *slot, uint32_t hash);
 static void hashagg_spill_finish(AggState *aggstate, HashAggSpill *spill,
 								 int setno);
 static Datum GetAggInitVal(Datum textInitVal, Oid transtype);
@@ -580,13 +580,10 @@ initialize_aggregate(AggState *aggstate, AggStatePerTrans pertrans,
 		pergroupstate->transValue = pertrans->initValue;
 	else
 	{
-		MemoryContext oldContext;
-
-		oldContext = MemoryContextSwitchTo(aggstate->curaggcontext->ecxt_per_tuple_memory);
+		MemoryContextScope ctx_guard{aggstate->curaggcontext->ecxt_per_tuple_memory};
 		pergroupstate->transValue = datumCopy(pertrans->initValue,
 											  pertrans->transtypeByVal,
 											  pertrans->transtypeLen);
-		MemoryContextSwitchTo(oldContext);
 	}
 	pergroupstate->transValueIsNull = pertrans->initValueIsNull;
 
@@ -660,7 +657,6 @@ advance_transition_function(AggState *aggstate,
 							AggStatePerGroup pergroupstate)
 {
 	FunctionCallInfo fcinfo = pertrans->transfn_fcinfo;
-	MemoryContext oldContext;
 	Datum		newVal;
 
 	if (pertrans->transfn.fn_strict)
@@ -688,13 +684,14 @@ advance_transition_function(AggState *aggstate,
 			 * We must copy the datum into aggcontext if it is pass-by-ref. We
 			 * do not need to pfree the old transValue, since it's NULL.
 			 */
-			oldContext = MemoryContextSwitchTo(aggstate->curaggcontext->ecxt_per_tuple_memory);
-			pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
-												  pertrans->transtypeByVal,
-												  pertrans->transtypeLen);
-			pergroupstate->transValueIsNull = false;
-			pergroupstate->noTransValue = false;
-			MemoryContextSwitchTo(oldContext);
+			{
+				MemoryContextScope ctx_guard{aggstate->curaggcontext->ecxt_per_tuple_memory};
+				pergroupstate->transValue = datumCopy(fcinfo->args[1].value,
+													  pertrans->transtypeByVal,
+													  pertrans->transtypeLen);
+				pergroupstate->transValueIsNull = false;
+				pergroupstate->noTransValue = false;
+			}
 			return;
 		}
 		if (pergroupstate->transValueIsNull)
@@ -710,7 +707,7 @@ advance_transition_function(AggState *aggstate,
 	}
 
 	/* We run the transition functions in per-input-tuple memory context */
-	oldContext = MemoryContextSwitchTo(aggstate->tmpcontext->ecxt_per_tuple_memory);
+	MemoryContextScope ctx_guard{aggstate->tmpcontext->ecxt_per_tuple_memory};
 
 	/* set up aggstate->curpertrans for AggGetAggref() */
 	aggstate->curpertrans = pertrans;
@@ -753,8 +750,6 @@ advance_transition_function(AggState *aggstate,
 
 	pergroupstate->transValue = newVal;
 	pergroupstate->transValueIsNull = fcinfo->isnull;
-
-	MemoryContextSwitchTo(oldContext);
 }
 
 /*
@@ -809,7 +804,6 @@ process_ordered_aggregate_single(AggState *aggstate,
 	bool		oldIsNull = true;
 	bool		haveOldVal = false;
 	MemoryContext workcontext = aggstate->tmpcontext->ecxt_per_tuple_memory;
-	MemoryContext oldContext;
 	bool		isDistinct = (pertrans->numDistinctCols > 0);
 	Datum		newAbbrevVal = (Datum) 0;
 	Datum		oldAbbrevVal = (Datum) 0;
@@ -839,7 +833,7 @@ process_ordered_aggregate_single(AggState *aggstate,
 		 * function and transition function.
 		 */
 		MemoryContextReset(workcontext);
-		oldContext = MemoryContextSwitchTo(workcontext);
+		MemoryContextScope ctx_guard{workcontext};
 
 		/*
 		 * If DISTINCT mode, and not distinct from prior, skip it.
@@ -869,8 +863,6 @@ process_ordered_aggregate_single(AggState *aggstate,
 			oldIsNull = *isNull;
 			haveOldVal = true;
 		}
-
-		MemoryContextSwitchTo(oldContext);
 	}
 
 	if (!oldIsNull && !pertrans->inputtypeByVal)
@@ -994,12 +986,11 @@ finalize_aggregate(AggState *aggstate,
 {
 	LOCAL_FCINFO(fcinfo, FUNC_MAX_ARGS);
 	bool		anynull = false;
-	MemoryContext oldContext;
 	int			i;
 	//ListCell   *lc;
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
 
-	oldContext = MemoryContextSwitchTo(aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	MemoryContextScope ctx_guard{aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
 	/*
 	 * Evaluate any direct arguments.  We do this even if there's no finalfn
@@ -1071,8 +1062,6 @@ finalize_aggregate(AggState *aggstate,
 									   pertrans->transtypeLen);
 		*resultIsNull = pergroupstate->transValueIsNull;
 	}
-
-	MemoryContextSwitchTo(oldContext);
 }
 
 /*
@@ -1088,9 +1077,8 @@ finalize_partialaggregate(AggState *aggstate,
 						  Datum *resultVal, bool *resultIsNull)
 {
 	AggStatePerTrans pertrans = &aggstate->pertrans[peragg->transno];
-	MemoryContext oldContext;
 
-	oldContext = MemoryContextSwitchTo(aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory);
+	MemoryContextScope ctx_guard{aggstate->ss.ps.ps_ExprContext->ecxt_per_tuple_memory};
 
 	/*
 	 * serialfn_oid will be set if we must serialize the transvalue before
@@ -1127,8 +1115,6 @@ finalize_partialaggregate(AggState *aggstate,
 									   pertrans->transtypeLen);
 		*resultIsNull = pergroupstate->transValueIsNull;
 	}
-
-	MemoryContextSwitchTo(oldContext);
 }
 
 /*
@@ -1551,9 +1537,9 @@ find_hash_columns(AggState *aggstate)
 		maxCols = bms_num_members(colnos) + perhash->numCols;
 
 		perhash->hashGrpColIdxInput =
-			make1<AttrNumber>(maxCols * sizeof(AttrNumber));
+			make_array<AttrNumber>(maxCols);
 		perhash->hashGrpColIdxHash =
-			make1<AttrNumber>(perhash->numCols * sizeof(AttrNumber));
+			make_array<AttrNumber>(perhash->numCols);
 
 		/* Add all the grouping columns to colnos */
 		for (i = 0; i < perhash->numCols; i++)
@@ -1778,7 +1764,7 @@ hash_agg_set_limits(double hashentrysize, double input_groups, int used_bits,
 static void
 hash_agg_check_limits(AggState *aggstate)
 {
-	uint64		ngroups = aggstate->hash_ngroups_current;
+	uint64_t	ngroups = aggstate->hash_ngroups_current;
 	Size		meta_mem = MemoryContextMemAllocated(aggstate->hash_metacxt,
 													 true);
 	Size		hashkey_mem = MemoryContextMemAllocated(aggstate->hashcontext->ecxt_per_tuple_memory,
@@ -1816,7 +1802,7 @@ hash_agg_enter_spill_mode(AggState *aggstate)
 
 		aggstate->hash_tapeset = LogicalTapeSetCreate(true, NULL, -1);
 
-		aggstate->hash_spills = make1<HashAggSpill>(sizeof(HashAggSpill) * aggstate->num_hashes);
+		aggstate->hash_spills = make_array<HashAggSpill>(aggstate->num_hashes);
 
 		for (int setno = 0; setno < aggstate->num_hashes; setno++)
 		{
@@ -1867,7 +1853,7 @@ hash_agg_update_metrics(AggState *aggstate, bool from_tape, int npartitions)
 	/* update disk usage */
 	if (aggstate->hash_tapeset != NULL)
 	{
-		uint64		disk_used = LogicalTapeSetBlocks(aggstate->hash_tapeset) * (BLCKSZ / 1024);
+		uint64_t	disk_used = LogicalTapeSetBlocks(aggstate->hash_tapeset) * (BLCKSZ / 1024);
 
 		if (aggstate->hash_disk_used < disk_used)
 			aggstate->hash_disk_used = disk_used;
@@ -2027,7 +2013,7 @@ lookup_hash_entries(AggState *aggstate)
 		TupleHashTable hashtable = perhash->hashtable;
 		TupleTableSlot *hashslot = perhash->hashslot;
 		TupleHashEntry entry;
-		uint32		hash;
+		uint32_t	hash;
 		bool		isnew = false;
 		bool	   *p_isnew;
 
@@ -2606,7 +2592,7 @@ agg_refill_hash_table(AggState *aggstate)
 		TupleTableSlot *hashslot = perhash->hashslot;
 		TupleHashEntry entry;
 		MinimalTuple tuple;
-		uint32		hash;
+		uint32_t	hash;
 		bool		isnew = false;
 		bool	   *p_isnew = aggstate->hash_spill_mode ? NULL : &isnew;
 
@@ -2809,7 +2795,7 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 		}
 		ExecStoreVirtualTuple(firstSlot);
 
-		pergroup = (AggStatePerGroup) entry->additional;
+		pergroup = static_cast<AggStatePerGroup>(entry->additional);
 
 		/*
 		 * Use the representative input tuple for any references to
@@ -2848,9 +2834,9 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
 	npartitions = hash_choose_num_partitions(input_groups, hashentrysize,
 											 used_bits, &partition_bits);
 
-	spill->partitions = make1<LogicalTape*>(sizeof(LogicalTape *) * npartitions);
-	spill->ntuples = make1<int64>(sizeof(int64) * npartitions);
-	spill->hll_card = make1<hyperLogLogState>(sizeof(hyperLogLogState) * npartitions);
+	spill->partitions = make_array<LogicalTape*>(npartitions);
+	spill->ntuples = make_array<int64_t>(npartitions);
+	spill->hll_card = make_array<hyperLogLogState>(npartitions);
 
 	for (int i = 0; i < npartitions; i++)
 		spill->partitions[i] = LogicalTapeCreate(tapeset);
@@ -2871,7 +2857,7 @@ hashagg_spill_init(HashAggSpill *spill, LogicalTapeSet *tapeset, int used_bits,
  */
 static Size
 hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
-					TupleTableSlot *inputslot, uint32 hash)
+					TupleTableSlot *inputslot, uint32_t hash)
 {
 	TupleTableSlot *spillslot;
 	int			partition;
@@ -2917,8 +2903,8 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
 
 	tape = spill->partitions[partition];
 
-	LogicalTapeWrite(tape, static_cast<const void *>(&hash), sizeof(uint32));
-	total_written += sizeof(uint32);
+	LogicalTapeWrite(tape, static_cast<const void *>(&hash), sizeof(uint32_t));
+	total_written += sizeof(uint32_t);
 
 	LogicalTapeWrite(tape, static_cast<const void *>(tuple), tuple->t_len);
 	total_written += tuple->t_len;
@@ -2937,9 +2923,9 @@ hashagg_spill_tuple(AggState *aggstate, HashAggSpill *spill,
  */
 static HashAggBatch *
 hashagg_batch_new(LogicalTape *input_tape, int setno,
-				  int64 input_tuples, double input_card, int used_bits)
+				  int64_t input_tuples, double input_card, int used_bits)
 {
-	HashAggBatch *batch = make1<HashAggBatch>(sizeof(HashAggBatch));
+	HashAggBatch *batch = make0<HashAggBatch>();
 
 	batch->setno = setno;
 	batch->used_bits = used_bits;
@@ -2955,43 +2941,40 @@ hashagg_batch_new(LogicalTape *input_tape, int setno,
  * 		read the next tuple from a batch's tape.  Return NULL if no more.
  */
 static MinimalTuple
-hashagg_batch_read(HashAggBatch *batch, uint32 *hashp)
+hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
 {
 	LogicalTape *tape = batch->input_tape;
 	MinimalTuple tuple;
-	uint32		t_len;
+	uint32_t	t_len;
 	size_t		nread;
-	uint32		hash;
+	uint32_t	hash;
 
-	nread = LogicalTapeRead(tape, &hash, sizeof(uint32));
+	nread = LogicalTapeRead(tape, &hash, sizeof(uint32_t));
 	if (nread == 0)
 		return NULL;
-	if (nread != sizeof(uint32))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
-								 tape, sizeof(uint32), nread)));
+	if (nread != sizeof(uint32_t))
+		PgReport(ERROR).code(errcode_for_file_access())
+			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
+				 static_cast<const void*>(tape), sizeof(uint32_t), nread);
 	if (hashp != NULL)
 		*hashp = hash;
 
 	nread = LogicalTapeRead(tape, &t_len, sizeof(t_len));
-	if (nread != sizeof(uint32))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
-								 tape, sizeof(uint32), nread)));
+	if (nread != sizeof(uint32_t))
+		PgReport(ERROR).code(errcode_for_file_access())
+			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
+				 static_cast<const void*>(tape), sizeof(uint32_t), nread);
 
 	tuple = make1<MinimalTupleData>(t_len);
 	tuple->t_len = t_len;
 
 	nread = LogicalTapeRead(tape,
-							(void *) ((char *) tuple + sizeof(uint32)),
-							t_len - sizeof(uint32));
-	if (nread != t_len - sizeof(uint32))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg_internal("unexpected EOF for tape %p: requested %zu bytes, read %zu bytes",
-								 tape, t_len - sizeof(uint32), nread)));
+							static_cast<void *>(reinterpret_cast<char *>(tuple) + sizeof(uint32_t)),
+							t_len - sizeof(uint32_t));
+	if (nread != t_len - sizeof(uint32_t))
+		PgReport(ERROR).code(errcode_for_file_access())
+			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
+				 static_cast<const void*>(tape), t_len - sizeof(uint32_t), nread);
 
 	return tuple;
 }
@@ -3211,7 +3194,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	aggstate->numphases = numPhases;
 
 	aggstate->aggcontexts = reinterpret_cast<ExprContext **>(
-		make1<ExprContext*>(sizeof(ExprContext *) * numGroupingSets));
+		make_array<ExprContext*>(numGroupingSets));
 
 	/*
 	 * Create expression contexts.  We need three or more, one for
@@ -3334,15 +3317,15 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * For each phase, prepare grouping set data and fmgr lookup data for
 	 * compare functions.  Accumulate all_grouped_cols in passing.
 	 */
-	aggstate->phases = make1<AggStatePerPhaseData>(numPhases * sizeof(AggStatePerPhaseData));
+	aggstate->phases = make_array<AggStatePerPhaseData>(numPhases);
 
 	aggstate->num_hashes = numHashes;
 	if (numHashes)
 	{
-		aggstate->perhash = make1<AggStatePerHashData>(sizeof(AggStatePerHashData) * numHashes);
+		aggstate->perhash = make_array<AggStatePerHashData>(numHashes);
 		aggstate->phases[0].numsets = 0;
-		aggstate->phases[0].gset_lengths = make1<int>(numHashes * sizeof(int));
-		aggstate->phases[0].grouped_cols = make1<Bitmapset*>(numHashes * sizeof(Bitmapset *));
+		aggstate->phases[0].gset_lengths = make_array<int>(numHashes);
+		aggstate->phases[0].grouped_cols = make_array<Bitmapset*>(numHashes);
 	}
 
 	phase = 0;
@@ -3401,8 +3384,8 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 			if (num_sets)
 			{
-				phasedata->gset_lengths = make1<int>(num_sets * sizeof(int));
-				phasedata->grouped_cols = make1<Bitmapset*>(num_sets * sizeof(Bitmapset *));
+				phasedata->gset_lengths = make_array<int>(num_sets);
+				phasedata->grouped_cols = make_array<Bitmapset*>(num_sets);
 
 				i = 0;
 				for(auto sublist : PList<List>(aggnode->groupingSets))
@@ -3445,7 +3428,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * need to be compared.
 				 */
 				phasedata->eqfunctions =
-					make1<ExprState*>(aggnode->numCols * sizeof(ExprState *));
+					make_array<ExprState*>(aggnode->numCols);
 
 				/* for each grouping set */
 				for (i = 0; i < phasedata->numsets; i++)
@@ -3500,27 +3483,25 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * allocate my private per-agg working storage
 	 */
 	econtext = aggstate->ss.ps.ps_ExprContext;
-	econtext->ecxt_aggvalues = make1<Datum>(sizeof(Datum) * numaggs);
-	econtext->ecxt_aggnulls = make1<bool>(sizeof(bool) * numaggs);
+	econtext->ecxt_aggvalues = make_array<Datum>(numaggs);
+	econtext->ecxt_aggnulls = make_array<bool>(numaggs);
 
-	peraggs = make1<AggStatePerAggData>(sizeof(AggStatePerAggData) * numaggs);
-	pertransstates = make1<AggStatePerTransData>(sizeof(AggStatePerTransData) * numtrans);
+	peraggs = make_array<AggStatePerAggData>(numaggs);
+	pertransstates = make_array<AggStatePerTransData>(numtrans);
 
 	aggstate->peragg = peraggs;
 	aggstate->pertrans = pertransstates;
 
 
 	aggstate->all_pergroups =
-		make1<AggStatePerGroup>(sizeof(AggStatePerGroup)
-									 * (numGroupingSets + numHashes));
+		make_array<AggStatePerGroup>(numGroupingSets + numHashes);
 	pergroups = aggstate->all_pergroups;
 
 	if (node->aggstrategy != AGG_HASHED)
 	{
 		for (i = 0; i < numGroupingSets; i++)
 		{
-			pergroups[i] = make1<AggStatePerGroupData>(sizeof(AggStatePerGroupData)
-													  * numaggs);
+			pergroups[i] = make_array<AggStatePerGroupData>(numaggs);
 		}
 
 		aggstate->pergroups = pergroups;
@@ -3533,7 +3514,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	if (use_hashing)
 	{
 		Plan	   *outerplan = outerPlan(node);
-		uint64		totalGroups = 0;
+		uint64_t	totalGroups = 0;
 
 		aggstate->hash_metacxt = AllocSetContextCreate(aggstate->ss.ps.state->es_query_cxt,
 													   "HashAgg meta context",
@@ -3634,9 +3615,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		aggTuple = SearchSysCache1(AGGFNOID,
 								   ObjectIdGetDatum(aggref->aggfnoid));
 		if (!HeapTupleIsValid(aggTuple))
-			elog(ERROR, "cache lookup failed for aggregate %u",
+			pg_log(ERROR, "cache lookup failed for aggregate {}",
 				 aggref->aggfnoid);
-		aggform = (Form_pg_aggregate) GETSTRUCT(aggTuple);
+		aggform = reinterpret_cast<Form_pg_aggregate>(GETSTRUCT(aggTuple));
 
 		/* Check permission to call aggregate function */
 		aclresult = object_aclcheck(ProcedureRelationId, aggref->aggfnoid, GetUserId(),
@@ -3676,7 +3657,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				Assert(DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit));
 
 				if (!OidIsValid(aggform->aggserialfn))
-					elog(ERROR, "serialfunc not provided for serialization aggregation");
+					pg_log(ERROR, "serialfunc not provided for serialization aggregation");
 				serialfn_oid = aggform->aggserialfn;
 			}
 
@@ -3687,7 +3668,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				Assert(DO_AGGSPLIT_COMBINE(aggstate->aggsplit));
 
 				if (!OidIsValid(aggform->aggdeserialfn))
-					elog(ERROR, "deserialfunc not provided for deserialization aggregation");
+					pg_log(ERROR, "deserialfunc not provided for deserialization aggregation");
 				deserialfn_oid = aggform->aggdeserialfn;
 			}
 		}
@@ -3699,9 +3680,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			procTuple = SearchSysCache1(PROCOID,
 										ObjectIdGetDatum(aggref->aggfnoid));
 			if (!HeapTupleIsValid(procTuple))
-				elog(ERROR, "cache lookup failed for function %u",
+				pg_log(ERROR, "cache lookup failed for function {}",
 					 aggref->aggfnoid);
-			aggOwner = ((Form_pg_proc) GETSTRUCT(procTuple))->proowner;
+			aggOwner = (reinterpret_cast<Form_pg_proc>(GETSTRUCT(procTuple)))->proowner;
 			ReleaseSysCache(procTuple);
 
 			if (OidIsValid(finalfn_oid))
@@ -3798,7 +3779,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 				/* If not set then the planner messed up */
 				if (!OidIsValid(transfn_oid))
-					elog(ERROR, "combinefn not set for aggregate function");
+					pg_log(ERROR, "combinefn not set for aggregate function");
 			}
 			else
 				transfn_oid = aggform->aggtransfn;
@@ -3849,10 +3830,10 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * since then.
 				 */
 				if (pertrans->transfn.fn_strict && aggtranstype == INTERNALOID)
-					ereport(ERROR,
-							(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-							 errmsg("combine function with transition type %s must not be declared STRICT",
-									format_type_be(aggtranstype))));
+					PgReport(ERROR)
+						.code(ERRCODE_INVALID_FUNCTION_DEFINITION)
+						.msg("combine function with transition type {} must not be declared STRICT",
+							 format_type_be(aggtranstype));
 			}
 			else
 			{
@@ -3883,10 +3864,10 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 					if (numAggTransFnArgs <= numDirectArgs ||
 						!IsBinaryCoercible(aggTransFnInputTypes[numDirectArgs],
 										   aggtranstype))
-						ereport(ERROR,
-								(errcode(ERRCODE_INVALID_FUNCTION_DEFINITION),
-								 errmsg("aggregate %u needs to have compatible input type and transition type",
-										aggref->aggfnoid)));
+						PgReport(ERROR)
+							.code(ERRCODE_INVALID_FUNCTION_DEFINITION)
+							.msg("aggregate {} needs to have compatible input type and transition type",
+								 aggref->aggfnoid);
 				}
 			}
 		}
@@ -3913,9 +3894,9 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * here anyway, just to be sure.)
 	 */
 	if (numaggrefs != list_length(aggstate->aggs))
-		ereport(ERROR,
-				(errcode(ERRCODE_GROUPING_ERROR),
-				 errmsg("aggregate function calls cannot be nested")));
+		PgReport(ERROR)
+			.code(ERRCODE_GROUPING_ERROR)
+			.msg("aggregate function calls cannot be nested");
 
 	/*
 	 * Build expressions doing all the transition work at once. We build a
@@ -4162,13 +4143,13 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 
 		/* Extract the sort information for use later */
 		pertrans->sortColIdx =
-			make1<AttrNumber>(numSortCols * sizeof(AttrNumber));
+			make_array<AttrNumber>(numSortCols);
 		pertrans->sortOperators =
-			make1<Oid>(numSortCols * sizeof(Oid));
+			make_array<Oid>(numSortCols);
 		pertrans->sortCollations =
-			make1<Oid>(numSortCols * sizeof(Oid));
+			make_array<Oid>(numSortCols);
 		pertrans->sortNullsFirst =
-			make1<bool>(numSortCols * sizeof(bool));
+			make_array<bool>(numSortCols);
 
 		i = 0;
 		for(auto sortcl : PList<SortGroupClause>(sortlist))
@@ -4195,7 +4176,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 		Assert(numArguments > 0);
 		Assert(list_length(aggref->aggdistinct) == numDistinctCols);
 
-		ops = make1<Oid>(numDistinctCols * sizeof(Oid));
+		ops = make_array<Oid>(numDistinctCols);
 
 		i = 0;
 		for(auto groupClause : PList<SortGroupClause>(aggref->aggdistinct)) {
@@ -4217,7 +4198,7 @@ build_pertrans_for_aggref(AggStatePerTrans pertrans,
 	}
 
 	pertrans->sortstates = 
-		make1<Tuplesortstate*>(sizeof(Tuplesortstate *) * numGroupingSets);
+		make_array<Tuplesortstate*>(numGroupingSets);
 }
 
 

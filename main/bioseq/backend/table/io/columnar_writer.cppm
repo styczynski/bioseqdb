@@ -27,11 +27,11 @@ import storage_metadata;
 import pg_utils;
 
 ChunkData *
-CreateEmptyChunkData(uint32 columnCount, bool *columnMask, uint32 chunkGroupRowCount);
+CreateEmptyChunkData(uint32_t columnCount, bool *columnMask, uint32_t chunkGroupRowCount);
 export ColumnarWriteState * ColumnarBeginWrite(RelFileLocator relfilelocator,
 											   ColumnarOptions options,
 											   TupleDesc tupleDescriptor);
-export uint64 ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
+export uint64_t ColumnarWriteRow(ColumnarWriteState *state, Datum *columnValues,
 							   bool *columnNulls);
 export void ColumnarFlushPendingWrites(ColumnarWriteState *state);
 export void ColumnarEndWrite(ColumnarWriteState *state);
@@ -42,23 +42,23 @@ export MemoryContext ColumnarWritePerTupleContext(ColumnarWriteState *state);
 
 
 // // trash
-// extern ChunkData * CreateEmptyChunkData(uint32 columnCount, bool *columnMask,
-// 										uint32 chunkGroupRowCount);
+// extern ChunkData * CreateEmptyChunkData(uint32_t columnCount, bool *columnMask,
+// 										uint32_t chunkGroupRowCount);
 
 
-static StripeBuffers * CreateEmptyStripeBuffers(uint32 stripeMaxRowCount,
-												uint32 chunkRowCount,
-												uint32 columnCount);
-static StripeSkipList * CreateEmptyStripeSkipList(uint32 stripeMaxRowCount,
-												  uint32 chunkRowCount,
-												  uint32 columnCount);
+static StripeBuffers * CreateEmptyStripeBuffers(uint32_t stripeMaxRowCount,
+												uint32_t chunkRowCount,
+												uint32_t columnCount);
+static StripeSkipList * CreateEmptyStripeSkipList(uint32_t stripeMaxRowCount,
+												  uint32_t chunkRowCount,
+												  uint32_t columnCount);
 static void FlushStripe(ColumnarWriteState *writeState);
-static StringInfo SerializeBoolArray(bool *boolArray, uint32 boolArrayLength);
+static StringInfo SerializeBoolArray(bool *boolArray, uint32_t boolArrayLength);
 static void SerializeSingleDatum(StringInfo datumBuffer, Datum datum,
 								 bool datumTypeByValue, int datumTypeLength,
 								 char datumTypeAlign);
-static void SerializeChunkData(ColumnarWriteState *writeState, uint32 chunkIndex,
-							   uint32 rowCount);
+static void SerializeChunkData(ColumnarWriteState *writeState, uint32_t chunkIndex,
+							   uint32_t rowCount);
 static void UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode,
 									  Datum columnValue, bool columnTypeByValue,
 									  int columnTypeLength, Oid columnCollation,
@@ -77,9 +77,9 @@ ColumnarBeginWrite(RelFileLocator relfilelocator,
 				   TupleDesc tupleDescriptor)
 {
 	/* get comparison function pointers for each of the columns */
-	uint32 columnCount = tupleDescriptor->natts;
-	FmgrInfo **comparisonFunctionArray = make1<FmgrInfo*>(columnCount * sizeof(FmgrInfo *));
-	for (uint32 columnIndex = 0; columnIndex < columnCount; columnIndex++)
+	uint32_t columnCount = tupleDescriptor->natts;
+	FmgrInfo **comparisonFunctionArray = make_array<FmgrInfo*>(columnCount);
+	for (uint32_t columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		FmgrInfo *comparisonFunction = NULL;
 		FormData_pg_attribute *attributeForm = TupleDescAttr(tupleDescriptor,
@@ -105,7 +105,7 @@ ColumnarBeginWrite(RelFileLocator relfilelocator,
 															 "Stripe Write Memory Context",
 															 ALLOCSET_DEFAULT_SIZES);
 
-	bool *columnMaskArray = make1<bool>(columnCount * sizeof(bool));
+	bool *columnMaskArray = make_array<bool>(columnCount);
 	memset(columnMaskArray, true, columnCount * sizeof(bool));
 
 	ChunkData *chunkData = CreateEmptyChunkData(columnCount, columnMaskArray,
@@ -139,20 +139,20 @@ ColumnarBeginWrite(RelFileLocator relfilelocator,
  *
  * Returns the "row number" assigned to written row.
  */
-uint64
+uint64_t
 ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *columnNulls)
 {
-	uint32 columnIndex = 0;
+	uint32_t columnIndex = 0;
 	StripeBuffers *stripeBuffers = writeState->stripeBuffers;
 	StripeSkipList *stripeSkipList = writeState->stripeSkipList;
-	uint32 columnCount = writeState->tupleDescriptor->natts;
+	uint32_t columnCount = writeState->tupleDescriptor->natts;
 	ColumnarOptions *options = &writeState->options;
-	const uint32 chunkRowCount = options->chunkRowCount;
+	const uint32_t chunkRowCount = options->chunkRowCount;
 	ChunkData *chunkData = writeState->chunkData;
-	MemoryContext oldContext = MemoryContextSwitchTo(writeState->stripeWriteContext);
+	MemoryContextScope ctx_guard{writeState->stripeWriteContext};
 
-	uint32 chunkIndex;
-	uint32 chunkRowIndex;
+	uint32_t chunkIndex;
+	uint32_t chunkRowIndex;
 
 	if (stripeBuffers)
 	{
@@ -180,11 +180,11 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 			int columnTypeLength = attributeForm->attlen;
 			char columnTypeAlign = attributeForm->attalign;
 
-			uint32 datumLength = att_addlength_datum(0, columnTypeLength, columnValues[columnIndex]);
-			uint32 datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
+			uint32_t datumLength = att_addlength_datum(0, columnTypeLength, columnValues[columnIndex]);
+			uint32_t datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
 
 			/* Check to see if we are within the 1 gigabyte value. */
-			if ((long) chunkData->valueBufferArray[columnIndex]->len + (long) datumLengthAligned > 1024000000)
+			if (static_cast<long>(chunkData->valueBufferArray[columnIndex]->len) + static_cast<long>(datumLengthAligned) > 1024000000)
 			{
 				fits = false;
 				break;
@@ -260,12 +260,12 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 
 			chunkData->existsArray[columnIndex][chunkRowIndex] = true;
 
-			uint32 datumLength = att_addlength_datum(0, columnTypeLength, columnValues[columnIndex]);
-			uint32 datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
+			uint32_t datumLength = att_addlength_datum(0, columnTypeLength, columnValues[columnIndex]);
+			uint32_t datumLengthAligned = att_align_nominal(datumLength, columnTypeAlign);
 
 			if (datumLengthAligned >= (256UL << 20))
 			{
-				elog(ERROR, "Error with insert on column \'%s\'. Inserting %d bytes, exceeding 256MB",
+				pg_log(ERROR, "Error with insert on column \'{}\'. Inserting {} bytes, exceeding 256MB",
 							 attributeForm->attname.data, datumLength);
 			}
 
@@ -289,15 +289,13 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 		SerializeChunkData(writeState, chunkIndex, chunkRowCount);
 	}
 
-	uint64 writtenRowNumber = writeState->emptyStripeReservation->stripeFirstRowNumber +
+	uint64_t writtenRowNumber = writeState->emptyStripeReservation->stripeFirstRowNumber +
 							  stripeBuffers->rowCount;
 	stripeBuffers->rowCount++;
 	if (stripeBuffers->rowCount >= options->stripeRowCount)
 	{
 		ColumnarFlushPendingWrites(writeState);
 	}
-
-	MemoryContextSwitchTo(oldContext);
 
 	return writtenRowNumber;
 }
@@ -325,7 +323,7 @@ ColumnarFlushPendingWrites(ColumnarWriteState *writeState)
 	StripeBuffers *stripeBuffers = writeState->stripeBuffers;
 	if (stripeBuffers != NULL)
 	{
-		MemoryContext oldContext = MemoryContextSwitchTo(writeState->stripeWriteContext);
+		MemoryContextScope ctx_guard{writeState->stripeWriteContext};
 
 		FlushStripe(writeState);
 		MemoryContextReset(writeState->stripeWriteContext);
@@ -333,8 +331,6 @@ ColumnarFlushPendingWrites(ColumnarWriteState *writeState)
 		/* set stripe data and skip list to NULL so they are recreated next time */
 		writeState->stripeBuffers = NULL;
 		writeState->stripeSkipList = NULL;
-
-		MemoryContextSwitchTo(oldContext);
 	}
 }
 
@@ -356,18 +352,18 @@ ColumnarWritePerTupleContext(ColumnarWriteState *state)
  * column count.
  */
 static StripeBuffers *
-CreateEmptyStripeBuffers(uint32 stripeMaxRowCount, uint32 chunkRowCount,
-						 uint32 columnCount)
+CreateEmptyStripeBuffers(uint32_t stripeMaxRowCount, uint32_t chunkRowCount,
+						 uint32_t columnCount)
 {
-	uint32 columnIndex = 0;
-	uint32 maxChunkCount = (stripeMaxRowCount / chunkRowCount) + 1;
-	ColumnBuffers **columnBuffersArray = make1<ColumnBuffers*>(columnCount * sizeof(ColumnBuffers *));
+	uint32_t columnIndex = 0;
+	uint32_t maxChunkCount = (stripeMaxRowCount / chunkRowCount) + 1;
+	ColumnBuffers **columnBuffersArray = make_array<ColumnBuffers*>(columnCount);
 
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
-		uint32 chunkIndex = 0;
+		uint32_t chunkIndex = 0;
 		ColumnChunkBuffers **chunkBuffersArray =
-			make1<ColumnChunkBuffers*>(maxChunkCount * sizeof(ColumnChunkBuffers *));
+			make_array<ColumnChunkBuffers*>(maxChunkCount);
 
 		for (chunkIndex = 0; chunkIndex < maxChunkCount; chunkIndex++)
 		{
@@ -396,18 +392,18 @@ CreateEmptyStripeBuffers(uint32 stripeMaxRowCount, uint32 chunkRowCount,
  * for stripeMaxRowCount rows.
  */
 static StripeSkipList *
-CreateEmptyStripeSkipList(uint32 stripeMaxRowCount, uint32 chunkRowCount,
-						  uint32 columnCount)
+CreateEmptyStripeSkipList(uint32_t stripeMaxRowCount, uint32_t chunkRowCount,
+						  uint32_t columnCount)
 {
-	uint32 columnIndex = 0;
-	uint32 maxChunkCount = (stripeMaxRowCount / chunkRowCount) + 1;
+	uint32_t columnIndex = 0;
+	uint32_t maxChunkCount = (stripeMaxRowCount / chunkRowCount) + 1;
 
 	ColumnChunkSkipNode **chunkSkipNodeArray =
-		make1<ColumnChunkSkipNode*>(columnCount * sizeof(ColumnChunkSkipNode *));
+		make_array<ColumnChunkSkipNode*>(columnCount);
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
 		chunkSkipNodeArray[columnIndex] =
-			make1<ColumnChunkSkipNode>(maxChunkCount * sizeof(ColumnChunkSkipNode));
+			make_array<ColumnChunkSkipNode>(maxChunkCount);
 	}
 
 	StripeSkipList *stripeSkipList = make0<StripeSkipList>();
@@ -428,21 +424,21 @@ CreateEmptyStripeSkipList(uint32 stripeMaxRowCount, uint32 chunkRowCount,
 static void
 FlushStripe(ColumnarWriteState *writeState)
 {
-	uint32 columnIndex = 0;
-	uint32 chunkIndex = 0;
+	uint32_t columnIndex = 0;
+	uint32_t chunkIndex = 0;
 	StripeBuffers *stripeBuffers = writeState->stripeBuffers;
 	StripeSkipList *stripeSkipList = writeState->stripeSkipList;
 	ColumnChunkSkipNode **columnSkipNodeArray = stripeSkipList->chunkSkipNodeArray;
 	TupleDesc tupleDescriptor = writeState->tupleDescriptor;
-	uint32 columnCount = tupleDescriptor->natts;
-	uint32 chunkCount = stripeSkipList->chunkCount;
-	uint32 chunkRowCount = writeState->options.chunkRowCount;
-	uint32 lastChunkIndex = stripeBuffers->rowCount / chunkRowCount;
-	uint32 lastChunkRowCount = stripeBuffers->rowCount % chunkRowCount;
-	uint64 stripeSize = 0;
-	uint64 stripeRowCount = stripeBuffers->rowCount;
+	uint32_t columnCount = tupleDescriptor->natts;
+	uint32_t chunkCount = stripeSkipList->chunkCount;
+	uint32_t chunkRowCount = writeState->options.chunkRowCount;
+	uint32_t lastChunkIndex = stripeBuffers->rowCount / chunkRowCount;
+	uint32_t lastChunkRowCount = stripeBuffers->rowCount % chunkRowCount;
+	uint64_t stripeSize = 0;
+	uint64_t stripeRowCount = stripeBuffers->rowCount;
 
-	elog(DEBUG1, "Flushing Stripe of size %d", stripeBuffers->rowCount);
+	pg_log(DEBUG1, "Flushing Stripe of size {}", stripeBuffers->rowCount);
 
 	Oid relationId = RelidByRelfilenumber(writeState->relfilelocator.spcOid,
 										  writeState->relfilelocator.relNumber);
@@ -468,7 +464,7 @@ FlushStripe(ColumnarWriteState *writeState)
 		{
 			ColumnChunkBuffers *chunkBuffers =
 				columnBuffers->chunkBuffersArray[chunkIndex];
-			uint64 existsBufferSize = chunkBuffers->existsBuffer->len;
+			uint64_t existsBufferSize = chunkBuffers->existsBuffer->len;
 			ColumnChunkSkipNode *chunkSkipNode = &chunkSkipNodeArray[chunkIndex];
 
 			chunkSkipNode->existsChunkOffset = stripeSize;
@@ -480,7 +476,7 @@ FlushStripe(ColumnarWriteState *writeState)
 		{
 			ColumnChunkBuffers *chunkBuffers =
 				columnBuffers->chunkBuffersArray[chunkIndex];
-			uint64 valueBufferSize = chunkBuffers->valueBuffer->len;
+			uint64_t valueBufferSize = chunkBuffers->valueBuffer->len;
 			CompressionType valueCompressionType = chunkBuffers->valueCompressionType;
 			ColumnChunkSkipNode *chunkSkipNode = &chunkSkipNodeArray[chunkIndex];
 
@@ -498,7 +494,7 @@ FlushStripe(ColumnarWriteState *writeState)
 		CompleteStripeReservation(relation, writeState->emptyStripeReservation->stripeId,
 								  stripeSize, stripeRowCount, chunkCount);
 
-	uint64 currentFileOffset = stripeMetadata->fileOffset;
+	uint64_t currentFileOffset = stripeMetadata->fileOffset;
 
 	/*
 	 * Each stripe has only one section:
@@ -560,10 +556,10 @@ FlushStripe(ColumnarWriteState *writeState)
  * as a StringInfo. This function packs every 8 boolean values into one byte.
  */
 static StringInfo
-SerializeBoolArray(bool *boolArray, uint32 boolArrayLength)
+SerializeBoolArray(bool *boolArray, uint32_t boolArrayLength)
 {
-	uint32 boolArrayIndex = 0;
-	uint32 byteCount = ((boolArrayLength * sizeof(bool)) + (8 - sizeof(bool))) / 8;
+	uint32_t boolArrayIndex = 0;
+	uint32_t byteCount = ((boolArrayLength * sizeof(bool)) + (8 - sizeof(bool))) / 8;
 
 	StringInfo boolArrayBuffer = makeStringInfo();
 	enlargeStringInfo(boolArrayBuffer, byteCount);
@@ -574,8 +570,8 @@ SerializeBoolArray(bool *boolArray, uint32 boolArrayLength)
 	{
 		if (boolArray[boolArrayIndex])
 		{
-			uint32 byteIndex = boolArrayIndex / 8;
-			uint32 bitIndex = boolArrayIndex % 8;
+			uint32_t byteIndex = boolArrayIndex / 8;
+			uint32_t bitIndex = boolArrayIndex % 8;
 			boolArrayBuffer->data[byteIndex] |= (1 << bitIndex);
 		}
 	}
@@ -592,8 +588,8 @@ static void
 SerializeSingleDatum(StringInfo datumBuffer, Datum datum, bool datumTypeByValue,
 					 int datumTypeLength, char datumTypeAlign)
 {
-	uint32 datumLength = att_addlength_datum(0, datumTypeLength, datum);
-	uint32 datumLengthAligned = att_align_nominal(datumLength, datumTypeAlign);
+	uint32_t datumLength = att_addlength_datum(0, datumTypeLength, datum);
+	uint32_t datumLengthAligned = att_align_nominal(datumLength, datumTypeAlign);
 
 	enlargeStringInfo(datumBuffer, datumLengthAligned);
 
@@ -626,14 +622,14 @@ SerializeSingleDatum(StringInfo datumBuffer, Datum datum, bool datumTypeByValue,
  * compression type for every column.
  */
 static void
-SerializeChunkData(ColumnarWriteState *writeState, uint32 chunkIndex, uint32 rowCount)
+SerializeChunkData(ColumnarWriteState *writeState, uint32_t chunkIndex, uint32_t rowCount)
 {
-	uint32 columnIndex = 0;
+	uint32_t columnIndex = 0;
 	StripeBuffers *stripeBuffers = writeState->stripeBuffers;
 	ChunkData *chunkData = writeState->chunkData;
 	CompressionType requestedCompressionType = writeState->options.compressionType;
 	int compressionLevel = writeState->options.compressionLevel;
-	const uint32 columnCount = stripeBuffers->columnCount;
+	const uint32_t columnCount = stripeBuffers->columnCount;
 	StringInfo compressionBuffer = writeState->compressionBuffer;
 
 	writeState->chunkGroupRowCounts =
@@ -773,7 +769,7 @@ DatumCopy(Datum datum, bool datumTypeByValue, int datumTypeLength)
 	}
 	else
 	{
-		uint32 datumLength = att_addlength_datum(0, datumTypeLength, datum);
+		uint32_t datumLength = att_addlength_datum(0, datumTypeLength, datum);
 		char *datumData = make1<char>(datumLength);
 		memcpy(datumData, DatumGetPointer(datum), datumLength);
 

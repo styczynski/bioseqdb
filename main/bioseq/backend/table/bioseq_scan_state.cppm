@@ -48,8 +48,8 @@ export struct BioseqScanVectorizationState
     bool vectorizationAggregate;
     TupleTableSlot* scanVectorSlot;
     TupleTableSlot* resultVectorSlot;
-    uint32 vectorPendingRowNumber;
-    uint32 vectorRowIndex;
+    uint32_t vectorPendingRowNumber;
+    uint32_t vectorRowIndex;
     PList<Node> vectorizedQualList;
     PList<Node> constructedVectorizedQualList;
     PIntList attrNeededList;

@@ -69,9 +69,9 @@ CreateVectorTupleTableSlot(TupleDesc tuple_desc)
 	{
 		Oid column_type_oid = TupleDescAttr(slot_tuple_desc, attribute_index)->atttypid;
 
-		int16 column_type_length = get_typlen(column_type_oid);
+		int16_t column_type_length = get_typlen(column_type_oid);
 
-		int16 vector_column_type_length =
+		int16_t vector_column_type_length =
 			column_type_length == -1 ? sizeof(Datum) : column_type_length;
 
 		/*
@@ -102,14 +102,14 @@ CreateVectorTupleTableSlot(TupleDesc tuple_desc)
  */
 void
 ExtractTupleFromVectorSlot(TupleTableSlot* output_slot, VectorTupleTableSlot* vector_slot,
-						   int32 row_index, List* attr_needed_list)
+						   int32_t row_index, List* attr_needed_list)
 {
 	foreach_int(attribute_number, attr_needed_list)
 	{
 		if (!output_slot->tts_tupleDescriptor->attrs[attribute_number].attisdropped)
 		{
 			VectorColumn* column = reinterpret_cast<VectorColumn*>(vector_slot->tts.tts_values[attribute_number]);
-			int8* raw_column_data = reinterpret_cast<int8*>(column->value) + column->columnTypeLen * row_index;
+			int8_t* raw_column_data = reinterpret_cast<int8_t*>(column->value) + column->columnTypeLen * row_index;
 			output_slot->tts_values[attribute_number] = fetch_att(raw_column_data, column->columnIsVal, column->columnTypeLen);
 			output_slot->tts_isnull[attribute_number] = column->isnull[row_index];
 		}
@@ -126,7 +126,7 @@ ExtractTupleFromVectorSlot(TupleTableSlot* output_slot, VectorTupleTableSlot* ve
  */
 void
 WriteTupleToVectorSlot(TupleTableSlot* input_slot, VectorTupleTableSlot* vector_slot,
-					   int32 row_index)
+					   int32_t row_index)
 {
 	TupleDesc tuple_desc = input_slot->tts_tupleDescriptor;
 
@@ -140,7 +140,7 @@ WriteTupleToVectorSlot(TupleTableSlot* input_slot, VectorTupleTableSlot* vector_
 
 			if (column->columnIsVal)
 			{
-				int8* write_column_row_position = reinterpret_cast<int8*>(column->value) + column->columnTypeLen * row_index;
+				int8_t* write_column_row_position = reinterpret_cast<int8_t*>(column->value) + column->columnTypeLen * row_index;
 
 				store_att_byval(write_column_row_position, input_slot->tts_values[attribute_index], column->columnTypeLen);
 			}
@@ -150,10 +150,10 @@ WriteTupleToVectorSlot(TupleTableSlot* input_slot, VectorTupleTableSlot* vector_
 
 				Size data_length = VARSIZE_ANY(varlena_source);
 
-				Datum* varlena_container = make1<Datum>(sizeof(int8) * data_length);
+				Datum* varlena_container = make1<Datum>(data_length);
 				memcpy(varlena_container, varlena_source, data_length);
 
-				*reinterpret_cast<Datum*>(reinterpret_cast<int8*>(column->value) + column->columnTypeLen * row_index) =
+				*reinterpret_cast<Datum*>(reinterpret_cast<int8_t*>(column->value) + column->columnTypeLen * row_index) =
 					PointerGetDatum(varlena_container);
 			}
 		}

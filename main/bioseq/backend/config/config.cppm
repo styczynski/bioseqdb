@@ -4,6 +4,8 @@ module;
 
 export module config;
 
+import pg_utils;
+
 export const config_enum_entry bioseq_compression_options[] =
 {
 	{ "none", COMPRESSION_NONE, false },

@@ -24,6 +24,7 @@ module;
 export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
+import pg_utils;
 
 extern "C++" {
 

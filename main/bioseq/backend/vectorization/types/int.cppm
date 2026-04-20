@@ -18,24 +18,26 @@ module;
 
 export module bioseq_vector_types_int;
 
+import pg_utils;
+
 extern "C" {
 
 // char
 BUILD_CMP_OPERATOR_INT( char,  char,  char)
 
 // int2
-BUILD_CMP_OPERATOR_INT( int2, int16, int16)
-BUILD_CMP_OPERATOR_INT(int24, int16, int32)
-BUILD_CMP_OPERATOR_INT(int28, int16, int64)
+BUILD_CMP_OPERATOR_INT( int2, int16_t, int16_t)
+BUILD_CMP_OPERATOR_INT(int24, int16_t, int32_t)
+BUILD_CMP_OPERATOR_INT(int28, int16_t, int64_t)
 
 // int4
-BUILD_CMP_OPERATOR_INT( int4, int32, int32)
-BUILD_CMP_OPERATOR_INT(int42, int32, int16)
-BUILD_CMP_OPERATOR_INT(int48, int32, int64)
+BUILD_CMP_OPERATOR_INT( int4, int32_t, int32_t)
+BUILD_CMP_OPERATOR_INT(int42, int32_t, int16_t)
+BUILD_CMP_OPERATOR_INT(int48, int32_t, int64_t)
 
 // int8
-BUILD_CMP_OPERATOR_INT( int8, int64, int64)
-BUILD_CMP_OPERATOR_INT(int82, int64, int16)
-BUILD_CMP_OPERATOR_INT(int84, int64, int32)
+BUILD_CMP_OPERATOR_INT( int8, int64_t, int64_t)
+BUILD_CMP_OPERATOR_INT(int82, int64_t, int16_t)
+BUILD_CMP_OPERATOR_INT(int84, int64_t, int32_t)
 
 }

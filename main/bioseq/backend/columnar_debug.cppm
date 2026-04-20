@@ -19,6 +19,7 @@ export module storage_debug;
 import storage_physical;
 import storage_metadata;
 import bioseq_table;
+import pg_utils;
 
 /*
  * MemoryContextTotals adds stats of the given memory context and its
@@ -111,19 +112,19 @@ POSTGRES_FN(bioseq_storage_info)
 	/* Build a tuple descriptor for our result type */
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 	{
-		elog(ERROR, "return type must be a row type");
+		pg_log(ERROR, "return type must be a row type");
 	}
 
 	if (tupdesc->natts != STORAGE_INFO_NATTS)
 	{
-		elog(ERROR, "return type must have %d columns", STORAGE_INFO_NATTS);
+		pg_log(ERROR, "return type must have {} columns", STORAGE_INFO_NATTS);
 	}
 
 	Relation rel = table_open(relid, AccessShareLock);
 	if (!IsColumnarTableAmTable(relid))
 	{
-		ereport(ERROR, (errmsg("table \"%s\" is not a columnar table",
-							   RelationGetRelationName(rel))));
+		pg_log(ERROR, "table \"{}\" is not a columnar table",
+			   RelationGetRelationName(rel));
 	}
 
 	Datum values[STORAGE_INFO_NATTS] = { 0 };

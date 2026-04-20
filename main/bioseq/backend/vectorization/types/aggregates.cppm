@@ -33,7 +33,7 @@ extern "C" {
 CXX_PG_FUNCTION_INFO_V1(vemptycount);
 Datum vemptycount(PG_FUNCTION_ARGS)
 {
-	int64 running_count = PG_GETARG_INT64(0);
+	int64_t running_count = PG_GETARG_INT64(0);
 	PG_RETURN_INT64(running_count);
 }
 
@@ -45,7 +45,7 @@ CXX_PG_FUNCTION_INFO_V1(vanycount);
 Datum
 vanycount(PG_FUNCTION_ARGS)
 {
-	int64 running_count = PG_GETARG_INT64(0);
+	int64_t running_count = PG_GETARG_INT64(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
@@ -69,15 +69,15 @@ CXX_PG_FUNCTION_INFO_V1(vint2sum);
 Datum
 vint2sum(PG_FUNCTION_ARGS)
 {
-	int64 running_sum = PG_GETARG_INT64(0);
+	int64_t running_sum = PG_GETARG_INT64(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
 
-	int16* lane_values = reinterpret_cast<int16*>(input_column->value);
+	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
 		if (!input_column->isnull[lane_index])
-			running_sum += static_cast<int64>(lane_values[lane_index]);
+			running_sum += static_cast<int64_t>(lane_values[lane_index]);
 	}
 
 	PG_RETURN_INT64(running_sum);
@@ -102,14 +102,14 @@ vint2acc(PG_FUNCTION_ARGS)
 
 	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
 
-	int16* lane_values = reinterpret_cast<int16*>(input_column->value);
+	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
 		if (!input_column->isnull[lane_index])
 		{
 			transition_data->N++;
-			transition_data->sumX += static_cast<int64>(lane_values[lane_index]);
+			transition_data->sumX += static_cast<int64_t>(lane_values[lane_index]);
 		}
 	}
 
@@ -123,11 +123,11 @@ vint2acc(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vint2larger);
 Datum vint2larger(PG_FUNCTION_ARGS)
 {
-	int16 running_max = PG_GETARG_INT16(0);
+	int16_t running_max = PG_GETARG_INT16(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int16 lane_max = running_max;
+	int16_t lane_max = running_max;
 
-	int16* lane_values = reinterpret_cast<int16*>(input_column->value);
+	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
@@ -148,11 +148,11 @@ Datum vint2larger(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vint2smaller);
 Datum vint2smaller(PG_FUNCTION_ARGS)
 {
-	int16 running_min = PG_GETARG_INT32(0);
+	int16_t running_min = PG_GETARG_INT32(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int16 lane_min = running_min;
+	int16_t lane_min = running_min;
 
-	int16* lane_values = reinterpret_cast<int16*>(input_column->value);
+	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
@@ -176,15 +176,15 @@ CXX_PG_FUNCTION_INFO_V1(vint4sum);
 Datum
 vint4sum(PG_FUNCTION_ARGS)
 {
-	int64 running_sum = PG_GETARG_INT64(0);
+	int64_t running_sum = PG_GETARG_INT64(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
 
-	int32* lane_values = reinterpret_cast<int32*>(input_column->value);
+	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
 		if (!input_column->isnull[lane_index])
-			running_sum += static_cast<int64>(lane_values[lane_index]);
+			running_sum += static_cast<int64_t>(lane_values[lane_index]);
 	}
 
 	PG_RETURN_INT64(running_sum);
@@ -207,14 +207,14 @@ vint4acc(PG_FUNCTION_ARGS)
 
 	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
 
-	int32* lane_values = reinterpret_cast<int32*>(input_column->value);
+	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
 		if (!input_column->isnull[lane_index])
 		{
 			transition_data->N++;
-			transition_data->sumX += static_cast<int64>(lane_values[lane_index]);
+			transition_data->sumX += static_cast<int64_t>(lane_values[lane_index]);
 		}
 	}
 
@@ -227,11 +227,11 @@ vint4acc(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vint4larger);
 Datum vint4larger(PG_FUNCTION_ARGS)
 {
-	int32 running_max = PG_GETARG_INT32(0);
+	int32_t running_max = PG_GETARG_INT32(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32 lane_max = running_max;
+	int32_t lane_max = running_max;
 
-	int32* lane_values = reinterpret_cast<int32*>(input_column->value);
+	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
@@ -252,11 +252,11 @@ Datum vint4larger(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vint4smaller);
 Datum vint4smaller(PG_FUNCTION_ARGS)
 {
-	int32 running_min = PG_GETARG_INT32(0);
+	int32_t running_min = PG_GETARG_INT32(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32 lane_min = running_min;
+	int32_t lane_min = running_min;
 
-	int32* lane_values = reinterpret_cast<int32*>(input_column->value);
+	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
@@ -286,7 +286,7 @@ vint2int4avg(PG_FUNCTION_ARGS)
 
 	if (ARR_HASNULL(transition_array) ||
 		ARR_SIZE(transition_array) != ARR_OVERHEAD_NONULLS(1) + sizeof(Int64AggState))
-		elog(ERROR, "expected 2-element int8 array");
+		pg_log(ERROR, "expected 2-element int8 array");
 
 	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
 
@@ -318,29 +318,29 @@ vint8acc(PG_FUNCTION_ARGS)
 	MemoryContext aggregate_context;
 
 	if (!AggCheckCallContext(fcinfo, &aggregate_context))
-		elog(ERROR, "aggregate function called in non-aggregate context");
+		pg_log(ERROR, "aggregate function called in non-aggregate context");
 
-	MemoryContext old_context = MemoryContextSwitchTo(aggregate_context);
-
-	/* Create the state data on the first call */
-	if (state == NULL)
 	{
-		state = make0<Int128AggState>();
-		state->calcSumX2 = false;
-	}
+		MemoryContextScope ctx_guard{aggregate_context};
 
-	int64* lane_values = reinterpret_cast<int64*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (!input_column->isnull[lane_index])
+		/* Create the state data on the first call */
+		if (state == NULL)
 		{
-			state->N++;
-			state->sumX += static_cast<int128>(lane_values[lane_index]);
+			state = make0<Int128AggState>();
+			state->calcSumX2 = false;
+		}
+
+		int64_t* lane_values = reinterpret_cast<int64_t*>(input_column->value);
+
+		for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
+		{
+			if (!input_column->isnull[lane_index])
+			{
+				state->N++;
+				state->sumX += static_cast<int128>(lane_values[lane_index]);
+			}
 		}
 	}
-
-	MemoryContextSwitchTo(old_context);
 
 	PG_RETURN_POINTER(state);
 }
@@ -393,11 +393,11 @@ vint8avg(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vint8larger);
 Datum vint8larger(PG_FUNCTION_ARGS)
 {
-	int64 running_max = PG_GETARG_INT64(0);
+	int64_t running_max = PG_GETARG_INT64(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int64 lane_max = 0;
+	int64_t lane_max = 0;
 
-	int64* lane_values = reinterpret_cast<int64*>(input_column->value);
+	int64_t* lane_values = reinterpret_cast<int64_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
@@ -418,11 +418,11 @@ Datum vint8larger(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vint8smaller);
 Datum vint8smaller(PG_FUNCTION_ARGS)
 {
-	int64 running_min = PG_GETARG_INT64(0);
+	int64_t running_min = PG_GETARG_INT64(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int64 lane_min = running_min;
+	int64_t lane_min = running_min;
 
-	int64* lane_values = reinterpret_cast<int64*>(input_column->value);
+	int64_t* lane_values = reinterpret_cast<int64_t*>(input_column->value);
 
 	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
 	{
@@ -445,9 +445,9 @@ Datum vint8smaller(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vdatelarger);
 Datum vdatelarger(PG_FUNCTION_ARGS)
 {
-	int32 running_max = PG_GETARG_INT32(0);
+	int32_t running_max = PG_GETARG_INT32(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32 lane_max = running_max;
+	int32_t lane_max = running_max;
 
 	DateADT* lane_values = reinterpret_cast<DateADT*>(input_column->value);
 
@@ -470,9 +470,9 @@ Datum vdatelarger(PG_FUNCTION_ARGS)
 CXX_PG_FUNCTION_INFO_V1(vdatesmaller);
 Datum vdatesmaller(PG_FUNCTION_ARGS)
 {
-	int32 running_min = PG_GETARG_INT32(0);
+	int32_t running_min = PG_GETARG_INT32(0);
 	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32 lane_min = running_min;
+	int32_t lane_min = running_min;
 
 	DateADT* lane_values = reinterpret_cast<DateADT*>(input_column->value);
 

@@ -16,6 +16,8 @@ module;
 
 export module bioseq_write_state_interface;
 
+import pg_utils;
+
 extern "C++" {
 	extern void FlushWriteStateForRelfilenode(Oid relfilenode, SubTransactionId current_sub_xid);
 	extern void ColumnarPopWriteStateForAllRels(SubTransactionId current_sub_xid, SubTransactionId parent_sub_xid, bool commit);

@@ -89,9 +89,9 @@ ColumnarAttrNeeded(ScanState *ss, List *customList)
 		}
 		else if (var->varattno < SelfItemPointerAttributeNumber)
 		{
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("MIN / MAX TransactionID or CommandID not supported for BioseqScan")));
+			PgReport(ERROR)
+				.code(ERRCODE_FEATURE_NOT_SUPPORTED)
+				.msg("MIN / MAX TransactionID or CommandID not supported for BioseqScan");
 		}
 
 		if (var->varattno == 0)

@@ -44,15 +44,15 @@ static MemoryContext columnarCacheContext = NULL;
 struct ColumnarCacheEntry
 {
 	dlist_node list_node;
-	uint64 relId;
-	uint64 stripeId;
-	uint64 chunkId;
-	uint64 readCount;
-	uint64 length;
+	uint64_t relId;
+	uint64_t stripeId;
+	uint64_t chunkId;
+	uint64_t readCount;
+	uint64_t length;
 	time_t creationTime;
 	time_t lastAccessTime;
 	void *store;
-	uint32 columnId;
+	uint32_t columnId;
 };
 
 /*
@@ -63,7 +63,7 @@ static dlist_head *head = NULL;
 /*
  * Storage for total length allocated.
  */
-static uint64 totalAllocationLength = 0;
+static uint64_t totalAllocationLength = 0;
 
 /*
  * Cache statistics.
@@ -77,9 +77,9 @@ export ColumnarCacheStatistics statistics = { 0 };
  */
 struct ColumarCacheChunkGroupInUse
 {
-	uint64 relId;
-	uint64 stripeId;
-	uint64 chunkId;
+	uint64_t relId;
+	uint64_t stripeId;
+	uint64_t chunkId;
 };
 
 static List * ChunkGroupsInUse = NIL;
@@ -96,10 +96,10 @@ ColumnarCacheMemoryContext(void)
 {
 	if (columnarCacheContext == NULL)
 	{
-		columnarCacheContext = 
-			AllocSetContextCreate(TopMemoryContext, 
-								  "Bioseq Decompression Cache", 
-								  0, (uint64) (bioseq_page_cache_size * 1024 * 1024 * .1), 
+		columnarCacheContext =
+			AllocSetContextCreate(TopMemoryContext,
+								  "Bioseq Decompression Cache",
+								  0, static_cast<uint64_t>(bioseq_page_cache_size * 1024 * 1024 * .1),
 								  bioseq_page_cache_size * 1024 * 1024);
 		memset(&statistics, 0, sizeof(ColumnarCacheStatistics));
 		head = NULL;
@@ -136,7 +136,7 @@ ColumnarResetCache(void)
  * none are found, NULL is returned instead.
  */
 static ColumnarCacheEntry *
-ColumnarFindInCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId)
+ColumnarFindInCache(uint64_t relId, uint64_t stripeId, uint64_t chunkId, uint32_t columnId)
 {
 	if (head == NULL)
 	{
@@ -168,7 +168,7 @@ ColumnarFindInCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 column
  * no matching entry exists.
  */
 static bool
-ColumnarInvalidateCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId)
+ColumnarInvalidateCacheEntry(uint64_t relId, uint64_t stripeId, uint64_t chunkId, uint32_t columnId)
 {
 	if (head == nullptr)
 	{
@@ -204,10 +204,10 @@ ColumnarInvalidateCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, uint
 }
 
 static void
-EvictCache(uint64 size)
+EvictCache(uint64_t size)
 {
-	uint64 lastCount = 0;
-	uint64 nextLowestCount = PG_UINT64_MAX;
+	uint64_t lastCount = 0;
+	uint64_t nextLowestCount = PG_UINT64_MAX;
 
 	while (size > 0)
 	{
@@ -269,10 +269,10 @@ EvictCache(uint64 size)
 }
 
 export void
-ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
+ColumnarMarkChunkGroupInUse(uint64_t relId, uint64_t stripeId, uint32_t chunkId)
 {
 	bool found = false;
-	MemoryContext ctx = MemoryContextSwitchTo(ColumnarCacheMemoryContext());
+	MemoryContextScope ctx_guard{ColumnarCacheMemoryContext()};
 
 	for (auto* chunkGroupInUse : PList<ColumarCacheChunkGroupInUse>(ChunkGroupsInUse))
 	{
@@ -294,8 +294,6 @@ ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
 
 		ChunkGroupsInUse = lappend(ChunkGroupsInUse, newChunkGroupInUse);
 	}
-
-	MemoryContextSwitchTo(ctx);
 }
 
 /*
@@ -304,15 +302,15 @@ ColumnarMarkChunkGroupInUse(uint64 relId, uint64 stripeId, uint32 chunkId)
  * Adds a cache entry, or updates an existing entry.
  */
 export void
-ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId, 
-					  uint32 columnId, void *data)
+ColumnarAddCacheEntry(uint64_t relId, uint64_t stripeId, uint64_t chunkId, 
+					  uint32_t columnId, void *data)
 {
 	if (bioseq_enable_page_cache == false)
 	{
 		return;
 	}
 
-	MemoryContext oldContext = MemoryContextSwitchTo(ColumnarCacheMemoryContext());
+	MemoryContextScope ctx_guard{ColumnarCacheMemoryContext()};
 
 	if (head == NULL)
 	{
@@ -349,7 +347,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 		dlist_push_tail(head, &(entry->list_node));
 	}
 
-	uint64 size = ((StringInfo) data)->len;
+	uint64_t size = static_cast<StringInfo>(data)->len;
 
 	entry->store = data;
 	entry->length = size;
@@ -369,8 +367,6 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
 	}
 
 	statistics.writes++;
-
-	MemoryContextSwitchTo(oldContext);
 }
 
 /*
@@ -380,7 +376,7 @@ ColumnarAddCacheEntry(uint64 relId, uint64 stripeId, uint64 chunkId,
  * make a copy in the current memory context and return it.
  */
 export void*
-ColumnarRetrieveCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 columnId)
+ColumnarRetrieveCache(uint64_t relId, uint64_t stripeId, uint64_t chunkId, uint32_t columnId)
 {
 	if (bioseq_enable_page_cache == false)
 	{
@@ -408,10 +404,10 @@ ColumnarRetrieveCache(uint64 relId, uint64 stripeId, uint64 chunkId, uint32 colu
  *
  * Returns how large our cache is, used for accounting.
  */
-static uint64
+static uint64_t
 ColumnarCacheLength()
 {
-	uint64 count = 0;
+	uint64_t count = 0;
 
 	if (head == NULL)
 	{
@@ -445,10 +441,10 @@ ColumnarGetCacheStatistics(void)
  */
 POSTGRES_FN(cache_evict)
 {
-	uint64 relId =PG_GETARG_INT64(0);
-	uint64 stripeId = PG_GETARG_INT64(1);
-	uint64 chunkId = PG_GETARG_INT16(2);
-	uint32 columnId = PG_GETARG_UINT32(3);
+	uint64_t relId =PG_GETARG_INT64(0);
+	uint64_t stripeId = PG_GETARG_INT64(1);
+	uint64_t chunkId = PG_GETARG_INT16(2);
+	uint32_t columnId = PG_GETARG_UINT32(3);
 
 	bool result = ColumnarInvalidateCacheEntry(relId, stripeId, chunkId, columnId);
 

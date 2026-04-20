@@ -26,7 +26,7 @@ constexpr int DEC_DIGITS = 4;          /* decimal digits per NBASE digit */
 constexpr int MUL_GUARD_DIGITS = 2;    /* measured in NBASE digits */
 constexpr int DIV_GUARD_DIGITS = 4;
 
-using NumericDigit = int16;
+using NumericDigit = int16_t;
 
 }
 
@@ -37,7 +37,7 @@ using NumericDigit = int16;
  */
 struct NumericShort
 {
-	uint16 n_header;                           /* Sign + display scale + weight */
+	uint16_t n_header;                         /* Sign + display scale + weight */
 	NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];/* Digits */
 };
 
@@ -47,8 +47,8 @@ struct NumericShort
  */
 struct NumericLong
 {
-	uint16 n_sign_dscale;                      /* Sign + display scale */
-	int16 n_weight;                            /* Weight of 1st digit  */
+	uint16_t n_sign_dscale;                    /* Sign + display scale */
+	int16_t n_weight;                          /* Weight of 1st digit  */
 	NumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];/* Digits */
 };
 
@@ -57,7 +57,7 @@ struct NumericLong
  */
 union NumericChoice
 {
-	uint16 n_header;                  /* Header word */
+	uint16_t n_header;                /* Header word */
 	struct NumericLong n_long;        /* Long form (4-byte header) */
 	struct NumericShort n_short;      /* Short form (2-byte header) */
 };
@@ -69,49 +69,49 @@ union NumericChoice
  */
 struct NumericData
 {
-	int32 vl_len_;                    /* varlena header (do not touch directly!) */
+	int32_t vl_len_;                  /* varlena header (do not touch directly!) */
 	union NumericChoice choice;       /* choice of format */
 };
 
 namespace {
 
-constexpr uint16 NUMERIC_SIGN_MASK = 0xC000;
-constexpr uint16 NUMERIC_POS = 0x0000;
-constexpr uint16 NUMERIC_NEG = 0x4000;
-constexpr uint16 NUMERIC_SHORT = 0x8000;
-constexpr uint16 NUMERIC_SPECIAL = 0xC000;
+constexpr uint16_t NUMERIC_SIGN_MASK = 0xC000;
+constexpr uint16_t NUMERIC_POS = 0x0000;
+constexpr uint16_t NUMERIC_NEG = 0x4000;
+constexpr uint16_t NUMERIC_SHORT = 0x8000;
+constexpr uint16_t NUMERIC_SPECIAL = 0xC000;
 
 #define NUMERIC_FLAGBITS(n) ((n)->choice.n_header & NUMERIC_SIGN_MASK)
 #define NUMERIC_IS_SHORT(n)		(NUMERIC_FLAGBITS(n) == NUMERIC_SHORT)
 #define NUMERIC_IS_SPECIAL(n)	(NUMERIC_FLAGBITS(n) == NUMERIC_SPECIAL)
 
-constexpr int NUMERIC_HDRSZ = VARHDRSZ + sizeof(uint16) + sizeof(int16);
-constexpr int NUMERIC_HDRSZ_SHORT = VARHDRSZ + sizeof(uint16);
+constexpr int NUMERIC_HDRSZ = VARHDRSZ + sizeof(uint16_t) + sizeof(int16_t);
+constexpr int NUMERIC_HDRSZ_SHORT = VARHDRSZ + sizeof(uint16_t);
 
 #define NUMERIC_HEADER_IS_SHORT(n)	(((n)->choice.n_header & 0x8000) != 0)
 #define NUMERIC_HEADER_SIZE(n) \
-	(VARHDRSZ + sizeof(uint16) + \
-	 (NUMERIC_HEADER_IS_SHORT(n) ? 0 : sizeof(int16)))
+	(VARHDRSZ + sizeof(uint16_t) + \
+	 (NUMERIC_HEADER_IS_SHORT(n) ? 0 : sizeof(int16_t)))
 
-constexpr uint16 NUMERIC_EXT_SIGN_MASK = 0xF000;
-constexpr uint16 NUMERIC_NAN = 0xC000;
-constexpr uint16 NUMERIC_PINF = 0xD000;
-constexpr uint16 NUMERIC_NINF = 0xF000;
-constexpr uint16 NUMERIC_INF_SIGN_MASK = 0x2000;
+constexpr uint16_t NUMERIC_EXT_SIGN_MASK = 0xF000;
+constexpr uint16_t NUMERIC_NAN = 0xC000;
+constexpr uint16_t NUMERIC_PINF = 0xD000;
+constexpr uint16_t NUMERIC_NINF = 0xF000;
+constexpr uint16_t NUMERIC_INF_SIGN_MASK = 0x2000;
 
 #define NUMERIC_EXT_FLAGBITS(n)	((n)->choice.n_header & NUMERIC_EXT_SIGN_MASK)
 
-constexpr uint16 NUMERIC_SHORT_SIGN_MASK = 0x2000;
-constexpr uint16 NUMERIC_SHORT_DSCALE_MASK = 0x1F80;
+constexpr uint16_t NUMERIC_SHORT_SIGN_MASK = 0x2000;
+constexpr uint16_t NUMERIC_SHORT_DSCALE_MASK = 0x1F80;
 constexpr int NUMERIC_SHORT_DSCALE_SHIFT = 7;
-constexpr uint16 NUMERIC_SHORT_DSCALE_MAX = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT_DSCALE_SHIFT;
-constexpr uint16 NUMERIC_SHORT_WEIGHT_SIGN_MASK = 0x0040;
-constexpr uint16 NUMERIC_SHORT_WEIGHT_MASK = 0x003F;
+constexpr uint16_t NUMERIC_SHORT_DSCALE_MAX = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT_DSCALE_SHIFT;
+constexpr uint16_t NUMERIC_SHORT_WEIGHT_SIGN_MASK = 0x0040;
+constexpr uint16_t NUMERIC_SHORT_WEIGHT_MASK = 0x003F;
 constexpr int NUMERIC_SHORT_WEIGHT_MAX = NUMERIC_SHORT_WEIGHT_MASK;
 constexpr int NUMERIC_SHORT_WEIGHT_MIN = -(NUMERIC_SHORT_WEIGHT_MASK + 1);
 
-constexpr uint16 NUMERIC_DSCALE_MASK = 0x3FFF;
-constexpr uint16 NUMERIC_DSCALE_MAX = NUMERIC_DSCALE_MASK;
+constexpr uint16_t NUMERIC_DSCALE_MASK = 0x3FFF;
+constexpr uint16_t NUMERIC_DSCALE_MAX = NUMERIC_DSCALE_MASK;
 
 #define NUMERIC_DSCALE(n)	(NUMERIC_HEADER_IS_SHORT((n)) ? \
 	((n)->choice.n_short.n_header & NUMERIC_SHORT_DSCALE_MASK) \
@@ -165,7 +165,7 @@ alloc_var(NumericVar* var, int digit_count)
 {
 	if (var->buf != nullptr)
 		pfree(var->buf);
-	var->buf = make1<NumericDigit>((digit_count + 1) * sizeof(NumericDigit));
+	var->buf = make_array<NumericDigit>(digit_count + 1);
 	var->buf[0] = 0;
 	var->digits = var->buf + 1;
 	var->ndigits = digit_count;
@@ -247,7 +247,7 @@ make_numeric(const NumericVar* var)
 		if (!(sign == NUMERIC_NAN ||
 			  sign == NUMERIC_PINF ||
 			  sign == NUMERIC_NINF))
-			elog(ERROR, "invalid numeric sign value 0x%x", sign);
+			pg_log(ERROR, "invalid numeric sign value 0x{:x}", sign);
 
 		result = make1<NumericData>(NUMERIC_HDRSZ_SHORT);
 		SET_VARSIZE(result, NUMERIC_HDRSZ_SHORT);
@@ -301,9 +301,7 @@ make_numeric(const NumericVar* var)
 	if (NUMERIC_WEIGHT(result) != weight ||
 		NUMERIC_DSCALE(result) != var->dscale)
 	{
-		ereport(ERROR,
-				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-				errmsg("value overflows numeric format")));
+		PgReport(ERROR).code(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE).msg("value overflows numeric format");
 	}
 
 	return result;
