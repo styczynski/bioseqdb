@@ -19,17 +19,85 @@
  */
 module;
 
+#include <hwy/highway.h>
 #include "common.h"
 
 #include <string>
+#include <map>
 #include <vector>
 
 export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
 import pg_utils;
+import bioseq_sequences.minimap_port;
+import bioseq_cigar;
 
-extern "C++" {
+HWY_BEFORE_NAMESPACE();
+
+namespace bioseq::simd::HWY_NAMESPACE {
+namespace hn = hwy::HWY_NAMESPACE;
+
+export class BatchProcessor {
+public:
+    // This should be called for batch of column inputs when finish_writing is called
+    template<typename K, size_t batch_capacity>
+    [[always_inline]] constexpr std::map<K, std::vector<MatchResult>> process_sequences(
+        const size_t batch_size, //< number of queries in the batch
+        const char* target_sequence, //< sequence passed in mmsearch_context.query_string
+        const std::array<const char*, batch_capacity>& query_sequences, //< should be batch of column strings. Note that batch_capacity can be higher than actual number of queries. Use batch_size to pass actual number of queries in batch
+        const std::array<K, batch_capacity>& query_ids //< we need to pass some row identitier (please extract primary key of the table to use here)
+    ) {
+        // Some dummy implementation
+        std::map<K, std::vector<MatchResult>> results;
+        // We skip first sequence to test what happens if the sequence is discarded
+        // Note that this function can return partial map without all input queries.
+        // If query is not in the returned map then it should be interpreted as "where mmsearch(seq, 'sequence_b')" returning FALSE (so the tuple should be completely filtered out from results)
+        for (size_t query_no=1; query_no<batch_size; ++query_no) {
+            std::vector<CigarOp> cigar = {
+                {
+                    .length = 5,
+                    .opcode = CIGAR_DEL
+                },
+                {
+                    .length = 3,
+                    .opcode = CIGAR_MATCH
+                },
+                {
+                    .length = 8,
+                    .opcode = CIGAR_EQ
+                },
+                {
+                    .length = 1,
+                    .opcode = CIGAR_INS
+                }
+            };
+            const MatchResult match = {
+                .query_len = query_no*2,    ///< col 2: query sequence length
+                .query_start            = query_no+1,    ///< col 3: query start (0-based, closed)
+                .query_end              = query_no*3+5,    ///< col 4: query end (0-based, open)
+                .is_reverse             = query_no % 2 == 0,///< col 5: '+' or '-'
+                .target_len             = query_no+2,    ///< col 7: target sequence length
+                .target_start           = query_no*4+7,    ///< col 8: target start on original strand
+                .target_end             = query_no*5+9,    ///< col 9: target end on original strand
+                .num_matches            = query_no,    ///< col 10: number of residue matches (mlen)
+                .block_length           = query_no,    ///< col 11: alignment block length (blen)
+                .mapq                   = query_no,    ///< col 12: mapping quality (0-255)
+                .chain_score            = query_no,    ///< chaining score
+                .dp_score               = query_no,    ///< DP alignment score
+                .dp_max_score           = query_no,    ///< max scoring segment score (dp_max0 in original)
+                .seed_count             = query_no,    ///< number of seeds in chain
+                .secondary_chain_score  = query_no,    ///< best secondary chaining score against this primary
+                .divergence             = -1.f, ///< sequence divergence estimate
+                .is_primary             = query_no % 3 == 0, ///< primary mapping flag
+                .has_cigar              = true, ///< whether CIGAR alignment was performed
+                .cigar                  = cigar
+            };
+            results[query_ids[query_no]].push_back(std::move(match));
+        }
+        return results;
+    }
+};
 
 export class TupleDispatchBuffer {
 public:
@@ -49,6 +117,7 @@ public:
     };
 
 private:
+    BatchProcessor processor;
     std::vector<TupleTableSlot*> buffered_slots;
     int buffer_position = -1;
     MmsearchContext mmsearch_context;
@@ -183,4 +252,5 @@ public:
     }
 };
 
-}
+} // namespace bioseq::simd::HWY_NAMESPACE
+HWY_AFTER_NAMESPACE();

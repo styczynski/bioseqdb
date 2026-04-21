@@ -54,7 +54,7 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 static int32_t counter = 100;
 static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
-static TupleDispatchBuffer buffer(1000);
+static bioseq::simd::N_NEON::TupleDispatchBuffer buffer(1000);
 
 /*
  * Pair of OIDs looked up from pg_proc for the bioseq extension's stub
