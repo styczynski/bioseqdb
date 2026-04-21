@@ -8,10 +8,12 @@ drop table if exists x CASCADE;
 
 SET bioseq.logging = on;
 SET bioseq.enable_bioseq_index_scan TO TRUE;
+set bioseq.enable_column_cache to on;
 
--- POC table: no PRIMARY KEY / no index, so the planner cannot choose
--- an index scan over our CustomScan path.
-create table x ( a INT, seq TEXT, c INT ) using bioseq;
+-- POC table: INT4 primary key on `a` so the batch processor's map<int32_t, ...>
+-- can key on it. `seq TEXT` is the target column for mmsearch; `c INT` is a
+-- regular projected column unrelated to alignment.
+create table x ( a INT PRIMARY KEY, seq TEXT, c INT ) using bioseq;
 
 INSERT INTO x VALUES (
     23,  'sequence_1', 1
@@ -23,11 +25,24 @@ INSERT INTO x VALUES (
     42,  'sequence_4', 2
 );
 
-set bioseq.enable_column_cache to on;
+-- ---- Case 1: vectorization OFF (baseline) ----
 set bioseq.enable_vectorization to off;
+EXPLAIN (COSTS OFF)
+  SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
+  FROM x
+  WHERE mmsearch(seq, 'sequence_b');
 
--- First EXPLAIN to verify that the custom scan (BioseqScan) is chosen.
-EXPLAIN (COSTS OFF) select a, c, bioseq.score(a) from x where mmsearch(seq, 'sequence_b');
+SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
+  FROM x
+  WHERE mmsearch(seq, 'sequence_b');
 
--- The goal query.
-select a, c, bioseq.score(a) from x where mmsearch(seq, 'sequence_b');
+-- ---- Case 2: vectorization ON; result must match Case 1 ----
+set bioseq.enable_vectorization to on;
+EXPLAIN (COSTS OFF)
+  SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
+  FROM x
+  WHERE mmsearch(seq, 'sequence_b');
+
+SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
+  FROM x
+  WHERE mmsearch(seq, 'sequence_b');

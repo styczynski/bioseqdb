@@ -34,6 +34,8 @@ import bioseq_table_types;
 import bioseq_scan_state;
 import pg_utils;
 import bioseq_scheduler.dispatch_buffer;
+import bioseq_sequences.minimap_port;  // for MatchResult
+import bioseq_cigar;                    // for format_cigar
 
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
@@ -51,43 +53,145 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							bool returnVectorizedTuple);
 
 
-static int32_t counter = 100;
 static List* newtargetlist = nullptr;
-static Const* const_score_node = nullptr;
+static Const* const_score_node = nullptr;   // legacy alias pointing at placeholder_consts.dp_score_node
 static bioseq::simd::N_NEON::TupleDispatchBuffer buffer(1000);
 
 /*
- * Pair of OIDs looked up from pg_proc for the bioseq extension's stub
- * SQL functions. Looked up on demand via LookupStubOids(); never cached
- * across calls because `drop extension; create extension` would leave a
+ * Placeholder Const nodes injected by VarInjectorMutator into the
+ * rewritten target list. Each one stands in for a bioseq.<field>(...)
+ * FuncExpr; per-row values are written into constvalue/constisnull
+ * before ExecProject runs. All pointers start as nullptr in a fresh
+ * backend; CustomExecScan's first-call init allocates them and
+ * VarInjectorMutator wires them into newtargetlist.
+ */
+struct BioseqPlaceholderConsts {
+	Const* dp_score_node              = nullptr;  // bioseq.score / bioseq.dp_score
+	Const* query_len_node             = nullptr;
+	Const* query_start_node           = nullptr;
+	Const* query_end_node             = nullptr;
+	Const* target_len_node            = nullptr;
+	Const* target_start_node          = nullptr;
+	Const* target_end_node            = nullptr;
+	Const* num_matches_node           = nullptr;
+	Const* block_length_node          = nullptr;
+	Const* mapq_node                  = nullptr;
+	Const* chain_score_node           = nullptr;
+	Const* dp_max_score_node          = nullptr;
+	Const* seed_count_node            = nullptr;
+	Const* secondary_chain_score_node = nullptr;
+	Const* is_reverse_node            = nullptr;
+	Const* is_primary_node            = nullptr;
+	Const* has_cigar_node             = nullptr;
+	Const* divergence_node            = nullptr;
+	Const* cigar_node                 = nullptr;
+};
+static BioseqPlaceholderConsts placeholder_consts;
+
+/*
+ * OIDs looked up from pg_proc for the bioseq extension's SQL stubs.
+ * Resolved on demand via LookupStubOids(); never cached across
+ * queries because `drop extension; create extension` would leave a
  * process-wide cache pointing at the old, dropped pg_proc rows.
  */
 struct BioseqStubOids {
 	Oid mmsearch_oid;
-	Oid bioseq_score_oid;
+
+	Oid score_oid;                    // bioseq.score (alias for dp_score)
+	Oid dp_score_oid;
+	Oid query_len_oid;
+	Oid query_start_oid;
+	Oid query_end_oid;
+	Oid target_len_oid;
+	Oid target_start_oid;
+	Oid target_end_oid;
+	Oid num_matches_oid;
+	Oid block_length_oid;
+	Oid mapq_oid;
+	Oid chain_score_oid;
+	Oid dp_max_score_oid;
+	Oid seed_count_oid;
+	Oid secondary_chain_score_oid;
+	Oid is_reverse_oid;
+	Oid is_primary_oid;
+	Oid has_cigar_oid;
+	Oid divergence_oid;
+	Oid cigar_oid;
 };
 
 /*
- * LookupStubOids resolves the OIDs of mmsearch(anyelement, text) and
- * bioseq.score(anyelement). regprocedurein raises ereport(ERROR, ...)
- * on miss, so we assume both functions are present by the time any
- * bioseq-aware code path runs (CREATE EXTENSION has to succeed first).
+ * LookupStubOids resolves all bioseq stub OIDs via regprocedurein,
+ * which raises ereport(ERROR, ...) if any function is missing. We
+ * assume CREATE EXTENSION bioseq has already succeeded before any
+ * path below runs.
  */
 [[nodiscard]] static BioseqStubOids LookupStubOids() {
 	BioseqStubOids result{};
-	result.mmsearch_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
-		CStringGetDatum("mmsearch(anyelement, text)")));
-	result.bioseq_score_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
-		CStringGetDatum("bioseq.score(anyelement)")));
+	auto resolve = [](const char* signature) {
+		return DatumGetObjectId(DirectFunctionCall1(regprocedurein,
+			CStringGetDatum(signature)));
+	};
+	result.mmsearch_oid              = resolve("mmsearch(anyelement, text)");
+	result.score_oid                 = resolve("bioseq.score(anyelement)");
+	result.dp_score_oid              = resolve("bioseq.dp_score(anyelement)");
+	result.query_len_oid             = resolve("bioseq.query_len(anyelement)");
+	result.query_start_oid           = resolve("bioseq.query_start(anyelement)");
+	result.query_end_oid             = resolve("bioseq.query_end(anyelement)");
+	result.target_len_oid            = resolve("bioseq.target_len(anyelement)");
+	result.target_start_oid          = resolve("bioseq.target_start(anyelement)");
+	result.target_end_oid            = resolve("bioseq.target_end(anyelement)");
+	result.num_matches_oid           = resolve("bioseq.num_matches(anyelement)");
+	result.block_length_oid          = resolve("bioseq.block_length(anyelement)");
+	result.mapq_oid                  = resolve("bioseq.mapq(anyelement)");
+	result.chain_score_oid           = resolve("bioseq.chain_score(anyelement)");
+	result.dp_max_score_oid          = resolve("bioseq.dp_max_score(anyelement)");
+	result.seed_count_oid            = resolve("bioseq.seed_count(anyelement)");
+	result.secondary_chain_score_oid = resolve("bioseq.secondary_chain_score(anyelement)");
+	result.is_reverse_oid            = resolve("bioseq.is_reverse(anyelement)");
+	result.is_primary_oid            = resolve("bioseq.is_primary(anyelement)");
+	result.has_cigar_oid             = resolve("bioseq.has_cigar(anyelement)");
+	result.divergence_oid            = resolve("bioseq.divergence(anyelement)");
+	result.cigar_oid                 = resolve("bioseq.cigar(anyelement)");
 	return result;
 }
 
 /*
+ * Classifier used by AddColumnarScanPath's wehavemagic sweep and by
+ * BeginCustomScan's primary-key discovery. Returns true if funcid
+ * matches any of the bioseq projection stubs (i.e. anything that
+ * VarInjectorMutator will rewrite into a placeholder Const).
+ */
+[[nodiscard]] static inline bool is_bioseq_projection_funcid(Oid funcid, const BioseqStubOids& o) {
+	return funcid == o.score_oid
+		|| funcid == o.dp_score_oid
+		|| funcid == o.query_len_oid
+		|| funcid == o.query_start_oid
+		|| funcid == o.query_end_oid
+		|| funcid == o.target_len_oid
+		|| funcid == o.target_start_oid
+		|| funcid == o.target_end_oid
+		|| funcid == o.num_matches_oid
+		|| funcid == o.block_length_oid
+		|| funcid == o.mapq_oid
+		|| funcid == o.chain_score_oid
+		|| funcid == o.dp_max_score_oid
+		|| funcid == o.seed_count_oid
+		|| funcid == o.secondary_chain_score_oid
+		|| funcid == o.is_reverse_oid
+		|| funcid == o.is_primary_oid
+		|| funcid == o.has_cigar_oid
+		|| funcid == o.divergence_oid
+		|| funcid == o.cigar_oid;
+}
+
+/*
  * Context passed to VarInjectorMutator through the void* context arg.
+ * Bundles the allocated placeholder Consts with the resolved OIDs so
+ * the mutator can dispatch on funcid -> Const* without a global.
  */
 struct VarInjectorCtx {
-	Const* const_score_node;
-	Oid bioseq_score_oid;
+	const BioseqPlaceholderConsts* consts;
+	const BioseqStubOids*          oids;
 };
 
 /* functions to cost paths in-place */
@@ -1511,8 +1615,8 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	bool wehavemagic = false;
 	int wehavemagic_cnt = 0;
-	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} bioseq_score_oid={}",
-		stub_oids.mmsearch_oid, stub_oids.bioseq_score_oid);
+	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={}",
+		stub_oids.mmsearch_oid, stub_oids.score_oid, stub_oids.cigar_oid, stub_oids.query_start_oid);
 	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
 		if (IsA(tgt->expr, FuncExpr)) {
 			FuncExpr* fe = reinterpret_cast<FuncExpr *>(tgt->expr);
@@ -1520,8 +1624,9 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 				JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr in targetlist");
 				wehavemagic = true;
 				wehavemagic_cnt++;
-			} else if (fe->funcid == stub_oids.bioseq_score_oid) {
-				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq.score funcexpr in targetlist");
+			} else if (is_bioseq_projection_funcid(fe->funcid, stub_oids)) {
+				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq projection funcexpr funcid={} in targetlist",
+					fe->funcid);
 				wehavemagic = true;
 				wehavemagic_cnt++;
 			}
@@ -1961,7 +2066,15 @@ ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 static Node *
 ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 {
+	/*
+	 * Reset the placeholder inventory. The previous query's Consts were
+	 * palloc'd in that query's memory context; those pointers are now
+	 * dangling. CustomExecScan's first-call init detects the nullptr
+	 * state and re-allocates them in the new context.
+	 */
+	placeholder_consts = BioseqPlaceholderConsts{};
 	const_score_node = nullptr;
+	newtargetlist = nullptr;
 	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() entered");
 	BioseqScanState* bioseq_scan_state = BioseqScanState::allocate();
 	bioseq_scan_state->as_custom_scan_state()->methods = &ColumnarScanExecuteMethods;
@@ -2120,14 +2233,41 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	}
 
 	/*
+	 * Discover the primary-key column by scanning the unmutated
+	 * targetlist for the first bioseq.<field>(Var) FuncExpr and using
+	 * its Var argument's varattno. BeginCustomScan runs before
+	 * CustomExecScan, so at this point cscan->scan.plan.targetlist
+	 * still contains the FuncExprs — they haven't been rewritten to
+	 * Const* yet (the rewrite target is newtargetlist, not
+	 * scan.plan.targetlist).
+	 */
+	const BioseqStubOids scan_stub_oids = LookupStubOids();
+	AttrNumber primary_key_attno = InvalidAttrNumber;
+	for (auto tgt : PList<TargetEntry>(cscan->scan.plan.targetlist))
+	{
+		if (tgt == nullptr || !IsA(tgt->expr, FuncExpr)) continue;
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(tgt->expr);
+		if (!is_bioseq_projection_funcid(fe->funcid, scan_stub_oids)) continue;
+		if (list_length(fe->args) < 1) continue;
+		PList<Node> fe_args(fe->args);
+		Node* arg0 = fe_args.first();
+		if (arg0 == nullptr || !IsA(arg0, Var)) continue;
+		Var* pk_var = reinterpret_cast<Var*>(arg0);
+		if (pk_var->varattno <= 0) continue;
+		primary_key_attno = pk_var->varattno;
+		JustLog("[bioseq] pg: BeginCustomScan() detected primary_key varattno={} from bioseq projection funcid={}",
+				static_cast<int>(primary_key_attno), fe->funcid);
+		break;
+	}
+
+	/*
 	 * Walk cscan->scan.plan.qual to discover the WHERE mmsearch(...) call,
 	 * pull out (varattno of the TEXT column, query literal) and configure
-	 * the dispatch buffer so on_submit() has enough context to emit the
-	 * per-tuple log line.
+	 * the dispatch buffer so submit_scan has enough context to emit the
+	 * per-tuple log line and buffer the right column values.
 	 */
 	buffer.clear_mmsearch_context();
 
-	const BioseqStubOids scan_stub_oids = LookupStubOids();
 	Relation relation_for_attname = cscanstate->ss.ss_currentRelation;
 	const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
 
@@ -2193,6 +2333,23 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			continue;
 		}
 
+		/*
+		 * Sanity-check the primary key column: must be INT4 for the POC.
+		 * If it is not INT4 or InvalidAttrNumber we still configure — the
+		 * batch processor will treat the column as null-PK and filter
+		 * those rows out (see TupleDispatchBuffer::run_batch_and_build_cursors).
+		 */
+		if (primary_key_attno != InvalidAttrNumber
+			&& primary_key_attno <= tuple_descriptor->natts)
+		{
+			Form_pg_attribute pk_attr_form = TupleDescAttr(tuple_descriptor, primary_key_attno - 1);
+			if (pk_attr_form->atttypid != INT4OID)
+			{
+				JustLog("[bioseq] pg: BeginCustomScan() primary key column type is {} not INT4OID; rows will be mis-keyed",
+						pk_attr_form->atttypid);
+			}
+		}
+
 		char* attname_cstr = get_attname(relation_oid_for_attname, col_var->varattno, /*missing_ok=*/true);
 		if (attname_cstr == nullptr)
 		{
@@ -2204,15 +2361,13 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 
 		buffer.configure_mmsearch(col_var->varattno,
 								  std::string(attname_cstr),
-								  std::string(query_cstr));
+								  std::string(query_cstr),
+								  primary_key_attno);
 
 		pfree(attname_cstr);
 		pfree(query_cstr);
 		break; /* POC: only honour the first mmsearch() qual we find */
 	}
-
-	/* Reset the counter so each scan starts from 100 deterministically. */
-	counter = 100;
 
 	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
@@ -2328,6 +2483,38 @@ ExecScanFetch(ScanState *node,
 	return (*accessMtd) (node);
 }
 
+/*
+ * Dispatch table: given a matched funcid, which placeholder Const do we
+ * substitute in? bioseq.score is an alias for bioseq.dp_score so both
+ * resolve to the same Const* (paradedb's score/pdb.score alias pattern).
+ */
+static Const*
+lookup_bioseq_placeholder_const(Oid funcid, const VarInjectorCtx* ctx)
+{
+	const BioseqStubOids* o = ctx->oids;
+	const BioseqPlaceholderConsts* c = ctx->consts;
+	if (funcid == o->score_oid || funcid == o->dp_score_oid)     return c->dp_score_node;
+	if (funcid == o->query_len_oid)              return c->query_len_node;
+	if (funcid == o->query_start_oid)            return c->query_start_node;
+	if (funcid == o->query_end_oid)              return c->query_end_node;
+	if (funcid == o->target_len_oid)             return c->target_len_node;
+	if (funcid == o->target_start_oid)           return c->target_start_node;
+	if (funcid == o->target_end_oid)             return c->target_end_node;
+	if (funcid == o->num_matches_oid)            return c->num_matches_node;
+	if (funcid == o->block_length_oid)           return c->block_length_node;
+	if (funcid == o->mapq_oid)                   return c->mapq_node;
+	if (funcid == o->chain_score_oid)            return c->chain_score_node;
+	if (funcid == o->dp_max_score_oid)           return c->dp_max_score_node;
+	if (funcid == o->seed_count_oid)             return c->seed_count_node;
+	if (funcid == o->secondary_chain_score_oid)  return c->secondary_chain_score_node;
+	if (funcid == o->is_reverse_oid)             return c->is_reverse_node;
+	if (funcid == o->is_primary_oid)             return c->is_primary_node;
+	if (funcid == o->has_cigar_oid)              return c->has_cigar_node;
+	if (funcid == o->divergence_oid)             return c->divergence_node;
+	if (funcid == o->cigar_oid)                  return c->cigar_node;
+	return nullptr;
+}
+
 static Node *
 VarInjectorMutator(Node *node, void* context)
 {
@@ -2338,13 +2525,73 @@ VarInjectorMutator(Node *node, void* context)
 	auto* injector_context = static_cast<VarInjectorCtx*>(context);
 	if (IsA(node, FuncExpr)) {
 		auto funcExpr = reinterpret_cast<FuncExpr *>(node);
-		if (funcExpr->funcid == injector_context->bioseq_score_oid) {
-			JustLog("[bioseq] pg: VarInjectorMutator() replacing bioseq.score FuncExpr with Const");
-			return reinterpret_cast<Node *>(injector_context->const_score_node);
+		Const* replacement = lookup_bioseq_placeholder_const(funcExpr->funcid, injector_context);
+		if (replacement != nullptr) {
+			JustLog("[bioseq] pg: VarInjectorMutator() replacing bioseq funcid={} with placeholder Const",
+					funcExpr->funcid);
+			return reinterpret_cast<Node *>(replacement);
 		}
 		/* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
 	}
 	return expression_tree_mutator(node, VarInjectorMutator, context);
+}
+
+/*
+ * Per-tuple update of every placeholder Const* from a MatchResult's
+ * fields. Fields we don't have a Const for (because the query didn't
+ * project them) are skipped thanks to the nullptr guard. The cigar text
+ * Datum is allocated via CStringGetTextDatum in CurrentMemoryContext;
+ * for the POC we accept the per-query leak (see SPEC_HOW_TO_CONNECT_ALIGNER_2.md §6.2).
+ *
+ * MatchResult and format_cigar live inside bioseq::simd::HWY_NAMESPACE
+ * (expanded to N_NEON on this arm64 target); this file does not use
+ * HWY_BEFORE_NAMESPACE() so we qualify with the full path.
+ */
+static void
+populate_placeholder_consts(const bioseq::simd::N_NEON::MatchResult& match)
+{
+	using bioseq::simd::N_NEON::format_cigar;
+	auto set_int = [](Const* node, int32_t value) {
+		if (node == nullptr) return;
+		node->constvalue = Int32GetDatum(value);
+		node->constisnull = false;
+	};
+	auto set_bool = [](Const* node, bool value) {
+		if (node == nullptr) return;
+		node->constvalue = BoolGetDatum(value);
+		node->constisnull = false;
+	};
+	auto set_float = [](Const* node, float value) {
+		if (node == nullptr) return;
+		node->constvalue = Float4GetDatum(value);
+		node->constisnull = false;
+	};
+
+	set_int(placeholder_consts.dp_score_node,              match.dp_score);
+	set_int(placeholder_consts.query_len_node,             match.query_len);
+	set_int(placeholder_consts.query_start_node,           match.query_start);
+	set_int(placeholder_consts.query_end_node,             match.query_end);
+	set_int(placeholder_consts.target_len_node,            match.target_len);
+	set_int(placeholder_consts.target_start_node,          match.target_start);
+	set_int(placeholder_consts.target_end_node,            match.target_end);
+	set_int(placeholder_consts.num_matches_node,           match.num_matches);
+	set_int(placeholder_consts.block_length_node,          match.block_length);
+	set_int(placeholder_consts.mapq_node,                  match.mapq);
+	set_int(placeholder_consts.chain_score_node,           match.chain_score);
+	set_int(placeholder_consts.dp_max_score_node,          match.dp_max_score);
+	set_int(placeholder_consts.seed_count_node,            match.seed_count);
+	set_int(placeholder_consts.secondary_chain_score_node, match.secondary_chain_score);
+	set_bool(placeholder_consts.is_reverse_node,           match.is_reverse);
+	set_bool(placeholder_consts.is_primary_node,           match.is_primary);
+	set_bool(placeholder_consts.has_cigar_node,            match.has_cigar);
+	set_float(placeholder_consts.divergence_node,          match.divergence);
+
+	if (placeholder_consts.cigar_node != nullptr)
+	{
+		std::string cigar_str = format_cigar(match.cigar);
+		placeholder_consts.cigar_node->constvalue = CStringGetTextDatum(cigar_str.c_str());
+		placeholder_consts.cigar_node->constisnull = false;
+	}
 }
 
 
@@ -2353,43 +2600,14 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
-	bool rec = false;
 	JustLog("[bioseq] pg: Inner_CustomExecScan() entered");
 	ExprContext *econtext;
 	ExprState  *qual;
-	ProjectionInfo *projInfo;
 
 	ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
 
-	/*
-	 * Fetch data from node
-	 */
-	qual = node->ps.qual;
-	projInfo = node->ps.ps_ProjInfo;
+	qual     = node->ps.qual;
 	econtext = node->ps.ps_ExprContext;
-
-	JustLog("[bioseq] pg: Inner_CustomExecScan() projection_info_is_null={}", projInfo == nullptr);
-
-	/* interrupt checks are in ExecScanFetch */
-
-	/*
-	 * No qual to check and no projection to do and vectorization is not enabled,
-	 * just skip all the overhead and return the raw scan tuple.
-	 */
-	// FIXME: Temporary disable this check
-	if (false && !qual && !projInfo && !columnarScanState->vectorization.vectorizationEnabled)
-	{
-		if(rec) ResetExprContext(econtext);
-		return ExecScanFetch(node, accessMtd, recheckMtd);
-	}
-
-	/*
-	 * Reset per-tuple memory context to free any expression evaluation
-	 * storage allocated in the previous tuple cycle.
-	 */
-	if(rec) ResetExprContext(econtext);
-	
-	uint resultVectorTupleSlotIdx = 0;
 
 	if (columnarScanState->vectorization.vectorizationAggregate)
 	{
@@ -2399,146 +2617,123 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 	}
 
 	/*
-	 * get a tuple from the access method.  Loop until we obtain a tuple that
-	 * passes the qualification.
+	 * Two-phase state machine:
+	 *
+	 *   Phase 1 (writing): pull tuples from the access method, run qual,
+	 *                      buffer passing tuples via buffer.submit_scan.
+	 *                      When source is exhausted, run batch processor
+	 *                      and transition.
+	 *   Phase 2 (reading): drain buffered output entries, setting
+	 *                      placeholder const nodes from MatchResults and
+	 *                      projecting via ExecProject.
+	 *
+	 * buffer.has_finished_writing() flips from false → true at the
+	 * transition.
 	 */
 	for (;;)
 	{
+		/* ---- Phase 2: drain buffered output ---- */
+		if (buffer.has_finished_writing())
+		{
+			JustLog("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
+			auto next = buffer.read_next_output();
+			if (!next)
+			{
+				JustLog("[bioseq] pg: Inner_CustomExecScan() output cursor drained; returning empty slot (EOF)");
+				return ExecClearTuple(node->ps.ps_ResultTupleSlot);
+			}
 
+			/*
+			 * Update every placeholder Const from the MatchResult. The
+			 * subsequent ExecProject reads the current constvalue of
+			 * every Const node referenced in newtargetlist.
+			 */
+			populate_placeholder_consts(*next->match);
+
+			/*
+			 * Re-install the buffered scan slot as the current scan
+			 * tuple so Var references (e.g. `a`, `c`) resolve off the
+			 * right row.
+			 */
+			econtext->ecxt_scantuple = next->entry->scan_slot_copy;
+
+			ProjectionInfo* proj = ExecBuildProjectionInfo(
+				newtargetlist,
+				econtext,
+				node->ps.ps_ResultTupleSlot,
+				&(node->ps),
+				next->entry->scan_slot_copy->tts_tupleDescriptor);
+
+			return ExecProject(proj);
+		}
+
+		/* ---- Phase 1: writing ---- */
 		TupleTableSlot *slot = NULL;
 
-		if (buffer.has_finished_writing()) {
-			JustLog("[bioseq] pg: Inner_CustomExecScan() draining buffered slot");
-			return buffer.read_next();
-		}
-
-		if (columnarScanState->vectorization.vectorizationEnabled && 
-			columnarScanState->vectorization.vectorPendingRowNumber == 0 &&
-			resultVectorTupleSlotIdx > 0)
-		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fast-exit returning result vector slot");
-			reinterpret_cast<VectorTupleTableSlot *>(columnarScanState->vectorization.resultVectorSlot)->dimension = resultVectorTupleSlotIdx;
-			ExecStoreVirtualTuple(columnarScanState->vectorization.resultVectorSlot);
-			resultVectorTupleSlotIdx = 0;
-			return columnarScanState->vectorization.resultVectorSlot;
-		}
-
-        // Fake proj here
-		const_score_node->constvalue = counter++;
-		const_score_node->constisnull = false;
-		JustLog("[bioseq] pg: Inner_CustomExecScan() advance const_score counter to {}", counter);
-
-		auto newProj = ExecBuildProjectionInfo(
-			newtargetlist,
-			econtext,
-			node->ps.ps_ResultTupleSlot,
-			&(node->ps),
-			node->ss_ScanTupleSlot->tts_tupleDescriptor
-		);
-		JustLog("[bioseq] pg: Inner_CustomExecScan() existing_projInfo_null={} replacing with built projection", projInfo == nullptr);
-		projInfo = newProj;
-
-		//JustLog("NEW PROJECTION [{}]", nodeStr(newProj));
-
 		/*
-		 * No vectorizaion in place so fetch slot by slot.
+		 * Scalar fetch path: pull one scan tuple and run qual on it.
 		 */
 		if (!columnarScanState->vectorization.vectorizationEnabled)
 		{
-
 			JustLog("[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
-			resultVectorTupleSlotIdx = 0;
-
-			/*
-			 * if the slot returned by the accessMtd contains NULL, then it means
-			 * there is nothing more to scan so we just return an empty slot,
-			 * being careful to use the projection result slot so it has correct
-			 * tupleDesc.
-			 */
 			if (TupIsNull(slot))
 			{
-				JustLog("[bioseq] pg: Inner_CustomExecScan() source slot null, finishing dispatch buffer");
-				return buffer.finish_writing();
-				// if (projInfo)
-				// 	return ExecClearTuple(projInfo->pi_state.resultslot);
-				// else
-				// 	return slot;
+				JustLog("[bioseq] pg: Inner_CustomExecScan() source exhausted; running batch processor");
+				buffer.run_batch_and_build_cursors();
+				continue; /* Next iteration enters Phase 2. */
 			}
 		}
 		/*
-		 * Get next tuple from vector tuple slot if vectorization exeuction is enabled
-		 * and if we exhausted previous vector.
+		 * Vectorized fetch path: pull a vector slot, apply vectorized
+		 * qual mask, then extract a single scalar tuple per iteration
+		 * until the vector is exhausted.
 		 */
-		else if (columnarScanState->vectorization.vectorizationEnabled &&
-				 columnarScanState->vectorization.vectorPendingRowNumber == 0)
+		else
 		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
-			slot = ExecScanFetch(node, accessMtd, recheckMtd);
-
 			/*
-			 * if the slot returned by the accessMtd contains NULL, then it means
-			 * there is nothing more to scan so we just return an empty slot,
-			 * being careful to use the projection result slot so it has correct
-			 * tupleDesc.
+			 * First vector pull or after previous vector drained.
 			 */
-			if (TupIsNull(slot))
+			if (columnarScanState->vectorization.vectorPendingRowNumber == 0)
 			{
-				// ????
-				JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted projInfo_present={} finalizing buffer",
-					projInfo != nullptr);
-				return buffer.finish_writing();
-			}
+				JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
+				slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
-			if (columnarScanState->vectorization.vectorizedQualList != NULL)
-			{
-
-				if (columnarScanState->vectorization.constructedVectorizedQualList == NULL)
+				if (TupIsNull(slot))
 				{
-					columnarScanState->vectorization.constructedVectorizedQualList =
-						ConstructVectorizedQualList(slot, columnarScanState->vectorization.vectorizedQualList);
+					JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted; running batch processor");
+					buffer.run_batch_and_build_cursors();
+					continue;
 				}
 
-				VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(slot);
+				if (columnarScanState->vectorization.vectorizedQualList != NULL)
+				{
+					if (columnarScanState->vectorization.constructedVectorizedQualList == NULL)
+					{
+						columnarScanState->vectorization.constructedVectorizedQualList =
+							ConstructVectorizedQualList(slot, columnarScanState->vectorization.vectorizedQualList);
+					}
 
-				bool *resultQual = 
-					ExecuteVectorizedQual(slot,
-										columnarScanState->vectorization.constructedVectorizedQualList,
-										AND_EXPR, econtext);
-
-				memcpy(vectorSlot->keep, resultQual, COLUMNAR_VECTOR_COLUMN_SIZE);
+					VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(slot);
+					bool *resultQual = ExecuteVectorizedQual(
+						slot,
+						columnarScanState->vectorization.constructedVectorizedQualList,
+						AND_EXPR, econtext);
+					memcpy(vectorSlot->keep, resultQual, COLUMNAR_VECTOR_COLUMN_SIZE);
+				}
 			}
+
 			/*
-			 * No qual, no vectorized qual, no projection but we need to return vector
-			 * for vectorized aggregate
+			 * Extract one kept row from the vector slot into the scalar
+			 * scan slot. Skip entries where keep[i] is false.
 			 */
-			else if (!qual && !projInfo && columnarScanState->vectorization.vectorizationAggregate)
-			{
-				columnarScanState->vectorization.vectorPendingRowNumber = 0;
-				JustLog("[bioseq] pg: Inner_CustomExecScan() submit vectorized aggregate slot to dispatch buffer");
-				buffer.submit(slot);
-				continue;
-				//return slot;
-			}
-		}
-
-		uint64_t rowNumber = 0;
-
-		/*
-		 * Get next tuple from vector tuple slot if vectorization execution 
-		 * is enabled.
-		 */
-		if (columnarScanState->vectorization.vectorizationEnabled)
-		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (post-qual extraction)");
-			VectorTupleTableSlot *vectorSlot =
-				reinterpret_cast<VectorTupleTableSlot *>(columnarScanState->vectorization.scanVectorSlot);
+			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized extraction");
+			VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(
+				columnarScanState->vectorization.scanVectorSlot);
 
 			bool rowFound = false;
-
-			while (columnarScanState->vectorization.vectorPendingRowNumber != 0 &&
-				   rowFound == false)
+			while (columnarScanState->vectorization.vectorPendingRowNumber != 0 && !rowFound)
 			{
 				if (vectorSlot->keep[columnarScanState->vectorization.vectorRowIndex])
 				{
@@ -2548,81 +2743,40 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 											   vectorSlot,
 											   columnarScanState->vectorization.vectorRowIndex,
 											   columnarScanState->vectorization.attrNeededList);
-					
-					rowNumber = vectorSlot->rowNumber[columnarScanState->vectorization.vectorRowIndex];
-					if (!columnarScanState->vectorization.vectorizationAggregate)
-						slot->tts_tid = row_number_to_tid(rowNumber);
+
+					uint64_t rowNumber = vectorSlot->rowNumber[columnarScanState->vectorization.vectorRowIndex];
+					slot->tts_tid = row_number_to_tid(rowNumber);
 					rowFound = true;
 				}
 				columnarScanState->vectorization.vectorPendingRowNumber--;
 				columnarScanState->vectorization.vectorRowIndex++;
 			}
 
-			if (rowFound == false)
+			/*
+			 * Vector exhausted without finding a kept row: go back to
+			 * pull another vector or finalize.
+			 */
+			if (!rowFound)
 				continue;
 		}
 
 		/*
-		 * place the current tuple into the expr context
+		 * Place the current tuple into the expr context and run the
+		 * non-vectorized qual (e.g. mmsearch()). Both scalar and
+		 * vectorized paths converge here.
 		 */
 		econtext->ecxt_scantuple = slot;
 
-		/*
-		 * check that the current tuple satisfies the qual-clause
-		 *
-		 * check for non-null qual here to avoid a function call to ExecQual()
-		 * when the qual is null ... saves only a few cycles, but they add up
-		 * ... 
-		 */
 		JustLog("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed");
-
-			/*
-			 * Fire the TupleDispatchBuffer on_submit hook while the scan
-			 * slot still contains every attribute (notably `seq` which
-			 * is required for the mmsearch read but is dropped by the
-			 * projection). Must come BEFORE ExecProject since ExecProject
-			 * reassigns `slot` to ps_ResultTupleSlot.
-			 */
-			if (!columnarScanState->vectorization.vectorizationEnabled)
-			{
-				buffer.on_submit(econtext->ecxt_scantuple);
-			}
-
-			if (projInfo)
-			{
-				/*
-				 * Form a projection tuple, store it in the result tuple slot
-				 * and return it.
-				 */
-				slot = ExecProject(projInfo);
-			}
-
-			if (columnarScanState->vectorization.vectorizationAggregate)
-			{
-				WriteTupleToVectorSlot(slot,
-									  reinterpret_cast<VectorTupleTableSlot *>(columnarScanState->vectorization.resultVectorSlot),
-									  resultVectorTupleSlotIdx);
-				reinterpret_cast<VectorTupleTableSlot *>(
-					columnarScanState->vectorization.resultVectorSlot)->rowNumber[resultVectorTupleSlotIdx] = rowNumber;
-				resultVectorTupleSlotIdx++;
-				continue;
-			}
-			else
-			{
-				JustLog("[bioseq] pg: Inner_CustomExecScan() submit projected slot to dispatch buffer");
-				buffer.submit(slot);
-			}
+			JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
+			buffer.submit_scan(econtext->ecxt_scantuple);
 		}
 		else
+		{
 			InstrCountFiltered1(node, 1);
-
-		/*
-		 * Tuple fails qual, so free per-tuple memory and try again.
-		 */
-		//if(rec) ResetExprContext(econtext);
+		}
 	}
 }
 
@@ -2651,26 +2805,91 @@ CustomExecScan(BioseqScanState *columnarScanState,
 	}
 	JustLog("[bioseq] pg: CustomExecScan() targetlist iteration complete");
 
-	if (const_score_node == nullptr) {
-		JustLog("[bioseq] pg: CustomExecScan() initialising const_score node");
-		const_score_node = makeConst(
-			INT4OID,
-			-1,
-			InvalidOid,
-			4,
-			static_cast<Datum>(static_cast<int32_t>(0)),
-			/*constisnull=*/ true,
-			/*constbyval=*/ true
-		);
+	if (placeholder_consts.dp_score_node == nullptr) {
+		JustLog("[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
+
+		/* INT4: byval, len=4, no collation. */
+		const auto int_placeholder = []() {
+			return makeConst(
+				INT4OID,
+				-1,
+				InvalidOid,
+				4,
+				static_cast<Datum>(static_cast<int32_t>(0)),
+				/*constisnull=*/ true,
+				/*constbyval=*/ true
+			);
+		};
+		/* BOOL: byval, len=1, no collation. */
+		const auto bool_placeholder = []() {
+			return makeConst(
+				BOOLOID,
+				-1,
+				InvalidOid,
+				1,
+				BoolGetDatum(false),
+				/*constisnull=*/ true,
+				/*constbyval=*/ true
+			);
+		};
+		/* FLOAT4: byval, len=4, no collation. */
+		const auto float_placeholder = []() {
+			return makeConst(
+				FLOAT4OID,
+				-1,
+				InvalidOid,
+				4,
+				static_cast<Datum>(static_cast<int32_t>(0)),
+				/*constisnull=*/ true,
+				/*constbyval=*/ true
+			);
+		};
+		/* TEXT: byref, len=-1 (varlena), default collation. */
+		const auto text_placeholder = []() {
+			return makeConst(
+				TEXTOID,
+				-1,
+				DEFAULT_COLLATION_OID,
+				-1,
+				PointerGetDatum(nullptr),
+				/*constisnull=*/ true,
+				/*constbyval=*/ false
+			);
+		};
+
+		placeholder_consts.dp_score_node              = int_placeholder();
+		placeholder_consts.query_len_node             = int_placeholder();
+		placeholder_consts.query_start_node           = int_placeholder();
+		placeholder_consts.query_end_node             = int_placeholder();
+		placeholder_consts.target_len_node            = int_placeholder();
+		placeholder_consts.target_start_node          = int_placeholder();
+		placeholder_consts.target_end_node            = int_placeholder();
+		placeholder_consts.num_matches_node           = int_placeholder();
+		placeholder_consts.block_length_node          = int_placeholder();
+		placeholder_consts.mapq_node                  = int_placeholder();
+		placeholder_consts.chain_score_node           = int_placeholder();
+		placeholder_consts.dp_max_score_node          = int_placeholder();
+		placeholder_consts.seed_count_node            = int_placeholder();
+		placeholder_consts.secondary_chain_score_node = int_placeholder();
+		placeholder_consts.is_reverse_node            = bool_placeholder();
+		placeholder_consts.is_primary_node            = bool_placeholder();
+		placeholder_consts.has_cigar_node             = bool_placeholder();
+		placeholder_consts.divergence_node            = float_placeholder();
+		placeholder_consts.cigar_node                 = text_placeholder();
+
+		/* Legacy alias used by log sites elsewhere in the file. */
+		const_score_node = placeholder_consts.dp_score_node;
+
 		/*
 		 * Reset only the slot buffer; keep the mmsearch_context that
 		 * BeginCustomScan configured earlier for this scan.
 		 */
 		buffer.clear_slots();
 
+		BioseqStubOids oids_snapshot = LookupStubOids();
 		VarInjectorCtx injector_ctx;
-		injector_ctx.const_score_node = const_score_node;
-		injector_ctx.bioseq_score_oid = LookupStubOids().bioseq_score_oid;
+		injector_ctx.consts = &placeholder_consts;
+		injector_ctx.oids   = &oids_snapshot;
 
 		newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
 			reinterpret_cast<Node *>(targetlist),
@@ -2793,6 +3012,18 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 {
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
 	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+
+	/*
+	 * Free buffered scan slots HERE, while the per-query ResourceOwner
+	 * that pinned their TupleDesc refs is still active. Deferring this
+	 * to the next query's init would leak TupleDesc refcounts onto a
+	 * dead ResourceOwner and produce
+	 *   "WARNING: resource was not closed: TupleDesc ..."
+	 * followed by
+	 *   "ERROR: tupdesc reference ... is not owned by resource owner Portal"
+	 * when the next query tries to release them.
+	 */
+	buffer.clear_slots();
 
 	/*
 	 * Cleanup BMS of selected scan attributes
