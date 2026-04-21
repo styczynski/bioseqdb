@@ -659,12 +659,10 @@ CREATE FUNCTION mmsearch_support(internal)
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE;
 
-CREATE OR REPLACE FUNCTION mmsearch(el ANYELEMENT, query TEXT)
-    RETURNS BOOLEAN
-    AS 'MODULE_PATHNAME', 'mmsearch'
-    LANGUAGE C IMMUTABLE STRICT
-    SUPPORT mmsearch_support
-    PARALLEL SAFE;
+-- mmsearch arg types reference bioseq.seq; see the bottom of this file for its
+-- full definition. The function body itself is declared below, after the type
+-- registration block, because the SQL parser needs the type to exist to accept
+-- the argument types here.
 
 CREATE OR REPLACE FUNCTION bioseq.score(el ANYELEMENT)
     RETURNS INTEGER
@@ -941,4 +939,17 @@ CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
     RETURNS integer
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_unit_len'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- ============================================================================
+-- mmsearch — WHERE-qual stub over two bioseq.seq values.
+-- Declared here (after bioseq.seq is fully registered) so the parser can
+-- resolve both argument types. The columnar custom scan rewrites the qual at
+-- plan time; see SPEC_HOW_TO_CONNECT_ALIGNER_4.md for the dataflow.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq)
+    RETURNS BOOLEAN
+    AS 'MODULE_PATHNAME', 'mmsearch'
+    LANGUAGE C IMMUTABLE STRICT
+    SUPPORT mmsearch_support
+    PARALLEL SAFE;
 

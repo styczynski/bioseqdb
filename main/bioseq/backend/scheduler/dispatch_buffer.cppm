@@ -8,17 +8,21 @@
  *
  *   Writing phase (driven by submit_scan): for every source tuple that
  *   passed the WHERE qual, the scan copies the slot into the buffer and
- *   records the row's primary key and its `seq` TEXT value. Projection
- *   does NOT happen here; `ecxt_scantuple` still references the original
- *   scan slot which is about to be overwritten by the next call.
+ *   records the row's primary key and a detoasted copy of its bioseq.seq
+ *   varlena. Projection does NOT happen here; `ecxt_scantuple` still
+ *   references the original scan slot which is about to be overwritten
+ *   by the next call.
  *
  *   Batch phase (run_batch_and_build_cursors): after the access method
- *   signals EOF, the buffer feeds its `seq`/pk arrays into
- *   BatchProcessor::process_sequences and records the returned
- *   MatchResult map. One OutputCursor is appended per MatchResult
- *   returned for a given primary key. Rows whose PK is missing from the
- *   map are skipped; this is how WHERE mmsearch(...) evaluates to
- *   FALSE for those rows.
+ *   signals EOF, the buffer feeds its target varlenas (plus the mmsearch
+ *   query varlena captured at BeginCustomScan) into
+ *   BatchProcessor::process_sequences. That function dispatches on the
+ *   column's (alphabet_code, width_code) typmod to instantiate the right
+ *   compact_sequence_range<Dst> specialisation, then invokes
+ *   minimap_port(query, target) for every row and stores the returned
+ *   MatchResults keyed by primary key. Rows whose PK is missing from the
+ *   returned map are filtered; this is how WHERE mmsearch(...) evaluates
+ *   to FALSE for those rows.
  *
  *   Reading phase (read_next_output): the custom scan iterates over
  *   output cursors, pointing `ecxt_scantuple` at the buffered scan slot
@@ -37,14 +41,17 @@ module;
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
 import pg_utils;
+import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bioseq_cigar;
+import bioseq_types.pg_compact_sequence;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -55,63 +62,124 @@ namespace hn = hwy::HWY_NAMESPACE;
 // constructor hint; entries beyond this get truncated with a log line.
 constexpr size_t kDispatchBatchCapacity = 1000;
 
+/*
+ * BatchProcessor drives minimap_port across a batch of (query, target)
+ * pairs that all share the same (alphabet_code, width_code) typmod. The
+ * caller hands us the already-detoasted query varlena (captured at
+ * BeginCustomScan — see columnar_customscan.cppm) and an array of per-row
+ * target varlenas (captured at submit_scan — see TupleDispatchBuffer).
+ *
+ * Dispatch: we branch on (alphabet_code, width_code) exactly once, then
+ * inside the matching arm all eight compact_sequence_range<Dst>
+ * specialisations compile down to their own minimap_port instantiation.
+ * No std::variant, no runtime type erasure on the hot path.
+ */
 export class BatchProcessor {
 public:
-    // This should be called for batch of column inputs when finish_writing is called
     template<typename K, size_t batch_capacity>
-    [[always_inline]] constexpr std::map<K, std::vector<MatchResult>> process_sequences(
-        const size_t batch_size, //< number of queries in the batch
-        const char* target_sequence, //< sequence passed in mmsearch_context.query_string
-        const std::array<const char*, batch_capacity>& query_sequences, //< should be batch of column strings. Note that batch_capacity can be higher than actual number of queries. Use batch_size to pass actual number of queries in batch
-        const std::array<K, batch_capacity>& query_ids //< we need to pass some row identitier (please extract primary key of the table to use here)
-    ) {
-        // Some dummy implementation
+    [[nodiscard]] std::map<K, std::vector<MatchResult>> process_sequences(
+        const size_t batch_size,
+        const uint8_t alphabet_code,
+        const uint8_t width_code,
+        const PgCompactSequenceHdr* query_hdr,
+        const std::array<const PgCompactSequenceHdr*, batch_capacity>& target_hdrs,
+        const std::array<K, batch_capacity>& query_ids)
+    {
         std::map<K, std::vector<MatchResult>> results;
-        // We skip first sequence to test what happens if the sequence is discarded
-        // Note that this function can return partial map without all input queries.
-        // If query is not in the returned map then it should be interpreted as "where mmsearch(seq, 'sequence_b')" returning FALSE (so the tuple should be completely filtered out from results)
-        for (size_t query_no=1; query_no<batch_size; ++query_no) {
-            std::vector<CigarOp> cigar = {
-                {
-                    .length = 5,
-                    .opcode = CIGAR_DEL
-                },
-                {
-                    .length = 3,
-                    .opcode = CIGAR_MATCH
-                },
-                {
-                    .length = 8,
-                    .opcode = CIGAR_EQ
-                },
-                {
-                    .length = 1,
-                    .opcode = CIGAR_INS
-                }
-            };
-            const MatchResult match = {
-                .query_len = static_cast<int32_t>(query_no*2),    ///< col 2: query sequence length
-                .query_start            = static_cast<int32_t>(query_no+1),    ///< col 3: query start (0-based, closed)
-                .query_end              = static_cast<int32_t>(query_no*3+5),    ///< col 4: query end (0-based, open)
-                .is_reverse             = query_no % 2 == 0,///< col 5: '+' or '-'
-                .target_len             = static_cast<int32_t>(query_no+2),    ///< col 7: target sequence length
-                .target_start           = static_cast<int32_t>(query_no*4+7),    ///< col 8: target start on original strand
-                .target_end             = static_cast<int32_t>(query_no*5+9),    ///< col 9: target end on original strand
-                .num_matches            = static_cast<int32_t>(query_no),    ///< col 10: number of residue matches (mlen)
-                .block_length           = static_cast<int32_t>(query_no),    ///< col 11: alignment block length (blen)
-                .mapq                   = static_cast<int32_t>(query_no),    ///< col 12: mapping quality (0-255)
-                .chain_score            = static_cast<int32_t>(query_no),    ///< chaining score
-                .dp_score               = static_cast<int32_t>(query_no),    ///< DP alignment score
-                .dp_max_score           = static_cast<int32_t>(query_no),    ///< max scoring segment score (dp_max0 in original)
-                .seed_count             = static_cast<int32_t>(query_no),    ///< number of seeds in chain
-                .secondary_chain_score  = static_cast<int32_t>(query_no),    ///< best secondary chaining score against this primary
-                .divergence             = -1.f, ///< sequence divergence estimate
-                .is_primary             = query_no % 3 == 0, ///< primary mapping flag
-                .has_cigar              = true, ///< whether CIGAR alignment was performed
-                .cigar                  = cigar
-            };
-            results[query_ids[query_no]].push_back(std::move(match));
+
+        if (query_hdr == nullptr) {
+            JustLog("[bioseq] pg: BatchProcessor::process_sequences received null query_hdr; returning empty map");
+            return results;
         }
+        if (query_hdr->alphabet_code != alphabet_code || query_hdr->width_code != width_code) {
+            JustLog("[bioseq] pg: BatchProcessor::process_sequences query_hdr typmod ({},{}) disagrees with context ({},{}); refusing to dispatch",
+                    static_cast<unsigned>(query_hdr->alphabet_code),
+                    static_cast<unsigned>(query_hdr->width_code),
+                    static_cast<unsigned>(alphabet_code),
+                    static_cast<unsigned>(width_code));
+            return results;
+        }
+
+        dispatch_pgseq(alphabet_code, width_code,
+            [&]<class Dst>() {
+                /*
+                 * Build the per-batch query compact_sequence_range once
+                 * from the stashed PG varlena. make_seq_range_from_pg
+                 * validates the header and copies the payload into an
+                 * owned std::vector — the alloc is amortised across
+                 * every target in this batch.
+                 */
+                compact_sequence_range<Dst> query_seq = make_seq_range_from_pg<Dst>(query_hdr);
+                JustLog("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={}",
+                        static_cast<unsigned>(alphabet_code),
+                        static_cast<unsigned>(width_code),
+                        query_seq.bp_size(), batch_size);
+
+                for (size_t i = 0; i < batch_size; ++i) {
+                    const PgCompactSequenceHdr* target_hdr = target_hdrs[i];
+                    if (target_hdr == nullptr) {
+                        continue;  // NULL seq column in this row → no match
+                    }
+                    if (target_hdr->alphabet_code != alphabet_code
+                        || target_hdr->width_code != width_code) {
+                        /*
+                         * PG's typmod coercion should have rejected the
+                         * INSERT if the stored typmod didn't match the
+                         * column typmod; getting here means someone
+                         * wrote raw bytes via pg_catalog mischief or a
+                         * future cross-typmod compare path. Skip rather
+                         * than crash and let the tuple's mmsearch
+                         * qualify as FALSE.
+                         */
+                        JustLog("[bioseq] pg: target row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
+                                static_cast<int>(query_ids[i]),
+                                static_cast<unsigned>(target_hdr->alphabet_code),
+                                static_cast<unsigned>(target_hdr->width_code),
+                                static_cast<unsigned>(alphabet_code),
+                                static_cast<unsigned>(width_code));
+                        continue;
+                    }
+                    compact_sequence_range<Dst> target_seq = make_seq_range_from_pg<Dst>(target_hdr);
+
+                    /*
+                     * Tune algorithm parameters for the query/target size
+                     * regime we are likely to see. minimap2's hard-coded
+                     * defaults (k=15, w=10, min_chain_score=40,
+                     * min_seed_count=3) are calibrated for long-read vs
+                     * genome mapping (kb-scale query against Mb-scale
+                     * target). In a Postgres context the query literal is
+                     * routinely short (a probe motif, a primer, an amplicon
+                     * region) against per-row targets typically <1 kb, so
+                     * we scale k/w down proportionally. When both operands
+                     * are long we keep the original minimap2 defaults.
+                     */
+                    Minimap2Params params;
+                    const size_t min_bp = std::min(query_seq.bp_size(),
+                                                   target_seq.bp_size());
+                    if (min_bp < 50) {
+                        params.kmer_size       = 8;
+                        params.window_size     = 3;
+                        params.min_chain_score = 10;
+                        params.min_seed_count  = 1;
+                    } else if (min_bp < 200) {
+                        params.kmer_size       = 10;
+                        params.window_size     = 5;
+                        params.min_chain_score = 20;
+                        params.min_seed_count  = 2;
+                    }
+                    MatchResultCollection collection = minimap_port(query_seq, target_seq, params);
+                    JustLog("[bioseq] pg: minimap_port query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} produced {} match(es)",
+                            static_cast<int>(query_ids[i]),
+                            target_seq.bp_size(),
+                            params.kmer_size, params.window_size,
+                            params.min_chain_score, params.min_seed_count,
+                            collection.size());
+                    if (!collection.empty()) {
+                        results[query_ids[i]] = std::move(collection.results);
+                    }
+                }
+            });
+
         return results;
     }
 };
@@ -123,32 +191,55 @@ public:
      * targetlist. seq_attno is the 1-based attribute number of the Var
      * passed as the first argument of mmsearch(); primary_key_attno is
      * the 1-based attribute number of the Var passed as the argument of
-     * any bioseq.<field>(...) projection function. query_string is the
-     * TEXT literal passed as the second argument of mmsearch(). Strings
-     * are std::string-owned so they survive PG MemoryContext resets.
+     * any bioseq.<field>(...) projection function. alphabet_code /
+     * width_code hold the (alphabet, width) typmod shared by the column
+     * and the query literal — they are validated to be equal at
+     * BeginCustomScan time. query_varlena holds a full detoasted copy
+     * of the mmsearch second-argument bioseq.seq Const, so submit_scan
+     * never has to re-read from the plan tree.
      */
     struct MmsearchContext {
         AttrNumber seq_attno           = InvalidAttrNumber;
         AttrNumber primary_key_attno   = InvalidAttrNumber;
         std::string column_name;
-        std::string query_string;
-        bool active = false;
+        std::vector<char> query_varlena;  // full detoasted varlena bytes, 16-byte aligned by std::allocator
+        uint8_t alphabet_code          = 0;
+        uint8_t width_code             = 0;
+        bool active                    = false;
+
+        [[nodiscard]] const PgCompactSequenceHdr* query_hdr() const {
+            if (!active || query_varlena.empty()) {
+                return nullptr;
+            }
+            return reinterpret_cast<const PgCompactSequenceHdr*>(query_varlena.data());
+        }
     };
 
     /*
      * One buffered scan tuple. The slot copy holds the full base-relation
      * tuple so projection can resolve any Var reference at read time.
      * primary_key is the detoasted INT4 value of the PK column; it is
-     * used as the map key by the batch processor. seq_string is the
-     * detoasted TEXT value of the mmsearch target column, passed into
-     * BatchProcessor::process_sequences as the per-row query.
+     * used as the map key by the batch processor. seq_varlena is a
+     * detoasted copy of the mmsearch target column's bioseq.seq value;
+     * it is passed through BatchProcessor::process_sequences as the
+     * per-row target sequence. Copying rather than pointing into the
+     * slot is mandatory: tts_values[] is reused across scan calls and
+     * the TOAST-detoasted buffer lives in CurrentMemoryContext which
+     * may reset between rows.
      */
     struct BufferedScanEntry {
-        TupleTableSlot* scan_slot_copy    = nullptr;
-        int32_t         primary_key       = -1;
+        TupleTableSlot* scan_slot_copy      = nullptr;
+        int32_t         primary_key         = -1;
         bool            primary_key_is_null = true;
-        std::string     seq_string;
-        bool            seq_is_null       = true;
+        std::vector<char> seq_varlena;
+        bool            seq_is_null         = true;
+
+        [[nodiscard]] const PgCompactSequenceHdr* seq_hdr() const {
+            if (seq_is_null || seq_varlena.empty()) {
+                return nullptr;
+            }
+            return reinterpret_cast<const PgCompactSequenceHdr*>(seq_varlena.data());
+        }
     };
 
     /*
@@ -181,23 +272,35 @@ public:
     }
 
     /*
-     * Record the mmsearch column/pk/query triple extracted from the
+     * Record the mmsearch column / pk / query triple extracted from the
      * plan. Called once per scan from ColumnarScan_BeginCustomScan.
+     * query_varlena_bytes owns the detoasted varlena — moved in.
      */
     void configure_mmsearch(AttrNumber seq_attno,
                             std::string column_name,
-                            std::string query_string,
+                            std::vector<char> query_varlena_bytes,
+                            uint8_t alphabet_code,
+                            uint8_t width_code,
                             AttrNumber primary_key_attno) {
         mmsearch_context.seq_attno          = seq_attno;
         mmsearch_context.primary_key_attno  = primary_key_attno;
         mmsearch_context.column_name        = std::move(column_name);
-        mmsearch_context.query_string       = std::move(query_string);
+        mmsearch_context.query_varlena      = std::move(query_varlena_bytes);
+        mmsearch_context.alphabet_code      = alphabet_code;
+        mmsearch_context.width_code         = width_code;
         mmsearch_context.active             = true;
-        JustLog("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch() seq_attno={} pk_attno={} column='{}' query='{}'",
+
+        uint32_t query_bp_size = 0;
+        if (const auto* hdr = mmsearch_context.query_hdr()) {
+            query_bp_size = hdr->bp_size;
+        }
+        JustLog("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch() seq_attno={} pk_attno={} column='{}' typmod=({},{}) query_bp_size={}",
                 static_cast<int>(seq_attno),
                 static_cast<int>(primary_key_attno),
                 mmsearch_context.column_name,
-                mmsearch_context.query_string);
+                static_cast<unsigned>(alphabet_code),
+                static_cast<unsigned>(width_code),
+                query_bp_size);
     }
 
     void clear_mmsearch_context() {
@@ -207,10 +310,10 @@ public:
     /*
      * Writing-phase hook. Fired from Inner_CustomExecScan after ExecQual
      * passes, using econtext->ecxt_scantuple which still holds every
-     * attribute of the base relation. Extracts the TEXT column named by
-     * configure_mmsearch, the PK column value, and copies the slot into
-     * a MinimalTuple-backed clone so the data outlives the next
-     * ExecScanFetch call.
+     * attribute of the base relation. Extracts the bioseq.seq column
+     * named by configure_mmsearch (detoasting its varlena), the PK
+     * column value, and copies the slot into a MinimalTuple-backed
+     * clone so the data outlives the next ExecScanFetch call.
      */
     [[gnu::always_inline]] void submit_scan(TupleTableSlot* scan_slot) {
         if (!mmsearch_context.active) {
@@ -224,7 +327,7 @@ public:
 
         BufferedScanEntry entry{};
 
-        /* Extract the target TEXT column (mmsearch arg0). */
+        /* Extract the target bioseq.seq column (mmsearch arg0). */
         if (mmsearch_context.seq_attno == InvalidAttrNumber) {
             entry.seq_is_null = true;
         } else {
@@ -233,10 +336,32 @@ public:
             if (is_null) {
                 entry.seq_is_null = true;
             } else {
-                char* cstr = TextDatumGetCString(seq_datum);
-                entry.seq_string = cstr;
-                pfree(cstr);
+                /*
+                 * PG_DETOAST_DATUM resolves short-header/TOASTed/compressed
+                 * varlenas into a flat 4-byte-header copy we can reinterpret
+                 * as PgCompactSequenceHdr*. The copy lives in
+                 * CurrentMemoryContext, which is the per-query context here
+                 * — it will be reset long after we finish writing, so the
+                 * read below is safe. We still memcpy the bytes into our
+                 * std::vector<char> so the BufferedScanEntry survives
+                 * ResetExprContext / per-tuple context cleanup between
+                 * calls to ExecScanFetch.
+                 */
+                PgCompactSequenceHdr* src_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+                    PG_DETOAST_DATUM(seq_datum));
+                const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
+                entry.seq_varlena.assign(
+                    reinterpret_cast<const char*>(src_hdr),
+                    reinterpret_cast<const char*>(src_hdr) + total_bytes);
                 entry.seq_is_null = false;
+                /*
+                 * Free the detoasted copy if it was distinct from the
+                 * original Datum (only the TOAST path actually palloc's).
+                 */
+                if (reinterpret_cast<void*>(src_hdr)
+                    != reinterpret_cast<void*>(DatumGetPointer(seq_datum))) {
+                    pfree(src_hdr);
+                }
             }
         }
 
@@ -280,9 +405,12 @@ public:
          */
         slot_getallattrs(entry.scan_slot_copy);
 
-        JustLog("need to do mmsearch on column value '{}' and provided argument string '{}'",
-                entry.seq_is_null ? std::string("NULL") : entry.seq_string,
-                mmsearch_context.query_string);
+        const uint32_t entry_seq_bp_size = entry.seq_hdr() != nullptr
+            ? entry.seq_hdr()->bp_size : 0;
+        JustLog("[bioseq] pg: submit_scan pk={} seq_bp_size={} (null={})",
+                entry.primary_key_is_null ? -1 : entry.primary_key,
+                entry_seq_bp_size,
+                entry.seq_is_null);
 
         buffered_entries.push_back(std::move(entry));
     }
@@ -290,13 +418,15 @@ public:
     /*
      * Batch-phase transition. Called when the access method returns
      * TupIsNull. Invokes BatchProcessor::process_sequences on the
-     * buffered inputs, stashes the returned MatchResult map, and builds
-     * output_cursors in insertion order (one per MatchResult per row,
-     * skipping rows whose PK is absent from the map).
+     * buffered target varlenas plus the stashed query varlena; stashes
+     * the returned MatchResult map; builds output_cursors in insertion
+     * order (one per MatchResult per row, skipping rows whose PK is
+     * absent from the map). The query/target type dispatch happens
+     * inside process_sequences via dispatch_pgseq.
      */
     void run_batch_and_build_cursors() {
-        std::array<const char*, kDispatchBatchCapacity> query_sequences{};
-        std::array<int32_t,     kDispatchBatchCapacity> query_ids{};
+        std::array<const PgCompactSequenceHdr*, kDispatchBatchCapacity> target_hdrs{};
+        std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
 
         const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
             ? kDispatchBatchCapacity
@@ -308,17 +438,24 @@ public:
 
         for (size_t i = 0; i < batch_size; ++i) {
             const BufferedScanEntry& entry = buffered_entries[i];
-            query_sequences[i] = entry.seq_is_null ? "" : entry.seq_string.c_str();
-            query_ids[i]       = entry.primary_key_is_null ? -1 : entry.primary_key;
+            target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
+            query_ids[i]   = entry.primary_key_is_null ? -1 : entry.primary_key;
         }
 
-        const char* target = mmsearch_context.query_string.c_str();
-
-        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} target='{}'",
-                batch_size, target);
+        const PgCompactSequenceHdr* query_hdr = mmsearch_context.query_hdr();
+        const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
+        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={}",
+                batch_size,
+                static_cast<unsigned>(mmsearch_context.alphabet_code),
+                static_cast<unsigned>(mmsearch_context.width_code),
+                query_bp_size);
 
         match_map = processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
-            batch_size, target, query_sequences, query_ids);
+            batch_size,
+            mmsearch_context.alphabet_code,
+            mmsearch_context.width_code,
+            query_hdr,
+            target_hdrs, query_ids);
 
         output_cursors.clear();
         for (size_t i = 0; i < buffered_entries.size(); ++i) {
@@ -374,6 +511,20 @@ public:
      */
     [[nodiscard]] constexpr bool has_finished_writing() const {
         return output_position >= 0;
+    }
+
+    /*
+     * True when BeginCustomScan found a WHERE mmsearch(...) qual and
+     * installed its (seq_attno, query_varlena, typmod) context. When
+     * false the custom scan must behave like a pass-through scan:
+     * fetch rows, project them directly via the (VarInjectorMutator-
+     * rewritten) target list, and return them without buffering. The
+     * buffering + batch pipeline is only meaningful when there is a
+     * WHERE mmsearch(...) to drive it. See SPEC 2 §6.8 for the
+     * historical gap this accessor closes.
+     */
+    [[nodiscard]] constexpr bool mmsearch_active() const {
+        return mmsearch_context.active;
     }
 
     [[nodiscard]] size_t buffered_count() const {

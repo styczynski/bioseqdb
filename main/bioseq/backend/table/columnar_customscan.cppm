@@ -36,6 +36,7 @@ import pg_utils;
 import bioseq_scheduler.dispatch_buffer;
 import bioseq_sequences.minimap_port;  // for MatchResult
 import bioseq_cigar;                    // for format_cigar
+import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
 
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
@@ -96,6 +97,7 @@ static BioseqPlaceholderConsts placeholder_consts;
  */
 struct BioseqStubOids {
 	Oid mmsearch_oid;
+	Oid bioseq_seq_type_oid;          // resolves to bioseq.seq pg_type row
 
 	Oid score_oid;                    // bioseq.score (alias for dp_score)
 	Oid dp_score_oid;
@@ -131,7 +133,12 @@ struct BioseqStubOids {
 		return DatumGetObjectId(DirectFunctionCall1(regprocedurein,
 			CStringGetDatum(signature)));
 	};
-	result.mmsearch_oid              = resolve("mmsearch(anyelement, text)");
+	auto resolve_type = [](const char* type_name) {
+		return DatumGetObjectId(DirectFunctionCall1(regtypein,
+			CStringGetDatum(type_name)));
+	};
+	result.mmsearch_oid              = resolve("mmsearch(bioseq.seq, bioseq.seq)");
+	result.bioseq_seq_type_oid       = resolve_type("bioseq.seq");
 	result.score_oid                 = resolve("bioseq.score(anyelement)");
 	result.dp_score_oid              = resolve("bioseq.dp_score(anyelement)");
 	result.query_len_oid             = resolve("bioseq.query_len(anyelement)");
@@ -2312,9 +2319,11 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		Var* col_var = reinterpret_cast<Var*>(arg0);
 		Const* query_const = reinterpret_cast<Const*>(arg1);
 
-		if (query_const->consttype != TEXTOID || query_const->constisnull)
+		if (query_const->consttype != scan_stub_oids.bioseq_seq_type_oid
+			|| query_const->constisnull)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null TEXT Const");
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null bioseq.seq Const (type={}, null={})",
+					query_const->consttype, query_const->constisnull);
 			continue;
 		}
 
@@ -2326,12 +2335,37 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			continue;
 		}
 		Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, col_var->varattno - 1);
-		if (attribute_form->atttypid != TEXTOID)
+		if (attribute_form->atttypid != scan_stub_oids.bioseq_seq_type_oid)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 column type is {}, expected TEXTOID",
-					attribute_form->atttypid);
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 column type is {}, expected bioseq.seq ({})",
+					attribute_form->atttypid, scan_stub_oids.bioseq_seq_type_oid);
 			continue;
 		}
+
+		/*
+		 * Both arguments must share the same (alphabet, width) typmod.
+		 * Without that invariant the template dispatch in
+		 * BatchProcessor::process_sequences would need a cartesian product
+		 * of query×target instantiations; minimap_port also static_asserts
+		 * that both sequences share the same alphabet_type.
+		 */
+		if (col_var->vartypmod < 0)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; bioseq.seq columns require an explicit (alphabet,width)");
+			continue;
+		}
+		if (query_const->consttypmod < 0)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal");
+			continue;
+		}
+		if (col_var->vartypmod != query_const->consttypmod)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch col_typmod={} query_typmod={}",
+					col_var->vartypmod, query_const->consttypmod);
+			continue;
+		}
+		const auto unpacked_typmod = unpack_pgseq_typmod(col_var->vartypmod);
 
 		/*
 		 * Sanity-check the primary key column: must be INT4 for the POC.
@@ -2357,15 +2391,32 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 					static_cast<int>(col_var->varattno));
 			continue;
 		}
-		char* query_cstr = TextDatumGetCString(query_const->constvalue);
+
+		/*
+		 * Detoast the query bioseq.seq varlena once; submit_scan reuses the
+		 * bytes across every row so the TOAST read never happens on the hot
+		 * path. The buffer owns a std::vector<char> copy so the bytes
+		 * outlive the planner's per-query memory context.
+		 */
+		PgCompactSequenceHdr* query_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+			PG_DETOAST_DATUM(query_const->constvalue));
+		const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
+		std::vector<char> query_varlena_bytes(query_total_bytes);
+		std::memcpy(query_varlena_bytes.data(), query_hdr, query_total_bytes);
+		if (reinterpret_cast<void*>(query_hdr)
+			!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue)))
+		{
+			pfree(query_hdr);
+		}
 
 		buffer.configure_mmsearch(col_var->varattno,
 								  std::string(attname_cstr),
-								  std::string(query_cstr),
+								  std::move(query_varlena_bytes),
+								  unpacked_typmod.alphabet_code,
+								  unpacked_typmod.width_code,
 								  primary_key_attno);
 
 		pfree(attname_cstr);
-		pfree(query_cstr);
 		break; /* POC: only honour the first mmsearch() qual we find */
 	}
 
@@ -2770,8 +2821,33 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		JustLog("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
-			buffer.submit_scan(econtext->ecxt_scantuple);
+			if (buffer.mmsearch_active()) {
+				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
+				buffer.submit_scan(econtext->ecxt_scantuple);
+			}
+			else {
+				/*
+				 * No WHERE mmsearch(...) qual installed → there is
+				 * nothing to batch. Behave like a plain scan: project
+				 * the current tuple through newtargetlist and return
+				 * immediately. newtargetlist is still the mutator's
+				 * output, so any unrelated target-list expressions
+				 * (Var refs, arithmetic, …) still resolve correctly;
+				 * any bioseq.<field>(anyelement) call that made it
+				 * into the target list without an accompanying
+				 * mmsearch qual reads from its placeholder Const,
+				 * which stays null in this branch — by design, since
+				 * we have no MatchResult to back it.
+				 */
+				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual — projecting tuple directly");
+				ProjectionInfo* proj = ExecBuildProjectionInfo(
+					newtargetlist,
+					econtext,
+					node->ps.ps_ResultTupleSlot,
+					&(node->ps),
+					slot->tts_tupleDescriptor);
+				return ExecProject(proj);
+			}
 		}
 		else
 		{

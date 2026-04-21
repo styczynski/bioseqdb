@@ -56,33 +56,33 @@ extern "C++" {
 // [0, 512), keeping the signed int non-negative.
 // ----------------------------------------------------------------------------
 
-constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
+export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
 
-[[nodiscard]] inline constexpr int32_t pack_pgseq_typmod(uint8_t alphabet_code, uint8_t width_code) noexcept {
+export [[nodiscard]] inline constexpr int32_t pack_pgseq_typmod(uint8_t alphabet_code, uint8_t width_code) noexcept {
 	return static_cast<int32_t>(alphabet_code) * 256 + static_cast<int32_t>(width_code);
 }
 
-struct UnpackedPgSeqTypmod {
+export struct UnpackedPgSeqTypmod {
 	uint8_t alphabet_code;
 	uint8_t width_code;
 };
 
-[[nodiscard]] inline constexpr UnpackedPgSeqTypmod unpack_pgseq_typmod(int32_t typmod) noexcept {
+export [[nodiscard]] inline constexpr UnpackedPgSeqTypmod unpack_pgseq_typmod(int32_t typmod) noexcept {
 	return UnpackedPgSeqTypmod{
 		static_cast<uint8_t>((typmod >> 8) & 0xFF),
 		static_cast<uint8_t>(typmod & 0xFF),
 	};
 }
 
-[[nodiscard]] inline constexpr uint8_t width_code_to_bits(uint8_t width_code) noexcept {
+export [[nodiscard]] inline constexpr uint8_t width_code_to_bits(uint8_t width_code) noexcept {
 	return static_cast<uint8_t>(8u << width_code);
 }
 
-[[nodiscard]] inline constexpr uint8_t width_code_to_bytes(uint8_t width_code) noexcept {
+export [[nodiscard]] inline constexpr uint8_t width_code_to_bytes(uint8_t width_code) noexcept {
 	return static_cast<uint8_t>(1u << width_code);
 }
 
-template<typename T> inline constexpr uint8_t width_code_for =
+export template<typename T> inline constexpr uint8_t width_code_for =
 	(sizeof(T) == 1 ? 0u : sizeof(T) == 2 ? 1u : sizeof(T) == 4 ? 2u : sizeof(T) == 8 ? 3u : 255u);
 static_assert(width_code_for<uint8_t>  == 0);
 static_assert(width_code_for<uint16_t> == 1);
@@ -100,7 +100,7 @@ static_assert(width_code_for<uint64_t> == 3);
 // embedded in other C++ containers) keeps data[] on an 8-byte boundary for
 // native uint64_t loads. Runtime varlenas are already MAXALIGN-aligned by
 // palloc and heap-tuple storage with typalign='d', so this is defensive.
-struct alignas(8) PgCompactSequenceHdr {
+export struct alignas(8) PgCompactSequenceHdr {
 	int32_t  vl_len_;           // 4 bytes — varlena header
 	uint8_t  alphabet_code;     // 1 byte
 	uint8_t  width_code;        // 1 byte
@@ -115,21 +115,21 @@ static_assert(sizeof(PgCompactSequenceHdr) == 16,
 static_assert(alignof(PgCompactSequenceHdr) == 8,
               "PgCompactSequenceHdr must be 8-byte aligned for uint64_t payload loads");
 
-constexpr int PG_SEQ_HEADER_SIZE_BYTES = 16;
+export constexpr int PG_SEQ_HEADER_SIZE_BYTES = 16;
 
-[[nodiscard]] inline size_t pg_seq_payload_bytes(const PgCompactSequenceHdr* hdr) {
+export [[nodiscard]] inline size_t pg_seq_payload_bytes(const PgCompactSequenceHdr* hdr) {
 	return static_cast<size_t>(VARSIZE(hdr)) - PG_SEQ_HEADER_SIZE_BYTES;
 }
 
-[[nodiscard]] inline size_t pg_seq_unit_count(const PgCompactSequenceHdr* hdr) {
+export [[nodiscard]] inline size_t pg_seq_unit_count(const PgCompactSequenceHdr* hdr) {
 	return pg_seq_payload_bytes(hdr) / width_code_to_bytes(hdr->width_code);
 }
 
-[[nodiscard]] inline char* pg_seq_data_ptr(PgCompactSequenceHdr* hdr) {
+export [[nodiscard]] inline char* pg_seq_data_ptr(PgCompactSequenceHdr* hdr) {
 	return reinterpret_cast<char*>(hdr) + PG_SEQ_HEADER_SIZE_BYTES;
 }
 
-[[nodiscard]] inline const char* pg_seq_data_ptr(const PgCompactSequenceHdr* hdr) {
+export [[nodiscard]] inline const char* pg_seq_data_ptr(const PgCompactSequenceHdr* hdr) {
 	return reinterpret_cast<const char*>(hdr) + PG_SEQ_HEADER_SIZE_BYTES;
 }
 
@@ -163,7 +163,7 @@ constexpr int PG_SEQ_HEADER_SIZE_BYTES = 16;
 // Runtime-indexed dispatch to one of eight template instantiations.
 // ----------------------------------------------------------------------------
 
-template<class OnMatch>
+export template<class OnMatch>
 [[gnu::always_inline]] inline decltype(auto) dispatch_pgseq(
 	uint8_t alphabet_code, uint8_t width_code, OnMatch&& on_match)
 {
@@ -199,7 +199,7 @@ template<class OnMatch>
 // will switch to a zero-copy span-based view.
 // ----------------------------------------------------------------------------
 
-template<class Dst>
+export template<class Dst>
 requires is_sequence_custom_alphabet<Dst>
 [[nodiscard]] inline compact_sequence_range<Dst> make_seq_range_from_pg(const PgCompactSequenceHdr* hdr)
 {
@@ -256,7 +256,7 @@ requires is_sequence_custom_alphabet<Dst>
 	return seq;
 }
 
-template<class Dst>
+export template<class Dst>
 requires is_sequence_custom_alphabet<Dst>
 [[nodiscard]] inline PgCompactSequenceHdr* make_pg_from_seq_range(
 	const compact_sequence_range<Dst>& seq,
