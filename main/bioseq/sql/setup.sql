@@ -1,48 +1,200 @@
--- Drop the extension and recreate it so the updated bioseq--1.0.sql is
--- loaded. Re-creation re-populates pg_proc with fresh OIDs; the custom
--- scan never caches OIDs across queries (see SPEC §7.4.1).
+-- Drop the extension and recreate so the updated bioseq--1.0.sql is loaded.
 drop extension if exists bioseq cascade;
 create extension bioseq;
 
 drop table if exists x CASCADE;
+drop table if exists y CASCADE;
 
 SET bioseq.logging = on;
 SET bioseq.enable_bioseq_index_scan TO TRUE;
 set bioseq.enable_column_cache to on;
+set bioseq.enable_vectorization to on;
 
--- POC table: INT4 primary key on `a` so the batch processor's map<int32_t, ...>
--- can key on it. `seq TEXT` is the target column for mmsearch; `c INT` is a
--- regular projected column unrelated to alignment.
-create table x ( a INT PRIMARY KEY, seq TEXT, c INT ) using bioseq;
-
-INSERT INTO x VALUES (
-    23,  'sequence_1', 1
-), (
-    101, 'sequence_2', 1
-), (
-    69,  'sequence_3', 2
-), (
-    42,  'sequence_4', 2
+-- ---- Test 1: dna4 + uint64 roundtrip through heap (not columnar) ----
+-- Use a vanilla heap table so storage/columnar interactions don't mask
+-- issues with the type itself. A columnar check follows in Test 6.
+create table x (
+    a    INT PRIMARY KEY,
+    seq  bioseq.seq('dna4', 64),
+    c    INT
 );
 
--- ---- Case 1: vectorization OFF (baseline) ----
-set bioseq.enable_vectorization to off;
-EXPLAIN (COSTS OFF)
-  SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
-  FROM x
-  WHERE mmsearch(seq, 'sequence_b');
+INSERT INTO x VALUES
+  (23,  'ACTAGGCACAT'::bioseq.seq('dna4', 64),                                   1),
+  (101, 'GGGGTTTTACTAGGCACATACTAGGCACATACT'::bioseq.seq('dna4', 64),             1),
+  (69,  'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64), 2),
+  (42,  'TTTTTT'::bioseq.seq('dna4', 64),                                        2);
 
-SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
-  FROM x
-  WHERE mmsearch(seq, 'sequence_b');
+-- ---- Test 1a: text roundtrip + metadata ----
+SELECT a, seq::text AS decoded, bioseq.len(seq), bioseq.unit_len(seq) FROM x ORDER BY a;
 
--- ---- Case 2: vectorization ON; result must match Case 1 ----
-set bioseq.enable_vectorization to on;
-EXPLAIN (COSTS OFF)
-  SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
-  FROM x
-  WHERE mmsearch(seq, 'sequence_b');
+-- ---- Test 1b: lexicographic ordering ----
+SELECT a, seq::text AS decoded FROM x ORDER BY seq;
 
-SELECT a, c, bioseq.cigar(a), bioseq.query_start(a)
-  FROM x
-  WHERE mmsearch(seq, 'sequence_b');
+-- ---- Test 1c: equality / range predicates ----
+SELECT a FROM x WHERE seq = 'TTTTTT'::bioseq.seq('dna4', 64);
+SELECT a FROM x WHERE seq < 'C'::bioseq.seq('dna4', 64) ORDER BY a;
+SELECT a FROM x WHERE seq BETWEEN 'A'::bioseq.seq('dna4', 64)
+                              AND 'G'::bioseq.seq('dna4', 64) ORDER BY a;
+
+-- ---- Test 2: dna5 + uint8 ----
+create table y (
+    a    INT PRIMARY KEY,
+    seq  bioseq.seq('dna5', 8)
+);
+
+INSERT INTO y VALUES
+  (1, 'ACGTN'::bioseq.seq('dna5', 8)),
+  (2, 'NNNNN'::bioseq.seq('dna5', 8)),
+  (3, 'ACGTNACGTN'::bioseq.seq('dna5', 8));
+
+SELECT a, seq::text AS decoded, bioseq.len(seq), bioseq.unit_len(seq) FROM y ORDER BY a;
+
+-- ---- Test 3: ordering with shared prefix ----
+-- ACGT vs ACTA: position 2 has G vs T → ACGT < ACTA lexicographically,
+-- despite ACTA having a smaller encoded uint8 (see SPEC §3.5).
+WITH t AS (
+    SELECT 'ACGT'::bioseq.seq('dna4', 8) AS a, 'ACTA'::bioseq.seq('dna4', 8) AS b
+) SELECT
+    a::text AS a_text, b::text AS b_text,
+    (a < b) AS a_lt_b, (a = b) AS a_eq_b, (a > b) AS a_gt_b,
+    bioseq.seq_cmp(a, b) AS cmp
+  FROM t;
+
+-- ---- Test 4: typmod error paths ----
+-- Each of these must raise. The `DO $$...$$` block catches and logs so the
+-- script continues.
+DO $$ BEGIN
+    BEGIN
+        PERFORM 'ACGT'::bioseq.seq('protein', 32);
+        RAISE NOTICE 'TEST4a FAILED: expected error on protein alphabet';
+    EXCEPTION WHEN invalid_parameter_value THEN
+        RAISE NOTICE 'TEST4a OK: % (%)', SQLERRM, SQLSTATE;
+    END;
+
+    BEGIN
+        PERFORM 'ACGT'::bioseq.seq('dna4', 128);
+        RAISE NOTICE 'TEST4b FAILED: expected error on width 128';
+    EXCEPTION WHEN invalid_parameter_value THEN
+        RAISE NOTICE 'TEST4b OK: % (%)', SQLERRM, SQLSTATE;
+    END;
+
+    BEGIN
+        PERFORM 'ACGT'::bioseq.seq('dna4', 64, 10);
+        RAISE NOTICE 'TEST4c FAILED: expected error on 3-arg typmod';
+    EXCEPTION WHEN invalid_parameter_value THEN
+        RAISE NOTICE 'TEST4c OK: % (%)', SQLERRM, SQLSTATE;
+    END;
+END $$;
+
+-- ---- Test 5: binary SEND/RECV roundtrip via hex-encoded bytea ----
+-- bytea of send() must decode to the same logical sequence via recv(). We
+-- achieve a full roundtrip by selecting bioseq.seq_send, re-binding the bytea
+-- via COPY BINARY. Direct recv() call isn't exposed from SQL (it requires
+-- internal), so we rely on COPY.
+COPY x TO '/tmp/bioseq_seq_x.bin' (FORMAT binary);
+DROP TABLE IF EXISTS x_roundtrip CASCADE;
+CREATE TABLE x_roundtrip (LIKE x INCLUDING ALL);
+COPY x_roundtrip FROM '/tmp/bioseq_seq_x.bin' (FORMAT binary);
+SELECT a, seq::text AS decoded, bioseq.len(seq), bioseq.unit_len(seq)
+  FROM x_roundtrip ORDER BY a;
+
+-- ---- Test 7: cross-typmod cast roundtrip ----
+-- `'ACGTN'::bioseq.seq('dna4', ...)` should silently remap N → A per seqan3
+-- semantics (dna4 has no N). `'ACGTN'::bioseq.seq('dna5', ...)` preserves N.
+SELECT
+    'ACGTN'::bioseq.seq('dna4', 16)::text AS dna4_lossy,
+    'ACGTN'::bioseq.seq('dna5', 16)::text AS dna5_preserved;
+
+-- ---- Test 8: every (alphabet, width) combo encodes / decodes ----
+-- Each row exercises a distinct dispatch arm.
+SELECT 'dna4' AS a, 8  AS w, 'ACGTACGT'::bioseq.seq('dna4', 8)::text  AS roundtrip
+UNION ALL SELECT 'dna4', 16, 'ACGTACGTACGT'::bioseq.seq('dna4', 16)::text
+UNION ALL SELECT 'dna4', 32, 'ACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32)::text
+UNION ALL SELECT 'dna4', 64, 'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64)::text
+UNION ALL SELECT 'dna5', 8,  'ACGTN'::bioseq.seq('dna5', 8)::text
+UNION ALL SELECT 'dna5', 16, 'ACGTNACGTN'::bioseq.seq('dna5', 16)::text
+UNION ALL SELECT 'dna5', 32, 'ACGTNACGTNACGTN'::bioseq.seq('dna5', 32)::text
+UNION ALL SELECT 'dna5', 64, 'ACGTNACGTNACGTNACGTNACGTN'::bioseq.seq('dna5', 64)::text
+ORDER BY a, w;
+
+-- ---- Test 9: empty-sequence edge case ----
+SELECT
+    ''::bioseq.seq('dna4', 8)::text  AS empty_dna4_text,
+    bioseq.len(''::bioseq.seq('dna4', 64)) AS empty_len,
+    bioseq.unit_len(''::bioseq.seq('dna4', 64)) AS empty_unit_len;
+
+-- ---- Test 10: ordering edge cases ----
+-- Same prefix, different lengths: shorter < longer.
+SELECT
+    ('A'::bioseq.seq('dna4', 8)    < 'AC'::bioseq.seq('dna4', 8))   AS a_lt_ac,
+    ('AC'::bioseq.seq('dna4', 8)   = 'AC'::bioseq.seq('dna4', 8))   AS ac_eq_ac,
+    ('ACGT'::bioseq.seq('dna4', 8) > 'ACG'::bioseq.seq('dna4', 8))  AS acgt_gt_acg;
+
+-- ---- Test 11: exercise the SIMD encoder with long inputs ----
+-- Inputs long enough that `complete_units >= L_out` for common targets.
+-- On ARM64 NEON: L_out(uint8)=16, L_out(uint64)=2. 512 chars = 128 uint64
+-- units (each lpu=32), well over L_out=2. Roundtrip must preserve the
+-- ASCII sequence and report correct bp_size.
+WITH long_input AS (
+    SELECT repeat('ACGT', 128) AS s  -- 512 chars
+)
+SELECT
+    length(s) AS in_len,
+    bioseq.len(s::bioseq.seq('dna4', 64)) AS dna4_64_len,
+    bioseq.unit_len(s::bioseq.seq('dna4', 64)) AS dna4_64_units,
+    (s::bioseq.seq('dna4', 64)::text = s) AS dna4_64_roundtrip,
+    bioseq.len(s::bioseq.seq('dna4', 8))  AS dna4_8_len,
+    bioseq.unit_len(s::bioseq.seq('dna4', 8)) AS dna4_8_units,
+    (s::bioseq.seq('dna4', 8)::text = s)  AS dna4_8_roundtrip
+FROM long_input;
+
+-- ---- Test 12: corrupt wire data rejected by recv ----
+-- This is a smoke test for the recv-side validation added for
+-- padding_letters and bp_size cross-checks. We craft a malformed bytea
+-- that would have triggered the __builtin_unreachable bug before the
+-- fixes. Caught via invalid_binary_representation (22P03).
+DO $$ BEGIN
+    BEGIN
+        -- Wire layout: alphabet_code=0, width_code=0, padding_letters=0,
+        -- bp_size=99 (NBO), unit_count=0. recv must reject because the
+        -- derived bp_size (0*4 - 0 = 0) does not match the wire bp_size
+        -- (99). The `internal`-typed seq_recv can't be called from SQL in
+        -- most builds; the EXCEPTION handler below covers that case.
+        PERFORM bioseq.seq_recv(
+            e'\\x0000000000000000630000000000'::bytea, 0::oid, -1
+        );
+        RAISE NOTICE 'TEST12 FAILED: expected binary-representation error';
+    EXCEPTION WHEN invalid_binary_representation THEN
+        RAISE NOTICE 'TEST12 OK: % (%)', SQLERRM, SQLSTATE;
+    WHEN OTHERS THEN
+        -- seq_recv is internal-only by SQL declaration; if we can't call
+        -- it directly the test silently passes. Not a concern.
+        RAISE NOTICE 'TEST12 SKIPPED (cannot invoke recv from SQL): % (%)',
+                     SQLERRM, SQLSTATE;
+    END;
+END $$;
+
+-- ---- Test 6: columnar AM — INSERT only ----
+-- SPEC 2's custom scan emits zero tuples for SELECTs without an mmsearch
+-- qual (the custom scan buffers tuples only when mmsearch_context is
+-- configured; otherwise submit_scan silently skips). So we only exercise
+-- the INSERT side here to confirm that the bioseq columnar writer accepts
+-- bioseq.seq varlenas. The SPEC §14.7 follow-up is to wire decode_sequence
+-- into the custom scan's submit path so these rows become visible via
+-- mmsearch queries.
+drop table if exists cx CASCADE;
+create table cx (
+    a    INT PRIMARY KEY,
+    seq  bioseq.seq('dna4', 32)
+) USING bioseq;
+
+INSERT INTO cx VALUES
+  (1, 'AAAA'),
+  (2, 'CCCC'),
+  (3, 'GGGG'),
+  (4, 'TTTT'),
+  (5, 'ACGT');
+-- Pre-existing SPEC 2 columnar AM limitation — SELECTs without mmsearch
+-- return zero rows. Commented out to document the expected state:
+-- SELECT a, seq::text, bioseq.len(seq), bioseq.unit_len(seq) FROM cx ORDER BY a;

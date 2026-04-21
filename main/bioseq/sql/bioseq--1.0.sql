@@ -786,4 +786,159 @@ CREATE OR REPLACE FUNCTION bioseq.cigar(el ANYELEMENT)
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE;
 
-  
+-- ============================================================================
+-- bioseq.seq -- parameterised compact-sequence type
+-- (SPEC_HOW_TO_CONNECT_ALIGNER_3.md)
+-- ============================================================================
+
+-- 1. Shell type so the I/O functions below can reference it.
+CREATE TYPE bioseq.seq;
+
+-- 2. I/O, SEND/RECV, TYPMOD IN/OUT.
+CREATE OR REPLACE FUNCTION bioseq.seq_in(cstring, oid, integer)
+    RETURNS bioseq.seq
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_out(bioseq.seq)
+    RETURNS cstring
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_recv(internal, oid, integer)
+    RETURNS bioseq.seq
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_recv'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_send(bioseq.seq)
+    RETURNS bytea
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_send'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_typmod_in(cstring[])
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_typmod_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_typmod_out(integer)
+    RETURNS cstring
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_typmod_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- 3. Type registration: wires I/O funcs, sets storage + alignment.
+CREATE TYPE bioseq.seq (
+    INPUT          = bioseq.seq_in,
+    OUTPUT         = bioseq.seq_out,
+    RECEIVE        = bioseq.seq_recv,
+    SEND           = bioseq.seq_send,
+    TYPMOD_IN      = bioseq.seq_typmod_in,
+    TYPMOD_OUT     = bioseq.seq_typmod_out,
+    STORAGE        = extended,
+    ALIGNMENT      = double,
+    INTERNALLENGTH = VARIABLE
+);
+
+-- 3a. Self-cast function to apply typmod coercion after bioseq.seq_in.
+CREATE OR REPLACE FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
+    RETURNS bioseq.seq
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_cast'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE CAST (bioseq.seq AS bioseq.seq)
+    WITH FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
+    AS IMPLICIT;
+
+-- 4. Comparison functions + operators.
+CREATE OR REPLACE FUNCTION bioseq.seq_cmp(bioseq.seq, bioseq.seq)
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_cmp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_lt(bioseq.seq, bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_lt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_le(bioseq.seq, bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_le'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_eq(bioseq.seq, bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_eq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_ne(bioseq.seq, bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_ne'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_ge(bioseq.seq, bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_ge'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.seq_gt(bioseq.seq, bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_gt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR < (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_lt,
+    COMMUTATOR = >, NEGATOR = >=,
+    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+);
+
+CREATE OPERATOR <= (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_le,
+    COMMUTATOR = >=, NEGATOR = >,
+    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+);
+
+CREATE OPERATOR = (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_eq,
+    COMMUTATOR = =, NEGATOR = <>,
+    RESTRICT = eqsel, JOIN = eqjoinsel,
+    HASHES, MERGES
+);
+
+CREATE OPERATOR <> (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_ne,
+    COMMUTATOR = <>, NEGATOR = =,
+    RESTRICT = neqsel, JOIN = neqjoinsel
+);
+
+CREATE OPERATOR >= (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_ge,
+    COMMUTATOR = <=, NEGATOR = <,
+    RESTRICT = scalargesel, JOIN = scalargejoinsel
+);
+
+CREATE OPERATOR > (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_gt,
+    COMMUTATOR = <, NEGATOR = <=,
+    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+);
+
+-- 5. Btree operator class.
+CREATE OPERATOR CLASS bioseq.seq_ops
+    DEFAULT FOR TYPE bioseq.seq USING btree AS
+    OPERATOR 1 < ,
+    OPERATOR 2 <= ,
+    OPERATOR 3 = ,
+    OPERATOR 4 >= ,
+    OPERATOR 5 > ,
+    FUNCTION 1 bioseq.seq_cmp(bioseq.seq, bioseq.seq);
+
+-- 6. bp_size / unit_size projection helpers.
+CREATE OR REPLACE FUNCTION bioseq.len(bioseq.seq)
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_len'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'pg_compact_sequence_unit_len'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+

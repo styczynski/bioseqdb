@@ -22,6 +22,7 @@ import alignment;
 import mlogging;
 import bioseq_columnar;
 import pg_utils;
+import bioseq_types.pg_compact_sequence;
 
 extern "C" {
 PG_MODULE_MAGIC;

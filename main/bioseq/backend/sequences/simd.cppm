@@ -302,6 +302,312 @@ inline void iterate_sequence_bp_simd_offsets(
 	return;
 }
 
+// ============================================================================
+// SPEC 3 §7: encode / decode / compare for compact_sequence_range<custom_alphabet>
+// ============================================================================
+
+// Compile-time ASCII[0..31] → rank lookup. The 5-bit index (char & 0x1F)
+// folds uppercase+lowercase for A..Z because bit 5 is the case bit in ASCII.
+// dna4 default for unknown chars is rank 0 (A); dna5 default is rank 3 (N).
+// Mirrors seqan3/alphabet/nucleotide/{dna4,dna5}.hpp.
+template<class Alphabet>
+constexpr std::array<uint8_t, 32> char_to_rank_lut = []() consteval {
+	std::array<uint8_t, 32> tbl{};
+	if constexpr (std::is_same_v<Alphabet, seq::dna4>) {
+		tbl.fill(0);        // unknown → A (matches seqan3 dna4 behaviour)
+		tbl[ 1] = 0;        // 'A' & 0x1F = 1 (A=0x41)
+		tbl[ 3] = 1;        // 'C' & 0x1F = 3 (C=0x43)
+		tbl[ 7] = 2;        // 'G' & 0x1F = 7 (G=0x47)
+		tbl[14] = 0;        // 'N' & 0x1F = 14 — dna4 has no N; seqan3 maps to A
+		tbl[20] = 3;        // 'T' & 0x1F = 20 (T=0x54)
+		tbl[21] = 3;        // 'U' & 0x1F = 21 — RNA uracil maps to T
+	} else {
+		static_assert(std::is_same_v<Alphabet, seq::dna5>,
+		              "char_to_rank_lut only supports seq::dna4 / seq::dna5");
+		tbl.fill(3);        // unknown → N (matches seqan3 dna5 behaviour)
+		tbl[ 1] = 0;        // A
+		tbl[ 3] = 1;        // C
+		tbl[ 7] = 2;        // G
+		tbl[14] = 3;        // N
+		tbl[20] = 4;        // T
+		tbl[21] = 4;        // U → T
+	}
+	return tbl;
+}();
+
+// Scalar reference encoder. Produces bit-identical output to `_convert`
+// at sequences.cppm:776-799 but operates on a raw cstring and selects the
+// rank via char_to_rank_lut (silent remap for unknown chars).
+template<class Dst>
+requires is_sequence_custom_alphabet<Dst>
+[[nodiscard]] compact_sequence_range<Dst> encode_sequence_scalar(
+	const char* input, size_t length)
+{
+	using seq_t = compact_sequence_range<Dst>;
+	using storage_unit_t = typename seq_t::traits::storage_unit;
+	using alphabet_t     = typename seq_t::traits::alphabet_type;
+	constexpr size_t bits_per_char    = seq_t::traits::bits_per_char;
+	constexpr size_t letters_per_unit = seq_t::traits::letters_per_unit;
+	constexpr size_t unit_used_bits   = seq_t::traits::unit_used_bits;
+	constexpr size_t unit_leftover    = seq_t::traits::unit_leftover_bits;
+
+	const size_t unit_count = length == 0
+		? 0
+		: (length + letters_per_unit - 1) / letters_per_unit;
+
+	compact_sequence_range<Dst> result{};
+	result._data.assign(unit_count, storage_unit_t{0});
+	result._padding = 0;
+	if (length == 0) return result;
+
+	storage_unit_t buf = 0;
+	size_t bit_count = letters_per_unit;
+	size_t write_pos = 0;
+
+	for (size_t i = 0; i < length; ++i) {
+		const uint8_t rank = char_to_rank_lut<alphabet_t>[
+			static_cast<uint8_t>(input[i]) & 0x1F];
+		buf >>= bits_per_char;
+		buf |= static_cast<storage_unit_t>(rank) << (unit_used_bits - bits_per_char);
+		if (--bit_count == 0) {
+			bit_count = letters_per_unit;
+			result._data[write_pos++] = buf;
+			if constexpr (unit_leftover > 0) buf = 0;
+		}
+	}
+	if (bit_count == letters_per_unit) {
+		result._padding = 0;
+	} else {
+		result._data[write_pos] = static_cast<storage_unit_t>(
+			buf >> (bits_per_char * bit_count));
+		result._padding = bit_count;
+	}
+	return result;
+}
+
+// SIMD encoder. Splits the input into L = hn::Lanes(d_out) stripes and
+// builds one storage_unit per lane per chunk via shift-and-OR of rank
+// vectors. Only the *complete* units (units that fit entirely within the
+// input) are processed by SIMD; any partial final unit is routed to the
+// scalar path so we never over-read the user-supplied buffer.
+template<class Dst>
+requires is_sequence_custom_alphabet<Dst>
+[[nodiscard]] compact_sequence_range<Dst> encode_sequence_simd(
+	const char* input, size_t length)
+{
+	using seq_t = compact_sequence_range<Dst>;
+	using storage_unit_t = typename seq_t::traits::storage_unit;
+	using alphabet_t     = typename seq_t::traits::alphabet_type;
+	constexpr size_t bits_per_char    = seq_t::traits::bits_per_char;
+	constexpr size_t letters_per_unit = seq_t::traits::letters_per_unit;
+
+	if (length == 0) {
+		compact_sequence_range<Dst> empty{};
+		empty._padding = 0;
+		return empty;
+	}
+
+	const hn::ScalableTag<storage_unit_t> d_out;
+	const size_t L_out = hn::Lanes(d_out);
+
+	// Total output size (with padding if length % letters_per_unit != 0).
+	const size_t unit_count     = (length + letters_per_unit - 1) / letters_per_unit;
+	// Number of FULLY-POPULATED units (no padding). SIMD body is restricted
+	// to this region so it never reads past `input + length`.
+	const size_t complete_units = length / letters_per_unit;
+
+	// Fall back to scalar if we can't form at least one SIMD chunk per lane.
+	if (complete_units < L_out) {
+		return encode_sequence_scalar<Dst>(input, length);
+	}
+
+	const size_t full_units_per_lane = complete_units / L_out;
+	const size_t body_units          = full_units_per_lane * L_out;
+	const size_t body_chars          = body_units * letters_per_unit;
+
+	compact_sequence_range<Dst> result{};
+	result._data.assign(unit_count, storage_unit_t{0});
+
+	using vec_out_t = hn::Vec<decltype(d_out)>;
+	HWY_ALIGN storage_unit_t gather_buf[hn::MaxLanes(d_out)];
+	HWY_ALIGN storage_unit_t store_buf [hn::MaxLanes(d_out)];
+
+	for (size_t chunk = 0; chunk < full_units_per_lane; ++chunk) {
+		vec_out_t accum = hn::Zero(d_out);
+
+		for (size_t bp = 0; bp < letters_per_unit; ++bp) {
+			for (size_t l = 0; l < L_out; ++l) {
+				const size_t pos =
+					(l * full_units_per_lane + chunk) * letters_per_unit + bp;
+				// `pos < body_chars <= length` by construction.
+				const uint8_t rank = char_to_rank_lut<alphabet_t>[
+					static_cast<uint8_t>(input[pos]) & 0x1F];
+				gather_buf[l] = static_cast<storage_unit_t>(rank);
+			}
+			const vec_out_t rank_vec = hn::Load(d_out, gather_buf);
+			// Shift by (bp * bits_per_char) so the rank lands at its
+			// position within the storage unit (first bp at low bits).
+			const vec_out_t shifted = hn::ShiftLeftSame(rank_vec,
+				static_cast<int>(bp * bits_per_char));
+			accum = hn::Or(accum, shifted);
+		}
+
+		hn::Store(accum, d_out, store_buf);
+		for (size_t l = 0; l < L_out; ++l) {
+			const size_t out_pos = l * full_units_per_lane + chunk;
+			result._data[out_pos] = store_buf[l];
+		}
+	}
+
+	// Tail: complete units not picked up by the body plus any partial final
+	// unit. encode_sequence_scalar handles both and returns _padding > 0
+	// for the partial case.
+	if (body_chars < length) {
+		auto tail = encode_sequence_scalar<Dst>(input + body_chars, length - body_chars);
+		for (size_t i = 0; i < tail._data.size(); ++i) {
+			result._data[body_units + i] = tail._data[i];
+		}
+		result._padding = tail._padding;
+	} else {
+		result._padding = 0;
+	}
+	return result;
+}
+
+// Scalar decoder — iterates BP symbols and converts each to its ASCII char.
+template<class Src>
+requires supports_compact_sequence_range<Src>
+[[nodiscard]] std::string decode_sequence_scalar(const compact_sequence_range<Src>& seq)
+{
+	using seq_traits = typename compact_sequence_range<Src>::traits;
+	std::string out;
+	out.reserve(seq.bp_size());
+	for (const auto& rank : seq.template iterable<BP>()) {
+		out.push_back(seq_traits::letter_to_char(
+			static_cast<typename seq_traits::storage_unit>(rank)));
+	}
+	return out;
+}
+
+// SIMD decoder — drives iterate_sequence_bp_simd_offsets with context=0
+// and stores each lane's emitted rank at its absolute bp position.
+template<class Src>
+requires supports_compact_sequence_range<Src>
+[[nodiscard]] std::string decode_sequence_simd(const compact_sequence_range<Src>& seq)
+{
+	using seq_traits = typename compact_sequence_range<Src>::traits;
+	using storage_unit_t = typename seq_traits::storage_unit;
+
+	const size_t bp_count = seq.bp_size();
+	if (bp_count == 0) return std::string{};
+
+	const hn::ScalableTag<storage_unit_t> d;
+	const size_t L = hn::Lanes(d);
+	// Shortest supported SIMD input in iterate_sequence_bp_simd_offsets is
+	// one full matrix = L*L units. Anything smaller falls back to scalar.
+	if (seq.size() < L * L) {
+		return decode_sequence_scalar<Src>(seq);
+	}
+
+	std::string out(bp_count, 'A');
+
+	HWY_ALIGN storage_unit_t lane_values[hn::MaxLanes(d)];
+	HWY_ALIGN storage_unit_t lane_mask_vals[hn::MaxLanes(d)];
+	std::array<size_t, hn::MaxLanes(d)> lane_cursors{};
+	bool first_call = true;
+
+	iterate_sequence_bp_simd_offsets(seq, seq.begin(), seq.end(), /*context_bps=*/0,
+		[&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets,
+		                  auto& d_cb, auto& mask, auto&& incoming) {
+			if (first_call) {
+				for (size_t l = 0; l < L; ++l) {
+					lane_cursors[l] = offsets[l] * seq_traits::letters_per_unit;
+				}
+				first_call = false;
+			}
+			hn::Store(incoming, d_cb, lane_values);
+			hn::Store(hn::VecFromMask(d_cb, mask), d_cb, lane_mask_vals);
+			for (size_t l = 0; l < L; ++l) {
+				if (lane_mask_vals[l]) {
+					const size_t pos = lane_cursors[l]++;
+					if (pos < bp_count) {
+						out[pos] = seq_traits::letter_to_char(lane_values[l]);
+					}
+				}
+			}
+		},
+		[](auto const&, auto&, auto&){});
+	return out;
+}
+
+// Lexicographic comparison on base pairs. The underlying storage_unit
+// layout places the FIRST bp at the LOW bits, which means unsigned-int
+// compare on _data gives *reverse* order within each unit. We use
+// `au != bu` as a fast equality check and fall into per-bp extraction
+// when unequal. Both sequences must share the same (alphabet, width).
+template<class R1, class R2>
+requires supports_compact_sequence_range<R1>
+      && supports_compact_sequence_range<R2>
+      && std::is_same_v<typename compact_sequence_range<R1>::traits::alphabet_type,
+                        typename compact_sequence_range<R2>::traits::alphabet_type>
+      && std::is_same_v<typename compact_sequence_range<R1>::traits::storage_unit,
+                        typename compact_sequence_range<R2>::traits::storage_unit>
+[[nodiscard]] std::strong_ordering compare_sequences_simd(
+	const compact_sequence_range<R1>& a,
+	const compact_sequence_range<R2>& b)
+{
+	using seq_traits = typename compact_sequence_range<R1>::traits;
+	using storage_unit_t = typename seq_traits::storage_unit;
+	constexpr size_t bits_per_char    = seq_traits::bits_per_char;
+	constexpr size_t letters_per_unit = seq_traits::letters_per_unit;
+	constexpr storage_unit_t char_mask = seq_traits::char_mask;
+	constexpr storage_unit_t used_mask = seq_traits::used_storage_mask;
+
+	const size_t bp_a = a.bp_size();
+	const size_t bp_b = b.bp_size();
+	const size_t bp_common = std::min(bp_a, bp_b);
+
+	const storage_unit_t* a_data = a._data.data();
+	const storage_unit_t* b_data = b._data.data();
+
+	size_t bp_idx = 0;
+	// Full-unit fast path: equality check on USED bits only (leftover
+	// high bits might contain junk that doesn't affect the logical bps).
+	// If any bp differs, fall into the bp-by-bp scan.
+	while (bp_idx + letters_per_unit <= bp_common) {
+		const size_t unit_idx = bp_idx / letters_per_unit;
+		storage_unit_t au = static_cast<storage_unit_t>(a_data[unit_idx] & used_mask);
+		storage_unit_t bu = static_cast<storage_unit_t>(b_data[unit_idx] & used_mask);
+		if (au != bu) {
+			for (size_t k = 0; k < letters_per_unit; ++k) {
+				const storage_unit_t ac = au & char_mask;
+				const storage_unit_t bc = bu & char_mask;
+				if (ac != bc) return ac <=> bc;
+				au = static_cast<storage_unit_t>(au >> bits_per_char);
+				bu = static_cast<storage_unit_t>(bu >> bits_per_char);
+			}
+			// au == bu in USED bits and all letters_per_unit bps compared
+			// equal — defensive fallthrough instead of __builtin_unreachable.
+			// Should not happen; leaving the loop means the check below
+			// (`bp_idx < bp_common`) or the length tiebreak finishes correctly.
+		}
+		bp_idx += letters_per_unit;
+	}
+	// Partial final unit / crossed into common tail.
+	if (bp_idx < bp_common) {
+		const size_t unit_idx = bp_idx / letters_per_unit;
+		storage_unit_t au = a_data[unit_idx];
+		storage_unit_t bu = b_data[unit_idx];
+		for (size_t k = 0; k < bp_common - bp_idx; ++k) {
+			const storage_unit_t ac = au & char_mask;
+			const storage_unit_t bc = bu & char_mask;
+			if (ac != bc) return ac <=> bc;
+			au = static_cast<storage_unit_t>(au >> bits_per_char);
+			bu = static_cast<storage_unit_t>(bu >> bits_per_char);
+		}
+	}
+	return bp_a <=> bp_b;
+}
 
 template <typename T, typename InfoT, typename I>
 requires (

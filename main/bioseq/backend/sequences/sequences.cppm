@@ -142,7 +142,13 @@ struct compact_sequence_range_base {
 
         static constexpr storage_unit char_mask = (static_cast<storage_unit>(1) << bits_per_char) - 1;
         static constexpr size_t rev_char_mask = char_mask << (bits_per_char * (letters_per_unit - 1));
-        static constexpr storage_unit used_storage_mask = (static_cast<storage_unit>(1) << unit_used_bits) - 1;
+        // unit_used_bits can equal unit_width (when the alphabet packs exactly
+        // — e.g. dna4 into uint8). `1 << unit_width` on a storage_unit-wide
+        // integer is UB, so branch on the leftover-bits case.
+        static constexpr storage_unit used_storage_mask =
+            (unit_leftover_bits == 0)
+                ? static_cast<storage_unit>(~static_cast<storage_unit>(0))
+                : static_cast<storage_unit>((static_cast<storage_unit>(1) << unit_used_bits) - 1);
 
         static constexpr size_t alphabet_size = seqan3::alphabet_size<alphabet_t>;
         static constexpr size_t alphabet_size_n = alphabet_size + 1;
