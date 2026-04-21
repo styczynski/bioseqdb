@@ -56,6 +56,40 @@ static List* newtargetlist = nullptr;
 static Const* const_score_node = nullptr;
 static TupleDispatchBuffer buffer(1000);
 
+/*
+ * Pair of OIDs looked up from pg_proc for the bioseq extension's stub
+ * SQL functions. Looked up on demand via LookupStubOids(); never cached
+ * across calls because `drop extension; create extension` would leave a
+ * process-wide cache pointing at the old, dropped pg_proc rows.
+ */
+struct BioseqStubOids {
+	Oid mmsearch_oid;
+	Oid bioseq_score_oid;
+};
+
+/*
+ * LookupStubOids resolves the OIDs of mmsearch(anyelement, text) and
+ * bioseq.score(anyelement). regprocedurein raises ereport(ERROR, ...)
+ * on miss, so we assume both functions are present by the time any
+ * bioseq-aware code path runs (CREATE EXTENSION has to succeed first).
+ */
+[[nodiscard]] static BioseqStubOids LookupStubOids() {
+	BioseqStubOids result{};
+	result.mmsearch_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
+		CStringGetDatum("mmsearch(anyelement, text)")));
+	result.bioseq_score_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
+		CStringGetDatum("bioseq.score(anyelement)")));
+	return result;
+}
+
+/*
+ * Context passed to VarInjectorMutator through the void* context arg.
+ */
+struct VarInjectorCtx {
+	Const* const_score_node;
+	Oid bioseq_score_oid;
+};
+
 /* functions to cost paths in-place */
 static void CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId);
 static void CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
@@ -1473,21 +1507,21 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	path->parent = rel;
 	path->pathtarget = copy_pathtarget(rel->reltarget);
 
-	const Oid mmsearch_oid = DatumGetObjectId(DirectFunctionCall1(regprocedurein,
-											   CStringGetDatum("mmsearch(ANYELEMENT, TEXT)")));
+	const BioseqStubOids stub_oids = LookupStubOids();
 
 	bool wehavemagic = false;
 	int wehavemagic_cnt = 0;
-	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={}", mmsearch_oid);
+	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} bioseq_score_oid={}",
+		stub_oids.mmsearch_oid, stub_oids.bioseq_score_oid);
 	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
 		if (IsA(tgt->expr, FuncExpr)) {
 			FuncExpr* fe = reinterpret_cast<FuncExpr *>(tgt->expr);
-			JustLog("[bioseq] pg: AddColumnarScanPath() targetlist funcexpr=[{}]", nodeStr(fe));
-			if (fe->funcid == mmsearch_oid) {
+			if (fe->funcid == stub_oids.mmsearch_oid) {
 				JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr in targetlist");
-				// Magic?
-				//if (!wehavemagic) lappend(path->pathtarget->exprs, tgt->expr);
-				//path->pathtarget->cost
+				wehavemagic = true;
+				wehavemagic_cnt++;
+			} else if (fe->funcid == stub_oids.bioseq_score_oid) {
+				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq.score funcexpr in targetlist");
 				wehavemagic = true;
 				wehavemagic_cnt++;
 			}
@@ -2085,6 +2119,101 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 									   &columnarScanState->snapshotRegisteredByUs);
 	}
 
+	/*
+	 * Walk cscan->scan.plan.qual to discover the WHERE mmsearch(...) call,
+	 * pull out (varattno of the TEXT column, query literal) and configure
+	 * the dispatch buffer so on_submit() has enough context to emit the
+	 * per-tuple log line.
+	 */
+	buffer.clear_mmsearch_context();
+
+	const BioseqStubOids scan_stub_oids = LookupStubOids();
+	Relation relation_for_attname = cscanstate->ss.ss_currentRelation;
+	const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
+
+	for (auto qual_node : PList<Node>(cscan->scan.plan.qual))
+	{
+		if (qual_node == nullptr || !IsA(qual_node, FuncExpr))
+		{
+			continue;
+		}
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(qual_node);
+		if (fe->funcid != scan_stub_oids.mmsearch_oid)
+		{
+			continue;
+		}
+		if (list_length(fe->args) != 2)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch FuncExpr has unexpected arg count={}",
+					list_length(fe->args));
+			continue;
+		}
+
+		PList<Node> fe_args(fe->args);
+		Node* arg0 = fe_args.first();
+		Node* arg1 = fe_args.second();
+		if (arg0 == nullptr || arg1 == nullptr)
+		{
+			continue;
+		}
+		if (!IsA(arg0, Var))
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 is not a Var (tag={})",
+					static_cast<int>(nodeTag(arg0)));
+			continue;
+		}
+		if (!IsA(arg1, Const))
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a Const (tag={})",
+					static_cast<int>(nodeTag(arg1)));
+			continue;
+		}
+
+		Var* col_var = reinterpret_cast<Var*>(arg0);
+		Const* query_const = reinterpret_cast<Const*>(arg1);
+
+		if (query_const->consttype != TEXTOID || query_const->constisnull)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null TEXT Const");
+			continue;
+		}
+
+		TupleDesc tuple_descriptor = RelationGetDescr(relation_for_attname);
+		if (col_var->varattno <= 0 || col_var->varattno > tuple_descriptor->natts)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 varattno={} out of range natts={}",
+					static_cast<int>(col_var->varattno), tuple_descriptor->natts);
+			continue;
+		}
+		Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, col_var->varattno - 1);
+		if (attribute_form->atttypid != TEXTOID)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 column type is {}, expected TEXTOID",
+					attribute_form->atttypid);
+			continue;
+		}
+
+		char* attname_cstr = get_attname(relation_oid_for_attname, col_var->varattno, /*missing_ok=*/true);
+		if (attname_cstr == nullptr)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() get_attname returned NULL for attno={}",
+					static_cast<int>(col_var->varattno));
+			continue;
+		}
+		char* query_cstr = TextDatumGetCString(query_const->constvalue);
+
+		buffer.configure_mmsearch(col_var->varattno,
+								  std::string(attname_cstr),
+								  std::string(query_cstr));
+
+		pfree(attname_cstr);
+		pfree(query_cstr);
+		break; /* POC: only honour the first mmsearch() qual we find */
+	}
+
+	/* Reset the counter so each scan starts from 100 deterministically. */
+	counter = 100;
+
 	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
 }
@@ -2202,18 +2331,18 @@ ExecScanFetch(ScanState *node,
 static Node *
 VarInjectorMutator(Node *node, void* context)
 {
-	JustLog("[bioseq] pg: VarInjectorMutator() entered");
 	if (node == NULL)
 	{
 		return NULL;
 	}
+	auto* injector_context = static_cast<VarInjectorCtx*>(context);
 	if (IsA(node, FuncExpr)) {
 		auto funcExpr = reinterpret_cast<FuncExpr *>(node);
-		Oid oid = funcExpr->funcid;
-		JustLog("[bioseq] pg: VarInjectorMutator() funcid={}", oid);
-		return reinterpret_cast<Node *>(context);
-		// replace?
-
+		if (funcExpr->funcid == injector_context->bioseq_score_oid) {
+			JustLog("[bioseq] pg: VarInjectorMutator() replacing bioseq.score FuncExpr with Const");
+			return reinterpret_cast<Node *>(injector_context->const_score_node);
+		}
+		/* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
 	}
 	return expression_tree_mutator(node, VarInjectorMutator, context);
 }
@@ -2448,13 +2577,20 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		JustLog("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed, projecting tuple");
-			
-			//slot = ExecProject(newProj);
-			
-			// /*
-			//  * Found a satisfactory scan tuple.
-			//  */
+			JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed");
+
+			/*
+			 * Fire the TupleDispatchBuffer on_submit hook while the scan
+			 * slot still contains every attribute (notably `seq` which
+			 * is required for the mmsearch read but is dropped by the
+			 * projection). Must come BEFORE ExecProject since ExecProject
+			 * reassigns `slot` to ps_ResultTupleSlot.
+			 */
+			if (!columnarScanState->vectorization.vectorizationEnabled)
+			{
+				buffer.on_submit(econtext->ecxt_scantuple);
+			}
+
 			if (projInfo)
 			{
 				/*
@@ -2473,7 +2609,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 					columnarScanState->vectorization.resultVectorSlot)->rowNumber[resultVectorTupleSlotIdx] = rowNumber;
 				resultVectorTupleSlotIdx++;
 				continue;
-			}		
+			}
 			else
 			{
 				JustLog("[bioseq] pg: Inner_CustomExecScan() submit projected slot to dispatch buffer");
@@ -2523,14 +2659,22 @@ CustomExecScan(BioseqScanState *columnarScanState,
 			InvalidOid,
 			4,
 			static_cast<Datum>(static_cast<int32_t>(0)),
-			true,
-			true
+			/*constisnull=*/ true,
+			/*constbyval=*/ true
 		);
-		buffer.clear();
+		/*
+		 * Reset only the slot buffer; keep the mmsearch_context that
+		 * BeginCustomScan configured earlier for this scan.
+		 */
+		buffer.clear_slots();
 
-		newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(reinterpret_cast<Node *>(targetlist), static_cast<void*>(const_score_node)));
-		//counter = 10;
-		//ps.plan->targetlist = newtargetlist;
+		VarInjectorCtx injector_ctx;
+		injector_ctx.const_score_node = const_score_node;
+		injector_ctx.bioseq_score_oid = LookupStubOids().bioseq_score_oid;
+
+		newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
+			reinterpret_cast<Node *>(targetlist),
+			static_cast<void*>(&injector_ctx)));
 	}
 
 

@@ -56,18 +56,29 @@ Datum testtest(PG_FUNCTION_ARGS) {
 }
 
 /*
- * mmsearch is a stub SQL function used by the demo setup. Returns a
- * synthetic integer derived from the argument so the custom scan plan can
- * be exercised with observable output.
+ * mmsearch is a BOOLEAN stub used as a WHERE-clause predicate. Always
+ * returns true so every scanned row passes the qual; the custom scan
+ * only cares that the FuncExpr exists in the plan so we can walk its
+ * args at BeginCustomScan time to discover the column and the query
+ * literal.
  */
 CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
-	Oid argument_type = get_fn_expr_argtype(fcinfo->flinfo, 0);
-	JustLog("[bioseq] pg: mmsearch() argument_type={}", argument_type);
-	if (argument_type == INT4OID) {
-		return Int32GetDatum((static_cast<int32_t>(PG_GETARG_INT32(0)) + 10000) * 100);
-	}
-	return Int32GetDatum(static_cast<int32_t>(999999));
+	JustLog("[bioseq] pg: mmsearch() stub invoked, always returning true");
+	PG_RETURN_BOOL(true);
+}
+
+/*
+ * bioseq_score_stub backs the SQL function bioseq.score(anyelement).
+ * Must never execute in the hot path: the custom scan rewrites the
+ * target list to replace every bioseq.score(...) FuncExpr with a Const
+ * we own. If this stub fires, the custom path was not chosen for the
+ * query; we log loudly and return a sentinel value.
+ */
+CXX_PG_FUNCTION_INFO_V1(bioseq_score_stub);
+Datum bioseq_score_stub(PG_FUNCTION_ARGS) {
+	JustLog("[bioseq] pg: bioseq_score_stub() UNEXPECTED direct call -- custom scan did not rewrite this call site");
+	PG_RETURN_INT32(-1);
 }
 
 /*

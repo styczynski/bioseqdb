@@ -1,54 +1,33 @@
+-- Drop the extension and recreate it so the updated bioseq--1.0.sql is
+-- loaded. Re-creation re-populates pg_proc with fresh OIDs; the custom
+-- scan never caches OIDs across queries (see SPEC §7.4.1).
 drop extension if exists bioseq cascade;
 create extension bioseq;
 
-DROP DATABASE IF EXISTS bioseq;
-
 drop table if exists x CASCADE;
-
-create database bioseq;
 
 SET bioseq.logging = on;
 SET bioseq.enable_bioseq_index_scan TO TRUE;
 
-create table x ( a INT PRIMARY KEY, seq TEXT, c INT ) using bioseq;
-CREATE INDEX x_default_index ON x USING btree(c);
-
---select create_distributed_table('x', 'a', shard_count => 2);
-
--- select testtest();
+-- POC table: no PRIMARY KEY / no index, so the planner cannot choose
+-- an index scan over our CustomScan path.
+create table x ( a INT, seq TEXT, c INT ) using bioseq;
 
 INSERT INTO x VALUES (
-    23, 'TEST1', 1
+    23,  'sequence_1', 1
 ), (
-    101, 'TEST2', 1
+    101, 'sequence_2', 1
 ), (
-    69, 'HE', 2
+    69,  'sequence_3', 2
 ), (
-    42, 'YO', 2
+    42,  'sequence_4', 2
 );
 
 set bioseq.enable_column_cache to on;
 set bioseq.enable_vectorization to off;
 
---set bioseq.enable_custom_scan TO 'off';
---set enable_seqscan TO off;
---set seq_page_cost TO 10000000;
+-- First EXPLAIN to verify that the custom scan (BioseqScan) is chosen.
+EXPLAIN (COSTS OFF) select a, c, bioseq.score(a) from x where mmsearch(seq, 'sequence_b');
 
---EXPLAIN (ANALYZE, BUFFERS) select sum(a) from x where c >= 2;
--- EXPLAIN (ANALYZE, BUFFERS) select a, seq, mmsearch(seq, 'A') from x;
---select a, seq, mmsearch(seq, 'A') from x;
-
-
-
---EXPLAIN (ANALYZE, BUFFERS) select a from x where a > 100;
---EXPLAIN (VERBOSE) SELECT a FROM x WHERE c > 1 ORDER BY c LIMIT 2;
---EXPLAIN (VERBOSE) SELECT a, mmsearch(a, 'Y'), mmsearch(a, 'Z') from x;
-
-EXPLAIN (ANALYZE, BUFFERS) select a, mmsearch(a, 'X') from x where c > 1;
-select a, c, mmsearch(a, 'X') from x where c = 2;
-
-select * from x;
-select * from x where c = 1;
-set bioseq.enable_vectorization to on;
-select * from x;
-select * from x where c = 1;
+-- The goal query.
+select a, c, bioseq.score(a) from x where mmsearch(seq, 'sequence_b');
