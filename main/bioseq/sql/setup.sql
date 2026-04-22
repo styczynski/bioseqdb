@@ -307,3 +307,26 @@ SET bioseq.enable_vectorization = on;
 SELECT a FROM cx_mini
  WHERE mmsearch(seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
  ORDER BY a;
+
+-- ---- Test 14: symbol_count on a columnar column goes through the sidecar ----
+-- Every row's meta_sidecar entry stores a hardcoded 49 for rank-0 letter
+-- (via compact_sequence_range::count_symbols()), so the custom scan's
+-- VarInjector rewrite of `bioseq.symbol_count(seq, 'A')` populates each
+-- row's placeholder Const with 49. Row 4 was inserted while the GUC was
+-- OFF; it has no meta_sidecar row so the placeholder stays NULL. The
+-- purpose of this test is to (a) exercise the VarInjector path for
+-- symbol_count (which previously relied on a thread-local context and is
+-- now cost-based rewrite), and (b) verify that the scalar and vector
+-- code paths produce the same output.
+\echo '=== Test 14 symbol_count via custom scan (vectorization OFF) ==='
+SET bioseq.enable_vectorization = off;
+SELECT a, bioseq.symbol_count(seq, 'A') AS ca FROM cx_mini ORDER BY a;
+
+\echo '=== Test 14 symbol_count via custom scan (vectorization ON) ==='
+SET bioseq.enable_vectorization = on;
+SELECT a, bioseq.symbol_count(seq, 'A') AS ca FROM cx_mini ORDER BY a;
+
+\echo '=== Test 14 symbol_count EXPLAIN (Fetched From Meta line) ==='
+SET bioseq.enable_vectorization = off;
+EXPLAIN (VERBOSE, COSTS off)
+SELECT a, bioseq.symbol_count(seq, 'A') FROM cx_mini ORDER BY a;

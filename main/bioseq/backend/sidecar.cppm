@@ -37,6 +37,8 @@ extern "C" {
 #include "catalog/pg_type.h"
 }
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -53,6 +55,7 @@ import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
 import bioseq_sequences.minimap_port;
 import bioseq_types.pg_compact_sequence;
+import sequan_compat;
 
 /* Pull TargetIndex / sketch_collector / collect_minimizers / minimap_int_hasher
  * / dispatch_pgseq / make_seq_range_from_pg / compact_sequence_range /
@@ -68,44 +71,6 @@ using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
  * module doesn't wrap in HWY_BEFORE_NAMESPACE). They are reachable directly. */
 
 namespace bioseq::sidecar {
-
-/* ---------------------------------------------------------------- */
-/* Thread-local scan-row context                                    */
-/*                                                                  */
-/* Set by the custom-scan execution loop (one entry per projected   */
-/* tuple) before ExecProject fires, so that scalar functions like   */
-/* bioseq.symbol_count can recover the (user_relid, rowno) pair and */
-/* use the meta_sidecar instead of recomputing from the varlena.    */
-/* ---------------------------------------------------------------- */
-export struct ScanRowContext {
-	Oid     user_relid     = InvalidOid;
-	int64_t sequence_rowno = -1;
-	bool    active         = false;
-};
-
-/* Module-linkage thread_local — callers inside bioseq::sidecar see this
- * directly; the symbol is also visible via `import bioseq_sidecar` from
- * other cppm modules (mod.cppm's bioseq_symbol_count and columnar_customscan
- * exec helpers). */
-export inline thread_local ScanRowContext g_scan_row_ctx{};
-
-/* RAII guard that activates g_scan_row_ctx for the lifetime of a single
- * projected tuple. Exceptions / longjmps on the ExecProject path cannot
- * desync the context because this guard's destructor runs via normal
- * stack-unwind (there is no PG_TRY around the guard itself; PG_CATCH in
- * the executor is above this frame). */
-export struct ScanRowContextScope {
-	ScanRowContext previous;
-	ScanRowContextScope(Oid relid, int64_t rowno) {
-		previous = g_scan_row_ctx;
-		g_scan_row_ctx = ScanRowContext{relid, rowno, true};
-	}
-	~ScanRowContextScope() {
-		g_scan_row_ctx = previous;
-	}
-	ScanRowContextScope(const ScanRowContextScope&) = delete;
-	ScanRowContextScope& operator=(const ScanRowContextScope&) = delete;
-};
 
 /* ---------------------------------------------------------------- */
 /* OID resolution                                                   */
@@ -202,18 +167,36 @@ static void insert_heap_row(Oid relid, int num_attrs, Datum* values, const bool*
 
 /* Build a Postgres INT8[] array from a contiguous run of int64 counts.
  * The returned ArrayType* lives in CurrentMemoryContext and is 1-indexed
- * (the stored Postgres array is accessed as symbol_counts[1..N]). */
+ * (the stored Postgres array is accessed as symbol_counts[1..N]).
+ *
+ * construct_array() only reads the Datum array — it copies bytes into the
+ * ArrayType — so a stack-local buffer is safe and avoids one palloc + one
+ * pfree per INSERT. Capacity is bounded by the largest supported alphabet
+ * (dna5 = 5); kMaxAlphabetSize in sidecar_compute_and_write_meta() caps
+ * at 8, which we mirror here. */
 [[nodiscard]] static ArrayType* make_int8_array(const int64_t* counts, int n) {
-	Datum* datums = static_cast<Datum*>(palloc(sizeof(Datum) * n));
+	constexpr int kStackBufferSlots = 8;
+	if (n > kStackBufferSlots) {
+		/* Fall back to palloc for unexpectedly large alphabets. */
+		Datum* datums = static_cast<Datum*>(palloc(sizeof(Datum) * n));
+		for (int i = 0; i < n; ++i) {
+			datums[i] = Int64GetDatum(counts[i]);
+		}
+		ArrayType* arr = construct_array(datums, n, INT8OID,
+										/*elemlen=*/ 8,
+										/*elembyval=*/ true,
+										/*elemalign=*/ 'd');
+		pfree(datums);
+		return arr;
+	}
+	std::array<Datum, kStackBufferSlots> datums{};
 	for (int i = 0; i < n; ++i) {
 		datums[i] = Int64GetDatum(counts[i]);
 	}
-	ArrayType* arr = construct_array(datums, n, INT8OID,
-									/*elemlen=*/ 8,
-									/*elembyval=*/ true,
-									/*elemalign=*/ 'd');
-	pfree(datums);
-	return arr;
+	return construct_array(datums.data(), n, INT8OID,
+						   /*elemlen=*/ 8,
+						   /*elembyval=*/ true,
+						   /*elemalign=*/ 'd');
 }
 
 export void sidecar_write_meta(Oid user_relid, int64_t rowno,
@@ -465,10 +448,21 @@ export std::optional<std::vector<char>> sidecar_read_index(Oid user_relid, int64
 	return result;
 }
 
+/* Fixed-size result of a meta_sidecar lookup. The maximum alphabet size
+ * supported by dispatch_pgseq is 5 (dna5); we round to 8 to keep the
+ * struct cache-line friendly and leave headroom for future alphabets.
+ * Using a stack-sized struct here avoids the std::vector<int64_t>
+ * heap allocation that every per-row scalar lookup otherwise pays for. */
+export struct SymbolCounts {
+	std::array<int64_t, 8> values{};
+	uint8_t                size    = 0;
+};
+
 /* Read a single (user_relid, rowno) row from meta_sidecar and return the
- * stored symbol_counts[] array as a std::vector<int64_t>, or empty optional
- * when missing. Uses the same PK-btree fast-path as sidecar_read_index. */
-export std::optional<std::vector<int64_t>> sidecar_read_meta_counts(Oid user_relid, int64_t rowno) {
+ * stored symbol_counts[] array inside a stack-sized SymbolCounts struct,
+ * or empty optional when the row is missing. Uses the same PK-btree
+ * fast-path as sidecar_read_index. */
+export std::optional<SymbolCounts> sidecar_read_meta_counts(Oid user_relid, int64_t rowno) {
 	const SidecarOids& oids = get_sidecar_oids();
 	if (oids.meta_sidecar_relid == InvalidOid) {
 		return std::nullopt;
@@ -496,7 +490,7 @@ export std::optional<std::vector<int64_t>> sidecar_read_meta_counts(Oid user_rel
 										  /*indexOK=*/ pk_index_oid != InvalidOid,
 										  NULL /*snapshot*/, 2, keys);
 
-	std::optional<std::vector<int64_t>> result;
+	std::optional<SymbolCounts> result;
 	HeapTuple tup = systable_getnext(scan);
 	if (HeapTupleIsValid(tup)) {
 		bool isnull = false;
@@ -504,20 +498,32 @@ export std::optional<std::vector<int64_t>> sidecar_read_meta_counts(Oid user_rel
 									   RelationGetDescr(rel), &isnull);
 		if (!isnull) {
 			ArrayType* arr = DatumGetArrayTypeP(arr_datum);
-			const int nelems = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
-			std::vector<int64_t> out;
-			out.reserve(nelems);
 			Datum*  elem_datums;
 			bool*   elem_nulls;
 			int     n_returned = 0;
 			deconstruct_array(arr, INT8OID, 8, true, 'd',
 							  &elem_datums, &elem_nulls, &n_returned);
-			for (int i = 0; i < n_returned; ++i) {
-				out.push_back(elem_nulls[i] ? int64_t{0} : DatumGetInt64(elem_datums[i]));
+			SymbolCounts out{};
+			/* Warn loudly when a stored meta row has more counts than the
+			 * stack-sized wrapper can carry. Today the writer caps at 8 via
+			 * kMaxAlphabetSize in sidecar_compute_and_write_meta, but a
+			 * hand-restored dump or a future wider alphabet would silently
+			 * return 0 for the truncated slots and present as
+			 * "symbol_count = 0" — better to surface the misconfiguration. */
+			if (n_returned > static_cast<int>(out.values.size())) {
+				JustLog("[bioseq] sidecar: meta row (relid={}, rowno={}) has {} counts, capped to {} — update SymbolCounts::values",
+						static_cast<unsigned>(user_relid), rowno,
+						n_returned, static_cast<int>(out.values.size()));
 			}
+			const int capped = std::min(n_returned,
+										static_cast<int>(out.values.size()));
+			for (int i = 0; i < capped; ++i) {
+				out.values[i] = elem_nulls[i] ? int64_t{0} : DatumGetInt64(elem_datums[i]);
+			}
+			out.size = static_cast<uint8_t>(capped);
 			pfree(elem_datums);
 			pfree(elem_nulls);
-			result = std::move(out);
+			result = out;
 			if (reinterpret_cast<void*>(arr) != reinterpret_cast<void*>(DatumGetPointer(arr_datum))) {
 				pfree(arr);
 			}
@@ -528,34 +534,62 @@ export std::optional<std::vector<int64_t>> sidecar_read_meta_counts(Oid user_rel
 	return result;
 }
 
-/* DEPRECATED: kept only to document the rank orderings for reviewers;
- * callers should use seqan3 via `dispatch_pgseq` + `alphabet_t{}.assign_char`
- * so there is a single source of truth for rank mapping. Intentionally
- * unused — the one call site in bioseq_symbol_count was switched to the
- * seqan3 path. Delete when the next refactor lands. */
-[[maybe_unused, nodiscard]] static inline int
-letter_to_rank_for_alphabet_reference_only(uint8_t alphabet_code, char letter) {
-	switch (alphabet_code) {
-		case 0: /* dna4 */
-			switch (letter) {
-				case 'A': case 'a': return 0;
-				case 'C': case 'c': return 1;
-				case 'G': case 'g': return 2;
-				case 'T': case 't': return 3;
-				default: return -1;
-			}
-		case 1: /* dna5 — seqan3 rank: A=0, C=1, G=2, N=3, T=4 */
-			switch (letter) {
-				case 'A': case 'a': return 0;
-				case 'C': case 'c': return 1;
-				case 'G': case 'g': return 2;
-				case 'N': case 'n': return 3;
-				case 'T': case 't': return 4;
-				default: return -1;
-			}
-		default:
-			return -1;
+/* Resolve an alphabet letter to its seqan3 rank. Returns -1 for letters
+ * outside the alphabet. The helper exists so the custom-scan planner can
+ * pre-compute the rank once per symbol_count() call site without paying
+ * for a dispatch_pgseq template instantiation + seqan3 assign_char on
+ * every EXPLAIN re-render or VarInjector rewrite.
+ *
+ * The table is built at static-init time by walking the seqan3 alphabets
+ * for every supported alphabet_code; the per-lookup cost is a pair of
+ * array indexes. Only alphabet_code is load-bearing; width_code is
+ * irrelevant because the rank mapping is identical for every storage
+ * width of the same alphabet. */
+namespace detail {
+
+/* kPgseqAlphabetCount is the single source of truth — it lives next to
+ * dispatch_pgseq in pg_compact_sequence.cppm and must grow alongside that
+ * switch statement. Any drift is caught here at build time. */
+constexpr std::size_t kNumAlphabets = static_cast<std::size_t>(kPgseqAlphabetCount);
+constexpr std::size_t kCharDomain   = 256;
+
+inline auto build_letter_rank_table() {
+	std::array<std::array<int8_t, kCharDomain>, kNumAlphabets> table{};
+	for (auto& row : table) {
+		row.fill(static_cast<int8_t>(-1));
 	}
+	for (uint8_t alphabet_code = 0; alphabet_code < kNumAlphabets; ++alphabet_code) {
+		dispatch_pgseq(alphabet_code, /*width_code=*/ 0,
+			[&]<class Dst>() {
+				using alphabet_t = typename compact_sequence_range<Dst>::traits::alphabet_type;
+				for (int c = 0; c < static_cast<int>(kCharDomain); ++c) {
+					const char letter = static_cast<char>(c);
+					if (!seqan3::char_is_valid_for<alphabet_t>(letter)) {
+						continue;
+					}
+					alphabet_t sym{};
+					sym.assign_char(letter);
+					table[alphabet_code][static_cast<uint8_t>(c)] =
+						static_cast<int8_t>(sym.to_rank());
+				}
+			});
+	}
+	return table;
+}
+
+inline const auto& letter_rank_table() {
+	static const auto table = build_letter_rank_table();
+	return table;
+}
+
+} // namespace detail
+
+export [[nodiscard]] inline int letter_to_rank(uint8_t alphabet_code, char letter) {
+	if (alphabet_code >= detail::kNumAlphabets) {
+		return -1;
+	}
+	const auto& table = detail::letter_rank_table();
+	return static_cast<int>(table[alphabet_code][static_cast<uint8_t>(letter)]);
 }
 
 } // namespace bioseq::sidecar

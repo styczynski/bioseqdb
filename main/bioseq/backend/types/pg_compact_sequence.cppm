@@ -162,6 +162,15 @@ export [[nodiscard]] inline const char* pg_seq_data_ptr(const PgCompactSequenceH
 // ----------------------------------------------------------------------------
 // Runtime-indexed dispatch to one of eight template instantiations.
 // ----------------------------------------------------------------------------
+// Number of distinct alphabets that dispatch_pgseq can switch on. Exported
+// so callers that need to iterate the alphabet space (e.g. the
+// letter->rank lookup table in sidecar.cppm) can stay in sync with the
+// switch below automatically. When a new alphabet is added to the body of
+// dispatch_pgseq, increment this constant and the downstream callers will
+// pick up the new alphabet at static-init time without further edits.
+// ----------------------------------------------------------------------------
+
+export constexpr uint8_t kPgseqAlphabetCount = 2;   // dna4, dna5
 
 export template<class OnMatch>
 [[gnu::always_inline]] inline decltype(auto) dispatch_pgseq(

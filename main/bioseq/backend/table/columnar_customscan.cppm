@@ -22,6 +22,10 @@ module;
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
+extern "C" {
+#include "utils/inval.h"
+}
+
 #include "columnar/vectorization/columnar_vector_execution.h"
 #include "columnar/vectorization/columnar_vector_types.h"
 
@@ -37,8 +41,10 @@ import bioseq_scheduler.dispatch_buffer;
 import bioseq_sequences.minimap_port;  // for MatchResult
 import bioseq_cigar;                    // for format_cigar
 import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
+import bioseq_sidecar;                   // meta_sidecar reads for symbol_count fast path
 
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
+extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
 uint64_t ColumnarTableRowCount(Relation relation);
 bool IsColumnarTableAmTable(Oid relationId);
@@ -59,12 +65,33 @@ static Const* const_score_node = nullptr;   // legacy alias pointing at placehol
 static bioseq::simd::N_NEON::TupleDispatchBuffer buffer(1000);
 
 /*
+ * One rewritten `bioseq.symbol_count(Var, 'L')` call site. The Const*
+ * replaces the FuncExpr in newtargetlist; `rank` is resolved once at
+ * plan time via seqan3 so the per-row populate path is a single array
+ * index into the meta_sidecar counts[]. `letter` + `column_name` are
+ * retained for the EXPLAIN-time "Fetched from meta:" string.
+ */
+struct SymbolCountCallSite {
+	Const*      placeholder   = nullptr;
+	int         rank          = -1;
+	char        letter        = '\0';
+	std::string column_name;    // attname for EXPLAIN output
+};
+
+/*
  * Placeholder Const nodes injected by VarInjectorMutator into the
  * rewritten target list. Each one stands in for a bioseq.<field>(...)
  * FuncExpr; per-row values are written into constvalue/constisnull
  * before ExecProject runs. All pointers start as nullptr in a fresh
  * backend; CustomExecScan's first-call init allocates them and
  * VarInjectorMutator wires them into newtargetlist.
+ *
+ * symbol_count_sites is populated dynamically by VarInjectorMutator as
+ * it discovers `symbol_count(Var, 'L')` call sites in the target list.
+ * Multiple call sites per scan are supported (different letters or
+ * different columns resolve to independent placeholders), and the
+ * vector is cleared at the top of every scan init so stale entries
+ * from a prior query cannot bleed across.
  */
 struct BioseqPlaceholderConsts {
 	Const* dp_score_node              = nullptr;  // bioseq.score / bioseq.dp_score
@@ -86,14 +113,16 @@ struct BioseqPlaceholderConsts {
 	Const* has_cigar_node             = nullptr;
 	Const* divergence_node            = nullptr;
 	Const* cigar_node                 = nullptr;
+	std::vector<SymbolCountCallSite> symbol_count_sites;
 };
 static BioseqPlaceholderConsts placeholder_consts;
 
 /*
  * OIDs looked up from pg_proc for the bioseq extension's SQL stubs.
- * Resolved on demand via LookupStubOids(); never cached across
- * queries because `drop extension; create extension` would leave a
- * process-wide cache pointing at the old, dropped pg_proc rows.
+ * Resolved on demand via LookupStubOids() and cached by
+ * get_cached_stub_oids() for the lifetime of a backend. The cache is
+ * flushed on any relcache invalidation (which covers DROP/CREATE
+ * EXTENSION re-registering the pg_proc rows with new OIDs).
  */
 struct BioseqStubOids {
 	Oid mmsearch_oid;
@@ -119,13 +148,16 @@ struct BioseqStubOids {
 	Oid has_cigar_oid;
 	Oid divergence_oid;
 	Oid cigar_oid;
+	Oid symbol_count_oid;
 };
 
 /*
  * LookupStubOids resolves all bioseq stub OIDs via regprocedurein,
  * which raises ereport(ERROR, ...) if any function is missing. We
  * assume CREATE EXTENSION bioseq has already succeeded before any
- * path below runs.
+ * path below runs. Prefer get_cached_stub_oids() on the hot path —
+ * this builder is kept public so the cache can repopulate on
+ * relcache invalidation.
  */
 [[nodiscard]] static BioseqStubOids LookupStubOids() {
 	BioseqStubOids result{};
@@ -159,7 +191,41 @@ struct BioseqStubOids {
 	result.has_cigar_oid             = resolve("bioseq.has_cigar(anyelement)");
 	result.divergence_oid            = resolve("bioseq.divergence(anyelement)");
 	result.cigar_oid                 = resolve("bioseq.cigar(anyelement)");
+	result.symbol_count_oid          = resolve("bioseq.symbol_count(bioseq.seq, text)");
 	return result;
+}
+
+/*
+ * Per-backend cache for BioseqStubOids. The prior implementation called
+ * LookupStubOids() from every planner path entry (AddColumnarScanPath,
+ * CustomExecScan first-call init, ExplainCustomScan) — that is ~22
+ * regprocedurein syscache hits per query. The cache is backed by a
+ * relcache invalidation callback so DROP/CREATE EXTENSION correctly
+ * flushes the resolved OIDs before the next lookup.
+ */
+struct CachedStubOids {
+	BioseqStubOids oids{};
+	bool           initialised = false;
+};
+static CachedStubOids g_cached_stub_oids{};
+
+static void invalidate_cached_stub_oids(Datum /*arg*/, Oid /*relid*/) {
+	g_cached_stub_oids.initialised = false;
+}
+
+[[nodiscard]] static const BioseqStubOids& get_cached_stub_oids() {
+	if (g_cached_stub_oids.initialised) {
+		return g_cached_stub_oids.oids;
+	}
+	static bool invalidation_registered = false;
+	if (!invalidation_registered) {
+		CacheRegisterRelcacheCallback(invalidate_cached_stub_oids,
+									  PointerGetDatum(NULL));
+		invalidation_registered = true;
+	}
+	g_cached_stub_oids.oids        = LookupStubOids();
+	g_cached_stub_oids.initialised = true;
+	return g_cached_stub_oids.oids;
 }
 
 /*
@@ -195,10 +261,16 @@ struct BioseqStubOids {
  * Context passed to VarInjectorMutator through the void* context arg.
  * Bundles the allocated placeholder Consts with the resolved OIDs so
  * the mutator can dispatch on funcid -> Const* without a global.
+ *
+ * `current_relation` is used exclusively when rewriting
+ * `symbol_count(Var, 'L')` call sites to resolve the column name
+ * (attname) referenced by the Var — so the EXPLAIN output can say
+ * "Fetched from meta: seq.symbol_count('A') AS ...".
  */
 struct VarInjectorCtx {
-	const BioseqPlaceholderConsts* consts;
-	const BioseqStubOids*          oids;
+	BioseqPlaceholderConsts* consts;
+	const BioseqStubOids*    oids;
+	Relation                 current_relation;
 };
 
 /* functions to cost paths in-place */
@@ -1618,12 +1690,13 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	path->parent = rel;
 	path->pathtarget = copy_pathtarget(rel->reltarget);
 
-	const BioseqStubOids stub_oids = LookupStubOids();
+	const BioseqStubOids& stub_oids = get_cached_stub_oids();
 
 	bool wehavemagic = false;
 	int wehavemagic_cnt = 0;
-	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={}",
-		stub_oids.mmsearch_oid, stub_oids.score_oid, stub_oids.cigar_oid, stub_oids.query_start_oid);
+	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={} symbol_count_oid={}",
+		stub_oids.mmsearch_oid, stub_oids.score_oid, stub_oids.cigar_oid, stub_oids.query_start_oid,
+		stub_oids.symbol_count_oid);
 	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
 		if (IsA(tgt->expr, FuncExpr)) {
 			FuncExpr* fe = reinterpret_cast<FuncExpr *>(tgt->expr);
@@ -1634,6 +1707,26 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			} else if (is_bioseq_projection_funcid(fe->funcid, stub_oids)) {
 				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq projection funcexpr funcid={} in targetlist",
 					fe->funcid);
+				wehavemagic = true;
+				wehavemagic_cnt++;
+			} else if (fe->funcid == stub_oids.symbol_count_oid
+					   && list_length(fe->args) == 2) {
+				/*
+				 * symbol_count(Var, Const) is a cost inflator: the scalar
+				 * Postgres-level function path is O(n) over the varlena,
+				 * but the custom scan resolves it via a single O(1) array
+				 * index into meta_sidecar.counts[]. We treat each call
+				 * site as one unit of wehavemagic_cnt so the cost
+				 * adjustment below scales with the number of rewrites we
+				 * will do in VarInjectorMutator. Call sites whose first
+				 * argument is a literal (Const-typed bioseq.seq) are
+				 * counted too: the scalar function's SupportRequestCost
+				 * still inflates the plain-scan cost enough that the
+				 * custom scan wins, and VarInjectorMutator will leave
+				 * those sites alone so the scalar fallback computes the
+				 * literal's count in place.
+				 */
+				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq.symbol_count funcexpr in targetlist");
 				wehavemagic = true;
 				wehavemagic_cnt++;
 			}
@@ -2248,7 +2341,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * Const* yet (the rewrite target is newtargetlist, not
 	 * scan.plan.targetlist).
 	 */
-	const BioseqStubOids scan_stub_oids = LookupStubOids();
+	const BioseqStubOids& scan_stub_oids = get_cached_stub_oids();
 	AttrNumber primary_key_attno = InvalidAttrNumber;
 	for (auto tgt : PList<TargetEntry>(cscan->scan.plan.targetlist))
 	{
@@ -2566,6 +2659,116 @@ lookup_bioseq_placeholder_const(Oid funcid, const VarInjectorCtx* ctx)
 	return nullptr;
 }
 
+/*
+ * Rewrite a single `bioseq.symbol_count(Var, 'L')` call site into a
+ * placeholder Const that the executor populates per-row from meta_sidecar.
+ * Returns the replacement Const*, or nullptr when the FuncExpr does not
+ * match the supported shape (in which case the caller must leave the
+ * original FuncExpr in place so the scalar O(n) path runs).
+ *
+ * Matching is deliberately strict: arg0 must be a Var (a column reference
+ * with a concrete bioseq.seq typmod), and arg1 must be a single-byte
+ * non-null text Const whose letter is in the column's alphabet. Any call
+ * outside this shape — e.g. symbol_count('ACGT'::bioseq.seq, 'A') — keeps
+ * its original FuncExpr and runs through the scalar entry point in
+ * mod.cppm, which is cost-inflated by bioseq_symbol_count_support.
+ */
+static Const*
+try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
+{
+	if (ctx == nullptr || fe == nullptr || ctx->consts == nullptr) {
+		return nullptr;
+	}
+	if (list_length(fe->args) != 2) {
+		return nullptr;
+	}
+	PList<Node> fe_args(fe->args);
+	Node* arg0 = fe_args.first();
+	Node* arg1 = fe_args.second();
+	if (arg0 == nullptr || arg1 == nullptr) {
+		return nullptr;
+	}
+	if (!IsA(arg0, Var) || !IsA(arg1, Const)) {
+		JustLog("[bioseq] pg: VarInjectorMutator() leaving symbol_count(...) alone; arg0_tag={} arg1_tag={}",
+				static_cast<int>(nodeTag(arg0)),
+				static_cast<int>(nodeTag(arg1)));
+		return nullptr;
+	}
+
+	Var* col_var = reinterpret_cast<Var*>(arg0);
+	Const* letter_const = reinterpret_cast<Const*>(arg1);
+	if (col_var->vartypmod < 0 || col_var->vartype != ctx->oids->bioseq_seq_type_oid) {
+		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count arg0 has wrong type/typmod (type={}, typmod={})",
+				col_var->vartype, col_var->vartypmod);
+		return nullptr;
+	}
+	if (letter_const->constisnull) {
+		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count arg1 is NULL; skipping");
+		return nullptr;
+	}
+
+	text* letter_text = reinterpret_cast<text*>(DatumGetPointer(letter_const->constvalue));
+	if (letter_text == nullptr) {
+		return nullptr;
+	}
+	text* letter_detoasted = reinterpret_cast<text*>(PG_DETOAST_DATUM(letter_const->constvalue));
+	const int32 letter_size = VARSIZE_ANY_EXHDR(letter_detoasted);
+	if (letter_size != 1) {
+		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count arg1 size={} (expected 1)", letter_size);
+		if (reinterpret_cast<void*>(letter_detoasted)
+			!= reinterpret_cast<void*>(DatumGetPointer(letter_const->constvalue))) {
+			pfree(letter_detoasted);
+		}
+		return nullptr;
+	}
+	const char letter_char = *VARDATA_ANY(letter_detoasted);
+	if (reinterpret_cast<void*>(letter_detoasted)
+		!= reinterpret_cast<void*>(DatumGetPointer(letter_const->constvalue))) {
+		pfree(letter_detoasted);
+	}
+
+	const UnpackedPgSeqTypmod typmod = unpack_pgseq_typmod(col_var->vartypmod);
+	const int rank = bioseq::sidecar::letter_to_rank(typmod.alphabet_code, letter_char);
+	if (rank < 0) {
+		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count letter '{}' not in alphabet_code={}; keeping scalar call",
+				letter_char, static_cast<unsigned>(typmod.alphabet_code));
+		return nullptr;
+	}
+
+	/*
+	 * Build the placeholder Const. INT8 is byval on LP64 (pg_type.typbyval
+	 * for bigint is 't'), so constbyval=true + constlen=8 is correct. The
+	 * initial value is NULL until the executor populates it per-row.
+	 */
+	Const* placeholder = makeConst(
+		INT8OID,
+		-1,
+		InvalidOid,
+		8,
+		Int64GetDatum(static_cast<int64_t>(0)),
+		/*constisnull=*/ true,
+		/*constbyval=*/ true);
+
+	SymbolCountCallSite site;
+	site.placeholder = placeholder;
+	site.rank        = rank;
+	site.letter      = letter_char;
+	if (ctx->current_relation != nullptr
+		&& col_var->varattno >= 1) {
+		char* attname_cstr = get_attname(
+			RelationGetRelid(ctx->current_relation), col_var->varattno, /*missing_ok=*/true);
+		if (attname_cstr != nullptr) {
+			site.column_name = std::string(attname_cstr);
+			pfree(attname_cstr);
+		}
+	}
+	JustLog("[bioseq] pg: VarInjectorMutator() installing symbol_count placeholder column='{}' letter='{}' rank={}",
+			site.column_name, letter_char, rank);
+
+	ctx->consts->symbol_count_sites.push_back(std::move(site));
+	return placeholder;
+}
+
 static Node *
 VarInjectorMutator(Node *node, void* context)
 {
@@ -2581,6 +2784,16 @@ VarInjectorMutator(Node *node, void* context)
 			JustLog("[bioseq] pg: VarInjectorMutator() replacing bioseq funcid={} with placeholder Const",
 					funcExpr->funcid);
 			return reinterpret_cast<Node *>(replacement);
+		}
+		if (funcExpr->funcid == injector_context->oids->symbol_count_oid) {
+			Const* symbol_placeholder =
+				try_rewrite_symbol_count(funcExpr, injector_context);
+			if (symbol_placeholder != nullptr) {
+				return reinterpret_cast<Node *>(symbol_placeholder);
+			}
+			/* Call shape not supported (literal arg, non-Const letter,
+			 * letter outside alphabet, …) — let the scalar entry point
+			 * in mod.cppm handle it in place. */
 		}
 		/* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
 	}
@@ -2645,6 +2858,60 @@ populate_placeholder_consts(const bioseq::simd::N_NEON::MatchResult& match)
 	}
 }
 
+/*
+ * Per-tuple populate for every `bioseq.symbol_count(Var, 'L')` placeholder
+ * in the rewritten target list. Fetches the counts[] array from
+ * bioseq_internal.meta_sidecar once per row, then hands each placeholder
+ * its own counts[rank] value. No placeholder = no meta read = no SPI call.
+ *
+ * The sidecar row is the source of truth: it was populated from the same
+ * count_symbols() method at INSERT time, so the values this function
+ * writes are bit-for-bit identical to what the scalar entry point in
+ * mod.cppm would compute on the same varlena.
+ *
+ * Missing meta row (GUC off at INSERT, hand-restored dump, …) is handled
+ * by leaving every placeholder as NULL. The scalar fallback in
+ * bioseq_symbol_count was responsible for that value historically;
+ * pushing a NULL through the projection keeps the optimizer contract
+ * ("STRICT" means NULL on any NULL input) honest for now. A later
+ * follow-up could backfill on scan, but that would require promoting
+ * the scan transaction to read-write and is out of scope for the POC.
+ */
+static void
+populate_symbol_count_placeholders(Oid user_relid, int64_t sequence_rowno)
+{
+	if (placeholder_consts.symbol_count_sites.empty()) {
+		return;
+	}
+	if (sequence_rowno < 0 || user_relid == InvalidOid) {
+		for (auto& site : placeholder_consts.symbol_count_sites) {
+			if (site.placeholder != nullptr) {
+				site.placeholder->constisnull = true;
+			}
+		}
+		return;
+	}
+
+	auto counts = bioseq::sidecar::sidecar_read_meta_counts(user_relid, sequence_rowno);
+	for (auto& site : placeholder_consts.symbol_count_sites) {
+		if (site.placeholder == nullptr) {
+			continue;
+		}
+		if (!counts.has_value()
+			|| site.rank < 0
+			|| static_cast<std::size_t>(site.rank) >= counts->size) {
+			site.placeholder->constisnull = true;
+			continue;
+		}
+		site.placeholder->constvalue = Int64GetDatum(counts->values[site.rank]);
+		site.placeholder->constisnull = false;
+	}
+	JustLog("[bioseq] pg: populate_symbol_count_placeholders relid={} rowno={} sites={} hit={}",
+			static_cast<unsigned>(user_relid), sequence_rowno,
+			placeholder_consts.symbol_count_sites.size(),
+			counts.has_value());
+}
+
 
 static TupleTableSlot *
 Inner_CustomExecScan(BioseqScanState *columnarScanState,
@@ -2700,6 +2967,16 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 * every Const node referenced in newtargetlist.
 			 */
 			populate_placeholder_consts(*next->match);
+
+			/*
+			 * symbol_count placeholders are independent of MatchResult;
+			 * they are resolved from meta_sidecar by (relid, rowno) so
+			 * we populate them alongside the per-match fields.
+			 */
+			{
+				const Oid user_relid = RelationGetRelid(node->ss_currentRelation);
+				populate_symbol_count_placeholders(user_relid, next->entry->sequence_rowno);
+			}
 
 			/*
 			 * Re-install the buffered scan slot as the current scan
@@ -2840,6 +3117,23 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 				 * we have no MatchResult to back it.
 				 */
 				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual — projecting tuple directly");
+
+				/*
+				 * symbol_count fast-path requires the row number; the
+				 * access method set it on slot->tts_tid above. Convert
+				 * once per projected row rather than stashing a
+				 * (relid, rowno) in a shared struct (which was the
+				 * anti-pattern this module used to carry).
+				 */
+				{
+					int64_t row_number = -1;
+					if (ItemPointerIsValid(&slot->tts_tid)) {
+						row_number = static_cast<int64_t>(tid_to_row_number(slot->tts_tid));
+					}
+					const Oid user_relid = RelationGetRelid(node->ss_currentRelation);
+					populate_symbol_count_placeholders(user_relid, row_number);
+				}
+
 				ProjectionInfo* proj = ExecBuildProjectionInfo(
 					newtargetlist,
 					econtext,
@@ -2933,6 +3227,7 @@ CustomExecScan(BioseqScanState *columnarScanState,
 			);
 		};
 
+		placeholder_consts.symbol_count_sites.clear();
 		placeholder_consts.dp_score_node              = int_placeholder();
 		placeholder_consts.query_len_node             = int_placeholder();
 		placeholder_consts.query_start_node           = int_placeholder();
@@ -2962,10 +3257,11 @@ CustomExecScan(BioseqScanState *columnarScanState,
 		 */
 		buffer.clear_slots();
 
-		BioseqStubOids oids_snapshot = LookupStubOids();
+		const BioseqStubOids& oids_snapshot = get_cached_stub_oids();
 		VarInjectorCtx injector_ctx;
-		injector_ctx.consts = &placeholder_consts;
-		injector_ctx.oids   = &oids_snapshot;
+		injector_ctx.consts           = &placeholder_consts;
+		injector_ctx.oids             = &oids_snapshot;
+		injector_ctx.current_relation = columnarScanState->custom_scanstate.ss.ss_currentRelation;
 
 		newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
 			reinterpret_cast<Node *>(targetlist),
@@ -3194,8 +3490,91 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	{
 		const char *vectorizedWhereClauses = ColumnarPushdownClausesStr(
 					context, columnarScanState->vectorization.vectorizedQualList);
-		ExplainPropertyText("Bioseq Vectorized Filter", 
+		ExplainPropertyText("Bioseq Vectorized Filter",
 							vectorizedWhereClauses, es);
+	}
+
+	/*
+	 * List every per-column metadata lookup the scan resolves without
+	 * touching the base relation's varlena. Today this is just the
+	 * symbol_count fast path — each rewritten call-site shows up as
+	 * "<column>.symbol_count('<letter>', rank=<n>)". The list is
+	 * recomputed here by walking the plan's target list instead of
+	 * inspecting `placeholder_consts.symbol_count_sites` directly: the
+	 * latter is populated lazily on first ExecScan, but EXPLAIN (without
+	 * ANALYZE) never runs ExecScan and would therefore show an empty
+	 * line. Re-deriving from the plan keeps EXPLAIN output useful for
+	 * planners inspecting queries that have not yet executed. When
+	 * future metadata is surfaced via the same pattern (min_qual,
+	 * gc_ratio, …) they should extend this walker accordingly.
+	 */
+	{
+		StringInfoData meta_buf;
+		initStringInfo(&meta_buf);
+		bool first = true;
+		const BioseqStubOids& oids_snapshot = get_cached_stub_oids();
+		Relation scan_rel = node->ss.ss_currentRelation;
+		for (auto tgt : PList<TargetEntry>(node->ss.ps.plan->targetlist)) {
+			if (tgt == nullptr || !IsA(tgt->expr, FuncExpr)) {
+				continue;
+			}
+			FuncExpr* fe = reinterpret_cast<FuncExpr*>(tgt->expr);
+			if (fe->funcid != oids_snapshot.symbol_count_oid
+				|| list_length(fe->args) != 2) {
+				continue;
+			}
+			PList<Node> args(fe->args);
+			Node* arg0 = args.first();
+			Node* arg1 = args.second();
+			if (!IsA(arg0, Var) || !IsA(arg1, Const)) {
+				continue;
+			}
+			Var* col_var = reinterpret_cast<Var*>(arg0);
+			Const* letter_const = reinterpret_cast<Const*>(arg1);
+			if (letter_const->constisnull || col_var->vartypmod < 0) {
+				continue;
+			}
+			text* letter_detoasted = reinterpret_cast<text*>(
+				PG_DETOAST_DATUM(letter_const->constvalue));
+			if (VARSIZE_ANY_EXHDR(letter_detoasted) != 1) {
+				if (reinterpret_cast<void*>(letter_detoasted)
+					!= reinterpret_cast<void*>(DatumGetPointer(letter_const->constvalue))) {
+					pfree(letter_detoasted);
+				}
+				continue;
+			}
+			const char letter_char = *VARDATA_ANY(letter_detoasted);
+			if (reinterpret_cast<void*>(letter_detoasted)
+				!= reinterpret_cast<void*>(DatumGetPointer(letter_const->constvalue))) {
+				pfree(letter_detoasted);
+			}
+			const UnpackedPgSeqTypmod typmod = unpack_pgseq_typmod(col_var->vartypmod);
+			const int rank = bioseq::sidecar::letter_to_rank(typmod.alphabet_code, letter_char);
+			if (rank < 0) {
+				continue;
+			}
+			std::string col_name;
+			if (scan_rel != nullptr && col_var->varattno >= 1) {
+				char* attname_cstr = get_attname(
+					RelationGetRelid(scan_rel), col_var->varattno, /*missing_ok=*/true);
+				if (attname_cstr != nullptr) {
+					col_name.assign(attname_cstr);
+					pfree(attname_cstr);
+				}
+			}
+			if (!first) {
+				appendStringInfoString(&meta_buf, ", ");
+			}
+			first = false;
+			appendStringInfo(&meta_buf,
+							 "%s.symbol_count('%c', rank=%d)",
+							 col_name.empty() ? "<unknown>" : col_name.c_str(),
+							 letter_char, rank);
+		}
+		if (!first) {
+			ExplainPropertyText("Bioseq Fetched From Meta", meta_buf.data, es);
+		}
+		pfree(meta_buf.data);
 	}
 
 	if (bioseq_enable_page_cache)

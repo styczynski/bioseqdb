@@ -101,7 +101,7 @@ static bool TruncateAndCombineColumnarStripes(Relation rel, int elevel);
 static HeapTuple ColumnarSlotCopyHeapTuple(TupleTableSlot *slot);
 static void ColumnarCheckLogicalReplication(Relation rel);
 static Datum * detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull);
-static uint64_t tid_to_row_number(ItemPointerData tid);
+extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
 static void ErrorIfInvalidRowNumber(uint64_t rowNumber);
 static void ColumnarReportTotalVirtualBlocks(Relation relation, Snapshot snapshot,
 											 int progressArrIndex);
@@ -478,8 +478,14 @@ row_number_to_tid(uint64_t rowNumber)
 
 /*
  * tid_to_row_number maps given ItemPointerData to rowNumber.
+ *
+ * Wrapped in `extern "C++"` so the symbol is attached to the global
+ * module fragment rather than `bioseq_table:access_method`. Scheduler
+ * and scheduler-adjacent callers (dispatch_buffer.cppm, not a partition
+ * of bioseq_table) can then forward-declare and link against it
+ * without importing the full table-AM module.
  */
-static uint64_t
+extern "C++" uint64_t
 tid_to_row_number(ItemPointerData tid)
 {
 	uint64_t rowNumber = ItemPointerGetBlockNumber(&tid) * VALID_ITEMPOINTER_OFFSETS +

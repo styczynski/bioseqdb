@@ -968,14 +968,28 @@ CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- ---------------------------------------------------------------------------
--- bioseq.symbol_count — POC scalar + vector; hardcoded 49 for 'A', errors for
--- other symbols.  Reads would eventually come from bioseq_internal.meta_sidecar
--- via the same VarInjector rewrite used by bioseq.score/bioseq.dp_score.
+-- bioseq.symbol_count — O(n) scalar fallback + cheap custom-scan fast path.
+--
+-- The Postgres entry point recomputes count_symbols() on the passed-in
+-- varlena, so it works correctly for literals and plain-heap tables. On a
+-- columnar scan the VarInjector in the bioseq custom scan rewrites every
+-- `symbol_count(Var, 'L')` call into a placeholder Const that is populated
+-- per-row from bioseq_internal.meta_sidecar; this is the preferred path
+-- and is several orders of magnitude cheaper than re-scanning every
+-- sequence. The SUPPORT function inflates the planner cost so any query
+-- that *can* go through the custom scan will prefer it.
 -- ---------------------------------------------------------------------------
+CREATE FUNCTION bioseq_symbol_count_support(internal)
+    RETURNS internal
+    AS 'MODULE_PATHNAME'
+    LANGUAGE C IMMUTABLE STRICT
+    PARALLEL SAFE;
+
 CREATE OR REPLACE FUNCTION bioseq.symbol_count(el bioseq.seq, sym text)
     RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_symbol_count'
-    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE
+    SUPPORT bioseq_symbol_count_support;
 
 -- ============================================================================
 -- mmsearch — WHERE-qual stub over two bioseq.seq values.

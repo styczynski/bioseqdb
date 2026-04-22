@@ -44,6 +44,14 @@ module;
 #include <utility>
 #include <vector>
 
+/* Forward-declared so we can stay out of bioseq_table (the module that
+ * defines tid_to_row_number). Pulling the full module in would
+ * reintroduce a circular import between the scheduler and the table AM.
+ * The `extern "C++"` attaches the declaration to the global module
+ * fragment, matching the attachment of the definition in
+ * access_method.cppm. */
+extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
+
 export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
@@ -231,6 +239,7 @@ public:
         TupleTableSlot* scan_slot_copy      = nullptr;
         int32_t         primary_key         = -1;
         bool            primary_key_is_null = true;
+        int64_t         sequence_rowno      = -1;   /* derived from scan_slot->tts_tid; -1 when the TID was invalid */
         std::vector<char> seq_varlena;
         bool            seq_is_null         = true;
 
@@ -327,6 +336,19 @@ public:
 
         BufferedScanEntry entry{};
 
+        /*
+         * Capture the scan slot's tts_tid (set by the bioseq columnar
+         * access method in ColumnarScanNext) and invert it back to a
+         * row number so downstream consumers can join against the
+         * sidecar tables (keyed on (user_relid, sequence_rowno)). Uses
+         * the canonical tid_to_row_number helper from access_method.cppm
+         * so the encoding stays in lockstep with row_number_to_tid.
+         */
+        if (ItemPointerIsValid(&scan_slot->tts_tid)) {
+            entry.sequence_rowno = static_cast<int64_t>(
+                tid_to_row_number(scan_slot->tts_tid));
+        }
+
         /* Extract the target bioseq.seq column (mmsearch arg0). */
         if (mmsearch_context.seq_attno == InvalidAttrNumber) {
             entry.seq_is_null = true;
@@ -407,8 +429,9 @@ public:
 
         const uint32_t entry_seq_bp_size = entry.seq_hdr() != nullptr
             ? entry.seq_hdr()->bp_size : 0;
-        JustLog("[bioseq] pg: submit_scan pk={} seq_bp_size={} (null={})",
+        JustLog("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
                 entry.primary_key_is_null ? -1 : entry.primary_key,
+                entry.sequence_rowno,
                 entry_seq_bp_size,
                 entry.seq_is_null);
 

@@ -205,24 +205,23 @@ Datum bioseq_cigar_stub(PG_FUNCTION_ARGS) {
 /*
  * bioseq.symbol_count(el bioseq.seq, sym text) -> bigint.
  *
- * Resolution order per the spec (§7):
- *   1. If we are inside an active sidecar scan-row context
- *      (bioseq::sidecar::g_scan_row_ctx.active), read symbol_counts[] from
- *      bioseq_internal.meta_sidecar by (user_relid, rowno) and index the
- *      requested letter's rank into that array. This matches what would
- *      have been computed at INSERT time, bit-for-bit, at the cost of one
- *      index probe.
- *   2. If the sidecar is missing (row absent — GUC was off at INSERT, or
- *      the row predates the feature), fall back to recomputing
- *      count_symbols() on the varlena and (if we were in a scan context)
- *      backfill the meta_sidecar row.
- *   3. If we are NOT in a scan context (literal call, non-custom scan),
- *      compute directly on the varlena via count_symbols().
+ * The Postgres entry point computes the result directly from the passed-in
+ * varlena (so it works on literals and outside a scan context). This path is
+ * deliberately expensive (O(n) over the sequence): the planner-support
+ * function bioseq_symbol_count_support flags it as such so any query that
+ * routes through the bioseq columnar custom scan will prefer the custom
+ * scan's cheap path, which resolves the value from bioseq_internal.meta_sidecar
+ * without re-examining the varlena. See columnar_customscan.cppm —
+ * VarInjectorMutator rewrites every `symbol_count(Var, 'L')` call site in
+ * the target list into a placeholder Const that is populated per-row from
+ * the sidecar; this function is never invoked inside the custom scan for a
+ * column reference.
  *
- * All three paths produce identical output because meta_sidecar rows are
- * themselves produced by calling count_symbols() on insert. The scalar and
- * vectorized planner paths therefore return EXACTLY the same value for any
- * input; see setup.sql Test 13 for the parity check.
+ * Both the scalar entry point here and the custom-scan fast path route
+ * through count_symbols() at some point (compute-at-call for literals vs.
+ * compute-at-INSERT for columns), so they return bit-for-bit identical
+ * values by construction. Test 13 exercises the parity with vectorization
+ * both on and off.
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count);
 Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
@@ -242,25 +241,17 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 	}
 	const char sym_char = *VARDATA_ANY(sym_text);
 
-	/* Resolve the letter-to-rank mapping *through* dispatch_pgseq so seqan3
-	 * is the single source of truth — avoids the hand-maintained
-	 * letter_to_rank_for_alphabet switch falling out of sync when an
-	 * alphabet is added.
-	 *
-	 * Memory-context note: dispatch_pgseq's default arm itself ereports
-	 * with ERRCODE_FEATURE_NOT_SUPPORTED on an unknown (alphabet_code,
-	 * width_code) pair. That longjmps past our PG_FREE_IF_COPY below, but
-	 * since every palloc in this function lives in the per-tuple context
-	 * (cleared on ereport unwinding), the "leak" is a convention gap, not
-	 * a real memory retention. The caller surfaces the ereport without
-	 * swallowing it. */
+	/* Resolve letter→rank through the seqan3 dispatch so the scalar path
+	 * and the INSERT-time meta_sidecar computation share one source of
+	 * truth. On an unknown letter the caller raises ERRCODE_INVALID_PARAMETER_VALUE
+	 * below. */
 	int rank = -1;
 	int64_t computed_result = 0;
 	dispatch_pgseq(hdr->alphabet_code, hdr->width_code,
 		[&]<class Dst>() {
 			using alphabet_t = typename compact_sequence_range<Dst>::traits::alphabet_type;
 			if (!seqan3::char_is_valid_for<alphabet_t>(sym_char)) {
-				return;          /* rank stays -1; caller below errors out */
+				return;
 			}
 			alphabet_t letter{};
 			letter.assign_char(sym_char);
@@ -281,41 +272,35 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 						sym_char, static_cast<unsigned>(hdr->alphabet_code))));
 	}
 
-	int64_t result = computed_result;
-
-	/* Tier 1 — fetch from meta_sidecar if we are inside an active scan-row
-	 * context. The sidecar row was populated on INSERT by the same
-	 * count_symbols() call path above, so tier-1 and tier-3 return bit-
-	 * identical values by construction. We intentionally do NOT perform a
-	 * tier-2 backfill from a SELECT: backfilling would (a) escalate the
-	 * transaction to read-write, which fails on hot-standbys, and (b) race
-	 * on the meta_sidecar PK against concurrent scanners. Missing rows
-	 * simply fall through to the already-computed value.
-	 *
-	 * TODO(future): if a user is able to alter the alphabet typmod of an
-	 * existing bioseq.seq column (currently blocked by the type system —
-	 * `ALTER TABLE ... ALTER COLUMN seq TYPE bioseq.seq(...)` rewrites the
-	 * column and repopulates meta_sidecar through bioseq_tuple_insert), we
-	 * could still see a stale sidecar row for a row whose seq was updated
-	 * in-place without passing through the insert path. A version-stamp
-	 * column on meta_sidecar + relcache-invalidation hook would catch this.
-	 * Today all write paths go through sidecar_after_insert, so the sidecar
-	 * is always current. */
-	if (bioseq::sidecar::g_scan_row_ctx.active) {
-		auto counts = bioseq::sidecar::sidecar_read_meta_counts(
-			bioseq::sidecar::g_scan_row_ctx.user_relid,
-			bioseq::sidecar::g_scan_row_ctx.sequence_rowno);
-		if (counts.has_value() && static_cast<size_t>(rank) < counts->size()) {
-			result = (*counts)[rank];
-			JustLog("[bioseq] pg: bioseq_symbol_count('{}') -> {} from meta_sidecar (relid={}, rowno={})",
-					sym_char, result,
-					static_cast<unsigned>(bioseq::sidecar::g_scan_row_ctx.user_relid),
-					bioseq::sidecar::g_scan_row_ctx.sequence_rowno);
-		}
-	}
-
 	PG_FREE_IF_COPY(hdr, 0);
-	PG_RETURN_INT64(result);
+	PG_RETURN_INT64(computed_result);
+}
+
+/*
+ * bioseq_symbol_count_support is the planner-support function attached to
+ * bioseq.symbol_count(). We return a high per-call cost so any query with a
+ * cheaper alternative (the bioseq columnar custom scan) is preferred by the
+ * optimiser. The cost is lower than mmsearch_support's (100000) because the
+ * scalar symbol_count implementation is O(n) where n is the sequence
+ * length, while mmsearch's scalar path is ~O(n^2). The ordering matters
+ * because both paths use the same "inflate to make plain scan look
+ * expensive" trick in AddColumnarScanPath — see columnar_customscan.cppm's
+ * `wehavemagic_cnt` scan which translates every detected cost inflator
+ * into a negative custom-scan startup cost.
+ */
+CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count_support);
+Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
+	JustLog("[bioseq] pg: bioseq_symbol_count_support() entered");
+	Node* response = nullptr;
+	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
+	if (IsA(request, SupportRequestCost)) {
+		SupportRequestCost* cost_request = reinterpret_cast<SupportRequestCost*>(request);
+		JustLog("[bioseq] pg: bioseq_symbol_count_support() received SupportRequestCost");
+		cost_request->startup = 50000;
+		cost_request->per_tuple = 0;
+		PG_RETURN_POINTER(cost_request);
+	}
+	PG_RETURN_POINTER(response);
 }
 
 /*

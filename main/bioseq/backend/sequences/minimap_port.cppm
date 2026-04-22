@@ -248,12 +248,34 @@ struct TargetIndex {
 
     static constexpr uint32_t kSerializeMagic   = 0xB1000001u;
     static constexpr uint32_t kSerializeVersion = 2u;
-    static constexpr std::size_t kSerializeHeaderBytes = 24;
+
+    /* Packed record shapes for the wire format. Using typed structs instead
+     * of four-field-at-a-time memcpy sequences lets the serializer emit a
+     * single memcpy per block and the compiler fold adjacent field stores
+     * into wide aligned writes; it also lets std::bit_cast-style validation
+     * run at compile time (see kSerializeHeaderBytes below). */
+    struct SerializedHeader {
+        uint32_t magic;
+        uint32_t version;
+        int32_t  target_len;
+        uint32_t bucket_count;
+        uint64_t total_positions;
+    };
     /* Bucket layout v2: hash(u64) + pos_offset(u32) + pos_count(u32) = 16 bytes.
      * A single TargetIndex cannot contain more than UINT32_MAX buckets nor
      * UINT32_MAX positions in practice (a bucket with 2^32 entries would
      * imply a 32 GB sequence). Shrinks the bucket array by 33% vs v1. */
-    static constexpr std::size_t kSerializeBucketBytes = 16;
+    struct SerializedBucket {
+        uint64_t hash;
+        uint32_t pos_offset;
+        uint32_t pos_count;
+    };
+    static constexpr std::size_t kSerializeHeaderBytes = sizeof(SerializedHeader);
+    static constexpr std::size_t kSerializeBucketBytes = sizeof(SerializedBucket);
+    static_assert(kSerializeHeaderBytes == 24,
+                  "SerializedHeader wire layout must remain 24 bytes");
+    static_assert(kSerializeBucketBytes == 16,
+                  "SerializedBucket wire layout must remain 16 bytes");
 
     /* Serialization format depends on native little-endian, 64-bit integers.
      * The columnar storage layer already requires the same ABI — if the host
@@ -313,34 +335,40 @@ struct TargetIndex {
     }
 
     void serialize_to_binary(char* output) const {
-        const uint32_t magic        = kSerializeMagic;
-        const uint32_t version      = kSerializeVersion;
         const uint32_t bucket_count = static_cast<uint32_t>(table.size());
-
         uint64_t total_positions = 0;
         for (const auto& kv : table) {
             total_positions += kv.second.size();
         }
 
-        std::memcpy(output + 0,  &magic,           4);
-        std::memcpy(output + 4,  &version,         4);
-        std::memcpy(output + 8,  &target_len,      4);
-        std::memcpy(output + 12, &bucket_count,    4);
-        std::memcpy(output + 16, &total_positions, 8);
+        /* One aligned memcpy for the whole 24-byte header beats five
+         * field-by-field stores: the compiler emits a single pair of
+         * SIMD stores on ARM64 / x86_64 once the struct is ABI-laid-out. */
+        const SerializedHeader header{
+            kSerializeMagic,
+            kSerializeVersion,
+            target_len,
+            bucket_count,
+            total_positions,
+        };
+        std::memcpy(output, &header, sizeof(header));
 
         char* bucket_cursor   = output + kSerializeHeaderBytes;
         char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
         uint32_t position_offset = 0;
 
         for (const auto& kv : table) {
-            const uint64_t hash = kv.first;
             const uint32_t count = static_cast<uint32_t>(kv.second.size());
-            std::memcpy(bucket_cursor + 0,  &hash,            8);
-            std::memcpy(bucket_cursor + 8,  &position_offset, 4);
-            std::memcpy(bucket_cursor + 12, &count,           4);
+            const SerializedBucket bucket{ kv.first, position_offset, count };
+            std::memcpy(bucket_cursor, &bucket, sizeof(bucket));
             bucket_cursor += kSerializeBucketBytes;
 
             if (count > 0) {
+                /* Positions are a flat run of uint64_t already; one memcpy
+                 * becomes a single memcpy/rep movsq which is the fastest
+                 * available for cache-cold bulk copies on both target
+                 * ISAs. AVX-512 scatter is not the right tool here — it
+                 * assumes unaligned random offsets; ours are contiguous. */
                 std::memcpy(position_cursor, kv.second.data(), count * 8);
                 position_cursor += count * 8;
             }
@@ -361,31 +389,24 @@ struct TargetIndex {
                  input_size);
         }
 
-        uint32_t magic{}, version{}, bucket_count{};
-        int32_t  target_length_local{};
-        uint64_t total_positions{};
+        SerializedHeader header{};
+        std::memcpy(&header, input, sizeof(header));
 
-        std::memcpy(&magic,               input + 0,  4);
-        std::memcpy(&version,             input + 4,  4);
-        std::memcpy(&target_length_local, input + 8,  4);
-        std::memcpy(&bucket_count,        input + 12, 4);
-        std::memcpy(&total_positions,     input + 16, 8);
-
-        if (magic != kSerializeMagic) {
+        if (header.magic != kSerializeMagic) {
             elog(ERROR,
                  "bioseq: TargetIndex deserialize: magic mismatch 0x%08x (expected 0x%08x)",
-                 magic, kSerializeMagic);
+                 header.magic, kSerializeMagic);
         }
-        if (version != kSerializeVersion) {
+        if (header.version != kSerializeVersion) {
             elog(ERROR,
                  "bioseq: TargetIndex deserialize: version mismatch %u (expected %u)",
-                 version, kSerializeVersion);
+                 header.version, kSerializeVersion);
         }
 
         const std::size_t expected_size =
             kSerializeHeaderBytes
-          + kSerializeBucketBytes * bucket_count
-          + 8 * total_positions;
+          + kSerializeBucketBytes * header.bucket_count
+          + 8 * header.total_positions;
         if (input_size != expected_size) {
             elog(ERROR,
                  "bioseq: TargetIndex deserialize: size mismatch expected=%zu got=%zu",
@@ -397,39 +418,36 @@ struct TargetIndex {
          * Those checks also use elog(ERROR) and must fire BEFORE the bucket
          * is emplaced so no std::unordered_map bucket is leaked on longjmp. */
         TargetIndex idx;
-        idx.target_len = target_length_local;
-        idx.table.reserve(bucket_count);
+        idx.target_len = header.target_len;
+        idx.table.reserve(header.bucket_count);
 
         const char* bucket_cursor   = input + kSerializeHeaderBytes;
-        const char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
+        const char* position_cursor = bucket_cursor + kSerializeBucketBytes * header.bucket_count;
 
-        for (uint32_t b = 0; b < bucket_count; ++b) {
-            uint64_t hash{};
-            uint32_t pos_offset{}, pos_count{};
-            std::memcpy(&hash,       bucket_cursor + 0,  8);
-            std::memcpy(&pos_offset, bucket_cursor + 8,  4);
-            std::memcpy(&pos_count,  bucket_cursor + 12, 4);
+        for (uint32_t b = 0; b < header.bucket_count; ++b) {
+            SerializedBucket bucket{};
+            std::memcpy(&bucket, bucket_cursor, sizeof(bucket));
             bucket_cursor += kSerializeBucketBytes;
 
             /* Bounds check before the memcpy — otherwise a crafted blob with
              * pos_offset = 0xFFFFFFF0 can read well past the end of input.
              * Uses uint64_t arithmetic to avoid uint32 wrap. */
-            if (static_cast<uint64_t>(pos_offset) + pos_count > total_positions) {
+            if (static_cast<uint64_t>(bucket.pos_offset) + bucket.pos_count > header.total_positions) {
                 elog(ERROR,
                      "bioseq: TargetIndex deserialize: bucket %u range (offset=%u count=%u) "
                      "exceeds total_positions=%llu",
-                     b, pos_offset, pos_count,
-                     static_cast<unsigned long long>(total_positions));
+                     b, bucket.pos_offset, bucket.pos_count,
+                     static_cast<unsigned long long>(header.total_positions));
             }
 
             std::vector<uint64_t> positions;
-            positions.resize(pos_count);
-            if (pos_count > 0) {
+            positions.resize(bucket.pos_count);
+            if (bucket.pos_count > 0) {
                 std::memcpy(positions.data(),
-                            position_cursor + 8 * pos_offset,
-                            pos_count * 8);
+                            position_cursor + 8 * bucket.pos_offset,
+                            bucket.pos_count * 8);
             }
-            idx.table.emplace(hash, std::move(positions));
+            idx.table.emplace(bucket.hash, std::move(positions));
         }
 
         return idx;
