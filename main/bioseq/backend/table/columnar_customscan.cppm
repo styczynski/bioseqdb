@@ -46,8 +46,8 @@ import bioseq_sidecar;                   // meta_sidecar reads for symbol_count 
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
-uint64_t ColumnarTableRowCount(Relation relation);
-bool IsColumnarTableAmTable(Oid relationId);
+extern "C++" uint64_t ColumnarTableRowCount(Relation relation);
+extern "C++" bool IsColumnarTableAmTable(Oid relationId);
 Bitmapset* ColumnarAttrNeeded(ScanState *ss, List *customList);
 int64_t ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);
 IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed);
@@ -927,8 +927,11 @@ ExprReferencesRelid(Expr *expr, Index relid)
 	return false;
 }
 
-/* ColumnarTableRowCount returns the exact row count of a table using skiplists */
-uint64_t
+/* ColumnarTableRowCount returns the exact row count of a table using skiplists.
+ * `extern "C++"` attaches the symbol to the global module fragment so
+ * cross-module callers (bioseq_sidecar's estimate_index_presence()) can
+ * link against it without importing the whole bioseq_table module. */
+extern "C++" uint64_t
 ColumnarTableRowCount(Relation relation)
 {
 	uint64_t totalRowCount = 0;
@@ -1849,11 +1852,38 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		//(&cpath->path)->total_cost -= 90000;
 		PathTarget* pt = (&cpath->path)->pathtarget;
 		//auto curcost = pt->cost.per_tuple;
-		JustLog("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={}",
+
+		/*
+		 * Estimate what fraction of the scanned relation's rows has a
+		 * prebuilt minimizer index in bioseq_internal.index_sidecar and
+		 * scale an additional cost reduction by that factor. A table with
+		 * 100% sidecar coverage (bioseq.update_index_on_insert = on for
+		 * every INSERT) wins by a fuller margin than one that was bulk-
+		 * loaded with the GUC off. See SPEC_MINIMIZER_STORAGE.md §8 for
+		 * how the GUC toggling interacts with scan-time backfill.
+		 *
+		 * estimate_index_presence() clamps to [0, 1]; the resulting
+		 * delta is in [0, 10000]. wehavemagic_cnt's 100000-per-call
+		 * reduction still dominates so the custom scan always wins when
+		 * a rewrite is possible — the sidecar coverage just adjusts the
+		 * *margin*, not the *direction*, of the preference.
+		 */
+		const float index_presence =
+			bioseq::sidecar::estimate_index_presence(rte->relid, rel->tuples);
+		const double sidecar_bonus = 10000.0 * static_cast<double>(index_presence);
+
+		JustLog("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={} magic_cnt={} index_presence={:.4f}",
 			path->total_cost, path->startup_cost, pt->cost.per_tuple, pt->cost.startup,
-			(&cpath->path)->startup_cost, (&cpath->path)->total_cost);
-		cpath->path.total_cost = -100000 * wehavemagic_cnt;
-		cpath->path.startup_cost = -100000 * wehavemagic_cnt;
+			(&cpath->path)->startup_cost, (&cpath->path)->total_cost,
+			wehavemagic_cnt, static_cast<double>(index_presence));
+		/* Apply the sidecar bonus to BOTH startup and total cost so the
+		 * Postgres cost-model invariant (startup_cost <= total_cost)
+		 * stays satisfied. Without the double-subtract the two costs
+		 * diverge when the bonus is positive and some planner paths
+		 * (parallel sort, partition pruning) rely on the invariant
+		 * when ranking candidate plans. */
+		cpath->path.total_cost   = -100000.0 * wehavemagic_cnt - sidecar_bonus;
+		cpath->path.startup_cost = -100000.0 * wehavemagic_cnt - sidecar_bonus;
 	}
 
 
@@ -3575,6 +3605,116 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			ExplainPropertyText("Bioseq Fetched From Meta", meta_buf.data, es);
 		}
 		pfree(meta_buf.data);
+	}
+
+	/*
+	 * Surface the estimated fraction of scanned rows that have a
+	 * prebuilt minimizer index in bioseq_internal.index_sidecar. This
+	 * mirrors the cost adjustment made in AddColumnarScanPath: the
+	 * scan's total cost was reduced by 10000 * this fraction. Reporting
+	 * it here lets operators correlate a query plan's chosen path with
+	 * whether the sidecar is carrying its weight.
+	 *
+	 * Gated on the plan actually consulting the sidecar: if the target
+	 * list has no mmsearch qual and no bioseq.symbol_count / projection
+	 * rewrites, the scan never opens index_sidecar and printing the line
+	 * would be misleading. We reuse the same walk that AddColumnarScanPath
+	 * does against `root->parse->targetList` — but here we look at the
+	 * *plan* node's targetlist and the scan's qual list.
+	 *
+	 * Recomputed at EXPLAIN time rather than stashed at plan time: the
+	 * factor has its own cap inside estimate_index_presence() so the
+	 * second call doesn't walk past the user relation's row count, and
+	 * this avoids threading an extra node through cscan->custom_private.
+	 */
+	{
+		/* Gate logic must match AddColumnarScanPath's `wehavemagic` sweep
+		 * exactly — otherwise EXPLAIN would either hide the line when the
+		 * planner applied the cost bonus or show it when it didn't. The
+		 * planner counts: (a) mmsearch in target list or qual,
+		 * (b) is_bioseq_projection_funcid match in target list,
+		 * (c) symbol_count with exactly 2 args in target list. */
+		bool consults_sidecar = false;
+		const BioseqStubOids& explain_oids = get_cached_stub_oids();
+		auto funcexpr_matches = [&](FuncExpr* fe) -> bool {
+			if (fe->funcid == explain_oids.mmsearch_oid) {
+				return true;
+			}
+			if (is_bioseq_projection_funcid(fe->funcid, explain_oids)) {
+				return true;
+			}
+			if (fe->funcid == explain_oids.symbol_count_oid
+				&& list_length(fe->args) == 2) {
+				return true;
+			}
+			return false;
+		};
+		for (auto tgt : PList<TargetEntry>(node->ss.ps.plan->targetlist)) {
+			if (tgt == nullptr || !IsA(tgt->expr, FuncExpr)) {
+				continue;
+			}
+			if (funcexpr_matches(reinterpret_cast<FuncExpr*>(tgt->expr))) {
+				consults_sidecar = true;
+				break;
+			}
+		}
+		if (!consults_sidecar) {
+			for (auto q : PList<Node>(node->ss.ps.plan->qual)) {
+				if (q == nullptr || !IsA(q, FuncExpr)) {
+					continue;
+				}
+				if (funcexpr_matches(reinterpret_cast<FuncExpr*>(q))) {
+					consults_sidecar = true;
+					break;
+				}
+			}
+		}
+
+		if (consults_sidecar) {
+			/* Resolve the user relation's OID via the plan's scanrelid +
+			 * the executor's range table. ss_currentRelation is only set
+			 * after ExecInitCustomScan runs, which EXPLAIN (without
+			 * ANALYZE) does not do — so we fall back to the plan node's
+			 * rtable entry, which is always populated at explain time. */
+			Oid user_relid = InvalidOid;
+			double rel_tuples = -1.0;
+			if (node->ss.ss_currentRelation != nullptr) {
+				user_relid = RelationGetRelid(node->ss.ss_currentRelation);
+				if (node->ss.ss_currentRelation->rd_rel != nullptr) {
+					rel_tuples = static_cast<double>(
+						node->ss.ss_currentRelation->rd_rel->reltuples);
+				}
+			} else if (cscan != nullptr && node->ss.ps.state != nullptr) {
+				RangeTblEntry* rte = rt_fetch(cscan->scan.scanrelid,
+											  node->ss.ps.state->es_range_table);
+				if (rte != nullptr) {
+					user_relid = rte->relid;
+				}
+			}
+			if (user_relid != InvalidOid) {
+				/* Fetch reltuples via syscache if the scan hadn't opened the
+				 * relation yet (EXPLAIN without ANALYZE branch). */
+				if (rel_tuples < 0.0) {
+					HeapTuple cls_tup = SearchSysCache1(RELOID,
+														ObjectIdGetDatum(user_relid));
+					if (HeapTupleIsValid(cls_tup)) {
+						Form_pg_class cls = reinterpret_cast<Form_pg_class>(GETSTRUCT(cls_tup));
+						rel_tuples = static_cast<double>(cls->reltuples);
+						ReleaseSysCache(cls_tup);
+					}
+				}
+				const float index_presence =
+					bioseq::sidecar::estimate_index_presence(user_relid, rel_tuples);
+				StringInfoData presence_buf;
+				initStringInfo(&presence_buf);
+				appendStringInfo(&presence_buf,
+								 "minimizers (index presence: %.0f%%)",
+								 static_cast<double>(index_presence) * 100.0);
+				ExplainPropertyText("Bioseq Fetched From Sequence Index",
+									presence_buf.data, es);
+				pfree(presence_buf.data);
+			}
+		}
 	}
 
 	if (bioseq_enable_page_cache)

@@ -41,6 +41,7 @@ extern "C" {
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -66,6 +67,17 @@ using bioseq::simd::HWY_NAMESPACE::TargetIndex;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
+
+/* Forward declarations for the two bioseq_table symbols we need at plan-
+ * time for estimate_index_presence's bioseq-AM row-count fallback.
+ * `extern "C++"` attaches the declarations to the global module fragment
+ * instead of `bioseq_sidecar`, so the linker matches the corresponding
+ * `extern "C++"` definitions in backend/table/access_method.cppm. Keeping
+ * the declarations out of an `import bioseq_table` preserves the current
+ * module graph (bioseq_sidecar is imported BY bioseq_table — reversing
+ * the edge would cause a circular import). */
+extern "C++" uint64_t ColumnarTableRowCount(Relation relation);
+extern "C++" bool     IsColumnarTableAmTable(Oid relationId);
 /* dispatch_pgseq / make_seq_range_from_pg / compact_sequence_range /
  * PgCompactSequenceHdr live in the root namespace (the pg_compact_sequence
  * module doesn't wrap in HWY_BEFORE_NAMESPACE). They are reachable directly. */
@@ -446,6 +458,123 @@ export std::optional<std::vector<char>> sidecar_read_index(Oid user_relid, int64
 	systable_endscan(scan);
 	relation_close(rel, AccessShareLock);
 	return result;
+}
+
+/* Count the rows in the user relation. Strategy:
+ *   1. If `estimated_total_rows` (pg_class.reltuples) is positive, trust
+ *      the planner's stats.
+ *   2. Otherwise, if the relation uses the bioseq columnar AM, fall back
+ *      to ColumnarTableRowCount() which reads the stripe-metadata stats
+ *      instead of doing a full scan.
+ *   3. Otherwise, return -1.0 — caller decides how to handle (today we
+ *      assume full coverage to avoid mis-estimating cost).
+ *
+ * The bioseq-AM fallback matters because our custom access method does
+ * not implement a working ANALYZE at the moment — pg_class.reltuples
+ * stays at the initial -1 sentinel until a user explicitly updates it.
+ * The stripe-metadata count is exact and cheap to compute. */
+[[nodiscard]] static double resolve_user_relation_tuples(
+	Oid user_relid, double estimated_total_rows)
+{
+	if (estimated_total_rows > 0.0) {
+		return estimated_total_rows;
+	}
+	if (!IsColumnarTableAmTable(user_relid)) {
+		return -1.0;
+	}
+	Relation user_rel = try_safe_relation_open(user_relid, AccessShareLock);
+	if (user_rel == nullptr) {
+		return -1.0;
+	}
+	const uint64_t rows = ColumnarTableRowCount(user_rel);
+	relation_close(user_rel, AccessShareLock);
+	return static_cast<double>(rows);
+}
+
+/* Estimate what fraction of `user_relid`'s rows have a matching entry in
+ * bioseq_internal.index_sidecar. Returns a float in [0.0, 1.0]:
+ *
+ *   0.0 → no minimizers stored (GUC was OFF at every INSERT for this rel)
+ *   1.0 → every row has a minimizer (the default path with GUC=ON)
+ *   fractional → some rows were inserted with the GUC off, or a bulk COPY
+ *                bypassed the ON path, or the sidecar was partially
+ *                vacuumed.
+ *
+ * Called from the planner (AddColumnarScanPath) to scale the cost
+ * reduction that drives the custom scan's "fetch from meta" fast path,
+ * and from ColumnarScan_ExplainCustomScan to surface the estimate in
+ * EXPLAIN output. Implementation cost: O(matching_rows) via the
+ * index_sidecar PK btree — amortised across a single query plan. The
+ * user-relation row count is O(1) for bioseq-AM tables (stripe metadata)
+ * and uses pg_class.reltuples otherwise.
+ *
+ * `estimated_total_rows` is typically `rel->tuples` from the
+ * RelOptInfo — pg_class.reltuples for the user relation. When stats are
+ * missing we fall through to ColumnarTableRowCount() for bioseq-AM
+ * tables; for everything else we assume full coverage. */
+export [[nodiscard]] float estimate_index_presence(Oid user_relid,
+												   double estimated_total_rows) {
+	const SidecarOids& oids = get_sidecar_oids();
+	if (oids.index_sidecar_relid == InvalidOid || !OidIsValid(user_relid)) {
+		return 0.0f;
+	}
+
+	/* Resolve the user-relation row count FIRST so we can cap the sidecar
+	 * scan at that count. On a fully-covered, very large table we would
+	 * otherwise walk every single sidecar row just to learn the ratio
+	 * clamps to 1.0. Early-termination once `sidecar_rows > resolved_rows`
+	 * bounds the planner cost at O(min(sidecar_rows, estimated_total_rows)). */
+	const double resolved_rows = resolve_user_relation_tuples(
+		user_relid, estimated_total_rows);
+	const bool   have_total    = resolved_rows > 0.0;
+	const uint64_t cap         = have_total
+		? static_cast<uint64_t>(resolved_rows) + 1  /* +1 so we can detect overshoot */
+		: std::numeric_limits<uint64_t>::max();
+
+	Relation rel = try_safe_relation_open(oids.index_sidecar_relid, AccessShareLock);
+	if (rel == nullptr) {
+		return 0.0f;
+	}
+
+	const Oid pk_index_oid = find_primary_key_oid(rel);
+	if (pk_index_oid == InvalidOid) {
+		/* The extension install is broken (the PK btree must exist per
+		 * bioseq--1.0.sql §2.1). Fall through to a sequential scan and
+		 * log loudly so the operator notices before they wonder why
+		 * planner time blew up under load. Mirrors sidecar_read_index. */
+		JustLog("[bioseq] sidecar: index_sidecar has no primary-key btree; "
+				"falling back to sequential scan for presence estimation "
+				"(install is broken, expect slow plans)");
+	}
+
+	ScanKeyData keys[1];
+	ScanKeyInit(&keys[0], 1 /*user_relid*/,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(user_relid));
+
+	SysScanDesc scan = systable_beginscan(rel, pk_index_oid,
+										  /*indexOK=*/ pk_index_oid != InvalidOid,
+										  NULL /*snapshot*/, 1, keys);
+
+	uint64_t sidecar_rows = 0;
+	while (sidecar_rows < cap && HeapTupleIsValid(systable_getnext(scan))) {
+		++sidecar_rows;
+	}
+	systable_endscan(scan);
+	relation_close(rel, AccessShareLock);
+
+	if (!have_total) {
+		/* Stats genuinely missing for a non-columnar table — treat the
+		 * sidecar presence as binary: if any row exists, assume the
+		 * caller wants the fast path; otherwise 0. */
+		return sidecar_rows == 0 ? 0.0f : 1.0f;
+	}
+
+	const float ratio = static_cast<float>(
+		static_cast<double>(sidecar_rows) / resolved_rows);
+	if (ratio < 0.0f) return 0.0f;
+	if (ratio > 1.0f) return 1.0f;
+	return ratio;
 }
 
 /* Fixed-size result of a meta_sidecar lookup. The maximum alphabet size

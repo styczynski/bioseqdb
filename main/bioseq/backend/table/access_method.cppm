@@ -55,11 +55,11 @@ sact int_action = {};
 sact trm_action = {};
 sact kil_action = {};
 
-uint64_t ColumnarTableRowCount(Relation relation);
+extern "C++" uint64_t ColumnarTableRowCount(Relation relation);
 void bioseq_customscan_init();
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
 bool ColumnarSupportsIndexAM(char *indexAMName);
-bool IsColumnarTableAmTable(Oid relationId);
+extern "C++" bool IsColumnarTableAmTable(Oid relationId);
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 
 TableScanDesc

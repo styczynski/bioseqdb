@@ -330,3 +330,28 @@ SELECT a, bioseq.symbol_count(seq, 'A') AS ca FROM cx_mini ORDER BY a;
 SET bioseq.enable_vectorization = off;
 EXPLAIN (VERBOSE, COSTS off)
 SELECT a, bioseq.symbol_count(seq, 'A') FROM cx_mini ORDER BY a;
+
+-- ---- Test 15: index-presence factor surfaces in EXPLAIN ----
+-- The "Bioseq Fetched From Sequence Index: minimizers (index presence: X%)"
+-- line should read 80% (4 sidecar rows / 5 user rows — row 4 was
+-- inserted while bioseq.update_index_on_insert was off). The planner
+-- also scales the custom scan's cost reduction by this factor, so
+-- a table with 80% sidecar coverage shows a proportionally cheaper
+-- custom scan than a 0%-covered table.
+--
+-- Without running ANALYZE (which hangs on bioseq-AM tables today, see
+-- RESEARCH/FIX_SIDECAR_IMPL_DETAILS_V2.md §4), the fallback uses the
+-- columnar AM's row-count helper, which reports the exact row count
+-- from stripe metadata — so the percentage is accurate.
+\echo '=== Test 15 full field panel (mmsearch + projections + symbol_count) ==='
+EXPLAIN (VERBOSE, COSTS off)
+SELECT a,
+       bioseq.symbol_count(seq, 'A') AS ca,
+       bioseq.query_start(a)    AS qs,
+       bioseq.query_end(a)      AS qe,
+       bioseq.target_start(a)   AS ts,
+       bioseq.target_end(a)     AS te,
+       bioseq.cigar(a)          AS cg
+  FROM cx_mini
+ WHERE mmsearch(seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
+ ORDER BY a;

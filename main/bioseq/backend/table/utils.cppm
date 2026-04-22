@@ -34,8 +34,13 @@ const TableAmRoutine * GetColumnarTableAmRoutine(void);
 /*
  * IsColumnarTableAmTable returns true if relation has bioseq_tableam
  * access method. This can be called before extension creation.
+ *
+ * `extern "C++"` attaches the symbol to the global module fragment
+ * so cross-module callers that can't `import bioseq_table` (e.g.
+ * bioseq_sidecar, which would otherwise form a circular dependency)
+ * can forward-declare and link against the same definition.
  */
-export bool
+export extern "C++" bool
 IsColumnarTableAmTable(Oid relationId)
 {
 	JustLog("[bioseq] pg: IsColumnarTableAmTable() entered");
