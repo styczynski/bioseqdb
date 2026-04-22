@@ -50,6 +50,7 @@ bool bioseq_enable_dml = true;
 bool bioseq_enable_page_cache = false;
 int bioseq_page_cache_size = 200U;
 bool bioseq_index_scan = true;
+bool bioseq_update_index_on_insert = true;
 
 /*
  * bioseq_init is the module's top-level initialiser. It wires up the GUC
@@ -216,6 +217,19 @@ bioseq_guc_init()
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.update_index_on_insert",
+		"When true, compute and persist a minimizer TargetIndex for every "
+		"bioseq.seq value written into a USING bioseq table.",
+		NULL,
+		&bioseq_update_index_on_insert,
+		true,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
 }
 
 }

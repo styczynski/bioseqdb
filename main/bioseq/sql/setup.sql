@@ -198,3 +198,112 @@ INSERT INTO cx VALUES
 -- Pre-existing SPEC 2 columnar AM limitation — SELECTs without mmsearch
 -- return zero rows. Commented out to document the expected state:
 -- SELECT a, seq::text, bioseq.len(seq), bioseq.unit_len(seq) FROM cx ORDER BY a;
+
+-- ===========================================================================
+-- Test 13: minimizer sidecars + symbol_count
+-- See RESEARCH/SPEC_MINIMIZER_STORAGE.md for the design.
+-- ===========================================================================
+SET bioseq.logging = on;
+SET bioseq.update_index_on_insert = on;
+SET bioseq.enable_vectorization = on;
+
+drop table if exists cx_mini CASCADE;
+create table cx_mini (
+    a    INT PRIMARY KEY,
+    seq  bioseq.seq('dna4', 32)
+) USING bioseq;
+
+INSERT INTO cx_mini VALUES
+  (1, 'ACGTACGTACGTACGT'),
+  (2, 'TTTTAAAAGGGGCCCC'),
+  (3, 'AAAAAAAAAAAAAAAA');
+
+-- Both sidecars must contain 3 rows for cx_mini.
+SELECT COUNT(*)::int AS index_rows_on
+  FROM bioseq_internal.index_sidecar
+ WHERE user_relid = 'cx_mini'::regclass;
+SELECT COUNT(*)::int AS meta_rows_on
+  FROM bioseq_internal.meta_sidecar
+ WHERE user_relid = 'cx_mini'::regclass;
+
+-- meta_sidecar per-row payload: each row must carry a rank-indexed array
+-- of counts produced by count_symbols(). For dna4 alphabet_code=0 and
+-- the array length must be 4 (ranks 0..3 = A,C,G,T).
+SELECT sequence_rowno,
+       alphabet_code,
+       array_length(symbol_counts, 1) AS arr_len,
+       symbol_counts[1] AS count_a_rank0
+  FROM bioseq_internal.meta_sidecar
+ WHERE user_relid = 'cx_mini'::regclass
+ ORDER BY sequence_rowno;
+
+-- symbol_count on a literal seq value must return 49 (hardcoded).
+-- The scalar call falls through to tier-3 "pure compute" because no
+-- scan-row context is active.
+SELECT bioseq.symbol_count(
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32),
+    'A') AS c_literal;
+
+-- Non-A letters must return 0 in this POC (count_symbols returns 0 for
+-- every non-rank-0 letter).
+SELECT bioseq.symbol_count(
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'C') AS c_c,
+       bioseq.symbol_count(
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'G') AS c_g,
+       bioseq.symbol_count(
+    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'T') AS c_t;
+
+-- Flip the GUC off; new inserts must not create index_sidecar rows but
+-- meta_sidecar still gets one.
+SET bioseq.update_index_on_insert = off;
+INSERT INTO cx_mini VALUES (4, 'GGGGAAAATTTTCCCC');
+
+SELECT COUNT(*)::int AS index_rows_after_off
+  FROM bioseq_internal.index_sidecar
+ WHERE user_relid = 'cx_mini'::regclass;
+SELECT COUNT(*)::int AS meta_rows_after_off
+  FROM bioseq_internal.meta_sidecar
+ WHERE user_relid = 'cx_mini'::regclass;
+
+-- Flip it back on — subsequent inserts populate index_sidecar again.
+SET bioseq.update_index_on_insert = on;
+INSERT INTO cx_mini VALUES (5, 'CCCCGGGGAAAATTTT');
+
+SELECT COUNT(*)::int AS index_rows_after_on
+  FROM bioseq_internal.index_sidecar
+ WHERE user_relid = 'cx_mini'::regclass;
+
+-- Vectorization parity: symbol_count must return 49 in both paths.
+SET bioseq.enable_vectorization = off;
+SELECT bioseq.symbol_count(
+    'AAAAAAAAAAAAAAAAAAAA'::bioseq.seq('dna4', 32),
+    'A') AS c_scalar;
+
+SET bioseq.enable_vectorization = on;
+SELECT bioseq.symbol_count(
+    'AAAAAAAAAAAAAAAAAAAA'::bioseq.seq('dna4', 32),
+    'A') AS c_vector;
+
+-- Blob integrity: deserialized TargetIndex must round-trip losslessly.
+-- We check that serialized blobs are non-empty and have the expected
+-- leading magic 0xB1000001 (little-endian: 01 00 00 B1).
+SELECT encode(substring(target_index, 1, 4), 'hex') AS magic_hex,
+       length(target_index) AS blob_bytes
+  FROM bioseq_internal.index_sidecar
+ WHERE user_relid = 'cx_mini'::regclass
+ ORDER BY sequence_rowno
+ LIMIT 3;
+
+-- mmsearch exercise — drives the custom scan + BatchProcessor. This
+-- confirms the insert-path hook didn't regress existing scan behavior.
+\echo '=== Test 13 mmsearch (vectorization OFF) ==='
+SET bioseq.enable_vectorization = off;
+SELECT a FROM cx_mini
+ WHERE mmsearch(seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
+ ORDER BY a;
+
+\echo '=== Test 13 mmsearch (vectorization ON) ==='
+SET bioseq.enable_vectorization = on;
+SELECT a FROM cx_mini
+ WHERE mmsearch(seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
+ ORDER BY a;

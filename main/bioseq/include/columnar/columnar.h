@@ -33,6 +33,7 @@ extern bool bioseq_enable_dml;
 extern bool bioseq_enable_page_cache;
 extern int bioseq_page_cache_size;
 extern bool bioseq_index_scan;
+extern bool bioseq_update_index_on_insert;
 
 
 /* called when the user changes options on the given relation */

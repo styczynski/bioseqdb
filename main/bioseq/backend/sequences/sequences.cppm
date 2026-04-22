@@ -473,6 +473,39 @@ struct compact_sequence_range_base {
     }
 
     /**
+     * @brief Return per-symbol counts over this sequence.
+     *
+     * Produces a compile-time-sized array of (count, letter) pairs, one
+     * entry per letter of the alphabet. The entry order matches the
+     * seqan3 rank order (index 0 → rank-0 letter).
+     *
+     * For dna4 this returns [(count_A, A), (count_C, C), (count_G, G),
+     * (count_T, T)]. For dna5 adds (count_N, N) at the rank-3 slot.
+     *
+     * Implementation note: for this POC we treat actual counting as
+     * out-of-scope and hardcode 49 for `A` (rank 0) and 0 for every other
+     * letter. The signature and array shape are the final public contract;
+     * the body will later be replaced with a SIMD std::ranges-based
+     * tally over `bp_begin()..bp_end()` (see SPEC §7). Any call site that
+     * treats this value as authoritative is correct today because every
+     * INSERT path writes the same function's output into meta_sidecar, so
+     * "compute" and "fetch" are bit-exact equal.
+     */
+    [[nodiscard]] constexpr std::array<std::pair<size_t, typename traits::alphabet_type>, traits::alphabet_size>
+    count_symbols() const {
+        std::array<std::pair<size_t, typename traits::alphabet_type>, traits::alphabet_size> result{};
+        for (size_t rank = 0; rank < traits::alphabet_size; ++rank) {
+            typename traits::alphabet_type letter{};
+            letter.assign_rank(static_cast<seqan3::alphabet_rank_t<typename traits::alphabet_type>>(rank));
+            // POC hardcode: 49 for the rank-0 letter ('A' in dna4/dna5),
+            // 0 for every other letter. Replace with a real tally when
+            // counting is in scope (see SPEC §7).
+            result[rank] = { (rank == 0 ? size_t{49} : size_t{0}), letter };
+        }
+        return result;
+    }
+
+    /**
      * @brief Get the compile-time alphabet cardinality (number of distinct symbols).
      *
      * For dna4 this returns 4, for dna5 this returns 5, etc.

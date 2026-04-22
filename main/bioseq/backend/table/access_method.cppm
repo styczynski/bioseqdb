@@ -42,6 +42,7 @@ import bioseq_table_types;
 import config;
 import bioseq_table_io;
 import pg_utils;
+import bioseq_sidecar;
 
 /*
  * This is a check whether we need to bail out of a vacuum, it is set by the
@@ -971,6 +972,11 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
+
+		/* Mirror the inserted row to bioseq_internal sidecars.
+		 * sidecar_after_insert internally skips sidecar self-inserts. */
+		bioseq::sidecar::sidecar_after_insert(
+			relation, slot, values, writtenRowNumber);
 	}
 	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
 
@@ -1052,6 +1058,9 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values,
 													   tupleSlot->tts_isnull);
+
+			bioseq::sidecar::sidecar_after_insert(
+				relation, tupleSlot, values, writtenRowNumber);
 
 			EState *estate = create_estate_for_relation(relation);
 

@@ -246,13 +246,23 @@ struct TargetIndex {
     std::unordered_map<uint64_t, std::vector<uint64_t>> table;
     int32_t target_len = 0;
 
-    /**
-     * @brief Build the index from target minimizer sketches.
-     *
-     * Equivalent to mm_idx_add + worker_post in index.c.
-     * For each minimizer, we store its position in the hash table keyed
-     * by the k-mer hash (upper 56 bits of MinimapSketchData.x).
-     */
+    static constexpr uint32_t kSerializeMagic   = 0xB1000001u;
+    static constexpr uint32_t kSerializeVersion = 2u;
+    static constexpr std::size_t kSerializeHeaderBytes = 24;
+    /* Bucket layout v2: hash(u64) + pos_offset(u32) + pos_count(u32) = 16 bytes.
+     * A single TargetIndex cannot contain more than UINT32_MAX buckets nor
+     * UINT32_MAX positions in practice (a bucket with 2^32 entries would
+     * imply a 32 GB sequence). Shrinks the bucket array by 33% vs v1. */
+    static constexpr std::size_t kSerializeBucketBytes = 16;
+
+    /* Serialization format depends on native little-endian, 64-bit integers.
+     * The columnar storage layer already requires the same ABI — if the host
+     * is big-endian, the extension as a whole is unsupported. */
+    static_assert(std::endian::native == std::endian::little,
+                  "TargetIndex serialization requires little-endian host");
+    static_assert(sizeof(std::size_t) >= 8,
+                  "TargetIndex serialization requires 64-bit size_t");
+
     void build(const std::vector<MinimapSketchData>& target_minimizers,
                int32_t target_length) {
         EASY_BLOCK("target_index_build");
@@ -261,8 +271,6 @@ struct TargetIndex {
         table.reserve(target_minimizers.size());
         for (const auto& minimizer : target_minimizers) {
             const uint64_t hash_key = minimizer.kmer;
-            // Encode position as: (rid << 32) | (last_pos << 1) | strand
-            // rid = 0 for single target
             const uint64_t encoded_position =
                 (static_cast<uint64_t>(minimizer.last_pos) << 1)
                 | static_cast<uint64_t>(minimizer.strand);
@@ -272,14 +280,6 @@ struct TargetIndex {
                 table.size(), target_minimizers.size());
     }
 
-    /**
-     * @brief Look up a minimizer hash in the index.
-     *
-     * Equivalent to mm_idx_get() in index.c:96-113.
-     *
-     * @param kmer_hash The k-mer hash (56-bit value from MinimapSketchData.kmer)
-     * @return Span of positions (empty if not found)
-     */
     [[nodiscard]] std::span<const uint64_t> lookup(uint64_t kmer_hash) const {
         auto iter = table.find(kmer_hash);
         if (iter == table.end()) {
@@ -287,7 +287,185 @@ struct TargetIndex {
         }
         return std::span<const uint64_t>(iter->second);
     }
+
+    [[nodiscard]] int32_t target_length() const { return target_len; }
+
+    // --------------------------------------------------------------------
+    //  Fast binary serialization  — v2 layout (little-endian, LP64)
+    //
+    //    0..3   magic         (uint32)
+    //    4..7   version       (uint32)
+    //    8..11  target_len    (int32)
+    //   12..15  bucket_count  (uint32)
+    //   16..23  total_positions (uint64)
+    //   24..24+16*n  bucket_array[n] = (hash:u64, pos_offset:u32, pos_count:u32)
+    //   ...          positions[total_positions] = uint64[]
+    // --------------------------------------------------------------------
+
+    [[nodiscard]] std::size_t serialize_binary_size() const {
+        std::size_t total_positions = 0;
+        for (const auto& kv : table) {
+            total_positions += kv.second.size();
+        }
+        return kSerializeHeaderBytes
+             + kSerializeBucketBytes * table.size()
+             + 8 * total_positions;
+    }
+
+    void serialize_to_binary(char* output) const {
+        const uint32_t magic        = kSerializeMagic;
+        const uint32_t version      = kSerializeVersion;
+        const uint32_t bucket_count = static_cast<uint32_t>(table.size());
+
+        uint64_t total_positions = 0;
+        for (const auto& kv : table) {
+            total_positions += kv.second.size();
+        }
+
+        std::memcpy(output + 0,  &magic,           4);
+        std::memcpy(output + 4,  &version,         4);
+        std::memcpy(output + 8,  &target_len,      4);
+        std::memcpy(output + 12, &bucket_count,    4);
+        std::memcpy(output + 16, &total_positions, 8);
+
+        char* bucket_cursor   = output + kSerializeHeaderBytes;
+        char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
+        uint32_t position_offset = 0;
+
+        for (const auto& kv : table) {
+            const uint64_t hash = kv.first;
+            const uint32_t count = static_cast<uint32_t>(kv.second.size());
+            std::memcpy(bucket_cursor + 0,  &hash,            8);
+            std::memcpy(bucket_cursor + 8,  &position_offset, 4);
+            std::memcpy(bucket_cursor + 12, &count,           4);
+            bucket_cursor += kSerializeBucketBytes;
+
+            if (count > 0) {
+                std::memcpy(position_cursor, kv.second.data(), count * 8);
+                position_cursor += count * 8;
+            }
+            position_offset += count;
+        }
+    }
+
+    [[nodiscard]] static TargetIndex deserialize_from_binary(
+        const char* input, std::size_t input_size)
+    {
+        /* ALL validation happens before we touch the unordered_map, so an
+         * elog(ERROR) longjmp can never leave a partially-populated
+         * std::unordered_map on the stack (the hash buckets are backed by
+         * malloc, not palloc — PG's context reset cannot free them). */
+        if (input_size < kSerializeHeaderBytes) {
+            elog(ERROR,
+                 "bioseq: TargetIndex deserialize: truncated blob (%zu bytes)",
+                 input_size);
+        }
+
+        uint32_t magic{}, version{}, bucket_count{};
+        int32_t  target_length_local{};
+        uint64_t total_positions{};
+
+        std::memcpy(&magic,               input + 0,  4);
+        std::memcpy(&version,             input + 4,  4);
+        std::memcpy(&target_length_local, input + 8,  4);
+        std::memcpy(&bucket_count,        input + 12, 4);
+        std::memcpy(&total_positions,     input + 16, 8);
+
+        if (magic != kSerializeMagic) {
+            elog(ERROR,
+                 "bioseq: TargetIndex deserialize: magic mismatch 0x%08x (expected 0x%08x)",
+                 magic, kSerializeMagic);
+        }
+        if (version != kSerializeVersion) {
+            elog(ERROR,
+                 "bioseq: TargetIndex deserialize: version mismatch %u (expected %u)",
+                 version, kSerializeVersion);
+        }
+
+        const std::size_t expected_size =
+            kSerializeHeaderBytes
+          + kSerializeBucketBytes * bucket_count
+          + 8 * total_positions;
+        if (input_size != expected_size) {
+            elog(ERROR,
+                 "bioseq: TargetIndex deserialize: size mismatch expected=%zu got=%zu",
+                 expected_size, input_size);
+        }
+
+        /* Top-level header is validated; two per-bucket bounds checks remain
+         * inside the loop below (pos_offset + pos_count <= total_positions).
+         * Those checks also use elog(ERROR) and must fire BEFORE the bucket
+         * is emplaced so no std::unordered_map bucket is leaked on longjmp. */
+        TargetIndex idx;
+        idx.target_len = target_length_local;
+        idx.table.reserve(bucket_count);
+
+        const char* bucket_cursor   = input + kSerializeHeaderBytes;
+        const char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
+
+        for (uint32_t b = 0; b < bucket_count; ++b) {
+            uint64_t hash{};
+            uint32_t pos_offset{}, pos_count{};
+            std::memcpy(&hash,       bucket_cursor + 0,  8);
+            std::memcpy(&pos_offset, bucket_cursor + 8,  4);
+            std::memcpy(&pos_count,  bucket_cursor + 12, 4);
+            bucket_cursor += kSerializeBucketBytes;
+
+            /* Bounds check before the memcpy — otherwise a crafted blob with
+             * pos_offset = 0xFFFFFFF0 can read well past the end of input.
+             * Uses uint64_t arithmetic to avoid uint32 wrap. */
+            if (static_cast<uint64_t>(pos_offset) + pos_count > total_positions) {
+                elog(ERROR,
+                     "bioseq: TargetIndex deserialize: bucket %u range (offset=%u count=%u) "
+                     "exceeds total_positions=%llu",
+                     b, pos_offset, pos_count,
+                     static_cast<unsigned long long>(total_positions));
+            }
+
+            std::vector<uint64_t> positions;
+            positions.resize(pos_count);
+            if (pos_count > 0) {
+                std::memcpy(positions.data(),
+                            position_cursor + 8 * pos_offset,
+                            pos_count * 8);
+            }
+            idx.table.emplace(hash, std::move(positions));
+        }
+
+        return idx;
+    }
 };
+
+// ----------------------------------------------------------------------------
+//  MinimizerIndex concept
+//
+//  Models any type that can be used as a minimizer lookup structure inside
+//  minimap2_port's pipeline. Consumers template on the concrete type so there
+//  is zero vtable overhead on the hot path (seed hit collection).
+// ----------------------------------------------------------------------------
+
+template <typename T>
+concept MinimizerIndex = requires (
+    T& mutable_index,
+    const T& const_index,
+    const std::vector<MinimapSketchData>& sketches,
+    int32_t target_length_arg,
+    uint64_t kmer_hash,
+    char* output_buffer,
+    const char* input_buffer,
+    std::size_t input_size)
+{
+    { mutable_index.build(sketches, target_length_arg) } -> std::same_as<void>;
+    { const_index.lookup(kmer_hash) } -> std::convertible_to<std::span<const uint64_t>>;
+    { const_index.target_length() } -> std::convertible_to<int32_t>;
+    { const_index.serialize_binary_size() } -> std::convertible_to<std::size_t>;
+    { const_index.serialize_to_binary(output_buffer) } -> std::same_as<void>;
+    { T::deserialize_from_binary(input_buffer, input_size) } -> std::same_as<T>;
+};
+
+static_assert(MinimizerIndex<TargetIndex>,
+              "TargetIndex must model MinimizerIndex");
+
 
 // ============================================================================
 // Phase 2: Collect seed hits — look up query minimizers in target index
@@ -314,9 +492,10 @@ struct TargetIndex {
  * @param max_occ          Max occurrences to keep (filter high-frequency seeds)
  * @return Sorted vector of anchors
  */
+template <MinimizerIndex IndexT>
 [[nodiscard]] std::vector<Anchor> collect_seed_hits(
     const std::vector<MinimapSketchData>& query_minimizers,
-    const TargetIndex& target_index,
+    const IndexT& target_index,
     int32_t query_len,
     int32_t max_occ)
 {
@@ -1534,6 +1713,25 @@ void print_match_results(
  * @param params              Algorithm parameters (defaults match minimap2)
  * @return MatchResultCollection containing PAF-like alignment results
  */
+/**
+ * @brief Variant that accepts a prebuilt MinimizerIndex (skipping phase 1).
+ *
+ * Used by the sidecar path in dispatch_buffer.cppm — a serialized
+ * TargetIndex is rehydrated from bytea and passed in verbatim. The template
+ * constraint MinimizerIndex<IndexT> lets future custom index types slot in
+ * without modifying the pipeline.
+ */
+template<
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    MinimizerIndex IndexT>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    const std::vector<MinimapSketchData>& query_minimizers,
+    const IndexT& prebuilt_target_index,
+    const Minimap2Params& params = Minimap2Params{});
+
 template<supports_compact_sequence_range QueryRange, supports_compact_sequence_range TargetRange>
 [[nodiscard]] MatchResultCollection minimap2_port(
     const compact_sequence_range<QueryRange>& query_seq,
@@ -1544,9 +1742,28 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
 {
     EASY_BLOCK("minimap2_port");
 
-    // Install a per-pipeline memory context if the caller hasn't already
-    // (the outer minimap_port overload does install one). Nested callers
-    // observe the outermost context's arenas.
+    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
+    TargetIndex target_index;
+    target_index.build(target_minimizers, target_len);
+
+    return minimap2_port_with_index(
+        query_seq, target_seq, query_minimizers, target_index, params);
+}
+
+template<
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    MinimizerIndex IndexT>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    const std::vector<MinimapSketchData>& query_minimizers,
+    const IndexT& prebuilt_target_index,
+    const Minimap2Params& params)
+{
+    EASY_BLOCK("minimap2_port_with_index");
+
+    // Install a per-pipeline memory context if the caller hasn't already.
     std::optional<context::context> owned_context;
     std::optional<context::installed_context_scope> context_install;
     if (context::current_or_null() == nullptr) {
@@ -1565,25 +1782,21 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const int32_t query_len  = static_cast<int32_t>(query_seq.bp_size());
     const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
 
-    JustLog("[minimap_port] Starting minimap2_port: query_len={}, target_len={}, "
-            "query_minimizers={}, target_minimizers={}, alphabet_size={}",
-            query_len, target_len, query_minimizers.size(), target_minimizers.size(),
-            alphabet_size);
+    JustLog("[minimap_port] Starting minimap2_port_with_index: query_len={}, target_len={}, "
+            "query_minimizers={}, prebuilt_target_len={}, alphabet_size={}",
+            query_len, target_len, query_minimizers.size(),
+            prebuilt_target_index.target_length(), alphabet_size);
 
     if (query_len == 0 || target_len == 0) {
         JustLog("[minimap_port] Empty input — returning no results");
         return MatchResultCollection{};
     }
 
-    // ---- Phase 1: Build target index ----
-    // target_index.build has its own EASY_BLOCK("target_index_build").
-    TargetIndex target_index;
-    target_index.build(target_minimizers, target_len);
+    // ---- Phase 1 is skipped — prebuilt_target_index is supplied ----
 
     // ---- Phase 2: Collect seed hits ----
-    // collect_seed_hits has its own EASY_BLOCK("collect_seed_hits").
     auto anchors = collect_seed_hits(
-        query_minimizers, target_index, query_len, params.max_occ);
+        query_minimizers, prebuilt_target_index, query_len, params.max_occ);
 
     if (anchors.empty()) {
         JustLog("[minimap_port] No seed hits found — returning no results");

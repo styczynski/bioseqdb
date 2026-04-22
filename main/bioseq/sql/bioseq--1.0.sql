@@ -323,6 +323,33 @@ COMMENT ON FUNCTION pg_catalog.alter_bioseq_table_reset(
     compression_level bool)
 IS 'reset on or more options on a bioseq table to the system defaults';
 
+-- ============================================================================
+-- SIDECAR TABLES (heap). See RESEARCH/SPEC_MINIMIZER_STORAGE.md.
+--
+--   index_sidecar: serialized TargetIndex blob per (user_relid, rowno).
+--   meta_sidecar:  per-sequence metadata (symbol counts). Count is
+--                  hardcoded to 49 A's for this POC.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS bioseq.index_sidecar (
+    user_relid      oid    NOT NULL,
+    sequence_rowno  bigint NOT NULL,
+    target_index    bytea  NOT NULL,
+    PRIMARY KEY (user_relid, sequence_rowno)
+);
+COMMENT ON TABLE bioseq.index_sidecar IS
+    'Serialized minimizer TargetIndex, keyed by (user_relid, rowno).';
+
+CREATE TABLE IF NOT EXISTS bioseq.meta_sidecar (
+    user_relid      oid      NOT NULL,
+    sequence_rowno  bigint   NOT NULL,
+    alphabet_code   smallint NOT NULL,
+    symbol_counts   bigint[] NOT NULL,         -- indexed by seqan3 rank
+    PRIMARY KEY (user_relid, sequence_rowno)
+);
+COMMENT ON TABLE bioseq.meta_sidecar IS
+    'Per-sequence symbol counts. symbol_counts[rank+1] is the count for '
+    'the rank-th letter in the alphabet identified by alphabet_code.';
+
 -- rename bioseq schema to bioseq_internal and tighten security
 
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA bioseq FROM PUBLIC;
@@ -938,6 +965,16 @@ CREATE OR REPLACE FUNCTION bioseq.len(bioseq.seq)
 CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
     RETURNS integer
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_unit_len'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+-- ---------------------------------------------------------------------------
+-- bioseq.symbol_count — POC scalar + vector; hardcoded 49 for 'A', errors for
+-- other symbols.  Reads would eventually come from bioseq_internal.meta_sidecar
+-- via the same VarInjector rewrite used by bioseq.score/bioseq.dp_score.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION bioseq.symbol_count(el bioseq.seq, sym text)
+    RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_symbol_count'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- ============================================================================
