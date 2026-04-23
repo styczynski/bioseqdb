@@ -61,7 +61,7 @@ bool bioseq_update_index_on_insert = true;
  * entry (INSERT happened under bioseq.update_index_on_insert = off) still
  * recompute — the recomputed count is surfaced in EXPLAIN.
  */
-bool bioseq_read_sequence_index = false;
+bool bioseq_read_sequence_index = true;
 
 /*
  * Aligner parameter GUCs — one per field of Minimap2Params so the user can
@@ -297,7 +297,7 @@ bioseq_guc_init()
 		"(inserted with update_index_on_insert = off) still recompute.",
 		NULL,
 		&bioseq_read_sequence_index,
-		false,
+		true,
 		PGC_USERSET,
 		0,
 		NULL,
