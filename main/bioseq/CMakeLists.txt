@@ -17,6 +17,7 @@ find_package(reflectcpp CONFIG REQUIRED)
 find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)
 find_package(easy_profiler REQUIRED)
+find_package(sqlgen REQUIRED)
 
 # AddCommonTarget(
 #   postgresql_bioseq
@@ -58,46 +59,47 @@ list (APPEND A_SRC_TESTS ${A_SRC_FILES})
 list(REMOVE_ITEM SRC_FILES ${A_SRC_TESTS})
 list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 
-# AddCommonTargetX(
-#   bioseq_aligner
-#   TYPE EXEC
-#   MAIN "main\.cpp"
-#   CXX 26
-#   RELOCATABLE
-#   NAME bioseq_aligner
-#   COMMENT "BioSeq Aligner"
-#   VERSION ${INSTALL_VERSION}
-#   COMPONENT ${PROJECT_NAME}
-#   INCLUDE_DIRS
-#     "${CMAKE_CURRENT_LIST_DIR}/../config"
-#     "${CMAKE_CURRENT_LIST_DIR}/include2"
-#     "${CMAKE_CURRENT_LIST_DIR}/include"
-#     "${CMAKE_CURRENT_LIST_DIR}/backend"
-#     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
-#     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
-#     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
-#     "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
-#   TESTS
-#     ${A_SRC_TESTS}
-#   LINKS
-#     safestring_static
-#     fmt
-#     ZLIB::ZLIB
-#     reflectcpp::reflectcpp
-#     libassert::assert
-#     foonathan_memory
-#     easy_profiler
-#   SOURCES
-#     ${A_SRC_FILES}
-#   SUPPORT_CXX_MODULES
-#   CXX_MOD_BASE_DIRS
-#     "${CMAKE_CURRENT_LIST_DIR}"
-#   CXX_MOD_FILES
-#     ${A_SRC_MOD_FILES}
-#   BOOST
-#     program_options regex serialization iterator integer
-#   HWY 1.3.0
-# )
+AddCommonTargetX(
+  bioseq_aligner
+  TYPE EXEC
+  MAIN "main\.cpp"
+  CXX 26
+  RELOCATABLE
+  NAME bioseq_aligner
+  COMMENT "BioSeq Aligner"
+  VERSION ${INSTALL_VERSION}
+  COMPONENT ${PROJECT_NAME}
+  INCLUDE_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/../config"
+    "${CMAKE_CURRENT_LIST_DIR}/include2"
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+    "${CMAKE_CURRENT_LIST_DIR}/backend"
+    "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
+    "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
+    "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
+    "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
+  TESTS
+    ${A_SRC_TESTS}
+  LINKS
+    safestring_static
+    fmt
+    ZLIB::ZLIB
+    reflectcpp::reflectcpp
+    libassert::assert
+    foonathan_memory
+    easy_profiler
+    sqlgen::sqlgen
+  SOURCES
+    ${A_SRC_FILES}
+  SUPPORT_CXX_MODULES
+  CXX_MOD_BASE_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}"
+  CXX_MOD_FILES
+    ${A_SRC_MOD_FILES}
+  BOOST
+    program_options regex serialization iterator integer
+  HWY 1.3.0
+)
 
 AddCommonTargetX(
   postgresql_bioseq

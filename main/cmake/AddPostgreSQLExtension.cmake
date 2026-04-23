@@ -277,6 +277,10 @@ function(AddCommonTargetX LIBRARY_NAME)
   message("TESTEESTSTSTS ${EXTENSION_TESTS}")
   if(EXTENSION_TESTS)
    AddCommonTarget("${LIBRARY_NAME}_tests_exec" "ON" ${SUBARGS})
+   # clang bug: ThinLTO drops TLS init wrappers (_ZTHW…) for module-attached
+   # thread_local template static data members. Triggers on mlogging's
+   # fmtlogDetailT<0>::sbc when linking the test exec. Disable LTO here only.
+   set_target_properties("${LIBRARY_NAME}_tests_exec" PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
    add_custom_target(
       "test_${LIBRARY_NAME}"
       COMMAND "./${LIBRARY_NAME}_tests_exec" "--reporter" "console::out=-::colour-mode=ansi"

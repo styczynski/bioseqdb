@@ -6,11 +6,12 @@
     "boost-serialization",
     "boost-system",
     "catch2",
+    "easy-profiler",
     "foonathan-memory",
     "highway",
     "libassert",
     "reflectcpp",
     "zlib",
-    "easy-profiler"
+    "sqlgen"
   ]
 }
