@@ -397,8 +397,16 @@ inline void collect_minimizers_simd(
         for(size_t i=0; i<hn::Lanes(d); ++i) {
             if (temp_buffer2[i]) {
                 if constexpr (ignore_distance) {
+                    // The current_min for lane `i` was stored at buffer slot `temp_buffer3[i]` in a
+                    // PREVIOUS iteration. `current_pos` is the slot just written in THIS iteration.
+                    // The number of iterations since current_min was stored is therefore always in
+                    // the inclusive range [1, capacity]. If the two slots are equal it means the
+                    // current_min was stored EXACTLY `capacity` iterations ago (full buffer wrap),
+                    // so distance must be `capacity`, never 0. Using `>=` here conflates
+                    // "just written" (distance 0) with "fully wrapped" (distance capacity) and
+                    // produces the wrong real_pos for the elapsed min.
                     const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
-                    const size_t distance = (current_pos >= temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
+                    const size_t distance = (current_pos > temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
                     JustLog("% pushmin {} pos={}, off={}, dist={}", real_pos, pos, offsets[i] * seq_traits::letters_per_unit, distance);
                     if (last_pushed_position != real_pos) {
@@ -411,7 +419,6 @@ inline void collect_minimizers_simd(
                                 .strand = 0,
                             } }
                         })));
-                        //temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
                         last_pushed_position = real_pos;
                     }
                 } else {
@@ -426,7 +433,6 @@ inline void collect_minimizers_simd(
                                 .strand = 0,
                             } }
                         })));
-                        //temp_positions.push_back(std::make_pair(real_pos, temp_buffer1[i]));
                         last_pushed_position = real_pos;
                     }
                 }
@@ -454,14 +460,26 @@ inline void collect_minimizers_simd(
             });
         }
 
-		// We don't need to check: kmer_span < max_span
-		if ((pos >= k || !IS_INIT)) {
-			buffer.push_back(std::move(hash_vec)); // std::move???
+		// Mask off lanes that are no longer iterating over valid sequence bytes (partial-matrix tail
+		// past the sequence end). Without this, the lane hasher still processes padding bytes and
+		// feeds their garbage hashes into `new_min_mask` / `current_min` via later Le checks —
+		// producing phantom minimizers at positions beyond `seq.bp_size()`.
+		hash_vec = hn::IfThenElse(mask, hash_vec, max_vec);
+
+		// The scalar collect_minimizers increments its `pos` BEFORE this push check (so its first
+		// real k-mer is pushed at scalar-iter `k - 1`, where the hasher holds chars[0..k-1]).
+		// In the SIMD path `pos` is still the 0-indexed iteration counter at this point, so we must
+		// compare against `k - 1` rather than `k` — otherwise the SIMD buffer never receives the
+		// k-mer ending at position `k - 1`, and whenever that k-mer is the minimizer of the first
+		// window the scalar emits it and the SIMD silently drops it. The window-alignment constants
+		// below (`w + k - 2`, `w + k - 1`) are shifted by the same -1 for the same reason.
+		if ((pos >= k - 1 || !IS_INIT)) {
+			buffer.push_back(std::move(hash_vec));
 		} else {
 			buffer.push_back(std::move(hash_vec_t(max_vec)));
 		}
 
-		if ((pos == w + k - 1 && IS_INIT)) { // special case for the first window - because identical k-mers are not stored yet
+		if ((pos == w + k - 2 && IS_INIT)) { // special case for the first window - because identical k-mers are not stored yet
 			// Copied code here
 			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& distance) {
 				// Check if hash is the same, but position different
@@ -476,7 +494,7 @@ inline void collect_minimizers_simd(
 		// buffer.last()
 
 
-		const bool need_to_push_current_min = (pos >= w + k || !IS_INIT) && !hn::AllFalse(d, new_min_mask);
+		const bool need_to_push_current_min = (pos >= w + k - 1 || !IS_INIT) && !hn::AllFalse(d, new_min_mask);
 
 		// JustLog("  . val         ({})  = {}", pos, hwy_str(d, buffer.last()));
 		// JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
@@ -499,7 +517,7 @@ inline void collect_minimizers_simd(
 
 		if (need_to_rescan) [[unlikely]] {
 
-            if ((pos >= w + k - 1 || !IS_INIT)) {
+            if ((pos >= w + k - 2 || !IS_INIT)) {
                 submit_results.template operator()<false>(d, offsets, buffer.capacity(), has_elapsed_min);
             }
 
@@ -510,7 +528,7 @@ inline void collect_minimizers_simd(
 				current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
 				current_min = hn::IfThenElse(new_min_mask, el, current_min);
 			});
-            if ((pos >= w + k - 1 || !IS_INIT)) {
+            if ((pos >= w + k - 2 || !IS_INIT)) {
                 // Need to push any value equal to new min
                 buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& distance) {
                     // Check if hash is the same, but position different
