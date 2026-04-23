@@ -57,9 +57,12 @@ export module bioseq_scheduler.dispatch_buffer;
 import mlogging;
 import pg_utils;
 import bioseq_sequences;
+import bioseq_sequences.kmers;
+import bioseq_sequences.kmers.hashers.minimap_int;
 import bioseq_sequences.minimap_port;
 import bioseq_cigar;
 import bioseq_types.pg_compact_sequence;
+import bioseq_sidecar;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -82,8 +85,106 @@ constexpr size_t kDispatchBatchCapacity = 1000;
  * specialisations compile down to their own minimap_port instantiation.
  * No std::variant, no runtime type erasure on the hot path.
  */
+/*
+ * Execution counters captured while BatchProcessor walks a batch. Used by
+ * EXPLAIN to print an accurate "Recomputed minimizers: X%" estimate.
+ * The struct lives next to the BatchProcessor instance inside the
+ * TupleDispatchBuffer so EXPLAIN can read it after run_batch_and_build_cursors
+ * without doing a second walk.
+ */
+export struct BatchExecutionStats {
+    /// Total rows submitted to process_sequences().
+    size_t targets_considered = 0;
+    /// Rows that arrived with a prebuilt index pointer and reused it.
+    size_t targets_with_prebuilt_index = 0;
+    /// Rows whose minimizers had to be recomputed from the compact_sequence_range.
+    size_t targets_recomputed_minimizers = 0;
+    /// Effective parameters used for the last batch. Captured for EXPLAIN so
+    /// the user sees the actually-applied values after overrides + size-heuristic
+    /// adjustments.
+    Minimap2Params last_effective_params{};
+
+    [[nodiscard]] float recomputed_fraction() const {
+        return targets_considered == 0
+            ? 0.0f
+            : static_cast<float>(targets_recomputed_minimizers)
+              / static_cast<float>(targets_considered);
+    }
+};
+
+/*
+ * Scale k/w for the small-query regime typical inside Postgres — short
+ * motifs vs per-row sequences under 1 kb. Runs once per row before the
+ * core pipeline. Factored out of the hot lambda so all code paths
+ * (recompute vs prebuilt index) share a single size-heuristic knob and
+ * so EXPLAIN can replay the same derivation for its param printout.
+ *
+ * The heuristic only fires when the user left the fields at their
+ * minimap2 defaults. Any aligner_options() override or non-default GUC
+ * value short-circuits the adjustment so we never silently overwrite a
+ * user-supplied tuning value.
+ */
+[[nodiscard]] inline Minimap2Params apply_size_heuristic(
+    const Minimap2Params& base, size_t min_bp)
+{
+    /*
+     * Only scale when every relevant parameter still matches the minimap2
+     * default. If the caller has already tuned one of these fields, we
+     * trust them and leave the batch alone.
+     */
+    const bool all_defaults =
+        base.kmer_size       == 15 &&
+        base.window_size     == 10 &&
+        base.min_chain_score == 40 &&
+        base.min_seed_count  == 3;
+    if (!all_defaults) {
+        return base;
+    }
+    Minimap2Params scaled = base;
+    if (min_bp < 50) {
+        scaled.kmer_size       = 8;
+        scaled.window_size     = 3;
+        scaled.min_chain_score = 10;
+        scaled.min_seed_count  = 1;
+    } else if (min_bp < 200) {
+        scaled.kmer_size       = 10;
+        scaled.window_size     = 5;
+        scaled.min_chain_score = 20;
+        scaled.min_seed_count  = 2;
+    }
+    return scaled;
+}
+
 export class BatchProcessor {
 public:
+    /*
+     * Per-row sidecar blob pointer + length pair. The pointer references
+     * memory owned by the caller's BufferedScanEntry (its own
+     * sidecar_blob std::vector<char>) — we never copy the bytes into the
+     * BatchProcessor. A null pointer or zero length means "no prebuilt
+     * index, recompute minimizers for this row".
+     */
+    struct TargetIndexBlobRef {
+        const char* data  = nullptr;
+        std::size_t bytes = 0;
+    };
+
+    /*
+     * Run the minimap2 pipeline across a batch. index_blobs may be nullptr
+     * when the caller has no sidecar path (legacy/read_sequence_index=off);
+     * otherwise it points at a contiguous block of batch_capacity pairs,
+     * one per target. Rows with an empty blob fall back to the recompute
+     * path so the caller can mix "index present" and "index absent" rows
+     * in the same scan (the common case when update_index_on_insert was
+     * toggled during loading).
+     */
+    /*
+     * NOTE on parameter passing: `target_hdrs`, `query_ids`, and
+     * `index_blobs` are full-size `kDispatchBatchCapacity`-element arrays
+     * (8 KB, 4 KB, and 16 KB respectively on a typical batch). They are
+     * all passed by const-ref / pointer so the call does not copy ~28 KB
+     * into the callee. The result map is RVO'd / moved on return.
+     */
     template<typename K, size_t batch_capacity>
     [[nodiscard]] std::map<K, std::vector<MatchResult>> process_sequences(
         const size_t batch_size,
@@ -91,7 +192,10 @@ public:
         const uint8_t width_code,
         const PgCompactSequenceHdr* query_hdr,
         const std::array<const PgCompactSequenceHdr*, batch_capacity>& target_hdrs,
-        const std::array<K, batch_capacity>& query_ids)
+        const std::array<K, batch_capacity>& query_ids,
+        const Minimap2Params& base_params,
+        const std::array<TargetIndexBlobRef, batch_capacity>* index_blobs,
+        BatchExecutionStats& stats)
     {
         std::map<K, std::vector<MatchResult>> results;
 
@@ -123,6 +227,15 @@ public:
                         static_cast<unsigned>(width_code),
                         query_seq.bp_size(), batch_size);
 
+                /*
+                 * Query minimizers are computed once per batch for the
+                 * prebuilt-index path (every row reuses the same query).
+                 * Recompute-path rows use minimap_port(), which does its
+                 * own sketching; the extra allocation here is avoided
+                 * for those rows via the optional nested-scope.
+                 */
+                std::optional<std::vector<MinimapSketchData>> cached_query_minimizers;
+
                 for (size_t i = 0; i < batch_size; ++i) {
                     const PgCompactSequenceHdr* target_hdr = target_hdrs[i];
                     if (target_hdr == nullptr) {
@@ -149,39 +262,100 @@ public:
                     }
                     compact_sequence_range<Dst> target_seq = make_seq_range_from_pg<Dst>(target_hdr);
 
-                    /*
-                     * Tune algorithm parameters for the query/target size
-                     * regime we are likely to see. minimap2's hard-coded
-                     * defaults (k=15, w=10, min_chain_score=40,
-                     * min_seed_count=3) are calibrated for long-read vs
-                     * genome mapping (kb-scale query against Mb-scale
-                     * target). In a Postgres context the query literal is
-                     * routinely short (a probe motif, a primer, an amplicon
-                     * region) against per-row targets typically <1 kb, so
-                     * we scale k/w down proportionally. When both operands
-                     * are long we keep the original minimap2 defaults.
-                     */
-                    Minimap2Params params;
                     const size_t min_bp = std::min(query_seq.bp_size(),
                                                    target_seq.bp_size());
-                    if (min_bp < 50) {
-                        params.kmer_size       = 8;
-                        params.window_size     = 3;
-                        params.min_chain_score = 10;
-                        params.min_seed_count  = 1;
-                    } else if (min_bp < 200) {
-                        params.kmer_size       = 10;
-                        params.window_size     = 5;
-                        params.min_chain_score = 20;
-                        params.min_seed_count  = 2;
+
+                    ++stats.targets_considered;
+
+                    /*
+                     * Prebuilt-index fast path — if the custom scan
+                     * captured a serialized TargetIndex blob for this
+                     * row, deserialize it in place and call
+                     * minimap2_port_with_index so we skip the target
+                     * sketch pass. The deserialized TargetIndex owns
+                     * its unordered_map buckets and dies at scope exit.
+                     *
+                     * CRITICAL: the sidecar index was built with the
+                     * w=10/k=15 defaults baked into
+                     * sidecar_compute_and_write_index (see sidecar.cppm).
+                     * Query minimizers extracted with different w/k
+                     * values would hash to incompatible minimizers and
+                     * miss every seed — so for the prebuilt-index
+                     * branch we suppress the batch-level size heuristic
+                     * (which otherwise lowers k/w for short targets).
+                     * The recompute branch keeps the heuristic because
+                     * both query and target are sketched under the same
+                     * k/w there.
+                     */
+                    const bool has_blob =
+                        index_blobs != nullptr
+                        && (*index_blobs)[i].data != nullptr
+                        && (*index_blobs)[i].bytes > 0;
+
+                    MatchResultCollection collection;
+                    if (has_blob) {
+                        Minimap2Params params = base_params;
+                        /* Pin the sketch parameters to the sidecar's k/w.
+                         * Keep every other knob from base_params (bandwidth,
+                         * scoring, algorithm selection, …) intact. */
+                        params.kmer_size   = 15;
+                        params.window_size = 10;
+                        /*
+                         * For very short inputs minimap2 defaults want
+                         * min_chain_score=40/min_seed_count=3 which would
+                         * reject every chain. Keep the rule-of-thumb
+                         * thresholds from the heuristic, just without the
+                         * k/w rewrite.
+                         */
+                        if (min_bp < 50) {
+                            params.min_chain_score = 10;
+                            params.min_seed_count  = 1;
+                        } else if (min_bp < 200) {
+                            params.min_chain_score = 20;
+                            params.min_seed_count  = 2;
+                        }
+
+                        ++stats.targets_with_prebuilt_index;
+                        if (!cached_query_minimizers.has_value()) {
+                            /*
+                             * Build query minimizers once per batch using
+                             * the sidecar's pinned k/w. Every row in the
+                             * prebuilt-index branch reuses this set.
+                             */
+                            sketch_collector query_collector;
+                            {
+                                EASY_BLOCK("mm_sketch");
+                                collect_minimizers<minimap_int_hasher>(
+                                    query_collector, query_seq,
+                                    query_seq.begin(), query_seq.end(),
+                                    static_cast<size_t>(params.window_size),
+                                    static_cast<size_t>(params.kmer_size));
+                            }
+                            cached_query_minimizers.emplace(
+                                query_collector.extract_sketches_data());
+                        }
+                        TargetIndex prebuilt_idx = TargetIndex::deserialize_from_binary(
+                            (*index_blobs)[i].data, (*index_blobs)[i].bytes);
+                        collection = minimap2_port_with_index(
+                            query_seq, target_seq,
+                            *cached_query_minimizers,
+                            prebuilt_idx, params);
+                        stats.last_effective_params = params;
+                    } else {
+                        ++stats.targets_recomputed_minimizers;
+                        Minimap2Params params = apply_size_heuristic(base_params, min_bp);
+                        collection = minimap_port(query_seq, target_seq, params);
+                        stats.last_effective_params = params;
                     }
-                    MatchResultCollection collection = minimap_port(query_seq, target_seq, params);
-                    JustLog("[bioseq] pg: minimap_port query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} produced {} match(es)",
+
+                    JustLog("[bioseq] pg: BatchProcessor row query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} prebuilt_index={} produced {} match(es)",
                             static_cast<int>(query_ids[i]),
                             target_seq.bp_size(),
-                            params.kmer_size, params.window_size,
-                            params.min_chain_score, params.min_seed_count,
-                            collection.size());
+                            stats.last_effective_params.kmer_size,
+                            stats.last_effective_params.window_size,
+                            stats.last_effective_params.min_chain_score,
+                            stats.last_effective_params.min_seed_count,
+                            has_blob, collection.size());
                     if (!collection.empty()) {
                         results[query_ids[i]] = std::move(collection.results);
                     }
@@ -243,6 +417,17 @@ public:
         std::vector<char> seq_varlena;
         bool            seq_is_null         = true;
 
+        /*
+         * Per-row serialized TargetIndex bytes read from
+         * bioseq_internal.index_sidecar. Populated by submit_scan only when
+         * bioseq.read_sequence_index = on AND the lookup returned a non-empty
+         * blob. When empty the batch processor falls back to recomputing
+         * minimizers for this row. The std::vector<char> owns its bytes so
+         * the BatchProcessor::TargetIndexBlobRef points directly into the
+         * entry's storage without copying.
+         */
+        std::vector<char> sidecar_index_blob;
+
         [[nodiscard]] const PgCompactSequenceHdr* seq_hdr() const {
             if (seq_is_null || seq_varlena.empty()) {
                 return nullptr;
@@ -269,6 +454,38 @@ private:
     BatchProcessor processor;
     MmsearchContext mmsearch_context;
 
+    /*
+     * Per-scan base Minimap2Params — captured by ColumnarScan_BeginCustomScan
+     * from the plan (GUC snapshot + per-call aligner_options() overrides) and
+     * pushed into BatchProcessor::process_sequences once per batch. Every
+     * row inherits these values with size-heuristic tuning applied if the
+     * user left the minimap2 defaults in place.
+     */
+    Minimap2Params base_params{};
+
+    /*
+     * Controls whether submit_scan will attempt an index_sidecar lookup.
+     * Captured at configure time so the submit_scan hot path doesn't touch
+     * the GUC. The caller (custom scan) is expected to keep this value in
+     * sync with bioseq.read_sequence_index.
+     */
+    bool read_sequence_index_active = false;
+
+    /*
+     * The OID of the relation being scanned. Only used to key into
+     * bioseq_internal.index_sidecar; set at configure time so submit_scan
+     * doesn't need to re-read RelationGetRelid per tuple.
+     */
+    Oid user_relid = InvalidOid;
+
+    /*
+     * Execution statistics captured during the last batch. Used by
+     * ColumnarScan_ExplainCustomScan so it can compute the "Bioseq
+     * Recomputed" percentage from runtime truth instead of the
+     * plan-time estimate.
+     */
+    BatchExecutionStats last_stats{};
+
     std::vector<BufferedScanEntry> buffered_entries;
     std::map<int32_t, std::vector<MatchResult>> match_map;
     std::vector<OutputCursor> output_cursors;
@@ -279,6 +496,25 @@ public:
         buffered_entries.reserve(estimated_tuple_count * 2);
         output_cursors.reserve(estimated_tuple_count * 2);
     }
+
+    /*
+     * Install the per-scan aligner parameters. Called from
+     * ColumnarScan_BeginCustomScan after the GUC snapshot + any per-call
+     * aligner_options() overrides have been applied. Must be called before
+     * the first submit_scan.
+     */
+    void configure_params(const Minimap2Params& params,
+                          bool read_sequence_index,
+                          Oid scan_user_relid) {
+        base_params                  = params;
+        read_sequence_index_active   = read_sequence_index;
+        user_relid                   = scan_user_relid;
+        last_stats                   = BatchExecutionStats{};
+    }
+
+    [[nodiscard]] const Minimap2Params& base_aligner_params() const { return base_params; }
+    [[nodiscard]] const BatchExecutionStats& execution_stats() const { return last_stats; }
+    [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
 
     /*
      * Record the mmsearch column / pk / query triple extracted from the
@@ -427,13 +663,39 @@ public:
          */
         slot_getallattrs(entry.scan_slot_copy);
 
+        /*
+         * Sidecar index read — only when the GUC is on, the row has a
+         * stable rowno, and there is a seq varlena (nothing to do for
+         * NULL-seq rows). We intentionally keep this INSIDE submit_scan
+         * so it happens once per row at buffering time; doing it later
+         * would require re-opening relcache entries per batch row.
+         *
+         * sidecar_read_index returns an owned std::vector<char>; moving
+         * it into entry.sidecar_index_blob avoids a memcpy. When the row
+         * has no stored blob (update_index_on_insert was off) the
+         * vector stays empty and the batch processor falls back to
+         * recomputing minimizers — that fallback is counted toward the
+         * EXPLAIN "recomputed" percentage.
+         */
+        if (read_sequence_index_active
+            && !entry.seq_is_null
+            && entry.sequence_rowno >= 0
+            && OidIsValid(user_relid)) {
+            auto blob = bioseq::sidecar::sidecar_read_index(
+                user_relid, entry.sequence_rowno);
+            if (blob.has_value()) {
+                entry.sidecar_index_blob = std::move(*blob);
+            }
+        }
+
         const uint32_t entry_seq_bp_size = entry.seq_hdr() != nullptr
             ? entry.seq_hdr()->bp_size : 0;
-        JustLog("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
+        JustLog("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={}) sidecar_blob_bytes={}",
                 entry.primary_key_is_null ? -1 : entry.primary_key,
                 entry.sequence_rowno,
                 entry_seq_bp_size,
-                entry.seq_is_null);
+                entry.seq_is_null,
+                entry.sidecar_index_blob.size());
 
         buffered_entries.push_back(std::move(entry));
     }
@@ -450,6 +712,8 @@ public:
     void run_batch_and_build_cursors() {
         std::array<const PgCompactSequenceHdr*, kDispatchBatchCapacity> target_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
+        std::array<typename BatchProcessor::TargetIndexBlobRef,
+                   kDispatchBatchCapacity> index_blobs{};
 
         const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
             ? kDispatchBatchCapacity
@@ -459,26 +723,47 @@ public:
                     buffered_entries.size(), kDispatchBatchCapacity);
         }
 
+        /*
+         * Populate the per-row blob reference array. The BatchProcessor
+         * reads directly from these pointers into BufferedScanEntry's
+         * own vector<char> storage — the vector keeps the bytes alive
+         * for the full batch and no extra copy happens. Rows without a
+         * sidecar blob stay at the default-constructed {nullptr, 0}
+         * pair, which the batch processor interprets as "recompute".
+         */
         for (size_t i = 0; i < batch_size; ++i) {
             const BufferedScanEntry& entry = buffered_entries[i];
             target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
             query_ids[i]   = entry.primary_key_is_null ? -1 : entry.primary_key;
+            if (!entry.sidecar_index_blob.empty()) {
+                index_blobs[i].data  = entry.sidecar_index_blob.data();
+                index_blobs[i].bytes = entry.sidecar_index_blob.size();
+            }
         }
 
         const PgCompactSequenceHdr* query_hdr = mmsearch_context.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
-        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={}",
+        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={}",
                 batch_size,
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.width_code),
-                query_bp_size);
+                query_bp_size,
+                read_sequence_index_active);
+
+        last_stats = BatchExecutionStats{};
+        const std::array<typename BatchProcessor::TargetIndexBlobRef,
+                         kDispatchBatchCapacity>* blob_arg =
+            read_sequence_index_active ? &index_blobs : nullptr;
 
         match_map = processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
             batch_size,
             mmsearch_context.alphabet_code,
             mmsearch_context.width_code,
             query_hdr,
-            target_hdrs, query_ids);
+            target_hdrs, query_ids,
+            base_params,
+            blob_arg,
+            last_stats);
 
         output_cursors.clear();
         for (size_t i = 0; i < buffered_entries.size(); ++i) {

@@ -51,6 +51,64 @@ bool bioseq_enable_page_cache = false;
 int bioseq_page_cache_size = 200U;
 bool bioseq_index_scan = true;
 bool bioseq_update_index_on_insert = true;
+/*
+ * read_sequence_index gates the sidecar read path. When OFF the batch
+ * processor always recomputes per-row minimizers for mmsearch targets
+ * (identical to the historical behaviour before the sidecar index read).
+ * When ON the custom scan opens bioseq_internal.index_sidecar for each
+ * buffered row and, if a blob exists, rehydrates the TargetIndex rather
+ * than re-computing it from the compact sequence. Rows without a sidecar
+ * entry (INSERT happened under bioseq.update_index_on_insert = off) still
+ * recompute — the recomputed count is surfaced in EXPLAIN.
+ */
+bool bioseq_read_sequence_index = false;
+
+/*
+ * Aligner parameter GUCs — one per field of Minimap2Params so the user can
+ * tune the minimap2 pipeline per-session without recompiling. Global defaults
+ * match mm_mapopt_init() in options.c; per-call overrides are delivered via
+ * the aligner_options() composite type passed as mmsearch's optional third
+ * argument. See sequences/minimap_port.cppm for field-by-field documentation.
+ */
+int  bioseq_aligner_kmer_size       = 15;
+int  bioseq_aligner_window_size     = 10;
+int  bioseq_aligner_max_gap         = 5000;
+int  bioseq_aligner_max_gap_ref     = -1;
+int  bioseq_aligner_bandwidth       = 500;
+int  bioseq_aligner_bandwidth_long  = 0;
+int  bioseq_aligner_max_chain_skip  = 25;
+int  bioseq_aligner_max_chain_iter  = 5000;
+int  bioseq_aligner_min_seed_count  = 3;
+int  bioseq_aligner_min_chain_score = 40;
+double bioseq_aligner_chain_gap_scale  = 0.8;
+double bioseq_aligner_chain_skip_scale = 0.0;
+double bioseq_aligner_mask_level    = 0.5;
+int  bioseq_aligner_mask_len        = 2147483647;   /* INT_MAX per options.c */
+double bioseq_aligner_pri_ratio     = 0.8;
+int  bioseq_aligner_best_n          = 5;
+int  bioseq_aligner_match_score     = 2;
+int  bioseq_aligner_mismatch_pen    = 4;
+int  bioseq_aligner_gap_open1       = 4;
+int  bioseq_aligner_gap_ext1        = 2;
+int  bioseq_aligner_gap_open2       = 24;
+int  bioseq_aligner_gap_ext2        = 1;
+int  bioseq_aligner_sc_ambi         = 1;
+int  bioseq_aligner_zdrop           = 400;
+int  bioseq_aligner_end_bonus       = -1;
+int  bioseq_aligner_max_occ         = 500;
+int  bioseq_aligner_mid_occ         = 500;
+int  bioseq_aligner_block_min_size  = 32;
+int  bioseq_aligner_block_max_size  = 256;
+/*
+ * Chaining algorithm selection — SCALAR_DP (O(n·iter), minimap2 baseline),
+ * SIMD_DP (same algorithm, Highway-vectorised forward pass), RMQ (AVL+RMQ
+ * tree; O(n log n)). Base-alignment selection — KSW2 (dual-affine DP, the
+ * minimap2 default) or BLOCK_ALIGNER (single-affine, Highway-vectorised).
+ * The enums below are parsed from GUC strings; the backend dispatches on
+ * them via constexpr if so the hot path stays branchless.
+ */
+int  bioseq_aligner_chaining_algorithm  = 0;  /* matches ChainingAlgorithmType::SCALAR_MM2 */
+int  bioseq_aligner_base_alignment_algorithm = 1;  /* matches BaseAlignmentAlgorithmType::BLOCK_ALIGNER */
 
 /*
  * bioseq_init is the module's top-level initialiser. It wires up the GUC
@@ -230,6 +288,162 @@ bioseq_guc_init()
 		NULL,
 		NULL,
 		NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.read_sequence_index",
+		"When true, the batch processor rehydrates a persisted minimizer "
+		"TargetIndex from bioseq_internal.index_sidecar for each buffered "
+		"row instead of recomputing it. Rows without a sidecar entry "
+		"(inserted with update_index_on_insert = off) still recompute.",
+		NULL,
+		&bioseq_read_sequence_index,
+		false,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	/* ---------------- Aligner parameter GUCs (global defaults) -------------- */
+	DefineCustomIntVariable("bioseq.aligner.kmer_size",
+							"Minimizer k-mer size for the aligner pipeline.",
+							NULL, &bioseq_aligner_kmer_size, 15,
+							1, 64, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.window_size",
+							"Minimizer window size.",
+							NULL, &bioseq_aligner_window_size, 10,
+							1, 1024, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.max_gap",
+							"Maximum reference gap in chaining.",
+							NULL, &bioseq_aligner_max_gap, 5000,
+							1, 1 << 30, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.max_gap_ref",
+							"Explicit reference gap (-1 uses max_gap).",
+							NULL, &bioseq_aligner_max_gap_ref, -1,
+							-1, 1 << 30, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.bandwidth",
+							"Bandwidth for chaining and alignment.",
+							NULL, &bioseq_aligner_bandwidth, 500,
+							1, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.bandwidth_long",
+							"Long-join bandwidth (0 disables long join).",
+							NULL, &bioseq_aligner_bandwidth_long, 0,
+							0, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.max_chain_skip",
+							"Max skip for early termination in chaining DP.",
+							NULL, &bioseq_aligner_max_chain_skip, 25,
+							0, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.max_chain_iter",
+							"Max predecessors examined per anchor.",
+							NULL, &bioseq_aligner_max_chain_iter, 5000,
+							1, 1 << 22, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.min_seed_count",
+							"Minimum seeds per chain.",
+							NULL, &bioseq_aligner_min_seed_count, 3,
+							0, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.min_chain_score",
+							"Minimum chain score.",
+							NULL, &bioseq_aligner_min_chain_score, 40,
+							0, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("bioseq.aligner.chain_gap_scale",
+							 "Chaining gap penalty scale.",
+							 NULL, &bioseq_aligner_chain_gap_scale, 0.8,
+							 0.0, 100.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("bioseq.aligner.chain_skip_scale",
+							 "Chaining skip penalty scale.",
+							 NULL, &bioseq_aligner_chain_skip_scale, 0.0,
+							 0.0, 100.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("bioseq.aligner.mask_level",
+							 "Primary/secondary overlap threshold.",
+							 NULL, &bioseq_aligner_mask_level, 0.5,
+							 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.mask_len",
+							"Maximum uncovered length for secondary classification.",
+							NULL, &bioseq_aligner_mask_len, 2147483647,
+							0, 2147483647, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomRealVariable("bioseq.aligner.pri_ratio",
+							 "Secondary-to-primary score ratio threshold.",
+							 NULL, &bioseq_aligner_pri_ratio, 0.8,
+							 0.0, 1.0, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.best_n",
+							"Max secondary alignments to keep per primary.",
+							NULL, &bioseq_aligner_best_n, 5,
+							0, 1024, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.match_score",
+							"Match score (a).", NULL,
+							&bioseq_aligner_match_score, 2,
+							1, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.mismatch_pen",
+							"Mismatch penalty (b).", NULL,
+							&bioseq_aligner_mismatch_pen, 4,
+							1, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.gap_open1",
+							"Short gap open (q).", NULL,
+							&bioseq_aligner_gap_open1, 4,
+							0, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.gap_ext1",
+							"Short gap extend (e).", NULL,
+							&bioseq_aligner_gap_ext1, 2,
+							0, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.gap_open2",
+							"Long gap open (q2).", NULL,
+							&bioseq_aligner_gap_open2, 24,
+							0, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.gap_ext2",
+							"Long gap extend (e2).", NULL,
+							&bioseq_aligner_gap_ext2, 1,
+							0, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.sc_ambi",
+							"Penalty for ambiguous base (N).", NULL,
+							&bioseq_aligner_sc_ambi, 1,
+							0, 127, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.zdrop",
+							"Z-drop threshold.", NULL,
+							&bioseq_aligner_zdrop, 400,
+							-1, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.end_bonus",
+							"Bonus for reaching sequence ends (-1 to disable).", NULL,
+							&bioseq_aligner_end_bonus, -1,
+							-1, 1 << 20, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.max_occ",
+							"Max seed occurrence to keep.", NULL,
+							&bioseq_aligner_max_occ, 500,
+							1, 1 << 24, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.mid_occ",
+							"Mid-level seed occurrence threshold.", NULL,
+							&bioseq_aligner_mid_occ, 500,
+							1, 1 << 24, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.block_min_size",
+							"Block aligner minimum block size (power of 2).",
+							NULL, &bioseq_aligner_block_min_size, 32,
+							8, 4096, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.block_max_size",
+							"Block aligner maximum block size (power of 2).",
+							NULL, &bioseq_aligner_block_max_size, 256,
+							8, 16384, PGC_USERSET, 0, NULL, NULL, NULL);
+
+	static const struct config_enum_entry chaining_algorithm_options[] = {
+		{ "scalar_mm2",   0, false },
+		{ "simd_mm2",     1, false },
+		{ "rmq",          2, false },
+		{ NULL, 0, false }
+	};
+	DefineCustomEnumVariable("bioseq.aligner.chaining_algorithm",
+							 "Chaining algorithm: scalar_mm2, simd_mm2, rmq.",
+							 NULL, &bioseq_aligner_chaining_algorithm, 0,
+							 chaining_algorithm_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	static const struct config_enum_entry base_alignment_algorithm_options[] = {
+		{ "ksw2",          0, false },
+		{ "block_aligner", 1, false },
+		{ NULL, 0, false }
+	};
+	DefineCustomEnumVariable("bioseq.aligner.base_alignment_algorithm",
+							 "Base alignment algorithm: ksw2, block_aligner.",
+							 NULL, &bioseq_aligner_base_alignment_algorithm, 1,
+							 base_alignment_algorithm_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
 }
 
 }

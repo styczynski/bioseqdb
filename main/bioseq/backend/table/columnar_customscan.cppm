@@ -65,6 +65,44 @@ static Const* const_score_node = nullptr;   // legacy alias pointing at placehol
 static bioseq::simd::N_NEON::TupleDispatchBuffer buffer(1000);
 
 /*
+ * Per-scan projection usage flags. Walked from the plan target list once
+ * per BeginCustomScan and pushed into Minimap2Params so the minimap2
+ * pipeline can skip expensive stages (divergence estimation, MAPQ, CIGAR
+ * base alignment) whose outputs are never projected to the caller.
+ *
+ * Keeping this in one place also makes EXPLAIN consistent: the same flags
+ * drive both what-to-run at execution time and which pipeline-step sections
+ * are surfaced in ColumnarScan_ExplainCustomScan output.
+ */
+struct BioseqScanFeatureFlags {
+	bool uses_cigar      = false;  ///< bioseq.cigar(a) in target list
+	bool uses_divergence = false;  ///< bioseq.divergence(a) in target list
+	bool uses_mapq       = false;  ///< bioseq.mapq(a) in target list
+	bool has_mmsearch    = false;  ///< WHERE mmsearch(seq, 'query'::bioseq.seq) present
+	/*
+	 * True when any placeholder projection that is resolved from a
+	 * MatchResult appears in the target list. Distinct from has_mmsearch
+	 * because a projection like bioseq.cigar(a) without a matching
+	 * mmsearch() qual is theoretically possible but yields NULLs today.
+	 */
+	bool any_match_projection = false;
+};
+
+/*
+ * Per-scan snapshot of the plan-level Minimap2Params and feature flags.
+ * Stored here (rather than inside buffer) so ColumnarScan_ExplainCustomScan
+ * can print the *exact* parameters that were fed to the batch processor —
+ * including any aligner_options() overrides — without a second plan walk.
+ * The Minimap2Params struct lives in bioseq::simd::N_NEON.
+ */
+struct PerScanAlignerState {
+	bioseq::simd::N_NEON::Minimap2Params params{};
+	BioseqScanFeatureFlags              features{};
+	bool                                params_captured = false;
+};
+static PerScanAlignerState g_per_scan_aligner_state;
+
+/*
  * One rewritten `bioseq.symbol_count(Var, 'L')` call site. The Const*
  * replaces the FuncExpr in newtargetlist; `rank` is resolved once at
  * plan time via seqan3 so the per-row populate path is a single array
@@ -126,6 +164,7 @@ static BioseqPlaceholderConsts placeholder_consts;
  */
 struct BioseqStubOids {
 	Oid mmsearch_oid;
+	Oid mmsearch_with_opts_oid;       // mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)
 	Oid bioseq_seq_type_oid;          // resolves to bioseq.seq pg_type row
 
 	Oid score_oid;                    // bioseq.score (alias for dp_score)
@@ -170,6 +209,7 @@ struct BioseqStubOids {
 			CStringGetDatum(type_name)));
 	};
 	result.mmsearch_oid              = resolve("mmsearch(bioseq.seq, bioseq.seq)");
+	result.mmsearch_with_opts_oid    = resolve("mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)");
 	result.bioseq_seq_type_oid       = resolve_type("bioseq.seq");
 	result.score_oid                 = resolve("bioseq.score(anyelement)");
 	result.dp_score_oid              = resolve("bioseq.dp_score(anyelement)");
@@ -234,6 +274,16 @@ static void invalidate_cached_stub_oids(Datum /*arg*/, Oid /*relid*/) {
  * matches any of the bioseq projection stubs (i.e. anything that
  * VarInjectorMutator will rewrite into a placeholder Const).
  */
+/*
+ * Accepts either the 2-arg mmsearch(seq, seq) or the 3-arg
+ * mmsearch(seq, seq, bioseq_aligner_options). Call sites care about
+ * "is this a match qual" rather than the arity, so funnelling both
+ * overloads here avoids scattering the same disjunction everywhere.
+ */
+[[nodiscard]] static inline bool is_mmsearch_funcid(Oid funcid, const BioseqStubOids& o) {
+	return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
+}
+
 [[nodiscard]] static inline bool is_bioseq_projection_funcid(Oid funcid, const BioseqStubOids& o) {
 	return funcid == o.score_oid
 		|| funcid == o.dp_score_oid
@@ -255,6 +305,293 @@ static void invalidate_cached_stub_oids(Datum /*arg*/, Oid /*relid*/) {
 		|| funcid == o.has_cigar_oid
 		|| funcid == o.divergence_oid
 		|| funcid == o.cigar_oid;
+}
+
+/*
+ * Walk a target list for bioseq.* function calls and set the matching
+ * feature-flags. We also recurse into arg subtrees so "bioseq.cigar(a) + 1"
+ * is still counted. The shape used for detection matches the shape used by
+ * VarInjectorMutator so the flags agree with which placeholders actually
+ * populate at execution time.
+ */
+struct BioseqFeatureDetector {
+	const BioseqStubOids* oids = nullptr;
+	BioseqScanFeatureFlags flags;
+};
+
+static bool
+collect_bioseq_feature_flags_walker(Node* node, void* context)
+{
+	if (node == nullptr) {
+		return false;
+	}
+	auto* detector = static_cast<BioseqFeatureDetector*>(context);
+	if (IsA(node, FuncExpr)) {
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+		const BioseqStubOids* o = detector->oids;
+		if (is_mmsearch_funcid(fe->funcid, *o)) {
+			detector->flags.has_mmsearch = true;
+		}
+		if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
+			detector->flags.uses_cigar = true;
+		}
+		if (fe->funcid == o->divergence_oid) {
+			detector->flags.uses_divergence = true;
+		}
+		if (fe->funcid == o->mapq_oid) {
+			detector->flags.uses_mapq = true;
+		}
+		if (is_bioseq_projection_funcid(fe->funcid, *o)) {
+			detector->flags.any_match_projection = true;
+		}
+	}
+	return expression_tree_walker(node, collect_bioseq_feature_flags_walker, context);
+}
+
+[[nodiscard]] static BioseqScanFeatureFlags
+detect_feature_flags(List* targetlist, List* qual, const BioseqStubOids& oids)
+{
+	BioseqFeatureDetector detector{ &oids, BioseqScanFeatureFlags{} };
+	for (auto tgt : PList<TargetEntry>(targetlist)) {
+		if (tgt == nullptr) {
+			continue;
+		}
+		collect_bioseq_feature_flags_walker(
+			reinterpret_cast<Node*>(tgt->expr), &detector);
+	}
+	for (auto q : PList<Node>(qual)) {
+		if (q == nullptr) {
+			continue;
+		}
+		collect_bioseq_feature_flags_walker(q, &detector);
+	}
+	return detector.flags;
+}
+
+/*
+ * Snapshot the bioseq.aligner.* GUCs into a Minimap2Params struct.
+ * A subsequent pass (parse_aligner_options_override) may overlay per-call
+ * fields that the user supplied via aligner_options() in the mmsearch
+ * FuncExpr. Keeping the two passes separate makes the precedence order
+ * obvious: GUC → aligner_options() override → size-heuristic → pipeline.
+ */
+[[nodiscard]] static bioseq::simd::N_NEON::Minimap2Params
+build_params_from_gucs()
+{
+	bioseq::simd::N_NEON::Minimap2Params params;
+	params.kmer_size        = bioseq_aligner_kmer_size;
+	params.window_size      = bioseq_aligner_window_size;
+	params.max_gap          = bioseq_aligner_max_gap;
+	params.max_gap_ref      = bioseq_aligner_max_gap_ref;
+	params.bandwidth        = bioseq_aligner_bandwidth;
+	params.max_chain_skip   = bioseq_aligner_max_chain_skip;
+	params.max_chain_iter   = bioseq_aligner_max_chain_iter;
+	params.min_seed_count   = bioseq_aligner_min_seed_count;
+	params.min_chain_score  = bioseq_aligner_min_chain_score;
+	params.chain_gap_scale  = static_cast<float>(bioseq_aligner_chain_gap_scale);
+	params.chain_skip_scale = static_cast<float>(bioseq_aligner_chain_skip_scale);
+	params.mask_level       = static_cast<float>(bioseq_aligner_mask_level);
+	params.mask_len         = bioseq_aligner_mask_len;
+	params.pri_ratio        = static_cast<float>(bioseq_aligner_pri_ratio);
+	params.best_n           = bioseq_aligner_best_n;
+	params.match_score      = bioseq_aligner_match_score;
+	params.mismatch_pen     = bioseq_aligner_mismatch_pen;
+	params.gap_open1        = bioseq_aligner_gap_open1;
+	params.gap_ext1         = bioseq_aligner_gap_ext1;
+	params.gap_open2        = bioseq_aligner_gap_open2;
+	params.gap_ext2         = bioseq_aligner_gap_ext2;
+	params.sc_ambi          = bioseq_aligner_sc_ambi;
+	params.zdrop            = bioseq_aligner_zdrop;
+	params.end_bonus        = bioseq_aligner_end_bonus;
+	params.max_occ          = bioseq_aligner_max_occ;
+	params.mid_occ          = bioseq_aligner_mid_occ;
+	params.block_min_size   = static_cast<size_t>(bioseq_aligner_block_min_size);
+	params.block_max_size   = static_cast<size_t>(bioseq_aligner_block_max_size);
+	params.bandwidth_long   = bioseq_aligner_bandwidth_long;
+	params.chaining_algorithm =
+		static_cast<bioseq::simd::N_NEON::ChainingAlgorithmType>(
+			bioseq_aligner_chaining_algorithm);
+	params.base_alignment_algorithm =
+		static_cast<bioseq::simd::N_NEON::BaseAlignmentAlgorithmType>(
+			bioseq_aligner_base_alignment_algorithm);
+	return params;
+}
+
+/*
+ * If the third argument of a mmsearch FuncExpr is a row-typed Const
+ * representing aligner_options(), decode its fields and overlay any
+ * non-NULL values on top of `params`. NULL field values signal "inherit
+ * the GUC" so they are skipped here.
+ *
+ * Field order must match the CREATE TYPE bioseq_aligner_options DDL in
+ * bioseq--1.0.sql. Each field is kept INT4 (or FLOAT8) so the decoder
+ * just pulls a Datum per non-null slot.
+ */
+static void
+apply_aligner_options_override(FuncExpr* mmsearch_fe,
+							   bioseq::simd::N_NEON::Minimap2Params& params,
+							   const BioseqStubOids& oids)
+{
+	(void) oids; // composite decoding is self-contained
+	if (mmsearch_fe == nullptr) {
+		return;
+	}
+	if (list_length(mmsearch_fe->args) < 3) {
+		return;
+	}
+	PList<Node> args(mmsearch_fe->args);
+	Node* opt_node = args.third();
+	if (opt_node == nullptr || !IsA(opt_node, Const)) {
+		return;
+	}
+	Const* opt_const = reinterpret_cast<Const*>(opt_node);
+	if (opt_const->constisnull) {
+		return;
+	}
+	/*
+	 * The composite comes through as a HeapTupleHeader varlena. Deconstruct
+	 * it via heap_deform_tuple against the pg_type tupdesc.
+	 */
+	HeapTupleHeader header = reinterpret_cast<HeapTupleHeader>(
+		PG_DETOAST_DATUM(opt_const->constvalue));
+	Oid row_typeoid    = HeapTupleHeaderGetTypeId(header);
+	int32 row_typmod   = HeapTupleHeaderGetTypMod(header);
+	TupleDesc tupdesc  = lookup_rowtype_tupdesc(row_typeoid, row_typmod);
+
+	HeapTupleData heap_tuple{};
+	heap_tuple.t_len  = HeapTupleHeaderGetDatumLength(header);
+	heap_tuple.t_data = header;
+	ItemPointerSetInvalid(&heap_tuple.t_self);
+	heap_tuple.t_tableOid = InvalidOid;
+
+	const int n_attrs = tupdesc->natts;
+	/*
+	 * Stack-sized buffers sized to the known maximum of 32 fields in the
+	 * bioseq_aligner_options composite (today's count is 31; the +1
+	 * leaves a slot of headroom). Avoids the per-call heap allocation
+	 * that std::vector<Datum> would add and keeps us clear of
+	 * std::vector<bool>'s proxy storage (no .data()).
+	 */
+	constexpr int kMaxOptionAttrs = 32;
+	if (n_attrs > kMaxOptionAttrs) {
+		ReleaseTupleDesc(tupdesc);
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("bioseq_aligner_options has %d fields, max supported is %d",
+					n_attrs, kMaxOptionAttrs)));
+	}
+	std::array<Datum, kMaxOptionAttrs> values{};
+	std::array<bool,  kMaxOptionAttrs> nulls{};
+	heap_deform_tuple(&heap_tuple, tupdesc, values.data(), nulls.data());
+
+	/*
+	 * Positional decoder — the ordinal must match the CREATE TYPE field
+	 * order in bioseq--1.0.sql. Keeping this logic here (rather than a
+	 * generic name-lookup) means we pay zero catalog hits per-call, which
+	 * matters because BeginCustomScan runs once per query invocation.
+	 */
+	auto get_int = [&](int idx, int32_t& out) {
+		if (idx < n_attrs && !nulls[idx]) {
+			out = DatumGetInt32(values[idx]);
+		}
+	};
+	auto get_float = [&](int idx, float& out) {
+		if (idx < n_attrs && !nulls[idx]) {
+			out = DatumGetFloat8(values[idx]);
+		}
+	};
+	int idx = 0;
+	get_int  (idx++, params.kmer_size);
+	get_int  (idx++, params.window_size);
+	get_int  (idx++, params.max_gap);
+	get_int  (idx++, params.max_gap_ref);
+	get_int  (idx++, params.bandwidth);
+	get_int  (idx++, params.bandwidth_long);
+	get_int  (idx++, params.max_chain_skip);
+	get_int  (idx++, params.max_chain_iter);
+	get_int  (idx++, params.min_seed_count);
+	get_int  (idx++, params.min_chain_score);
+	get_float(idx++, params.chain_gap_scale);
+	get_float(idx++, params.chain_skip_scale);
+	get_float(idx++, params.mask_level);
+	get_int  (idx++, params.mask_len);
+	get_float(idx++, params.pri_ratio);
+	get_int  (idx++, params.best_n);
+	get_int  (idx++, params.match_score);
+	get_int  (idx++, params.mismatch_pen);
+	get_int  (idx++, params.gap_open1);
+	get_int  (idx++, params.gap_ext1);
+	get_int  (idx++, params.gap_open2);
+	get_int  (idx++, params.gap_ext2);
+	get_int  (idx++, params.sc_ambi);
+	get_int  (idx++, params.zdrop);
+	get_int  (idx++, params.end_bonus);
+	get_int  (idx++, params.max_occ);
+	get_int  (idx++, params.mid_occ);
+	if (idx < n_attrs && !nulls[idx]) {
+		params.block_min_size = static_cast<size_t>(DatumGetInt32(values[idx]));
+	}
+	++idx;
+	if (idx < n_attrs && !nulls[idx]) {
+		params.block_max_size = static_cast<size_t>(DatumGetInt32(values[idx]));
+	}
+	++idx;
+	if (idx < n_attrs && !nulls[idx]) {
+		/*
+		 * Range-check before the enum cast — otherwise a crafted caller
+		 * (aligner_options(chaining_algorithm => 42)) injects an invalid
+		 * enum value into params.chaining_algorithm, which produces UB
+		 * via the constexpr switch in to_chaining_params(). Known-good
+		 * ordinals: 0=SCALAR_MM2, 1=SIMD_MM2, 2=RMQ.
+		 */
+		const int32_t raw = DatumGetInt32(values[idx]);
+		if (raw >= 0 && raw <= 2) {
+			params.chaining_algorithm =
+				static_cast<bioseq::simd::N_NEON::ChainingAlgorithmType>(raw);
+		} else {
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("aligner_options.chaining_algorithm out of range: %d (expected 0..2)", raw)));
+		}
+	}
+	++idx;
+	if (idx < n_attrs && !nulls[idx]) {
+		const int32_t raw = DatumGetInt32(values[idx]);
+		if (raw >= 0 && raw <= 1) {
+			params.base_alignment_algorithm =
+				static_cast<bioseq::simd::N_NEON::BaseAlignmentAlgorithmType>(raw);
+		} else {
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("aligner_options.base_alignment_algorithm out of range: %d (expected 0..1)", raw)));
+		}
+	}
+	ReleaseTupleDesc(tupdesc);
+	/* Free the detoasted copy if PG_DETOAST_DATUM actually copied. */
+	if (reinterpret_cast<void*>(header)
+		!= reinterpret_cast<void*>(DatumGetPointer(opt_const->constvalue))) {
+		pfree(header);
+	}
+}
+
+/*
+ * Resolve the first mmsearch FuncExpr in `qual` (or nullptr when the plan
+ * has no mmsearch filter). Shared between the params-override pass and the
+ * BeginCustomScan buffer configure call site.
+ */
+[[nodiscard]] static FuncExpr*
+find_mmsearch_funcexpr(List* qual, const BioseqStubOids& oids)
+{
+	for (auto q : PList<Node>(qual)) {
+		if (q == nullptr || !IsA(q, FuncExpr)) {
+			continue;
+		}
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(q);
+		if (is_mmsearch_funcid(fe->funcid, oids)) {
+			return fe;
+		}
+	}
+	return nullptr;
 }
 
 /*
@@ -1703,7 +2040,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
 		if (IsA(tgt->expr, FuncExpr)) {
 			FuncExpr* fe = reinterpret_cast<FuncExpr *>(tgt->expr);
-			if (fe->funcid == stub_oids.mmsearch_oid) {
+			if (is_mmsearch_funcid(fe->funcid, stub_oids)) {
 				JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr in targetlist");
 				wehavemagic = true;
 				wehavemagic_cnt++;
@@ -2408,14 +2745,21 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			continue;
 		}
 		FuncExpr* fe = reinterpret_cast<FuncExpr*>(qual_node);
-		if (fe->funcid != scan_stub_oids.mmsearch_oid)
+		if (!is_mmsearch_funcid(fe->funcid, scan_stub_oids))
 		{
 			continue;
 		}
-		if (list_length(fe->args) != 2)
+		/*
+		 * Accept either mmsearch(seq, query) or
+		 * mmsearch(seq, query, aligner_options) — arg[0]/arg[1] are
+		 * position-stable across both overloads; arg[2] (when present)
+		 * is decoded by apply_aligner_options_override below.
+		 */
+		const int mmsearch_argc = list_length(fe->args);
+		if (mmsearch_argc != 2 && mmsearch_argc != 3)
 		{
 			JustLog("[bioseq] pg: BeginCustomScan() mmsearch FuncExpr has unexpected arg count={}",
-					list_length(fe->args));
+					mmsearch_argc);
 			continue;
 		}
 
@@ -2542,6 +2886,45 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		pfree(attname_cstr);
 		break; /* POC: only honour the first mmsearch() qual we find */
 	}
+
+	/*
+	 * Build the per-scan Minimap2Params: start from a GUC snapshot, overlay
+	 * any aligner_options() overrides the user passed to mmsearch, then
+	 * flip conditional-pipeline flags based on which bioseq.* projections
+	 * the target list actually references.
+	 *
+	 * The resulting struct is pushed into the TupleDispatchBuffer so every
+	 * batch row inherits the same parameters, and copied into the per-scan
+	 * g_per_scan_aligner_state so EXPLAIN can reproduce the user-visible
+	 * decision tree without re-walking the plan.
+	 */
+	const BioseqScanFeatureFlags features = detect_feature_flags(
+		cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
+	bioseq::simd::N_NEON::Minimap2Params aligner_params = build_params_from_gucs();
+	FuncExpr* mmsearch_fe = find_mmsearch_funcexpr(
+		cscan->scan.plan.qual, scan_stub_oids);
+	apply_aligner_options_override(mmsearch_fe, aligner_params, scan_stub_oids);
+	aligner_params.do_cigar           = features.uses_cigar;
+	aligner_params.compute_divergence = features.uses_divergence;
+	aligner_params.compute_mapq       = features.uses_mapq;
+
+	g_per_scan_aligner_state.params          = aligner_params;
+	g_per_scan_aligner_state.features        = features;
+	g_per_scan_aligner_state.params_captured = true;
+
+	/*
+	 * Only consult the sidecar when mmsearch is actually present. Without
+	 * mmsearch there is no BatchProcessor call so opening the sidecar
+	 * relation would be wasted work (and would surface a confusing
+	 * "Recomputed" line in EXPLAIN on a query that doesn't use any index).
+	 */
+	const Oid resolved_user_relid =
+		cscanstate->ss.ss_currentRelation != nullptr
+			? RelationGetRelid(cscanstate->ss.ss_currentRelation)
+			: InvalidOid;
+	buffer.configure_params(aligner_params,
+							features.has_mmsearch && bioseq_read_sequence_index,
+							resolved_user_relid);
 
 	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
@@ -3608,74 +3991,44 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	}
 
 	/*
-	 * Surface the estimated fraction of scanned rows that have a
-	 * prebuilt minimizer index in bioseq_internal.index_sidecar. This
-	 * mirrors the cost adjustment made in AddColumnarScanPath: the
-	 * scan's total cost was reduced by 10000 * this fraction. Reporting
-	 * it here lets operators correlate a query plan's chosen path with
-	 * whether the sidecar is carrying its weight.
+	 * Two-tier EXPLAIN:
+	 *   1. A "Bioseq Fetched From Sequence Index" / "Bioseq Recomputed"
+	 *      summary line — surfaces only when the plan actually runs the
+	 *      minimap2 pipeline (i.e. mmsearch is part of the plan).
+	 *   2. A full One-to-many alignment breakdown showing each pipeline
+	 *      stage and the Minimap2Params values that drive it. The stage
+	 *      list is gated by params.do_cigar / compute_divergence /
+	 *      compute_mapq so users see exactly what will (or will not) run.
 	 *
-	 * Gated on the plan actually consulting the sidecar: if the target
-	 * list has no mmsearch qual and no bioseq.symbol_count / projection
-	 * rewrites, the scan never opens index_sidecar and printing the line
-	 * would be misleading. We reuse the same walk that AddColumnarScanPath
-	 * does against `root->parse->targetList` — but here we look at the
-	 * *plan* node's targetlist and the scan's qual list.
-	 *
-	 * Recomputed at EXPLAIN time rather than stashed at plan time: the
-	 * factor has its own cap inside estimate_index_presence() so the
-	 * second call doesn't walk past the user relation's row count, and
-	 * this avoids threading an extra node through cscan->custom_private.
+	 * The distinction from the previous implementation is that the
+	 * sidecar/recomputed line never prints for a pass-through scan. Plans
+	 * that only use symbol_count/meta projections still show the "Fetched
+	 * From Meta" line above but never a minimizer-index line — because
+	 * they never consult index_sidecar.
 	 */
 	{
-		/* Gate logic must match AddColumnarScanPath's `wehavemagic` sweep
-		 * exactly — otherwise EXPLAIN would either hide the line when the
-		 * planner applied the cost bonus or show it when it didn't. The
-		 * planner counts: (a) mmsearch in target list or qual,
-		 * (b) is_bioseq_projection_funcid match in target list,
-		 * (c) symbol_count with exactly 2 args in target list. */
-		bool consults_sidecar = false;
+		/*
+		 * Use the feature flags captured on BeginCustomScan when
+		 * available (executor ran). For EXPLAIN without ANALYZE the
+		 * BeginCustomScan may not have fired — recompute locally using
+		 * the plan targetlist/qual so the printed output is still
+		 * accurate.
+		 */
 		const BioseqStubOids& explain_oids = get_cached_stub_oids();
-		auto funcexpr_matches = [&](FuncExpr* fe) -> bool {
-			if (fe->funcid == explain_oids.mmsearch_oid) {
-				return true;
-			}
-			if (is_bioseq_projection_funcid(fe->funcid, explain_oids)) {
-				return true;
-			}
-			if (fe->funcid == explain_oids.symbol_count_oid
-				&& list_length(fe->args) == 2) {
-				return true;
-			}
-			return false;
-		};
-		for (auto tgt : PList<TargetEntry>(node->ss.ps.plan->targetlist)) {
-			if (tgt == nullptr || !IsA(tgt->expr, FuncExpr)) {
-				continue;
-			}
-			if (funcexpr_matches(reinterpret_cast<FuncExpr*>(tgt->expr))) {
-				consults_sidecar = true;
-				break;
-			}
-		}
-		if (!consults_sidecar) {
-			for (auto q : PList<Node>(node->ss.ps.plan->qual)) {
-				if (q == nullptr || !IsA(q, FuncExpr)) {
-					continue;
-				}
-				if (funcexpr_matches(reinterpret_cast<FuncExpr*>(q))) {
-					consults_sidecar = true;
-					break;
-				}
-			}
-		}
+		BioseqScanFeatureFlags features = g_per_scan_aligner_state.params_captured
+			? g_per_scan_aligner_state.features
+			: detect_feature_flags(node->ss.ps.plan->targetlist,
+								   node->ss.ps.plan->qual, explain_oids);
 
-		if (consults_sidecar) {
-			/* Resolve the user relation's OID via the plan's scanrelid +
-			 * the executor's range table. ss_currentRelation is only set
-			 * after ExecInitCustomScan runs, which EXPLAIN (without
-			 * ANALYZE) does not do — so we fall back to the plan node's
-			 * rtable entry, which is always populated at explain time. */
+		/*
+		 * Only the WHERE mmsearch(...) pipeline consults the minimizer
+		 * index. A bare SELECT with only symbol_count/metadata projections
+		 * stays on the meta-sidecar side and should not see a minimizer
+		 * line at all (the previous behaviour printed one unconditionally
+		 * and was misleading).
+		 */
+		if (features.has_mmsearch)
+		{
 			Oid user_relid = InvalidOid;
 			double rel_tuples = -1.0;
 			if (node->ss.ss_currentRelation != nullptr) {
@@ -3691,9 +4044,8 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 					user_relid = rte->relid;
 				}
 			}
+
 			if (user_relid != InvalidOid) {
-				/* Fetch reltuples via syscache if the scan hadn't opened the
-				 * relation yet (EXPLAIN without ANALYZE branch). */
 				if (rel_tuples < 0.0) {
 					HeapTuple cls_tup = SearchSysCache1(RELOID,
 														ObjectIdGetDatum(user_relid));
@@ -3703,17 +4055,227 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						ReleaseSysCache(cls_tup);
 					}
 				}
+				/*
+				 * Index-presence estimate is the plan-time view of how
+				 * many rows have a prebuilt sidecar blob. With
+				 * read_sequence_index off we always recompute — surface
+				 * that explicitly. With it on we display both the
+				 * "fetched from sidecar" and "recomputed" halves so the
+				 * user can see exactly what the pipeline did (or will
+				 * do): fetched = min(presence, 1), recomputed = 1 -
+				 * fetched. The two lines sum to 100%.
+				 */
 				const float index_presence =
 					bioseq::sidecar::estimate_index_presence(user_relid, rel_tuples);
-				StringInfoData presence_buf;
-				initStringInfo(&presence_buf);
-				appendStringInfo(&presence_buf,
-								 "minimizers (index presence: %.0f%%)",
-								 static_cast<double>(index_presence) * 100.0);
-				ExplainPropertyText("Bioseq Fetched From Sequence Index",
-									presence_buf.data, es);
-				pfree(presence_buf.data);
+				float fetched_pct    = 0.0f;
+				float recomputed_pct = 100.0f;
+				if (bioseq_read_sequence_index) {
+					fetched_pct    = index_presence * 100.0f;
+					recomputed_pct = (1.0f - index_presence) * 100.0f;
+					if (fetched_pct > 0.0f) {
+						StringInfoData presence_buf;
+						initStringInfo(&presence_buf);
+						appendStringInfo(&presence_buf,
+										 "minimizers (index presence: %.0f%%)",
+										 static_cast<double>(fetched_pct));
+						ExplainPropertyText("Bioseq Fetched From Sequence Index",
+											presence_buf.data, es);
+						pfree(presence_buf.data);
+					}
+					if (recomputed_pct > 0.0f) {
+						StringInfoData recompute_buf;
+						initStringInfo(&recompute_buf);
+						appendStringInfo(&recompute_buf,
+										 "minimizers %.0f%%",
+										 static_cast<double>(recomputed_pct));
+						ExplainPropertyText("Bioseq Recomputed",
+											recompute_buf.data, es);
+						pfree(recompute_buf.data);
+					}
+				} else {
+					/* 100% recomputed because the GUC is off. */
+					ExplainPropertyText("Bioseq Recomputed",
+										"minimizers 100% (read_sequence_index disabled)",
+										es);
+				}
 			}
+		}
+	}
+
+	/*
+	 * Rich pipeline-step breakdown. Only shown when mmsearch is present
+	 * (without mmsearch the minimap2 pipeline never runs). Uses the
+	 * per-scan params captured at BeginCustomScan so every printed value
+	 * is the one actually fed to the batch processor — not a recomputation
+	 * off GUCs that might have changed since.
+	 */
+	if (g_per_scan_aligner_state.params_captured &&
+		g_per_scan_aligner_state.features.has_mmsearch)
+	{
+		using bioseq::simd::N_NEON::ChainingAlgorithmType;
+		using bioseq::simd::N_NEON::BaseAlignmentAlgorithmType;
+		using bioseq::simd::N_NEON::chaining_algorithm_name;
+		using bioseq::simd::N_NEON::base_alignment_algorithm_name;
+		const auto& params = g_per_scan_aligner_state.params;
+		const auto& features = g_per_scan_aligner_state.features;
+
+		if (es->format == EXPLAIN_FORMAT_TEXT) {
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfoString(es->str,
+				"One-to-many alignment:\n");
+			++es->indent;
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfoString(es->str,
+				"Single thread [workers=1]:\n");
+			++es->indent;
+
+			auto print_step = [&](const char* label) {
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str, "| %s\n", label);
+			};
+			auto print_submit = [&](const char* label) {
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str, "* %s\n", label);
+			};
+			auto print_param_int = [&](const char* name, int32_t value) {
+				appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
+				appendStringInfo(es->str, "%s: %d\n", name, static_cast<int>(value));
+			};
+			auto print_param_float = [&](const char* name, double value) {
+				appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
+				appendStringInfo(es->str, "%s: %.4f\n", name, value);
+			};
+
+			/*
+			 * "Compute indices" lists kmer_size/window_size. When the
+			 * sidecar fast path is active for some fraction of the
+			 * batch, those rows pin k=15/w=10 regardless of the user's
+			 * GUC (see dispatch_buffer.cppm's prebuilt-index branch —
+			 * the sidecar blob was sketched at INSERT with those fixed
+			 * values). Surface this divergence directly rather than
+			 * silently misrepresenting the parameter.
+			 */
+			const bool sidecar_path_active = bioseq_read_sequence_index;
+			const bool user_kw_differs =
+				sidecar_path_active &&
+				(params.kmer_size != 15 || params.window_size != 10);
+			if (user_kw_differs) {
+				print_step("Compute indices (sidecar rows pin kmer_size=15 window_size=10)");
+			} else {
+				print_step("Compute indices");
+			}
+			print_param_int("kmer_size",   params.kmer_size);
+			print_param_int("window_size", params.window_size);
+
+			print_step("Collect chain seeds");
+			print_param_int("max_occ", params.max_occ);
+
+			{
+				StringInfoData chain_label;
+				initStringInfo(&chain_label);
+				appendStringInfo(&chain_label, "Chain seeds: %s",
+								 chaining_algorithm_name(params.chaining_algorithm));
+				print_step(chain_label.data);
+				pfree(chain_label.data);
+			}
+			print_param_int  ("min_chain_score", params.min_chain_score);
+			print_param_int  ("min_seed_count",  params.min_seed_count);
+			print_param_int  ("max_chain_skip",  params.max_chain_skip);
+			print_param_int  ("max_chain_iter",  params.max_chain_iter);
+			print_param_int  ("bandwidth",       params.bandwidth);
+			print_param_int  ("max_gap",         params.max_gap);
+			print_param_float("chain_gap_scale",  static_cast<double>(params.chain_gap_scale));
+			print_param_float("chain_skip_scale", static_cast<double>(params.chain_skip_scale));
+			if (params.chaining_algorithm == ChainingAlgorithmType::RMQ) {
+				print_param_int("bandwidth_long", params.bandwidth_long);
+			}
+
+			print_step("Generate alignment regions");
+
+			print_step("Classification/filter");
+			print_param_float("mask_level",   static_cast<double>(params.mask_level));
+			print_param_int  ("mask_len",     params.mask_len);
+			print_param_float("pri_ratio",    static_cast<double>(params.pri_ratio));
+			print_param_int  ("best_n",       params.best_n);
+
+			/*
+			 * Pipeline order matches minimap2_port_with_index_impl in
+			 * minimap_port.cppm: divergence estimation → base alignment →
+			 * MAPQ. Skipped stages are omitted entirely so the printed
+			 * tree is a faithful render of what the executor actually runs.
+			 */
+			if (params.compute_divergence) {
+				print_step("Compute divergence");
+			}
+
+			if (params.do_cigar) {
+				StringInfoData base_label;
+				initStringInfo(&base_label);
+				const bool ksw2_is_single_affine =
+					params.base_alignment_algorithm ==
+						BaseAlignmentAlgorithmType::KSW2
+					&& params.gap_open1 == params.gap_open2
+					&& params.gap_ext1  == params.gap_ext2;
+				appendStringInfo(&base_label, "Perform base alignment: %s%s",
+					base_alignment_algorithm_name(params.base_alignment_algorithm),
+					ksw2_is_single_affine ? " (single-affine)" : "");
+				print_step(base_label.data);
+				pfree(base_label.data);
+				print_param_int("match_score",  params.match_score);
+				print_param_int("mismatch_pen", params.mismatch_pen);
+				print_param_int("gap_open1",    params.gap_open1);
+				print_param_int("gap_ext1",     params.gap_ext1);
+				if (params.base_alignment_algorithm ==
+					BaseAlignmentAlgorithmType::KSW2) {
+					/*
+					 * gap_open2/gap_ext2/zdrop/end_bonus are only
+					 * consulted by the dual-affine z2/d2 kernels. When
+					 * the single-affine collapse fires we still show
+					 * them for completeness — the label above tells the
+					 * user which path actually runs.
+					 */
+					print_param_int("gap_open2", params.gap_open2);
+					print_param_int("gap_ext2",  params.gap_ext2);
+					print_param_int("zdrop",     params.zdrop);
+					print_param_int("end_bonus", params.end_bonus);
+				} else {
+					/* block aligner — min/max block sizes are the relevant knobs. */
+					print_param_int("block_min_size",
+									static_cast<int32_t>(params.block_min_size));
+					print_param_int("block_max_size",
+									static_cast<int32_t>(params.block_max_size));
+				}
+			}
+
+			if (params.compute_mapq) {
+				print_step("Compute mapping quality");
+			}
+
+			print_submit("Submit results");
+
+			es->indent -= 2;
+			(void) features;  // currently only has_mmsearch is load-bearing
+		} else {
+			/* Structured formats: emit the same info via ExplainPropertyText
+			 * so machine-readable EXPLAIN still exposes every decision. */
+			ExplainOpenGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
+			ExplainPropertyText("Chaining Algorithm",
+								chaining_algorithm_name(params.chaining_algorithm), es);
+			ExplainPropertyText("Base Alignment Algorithm",
+								base_alignment_algorithm_name(params.base_alignment_algorithm), es);
+			ExplainPropertyInteger("kmer_size",   NULL, params.kmer_size,   es);
+			ExplainPropertyInteger("window_size", NULL, params.window_size, es);
+			ExplainPropertyInteger("min_chain_score", NULL, params.min_chain_score, es);
+			ExplainPropertyInteger("min_seed_count",  NULL, params.min_seed_count,  es);
+			ExplainPropertyInteger("bandwidth",       NULL, params.bandwidth,       es);
+			ExplainPropertyInteger("max_gap",         NULL, params.max_gap,         es);
+			ExplainPropertyInteger("max_occ",         NULL, params.max_occ,         es);
+			ExplainPropertyInteger("match_score",     NULL, params.match_score,     es);
+			ExplainPropertyInteger("mismatch_pen",    NULL, params.mismatch_pen,    es);
+			ExplainPropertyText("do_cigar",           params.do_cigar ? "true" : "false", es);
+			ExplainPropertyText("compute_divergence", params.compute_divergence ? "true" : "false", es);
+			ExplainPropertyText("compute_mapq",       params.compute_mapq ? "true" : "false", es);
+			ExplainCloseGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
 		}
 	}
 

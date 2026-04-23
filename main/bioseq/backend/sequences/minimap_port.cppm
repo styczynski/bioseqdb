@@ -83,6 +83,45 @@ using bioseq::chaining::chain_anchors_rmq;
 using bioseq::chaining::backtrack_chains;
 
 // ============================================================================
+// Algorithm selection enums
+// ============================================================================
+
+/// Chaining algorithm — resolved at plan time from the
+/// bioseq.aligner.chaining_algorithm GUC and dispatched with constexpr-if
+/// inside minimap2_port_with_index so the hot loop stays branchless.
+/// Values MUST match the ordinal used in the GUC enum (columnar.cppm).
+enum class ChainingAlgorithmType : uint8_t {
+    SCALAR_MM2 = 0,
+    SIMD_MM2   = 1,
+    RMQ        = 2,
+};
+
+/// Base-level alignment algorithm — KSW2 dual-affine DP (minimap2 default)
+/// vs Highway-vectorised block aligner (single-affine). Values MUST match
+/// bioseq.aligner.base_alignment_algorithm ordinals.
+enum class BaseAlignmentAlgorithmType : uint8_t {
+    KSW2          = 0,
+    BLOCK_ALIGNER = 1,
+};
+
+[[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
+    switch (mode) {
+        case ChainingAlgorithmType::SCALAR_MM2: return "Minimap2 Scalar";
+        case ChainingAlgorithmType::SIMD_MM2:   return "Minimap2 SIMD";
+        case ChainingAlgorithmType::RMQ:        return "Minimap2 RMQ";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr const char* base_alignment_algorithm_name(BaseAlignmentAlgorithmType mode) {
+    switch (mode) {
+        case BaseAlignmentAlgorithmType::KSW2:          return "KSW2";
+        case BaseAlignmentAlgorithmType::BLOCK_ALIGNER: return "Block Aligner";
+    }
+    return "unknown";
+}
+
+// ============================================================================
 // Constants — mirrors minimap2 defaults from mm_mapopt_t
 // ============================================================================
 
@@ -117,23 +156,41 @@ struct Minimap2Params {
     int32_t max_occ        = 500;    ///< max seed occurrence to keep
     int32_t mid_occ        = 500;    ///< mid-level seed occurrence threshold
 
-    /// When true, perform base-level alignment via KSW2 and produce CIGAR.
-    /// Equivalent to MM_F_CIGAR flag in minimap2. By default we use -c in build.sh
-    bool    do_cigar       = true;
+    /// When true, perform base-level alignment via the selected aligner and
+    /// produce CIGAR. Equivalent to MM_F_CIGAR flag in minimap2. Driven by
+    /// whether bioseq.cigar(...) appears in the scan target list.
+    bool    do_cigar            = true;
 
-    /// When true, use block aligner instead of KSW2 for gap-filling alignment.
-    /// Block aligner supports only single-affine gaps; extensions still use KSW2.
-    bool    use_block_aligner = true;
-    size_t  block_min_size    = 32;
-    size_t  block_max_size    = 256;
+    /// When true, run estimate_divergence_from_seeds() and populate
+    /// MatchResult::divergence. Driven by whether bioseq.divergence(...) is
+    /// requested. Leaving this false saves the O(n log n) binary-search walk
+    /// per region, with no impact on downstream fields.
+    bool    compute_divergence  = true;
+
+    /// When true, run compute_mapping_quality() and populate
+    /// MatchResult::mapq. Driven by whether bioseq.mapq(...) is requested.
+    /// Skipping this omits the O(regions) log-computation loop.
+    bool    compute_mapq        = true;
+
+    /// Block aligner tunables (ignored when base_alignment_algorithm == KSW2).
+    size_t  block_min_size      = 32;
+    size_t  block_max_size      = 256;
 
     /// Algorithm selection for chaining. Default: SCALAR_DP for backwards compatibility.
-    ChainingMode chaining_mode = ChainingMode::SCALAR_DP;
-    int32_t bandwidth_long  = 0;  ///< Long-join bandwidth (0 = disabled)
+    ChainingMode chaining_mode  = ChainingMode::SCALAR_DP;
+    int32_t bandwidth_long      = 0;  ///< Long-join bandwidth (0 = disabled)
+
+    /// Runtime chaining algorithm selector. The pipeline reads this value
+    /// once and template-dispatches so the inner loop is branchless.
+    ChainingAlgorithmType        chaining_algorithm        = ChainingAlgorithmType::SCALAR_MM2;
+    /// Runtime base-alignment algorithm selector.
+    BaseAlignmentAlgorithmType   base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
 
     /// Build ChainingParams from this Minimap2Params.
     ///
     /// Extracts only the chaining-relevant subset and precomputes derived values.
+    /// The ChainingMode (used by the shared chaining modules) is synthesized
+    /// from chaining_algorithm so both selectors stay aligned.
     [[nodiscard]] ChainingParams to_chaining_params() const {
         ChainingParams cp;
         cp.kmer_size        = kmer_size;
@@ -145,7 +202,12 @@ struct Minimap2Params {
         cp.min_chain_score  = min_chain_score;
         cp.chain_gap_scale  = chain_gap_scale;
         cp.chain_skip_scale = chain_skip_scale;
-        cp.chaining_mode    = chaining_mode;
+        switch (chaining_algorithm) {
+            case ChainingAlgorithmType::SIMD_MM2:   cp.chaining_mode = ChainingMode::SIMD_DP; break;
+            case ChainingAlgorithmType::RMQ:        cp.chaining_mode = ChainingMode::RMQ;     break;
+            case ChainingAlgorithmType::SCALAR_MM2:
+            default:                                cp.chaining_mode = ChainingMode::SCALAR_DP; break;
+        }
         cp.prepare();
         return cp;
     }
@@ -1047,7 +1109,7 @@ template<
 // append_cigar is now in bioseq_cigar module.
 
 /**
- * @brief Perform base-level alignment for each region using KSW2.
+ * @brief Perform base-level alignment for each region.
  *
  * Equivalent to align_regs() -> mm_align_skeleton() -> mm_align1() in align.c.
  *
@@ -1060,11 +1122,14 @@ template<
  * indices — no pre-encoding into uint8_t vectors is needed. The KSW2 core
  * kernel handles encoding of the specific regions it needs.
  *
- * @tparam QueryRange   compact_sequence_range type for query
- * @tparam TargetRange  compact_sequence_range type for target
- * @tparam AlphabetDim  Scoring matrix dimension (default: alphabet_size + 1)
+ * @tparam base_alignment_algorithm  Compile-time selector between KSW2 and
+ *                                   block aligner. Templated so the inner
+ *                                   gap-fill branch is resolved at compile
+ *                                   time and no runtime branch exists in the
+ *                                   hot per-region loop.
  */
 template<
+    BaseAlignmentAlgorithmType base_alignment_algorithm,
     supports_compact_sequence_range QueryRange,
     supports_compact_sequence_range TargetRange>
 void align_regions(
@@ -1180,17 +1245,16 @@ void align_regions(
                 const int32_t gap_query_len = seed_query_end - seed_query_start;
                 const int32_t gap_target_len = seed_ref_end - seed_ref_start;
                 if (gap_query_len > 0 && gap_target_len > 0) {
-                    const KswAlignResult fill_result = params.use_block_aligner
-                        ? block_aligner_align_pair<strand_reversed>(
-                            query_seq, target_seq,
-                            static_cast<size_t>(seed_query_start),
-                            static_cast<size_t>(seed_query_end),
-                            static_cast<size_t>(seed_ref_start),
-                            static_cast<size_t>(seed_ref_end),
-                            scoring_matrix, params,
-                            align_bandwidth, -1, params.zdrop,
-                            KswFlags{.approx_max = true})
-                        : ksw2_align_pair<strand_reversed>(
+                    /*
+                     * constexpr-if dispatch — the template parameter is
+                     * resolved at compile time so no runtime branch lives
+                     * in the inner region loop. KSW2 handles dual-affine
+                     * gaps; block aligner is single-affine but Highway-
+                     * vectorised.
+                     */
+                    KswAlignResult fill_result;
+                    if constexpr (base_alignment_algorithm == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+                        fill_result = block_aligner_align_pair<strand_reversed>(
                             query_seq, target_seq,
                             static_cast<size_t>(seed_query_start),
                             static_cast<size_t>(seed_query_end),
@@ -1199,6 +1263,17 @@ void align_regions(
                             scoring_matrix, params,
                             align_bandwidth, -1, params.zdrop,
                             KswFlags{.approx_max = true});
+                    } else {
+                        fill_result = ksw2_align_pair<strand_reversed>(
+                            query_seq, target_seq,
+                            static_cast<size_t>(seed_query_start),
+                            static_cast<size_t>(seed_query_end),
+                            static_cast<size_t>(seed_ref_start),
+                            static_cast<size_t>(seed_ref_end),
+                            scoring_matrix, params,
+                            align_bandwidth, -1, params.zdrop,
+                            KswFlags{.approx_max = true});
+                    }
                     if (!fill_result.cigar.empty()) {
                         append_cigar(region.cigar, fill_result.cigar);
                     }
@@ -1768,11 +1843,97 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         query_seq, target_seq, query_minimizers, target_index, params);
 }
 
+/*
+ * Internal, template-dispatched body of minimap2_port_with_index. The
+ * runtime entry point performs a single switch on
+ * (base_alignment_algorithm, chaining_algorithm) to pick the matching
+ * instantiation — so both algorithm selectors are resolved to a template
+ * parameter and `constexpr if` is used everywhere they are consumed.
+ *
+ * Not marked static — doing so would give the declaration internal linkage
+ * which conflicts with being inside a module's exported region. Template
+ * instantiations get unique names at link time so there is no ODR risk.
+ */
+template<
+    BaseAlignmentAlgorithmType base_alignment_algorithm,
+    ChainingAlgorithmType      chaining_algorithm,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    MinimizerIndex IndexT>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index_impl(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    const std::vector<MinimapSketchData>& query_minimizers,
+    const IndexT& prebuilt_target_index,
+    const Minimap2Params& params);
+
 template<
     supports_compact_sequence_range QueryRange,
     supports_compact_sequence_range TargetRange,
     MinimizerIndex IndexT>
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    const std::vector<MinimapSketchData>& query_minimizers,
+    const IndexT& prebuilt_target_index,
+    const Minimap2Params& params)
+{
+    /*
+     * Nested runtime switch — promotes BOTH selectors into template
+     * parameters so the per-region alignment loop and the chaining
+     * dispatch both compile in their branchless forms. 2×3 = 6 template
+     * instantiations; each is specialised for the fixed algorithm pair.
+     */
+    switch (params.base_alignment_algorithm) {
+        case BaseAlignmentAlgorithmType::KSW2:
+            switch (params.chaining_algorithm) {
+                case ChainingAlgorithmType::SIMD_MM2:
+                    return minimap2_port_with_index_impl<
+                        BaseAlignmentAlgorithmType::KSW2,
+                        ChainingAlgorithmType::SIMD_MM2>(
+                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+                case ChainingAlgorithmType::RMQ:
+                    return minimap2_port_with_index_impl<
+                        BaseAlignmentAlgorithmType::KSW2,
+                        ChainingAlgorithmType::RMQ>(
+                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+                case ChainingAlgorithmType::SCALAR_MM2:
+                default:
+                    return minimap2_port_with_index_impl<
+                        BaseAlignmentAlgorithmType::KSW2,
+                        ChainingAlgorithmType::SCALAR_MM2>(
+                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+            }
+        case BaseAlignmentAlgorithmType::BLOCK_ALIGNER:
+        default:
+            switch (params.chaining_algorithm) {
+                case ChainingAlgorithmType::SIMD_MM2:
+                    return minimap2_port_with_index_impl<
+                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
+                        ChainingAlgorithmType::SIMD_MM2>(
+                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+                case ChainingAlgorithmType::RMQ:
+                    return minimap2_port_with_index_impl<
+                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
+                        ChainingAlgorithmType::RMQ>(
+                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+                case ChainingAlgorithmType::SCALAR_MM2:
+                default:
+                    return minimap2_port_with_index_impl<
+                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
+                        ChainingAlgorithmType::SCALAR_MM2>(
+                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+            }
+    }
+}
+
+template<
+    BaseAlignmentAlgorithmType base_alignment_algorithm,
+    ChainingAlgorithmType      chaining_algorithm,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    MinimizerIndex IndexT>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index_impl(
     const compact_sequence_range<QueryRange>& query_seq,
     const compact_sequence_range<TargetRange>& target_seq,
     const std::vector<MinimapSketchData>& query_minimizers,
@@ -1825,18 +1986,23 @@ template<
     // Each chain_anchors_* function has its own EASY_BLOCK covering the
     // full body (mg_lchain_dp / mg_lchain_rmq / mg_lchain_simd) plus
     // sub-blocks for forward-pass and backtracking.
+    //
+    // Dispatched via `constexpr if` on the chaining_algorithm template
+    // parameter so the per-chain inner loops are compiled branchlessly —
+    // promoted from the Minimap2Params enum once in the outer switch of
+    // minimap2_port_with_index.
     const auto chaining_params = params.to_chaining_params();
     auto [chains, reordered_anchors] = [&]()
         -> std::pair<std::vector<Chain>, std::vector<Anchor>>
     {
-        switch (chaining_params.chaining_mode) {
-            case ChainingMode::SIMD_DP:
-                return chain_anchors_simd(anchors, chaining_params);
-            case ChainingMode::RMQ:
-                return chain_anchors_rmq(anchors, chaining_params);
-            case ChainingMode::SCALAR_DP:
-            default:
-                return chain_anchors_scalar(anchors, chaining_params);
+        if constexpr (chaining_algorithm == ChainingAlgorithmType::SIMD_MM2) {
+            return chain_anchors_simd(anchors, chaining_params);
+        } else if constexpr (chaining_algorithm == ChainingAlgorithmType::RMQ) {
+            return chain_anchors_rmq(anchors, chaining_params);
+        } else {
+            static_assert(chaining_algorithm == ChainingAlgorithmType::SCALAR_MM2,
+                          "Unhandled ChainingAlgorithmType variant");
+            return chain_anchors_scalar(anchors, chaining_params);
         }
     }();
 
@@ -1858,8 +2024,16 @@ template<
 
     // ---- Phase 6: Estimate divergence from seeds (mm_est_err equivalent) ----
     // estimate_divergence_from_seeds has EASY_BLOCK("mm_est_err") inside.
-    estimate_divergence_from_seeds(regions, query_minimizers, reordered_anchors,
-                                   query_len, params.kmer_size, target_len);
+    // Gated on compute_divergence — if the target list never projects
+    // bioseq.divergence() there is no reason to spend the binary-search
+    // walk per region. MatchResult::divergence stays at its -1.f sentinel
+    // in that case, which maps back to SQL NULL.
+    if (params.compute_divergence) {
+        estimate_divergence_from_seeds(regions, query_minimizers, reordered_anchors,
+                                       query_len, params.kmer_size, target_len);
+    } else {
+        JustLog("[minimap_port] Skipping mm_est_err (compute_divergence=false)");
+    }
 
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
     // align_regions has EASY_BLOCK("mm_align_skeleton") inside.
@@ -1871,18 +2045,26 @@ template<
             static_cast<int8_t>(params.sc_ambi));
 
         // Sequences are passed directly — encoding of specific sub-regions
-        // happens lazily inside the KSW2 core kernel.
-        align_regions(regions, reordered_anchors,
-                      query_seq, target_seq,
-                      scoring_matrix, params);
+        // happens lazily inside the KSW2 core kernel. Base-alignment algorithm
+        // is pinned to base_alignment_algorithm at compile time.
+        align_regions<base_alignment_algorithm>(
+            regions, reordered_anchors,
+            query_seq, target_seq,
+            scoring_matrix, params);
 
         // Re-classify after DP (like align_regs does in map.c:572-574)
         classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
         filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
+    } else {
+        JustLog("[minimap_port] Skipping mm_align_skeleton (do_cigar=false)");
     }
 
     // ---- Phase 8: Compute MAPQ (EASY_BLOCK inside the fn) ----
-    compute_mapping_quality(regions, params, 0);
+    if (params.compute_mapq) {
+        compute_mapping_quality(regions, params, 0);
+    } else {
+        JustLog("[minimap_port] Skipping mm_set_mapq (compute_mapq=false)");
+    }
 
     // ---- Phase 9: Convert to MatchResult ----
     std::vector<MatchResult> results;

@@ -34,6 +34,42 @@ extern bool bioseq_enable_page_cache;
 extern int bioseq_page_cache_size;
 extern bool bioseq_index_scan;
 extern bool bioseq_update_index_on_insert;
+extern bool bioseq_read_sequence_index;
+
+/* Aligner parameter GUCs — see sequences/minimap_port.cppm Minimap2Params
+ * for field-by-field documentation. Kept in plain extern form so any module
+ * that #includes columnar.h can read them without additional plumbing. */
+extern int  bioseq_aligner_kmer_size;
+extern int  bioseq_aligner_window_size;
+extern int  bioseq_aligner_max_gap;
+extern int  bioseq_aligner_max_gap_ref;
+extern int  bioseq_aligner_bandwidth;
+extern int  bioseq_aligner_bandwidth_long;
+extern int  bioseq_aligner_max_chain_skip;
+extern int  bioseq_aligner_max_chain_iter;
+extern int  bioseq_aligner_min_seed_count;
+extern int  bioseq_aligner_min_chain_score;
+extern double bioseq_aligner_chain_gap_scale;
+extern double bioseq_aligner_chain_skip_scale;
+extern double bioseq_aligner_mask_level;
+extern int  bioseq_aligner_mask_len;
+extern double bioseq_aligner_pri_ratio;
+extern int  bioseq_aligner_best_n;
+extern int  bioseq_aligner_match_score;
+extern int  bioseq_aligner_mismatch_pen;
+extern int  bioseq_aligner_gap_open1;
+extern int  bioseq_aligner_gap_ext1;
+extern int  bioseq_aligner_gap_open2;
+extern int  bioseq_aligner_gap_ext2;
+extern int  bioseq_aligner_sc_ambi;
+extern int  bioseq_aligner_zdrop;
+extern int  bioseq_aligner_end_bonus;
+extern int  bioseq_aligner_max_occ;
+extern int  bioseq_aligner_mid_occ;
+extern int  bioseq_aligner_block_min_size;
+extern int  bioseq_aligner_block_max_size;
+extern int  bioseq_aligner_chaining_algorithm;
+extern int  bioseq_aligner_base_alignment_algorithm;
 
 
 /* called when the user changes options on the given relation */

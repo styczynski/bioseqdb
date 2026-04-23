@@ -1004,3 +1004,110 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq)
     SUPPORT mmsearch_support
     PARALLEL SAFE;
 
+-- ============================================================================
+-- aligner_options — composite type for per-call overrides of
+-- bioseq.aligner.* GUCs. Field order MUST match apply_aligner_options_override
+-- in columnar_customscan.cppm; adding/removing a field requires updating
+-- both sides simultaneously.
+--
+-- NULL in any field means "inherit the corresponding bioseq.aligner.* GUC".
+-- The aligner_options() helper below builds a row where every field is
+-- defaulted to NULL so "aligner_options(max_occ => 69)" overrides only
+-- max_occ and leaves every other field at its GUC value.
+--
+-- For chaining_algorithm / base_alignment_algorithm the user supplies the
+-- enum ordinal (matching bioseq.aligner.chaining_algorithm's order:
+-- 0 = scalar_mm2, 1 = simd_mm2, 2 = rmq; and
+-- 0 = ksw2, 1 = block_aligner for base alignment).
+-- ============================================================================
+CREATE TYPE bioseq_aligner_options AS (
+    kmer_size                 integer,
+    window_size               integer,
+    max_gap                   integer,
+    max_gap_ref               integer,
+    bandwidth                 integer,
+    bandwidth_long            integer,
+    max_chain_skip            integer,
+    max_chain_iter            integer,
+    min_seed_count            integer,
+    min_chain_score           integer,
+    chain_gap_scale           double precision,
+    chain_skip_scale          double precision,
+    mask_level                double precision,
+    mask_len                  integer,
+    pri_ratio                 double precision,
+    best_n                    integer,
+    match_score               integer,
+    mismatch_pen              integer,
+    gap_open1                 integer,
+    gap_ext1                  integer,
+    gap_open2                 integer,
+    gap_ext2                  integer,
+    sc_ambi                   integer,
+    zdrop                     integer,
+    end_bonus                 integer,
+    max_occ                   integer,
+    mid_occ                   integer,
+    block_min_size            integer,
+    block_max_size            integer,
+    chaining_algorithm        integer,
+    base_alignment_algorithm  integer
+);
+
+CREATE OR REPLACE FUNCTION aligner_options(
+    kmer_size                 integer  DEFAULT NULL,
+    window_size               integer  DEFAULT NULL,
+    max_gap                   integer  DEFAULT NULL,
+    max_gap_ref               integer  DEFAULT NULL,
+    bandwidth                 integer  DEFAULT NULL,
+    bandwidth_long            integer  DEFAULT NULL,
+    max_chain_skip            integer  DEFAULT NULL,
+    max_chain_iter            integer  DEFAULT NULL,
+    min_seed_count            integer  DEFAULT NULL,
+    min_chain_score           integer  DEFAULT NULL,
+    chain_gap_scale           double precision DEFAULT NULL,
+    chain_skip_scale          double precision DEFAULT NULL,
+    mask_level                double precision DEFAULT NULL,
+    mask_len                  integer  DEFAULT NULL,
+    pri_ratio                 double precision DEFAULT NULL,
+    best_n                    integer  DEFAULT NULL,
+    match_score               integer  DEFAULT NULL,
+    mismatch_pen              integer  DEFAULT NULL,
+    gap_open1                 integer  DEFAULT NULL,
+    gap_ext1                  integer  DEFAULT NULL,
+    gap_open2                 integer  DEFAULT NULL,
+    gap_ext2                  integer  DEFAULT NULL,
+    sc_ambi                   integer  DEFAULT NULL,
+    zdrop                     integer  DEFAULT NULL,
+    end_bonus                 integer  DEFAULT NULL,
+    max_occ                   integer  DEFAULT NULL,
+    mid_occ                   integer  DEFAULT NULL,
+    block_min_size            integer  DEFAULT NULL,
+    block_max_size            integer  DEFAULT NULL,
+    chaining_algorithm        integer  DEFAULT NULL,
+    base_alignment_algorithm  integer  DEFAULT NULL
+) RETURNS bioseq_aligner_options AS $$
+    SELECT ROW(
+        kmer_size, window_size, max_gap, max_gap_ref, bandwidth, bandwidth_long,
+        max_chain_skip, max_chain_iter, min_seed_count, min_chain_score,
+        chain_gap_scale, chain_skip_scale, mask_level, mask_len, pri_ratio,
+        best_n, match_score, mismatch_pen, gap_open1, gap_ext1, gap_open2,
+        gap_ext2, sc_ambi, zdrop, end_bonus, max_occ, mid_occ,
+        block_min_size, block_max_size,
+        chaining_algorithm, base_alignment_algorithm
+    )::bioseq_aligner_options
+$$ LANGUAGE SQL IMMUTABLE;
+
+-- Overload of mmsearch that accepts an aligner_options payload. The third
+-- argument is read by ColumnarScan_BeginCustomScan (see
+-- apply_aligner_options_override in columnar_customscan.cppm) and overlays
+-- the non-NULL fields on top of the bioseq.aligner.* GUC snapshot. The
+-- function itself is still a tautology at the scalar level.
+CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq,
+                                    opts bioseq_aligner_options)
+    RETURNS BOOLEAN
+    AS 'MODULE_PATHNAME', 'mmsearch'
+    LANGUAGE C IMMUTABLE
+    SUPPORT mmsearch_support
+    PARALLEL SAFE;
+
