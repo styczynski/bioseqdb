@@ -290,7 +290,7 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	buffer.print_ptrs();
 	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
-	const auto& [present_columns_left_count, present_rows_last_left] = mat.partial_fill_with_offsets(
+	mat.partial_fill_with_offsets(
 		d, end - iter, offsets, seq.read_cptr(iter) //static_cast<const typename seq_traits::storage_unit*>(&(*iter))
 	);
 	mat.transpose(d);

@@ -222,8 +222,13 @@ TEMPLATE_TEST_CASE("SIMD matrix partial_fill_with_offsets()/fill_with_offsets() 
         partial_rows_counter = 0;
     }
 
+    if (!is_full) {
+        // partial fill counts lanes by number of offsets
+        expected_full_rows += (256 - lanes);
+    }
+
     ASSERT(loaded == expected_matrix);
-    ASSERT(loaded_full_rows == expected_full_rows, fmt::format("Correct count of loaded full rows fake_context={} is_full={}", fake_context, is_full));
+    ASSERT(loaded_full_rows == expected_full_rows, fmt::format("Correct count of loaded full rows fake_context={} is_full={} lanes={}", fake_context, is_full, lanes));
     ASSERT(loaded_partial_filled_rows == expected_partial_filled_rows, fmt::format("Correct count of loaded partial rows fake_context={} is_full={}", fake_context, is_full));
     
 }
