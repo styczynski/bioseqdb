@@ -50,9 +50,28 @@ find_package(sqlgen REQUIRED)
 #     sql/bioseq--1.0.sql
 # )
 
-file(GLOB_RECURSE A_SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/aligner/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.c ${CMAKE_CURRENT_LIST_DIR}/aligner/*.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*.cpp)
-file(GLOB_RECURSE A_SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/alignment/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm)
-file(GLOB_RECURSE A_SRC_TESTS ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/*_test.cpp ${CMAKE_CURRENT_LIST_DIR}/aligner/**/*_test.cpp)
+# === bench target (unit-test binary for minimap_port + tool_minimap2) ===
+# Sources for the minimap2 reference implementation live under
+# ../bench/tool_minimap2/** — they are treated as a black box and only
+# linked into the test binary, never into the Postgres extension.
+file(GLOB_RECURSE A_SRC_FILES
+  ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/minimap2/*.c
+  ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/minimap2/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../bench/bench_main.cpp)
+# CXX modules: bench-specific (tool_minimap2 wrapper, generator, evaluation,
+# plus the minimap2-internal `alignment` module) + the bioseq module tree
+# still needed by bioseq's minimap_port.
+file(GLOB_RECURSE A_SRC_MOD_FILES
+  ${CMAKE_CURRENT_LIST_DIR}/../bench/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm)
+file(GLOB_RECURSE A_SRC_TESTS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../bench/*_test.cpp)
 
 list (APPEND A_SRC_TESTS ${A_SRC_FILES})
 
@@ -62,11 +81,11 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 AddCommonTargetX(
   bioseq_aligner
   TYPE EXEC
-  MAIN "main\.cpp"
+  MAIN "bench_main\.cpp"
   CXX 26
   RELOCATABLE
   NAME bioseq_aligner
-  COMMENT "BioSeq Aligner"
+  COMMENT "BioSeq Aligner benchmark harness"
   VERSION ${INSTALL_VERSION}
   COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
@@ -74,6 +93,7 @@ AddCommonTargetX(
     "${CMAKE_CURRENT_LIST_DIR}/include2"
     "${CMAKE_CURRENT_LIST_DIR}/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
+    "${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
@@ -94,6 +114,7 @@ AddCommonTargetX(
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/../bench"
   CXX_MOD_FILES
     ${A_SRC_MOD_FILES}
   BOOST

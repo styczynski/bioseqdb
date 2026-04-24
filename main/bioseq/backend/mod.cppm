@@ -3,7 +3,7 @@
  * mod.cppm
  *
  * Extension entry points: PG_MODULE_MAGIC, _PG_init and the SQL-level C
- * functions exported to the bioseq extension script (testtest, mmsearch,
+ * functions exported to the bioseq extension script (mmsearch,
  * mmsearch_support). The C functions are defined with extern "C" linkage
  * so PostgreSQL's fmgr can call them directly.
  *
@@ -18,7 +18,6 @@ module;
 
 export module bioseq_mod;
 
-import alignment;
 import mlogging;
 import bioseq_columnar;
 import pg_utils;
@@ -43,20 +42,6 @@ _PG_init()
 	log_configure();
 	JustLog("[bioseq] pg: _PG_init() entered");
 	bioseq_init();
-}
-
-/*
- * testtest smoke-tests the ksw2 aligner entry point by invoking it with
- * empty arguments. Useful for verifying that the module actually loads and
- * linked against the alignment library.
- */
-CXX_PG_FUNCTION_INFO_V1(testtest);
-Datum testtest(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: testtest() entered");
-	auto align_result = make0<ksw_extz_t>();
-	Aligner<ALIGN_ALGORITHM_KSW2>::z2(nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0, 0, align_result);
-	JustLog("[bioseq] pg: testtest() align complete");
-	return BoolGetDatum(true);
 }
 
 /*

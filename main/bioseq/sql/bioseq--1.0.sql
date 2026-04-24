@@ -673,13 +673,6 @@ CREATE FUNCTION vtimestamptz_le(timestamptz, timestamptz) RETURNS bool AS 'MODUL
 CREATE FUNCTION vtimestamptz_ge(timestamptz, timestamptz) RETURNS bool AS 'MODULE_PATHNAME' LANGUAGE C IMMUTABLE STRICT;
 
 
--- TUTAJ
-CREATE OR REPLACE FUNCTION testtest()
-    RETURNS BOOLEAN
-    AS 'MODULE_PATHNAME'
-    LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
-
 CREATE FUNCTION mmsearch_support(internal)
     RETURNS internal
     AS 'MODULE_PATHNAME'
