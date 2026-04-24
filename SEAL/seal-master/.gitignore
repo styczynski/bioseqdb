@@ -1,0 +1,8 @@
+bin
+build
+distrib
+data
+*.fasta
+*.fastq
+log*.txt
+*~
