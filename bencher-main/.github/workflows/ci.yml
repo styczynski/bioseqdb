@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  gcc:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+        gcc_version: [13, 14]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GCC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-${{ matrix.gcc_version }} g++-${{ matrix.gcc_version }}
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_COMPILER=g++-${{ matrix.gcc_version }} \
+            -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j $(nproc)
+
+      - name: Test
+        working-directory: build
+        run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+  clang:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+        clang_version: [17, 18, 19]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Clang
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ matrix.clang_version }}
+          sudo apt-get install -y libc++-${{ matrix.clang_version }}-dev libc++abi-${{ matrix.clang_version }}-dev
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_COMPILER=clang++-${{ matrix.clang_version }} \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+            -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j $(nproc)
+
+      - name: Test
+        working-directory: build
+        run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+  msvc:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j $env:NUMBER_OF_PROCESSORS
+
+      - name: Test
+        working-directory: build
+        run: ctest -C ${{ matrix.build_type }} --output-on-failure
+
+  macos:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j $(sysctl -n hw.ncpu)
+
+      - name: Test
+        working-directory: build
+        run: ctest -C ${{ matrix.build_type }} --output-on-failure

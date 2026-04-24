@@ -1,0 +1,35 @@
+// Copyright (c) 2015-2022, Lawrence Livermore National Security, LLC.
+// See top-level LICENSE file for details.
+
+/// \file Json.h
+/// Json output formatter
+
+#pragma once
+
+#include "Formatter.h"
+
+#include <memory>
+
+namespace cali
+{
+
+class CaliperMetadataAccessInterface;
+struct QuerySpec;
+
+/// \brief Prints snapshot records as sparse JSON
+/// \ingroup ReaderAPI
+class JsonSplitFormatter : public Formatter
+{
+    struct JsonSplitFormatterImpl;
+    std::shared_ptr<JsonSplitFormatterImpl> mP;
+
+public:
+
+    JsonSplitFormatter(const QuerySpec& spec);
+
+    void process_record(CaliperMetadataAccessInterface&, const EntryList&);
+
+    void flush(CaliperMetadataAccessInterface&, std::ostream& os);
+};
+
+} // namespace cali

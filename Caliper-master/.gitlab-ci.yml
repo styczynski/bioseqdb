@@ -1,0 +1,230 @@
+###############################################################################
+# Copyright (c) 2022-25, Lawrence Livermore National Security, LLC and RADIUSS
+# project contributors. See the COPYRIGHT file for details.
+#
+# SPDX-License-Identifier: (MIT)
+###############################################################################
+
+# DESCRIPTION:
+###############################################################################
+# General GitLab pipelines configurations for supercomputers and Linux clusters
+# at Lawrence Livermore National Laboratory (LLNL).
+# This entire pipeline is LLNL-specific
+#
+# This file uses GitLab CI Components from radiuss-shared-ci (requires GitLab 17.0+).
+# Components provide better versioning, type-safe inputs, and cleaner syntax.
+#
+# In addition, each project should have:
+# - .gitlab/custom-jobs.yml - Job templates for child pipelines
+# - .gitlab/custom-variables.yml - Machine-specific variables
+# - .gitlab/jobs/${CI_MACHINE}.yml - Machine-specific job definitions
+###############################################################################
+
+###############################################################################
+# VARIABLES
+###############################################################################
+
+variables:
+
+# LC GITLAB CONFIGURATION
+# Use an LLNL service user to run CI. This prevents from running pipelines as
+# an actual user.
+  LLNL_SERVICE_USER: ""
+# Use the service user workspace. Solves permission issues, stores everything
+# at the same location whoever triggers a pipeline.
+#  CUSTOM_CI_BUILDS_DIR: ""
+# Optimize submodules usage: only fetch the ones we need.
+# Note: We don't need to fetch dependencies handled by Spack.
+  GIT_SUBMODULE_STRATEGY: normal
+  GIT_SUBMODULE_DEPTH: 1
+  GIT_SUBMODULE_UPDATE_FLAGS: --jobs 2
+  GIT_SUBMODULE_PATHS: scripts/radiuss-spack-configs scripts/uberenv
+
+# SHARED_CI CONFIGURATION
+# Required information about GitHub repository
+  GITHUB_PROJECT_NAME: "Caliper"
+  GITHUB_PROJECT_ORG: "LLNL"
+# Set the build-and-test command.
+# Nested variables are allowed and useful to customize the job command. We
+# prevent variable expansion so that you can define them at job level.
+  JOB_CMD:
+    value: "./scripts/gitlab/build-and-test.sh"
+    expand: false
+
+###############################################################################
+# MAIN PIPELINE STAGES
+###############################################################################
+# IMPORTANT: You must define stages yourself to allow customization.
+# The following stages are REQUIRED by RADIUSS Shared CI components:
+stages:
+  - prerequisites           # Required: machine availability checks
+  - build-and-test          # Required: build and test jobs
+
+###############################################################################
+# INCLUDES
+###############################################################################
+
+include:
+  # Sets ID tokens for every job using `default:`
+  - project: 'lc-templates/id_tokens'
+    file: 'id_tokens.yml'
+
+  # Base pipeline templates and utilities
+  - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/base-pipeline@v2026.02.0
+    inputs:
+      github_project_name: $GITHUB_PROJECT_NAME
+      github_project_org: $GITHUB_PROJECT_ORG
+      github_token: $RSCI_GITHUB_STATUS_TOKEN
+
+  # Draft PR filter
+  - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/utility-draft-pr-filter@v2026.02.0
+    inputs:
+      github_token: $RSCI_GITHUB_STATUS_TOKEN
+      github_project_name: $GITHUB_PROJECT_NAME
+      github_project_org: $GITHUB_PROJECT_ORG
+      always_run_pattern: "^develop$|^master$|^v[0-9.]*$|^releases/$"
+
+  # Local custom variables (used for component inputs and forwarded to child pipelines)
+  - local: '.gitlab/custom-variables.yml'
+
+###############################################################################
+# MACHINE PIPELINES
+###############################################################################
+# We organize the build-and-test stage with sub-pipelines. Each sub-pipeline
+# corresponds to a test batch on a given machine.
+
+# Note: .machine-check template is provided by the base-pipeline component
+# and includes better error handling, validation, and GitHub status reporting.
+# Trigger a build-and-test pipeline for each machine.
+# Comment out the machine blocks you don't need.
+
+# One job to generate the job list for all the subpipelines
+generate-job-lists:
+  stage: prerequisites
+  tags: [shell, oslic]
+  variables:
+    RADIUSS_JOBS_PATH: "scripts/radiuss-spack-configs/gitlab/radiuss-jobs"
+    LOCAL_JOBS_PATH: ".gitlab/jobs"
+  script:
+    - cat ${RADIUSS_JOBS_PATH}/dane.yml ${LOCAL_JOBS_PATH}/dane.yml > dane-jobs.yml
+    - cat ${RADIUSS_JOBS_PATH}/matrix.yml ${LOCAL_JOBS_PATH}/matrix.yml > matrix-jobs.yml
+    - cat ${RADIUSS_JOBS_PATH}/corona.yml ${LOCAL_JOBS_PATH}/corona.yml > corona-jobs.yml
+    - cat ${RADIUSS_JOBS_PATH}/tioga.yml ${LOCAL_JOBS_PATH}/tioga.yml > tioga-jobs.yml
+    - cat ${RADIUSS_JOBS_PATH}/tuolumne.yml ${LOCAL_JOBS_PATH}/tuolumne.yml > tuolumne-jobs.yml
+  artifacts:
+    paths:
+      - dane-jobs.yml
+      - matrix-jobs.yml
+      - corona-jobs.yml
+      - tioga-jobs.yml
+      - tuolumne-jobs.yml
+
+# DANE
+dane-up-check:
+  extends: [.dane, .machine-check]
+  variables:
+    ASSOCIATED_CHILD_PIPELINE: "dane-build-and-test"
+
+dane-build-and-test:
+  extends: [.dane, .build-and-test]
+  needs: [dane-up-check, generate-job-lists]
+  trigger:
+    include:
+      - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/dane-pipeline@v2026.02.0
+        inputs:
+          job_cmd: $JOB_CMD
+          shared_alloc: $DANE_SHARED_ALLOC
+          job_alloc: $DANE_JOB_ALLOC
+          github_project_name: $GITHUB_PROJECT_NAME
+          github_project_org: $GITHUB_PROJECT_ORG
+      - local: '.gitlab/custom-jobs.yml'
+      - artifact: 'dane-jobs.yml'
+        job: 'generate-job-lists'
+
+# MATRIX
+matrix-up-check:
+  extends: [.matrix, .machine-check]
+  variables:
+    ASSOCIATED_CHILD_PIPELINE: "matrix-build-and-test"
+
+matrix-build-and-test:
+  extends: [.matrix, .build-and-test]
+  needs: [matrix-up-check, generate-job-lists]
+  trigger:
+    include:
+      - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/matrix-pipeline@v2026.02.0
+        inputs:
+          job_cmd: $JOB_CMD
+          shared_alloc: $MATRIX_SHARED_ALLOC
+          job_alloc: $MATRIX_JOB_ALLOC
+          github_project_name: $GITHUB_PROJECT_NAME
+          github_project_org: $GITHUB_PROJECT_ORG
+      - local: '.gitlab/custom-jobs.yml'
+      - artifact: 'matrix-jobs.yml'
+        job: 'generate-job-lists'
+
+# CORONA
+corona-up-check:
+  extends: [.corona, .machine-check]
+  variables:
+    ASSOCIATED_CHILD_PIPELINE: "corona-build-and-test"
+
+corona-build-and-test:
+  extends: [.corona, .build-and-test]
+  needs: [corona-up-check, generate-job-lists]
+  trigger:
+    include:
+      - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/corona-pipeline@v2026.02.0
+        inputs:
+          job_cmd: $JOB_CMD
+          shared_alloc: $CORONA_SHARED_ALLOC
+          job_alloc: $CORONA_JOB_ALLOC
+          github_project_name: $GITHUB_PROJECT_NAME
+          github_project_org: $GITHUB_PROJECT_ORG
+      - local: '.gitlab/custom-jobs.yml'
+      - artifact: 'corona-jobs.yml'
+        job: 'generate-job-lists'
+
+# TIOGA
+tioga-up-check:
+  extends: [.tioga, .machine-check]
+  variables:
+    ASSOCIATED_CHILD_PIPELINE: "tioga-build-and-test"
+
+tioga-build-and-test:
+  extends: [.tioga, .build-and-test]
+  needs: [tioga-up-check, generate-job-lists]
+  trigger:
+    include:
+      - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/tioga-pipeline@v2026.02.0
+        inputs:
+          job_cmd: $JOB_CMD
+          shared_alloc: $TIOGA_SHARED_ALLOC
+          job_alloc: $TIOGA_JOB_ALLOC
+          github_project_name: $GITHUB_PROJECT_NAME
+          github_project_org: $GITHUB_PROJECT_ORG
+      - local: '.gitlab/custom-jobs.yml'
+      - artifact: 'tioga-jobs.yml'
+        job: 'generate-job-lists'
+
+# TUOLUMNE
+tuolumne-up-check:
+  extends: [.tuolumne, .machine-check]
+  variables:
+    ASSOCIATED_CHILD_PIPELINE: "tuolumne-build-and-test"
+
+tuolumne-build-and-test:
+  extends: [.tuolumne, .build-and-test]
+  needs: [tuolumne-up-check, generate-job-lists]
+  trigger:
+    include:
+      - component: $CI_SERVER_FQDN/radiuss/radiuss-shared-ci/tuolumne-pipeline@v2026.02.0
+        inputs:
+          job_cmd: $JOB_CMD
+          shared_alloc: $TUOLUMNE_SHARED_ALLOC
+          job_alloc: $TUOLUMNE_JOB_ALLOC
+          github_project_name: $GITHUB_PROJECT_NAME
+          github_project_org: $GITHUB_PROJECT_ORG
+      - local: '.gitlab/custom-jobs.yml'
+      - artifact: 'tuolumne-jobs.yml'
+        job: 'generate-job-lists'
