@@ -109,6 +109,13 @@ public:
 			return key;
 		}
 
+		// Forward to the underlying lexic hasher — `minimap_int_hasher` is a
+		// deterministic post-hash on the lexic result, so its per-lane palindrome
+		// status is exactly whatever the base hasher reports.
+		[[nodiscard]] constexpr hn::Mask<d_t> get_palindrome_mask(const d_t& d) const {
+			return base_hasher.get_palindrome_mask(d);
+		}
+
 
 	};
 

@@ -252,13 +252,22 @@ inline void collect_minimizers(
 			} else {
 				const auto [c_hash, c_strand] = hasher.next(static_cast<hash_val_t>(*iter), static_cast<hash_val_t>(*iter));
 
-
-				if (c_strand == SEQUENCE_STRAND_EQUAL) continue;
+				// NOTE: minimap2 skips "symmetric k-mers" (fwd == rc palindromes) by
+				// `continue`ing past the push/update logic — the iteration disappears from
+				// the minimizer window entirely. The SIMD path cannot mirror that without
+				// per-lane pos tracking (different lanes see different palindromes), so to
+				// keep scalar and SIMD in lock-step we let the palindrome iter through but
+				// push `MinimapSketch::getMax()`. A max-valued sketch can never become a
+				// window minimum, so the "don't know the strand" intent is preserved: the
+				// palindromic k-mer never gets emitted as a minimizer. The difference is
+				// only structural (window slot is consumed instead of skipped), which is
+				// exactly what the SIMD path does with the equivalent IfThenElse mask.
 				const auto kmer_span = (pos + 1 < k && IS_INIT) ? pos + 1 : k;
 				++pos;
 
-				// We don't need to check: kmer_span < max_span
-				if ((pos >= k || !IS_INIT)) {
+				if (c_strand == SEQUENCE_STRAND_EQUAL) {
+					buffer.push_back(MinimapSketch::getMax());
+				} else if ((pos >= k || !IS_INIT)) {
 					buffer.push_back(std::move(MinimapSketch({
 						.sketch { .sketch {
                             // FIX THIS SHOULD BE HASH!!!!! THIS IS COMMENTED TEMPORARILY
@@ -395,7 +404,12 @@ inline void collect_minimizers_simd(
             hn::StoreU(current_min_pos, d, temp_buffer3);
         }
         for(size_t i=0; i<hn::Lanes(d); ++i) {
-            if (temp_buffer2[i]) {
+            // Skip lanes whose current_min was reset to max_val by a prior emit (mask
+            // transition emit in particular). Without this, once a lane's "final" min
+            // has been emitted and reset to `max_val`, any subsequent submit (e.g. the
+            // finish_fn tail emit) would publish (real_pos, max_val) as a phantom pair
+            // whose hash is the sentinel.
+            if (temp_buffer2[i] && temp_buffer1[i] != max_val) {
                 if constexpr (ignore_distance) {
                     // The current_min for lane `i` was stored at buffer slot `temp_buffer3[i]` in a
                     // PREVIOUS iteration. `current_pos` is the slot just written in THIS iteration.
@@ -441,6 +455,24 @@ inline void collect_minimizers_simd(
     };
 
 	constexpr bool IS_INIT = true;
+	// Track the mask from the previous handler call so we can detect per-lane
+	// "just became inactive" transitions. When a lane is masked off in the
+	// partial-matrix tail its iterations no longer contribute valid hashes,
+	// and its still-pending current_min will be silently lost (no elapsed
+	// rescan, no finish_fn path reaches it) unless we flush it at the exact
+	// moment it transitions. Initialise to all-false so the first handler
+	// call sees "every active lane just came online" (harmless — current_min
+	// is still max_val and the emit guard in submit_results skips it).
+	hash_mask_t prev_mask = hn::MaskFalse(dd);
+	// Also track the `new_min_mask` from the previous handler call. Needed by
+	// finish_fn: the submit_results<true> distance formula derives `distance`
+	// from buffer-slot arithmetic, which cannot distinguish "current_min was
+	// just set at this iter" (real distance = 0) from "current_min was set
+	// exactly `capacity` iters ago" (real distance = capacity) because both
+	// produce current_min_pos == last_write_pos. At finish_fn we need to
+	// know which case we are in, so we remember the flag for the iter that
+	// just finished.
+	hash_mask_t prev_new_min_mask = hn::MaskFalse(dd);
 	iterate_sequence_bp_simd_offsets(seq, seq_begin, seq_end, k+w-1, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
         //JustLog("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
@@ -465,6 +497,14 @@ inline void collect_minimizers_simd(
 		// feeds their garbage hashes into `new_min_mask` / `current_min` via later Le checks —
 		// producing phantom minimizers at positions beyond `seq.bp_size()`.
 		hash_vec = hn::IfThenElse(mask, hash_vec, max_vec);
+		// Also mask palindromic k-mers (lanes where state_forward == state_reverse_compl).
+		// The scalar path pushes `MinimapSketch::getMax()` for EQUAL strand to mirror
+		// minimap2's palindrome skip while keeping pos alignment (see comment in
+		// collect_minimizers's else-branch). We do the same here so that scalar and
+		// SIMD produce identical minimizer sets even on narrow storage_unit widths
+		// (uint8_t) where the effective k-mer is short enough that palindromic 2/4-mers
+		// appear frequently in the test sequences.
+		hash_vec = hn::IfThenElse(hasher.get_palindrome_mask(d), max_vec, hash_vec);
 
 		// The scalar collect_minimizers increments its `pos` BEFORE this push check (so its first
 		// real k-mer is pushed at scalar-iter `k - 1`, where the hasher holds chars[0..k-1]).
@@ -479,11 +519,50 @@ inline void collect_minimizers_simd(
 			buffer.push_back(std::move(hash_vec_t(max_vec)));
 		}
 
+		// Flush pending current_min for lanes that just became inactive. Equivalent to the
+		// scalar path's "end-of-sequence emit" but for a subset of lanes: each lane reaches
+		// the end of its own slice of the sequence at a different iteration (determined by
+		// offsets × letters_per_unit + valid bps). A lane that's been holding a stable
+		// current_min right up to that boundary would otherwise never be emitted, because:
+		//   - elapsed-rescan is gated by `mask` (so a just-masked lane doesn't trigger),
+		//   - finish_fn emits only lane N-1 and uses stale current_min_pos → wrong real_pos,
+		//   - the window never slides past the lane's current_min so `need_to_push_current_min`
+		//     doesn't fire either.
+		// The emit runs AFTER the push above because submit_results<true> derives distance
+		// from `buffer.last_write_pos()` — we want that to be THIS iteration's slot so the
+		// (slot_of_current_min - slot_now) wraparound distance maps back to the correct
+		// real_pos. After the emit the lane's state is reset to max_val so neither the
+		// subsequent-iteration logic nor finish_fn re-emits the same pair.
+		hash_mask_t just_masked = hn::And(prev_mask, hn::Not(mask));
+		if (!hn::AllFalse(d, just_masked)) {
+			submit_results.template operator()<true>(d, offsets, 0, just_masked);
+			current_min = hn::IfThenElse(just_masked, max_vec, current_min);
+			current_min_pos = hn::IfThenElse(just_masked, hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos())), current_min_pos);
+		}
+		prev_mask = mask;
+
 		if ((pos == w + k - 2 && IS_INIT)) { // special case for the first window - because identical k-mers are not stored yet
-			// Copied code here
+			// The scalar path fires this "emit identical k-mers in the first window"
+			// once at seq_pos = w + k - 2 (pos = w + k - 1 after ++). For SIMD, the
+			// equivalent seq_pos for lane `l` is `lane_pos + offsets[l] * lpu`, but
+			// the SIMD loop counts a single `pos` that increments uniformly across
+			// lanes. Only lane 0 (offset == 0) has `lane_pos == seq_pos`, so its
+			// first-window matches scalar's exactly. For lanes with offset > 0 the
+			// first-window would fire at a seq_pos scalar doesn't special-case
+			// (scalar has already moved past first-window and handles identical
+			// k-mers via the rescan / supersede paths there). Emitting from those
+			// lanes here produces extras — the analogous scalar emits come from
+			// later iterations via the regular paths, not a first-window.
+			// Restrict the emit to lanes whose offset is 0 to mirror scalar.
+			HWY_ALIGN storage_unit offset_zero_mask_bytes[hn::MaxLanes(d)];
+			for (size_t lane = 0; lane < hn::Lanes(d); ++lane) {
+				offset_zero_mask_bytes[lane] = (offsets[lane] == 0) ? static_cast<storage_unit>(-1) : static_cast<storage_unit>(0);
+			}
+			const hash_vec_t offset_zero_vec = hn::Load(d, offset_zero_mask_bytes);
+			const hash_mask_t offset_zero_mask = hn::Ne(offset_zero_vec, hn::Zero(d));
 			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& distance) {
 				// Check if hash is the same, but position different
-				hash_mask_t values_to_append_mask = hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos));
+				hash_mask_t values_to_append_mask = hn::And(offset_zero_mask, hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos)));
 				if (!hn::AllFalse(d, values_to_append_mask)) {
                     submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask);
 				}
@@ -502,9 +581,14 @@ inline void collect_minimizers_simd(
         // JustLog("  . pos         (pos) = {}", hwy_str(d, new_min_pos_val));
 		// JustLog("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
 
-		// Check if we need to update min
+		// Check if we need to update min. `has_elapsed_min` must be gated by `mask` —
+		// otherwise a lane that has just transitioned to padding (its hash was replaced by
+		// `max_vec` above) can still register as "elapsed" on the slot equality check and
+		// drag the rescan path through a phantom update. A masked lane has nothing valid
+		// left to emit, and its buffer slot has been overwritten with `max_vec`, so we
+		// must not treat it as having an elapsed minimum at all.
 		hash_vec_t last_write_pos = hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos()));
-		hash_mask_t has_elapsed_min = hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos));
+		hash_mask_t has_elapsed_min = hn::And(mask, hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos)));
 		const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
 
 		// JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
@@ -515,39 +599,77 @@ inline void collect_minimizers_simd(
             submit_results.template operator()<true>(d, offsets, 0, new_min_mask);
 		}
 
+		// Always apply the "new min arrived" update to every lane whose new_min_mask
+		// is set. Previously this lived only in the `else` branch of the
+		// `if (need_to_rescan)` — which meant any iteration where some *other* lane
+		// needed a rescan skipped this update entirely, and lanes with legitimate new
+		// mins never had their `current_min` / `current_min_pos` written back.
+		// `has_elapsed_min` implies `!new_min_mask` by construction, so this update
+		// and the elapsed-lane rescan below touch disjoint sets of lanes.
+		current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
+		current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
+
 		if (need_to_rescan) [[unlikely]] {
 
             if ((pos >= w + k - 2 || !IS_INIT)) {
                 submit_results.template operator()<false>(d, offsets, buffer.capacity(), has_elapsed_min);
             }
 
-			current_min = max_vec;
+			// Only reset current_min for lanes that need rescanning. Masked or non-elapsed
+			// lanes must retain their existing current_min / current_min_pos so that
+			// subsequent iterations (including finish_fn) emit the right values. Before
+			// the gate was added a single other lane triggering rescan would clobber the
+			// still-valid current_min in a masked (padding-only) lane by running it
+			// through the max_vec-reset-and-rescan sequence below.
+			current_min = hn::IfThenElse(has_elapsed_min, max_vec, current_min);
 			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& _distance) {
-				hash_mask_t new_min_mask = hn::Le(el, current_min);
+				hash_mask_t rescan_new_mask = hn::And(has_elapsed_min, hn::Le(el, current_min));
 				hash_vec_t new_min_pos_val = hn::Set(d, static_cast<storage_unit>(index));
-				current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
-				current_min = hn::IfThenElse(new_min_mask, el, current_min);
+				current_min_pos = hn::IfThenElse(rescan_new_mask, new_min_pos_val, current_min_pos);
+				current_min = hn::IfThenElse(rescan_new_mask, el, current_min);
 			});
             if ((pos >= w + k - 2 || !IS_INIT)) {
                 // Need to push any value equal to new min
                 buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& distance) {
-                    // Check if hash is the same, but position different
-                    hash_mask_t values_to_append_mask = hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos));
+                    // Check if hash is the same, but position different. Gate by
+                    // has_elapsed_min — only lanes we just rescanned can have duplicate
+                    // equals emitted.
+                    hash_mask_t values_to_append_mask = hn::And(has_elapsed_min, hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos)));
                     if (!hn::AllFalse(d, values_to_append_mask)) {
                         submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask);
                     }
                 });
             }
-		} else {
-            current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
-            current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
-        }
+		}
 
+        // Remember whether this iter's push was a new minimum for each lane.
+        // We look this up in finish_fn to disambiguate "just set" from the
+        // ambiguous slot-equality that the standard distance formula resolves
+        // to `capacity`.
+        prev_new_min_mask = new_min_mask;
         ++pos;
 	}, [&](auto const& offsets, auto& d, auto& mask){
-        hash_mask_t new_min_mask = hn::Not(hn::FirstN(d, hn::Lanes(d)-1));
+        hash_mask_t last_lane_mask = hn::Not(hn::FirstN(d, hn::Lanes(d)-1));
         --pos;
-        submit_results.template operator()<true>(d, offsets, 0, new_min_mask);
+        // Loop exit. For lane N-1 (the only lane where finish_fn is expected to
+        // flush a pending current_min), the state of `current_min_pos` after the
+        // last handler iteration is ambiguous when it equals `last_write_pos`:
+        // either the last iter set current_min at the just-written slot (dist 0)
+        // or the lane happens to have its min exactly `capacity` iters old
+        // (dist = capacity). Split the emit into two buckets based on
+        // `prev_new_min_mask` so we can feed the correct distance to each:
+        //   - just-set lanes: pass dist=0 via submit_results<false>
+        //   - older lanes: let submit_results<true> reconstruct the distance
+        //     from slot arithmetic (the capacity-wrap formula is correct here
+        //     because the lane never had a new-min flip in the last iter).
+        hash_mask_t just_set_mask = hn::And(last_lane_mask, prev_new_min_mask);
+        if (!hn::AllFalse(d, just_set_mask)) {
+            submit_results.template operator()<false>(d, offsets, 0, just_set_mask);
+        }
+        hash_mask_t older_mask = hn::And(last_lane_mask, hn::Not(prev_new_min_mask));
+        if (!hn::AllFalse(d, older_mask)) {
+            submit_results.template operator()<true>(d, offsets, 0, older_mask);
+        }
     }, 0); //k-1);
 
 

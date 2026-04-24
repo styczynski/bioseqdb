@@ -141,7 +141,24 @@ inline void iterate_sequence_bp_simd_offsets(
 	);
 
 	const size_t bps_per_lane = (context_units + units_per_lane) * seq_traits::letters_per_unit;
-	const auto& [full_chunks_count, bps_last_chunk] = int_div_floor(bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit); 
+	auto [full_chunks_count_raw, bps_last_chunk_raw] = int_div_floor(bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit);
+	// When the sequence length is an exact multiple of (Lanes * letters_per_unit) per
+	// lane we end up with bps_last_chunk == 0. That means:
+	//   (a) the partial-matrix loop never runs, so `finish_fn` is never invoked, and
+	//   (b) any padding that lives in the tail of the last "full" chunk is processed
+	//       without the partial-matrix lane mask, so garbage bytes can poison the
+	//       minimizer search. Both cases showed up in dna5 × uint32_t and dna4 ×
+	//       uint64_t parameterizations of the kmer tests. Fix: whenever this happens
+	//       move the final full chunk into the partial-matrix path (reduce full
+	//       chunks by one, set bps_last_chunk to a full matrix worth). This keeps
+	//       the full-chunk fast path for everything in the middle but gives the tail
+	//       proper masking and a finish_fn call.
+	size_t full_chunks_count = full_chunks_count_raw;
+	size_t bps_last_chunk = bps_last_chunk_raw;
+	if (bps_last_chunk == 0 && full_chunks_count > 0) {
+		--full_chunks_count;
+		bps_last_chunk = hn::Lanes(d) * seq_traits::letters_per_unit;
+	}
 
 	using buffer_t = circular_append_buffer<VecT, buffer_size_bound, 0, false, hwy::AlignedFreeUniquePtr<VecT[]>, simd_array_allocator>;
 	buffer_t buffer(buffer_size);
@@ -166,8 +183,8 @@ inline void iterate_sequence_bp_simd_offsets(
 	int32_t main_counter = 0;
 
 	DEBUG_ASSERT(bps_last_chunk >= seq.padding() || bps_last_chunk == 0, "Sanity check. This should never fail as we should have more basses than are padded, otherwise all calculations are wrong.");
-	const int32_t main_counter_only_left = bps_last_chunk - seq.padding();
-	const int32_t main_counter_none = bps_last_chunk;
+	const int32_t main_counter_only_left = static_cast<int32_t>(bps_last_chunk) - static_cast<int32_t>(seq.padding());
+	const int32_t main_counter_none = static_cast<int32_t>(bps_last_chunk);
 
 	size_t live_iterators_count = 1 + delays_count;
 
@@ -285,7 +302,14 @@ inline void iterate_sequence_bp_simd_offsets(
 	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_only_left >= 1, "Only-left counter cannot be less than 1.");
 	DEBUG_ASSERT(main_counter_none >= main_counter_only_left, "Counters should have proper order (first should be left, then none)");
-	DEBUG_ASSERT(main_counter_none <= seq.bp_size(), "Sanity check. If this fails, there's probably size_t overflow");
+	// `main_counter_none` is how many partial-matrix iterations we will run; that
+	// upper bound is the per-lane reach (bps_per_lane), NOT the total sequence
+	// length. After the `bps_last_chunk == 0` fix we may pull a full chunk into
+	// partial mode, and then bps_per_lane can be larger than seq.bp_size() (e.g.
+	// dna4 × uint64_t: 64 iterations over a 62-bp sequence — the last 2 are
+	// masked out via left_mask/none_mask transitions). Use bps_per_lane as the
+	// sanity bound instead of seq.bp_size().
+	DEBUG_ASSERT(static_cast<size_t>(main_counter_none) <= bps_per_lane, "Sanity check. If this fails, there's probably size_t overflow");
 
 	JustLog("CTR main_counter_none={} main_counter_only_left={} (bps_per_lane={}, (bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit)={}) (context_units={}, units_per_lane={})", main_counter_none, main_counter_only_left, bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit, context_units, units_per_lane);
 
