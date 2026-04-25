@@ -1,0 +1,68 @@
+{
+  "dependencies": [
+    {
+      "name": "reflectcpp",
+      "version>=": "0.22.0"
+    }
+  ],
+  "features": {
+    "duckdb": {
+      "description": "Enable DuckDB support",
+      "dependencies": [
+        {
+          "name": "duckdb",
+          "version>=": "1.4.2"
+        },
+	{
+	  "name":"icu",
+	  "version>=":"78.1"
+	}
+      ]
+    },
+    "mysql": {
+      "description": "Enable MySQL/MariaDB support",
+      "dependencies": [
+        {
+          "name": "libmariadb",
+          "version>=": "3.4.5"
+        }
+      ]
+    },
+    "postgres": {
+      "description": "Enable PostgreSQL support",
+      "dependencies": [
+        {
+          "name": "libpq",
+          "version>=": "16.4"
+        }
+      ]
+    },
+    "sqlite3": {
+      "description": "Enable SQLite3 support",
+      "dependencies": [
+        {
+          "name": "sqlite3",
+          "version>=": "3.49.1",
+          "features": ["math"]
+        }
+      ]
+    },
+    "tests": {
+      "description": "Build the tests",
+      "dependencies": [
+        {
+          "name": "gtest",
+          "version>=": "1.14.0"
+        },
+        {
+          "name": "boost-lexical-cast",
+          "version>=": "1.88.0"
+        },
+        {
+          "name": "boost-uuid",
+          "version>=": "1.88.0"
+        }
+      ]
+    }
+  }
+}

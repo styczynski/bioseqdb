@@ -1,0 +1,5 @@
+#include "sqlgen/duckdb/Connection.cpp"
+#include "sqlgen/duckdb/DuckDBAppender.cpp"
+#include "sqlgen/duckdb/DuckDBConnection.cpp"
+#include "sqlgen/duckdb/DuckDBResult.cpp"
+#include "sqlgen/duckdb/to_sql.cpp"

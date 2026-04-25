@@ -1,0 +1,3 @@
+#ifndef SQLGEN_BATCH_SIZE
+#define SQLGEN_BATCH_SIZE 50000
+#endif
