@@ -53,12 +53,12 @@ static_assert(is_context_args<context_args_no_profiling>);
 /// Picked by the dispatch fork when bioseq.aligner.enable_profiling = true.
 struct context_args_profiling_full {
     static constexpr bool     enable_profiling      = true;
-    static constexpr bool     enable_counters       = false;
-    static constexpr bool     enable_tracing        = false;
-    static constexpr bool     enable_sampling       = false;
+    static constexpr bool     enable_counters       = true;
+    static constexpr bool     enable_tracing        = true;
+    static constexpr bool     enable_sampling       = true;
     static constexpr bool     enable_arena_tracking = true;
     static constexpr unsigned snap_capacity         = 32;
-    static constexpr unsigned trace_capacity        = 0;
+    static constexpr unsigned trace_capacity        = 256;
     static constexpr unsigned aggr_block_size       = 256;
 };
 static_assert(is_context_args<context_args_profiling_full>);
