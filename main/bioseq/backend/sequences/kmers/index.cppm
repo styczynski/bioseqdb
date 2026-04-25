@@ -16,6 +16,7 @@ import bioseq_sequences;
 import bioseq_sequences.simd;
 import bioseq_sequences.kmers.hashers;
 import algo.circular_append_buffer;
+import bioseq_instr;
 
 // // remove
 // import sequan_compat;
@@ -207,7 +208,9 @@ inline void collect_minimizers(
 	const size_t w,
 	const size_t k
 ) {
-    EASY_BLOCK("mm_sketch");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_sketch");
+    auto _scope = bioseq::instr::region(_desc);
 
 	using seq_traits = compact_sequence_range<R>::traits;
 	using hasher_t = scalar_hash_t<typename seq_traits::alphabet_type>::template scalar_hash<hash_val_t>;
@@ -365,7 +368,9 @@ inline void collect_minimizers_simd(
 	const size_t w,
 	const size_t k
 ) {
-    EASY_BLOCK("mm_sketch_simd");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_sketch_simd");
+    auto _scope = bioseq::instr::region(_desc);
 
     using seq_traits = compact_sequence_range<R>::traits;
     using storage_unit = typename seq_traits::storage_unit;

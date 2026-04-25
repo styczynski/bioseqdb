@@ -20,7 +20,6 @@ find_package(ZLIB REQUIRED)
 find_package(reflectcpp CONFIG REQUIRED)
 find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)
-find_package(easy_profiler REQUIRED)
 find_package(sqlgen REQUIRED)
 
 # AddCommonTarget(
@@ -113,7 +112,6 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
-    easy_profiler
     sqlgen::sqlgen
   SOURCES
     ${A_SRC_FILES}
@@ -153,7 +151,6 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
-    easy_profiler
   SOURCES
     ${SRC_FILES}
   SUPPORT_CXX_MODULES

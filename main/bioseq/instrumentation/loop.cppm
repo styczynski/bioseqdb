@@ -1,6 +1,12 @@
 /**
  * @file instrumentation/loop.cppm
  * @brief LoopScope<Args> RAII type with tick().
+ *
+ * Two flavours of `loop()` ship; the non-templated overload fixes
+ * Args = context_args_profiling_full so legacy EASY_BLOCK call sites
+ * inside non-templated helpers can opt into the profiler without
+ * threading Args through their callers. See region.cppm for the same
+ * pattern and rationale.
  */
 module;
 
@@ -74,6 +80,13 @@ template<is_context_args Args>
 [[nodiscard, gnu::always_inline]]
 inline LoopScope<Args> loop(const LoopDescriptor* d) noexcept {
     return LoopScope<Args>(d);
+}
+
+/// Non-templated convenience overload — see region.cppm for rationale.
+[[nodiscard, gnu::always_inline]]
+inline LoopScope<context_args_profiling_full>
+loop(const LoopDescriptor* d) noexcept {
+    return LoopScope<context_args_profiling_full>(d);
 }
 
 }  // namespace bioseq::instr

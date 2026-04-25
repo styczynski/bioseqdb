@@ -5,6 +5,16 @@
  * Hot-path entry point. The scope reads the typed profiler block from
  * `tls_profiler<Args>`. When Args::enable_profiling is false, every
  * body is empty and the type collapses.
+ *
+ * Two flavours of `region()` ship:
+ *   - the explicitly-templated `region<Args>(desc)` used inside templated
+ *     pipeline scopes (the dispatch fork's lambda body); and
+ *   - the non-templated `region(desc)` that fixes Args =
+ *     context_args_profiling_full. The non-templated form is the
+ *     migration target for the legacy EASY_BLOCK call sites buried in
+ *     non-templated chain/seed helpers — when the dispatch fork picks
+ *     no-profiling, `tls_profiler<context_args_profiling_full>` stays
+ *     null and the scope short-circuits with a single load + branch.
  */
 module;
 
@@ -72,6 +82,18 @@ template<is_context_args Args>
 [[nodiscard, gnu::always_inline]]
 inline RegionScope<Args> region(const RegionDescriptor* d) noexcept {
     return RegionScope<Args>(d);
+}
+
+/// Non-templated convenience overload. Routes to the
+/// `context_args_profiling_full` instantiation; when the dispatch fork
+/// has not installed a profiler block (no-profiling pipeline), the
+/// per-thread `tls_profiler<context_args_profiling_full>` is null and
+/// the scope short-circuits at construction time. The cost in the
+/// non-installed path is one load + one compare + one branch.
+[[nodiscard, gnu::always_inline]]
+inline RegionScope<context_args_profiling_full>
+region(const RegionDescriptor* d) noexcept {
+    return RegionScope<context_args_profiling_full>(d);
 }
 
 }  // namespace bioseq::instr

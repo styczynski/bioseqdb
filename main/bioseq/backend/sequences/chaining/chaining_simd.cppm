@@ -36,6 +36,7 @@ import mlogging;
 import bioseq_sequences.chaining.utils;
 import bioseq_simd.utils;
 import context;
+import bioseq_instr;
 
 export {
 
@@ -479,7 +480,9 @@ void simd_dp_forward_pass(
     std::vector<Anchor>& anchors,
     const ChainingParams& params)
 {
-    EASY_BLOCK("mg_lchain_simd");
+    static const auto* _simd_desc =
+        bioseq::instr::register_region_static("mg_lchain_simd");
+    auto _simd_scope = bioseq::instr::region(_simd_desc);
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
     if (anchor_count == 0) return {{}, {}};
 
@@ -495,7 +498,9 @@ void simd_dp_forward_pass(
 
     SoaAnchors soa;
     {
-        EASY_BLOCK("mg_lchain_simd_aos_to_soa");
+        static const auto* _aos_desc =
+            bioseq::instr::register_region_static("mg_lchain_simd_aos_to_soa");
+        auto _aos_scope = bioseq::instr::region(_aos_desc);
         soa = create_soa_anchors(d_int, anchors);
     }
 
@@ -515,14 +520,23 @@ void simd_dp_forward_pass(
     peak_scores_v.resize(anchor_count);
 
     {
-        EASY_BLOCK("mg_lchain_simd_forward");
+        static const auto* _fwd_desc =
+            bioseq::instr::register_loop_static("mg_lchain_simd_forward");
+        auto _fwd_scope = bioseq::instr::loop(_fwd_desc);
+        // simd_dp_forward_pass owns the inner iterations; the loop scope
+        // captures the wrapping region time. tick() is not invoked from the
+        // outer scope because the simd helper does not expose an iteration
+        // count — region-style timing is sufficient at this granularity.
+        (void)_fwd_scope;
         simd_dp_forward_pass(d_int, anchors, soa,
             padded_best_scores, predecessors_v, peak_scores_v, params);
     }
 
     JustLog("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
 
-    EASY_BLOCK("backtrack_chains");
+    static const auto* _bt_desc =
+        bioseq::instr::register_region_static("backtrack_chains");
+    auto _bt_scope = bioseq::instr::region(_bt_desc);
     return backtrack_chains(anchors,
         std::span<const int32_t>(padded_best_scores, anchor_count),
         std::span<const int64_t>(predecessors_v),

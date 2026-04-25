@@ -33,6 +33,7 @@ export module bioseq_sequences.chaining.rmq;
 import mlogging;
 import bioseq_sequences.chaining.utils;
 import context;
+import bioseq_instr;
 
 export {
 namespace bioseq::chaining {
@@ -623,7 +624,9 @@ struct RmqTree {
     int32_t max_dist_inner = 0,
     int32_t cap_rmq_size = 100000)
 {
-    EASY_BLOCK("mg_lchain_rmq");
+    static const auto* _rmq_desc =
+        bioseq::instr::register_region_static("mg_lchain_rmq");
+    auto _rmq_scope = bioseq::instr::region(_rmq_desc);
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
     if (anchor_count == 0) return {{}, {}};
 
@@ -667,8 +670,12 @@ struct RmqTree {
     auto primary_nodes = std::span<RmqNode*>(primary_nodes_v);
     auto inner_nodes   = std::span<RmqNode*>(inner_nodes_v);
 
-    EASY_BLOCK("mg_lchain_rmq_forward");
+    {
+    static const auto* _fwd_desc =
+        bioseq::instr::register_loop_static("mg_lchain_rmq_forward");
+    auto _fwd_scope = bioseq::instr::loop(_fwd_desc);
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
+        _fwd_scope.tick();
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
         int64_t best_predecessor = -1;
 
@@ -826,10 +833,12 @@ struct RmqTree {
             ? peak_scores[best_predecessor] : best_score;
     }
 
-    EASY_END_BLOCK;
+    }  // end mg_lchain_rmq_forward scope
     JustLog("[chaining_rmq] RMQ chaining pass complete for {} anchors", anchor_count);
 
-    EASY_BLOCK("backtrack_chains");
+    static const auto* _bt_desc =
+        bioseq::instr::register_region_static("backtrack_chains");
+    auto _bt_scope = bioseq::instr::region(_bt_desc);
     return backtrack_chains(anchors,
         std::span<const int32_t>(best_scores_v),
         std::span<const int64_t>(predecessors_v),

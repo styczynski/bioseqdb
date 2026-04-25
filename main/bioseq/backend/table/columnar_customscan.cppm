@@ -42,6 +42,7 @@ import bioseq_sequences.minimap_port;  // for MatchResult
 import bioseq_cigar;                    // for format_cigar
 import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
 import bioseq_sidecar;                   // meta_sidecar reads for symbol_count fast path
+import bioseq_instr;                      // runtime profiler — summary at scan end
 
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
@@ -3798,6 +3799,18 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 {
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
 	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+
+	/*
+	 * Profiler summary lives here (not inside the per-batch dispatch
+	 * fork) so multi-batch scans emit exactly one block of summary
+	 * lines. After dumping, reset_all() clears the persistent
+	 * per-process aggregate so the next scan starts with fresh counts.
+	 * Part 48.5 / 48.8 of NEW_PROFILING_RESEARCH.md.
+	 */
+	if (bioseq_aligner_enable_profiling) {
+		bioseq::instr::access::write_summary_to_justlog();
+		bioseq::instr::access::reset_all();
+	}
 
 	/*
 	 * Free buffered scan slots HERE, while the per-query ResourceOwner

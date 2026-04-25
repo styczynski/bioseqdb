@@ -169,9 +169,13 @@ inline RegionDescriptor* register_impl(
         }
     }
 
-    const auto id        = reg.next_id.fetch_add(1, std::memory_order_relaxed);
-    const auto block_idx = id / kBlockSize;
-    const auto slot_idx  = id % kBlockSize;
+    // raw_id is the 0-based slot index across the descriptor table
+    // (next_id starts at 0). The stored desc->id is shifted +1 so that
+    // 0 stays reserved as the "invalid" sentinel for callers that pass
+    // a default-constructed Region.desc.
+    const auto raw_id    = reg.next_id.fetch_add(1, std::memory_order_relaxed);
+    const auto block_idx = raw_id / kBlockSize;
+    const auto slot_idx  = raw_id % kBlockSize;
     if (block_idx >= kMaxBlocks) {
         // Out of descriptor space. Return a sentinel (the first descriptor)
         // so the caller's static-local stays non-null but loses uniqueness.
@@ -186,7 +190,7 @@ inline RegionDescriptor* register_impl(
     }
     auto* desc = block + slot_idx;
 
-    desc->id            = id == 0 ? 1 : id;   // reserve 0 as the "invalid" sentinel
+    desc->id            = raw_id + 1;
     desc->name_hash     = hash;
     desc->name          = name.data();        // borrow the literal pointer
     desc->file          = loc.file_name();

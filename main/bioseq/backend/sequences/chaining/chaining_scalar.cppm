@@ -26,6 +26,7 @@ export module bioseq_sequences.chaining.scalar;
 import mlogging;
 import bioseq_sequences.chaining.utils;
 import context;
+import bioseq_instr;
 
 export {
 namespace bioseq::chaining {
@@ -52,7 +53,9 @@ namespace bioseq::chaining {
     std::vector<Anchor>& anchors,
     const ChainingParams& params)
 {
-    EASY_BLOCK("mg_lchain_dp");
+    static const auto* _dp_desc =
+        bioseq::instr::register_region_static("mg_lchain_dp");
+    auto _dp_scope = bioseq::instr::region(_dp_desc);
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
     if (anchor_count == 0) {
         return {{}, {}};
@@ -88,8 +91,12 @@ namespace bioseq::chaining {
 
     // --- Forward DP pass ---
     // Equivalent to lchain.c lines 171-206
-    EASY_BLOCK("mg_lchain_dp_forward");
+    {
+    static const auto* _fwd_desc =
+        bioseq::instr::register_loop_static("mg_lchain_dp_forward");
+    auto _fwd_scope = bioseq::instr::loop(_fwd_desc);
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
+        _fwd_scope.tick();
         int64_t best_predecessor_idx = -1;
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
         int32_t skip_count = 0;
@@ -182,10 +189,12 @@ namespace bioseq::chaining {
         }
     }
 
-    EASY_END_BLOCK;
+    }  // end mg_lchain_dp_forward scope
     JustLog("[chaining_scalar] Forward DP pass complete for {} anchors", anchor_count);
 
-    EASY_BLOCK("backtrack_chains");
+    static const auto* _bt_desc =
+        bioseq::instr::register_region_static("backtrack_chains");
+    auto _bt_scope = bioseq::instr::region(_bt_desc);
     return backtrack_chains(anchors, best_scores, predecessors, peak_scores,
                            params.min_chain_score, params.min_seed_count);
 }

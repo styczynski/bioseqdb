@@ -2,16 +2,18 @@
  * @file instrumentation/access.cppm
  * @brief Consumer-side accessors. Summary writer dumps aggregates via JustLog.
  *
- * The summary writer takes the profiling context directly as a parameter,
- * so it does not depend on the thread-local context lookup. The dispatch
- * fork in BatchProcessor::process_sequences calls it after the pipeline
- * runs, before the context destructs.
+ * The summary writer takes a ProfilerBlock<Args>& as input. The non-templated
+ * convenience overload `write_summary_to_justlog()` lives in
+ * `instrumentation/detail/summary_writer.cppm` and routes to the persistent
+ * process-wide block; ColumnarScan_EndCustomScan calls it once per scan.
  */
 module;
 
 #include "common.h"   // JustLog
 
+#include <array>
 #include <cstdint>
+#include <limits>
 
 export module bioseq_instr.access;
 
@@ -24,11 +26,40 @@ import bioseq_instr.thread_state;
 
 export namespace bioseq::instr::access {
 
+namespace detail {
+
+/// Estimate a percentile from a 16-bucket log2 histogram. Returns the
+/// upper bound of the bucket that contains the cumulative-count at the
+/// requested fraction. Coarse but enough to flag order-of-magnitude
+/// outliers, which is what the histogram is sized for. p in [0, 1].
+[[nodiscard]] inline std::uint64_t hist_percentile(
+    const Histogram16& h, double p) noexcept
+{
+    std::uint64_t total = 0;
+    for (auto v : h.buckets) total += v;
+    if (total == 0) return 0;
+    const std::uint64_t target = static_cast<std::uint64_t>(
+        static_cast<double>(total) * p);
+    std::uint64_t cum = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        cum += h.buckets[i];
+        if (cum >= target) {
+            // Bucket i covers values with floor(log2(v)) == i, so the
+            // upper bound is 2^(i+1) - 1.
+            if (i >= 63) return std::numeric_limits<std::uint64_t>::max();
+            return (1ull << (i + 1)) - 1ull;
+        }
+    }
+    return std::numeric_limits<std::uint64_t>::max();
+}
+
+}  // namespace detail
+
 /// Dump every region/loop aggregate with non-zero visits to JustLog.
-/// Called from the dispatch fork inside BatchProcessor::process_sequences
-/// (Part 48.5 of the design doc). The profiler block is read directly
-/// from the passed-in profiler reference, so the writer does not depend
-/// on the thread-local context lookup.
+/// Output format mirrors Part 48.5 of NEW_PROFILING_RESEARCH.md:
+///   [bioseq] profile <region_name> total=<ns> visits=<n> mean=<ns> p50=<ns> p99=<ns>
+/// Loops add per-iteration fields. ColumnarScan_EndCustomScan calls the
+/// non-templated overload (in detail/summary_writer.cppm) once per scan.
 template<is_context_args Args>
 void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
     if constexpr (!Args::enable_profiling) {
@@ -49,14 +80,17 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
             if (auto* la = prof.loop_aggregates.try_get(id)) {
                 if (la->visits > 0) {
                     const auto mean_ns = la->total_ns / la->visits;
+                    const auto p50 = detail::hist_percentile(la->ns_hist, 0.50);
+                    const auto p99 = detail::hist_percentile(la->ns_hist, 0.99);
                     const auto per_iter_mean_ns = la->total_iterations > 0
                         ? la->total_ns / la->total_iterations
                         : std::uint64_t{0};
-                    JustLog("[bioseq] profile loop {} total={} ns visits={} mean={} ns "
-                            "min={} ns max={} ns iters={} mean_per_iter={} ns "
-                            "work={} target={} lanes={}",
+                    JustLog("[bioseq] profile {} total={} ns visits={} mean={} ns "
+                            "p50={} ns p99={} ns min={} ns max={} ns "
+                            "iters={} mean_per_iter={} ns work={} target={} lanes={}",
                             desc->name,
                             la->total_ns, la->visits, mean_ns,
+                            p50, p99,
                             la->min_ns, la->max_ns,
                             la->total_iterations, per_iter_mean_ns,
                             la->total_work,
@@ -68,10 +102,13 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
             if (auto* ra = prof.aggregates.try_get(id)) {
                 if (ra->visits > 0) {
                     const auto mean_ns = ra->total_ns / ra->visits;
-                    JustLog("[bioseq] profile region {} total={} ns visits={} mean={} ns "
-                            "min={} ns max={} ns",
+                    const auto p50 = detail::hist_percentile(ra->ns_hist, 0.50);
+                    const auto p99 = detail::hist_percentile(ra->ns_hist, 0.99);
+                    JustLog("[bioseq] profile {} total={} ns visits={} mean={} ns "
+                            "p50={} ns p99={} ns min={} ns max={} ns",
                             desc->name,
                             ra->total_ns, ra->visits, mean_ns,
+                            p50, p99,
                             ra->min_ns, ra->max_ns);
                 }
             }
@@ -90,7 +127,7 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                     case arena_kind::hash:    kind_name = "hash"; break;
                     default:                  kind_name = "?"; break;
                 }
-                JustLog("[bioseq] profile arena {} live={} bytes total={} bytes "
+                JustLog("[bioseq] profile.arena {} live={} bytes total={} bytes "
                         "allocs={} largest={} bytes",
                         kind_name, c.bytes_live, c.bytes_total,
                         c.alloc_count, c.largest);

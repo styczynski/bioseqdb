@@ -343,7 +343,9 @@ public:
                              */
                             sketch_collector query_collector;
                             {
-                                EASY_BLOCK("mm_sketch");
+                                static const auto* mm_sketch_desc =
+                                    bioseq::instr::register_region_static("mm_sketch");
+                                auto _mm_sketch = bioseq::instr::region<Args>(mm_sketch_desc);
                                 collect_minimizers<minimap_int_hasher>(
                                     query_collector, query_seq,
                                     query_seq.begin(), query_seq.end(),
@@ -383,11 +385,20 @@ public:
         };  // run_pipeline_body
 
         if (base_params.enable_profiling) {
+            /*
+             * Profiling pipeline. The ProfilerBlock is the persistent
+             * process-wide singleton (see global_state.cppm); aggregates
+             * accumulate across every batch in the current scan. The
+             * one-shot summary fires at scan end inside
+             * ColumnarScan_EndCustomScan (Part 48.5/48.8 of the
+             * design doc) — emitting it here would produce one summary
+             * per batch and accumulate duplicates on multi-batch scans.
+             */
             using Args = bioseq::instr::context_args_profiling_full;
-            bioseq::instr::ProfilerBlock<Args> profiler_block;
+            auto& profiler_block =
+                bioseq::instr::persistent_profiler_block<Args>();
             bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
             run_pipeline_body.template operator()<Args>();
-            bioseq::instr::access::write_summary_to_justlog<Args>(profiler_block);
         } else {
             using Args = bioseq::instr::context_args_no_profiling;
             run_pipeline_body.template operator()<Args>();

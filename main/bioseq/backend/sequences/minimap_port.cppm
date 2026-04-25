@@ -62,6 +62,7 @@ import bioseq_sequences.chaining.scalar;
 import bioseq_sequences.chaining.simd;
 import bioseq_sequences.chaining.rmq;
 import context;
+import bioseq_instr;
 
 export {
 
@@ -355,7 +356,9 @@ struct TargetIndex {
 
     void build(const std::vector<MinimapSketchData>& target_minimizers,
                int32_t target_length) {
-        EASY_BLOCK("target_index_build");
+        static const auto* _desc =
+            bioseq::instr::register_region_static("target_index_build");
+        auto _scope = bioseq::instr::region(_desc);
         target_len = target_length;
         table.clear();
         table.reserve(target_minimizers.size());
@@ -585,14 +588,19 @@ template <MinimizerIndex IndexT>
     int32_t query_len,
     int32_t max_occ)
 {
-    EASY_BLOCK("collect_seed_hits");
+    static const auto* _seed_hits_desc =
+        bioseq::instr::register_region_static("collect_seed_hits");
+    auto _seed_hits_scope = bioseq::instr::region(_seed_hits_desc);
     std::vector<Anchor> anchors;
     anchors.reserve(query_minimizers.size() * 2);
 
     // Target-index lookup is the hot per-minimizer operation. We wrap the
     // whole loop (not each lookup) to avoid profiler overhead dominating
     // the measurement; the loop body also classifies/sorts anchors.
-    EASY_BLOCK("target_index_lookup");
+    {
+    static const auto* _idx_lookup_desc =
+        bioseq::instr::register_region_static("target_index_lookup");
+    auto _idx_lookup_scope = bioseq::instr::region(_idx_lookup_desc);
     for (const auto& query_minimizer : query_minimizers) {
         const auto target_hits = target_index.lookup(query_minimizer.kmer);
         if (target_hits.empty() || static_cast<int32_t>(target_hits.size()) > max_occ) {
@@ -636,15 +644,19 @@ template <MinimizerIndex IndexT>
             anchors.push_back(anchor);
         }
     }
-    EASY_END_BLOCK;  // target_index_lookup
+    }  // end target_index_lookup scope
 
     // Sort by reference position (ref_bits field), same as radix_sort_128x
-    EASY_BLOCK("collect_seed_hits_sort");
+    {
+    static const auto* _sort_desc =
+        bioseq::instr::register_region_static("collect_seed_hits_sort");
+    auto _sort_scope = bioseq::instr::region(_sort_desc);
     std::sort(anchors.begin(), anchors.end(),
               [](const Anchor& left, const Anchor& right) {
                   return left.ref_bits < right.ref_bits
                       || (left.ref_bits == right.ref_bits && left.query_bits < right.query_bits);
               });
+    }  // end collect_seed_hits_sort scope
 
     JustLog("[minimap_port] Collected {} seed anchors from {} query minimizers",
             anchors.size(), query_minimizers.size());
@@ -761,7 +773,9 @@ void set_region_coordinates(
     const std::vector<Anchor>& anchors,
     int32_t query_len)
 {
-    EASY_BLOCK("mm_gen_regs");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_gen_regs");
+    auto _scope = bioseq::instr::region(_desc);
     if (chains.empty()) {
         return {};
     }
@@ -809,7 +823,9 @@ void classify_primary_secondary(
     int32_t mask_len,
     int32_t sub_diff)
 {
-    EASY_BLOCK("mm_set_parent");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_set_parent");
+    auto _scope = bioseq::instr::region(_desc);
     const size_t region_count = regions.size();
     if (region_count == 0) {
         return;
@@ -947,7 +963,9 @@ void filter_secondary_regions(
     int32_t min_diff,
     int32_t best_n)
 {
-    EASY_BLOCK("mm_select_sub");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_select_sub");
+    auto _scope = bioseq::instr::region(_desc);
     if (regions.empty() || pri_ratio <= 0.0f) {
         return;
     }
@@ -1146,7 +1164,9 @@ void align_regions(
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params)
 {
-    EASY_BLOCK("mm_align_skeleton");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_align_skeleton");
+    auto _scope = bioseq::instr::region(_desc);
     const int32_t query_length = static_cast<int32_t>(query_seq.bp_size());
     const int32_t target_length = static_cast<int32_t>(target_seq.bp_size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
@@ -1410,7 +1430,9 @@ void estimate_divergence_from_seeds(
     int32_t kmer_size,
     int32_t target_len)
 {
-    EASY_BLOCK("mm_est_err");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_est_err");
+    auto _scope = bioseq::instr::region(_desc);
     if (query_minimizers.empty()) {
         return;
     }
@@ -1532,7 +1554,9 @@ void compute_mapping_quality(
     const Minimap2Params& params,
     int32_t rep_len)
 {
-    EASY_BLOCK("mm_set_mapq");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_set_mapq");
+    auto _scope = bioseq::instr::region(_desc);
     constexpr float quality_coefficient = 40.0f;
     const int32_t match_sc = params.match_score;
     const int32_t min_chain_sc = params.min_chain_score;
@@ -1839,7 +1863,9 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const std::vector<MinimapSketchData>& target_minimizers,
     const Minimap2Params& params = Minimap2Params{})
 {
-    EASY_BLOCK("minimap2_port");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap2_port");
+    auto _scope = bioseq::instr::region(_desc);
 
     const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
     TargetIndex target_index;
@@ -1946,7 +1972,9 @@ template<
     const IndexT& prebuilt_target_index,
     const Minimap2Params& params)
 {
-    EASY_BLOCK("minimap2_port_with_index");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap2_port_with_index");
+    auto _scope = bioseq::instr::region(_desc);
 
     // Install a per-pipeline memory context if the caller hasn't already.
     std::optional<context::context> owned_context;
@@ -1989,9 +2017,9 @@ template<
     }
 
     // ---- Phase 3: Chain seeds ----
-    // Each chain_anchors_* function has its own EASY_BLOCK covering the
-    // full body (mg_lchain_dp / mg_lchain_rmq / mg_lchain_simd) plus
-    // sub-blocks for forward-pass and backtracking.
+    // Each chain_anchors_* function has its own bioseq::instr::region
+    // covering the full body (mg_lchain_dp / mg_lchain_rmq / mg_lchain_simd)
+    // plus sub-scopes for forward-pass and backtracking.
     //
     // Dispatched via `constexpr if` on the chaining_algorithm template
     // parameter so the per-chain inner loops are compiled branchlessly —
@@ -2017,19 +2045,19 @@ template<
         return MatchResultCollection{};
     }
 
-    // ---- Phase 4: Generate alignment regions (EASY_BLOCK inside the fn) ----
+    // ---- Phase 4: Generate alignment regions (region scope inside the fn) ----
     auto regions = generate_regions(chains, reordered_anchors, query_len);
 
     // ---- Phase 5 (chain_post): Primary/secondary classification + filter ----
     // classify_primary_secondary and filter_secondary_regions have
-    // EASY_BLOCK annotations inside them.
+    // bioseq::instr::region scopes inside them.
     const int32_t sub_diff = params.match_score * 2 + params.mismatch_pen;
     classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
     const int32_t min_diff = params.kmer_size * 2;
     filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
 
     // ---- Phase 6: Estimate divergence from seeds (mm_est_err equivalent) ----
-    // estimate_divergence_from_seeds has EASY_BLOCK("mm_est_err") inside.
+    // estimate_divergence_from_seeds has a "mm_est_err" region scope inside.
     // Gated on compute_divergence — if the target list never projects
     // bioseq.divergence() there is no reason to spend the binary-search
     // walk per region. MatchResult::divergence stays at its -1.f sentinel
@@ -2042,7 +2070,7 @@ template<
     }
 
     // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
-    // align_regions has EASY_BLOCK("mm_align_skeleton") inside.
+    // align_regions has a "mm_align_skeleton" region scope inside.
     if (params.do_cigar) {
         // Build unified scoring matrix for KSW2 and block aligner.
         const auto scoring_matrix = ScoringMatrix<QueryRange>::generate(
@@ -2065,7 +2093,7 @@ template<
         JustLog("[minimap_port] Skipping mm_align_skeleton (do_cigar=false)");
     }
 
-    // ---- Phase 8: Compute MAPQ (EASY_BLOCK inside the fn) ----
+    // ---- Phase 8: Compute MAPQ (region scope inside the fn) ----
     if (params.compute_mapq) {
         compute_mapping_quality(regions, params, 0);
     } else {
@@ -2092,10 +2120,11 @@ template<
  *   2. Minimizer extraction for query   (mm_sketch equivalent)
  *   3. Delegates to `minimap2_port` for the remainder of the pipeline.
  *
- * The function is annotated with EASY_BLOCK markers so the profiler can
- * attribute time to each pipeline stage. The minimizer extraction stages share
- * the `mm_sketch` block name with the corresponding minimap2 C function, which
- * makes the profile comparable side-by-side between the two implementations.
+ * The function is annotated with bioseq::instr::region scopes so the profiler
+ * can attribute time to each pipeline stage. The minimizer extraction stages
+ * share the `mm_sketch` region name with the corresponding minimap2 C
+ * function, which makes the profile comparable side-by-side between the two
+ * implementations.
  *
  * @tparam QueryRange   compact_sequence_range type for query
  * @tparam TargetRange  compact_sequence_range type for target
@@ -2110,7 +2139,9 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     compact_sequence_range<TargetRange>& target_seq,
     const Minimap2Params& params = Minimap2Params{})
 {
-    EASY_BLOCK("minimap_port");
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap_port");
+    auto _scope = bioseq::instr::region(_desc);
 
     // Install a per-query memory context. Every downstream allocation
     // site (KSW2 state, backtrack matrix, chaining DP arrays, anchors,
@@ -2125,7 +2156,9 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     // ---- Minimizer extraction: target (same block name as minimap2 mm_sketch) ----
     sketch_collector target_collector;
     {
-        EASY_BLOCK("mm_sketch");
+        static const auto* _mm_sketch_target_desc =
+            bioseq::instr::register_region_static("mm_sketch");
+        auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
         collect_minimizers<minimap_int_hasher>(
             target_collector, target_seq,
             target_seq.begin(), target_seq.end(),
@@ -2137,7 +2170,9 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     // ---- Minimizer extraction: query ----
     sketch_collector query_collector;
     {
-        EASY_BLOCK("mm_sketch");
+        static const auto* _mm_sketch_query_desc =
+            bioseq::instr::register_region_static("mm_sketch");
+        auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
         collect_minimizers<minimap_int_hasher>(
             query_collector, query_seq,
             query_seq.begin(), query_seq.end(),
