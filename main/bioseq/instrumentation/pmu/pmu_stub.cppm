@@ -24,7 +24,10 @@ struct counters_t {
 };
 
 [[nodiscard]] inline bool init() noexcept { return true; }
+[[nodiscard]] inline bool init_thread() noexcept { return false; }
 inline void shutdown() noexcept {}
+inline void shutdown_thread() noexcept {}
 [[nodiscard]] inline counters_t read() noexcept { return counters_t{}; }
+[[nodiscard]] inline bool counters_available() noexcept { return false; }
 
 }  // namespace bioseq::instr::pmu::stub

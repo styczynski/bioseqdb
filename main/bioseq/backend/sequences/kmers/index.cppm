@@ -485,18 +485,6 @@ inline void collect_minimizers_simd(
 
         JustLog("BASE STEP {} (offsets={}, lpu={})", pos, offsets, seq_traits::letters_per_unit);
 
-        // dump everything
-        if (pos >= w+k) {
-            JustLog("Next step {}", pos);
-            buffer.unsafe_filled_for_each([&](const auto& _index, const auto& el, const auto& distance) {
-                HWY_ALIGN storage_unit temp_buffer4[32];
-                size_t lane_index = hn::Lanes(d)-1;
-                hn::StoreU(el, d, temp_buffer4);
-                const size_t real_pos = pos + offsets[lane_index] * seq_traits::letters_per_unit - distance;
-                JustLog("| {}: pos={} kmer={} <top={}>", static_cast<int64_t>(_index), real_pos, temp_buffer4[lane_index], (pos + offsets[lane_index] * seq_traits::letters_per_unit));
-            });
-        }
-
 		// Mask off lanes that are no longer iterating over valid sequence bytes (partial-matrix tail
 		// past the sequence end). Without this, the lane hasher still processes padding bytes and
 		// feeds their garbage hashes into `new_min_mask` / `current_min` via later Le checks —

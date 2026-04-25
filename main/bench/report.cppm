@@ -158,6 +158,45 @@ inline std::string fmt_iters_per_sec(std::uint64_t total_iters, std::uint64_t to
     return fmt::format("{:14.2f}", iters_per_sec);
 }
 
+/// Compact representation of a counter in Mc / Bc (mega-/giga-counts) so
+/// the wide PMU columns fit in 12 chars without scientific notation.
+inline std::string fmt_compact_count(std::uint64_t value) noexcept {
+    if (value == 0) return fmt::format("{:>12}", "0");
+    if (value < 1'000ull)             return fmt::format("{:>12}", value);
+    if (value < 1'000'000ull)         return fmt::format("{:>9.2f} k", value / 1'000.0);
+    if (value < 1'000'000'000ull)     return fmt::format("{:>9.2f} M", value / 1'000'000.0);
+    if (value < 1'000'000'000'000ull) return fmt::format("{:>9.2f} G", value / 1'000'000'000.0);
+    return fmt::format("{:>9.2f} T", value / 1'000'000'000'000.0);
+}
+
+/// IPC = total_instructions / total_cycles. Returns "-" when cycles==0
+/// (no PMU data, or zero-time region). 6.3 chars (e.g. " 2.471"); we
+/// pad to the column width at format time.
+inline std::string fmt_ipc(std::uint64_t total_cycles, std::uint64_t total_instructions) noexcept {
+    if (total_cycles == 0) return fmt::format("{:>7}", "-");
+    const double ipc =
+        static_cast<double>(total_instructions) / static_cast<double>(total_cycles);
+    return fmt::format("{:>7.3f}", ipc);
+}
+
+/// Branch miss rate as a percent of total branches.
+inline std::string fmt_branch_miss_pct(std::uint64_t total_branches,
+                                       std::uint64_t total_branch_misses) noexcept {
+    if (total_branches == 0) return fmt::format("{:>8}", "-");
+    const double pct =
+        100.0 * static_cast<double>(total_branch_misses)
+              / static_cast<double>(total_branches);
+    return fmt::format("{:>7.3f}%", pct);
+}
+
+/// Mean cycles per visit. We surface this so the reader can spot the
+/// "this region runs for 30k cycles per visit, 408 visits, no wonder
+/// it's hot" reading at a glance without doing the division by hand.
+inline std::string fmt_per_visit(std::uint64_t total, std::uint64_t visits) noexcept {
+    if (visits == 0) return fmt::format("{:>12}", "-");
+    return fmt_compact_count(total / visits);
+}
+
 /// Width of the wide tables. Picked to match Catch2's own BENCHMARK
 /// rule width (CATCH_CONFIG_CONSOLE_WIDTH-1 == 199 after our rebuild)
 /// so the reader sees a single visual column when the report block
@@ -334,6 +373,98 @@ inline void print_instrumentation_summary(std::string_view section_name) {
     if (!printed_any) {
         cout << "  (no regions visited yet — instrumentation may be off)\n";
     }
+    cout << rule() << "\n";
+}
+
+// ---------------------------------------------------------------------
+// 2b. PMU summary — cycles, instructions, IPC, branches, branch_miss%.
+//     Separated from the timing summary so the timing table stays
+//     readable; on macOS without root and on Linux without
+//     perf_event_paranoid<=2 these columns are all zero (or `-`)
+//     because read_thread_counters() falls back to zeros when the
+//     backend can't open the PMU.
+// ---------------------------------------------------------------------
+
+inline void print_pmu_summary(std::string_view section_name) {
+    using std::cout;
+
+    // Sample one region's PMU values to decide whether to print the
+    // table at all — when no backend is available every aggregate has
+    // zeros across the board and the table is just noise.
+    bool has_any_pmu = false;
+    for_each_visited_descriptor(
+        [&](const bioseq::instr::RegionDescriptor* /*desc*/,
+            const bioseq::instr::RegionAggregate* ra,
+            const bioseq::instr::LoopAggregate* la) {
+        const auto* base = la != nullptr
+            ? static_cast<const bioseq::instr::RegionAggregate*>(la) : ra;
+        if (base == nullptr) return;
+        if (base->total_cycles > 0 || base->total_instructions > 0) {
+            has_any_pmu = true;
+        }
+    });
+
+    cout << rule() << "\n";
+    cout << fmt::format(
+        "[bioseq] PMU summary  section=\"{}\"  (counters via "
+#if defined(__APPLE__)
+        "kperf.framework"
+#elif defined(__linux__)
+        "perf_event_open"
+#else
+        "stub"
+#endif
+        ")\n",
+        section_name);
+    cout << rule() << "\n";
+
+    if (!has_any_pmu) {
+        cout <<
+#if defined(__APPLE__)
+            "  (no PMU data — kperf init failed; on macOS this normally requires running under sudo)\n"
+#elif defined(__linux__)
+            "  (no PMU data — perf_event_open failed; check /proc/sys/kernel/perf_event_paranoid)\n"
+#else
+            "  (no PMU data — no PMU backend on this platform)\n"
+#endif
+            ;
+        cout << rule() << "\n";
+        return;
+    }
+
+    // Columns: 48 + 9 + 12 + 12 + 7 + 12 + 12 + 12 + 8 + separators
+    cout << fmt::format(
+        "{:<48} {:>9} {:>12} {:>12} {:>7} {:>12} {:>12} {:>12} {:>8}\n",
+        "name", "visits",
+        "cycles", "cyc/visit", "IPC",
+        "instr", "branches", "br/visit", "br_miss%");
+    cout << rule() << "\n";
+
+    for_each_visited_descriptor(
+        [&](const bioseq::instr::RegionDescriptor* desc,
+            const bioseq::instr::RegionAggregate* ra,
+            const bioseq::instr::LoopAggregate* la) {
+        const auto* base = la != nullptr
+            ? static_cast<const bioseq::instr::RegionAggregate*>(la) : ra;
+        if (base == nullptr) return;
+        // Skip rows with no PMU data — they would print all-`-` and
+        // visually distract from the rows that do have data.
+        if (base->total_cycles == 0 && base->total_instructions == 0
+            && base->total_branches == 0 && base->total_branch_misses == 0) {
+            return;
+        }
+        cout << fmt::format(
+            "{:<48} {:>9} {} {} {} {} {} {} {}\n",
+            render_name(desc),
+            base->visits,
+            fmt_compact_count(base->total_cycles),
+            fmt_per_visit(base->total_cycles, base->visits),
+            fmt_ipc(base->total_cycles, base->total_instructions),
+            fmt_compact_count(base->total_instructions),
+            fmt_compact_count(base->total_branches),
+            fmt_per_visit(base->total_branches, base->visits),
+            fmt_branch_miss_pct(base->total_branches, base->total_branch_misses));
+    });
     cout << rule() << "\n";
 }
 
@@ -761,6 +892,7 @@ export inline void print_section_summary(
     const EvaluationResults& results) noexcept
 {
     print_instrumentation_summary(section_name);
+    print_pmu_summary(section_name);
     print_arena_summary();
     print_top_bottlenecks();
     print_top_call_frequency();
@@ -777,6 +909,7 @@ export inline void print_section_summary(
     const SingleEvalResult& /*result*/) noexcept
 {
     print_instrumentation_summary(section_name);
+    print_pmu_summary(section_name);
     print_arena_summary();
     print_top_bottlenecks();
     print_top_call_frequency();

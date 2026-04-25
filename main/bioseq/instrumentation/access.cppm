@@ -91,7 +91,8 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                         : std::uint64_t{0};
                     JustLog("[bioseq] profile {} total={} ns visits={} mean={} ns "
                             "p50={} ns p99={} ns min={} ns max={} ns "
-                            "iters={} mean_per_iter={} ns work={} target={} lanes={}",
+                            "iters={} mean_per_iter={} ns work={} target={} lanes={} "
+                            "cycles={} instructions={} branches={} branch_misses={}",
                             desc->name,
                             la->total_ns, la->visits, mean_ns,
                             p50, p99,
@@ -99,7 +100,9 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                             la->total_iterations, per_iter_mean_ns,
                             la->total_work,
                             desc->highway_target ? desc->highway_target : "-",
-                            desc->highway_lanes);
+                            desc->highway_lanes,
+                            la->total_cycles, la->total_instructions,
+                            la->total_branches, la->total_branch_misses);
                     continue;
                 }
             }
@@ -109,11 +112,14 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                     const auto p50 = detail::hist_percentile(ra->ns_hist, 0.50);
                     const auto p99 = detail::hist_percentile(ra->ns_hist, 0.99);
                     JustLog("[bioseq] profile {} total={} ns visits={} mean={} ns "
-                            "p50={} ns p99={} ns min={} ns max={} ns",
+                            "p50={} ns p99={} ns min={} ns max={} ns "
+                            "cycles={} instructions={} branches={} branch_misses={}",
                             desc->name,
                             ra->total_ns, ra->visits, mean_ns,
                             p50, p99,
-                            ra->min_ns, ra->max_ns);
+                            ra->min_ns, ra->max_ns,
+                            ra->total_cycles, ra->total_instructions,
+                            ra->total_branches, ra->total_branch_misses);
                 }
             }
         }

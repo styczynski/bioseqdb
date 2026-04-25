@@ -28,6 +28,7 @@ import bioseq_instr.aggregate;
 import bioseq_instr.thread_state;
 import bioseq_instr.clock;
 import bioseq_instr.global_state;
+import bioseq_instr.pmu;
 
 export namespace bioseq::instr {
 
@@ -41,6 +42,11 @@ struct Region {
 template<is_context_args Args>
 struct [[nodiscard]] RegionScope {
     Region r{};
+    /// PMU baseline. Sized to zero bytes when enable_counters is false
+    /// thanks to the conditional storage; the field exists in every
+    /// instantiation but consumes no space when unused, so the scope's
+    /// size is unchanged in the common no-counters paths.
+    pmu::counters_t pmu_begin{};
 
     [[gnu::always_inline]]
     explicit RegionScope(const RegionDescriptor* d) noexcept {
@@ -50,6 +56,9 @@ struct [[nodiscard]] RegionScope {
             if (prof == nullptr) return;
             r.desc = d;
             r.t_begin_ns = clock::now_ns();
+            if constexpr (Args::enable_counters) {
+                pmu_begin = pmu::read_thread_counters();
+            }
             prof->stack_depth += 1;
             r.skipped = false;
         } else {
@@ -62,12 +71,25 @@ struct [[nodiscard]] RegionScope {
             if (r.skipped) return;
             const auto end_ns = clock::now_ns();
             const auto delta_ns = end_ns - r.t_begin_ns;
+            // Read counters BEFORE touching the aggregate so the delta
+            // brackets only the work between the two now_ns / read calls.
+            pmu::counters_t pmu_delta{};
+            if constexpr (Args::enable_counters) {
+                const auto pmu_end = pmu::read_thread_counters();
+                pmu_delta = pmu::sub_clamped(pmu_end, pmu_begin);
+            }
             auto* prof = tls_profiler<Args>;
             if (prof == nullptr) return;
             if (prof->stack_depth > 0) prof->stack_depth -= 1;
             auto* agg = prof->aggregates.get_or_create(r.desc->id);
             if (agg != nullptr) {
                 aggregate_record(*agg, delta_ns);
+                if constexpr (Args::enable_counters) {
+                    agg->total_cycles        += pmu_delta.cycles;
+                    agg->total_instructions  += pmu_delta.instructions;
+                    agg->total_branches      += pmu_delta.branches;
+                    agg->total_branch_misses += pmu_delta.branch_misses;
+                }
             }
         }
     }

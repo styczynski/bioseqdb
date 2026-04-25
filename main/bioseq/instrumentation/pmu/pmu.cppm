@@ -5,21 +5,27 @@
  * The four-event canon group (cycles, instructions, branches,
  * branch_misses) is exposed across platforms. Each platform backend lives
  * in a sibling module guarded by platform macros; this header is the
- * uniform interface.
+ * uniform interface the region/loop scopes call into.
  *
- * v1 status: the public surface is in place; all backends ship the
- * stubbed implementation that returns zeros. Linux perf_event and macOS
- * kperf backends are sketched in pmu_linux.cppm / pmu_macos.cppm — they
- * are activated by replacing the stub. The hot path (region/loop scopes)
- * does not currently invoke read_thread_counters so there is no runtime
- * cost yet; wiring is deferred to a follow-up that opts in via
- * Args::enable_counters and lifts the field reads in begin/end.
+ * Hot-path read overhead:
+ *   - macOS: one sysctl (kpc_get_thread_counters), ~300 ns on M-series.
+ *   - Linux: one read() on a perf-event group fd, ~200-400 ns depending
+ *     on kernel version.
+ *
+ * The cost is paid only when Args::enable_counters is true and the
+ * region is taken (skipped == false). The enable_counters bool sits
+ * directly on context_args_profiling_full so the compiler eliminates
+ * every PMU read in instantiations that don't ask for them.
  */
 module;
 
 #include <cstdint>
 
 export module bioseq_instr.pmu;
+
+import bioseq_instr.pmu.macos;
+import bioseq_instr.pmu.linux;
+import bioseq_instr.pmu.stub;
 
 export namespace bioseq::instr::pmu {
 
@@ -31,39 +37,92 @@ struct counters_t {
     std::uint64_t branch_misses = 0;
 };
 
-/// Initialise per-thread counter group. Called once per thread on first
-/// region begin in a profiling instantiation. Returns false when no PMU
-/// access is available on this platform.
-bool init_thread_counters() noexcept;
+/// Initialise per-thread counter group. Idempotent: lazy-cached
+/// thread-locally inside the backend, so the second-and-onward calls
+/// short-circuit on a single load + branch. Returns false when no PMU
+/// access is available on this platform (Windows, missing root on
+/// macOS, perf_event_paranoid too high on Linux).
+[[nodiscard]] inline bool init_thread_counters() noexcept {
+#if defined(__APPLE__)
+    return macos_backend::init_thread();
+#elif defined(__linux__)
+    return linux_backend::init_thread();
+#else
+    return stub::init();
+#endif
+}
 
-/// Tear down per-thread counter group. Called from ThreadState's
-/// destructor; idempotent if init_thread_counters returned false.
-void shutdown_thread_counters() noexcept;
-
-/// Read the current counter values. Returns zeros if the per-thread
-/// group is not initialised.
-counters_t read_thread_counters() noexcept;
+/// Tear down per-thread counter group. Idempotent if init_thread_counters
+/// returned false. Called from ThreadState's destructor on threads that
+/// opted into PMU; safe to call from any thread.
+inline void shutdown_thread_counters() noexcept {
+#if defined(__APPLE__)
+    macos_backend::shutdown_thread();
+#elif defined(__linux__)
+    linux_backend::shutdown_thread();
+#else
+    stub::shutdown();
+#endif
+}
 
 /// True if the platform backend is functional on this host. False on
 /// Windows or when PMU access was denied at init time.
-[[nodiscard]] bool counters_available() noexcept;
+[[nodiscard]] inline bool counters_available() noexcept {
+#if defined(__APPLE__)
+    return macos_backend::counters_available();
+#elif defined(__linux__)
+    return linux_backend::counters_available();
+#else
+    return false;
+#endif
+}
 
-}  // namespace bioseq::instr::pmu
+/// Read the current counter values. The kernel hands back monotonically-
+/// increasing counter values; the caller subtracts a baseline taken at
+/// scope-begin to obtain the delta. Returns zeros when the per-thread
+/// group is not initialised, including on the very first call (which
+/// triggers a lazy init in this same call so the *second* call has the
+/// fast path).
+[[nodiscard, gnu::always_inline]]
+inline counters_t read_thread_counters() noexcept {
+#if defined(__APPLE__)
+    if (!macos_backend::init_thread()) return counters_t{};
+    auto raw = macos_backend::read();
+    return counters_t{
+        .cycles        = raw.cycles,
+        .instructions  = raw.instructions,
+        .branches      = raw.branches,
+        .branch_misses = raw.branch_misses,
+    };
+#elif defined(__linux__)
+    if (!linux_backend::init_thread()) return counters_t{};
+    auto raw = linux_backend::read();
+    return counters_t{
+        .cycles        = raw.cycles,
+        .instructions  = raw.instructions,
+        .branches      = raw.branches,
+        .branch_misses = raw.branch_misses,
+    };
+#else
+    return counters_t{};
+#endif
+}
 
-// =====================================================================
-// Inline default (stub) implementation. Linux / macOS / Windows specific
-// implementations are sketched in adjacent modules and activated when
-// the project chooses to wire them up. Until then this stub returns
-// zeros — the aggregate fields stay zero and the summary writer prints
-// `cycles=0 instructions=0 ...` which is the documented v1 behaviour.
-// =====================================================================
-
-namespace bioseq::instr::pmu {
-
-[[nodiscard]] inline bool counters_available() noexcept { return false; }
-
-inline bool init_thread_counters() noexcept { return false; }
-inline void shutdown_thread_counters() noexcept {}
-inline counters_t read_thread_counters() noexcept { return counters_t{}; }
+/// Subtract two counter samples in field-wise fashion, taking care to
+/// handle the rare case where the kernel returns out-of-order values
+/// (counter rollover, scheduling artifacts) by clamping at zero.
+[[nodiscard, gnu::always_inline]]
+inline counters_t sub_clamped(const counters_t& end,
+                              const counters_t& begin) noexcept {
+    auto safe_sub = [](std::uint64_t a, std::uint64_t b) noexcept {
+        return a >= b ? a - b : std::uint64_t{0};
+    };
+    return counters_t{
+        .cycles        = safe_sub(end.cycles,        begin.cycles),
+        .instructions  = safe_sub(end.instructions,  begin.instructions),
+        .branches      = safe_sub(end.branches,      begin.branches),
+        .branch_misses = safe_sub(end.branch_misses, begin.branch_misses),
+    };
+}
 
 }  // namespace bioseq::instr::pmu
