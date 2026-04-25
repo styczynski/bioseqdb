@@ -1,0 +1,302 @@
+baclears.any, 0x1e6
+baclears.cond, 0x10e6
+baclears.indirect, 0x2e6
+baclears.return, 0x8e6
+baclears.uncond, 0x4e6
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.call, 0xf9c4
+br_inst_retired.far_branch, 0xbfc4
+br_inst_retired.ind_call, 0xfbc4
+br_inst_retired.jcc, 0x7ec4
+br_inst_retired.non_return_ind, 0xebc4
+br_inst_retired.rel_call, 0xfdc4
+br_inst_retired.return, 0xf7c4
+br_inst_retired.taken_jcc, 0xfec4
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.ind_call, 0xfbc5
+br_misp_retired.jcc, 0x7ec5
+br_misp_retired.non_return_ind, 0xebc5
+br_misp_retired.return, 0xf7c5
+br_misp_retired.taken_jcc, 0xfec5
+btclear.any, 0xe8
+bus_lock.all, 0x63
+bus_lock.block_cycles, 0x263
+bus_lock.cycles_other_block, 0x263
+bus_lock.cycles_self_block, 0x163
+bus_lock.lock_cycles, 0x163
+bus_lock.self_locks, 0x63
+c0_stalls.load_dram_hit, 0x434
+c0_stalls.load_l2_hit, 0x134
+c0_stalls.load_llc_hit, 0x234
+core_reject_l2q.any, 0x31
+cpu_clk_unhalted.core_p, 0x3c
+cpu_clk_unhalted.ref, 0x13c
+cpu_clk_unhalted.ref_tsc_p, 0x13c
+cycles_div_busy.any, 0xcd
+cycles_div_busy.fpdiv, 0x2cd
+cycles_div_busy.idiv, 0x1cd
+decode_restriction.predecode_wrong, 0x1e9
+dl1.dirty_eviction, 0x151
+dtlb_load_misses.pde_cache_miss, 0x8008
+dtlb_load_misses.stlb_hit, 0x2008
+dtlb_load_misses.walk_completed, 0xe08
+dtlb_load_misses.walk_completed_1g, 0x808
+dtlb_load_misses.walk_completed_2m_4m, 0x408
+dtlb_load_misses.walk_completed_4k, 0x208
+dtlb_load_misses.walk_pending, 0x1008
+dtlb_store_misses.pde_cache_miss, 0x8049
+dtlb_store_misses.stlb_hit, 0x2049
+dtlb_store_misses.walk_completed, 0xe49
+dtlb_store_misses.walk_completed_1g, 0x849
+dtlb_store_misses.walk_completed_2m_4m, 0x449
+dtlb_store_misses.walk_completed_4k, 0x249
+dtlb_store_misses.walk_pending, 0x1049
+ept.epde_hit, 0x14f
+ept.epde_miss, 0x24f
+ept.epdpe_hit, 0x44f
+ept.epdpe_miss, 0x84f
+ept.walk_pending, 0x104f
+hw_interrupts.masked, 0x2cb
+hw_interrupts.pending_and_masked, 0x4cb
+hw_interrupts.received, 0x1cb
+icache.accesses, 0x380
+icache.hit, 0x180
+icache.misses, 0x280
+inst_retired.any_p, 0xc0
+itlb.fills, 0x481
+itlb_misses.pde_cache_miss, 0x8085
+itlb_misses.stlb_hit, 0x2085
+itlb_misses.walk_completed, 0xe85
+itlb_misses.walk_completed_1g, 0x885
+itlb_misses.walk_completed_2m_4m, 0x485
+itlb_misses.walk_completed_4k, 0x285
+itlb_misses.walk_pending, 0x1085
+l2_reject_xq.any, 0x30
+l2_request.all, 0x24
+l2_request.hit, 0x224
+l2_request.miss, 0x124
+l2_request.rejects, 0x424
+ld_blocks.4k_alias, 0x403
+ld_blocks.all, 0x1003
+ld_blocks.data_unknown, 0x103
+ld_blocks.dtlb_miss, 0x803
+ld_blocks.store_forward, 0x203
+longest_lat_cache.miss, 0x412e
+longest_lat_cache.reference, 0x4f2e
+machine_clears.any, 0xc3
+machine_clears.disambiguation, 0x8c3
+machine_clears.fp_assist, 0x4c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.page_fault, 0x20c3
+machine_clears.smc, 0x1c3
+mem_bound_stalls.ifetch, 0x3834
+mem_bound_stalls.ifetch_dram_hit, 0x2034
+mem_bound_stalls.ifetch_l2_hit, 0x834
+mem_bound_stalls.ifetch_llc_hit, 0x1034
+mem_bound_stalls.load, 0x734
+mem_bound_stalls.load_dram_hit, 0x434
+mem_bound_stalls.load_l2_hit, 0x134
+mem_bound_stalls.load_llc_hit, 0x234
+mem_bound_stalls.store_buffer_full, 0x4034
+mem_load_uops_retired.dram_hit, 0x80d1
+mem_load_uops_retired.hitm, 0x20d1
+mem_load_uops_retired.l1_hit, 0x1d1
+mem_load_uops_retired.l1_miss, 0x8d1
+mem_load_uops_retired.l2_hit, 0x2d1
+mem_load_uops_retired.l2_miss, 0x10d1
+mem_load_uops_retired.l3_hit, 0x4d1
+mem_uops_retired.all, 0x83d0
+mem_uops_retired.all_loads, 0x81d0
+mem_uops_retired.all_stores, 0x82d0
+mem_uops_retired.dtlb_miss, 0x13d0
+mem_uops_retired.dtlb_miss_loads, 0x11d0
+mem_uops_retired.dtlb_miss_stores, 0x12d0
+mem_uops_retired.lock_loads, 0x21d0
+mem_uops_retired.split, 0x43d0
+mem_uops_retired.split_loads, 0x41d0
+mem_uops_retired.split_stores, 0x42d0
+misalign_mem_ref.load_page_split, 0x213
+misalign_mem_ref.store_page_split, 0x413
+ocr.all_code_rd.any_response, 0x1b7, 0x10044
+ocr.all_code_rd.dram, 0x1b7, 0x184000044
+ocr.all_code_rd.l3_hit, 0x1b7, 0x1f803c0044
+ocr.all_code_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0044
+ocr.all_code_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0044
+ocr.all_code_rd.l3_hit.snoop_hitm, 0x1b7, 0x10003c0044
+ocr.all_code_rd.l3_hit.snoop_miss, 0x1b7, 0x2003c0044
+ocr.all_code_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0044
+ocr.all_code_rd.l3_miss, 0x1b7, 0x2184000044
+ocr.all_code_rd.l3_miss_local, 0x1b7, 0x2184000044
+ocr.all_code_rd.local_dram, 0x1b7, 0x184000044
+ocr.all_code_rd.outstanding, 0x1b7, 0x8000000000000044
+ocr.corewb_m.any_response, 0x1b7, 0x3000000010000
+ocr.corewb_m.l3_hit, 0x1b7, 0x3001f803c0000
+ocr.corewb_m.l3_miss, 0x1b7, 0x3002184000000
+ocr.corewb_m.l3_miss_local, 0x1b7, 0x3002184000000
+ocr.corewb_m.outstanding, 0x1b7, 0x8003000000000000
+ocr.demand_code_rd.any_response, 0x1b7, 0x10004
+ocr.demand_code_rd.dram, 0x1b7, 0x184000004
+ocr.demand_code_rd.l3_hit, 0x1b7, 0x1f803c0004
+ocr.demand_code_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0004
+ocr.demand_code_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0004
+ocr.demand_code_rd.l3_hit.snoop_hitm, 0x1b7, 0x10003c0004
+ocr.demand_code_rd.l3_hit.snoop_miss, 0x1b7, 0x2003c0004
+ocr.demand_code_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0004
+ocr.demand_code_rd.l3_miss, 0x1b7, 0x2184000004
+ocr.demand_code_rd.l3_miss_local, 0x1b7, 0x2184000004
+ocr.demand_code_rd.local_dram, 0x1b7, 0x184000004
+ocr.demand_data_and_l1pf_rd.any_response, 0x1b7, 0x10001
+ocr.demand_data_and_l1pf_rd.dram, 0x1b7, 0x184000001
+ocr.demand_data_and_l1pf_rd.l3_hit, 0x1b7, 0x1f803c0001
+ocr.demand_data_and_l1pf_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0001
+ocr.demand_data_and_l1pf_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0001
+ocr.demand_data_and_l1pf_rd.l3_hit.snoop_hitm, 0x1b7, 0x10003c0001
+ocr.demand_data_and_l1pf_rd.l3_hit.snoop_miss, 0x1b7, 0x2003c0001
+ocr.demand_data_and_l1pf_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0001
+ocr.demand_data_and_l1pf_rd.l3_miss, 0x1b7, 0x2184000001
+ocr.demand_data_and_l1pf_rd.l3_miss_local, 0x1b7, 0x2184000001
+ocr.demand_data_and_l1pf_rd.local_dram, 0x1b7, 0x184000001
+ocr.demand_data_and_l1pf_rd.outstanding, 0x1b7, 0x8000000000000001
+ocr.demand_data_rd.any_response, 0x1b7, 0x10001
+ocr.demand_data_rd.dram, 0x1b7, 0x184000001
+ocr.demand_data_rd.l3_hit, 0x1b7, 0x1f803c0001
+ocr.demand_data_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0001
+ocr.demand_data_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0001
+ocr.demand_data_rd.l3_hit.snoop_hitm, 0x1b7, 0x10003c0001
+ocr.demand_data_rd.l3_hit.snoop_miss, 0x1b7, 0x2003c0001
+ocr.demand_data_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0001
+ocr.demand_data_rd.l3_miss, 0x1b7, 0x2184000001
+ocr.demand_data_rd.l3_miss_local, 0x1b7, 0x2184000001
+ocr.demand_data_rd.local_dram, 0x1b7, 0x184000001
+ocr.demand_data_rd.outstanding, 0x1b7, 0x8000000000000001
+ocr.demand_rfo.any_response, 0x1b7, 0x10002
+ocr.demand_rfo.dram, 0x1b7, 0x184000002
+ocr.demand_rfo.l3_hit, 0x1b7, 0x1f803c0002
+ocr.demand_rfo.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0002
+ocr.demand_rfo.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0002
+ocr.demand_rfo.l3_hit.snoop_hitm, 0x1b7, 0x10003c0002
+ocr.demand_rfo.l3_hit.snoop_miss, 0x1b7, 0x2003c0002
+ocr.demand_rfo.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0002
+ocr.demand_rfo.l3_miss, 0x1b7, 0x2184000002
+ocr.demand_rfo.l3_miss_local, 0x1b7, 0x2184000002
+ocr.demand_rfo.local_dram, 0x1b7, 0x184000002
+ocr.demand_rfo.outstanding, 0x1b7, 0x8000000000000002
+ocr.full_streaming_wr.any_response, 0x1b7, 0x800000010000
+ocr.full_streaming_wr.l3_hit, 0x1b7, 0x801f803c0000
+ocr.full_streaming_wr.l3_miss, 0x1b7, 0x802184000000
+ocr.full_streaming_wr.l3_miss_local, 0x1b7, 0x802184000000
+ocr.hwpf_l1d_and_swpf.any_response, 0x1b7, 0x10400
+ocr.hwpf_l1d_and_swpf.l3_hit.snoop_hitm, 0x1b7, 0x10003c0400
+ocr.hwpf_l2_code_rd.any_response, 0x1b7, 0x10040
+ocr.hwpf_l2_code_rd.dram, 0x1b7, 0x184000040
+ocr.hwpf_l2_code_rd.l3_hit, 0x1b7, 0x1f803c0040
+ocr.hwpf_l2_code_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0040
+ocr.hwpf_l2_code_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0040
+ocr.hwpf_l2_code_rd.l3_hit.snoop_hitm, 0x1b7, 0x10003c0040
+ocr.hwpf_l2_code_rd.l3_hit.snoop_miss, 0x1b7, 0x2003c0040
+ocr.hwpf_l2_code_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0040
+ocr.hwpf_l2_code_rd.l3_miss, 0x1b7, 0x2184000040
+ocr.hwpf_l2_code_rd.l3_miss_local, 0x1b7, 0x2184000040
+ocr.hwpf_l2_code_rd.local_dram, 0x1b7, 0x184000040
+ocr.hwpf_l2_code_rd.outstanding, 0x1b7, 0x8000000000000040
+ocr.hwpf_l2_data_rd.any_response, 0x1b7, 0x10010
+ocr.hwpf_l2_data_rd.dram, 0x1b7, 0x184000010
+ocr.hwpf_l2_data_rd.l3_hit, 0x1b7, 0x1f803c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hitm, 0x1b7, 0x10003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_miss, 0x1b7, 0x2003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0010
+ocr.hwpf_l2_data_rd.l3_miss, 0x1b7, 0x2184000010
+ocr.hwpf_l2_data_rd.l3_miss_local, 0x1b7, 0x2184000010
+ocr.hwpf_l2_data_rd.local_dram, 0x1b7, 0x184000010
+ocr.hwpf_l2_rfo.any_response, 0x1b7, 0x10020
+ocr.hwpf_l2_rfo.dram, 0x1b7, 0x184000020
+ocr.hwpf_l2_rfo.l3_hit, 0x1b7, 0x1f803c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hitm, 0x1b7, 0x10003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_miss, 0x1b7, 0x2003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0020
+ocr.hwpf_l2_rfo.l3_miss, 0x1b7, 0x2184000020
+ocr.hwpf_l2_rfo.l3_miss_local, 0x1b7, 0x2184000020
+ocr.hwpf_l2_rfo.local_dram, 0x1b7, 0x184000020
+ocr.hwpf_l2_rfo.outstanding, 0x1b7, 0x8000000000000020
+ocr.l1wb_m.any_response, 0x1b7, 0x1000000010000
+ocr.l1wb_m.l3_hit, 0x1b7, 0x1001f803c0000
+ocr.l1wb_m.l3_miss, 0x1b7, 0x1002184000000
+ocr.l1wb_m.l3_miss_local, 0x1b7, 0x1002184000000
+ocr.l2wb_m.any_response, 0x1b7, 0x2000000010000
+ocr.l2wb_m.l3_hit, 0x1b7, 0x2001f803c0000
+ocr.l2wb_m.l3_miss, 0x1b7, 0x2002184000000
+ocr.l2wb_m.l3_miss_local, 0x1b7, 0x2002184000000
+ocr.other.any_response, 0x1b7, 0x18000
+ocr.other.l3_miss, 0x1b7, 0x2184008000
+ocr.other.l3_miss_local, 0x1b7, 0x2184008000
+ocr.partial_streaming_wr.any_response, 0x1b7, 0x400000010000
+ocr.partial_streaming_wr.l3_hit, 0x1b7, 0x401f803c0000
+ocr.partial_streaming_wr.l3_miss, 0x1b7, 0x402184000000
+ocr.partial_streaming_wr.l3_miss_local, 0x1b7, 0x402184000000
+ocr.prefetches.any_response, 0x1b7, 0x10470
+ocr.prefetches.l3_miss, 0x1b7, 0x2184000470
+ocr.reads_to_core.any_response, 0x1b7, 0x10477
+ocr.reads_to_core.dram, 0x1b7, 0x184000477
+ocr.reads_to_core.l3_hit, 0x1b7, 0x1f803c0477
+ocr.reads_to_core.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x4003c0477
+ocr.reads_to_core.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x8003c0477
+ocr.reads_to_core.l3_hit.snoop_hitm, 0x1b7, 0x10003c0477
+ocr.reads_to_core.l3_hit.snoop_miss, 0x1b7, 0x2003c0477
+ocr.reads_to_core.l3_hit.snoop_not_needed, 0x1b7, 0x1003c0477
+ocr.reads_to_core.l3_miss, 0x1b7, 0x2184000477
+ocr.reads_to_core.l3_miss_local, 0x1b7, 0x2184000477
+ocr.reads_to_core.local_dram, 0x1b7, 0x184000477
+ocr.reads_to_core.outstanding, 0x1b7, 0x8000000000000477
+ocr.streaming_wr.any_response, 0x1b7, 0x10800
+ocr.streaming_wr.l3_hit, 0x1b7, 0x1f803c0800
+ocr.streaming_wr.l3_miss, 0x1b7, 0x2184000800
+ocr.streaming_wr.l3_miss_local, 0x1b7, 0x2184000800
+ocr.uc_rd.any_response, 0x1b7, 0x100000010000
+ocr.uc_rd.dram, 0x1b7, 0x100184000000
+ocr.uc_rd.l3_hit, 0x1b7, 0x101f803c0000
+ocr.uc_rd.l3_hit.snoop_hit_no_fwd, 0x1b7, 0x1004003c0000
+ocr.uc_rd.l3_hit.snoop_hit_with_fwd, 0x1b7, 0x1008003c0000
+ocr.uc_rd.l3_hit.snoop_hitm, 0x1b7, 0x1010003c0000
+ocr.uc_rd.l3_hit.snoop_miss, 0x1b7, 0x1002003c0000
+ocr.uc_rd.l3_hit.snoop_not_needed, 0x1b7, 0x1001003c0000
+ocr.uc_rd.l3_miss, 0x1b7, 0x102184000000
+ocr.uc_rd.l3_miss_local, 0x1b7, 0x102184000000
+ocr.uc_rd.local_dram, 0x1b7, 0x100184000000
+ocr.uc_rd.outstanding, 0x1b7, 0x8000100000000000
+ocr.uc_wr.any_response, 0x1b7, 0x200000010000
+ocr.uc_wr.l3_hit, 0x1b7, 0x201f803c0000
+ocr.uc_wr.l3_miss, 0x1b7, 0x202184000000
+ocr.uc_wr.l3_miss_local, 0x1b7, 0x202184000000
+topdown_bad_speculation.all, 0x673
+topdown_bad_speculation.fastnuke, 0x273
+topdown_bad_speculation.machine_clears, 0x273
+topdown_bad_speculation.mispredict, 0x473
+topdown_bad_speculation.monuke, 0x273
+topdown_be_bound.all, 0x74
+topdown_be_bound.alloc_restrictions, 0x174
+topdown_be_bound.mem_scheduler, 0x274
+topdown_be_bound.non_mem_scheduler, 0x874
+topdown_be_bound.register, 0x2074
+topdown_be_bound.reorder_buffer, 0x4074
+topdown_be_bound.serialization, 0x1074
+topdown_be_bound.store_buffer, 0x474
+topdown_fe_bound.all, 0x71
+topdown_fe_bound.branch_detect, 0x271
+topdown_fe_bound.branch_resteer, 0x4071
+topdown_fe_bound.cisc, 0x171
+topdown_fe_bound.decode, 0x871
+topdown_fe_bound.icache, 0x2071
+topdown_fe_bound.itlb, 0x1071
+topdown_fe_bound.other, 0x8071
+topdown_fe_bound.predecode, 0x471
+topdown_retiring.all, 0xc2
+uops_issued.any, 0xe
+uops_retired.all, 0xc2
+uops_retired.fpdiv, 0x8c2
+uops_retired.idiv, 0x10c2
+uops_retired.ms, 0x1c2
+uops_retired.x87, 0x2c2

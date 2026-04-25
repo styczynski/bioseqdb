@@ -1,0 +1,446 @@
+arith.divider_uops, 0x214
+avx_insts.all, 0x7c6
+baclears.any, 0x1fe6
+br_inst_exec.all_branches, 0xff88
+br_inst_exec.all_conditional, 0xc188
+br_inst_exec.all_direct_jmp, 0xc288
+br_inst_exec.all_direct_near_call, 0xd088
+br_inst_exec.all_indirect_jump_non_call_ret, 0xc488
+br_inst_exec.all_indirect_near_return, 0xc888
+br_inst_exec.nontaken_conditional, 0x4188
+br_inst_exec.taken_conditional, 0x8188
+br_inst_exec.taken_direct_jump, 0x8288
+br_inst_exec.taken_direct_near_call, 0x9088
+br_inst_exec.taken_indirect_jump_non_call_ret, 0x8488
+br_inst_exec.taken_indirect_near_call, 0xa088
+br_inst_exec.taken_indirect_near_return, 0x8888
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.all_branches_pebs, 0x4c4
+br_inst_retired.conditional, 0x1c4
+br_inst_retired.far_branch, 0x40c4
+br_inst_retired.near_call, 0x2c4
+br_inst_retired.near_call_r3, 0x2c4
+br_inst_retired.near_return, 0x8c4
+br_inst_retired.near_taken, 0x20c4
+br_inst_retired.not_taken, 0x10c4
+br_misp_exec.all_branches, 0xff89
+br_misp_exec.all_conditional, 0xc189
+br_misp_exec.all_indirect_jump_non_call_ret, 0xc489
+br_misp_exec.indirect, 0xe489
+br_misp_exec.nontaken_conditional, 0x4189
+br_misp_exec.taken_conditional, 0x8189
+br_misp_exec.taken_indirect_jump_non_call_ret, 0x8489
+br_misp_exec.taken_indirect_near_call, 0xa089
+br_misp_exec.taken_return_near, 0x8889
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.all_branches_pebs, 0x4c5
+br_misp_retired.conditional, 0x1c5
+br_misp_retired.near_taken, 0x20c5
+cpl_cycles.ring0, 0x15c
+cpl_cycles.ring0_trans, 0x15c
+cpl_cycles.ring123, 0x25c
+cpu_clk_thread_unhalted.one_thread_active, 0x23c
+cpu_clk_thread_unhalted.ref_xclk, 0x13c
+cpu_clk_thread_unhalted.ref_xclk_any, 0x13c
+cpu_clk_unhalted.one_thread_active, 0x23c
+cpu_clk_unhalted.ref_xclk, 0x13c
+cpu_clk_unhalted.ref_xclk_any, 0x13c
+cpu_clk_unhalted.thread_p, 0x3c
+cpu_clk_unhalted.thread_p_any, 0x3c
+cycle_activity.cycles_l1d_pending, 0x8a3
+cycle_activity.cycles_l2_pending, 0x1a3
+cycle_activity.cycles_ldm_pending, 0x2a3
+cycle_activity.cycles_no_execute, 0x4a3
+cycle_activity.stalls_l1d_pending, 0xca3
+cycle_activity.stalls_l2_pending, 0x5a3
+cycle_activity.stalls_ldm_pending, 0x6a3
+dsb2mite_switches.penalty_cycles, 0x2ab
+dtlb_load_misses.miss_causes_a_walk, 0x108
+dtlb_load_misses.pde_cache_miss, 0x8008
+dtlb_load_misses.stlb_hit, 0x6008
+dtlb_load_misses.stlb_hit_2m, 0x4008
+dtlb_load_misses.stlb_hit_4k, 0x2008
+dtlb_load_misses.walk_completed, 0xe08
+dtlb_load_misses.walk_completed_1g, 0x808
+dtlb_load_misses.walk_completed_2m_4m, 0x408
+dtlb_load_misses.walk_completed_4k, 0x208
+dtlb_load_misses.walk_duration, 0x1008
+dtlb_store_misses.miss_causes_a_walk, 0x149
+dtlb_store_misses.pde_cache_miss, 0x8049
+dtlb_store_misses.stlb_hit, 0x6049
+dtlb_store_misses.stlb_hit_2m, 0x4049
+dtlb_store_misses.stlb_hit_4k, 0x2049
+dtlb_store_misses.walk_completed, 0xe49
+dtlb_store_misses.walk_completed_1g, 0x849
+dtlb_store_misses.walk_completed_2m_4m, 0x449
+dtlb_store_misses.walk_completed_4k, 0x249
+dtlb_store_misses.walk_duration, 0x1049
+ept.walk_cycles, 0x104f
+fp_assist.any, 0x1eca
+fp_assist.simd_input, 0x10ca
+fp_assist.simd_output, 0x8ca
+fp_assist.x87_input, 0x4ca
+fp_assist.x87_output, 0x2ca
+hle_retired.aborted, 0x4c8
+hle_retired.aborted_misc1, 0x8c8
+hle_retired.aborted_misc2, 0x10c8
+hle_retired.aborted_misc3, 0x20c8
+hle_retired.aborted_misc4, 0x40c8
+hle_retired.aborted_misc5, 0x80c8
+hle_retired.commit, 0x2c8
+hle_retired.start, 0x1c8
+icache.hit, 0x180
+icache.ifdata_stall, 0x480
+icache.ifetch_stall, 0x480
+icache.misses, 0x280
+idq.all_dsb_cycles_4_uops, 0x1879
+idq.all_dsb_cycles_any_uops, 0x1879
+idq.all_mite_cycles_4_uops, 0x2479
+idq.all_mite_cycles_any_uops, 0x2479
+idq.dsb_cycles, 0x879
+idq.dsb_uops, 0x879
+idq.empty, 0x279
+idq.mite_all_uops, 0x3c79
+idq.mite_cycles, 0x479
+idq.mite_uops, 0x479
+idq.ms_cycles, 0x3079
+idq.ms_dsb_cycles, 0x1079
+idq.ms_dsb_occur, 0x1079
+idq.ms_dsb_uops, 0x1079
+idq.ms_mite_uops, 0x2079
+idq.ms_switches, 0x3079
+idq.ms_uops, 0x3079
+idq_uops_not_delivered.core, 0x19c
+idq_uops_not_delivered.cycles_0_uops_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_fe_was_ok, 0x19c
+idq_uops_not_delivered.cycles_le_1_uop_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_le_2_uop_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_le_3_uop_deliv.core, 0x19c
+ild_stall.iq_full, 0x487
+ild_stall.lcp, 0x187
+inst_retired.any_p, 0xc0
+inst_retired.prec_dist, 0x1c0
+inst_retired.x87, 0x2c0
+int_misc.recovery_cycles, 0x30d
+int_misc.recovery_cycles_any, 0x30d
+itlb.itlb_flush, 0x1ae
+itlb_misses.miss_causes_a_walk, 0x185
+itlb_misses.stlb_hit, 0x6085
+itlb_misses.stlb_hit_2m, 0x4085
+itlb_misses.stlb_hit_4k, 0x2085
+itlb_misses.walk_completed, 0xe85
+itlb_misses.walk_completed_1g, 0x885
+itlb_misses.walk_completed_2m_4m, 0x485
+itlb_misses.walk_completed_4k, 0x285
+itlb_misses.walk_duration, 0x1085
+l1d.replacement, 0x151
+l1d_pend_miss.fb_full, 0x248
+l1d_pend_miss.pending, 0x148
+l1d_pend_miss.pending_cycles, 0x148
+l1d_pend_miss.pending_cycles_any, 0x148
+l1d_pend_miss.request_fb_full, 0x248
+l2_demand_rqsts.wb_hit, 0x5027
+l2_lines_in.all, 0x7f1
+l2_lines_in.e, 0x4f1
+l2_lines_in.i, 0x1f1
+l2_lines_in.s, 0x2f1
+l2_lines_out.demand_clean, 0x5f2
+l2_lines_out.demand_dirty, 0x6f2
+l2_rqsts.all_code_rd, 0xe424
+l2_rqsts.all_demand_data_rd, 0xe124
+l2_rqsts.all_demand_miss, 0x2724
+l2_rqsts.all_demand_references, 0xe724
+l2_rqsts.all_pf, 0xf824
+l2_rqsts.all_rfo, 0xe224
+l2_rqsts.code_rd_hit, 0xc424
+l2_rqsts.code_rd_miss, 0x2424
+l2_rqsts.demand_data_rd_hit, 0xc124
+l2_rqsts.demand_data_rd_miss, 0x2124
+l2_rqsts.l2_pf_hit, 0xd024
+l2_rqsts.l2_pf_miss, 0x3024
+l2_rqsts.miss, 0x3f24
+l2_rqsts.references, 0xff24
+l2_rqsts.rfo_hit, 0xc224
+l2_rqsts.rfo_miss, 0x2224
+l2_trans.all_pf, 0x8f0
+l2_trans.all_requests, 0x80f0
+l2_trans.code_rd, 0x4f0
+l2_trans.demand_data_rd, 0x1f0
+l2_trans.l1d_wb, 0x10f0
+l2_trans.l2_fill, 0x20f0
+l2_trans.l2_wb, 0x40f0
+l2_trans.rfo, 0x2f0
+ld_blocks.no_sr, 0x803
+ld_blocks.store_forward, 0x203
+ld_blocks_partial.address_alias, 0x107
+load_hit_pre.hw_pf, 0x24c
+load_hit_pre.sw_pf, 0x14c
+lock_cycles.cache_lock_duration, 0x263
+lock_cycles.split_lock_uc_lock_duration, 0x163
+longest_lat_cache.miss, 0x412e
+longest_lat_cache.reference, 0x4f2e
+lsd.cycles_4_uops, 0x1a8
+lsd.cycles_active, 0x1a8
+lsd.uops, 0x1a8
+machine_clears.count, 0x1c3
+machine_clears.cycles, 0x1c3
+machine_clears.maskmov, 0x20c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.smc, 0x4c3
+mem_load_uops_l3_hit_retired.xsnp_hit, 0x2d2
+mem_load_uops_l3_hit_retired.xsnp_hitm, 0x4d2
+mem_load_uops_l3_hit_retired.xsnp_miss, 0x1d2
+mem_load_uops_l3_hit_retired.xsnp_none, 0x8d2
+mem_load_uops_l3_miss_retired.local_dram, 0x1d3
+mem_load_uops_retired.hit_lfb, 0x40d1
+mem_load_uops_retired.l1_hit, 0x1d1
+mem_load_uops_retired.l1_miss, 0x8d1
+mem_load_uops_retired.l2_hit, 0x2d1
+mem_load_uops_retired.l2_miss, 0x10d1
+mem_load_uops_retired.l3_hit, 0x4d1
+mem_load_uops_retired.l3_miss, 0x20d1
+mem_trans_retired.load_latency_gt_128, 0x1cd, 0x80
+mem_trans_retired.load_latency_gt_16, 0x1cd, 0x10
+mem_trans_retired.load_latency_gt_256, 0x1cd, 0x100
+mem_trans_retired.load_latency_gt_32, 0x1cd, 0x20
+mem_trans_retired.load_latency_gt_4, 0x1cd, 0x4
+mem_trans_retired.load_latency_gt_512, 0x1cd, 0x200
+mem_trans_retired.load_latency_gt_64, 0x1cd, 0x40
+mem_trans_retired.load_latency_gt_8, 0x1cd, 0x8
+mem_uops_retired.all_loads, 0x81d0
+mem_uops_retired.all_stores, 0x82d0
+mem_uops_retired.lock_loads, 0x21d0
+mem_uops_retired.split_loads, 0x41d0
+mem_uops_retired.split_stores, 0x42d0
+mem_uops_retired.stlb_miss_loads, 0x11d0
+mem_uops_retired.stlb_miss_stores, 0x12d0
+misalign_mem_ref.loads, 0x105
+misalign_mem_ref.stores, 0x205
+move_elimination.int_eliminated, 0x158
+move_elimination.int_not_eliminated, 0x458
+move_elimination.simd_eliminated, 0x258
+move_elimination.simd_not_eliminated, 0x858
+offcore_requests.all_data_rd, 0x8b0
+offcore_requests.demand_code_rd, 0x2b0
+offcore_requests.demand_data_rd, 0x1b0
+offcore_requests.demand_rfo, 0x4b0
+offcore_requests_buffer.sq_full, 0x1b2
+offcore_requests_outstanding.all_data_rd, 0x860
+offcore_requests_outstanding.cycles_with_data_rd, 0x860
+offcore_requests_outstanding.cycles_with_demand_data_rd, 0x160
+offcore_requests_outstanding.cycles_with_demand_rfo, 0x460
+offcore_requests_outstanding.demand_code_rd, 0x260
+offcore_requests_outstanding.demand_data_rd, 0x160
+offcore_requests_outstanding.demand_data_rd_ge_6, 0x160
+offcore_requests_outstanding.demand_rfo, 0x460
+offcore_response.all_code_rd.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0244
+offcore_response.all_code_rd.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0244
+offcore_response.all_code_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00244
+offcore_response.all_code_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00244
+offcore_response.all_code_rd.l3_miss.local_dram_0, 0x1b7, 0x100400244
+offcore_response.all_code_rd.l3_miss.local_dram_1, 0x1bb, 0x100400244
+offcore_response.all_data_rd.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0091
+offcore_response.all_data_rd.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0091
+offcore_response.all_data_rd.l3_hit.hitm_other_core_0, 0x1b7, 0x10003c0091
+offcore_response.all_data_rd.l3_hit.hitm_other_core_1, 0x1bb, 0x10003c0091
+offcore_response.all_data_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00091
+offcore_response.all_data_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00091
+offcore_response.all_data_rd.l3_miss.local_dram_0, 0x1b7, 0x100400091
+offcore_response.all_data_rd.l3_miss.local_dram_1, 0x1bb, 0x100400091
+offcore_response.all_reads.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c07f7
+offcore_response.all_reads.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c07f7
+offcore_response.all_reads.l3_hit.hitm_other_core_0, 0x1b7, 0x10003c07f7
+offcore_response.all_reads.l3_hit.hitm_other_core_1, 0x1bb, 0x10003c07f7
+offcore_response.all_reads.l3_miss.any_response_0, 0x1b7, 0x3fffc007f7
+offcore_response.all_reads.l3_miss.any_response_1, 0x1bb, 0x3fffc007f7
+offcore_response.all_reads.l3_miss.local_dram_0, 0x1b7, 0x1004007f7
+offcore_response.all_reads.l3_miss.local_dram_1, 0x1bb, 0x1004007f7
+offcore_response.all_requests.l3_hit.any_response_0, 0x1b7, 0x3f803c8fff
+offcore_response.all_requests.l3_hit.any_response_1, 0x1bb, 0x3f803c8fff
+offcore_response.all_requests.l3_miss.any_response_0, 0x1b7, 0x3fffc08fff
+offcore_response.all_requests.l3_miss.any_response_1, 0x1bb, 0x3fffc08fff
+offcore_response.all_rfo.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0122
+offcore_response.all_rfo.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0122
+offcore_response.all_rfo.l3_hit.hitm_other_core_0, 0x1b7, 0x10003c0122
+offcore_response.all_rfo.l3_hit.hitm_other_core_1, 0x1bb, 0x10003c0122
+offcore_response.all_rfo.l3_miss.any_response_0, 0x1b7, 0x3fffc00122
+offcore_response.all_rfo.l3_miss.any_response_1, 0x1bb, 0x3fffc00122
+offcore_response.all_rfo.l3_miss.local_dram_0, 0x1b7, 0x100400122
+offcore_response.all_rfo.l3_miss.local_dram_1, 0x1bb, 0x100400122
+offcore_response.demand_code_rd.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0004
+offcore_response.demand_code_rd.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0004
+offcore_response.demand_code_rd.l3_hit.hitm_other_core_0, 0x1b7, 0x10003c0004
+offcore_response.demand_code_rd.l3_hit.hitm_other_core_1, 0x1bb, 0x10003c0004
+offcore_response.demand_code_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00004
+offcore_response.demand_code_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00004
+offcore_response.demand_code_rd.l3_miss.local_dram_0, 0x1b7, 0x100400004
+offcore_response.demand_code_rd.l3_miss.local_dram_1, 0x1bb, 0x100400004
+offcore_response.demand_data_rd.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0001
+offcore_response.demand_data_rd.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0001
+offcore_response.demand_data_rd.l3_hit.hitm_other_core_0, 0x1b7, 0x10003c0001
+offcore_response.demand_data_rd.l3_hit.hitm_other_core_1, 0x1bb, 0x10003c0001
+offcore_response.demand_data_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00001
+offcore_response.demand_data_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00001
+offcore_response.demand_data_rd.l3_miss.local_dram_0, 0x1b7, 0x100400001
+offcore_response.demand_data_rd.l3_miss.local_dram_1, 0x1bb, 0x100400001
+offcore_response.demand_rfo.l3_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0002
+offcore_response.demand_rfo.l3_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0002
+offcore_response.demand_rfo.l3_hit.hitm_other_core_0, 0x1b7, 0x10003c0002
+offcore_response.demand_rfo.l3_hit.hitm_other_core_1, 0x1bb, 0x10003c0002
+offcore_response.demand_rfo.l3_miss.any_response_0, 0x1b7, 0x3fffc00002
+offcore_response.demand_rfo.l3_miss.any_response_1, 0x1bb, 0x3fffc00002
+offcore_response.demand_rfo.l3_miss.local_dram_0, 0x1b7, 0x100400002
+offcore_response.demand_rfo.l3_miss.local_dram_1, 0x1bb, 0x100400002
+offcore_response.pf_l2_code_rd.l3_hit.any_response_0, 0x1b7, 0x3f803c0040
+offcore_response.pf_l2_code_rd.l3_hit.any_response_1, 0x1bb, 0x3f803c0040
+offcore_response.pf_l2_code_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00040
+offcore_response.pf_l2_code_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00040
+offcore_response.pf_l2_data_rd.l3_hit.any_response_0, 0x1b7, 0x3f803c0010
+offcore_response.pf_l2_data_rd.l3_hit.any_response_1, 0x1bb, 0x3f803c0010
+offcore_response.pf_l2_data_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00010
+offcore_response.pf_l2_data_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00010
+offcore_response.pf_l2_rfo.l3_hit.any_response_0, 0x1b7, 0x3f803c0020
+offcore_response.pf_l2_rfo.l3_hit.any_response_1, 0x1bb, 0x3f803c0020
+offcore_response.pf_l2_rfo.l3_miss.any_response_0, 0x1b7, 0x3fffc00020
+offcore_response.pf_l2_rfo.l3_miss.any_response_1, 0x1bb, 0x3fffc00020
+offcore_response.pf_l3_code_rd.l3_hit.any_response_0, 0x1b7, 0x3f803c0200
+offcore_response.pf_l3_code_rd.l3_hit.any_response_1, 0x1bb, 0x3f803c0200
+offcore_response.pf_l3_code_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00200
+offcore_response.pf_l3_code_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00200
+offcore_response.pf_l3_data_rd.l3_hit.any_response_0, 0x1b7, 0x3f803c0080
+offcore_response.pf_l3_data_rd.l3_hit.any_response_1, 0x1bb, 0x3f803c0080
+offcore_response.pf_l3_data_rd.l3_miss.any_response_0, 0x1b7, 0x3fffc00080
+offcore_response.pf_l3_data_rd.l3_miss.any_response_1, 0x1bb, 0x3fffc00080
+offcore_response.pf_l3_rfo.l3_hit.any_response_0, 0x1b7, 0x3f803c0100
+offcore_response.pf_l3_rfo.l3_hit.any_response_1, 0x1bb, 0x3f803c0100
+offcore_response.pf_l3_rfo.l3_miss.any_response_0, 0x1b7, 0x3fffc00100
+offcore_response.pf_l3_rfo.l3_miss.any_response_1, 0x1bb, 0x3fffc00100
+offcore_response_0, 0x1b7
+offcore_response_1, 0x1bb
+other_assists.any_wb_assist, 0x40c1
+other_assists.avx_to_sse, 0x8c1
+other_assists.sse_to_avx, 0x10c1
+page_walker_loads.dtlb_l1, 0x11bc
+page_walker_loads.dtlb_l2, 0x12bc
+page_walker_loads.dtlb_l3, 0x14bc
+page_walker_loads.dtlb_memory, 0x18bc
+page_walker_loads.ept_dtlb_l1, 0x41bc
+page_walker_loads.ept_dtlb_l2, 0x42bc
+page_walker_loads.ept_dtlb_l3, 0x44bc
+page_walker_loads.ept_dtlb_memory, 0x48bc
+page_walker_loads.ept_itlb_l1, 0x81bc
+page_walker_loads.ept_itlb_l2, 0x82bc
+page_walker_loads.ept_itlb_l3, 0x84bc
+page_walker_loads.ept_itlb_memory, 0x88bc
+page_walker_loads.itlb_l1, 0x21bc
+page_walker_loads.itlb_l2, 0x22bc
+page_walker_loads.itlb_l3, 0x24bc
+page_walker_loads.itlb_memory, 0x28bc
+resource_stalls.any, 0x1a2
+resource_stalls.rob, 0x10a2
+resource_stalls.rs, 0x4a2
+resource_stalls.sb, 0x8a2
+rob_misc_events.lbr_inserts, 0x20cc
+rs_events.empty_cycles, 0x15e
+rs_events.empty_end, 0x15e
+rtm_retired.aborted, 0x4c9
+rtm_retired.aborted_misc1, 0x8c9
+rtm_retired.aborted_misc2, 0x10c9
+rtm_retired.aborted_misc3, 0x20c9
+rtm_retired.aborted_misc4, 0x40c9
+rtm_retired.aborted_misc5, 0x80c9
+rtm_retired.commit, 0x2c9
+rtm_retired.start, 0x1c9
+sq_misc.split_lock, 0x10f4
+tlb_flush.dtlb_thread, 0x1bd
+tlb_flush.stlb_any, 0x20bd
+tx_exec.misc1, 0x15d
+tx_exec.misc2, 0x25d
+tx_exec.misc3, 0x45d
+tx_exec.misc4, 0x85d
+tx_exec.misc5, 0x105d
+tx_mem.abort_capacity_write, 0x254
+tx_mem.abort_conflict, 0x154
+tx_mem.abort_hle_elision_buffer_mismatch, 0x1054
+tx_mem.abort_hle_elision_buffer_not_empty, 0x854
+tx_mem.abort_hle_elision_buffer_unsupported_alignment, 0x2054
+tx_mem.abort_hle_store_to_elided_lock, 0x454
+tx_mem.hle_elision_buffer_full, 0x4054
+unc_arb_coh_trk_occupancy.all, 0x183
+unc_arb_coh_trk_requests.all, 0x184
+unc_arb_trk_occupancy.all, 0x180
+unc_arb_trk_occupancy.cycles_with_any_request, 0x180
+unc_arb_trk_requests.all, 0x181
+unc_arb_trk_requests.writes, 0x2081
+unc_cbo_cache_lookup.any_es, 0x8634
+unc_cbo_cache_lookup.any_i, 0x8834
+unc_cbo_cache_lookup.any_m, 0x8134
+unc_cbo_cache_lookup.any_mesi, 0x8f34
+unc_cbo_cache_lookup.extsnp_es, 0x4634
+unc_cbo_cache_lookup.extsnp_i, 0x4834
+unc_cbo_cache_lookup.extsnp_m, 0x4134
+unc_cbo_cache_lookup.extsnp_mesi, 0x4f34
+unc_cbo_cache_lookup.read_es, 0x1634
+unc_cbo_cache_lookup.read_i, 0x1834
+unc_cbo_cache_lookup.read_m, 0x1134
+unc_cbo_cache_lookup.read_mesi, 0x1f34
+unc_cbo_cache_lookup.write_es, 0x2634
+unc_cbo_cache_lookup.write_i, 0x2834
+unc_cbo_cache_lookup.write_m, 0x2134
+unc_cbo_cache_lookup.write_mesi, 0x2f34
+unc_cbo_xsnp_response.hit_eviction, 0x8422
+unc_cbo_xsnp_response.hit_external, 0x2422
+unc_cbo_xsnp_response.hit_xcore, 0x4422
+unc_cbo_xsnp_response.hitm_eviction, 0x8822
+unc_cbo_xsnp_response.hitm_external, 0x2822
+unc_cbo_xsnp_response.hitm_xcore, 0x4822
+unc_cbo_xsnp_response.miss_eviction, 0x8122
+unc_cbo_xsnp_response.miss_external, 0x2122
+unc_cbo_xsnp_response.miss_xcore, 0x4122
+unc_clock.socket, 0xff
+uops_dispatched_port.port_0, 0x1a1
+uops_dispatched_port.port_1, 0x2a1
+uops_dispatched_port.port_2, 0x4a1
+uops_dispatched_port.port_3, 0x8a1
+uops_dispatched_port.port_4, 0x10a1
+uops_dispatched_port.port_5, 0x20a1
+uops_dispatched_port.port_6, 0x40a1
+uops_dispatched_port.port_7, 0x80a1
+uops_executed.core, 0x2b1
+uops_executed.core_cycles_ge_1, 0x2b1
+uops_executed.core_cycles_ge_2, 0x2b1
+uops_executed.core_cycles_ge_3, 0x2b1
+uops_executed.core_cycles_ge_4, 0x2b1
+uops_executed.core_cycles_none, 0x2b1
+uops_executed.cycles_ge_1_uop_exec, 0x1b1
+uops_executed.cycles_ge_2_uops_exec, 0x1b1
+uops_executed.cycles_ge_3_uops_exec, 0x1b1
+uops_executed.cycles_ge_4_uops_exec, 0x1b1
+uops_executed.stall_cycles, 0x1b1
+uops_executed_port.port_0, 0x1a1
+uops_executed_port.port_0_core, 0x1a1
+uops_executed_port.port_1, 0x2a1
+uops_executed_port.port_1_core, 0x2a1
+uops_executed_port.port_2, 0x4a1
+uops_executed_port.port_2_core, 0x4a1
+uops_executed_port.port_3, 0x8a1
+uops_executed_port.port_3_core, 0x8a1
+uops_executed_port.port_4, 0x10a1
+uops_executed_port.port_4_core, 0x10a1
+uops_executed_port.port_5, 0x20a1
+uops_executed_port.port_5_core, 0x20a1
+uops_executed_port.port_6, 0x40a1
+uops_executed_port.port_6_core, 0x40a1
+uops_executed_port.port_7, 0x80a1
+uops_executed_port.port_7_core, 0x80a1
+uops_issued.any, 0x10e
+uops_issued.core_stall_cycles, 0x10e
+uops_issued.flags_merge, 0x100e
+uops_issued.single_mul, 0x400e
+uops_issued.slow_lea, 0x200e
+uops_issued.stall_cycles, 0x10e
+uops_retired.all, 0x1c2
+uops_retired.core_stall_cycles, 0x1c2
+uops_retired.retire_slots, 0x2c2
+uops_retired.stall_cycles, 0x1c2
+uops_retired.total_cycles, 0x1c2

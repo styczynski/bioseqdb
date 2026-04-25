@@ -1,0 +1,32 @@
+br_inst_retired.all_branches, 0xc4
+br_misp_retired.all_branches, 0xc5
+cpu_clk_unhalted.core_p, 0x3c
+cpu_clk_unhalted.ref_tsc_p, 0x13c
+cpu_clk_unhalted.thread_p, 0x3c
+dtlb_load_misses.walk_completed, 0xe08
+dtlb_store_misses.walk_completed, 0xe49
+icache.accesses, 0x380
+icache.misses, 0x280
+inst_retired.any_p, 0xc0
+itlb_misses.walk_completed, 0xe85
+longest_lat_cache.miss, 0x412e
+longest_lat_cache.reference, 0x4f2e
+mem_uops_retired.all_loads, 0x81d0
+mem_uops_retired.all_stores, 0x82d0
+mem_uops_retired.load_latency_gt_1024, 0x5d0, 0x400
+mem_uops_retired.load_latency_gt_128, 0x5d0, 0x80
+mem_uops_retired.load_latency_gt_16, 0x5d0, 0x10
+mem_uops_retired.load_latency_gt_2048, 0x5d0, 0x800
+mem_uops_retired.load_latency_gt_256, 0x5d0, 0x100
+mem_uops_retired.load_latency_gt_32, 0x5d0, 0x20
+mem_uops_retired.load_latency_gt_4, 0x5d0, 0x4
+mem_uops_retired.load_latency_gt_512, 0x5d0, 0x200
+mem_uops_retired.load_latency_gt_64, 0x5d0, 0x40
+mem_uops_retired.load_latency_gt_8, 0x5d0, 0x8
+mem_uops_retired.store_latency, 0x6d0
+ocr.demand_data_rd.any_response, 0x1b7, 0x10001
+ocr.demand_data_rd.l3_miss, 0x1b7, 0x33fbfc00001
+ocr.demand_rfo.any_response, 0x1b7, 0x10002
+ocr.demand_rfo.l3_miss, 0x1b7, 0x33fbfc00002
+topdown_be_bound.all, 0x2a4
+topdown_be_bound.all_p, 0x2a4

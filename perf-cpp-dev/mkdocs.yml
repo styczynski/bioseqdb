@@ -1,0 +1,66 @@
+site_name: perf-cpp
+site_description: C++ library for recording and sampling performance counters using the Linux perf subsystem
+site_url: https://jmuehlig.github.io/perf-cpp/  # uncomment for deployment
+repo_url: https://github.com/jmuehlig/perf-cpp
+repo_name: jmuehlig/perf-cpp
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+plugins:
+  - search
+  - callouts
+  - meta
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - tables
+  - toc:
+      permalink: true
+
+extra:
+  analytics:
+    provider: google
+    property: G-6SPLE817K1
+
+nav:
+  - Home: README.md
+  - Building: build.md
+  - What are Performance Counters?: what-are-performance-counters.md
+  - Recording Events:
+    - Basics: recording.md
+    - Live Events: recording-live-events.md
+    - Multi-Thread, -Core & -Process: recording-parallel.md
+    - Metrics: metrics.md
+    - Customizing Events: counters.md
+  - Sampling:
+    - Basics: sampling.md
+    - Multi-Thread & Multi-Core: sampling-parallel.md
+    - Symbols & Flamegraphs: sampling-symbols-and-flamegraphs.md
+    - CSV Export: sampling-export-to-csv.md
+    - Perf Report: sampling-export-to-perf.md
+    - Memory Access Patterns: sampling-memory-analysis.md
+  - Reference:
+    - Perf Paranoid: perf-paranoid.md

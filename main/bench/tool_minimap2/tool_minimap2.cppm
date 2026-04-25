@@ -36,6 +36,13 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_cigar;
 import bioseq_sequences.minimap_port;
+import bioseq_instr;
+// Force the C-shim trampolines (extern "C" registration / begin / end)
+// to be linked into this TU. Without an explicit import the build
+// system's module-graph reachability check can drop the shim on hosts
+// where the .c TUs are visited before the wrapper, leaving
+// bench_instr_region_register undefined at link time.
+import bench.tool_minimap2.instr_shim;
 
 export {
 
@@ -232,6 +239,15 @@ template<
             typename compact_sequence_range<QueryRange>::traits::alphabet_type,
             typename compact_sequence_range<TargetRange>::traits::alphabet_type>,
         "tool_minimap2: query and target must use the same alphabet type");
+
+    // Top-level region for the reference-minimap2 wrapper. Inner regions
+    // come from BENCH_INSTR_BLOCK call sites inside minimap2/*.c; this
+    // outer region lets the report layer attribute the wrapper-side
+    // overhead (sequence-to-ACGT conversion, mm_idx_str index build,
+    // mm_tbuf_init, result copy) that minimap2's own markers don't see.
+    static const auto* _tool_minimap2_run_desc =
+        bioseq::instr::register_region_static("tool_minimap2.run");
+    auto _tool_minimap2_run_scope = bioseq::instr::region(_tool_minimap2_run_desc);
 
     const std::string target_acgt = detail::compact_sequence_to_acgt(target_seq);
     const std::string query_acgt  = detail::compact_sequence_to_acgt(query_seq);

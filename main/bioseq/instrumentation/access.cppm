@@ -28,25 +28,29 @@ export namespace bioseq::instr::access {
 
 namespace detail {
 
-/// Estimate a percentile from a 16-bucket log2 histogram. Returns the
+/// Estimate a percentile from the 32-bucket log2 histogram. Returns the
 /// upper bound of the bucket that contains the cumulative-count at the
 /// requested fraction. Coarse but enough to flag order-of-magnitude
-/// outliers, which is what the histogram is sized for. p in [0, 1].
+/// outliers; with 32 buckets the saturated bucket only kicks in for
+/// regions over ~2 s, which is well past anything we benchmark. p in
+/// [0, 1].
 [[nodiscard]] inline std::uint64_t hist_percentile(
     const Histogram16& h, double p) noexcept
 {
+    constexpr unsigned kBuckets = static_cast<unsigned>(h.buckets.size());
     std::uint64_t total = 0;
     for (auto v : h.buckets) total += v;
     if (total == 0) return 0;
     const std::uint64_t target = static_cast<std::uint64_t>(
         static_cast<double>(total) * p);
     std::uint64_t cum = 0;
-    for (unsigned i = 0; i < 16; ++i) {
+    for (unsigned i = 0; i < kBuckets; ++i) {
         cum += h.buckets[i];
         if (cum >= target) {
             // Bucket i covers values with floor(log2(v)) == i, so the
-            // upper bound is 2^(i+1) - 1.
-            if (i >= 63) return std::numeric_limits<std::uint64_t>::max();
+            // upper bound is 2^(i+1) - 1. Guard against undefined
+            // 1<<63 by clamping the last bucket.
+            if (i + 1 >= 64) return std::numeric_limits<std::uint64_t>::max();
             return (1ull << (i + 1)) - 1ull;
         }
     }

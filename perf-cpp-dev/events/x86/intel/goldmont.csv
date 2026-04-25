@@ -1,0 +1,166 @@
+baclears.all, 0x1e6
+baclears.cond, 0x10e6
+baclears.return, 0x8e6
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.all_taken_branches, 0x80c4
+br_inst_retired.call, 0xf9c4
+br_inst_retired.far_branch, 0xbfc4
+br_inst_retired.ind_call, 0xfbc4
+br_inst_retired.jcc, 0x7ec4
+br_inst_retired.non_return_ind, 0xebc4
+br_inst_retired.rel_call, 0xfdc4
+br_inst_retired.return, 0xf7c4
+br_inst_retired.taken_jcc, 0xfec4
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.ind_call, 0xfbc5
+br_misp_retired.jcc, 0x7ec5
+br_misp_retired.non_return_ind, 0xebc5
+br_misp_retired.return, 0xf7c5
+br_misp_retired.taken_jcc, 0xfec5
+core_reject_l2q.all, 0x31
+cpu_clk_unhalted.core_p, 0x3c
+cpu_clk_unhalted.ref, 0x13c
+cycles_div_busy.all, 0xcd
+cycles_div_busy.fpdiv, 0x2cd
+cycles_div_busy.idiv, 0x1cd
+decode_restriction.predecode_wrong, 0x1e9
+dl1.dirty_eviction, 0x151
+fetch_stall.all, 0x86
+fetch_stall.icache_fill_pending_cycles, 0x286
+fetch_stall.itlb_fill_pending_cycles, 0x186
+hw_interrupts.masked, 0x2cb
+hw_interrupts.pending_and_masked, 0x4cb
+hw_interrupts.received, 0x1cb
+icache.accesses, 0x380
+icache.hit, 0x180
+icache.misses, 0x280
+inst_retired.any_p, 0xc0
+issue_slots_not_consumed.any, 0xca
+issue_slots_not_consumed.recovery, 0x2ca
+issue_slots_not_consumed.resource_full, 0x1ca
+itlb.miss, 0x481
+l2_reject_xq.all, 0x30
+ld_blocks.4k_alias, 0x403
+ld_blocks.all_block, 0x1003
+ld_blocks.data_unknown, 0x103
+ld_blocks.store_forward, 0x203
+ld_blocks.utlb_miss, 0x803
+longest_lat_cache.miss, 0x412e
+longest_lat_cache.reference, 0x4f2e
+machine_clears.all, 0xc3
+machine_clears.disambiguation, 0x8c3
+machine_clears.fp_assist, 0x4c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.smc, 0x1c3
+mem_load_uops_retired.dram_hit, 0x80d1
+mem_load_uops_retired.hitm, 0x20d1
+mem_load_uops_retired.l1_hit, 0x1d1
+mem_load_uops_retired.l1_miss, 0x8d1
+mem_load_uops_retired.l2_hit, 0x2d1
+mem_load_uops_retired.l2_miss, 0x10d1
+mem_load_uops_retired.wcb_hit, 0x40d1
+mem_uops_retired.all, 0x83d0
+mem_uops_retired.all_loads, 0x81d0
+mem_uops_retired.all_stores, 0x82d0
+mem_uops_retired.dtlb_miss, 0x13d0
+mem_uops_retired.dtlb_miss_loads, 0x11d0
+mem_uops_retired.dtlb_miss_stores, 0x12d0
+mem_uops_retired.lock_loads, 0x21d0
+mem_uops_retired.split, 0x43d0
+mem_uops_retired.split_loads, 0x41d0
+mem_uops_retired.split_stores, 0x42d0
+misalign_mem_ref.load_page_split, 0x213
+misalign_mem_ref.store_page_split, 0x413
+ms_decoded.ms_entry, 0x1e7
+offcore_response, 0x1b7
+offcore_response.any_data_rd.l2_hit, 0x1b7, 0x43091
+offcore_response.any_data_rd.l2_miss.any, 0x1b7, 0x3600003091
+offcore_response.any_data_rd.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400003091
+offcore_response.any_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000003091
+offcore_response.any_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200003091
+offcore_response.any_pf_data_rd.l2_hit, 0x1b7, 0x43010
+offcore_response.any_pf_data_rd.l2_miss.any, 0x1b7, 0x3600003010
+offcore_response.any_pf_data_rd.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400003010
+offcore_response.any_pf_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000003010
+offcore_response.any_pf_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200003010
+offcore_response.any_read.l2_hit, 0x1b7, 0x432b7
+offcore_response.any_read.l2_miss.any, 0x1b7, 0x36000032b7
+offcore_response.any_read.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x4000032b7
+offcore_response.any_read.l2_miss.hitm_other_core, 0x1b7, 0x10000032b7
+offcore_response.any_read.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x2000032b7
+offcore_response.any_request.any_response, 0x1b7, 0x18000
+offcore_response.any_request.l2_hit, 0x1b7, 0x48000
+offcore_response.any_request.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400008000
+offcore_response.any_request.l2_miss.hitm_other_core, 0x1b7, 0x1000008000
+offcore_response.any_request.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200008000
+offcore_response.any_rfo.l2_hit, 0x1b7, 0x40022
+offcore_response.any_rfo.l2_miss.any, 0x1b7, 0x3600000022
+offcore_response.any_rfo.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000022
+offcore_response.any_rfo.l2_miss.hitm_other_core, 0x1b7, 0x1000000022
+offcore_response.any_rfo.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000022
+offcore_response.bus_locks.any_response, 0x1b7, 0x10400
+offcore_response.corewb.l2_hit, 0x1b7, 0x40008
+offcore_response.corewb.l2_miss.any, 0x1b7, 0x3600000008
+offcore_response.corewb.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000008
+offcore_response.corewb.l2_miss.hitm_other_core, 0x1b7, 0x1000000008
+offcore_response.corewb.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000008
+offcore_response.demand_code_rd.l2_hit, 0x1b7, 0x40004
+offcore_response.demand_code_rd.l2_miss.any, 0x1b7, 0x3600000004
+offcore_response.demand_code_rd.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000004
+offcore_response.demand_code_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000004
+offcore_response.demand_code_rd.outstanding, 0x1b7, 0x4000000004
+offcore_response.demand_data_rd.l2_hit, 0x1b7, 0x40001
+offcore_response.demand_data_rd.l2_miss.any, 0x1b7, 0x3600000001
+offcore_response.demand_data_rd.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000001
+offcore_response.demand_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000000001
+offcore_response.demand_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000001
+offcore_response.demand_data_rd.outstanding, 0x1b7, 0x4000000001
+offcore_response.demand_rfo.l2_hit, 0x1b7, 0x40002
+offcore_response.demand_rfo.l2_miss.any, 0x1b7, 0x3600000002
+offcore_response.demand_rfo.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000002
+offcore_response.demand_rfo.l2_miss.hitm_other_core, 0x1b7, 0x1000000002
+offcore_response.demand_rfo.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000002
+offcore_response.demand_rfo.outstanding, 0x1b7, 0x4000000002
+offcore_response.full_streaming_stores.l2_hit, 0x1b7, 0x40800
+offcore_response.full_streaming_stores.l2_miss.any, 0x1b7, 0x3600000800
+offcore_response.full_streaming_stores.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000800
+offcore_response.full_streaming_stores.l2_miss.hitm_other_core, 0x1b7, 0x1000000800
+offcore_response.full_streaming_stores.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000800
+offcore_response.partial_reads.l2_miss.any, 0x1b7, 0x3600000080
+offcore_response.partial_streaming_stores.l2_hit, 0x1b7, 0x44000
+offcore_response.partial_streaming_stores.l2_miss.any, 0x1b7, 0x3600004000
+offcore_response.partial_streaming_stores.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400004000
+offcore_response.partial_streaming_stores.l2_miss.hitm_other_core, 0x1b7, 0x1000004000
+offcore_response.partial_streaming_stores.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200004000
+offcore_response.partial_writes.l2_miss.any, 0x1b7, 0x3600000100
+offcore_response.pf_l1_data_rd.l2_hit, 0x1b7, 0x42000
+offcore_response.pf_l1_data_rd.l2_miss.any, 0x1b7, 0x3600002000
+offcore_response.pf_l1_data_rd.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400002000
+offcore_response.pf_l1_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000002000
+offcore_response.pf_l1_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200002000
+offcore_response.pf_l2_data_rd.l2_hit, 0x1b7, 0x40010
+offcore_response.pf_l2_data_rd.l2_miss.any, 0x1b7, 0x3600000010
+offcore_response.pf_l2_data_rd.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000010
+offcore_response.pf_l2_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000000010
+offcore_response.pf_l2_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000010
+offcore_response.pf_l2_rfo.l2_hit, 0x1b7, 0x40020
+offcore_response.pf_l2_rfo.l2_miss.any, 0x1b7, 0x3600000020
+offcore_response.pf_l2_rfo.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400000020
+offcore_response.pf_l2_rfo.l2_miss.hitm_other_core, 0x1b7, 0x1000000020
+offcore_response.pf_l2_rfo.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000020
+offcore_response.streaming_stores.l2_hit, 0x1b7, 0x44800
+offcore_response.streaming_stores.l2_miss.any, 0x1b7, 0x3600004800
+offcore_response.sw_prefetch.l2_hit, 0x1b7, 0x41000
+offcore_response.sw_prefetch.l2_miss.any, 0x1b7, 0x3600001000
+offcore_response.sw_prefetch.l2_miss.hit_other_core_no_fwd, 0x1b7, 0x400001000
+offcore_response.sw_prefetch.l2_miss.hitm_other_core, 0x1b7, 0x1000001000
+offcore_response.sw_prefetch.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200001000
+page_walks.cycles, 0x305
+page_walks.d_side_cycles, 0x105
+page_walks.i_side_cycles, 0x205
+uops_issued.any, 0xe
+uops_not_delivered.any, 0x9c
+uops_retired.any, 0xc2
+uops_retired.fpdiv, 0x8c2
+uops_retired.idiv, 0x10c2
+uops_retired.ms, 0x1c2

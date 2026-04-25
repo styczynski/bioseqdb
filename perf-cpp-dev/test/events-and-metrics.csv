@@ -1,0 +1,3 @@
+EVENT.TEST0,0x1f3010e
+event-test-1,0x1CD,3
+test-metric,3*'event-test-1'

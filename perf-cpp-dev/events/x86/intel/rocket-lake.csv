@@ -1,0 +1,418 @@
+arith.divider_active, 0x914
+arith.fp_divider_active, 0x114
+assists.any, 0x7c1
+assists.fp, 0x2c1
+baclears.any, 0x1e6
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.cond, 0x11c4
+br_inst_retired.cond_ntaken, 0x10c4
+br_inst_retired.cond_taken, 0x1c4
+br_inst_retired.far_branch, 0x40c4
+br_inst_retired.indirect, 0x80c4
+br_inst_retired.near_call, 0x2c4
+br_inst_retired.near_return, 0x8c4
+br_inst_retired.near_taken, 0x20c4
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.cond, 0x11c5
+br_misp_retired.cond_ntaken, 0x10c5
+br_misp_retired.cond_taken, 0x1c5
+br_misp_retired.indirect, 0x80c5
+br_misp_retired.indirect_call, 0x2c5
+br_misp_retired.near_taken, 0x20c5
+br_misp_retired.ret, 0x8c5
+core_power.lvl0_turbo_license, 0x728
+core_power.lvl1_turbo_license, 0x1828
+core_power.lvl2_turbo_license, 0x2028
+cpu_clk_unhalted.distributed, 0x2ec
+cpu_clk_unhalted.one_thread_active, 0x23c
+cpu_clk_unhalted.ref_distributed, 0x83c
+cpu_clk_unhalted.ref_xclk, 0x13c
+cpu_clk_unhalted.thread_p, 0x3c
+cycle_activity.cycles_l1d_miss, 0x8a3
+cycle_activity.cycles_l2_miss, 0x1a3
+cycle_activity.cycles_l3_miss, 0x2a3
+cycle_activity.cycles_mem_any, 0x10a3
+cycle_activity.stalls_l1d_miss, 0xca3
+cycle_activity.stalls_l2_miss, 0x5a3
+cycle_activity.stalls_l3_miss, 0x6a3
+cycle_activity.stalls_mem_any, 0x14a3
+cycle_activity.stalls_total, 0x4a3
+decode.lcp, 0x187
+dsb2mite_switches.count, 0x2ab
+dsb2mite_switches.penalty_cycles, 0x2ab
+dtlb_load_misses.stlb_hit, 0x2008
+dtlb_load_misses.walk_active, 0x1008
+dtlb_load_misses.walk_completed, 0xe08
+dtlb_load_misses.walk_completed_1g, 0x808
+dtlb_load_misses.walk_completed_2m_4m, 0x408
+dtlb_load_misses.walk_completed_4k, 0x208
+dtlb_load_misses.walk_pending, 0x1008
+dtlb_store_misses.stlb_hit, 0x2049
+dtlb_store_misses.walk_active, 0x1049
+dtlb_store_misses.walk_completed, 0xe49
+dtlb_store_misses.walk_completed_1g, 0x849
+dtlb_store_misses.walk_completed_2m_4m, 0x449
+dtlb_store_misses.walk_completed_4k, 0x249
+dtlb_store_misses.walk_pending, 0x1049
+exe_activity.1_ports_util, 0x2a6
+exe_activity.2_ports_util, 0x4a6
+exe_activity.3_ports_util, 0x8a6
+exe_activity.4_ports_util, 0x10a6
+exe_activity.bound_on_stores, 0x40a6
+fp_arith_inst_retired.128b_packed_double, 0x4c7
+fp_arith_inst_retired.128b_packed_single, 0x8c7
+fp_arith_inst_retired.256b_packed_double, 0x10c7
+fp_arith_inst_retired.256b_packed_single, 0x20c7
+fp_arith_inst_retired.4_flops, 0x18c7
+fp_arith_inst_retired.512b_packed_double, 0x40c7
+fp_arith_inst_retired.512b_packed_single, 0x80c7
+fp_arith_inst_retired.8_flops, 0x60c7
+fp_arith_inst_retired.scalar, 0x3c7
+fp_arith_inst_retired.scalar_double, 0x1c7
+fp_arith_inst_retired.scalar_single, 0x2c7
+fp_arith_inst_retired.vector, 0xfcc7
+frontend_retired.any_dsb_miss, 0x1c6, 0x1
+frontend_retired.dsb_miss, 0x1c6, 0x11
+frontend_retired.itlb_miss, 0x1c6, 0x14
+frontend_retired.l1i_miss, 0x1c6, 0x12
+frontend_retired.l2_miss, 0x1c6, 0x13
+frontend_retired.latency_ge_1, 0x1c6, 0x500106
+frontend_retired.latency_ge_128, 0x1c6, 0x508006
+frontend_retired.latency_ge_16, 0x1c6, 0x501006
+frontend_retired.latency_ge_2, 0x1c6, 0x500206
+frontend_retired.latency_ge_256, 0x1c6, 0x510006
+frontend_retired.latency_ge_2_bubbles_ge_1, 0x1c6, 0x100206
+frontend_retired.latency_ge_32, 0x1c6, 0x502006
+frontend_retired.latency_ge_4, 0x1c6, 0x500406
+frontend_retired.latency_ge_512, 0x1c6, 0x520006
+frontend_retired.latency_ge_64, 0x1c6, 0x504006
+frontend_retired.latency_ge_8, 0x1c6, 0x500806
+frontend_retired.stlb_miss, 0x1c6, 0x15
+hle_retired.aborted, 0x4c8
+hle_retired.aborted_events, 0x80c8
+hle_retired.aborted_mem, 0x8c8
+hle_retired.aborted_unfriendly, 0x20c8
+hle_retired.commit, 0x2c8
+hle_retired.start, 0x1c8
+icache_16b.ifdata_stall, 0x480
+icache_64b.iftag_hit, 0x183
+icache_64b.iftag_miss, 0x283
+icache_64b.iftag_stall, 0x483
+icache_data.stalls, 0x480
+icache_tag.stalls, 0x483
+idq.dsb_cycles_any, 0x879
+idq.dsb_cycles_ok, 0x879
+idq.dsb_uops, 0x879
+idq.mite_cycles_any, 0x479
+idq.mite_cycles_ok, 0x479
+idq.mite_uops, 0x479
+idq.ms_cycles_any, 0x3079
+idq.ms_switches, 0x3079
+idq.ms_uops, 0x3079
+idq_uops_not_delivered.core, 0x19c
+idq_uops_not_delivered.cycles_0_uops_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_fe_was_ok, 0x19c
+ild_stall.lcp, 0x187
+inst_decoded.decoders, 0x155
+inst_retired.any_p, 0xc0
+inst_retired.nop, 0x2c0
+inst_retired.stall_cycles, 0x1c0
+int_misc.all_recovery_cycles, 0x30d
+int_misc.clear_resteer_cycles, 0x800d
+int_misc.clears_count, 0x10d
+int_misc.recovery_cycles, 0x10d
+int_misc.uop_dropping, 0x100d
+itlb_misses.stlb_hit, 0x2085
+itlb_misses.walk_active, 0x1085
+itlb_misses.walk_completed, 0xe85
+itlb_misses.walk_completed_2m_4m, 0x485
+itlb_misses.walk_completed_4k, 0x285
+itlb_misses.walk_pending, 0x1085
+l1d.replacement, 0x151
+l1d_pend_miss.fb_full, 0x248
+l1d_pend_miss.fb_full_periods, 0x248
+l1d_pend_miss.l2_stall, 0x448
+l1d_pend_miss.pending, 0x148
+l1d_pend_miss.pending_cycles, 0x148
+l2_lines_in.all, 0x1ff1
+l2_lines_out.non_silent, 0x2f2
+l2_lines_out.silent, 0x1f2
+l2_lines_out.useless_hwpf, 0x4f2
+l2_rqsts.all_code_rd, 0xe424
+l2_rqsts.all_demand_data_rd, 0xe124
+l2_rqsts.all_demand_miss, 0x2724
+l2_rqsts.all_demand_references, 0xe724
+l2_rqsts.all_rfo, 0xe224
+l2_rqsts.code_rd_hit, 0xc424
+l2_rqsts.code_rd_miss, 0x2424
+l2_rqsts.demand_data_rd_hit, 0xc124
+l2_rqsts.demand_data_rd_miss, 0x2124
+l2_rqsts.miss, 0x3f24
+l2_rqsts.references, 0xff24
+l2_rqsts.rfo_hit, 0xc224
+l2_rqsts.rfo_miss, 0x2224
+l2_rqsts.swpf_hit, 0xc824
+l2_rqsts.swpf_miss, 0x2824
+l2_trans.l2_wb, 0x40f0
+ld_blocks.no_sr, 0x803
+ld_blocks.store_forward, 0x203
+ld_blocks_partial.address_alias, 0x107
+load_hit_prefetch.swpf, 0x14c
+longest_lat_cache.miss, 0x412e
+lsd.cycles_active, 0x1a8
+lsd.cycles_ok, 0x1a8
+lsd.uops, 0x1a8
+machine_clears.count, 0x1c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.smc, 0x4c3
+mem_inst_retired.all_loads, 0x81d0
+mem_inst_retired.all_stores, 0x82d0
+mem_inst_retired.any, 0x83d0
+mem_inst_retired.lock_loads, 0x21d0
+mem_inst_retired.split_loads, 0x41d0
+mem_inst_retired.split_stores, 0x42d0
+mem_inst_retired.stlb_miss_loads, 0x11d0
+mem_inst_retired.stlb_miss_stores, 0x12d0
+mem_load_l3_hit_retired.xsnp_hit, 0x2d2
+mem_load_l3_hit_retired.xsnp_hitm, 0x4d2
+mem_load_l3_hit_retired.xsnp_miss, 0x1d2
+mem_load_l3_hit_retired.xsnp_none, 0x8d2
+mem_load_misc_retired.uc, 0x4d4
+mem_load_retired.fb_hit, 0x40d1
+mem_load_retired.l1_hit, 0x1d1
+mem_load_retired.l1_miss, 0x8d1
+mem_load_retired.l2_hit, 0x2d1
+mem_load_retired.l2_miss, 0x10d1
+mem_load_retired.l3_hit, 0x4d1
+mem_load_retired.l3_miss, 0x20d1
+mem_trans_retired.load_latency_gt_128, 0x1cd, 0x80
+mem_trans_retired.load_latency_gt_16, 0x1cd, 0x10
+mem_trans_retired.load_latency_gt_256, 0x1cd, 0x100
+mem_trans_retired.load_latency_gt_32, 0x1cd, 0x20
+mem_trans_retired.load_latency_gt_4, 0x1cd, 0x4
+mem_trans_retired.load_latency_gt_512, 0x1cd, 0x200
+mem_trans_retired.load_latency_gt_64, 0x1cd, 0x40
+mem_trans_retired.load_latency_gt_8, 0x1cd, 0x8
+misc_retired.lbr_inserts, 0x20cc
+misc_retired.pause_inst, 0x40cc
+ocr.demand_code_rd.any_response_0, 0x1b7, 0x10004
+ocr.demand_code_rd.any_response_1, 0x1bb, 0x10004
+ocr.demand_code_rd.dram_0, 0x1b7, 0x184000004
+ocr.demand_code_rd.dram_1, 0x1bb, 0x184000004
+ocr.demand_code_rd.l3_hit.any_0, 0x1b7, 0x3fc03c0004
+ocr.demand_code_rd.l3_hit.any_1, 0x1bb, 0x3fc03c0004
+ocr.demand_code_rd.l3_hit.snoop_hit_no_fwd_0, 0x1b7, 0x4003c0004
+ocr.demand_code_rd.l3_hit.snoop_hit_no_fwd_1, 0x1bb, 0x4003c0004
+ocr.demand_code_rd.l3_hit.snoop_hitm_0, 0x1b7, 0x10003c0004
+ocr.demand_code_rd.l3_hit.snoop_hitm_1, 0x1bb, 0x10003c0004
+ocr.demand_code_rd.l3_hit.snoop_miss_0, 0x1b7, 0x2003c0004
+ocr.demand_code_rd.l3_hit.snoop_miss_1, 0x1bb, 0x2003c0004
+ocr.demand_code_rd.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c0004
+ocr.demand_code_rd.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c0004
+ocr.demand_code_rd.l3_hit.snoop_sent_0, 0x1b7, 0x1e003c0004
+ocr.demand_code_rd.l3_hit.snoop_sent_1, 0x1bb, 0x1e003c0004
+ocr.demand_code_rd.l3_miss_0, 0x1b7, 0x3fffc00004
+ocr.demand_code_rd.l3_miss_1, 0x1bb, 0x3fffc00004
+ocr.demand_code_rd.local_dram_0, 0x1b7, 0x184000004
+ocr.demand_code_rd.local_dram_1, 0x1bb, 0x184000004
+ocr.demand_data_rd.any_response_0, 0x1b7, 0x10001
+ocr.demand_data_rd.any_response_1, 0x1bb, 0x10001
+ocr.demand_data_rd.dram_0, 0x1b7, 0x184000001
+ocr.demand_data_rd.dram_1, 0x1bb, 0x184000001
+ocr.demand_data_rd.l3_hit.any_0, 0x1b7, 0x3fc03c0001
+ocr.demand_data_rd.l3_hit.any_1, 0x1bb, 0x3fc03c0001
+ocr.demand_data_rd.l3_hit.snoop_hit_no_fwd_0, 0x1b7, 0x4003c0001
+ocr.demand_data_rd.l3_hit.snoop_hit_no_fwd_1, 0x1bb, 0x4003c0001
+ocr.demand_data_rd.l3_hit.snoop_hitm_0, 0x1b7, 0x10003c0001
+ocr.demand_data_rd.l3_hit.snoop_hitm_1, 0x1bb, 0x10003c0001
+ocr.demand_data_rd.l3_hit.snoop_miss_0, 0x1b7, 0x2003c0001
+ocr.demand_data_rd.l3_hit.snoop_miss_1, 0x1bb, 0x2003c0001
+ocr.demand_data_rd.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c0001
+ocr.demand_data_rd.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c0001
+ocr.demand_data_rd.l3_hit.snoop_sent_0, 0x1b7, 0x1e003c0001
+ocr.demand_data_rd.l3_hit.snoop_sent_1, 0x1bb, 0x1e003c0001
+ocr.demand_data_rd.l3_miss_0, 0x1b7, 0x3fffc00001
+ocr.demand_data_rd.l3_miss_1, 0x1bb, 0x3fffc00001
+ocr.demand_data_rd.local_dram_0, 0x1b7, 0x184000001
+ocr.demand_data_rd.local_dram_1, 0x1bb, 0x184000001
+ocr.demand_rfo.any_response_0, 0x1b7, 0x10002
+ocr.demand_rfo.any_response_1, 0x1bb, 0x10002
+ocr.demand_rfo.dram_0, 0x1b7, 0x184000002
+ocr.demand_rfo.dram_1, 0x1bb, 0x184000002
+ocr.demand_rfo.l3_hit.any_0, 0x1b7, 0x3fc03c0002
+ocr.demand_rfo.l3_hit.any_1, 0x1bb, 0x3fc03c0002
+ocr.demand_rfo.l3_hit.snoop_hit_no_fwd_0, 0x1b7, 0x4003c0002
+ocr.demand_rfo.l3_hit.snoop_hit_no_fwd_1, 0x1bb, 0x4003c0002
+ocr.demand_rfo.l3_hit.snoop_hitm_0, 0x1b7, 0x10003c0002
+ocr.demand_rfo.l3_hit.snoop_hitm_1, 0x1bb, 0x10003c0002
+ocr.demand_rfo.l3_hit.snoop_miss_0, 0x1b7, 0x2003c0002
+ocr.demand_rfo.l3_hit.snoop_miss_1, 0x1bb, 0x2003c0002
+ocr.demand_rfo.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c0002
+ocr.demand_rfo.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c0002
+ocr.demand_rfo.l3_hit.snoop_sent_0, 0x1b7, 0x1e003c0002
+ocr.demand_rfo.l3_hit.snoop_sent_1, 0x1bb, 0x1e003c0002
+ocr.demand_rfo.l3_miss_0, 0x1b7, 0x3fffc00002
+ocr.demand_rfo.l3_miss_1, 0x1bb, 0x3fffc00002
+ocr.demand_rfo.local_dram_0, 0x1b7, 0x184000002
+ocr.demand_rfo.local_dram_1, 0x1bb, 0x184000002
+ocr.hwpf_l1d_and_swpf.any_response_0, 0x1b7, 0x10400
+ocr.hwpf_l1d_and_swpf.any_response_1, 0x1bb, 0x10400
+ocr.hwpf_l1d_and_swpf.dram_0, 0x1b7, 0x184000400
+ocr.hwpf_l1d_and_swpf.dram_1, 0x1bb, 0x184000400
+ocr.hwpf_l1d_and_swpf.l3_hit.any_0, 0x1b7, 0x3fc03c0400
+ocr.hwpf_l1d_and_swpf.l3_hit.any_1, 0x1bb, 0x3fc03c0400
+ocr.hwpf_l1d_and_swpf.l3_hit.snoop_miss_0, 0x1b7, 0x2003c0400
+ocr.hwpf_l1d_and_swpf.l3_hit.snoop_miss_1, 0x1bb, 0x2003c0400
+ocr.hwpf_l1d_and_swpf.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c0400
+ocr.hwpf_l1d_and_swpf.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c0400
+ocr.hwpf_l1d_and_swpf.l3_miss_0, 0x1b7, 0x3fffc00400
+ocr.hwpf_l1d_and_swpf.l3_miss_1, 0x1bb, 0x3fffc00400
+ocr.hwpf_l1d_and_swpf.local_dram_0, 0x1b7, 0x184000400
+ocr.hwpf_l1d_and_swpf.local_dram_1, 0x1bb, 0x184000400
+ocr.hwpf_l2_data_rd.any_response_0, 0x1b7, 0x10010
+ocr.hwpf_l2_data_rd.any_response_1, 0x1bb, 0x10010
+ocr.hwpf_l2_data_rd.dram_0, 0x1b7, 0x184000010
+ocr.hwpf_l2_data_rd.dram_1, 0x1bb, 0x184000010
+ocr.hwpf_l2_data_rd.l3_hit.any_0, 0x1b7, 0x3fc03c0010
+ocr.hwpf_l2_data_rd.l3_hit.any_1, 0x1bb, 0x3fc03c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hit_no_fwd_0, 0x1b7, 0x4003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hit_no_fwd_1, 0x1bb, 0x4003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hitm_0, 0x1b7, 0x10003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_hitm_1, 0x1bb, 0x10003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_miss_0, 0x1b7, 0x2003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_miss_1, 0x1bb, 0x2003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_sent_0, 0x1b7, 0x1e003c0010
+ocr.hwpf_l2_data_rd.l3_hit.snoop_sent_1, 0x1bb, 0x1e003c0010
+ocr.hwpf_l2_data_rd.l3_miss_0, 0x1b7, 0x3fffc00010
+ocr.hwpf_l2_data_rd.l3_miss_1, 0x1bb, 0x3fffc00010
+ocr.hwpf_l2_data_rd.local_dram_0, 0x1b7, 0x184000010
+ocr.hwpf_l2_data_rd.local_dram_1, 0x1bb, 0x184000010
+ocr.hwpf_l2_rfo.any_response_0, 0x1b7, 0x10020
+ocr.hwpf_l2_rfo.any_response_1, 0x1bb, 0x10020
+ocr.hwpf_l2_rfo.dram_0, 0x1b7, 0x184000020
+ocr.hwpf_l2_rfo.dram_1, 0x1bb, 0x184000020
+ocr.hwpf_l2_rfo.l3_hit.any_0, 0x1b7, 0x3fc03c0020
+ocr.hwpf_l2_rfo.l3_hit.any_1, 0x1bb, 0x3fc03c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hit_no_fwd_0, 0x1b7, 0x4003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hit_no_fwd_1, 0x1bb, 0x4003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hitm_0, 0x1b7, 0x10003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_hitm_1, 0x1bb, 0x10003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_miss_0, 0x1b7, 0x2003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_miss_1, 0x1bb, 0x2003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_sent_0, 0x1b7, 0x1e003c0020
+ocr.hwpf_l2_rfo.l3_hit.snoop_sent_1, 0x1bb, 0x1e003c0020
+ocr.hwpf_l2_rfo.l3_miss_0, 0x1b7, 0x3fffc00020
+ocr.hwpf_l2_rfo.l3_miss_1, 0x1bb, 0x3fffc00020
+ocr.hwpf_l2_rfo.local_dram_0, 0x1b7, 0x184000020
+ocr.hwpf_l2_rfo.local_dram_1, 0x1bb, 0x184000020
+ocr.hwpf_l3.l3_hit.any_0, 0x1b7, 0x3fc03c2380
+ocr.hwpf_l3.l3_hit.any_1, 0x1bb, 0x3fc03c2380
+ocr.other.any_response_0, 0x1b7, 0x18000
+ocr.other.any_response_1, 0x1bb, 0x18000
+ocr.other.dram_0, 0x1b7, 0x184008000
+ocr.other.dram_1, 0x1bb, 0x184008000
+ocr.other.l3_hit.snoop_hit_no_fwd_0, 0x1b7, 0x4003c8000
+ocr.other.l3_hit.snoop_hit_no_fwd_1, 0x1bb, 0x4003c8000
+ocr.other.l3_hit.snoop_miss_0, 0x1b7, 0x2003c8000
+ocr.other.l3_hit.snoop_miss_1, 0x1bb, 0x2003c8000
+ocr.other.l3_hit.snoop_not_needed_0, 0x1b7, 0x1003c8000
+ocr.other.l3_hit.snoop_not_needed_1, 0x1bb, 0x1003c8000
+ocr.other.l3_hit.snoop_sent_0, 0x1b7, 0x1e003c8000
+ocr.other.l3_hit.snoop_sent_1, 0x1bb, 0x1e003c8000
+ocr.other.l3_miss_0, 0x1b7, 0x3fffc08000
+ocr.other.l3_miss_1, 0x1bb, 0x3fffc08000
+ocr.other.local_dram_0, 0x1b7, 0x184008000
+ocr.other.local_dram_1, 0x1bb, 0x184008000
+ocr.streaming_wr.any_response_0, 0x1b7, 0x10800
+ocr.streaming_wr.any_response_1, 0x1bb, 0x10800
+ocr.streaming_wr.dram_0, 0x1b7, 0x184000800
+ocr.streaming_wr.dram_1, 0x1bb, 0x184000800
+ocr.streaming_wr.l3_hit.any_0, 0x1b7, 0x3fc03c0800
+ocr.streaming_wr.l3_hit.any_1, 0x1bb, 0x3fc03c0800
+ocr.streaming_wr.l3_miss_0, 0x1b7, 0x3fffc00800
+ocr.streaming_wr.l3_miss_1, 0x1bb, 0x3fffc00800
+ocr.streaming_wr.local_dram_0, 0x1b7, 0x184000800
+ocr.streaming_wr.local_dram_1, 0x1bb, 0x184000800
+offcore_requests.all_data_rd, 0x8b0
+offcore_requests.all_requests, 0x80b0
+offcore_requests.demand_data_rd, 0x1b0
+offcore_requests.demand_rfo, 0x4b0
+offcore_requests.l3_miss_demand_data_rd, 0x10b0
+offcore_requests_outstanding.all_data_rd, 0x860
+offcore_requests_outstanding.cycles_with_data_rd, 0x860
+offcore_requests_outstanding.cycles_with_demand_code_rd, 0x260
+offcore_requests_outstanding.cycles_with_demand_rfo, 0x460
+offcore_requests_outstanding.cycles_with_l3_miss_demand_data_rd, 0x1060
+offcore_requests_outstanding.demand_data_rd, 0x160
+offcore_requests_outstanding.demand_rfo, 0x460
+resource_stalls.sb, 0x8a2
+resource_stalls.scoreboard, 0x2a2
+rs_events.empty_cycles, 0x15e
+rs_events.empty_end, 0x15e
+rtm_retired.aborted, 0x4c9
+rtm_retired.aborted_events, 0x80c9
+rtm_retired.aborted_mem, 0x8c9
+rtm_retired.aborted_memtype, 0x40c9
+rtm_retired.aborted_unfriendly, 0x20c9
+rtm_retired.commit, 0x2c9
+rtm_retired.start, 0x1c9
+sq_misc.bus_lock, 0x10f4
+sq_misc.sq_full, 0x4f4
+sw_prefetch_access.any, 0xf32
+sw_prefetch_access.nta, 0x132
+sw_prefetch_access.prefetchw, 0x832
+sw_prefetch_access.t0, 0x232
+sw_prefetch_access.t1_t2, 0x432
+tlb_flush.dtlb_thread, 0x1bd
+tlb_flush.stlb_any, 0x20bd
+topdown.backend_bound_slots, 0x2a4
+topdown.slots_p, 0x1a4
+tx_exec.misc2, 0x25d
+tx_exec.misc3, 0x45d
+tx_mem.abort_capacity_read, 0x8054
+tx_mem.abort_capacity_write, 0x254
+tx_mem.abort_conflict, 0x154
+tx_mem.abort_hle_elision_buffer_mismatch, 0x1054
+tx_mem.abort_hle_elision_buffer_not_empty, 0x854
+tx_mem.abort_hle_elision_buffer_unsupported_alignment, 0x2054
+tx_mem.abort_hle_store_to_elided_lock, 0x454
+tx_mem.hle_elision_buffer_full, 0x4054
+unc_arb_coh_trk_requests.all, 0x184
+unc_arb_dat_occupancy.all, 0x185
+unc_arb_dat_occupancy.rd, 0x285
+unc_arb_req_trk_occupancy.drd, 0x280
+unc_arb_trk_occupancy.all, 0x180
+unc_arb_trk_occupancy.rd, 0x280
+unc_arb_trk_requests.all, 0x181
+unc_arb_trk_requests.rd, 0x281
+unc_clock.socket, 0xff
+uops_decoded.dec0, 0x156
+uops_dispatched.port_0, 0x1a1
+uops_dispatched.port_1, 0x2a1
+uops_dispatched.port_2_3, 0x4a1
+uops_dispatched.port_4_9, 0x10a1
+uops_dispatched.port_5, 0x20a1
+uops_dispatched.port_6, 0x40a1
+uops_dispatched.port_7_8, 0x80a1
+uops_executed.core, 0x2b1
+uops_executed.core_cycles_ge_1, 0x2b1
+uops_executed.core_cycles_ge_2, 0x2b1
+uops_executed.core_cycles_ge_3, 0x2b1
+uops_executed.core_cycles_ge_4, 0x2b1
+uops_executed.cycles_ge_1, 0x1b1
+uops_executed.cycles_ge_2, 0x1b1
+uops_executed.cycles_ge_3, 0x1b1
+uops_executed.cycles_ge_4, 0x1b1
+uops_executed.stall_cycles, 0x1b1
+uops_executed.thread, 0x1b1
+uops_executed.x87, 0x10b1
+uops_issued.any, 0x10e
+uops_issued.stall_cycles, 0x10e
+uops_issued.vector_width_mismatch, 0x20e
+uops_retired.slots, 0x2c2
+uops_retired.stall_cycles, 0x2c2
+uops_retired.total_cycles, 0x2c2

@@ -3,6 +3,7 @@
 #include <hwy/aligned_allocator.h>
 
 #include "common.h"
+#include "instr_shim.h"
 
 #include <ranges>
 #include <bitset>
@@ -79,7 +80,7 @@ static int mm_dust_minier(void *km, int n, mm128_t *a, int l_seq, const char *se
 
 static void base_collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_idx_t *mi, int n_segs, const int *qlens, const char **seqs, mm128_v *mv)
 {
-	EASY_BLOCK("base_collect_minimizers");
+	BENCH_INSTR_BLOCK("tool_minimap2.base_collect_minimizers");
 	int i, n, sum = 0;
 	mv->n = 0;
 	for (i = n = 0; i < n_segs; ++i) {
@@ -455,7 +456,7 @@ static inline int skip_seed(int flag, uint64_t r, const mm_seed_t *q, const char
 static mm128_t *collect_seed_hits_heap(void *km, const mm_mapopt_t *opt, int max_occ, const mm_idx_t *mi, const char *qname, const mm128_v *mv, int qlen, int64_t *n_a, int *rep_len,
 								  int *n_mini_pos, uint64_t **mini_pos)
 {
-	EASY_BLOCK("collect_seed_hits");
+	BENCH_INSTR_BLOCK("tool_minimap2.collect_seed_hits");
 	int i, n_m, heap_size = 0;
 	int64_t j, n_for = 0, n_rev = 0;
 	mm_seed_t *m;
@@ -522,7 +523,7 @@ static mm128_t *collect_seed_hits_heap(void *km, const mm_mapopt_t *opt, int max
 static mm128_t *collect_seed_hits(void *km, const mm_mapopt_t *opt, int max_occ, const mm_idx_t *mi, const char *qname, const mm128_v *mv, int qlen, int64_t *n_a, int *rep_len,
 								  int *n_mini_pos, uint64_t **mini_pos)
 {
-	EASY_BLOCK("collect_seed_hits");
+	BENCH_INSTR_BLOCK("tool_minimap2.collect_seed_hits");
 	int i, n_m;
 	mm_seed_t *m;
 	mm128_t *a;
@@ -560,7 +561,7 @@ static mm128_t *collect_seed_hits(void *km, const mm_mapopt_t *opt, int max_occ,
 
 static void chain_post(const mm_mapopt_t *opt, int max_chain_gap_ref, const mm_idx_t *mi, void *km, int qlen, int n_segs, const int *qlens, int *n_regs, mm_reg1_t *regs, mm128_t *a)
 {
-	EASY_BLOCK("chain_post");
+	BENCH_INSTR_BLOCK("tool_minimap2.chain_post");
 	if (!(opt->flag & MM_F_ALL_CHAINS)) { // don't choose primary mapping(s)
 		mm_set_parent(km, opt->mask_level, opt->mask_len, *n_regs, regs, opt->a * 2 + opt->b, opt->flag&MM_F_HARD_MLEVEL, opt->alt_drop);
 		if (n_segs <= 1) mm_select_sub(km, opt->pri_ratio, mi->k*2, opt->best_n, 1, opt->max_gap * 0.8, n_regs, regs);
@@ -570,7 +571,7 @@ static void chain_post(const mm_mapopt_t *opt, int max_chain_gap_ref, const mm_i
 
 static mm_reg1_t *align_regs(const mm_mapopt_t *opt, const mm_idx_t *mi, void *km, int qlen, const char *seq, int *n_regs, mm_reg1_t *regs, mm128_t *a)
 {
-	EASY_BLOCK("align_regs");
+	BENCH_INSTR_BLOCK("tool_minimap2.align_regs");
 	if (!(opt->flag & MM_F_CIGAR)) return regs;
 	regs = mm_align_skeleton(km, opt, mi, qlen, seq, n_regs, regs, a); // this calls mm_filter_regs()
 	if (!(opt->flag & MM_F_ALL_CHAINS)) { // don't choose primary mapping(s)
@@ -586,7 +587,7 @@ static mm_reg1_t *align_regs(const mm_mapopt_t *opt, const mm_idx_t *mi, void *k
 
 void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const char **seqs, int *n_regs, mm_reg1_t **regs, mm_tbuf_t *b, const mm_mapopt_t *opt, const char *qname)
 {
-	EASY_BLOCK("mm_map_frag_core");
+	BENCH_INSTR_BLOCK("tool_minimap2.mm_map_frag_core");
 	int i, j, rep_len, qlen_sum, n_regs0, n_mini_pos;
 	int max_chain_gap_qry, max_chain_gap_ref, is_splice = !!(opt->flag & MM_F_SPLICE), is_sr = !!(opt->flag & MM_F_SR), is_sr_rna = !!(opt->flag & MM_F_SR_RNA);
 	uint32_t hash;

@@ -1,0 +1,177 @@
+baclears.all, 0x1e6
+baclears.cond, 0x10e6
+baclears.return, 0x8e6
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.all_taken_branches, 0x80c4
+br_inst_retired.call, 0xf9c4
+br_inst_retired.far_branch, 0xbfc4
+br_inst_retired.ind_call, 0xfbc4
+br_inst_retired.jcc, 0x7ec4
+br_inst_retired.non_return_ind, 0xebc4
+br_inst_retired.rel_call, 0xfdc4
+br_inst_retired.return, 0xf7c4
+br_inst_retired.taken_jcc, 0xfec4
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.ind_call, 0xfbc5
+br_misp_retired.jcc, 0x7ec5
+br_misp_retired.non_return_ind, 0xebc5
+br_misp_retired.return, 0xf7c5
+br_misp_retired.taken_jcc, 0xfec5
+core_reject_l2q.all, 0x31
+cpu_clk_unhalted.core_p, 0x3c
+cpu_clk_unhalted.ref, 0x13c
+cycles_div_busy.all, 0xcd
+cycles_div_busy.fpdiv, 0x2cd
+cycles_div_busy.idiv, 0x1cd
+decode_restriction.predecode_wrong, 0x1e9
+dl1.replacement, 0x151
+dtlb_load_misses.walk_completed_1gb, 0x808
+dtlb_load_misses.walk_completed_2m_4m, 0x408
+dtlb_load_misses.walk_completed_4k, 0x208
+dtlb_load_misses.walk_pending, 0x1008
+dtlb_store_misses.walk_completed_1gb, 0x849
+dtlb_store_misses.walk_completed_2m_4m, 0x449
+dtlb_store_misses.walk_completed_4k, 0x249
+dtlb_store_misses.walk_pending, 0x1049
+ept.walk_pending, 0x104f
+fetch_stall.all, 0x86
+fetch_stall.icache_fill_pending_cycles, 0x286
+fetch_stall.itlb_fill_pending_cycles, 0x186
+hw_interrupts.masked, 0x2cb
+hw_interrupts.pending_and_masked, 0x4cb
+hw_interrupts.received, 0x1cb
+icache.accesses, 0x380
+icache.hit, 0x180
+icache.misses, 0x280
+inst_retired.any_p, 0xc0
+inst_retired.prec_dist, 0xc0
+issue_slots_not_consumed.any, 0xca
+issue_slots_not_consumed.recovery, 0x2ca
+issue_slots_not_consumed.resource_full, 0x1ca
+itlb.miss, 0x481
+itlb_misses.walk_completed_1gb, 0x885
+itlb_misses.walk_completed_2m_4m, 0x485
+itlb_misses.walk_completed_4k, 0x285
+itlb_misses.walk_pending, 0x1085
+l2_reject_xq.all, 0x30
+ld_blocks.4k_alias, 0x403
+ld_blocks.all_block, 0x1003
+ld_blocks.data_unknown, 0x103
+ld_blocks.store_forward, 0x203
+ld_blocks.utlb_miss, 0x803
+longest_lat_cache.miss, 0x412e
+longest_lat_cache.reference, 0x4f2e
+machine_clears.all, 0xc3
+machine_clears.disambiguation, 0x8c3
+machine_clears.fp_assist, 0x4c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.page_fault, 0x20c3
+machine_clears.smc, 0x1c3
+mem_load_uops_retired.dram_hit, 0x80d1
+mem_load_uops_retired.hitm, 0x20d1
+mem_load_uops_retired.l1_hit, 0x1d1
+mem_load_uops_retired.l1_miss, 0x8d1
+mem_load_uops_retired.l2_hit, 0x2d1
+mem_load_uops_retired.l2_miss, 0x10d1
+mem_load_uops_retired.wcb_hit, 0x40d1
+mem_uops_retired.all, 0x83d0
+mem_uops_retired.all_loads, 0x81d0
+mem_uops_retired.all_stores, 0x82d0
+mem_uops_retired.dtlb_miss, 0x13d0
+mem_uops_retired.dtlb_miss_loads, 0x11d0
+mem_uops_retired.dtlb_miss_stores, 0x12d0
+mem_uops_retired.lock_loads, 0x21d0
+mem_uops_retired.split, 0x43d0
+mem_uops_retired.split_loads, 0x41d0
+mem_uops_retired.split_stores, 0x42d0
+misalign_mem_ref.load_page_split, 0x213
+misalign_mem_ref.store_page_split, 0x413
+ms_decoded.ms_entry, 0x1e7
+offcore_response, 0x1b7
+offcore_response.any_data_rd.any_response, 0x1b7, 0x13091
+offcore_response.any_data_rd.l2_hit, 0x1b7, 0x43091
+offcore_response.any_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000003091
+offcore_response.any_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200003091
+offcore_response.any_data_rd.outstanding, 0x1b7, 0x4000003091
+offcore_response.any_pf_data_rd.any_response, 0x1b7, 0x13010
+offcore_response.any_pf_data_rd.l2_hit, 0x1b7, 0x43010
+offcore_response.any_pf_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000003010
+offcore_response.any_pf_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200003010
+offcore_response.any_pf_data_rd.outstanding, 0x1b7, 0x4000003010
+offcore_response.any_read.any_response, 0x1b7, 0x132b7
+offcore_response.any_read.l2_hit, 0x1b7, 0x432b7
+offcore_response.any_read.l2_miss.hitm_other_core, 0x1b7, 0x10000032b7
+offcore_response.any_read.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x2000032b7
+offcore_response.any_read.outstanding, 0x1b7, 0x40000032b7
+offcore_response.any_request.any_response, 0x1b7, 0x18000
+offcore_response.any_request.l2_hit, 0x1b7, 0x48000
+offcore_response.any_request.l2_miss.hitm_other_core, 0x1b7, 0x1000008000
+offcore_response.any_request.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200008000
+offcore_response.any_request.outstanding, 0x1b7, 0x4000008000
+offcore_response.any_rfo.any_response, 0x1b7, 0x10022
+offcore_response.any_rfo.l2_hit, 0x1b7, 0x40022
+offcore_response.any_rfo.l2_miss.hitm_other_core, 0x1b7, 0x1000000022
+offcore_response.any_rfo.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000022
+offcore_response.any_rfo.outstanding, 0x1b7, 0x4000000022
+offcore_response.bus_locks.any_response, 0x1b7, 0x10400
+offcore_response.bus_locks.l2_hit, 0x1b7, 0x40400
+offcore_response.bus_locks.l2_miss.hitm_other_core, 0x1b7, 0x1000000400
+offcore_response.bus_locks.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000400
+offcore_response.bus_locks.outstanding, 0x1b7, 0x4000000400
+offcore_response.corewb.any_response, 0x1b7, 0x10008
+offcore_response.corewb.l2_hit, 0x1b7, 0x40008
+offcore_response.corewb.l2_miss.hitm_other_core, 0x1b7, 0x1000000008
+offcore_response.corewb.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000008
+offcore_response.corewb.outstanding, 0x1b7, 0x4000000008
+offcore_response.demand_code_rd.any_response, 0x1b7, 0x10004
+offcore_response.demand_code_rd.l2_hit, 0x1b7, 0x40004
+offcore_response.demand_code_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000000004
+offcore_response.demand_code_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000004
+offcore_response.demand_code_rd.outstanding, 0x1b7, 0x4000000004
+offcore_response.demand_data_rd.any_response, 0x1b7, 0x10001
+offcore_response.demand_data_rd.l2_hit, 0x1b7, 0x40001
+offcore_response.demand_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000000001
+offcore_response.demand_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000001
+offcore_response.demand_data_rd.outstanding, 0x1b7, 0x4000000001
+offcore_response.demand_rfo.any_response, 0x1b7, 0x10002
+offcore_response.demand_rfo.l2_hit, 0x1b7, 0x40002
+offcore_response.demand_rfo.l2_miss.hitm_other_core, 0x1b7, 0x1000000002
+offcore_response.demand_rfo.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000002
+offcore_response.demand_rfo.outstanding, 0x1b7, 0x4000000002
+offcore_response.full_streaming_stores.any_response, 0x1b7, 0x10800
+offcore_response.full_streaming_stores.l2_hit, 0x1b7, 0x40800
+offcore_response.full_streaming_stores.l2_miss.hitm_other_core, 0x1b7, 0x1000000800
+offcore_response.full_streaming_stores.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000800
+offcore_response.full_streaming_stores.outstanding, 0x1b7, 0x4000000800
+offcore_response.pf_l1_data_rd.any_response, 0x1b7, 0x12000
+offcore_response.pf_l1_data_rd.l2_hit, 0x1b7, 0x42000
+offcore_response.pf_l1_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000002000
+offcore_response.pf_l1_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200002000
+offcore_response.pf_l1_data_rd.outstanding, 0x1b7, 0x4000002000
+offcore_response.pf_l2_data_rd.any_response, 0x1b7, 0x10010
+offcore_response.pf_l2_data_rd.l2_hit, 0x1b7, 0x40010
+offcore_response.pf_l2_data_rd.l2_miss.hitm_other_core, 0x1b7, 0x1000000010
+offcore_response.pf_l2_data_rd.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000010
+offcore_response.pf_l2_data_rd.outstanding, 0x1b7, 0x4000000010
+offcore_response.pf_l2_rfo.any_response, 0x1b7, 0x10020
+offcore_response.pf_l2_rfo.l2_hit, 0x1b7, 0x40020
+offcore_response.pf_l2_rfo.l2_miss.hitm_other_core, 0x1b7, 0x1000000020
+offcore_response.pf_l2_rfo.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200000020
+offcore_response.pf_l2_rfo.outstanding, 0x1b7, 0x4000000020
+offcore_response.streaming_stores.any_response, 0x1b7, 0x14800
+offcore_response.streaming_stores.l2_hit, 0x1b7, 0x44800
+offcore_response.streaming_stores.l2_miss.hitm_other_core, 0x1b7, 0x1000004800
+offcore_response.streaming_stores.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200004800
+offcore_response.streaming_stores.outstanding, 0x1b7, 0x4000004800
+offcore_response.sw_prefetch.any_response, 0x1b7, 0x11000
+offcore_response.sw_prefetch.l2_hit, 0x1b7, 0x41000
+offcore_response.sw_prefetch.l2_miss.hitm_other_core, 0x1b7, 0x1000001000
+offcore_response.sw_prefetch.l2_miss.snoop_miss_or_no_snoop_needed, 0x1b7, 0x200001000
+offcore_response.sw_prefetch.outstanding, 0x1b7, 0x4000001000
+tlb_flushes.stlb_any, 0x20bd
+uops_issued.any, 0xe
+uops_not_delivered.any, 0x9c
+uops_retired.any, 0xc2
+uops_retired.fpdiv, 0x8c2
+uops_retired.idiv, 0x10c2
+uops_retired.ms, 0x1c2

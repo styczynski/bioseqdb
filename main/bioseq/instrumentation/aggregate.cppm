@@ -24,9 +24,17 @@ import bioseq_instr.descriptor;
 
 export namespace bioseq::instr {
 
-/// 16-bucket log2 histogram of nanosecond durations.
+/// 32-bucket log2 histogram of nanosecond durations. The previous
+/// 16-bucket version saturated at 2^15 ns = 32.77 us, which collapsed
+/// every multi-millisecond region into the last bucket and made
+/// `p50` / `p99` indistinguishable from the bucket-end constant. With
+/// 32 buckets the range now extends to ~2^32 ns ≈ 4.3 s; in practice
+/// every region we instrument fits with several buckets to spare.
+/// The structure is still cache-line friendly: 32 × 8 B = 256 B = 4
+/// cache lines, and the type is a member of the per-region aggregate
+/// rather than something we walk over millions of in a tight loop.
 struct Histogram16 {
-    std::array<std::uint64_t, 16> buckets{};
+    std::array<std::uint64_t, 32> buckets{};
 
     [[gnu::always_inline]]
     void add(std::uint64_t value) noexcept {
@@ -35,10 +43,10 @@ struct Histogram16 {
             return;
         }
         const unsigned msb = 63u - static_cast<unsigned>(std::countl_zero(value));
-        ++buckets[msb < 16u ? msb : 15u];
+        ++buckets[msb < 32u ? msb : 31u];
     }
 };
-static_assert(sizeof(Histogram16) == 128);
+static_assert(sizeof(Histogram16) == 256);
 
 /// Region aggregate. One row per region per thread. 192 bytes.
 struct alignas(64) RegionAggregate {

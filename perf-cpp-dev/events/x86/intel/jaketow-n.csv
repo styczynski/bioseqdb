@@ -1,0 +1,937 @@
+agu_bypass_cancel.count, 0x1b6
+arith.fpu_div, 0x114
+arith.fpu_div_active, 0x114
+baclears.any, 0x1fe6
+br_inst_exec.all_branches, 0xff88
+br_inst_exec.all_conditional, 0xc188
+br_inst_exec.all_direct_jmp, 0xc288
+br_inst_exec.all_direct_near_call, 0xd088
+br_inst_exec.all_indirect_jump_non_call_ret, 0xc488
+br_inst_exec.all_indirect_near_return, 0xc888
+br_inst_exec.nontaken_conditional, 0x4188
+br_inst_exec.taken_conditional, 0x8188
+br_inst_exec.taken_direct_jump, 0x8288
+br_inst_exec.taken_direct_near_call, 0x9088
+br_inst_exec.taken_indirect_jump_non_call_ret, 0x8488
+br_inst_exec.taken_indirect_near_call, 0xa088
+br_inst_exec.taken_indirect_near_return, 0x8888
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.all_branches_pebs, 0x4c4
+br_inst_retired.conditional, 0x1c4
+br_inst_retired.far_branch, 0x40c4
+br_inst_retired.near_call, 0x2c4
+br_inst_retired.near_return, 0x8c4
+br_inst_retired.near_taken, 0x20c4
+br_inst_retired.not_taken, 0x10c4
+br_misp_exec.all_branches, 0xff89
+br_misp_exec.all_conditional, 0xc189
+br_misp_exec.all_direct_near_call, 0xd089
+br_misp_exec.all_indirect_jump_non_call_ret, 0xc489
+br_misp_exec.indirect, 0xe489
+br_misp_exec.nontaken_conditional, 0x4189
+br_misp_exec.taken_conditional, 0x8189
+br_misp_exec.taken_direct_near_call, 0x9089
+br_misp_exec.taken_indirect_jump_non_call_ret, 0x8489
+br_misp_exec.taken_indirect_near_call, 0xa089
+br_misp_exec.taken_return_near, 0x8889
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.all_branches_pebs, 0x4c5
+br_misp_retired.conditional, 0x1c5
+br_misp_retired.near_call, 0x2c5
+br_misp_retired.not_taken, 0x10c5
+br_misp_retired.taken, 0x20c5
+cpl_cycles.ring0, 0x15c
+cpl_cycles.ring0_trans, 0x15c
+cpl_cycles.ring123, 0x25c
+cpu_clk_thread_unhalted.one_thread_active, 0x23c
+cpu_clk_thread_unhalted.ref_xclk, 0x13c
+cpu_clk_thread_unhalted.ref_xclk_any, 0x13c
+cpu_clk_unhalted.one_thread_active, 0x23c
+cpu_clk_unhalted.ref_xclk, 0x13c
+cpu_clk_unhalted.ref_xclk_any, 0x13c
+cpu_clk_unhalted.thread_p, 0x3c
+cpu_clk_unhalted.thread_p_any, 0x3c
+cycle_activity.cycles_l1d_pending, 0x2a3
+cycle_activity.cycles_l2_pending, 0x1a3
+cycle_activity.cycles_no_dispatch, 0x4a3
+cycle_activity.stalls_l1d_pending, 0x6a3
+cycle_activity.stalls_l2_pending, 0x5a3
+dsb2mite_switches.count, 0x1ab
+dsb2mite_switches.penalty_cycles, 0x2ab
+dsb_fill.all_cancel, 0xaac
+dsb_fill.exceed_dsb_lines, 0x8ac
+dsb_fill.other_cancel, 0x2ac
+dtlb_load_misses.miss_causes_a_walk, 0x108
+dtlb_load_misses.stlb_hit, 0x1008
+dtlb_load_misses.walk_completed, 0x208
+dtlb_load_misses.walk_duration, 0x408
+dtlb_store_misses.miss_causes_a_walk, 0x149
+dtlb_store_misses.stlb_hit, 0x1049
+dtlb_store_misses.walk_completed, 0x249
+dtlb_store_misses.walk_duration, 0x449
+ept.walk_cycles, 0x104f
+fp_assist.any, 0x1eca
+fp_assist.simd_input, 0x10ca
+fp_assist.simd_output, 0x8ca
+fp_assist.x87_input, 0x4ca
+fp_assist.x87_output, 0x2ca
+fp_comp_ops_exe.sse_packed_double, 0x1010
+fp_comp_ops_exe.sse_packed_single, 0x4010
+fp_comp_ops_exe.sse_scalar_double, 0x8010
+fp_comp_ops_exe.sse_scalar_single, 0x2010
+fp_comp_ops_exe.x87, 0x110
+hw_pre_req.dl1_miss, 0x24e
+icache.hit, 0x180
+icache.misses, 0x280
+idq.all_dsb_cycles_4_uops, 0x1879
+idq.all_dsb_cycles_any_uops, 0x1879
+idq.all_mite_cycles_4_uops, 0x2479
+idq.all_mite_cycles_any_uops, 0x2479
+idq.dsb_cycles, 0x879
+idq.dsb_uops, 0x879
+idq.empty, 0x279
+idq.mite_all_uops, 0x3c79
+idq.mite_cycles, 0x479
+idq.mite_uops, 0x479
+idq.ms_cycles, 0x3079
+idq.ms_dsb_cycles, 0x1079
+idq.ms_dsb_occur, 0x1079
+idq.ms_dsb_uops, 0x1079
+idq.ms_mite_uops, 0x2079
+idq.ms_switches, 0x3079
+idq.ms_uops, 0x3079
+idq_uops_not_delivered.core, 0x19c
+idq_uops_not_delivered.cycles_0_uops_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_fe_was_ok, 0x19c
+idq_uops_not_delivered.cycles_ge_1_uop_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_le_1_uop_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_le_2_uop_deliv.core, 0x19c
+idq_uops_not_delivered.cycles_le_3_uop_deliv.core, 0x19c
+ild_stall.iq_full, 0x487
+ild_stall.lcp, 0x187
+inst_retired.any_p, 0xc0
+inst_retired.prec_dist, 0x1c0
+insts_written_to_iq.insts, 0x117
+int_misc.rat_stall_cycles, 0x400d
+int_misc.recovery_cycles, 0x30d
+int_misc.recovery_cycles_any, 0x30d
+int_misc.recovery_stalls_count, 0x30d
+itlb.itlb_flush, 0x1ae
+itlb_misses.miss_causes_a_walk, 0x185
+itlb_misses.stlb_hit, 0x1085
+itlb_misses.walk_completed, 0x285
+itlb_misses.walk_duration, 0x485
+l1d.all_m_replacement, 0x851
+l1d.allocated_in_m, 0x251
+l1d.eviction, 0x451
+l1d.replacement, 0x151
+l1d_blocks.bank_conflict_cycles, 0x5bf
+l1d_pend_miss.fb_full, 0x248
+l1d_pend_miss.pending, 0x148
+l1d_pend_miss.pending_cycles, 0x148
+l1d_pend_miss.pending_cycles_any, 0x148
+l2_l1d_wb_rqsts.all, 0xf28
+l2_l1d_wb_rqsts.hit_e, 0x428
+l2_l1d_wb_rqsts.hit_m, 0x828
+l2_l1d_wb_rqsts.hit_s, 0x228
+l2_l1d_wb_rqsts.miss, 0x128
+l2_lines_in.all, 0x7f1
+l2_lines_in.e, 0x4f1
+l2_lines_in.i, 0x1f1
+l2_lines_in.s, 0x2f1
+l2_lines_out.demand_clean, 0x1f2
+l2_lines_out.demand_dirty, 0x2f2
+l2_lines_out.dirty_all, 0xaf2
+l2_lines_out.pf_clean, 0x4f2
+l2_lines_out.pf_dirty, 0x8f2
+l2_rqsts.all_code_rd, 0x3024
+l2_rqsts.all_demand_data_rd, 0x324
+l2_rqsts.all_pf, 0xc024
+l2_rqsts.all_rfo, 0xc24
+l2_rqsts.code_rd_hit, 0x1024
+l2_rqsts.code_rd_miss, 0x2024
+l2_rqsts.demand_data_rd_hit, 0x124
+l2_rqsts.pf_hit, 0x4024
+l2_rqsts.pf_miss, 0x8024
+l2_rqsts.rfo_hit, 0x424
+l2_rqsts.rfo_miss, 0x824
+l2_store_lock_rqsts.all, 0xf27
+l2_store_lock_rqsts.hit_e, 0x427
+l2_store_lock_rqsts.hit_m, 0x827
+l2_store_lock_rqsts.miss, 0x127
+l2_trans.all_pf, 0x8f0
+l2_trans.all_requests, 0x80f0
+l2_trans.code_rd, 0x4f0
+l2_trans.demand_data_rd, 0x1f0
+l2_trans.l1d_wb, 0x10f0
+l2_trans.l2_fill, 0x20f0
+l2_trans.l2_wb, 0x40f0
+l2_trans.rfo, 0x2f0
+ld_blocks.all_block, 0x1003
+ld_blocks.data_unknown, 0x103
+ld_blocks.no_sr, 0x803
+ld_blocks.store_forward, 0x203
+ld_blocks_partial.address_alias, 0x107
+ld_blocks_partial.all_sta_block, 0x807
+load_hit_pre.hw_pf, 0x24c
+load_hit_pre.sw_pf, 0x14c
+lock_cycles.cache_lock_duration, 0x263
+lock_cycles.split_lock_uc_lock_duration, 0x163
+longest_lat_cache.miss, 0x412e
+longest_lat_cache.reference, 0x4f2e
+lsd.cycles_4_uops, 0x1a8
+lsd.cycles_active, 0x1a8
+lsd.uops, 0x1a8
+machine_clears.count, 0x1c3
+machine_clears.maskmov, 0x20c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.smc, 0x4c3
+mem_load_uops_llc_hit_retired.xsnp_hit, 0x2d2
+mem_load_uops_llc_hit_retired.xsnp_hitm, 0x4d2
+mem_load_uops_llc_hit_retired.xsnp_miss, 0x1d2
+mem_load_uops_llc_hit_retired.xsnp_none, 0x8d2
+mem_load_uops_llc_miss_retired.local_dram, 0x1d3
+mem_load_uops_llc_miss_retired.remote_dram, 0x4d3
+mem_load_uops_retired.hit_lfb, 0x40d1
+mem_load_uops_retired.l1_hit, 0x1d1
+mem_load_uops_retired.l2_hit, 0x2d1
+mem_load_uops_retired.llc_hit, 0x4d1
+mem_load_uops_retired.llc_miss, 0x20d1
+mem_trans_retired.load_latency_gt_128, 0x1cd, 0x80
+mem_trans_retired.load_latency_gt_16, 0x1cd, 0x10
+mem_trans_retired.load_latency_gt_256, 0x1cd, 0x100
+mem_trans_retired.load_latency_gt_32, 0x1cd, 0x20
+mem_trans_retired.load_latency_gt_4, 0x1cd, 0x4
+mem_trans_retired.load_latency_gt_512, 0x1cd, 0x200
+mem_trans_retired.load_latency_gt_64, 0x1cd, 0x40
+mem_trans_retired.load_latency_gt_8, 0x1cd, 0x8
+mem_trans_retired.precise_store, 0x2cd
+mem_uops_retired.all_loads, 0x81d0
+mem_uops_retired.all_stores, 0x82d0
+mem_uops_retired.lock_loads, 0x21d0
+mem_uops_retired.split_loads, 0x41d0
+mem_uops_retired.split_stores, 0x42d0
+mem_uops_retired.stlb_miss_loads, 0x11d0
+mem_uops_retired.stlb_miss_stores, 0x12d0
+misalign_mem_ref.loads, 0x105
+misalign_mem_ref.stores, 0x205
+offcore_requests.all_data_rd, 0x8b0
+offcore_requests.demand_code_rd, 0x2b0
+offcore_requests.demand_data_rd, 0x1b0
+offcore_requests.demand_rfo, 0x4b0
+offcore_requests_buffer.sq_full, 0x1b2
+offcore_requests_outstanding.all_data_rd, 0x860
+offcore_requests_outstanding.cycles_with_data_rd, 0x860
+offcore_requests_outstanding.cycles_with_demand_data_rd, 0x160
+offcore_requests_outstanding.cycles_with_demand_rfo, 0x460
+offcore_requests_outstanding.demand_data_rd, 0x160
+offcore_requests_outstanding.demand_data_rd_c6, 0x160
+offcore_requests_outstanding.demand_rfo, 0x460
+offcore_response.all_data_rd.any_response_0, 0x1b7, 0x105b3
+offcore_response.all_data_rd.any_response_1, 0x1bb, 0x105b3
+offcore_response.all_data_rd.llc_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0091
+offcore_response.all_data_rd.llc_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0091
+offcore_response.all_data_rd.llc_hit.hitm_other_core_0, 0x1b7, 0x10003c0091
+offcore_response.all_data_rd.llc_hit.hitm_other_core_1, 0x1bb, 0x10003c0091
+offcore_response.all_data_rd.llc_hit.no_snoop_needed_0, 0x1b7, 0x1003c0091
+offcore_response.all_data_rd.llc_hit.no_snoop_needed_1, 0x1bb, 0x1003c0091
+offcore_response.all_data_rd.llc_hit.snoop_miss_0, 0x1b7, 0x2003c0091
+offcore_response.all_data_rd.llc_hit.snoop_miss_1, 0x1bb, 0x2003c0091
+offcore_response.all_demand_mlc_pref_reads.llc_miss.any_response_0, 0x1b7, 0x3fffc20077
+offcore_response.all_demand_mlc_pref_reads.llc_miss.any_response_1, 0x1bb, 0x3fffc20077
+offcore_response.all_demand_mlc_pref_reads.llc_miss.local_dram_0, 0x1b7, 0x600400077
+offcore_response.all_demand_mlc_pref_reads.llc_miss.local_dram_1, 0x1bb, 0x600400077
+offcore_response.all_demand_mlc_pref_reads.llc_miss.remote_hitm_hit_forward_0, 0x1b7, 0x187fc20077
+offcore_response.all_demand_mlc_pref_reads.llc_miss.remote_hitm_hit_forward_1, 0x1bb, 0x187fc20077
+offcore_response.all_pf_data_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0090
+offcore_response.all_pf_data_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0090
+offcore_response.all_pf_data_rd.llc_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0090
+offcore_response.all_pf_data_rd.llc_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0090
+offcore_response.all_pf_data_rd.llc_hit.hitm_other_core_0, 0x1b7, 0x10003c0090
+offcore_response.all_pf_data_rd.llc_hit.hitm_other_core_1, 0x1bb, 0x10003c0090
+offcore_response.all_pf_data_rd.llc_hit.no_snoop_needed_0, 0x1b7, 0x1003c0090
+offcore_response.all_pf_data_rd.llc_hit.no_snoop_needed_1, 0x1bb, 0x1003c0090
+offcore_response.all_pf_data_rd.llc_hit.snoop_miss_0, 0x1b7, 0x2003c0090
+offcore_response.all_pf_data_rd.llc_hit.snoop_miss_1, 0x1bb, 0x2003c0090
+offcore_response.all_reads.any_response_0, 0x1b7, 0x107f7
+offcore_response.all_reads.any_response_1, 0x1bb, 0x107f7
+offcore_response.all_reads.llc_hit.any_response_0, 0x1b7, 0x3f803c03f7
+offcore_response.all_reads.llc_hit.any_response_1, 0x1bb, 0x3f803c03f7
+offcore_response.all_reads.llc_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c03f7
+offcore_response.all_reads.llc_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c03f7
+offcore_response.all_reads.llc_hit.hitm_other_core_0, 0x1b7, 0x10003c03f7
+offcore_response.all_reads.llc_hit.hitm_other_core_1, 0x1bb, 0x10003c03f7
+offcore_response.all_reads.llc_hit.no_snoop_needed_0, 0x1b7, 0x1003c03f7
+offcore_response.all_reads.llc_hit.no_snoop_needed_1, 0x1bb, 0x1003c03f7
+offcore_response.all_reads.llc_hit.snoop_miss_0, 0x1b7, 0x2003c03f7
+offcore_response.all_reads.llc_hit.snoop_miss_1, 0x1bb, 0x2003c03f7
+offcore_response.all_rfo.any_response_0, 0x1b7, 0x10122
+offcore_response.all_rfo.any_response_1, 0x1bb, 0x10122
+offcore_response.corewb.any_response_0, 0x1b7, 0x10008
+offcore_response.corewb.any_response_1, 0x1bb, 0x10008
+offcore_response.demand_code_rd.any_response_0, 0x1b7, 0x10004
+offcore_response.demand_code_rd.any_response_1, 0x1bb, 0x10004
+offcore_response.demand_code_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0004
+offcore_response.demand_code_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0004
+offcore_response.demand_code_rd.llc_miss.any_response_0, 0x1b7, 0x3fffc20004
+offcore_response.demand_code_rd.llc_miss.any_response_1, 0x1bb, 0x3fffc20004
+offcore_response.demand_code_rd.llc_miss.local_dram_0, 0x1b7, 0x600400004
+offcore_response.demand_code_rd.llc_miss.local_dram_1, 0x1bb, 0x600400004
+offcore_response.demand_code_rd.llc_miss.remote_dram_0, 0x1b7, 0x67f800004
+offcore_response.demand_code_rd.llc_miss.remote_dram_1, 0x1bb, 0x67f800004
+offcore_response.demand_code_rd.llc_miss.remote_hit_forward_0, 0x1b7, 0x87f820004
+offcore_response.demand_code_rd.llc_miss.remote_hit_forward_1, 0x1bb, 0x87f820004
+offcore_response.demand_code_rd.llc_miss.remote_hitm_0, 0x1b7, 0x107fc00004
+offcore_response.demand_code_rd.llc_miss.remote_hitm_1, 0x1bb, 0x107fc00004
+offcore_response.demand_data_rd.any_response_0, 0x1b7, 0x10001
+offcore_response.demand_data_rd.any_response_1, 0x1bb, 0x10001
+offcore_response.demand_data_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0001
+offcore_response.demand_data_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0001
+offcore_response.demand_data_rd.llc_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0001
+offcore_response.demand_data_rd.llc_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0001
+offcore_response.demand_data_rd.llc_hit.hitm_other_core_0, 0x1b7, 0x10003c0001
+offcore_response.demand_data_rd.llc_hit.hitm_other_core_1, 0x1bb, 0x10003c0001
+offcore_response.demand_data_rd.llc_hit.no_snoop_needed_0, 0x1b7, 0x1003c0001
+offcore_response.demand_data_rd.llc_hit.no_snoop_needed_1, 0x1bb, 0x1003c0001
+offcore_response.demand_data_rd.llc_hit.snoop_miss_0, 0x1b7, 0x2003c0001
+offcore_response.demand_data_rd.llc_hit.snoop_miss_1, 0x1bb, 0x2003c0001
+offcore_response.demand_data_rd.llc_miss.any_dram_0, 0x1b7, 0x67fc00001
+offcore_response.demand_data_rd.llc_miss.any_dram_1, 0x1bb, 0x67fc00001
+offcore_response.demand_data_rd.llc_miss.any_response_0, 0x1b7, 0x3fffc20001
+offcore_response.demand_data_rd.llc_miss.any_response_1, 0x1bb, 0x3fffc20001
+offcore_response.demand_data_rd.llc_miss.local_dram_0, 0x1b7, 0x600400001
+offcore_response.demand_data_rd.llc_miss.local_dram_1, 0x1bb, 0x600400001
+offcore_response.demand_data_rd.llc_miss.remote_dram_0, 0x1b7, 0x67f800001
+offcore_response.demand_data_rd.llc_miss.remote_dram_1, 0x1bb, 0x67f800001
+offcore_response.demand_data_rd.llc_miss.remote_hit_forward_0, 0x1b7, 0x87f820001
+offcore_response.demand_data_rd.llc_miss.remote_hit_forward_1, 0x1bb, 0x87f820001
+offcore_response.demand_data_rd.llc_miss.remote_hitm_0, 0x1b7, 0x107fc00001
+offcore_response.demand_data_rd.llc_miss.remote_hitm_1, 0x1bb, 0x107fc00001
+offcore_response.demand_rfo.any_response_0, 0x1b7, 0x10002
+offcore_response.demand_rfo.any_response_1, 0x1bb, 0x10002
+offcore_response.other.lru_hints_0, 0x1b7, 0x803c8000
+offcore_response.other.lru_hints_1, 0x1bb, 0x803c8000
+offcore_response.other.portio_mmio_uc_0, 0x1b7, 0x23ffc08000
+offcore_response.other.portio_mmio_uc_1, 0x1bb, 0x23ffc08000
+offcore_response.pf_l2_code_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0040
+offcore_response.pf_l2_code_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0040
+offcore_response.pf_l2_code_rd.llc_miss.any_response_0, 0x1b7, 0x3fffc20040
+offcore_response.pf_l2_code_rd.llc_miss.any_response_1, 0x1bb, 0x3fffc20040
+offcore_response.pf_l2_data_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0010
+offcore_response.pf_l2_data_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0010
+offcore_response.pf_l2_data_rd.llc_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0010
+offcore_response.pf_l2_data_rd.llc_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0010
+offcore_response.pf_l2_data_rd.llc_hit.hitm_other_core_0, 0x1b7, 0x10003c0010
+offcore_response.pf_l2_data_rd.llc_hit.hitm_other_core_1, 0x1bb, 0x10003c0010
+offcore_response.pf_l2_data_rd.llc_hit.no_snoop_needed_0, 0x1b7, 0x1003c0010
+offcore_response.pf_l2_data_rd.llc_hit.no_snoop_needed_1, 0x1bb, 0x1003c0010
+offcore_response.pf_l2_data_rd.llc_hit.snoop_miss_0, 0x1b7, 0x2003c0010
+offcore_response.pf_l2_data_rd.llc_hit.snoop_miss_1, 0x1bb, 0x2003c0010
+offcore_response.pf_l2_data_rd.llc_miss.any_dram_0, 0x1b7, 0x67fc00010
+offcore_response.pf_l2_data_rd.llc_miss.any_dram_1, 0x1bb, 0x67fc00010
+offcore_response.pf_l2_data_rd.llc_miss.any_response_0, 0x1b7, 0x3fffc20010
+offcore_response.pf_l2_data_rd.llc_miss.any_response_1, 0x1bb, 0x3fffc20010
+offcore_response.pf_l2_data_rd.llc_miss.local_dram_0, 0x1b7, 0x600400010
+offcore_response.pf_l2_data_rd.llc_miss.local_dram_1, 0x1bb, 0x600400010
+offcore_response.pf_l2_data_rd.llc_miss.remote_dram_0, 0x1b7, 0x67f800010
+offcore_response.pf_l2_data_rd.llc_miss.remote_dram_1, 0x1bb, 0x67f800010
+offcore_response.pf_l2_data_rd.llc_miss.remote_hit_forward_0, 0x1b7, 0x87f820010
+offcore_response.pf_l2_data_rd.llc_miss.remote_hit_forward_1, 0x1bb, 0x87f820010
+offcore_response.pf_l2_data_rd.llc_miss.remote_hitm_0, 0x1b7, 0x107fc00010
+offcore_response.pf_l2_data_rd.llc_miss.remote_hitm_1, 0x1bb, 0x107fc00010
+offcore_response.pf_llc_code_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0200
+offcore_response.pf_llc_code_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0200
+offcore_response.pf_llc_code_rd.llc_miss.any_response_0, 0x1b7, 0x3fffc20200
+offcore_response.pf_llc_code_rd.llc_miss.any_response_1, 0x1bb, 0x3fffc20200
+offcore_response.pf_llc_data_rd.llc_hit.any_response_0, 0x1b7, 0x3f803c0080
+offcore_response.pf_llc_data_rd.llc_hit.any_response_1, 0x1bb, 0x3f803c0080
+offcore_response.pf_llc_data_rd.llc_hit.hit_other_core_no_fwd_0, 0x1b7, 0x4003c0080
+offcore_response.pf_llc_data_rd.llc_hit.hit_other_core_no_fwd_1, 0x1bb, 0x4003c0080
+offcore_response.pf_llc_data_rd.llc_hit.hitm_other_core_0, 0x1b7, 0x10003c0080
+offcore_response.pf_llc_data_rd.llc_hit.hitm_other_core_1, 0x1bb, 0x10003c0080
+offcore_response.pf_llc_data_rd.llc_hit.no_snoop_needed_0, 0x1b7, 0x1003c0080
+offcore_response.pf_llc_data_rd.llc_hit.no_snoop_needed_1, 0x1bb, 0x1003c0080
+offcore_response.pf_llc_data_rd.llc_hit.snoop_miss_0, 0x1b7, 0x2003c0080
+offcore_response.pf_llc_data_rd.llc_hit.snoop_miss_1, 0x1bb, 0x2003c0080
+offcore_response.pf_llc_data_rd.llc_miss.any_response_0, 0x1b7, 0x3fffc20080
+offcore_response.pf_llc_data_rd.llc_miss.any_response_1, 0x1bb, 0x3fffc20080
+offcore_response.split_lock_uc_lock.any_response_0, 0x1b7, 0x10400
+offcore_response.split_lock_uc_lock.any_response_1, 0x1bb, 0x10400
+offcore_response.streaming_stores.any_response_0, 0x1b7, 0x10800
+offcore_response.streaming_stores.any_response_1, 0x1bb, 0x10800
+other_assists.avx_store, 0x8c1
+other_assists.avx_to_sse, 0x10c1
+other_assists.itlb_miss_retired, 0x2c1
+other_assists.sse_to_avx, 0x20c1
+partial_rat_stalls.flags_merge_uop, 0x2059
+partial_rat_stalls.flags_merge_uop_cycles, 0x2059
+partial_rat_stalls.mul_single_uop, 0x8059
+partial_rat_stalls.slow_lea_window, 0x4059
+resource_stalls.any, 0x1a2
+resource_stalls.lb, 0x2a2
+resource_stalls.lb_sb, 0xaa2
+resource_stalls.mem_rs, 0xea2
+resource_stalls.ooo_rsrc, 0xf0a2
+resource_stalls.rob, 0x10a2
+resource_stalls.rs, 0x4a2
+resource_stalls.sb, 0x8a2
+resource_stalls2.all_fl_empty, 0xc5b
+resource_stalls2.all_prf_control, 0xf5b
+resource_stalls2.bob_full, 0x405b
+resource_stalls2.ooo_rsrc, 0x4f5b
+rob_misc_events.lbr_inserts, 0x20cc
+rs_events.empty_cycles, 0x15e
+rs_events.empty_end, 0x15e
+simd_fp_256.packed_double, 0x211
+simd_fp_256.packed_single, 0x111
+sq_misc.split_lock, 0x10f4
+tlb_flush.dtlb_thread, 0x1bd
+tlb_flush.stlb_any, 0x20bd
+unc_c_counter0_occupancy, 0x1f
+unc_c_ismq_drd_miss_occ, 0x21
+unc_c_llc_lookup.data_read, 0x334
+unc_c_llc_lookup.nid, 0x4134
+unc_c_llc_lookup.remote_snoop, 0x934
+unc_c_llc_lookup.write, 0x534
+unc_c_llc_victims.e_state, 0x237
+unc_c_llc_victims.m_state, 0x137
+unc_c_llc_victims.miss, 0x837
+unc_c_llc_victims.nid, 0x4037
+unc_c_llc_victims.s_state, 0x437
+unc_c_misc.rfo_hit_s, 0x839
+unc_c_misc.rspi_was_fse, 0x139
+unc_c_misc.started, 0x439
+unc_c_misc.wc_aliasing, 0x239
+unc_c_ring_ad_used.down_even, 0x41b
+unc_c_ring_ad_used.down_odd, 0x81b
+unc_c_ring_ad_used.up_even, 0x11b
+unc_c_ring_ad_used.up_odd, 0x21b
+unc_c_ring_ak_used.down_even, 0x41c
+unc_c_ring_ak_used.down_odd, 0x81c
+unc_c_ring_ak_used.up_even, 0x11c
+unc_c_ring_ak_used.up_odd, 0x21c
+unc_c_ring_bl_used.down_even, 0x41d
+unc_c_ring_bl_used.down_odd, 0x81d
+unc_c_ring_bl_used.up_even, 0x11d
+unc_c_ring_bl_used.up_odd, 0x21d
+unc_c_ring_bounces.ak_core, 0x205
+unc_c_ring_bounces.bl_core, 0x405
+unc_c_ring_bounces.iv_core, 0x805
+unc_c_ring_iv_used.any, 0xf1e
+unc_c_ring_sink_starved.ad_cache, 0x106
+unc_c_ring_sink_starved.ak_core, 0x206
+unc_c_ring_sink_starved.bl_core, 0x406
+unc_c_ring_sink_starved.iv_core, 0x806
+unc_c_ring_src_thrtl, 0x7
+unc_c_rxr_ext_starved.ipq, 0x212
+unc_c_rxr_ext_starved.irq, 0x112
+unc_c_rxr_ext_starved.ismq, 0x412
+unc_c_rxr_ext_starved.ismq_bids, 0x812
+unc_c_rxr_inserts.ipq, 0x413
+unc_c_rxr_inserts.irq, 0x113
+unc_c_rxr_inserts.irq_rejected, 0x213
+unc_c_rxr_inserts.vfifo, 0x1013
+unc_c_rxr_int_starved.ipq, 0x414
+unc_c_rxr_int_starved.irq, 0x114
+unc_c_rxr_int_starved.ismq, 0x814
+unc_c_rxr_ipq_retry.addr_conflict, 0x431
+unc_c_rxr_ipq_retry.any, 0x131
+unc_c_rxr_ipq_retry.full, 0x231
+unc_c_rxr_ipq_retry.qpi_credits, 0x1031
+unc_c_rxr_irq_retry.addr_conflict, 0x432
+unc_c_rxr_irq_retry.any, 0x132
+unc_c_rxr_irq_retry.full, 0x232
+unc_c_rxr_irq_retry.qpi_credits, 0x1032
+unc_c_rxr_irq_retry.rtid, 0x832
+unc_c_rxr_ismq_retry.any, 0x133
+unc_c_rxr_ismq_retry.full, 0x233
+unc_c_rxr_ismq_retry.iio_credits, 0x2033
+unc_c_rxr_ismq_retry.qpi_credits, 0x1033
+unc_c_rxr_ismq_retry.rtid, 0x833
+unc_c_rxr_occupancy.ipq, 0x411
+unc_c_rxr_occupancy.irq, 0x111
+unc_c_rxr_occupancy.irq_rejected, 0x211
+unc_c_rxr_occupancy.vfifo, 0x1011
+unc_c_tor_inserts.eviction, 0x435
+unc_c_tor_inserts.miss_all, 0xa35
+unc_c_tor_inserts.miss_opcode, 0x335
+unc_c_tor_inserts.nid_all, 0x4835
+unc_c_tor_inserts.nid_eviction, 0x4435
+unc_c_tor_inserts.nid_miss_all, 0x4a35
+unc_c_tor_inserts.nid_miss_opcode, 0x4335
+unc_c_tor_inserts.nid_opcode, 0x4135
+unc_c_tor_inserts.nid_wb, 0x5035
+unc_c_tor_inserts.opcode, 0x135
+unc_c_tor_inserts.wb, 0x1035
+unc_c_tor_occupancy.all, 0x836
+unc_c_tor_occupancy.eviction, 0x436
+unc_c_tor_occupancy.miss_all, 0xa36
+unc_c_tor_occupancy.miss_opcode, 0x336
+unc_c_tor_occupancy.nid_all, 0x4836
+unc_c_tor_occupancy.nid_eviction, 0x4436
+unc_c_tor_occupancy.nid_miss_all, 0x4a36
+unc_c_tor_occupancy.nid_miss_opcode, 0x4336
+unc_c_tor_occupancy.nid_opcode, 0x4136
+unc_c_tor_occupancy.opcode, 0x136
+unc_c_txr_ads_used, 0x4
+unc_c_txr_inserts.ad_cache, 0x102
+unc_c_txr_inserts.ad_core, 0x1002
+unc_c_txr_inserts.ak_cache, 0x202
+unc_c_txr_inserts.ak_core, 0x2002
+unc_c_txr_inserts.bl_cache, 0x402
+unc_c_txr_inserts.bl_core, 0x4002
+unc_c_txr_inserts.iv_cache, 0x802
+unc_c_txr_starved.ak, 0x203
+unc_c_txr_starved.bl, 0x403
+unc_h_bypass_imc.not_taken, 0x214
+unc_h_bypass_imc.taken, 0x114
+unc_h_conflict_cycles.conflict, 0x20b
+unc_h_conflict_cycles.no_conflict, 0x10b
+unc_h_direct2core_count, 0x11
+unc_h_direct2core_cycles_disabled, 0x12
+unc_h_direct2core_txn_override, 0x13
+unc_h_directory_lookup.no_snp, 0x20c
+unc_h_directory_lookup.snp, 0x10c
+unc_h_directory_update.any, 0x30d
+unc_h_directory_update.clear, 0x20d
+unc_h_directory_update.set, 0x10d
+unc_h_igr_no_credit_cycles.ad_qpi0, 0x122
+unc_h_igr_no_credit_cycles.ad_qpi1, 0x222
+unc_h_igr_no_credit_cycles.bl_qpi0, 0x422
+unc_h_igr_no_credit_cycles.bl_qpi1, 0x822
+unc_h_imc_retry, 0x1e
+unc_h_imc_writes.all, 0xf1a
+unc_h_imc_writes.full, 0x11a
+unc_h_imc_writes.full_isoch, 0x41a
+unc_h_imc_writes.partial, 0x21a
+unc_h_imc_writes.partial_isoch, 0x81a
+unc_h_requests.reads, 0x301
+unc_h_requests.writes, 0xc01
+unc_h_ring_ad_used.ccw_even, 0x43e
+unc_h_ring_ad_used.ccw_odd, 0x83e
+unc_h_ring_ad_used.cw_even, 0x13e
+unc_h_ring_ad_used.cw_odd, 0x23e
+unc_h_ring_ak_used.ccw_even, 0x43f
+unc_h_ring_ak_used.ccw_odd, 0x83f
+unc_h_ring_ak_used.cw_even, 0x13f
+unc_h_ring_ak_used.cw_odd, 0x23f
+unc_h_ring_bl_used.ccw_even, 0x440
+unc_h_ring_bl_used.ccw_odd, 0x840
+unc_h_ring_bl_used.cw_even, 0x140
+unc_h_ring_bl_used.cw_odd, 0x240
+unc_h_rpq_cycles_no_reg_credits.chn0, 0x115
+unc_h_rpq_cycles_no_reg_credits.chn1, 0x215
+unc_h_rpq_cycles_no_reg_credits.chn2, 0x415
+unc_h_rpq_cycles_no_reg_credits.chn3, 0x815
+unc_h_rpq_cycles_no_spec_credits.chn0, 0x116
+unc_h_rpq_cycles_no_spec_credits.chn1, 0x216
+unc_h_rpq_cycles_no_spec_credits.chn2, 0x416
+unc_h_rpq_cycles_no_spec_credits.chn3, 0x816
+unc_h_tad_requests_g0.region0, 0x11b
+unc_h_tad_requests_g0.region1, 0x21b
+unc_h_tad_requests_g0.region2, 0x41b
+unc_h_tad_requests_g0.region3, 0x81b
+unc_h_tad_requests_g0.region4, 0x101b
+unc_h_tad_requests_g0.region5, 0x201b
+unc_h_tad_requests_g0.region6, 0x401b
+unc_h_tad_requests_g0.region7, 0x801b
+unc_h_tad_requests_g1.region10, 0x41c
+unc_h_tad_requests_g1.region11, 0x81c
+unc_h_tad_requests_g1.region8, 0x11c
+unc_h_tad_requests_g1.region9, 0x21c
+unc_h_tracker_inserts.all, 0x306
+unc_h_txr_ad.ndr, 0x10f
+unc_h_txr_ad.snp, 0x20f
+unc_h_txr_ad_cycles_full.all, 0x32a
+unc_h_txr_ad_cycles_full.sched0, 0x12a
+unc_h_txr_ad_cycles_full.sched1, 0x22a
+unc_h_txr_ad_cycles_ne.all, 0x329
+unc_h_txr_ad_cycles_ne.sched0, 0x129
+unc_h_txr_ad_cycles_ne.sched1, 0x229
+unc_h_txr_ad_inserts.all, 0x327
+unc_h_txr_ad_inserts.sched0, 0x127
+unc_h_txr_ad_inserts.sched1, 0x227
+unc_h_txr_ad_occupancy.all, 0x328
+unc_h_txr_ad_occupancy.sched0, 0x128
+unc_h_txr_ad_occupancy.sched1, 0x228
+unc_h_txr_ak_cycles_full.all, 0x332
+unc_h_txr_ak_cycles_full.sched0, 0x132
+unc_h_txr_ak_cycles_full.sched1, 0x232
+unc_h_txr_ak_cycles_ne.all, 0x331
+unc_h_txr_ak_cycles_ne.sched0, 0x131
+unc_h_txr_ak_cycles_ne.sched1, 0x231
+unc_h_txr_ak_inserts.all, 0x32f
+unc_h_txr_ak_inserts.sched0, 0x12f
+unc_h_txr_ak_inserts.sched1, 0x22f
+unc_h_txr_ak_ndr, 0xe
+unc_h_txr_ak_occupancy.all, 0x330
+unc_h_txr_ak_occupancy.sched0, 0x130
+unc_h_txr_ak_occupancy.sched1, 0x230
+unc_h_txr_bl.drs_cache, 0x110
+unc_h_txr_bl.drs_core, 0x210
+unc_h_txr_bl.drs_qpi, 0x410
+unc_h_txr_bl_cycles_full.all, 0x336
+unc_h_txr_bl_cycles_full.sched0, 0x136
+unc_h_txr_bl_cycles_full.sched1, 0x236
+unc_h_txr_bl_cycles_ne.all, 0x335
+unc_h_txr_bl_cycles_ne.sched0, 0x135
+unc_h_txr_bl_cycles_ne.sched1, 0x235
+unc_h_txr_bl_inserts.all, 0x333
+unc_h_txr_bl_inserts.sched0, 0x133
+unc_h_txr_bl_inserts.sched1, 0x233
+unc_h_txr_bl_occupancy.all, 0x334
+unc_h_txr_bl_occupancy.sched0, 0x134
+unc_h_txr_bl_occupancy.sched1, 0x234
+unc_h_wpq_cycles_no_reg_credits.chn0, 0x118
+unc_h_wpq_cycles_no_reg_credits.chn1, 0x218
+unc_h_wpq_cycles_no_reg_credits.chn2, 0x418
+unc_h_wpq_cycles_no_reg_credits.chn3, 0x818
+unc_h_wpq_cycles_no_spec_credits.chn0, 0x119
+unc_h_wpq_cycles_no_spec_credits.chn1, 0x219
+unc_h_wpq_cycles_no_spec_credits.chn2, 0x419
+unc_h_wpq_cycles_no_spec_credits.chn3, 0x819
+unc_i_address_match.merge_count, 0x217
+unc_i_address_match.stall_count, 0x117
+unc_i_cache_ack_pending_occupancy.any, 0x114
+unc_i_cache_ack_pending_occupancy.source, 0x214
+unc_i_cache_own_occupancy.any, 0x113
+unc_i_cache_own_occupancy.source, 0x213
+unc_i_cache_read_occupancy.any, 0x110
+unc_i_cache_read_occupancy.source, 0x210
+unc_i_cache_total_occupancy.any, 0x112
+unc_i_cache_total_occupancy.source, 0x212
+unc_i_cache_write_occupancy.any, 0x111
+unc_i_cache_write_occupancy.source, 0x211
+unc_i_rxr_ak_cycles_full, 0xb
+unc_i_rxr_ak_inserts, 0xa
+unc_i_rxr_ak_occupancy, 0xc
+unc_i_rxr_bl_drs_cycles_full, 0x4
+unc_i_rxr_bl_drs_inserts, 0x1
+unc_i_rxr_bl_drs_occupancy, 0x7
+unc_i_rxr_bl_ncb_cycles_full, 0x5
+unc_i_rxr_bl_ncb_inserts, 0x2
+unc_i_rxr_bl_ncb_occupancy, 0x8
+unc_i_rxr_bl_ncs_cycles_full, 0x6
+unc_i_rxr_bl_ncs_inserts, 0x3
+unc_i_rxr_bl_ncs_occupancy, 0x9
+unc_i_tickles.lost_ownership, 0x116
+unc_i_tickles.top_of_queue, 0x216
+unc_i_transactions.pd_prefetches, 0x415
+unc_i_transactions.reads, 0x115
+unc_i_transactions.writes, 0x215
+unc_i_txr_ad_stall_credit_cycles, 0x18
+unc_i_txr_bl_stall_credit_cycles, 0x19
+unc_i_txr_data_inserts_ncb, 0xe
+unc_i_txr_data_inserts_ncs, 0xf
+unc_i_txr_request_occupancy, 0xd
+unc_i_write_ordering_stall_cycles, 0x1a
+unc_m_act_count, 0x1
+unc_m_cas_count.all, 0xf04
+unc_m_cas_count.rd, 0x304
+unc_m_cas_count.rd_reg, 0x104
+unc_m_cas_count.rd_underfill, 0x204
+unc_m_cas_count.wr, 0xc04
+unc_m_cas_count.wr_rmm, 0x804
+unc_m_cas_count.wr_wmm, 0x404
+unc_m_dram_pre_all, 0x6
+unc_m_dram_refresh.high, 0x405
+unc_m_dram_refresh.panic, 0x205
+unc_m_ecc_correctable_errors, 0x9
+unc_m_major_modes.isoch, 0x807
+unc_m_major_modes.partial, 0x407
+unc_m_major_modes.read, 0x107
+unc_m_major_modes.write, 0x207
+unc_m_power_channel_dlloff, 0x84
+unc_m_power_channel_ppd, 0x85
+unc_m_power_cke_cycles.rank0, 0x183
+unc_m_power_cke_cycles.rank1, 0x283
+unc_m_power_cke_cycles.rank2, 0x483
+unc_m_power_cke_cycles.rank3, 0x883
+unc_m_power_cke_cycles.rank4, 0x1083
+unc_m_power_cke_cycles.rank5, 0x2083
+unc_m_power_cke_cycles.rank6, 0x4083
+unc_m_power_cke_cycles.rank7, 0x8083
+unc_m_power_critical_throttle_cycles, 0x86
+unc_m_power_self_refresh, 0x43
+unc_m_power_throttle_cycles.rank0, 0x141
+unc_m_power_throttle_cycles.rank1, 0x241
+unc_m_power_throttle_cycles.rank2, 0x441
+unc_m_power_throttle_cycles.rank3, 0x841
+unc_m_power_throttle_cycles.rank4, 0x1041
+unc_m_power_throttle_cycles.rank5, 0x2041
+unc_m_power_throttle_cycles.rank6, 0x4041
+unc_m_power_throttle_cycles.rank7, 0x8041
+unc_m_pre_count.page_close, 0x202
+unc_m_pre_count.page_miss, 0x102
+unc_m_preemption.rd_preempt_rd, 0x108
+unc_m_preemption.rd_preempt_wr, 0x208
+unc_m_rpq_cycles_full, 0x12
+unc_m_rpq_cycles_ne, 0x11
+unc_m_rpq_inserts, 0x10
+unc_m_rpq_occupancy, 0x80
+unc_m_wpq_cycles_full, 0x22
+unc_m_wpq_cycles_ne, 0x21
+unc_m_wpq_inserts, 0x20
+unc_m_wpq_occupancy, 0x81
+unc_m_wpq_read_hit, 0x23
+unc_m_wpq_write_hit, 0x24
+unc_p_core0_transition_cycles, 0x3
+unc_p_core1_transition_cycles, 0x4
+unc_p_core2_transition_cycles, 0x5
+unc_p_core3_transition_cycles, 0x6
+unc_p_core4_transition_cycles, 0x7
+unc_p_core5_transition_cycles, 0x8
+unc_p_core6_transition_cycles, 0x9
+unc_p_core7_transition_cycles, 0xa
+unc_p_demotions_core0, 0x1e
+unc_p_demotions_core1, 0x1f
+unc_p_demotions_core2, 0x20
+unc_p_demotions_core3, 0x21
+unc_p_demotions_core4, 0x22
+unc_p_demotions_core5, 0x23
+unc_p_demotions_core6, 0x24
+unc_p_demotions_core7, 0x25
+unc_p_freq_band0_cycles, 0xb
+unc_p_freq_band1_cycles, 0xc
+unc_p_freq_band2_cycles, 0xd
+unc_p_freq_band3_cycles, 0xe
+unc_p_freq_max_current_cycles, 0x7
+unc_p_freq_max_limit_thermal_cycles, 0x4
+unc_p_freq_max_os_cycles, 0x6
+unc_p_freq_max_power_cycles, 0x5
+unc_p_freq_min_io_p_cycles, 0x1
+unc_p_freq_min_perf_p_cycles, 0x2
+unc_p_memory_phase_shedding_cycles, 0x2f
+unc_p_power_state_occupancy.cores_c0, 0x80
+unc_p_power_state_occupancy.cores_c3, 0x80
+unc_p_power_state_occupancy.cores_c6, 0x80
+unc_p_prochot_external_cycles, 0xa
+unc_p_prochot_internal_cycles, 0x9
+unc_p_total_transition_cycles, 0xb
+unc_p_volt_trans_cycles_change, 0x3
+unc_p_volt_trans_cycles_decrease, 0x2
+unc_p_volt_trans_cycles_increase, 0x1
+unc_p_vr_hot_cycles, 0x32
+unc_q_clockticks, 0x14
+unc_q_cto_count, 0x38
+unc_q_direct2core.failure_credits, 0x213
+unc_q_direct2core.failure_credits_rbt, 0x813
+unc_q_direct2core.failure_rbt, 0x413
+unc_q_direct2core.success, 0x113
+unc_q_l1_power_cycles, 0x12
+unc_q_rxl0_power_cycles, 0xf
+unc_q_rxl0p_power_cycles, 0x10
+unc_q_rxl_bypassed, 0x9
+unc_q_rxl_crc_errors.link_init, 0x103
+unc_q_rxl_crc_errors.normal_op, 0x203
+unc_q_rxl_credits_consumed_vn0.drs, 0x11e
+unc_q_rxl_credits_consumed_vn0.hom, 0x81e
+unc_q_rxl_credits_consumed_vn0.ncb, 0x21e
+unc_q_rxl_credits_consumed_vn0.ncs, 0x41e
+unc_q_rxl_credits_consumed_vn0.ndr, 0x201e
+unc_q_rxl_credits_consumed_vn0.snp, 0x101e
+unc_q_rxl_credits_consumed_vna, 0x1d
+unc_q_rxl_cycles_ne, 0xa
+unc_q_rxl_flits_g0.data, 0x201
+unc_q_rxl_flits_g0.idle, 0x101
+unc_q_rxl_flits_g0.non_data, 0x401
+unc_q_rxl_flits_g1.drs, 0x1802
+unc_q_rxl_flits_g1.drs_data, 0x802
+unc_q_rxl_flits_g1.drs_nondata, 0x1002
+unc_q_rxl_flits_g1.hom, 0x602
+unc_q_rxl_flits_g1.hom_nonreq, 0x402
+unc_q_rxl_flits_g1.hom_req, 0x202
+unc_q_rxl_flits_g1.snp, 0x102
+unc_q_rxl_flits_g2.ncb, 0xc03
+unc_q_rxl_flits_g2.ncb_data, 0x403
+unc_q_rxl_flits_g2.ncb_nondata, 0x803
+unc_q_rxl_flits_g2.ncs, 0x1003
+unc_q_rxl_flits_g2.ndr_ad, 0x103
+unc_q_rxl_flits_g2.ndr_ak, 0x203
+unc_q_rxl_inserts, 0x8
+unc_q_rxl_inserts_drs, 0x9
+unc_q_rxl_inserts_hom, 0xc
+unc_q_rxl_inserts_ncb, 0xa
+unc_q_rxl_inserts_ncs, 0xb
+unc_q_rxl_inserts_ndr, 0xe
+unc_q_rxl_inserts_snp, 0xd
+unc_q_rxl_occupancy, 0xb
+unc_q_rxl_occupancy_drs, 0x15
+unc_q_rxl_occupancy_hom, 0x18
+unc_q_rxl_occupancy_ncb, 0x16
+unc_q_rxl_occupancy_ncs, 0x17
+unc_q_rxl_occupancy_ndr, 0x1a
+unc_q_rxl_occupancy_snp, 0x19
+unc_q_rxl_stalls.bgf_drs, 0x135
+unc_q_rxl_stalls.bgf_hom, 0x835
+unc_q_rxl_stalls.bgf_ncb, 0x235
+unc_q_rxl_stalls.bgf_ncs, 0x435
+unc_q_rxl_stalls.bgf_ndr, 0x2035
+unc_q_rxl_stalls.bgf_snp, 0x1035
+unc_q_rxl_stalls.egress_credits, 0x4035
+unc_q_rxl_stalls.gv, 0x8035
+unc_q_txl0_power_cycles, 0xc
+unc_q_txl0p_power_cycles, 0xd
+unc_q_txl_bypassed, 0x5
+unc_q_txl_crc_no_credits.almost_full, 0x202
+unc_q_txl_crc_no_credits.full, 0x102
+unc_q_txl_cycles_ne, 0x6
+unc_q_txl_flits_g2.ncb, 0xc01
+unc_q_txl_flits_g2.ncb_data, 0x401
+unc_q_txl_flits_g2.ncb_nondata, 0x801
+unc_q_txl_flits_g2.ncs, 0x1001
+unc_q_txl_flits_g2.ndr_ad, 0x101
+unc_q_txl_flits_g2.ndr_ak, 0x201
+unc_q_txl_inserts, 0x4
+unc_q_txl_occupancy, 0x7
+unc_q_vna_credit_return_occupancy, 0x1b
+unc_q_vna_credit_returns, 0x1c
+unc_r2_clockticks, 0x1
+unc_r2_iio_credits_acquired.drs, 0x833
+unc_r2_iio_credits_acquired.ncb, 0x1033
+unc_r2_iio_credits_acquired.ncs, 0x2033
+unc_r2_iio_credits_reject.drs, 0x834
+unc_r2_iio_credits_reject.ncb, 0x1034
+unc_r2_iio_credits_reject.ncs, 0x2034
+unc_r2_iio_credits_used.drs, 0x832
+unc_r2_iio_credits_used.ncb, 0x1032
+unc_r2_iio_credits_used.ncs, 0x2032
+unc_r2_ring_ad_used.ccw_even, 0x407
+unc_r2_ring_ad_used.ccw_odd, 0x807
+unc_r2_ring_ad_used.cw_even, 0x107
+unc_r2_ring_ad_used.cw_odd, 0x207
+unc_r2_ring_ak_used.ccw_even, 0x408
+unc_r2_ring_ak_used.ccw_odd, 0x808
+unc_r2_ring_ak_used.cw_even, 0x108
+unc_r2_ring_ak_used.cw_odd, 0x208
+unc_r2_ring_bl_used.ccw_even, 0x409
+unc_r2_ring_bl_used.ccw_odd, 0x809
+unc_r2_ring_bl_used.cw_even, 0x109
+unc_r2_ring_bl_used.cw_odd, 0x209
+unc_r2_ring_iv_used.any, 0xf0a
+unc_r2_rxr_ak_bounces, 0x12
+unc_r2_rxr_cycles_ne.drs, 0x810
+unc_r2_rxr_cycles_ne.ncb, 0x1010
+unc_r2_rxr_cycles_ne.ncs, 0x2010
+unc_r2_txr_cycles_full.ad, 0x125
+unc_r2_txr_cycles_full.ak, 0x225
+unc_r2_txr_cycles_full.bl, 0x425
+unc_r2_txr_cycles_ne.ad, 0x123
+unc_r2_txr_cycles_ne.ak, 0x223
+unc_r2_txr_cycles_ne.bl, 0x423
+unc_r2_txr_nacks.ad, 0x126
+unc_r2_txr_nacks.ak, 0x226
+unc_r2_txr_nacks.bl, 0x426
+unc_r3_clockticks, 0x1
+unc_r3_iio_credits_acquired.drs, 0x820
+unc_r3_iio_credits_acquired.ncb, 0x1020
+unc_r3_iio_credits_acquired.ncs, 0x2020
+unc_r3_iio_credits_reject.drs, 0x821
+unc_r3_iio_credits_reject.ncb, 0x1021
+unc_r3_iio_credits_reject.ncs, 0x2021
+unc_r3_iio_credits_used.drs, 0x822
+unc_r3_iio_credits_used.ncb, 0x1022
+unc_r3_iio_credits_used.ncs, 0x2022
+unc_r3_ring_ad_used.ccw_even, 0x407
+unc_r3_ring_ad_used.ccw_odd, 0x807
+unc_r3_ring_ad_used.cw_even, 0x107
+unc_r3_ring_ad_used.cw_odd, 0x207
+unc_r3_ring_ak_used.ccw_even, 0x408
+unc_r3_ring_ak_used.ccw_odd, 0x808
+unc_r3_ring_ak_used.cw_even, 0x108
+unc_r3_ring_ak_used.cw_odd, 0x208
+unc_r3_ring_bl_used.ccw_even, 0x409
+unc_r3_ring_bl_used.ccw_odd, 0x809
+unc_r3_ring_bl_used.cw_even, 0x109
+unc_r3_ring_bl_used.cw_odd, 0x209
+unc_r3_ring_iv_used.any, 0xf0a
+unc_r3_rxr_bypassed.ad, 0x112
+unc_r3_rxr_cycles_ne.drs, 0x810
+unc_r3_rxr_cycles_ne.hom, 0x110
+unc_r3_rxr_cycles_ne.ncb, 0x1010
+unc_r3_rxr_cycles_ne.ncs, 0x2010
+unc_r3_rxr_cycles_ne.ndr, 0x410
+unc_r3_rxr_cycles_ne.snp, 0x210
+unc_r3_rxr_inserts.drs, 0x811
+unc_r3_rxr_inserts.hom, 0x111
+unc_r3_rxr_inserts.ncb, 0x1011
+unc_r3_rxr_inserts.ncs, 0x2011
+unc_r3_rxr_inserts.ndr, 0x411
+unc_r3_rxr_inserts.snp, 0x211
+unc_r3_rxr_occupancy.drs, 0x813
+unc_r3_rxr_occupancy.hom, 0x113
+unc_r3_rxr_occupancy.ncb, 0x1013
+unc_r3_rxr_occupancy.ncs, 0x2013
+unc_r3_rxr_occupancy.ndr, 0x413
+unc_r3_rxr_occupancy.snp, 0x213
+unc_r3_vn0_credits_reject.drs, 0x837
+unc_r3_vn0_credits_reject.hom, 0x137
+unc_r3_vn0_credits_reject.ncb, 0x1037
+unc_r3_vn0_credits_reject.ncs, 0x2037
+unc_r3_vn0_credits_reject.ndr, 0x437
+unc_r3_vn0_credits_reject.snp, 0x237
+unc_r3_vn0_credits_used.drs, 0x836
+unc_r3_vn0_credits_used.hom, 0x136
+unc_r3_vn0_credits_used.ncb, 0x1036
+unc_r3_vn0_credits_used.ncs, 0x2036
+unc_r3_vn0_credits_used.ndr, 0x436
+unc_r3_vn0_credits_used.snp, 0x236
+unc_r3_vna_credit_cycles_out, 0x31
+unc_r3_vna_credit_cycles_used, 0x32
+unc_r3_vna_credits_acquired, 0x33
+unc_r3_vna_credits_reject.drs, 0x834
+unc_r3_vna_credits_reject.hom, 0x134
+unc_r3_vna_credits_reject.ncb, 0x1034
+unc_r3_vna_credits_reject.ncs, 0x2034
+unc_r3_vna_credits_reject.ndr, 0x434
+unc_r3_vna_credits_reject.snp, 0x234
+unc_u_event_msg.doorbell_rcvd, 0x842
+unc_u_event_msg.int_prio, 0x1042
+unc_u_event_msg.ipi_rcvd, 0x442
+unc_u_event_msg.msi_rcvd, 0x242
+unc_u_event_msg.vlw_rcvd, 0x142
+unc_u_filter_match.disable, 0x241
+unc_u_filter_match.enable, 0x141
+unc_u_filter_match.u2c_disable, 0x841
+unc_u_filter_match.u2c_enable, 0x441
+unc_u_lock_cycles, 0x44
+unc_u_msg_chnl_size_count.4b, 0x147
+unc_u_msg_chnl_size_count.8b, 0x247
+unc_u_phold_cycles.ack_to_deassert, 0x245
+unc_u_phold_cycles.assert_to_ack, 0x145
+unc_u_racu_requests.count, 0x146
+unc_u_u2c_events.cmc, 0x1043
+unc_u_u2c_events.livelock, 0x443
+unc_u_u2c_events.lterror, 0x843
+unc_u_u2c_events.monitor_t0, 0x143
+unc_u_u2c_events.monitor_t1, 0x243
+unc_u_u2c_events.other, 0x8043
+unc_u_u2c_events.trap, 0x4043
+unc_u_u2c_events.umc, 0x2043
+uops_dispatched.core, 0x2b1
+uops_dispatched.thread, 0x1b1
+uops_dispatched_port.port_0, 0x1a1
+uops_dispatched_port.port_0_core, 0x1a1
+uops_dispatched_port.port_1, 0x2a1
+uops_dispatched_port.port_1_core, 0x2a1
+uops_dispatched_port.port_2, 0xca1
+uops_dispatched_port.port_2_core, 0xca1
+uops_dispatched_port.port_3, 0x30a1
+uops_dispatched_port.port_3_core, 0x30a1
+uops_dispatched_port.port_4, 0x40a1
+uops_dispatched_port.port_4_core, 0x40a1
+uops_dispatched_port.port_5, 0x80a1
+uops_dispatched_port.port_5_core, 0x80a1
+uops_executed.core_cycles_ge_1, 0x2b1
+uops_executed.core_cycles_ge_2, 0x2b1
+uops_executed.core_cycles_ge_3, 0x2b1
+uops_executed.core_cycles_ge_4, 0x2b1
+uops_executed.core_cycles_none, 0x2b1
+uops_issued.any, 0x10e
+uops_issued.core_stall_cycles, 0x10e
+uops_issued.stall_cycles, 0x10e
+uops_retired.all, 0x1c2
+uops_retired.core_stall_cycles, 0x1c2
+uops_retired.retire_slots, 0x2c2
+uops_retired.stall_cycles, 0x1c2
+uops_retired.total_cycles, 0x1c2

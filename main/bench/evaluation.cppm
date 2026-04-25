@@ -44,6 +44,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bioseq_cigar;
+import bioseq_instr;
 import bench.tool_minimap2;
 import bench.generator;
 
@@ -464,6 +465,14 @@ template<
 {
     EvaluationResults output;
     output.per_pair.reserve(pairs.size());
+    // Bench-level loop region. Each tick records one (query,target) pair
+    // and stamps the query bp count as work units, so the report layer
+    // can derive batch GB/s from work / total_ns. The loop also gives
+    // us a per-pair iter/s reading independent of the per-aligner
+    // sub-region timings.
+    static const auto* _bench_batch_loop_desc =
+        bioseq::instr::register_loop_static("bench.evaluation_batch_loop");
+    auto _bench_batch_loop_scope = bioseq::instr::loop(_bench_batch_loop_desc);
     for (auto& pair : pairs) {
         SingleEvalResult per_pair = evaluate_and_benchmark_results(
             pair.query, pair.target,
@@ -476,6 +485,10 @@ template<
         per_pair.effective_error_rate  = pair.effective_error_rate;
         per_pair.original_query_length = pair.original_query_length;
         output.per_pair.push_back(std::move(per_pair));
+        // Stamp the work unit (bp count of the query) so the loop
+        // aggregate's GB/s column reflects actual sequence throughput
+        // rather than just iterations.
+        _bench_batch_loop_scope.tick(pair.query.bp_size());
     }
     detail::finalize_aggregated_stats(
         output.bioseq,   output.per_pair, /*use_bioseq=*/true,  params.mapq_thresholds);

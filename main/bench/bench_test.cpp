@@ -6,6 +6,21 @@
  * the default run; invoke explicitly with `[benchmark-evaluation]` to
  * exercise minimap_port + tool_minimap2 side-by-side on two hard-coded
  * sequences that share a known ground-truth origin.
+ *
+ * Output shape per TEST_CASE:
+ *   1. Catch2's own BENCHMARK table (samples, iterations, est run time,
+ *      mean / low mean / high mean, std dev / low std dev / high std dev).
+ *      Catch2 emits this to stdout when the BENCHMARK macros run.
+ *   2. The bench::report block (regions, loops, arenas, top-N
+ *      bottlenecks, top-N call frequency, match-quality, length-bucket
+ *      cross-cut, side-by-side delta) emitted by
+ *      bench::report::print_section_summary AFTER the BENCHMARKs run.
+ *
+ * Each TEST_CASE creates an InstalledProfiler at scope start so the
+ * thread-local ProfilerBlock pointer is non-null while the benchmarks
+ * run; aggregates therefore accumulate across BENCHMARK samples and the
+ * final eval pass. reset_aggregates() is called between TEST_CASEs to
+ * keep sections independent.
  */
 #include "common_simd.h"
 #include "common_tests.h"
@@ -22,6 +37,7 @@ import bioseq_sequences.minimap_port;
 import bench.tool_minimap2;
 import bench.generator;
 import bench.evaluation;
+import bench.report;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -33,6 +49,12 @@ using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
           "[.benchmark-evaluation]") {
     using namespace seq::literals;
+
+    // Make sure each TEST_CASE starts on a clean instrumentation slate
+    // and has the persistent ProfilerBlock installed for the duration of
+    // the case (BENCHMARK samples + final eval).
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
 
     // Target / query from main/bioseq/RESEARCH/CODE_GUIDELINES.md §9 —
     // the query is a literal slice of the target starting at position
@@ -76,6 +98,31 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
     const size_t truth_target_end = truth_target_start + query.bp_size();
     const bool   truth_is_reverse = false;
 
+    // ---------------- Catch2 BENCHMARK block (single-pair) ----------------
+    // Each BENCHMARK runs the aligner repeatedly so Catch2 can compute
+    // mean / low mean / high mean / std dev. The instrumentation
+    // aggregates accumulate across all samples; the final
+    // print_section_summary call below reads the totals.
+    BENCHMARK_ADVANCED("bioseq minimap_port (single curated pair)")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            auto results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+                query, target, params.aligner_params);
+            return results.view().size();
+        });
+    };
+    BENCHMARK_ADVANCED("minimap2 reference (single curated pair)")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            auto results = tool_minimap2(query, target, params.aligner_params);
+            return results.view().size();
+        });
+    };
+
+    // One last invocation through the eval helper so we get the
+    // correctness / match-quality stats for the report block.
     SingleEvalResult evaluation = evaluate_and_benchmark_results(
         query, target,
         truth_target_start, truth_target_end, truth_is_reverse,
@@ -94,6 +141,9 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
             evaluation.minimap2.primary_mapq,
             evaluation.minimap2.elapsed_ns);
 
+    report::print_section_summary(
+        "curated single pair", evaluation);
+
     REQUIRE(evaluation.bioseq.produced_primary);
     REQUIRE(evaluation.minimap2.produced_primary);
     REQUIRE(evaluation.bioseq_strand_correct);
@@ -110,6 +160,9 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
 
 TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to land on truth",
           "[.benchmark-evaluation]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+
     // Uses generate_test_sequences with a random 2 kbp reference so no
     // fragment can alias to another target location. This is the one
     // place we require bioseq_position_correct — the curated test above
@@ -131,6 +184,25 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 5;
 
+    BENCHMARK_ADVANCED("bioseq minimap_port (unique fragment)")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            auto results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+                pair.query, pair.target, evaluation_params.aligner_params);
+            return results.view().size();
+        });
+    };
+    BENCHMARK_ADVANCED("minimap2 reference (unique fragment)")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            auto results = tool_minimap2(
+                pair.query, pair.target, evaluation_params.aligner_params);
+            return results.view().size();
+        });
+    };
+
     SingleEvalResult evaluation = evaluate_and_benchmark_results(
         pair.query, pair.target,
         pair.truth_target_start, pair.truth_target_end, pair.is_reverse,
@@ -138,6 +210,9 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
 
     JustLog("[bench_test] unique-fragment evaluation: bioseq offset={} minimap2 offset={}",
             evaluation.bioseq_position_offset, evaluation.minimap2_position_offset);
+
+    report::print_section_summary(
+        "unique single fragment", evaluation);
 
     REQUIRE(evaluation.bioseq.produced_primary);
     REQUIRE(evaluation.minimap2.produced_primary);
@@ -149,6 +224,9 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
 
 TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL semantics",
           "[.benchmark-evaluation]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+
     // SamReader.java:109 uses strict `readPosition == alignedPosition`
     // equality. With position_tolerance=0 our evaluator must classify
     // the same way: a 1 bp offset is incorrect, a 0 bp offset is correct.
@@ -169,7 +247,37 @@ TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL seman
     evaluation_params.position_tolerance = 0;
     evaluation_params.mapq_thresholds = {0};
 
+    BENCHMARK_ADVANCED("bioseq minimap_port batch (SEAL-exact)")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            std::size_t total = 0;
+            for (auto& p : pairs) {
+                auto results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+                    p.query, p.target, evaluation_params.aligner_params);
+                total += results.view().size();
+            }
+            return total;
+        });
+    };
+    BENCHMARK_ADVANCED("minimap2 reference batch (SEAL-exact)")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            std::size_t total = 0;
+            for (auto& p : pairs) {
+                auto results = tool_minimap2(
+                    p.query, p.target, evaluation_params.aligner_params);
+                total += results.view().size();
+            }
+            return total;
+        });
+    };
+
     EvaluationResults results = evaluate_and_benchmark_results(pairs, evaluation_params);
+
+    report::print_section_summary(
+        "SEAL-exact tolerance=0 batch", results);
 
     REQUIRE(results.minimap2.mapped == pairs.size());
     REQUIRE(results.minimap2.correct == pairs.size());
@@ -178,6 +286,9 @@ TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL seman
 
 TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
           "[.benchmark-evaluation]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+
     GeneratorParams generator_params;
     generator_params.reference_length       = 4'000;
     generator_params.fragment_count         = 8;
@@ -196,6 +307,33 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
     evaluation_params.position_tolerance = 25;
     evaluation_params.mapq_thresholds = {0, 10, 30};
 
+    BENCHMARK_ADVANCED("bioseq minimap_port SEAL-style batch")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            std::size_t total = 0;
+            for (auto& p : pairs) {
+                auto results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+                    p.query, p.target, evaluation_params.aligner_params);
+                total += results.view().size();
+            }
+            return total;
+        });
+    };
+    BENCHMARK_ADVANCED("minimap2 reference SEAL-style batch")(
+        Catch::Benchmark::Chronometer meter)
+    {
+        meter.measure([&] {
+            std::size_t total = 0;
+            for (auto& p : pairs) {
+                auto results = tool_minimap2(
+                    p.query, p.target, evaluation_params.aligner_params);
+                total += results.view().size();
+            }
+            return total;
+        });
+    };
+
     EvaluationResults results = evaluate_and_benchmark_results(
         pairs, evaluation_params);
 
@@ -206,6 +344,9 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
             results.bioseq.mean_absolute_offset,   results.bioseq.mean_alignment_ns,
             results.minimap2.correct, results.minimap2.total_pairs,
             results.minimap2.mean_absolute_offset, results.minimap2.mean_alignment_ns);
+
+    report::print_section_summary(
+        "SEAL-style generated batch", results);
 
     REQUIRE(results.per_pair.size() == pairs.size());
     REQUIRE(results.bioseq.total_pairs   == pairs.size());

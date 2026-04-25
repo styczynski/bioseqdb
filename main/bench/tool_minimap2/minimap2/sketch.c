@@ -1,4 +1,5 @@
 #include "common.h"
+#include "instr_shim.h"
 
 #include <ranges>
 #include <bitset>
@@ -98,7 +99,7 @@ static inline int tq_shift(tiny_queue_t *q)
  */
 void mm_sketch(void *km, const char *str, int len, int w, int k, uint32_t rid, int is_hpc, mm128_v *p)
 {
-	EASY_BLOCK("mm_sketch");
+	BENCH_INSTR_BLOCK("tool_minimap2.mm_sketch");
 	JustLog("Calling mm_sketch() w = {}, k = {}, rid = {}", w, k, rid);
 
 	auto start = std::chrono::high_resolution_clock::now();

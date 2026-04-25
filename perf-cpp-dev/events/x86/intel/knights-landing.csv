@@ -1,0 +1,827 @@
+baclears.all, 0x1e6
+baclears.cond, 0x10e6
+baclears.return, 0x8e6
+br_inst_retired.all_branches, 0xc4
+br_inst_retired.call, 0xf9c4
+br_inst_retired.far_branch, 0xbfc4
+br_inst_retired.ind_call, 0xfbc4
+br_inst_retired.jcc, 0x7ec4
+br_inst_retired.non_return_ind, 0xebc4
+br_inst_retired.rel_call, 0xfdc4
+br_inst_retired.return, 0xf7c4
+br_inst_retired.taken_jcc, 0xfec4
+br_misp_retired.all_branches, 0xc5
+br_misp_retired.call, 0xf9c5
+br_misp_retired.far_branch, 0xbfc5
+br_misp_retired.ind_call, 0xfbc5
+br_misp_retired.jcc, 0x7ec5
+br_misp_retired.non_return_ind, 0xebc5
+br_misp_retired.rel_call, 0xfdc5
+br_misp_retired.return, 0xf7c5
+br_misp_retired.taken_jcc, 0xfec5
+core_reject_l2q.all, 0x31
+cpu_clk_unhalted.ref, 0x13c
+cpu_clk_unhalted.thread_p, 0x3c
+cycles_div_busy.all, 0x1cd
+fetch_stall.icache_fill_pending_cycles, 0x486
+icache.accesses, 0x380
+icache.hit, 0x180
+icache.misses, 0x280
+inst_retired.any_p, 0xc0
+inst_retired.any_ps, 0xc0
+l2_prefetcher.alloc_xq, 0x43e
+l2_requests.miss, 0x412e
+l2_requests.reference, 0x4f2e
+l2_requests_reject.all, 0x30
+machine_clears.all, 0x8c3
+machine_clears.fp_assist, 0x4c3
+machine_clears.memory_ordering, 0x2c3
+machine_clears.smc, 0x1c3
+mem_uops_retired.all_loads, 0x4004
+mem_uops_retired.all_stores, 0x8004
+mem_uops_retired.dtlb_miss_loads, 0x804
+mem_uops_retired.hitm, 0x2004
+mem_uops_retired.l1_miss_loads, 0x104
+mem_uops_retired.l2_hit_loads, 0x204
+mem_uops_retired.l2_miss_loads, 0x404
+mem_uops_retired.utlb_miss_loads, 0x1004
+ms_decoded.ms_entry, 0x1e7
+no_alloc_cycles.all, 0x7fca
+no_alloc_cycles.mispredicts, 0x4ca
+no_alloc_cycles.not_delivered, 0x90ca
+no_alloc_cycles.rat_stall, 0x20ca
+no_alloc_cycles.rob_full, 0x1ca
+offcore_response, 0x1b7
+offcore_response.any_code_rd.any_response, 0x1b7, 0x10044
+offcore_response.any_code_rd.ddr, 0x1b7, 0x181800044
+offcore_response.any_code_rd.ddr_far, 0x1b7, 0x101000044
+offcore_response.any_code_rd.ddr_near, 0x1b7, 0x80800044
+offcore_response.any_code_rd.l2_hit_far_tile, 0x1b7, 0x1800400044
+offcore_response.any_code_rd.l2_hit_far_tile_e_f, 0x1b7, 0x800400044
+offcore_response.any_code_rd.l2_hit_far_tile_m, 0x1b7, 0x1000400044
+offcore_response.any_code_rd.l2_hit_near_tile, 0x1b7, 0x1800180044
+offcore_response.any_code_rd.l2_hit_near_tile_e_f, 0x1b7, 0x800080044
+offcore_response.any_code_rd.l2_hit_near_tile_m, 0x1b7, 0x1000080044
+offcore_response.any_code_rd.l2_hit_this_tile_e, 0x1b7, 0x4000044
+offcore_response.any_code_rd.l2_hit_this_tile_f, 0x1b7, 0x10000044
+offcore_response.any_code_rd.l2_hit_this_tile_m, 0x1b7, 0x2000044
+offcore_response.any_code_rd.l2_hit_this_tile_s, 0x1b7, 0x8000044
+offcore_response.any_code_rd.mcdram, 0x1b7, 0x180600044
+offcore_response.any_code_rd.mcdram_far, 0x1b7, 0x100400044
+offcore_response.any_code_rd.mcdram_near, 0x1b7, 0x80200044
+offcore_response.any_code_rd.outstanding, 0x1b7, 0x4000000044
+offcore_response.any_data_rd.any_response, 0x1b7, 0x13091
+offcore_response.any_data_rd.ddr, 0x1b7, 0x181803091
+offcore_response.any_data_rd.ddr_far, 0x1b7, 0x101003091
+offcore_response.any_data_rd.ddr_near, 0x1b7, 0x80803091
+offcore_response.any_data_rd.l2_hit_far_tile, 0x1b7, 0x1800403091
+offcore_response.any_data_rd.l2_hit_far_tile_e_f, 0x1b7, 0x800403091
+offcore_response.any_data_rd.l2_hit_far_tile_m, 0x1b7, 0x1000403091
+offcore_response.any_data_rd.l2_hit_near_tile, 0x1b7, 0x1800183091
+offcore_response.any_data_rd.l2_hit_near_tile_e_f, 0x1b7, 0x800083091
+offcore_response.any_data_rd.l2_hit_near_tile_m, 0x1b7, 0x1000083091
+offcore_response.any_data_rd.l2_hit_this_tile_e, 0x1b7, 0x4003091
+offcore_response.any_data_rd.l2_hit_this_tile_f, 0x1b7, 0x10003091
+offcore_response.any_data_rd.l2_hit_this_tile_m, 0x1b7, 0x2003091
+offcore_response.any_data_rd.l2_hit_this_tile_s, 0x1b7, 0x8003091
+offcore_response.any_data_rd.mcdram, 0x1b7, 0x180603091
+offcore_response.any_data_rd.mcdram_far, 0x1b7, 0x100403091
+offcore_response.any_data_rd.mcdram_near, 0x1b7, 0x80203091
+offcore_response.any_data_rd.outstanding, 0x1b7, 0x4000003091
+offcore_response.any_pf_l2.any_response, 0x1b7, 0x10070
+offcore_response.any_pf_l2.ddr_far, 0x1b7, 0x101000070
+offcore_response.any_pf_l2.ddr_near, 0x1b7, 0x80800070
+offcore_response.any_pf_l2.l2_hit_far_tile, 0x1b7, 0x1800400070
+offcore_response.any_pf_l2.l2_hit_far_tile_e_f, 0x1b7, 0x800400070
+offcore_response.any_pf_l2.l2_hit_far_tile_m, 0x1b7, 0x1000400070
+offcore_response.any_pf_l2.l2_hit_near_tile, 0x1b7, 0x1800180070
+offcore_response.any_pf_l2.l2_hit_near_tile_e_f, 0x1b7, 0x800080070
+offcore_response.any_pf_l2.l2_hit_near_tile_m, 0x1b7, 0x1000080070
+offcore_response.any_pf_l2.l2_hit_this_tile_e, 0x1b7, 0x4000070
+offcore_response.any_pf_l2.l2_hit_this_tile_f, 0x1b7, 0x10000070
+offcore_response.any_pf_l2.l2_hit_this_tile_m, 0x1b7, 0x2000070
+offcore_response.any_pf_l2.mcdram, 0x1b7, 0x180600070
+offcore_response.any_pf_l2.mcdram_far, 0x1b7, 0x100400070
+offcore_response.any_pf_l2.mcdram_near, 0x1b7, 0x80200070
+offcore_response.any_pf_l2.outstanding, 0x1b7, 0x4000000070
+offcore_response.any_read.any_response, 0x1b7, 0x132f7
+offcore_response.any_read.ddr, 0x1b7, 0x1818032f7
+offcore_response.any_read.ddr_far, 0x1b7, 0x1010032f7
+offcore_response.any_read.ddr_near, 0x1b7, 0x808032f7
+offcore_response.any_read.l2_hit_far_tile, 0x1b7, 0x18004032f7
+offcore_response.any_read.l2_hit_far_tile_e_f, 0x1b7, 0x8004032f7
+offcore_response.any_read.l2_hit_far_tile_m, 0x1b7, 0x10004032f7
+offcore_response.any_read.l2_hit_near_tile, 0x1b7, 0x18001832f7
+offcore_response.any_read.l2_hit_near_tile_e_f, 0x1b7, 0x8000832f7
+offcore_response.any_read.l2_hit_near_tile_m, 0x1b7, 0x10000832f7
+offcore_response.any_read.l2_hit_this_tile_e, 0x1b7, 0x40032f7
+offcore_response.any_read.l2_hit_this_tile_f, 0x1b7, 0x100032f7
+offcore_response.any_read.l2_hit_this_tile_m, 0x1b7, 0x20032f7
+offcore_response.any_read.l2_hit_this_tile_s, 0x1b7, 0x80032f7
+offcore_response.any_read.mcdram, 0x1b7, 0x1806032f7
+offcore_response.any_read.mcdram_far, 0x1b7, 0x1004032f7
+offcore_response.any_read.mcdram_near, 0x1b7, 0x802032f7
+offcore_response.any_read.outstanding, 0x1b7, 0x40000032f7
+offcore_response.any_request.any_response, 0x1b7, 0x18000
+offcore_response.any_request.ddr, 0x1b7, 0x181808000
+offcore_response.any_request.ddr_far, 0x1b7, 0x101008000
+offcore_response.any_request.ddr_near, 0x1b7, 0x80808000
+offcore_response.any_request.l2_hit_far_tile, 0x1b7, 0x1800408000
+offcore_response.any_request.l2_hit_far_tile_e_f, 0x1b7, 0x800408000
+offcore_response.any_request.l2_hit_far_tile_m, 0x1b7, 0x1000408000
+offcore_response.any_request.l2_hit_near_tile, 0x1b7, 0x1800188000
+offcore_response.any_request.l2_hit_near_tile_e_f, 0x1b7, 0x800088000
+offcore_response.any_request.l2_hit_near_tile_m, 0x1b7, 0x1000088000
+offcore_response.any_request.l2_hit_this_tile_e, 0x1b7, 0x4008000
+offcore_response.any_request.l2_hit_this_tile_f, 0x1b7, 0x10008000
+offcore_response.any_request.l2_hit_this_tile_m, 0x1b7, 0x2008000
+offcore_response.any_request.l2_hit_this_tile_s, 0x1b7, 0x8008000
+offcore_response.any_request.l2_miss, 0x1b7, 0x18001981f8
+offcore_response.any_request.mcdram, 0x1b7, 0x180608000
+offcore_response.any_request.mcdram_far, 0x1b7, 0x100408000
+offcore_response.any_request.mcdram_near, 0x1b7, 0x80208000
+offcore_response.any_request.outstanding, 0x1b7, 0x4000008000
+offcore_response.any_rfo.any_response, 0x1b7, 0x10022
+offcore_response.any_rfo.ddr, 0x1b7, 0x181800022
+offcore_response.any_rfo.ddr_far, 0x1b7, 0x101000022
+offcore_response.any_rfo.ddr_near, 0x1b7, 0x80800022
+offcore_response.any_rfo.l2_hit_far_tile, 0x1b7, 0x1800400022
+offcore_response.any_rfo.l2_hit_far_tile_e_f, 0x1b7, 0x800400022
+offcore_response.any_rfo.l2_hit_far_tile_m, 0x1b7, 0x1000400022
+offcore_response.any_rfo.l2_hit_near_tile, 0x1b7, 0x1800180022
+offcore_response.any_rfo.l2_hit_near_tile_e_f, 0x1b7, 0x800080022
+offcore_response.any_rfo.l2_hit_near_tile_m, 0x1b7, 0x1000080022
+offcore_response.any_rfo.l2_hit_this_tile_e, 0x1b7, 0x4000022
+offcore_response.any_rfo.l2_hit_this_tile_f, 0x1b7, 0x10000022
+offcore_response.any_rfo.l2_hit_this_tile_m, 0x1b7, 0x2000022
+offcore_response.any_rfo.l2_hit_this_tile_s, 0x1b7, 0x8000022
+offcore_response.any_rfo.mcdram, 0x1b7, 0x180600022
+offcore_response.any_rfo.mcdram_far, 0x1b7, 0x100400022
+offcore_response.any_rfo.mcdram_near, 0x1b7, 0x80200022
+offcore_response.any_rfo.outstanding, 0x1b7, 0x4000000022
+offcore_response.bus_locks.any_response, 0x1b7, 0x10400
+offcore_response.bus_locks.ddr, 0x1b7, 0x181800400
+offcore_response.bus_locks.ddr_far, 0x1b7, 0x101000400
+offcore_response.bus_locks.ddr_near, 0x1b7, 0x80800400
+offcore_response.bus_locks.l2_hit_far_tile, 0x1b7, 0x1800400400
+offcore_response.bus_locks.l2_hit_far_tile_e_f, 0x1b7, 0x800400400
+offcore_response.bus_locks.l2_hit_far_tile_m, 0x1b7, 0x1000400400
+offcore_response.bus_locks.l2_hit_near_tile, 0x1b7, 0x1800180400
+offcore_response.bus_locks.l2_hit_near_tile_e_f, 0x1b7, 0x800080400
+offcore_response.bus_locks.l2_hit_near_tile_m, 0x1b7, 0x1000080400
+offcore_response.bus_locks.l2_hit_this_tile_e, 0x1b7, 0x4000400
+offcore_response.bus_locks.l2_hit_this_tile_f, 0x1b7, 0x10000400
+offcore_response.bus_locks.l2_hit_this_tile_m, 0x1b7, 0x2000400
+offcore_response.bus_locks.l2_hit_this_tile_s, 0x1b7, 0x8000400
+offcore_response.bus_locks.mcdram, 0x1b7, 0x180600400
+offcore_response.bus_locks.mcdram_far, 0x1b7, 0x100400400
+offcore_response.bus_locks.mcdram_near, 0x1b7, 0x80200400
+offcore_response.bus_locks.outstanding, 0x1b7, 0x4000000400
+offcore_response.demand_code_rd.any_response, 0x1b7, 0x10004
+offcore_response.demand_code_rd.ddr, 0x1b7, 0x181800004
+offcore_response.demand_code_rd.ddr_far, 0x1b7, 0x101000004
+offcore_response.demand_code_rd.ddr_near, 0x1b7, 0x80800004
+offcore_response.demand_code_rd.l2_hit_far_tile, 0x1b7, 0x1800400004
+offcore_response.demand_code_rd.l2_hit_far_tile_e_f, 0x1b7, 0x800400004
+offcore_response.demand_code_rd.l2_hit_far_tile_m, 0x1b7, 0x1000400004
+offcore_response.demand_code_rd.l2_hit_near_tile, 0x1b7, 0x1800180004
+offcore_response.demand_code_rd.l2_hit_near_tile_e_f, 0x1b7, 0x800080004
+offcore_response.demand_code_rd.l2_hit_near_tile_m, 0x1b7, 0x1000080004
+offcore_response.demand_code_rd.l2_hit_this_tile_e, 0x1b7, 0x4000004
+offcore_response.demand_code_rd.l2_hit_this_tile_f, 0x1b7, 0x10000004
+offcore_response.demand_code_rd.l2_hit_this_tile_m, 0x1b7, 0x2000004
+offcore_response.demand_code_rd.l2_hit_this_tile_s, 0x1b7, 0x8000004
+offcore_response.demand_code_rd.mcdram, 0x1b7, 0x180600004
+offcore_response.demand_code_rd.mcdram_far, 0x1b7, 0x100400004
+offcore_response.demand_code_rd.mcdram_near, 0x1b7, 0x80200004
+offcore_response.demand_code_rd.outstanding, 0x1b7, 0x4000000004
+offcore_response.demand_data_rd.any_response, 0x1b7, 0x10001
+offcore_response.demand_data_rd.ddr, 0x1b7, 0x181800001
+offcore_response.demand_data_rd.ddr_far, 0x1b7, 0x101000001
+offcore_response.demand_data_rd.ddr_near, 0x1b7, 0x80800001
+offcore_response.demand_data_rd.l2_hit_far_tile_e_f, 0x1b7, 0x800400001
+offcore_response.demand_data_rd.l2_hit_far_tile_m, 0x1b7, 0x1000400001
+offcore_response.demand_data_rd.l2_hit_near_tile_e_f, 0x1b7, 0x800080001
+offcore_response.demand_data_rd.l2_hit_near_tile_m, 0x1b7, 0x1000080001
+offcore_response.demand_data_rd.l2_hit_this_tile_e, 0x1b7, 0x4000001
+offcore_response.demand_data_rd.l2_hit_this_tile_f, 0x1b7, 0x10000001
+offcore_response.demand_data_rd.l2_hit_this_tile_m, 0x1b7, 0x2000001
+offcore_response.demand_data_rd.l2_hit_this_tile_s, 0x1b7, 0x8000001
+offcore_response.demand_data_rd.mcdram, 0x1b7, 0x180600001
+offcore_response.demand_data_rd.mcdram_far, 0x1b7, 0x100400001
+offcore_response.demand_data_rd.mcdram_near, 0x1b7, 0x80200001
+offcore_response.demand_data_rd.outstanding, 0x1b7, 0x4000000001
+offcore_response.demand_rfo.any_response, 0x1b7, 0x10002
+offcore_response.demand_rfo.ddr, 0x1b7, 0x181800002
+offcore_response.demand_rfo.ddr_far, 0x1b7, 0x101000002
+offcore_response.demand_rfo.ddr_near, 0x1b7, 0x80800002
+offcore_response.demand_rfo.l2_hit_far_tile, 0x1b7, 0x1800400002
+offcore_response.demand_rfo.l2_hit_far_tile_e_f, 0x1b7, 0x800400002
+offcore_response.demand_rfo.l2_hit_far_tile_m, 0x1b7, 0x1000400002
+offcore_response.demand_rfo.l2_hit_near_tile, 0x1b7, 0x1800180002
+offcore_response.demand_rfo.l2_hit_near_tile_e_f, 0x1b7, 0x800080002
+offcore_response.demand_rfo.l2_hit_near_tile_m, 0x1b7, 0x1000080002
+offcore_response.demand_rfo.l2_hit_this_tile_e, 0x1b7, 0x4000002
+offcore_response.demand_rfo.l2_hit_this_tile_f, 0x1b7, 0x10000002
+offcore_response.demand_rfo.l2_hit_this_tile_m, 0x1b7, 0x2000002
+offcore_response.demand_rfo.l2_hit_this_tile_s, 0x1b7, 0x8000002
+offcore_response.demand_rfo.mcdram, 0x1b7, 0x180600002
+offcore_response.demand_rfo.mcdram_far, 0x1b7, 0x100400002
+offcore_response.demand_rfo.mcdram_near, 0x1b7, 0x80200002
+offcore_response.demand_rfo.outstanding, 0x1b7, 0x4000000002
+offcore_response.full_streaming_stores.any_response, 0x1b7, 0x10800
+offcore_response.partial_reads.any_response, 0x1b7, 0x10080
+offcore_response.partial_reads.ddr, 0x1b7, 0x181800080
+offcore_response.partial_reads.ddr_far, 0x1b7, 0x101000080
+offcore_response.partial_reads.ddr_near, 0x1b7, 0x80800080
+offcore_response.partial_reads.l2_hit_far_tile, 0x1b7, 0x1800400080
+offcore_response.partial_reads.l2_hit_far_tile_e_f, 0x1b7, 0x800400080
+offcore_response.partial_reads.l2_hit_far_tile_m, 0x1b7, 0x1000400080
+offcore_response.partial_reads.l2_hit_near_tile, 0x1b7, 0x1800180080
+offcore_response.partial_reads.l2_hit_near_tile_e_f, 0x1b7, 0x800080080
+offcore_response.partial_reads.l2_hit_near_tile_m, 0x1b7, 0x1000080080
+offcore_response.partial_reads.l2_hit_this_tile_e, 0x1b7, 0x4000080
+offcore_response.partial_reads.l2_hit_this_tile_f, 0x1b7, 0x10000080
+offcore_response.partial_reads.l2_hit_this_tile_m, 0x1b7, 0x2000080
+offcore_response.partial_reads.l2_hit_this_tile_s, 0x1b7, 0x8000080
+offcore_response.partial_reads.mcdram, 0x1b7, 0x180600080
+offcore_response.partial_reads.mcdram_far, 0x1b7, 0x100400080
+offcore_response.partial_reads.mcdram_near, 0x1b7, 0x80200080
+offcore_response.partial_reads.non_dram, 0x1b7, 0x2000020080
+offcore_response.partial_reads.outstanding, 0x1b7, 0x4000000080
+offcore_response.partial_streaming_stores.any_response, 0x1b7, 0x14000
+offcore_response.partial_writes.any_response, 0x1b7, 0x10100
+offcore_response.partial_writes.ddr_far, 0x1b7, 0x101000100
+offcore_response.partial_writes.ddr_near, 0x1b7, 0x80800100
+offcore_response.partial_writes.l2_hit_far_tile, 0x1b7, 0x1800400100
+offcore_response.partial_writes.l2_hit_far_tile_e_f, 0x1b7, 0x800400100
+offcore_response.partial_writes.l2_hit_far_tile_m, 0x1b7, 0x1000400100
+offcore_response.partial_writes.l2_hit_near_tile, 0x1b7, 0x1800180100
+offcore_response.partial_writes.l2_hit_near_tile_e_f, 0x1b7, 0x800080100
+offcore_response.partial_writes.l2_hit_near_tile_m, 0x1b7, 0x1000080100
+offcore_response.partial_writes.l2_hit_this_tile_e, 0x1b7, 0x4000100
+offcore_response.partial_writes.l2_hit_this_tile_f, 0x1b7, 0x10000100
+offcore_response.partial_writes.l2_hit_this_tile_m, 0x1b7, 0x2000100
+offcore_response.partial_writes.l2_hit_this_tile_s, 0x1b7, 0x8000100
+offcore_response.partial_writes.mcdram, 0x1b7, 0x180600100
+offcore_response.partial_writes.mcdram_far, 0x1b7, 0x100400100
+offcore_response.partial_writes.mcdram_near, 0x1b7, 0x80200100
+offcore_response.pf_l1_data_rd.any_response, 0x1b7, 0x12000
+offcore_response.pf_l1_data_rd.ddr, 0x1b7, 0x181802000
+offcore_response.pf_l1_data_rd.ddr_far, 0x1b7, 0x101002000
+offcore_response.pf_l1_data_rd.ddr_near, 0x1b7, 0x80802000
+offcore_response.pf_l1_data_rd.l2_hit_far_tile, 0x1b7, 0x1800402000
+offcore_response.pf_l1_data_rd.l2_hit_far_tile_e_f, 0x1b7, 0x800402000
+offcore_response.pf_l1_data_rd.l2_hit_far_tile_m, 0x1b7, 0x1000402000
+offcore_response.pf_l1_data_rd.l2_hit_near_tile, 0x1b7, 0x1800182000
+offcore_response.pf_l1_data_rd.l2_hit_near_tile_e_f, 0x1b7, 0x800082000
+offcore_response.pf_l1_data_rd.l2_hit_near_tile_m, 0x1b7, 0x1000082000
+offcore_response.pf_l1_data_rd.l2_hit_this_tile_e, 0x1b7, 0x4002000
+offcore_response.pf_l1_data_rd.l2_hit_this_tile_f, 0x1b7, 0x10002000
+offcore_response.pf_l1_data_rd.l2_hit_this_tile_m, 0x1b7, 0x2002000
+offcore_response.pf_l1_data_rd.l2_hit_this_tile_s, 0x1b7, 0x8002000
+offcore_response.pf_l1_data_rd.mcdram_far, 0x1b7, 0x100402000
+offcore_response.pf_l1_data_rd.mcdram_near, 0x1b7, 0x80202000
+offcore_response.pf_l1_data_rd.outstanding, 0x1b7, 0x4000002000
+offcore_response.pf_l2_code_rd.any_response, 0x1b7, 0x10040
+offcore_response.pf_l2_code_rd.ddr, 0x1b7, 0x181800040
+offcore_response.pf_l2_code_rd.ddr_far, 0x1b7, 0x101000040
+offcore_response.pf_l2_code_rd.ddr_near, 0x1b7, 0x80800040
+offcore_response.pf_l2_code_rd.l2_hit_far_tile, 0x1b7, 0x1800400040
+offcore_response.pf_l2_code_rd.l2_hit_far_tile_e_f, 0x1b7, 0x800400040
+offcore_response.pf_l2_code_rd.l2_hit_far_tile_m, 0x1b7, 0x1000400040
+offcore_response.pf_l2_code_rd.l2_hit_near_tile, 0x1b7, 0x1800180040
+offcore_response.pf_l2_code_rd.l2_hit_near_tile_e_f, 0x1b7, 0x800080040
+offcore_response.pf_l2_code_rd.l2_hit_near_tile_m, 0x1b7, 0x1000080040
+offcore_response.pf_l2_code_rd.l2_hit_this_tile_e, 0x1b7, 0x4000040
+offcore_response.pf_l2_code_rd.l2_hit_this_tile_f, 0x1b7, 0x10000040
+offcore_response.pf_l2_code_rd.mcdram_far, 0x1b7, 0x100400040
+offcore_response.pf_l2_code_rd.mcdram_near, 0x1b7, 0x80200040
+offcore_response.pf_l2_code_rd.outstanding, 0x1b7, 0x4000000040
+offcore_response.pf_l2_rfo.any_response, 0x1b7, 0x10020
+offcore_response.pf_l2_rfo.ddr, 0x1b7, 0x181800020
+offcore_response.pf_l2_rfo.ddr_far, 0x1b7, 0x101000020
+offcore_response.pf_l2_rfo.ddr_near, 0x1b7, 0x80800020
+offcore_response.pf_l2_rfo.l2_hit_far_tile_e_f, 0x1b7, 0x800400020
+offcore_response.pf_l2_rfo.l2_hit_far_tile_m, 0x1b7, 0x1000400020
+offcore_response.pf_l2_rfo.l2_hit_near_tile, 0x1b7, 0x1800180020
+offcore_response.pf_l2_rfo.l2_hit_near_tile_e_f, 0x1b7, 0x800080020
+offcore_response.pf_l2_rfo.l2_hit_near_tile_m, 0x1b7, 0x1000080020
+offcore_response.pf_l2_rfo.l2_hit_this_tile_e, 0x1b7, 0x4000020
+offcore_response.pf_l2_rfo.l2_hit_this_tile_f, 0x1b7, 0x10000020
+offcore_response.pf_l2_rfo.l2_hit_this_tile_m, 0x1b7, 0x2000020
+offcore_response.pf_l2_rfo.l2_hit_this_tile_s, 0x1b7, 0x8000020
+offcore_response.pf_l2_rfo.mcdram, 0x1b7, 0x180600020
+offcore_response.pf_l2_rfo.mcdram_far, 0x1b7, 0x100400020
+offcore_response.pf_l2_rfo.mcdram_near, 0x1b7, 0x80200020
+offcore_response.pf_l2_rfo.non_dram, 0x1b7, 0x2000020020
+offcore_response.pf_software.any_response, 0x1b7, 0x11000
+offcore_response.pf_software.ddr, 0x1b7, 0x181801000
+offcore_response.pf_software.ddr_far, 0x1b7, 0x101001000
+offcore_response.pf_software.ddr_near, 0x1b7, 0x80801000
+offcore_response.pf_software.l2_hit_far_tile, 0x1b7, 0x1800401000
+offcore_response.pf_software.l2_hit_far_tile_e_f, 0x1b7, 0x800401000
+offcore_response.pf_software.l2_hit_far_tile_m, 0x1b7, 0x1000401000
+offcore_response.pf_software.l2_hit_near_tile, 0x1b7, 0x1800181000
+offcore_response.pf_software.l2_hit_near_tile_e_f, 0x1b7, 0x800081000
+offcore_response.pf_software.l2_hit_near_tile_m, 0x1b7, 0x1000081000
+offcore_response.pf_software.l2_hit_this_tile_e, 0x1b7, 0x4001000
+offcore_response.pf_software.l2_hit_this_tile_f, 0x1b7, 0x10001000
+offcore_response.pf_software.l2_hit_this_tile_m, 0x1b7, 0x2001000
+offcore_response.pf_software.l2_hit_this_tile_s, 0x1b7, 0x8001000
+offcore_response.pf_software.mcdram, 0x1b7, 0x180601000
+offcore_response.pf_software.mcdram_far, 0x1b7, 0x100401000
+offcore_response.pf_software.mcdram_near, 0x1b7, 0x80201000
+offcore_response.pf_software.outstanding, 0x1b7, 0x4000001000
+offcore_response.streaming_stores.any_response, 0x1b7, 0x14800
+offcore_response.uc_code_reads.any_response, 0x1b7, 0x10200
+offcore_response.uc_code_reads.ddr, 0x1b7, 0x181800200
+offcore_response.uc_code_reads.ddr_far, 0x1b7, 0x101000200
+offcore_response.uc_code_reads.ddr_near, 0x1b7, 0x80800200
+offcore_response.uc_code_reads.l2_hit_far_tile_e_f, 0x1b7, 0x800400200
+offcore_response.uc_code_reads.l2_hit_far_tile_m, 0x1b7, 0x1000400200
+offcore_response.uc_code_reads.l2_hit_near_tile, 0x1b7, 0x1800180200
+offcore_response.uc_code_reads.l2_hit_near_tile_e_f, 0x1b7, 0x800080200
+offcore_response.uc_code_reads.l2_hit_near_tile_m, 0x1b7, 0x1000080200
+offcore_response.uc_code_reads.l2_hit_this_tile_e, 0x1b7, 0x4000200
+offcore_response.uc_code_reads.l2_hit_this_tile_f, 0x1b7, 0x10000200
+offcore_response.uc_code_reads.l2_hit_this_tile_m, 0x1b7, 0x2000200
+offcore_response.uc_code_reads.l2_hit_this_tile_s, 0x1b7, 0x8000200
+offcore_response.uc_code_reads.mcdram, 0x1b7, 0x180600200
+offcore_response.uc_code_reads.mcdram_far, 0x1b7, 0x100400200
+offcore_response.uc_code_reads.mcdram_near, 0x1b7, 0x80200200
+offcore_response.uc_code_reads.outstanding, 0x1b7, 0x4000000200
+page_walks.cycles, 0x305
+page_walks.d_side_cycles, 0x105
+page_walks.d_side_walks, 0x105
+page_walks.i_side_cycles, 0x205
+page_walks.i_side_walks, 0x205
+page_walks.walks, 0x305
+recycleq.any_ld, 0x4003
+recycleq.any_st, 0x8003
+recycleq.ld_block_st_forward, 0x103
+recycleq.ld_block_std_notready, 0x203
+recycleq.ld_splits, 0x803
+recycleq.lock, 0x1003
+recycleq.st_splits, 0x403
+recycleq.sta_full, 0x2003
+rs_full_stall.all, 0x1fcb
+rs_full_stall.mec, 0x1cb
+unc_c_tor_inserts.ipq_hit, 0x1835
+unc_c_tor_inserts.ipq_miss, 0x2835
+unc_c_tor_inserts.irq_hit, 0x1135
+unc_c_tor_inserts.irq_miss, 0x2135
+unc_c_tor_inserts.loc_all, 0x3735
+unc_c_tor_inserts.prq_hit, 0x1435
+unc_c_tor_inserts.prq_miss, 0x2435
+unc_e_edc_access.hit_clean, 0x102
+unc_e_edc_access.hit_dirty, 0x202
+unc_e_edc_access.miss_clean, 0x402
+unc_e_edc_access.miss_dirty, 0x802
+unc_e_edc_access.miss_invalid, 0x1002
+unc_e_rpq_inserts, 0x101
+unc_e_wpq_inserts, 0x102
+unc_h_ag0_ad_crd_acquired.tgr0, 0x180
+unc_h_ag0_ad_crd_acquired.tgr1, 0x280
+unc_h_ag0_ad_crd_acquired.tgr2, 0x480
+unc_h_ag0_ad_crd_acquired.tgr3, 0x880
+unc_h_ag0_ad_crd_acquired.tgr4, 0x1080
+unc_h_ag0_ad_crd_acquired.tgr5, 0x2080
+unc_h_ag0_ad_crd_acquired.tgr6, 0x4080
+unc_h_ag0_ad_crd_acquired.tgr7, 0x8080
+unc_h_ag0_ad_crd_acquired_ext.any_of_tgr0_thru_tgr7, 0x281
+unc_h_ag0_ad_crd_acquired_ext.tgr8, 0x181
+unc_h_ag0_ad_crd_occupancy.tgr0, 0x182
+unc_h_ag0_ad_crd_occupancy.tgr1, 0x282
+unc_h_ag0_ad_crd_occupancy.tgr2, 0x482
+unc_h_ag0_ad_crd_occupancy.tgr3, 0x882
+unc_h_ag0_ad_crd_occupancy.tgr4, 0x1082
+unc_h_ag0_ad_crd_occupancy.tgr5, 0x2082
+unc_h_ag0_ad_crd_occupancy.tgr6, 0x4082
+unc_h_ag0_ad_crd_occupancy.tgr7, 0x8082
+unc_h_ag0_ad_crd_occupancy_ext.any_of_tgr0_thru_tgr7, 0x283
+unc_h_ag0_ad_crd_occupancy_ext.tgr8, 0x183
+unc_h_ag0_bl_crd_acquired.tgr0, 0x188
+unc_h_ag0_bl_crd_acquired.tgr1, 0x288
+unc_h_ag0_bl_crd_acquired.tgr2, 0x488
+unc_h_ag0_bl_crd_acquired.tgr3, 0x888
+unc_h_ag0_bl_crd_acquired.tgr4, 0x1088
+unc_h_ag0_bl_crd_acquired.tgr5, 0x2088
+unc_h_ag0_bl_crd_acquired.tgr6, 0x4088
+unc_h_ag0_bl_crd_acquired.tgr7, 0x8088
+unc_h_ag0_bl_crd_acquired_ext.any_of_tgr0_thru_tgr7, 0x289
+unc_h_ag0_bl_crd_acquired_ext.tgr8, 0x189
+unc_h_ag0_bl_crd_occupancy.tgr0, 0x18a
+unc_h_ag0_bl_crd_occupancy.tgr1, 0x28a
+unc_h_ag0_bl_crd_occupancy.tgr2, 0x48a
+unc_h_ag0_bl_crd_occupancy.tgr3, 0x88a
+unc_h_ag0_bl_crd_occupancy.tgr4, 0x108a
+unc_h_ag0_bl_crd_occupancy.tgr5, 0x208a
+unc_h_ag0_bl_crd_occupancy.tgr6, 0x408a
+unc_h_ag0_bl_crd_occupancy.tgr7, 0x808a
+unc_h_ag0_bl_crd_occupancy_ext.any_of_tgr0_thru_tgr7, 0x28b
+unc_h_ag0_bl_crd_occupancy_ext.tgr8, 0x18b
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr0, 0x1d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr1, 0x2d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr2, 0x4d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr3, 0x8d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr4, 0x10d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr5, 0x20d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr6, 0x40d0
+unc_h_ag0_stall_no_crd_egress_horz_ad.tgr7, 0x80d0
+unc_h_ag0_stall_no_crd_egress_horz_ad_ext.any_of_tgr0_thru_tgr7, 0x2d1
+unc_h_ag0_stall_no_crd_egress_horz_ad_ext.tgr8, 0x1d1
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr0, 0x1d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr1, 0x2d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr2, 0x4d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr3, 0x8d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr4, 0x10d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr5, 0x20d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr6, 0x40d4
+unc_h_ag0_stall_no_crd_egress_horz_bl.tgr7, 0x80d4
+unc_h_ag0_stall_no_crd_egress_horz_bl_ext.any_of_tgr0_thru_tgr7, 0x2d5
+unc_h_ag0_stall_no_crd_egress_horz_bl_ext.tgr8, 0x1d5
+unc_h_ag1_ad_crd_acquired.tgr0, 0x184
+unc_h_ag1_ad_crd_acquired.tgr1, 0x284
+unc_h_ag1_ad_crd_acquired.tgr2, 0x484
+unc_h_ag1_ad_crd_acquired.tgr3, 0x884
+unc_h_ag1_ad_crd_acquired.tgr4, 0x1084
+unc_h_ag1_ad_crd_acquired.tgr5, 0x2084
+unc_h_ag1_ad_crd_acquired.tgr6, 0x4084
+unc_h_ag1_ad_crd_acquired.tgr7, 0x8084
+unc_h_ag1_ad_crd_acquired_ext.any_of_tgr0_thru_tgr7, 0x285
+unc_h_ag1_ad_crd_acquired_ext.tgr8, 0x185
+unc_h_ag1_ad_crd_occupancy.tgr0, 0x186
+unc_h_ag1_ad_crd_occupancy.tgr1, 0x286
+unc_h_ag1_ad_crd_occupancy.tgr2, 0x486
+unc_h_ag1_ad_crd_occupancy.tgr3, 0x886
+unc_h_ag1_ad_crd_occupancy.tgr4, 0x1086
+unc_h_ag1_ad_crd_occupancy.tgr5, 0x2086
+unc_h_ag1_ad_crd_occupancy.tgr6, 0x4086
+unc_h_ag1_ad_crd_occupancy.tgr7, 0x8086
+unc_h_ag1_ad_crd_occupancy_ext.any_of_tgr0_thru_tgr7, 0x287
+unc_h_ag1_ad_crd_occupancy_ext.tgr8, 0x187
+unc_h_ag1_bl_crd_acquired.tgr0, 0x18c
+unc_h_ag1_bl_crd_acquired.tgr1, 0x28c
+unc_h_ag1_bl_crd_acquired.tgr2, 0x48c
+unc_h_ag1_bl_crd_acquired.tgr3, 0x88c
+unc_h_ag1_bl_crd_acquired.tgr4, 0x108c
+unc_h_ag1_bl_crd_acquired.tgr5, 0x208c
+unc_h_ag1_bl_crd_acquired.tgr6, 0x408c
+unc_h_ag1_bl_crd_acquired.tgr7, 0x808c
+unc_h_ag1_bl_crd_acquired_ext.any_of_tgr0_thru_tgr7, 0x28d
+unc_h_ag1_bl_crd_acquired_ext.tgr8, 0x18d
+unc_h_ag1_bl_crd_occupancy.tgr0, 0x18e
+unc_h_ag1_bl_crd_occupancy.tgr1, 0x28e
+unc_h_ag1_bl_crd_occupancy.tgr2, 0x48e
+unc_h_ag1_bl_crd_occupancy.tgr3, 0x88e
+unc_h_ag1_bl_crd_occupancy.tgr4, 0x108e
+unc_h_ag1_bl_crd_occupancy.tgr5, 0x208e
+unc_h_ag1_bl_crd_occupancy.tgr6, 0x408e
+unc_h_ag1_bl_crd_occupancy.tgr7, 0x808e
+unc_h_ag1_bl_crd_occupancy_ext.any_of_tgr0_thru_tgr7, 0x28f
+unc_h_ag1_bl_crd_occupancy_ext.tgr8, 0x18f
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr0, 0x1d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr1, 0x2d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr2, 0x4d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr3, 0x8d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr4, 0x10d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr5, 0x20d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr6, 0x40d2
+unc_h_ag1_stall_no_crd_egress_horz_ad.tgr7, 0x80d2
+unc_h_ag1_stall_no_crd_egress_horz_ad_ext.any_of_tgr0_thru_tgr7, 0x2d3
+unc_h_ag1_stall_no_crd_egress_horz_ad_ext.tgr8, 0x1d3
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr0, 0x1d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr1, 0x2d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr2, 0x4d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr3, 0x8d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr4, 0x10d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr5, 0x20d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr6, 0x40d6
+unc_h_ag1_stall_no_crd_egress_horz_bl.tgr7, 0x80d6
+unc_h_ag1_stall_no_crd_egress_horz_bl_ext.any_of_tgr0_thru_tgr7, 0x2d7
+unc_h_ag1_stall_no_crd_egress_horz_bl_ext.tgr8, 0x1d7
+unc_h_cache_lines_victimized.e_state, 0x237
+unc_h_cache_lines_victimized.f_state, 0x837
+unc_h_cache_lines_victimized.local, 0x2037
+unc_h_cache_lines_victimized.m_state, 0x137
+unc_h_cache_lines_victimized.remote, 0x8037
+unc_h_cache_lines_victimized.s_state, 0x437
+unc_h_clock, 0xc0
+unc_h_egress_horz_ads_used.ad, 0x19d
+unc_h_egress_horz_ads_used.ak, 0x29d
+unc_h_egress_horz_ads_used.bl, 0x49d
+unc_h_egress_horz_bypass.ad, 0x19f
+unc_h_egress_horz_bypass.ak, 0x29f
+unc_h_egress_horz_bypass.bl, 0x49f
+unc_h_egress_horz_bypass.iv, 0x89f
+unc_h_egress_horz_cycles_full.ad, 0x196
+unc_h_egress_horz_cycles_full.ak, 0x296
+unc_h_egress_horz_cycles_full.bl, 0x496
+unc_h_egress_horz_cycles_full.iv, 0x896
+unc_h_egress_horz_cycles_ne.ad, 0x197
+unc_h_egress_horz_cycles_ne.ak, 0x297
+unc_h_egress_horz_cycles_ne.bl, 0x497
+unc_h_egress_horz_cycles_ne.iv, 0x897
+unc_h_egress_horz_inserts.ad, 0x195
+unc_h_egress_horz_inserts.ak, 0x295
+unc_h_egress_horz_inserts.bl, 0x495
+unc_h_egress_horz_inserts.iv, 0x895
+unc_h_egress_horz_nack.ad, 0x199
+unc_h_egress_horz_nack.ak, 0x299
+unc_h_egress_horz_nack.bl, 0x499
+unc_h_egress_horz_nack.iv, 0x899
+unc_h_egress_horz_occupancy.ad, 0x194
+unc_h_egress_horz_occupancy.ak, 0x294
+unc_h_egress_horz_occupancy.bl, 0x494
+unc_h_egress_horz_occupancy.iv, 0x894
+unc_h_egress_horz_starved.ad, 0x19b
+unc_h_egress_horz_starved.ak, 0x29b
+unc_h_egress_horz_starved.bl, 0x49b
+unc_h_egress_horz_starved.iv, 0x89b
+unc_h_egress_ordering.iv_snp_go_dn, 0x4ae
+unc_h_egress_ordering.iv_snp_go_up, 0x1ae
+unc_h_egress_vert_ads_used.ad_ag0, 0x19c
+unc_h_egress_vert_ads_used.ad_ag1, 0x109c
+unc_h_egress_vert_ads_used.ak_ag0, 0x29c
+unc_h_egress_vert_ads_used.ak_ag1, 0x209c
+unc_h_egress_vert_ads_used.bl_ag0, 0x49c
+unc_h_egress_vert_ads_used.bl_ag1, 0x409c
+unc_h_egress_vert_bypass.ad_ag0, 0x19e
+unc_h_egress_vert_bypass.ad_ag1, 0x109e
+unc_h_egress_vert_bypass.ak_ag0, 0x29e
+unc_h_egress_vert_bypass.ak_ag1, 0x209e
+unc_h_egress_vert_bypass.bl_ag0, 0x49e
+unc_h_egress_vert_bypass.bl_ag1, 0x409e
+unc_h_egress_vert_bypass.iv, 0x89e
+unc_h_egress_vert_cycles_full.ad_ag0, 0x192
+unc_h_egress_vert_cycles_full.ad_ag1, 0x1092
+unc_h_egress_vert_cycles_full.ak_ag0, 0x292
+unc_h_egress_vert_cycles_full.ak_ag1, 0x2092
+unc_h_egress_vert_cycles_full.bl_ag0, 0x492
+unc_h_egress_vert_cycles_full.bl_ag1, 0x4092
+unc_h_egress_vert_cycles_full.iv_ag0, 0x892
+unc_h_egress_vert_cycles_ne.ad_ag0, 0x193
+unc_h_egress_vert_cycles_ne.ad_ag1, 0x1093
+unc_h_egress_vert_cycles_ne.ak_ag0, 0x293
+unc_h_egress_vert_cycles_ne.ak_ag1, 0x2093
+unc_h_egress_vert_cycles_ne.bl_ag0, 0x493
+unc_h_egress_vert_cycles_ne.bl_ag1, 0x4093
+unc_h_egress_vert_cycles_ne.iv_ag0, 0x893
+unc_h_egress_vert_inserts.ad_ag0, 0x191
+unc_h_egress_vert_inserts.ad_ag1, 0x1091
+unc_h_egress_vert_inserts.ak_ag0, 0x291
+unc_h_egress_vert_inserts.ak_ag1, 0x2091
+unc_h_egress_vert_inserts.bl_ag0, 0x491
+unc_h_egress_vert_inserts.bl_ag1, 0x4091
+unc_h_egress_vert_inserts.iv_ag0, 0x891
+unc_h_egress_vert_nack.ad_ag0, 0x198
+unc_h_egress_vert_nack.ad_ag1, 0x1098
+unc_h_egress_vert_nack.ak_ag0, 0x298
+unc_h_egress_vert_nack.ak_ag1, 0x2098
+unc_h_egress_vert_nack.bl_ag0, 0x498
+unc_h_egress_vert_nack.bl_ag1, 0x4098
+unc_h_egress_vert_nack.iv_ag0, 0x898
+unc_h_egress_vert_occupancy.ad_ag0, 0x190
+unc_h_egress_vert_occupancy.ad_ag1, 0x1090
+unc_h_egress_vert_occupancy.ak_ag0, 0x290
+unc_h_egress_vert_occupancy.ak_ag1, 0x2090
+unc_h_egress_vert_occupancy.bl_ag0, 0x490
+unc_h_egress_vert_occupancy.bl_ag1, 0x4090
+unc_h_egress_vert_occupancy.iv_ag0, 0x890
+unc_h_egress_vert_starved.ad_ag0, 0x19a
+unc_h_egress_vert_starved.ad_ag1, 0x109a
+unc_h_egress_vert_starved.ak_ag0, 0x29a
+unc_h_egress_vert_starved.ak_ag1, 0x209a
+unc_h_egress_vert_starved.bl_ag0, 0x49a
+unc_h_egress_vert_starved.bl_ag1, 0x409a
+unc_h_egress_vert_starved.iv_ag0, 0x89a
+unc_h_fast_asserted.horz, 0x1a5
+unc_h_fast_asserted.vert, 0xa5
+unc_h_horz_ring_ad_in_use.left_even, 0x1a7
+unc_h_horz_ring_ad_in_use.left_odd, 0x2a7
+unc_h_horz_ring_ad_in_use.right_even, 0x4a7
+unc_h_horz_ring_ad_in_use.right_odd, 0x8a7
+unc_h_horz_ring_ak_in_use.left_even, 0x1a9
+unc_h_horz_ring_ak_in_use.left_odd, 0x2a9
+unc_h_horz_ring_ak_in_use.right_even, 0x4a9
+unc_h_horz_ring_ak_in_use.right_odd, 0x8a9
+unc_h_horz_ring_bl_in_use.left_even, 0x1ab
+unc_h_horz_ring_bl_in_use.left_odd, 0x2ab
+unc_h_horz_ring_bl_in_use.right_even, 0x4ab
+unc_h_horz_ring_bl_in_use.right_odd, 0x8ab
+unc_h_horz_ring_iv_in_use.left, 0x1ad
+unc_h_horz_ring_iv_in_use.right, 0x4ad
+unc_h_ingress_inserts.ipq, 0x413
+unc_h_ingress_inserts.irq, 0x113
+unc_h_ingress_inserts.irq_rej, 0x213
+unc_h_ingress_inserts.prq, 0x1013
+unc_h_ingress_inserts.prq_rej, 0x2013
+unc_h_ingress_int_starved.ipq, 0x414
+unc_h_ingress_int_starved.irq, 0x114
+unc_h_ingress_int_starved.ismq, 0x814
+unc_h_ingress_int_starved.prq, 0x1014
+unc_h_ingress_occupancy.ipq, 0x411
+unc_h_ingress_occupancy.irq, 0x111
+unc_h_ingress_occupancy.irq_rej, 0x211
+unc_h_ingress_occupancy.prq, 0x1011
+unc_h_ingress_occupancy.prq_rej, 0x2011
+unc_h_ingress_retry_ipq0_reject.ad_req_vn0, 0x122
+unc_h_ingress_retry_ipq0_reject.ad_rsp_vn0, 0x222
+unc_h_ingress_retry_ipq0_reject.ak_non_upi, 0x4022
+unc_h_ingress_retry_ipq0_reject.bl_ncb_vn0, 0x1022
+unc_h_ingress_retry_ipq0_reject.bl_ncs_vn0, 0x2022
+unc_h_ingress_retry_ipq0_reject.bl_rsp_vn0, 0x422
+unc_h_ingress_retry_ipq0_reject.bl_wb_vn0, 0x822
+unc_h_ingress_retry_ipq0_reject.iv_non_upi, 0x8022
+unc_h_ingress_retry_ipq1_reject.allow_snp, 0x4023
+unc_h_ingress_retry_ipq1_reject.any_reject_ipq0, 0x123
+unc_h_ingress_retry_ipq1_reject.pa_match, 0x8023
+unc_h_ingress_retry_ipq1_reject.sf_victim, 0x823
+unc_h_ingress_retry_ipq1_reject.sf_way, 0x2023
+unc_h_ingress_retry_irq0_reject.ad_req_vn0, 0x118
+unc_h_ingress_retry_irq0_reject.ad_rsp_vn0, 0x218
+unc_h_ingress_retry_irq0_reject.ak_non_upi, 0x4018
+unc_h_ingress_retry_irq0_reject.bl_ncb_vn0, 0x1018
+unc_h_ingress_retry_irq0_reject.bl_ncs_vn0, 0x2018
+unc_h_ingress_retry_irq0_reject.bl_rsp_vn0, 0x418
+unc_h_ingress_retry_irq0_reject.bl_wb_vn0, 0x818
+unc_h_ingress_retry_irq0_reject.iv_non_upi, 0x8018
+unc_h_ingress_retry_irq1_reject.allow_snp, 0x4019
+unc_h_ingress_retry_irq1_reject.any_reject_irq0, 0x119
+unc_h_ingress_retry_irq1_reject.pa_match, 0x8019
+unc_h_ingress_retry_irq1_reject.sf_victim, 0x819
+unc_h_ingress_retry_irq1_reject.sf_way, 0x2019
+unc_h_ingress_retry_ismq0_reject.ad_req_vn0, 0x124
+unc_h_ingress_retry_ismq0_reject.ad_rsp_vn0, 0x224
+unc_h_ingress_retry_ismq0_reject.ak_non_upi, 0x4024
+unc_h_ingress_retry_ismq0_reject.bl_ncb_vn0, 0x1024
+unc_h_ingress_retry_ismq0_reject.bl_ncs_vn0, 0x2024
+unc_h_ingress_retry_ismq0_reject.bl_rsp_vn0, 0x424
+unc_h_ingress_retry_ismq0_reject.bl_wb_vn0, 0x824
+unc_h_ingress_retry_ismq0_reject.iv_non_upi, 0x8024
+unc_h_ingress_retry_ismq0_retry.ad_req_vn0, 0x12c
+unc_h_ingress_retry_ismq0_retry.ad_rsp_vn0, 0x22c
+unc_h_ingress_retry_ismq0_retry.ak_non_upi, 0x402c
+unc_h_ingress_retry_ismq0_retry.bl_ncb_vn0, 0x102c
+unc_h_ingress_retry_ismq0_retry.bl_ncs_vn0, 0x202c
+unc_h_ingress_retry_ismq0_retry.bl_rsp_vn0, 0x42c
+unc_h_ingress_retry_ismq0_retry.bl_wb_vn0, 0x82c
+unc_h_ingress_retry_ismq0_retry.iv_non_upi, 0x802c
+unc_h_ingress_retry_other0_retry.ad_req_vn0, 0x12e
+unc_h_ingress_retry_other0_retry.ad_rsp_vn0, 0x22e
+unc_h_ingress_retry_other0_retry.ak_non_upi, 0x402e
+unc_h_ingress_retry_other0_retry.bl_ncb_vn0, 0x102e
+unc_h_ingress_retry_other0_retry.bl_ncs_vn0, 0x202e
+unc_h_ingress_retry_other0_retry.bl_rsp_vn0, 0x42e
+unc_h_ingress_retry_other0_retry.bl_wb_vn0, 0x82e
+unc_h_ingress_retry_other0_retry.iv_non_upi, 0x802e
+unc_h_ingress_retry_other1_retry.allow_snp, 0x402f
+unc_h_ingress_retry_other1_retry.any_reject_irq0, 0x12f
+unc_h_ingress_retry_other1_retry.pa_match, 0x802f
+unc_h_ingress_retry_other1_retry.sf_victim, 0x82f
+unc_h_ingress_retry_other1_retry.sf_way, 0x202f
+unc_h_ingress_retry_prq0_reject.ad_req_vn0, 0x120
+unc_h_ingress_retry_prq0_reject.ad_rsp_vn0, 0x220
+unc_h_ingress_retry_prq0_reject.ak_non_upi, 0x4020
+unc_h_ingress_retry_prq0_reject.bl_ncb_vn0, 0x1020
+unc_h_ingress_retry_prq0_reject.bl_ncs_vn0, 0x2020
+unc_h_ingress_retry_prq0_reject.bl_rsp_vn0, 0x420
+unc_h_ingress_retry_prq0_reject.bl_wb_vn0, 0x820
+unc_h_ingress_retry_prq0_reject.iv_non_upi, 0x8020
+unc_h_ingress_retry_prq1_reject.allow_snp, 0x4021
+unc_h_ingress_retry_prq1_reject.any_reject_irq0, 0x121
+unc_h_ingress_retry_prq1_reject.pa_match, 0x8021
+unc_h_ingress_retry_prq1_reject.sf_victim, 0x821
+unc_h_ingress_retry_prq1_reject.sf_way, 0x2021
+unc_h_ingress_retry_req_q0_retry.ad_req_vn0, 0x12a
+unc_h_ingress_retry_req_q0_retry.ad_rsp_vn0, 0x22a
+unc_h_ingress_retry_req_q0_retry.ak_non_upi, 0x402a
+unc_h_ingress_retry_req_q0_retry.bl_ncb_vn0, 0x102a
+unc_h_ingress_retry_req_q0_retry.bl_ncs_vn0, 0x202a
+unc_h_ingress_retry_req_q0_retry.bl_rsp_vn0, 0x42a
+unc_h_ingress_retry_req_q0_retry.bl_wb_vn0, 0x82a
+unc_h_ingress_retry_req_q0_retry.iv_non_upi, 0x802a
+unc_h_ingress_retry_req_q1_retry.allow_snp, 0x402b
+unc_h_ingress_retry_req_q1_retry.any_reject_irq0, 0x12b
+unc_h_ingress_retry_req_q1_retry.pa_match, 0x802b
+unc_h_ingress_retry_req_q1_retry.sf_victim, 0x82b
+unc_h_ingress_retry_req_q1_retry.sf_way, 0x202b
+unc_h_misc.cv0_pref_miss, 0x2039
+unc_h_misc.cv0_pref_vic, 0x1039
+unc_h_misc.rfo_hit_s, 0x839
+unc_h_misc.rspi_was_fse, 0x139
+unc_h_misc.wc_aliasing, 0x239
+unc_h_ring_bounces_horz.ad, 0x1a1
+unc_h_ring_bounces_horz.ak, 0x2a1
+unc_h_ring_bounces_horz.bl, 0x4a1
+unc_h_ring_bounces_horz.iv, 0x8a1
+unc_h_ring_bounces_vert.ad, 0x1a0
+unc_h_ring_bounces_vert.ak, 0x2a0
+unc_h_ring_bounces_vert.bl, 0x4a0
+unc_h_ring_bounces_vert.iv, 0x8a0
+unc_h_ring_sink_starved_horz.ad, 0x1a3
+unc_h_ring_sink_starved_horz.ak, 0x2a3
+unc_h_ring_sink_starved_horz.bl, 0x4a3
+unc_h_ring_sink_starved_horz.iv, 0x8a3
+unc_h_ring_sink_starved_vert.ad, 0x1a2
+unc_h_ring_sink_starved_vert.ak, 0x2a2
+unc_h_ring_sink_starved_vert.bl, 0x4a2
+unc_h_ring_sink_starved_vert.iv, 0x8a2
+unc_h_ring_src_thrtl, 0xa4
+unc_h_sf_lookup.any, 0x1134
+unc_h_sf_lookup.data_read, 0x334
+unc_h_sf_lookup.remote_snoop, 0x934
+unc_h_sf_lookup.write, 0x534
+unc_h_tg_ingress_busy_starved.ad_bnc, 0x1b4
+unc_h_tg_ingress_busy_starved.ad_crd, 0x10b4
+unc_h_tg_ingress_busy_starved.bl_bnc, 0x4b4
+unc_h_tg_ingress_busy_starved.bl_crd, 0x40b4
+unc_h_tg_ingress_bypass.ad_bnc, 0x1b2
+unc_h_tg_ingress_bypass.ad_crd, 0x10b2
+unc_h_tg_ingress_bypass.ak_bnc, 0x2b2
+unc_h_tg_ingress_bypass.bl_bnc, 0x4b2
+unc_h_tg_ingress_bypass.bl_crd, 0x40b2
+unc_h_tg_ingress_bypass.iv_bnc, 0x8b2
+unc_h_tg_ingress_crd_starved.ad_bnc, 0x1b3
+unc_h_tg_ingress_crd_starved.ad_crd, 0x10b3
+unc_h_tg_ingress_crd_starved.ak_bnc, 0x2b3
+unc_h_tg_ingress_crd_starved.bl_bnc, 0x4b3
+unc_h_tg_ingress_crd_starved.bl_crd, 0x40b3
+unc_h_tg_ingress_crd_starved.ifv, 0x80b3
+unc_h_tg_ingress_crd_starved.iv_bnc, 0x8b3
+unc_h_tg_ingress_inserts.ad_bnc, 0x1b1
+unc_h_tg_ingress_inserts.ad_crd, 0x10b1
+unc_h_tg_ingress_inserts.ak_bnc, 0x2b1
+unc_h_tg_ingress_inserts.bl_bnc, 0x4b1
+unc_h_tg_ingress_inserts.bl_crd, 0x40b1
+unc_h_tg_ingress_inserts.iv_bnc, 0x8b1
+unc_h_tg_ingress_occupancy.ad_bnc, 0x1b0
+unc_h_tg_ingress_occupancy.ad_crd, 0x10b0
+unc_h_tg_ingress_occupancy.ak_bnc, 0x2b0
+unc_h_tg_ingress_occupancy.bl_bnc, 0x4b0
+unc_h_tg_ingress_occupancy.bl_crd, 0x40b0
+unc_h_tg_ingress_occupancy.iv_bnc, 0x8b0
+unc_h_tor_inserts.evict, 0x3235
+unc_h_tor_inserts.hit, 0x1f35
+unc_h_tor_inserts.ipq, 0x3835
+unc_h_tor_inserts.irq, 0x3135
+unc_h_tor_inserts.miss, 0x2f35
+unc_h_tor_inserts.prq, 0x3435
+unc_h_tor_occupancy.evict, 0x3236
+unc_h_tor_occupancy.hit, 0x1f36
+unc_h_tor_occupancy.ipq, 0x3836
+unc_h_tor_occupancy.ipq_hit, 0x1836
+unc_h_tor_occupancy.ipq_miss, 0x2836
+unc_h_tor_occupancy.irq, 0x3136
+unc_h_tor_occupancy.irq_hit, 0x1136
+unc_h_tor_occupancy.irq_miss, 0x2136
+unc_h_tor_occupancy.miss, 0x2f36
+unc_h_tor_occupancy.prq, 0x3436
+unc_h_tor_occupancy.prq_hit, 0x1436
+unc_h_tor_occupancy.prq_miss, 0x2436
+unc_h_vert_ring_ad_in_use.dn_even, 0x4a6
+unc_h_vert_ring_ad_in_use.dn_odd, 0x8a6
+unc_h_vert_ring_ad_in_use.up_even, 0x1a6
+unc_h_vert_ring_ad_in_use.up_odd, 0x2a6
+unc_h_vert_ring_ak_in_use.dn_even, 0x4a8
+unc_h_vert_ring_ak_in_use.dn_odd, 0x8a8
+unc_h_vert_ring_ak_in_use.up_even, 0x1a8
+unc_h_vert_ring_ak_in_use.up_odd, 0x2a8
+unc_h_vert_ring_bl_in_use.dn_even, 0x4aa
+unc_h_vert_ring_bl_in_use.dn_odd, 0x8aa
+unc_h_vert_ring_bl_in_use.up_even, 0x1aa
+unc_h_vert_ring_bl_in_use.up_odd, 0x2aa
+unc_h_vert_ring_iv_in_use.dn, 0x4ac
+unc_h_vert_ring_iv_in_use.up, 0x1ac
+unc_m2p_egress_cycles_full.ad_0, 0x125
+unc_m2p_egress_cycles_full.ad_1, 0x825
+unc_m2p_egress_cycles_full.ak_0, 0x225
+unc_m2p_egress_cycles_full.ak_1, 0x1025
+unc_m2p_egress_cycles_full.bl_0, 0x425
+unc_m2p_egress_cycles_full.bl_1, 0x2025
+unc_m2p_egress_cycles_ne.ad_0, 0x123
+unc_m2p_egress_cycles_ne.ad_1, 0x823
+unc_m2p_egress_cycles_ne.ak_0, 0x223
+unc_m2p_egress_cycles_ne.ak_1, 0x1023
+unc_m2p_egress_cycles_ne.bl_0, 0x423
+unc_m2p_egress_cycles_ne.bl_1, 0x2023
+unc_m2p_egress_inserts.ad_0, 0x124
+unc_m2p_egress_inserts.ad_1, 0x1024
+unc_m2p_egress_inserts.ak_0, 0x224
+unc_m2p_egress_inserts.ak_1, 0x2024
+unc_m2p_egress_inserts.ak_crd_0, 0x824
+unc_m2p_egress_inserts.ak_crd_1, 0x8024
+unc_m2p_egress_inserts.bl_0, 0x424
+unc_m2p_egress_inserts.bl_1, 0x4024
+unc_m2p_ingress_cycles_ne.all, 0x8010
+unc_m2p_ingress_cycles_ne.cbo_idi, 0x110
+unc_m2p_ingress_cycles_ne.cbo_ncb, 0x210
+unc_m2p_ingress_cycles_ne.cbo_ncs, 0x410
+unc_m_cas_count.all, 0x303
+unc_m_cas_count.rd, 0x103
+unc_m_cas_count.wr, 0x203
+uops_retired.all, 0x10c2
+uops_retired.ms, 0x1c2
+uops_retired.packed_simd, 0x40c2
+uops_retired.scalar_simd, 0x20c2

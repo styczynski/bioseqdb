@@ -15,18 +15,11 @@
 
 #include <libassert/assert.hpp>
 
-/*
- * easy_profiler has been removed (Part 48.7 of NEW_PROFILING_RESEARCH.md).
- * The macros below stay as no-ops only because the upstream minimap2
- * reference under bench/tool_minimap2 still expands them; that code is
- * treated as a black box and is not part of bioseq.dylib. The bioseq
- * tree itself uses bioseq::instr::region / loop instead.
- */
-#define EASY_BLOCK(...)
-#define EASY_PROFILER_ENABLE
-#define EASY_END_BLOCK
-#define EASY_VIN(...)
-#define EASY_VAR(...)
-#define EASY_FUNCTION(...)
+// easy_profiler is fully removed (Part 48.7 of NEW_PROFILING_RESEARCH.md
+// and follow-up): the bioseq tree uses bioseq::instr::region/loop and
+// the bench/tool_minimap2 sources use BENCH_INSTR_BLOCK from
+// `bench/tool_minimap2/minimap2/instr_shim.h`. No EASY_* macro should
+// be referenced anywhere; if a future paste of upstream minimap2 brings
+// one back, fail the build instead of silently shimming it.
 
 #endif

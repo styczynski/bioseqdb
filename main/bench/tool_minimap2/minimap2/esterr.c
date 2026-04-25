@@ -1,4 +1,5 @@
 #include "common.h"
+#include "instr_shim.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -31,7 +32,7 @@ static int get_mini_idx(int qlen, const mm128_t *a, int32_t n, const uint64_t *m
 
 void mm_est_err(const mm_idx_t *mi, int qlen, int n_regs, mm_reg1_t *regs, const mm128_t *a, int32_t n, const uint64_t *mini_pos)
 {
-	EASY_BLOCK("mm_est_err");
+	BENCH_INSTR_BLOCK("tool_minimap2.mm_est_err");
 	int i;
 	uint64_t sum_k = 0;
 	float avg_k;

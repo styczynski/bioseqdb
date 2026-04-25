@@ -1,0 +1,36 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { cc: gcc-12, cxx: g++-12 }
+          - { cc: gcc-13, cxx: g++-13 }
+          - { cc: gcc-14, cxx: g++-14 }
+          - { cc: clang-16, cxx: clang++-16 }
+          - { cc: clang-17, cxx: clang++-17 }
+          - { cc: clang-18, cxx: clang++-18 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cxx }}
+        run: cmake . -B build -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --target tests
+
+      - name: Test
+        run: ./build/bin/tests ~[EventCounter] ~[Sampler] ~[HardwareInfo] ~[MultiThreadEventCounter] ~[MultiThreadSampler]
