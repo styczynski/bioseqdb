@@ -9,6 +9,7 @@ SET bioseq.logging = on;
 SET bioseq.enable_bioseq_index_scan TO TRUE;
 set bioseq.enable_column_cache to on;
 set bioseq.enable_vectorization to on;
+SET bioseq.aligner.enable_profiling = on;
 
 -- ---- Test 1: dna4 + uint64 roundtrip through heap (not columnar) ----
 -- Use a vanilla heap table so storage/columnar interactions don't mask

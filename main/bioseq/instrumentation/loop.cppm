@@ -1,0 +1,79 @@
+/**
+ * @file instrumentation/loop.cppm
+ * @brief LoopScope<Args> RAII type with tick().
+ */
+module;
+
+#include <cstdint>
+
+export module bioseq_instr.loop;
+
+import bioseq_instr.config;
+import bioseq_instr.descriptor;
+import bioseq_instr.aggregate;
+import bioseq_instr.thread_state;
+import bioseq_instr.clock;
+import bioseq_instr.global_state;
+
+export namespace bioseq::instr {
+
+template<is_context_args Args>
+struct [[nodiscard]] LoopScope {
+    const LoopDescriptor* desc = nullptr;
+    std::uint64_t         t_begin_ns = 0;
+    std::uint64_t         iterations = 0;
+    std::uint64_t         work = 0;
+    bool                  skipped = true;
+
+    [[gnu::always_inline]]
+    explicit LoopScope(const LoopDescriptor* d) noexcept {
+        if constexpr (Args::enable_profiling) {
+            if (!runtime_enabled() || d == nullptr || d->id == 0) return;
+            auto* prof = tls_profiler<Args>;
+            if (prof == nullptr) return;
+            desc = d;
+            t_begin_ns = clock::now_ns();
+            prof->stack_depth += 1;
+            skipped = false;
+        } else {
+            (void)d;
+        }
+    }
+
+    [[gnu::always_inline]] ~LoopScope() noexcept {
+        if constexpr (Args::enable_profiling) {
+            if (skipped) return;
+            const auto end_ns = clock::now_ns();
+            const auto delta_ns = end_ns - t_begin_ns;
+            auto* prof = tls_profiler<Args>;
+            if (prof == nullptr) return;
+            if (prof->stack_depth > 0) prof->stack_depth -= 1;
+            auto* agg = prof->loop_aggregates.get_or_create(desc->id);
+            if (agg != nullptr) {
+                loop_aggregate_record(*agg, delta_ns, iterations, work);
+            }
+        }
+    }
+
+    [[gnu::always_inline]] void tick(std::uint64_t units = 1) noexcept {
+        if constexpr (Args::enable_profiling) {
+            iterations += 1;
+            work += units;
+        } else {
+            (void)units;
+        }
+    }
+
+    LoopScope(LoopScope&&) = delete;
+    LoopScope(const LoopScope&) = delete;
+    LoopScope& operator=(LoopScope&&) = delete;
+    LoopScope& operator=(const LoopScope&) = delete;
+};
+
+template<is_context_args Args>
+[[nodiscard, gnu::always_inline]]
+inline LoopScope<Args> loop(const LoopDescriptor* d) noexcept {
+    return LoopScope<Args>(d);
+}
+
+}  // namespace bioseq::instr

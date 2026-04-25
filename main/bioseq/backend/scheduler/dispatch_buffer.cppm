@@ -63,6 +63,7 @@ import bioseq_sequences.minimap_port;
 import bioseq_cigar;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sidecar;
+import bioseq_instr;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -212,8 +213,26 @@ public:
             return results;
         }
 
-        dispatch_pgseq(alphabet_code, width_code,
-            [&]<class Dst>() {
+        /*
+         * Profiler dispatch fork. Picks one of the two pipelines based
+         * on bioseq.aligner.enable_profiling (mirrored into
+         * Minimap2Params::enable_profiling by build_params_from_gucs in
+         * columnar_customscan.cppm). The two compile to genuinely
+         * different code: every templated bioseq::instr::region/loop
+         * call below is instantiated per Args, so the no-profiling
+         * instantiation collapses to nothing.
+         *
+         * We use the run_pipeline lambda + a per-args constexpr-if dispatcher
+         * to share the pipeline body; the templated outer scope owns the
+         * ProfilerBlock + RAII installer when profiling is on.
+         */
+        auto run_pipeline_body = [&]<bioseq::instr::is_context_args Args>() {
+            static const auto* batch_desc =
+                bioseq::instr::register_region_static("BatchProcessor.process_sequences");
+            auto _batch_scope = bioseq::instr::region<Args>(batch_desc);
+
+            dispatch_pgseq(alphabet_code, width_code,
+                [&]<class Dst>() {
                 /*
                  * Build the per-batch query compact_sequence_range once
                  * from the stashed PG varlena. make_seq_range_from_pg
@@ -361,6 +380,18 @@ public:
                     }
                 }
             });
+        };  // run_pipeline_body
+
+        if (base_params.enable_profiling) {
+            using Args = bioseq::instr::context_args_profiling_full;
+            bioseq::instr::ProfilerBlock<Args> profiler_block;
+            bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
+            run_pipeline_body.template operator()<Args>();
+            bioseq::instr::access::write_summary_to_justlog<Args>(profiler_block);
+        } else {
+            using Args = bioseq::instr::context_args_no_profiling;
+            run_pipeline_body.template operator()<Args>();
+        }
 
         return results;
     }

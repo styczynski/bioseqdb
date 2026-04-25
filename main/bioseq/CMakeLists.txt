@@ -6,7 +6,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
-file(GLOB_RECURSE SRC_MOD_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm)
+file(GLOB_RECURSE SRC_MOD_FILES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 message("SOURCES ${SRC_FILES}")
 
 message("MODULES? ${SRC_MOD_FILES}")
@@ -66,7 +70,9 @@ file(GLOB_RECURSE A_SRC_MOD_FILES
   ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp

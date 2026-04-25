@@ -109,6 +109,12 @@ int  bioseq_aligner_block_max_size  = 256;
  */
 int  bioseq_aligner_chaining_algorithm  = 0;  /* matches ChainingAlgorithmType::SCALAR_MM2 */
 int  bioseq_aligner_base_alignment_algorithm = 1;  /* matches BaseAlignmentAlgorithmType::BLOCK_ALIGNER */
+/*
+ * Runtime profiling toggle. When true, BatchProcessor::process_sequences
+ * picks the profiling pipeline (context_args_profiling_full); when false,
+ * picks context_args_no_profiling (zero overhead). Defaults to false.
+ */
+bool bioseq_aligner_enable_profiling = false;
 
 /*
  * bioseq_init is the module's top-level initialiser. It wires up the GUC
@@ -444,6 +450,16 @@ bioseq_guc_init()
 							 NULL, &bioseq_aligner_base_alignment_algorithm, 1,
 							 base_alignment_algorithm_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.aligner.enable_profiling",
+		"Enable bioseq runtime profiler for the aligner pipeline.",
+		NULL,
+		&bioseq_aligner_enable_profiling,
+		false,
+		PGC_USERSET,
+		0,
+		NULL, NULL, NULL);
 }
 
 }

@@ -186,6 +186,12 @@ struct Minimap2Params {
     /// Runtime base-alignment algorithm selector.
     BaseAlignmentAlgorithmType   base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
 
+    /// Runtime profiler toggle. Driven by bioseq.aligner.enable_profiling
+    /// GUC. When true, BatchProcessor::process_sequences instantiates the
+    /// pipeline with context_args_profiling_full; when false, the
+    /// no-profiling instantiation runs (zero overhead).
+    bool                          enable_profiling          = false;
+
     /// Build ChainingParams from this Minimap2Params.
     ///
     /// Extracts only the chaining-relevant subset and precomputes derived values.
