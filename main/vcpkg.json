@@ -12,6 +12,6 @@
     "libassert",
     "reflectcpp",
     "zlib",
-    "sqlgen"
+    {"name": "sqlgen", "features": ["postgres"]}
   ]
 }

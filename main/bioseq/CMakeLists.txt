@@ -1,6 +1,8 @@
 # set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm/bin/clang)
 # set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm/bin/clang++)
 
+set(VCPKG_CMAKE_CONFIGURE_OPTIONS ${VCPKG_CMAKE_CONFIGURE_OPTIONS} -DSQLGEN_POSTGRES=1)
+
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
@@ -78,7 +80,19 @@ file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/../bench/*_test.cpp)
 
+file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cpp)
+
+file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS_MODULES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm)
+
 list (APPEND A_SRC_TESTS ${A_SRC_FILES})
+#list (APPEND A_INTEGRATION_SRC_TESTS ${A_SRC_FILES})
 
 list(REMOVE_ITEM SRC_FILES ${A_SRC_TESTS})
 list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
@@ -105,6 +119,12 @@ AddCommonTargetX(
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
   TESTS
     ${A_SRC_TESTS}
+  INTEGRATION_TESTS
+    ${A_INTEGRATION_SRC_TESTS}
+  INTEGRATION_TESTS_LINKS
+    sqlgen::sqlgen
+  INTEGRATION_TESTS_MODULES
+    ${A_INTEGRATION_SRC_TESTS_MODULES}
   LINKS
     safestring_static
     fmt
@@ -112,7 +132,6 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
-    sqlgen::sqlgen
   SOURCES
     ${A_SRC_FILES}
   SUPPORT_CXX_MODULES

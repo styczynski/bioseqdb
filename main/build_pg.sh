@@ -10,10 +10,12 @@ export CMAKE_EXPORT_COMPILE_COMMANDS=1 && \
 cd build && \
 cmake --preset dev-opt-pg .. && cmake --build . && \
 cmake --build . --target install && \
-"/Applications/Postgres.app/Contents/Versions/17/bin/psql" -h localhost -p 5432 "bioseq" -a -f ../bioseq/sql/setup.sql && \
-./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[.benchmark-evaluation]"
+./bioseq/bioseq_aligner_int_tests_exec --reporter console::out=-::colour-mode=ansi
 
+# "/Applications/Postgres.app/Contents/Versions/17/bin/psql" -h localhost -p 5432 "bioseq" -a -f ../bioseq/sql/setup.sql && \
+# ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[.benchmark-evaluation]"
 
+#./build/bioseq/bioseq_aligner_int_tests_exec --reporter console::out=-::colour-mode=ansi 
 #./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi  #"[minimizers]"
 
 #&& \ "/Applications/Postgres.app/Contents/Versions/17/bin/psql" -h localhost -p 5432 "bioseq" -a -f ../bioseq/sql/setup.sql

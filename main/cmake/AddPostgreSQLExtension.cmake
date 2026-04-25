@@ -7,31 +7,42 @@ set(SUPPORTED_TARGET_TYPES
 set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version major")
 
 # Find packages go here.
-find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
+find_package(
+  PostgreSQL ${POSTGRESQL_VERSION} REQUIRED
+  #PATHS "/Applications/Postgres.app/Contents/Versions/latest"
+)
 
 # Helper command to add extensions
 function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
   set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN)
-  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS)
+  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
-  message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}>")
+  message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}> <${EXTENSION_INTEGRATION_TESTS}>")
 
   set(EXTENSION_X_INTERNAL_TESTS ${EXTENSION_TESTS})
+  set(EXTENSION_X_INTERNAL_INT_TESTS ${EXTENSION_INTEGRATION_TESTS})
 
   if("${ENABLE_TEST_TARGET}" STREQUAL "OFF" OR "${ENABLE_TEST_TARGET}" STREQUAL "NEVER")
     unset(EXTENSION_X_INTERNAL_TESTS)
   endif()
 
-  if("${ENABLE_TEST_TARGET}" STREQUAL "ON")
+  if("${ENABLE_TEST_TARGET}" STREQUAL "ON" OR "${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
     if(EXTENSION_TYPE STREQUAL "EXEC")
       if(NOT EXTENSION_MAIN)
         message("You need to specify MAIN argument (name of the source file containing main function) when you use TESTS for TYPE EXEC")
       endif()
     endif()
     set(EXTENSION_TYPE "EXEC")
-    list(APPEND EXTENSION_SOURCES ${EXTENSION_X_INTERNAL_TESTS})
+    if("${ENABLE_TEST_TARGET}" STREQUAL "ON")
+      list(APPEND EXTENSION_SOURCES ${EXTENSION_X_INTERNAL_TESTS})
+    endif()
+    if("${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
+      set(EXTENSION_SOURCES ${EXTENSION_X_INTERNAL_INT_TESTS})
+      message("HUJEMUJE => ${EXTENSION_X_INTERNAL_INT_TESTS}")
+    endif()
+
     message("Source exclude '${EXTENSION_MAIN}' from '${EXTENSION_SOURCES}'")
     list(FILTER EXTENSION_SOURCES EXCLUDE REGEX ${EXTENSION_MAIN})
   endif()
@@ -59,7 +70,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   endif()
 
   # Override tests target name
-  if("${ENABLE_TEST_TARGET}" STREQUAL "ON")
+  if("${ENABLE_TEST_TARGET}" STREQUAL "ON" OR "${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
     set(EXTENSION_NAME ${LIBRARY_NAME})
   endif()
 
@@ -105,7 +116,13 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       endif()
     endif()
   else()
-    target_compile_definitions(${LIBRARY_NAME} PUBLIC -DNO_POSTGRES=1)
+    if("${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
+      target_include_directories(${LIBRARY_NAME} PRIVATE ${PostgreSQL_INCLUDE_DIRS})
+      target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::PostgreSQL)
+      target_compile_definitions(${LIBRARY_NAME} PUBLIC -DNO_POSTGRES=1)
+    else()
+      target_compile_definitions(${LIBRARY_NAME} PUBLIC -DNO_POSTGRES=1)
+    endif()
   endif() # End postgress setup
 
   # Debug
@@ -175,6 +192,18 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
     # Link libraries
     if(EXTENSION_LINKS)
       target_link_libraries(${LIBRARY_NAME} PRIVATE ${EXTENSION_LINKS})
+    endif()
+
+    if(EXTENSION_INTEGRATION_TESTS_LINKS)
+      if("${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
+        target_link_libraries(${LIBRARY_NAME} PRIVATE ${EXTENSION_INTEGRATION_TESTS_LINKS})
+      endif()
+    endif()
+
+    if(EXTENSION_INTEGRATION_TESTS_MODULES)
+      if("${ENABLE_TEST_TARGET}" STREQUAL "INTEGRATION")
+        set(EXTENSION_CXX_MOD_FILES ${EXTENSION_INTEGRATION_TESTS_MODULES})
+      endif()
     endif()
 
     # Suport CXX modules
@@ -272,21 +301,38 @@ function(AddCommonTargetX LIBRARY_NAME)
   set(SUBARGS ${ARGN})
   set(options)
   set(oneValueArgs)
-  set(multiValueArgs TESTS)
+  set(multiValueArgs TESTS INTEGRATION_TESTS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   message("TESTEESTSTSTS ${EXTENSION_TESTS}")
-  if(EXTENSION_TESTS)
-   AddCommonTarget("${LIBRARY_NAME}_tests_exec" "ON" ${SUBARGS})
-   # clang bug: ThinLTO drops TLS init wrappers (_ZTHW…) for module-attached
-   # thread_local template static data members. Triggers on mlogging's
-   # fmtlogDetailT<0>::sbc when linking the test exec. Disable LTO here only.
-   set_target_properties("${LIBRARY_NAME}_tests_exec" PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
-   add_custom_target(
+  if(EXTENSION_TESTS OR EXTENSION_INTEGRATION_TESTS)
+   if(EXTENSION_TESTS)
+    AddCommonTarget("${LIBRARY_NAME}_tests_exec" "ON" ${SUBARGS})
+    # clang bug: ThinLTO drops TLS init wrappers (_ZTHW…) for module-attached
+    # thread_local template static data members. Triggers on mlogging's
+    # fmtlogDetailT<0>::sbc when linking the test exec. Disable LTO here only.
+    set_target_properties("${LIBRARY_NAME}_tests_exec" PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+    add_custom_target(
       "test_${LIBRARY_NAME}"
       COMMAND "./${LIBRARY_NAME}_tests_exec" "--reporter" "console::out=-::colour-mode=ansi"
       DEPENDS "${LIBRARY_NAME}_tests_exec"
       WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     )
+   endif()
+   message("CHECK INT => '${EXTENSION_INTEGRATION_TESTS}'")
+   if(EXTENSION_INTEGRATION_TESTS)
+    message("add int target tests")
+    AddCommonTarget("${LIBRARY_NAME}_int_tests_exec" "INTEGRATION" ${SUBARGS})
+    # clang bug: ThinLTO drops TLS init wrappers (_ZTHW…) for module-attached
+    # thread_local template static data members. Triggers on mlogging's
+    # fmtlogDetailT<0>::sbc when linking the test exec. Disable LTO here only.
+    set_target_properties("${LIBRARY_NAME}_int_tests_exec" PROPERTIES INTERPROCEDURAL_OPTIMIZATION FALSE)
+    add_custom_target(
+      "integration_test_${LIBRARY_NAME}"
+      COMMAND "./${LIBRARY_NAME}_int_tests_exec" "--reporter" "console::out=-::colour-mode=ansi"
+      DEPENDS "${LIBRARY_NAME}_int_tests_exec"
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+   endif()
     AddCommonTarget("${LIBRARY_NAME}" "OFF" ${SUBARGS})
   else()
     AddCommonTarget("${LIBRARY_NAME}" "NEVER" ${SUBARGS})
