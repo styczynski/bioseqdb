@@ -533,6 +533,24 @@ private:
     std::vector<OutputCursor> output_cursors;
     int output_position = -1;
 
+    /*
+     * Additional Const-only mmsearch quals that share the primary
+     * mmsearch_context's seq column and (alphabet, width) typmod.
+     * Each entry holds the detoasted bioseq.seq varlena bytes for one
+     * extra query. After the primary batch runs, run_batch_and_build_cursors
+     * dispatches process_sequences once per extra query and intersects
+     * the per-entry match presence so output_cursors only emit rows
+     * that match every mmsearch qual (logical AND).
+     *
+     * Only the FIRST mmsearch context drives projection placeholders
+     * (bioseq.cigar / score / target_*); the extra queries are pure
+     * filters. Param-driven (cross-table) extras and same-column-but-
+     * different-typmod extras are not supported in this iteration —
+     * they are detected and rejected at BeginCustomScan with a log
+     * line so the user sees why the qual didn't apply.
+     */
+    std::vector<std::vector<char>> extra_query_varlenas;
+
 public:
     explicit TupleDispatchBuffer(const size_t estimated_tuple_count) {
         buffered_entries.reserve(estimated_tuple_count * 2);
@@ -590,8 +608,47 @@ public:
                 query_bp_size);
     }
 
+    /*
+     * Reset the primary mmsearch context AND any registered extra
+     * AND-filter queries. ReScanCustomScan calls this on the
+     * Param-rebind failure path (parameter NULL / wrong kind) — the
+     * extras are guaranteed empty in that case because BeginCustomScan
+     * rejects Param-primary + Const-extra combinations at registration
+     * time, so today this is a no-op for `extra_query_varlenas`. The
+     * coupling is intentional: if the rejection is ever relaxed,
+     * extras must follow the primary's lifecycle (resetting the primary
+     * implicitly invalidates any AND-filters that reference it).
+     */
     void clear_mmsearch_context() {
         mmsearch_context = MmsearchContext{};
+        extra_query_varlenas.clear();
+    }
+
+    /*
+     * Append another Const-driven mmsearch query that shares the
+     * primary context's column and typmod. The caller (BeginCustomScan)
+     * is responsible for validating the column / typmod match before
+     * calling — we only own ownership of the bytes here.
+     *
+     * The accepted shape is exactly one same-column same-typmod
+     * mmsearch beyond the first. Any extra query with a different
+     * column or typmod must be rejected by the caller; if added here
+     * it would silently get dispatched against the first context's
+     * (seq, alphabet, width) and produce nonsense matches.
+     */
+    void add_extra_const_query(std::vector<char> query_varlena_bytes) {
+        const PgCompactSequenceHdr* hdr =
+            reinterpret_cast<const PgCompactSequenceHdr*>(
+                query_varlena_bytes.data());
+        const uint32_t bp_size = (query_varlena_bytes.empty() || hdr == nullptr)
+            ? 0u : hdr->bp_size;
+        JustLog("[bioseq] pg: TupleDispatchBuffer::add_extra_const_query() bp_size={} (extra index #{})",
+                bp_size, extra_query_varlenas.size());
+        extra_query_varlenas.push_back(std::move(query_varlena_bytes));
+    }
+
+    [[nodiscard]] size_t extra_query_count() const {
+        return extra_query_varlenas.size();
     }
 
     /*
@@ -772,11 +829,26 @@ public:
          * for the full batch and no extra copy happens. Rows without a
          * sidecar blob stay at the default-constructed {nullptr, 0}
          * pair, which the batch processor interprets as "recompute".
+         *
+         * We use the buffer entry index `i` as the BatchProcessor's
+         * key rather than the row's primary_key column. The PK from
+         * the user's table is only available when the targetlist
+         * includes a bioseq.<projection>(pk) FuncExpr (which is what
+         * BeginCustomScan walks to discover `primary_key_attno`).
+         * For queries without such a projection — e.g. plain
+         * `SELECT t.pk FROM t WHERE mmsearch(t.seq, ...)` or
+         * cross-table mmsearch joins where the qual is the only
+         * bioseq surface — primary_key_attno stays
+         * InvalidAttrNumber and every row would map to query_id=-1,
+         * letting the std::map key collapse all matches into one
+         * bucket. Using the entry index as the key keeps each row
+         * uniquely identifiable inside the batch regardless of
+         * targetlist shape.
          */
         for (size_t i = 0; i < batch_size; ++i) {
             const BufferedScanEntry& entry = buffered_entries[i];
             target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
-            query_ids[i]   = entry.primary_key_is_null ? -1 : entry.primary_key;
+            query_ids[i]   = static_cast<int32_t>(i);
             if (!entry.sidecar_index_blob.empty()) {
                 index_blobs[i].data  = entry.sidecar_index_blob.data();
                 index_blobs[i].bytes = entry.sidecar_index_blob.size();
@@ -807,20 +879,110 @@ public:
             blob_arg,
             last_stats);
 
+        /*
+         * For every extra mmsearch qual the caller registered we run
+         * an independent process_sequences pass over the same
+         * buffered targets, then logically AND the matches into the
+         * primary `match_map`: an entry index that fails to match
+         * any extra query is ERASED from `match_map`, so it never
+         * makes it into output_cursors below. This is the simple
+         * AND semantics the user asked for ("multiple mmsearch
+         * quals filter the row through ALL of them"). We do NOT
+         * carry the extra queries' MatchResults through to
+         * placeholder consts — only the first context drives the
+         * bioseq.* projections. That keeps the output projection
+         * shape single-valued; if a future iteration wants to
+         * surface per-qual cigars we'd need to extend the
+         * placeholder Const inventory.
+         */
+        for (size_t extra_idx = 0; extra_idx < extra_query_varlenas.size();
+             ++extra_idx) {
+            const std::vector<char>& extra_bytes =
+                extra_query_varlenas[extra_idx];
+            if (extra_bytes.empty()) {
+                continue;
+            }
+            const PgCompactSequenceHdr* extra_hdr =
+                reinterpret_cast<const PgCompactSequenceHdr*>(
+                    extra_bytes.data());
+            BatchExecutionStats discarded_stats{};
+            auto extra_match_map =
+                processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
+                    batch_size,
+                    mmsearch_context.alphabet_code,
+                    mmsearch_context.width_code,
+                    extra_hdr,
+                    target_hdrs, query_ids,
+                    base_params,
+                    blob_arg,
+                    discarded_stats);
+            JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} produced matches for {} entries",
+                    extra_idx, extra_match_map.size());
+            for (auto it = match_map.begin(); it != match_map.end(); ) {
+                if (extra_match_map.find(it->first) == extra_match_map.end()) {
+                    /*
+                     * This entry matched the primary mmsearch but not
+                     * the current extra qual — drop it from the
+                     * primary match_map so the output cursor build
+                     * below skips it.
+                     */
+                    it = match_map.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
         output_cursors.clear();
         for (size_t i = 0; i < buffered_entries.size(); ++i) {
             const BufferedScanEntry& entry = buffered_entries[i];
-            if (entry.primary_key_is_null) {
-                JustLog("[bioseq] pg: batch skip: null primary key for entry {}", i);
-                continue;
-            }
-            auto hit = match_map.find(entry.primary_key);
+            /*
+             * Match map is keyed on the entry index (see comment in
+             * the loop above that built `query_ids[i] = i`). Skip
+             * entries whose index is not in the map — those rows had
+             * no usable target sequence (NULL seq column) or the
+             * aligner produced zero matches; either way `WHERE
+             * mmsearch(...)` evaluates to FALSE for them.
+             */
+            auto hit = match_map.find(static_cast<int32_t>(i));
             if (hit == match_map.end()) {
-                JustLog("[bioseq] pg: batch miss for PK={}; WHERE mmsearch evaluates to FALSE",
-                        entry.primary_key);
+                JustLog("[bioseq] pg: batch miss for entry index={}; WHERE mmsearch evaluates to FALSE",
+                        i);
                 continue;
             }
+            /*
+             * Filter degenerate matches. The aligner can return a
+             * MatchResult that has a chain pinned in the seed pass
+             * but no usable base alignment (`has_cigar == false` or
+             * `cigar` empty). When the user requested a CIGAR via
+             * `bioseq.cigar(...)`, an empty/no-cigar match is the
+             * fuzzy-search equivalent of "no real hit": surfacing it
+             * as a row would mean WHERE mmsearch(...) acts more like
+             * a tautology than a filter, which contradicts the
+             * substring-match semantics users expect of mmsearch.
+             *
+             * Skipping these here filters them out at output-cursor
+             * build time; the row never reaches the projection
+             * pipeline, so its bioseq.cigar / bioseq.target_start /
+             * etc. would have come back as the placeholder Const's
+             * default-NULL state — exactly the kind of "row but
+             * empty fields" output the user reported as undesired.
+             *
+             * When `do_cigar` is false (the user only projects e.g.
+             * bioseq.target_start / bioseq.score), we don't have a
+             * cigar to inspect; in that case we keep every match
+             * the chainer surfaced because the chain itself is
+             * meaningful (passed `min_seed_count` / `min_chain_score`).
+             */
             for (size_t m = 0; m < hit->second.size(); ++m) {
+                const MatchResult& match_candidate = hit->second[m];
+                if (base_params.do_cigar
+                    && (!match_candidate.has_cigar
+                        || match_candidate.cigar.empty())) {
+                    JustLog("[bioseq] pg: batch skip: degenerate match for entry index={} cursor m={} (do_cigar=true but cigar empty)",
+                            i, m);
+                    continue;
+                }
                 output_cursors.push_back({ i, m });
             }
         }
@@ -846,9 +1008,10 @@ public:
             return std::nullopt;
         }
         BufferedScanEntry& entry = buffered_entries[cursor.scan_entry_index];
-        auto hit = match_map.find(entry.primary_key);
+        auto hit = match_map.find(static_cast<int32_t>(cursor.scan_entry_index));
         if (hit == match_map.end() || cursor.match_index >= hit->second.size()) {
-            JustLog("[bioseq] pg: cursor references missing match for PK={}", entry.primary_key);
+            JustLog("[bioseq] pg: cursor references missing match for entry index={}",
+                    cursor.scan_entry_index);
             return std::nullopt;
         }
         return NextOutput{ &entry, &hit->second[cursor.match_index] };

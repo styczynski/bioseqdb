@@ -239,6 +239,32 @@ PlanTreeMutator(Plan* node, void* context)
 			if (agg_node->plan.lefttree->type == T_CustomScan)
 			{
 				JustLog("[bioseq] pg: PlanTreeMutator() Agg has CustomScan child");
+				/*
+				 * Skip the vectorised-aggregator rewrite when the Agg
+				 * pulls a value from a bioseq.<projection>(...) call or
+				 * an mmsearch FuncExpr. Those go through the BioseqScan's
+				 * placeholder-Const rewrite at execution time, which
+				 * yields a regular tuple slot — not the vector-typed
+				 * slot the vectorised aggregator expects. Without this
+				 * guard the vectorised aggregator engages, dereferences
+				 * the regular slot as if it were a VectorTupleTableSlot,
+				 * and crashes with a SIGSEGV (observed for
+				 * `SELECT MIN(bioseq.target_start(a)) FROM ... WHERE
+				 *  mmsearch(seq, '...')`).
+				 */
+				const bool agg_input_uses_bioseq_projection =
+					bioseq_expr_uses_bioseq_projection(
+						reinterpret_cast<Node*>(agg_node->plan.targetlist))
+					|| bioseq_expr_uses_bioseq_projection(
+						reinterpret_cast<Node*>(agg_node->plan.qual))
+					|| bioseq_expr_uses_bioseq_projection(
+						reinterpret_cast<Node*>(agg_node->plan.lefttree->targetlist))
+					|| bioseq_expr_uses_bioseq_projection(
+						reinterpret_cast<Node*>(agg_node->plan.lefttree->qual));
+				if (agg_input_uses_bioseq_projection) {
+					JustLog("[bioseq] pg: PlanTreeMutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
+					return node;
+				}
 				if (agg_node->aggstrategy == AGG_PLAIN)
 				{
 					JustLog("[bioseq] pg: PlanTreeMutator() rewriting AGG_PLAIN into vectorized aggregator");

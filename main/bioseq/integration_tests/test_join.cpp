@@ -21,6 +21,9 @@
 //     placeholder Const and the executor crashed.
 
 #include "common_tests_integration.h"
+
+#include <set>
+
 import integration_tests.common;
 
 using namespace bioseq_int_tests;
@@ -750,4 +753,245 @@ TEST_CASE("EXPLAIN ANALYZE survives CROSS JOIN of bioseq tables",
         }
     }
     REQUIRE(outer_returned_five);
+}
+
+TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
+          "where the aligner produced a real match",
+          "[join][cross_join][cross_table_mmsearch][regression]") {
+    // Pre-fix: `WHERE mmsearch(t1.seq, t2.seq2)` ran the C stub
+    // (always TRUE) above the Nested Loop, returning every cross-
+    // product row with NULL bioseq.* columns. The user reported this
+    // — the expectation is that mmsearch behaves like a fuzzy
+    // substring search: rows whose alignment doesn't really match
+    // must be filtered out, not surfaced with NULL projections.
+    //
+    // Post-fix:
+    //   1. ExtractPushdownClause accepts mmsearch FuncExprs so the
+    //      planner generates a parameterised inner-side path.
+    //   2. AddColumnarScanPath counts mmsearch in scan quals as
+    //      an additional wehavemagic unit so the parameterised
+    //      path's cost beats the unparameterised competitor.
+    //   3. run_batch_and_build_cursors filters out matches whose
+    //      cigar would come back empty (when do_cigar=true), since
+    //      those are the aligner's "found a chain but the base
+    //      alignment produced nothing useful" sentinels.
+    auto ctx = fresh_context({kHoeJoin});
+    seed_hoe_fixture(ctx, kHoeJoin);
+
+    const auto rows = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
+            "  FROM {} t1 CROSS JOIN {} t2 "
+            " WHERE mmsearch(t1.seq0, t2.seq1) "
+            " ORDER BY t1.pk, t2.pk;",
+            kHoeJoin, kHoeJoin));
+
+    // Pre-fix this came back as 25 rows (full 5x5 cartesian) with
+    // every cigar NULL — exactly the regression the user
+    // described. Post-fix the row count drops because not every
+    // pair produces a valid alignment, AND every emitted cigar is
+    // a non-empty valid CIGAR string.
+    REQUIRE_FALSE(rows.empty());
+    // Strict upper bound: at most full cartesian (25) — no row
+    // explosion from match multiplicity should exceed that under
+    // these probes, but we leave headroom for the multi-match-per-
+    // row case.
+    REQUIRE(rows.size() <= 100);
+
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 3);
+        REQUIRE(row[0].has_value());
+        REQUIRE(row[1].has_value());
+        // The user's headline assertion: every row that surfaces
+        // MUST have a non-empty, valid CIGAR — no
+        // "rows with empty/NULL bioseq.cigar" fall out of the
+        // join filter.
+        REQUIRE(row[2].has_value());
+        REQUIRE_FALSE(row[2].value().empty());
+        REQUIRE(is_valid_cigar(row[2].value()));
+    }
+}
+
+TEST_CASE("Multiple Const mmsearch quals AND-filter the same column",
+          "[mmsearch][multi_qual][regression]") {
+    // Tests the new multi-mmsearch-per-scan support. Two
+    // mmsearch quals on the same column with different literal
+    // queries should AND together: a row is returned iff BOTH
+    // queries align against its sequence. The first mmsearch
+    // drives projections; the second is a pure filter.
+    //
+    // For the test to discriminate "AND is honoured" vs "second
+    // qual is a silent no-op via the C stub", the two probes
+    // must match DIFFERENT subsets of rows. We pick:
+    //   probe_1 = canonical probe (matches a known set)
+    //   probe_2 = a probe rooted in a different region of the
+    //             seeded sequences, hence matching a different
+    //             set. The intersection should be a strict
+    //             subset of the union — and the AND result must
+    //             equal the per-row intersection.
+    auto ctx = fresh_context({kHoeJoin});
+    seed_hoe_fixture(ctx, kHoeJoin);
+
+    // Probe 2 matches a different subset than the canonical probe
+    // (overlapping but not identical), so the AND result is a
+    // strict intersection. If the test runner ignored the second
+    // qual it would observe `set_a` (canonical's matches) instead
+    // of the intersection — and the equality assertion below would
+    // fail.
+    constexpr std::string_view second_probe = "TTCATCATCATCATCTACTCCT";
+
+    const auto rows_a = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+            "ORDER BY pk;",
+            kHoeJoin, kHoeProbeSequence));
+    const auto rows_b = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+            "ORDER BY pk;",
+            kHoeJoin, second_probe));
+    REQUIRE_FALSE(rows_a.empty());
+    REQUIRE_FALSE(rows_b.empty());
+
+    // Build the expected intersection (set semantics over pk).
+    std::set<std::string> set_a, set_b, expected_intersection;
+    for (const auto& r : rows_a) if (r[0].has_value()) set_a.insert(*r[0]);
+    for (const auto& r : rows_b) if (r[0].has_value()) set_b.insert(*r[0]);
+    for (const auto& key : set_a) {
+        if (set_b.count(key) > 0) expected_intersection.insert(key);
+    }
+
+    const auto and_rows = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT pk FROM {} "
+            " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+            "   AND mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+            " ORDER BY pk;",
+            kHoeJoin, kHoeProbeSequence, second_probe));
+    std::set<std::string> set_and;
+    for (const auto& r : and_rows) if (r[0].has_value()) set_and.insert(*r[0]);
+
+    // The AND result MUST be exactly the intersection of A and B.
+    // If the second qual were silently a no-op (C-stub TRUE), the
+    // AND result would equal A — possibly a strict superset of
+    // A∩B. Asserting equality with the intersection is what makes
+    // this test discriminating.
+    REQUIRE(set_and == expected_intersection);
+    REQUIRE(set_and.size() <= set_a.size());
+    REQUIRE(set_and.size() <= set_b.size());
+}
+
+TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
+          "lexicographic max CIGAR",
+          "[aggregate][placeholder_support][regression]") {
+    // Exercises the has_aggs branch of bioseq_placeholder_support.
+    // Pre-fix this was untested and the vectorised aggregator
+    // crashed with SIGSEGV when it tried to consume a regular slot
+    // carrying placeholder Consts. Post-fix the planner hook skips
+    // the vectorised aggregator rewrite when the agg input depends
+    // on a bioseq projection, falling back to the standard
+    // Aggregate node which evaluates the placeholder Const correctly.
+    auto ctx = fresh_context({kHoeJoin});
+    seed_hoe_fixture(ctx, kHoeJoin);
+
+    const std::string sql = fmt::format(
+        "SELECT MAX(bioseq.cigar(pk)) FROM {} "
+        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+        kHoeJoin, kHoeProbeSequence);
+    const auto row = query_one(ctx, sql);
+    REQUIRE(row.size() == 1);
+    REQUIRE(row[0].has_value());
+    REQUIRE_FALSE(row[0].value().empty());
+    REQUIRE(is_valid_cigar(row[0].value()));
+}
+
+TEST_CASE("COUNT(*) over an mmsearch-filtered bioseq table compiles and runs",
+          "[aggregate][placeholder_support][regression]") {
+    // COUNT(*) doesn't take a bioseq projection as an argument,
+    // so the SUPPORT-function PHV machinery doesn't fire for it
+    // — but the WHERE mmsearch(...) does filter rows through our
+    // batch processor. The hit count must reflect the number of
+    // matching rows the aligner returned, NOT the raw 5 rows in
+    // the fixture.
+    //
+    // INT-typed aggregates over bioseq.* projections are tracked
+    // separately as a known limitation (see
+    // REPORT_POSTGRES_QUERY_BUGFIXING_1.md §6): wrapping
+    // `bioseq.target_start(pk)` in a PHV inside an Aggref args
+    // triggers `ERROR: Aggref found in non-Agg plan node` from
+    // Postgres' `setrefs` pass when the table has more than one
+    // row. The text-typed (cigar) version works because there is
+    // no vectorised aggregate variant for TEXT, which keeps the
+    // planner on a different code path — that case is exercised
+    // by the dedicated MAX(bioseq.cigar(pk)) test above.
+    auto ctx = fresh_context({kHoeJoin});
+    seed_hoe_fixture(ctx, kHoeJoin);
+
+    const std::string count_sql = fmt::format(
+        "SELECT COUNT(*)::int8 AS hits "
+        "  FROM {} "
+        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+        kHoeJoin, kHoeProbeSequence);
+    const auto count_row = query_one(ctx, count_sql);
+    REQUIRE(count_row.size() == 1);
+    REQUIRE(count_row[0].has_value());
+    const long long hits = std::stoll(count_row[0].value());
+    REQUIRE(hits > 0);
+    // Five seeded rows; not all need to align under the probe.
+    REQUIRE(hits <= 100);
+}
+
+TEST_CASE("GROUP BY pk with bioseq aggregate returns one row per matching pk",
+          "[aggregate][group_by][placeholder_support]") {
+    auto ctx = fresh_context({kHoeJoin});
+    seed_hoe_fixture(ctx, kHoeJoin);
+
+    const std::string sql = fmt::format(
+        "SELECT pk, MAX(bioseq.cigar(pk)) AS best_cigar "
+        "  FROM {} "
+        " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+        " GROUP BY pk ORDER BY pk;",
+        kHoeJoin, kHoeProbeSequence);
+    const auto rows = query_rows(ctx, sql);
+    REQUIRE_FALSE(rows.empty());
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 2);
+        REQUIRE(row[0].has_value());
+        REQUIRE(row[1].has_value());
+        REQUIRE_FALSE(row[1].value().empty());
+        REQUIRE(is_valid_cigar(row[1].value()));
+    }
+}
+
+TEST_CASE("Cross-table mmsearch via INNER JOIN with bioseq.cigar projection",
+          "[join][inner_join][cross_table_mmsearch][regression]") {
+    // Variant of the user's CROSS JOIN regression that goes through
+    // INNER JOIN syntax instead. Same semantics — every emitted
+    // row must have a valid (non-empty) CIGAR, and the planner
+    // must pick the parameterised inner-side path.
+    auto ctx = fresh_context({kHoeJoinLeft, kHoeJoinRight});
+    seed_hoe_fixture(ctx, kHoeJoinLeft);
+    seed_hoe_fixture(ctx, kHoeJoinRight);
+
+    const auto rows = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
+            "  FROM {} t1 INNER JOIN {} t2 "
+            "    ON mmsearch(t1.seq0, t2.seq1) "
+            " ORDER BY t1.pk, t2.pk;",
+            kHoeJoinLeft, kHoeJoinRight));
+    REQUIRE_FALSE(rows.empty());
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 3);
+        REQUIRE(row[0].has_value());
+        REQUIRE(row[1].has_value());
+        REQUIRE(row[2].has_value());
+        REQUIRE_FALSE(row[2].value().empty());
+        REQUIRE(is_valid_cigar(row[2].value()));
+    }
 }

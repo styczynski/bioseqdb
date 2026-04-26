@@ -922,6 +922,55 @@ bioseq_customscan_methods(void)
 	return &ColumnarScanScanMethods;
 }
 
+/*
+ * Walker context for bioseq_node_has_projection_or_mmsearch.
+ */
+struct BioseqProjectionPresenceProbe {
+	const BioseqStubOids* stub_oids;
+	bool found;
+};
+
+static bool
+bioseq_projection_presence_walker(Node* node, void* ctx)
+{
+	if (node == nullptr) return false;
+	auto* data = static_cast<BioseqProjectionPresenceProbe*>(ctx);
+	if (data->found) return true;
+	if (IsA(node, FuncExpr)) {
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+		if (is_bioseq_projection_funcid(fe->funcid, *data->stub_oids)
+			|| is_mmsearch_funcid(fe->funcid, *data->stub_oids)
+			|| fe->funcid == data->stub_oids->symbol_count_oid) {
+			data->found = true;
+			return true;
+		}
+	}
+	return expression_tree_walker(node, bioseq_projection_presence_walker, ctx);
+}
+
+/*
+ * True if any node in the expression tree references a bioseq.<...>
+ * projection FuncExpr (cigar / score / target_*, or symbol_count) or
+ * an mmsearch FuncExpr. The vectorised aggregator rewrite path uses
+ * this to skip its rewrite when the agg input depends on any of
+ * these — the projection FuncExprs are scan-time-rewritten into
+ * placeholder Consts that the regular Postgres Aggregate node can
+ * evaluate, but the vectorised aggregator expects vector-typed
+ * scan output and crashes with a SIGSEGV when fed a regular slot
+ * carrying our placeholder Consts.
+ */
+export bool
+bioseq_expr_uses_bioseq_projection(Node* node)
+{
+	if (node == nullptr) {
+		return false;
+	}
+	const BioseqStubOids& stub_oids = get_cached_stub_oids();
+	BioseqProjectionPresenceProbe probe{ &stub_oids, false };
+	bioseq_projection_presence_walker(node, &probe);
+	return probe.found;
+}
+
 
 /*
  * bioseq_customscan_init installs the hook required to intercept the postgres planner and
@@ -1502,6 +1551,121 @@ ColumnarTableRowCount(Relation relation)
  * expressions, we will pushdown the following:
  *  (a < 200) OR ((a = 300) OR (a > 400))
  */
+/*
+ * mmsearch() FuncExprs are recognised here as pushdownable scan
+ * quals even though they have no btree opclass and no scan-key
+ * shape: the actual filtering happens at execution time inside
+ * BatchProcessor::process_sequences. The reason we still register
+ * them as "pushdownable" is to make the planner consider
+ * parameterised paths for cross-table mmsearches like
+ *   WHERE mmsearch(t1.seq, t2.seq2)
+ * Without this recognition `FilterPushdownClauses` drops the
+ * FuncExpr from `joinClauses`, `FindCandidateRelids` returns no
+ * outer rels for it, and `AddColumnarScanPathsRec` never asks
+ * `get_baserel_parampathinfo` to bring the qual into the inner
+ * scan's `ppi_clauses`. The result: mmsearch ends up as a Nested
+ * Loop join filter (the C stub), which always returns TRUE, and
+ * the inner scan never runs the aligner — every cross-product row
+ * comes back with NULL bioseq.* projections.
+ *
+ * Returning the unchanged FuncExpr from this helper tells
+ * FilterPushdownClauses "this clause references this rel and is
+ * safe to attach to its quals." Postgres (via
+ * `replace_nestloop_params`) will rewrite the cross-rel Var (e.g.
+ * t2.seq2) into a PARAM_EXEC Param at plan-finalization time, and
+ * BeginCustomScan / ReScanCustomScan already handle Params for the
+ * mmsearch second argument.
+ */
+[[nodiscard]] static bool
+IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
+					   const BioseqStubOids& stub_oids)
+{
+	if (!is_mmsearch_funcid(fe->funcid, stub_oids)) {
+		return false;
+	}
+	const int argc = list_length(fe->args);
+	if (argc != 2 && argc != 3) {
+		return false;
+	}
+	PList<Node> fe_args(fe->args);
+	Node* arg0 = fe_args.first();
+	Node* arg1 = fe_args.second();
+	if (arg0 == nullptr || arg1 == nullptr || !IsA(arg0, Var)) {
+		return false;
+	}
+	Var* col_var = reinterpret_cast<Var*>(arg0);
+	/*
+	 * The first argument is the column to align — it MUST belong to
+	 * `rel`. Cross-table mmsearch with the column on the OTHER side
+	 * (e.g. mmsearch(t1.seq, t2.seq) when we are processing t2)
+	 * doesn't push to this rel; the mirror call from t1's side
+	 * (mmsearch(t1.seq, t2.seq) processing t1) does.
+	 */
+	if (col_var->varno != rel->relid) {
+		return false;
+	}
+	if (col_var->varattno <= 0) {
+		return false;
+	}
+	/*
+	 * Constrain the second argument to shapes ColumnarScan_BeginCustomScan
+	 * actually handles at execution time (Const literal, Param-driven NL
+	 * inner-side rewrite, or another base-relation Var with a varno that
+	 * Postgres can later turn into a PARAM_EXEC on the parameterised path).
+	 * Without this filter the planner would generate a parameterised path
+	 * carrying a complex-expression mmsearch which BeginCustomScan then
+	 * silently rejects, leaving the buffer inactive and the bioseq.*
+	 * projections back to NULL — the very bug §8 of
+	 * REPORT_POSTGRES_QUERY_BUGFIXING_1.md is meant to fix.
+	 */
+	if (!IsA(arg1, Const) && !IsA(arg1, Var) && !IsA(arg1, Param)) {
+		return false;
+	}
+	/*
+	 * Reject volatile second arguments. The OpExpr branch already
+	 * does this (search for `contain_volatile_functions` below); the
+	 * mmsearch branch needs the same protection so a query like
+	 *   WHERE mmsearch(t.seq, gen_random_seq())
+	 * does not get re-evaluated arbitrarily often on rescan.
+	 */
+	if (contain_volatile_functions(arg1)) {
+		return false;
+	}
+	/*
+	 * Typmod compatibility check. Both args MUST share the same
+	 * (alphabet, width). If they don't, BeginCustomScan rejects the
+	 * qual (line search for "mmsearch typmod mismatch") and the
+	 * scan would run with no mmsearch context. We catch the mismatch
+	 * up here at planning time instead so the parameterised path is
+	 * not even generated for this qual.
+	 */
+	if (col_var->vartype != stub_oids.bioseq_seq_type_oid
+		|| col_var->vartypmod < 0) {
+		return false;
+	}
+	int32 arg1_typmod = -1;
+	Oid   arg1_typoid = InvalidOid;
+	if (IsA(arg1, Const)) {
+		Const* c = reinterpret_cast<Const*>(arg1);
+		arg1_typmod = c->consttypmod;
+		arg1_typoid = c->consttype;
+	} else if (IsA(arg1, Var)) {
+		Var* v = reinterpret_cast<Var*>(arg1);
+		arg1_typmod = v->vartypmod;
+		arg1_typoid = v->vartype;
+	} else if (IsA(arg1, Param)) {
+		Param* p = reinterpret_cast<Param*>(arg1);
+		arg1_typmod = p->paramtypmod;
+		arg1_typoid = p->paramtype;
+	}
+	if (arg1_typoid != stub_oids.bioseq_seq_type_oid
+		|| arg1_typmod < 0
+		|| arg1_typmod != col_var->vartypmod) {
+		return false;
+	}
+	return true;
+}
+
 static Expr *
 ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 {
@@ -1511,6 +1675,23 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 	if (node == NULL)
 	{
 		return NULL;
+	}
+
+	/*
+	 * mmsearch FuncExpr accepted by IsMmsearchPushdownable above.
+	 * When the qual is a parameter-driven cross-table join
+	 * mmsearch(t1.seq, t2.seq2), letting it through here is what
+	 * makes Postgres generate the parameterised inner-side path
+	 * that drives MmsearchParamRebind.
+	 */
+	if (IsA(node, FuncExpr)) {
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+		const BioseqStubOids& stub_oids = get_cached_stub_oids();
+		if (IsMmsearchPushdownable(rel, fe, stub_oids)) {
+			JustLog("[bioseq] pg: ExtractPushdownClause() accepting mmsearch funcexpr funcid={} for rel relid={}",
+					fe->funcid, static_cast<int>(rel->relid));
+			return reinterpret_cast<Expr*>(node);
+		}
 	}
 
 	if (IsA(node, BoolExpr))
@@ -2304,6 +2485,42 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	allClauses = FilterPushdownClauses(root, rel, allClauses);
 
 	/*
+	 * Count mmsearch FuncExprs that landed in this path's scan-quals
+	 * (allClauses already contains both baserestrictinfo and the
+	 * `ppi_clauses` Postgres added because `paramRelids` brings them
+	 * into scope). For an unparameterised path, a cross-table
+	 * mmsearch like `mmsearch(t1.seq, t2.seq2)` lives in the join
+	 * filter and is NOT in allClauses; for the matching
+	 * parameterised path, it IS — and we want the planner to pick
+	 * that one. Each such qual contributes another unit of
+	 * wehavemagic so the parameterised path's negative cost is
+	 * strictly more negative than the unparameterised competitor.
+	 *
+	 * Without this boost the unparameterised path's cost matches the
+	 * parameterised one (both have wehavemagic_cnt = 1 from the
+	 * targetlist's bioseq.cigar projection). The planner then picks
+	 * the simpler unparameterised path + Nested-Loop-with-join-filter
+	 * shape, which silently runs the mmsearch C stub (always TRUE)
+	 * and emits every cross-product row with NULL bioseq.* columns —
+	 * the regression the user reported.
+	 */
+	{
+		const BioseqStubOids& mmsearch_oids = get_cached_stub_oids();
+		for (auto rinfo : allClauses) {
+			Node* clause_node = reinterpret_cast<Node*>(rinfo->clause);
+			if (clause_node != nullptr && IsA(clause_node, FuncExpr)) {
+				FuncExpr* fe = reinterpret_cast<FuncExpr*>(clause_node);
+				if (is_mmsearch_funcid(fe->funcid, mmsearch_oids)) {
+					wehavemagic = true;
+					++wehavemagic_cnt;
+					JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch in scan quals adds wehavemagic; new cnt={}",
+							wehavemagic_cnt);
+				}
+			}
+		}
+	}
+
+	/*
 	 * Plain clauses may contain extern params, but not exec params, and can
 	 * be evaluated at init time or rescan time. Track them in another list
 	 * that is a subset of allClauses.
@@ -2950,6 +3167,30 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	Relation relation_for_attname = cscanstate->ss.ss_currentRelation;
 	const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
 
+	/*
+	 * State threaded across the qual loop so subsequent mmsearch
+	 * quals can be registered as additional Const-driven filters.
+	 *
+	 * `primary_configured` flips to true once the first acceptable
+	 * mmsearch qual is installed (either via configure_mmsearch for
+	 * the literal-query case or via param_rebind for the
+	 * parametrised-NL case). Every subsequent mmsearch qual we see
+	 * is treated as an additional AND-filter — but only when:
+	 *   - the primary was Const-driven (not Param-driven; we don't
+	 *     yet support multiple Param rebinds in the same scan),
+	 *   - the new qual's first Var is the SAME column as the
+	 *     primary's,
+	 *   - and the new qual's typmod matches the primary's.
+	 * Anything else logs a warning and is silently ignored.
+	 *
+	 * `primary_seq_attno` / `primary_typmod_packed` carry the
+	 * primary's column and typmod for these comparisons.
+	 */
+	bool primary_configured = false;
+	bool primary_is_const = false;
+	AttrNumber primary_seq_attno = InvalidAttrNumber;
+	int32 primary_typmod_packed = -1;
+
 	for (auto qual_node : PList<Node>(cscan->scan.plan.qual))
 	{
 		if (qual_node == nullptr || !IsA(qual_node, FuncExpr))
@@ -3127,6 +3368,61 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			continue;
 		}
 
+		/*
+		 * Subsequent mmsearch quals get treated as additional AND
+		 * filters. We require: (a) the primary was Const-driven,
+		 * (b) the extra is also Const-driven, (c) same seq column,
+		 * (d) matching typmod. Anything else is rejected: the qual
+		 * stays in `cscan->scan.plan.qual` and ExecQual evaluates
+		 * mmsearch via the always-true C stub, which silently makes
+		 * the AND-filter behaviour incorrect. We surface this via
+		 * ereport(NOTICE, ...) so the user sees the rejection
+		 * (default client_min_messages includes NOTICE) instead of
+		 * having to enable bioseq.logging.
+		 */
+		if (primary_configured)
+		{
+			if (!primary_is_const || !arg1_is_const) {
+				ereport(NOTICE,
+					(errmsg("bioseq: additional mmsearch qual ignored: only Const+Const stacking supported (primary_const=%d, this_const=%d)",
+							primary_is_const, arg1_is_const),
+					 errhint("Combine quals with the same column and a literal query to AND-filter rows.")));
+				pfree(attname_cstr);
+				continue;
+			}
+			if (col_var->varattno != primary_seq_attno) {
+				ereport(NOTICE,
+					(errmsg("bioseq: additional mmsearch qual ignored: column attno=%d differs from primary attno=%d",
+							static_cast<int>(col_var->varattno),
+							static_cast<int>(primary_seq_attno))));
+				pfree(attname_cstr);
+				continue;
+			}
+			if (col_var->vartypmod != primary_typmod_packed) {
+				ereport(NOTICE,
+					(errmsg("bioseq: additional mmsearch qual ignored: typmod=%d differs from primary=%d",
+							col_var->vartypmod, primary_typmod_packed)));
+				pfree(attname_cstr);
+				continue;
+			}
+			Const* query_const = reinterpret_cast<Const*>(arg1);
+			PgCompactSequenceHdr* extra_query_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+				PG_DETOAST_DATUM(query_const->constvalue));
+			const size_t extra_total_bytes = static_cast<size_t>(VARSIZE(extra_query_hdr));
+			std::vector<char> extra_varlena_bytes(extra_total_bytes);
+			std::memcpy(extra_varlena_bytes.data(), extra_query_hdr, extra_total_bytes);
+			if (reinterpret_cast<void*>(extra_query_hdr)
+				!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue)))
+			{
+				pfree(extra_query_hdr);
+			}
+			runtime.buffer.add_extra_const_query(std::move(extra_varlena_bytes));
+			JustLog("[bioseq] pg: BeginCustomScan() registered additional mmsearch (extra count now {})",
+					runtime.buffer.extra_query_count());
+			pfree(attname_cstr);
+			continue;
+		}
+
 		if (arg1_is_const)
 		{
 			/*
@@ -3153,6 +3449,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 										  unpacked_typmod.alphabet_code,
 										  unpacked_typmod.width_code,
 										  primary_key_attno);
+			primary_is_const = true;
 		}
 		else
 		{
@@ -3174,14 +3471,24 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			runtime.param_rebind.alphabet_code     = unpacked_typmod.alphabet_code;
 			runtime.param_rebind.width_code        = unpacked_typmod.width_code;
 			runtime.param_rebind.primary_key_attno = primary_key_attno;
+			primary_is_const = false;
 			JustLog("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
 					query_param->paramid, static_cast<int>(query_param->paramkind),
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
 					static_cast<unsigned>(unpacked_typmod.width_code));
 		}
 
+		primary_configured = true;
+		primary_seq_attno = col_var->varattno;
+		primary_typmod_packed = col_var->vartypmod;
+
 		pfree(attname_cstr);
-		break; /* POC: only honour the first mmsearch() qual we find */
+		/*
+		 * Don't break — subsequent loop iterations that also match
+		 * an mmsearch FuncExpr will fall into the
+		 * `primary_configured` branch above and stack as additional
+		 * AND filters.
+		 */
 	}
 
 	/*
