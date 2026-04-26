@@ -34,3 +34,9 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS, BUFFERS) SELECT table1.a, table2.a, bioseq.cig
 EXPLAIN (ANALYZE, VERBOSE, COSTS, BUFFERS)  SELECT table1.a, table2.a FROM samples AS table1 CROSS JOIN samples AS table2;
 
 EXPLAIN (ANALYZE, VERBOSE, COSTS, BUFFERS)  SELECT table1.a, table2.a, bioseq.cigar(table1.a) FROM samples AS table1 LEFT JOIN samples AS table2 ON table1.a = table2.a WHERE mmsearch(table1.seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32));
+
+
+-- cross join match
+
+SELECT table1.a, table2.a, bioseq.cigar(table1.a) FROM samples AS table1 CROSS JOIN samples AS table2 WHERE mmsearch(table1.seq, table2.seq);
+--SELECT table1.a, table2.a, bioseq.cigar(table1.a) FROM samples AS table1 LEFT JOIN samples AS table2 ON table1.a = table2.a WHERE mmsearch(table1.seq, table2.seq);

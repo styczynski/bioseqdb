@@ -273,10 +273,68 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
  * `wehavemagic_cnt` scan which translates every detected cost inflator
  * into a negative custom-scan startup cost.
  */
+/*
+ * Hand-rolled walker that returns the first Var in a node tree without
+ * raising on Aggref/WindowFunc/SubLink/etc. Used by the simplify helper
+ * below. We deliberately avoid Postgres' pull_var_clause() because that
+ * call is documented to raise from late planning paths and we are
+ * invoked from eval_const_expressions() which is reached very early in
+ * subquery_planner.
+ */
+struct FirstVarFinder {
+	Var* result = nullptr;
+};
+static bool find_first_var_walker(Node* node, void* ctx) {
+	if (node == nullptr) return false;
+	auto* finder = static_cast<FirstVarFinder*>(ctx);
+	if (finder->result != nullptr) {
+		return true;  /* abort the walk */
+	}
+	if (IsA(node, Var)) {
+		finder->result = reinterpret_cast<Var*>(node);
+		return true;
+	}
+	return expression_tree_walker(node, find_first_var_walker, ctx);
+}
+
+/*
+ * Shared simplify-time PHV wrapping. Used by both bioseq_placeholder_support
+ * (attached to the ANYELEMENT projections) and bioseq_symbol_count_support
+ * (which also folds bioseq.symbol_count()). Returning nullptr here means
+ * "no rewrite" — the caller surfaces that to PostgreSQL as "leave the
+ * FuncExpr alone."
+ */
+static Node* try_wrap_in_placeholder(SupportRequestSimplify* simplify) {
+	if (simplify == nullptr || simplify->root == nullptr || simplify->fcall == nullptr) {
+		return nullptr;
+	}
+	PlannerInfo* root = simplify->root;
+	const bool has_joins = root->hasJoinRTEs;
+	const bool has_aggs = root->parse != nullptr && root->parse->hasAggs;
+	if (!has_joins && !has_aggs) {
+		return nullptr;
+	}
+	FirstVarFinder finder;
+	find_first_var_walker(reinterpret_cast<Node*>(simplify->fcall), &finder);
+	if (finder.result == nullptr) {
+		JustLog("[bioseq] pg: try_wrap_in_placeholder() no Var found in fcall — skipping");
+		return nullptr;
+	}
+	Var* arg_var = finder.result;
+	Relids phrels = bms_make_singleton(static_cast<int>(arg_var->varno));
+	Expr* expr_copy = reinterpret_cast<Expr*>(copyObjectImpl(simplify->fcall));
+	PlaceHolderVar* phv = make_placeholder_expr(root, expr_copy, phrels);
+	phv->phlevelsup    = arg_var->varlevelsup;
+	phv->phnullingrels = arg_var->varnullingrels;
+	JustLog("[bioseq] pg: try_wrap_in_placeholder() wrapped funcid={} phid={} phrels={}",
+			simplify->fcall->funcid, phv->phid,
+			static_cast<int>(arg_var->varno));
+	return reinterpret_cast<Node*>(phv);
+}
+
 CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count_support);
 Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_symbol_count_support() entered");
-	Node* response = nullptr;
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
 	if (IsA(request, SupportRequestCost)) {
 		SupportRequestCost* cost_request = reinterpret_cast<SupportRequestCost*>(request);
@@ -285,7 +343,23 @@ Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
 		cost_request->per_tuple = 0;
 		PG_RETURN_POINTER(cost_request);
 	}
-	PG_RETURN_POINTER(response);
+	if (IsA(request, SupportRequestSimplify)) {
+		/*
+		 * symbol_count's projection placeholder is rewritten by the
+		 * VarInjectorMutator just like the bioseq.cigar/score/...
+		 * projections, so the same join-pushdown bug bites it. The
+		 * simplify branch here mirrors bioseq_placeholder_support so a
+		 * LEFT JOIN with WHERE mmsearch + bioseq.symbol_count(...) on
+		 * the projection no longer crashes.
+		 */
+		SupportRequestSimplify* simplify =
+			reinterpret_cast<SupportRequestSimplify*>(request);
+		Node* wrapped = try_wrap_in_placeholder(simplify);
+		if (wrapped != nullptr) {
+			PG_RETURN_POINTER(wrapped);
+		}
+	}
+	PG_RETURN_POINTER(nullptr);
 }
 
 /*
@@ -318,5 +392,38 @@ Datum mmsearch_support(PG_FUNCTION_ARGS) {
 		PG_RETURN_POINTER(cost_request);
 	}
 	PG_RETURN_POINTER(response);
+}
+
+/*
+ * bioseq_placeholder_support is the planner-support function attached to
+ * every bioseq.* projection function (bioseq.cigar, bioseq.score,
+ * bioseq.target_start, ...). Mirrors paradedb's `placeholder_support`
+ * (see paradedb-experiments/pg_search/.../projections/mod.rs) — when a
+ * query contains JOINs or aggregates, we wrap the FuncExpr in a
+ * PlaceHolderVar so PostgreSQL evaluates it once at the originating scan
+ * level and propagates the value upward through joins/aggregates without
+ * re-evaluating it. Without this, the planner pushes copies of the
+ * FuncExpr into every join child's targetlist, which crashes the LEFT
+ * JOIN + bioseq.cigar + WHERE mmsearch path because the inner-side scan
+ * has no MatchResult to back the rewritten placeholder Const.
+ *
+ * Returns NULL (no rewrite) when the query has no joins or aggregates;
+ * the FuncExpr stays bare and the scan-time VarInjectorMutator rewrites
+ * it to a placeholder Const directly. Returns NULL likewise when the
+ * function call shape cannot be wrapped (zero or multiple Vars,
+ * varlevelsup mismatch, …) — the executor still falls back to the stub
+ * which logs and returns a sentinel.
+ */
+CXX_PG_FUNCTION_INFO_V1(bioseq_placeholder_support);
+Datum bioseq_placeholder_support(PG_FUNCTION_ARGS) {
+	JustLog("[bioseq] pg: bioseq_placeholder_support() entered");
+	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
+	if (!IsA(request, SupportRequestSimplify)) {
+		PG_RETURN_POINTER(nullptr);
+	}
+	SupportRequestSimplify* simplify =
+		reinterpret_cast<SupportRequestSimplify*>(request);
+	Node* wrapped = try_wrap_in_placeholder(simplify);
+	PG_RETURN_POINTER(wrapped);
 }
 }

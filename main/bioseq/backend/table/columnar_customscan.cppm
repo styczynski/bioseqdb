@@ -61,9 +61,13 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							bool returnVectorizedTuple);
 
 
-static List* newtargetlist = nullptr;
-static Const* const_score_node = nullptr;   // legacy alias pointing at placeholder_consts.dp_score_node
-static bioseq::simd::N_NEON::TupleDispatchBuffer buffer(1000);
+/*
+ * Initial reservation hint passed to TupleDispatchBuffer when a
+ * BioseqScanRuntime is constructed. Sized for the typical small-result
+ * scan; the buffer reallocates linearly past this if a query produces
+ * more buffered tuples.
+ */
+constexpr std::size_t kBioseqRuntimeBufferReserve = 1000;
 
 /*
  * Per-scan projection usage flags. Walked from the plan target list once
@@ -101,11 +105,44 @@ struct PerScanAlignerState {
 	BioseqScanFeatureFlags              features{};
 	bool                                params_captured = false;
 };
-static PerScanAlignerState g_per_scan_aligner_state;
+
+/*
+ * Param-driven mmsearch query reconfiguration metadata. When the planner
+ * rewrites the second mmsearch argument into a Param (the typical shape
+ * for parameterized inner-side scans of a Nested Loop join — e.g.
+ * `WHERE mmsearch(t2.seq, t1.seq)` becomes `mmsearch(t2.seq, $0)` on the
+ * inner side), BeginCustomScan stashes the Param coordinates here. Every
+ * ReScanCustomScan invocation then resolves the Param through
+ * EvalParamsMutator, detoasts the resulting bioseq.seq varlena and pushes
+ * the new query into TupleDispatchBuffer::configure_mmsearch — turning a
+ * single-literal scan into a many-to-many alignment under NL.
+ *
+ * `paramid` follows pgsql's PARAM_EXEC ID space (matches Param->paramid).
+ * `paramkind` is captured so we can validate it really is PARAM_EXEC at
+ * ReScan (PARAM_EXTERN would route through a different ParamListInfo
+ * member and is not currently supported).
+ *
+ * `seq_attno` / `column_name` / `alphabet_code` / `width_code` /
+ * `primary_key_attno` mirror the equivalent MmsearchContext fields so the
+ * ReScan path can call configure_mmsearch with a fresh query without
+ * re-walking the plan.
+ */
+struct MmsearchParamRebind {
+	bool       active             = false;
+	int        paramid            = -1;
+	int        paramkind          = -1;
+	Oid        param_typoid       = InvalidOid;
+	int32_t    param_typmod       = -1;
+	AttrNumber seq_attno          = InvalidAttrNumber;
+	AttrNumber primary_key_attno  = InvalidAttrNumber;
+	uint8_t    alphabet_code      = 0;
+	uint8_t    width_code         = 0;
+	std::string column_name;
+};
 
 /*
  * One rewritten `bioseq.symbol_count(Var, 'L')` call site. The Const*
- * replaces the FuncExpr in newtargetlist; `rank` is resolved once at
+ * replaces the FuncExpr in runtime.newtargetlist; `rank` is resolved once at
  * plan time via seqan3 so the per-row populate path is a single array
  * index into the meta_sidecar counts[]. `letter` + `column_name` are
  * retained for the EXPLAIN-time "Fetched from meta:" string.
@@ -122,8 +159,8 @@ struct SymbolCountCallSite {
  * rewritten target list. Each one stands in for a bioseq.<field>(...)
  * FuncExpr; per-row values are written into constvalue/constisnull
  * before ExecProject runs. All pointers start as nullptr in a fresh
- * backend; CustomExecScan's first-call init allocates them and
- * VarInjectorMutator wires them into newtargetlist.
+ * BioseqScanRuntime; CustomExecScan's first-call init allocates them
+ * and VarInjectorMutator wires them into runtime.newtargetlist.
  *
  * symbol_count_sites is populated dynamically by VarInjectorMutator as
  * it discovers `symbol_count(Var, 'L')` call sites in the target list.
@@ -154,7 +191,139 @@ struct BioseqPlaceholderConsts {
 	Const* cigar_node                 = nullptr;
 	std::vector<SymbolCountCallSite> symbol_count_sites;
 };
-static BioseqPlaceholderConsts placeholder_consts;
+
+/*
+ * Per-scan runtime state, owned via a heap pointer from BioseqScanState
+ * (see bioseq_scan_state.cppm for the void* runtime slot).
+ *
+ * Owning these fields per-scan-state — rather than as file statics —
+ * lets a single backend run two BioseqScan nodes concurrently. The bug
+ * before this refactor: a CROSS JOIN of `samples` against itself shares
+ * the global `output_position` cursor; once the second scan exhausted
+ * its batch the first scan's next ExecCustomScan call would observe
+ * `has_finished_writing() == true` against an empty cursor and return
+ * EOF, capping the join at one outer row instead of four. The same
+ * sharing crashed LEFT JOIN queries that combined a `WHERE mmsearch`
+ * filter with a `bioseq.cigar` projection: the inner scan's
+ * `clear_mmsearch_context()` wiped the outer scan's mmsearch context.
+ *
+ * Lives on the C++ heap so std::vector / std::map free their own
+ * storage. To handle the mid-scan-error case (any longjmp out of an
+ * ereport(ERROR, ...) inside Begin/Exec/End that would otherwise skip
+ * EndCustomScan) we register a MemoryContext reset callback on
+ * `estate->es_query_cxt` from BeginCustomScan. Postgres invokes the
+ * callback when the query context is destroyed — that is, on either
+ * normal end-of-query or transaction abort — so the C++ heap memory
+ * never outlives a single statement. The `abort_cleanup_done` flag
+ * lets EndCustomScan claim the runtime explicitly (so its
+ * `clear_slots()` runs while the per-query ResourceOwner is still
+ * alive) without racing the callback.
+ */
+struct BioseqScanRuntime {
+	bioseq::simd::N_NEON::TupleDispatchBuffer buffer{kBioseqRuntimeBufferReserve};
+	BioseqPlaceholderConsts                   placeholder_consts{};
+	List*                                     newtargetlist = nullptr;
+	PerScanAlignerState                       aligner_state{};
+	MmsearchParamRebind                       param_rebind{};
+
+	/*
+	 * Cleanup hook registered against the query MemoryContext. Set up
+	 * once in BeginCustomScan (see register_runtime_cleanup_callback).
+	 * Postgres' MemoryContextCallback is a single-linked-list node
+	 * embedded directly in the runtime struct — its `next` pointer is
+	 * threaded into the context's chain at registration time. Each
+	 * BioseqScanRuntime therefore needs exactly one such node.
+	 */
+	MemoryContextCallback                     memcontext_callback{};
+	BioseqScanState*                          owning_state = nullptr;
+	bool                                      cleanup_done = false;
+};
+
+/*
+ * Centralised accessor: each BioseqScanState owns exactly one
+ * BioseqScanRuntime, allocated by BeginCustomScan via
+ * register_runtime_cleanup_callback and torn down by the per-query
+ * MemoryContext reset callback. The runtime is held as `void*` on
+ * BioseqScanState so the public scan-state header stays
+ * standard-layout; this file is the only one that knows the concrete
+ * BioseqScanRuntime type and casts back to it.
+ *
+ * If we somehow get here before BeginCustomScan fired (no current
+ * call path does, but future hooks could regress) we lazy-allocate
+ * without registering a cleanup callback — that allocation WILL
+ * leak its std::vector / std::map storage on context teardown
+ * because no callback is wired to call the destructor. The JustLog
+ * makes the regression loud so a future maintainer notices.
+ */
+[[nodiscard]] static BioseqScanRuntime& bioseq_runtime(BioseqScanState* state) {
+	if (state->runtime == nullptr) {
+		JustLog("[bioseq] pg: bioseq_runtime() lazy-allocating runtime — BeginCustomScan did not fire first; this allocation will leak unless a cleanup callback is wired");
+		state->runtime = static_cast<void*>(new BioseqScanRuntime{});
+	}
+	return *static_cast<BioseqScanRuntime*>(state->runtime);
+}
+
+/*
+ * MemoryContext reset callback for BioseqScanRuntime. Postgres invokes
+ * this when `estate->es_query_cxt` is destroyed — both on normal end
+ * of query and on transaction abort. The callback is the safety net
+ * that prevents leaks when an ereport(ERROR, ...) longjmps over
+ * ColumnarScan_EndCustomScan.
+ *
+ * Important lifecycle constraint: the MemoryContextCallback struct
+ * itself is embedded INSIDE the BioseqScanRuntime, so it must not be
+ * freed before this callback fires. We therefore do NOT `delete
+ * runtime_ptr` in EndCustomScan — that would dangle the callback
+ * pointer in the context's reset-cb chain and crash on context
+ * teardown. Instead EndCustomScan only releases per-tuple resources
+ * (`buffer.clear_slots()`) while the per-query ResourceOwner is still
+ * alive, sets `cleanup_done = true`, and lets this callback do the
+ * actual delete when the context tears down.
+ *
+ * On the abort path (EndCustomScan never ran) we get `cleanup_done =
+ * false` and must skip touching any Postgres tuple-table machinery
+ * because the ResourceOwner is also being torn down. Postgres' own
+ * bookkeeping handles the tuple-desc refcount cleanup; just freeing
+ * the C++ heap is enough.
+ */
+static void bioseq_runtime_cleanup_callback(void* arg) {
+	auto* state = static_cast<BioseqScanState*>(arg);
+	if (state == nullptr || state->runtime == nullptr) {
+		return;
+	}
+	auto* runtime_ptr = static_cast<BioseqScanRuntime*>(state->runtime);
+	if (runtime_ptr->cleanup_done) {
+		JustLog("[bioseq] pg: bioseq_runtime_cleanup_callback() normal-path delete after EndCustomScan");
+	} else {
+		JustLog("[bioseq] pg: bioseq_runtime_cleanup_callback() abort-path delete (slots not released)");
+	}
+	state->runtime = nullptr;
+	delete runtime_ptr;
+}
+
+/*
+ * Wire the cleanup callback so Postgres frees the runtime on
+ * transaction abort. Idempotent — callable multiple times across
+ * Begin / ReScan without effect; the callback list is keyed on the
+ * MemoryContextCallback struct address, and we always pass the same
+ * embedded address.
+ */
+static void register_runtime_cleanup_callback(BioseqScanState* state,
+											  EState* estate)
+{
+	if (state == nullptr || estate == nullptr) {
+		return;
+	}
+	BioseqScanRuntime& runtime = bioseq_runtime(state);
+	if (runtime.owning_state == state) {
+		return;  /* already registered */
+	}
+	runtime.owning_state             = state;
+	runtime.memcontext_callback.func = bioseq_runtime_cleanup_callback;
+	runtime.memcontext_callback.arg  = static_cast<void*>(state);
+	MemoryContextRegisterResetCallback(estate->es_query_cxt,
+									   &runtime.memcontext_callback);
+}
 
 /*
  * OIDs looked up from pg_proc for the bioseq extension's SQL stubs.
@@ -2003,6 +2172,51 @@ CostTestWalker(Node *node, Query *notUsed)
 }
 
 /*
+ * Walker context for bioseq_projection_walker — pairs a stub-OID
+ * snapshot with an integer counter incremented for each detected
+ * bioseq.<...>(...) call site. The walker handles FuncExprs at any
+ * depth, including children of PlaceHolderVar wrappers introduced by
+ * bioseq_placeholder_support when the query has joins or aggregates.
+ */
+struct BioseqProjectionCounter {
+	const BioseqStubOids* stub_oids;
+	int* count;
+};
+
+static bool
+bioseq_projection_walker(Node* node, void* ctx)
+{
+	if (node == nullptr) {
+		return false;
+	}
+	auto* data = static_cast<BioseqProjectionCounter*>(ctx);
+	if (IsA(node, FuncExpr)) {
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+		if (is_mmsearch_funcid(fe->funcid, *data->stub_oids)) {
+			JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr (any depth)");
+			++(*data->count);
+		} else if (is_bioseq_projection_funcid(fe->funcid, *data->stub_oids)) {
+			JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq projection funcid={}",
+					fe->funcid);
+			++(*data->count);
+		} else if (fe->funcid == data->stub_oids->symbol_count_oid
+				   && list_length(fe->args) == 2) {
+			/*
+			 * symbol_count(Var, Const) is a cost inflator: the scalar
+			 * Postgres-level function path is O(n) over the varlena,
+			 * but the custom scan resolves it via a single O(1) array
+			 * index into meta_sidecar.counts[]. We count every call
+			 * site so the negative-cost adjustment scales with the
+			 * number of rewrites VarInjectorMutator will perform.
+			 */
+			JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq.symbol_count funcexpr");
+			++(*data->count);
+		}
+	}
+	return expression_tree_walker(node, bioseq_projection_walker, ctx);
+}
+
+/*
  * Create and add a path with the given parameterization paramRelids.
  *
  * XXX: Consider refactoring to be more like postgresGetForeignPaths(). The
@@ -2039,41 +2253,25 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={} symbol_count_oid={}",
 		stub_oids.mmsearch_oid, stub_oids.score_oid, stub_oids.cigar_oid, stub_oids.query_start_oid,
 		stub_oids.symbol_count_oid);
-	for (auto tgt : PList<TargetEntry>(root->parse->targetList)) {
-		if (IsA(tgt->expr, FuncExpr)) {
-			FuncExpr* fe = reinterpret_cast<FuncExpr *>(tgt->expr);
-			if (is_mmsearch_funcid(fe->funcid, stub_oids)) {
-				JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr in targetlist");
-				wehavemagic = true;
-				wehavemagic_cnt++;
-			} else if (is_bioseq_projection_funcid(fe->funcid, stub_oids)) {
-				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq projection funcexpr funcid={} in targetlist",
-					fe->funcid);
-				wehavemagic = true;
-				wehavemagic_cnt++;
-			} else if (fe->funcid == stub_oids.symbol_count_oid
-					   && list_length(fe->args) == 2) {
-				/*
-				 * symbol_count(Var, Const) is a cost inflator: the scalar
-				 * Postgres-level function path is O(n) over the varlena,
-				 * but the custom scan resolves it via a single O(1) array
-				 * index into meta_sidecar.counts[]. We treat each call
-				 * site as one unit of wehavemagic_cnt so the cost
-				 * adjustment below scales with the number of rewrites we
-				 * will do in VarInjectorMutator. Call sites whose first
-				 * argument is a literal (Const-typed bioseq.seq) are
-				 * counted too: the scalar function's SupportRequestCost
-				 * still inflates the plain-scan cost enough that the
-				 * custom scan wins, and VarInjectorMutator will leave
-				 * those sites alone so the scalar fallback computes the
-				 * literal's count in place.
-				 */
-				JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq.symbol_count funcexpr in targetlist");
-				wehavemagic = true;
-				wehavemagic_cnt++;
-			}
-		}
-	}
+	/*
+	 * Tree-walk the parse tlist (and its expression children) to count
+	 * every bioseq.* FuncExpr. A flat top-level scan misses three real
+	 * shapes that need the custom scan to win:
+	 *   (a) Targetlist entries holding a TargetEntry whose expr is a
+	 *       PlaceHolderVar — this is the post-planner-support shape for
+	 *       any bioseq.* projection in a query with JOINs or aggs.
+	 *   (b) Composite expressions like `bioseq.cigar(t1.pk) || '!'`
+	 *       where the FuncExpr is a child of a higher operator.
+	 *   (c) `symbol_count(Var, 'L')` calls nested similarly.
+	 * Without the walker, picking PHV-wrapping in
+	 * bioseq_placeholder_support would silently lose the cost reduction
+	 * and the planner would prefer Index Scan / Seq Scan over our
+	 * custom scan — observed for the LEFT JOIN regression test.
+	 */
+	BioseqProjectionCounter walker_data{ &stub_oids, &wehavemagic_cnt };
+	bioseq_projection_walker(
+		reinterpret_cast<Node*>(root->parse->targetList), &walker_data);
+	wehavemagic = wehavemagic_cnt > 0;
 
 	JustLog("[bioseq] pg: AddColumnarScanPath() walking pathtarget expressions");
 	for (auto expr : PList<Node>(path->pathtarget->exprs)) {
@@ -2535,18 +2733,21 @@ ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 static Node *
 ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 {
-	/*
-	 * Reset the placeholder inventory. The previous query's Consts were
-	 * palloc'd in that query's memory context; those pointers are now
-	 * dangling. CustomExecScan's first-call init detects the nullptr
-	 * state and re-allocates them in the new context.
-	 */
-	placeholder_consts = BioseqPlaceholderConsts{};
-	const_score_node = nullptr;
-	newtargetlist = nullptr;
 	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() entered");
 	BioseqScanState* bioseq_scan_state = BioseqScanState::allocate();
 	bioseq_scan_state->as_custom_scan_state()->methods = &ColumnarScanExecuteMethods;
+	/*
+	 * Defer runtime allocation to BeginCustomScan: that's where we
+	 * have the EState (and therefore the per-query MemoryContext we
+	 * register the cleanup callback against). A scan that never enters
+	 * Begin (e.g. EXPLAIN without ANALYZE) therefore never allocates
+	 * a runtime — bioseq_runtime() in the Explain hook is the only
+	 * other caller that would lazily allocate, and that case is
+	 * benign because EXPLAIN doesn't run the executor body. The
+	 * `void*` storage on BioseqScanState lets the public scan-state
+	 * header stay standard-layout; we re-cast in bioseq_runtime().
+	 */
+	bioseq_scan_state->runtime = nullptr;
 	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() returning");
 	return bioseq_scan_state->as_node();
 }
@@ -2730,12 +2931,21 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	}
 
 	/*
+	 * Register the per-query MemoryContext callback BEFORE touching
+	 * the runtime so an ereport(ERROR) further down still triggers
+	 * cleanup on transaction abort. Idempotent across rescans.
+	 */
+	register_runtime_cleanup_callback(columnarScanState, estate);
+
+	/*
 	 * Walk cscan->scan.plan.qual to discover the WHERE mmsearch(...) call,
 	 * pull out (varattno of the TEXT column, query literal) and configure
 	 * the dispatch buffer so submit_scan has enough context to emit the
 	 * per-tuple log line and buffer the right column values.
 	 */
-	buffer.clear_mmsearch_context();
+	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+	runtime.buffer.clear_mmsearch_context();
+	runtime.param_rebind = MmsearchParamRebind{};
 
 	Relation relation_for_attname = cscanstate->ss.ss_currentRelation;
 	const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
@@ -2778,22 +2988,75 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 					static_cast<int>(nodeTag(arg0)));
 			continue;
 		}
-		if (!IsA(arg1, Const))
+		/*
+		 * Two accepted shapes for the second arg:
+		 *   (1) Const — the literal-query case. We detoast the query
+		 *       bytes once at Begin and reuse them for every batched
+		 *       row.
+		 *   (2) Param of bioseq.seq — the parameterized-NL case used
+		 *       when the planner pushes an outer Var into the inner
+		 *       side. The query value isn't known yet, so we stash the
+		 *       Param coordinates and resolve them at every
+		 *       ReScanCustomScan via EvalParamsMutator. This is what
+		 *       enables many-to-many alignments under Nested Loop.
+		 *
+		 * Anything else (a Var that wasn't parameterized, a complex
+		 * expression, …) is currently unsupported: the qual still runs
+		 * as a tautology (mmsearch's scalar stub returns TRUE), but the
+		 * batch processor never fires so the bioseq.* projections stay
+		 * NULL. We log loudly so users can see why their cigar/score
+		 * came back blank.
+		 */
+		const bool arg1_is_const = IsA(arg1, Const);
+		const bool arg1_is_param = IsA(arg1, Param);
+		if (!arg1_is_const && !arg1_is_param)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a Const (tag={})",
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a Const or Param (tag={}); "
+					"bioseq.* projections will return NULL for this scan",
 					static_cast<int>(nodeTag(arg1)));
 			continue;
 		}
 
 		Var* col_var = reinterpret_cast<Var*>(arg0);
-		Const* query_const = reinterpret_cast<Const*>(arg1);
 
-		if (query_const->consttype != scan_stub_oids.bioseq_seq_type_oid
-			|| query_const->constisnull)
+		if (arg1_is_const)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null bioseq.seq Const (type={}, null={})",
-					query_const->consttype, query_const->constisnull);
-			continue;
+			Const* query_const = reinterpret_cast<Const*>(arg1);
+			if (query_const->consttype != scan_stub_oids.bioseq_seq_type_oid
+				|| query_const->constisnull)
+			{
+				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null bioseq.seq Const (type={}, null={})",
+						query_const->consttype, query_const->constisnull);
+				continue;
+			}
+		}
+		else
+		{
+			Param* query_param = reinterpret_cast<Param*>(arg1);
+			if (query_param->paramtype != scan_stub_oids.bioseq_seq_type_oid)
+			{
+				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramtype={}, expected bioseq.seq ({})",
+						query_param->paramtype, scan_stub_oids.bioseq_seq_type_oid);
+				continue;
+			}
+			/*
+			 * Only PARAM_EXEC is the planner-internal kind that
+			 * appears for parameterized inner-side NL scans (the
+			 * scenario we want to support — outer Var pushed into
+			 * the inner side as $0). PARAM_EXTERN comes from the
+			 * client protocol and would route through
+			 * `econtext->ecxt_param_list_info` rather than
+			 * `estate->es_param_exec_vals`; treating it the same
+			 * way would silently miss the rebind. Reject other
+			 * kinds for now so the failure is loud rather than
+			 * "rows but cigar empty".
+			 */
+			if (query_param->paramkind != PARAM_EXEC)
+			{
+				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramkind={}, only PARAM_EXEC supported — bioseq.* projections will be NULL",
+						static_cast<int>(query_param->paramkind));
+				continue;
+			}
 		}
 
 		TupleDesc tuple_descriptor = RelationGetDescr(relation_for_attname);
@@ -2823,15 +3086,18 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; bioseq.seq columns require an explicit (alphabet,width)");
 			continue;
 		}
-		if (query_const->consttypmod < 0)
+		const int32 arg1_typmod = arg1_is_const
+			? reinterpret_cast<Const*>(arg1)->consttypmod
+			: reinterpret_cast<Param*>(arg1)->paramtypmod;
+		if (arg1_typmod < 0)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal");
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
 			continue;
 		}
-		if (col_var->vartypmod != query_const->consttypmod)
+		if (col_var->vartypmod != arg1_typmod)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch col_typmod={} query_typmod={}",
-					col_var->vartypmod, query_const->consttypmod);
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch col_typmod={} arg1_typmod={}",
+					col_var->vartypmod, arg1_typmod);
 			continue;
 		}
 		const auto unpacked_typmod = unpack_pgseq_typmod(col_var->vartypmod);
@@ -2861,29 +3127,58 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			continue;
 		}
 
-		/*
-		 * Detoast the query bioseq.seq varlena once; submit_scan reuses the
-		 * bytes across every row so the TOAST read never happens on the hot
-		 * path. The buffer owns a std::vector<char> copy so the bytes
-		 * outlive the planner's per-query memory context.
-		 */
-		PgCompactSequenceHdr* query_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
-			PG_DETOAST_DATUM(query_const->constvalue));
-		const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
-		std::vector<char> query_varlena_bytes(query_total_bytes);
-		std::memcpy(query_varlena_bytes.data(), query_hdr, query_total_bytes);
-		if (reinterpret_cast<void*>(query_hdr)
-			!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue)))
+		if (arg1_is_const)
 		{
-			pfree(query_hdr);
-		}
+			/*
+			 * Literal-query case. Detoast the query bioseq.seq varlena once;
+			 * submit_scan reuses the bytes across every row so the TOAST read
+			 * never happens on the hot path. The buffer owns a std::vector<char>
+			 * copy so the bytes outlive the planner's per-query memory context.
+			 */
+			Const* query_const = reinterpret_cast<Const*>(arg1);
+			PgCompactSequenceHdr* query_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+				PG_DETOAST_DATUM(query_const->constvalue));
+			const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
+			std::vector<char> query_varlena_bytes(query_total_bytes);
+			std::memcpy(query_varlena_bytes.data(), query_hdr, query_total_bytes);
+			if (reinterpret_cast<void*>(query_hdr)
+				!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue)))
+			{
+				pfree(query_hdr);
+			}
 
-		buffer.configure_mmsearch(col_var->varattno,
-								  std::string(attname_cstr),
-								  std::move(query_varlena_bytes),
-								  unpacked_typmod.alphabet_code,
-								  unpacked_typmod.width_code,
-								  primary_key_attno);
+			runtime.buffer.configure_mmsearch(col_var->varattno,
+										  std::string(attname_cstr),
+										  std::move(query_varlena_bytes),
+										  unpacked_typmod.alphabet_code,
+										  unpacked_typmod.width_code,
+										  primary_key_attno);
+		}
+		else
+		{
+			/*
+			 * Parameterized-query case. Stash the Param coordinates so
+			 * ColumnarScan_ReScanCustomScan can resolve them per-rescan
+			 * via EvalParamsMutator. The buffer's mmsearch_context stays
+			 * inactive at Begin; ReScan installs it (or skips this scan
+			 * iteration when the Param resolves to NULL).
+			 */
+			Param* query_param = reinterpret_cast<Param*>(arg1);
+			runtime.param_rebind.active            = true;
+			runtime.param_rebind.paramid           = query_param->paramid;
+			runtime.param_rebind.paramkind         = static_cast<int>(query_param->paramkind);
+			runtime.param_rebind.param_typoid      = query_param->paramtype;
+			runtime.param_rebind.param_typmod      = query_param->paramtypmod;
+			runtime.param_rebind.seq_attno         = col_var->varattno;
+			runtime.param_rebind.column_name       = std::string(attname_cstr);
+			runtime.param_rebind.alphabet_code     = unpacked_typmod.alphabet_code;
+			runtime.param_rebind.width_code        = unpacked_typmod.width_code;
+			runtime.param_rebind.primary_key_attno = primary_key_attno;
+			JustLog("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
+					query_param->paramid, static_cast<int>(query_param->paramkind),
+					static_cast<unsigned>(unpacked_typmod.alphabet_code),
+					static_cast<unsigned>(unpacked_typmod.width_code));
+		}
 
 		pfree(attname_cstr);
 		break; /* POC: only honour the first mmsearch() qual we find */
@@ -2897,7 +3192,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 *
 	 * The resulting struct is pushed into the TupleDispatchBuffer so every
 	 * batch row inherits the same parameters, and copied into the per-scan
-	 * g_per_scan_aligner_state so EXPLAIN can reproduce the user-visible
+	 * runtime.aligner_state so EXPLAIN can reproduce the user-visible
 	 * decision tree without re-walking the plan.
 	 */
 	const BioseqScanFeatureFlags features = detect_feature_flags(
@@ -2910,9 +3205,9 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
 
-	g_per_scan_aligner_state.params          = aligner_params;
-	g_per_scan_aligner_state.features        = features;
-	g_per_scan_aligner_state.params_captured = true;
+	runtime.aligner_state.params          = aligner_params;
+	runtime.aligner_state.features        = features;
+	runtime.aligner_state.params_captured = true;
 
 	/*
 	 * Only consult the sidecar when mmsearch is actually present. Without
@@ -2924,7 +3219,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		cscanstate->ss.ss_currentRelation != nullptr
 			? RelationGetRelid(cscanstate->ss.ss_currentRelation)
 			: InvalidOid;
-	buffer.configure_params(aligner_params,
+	runtime.buffer.configure_params(aligner_params,
 							features.has_mmsearch && bioseq_read_sequence_index,
 							resolved_user_relid);
 
@@ -3212,6 +3507,25 @@ VarInjectorMutator(Node *node, void* context)
 		}
 		/* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
 	}
+	/*
+	 * PlaceHolderVar handling. By Postgres convention the planner
+	 * resolves PHVs to Vars / Params by execution time (pathnodes.h:
+	 * "it is not recognized by the parser or executor"), so seeing
+	 * one here is a planner bug. We log loudly and pass the node
+	 * through — unwrapping would silently drop the PHV's
+	 * phnullingrels metadata and could produce wrong results in
+	 * outer-join nullable positions (a plain Const has no nulling
+	 * semantics). Falling through to expression_tree_mutator below
+	 * does the right thing because that walker recurses into phexpr,
+	 * giving VarInjectorMutator a chance to rewrite our FuncExpr in
+	 * place; the PHV node itself is preserved.
+	 */
+	if (IsA(node, PlaceHolderVar)) {
+		PlaceHolderVar* phv = reinterpret_cast<PlaceHolderVar*>(node);
+		JustLog("[bioseq] pg: VarInjectorMutator() encountered PlaceHolderVar phid={} at exec time — passing through",
+				phv->phid);
+		/* fall through to expression_tree_mutator */
+	}
 	return expression_tree_mutator(node, VarInjectorMutator, context);
 }
 
@@ -3227,7 +3541,8 @@ VarInjectorMutator(Node *node, void* context)
  * HWY_BEFORE_NAMESPACE() so we qualify with the full path.
  */
 static void
-populate_placeholder_consts(const bioseq::simd::N_NEON::MatchResult& match)
+populate_placeholder_consts(BioseqPlaceholderConsts& consts,
+							const bioseq::simd::N_NEON::MatchResult& match)
 {
 	using bioseq::simd::N_NEON::format_cigar;
 	auto set_int = [](Const* node, int32_t value) {
@@ -3246,30 +3561,30 @@ populate_placeholder_consts(const bioseq::simd::N_NEON::MatchResult& match)
 		node->constisnull = false;
 	};
 
-	set_int(placeholder_consts.dp_score_node,              match.dp_score);
-	set_int(placeholder_consts.query_len_node,             match.query_len);
-	set_int(placeholder_consts.query_start_node,           match.query_start);
-	set_int(placeholder_consts.query_end_node,             match.query_end);
-	set_int(placeholder_consts.target_len_node,            match.target_len);
-	set_int(placeholder_consts.target_start_node,          match.target_start);
-	set_int(placeholder_consts.target_end_node,            match.target_end);
-	set_int(placeholder_consts.num_matches_node,           match.num_matches);
-	set_int(placeholder_consts.block_length_node,          match.block_length);
-	set_int(placeholder_consts.mapq_node,                  match.mapq);
-	set_int(placeholder_consts.chain_score_node,           match.chain_score);
-	set_int(placeholder_consts.dp_max_score_node,          match.dp_max_score);
-	set_int(placeholder_consts.seed_count_node,            match.seed_count);
-	set_int(placeholder_consts.secondary_chain_score_node, match.secondary_chain_score);
-	set_bool(placeholder_consts.is_reverse_node,           match.is_reverse);
-	set_bool(placeholder_consts.is_primary_node,           match.is_primary);
-	set_bool(placeholder_consts.has_cigar_node,            match.has_cigar);
-	set_float(placeholder_consts.divergence_node,          match.divergence);
+	set_int(consts.dp_score_node,              match.dp_score);
+	set_int(consts.query_len_node,             match.query_len);
+	set_int(consts.query_start_node,           match.query_start);
+	set_int(consts.query_end_node,             match.query_end);
+	set_int(consts.target_len_node,            match.target_len);
+	set_int(consts.target_start_node,          match.target_start);
+	set_int(consts.target_end_node,            match.target_end);
+	set_int(consts.num_matches_node,           match.num_matches);
+	set_int(consts.block_length_node,          match.block_length);
+	set_int(consts.mapq_node,                  match.mapq);
+	set_int(consts.chain_score_node,           match.chain_score);
+	set_int(consts.dp_max_score_node,          match.dp_max_score);
+	set_int(consts.seed_count_node,            match.seed_count);
+	set_int(consts.secondary_chain_score_node, match.secondary_chain_score);
+	set_bool(consts.is_reverse_node,           match.is_reverse);
+	set_bool(consts.is_primary_node,           match.is_primary);
+	set_bool(consts.has_cigar_node,            match.has_cigar);
+	set_float(consts.divergence_node,          match.divergence);
 
-	if (placeholder_consts.cigar_node != nullptr)
+	if (consts.cigar_node != nullptr)
 	{
 		std::string cigar_str = format_cigar(match.cigar);
-		placeholder_consts.cigar_node->constvalue = CStringGetTextDatum(cigar_str.c_str());
-		placeholder_consts.cigar_node->constisnull = false;
+		consts.cigar_node->constvalue = CStringGetTextDatum(cigar_str.c_str());
+		consts.cigar_node->constisnull = false;
 	}
 }
 
@@ -3293,13 +3608,14 @@ populate_placeholder_consts(const bioseq::simd::N_NEON::MatchResult& match)
  * the scan transaction to read-write and is out of scope for the POC.
  */
 static void
-populate_symbol_count_placeholders(Oid user_relid, int64_t sequence_rowno)
+populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
+								   Oid user_relid, int64_t sequence_rowno)
 {
-	if (placeholder_consts.symbol_count_sites.empty()) {
+	if (consts.symbol_count_sites.empty()) {
 		return;
 	}
 	if (sequence_rowno < 0 || user_relid == InvalidOid) {
-		for (auto& site : placeholder_consts.symbol_count_sites) {
+		for (auto& site : consts.symbol_count_sites) {
 			if (site.placeholder != nullptr) {
 				site.placeholder->constisnull = true;
 			}
@@ -3308,7 +3624,7 @@ populate_symbol_count_placeholders(Oid user_relid, int64_t sequence_rowno)
 	}
 
 	auto counts = bioseq::sidecar::sidecar_read_meta_counts(user_relid, sequence_rowno);
-	for (auto& site : placeholder_consts.symbol_count_sites) {
+	for (auto& site : consts.symbol_count_sites) {
 		if (site.placeholder == nullptr) {
 			continue;
 		}
@@ -3323,7 +3639,7 @@ populate_symbol_count_placeholders(Oid user_relid, int64_t sequence_rowno)
 	}
 	JustLog("[bioseq] pg: populate_symbol_count_placeholders relid={} rowno={} sites={} hit={}",
 			static_cast<unsigned>(user_relid), sequence_rowno,
-			placeholder_consts.symbol_count_sites.size(),
+			consts.symbol_count_sites.size(),
 			counts.has_value());
 }
 
@@ -3338,6 +3654,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 	ExprState  *qual;
 
 	ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
+	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
 
 	qual     = node->ps.qual;
 	econtext = node->ps.ps_ExprContext;
@@ -3366,10 +3683,10 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 	for (;;)
 	{
 		/* ---- Phase 2: drain buffered output ---- */
-		if (buffer.has_finished_writing())
+		if (runtime.buffer.has_finished_writing())
 		{
 			JustLog("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
-			auto next = buffer.read_next_output();
+			auto next = runtime.buffer.read_next_output();
 			if (!next)
 			{
 				JustLog("[bioseq] pg: Inner_CustomExecScan() output cursor drained; returning empty slot (EOF)");
@@ -3381,7 +3698,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 * subsequent ExecProject reads the current constvalue of
 			 * every Const node referenced in newtargetlist.
 			 */
-			populate_placeholder_consts(*next->match);
+			populate_placeholder_consts(runtime.placeholder_consts, *next->match);
 
 			/*
 			 * symbol_count placeholders are independent of MatchResult;
@@ -3390,7 +3707,8 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 */
 			{
 				const Oid user_relid = RelationGetRelid(node->ss_currentRelation);
-				populate_symbol_count_placeholders(user_relid, next->entry->sequence_rowno);
+				populate_symbol_count_placeholders(runtime.placeholder_consts,
+												   user_relid, next->entry->sequence_rowno);
 			}
 
 			/*
@@ -3401,7 +3719,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			econtext->ecxt_scantuple = next->entry->scan_slot_copy;
 
 			ProjectionInfo* proj = ExecBuildProjectionInfo(
-				newtargetlist,
+				runtime.newtargetlist,
 				econtext,
 				node->ps.ps_ResultTupleSlot,
 				&(node->ps),
@@ -3424,7 +3742,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			if (TupIsNull(slot))
 			{
 				JustLog("[bioseq] pg: Inner_CustomExecScan() source exhausted; running batch processor");
-				buffer.run_batch_and_build_cursors();
+				runtime.buffer.run_batch_and_build_cursors();
 				continue; /* Next iteration enters Phase 2. */
 			}
 		}
@@ -3446,7 +3764,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 				if (TupIsNull(slot))
 				{
 					JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted; running batch processor");
-					buffer.run_batch_and_build_cursors();
+					runtime.buffer.run_batch_and_build_cursors();
 					continue;
 				}
 
@@ -3513,9 +3831,9 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		JustLog("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
-			if (buffer.mmsearch_active()) {
+			if (runtime.buffer.mmsearch_active()) {
 				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
-				buffer.submit_scan(econtext->ecxt_scantuple);
+				runtime.buffer.submit_scan(econtext->ecxt_scantuple);
 			}
 			else {
 				/*
@@ -3546,11 +3864,12 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 						row_number = static_cast<int64_t>(tid_to_row_number(slot->tts_tid));
 					}
 					const Oid user_relid = RelationGetRelid(node->ss_currentRelation);
-					populate_symbol_count_placeholders(user_relid, row_number);
+					populate_symbol_count_placeholders(runtime.placeholder_consts,
+													   user_relid, row_number);
 				}
 
 				ProjectionInfo* proj = ExecBuildProjectionInfo(
-					newtargetlist,
+					runtime.newtargetlist,
 					econtext,
 					node->ps.ps_ResultTupleSlot,
 					&(node->ps),
@@ -3577,7 +3896,8 @@ CustomExecScan(BioseqScanState *columnarScanState,
 	ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
 	PlanState ps = node->ps;
 	auto context = ps.ps_ExprContext;
-	
+	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+
 	JustLog("[bioseq] pg: CustomExecScan() reading plan targetlist");
 	auto targetlist = ps.plan->targetlist;
 	JustLog("[bioseq] pg: CustomExecScan() targetlist_is_null={}", targetlist == nullptr);
@@ -3590,7 +3910,7 @@ CustomExecScan(BioseqScanState *columnarScanState,
 	}
 	JustLog("[bioseq] pg: CustomExecScan() targetlist iteration complete");
 
-	if (placeholder_consts.dp_score_node == nullptr) {
+	if (runtime.placeholder_consts.dp_score_node == nullptr) {
 		JustLog("[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
 
 		/* INT4: byval, len=4, no collation. */
@@ -3642,43 +3962,40 @@ CustomExecScan(BioseqScanState *columnarScanState,
 			);
 		};
 
-		placeholder_consts.symbol_count_sites.clear();
-		placeholder_consts.dp_score_node              = int_placeholder();
-		placeholder_consts.query_len_node             = int_placeholder();
-		placeholder_consts.query_start_node           = int_placeholder();
-		placeholder_consts.query_end_node             = int_placeholder();
-		placeholder_consts.target_len_node            = int_placeholder();
-		placeholder_consts.target_start_node          = int_placeholder();
-		placeholder_consts.target_end_node            = int_placeholder();
-		placeholder_consts.num_matches_node           = int_placeholder();
-		placeholder_consts.block_length_node          = int_placeholder();
-		placeholder_consts.mapq_node                  = int_placeholder();
-		placeholder_consts.chain_score_node           = int_placeholder();
-		placeholder_consts.dp_max_score_node          = int_placeholder();
-		placeholder_consts.seed_count_node            = int_placeholder();
-		placeholder_consts.secondary_chain_score_node = int_placeholder();
-		placeholder_consts.is_reverse_node            = bool_placeholder();
-		placeholder_consts.is_primary_node            = bool_placeholder();
-		placeholder_consts.has_cigar_node             = bool_placeholder();
-		placeholder_consts.divergence_node            = float_placeholder();
-		placeholder_consts.cigar_node                 = text_placeholder();
-
-		/* Legacy alias used by log sites elsewhere in the file. */
-		const_score_node = placeholder_consts.dp_score_node;
+		runtime.placeholder_consts.symbol_count_sites.clear();
+		runtime.placeholder_consts.dp_score_node              = int_placeholder();
+		runtime.placeholder_consts.query_len_node             = int_placeholder();
+		runtime.placeholder_consts.query_start_node           = int_placeholder();
+		runtime.placeholder_consts.query_end_node             = int_placeholder();
+		runtime.placeholder_consts.target_len_node            = int_placeholder();
+		runtime.placeholder_consts.target_start_node          = int_placeholder();
+		runtime.placeholder_consts.target_end_node            = int_placeholder();
+		runtime.placeholder_consts.num_matches_node           = int_placeholder();
+		runtime.placeholder_consts.block_length_node          = int_placeholder();
+		runtime.placeholder_consts.mapq_node                  = int_placeholder();
+		runtime.placeholder_consts.chain_score_node           = int_placeholder();
+		runtime.placeholder_consts.dp_max_score_node          = int_placeholder();
+		runtime.placeholder_consts.seed_count_node            = int_placeholder();
+		runtime.placeholder_consts.secondary_chain_score_node = int_placeholder();
+		runtime.placeholder_consts.is_reverse_node            = bool_placeholder();
+		runtime.placeholder_consts.is_primary_node            = bool_placeholder();
+		runtime.placeholder_consts.has_cigar_node             = bool_placeholder();
+		runtime.placeholder_consts.divergence_node            = float_placeholder();
+		runtime.placeholder_consts.cigar_node                 = text_placeholder();
 
 		/*
 		 * Reset only the slot buffer; keep the mmsearch_context that
 		 * BeginCustomScan configured earlier for this scan.
 		 */
-		buffer.clear_slots();
+		runtime.buffer.clear_slots();
 
 		const BioseqStubOids& oids_snapshot = get_cached_stub_oids();
 		VarInjectorCtx injector_ctx;
-		injector_ctx.consts           = &placeholder_consts;
+		injector_ctx.consts           = &runtime.placeholder_consts;
 		injector_ctx.oids             = &oids_snapshot;
 		injector_ctx.current_relation = columnarScanState->custom_scanstate.ss.ss_currentRelation;
 
-		newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
+		runtime.newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
 			reinterpret_cast<Node *>(targetlist),
 			static_cast<void*>(&injector_ctx)));
 	}
@@ -3821,8 +4138,32 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 	 * followed by
 	 *   "ERROR: tupdesc reference ... is not owned by resource owner Portal"
 	 * when the next query tries to release them.
+	 *
+	 * After clear_slots, free the BioseqScanRuntime itself. Owning the
+	 * std::vector / std::map storage on the C++ heap (rather than in a
+	 * Postgres MemoryContext) means we have to reach the destructor
+	 * here — Postgres' MemoryContext teardown wouldn't run them.
 	 */
-	buffer.clear_slots();
+	if (columnarScanState->runtime != nullptr) {
+		BioseqScanRuntime* runtime_ptr =
+			static_cast<BioseqScanRuntime*>(columnarScanState->runtime);
+		/*
+		 * Clear MinimalTuple slots while the per-query ResourceOwner
+		 * is still alive — Postgres tuple-desc refcounts are tracked
+		 * against it. The MemoryContext reset callback fires later
+		 * (during es_query_cxt teardown) and is forbidden from
+		 * touching slots, so we MUST do this here.
+		 *
+		 * We deliberately do NOT delete the runtime here. The
+		 * MemoryContextCallback struct that bioseq_runtime_cleanup_callback
+		 * uses lives inside the runtime; freeing the runtime now would
+		 * dangle the callback pointer in es_query_cxt's reset chain
+		 * and SIGSEGV on context teardown. The callback handles the
+		 * delete safely once the context begins to tear down.
+		 */
+		runtime_ptr->buffer.clear_slots();
+		runtime_ptr->cleanup_done = true;
+	}
 
 	/*
 	 * Cleanup BMS of selected scan attributes
@@ -3859,11 +4200,122 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 {
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(node->ss.ps.plan);
 	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
 
 	ResetExprContext(columnarScanState->css_RuntimeContext);
 	List *allClauses = PList<List>(cscan->custom_exprs).second();
 	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
 		reinterpret_cast<Node *>(allClauses), columnarScanState->css_RuntimeContext));
+
+	/*
+	 * Drop every buffered tuple, output cursor and match map left over
+	 * from the previous scan iteration. Without this, an inner-side
+	 * scan that drained its cursor on iteration N would re-enter Phase
+	 * 2 immediately on iteration N+1 (because output_position stayed
+	 * pointing past the cursor end) and return EOF without ever pulling
+	 * a tuple from the access method. ReScan is the natural reset
+	 * point: BeginCustomScan only fires once per query, so we cannot
+	 * defer this to there.
+	 */
+	runtime.buffer.clear_slots();
+
+	/*
+	 * Param-driven mmsearch rebind: when the planner rewrote the
+	 * second mmsearch argument as a Param (parameterized inner-side
+	 * scan in a Nested Loop), each rescan needs to install the current
+	 * Param value as the new query. The Param lives in the scan
+	 * node's PlanState ExprContext (filled by the NL parent before
+	 * triggering rescan), so we resolve it via EvalParamsMutator
+	 * against a copy of the original FuncExpr argument.
+	 *
+	 * We re-walk plan.qual rather than caching the original Param
+	 * pointer because EvalParamsMutator (above) already replaced
+	 * Params in `columnarScanState->qual` with Consts; the originals
+	 * still live in cscan->scan.plan.qual and are stable across
+	 * rescans.
+	 */
+	if (runtime.param_rebind.active)
+	{
+		/*
+		 * Defence in depth: BeginCustomScan should already have
+		 * accepted only PARAM_EXEC, but if a future change relaxes
+		 * that gate the rebind path must not silently route through
+		 * the wrong ParamListInfo. Refuse to rebind if the kind
+		 * doesn't match what the rebind path supports.
+		 */
+		if (runtime.param_rebind.paramkind != PARAM_EXEC) {
+			JustLog("[bioseq] pg: ReScanCustomScan() refusing rebind for non-PARAM_EXEC kind={}",
+					runtime.param_rebind.paramkind);
+			runtime.buffer.clear_mmsearch_context();
+		} else {
+		const BioseqStubOids& scan_stub_oids = get_cached_stub_oids();
+		FuncExpr* mmsearch_fe = find_mmsearch_funcexpr(
+			cscan->scan.plan.qual, scan_stub_oids);
+		ExprContext* econtext = node->ss.ps.ps_ExprContext;
+		bool reconfigured = false;
+		if (mmsearch_fe != nullptr && list_length(mmsearch_fe->args) >= 2)
+		{
+			PList<Node> fe_args(mmsearch_fe->args);
+			Node* arg1 = fe_args.second();
+			if (arg1 != nullptr && IsA(arg1, Param))
+			{
+				/*
+				 * EvalParamsMutator is the same helper used to fold
+				 * Params in plain qualifiers — it returns a Const node
+				 * holding the current Param value (or constisnull=true
+				 * if the Param resolved to NULL).
+				 */
+				Node* folded = EvalParamsMutator(arg1, econtext);
+				if (folded != nullptr && IsA(folded, Const))
+				{
+					Const* query_const = reinterpret_cast<Const*>(folded);
+					if (!query_const->constisnull
+						&& query_const->consttype == scan_stub_oids.bioseq_seq_type_oid)
+					{
+						PgCompactSequenceHdr* query_hdr =
+							reinterpret_cast<PgCompactSequenceHdr*>(
+								PG_DETOAST_DATUM(query_const->constvalue));
+						const std::size_t query_total_bytes =
+							static_cast<std::size_t>(VARSIZE(query_hdr));
+						std::vector<char> query_varlena_bytes(query_total_bytes);
+						std::memcpy(query_varlena_bytes.data(), query_hdr,
+									query_total_bytes);
+						if (reinterpret_cast<void*>(query_hdr)
+							!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
+							pfree(query_hdr);
+						}
+						runtime.buffer.configure_mmsearch(
+							runtime.param_rebind.seq_attno,
+							runtime.param_rebind.column_name,
+							std::move(query_varlena_bytes),
+							runtime.param_rebind.alphabet_code,
+							runtime.param_rebind.width_code,
+							runtime.param_rebind.primary_key_attno);
+						reconfigured = true;
+						JustLog("[bioseq] pg: ReScanCustomScan() rebound mmsearch query from Param paramid={}",
+								runtime.param_rebind.paramid);
+					}
+					else if (query_const->constisnull)
+					{
+						JustLog("[bioseq] pg: ReScanCustomScan() Param paramid={} resolved to NULL; mmsearch will match no rows",
+								runtime.param_rebind.paramid);
+					}
+				}
+			}
+		}
+		if (!reconfigured)
+		{
+			/*
+			 * Could not resolve the Param. Mark the buffer's mmsearch
+			 * context inactive so this rescan iteration skips batch
+			 * processing entirely and the qual evaluates as the
+			 * tautology stub (which still rejects via NULL semantics
+			 * when a param was NULL, since mmsearch is STRICT).
+			 */
+			runtime.buffer.clear_mmsearch_context();
+		}
+		}  /* end of else (paramkind == PARAM_EXEC) */
+	}
 
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
 
@@ -4020,6 +4472,19 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	 * From Meta" line above but never a minimizer-index line — because
 	 * they never consult index_sidecar.
 	 */
+	/*
+	 * Per-scan aligner snapshot captured at BeginCustomScan. Hoisted to
+	 * the outer scope so the pipeline-step breakdown block below can
+	 * reuse it without a second runtime lookup.
+	 */
+	BioseqScanState* explainScanState = BioseqScanState::from_custom_scan_state(node);
+	const BioseqScanRuntime* explain_runtime =
+		(explainScanState != nullptr && explainScanState->runtime != nullptr)
+			? static_cast<const BioseqScanRuntime*>(explainScanState->runtime)
+			: nullptr;
+	const PerScanAlignerState* aligner_snapshot =
+		(explain_runtime != nullptr) ? &explain_runtime->aligner_state : nullptr;
+
 	{
 		/*
 		 * Use the feature flags captured on BeginCustomScan when
@@ -4029,10 +4494,11 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 * accurate.
 		 */
 		const BioseqStubOids& explain_oids = get_cached_stub_oids();
-		BioseqScanFeatureFlags features = g_per_scan_aligner_state.params_captured
-			? g_per_scan_aligner_state.features
-			: detect_feature_flags(node->ss.ps.plan->targetlist,
-								   node->ss.ps.plan->qual, explain_oids);
+		BioseqScanFeatureFlags features =
+			(aligner_snapshot != nullptr && aligner_snapshot->params_captured)
+				? aligner_snapshot->features
+				: detect_feature_flags(node->ss.ps.plan->targetlist,
+									   node->ss.ps.plan->qual, explain_oids);
 
 		/*
 		 * Only the WHERE mmsearch(...) pipeline consults the minimizer
@@ -4123,15 +4589,16 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	 * is the one actually fed to the batch processor — not a recomputation
 	 * off GUCs that might have changed since.
 	 */
-	if (g_per_scan_aligner_state.params_captured &&
-		g_per_scan_aligner_state.features.has_mmsearch)
+	if (aligner_snapshot != nullptr
+		&& aligner_snapshot->params_captured
+		&& aligner_snapshot->features.has_mmsearch)
 	{
 		using bioseq::simd::N_NEON::ChainingAlgorithmType;
 		using bioseq::simd::N_NEON::BaseAlignmentAlgorithmType;
 		using bioseq::simd::N_NEON::chaining_algorithm_name;
 		using bioseq::simd::N_NEON::base_alignment_algorithm_name;
-		const auto& params = g_per_scan_aligner_state.params;
-		const auto& features = g_per_scan_aligner_state.features;
+		const auto& params = aligner_snapshot->params;
+		const auto& features = aligner_snapshot->features;
 
 		if (es->format == EXPLAIN_FORMAT_TEXT) {
 			appendStringInfoSpaces(es->str, es->indent * 2);

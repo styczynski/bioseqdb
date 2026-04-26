@@ -679,6 +679,23 @@ CREATE FUNCTION mmsearch_support(internal)
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE;
 
+-- bioseq_placeholder_support is the SUPPORT function attached to every
+-- bioseq.* projection (score, cigar, target_start, ...). It receives a
+-- SupportRequestSimplify and, when the planner is processing a query
+-- with JOINs or aggregates, wraps the FuncExpr in a PlaceHolderVar so
+-- the projection stays anchored to the originating scan level and is
+-- not duplicated into sibling join children's targetlists. Without it,
+-- a LEFT JOIN with `bioseq.cigar(t1.a)` and `WHERE mmsearch(t1.seq, ...)`
+-- crashes the backend because the inner side ends up with a copy of
+-- the cigar() FuncExpr but no MatchResult to back the placeholder.
+-- Inspired by paradedb pg_search's `placeholder_support` — see
+-- main/bioseq/RESEARCH/REPORT_POSTGRES_QUERY_BUGFIXING_1.md §3.
+CREATE FUNCTION bioseq_placeholder_support(internal)
+    RETURNS internal
+    AS 'MODULE_PATHNAME'
+    LANGUAGE C IMMUTABLE STRICT
+    PARALLEL SAFE;
+
 -- mmsearch arg types reference bioseq.seq; see the bottom of this file for its
 -- full definition. The function body itself is declared below, after the type
 -- registration block, because the SQL parser needs the type to exist to accept
@@ -688,121 +705,141 @@ CREATE OR REPLACE FUNCTION bioseq.score(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_score_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.dp_score(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_dp_score_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.query_len(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_query_len_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.query_start(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_query_start_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.query_end(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_query_end_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.target_len(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_target_len_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.target_start(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_target_start_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.target_end(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_target_end_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.num_matches(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_num_matches_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.block_length(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_block_length_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.mapq(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_mapq_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.chain_score(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_chain_score_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.dp_max_score(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_dp_max_score_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.seed_count(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_seed_count_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.secondary_chain_score(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_secondary_chain_score_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.is_reverse(el ANYELEMENT)
     RETURNS BOOLEAN
     AS 'MODULE_PATHNAME', 'bioseq_is_reverse_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.is_primary(el ANYELEMENT)
     RETURNS BOOLEAN
     AS 'MODULE_PATHNAME', 'bioseq_is_primary_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.has_cigar(el ANYELEMENT)
     RETURNS BOOLEAN
     AS 'MODULE_PATHNAME', 'bioseq_has_cigar_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.divergence(el ANYELEMENT)
     RETURNS REAL
     AS 'MODULE_PATHNAME', 'bioseq_divergence_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.cigar(el ANYELEMENT)
     RETURNS TEXT
     AS 'MODULE_PATHNAME', 'bioseq_cigar_stub'
     LANGUAGE C IMMUTABLE STRICT
-    PARALLEL SAFE;
+    PARALLEL SAFE
+    SUPPORT bioseq_placeholder_support;
 
 -- ============================================================================
 -- bioseq.seq -- parameterised compact-sequence type

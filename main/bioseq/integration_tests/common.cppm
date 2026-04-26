@@ -348,12 +348,20 @@ public:
 // Drops the named tables (CASCADE), recreates the bioseq extension, RESETs
 // every bioseq.* GUC, and trims residual sidecar rows so the next test starts
 // from a baseline regardless of what ran before.
+//
+// We DROP+CREATE the extension on every reset so a developer who edited
+// bioseq--1.0.sql since the previous test run picks up the new definitions
+// (otherwise CREATE EXTENSION IF NOT EXISTS is a no-op against the old
+// pg_proc rows). The schemas it owns — bioseq, bioseq_internal — are
+// rebuilt by the install script and contain only fixture state at the
+// boundary of each test, so the cascade is safe.
 export inline void reset_extension(const connection_test_context& ctx,
                                    std::span<const std::string_view> tables) {
     for (const auto& table : tables) {
         exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", table);
     }
-    exec_sql(ctx, "CREATE EXTENSION IF NOT EXISTS bioseq;");
+    exec_sql(ctx, "DROP EXTENSION IF EXISTS bioseq CASCADE;");
+    exec_sql(ctx, "CREATE EXTENSION bioseq;");
     // GUC reset: a previous test may have left bioseq.enable_vectorization
     // off etc.; the explicit names cover everything reachable from the
     // option matrix tests. RESET ALL would be cheaper but resets system GUCs

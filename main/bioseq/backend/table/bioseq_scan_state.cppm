@@ -76,6 +76,24 @@ export struct BioseqScanState
     bool snapshotRegisteredByUs;
 
     /*
+     * Per-scan runtime, owned by BioseqScanState. Stored as a `void*`
+     * opaque pointer so the std::vector / std::map / TupleDispatchBuffer
+     * fields it really points at don't drag non-standard-layout state
+     * into this struct (BioseqScanState must remain standard-layout for
+     * the reinterpret_cast across the Postgres C ABI to round-trip). The
+     * concrete type is `BioseqScanRuntime`, defined inside
+     * columnar_customscan.cppm; that file is the only one that
+     * dereferences the pointer. Allocated in
+     * ColumnarScan_CreateCustomScanState and released in
+     * ColumnarScan_EndCustomScan.
+     *
+     * Owning this state per-scan-state (rather than as a file static)
+     * is what lets a single backend run two BioseqScan nodes
+     * concurrently — a precondition for working CROSS / LEFT joins.
+     */
+    void* runtime;
+
+    /*
      * Reinterpret a CustomScanState* received from PostgreSQL back into
      * a BioseqScanState*. Safe because custom_scanstate is the first
      * field; static_assert on standard-layout below guarantees the cast
