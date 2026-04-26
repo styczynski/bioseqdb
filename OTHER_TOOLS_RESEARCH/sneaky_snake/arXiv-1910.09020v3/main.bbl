@@ -1,0 +1,233 @@
+\begin{thebibliography}{}
+
+\bibitem[Alser {\em et~al.}(2017a)Alser, Hassan, Xin, Ergin, Mutlu, and
+  Alkan]{alser2017gatekeeper}
+Alser, M., Hassan, H., Xin, H., Ergin, O., Mutlu, O., and Alkan, C. (2017a).
+\newblock {GateKeeper: a new hardware architecture for accelerating
+  pre-alignment in DNA short read mapping}.
+\newblock {\em Bioinformatics\/}, {\bf 33}(21), 3355--3363.
+
+\bibitem[Alser {\em et~al.}(2017b)Alser, Mutlu, and Alkan]{alser2017magnet1}
+Alser, M., Mutlu, O., and Alkan, C. (2017b).
+\newblock {MAGNET: Understanding and improving the accuracy of genome
+  pre-alignment filtering}.
+\newblock {\em Transactions on Internet Research\/}, {\bf 13}(2), 33--42.
+
+\bibitem[Alser {\em et~al.}(2019)Alser, Hassan, Kumar, Mutlu, and
+  Alkan]{alser2019shouji}
+Alser, M., Hassan, H., Kumar, A., Mutlu, O., and Alkan, C. (2019).
+\newblock Shouji: a fast and efficient pre-alignment filter for sequence
+  alignment.
+\newblock {\em Bioinformatics\/}, {\bf 35}(21), 4255--4263.
+
+\bibitem[Alser {\em et~al.}(2020a)Alser, Bing{\"o}l, Cali, Kim, Ghose, Alkan,
+  and Mutlu]{alser2020accelerating}
+Alser, M., Bing{\"o}l, Z., Cali, D.~S., Kim, J., Ghose, S., Alkan, C., and
+  Mutlu, O. (2020a).
+\newblock {Accelerating Genome Analysis: A Primer on an Ongoing Journey}.
+\newblock {\em IEEE Micro\/}, {\bf 40}(5), 65--75.
+
+\bibitem[Alser {\em et~al.}(2020b)Alser, Rotman, Taraszka, Shi, Baykal, Yang,
+  Xue, Knyazev, Singer, Balliu, {\em et~al.}]{alser2020technology}
+Alser, M., Rotman, J., Taraszka, K., Shi, H., Baykal, P.~I., Yang, H.~T., Xue,
+  V., Knyazev, S., Singer, B.~D., Balliu, B., {\em et~al.} (2020b).
+\newblock Technology dictates algorithms: Recent developments in read
+  alignment.
+\newblock {\em arXiv preprint arXiv:2003.00110\/}.
+
+\bibitem[Chaisson and Tesler(2012)Chaisson and Tesler]{chaisson2012mapping}
+Chaisson, M.~J. and Tesler, G. (2012).
+\newblock {Mapping single molecule sequencing reads using basic local alignment
+  with successive refinement (BLASR): application and theory}.
+\newblock {\em BMC Bioinformatics\/}, {\bf 13}(1), 238.
+
+\bibitem[Chakraborty {\em et~al.}(2018)Chakraborty, Das, Goldenberg, Koucky,
+  and Saks]{chakraborty2018approximating}
+Chakraborty, D., Das, D., Goldenberg, E., Koucky, M., and Saks, M. (2018).
+\newblock {Approximating edit distance within constant factor in truly
+  sub-quadratic time}.
+\newblock In {\em IEEE Annual Symp. on Foundations of Computer Science
+  (FOCS)\/}, pages 979--990.
+
+\bibitem[Charikar {\em et~al.}(2018)Charikar, Geri, Kim, and
+  Kuszmaul]{charikar2018estimating}
+Charikar, M., Geri, O., Kim, M.~P., and Kuszmaul, W. (2018).
+\newblock {On Estimating Edit Distance: Alignment, Dimension Reduction, and
+  Embeddings}.
+\newblock In {\em 45th International Colloquium on Automata, Languages, and
+  Programming (ICALP)\/}.
+
+\bibitem[Chen {\em et~al.}(2014)Chen, Wang, Li, and Zhou]{chen2014accelerating}
+Chen, P., Wang, C., Li, X., and Zhou, X. (2014).
+\newblock {Accelerating the next generation long read mapping with the
+  FPGA-based system}.
+\newblock {\em IEEE/ACM transactions on computational biology and
+  bioinformatics\/}, {\bf 11}(5), 840--852.
+
+\bibitem[Consortium {\em et~al.}(2015)Consortium {\em et~al.}]{10002015global}
+Consortium, . G.~P. {\em et~al.} (2015).
+\newblock A global reference for human genetic variation.
+\newblock {\em Nature\/}, {\bf 526}(7571), 68--74.
+
+\bibitem[Daily(2016)Daily]{daily2016parasail}
+Daily, J. (2016).
+\newblock {Parasail: SIMD C library for global, semi-global, and local pairwise
+  sequence alignments}.
+\newblock {\em BMC bioinformatics\/}, {\bf 17}(1), 81.
+
+\bibitem[Eddy(2004)Eddy]{eddy2004dynamic}
+Eddy, S.~R. (2004).
+\newblock {What is dynamic programming?}
+\newblock {\em Nature biotechnology\/}, {\bf 22}(7), 909.
+
+\bibitem[Fei {\em et~al.}(2018)Fei, Dan, Lina, Xin, and Chunlei]{fei2018fpgasw}
+Fei, X., Dan, Z., Lina, L., Xin, M., and Chunlei, Z. (2018).
+\newblock {FPGASW: Accelerating Large-Scale Smith--Waterman Sequence Alignment
+  Application with Backtracking on FPGA Linear Systolic Array}.
+\newblock {\em Interdisciplinary Sciences: Computational Life Sciences\/}, {\bf
+  10}(1), 176--188.
+
+\bibitem[Firtina {\em et~al.}(2020)Firtina, Kim, Alser, Senol~Cali, Cicek,
+  Alkan, and Mutlu]{firtina2020apollo}
+Firtina, C., Kim, J.~S., Alser, M., Senol~Cali, D., Cicek, A.~E., Alkan, C.,
+  and Mutlu, O. (2020).
+\newblock {Apollo: a sequencing-technology-independent, scalable and accurate
+  assembly polishing algorithm}.
+\newblock {\em Bioinformatics\/}, {\bf 36}(12), 3669--3679.
+
+\bibitem[Ghose {\em et~al.}(2019)Ghose, Boroumand, Kim, G{\'o}mez-Luna, and
+  Mutlu]{ghose2019processing}
+Ghose, S., Boroumand, A., Kim, J.~S., G{\'o}mez-Luna, J., and Mutlu, O. (2019).
+\newblock {Processing-in-memory: A workload-driven perspective}.
+\newblock {\em IBM Journal of Research and Development\/}, {\bf 63}(6), 3--1.
+
+\bibitem[Kim {\em et~al.}(2018)Kim, Cali, Xin, Lee, Ghose, Alser, Hassan,
+  Ergin, Alkan, and Mutlu]{kim2018grim}
+Kim, J.~S., Cali, D.~S., Xin, H., Lee, D., Ghose, S., Alser, M., Hassan, H.,
+  Ergin, O., Alkan, C., and Mutlu, O. (2018).
+\newblock {GRIM-Filter: Fast seed location filtering in DNA read mapping using
+  processing-in-memory technologies}.
+\newblock {\em BMC Genomics\/}, {\bf 19}(2), 89.
+
+\bibitem[Lee {\em et~al.}(1976)Lee, Bose, and Hwang]{lee1976use}
+Lee, J., Bose, N., and Hwang, F. (1976).
+\newblock {Use of Steiner's problem in suboptimal routing in rectilinear
+  metric}.
+\newblock {\em IEEE Transactions on Circuits and Systems\/}, {\bf 23}(7),
+  470--476.
+
+\bibitem[Levenshtein(1966)Levenshtein]{levenshtein1966binary}
+Levenshtein, V.~I. (1966).
+\newblock {Binary codes capable of correcting deletions, insertions, and
+  reversals}.
+\newblock In {\em Soviet Physics-Doklady\/}, volume~10, pages 707--710.
+
+\bibitem[Li(2018)Li]{li2018minimap2}
+Li, H. (2018).
+\newblock {Minimap2: pairwise alignment for nucleotide sequences}.
+\newblock {\em Bioinformatics\/}, {\bf 34}(18), 3094--3100.
+
+\bibitem[Liu and Schmidt(2015)Liu and Schmidt]{liu2015gswabe}
+Liu, Y. and Schmidt, B. (2015).
+\newblock {GSWABE: faster GPU-accelerated sequence alignment with optimal
+  alignment retrieval for short DNA sequences}.
+\newblock {\em Concurrency and Computation: Practice and Experience\/}, {\bf
+  27}(4), 958--972.
+
+\bibitem[Mutlu {\em et~al.}(2019)Mutlu, Ghose, G{\'o}mez-Luna, and
+  Ausavarungnirun]{mutlu2019processing}
+Mutlu, O., Ghose, S., G{\'o}mez-Luna, J., and Ausavarungnirun, R. (2019).
+\newblock {Processing data where it makes sense: Enabling in-memory
+  computation}.
+\newblock {\em Microprocessors and Microsystems\/}, {\bf 67}, 28--41.
+
+\bibitem[Myers(1999)Myers]{myers1999fast}
+Myers, G. (1999).
+\newblock {A fast bit-vector algorithm for approximate string matching based on
+  dynamic programming}.
+\newblock {\em Journal of the ACM (JACM)\/}, {\bf 46}(3), 395--415.
+
+\bibitem[Navarro(2001)Navarro]{navarro2001guided}
+Navarro, G. (2001).
+\newblock {A guided tour to approximate string matching}.
+\newblock {\em ACM computing surveys (CSUR)\/}, {\bf 33}(1), 31--88.
+
+\bibitem[Needleman and Wunsch(1970)Needleman and Wunsch]{needleman1970general}
+Needleman, S.~B. and Wunsch, C.~D. (1970).
+\newblock {A general method applicable to the search for similarities in the
+  amino acid sequence of two proteins}.
+\newblock {\em Journal of molecular biology\/}, {\bf 48}(3), 443--453.
+
+\bibitem[NVIDIA(2019a)NVIDIA]{cuda-guide}
+NVIDIA (2019a).
+\newblock {{CUDA C} Programming Guide}.
+
+\bibitem[NVIDIA(2019b)NVIDIA]{guide2019Nvidia2080}
+NVIDIA (2019b).
+\newblock {NVIDIA GeForce RTX 2080 Ti User Guide}.
+
+\bibitem[Senol~Cali {\em et~al.}(2019)Senol~Cali, Kim, Ghose, Alkan, and
+  Mutlu]{senol2019nanopore}
+Senol~Cali, D., Kim, J.~S., Ghose, S., Alkan, C., and Mutlu, O. (2019).
+\newblock {Nanopore sequencing technology and tools for genome assembly:
+  computational analysis of the current state, bottlenecks and future
+  directions}.
+\newblock {\em Briefings in bioinformatics\/}, {\bf 20}(4), 1542--1559.
+
+\bibitem[Senol~Cali {\em et~al.}(2020)Senol~Cali, Kalsi, Bing{\"o}l, Firtina,
+  Subramanian, Kim, Ausavarungnirun, Alser, Luna, Boroumand, Nori, Scibisz,
+  Subramoney, Alkan, Ghose, and Mutlu]{senolcalimicro2020}
+Senol~Cali, D., Kalsi, G.~S., Bing{\"o}l, Z., Firtina, C., Subramanian, L.,
+  Kim, J.~S., Ausavarungnirun, R., Alser, M., Luna, J.~G., Boroumand, A., Nori,
+  A., Scibisz, A., Subramoney, S., Alkan, C., Ghose, S., and Mutlu, O. (2020).
+\newblock {{GenASM: A High Performance, Low-Power Approximate String Matching
+  Acceleration Framework for Genome Sequence Analysis}}.
+\newblock In {\em MICRO\/}.
+
+\bibitem[Seshadri {\em et~al.}(2017)Seshadri, Lee, Mullins, Hassan, Boroumand,
+  Kim, Kozuch, Mutlu, Gibbons, and Mowry]{seshadri2017ambit}
+Seshadri, V., Lee, D., Mullins, T., Hassan, H., Boroumand, A., Kim, J., Kozuch,
+  M.~A., Mutlu, O., Gibbons, P.~B., and Mowry, T.~C. (2017).
+\newblock {Ambit: In-memory accelerator for bulk bitwise operations using
+  commodity DRAM technology}.
+\newblock In {\em MICRO\/}.
+
+\bibitem[{\v{S}}o{\v{s}}i{\'c} and {\v{S}}iki{\'c}(2017){\v{S}}o{\v{s}}i{\'c}
+  and {\v{S}}iki{\'c}]{vsovsic2017edlib}
+{\v{S}}o{\v{s}}i{\'c}, M. and {\v{S}}iki{\'c}, M. (2017).
+\newblock {Edlib: a C/C++ library for fast, exact sequence alignment using edit
+  distance}.
+\newblock {\em Bioinformatics\/}, {\bf 33}(9), 1394--1395.
+
+\bibitem[Suzuki and Kasahara(2018)Suzuki and Kasahara]{suzuki2018introducing}
+Suzuki, H. and Kasahara, M. (2018).
+\newblock Introducing difference recurrence relations for faster semi-global
+  alignment of long sequences.
+\newblock {\em BMC bioinformatics\/}, {\bf 19}(1), 33--47.
+
+\bibitem[Wang {\em et~al.}(2011)Wang, Yan, Wang, Si, and
+  Zhang]{wang2011comparison}
+Wang, C., Yan, R.-X., Wang, X.-F., Si, J.-N., and Zhang, Z. (2011).
+\newblock {Comparison of linear gap penalties and profile-based variable gap
+  penalties in profile--profile alignments}.
+\newblock {\em Computational biology and chemistry\/}, {\bf 35}(5), 308--318.
+
+\bibitem[Xilinx(2013)Xilinx]{guide2013virtex}
+Xilinx (2013).
+\newblock {Virtex-7 XT VC709 Connectivity Kit}.
+
+\bibitem[Xin {\em et~al.}(2013)Xin, Lee, Hormozdiari, Yedkar, Mutlu, and
+  Alkan]{xin2013accelerating}
+Xin, H., Lee, D., Hormozdiari, F., Yedkar, S., Mutlu, O., and Alkan, C. (2013).
+\newblock {Accelerating read mapping with FastHASH}.
+\newblock In {\em BMC genomics\/}, volume~14, page S13.
+
+\bibitem[Xin {\em et~al.}(2015)Xin, Greth, Emmons, Pekhimenko, Kingsford,
+  Alkan, and Mutlu]{xin2015shifted}
+Xin, H., Greth, J., Emmons, J., Pekhimenko, G., Kingsford, C., Alkan, C., and
+  Mutlu, O. (2015).
+\newblock {Shifted Hamming distance: a fast and accurate SIMD-friendly filter
+  to accelerate alignment verification in read mapping}.
+\newblock {\em Bioinformatics\/}, {\bf 31}(10), 1553--1560.
+
+\end{thebibliography}

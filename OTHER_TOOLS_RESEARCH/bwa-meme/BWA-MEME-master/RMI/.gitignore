@@ -1,0 +1,12 @@
+target/
+Cargo.lock
+*~
+.ipynb_checkpoints/
+*\#
+\#*
+*uint32
+*uint64
+*uint512
+rmi_data
+rmi_data/
+tests/

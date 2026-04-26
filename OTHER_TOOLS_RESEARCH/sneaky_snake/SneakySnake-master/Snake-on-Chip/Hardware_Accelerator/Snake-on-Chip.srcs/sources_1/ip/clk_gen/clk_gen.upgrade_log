@@ -1,0 +1,58 @@
+Copyright 1986-2015 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2015.4 (lin64) Build 1412921 Wed Nov 18 09:44:32 MST 2015
+| Date         : Tue Jun 21 04:32:08 2016
+| Host         : jalapeno running 64-bit unknown
+| Command      : upgrade_ip
+| Device       : xc7vx690tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'clk_gen'
+
+1. Summary
+----------
+
+SUCCESS in the upgrade of clk_gen from xilinx.com:ip:clk_wiz:5.1 (Rev. 4) to xilinx.com:ip:clk_wiz:5.2 (Rev. 1)
+
+
+
+
+
+
+Copyright 1986-2014 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2014.3 (lin64) Build 1034051 Fri Oct  3 16:31:15 MDT 2014
+| Date         : Fri Oct  2 12:58:54 2015
+| Host         : arthas-ubuntu running 64-bit Ubuntu 14.04.3 LTS
+| Command      : upgrade_ip
+| Device       : xc7vx690tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'clk_gen'
+
+1. Summary
+----------
+
+SUCCESS in the update of clk_gen (xilinx.com:ip:clk_wiz:5.1 (Rev. 4)) to current project options.
+
+
+
+
+
+
+Copyright 1986-2014 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2014.3 (lin64) Build 1034051 Fri Oct  3 16:31:15 MDT 2014
+| Date         : Fri Oct  2 12:56:46 2015
+| Host         : arthas-ubuntu running 64-bit Ubuntu 14.04.3 LTS
+| Command      : upgrade_ip
+| Device       : xc7vx485tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'clk_gen'
+
+1. Summary
+----------
+
+SUCCESS in the upgrade of clk_gen (xilinx.com:ip:clk_wiz:5.1) from (Rev. 5) to (Rev. 4)
+

@@ -1,0 +1,302 @@
+\section{Methods} \label{sec:methods}
+
+\subsection{Overview}
+\alser{The primary purpose of SneakySnake is to accelerate sequence alignment calculation by providing fast and accurate pre-alignment filtering}. 
+The SneakySnake algorithm quickly examines each sequence pair before applying sequence alignment and decide{s} whether computationally{-}expensive sequence alignment is needed \alser{for two genomic sequences}. 
+This filtering decision of the SneakySnake algorithm is made based on accurately estimating the number of edits between two given sequences.  
+If two genomic sequences differ by more than the edit distance threshold, then the two sequences are identified as dissimilar sequences and hence identifying the location and the type of each edit is not needed. 
+\emph{{The edit distance estimated by the SneakySnake algorithm should always be less than or equal to the actual edit distance}} value so that SneakySnake ensures \emph{reliable and lossless} filtering (preserving all similar sequences).
+\alser{To reliably estimate the edit distance between two sequences, we reduce the ASM problem to the SNR problem. 
+That is, instead of calculating the sequence alignment, the SneakySnake algorithm finds the routing path that interconnects two terminals {while passing} through the minimum number of obstacles on {a} VLSI chip.
+The number of obstacles faced throughout the found routing path represents a \emph{lower bound} on the edit distance between two sequences (Theorem 2, Section \ref{theorem}) and hence this number of obstacles can be used for the reliable filtering decision of SneakySnake. 
+SneakySnake treats all obstacles (edits) faced along a path equally (i.e., it does not favor one type of edits over the others).
+This eliminates the need for examining different possible arrangements of the edit operations, as in DP-based algorithms, and makes solving the SNR problem easier and faster than solving the ASM problem. However, users can still configure the aligner of their choice for their desired scoring function.} 
+
+%This section is composed of four key subsections. (1) We explain the SNR problem and provide the definitions and assumptions needed for the description and optimality proof of the SneakySnake algorithm. 
+%(2) We show how to convert the ASM problem to the SNR problem. (3) We introduce our proposed SneakySnake algorithm for solving the SNR problem and we prove that it guarantees to find an optimal path, when it exists. 
+%Such an optimal path should be both short and has the least number of obstacles. (4) We introduce the hardware architecture for Snake-on-Chip.}
+%\vspace{- 10pt}
+
+\subsection{Single Net Routing (SNR) Problem} \label{SNR_problem}
+The SNR problem in VLSI chip layout \alser{refers to the problem of optimally interconnecting two terminals on a grid graph while respecting constraints}. We present an example of a VLSI chip layout in Fig. \ref{fig:overview}. The goal is to find the optimal path \alser{--called \emph{signal net}--} that connects the source and destination terminals through the chip layout. We describe the special grid graph of the SNR problem and define {the} optimal signal net as follows:
+
+
+\begin{figure}
+\centerline{\includegraphics[width=1\linewidth]{figures/SneakySnake-Figure1.pdf}}
+\caption{\alser{{Chip layout with processing elements and two layers of metal routing tracks. In this example, the chip layout has 7 horizontal routing tracks (HRTs) located on the first layer and another 12 vertical routing tracks (VRTs) located on the second layer. 
+%We show only a single VRT out of the 12 VRTs for simplicity of illustration. 
+The optimal signal net that is calculated using the SneakySnake algorithm 
+%(the solution to the single net routing problem) 
+is highlighted in red using three escape segments. The first escape segment is connected to the second escape segment using {a} VRT through vias. The second escape segment is connected to the third escape segment without passing through a VRT as both escape segments are located on the same HRT. The optimal signal net passes through three {obstacles (each of which is located at the end of each escape segment)} and hence the signal net has a total delay of} $3\times t_{obstacle}$.}}
+\label{fig:overview}
+\end{figure}
+
+\begin{itemize}
+%\item The chip layout has two layers of evenly spaced metal routing tracks. While the first layer allows traversing the chip horizontally through dedicated \emph{horizontal routing tracks} (HRTs), the second layer allows traversing the chip vertically using dedicated \emph{vertical routing tracks} (VRTs).
+
+\item The chip layout has two layers of evenly spaced metal routing tracks. While the first layer allows traversing the chip horizontally through dedicated \emph{horizontal routing tracks} (HRTs), the second layer allows traversing the chip vertically using dedicated \emph{vertical routing tracks} (VRTs).
+
+\item The horizontal and vertical routing tracks induce a two dimensional uniform grid over the chip layout. Each HRT can be obstructed by some obstacles (e.g., processing elements in the chip). \alser{For simplicity, we assume that VRTs can not be obstructed by obstacles.} These obstacles allow the signal to pass horizontally through HRTs, but they induce a signal delay on the passed signal. Each obstacle induces a fixed propagation delay, $t_{obstacle}$, on the victim signal that passes through the obstacle in the corresponding HRT.
+\item A signal net often uses a sequence of alternating horizontal and vertical segments that are parts of the routing tracks. Adjacent horizontal and vertical segments in the signal net are connected by an inter-layer \emph{via}. \alser{We call a signal net \emph{optimal} if it is both the shortest and the fastest routing path 
+(i.e., passes through the minimum number of obstacles)}.
+\item \alser{Alternating between horizontal and vertical segments is restricted by passing a single obstacle. Thus, segment alternating strictly} delays the signal by $t_{obstacle}$ time.
+\item The terminals can be any of the I/O pads that are located on the right-hand and left-hand boundaries of the chip layout. The source terminal always lies on the opposite side of the destination terminal.
+\end{itemize}
+
+The general goal of this SNR problem is to find an \emph{optimal} signal net in the grid graph of the chip layout. 
+For the simplicity of developing a solution, we call a horizontal segment that ends with at most an obstacle an \emph{escape segment}. 
+The escape segment can also be a single obstacle only. Also for simplicity, we call the right-hand side of an escape segment {a} \emph{checkpoint}. 
+%We relax this definition later in Section \ref{Snake-on-Chip-Section} to allow partitioning the single net routing problem into smaller subproblems that can be solved independently and in parallel. 
+Next, we present how we can reduce the ASM problem to the SNR problem.
+
+\subsection{Reducing the Approximate String Matching (ASM) Problem to the Single Net Routing (SNR) Problem}\label{ASM2SNR}
+%Our goal is to reduce the time calculate the sequence alignment accurately and quickly. 
+%There are two challenges \alser{against} improving today's sequence alignment algorithms that we need to tackle. 
+%(1) How to build a data structure that is simpler than the DP table \alser{(i.e., \emph{data-dependency free})} and yet \alser{it} accurately represents the similarities and the differences between two sequences. 
+%(2) How to compute the \emph{optimal} number of differences between the two sequences using this new data structure. 
+%To this end, w
+We reduce the problem of finding the similarities and differences between two genomic sequences to that of finding the optimal signal net in a VLSI chip layout.
+\alser{Reducing the ASM problem to the SNR problem requires two key steps: (1) replacing the DP table used by \alser{the} sequence alignment algorithm \alser{to} a special grid graph called \emph{chip maze} and (2) finding the number of differences between two genomic sequences} \unskip\parfillskip 0pt \par
+
+\begin{figure*}
+\centerline{\includegraphics[width=0.95\linewidth]{figures/SneakySnake-Figure2.pdf}}
+\caption{{(a) An example of how we build the 6$^{th}$ column of the chip maze, $Z$, using Equation 1 for \alser{a reference sequence} $R$ = \lq{GGTGCAGAGCTC}\rq{}, \alser{a query sequence} $Q$ = \lq{GGTGAGAGTTGT}\rq{}, and an edit distance threshold ($E$) of 3. The 6$^{th}$ character of $R$ is compared with each of its corresponding $2E+1$ characters of $Q$. 
+{The order of the results of comparing $R[6]$ with $Q[3]$, $Q[4]$, and $Q[5]$ is reversed to easily derive the second case of Equation 1}.
+(b) The complete chip maze that is calculated using Equation 1, which has 2$E$+1 rows and $m$ (length of $Q$) columns. (c) The actual chip maze that is calculated using the SneakySnake algorithm. The optimal signal net is highlighted in both chip mazes in red. The signal net has 3 obstacles {(each of which is located at the end of each escape segment)} and hence sequence alignment is needed, as the number of differences $\leq E$.}}
+\label{fig:steps}
+\end{figure*}
+
+\noindent \alser{in the chip maze by solving the SNR problem.} 
+We replace the $(m+1) \times (m+1)$ DP table with our chip maze, $Z$, where $m$ is the sequence length (for simplicity, we assume that we have a pair of equal-length sequences but we relax this assumption in {Section}~\ref{theorem}). 
+The chip maze is a $(2E+1) \times m$ grid graph, where $E$ is the edit distance threshold {in terms of {the number of} tolerable character differences}, $(2E+1)$ is the number of HRTs, and $m$ is the number of VRTs. 
+The chip maze is an abstract layout for the VLSI chip layout, \alser{as we show in Fig. \ref{fig:steps}(b) for the same chip layout of Fig. \ref{fig:overview}}. 
+Each entry of the chip maze represents the pairwise comparison result of a character of one sequence with another character of the other sequence. 
+A pairwise mismatch is represented by an obstacle (an entry of value '1') in the chip maze and a pairwise match is represented by an available path (an entry of value '0') in its corresponding HRT.
+Given two genomic sequences, a reference sequence $R[1\dots m]$ and a query sequence $Q[1\dots m]$, and an edit distance threshold $E$, we calculate the entry $Z[i, j]$ of the chip maze, where $1\leq i\leq (2E+1)$ and $1\leq j\leq m$, as follows:\newline
+\begin{equation}
+\label{equ:chipmaze}
+Z[i,j]=\left\{\begin{matrix*}[l]
+0,\quad\quad if~~i=E+1, ~Q[j]=R[j],  \\ 
+0,\quad\quad if~~1\leq i\leq E, ~Q[j-i]=R[j],  \\ 
+0,\quad\quad if~~i> E+1, ~Q[j+i-E-1]=R[j],  \\ 
+1,\quad\quad otherwise 
+\end{matrix*}\right.
+\end{equation}
+
+We derive {the four cases of Equation 1} by considering  all possible pairwise matches and mismatches (due to possible edits) between two sequences. That is, each column of the chip maze stores the result of comparing the $j^{th}$ character of the \alser{reference sequence}, $R$, with each of {the} corresponding $2E+1$ characters of the \alser{query sequence}, $Q${, as we show in Fig.} \ref{fig:steps}(a). 
+{In the first case of Equation 1, we compare the $j^{th}$ character of the reference sequence, $R$, with the $j^{th}$ character of the query sequence, $Q$, to detect pairwise matches and substitutions.
+In the second case of Equation 1, we compare the $j^{th}$ character of the reference sequence with each of the $E$ left-hand neighboring characters of the $j^{th}$ character of the query sequence, to accurately detect deleted characters in the query {sequence}.
+In the third case of Equation 1, we compare the $j^{th}$ character of the reference sequence with each of the $E$ right-hand neighboring characters of the $j^{th}$ character of the query sequence, to accurately detect inserted characters in the query {sequence}}. 
+Each insertion and deletion can shift multiple trailing characters (e.g., deleting the character \lq{N}\rq{} from \lq{GE\textbf{N}OME}\rq{} shifts the last three characters to the left direction, making it \lq{GE\textbf{OME}}\rq{}). {Hence, in the second and the third cases of Equation 1,} we need to compare a character of the \alser{reference sequence} with the neighboring characters of its corresponding character of the \alser{query sequence} to cancel the effect of deletion/insertion and correctly detect the common subsequences between two sequences. 
+%have no shift effect on the alignment of subsequent bases, comparing the $j^{th}$ character of the \alser{reference sequence}, $R$, with the $j^{th}$ character of the \alser{query sequence}, $Q$, is needed to find such substitutions.
+%these $2E+1$ characters of the \alser{query sequence}, $Q$, are as follows: the $j^{th}$ character of the \alser{query sequence} {(case 1)}, the $E$ right-hand neighboring characters of the $j^{th}$ character, and the $E$ left-hand neighboring characters of the $j^{th}$ character. 
+%Each insertion and deletion can shift multiple trailing characters (e.g., deleting the character \lq{N}\rq{} from \lq{GE\textbf{N}OME}\rq{} shifts the last three characters to the left direction, making it \lq{GE\textbf{OME}}\rq{}). Hence, we need to compare a character of the \alser{reference sequence}, $R$, with the neighboring characters of its corresponding character of the \alser{query sequence}, $Q$, to cancel the effect of deletion/insertion and correctly detect the common subsequences between two sequences. 
+{In the fourth case of Equation 1,} we fill the remaining empty entries of each row {with} ones (i.e., obstacles) to indicate that there is no match between the corresponding characters.
+{These four cases are essential to accurately detect} substituted, deleted, and inserted characters in one or both {of the} sequences. 
+We present in Fig. \ref{fig:steps}(b) an example of the chip maze for two sequences, where a \alser{query sequence}, $Q$, differs from a \alser{reference sequence}, $R$, by three edits. 
+
+The chip maze is a data-dependency free data structure as computing each of its entries is independent of every other and thus the entire grid graph can be computed all at once in a parallel fashion. Hence, our chip maze is well suited for both sequential and highly-parallel computing platforms \citep{seshadri2017ambit}.
+%By building the chip maze, we address the first challenge against improving today's sequence alignment algorithms.
+The challenge is now calculating the minimum number of edits between two sequences using the chip maze. 
+Considering the chip maze as a chip layout where the rows represent the HRTs and the columns represent the VRTs, we observe that we can reduce the ASM problem to the SNR problem. 
+Now, the problem becomes finding an optimal set (i.e., signal net) of non-overlapping escape segments. As we discuss in Section \ref{SNR_problem}, a set of escape segments is optimal if there is no other set that solves the SNR problem and has both {smaller} number of escape segments and {smaller} number of entries of value '1' (i.e., obstacles). Once we find such an optimal set \alser{of escape segments}, we can compute the minimum number of edits between two sequences as the total number of obstacles along the computed optimal set. 
+Next, we present an efficient algorithm that solves this SNR problem.
+
+%As an entry of value 0 in the chip maze represents a pairwise match, a sequence of horizontally consecutive entries of '0's forms a common subsequence between two sequences. 
+
+%A set of one or more non-overlapping sequences of horizontally consecutive white shaded entries forms a sequence of pairwise matches. 
+%If there is more than one sequence in this set, then there should be a black shaded entry that is located at the end of each sequence of consecutive white shaded entries (except probably the last sequence). 
+%Hence, similar to the SNR problem, we call each sequence of consecutive white shaded entries including at most a single black shaded entry that is located right after the sequence as an escape segment. 
+%These escape segments should also be non-overlapping as each entry indicates that the corresponding characters of both sequences are either similar or dissimilar. 
+%The more the total number of these white shaded entries in a set the less the total number of black shaded entries. 
+
+
+
+
+\subsection{Solving the Single Net Routing Problem}\label{theorem}
+\alser{The primary purpose of the SneakySnake algorithm is to solve the SNR problem by providing an optimal signal net. 
+Solving the SNR problem requires achieving two key objectives: 1) achieving the lowest possible latency by finding the minimum number of escape segments that are sufficient to link the source terminal to the destination terminal and 2) achieving the shortest length of the signal net by considering each escape segment just once and in monotonically increasing order of their start index (or end index). 
+The first objective is based on a key observation that a signal net with fewer escape segments always {has} fewer obstacles, as each escape segment has at most a single obstacle (based on our definition in Section \ref{SNR_problem}). This key observation leads to a signal net that has the least possible total propagation delay. The second objective restricts the SneakySnake algorithm from ever searching backward for the longest escape segment. This leads to a signal net that has non-overlapping escape segments.
+
+To achieve these two key objectives, the SneakySnake algorithm applies five effective steps. (1) The SneakySnake algorithm first constructs the chip maze {using Equation 1}. 
+It then considers the first column of the chip maze as the first checkpoint, where the first iteration starts.
+(2) At each new checkpoint, the SneakySnake algorithm always selects the longest escape segment that allows the signal to travel as far forward as possible until it reaches an obstacle. 
+For each row of the chip maze, it computes the length of the first horizontal segment of consecutive entries of value '0' that starts from a checkpoint and ends at an obstacle or at the end of the current row. 
+The SneakySnake algorithm compares the length of all the $2E+1$ computed horizontal segments, selects the longest one, and considers it along with its first following obstacle as an escape segment. 
+If the SneakySnake algorithm is unable to find a horizontal segment (i.e., following a checkpoint, all rows start with an obstacle), it considers one of the obstacles as the longest escape segment. 
+It considers the computed escape segment as part of the solution to the SNR problem. 
+(3) It creates a new checkpoint after the longest escape segment. 
+(4) It repeats the second and third steps until either the signal net reaches a destination terminal, or the total propagation delay exceeds the allowed propagation delay threshold (i.e., $E\times t_{obstacle}$).} 
+{When the two input sequences are different in length, {we} need to count the number of obstacles more conservatively along {the signal net}. 
+Doing so ensures a correct reduction of the ASM problem. 
+This means that we need to deduct the total number of leading and trailing obstacles from the total count of edits between two input sequences before making the filtering decision, as such obstacles can be caused by the fourth case of Equation 1.} 
+(5) If SneakySnake finds the optimal net using the previous steps, then {it indicates that the edit distance between two input sequences is $\leq E$}.
+{If so, sequence alignment is needed to know the exact number of edits, type of each edit, and location of each edit between the two} sequences using user's favourite sequence alignment algorithm. 
+Otherwise, the SneakySnake algorithm terminates without performing computationally expensive sequence alignment{, since the differences between sequences is guaranteed to be $>E$}.
+%For the rest of the paper, we consider examining only a pair of equal-length input sequences as the general case since it is more challenging and includes more computations, as it examines the similarity end-to-end.
+
+To efficiently implement the SneakySnake algorithm, we use an implicit representation of the chip maze. That is, the SneakySnake algorithm starts computing on-the-fly one entry of the chip maze after another for each row until it faces an obstacle (i.e., $Z$[$i$,$j$] = 1) or it reaches the end of the current row. 
+Thus, the entries that are actually calculated for each row of the chip maze are the entries that are located only between each checkpoint and the first obstacle, in each row, following this checkpoint, as we show in Fig. \ref{fig:steps}(c). 
+This significantly reduces the number of computations needed for the SneakySnake algorithm.
+We provide the SneakySnake algorithm along with analysis of its computational complexity (asymptotic run time and space complexity) in \textcolor{black}{Supplementary Materials, Section 5}.
+
+The SneakySnake algorithm is both correct and optimal {in solving the SNR problem}. 
+The SneakySnake algorithm is correct as it always provides a signal net (if it exists) that interconnects the source terminal and the destination terminal. 
+In other words, it does not lead to routing failure as signal will eventually reach its destination.
+
+\textbf{Theorem 1.} \emph{The SneakySnake algorithm {is guaranteed} to find a signal net that interconnects the source terminal and the destination terminal when one exists.\\}
+We provide the correctness proof for Theorem 1 in \textcolor{black}{Supplementary Materials, Section 6.1}. 
+The SneakySnake algorithm is also optimal as it {is guaranteed} to find an optimal signal net that links the source terminal to destination terminal when one exists. 
+Such an optimal signal net always ensures that the signal arrives the destination terminal with the least possible total propagation delay.
+
+\textbf{Theorem 2.} \emph{When a signal net exists between the source terminal and the destination terminal, using the SneakySnake algorithm, a signal from the source terminal reaches the destination terminal with the minimum possible latency.\\}
+We provide the optimality proof for Theorem 2 in \textcolor{black}{Supplementary Materials, Section 6.2}.
+%Unlike existing sequence alignment algorithms that are based on DP~\citep{daily2016parasail} or sparse DP~\citep{chaisson2012mapping, schmidt2019accurate} approaches, SneakySnake has three unique advantages that we discuss in Supplementary Materials, Section 8.
+\\\vspace{-10 pt}
+
+{\textbf{Different from existing sequence alignment algorithms} that are based on DP approaches} \citep{daily2016parasail, xin2013accelerating} or sparse DP (i.e., chaining exact matches between two sequences using DP algorithms) approaches \citep{chaisson2012mapping}, 
+%schmidt2019accurate}, 
+{SneakySnake 1) does not require knowing the location and the length of {common subsequences} between the two {input} sequences in advance, 2) does not consider the vertical distance (i.e., the number of rows) between two escape segments in the calculation of the minimum number of edits, and 3) does not build the entire dynamic programming table; SneakySnake builds only a minimal portion of the chip maze that is needed to provide an optimal solution.
+The first difference makes SneakySnake independent of any algorithm that aims to calculate sequence alignment, as SneakySnake quickly and efficiently calculates its own data structure (i.e., chip maze) to find \emph{all} {common subsequences}. {The second difference helps {to construct} a data dependency-free chip maze and allows for solving many SNR subproblems in parallel as calculating the routing path after facing an obstacle is independent of the calculated path before this obstacle.}
+%simplifies the computations of SneakySnake but tends to underestimate the actual number of edits between two sequences. Slightly underestimating the number of edits while achieving fast computation is acceptable as long as we do not overestimate the number of edits. 
+The third difference significantly reduces the number of computations needed for the SneakySnake algorithm.}
+
+%The first difference makes SneakySnake independent of any algorithm that aims to calculate sequence alignment, as SneakySnake quickly and efficiently calculates its own data structure (i.e., chip maze) to find \emph{all} exact matches.
+%The second difference simplifies the computations of SneakySnake but tends to underestimate the actual number of edits between two sequences. 
+%To fix this issue, we need to consider the number of obstacles of the vertical segment that links each two adjacent escape segments in the calculation of the number of edits. 
+%We need to enumerate all possible combinations of vertical segments and escape segments that exist after each escape segment and select the one that provides the least number of obstacles.
+%This enforces us to use a DP table to avoid re-computing the length of the same escape segments many times unnecessarily. In fact, we avoid using DP tables to achieve fast and parallel calculation of the optimal signal net. 
+%Slightly underestimating the number of edits while achieving fast computation is acceptable as long as we do not overestimate the number of edits.
+
+\textbf{Different from existing edit distance approximation algorithms} \citep{chakraborty2018approximating,charikar2018estimating}
+%\citep{batu2006oblivious,andoni2012approximating,chakraborty2018approximating,charikar2018estimating}
+that sacrifice the optimality of the edit distance solution (i.e., its solution $\geq$ the actual edit distance of each sequence pair) for a reduction in time complexity, (e.g., $O(m^{1.647})$ instead of $O(m^{2})$), SneakySnake does not overestimate the edit distance as the calculated optimal signal net has \emph{always} the minimum possible number of obstacles (Theorem 2).
+{We {take advantage of} the edit distance underestimation of SneakySnake by using our fast computation method as a pre-alignment filter}.
+%ing step to decide whether {or not} sequence alignment computation is needed. 
+%If two sequences have more edits than the edit distance threshold, $E$, then we do \emph{not} need computationally costly algorithms to conclude that the two sequences have unacceptable number of edits. But if the number of edits is less than or equal the edit distance threshold, then our filtering step should be followed by accurate sequence alignment algorithms, where users can choose different scoring functions. 
+{Doing so} {ensures} two key properties: \alser{(1) {allows} sequence alignment to be calculated only for similar (or nearly similar) sequences and (2) {accelerates} the sequence alignment algorithms without changing (or replacing) their algorithmic method and hence preserving all the capabilities of the sequence alignment algorithms}.
+
+%We observe that the backtracking step of a global alignment algorithm finds the optimal sequence of edit operations between two sequences by examining the value of the entries from the bottom-right entry of the DP table to the top-left entry. Similar to a global alignment algorithm, the first escape segment in the optimal solution set should start from any entry of the first column of the chip maze. Similarly, the last escape segment in the set should end at any entry of the last column of the chip maze. 
+
+%Until now, we explain how SneakySnake examines a pair of equal-length input sequences. When the two input sequences are different in length, then we need to count the number of obstacles more conservatively along the optimal solution set. 
+%Doing so ensures a correct reduction of the ASM problem. 
+%Sequence alignment can be performed as a \emph{global} alignment, where two sequences of the same length are aligned end-to-end, or a \emph{local} alignment, where subsequences of the two given sequences are aligned. It can also be performed as a \emph{semi-global} alignment, where the entirety of one sequence is aligned to one of the ends of the other sequence. 
+%This means that we need to deduct the total number of leading and trailing obstacles from the total count of edits between two {input} sequences before making the filtering decision. 
+%Similarly for a semi-global alignment, we should not consider the leading or the trailing obstacles. 
+%For the rest of the paper, we consider only the global alignment as the general case since it is more challenging and includes more computations, as it examines the similarity end-to-end.
+
+
+
+%\alser{Next, we discuss an efficient implementation of the SneakySnake algorithm. Instead of building the chip maze explicitly, we use an implicit representation of the chip layout. That is, we compute each row of the chip maze \emph{on-the-fly}. The computation of the chip maze consists of two steps: (1) gradually shifting the \alser{query sequence}, $Q$, and (2) performing pairwise comparison of the shifted version of $Q$ with the \alser{reference sequence}, $R$. The SneakySnake algorithm shifts the \alser{query sequence} by $r$ steps to construct the $r^{th}$ row that is located above or below the $E+1^{th}$ row (called main diagonal in Fig. \ref{fig:steps}(d)) of the chip maze, where $1\leq r\leq E$. The shift direction is performed in the right-hand direction if the row is located above the $E+1^{th}$ row of the chip maze. Otherwise, the shift direction is performed in the left-hand direction. At each checkpoint, the SneakySnake algorithm starts computing on-the-fly one entry after another for each row until it faces an obstacle (the character of $Q$ at the current index mismatches its corresponding character of $R$) or it reaches the end of the row. Thus, the entries that are actually calculated for each row of the chip maze are the entries that are located only between each checkpoint and the first obstacle, in each row, following this checkpoint. This significantly reduces the number of computations needed for the SneakySnake algorithm as we discuss in detail in \textcolor{black}{Supplementary Materials, Section 7}.} 
+
+%It is important to notice that if the first and the last longest escape segments are longer than their corresponding escape segments that are located at the $E+1^{th}$ horizontal routing track, then we penalize each by an obstacle's worth of propagation delay (i.e., $t_{obstacle}$). This ensures to increase the accuracy of the SneakySnake algorithm to be as close as possible to that of a global alignment algorithm.
+We next discuss further optimizations and new software/hardware co-designed versions of the SneakySnake algorithm that {can} leverage FPGA and GPU architectures for highly-parallel computation.\\ 
+
+\subsection{Snake-on-Chip Hardware Architecture} \label{Snake-on-Chip-Section}
+We introduce an FPGA-friendly architecture for the SneakySnake algorithm, called \emph{Snake-on-Chip}. The main idea behind the hardware architecture of Snake-on-Chip is to divide the SNR problem into smaller non-overlapping subproblems. Each subproblem has a width of $t$ VRTs and a height of $2E+1$ HRTs, where $1<t\leq m$. We then solve each subproblem independently from the other subproblems. This approach results in three key benefits. 
+(1) Downsizing the search space into a reasonably small grid graph with a known dimension {at} design time limits the number of all possible solutions for that subproblem. This reduces the size of the look-up tables (LUTs) required to build the architecture and simplifies the overall design. 
+(2) Dividing the SNR problem into subproblems helps to maintain a modular and scalable architecture that can be implemented for any sequence length and edit distance threshold. (3) All the smaller subproblems can be solved independently and rapidly {with} high parallelism. This reduces the execution time of the overall algorithm as the SneakySnake algorithm does not need to evaluate the entire chip maze. 
+
+However, these three key benefits come at the cost of accuracy degradation. As we demonstrate in Theorem 2, the SneakySnake algorithm guarantees to find an optimal solution to the SNR problem. However, the solution for each subproblem is not necessarily part of the optimal solution for the main problem (with the original size of $(2E+1) \times m$). This is because the source and destination terminals of these subproblems are not necessarily the same. 
+{The SneakySnake algorithm determines the source and destination terminals for each SNR subproblem based on the optimal signal net of each SNR subproblem.}
+%The source and destination terminals should be located at any of the $2E+1$ entries of the first and the last VRTs, respectively, of each subproblem, but the SneakySnake algorithm determines the exact location of the source and destination terminals for each subproblem based on its individual optimal solution. 
+This {leads to underestimation of} the total number of obstacles found along each signal net of each SNR subproblem. This is still acceptable as long as {the SneakySnake algorithm} solves the SNR problem quickly and {\emph{without}} {\emph{overestimating}} the number of obstacles {compared to the edit distance threshold}.
+We provide the details of our hardware architecture of Snake-on-Chip in \textcolor{black}{Supplementary Materials, Section 8}.
+
+%Next, we present the details of our hardware architecture of Snake-on-Chip in four key steps. \alser{(1) Snake-on-Chip constructs the \emph{entire} chip maze of each subproblem. Each chip maze has $2E+1$ bit-vectors (rows) and each bit-vector is $t$ bits long. This is now different from the CPU implementation of the SneakySnake algorithm, as the number of entries computed in each row is no longer limited to the entries that are located only between a checkpoint and the first following obstacle. 
+%This is due to the fundamental difference between CPU core (sequential execution) and FPGA chip (parallel processing).
+%We want to concurrently compute all bits of all bit-vectors beforehand so that we can exploit massive bitwise parallelism provided by FPGA and perform computations on all bit-vectors in a parallel fashion. 
+
+%(2) It computes the length of the first horizontal segment of consecutive zeros for each bit-vector (i.e., each HRT) using a leading-zero counter (LZC). Snake-on-Chip uses the LZC design proposed in \citep{dimitrakopoulos2008low} as it requires low number of both logic gates and logic levels. It counts the number of consecutive zeros that appear in a $t$-bit input vector before the first more significant bit that is equal to one. 
+%The $t$-LZC generates two output signals, a $C$ bit-vector and a $Valid$ flag, for an input word $A = A_{t-1}, A_{t-2}, \dots, A_0$, where $A_{t-1}$ is the most significant bit. Only when all input bits are set to zero, the $Valid$ flag is set to one. 
+%For other values of input $A$, the $C$ bit-vector represents the number of leading zeros in binary. The $C$ bit-vector encodes $log_2 t$ bits. The LZC sets $C_0$ to one if its leading-zero count is an odd number. Otherwise, it is set to zero. 
+%For the case of an 8-bit input operand ($t$ = 8 bits), the two output signals of the LZC are given by:
+%\begin{equation} 
+%\begin{aligned}
+%\overline{C_2} & = A_7 + A_6 + A_5 + A_4 \\
+%\overline{C_1} & = A_7 + A_6 + \overline{A_5} \cdot  %\overline{A_4} \cdot (A_3+A_2)  \\
+%\overline{C_0} & = A_7 + \overline{A_6} \cdot A_5 + %\overline{A_6} \cdot \overline{A_4} \cdot A_3 + %\overline{A_6} \cdot \overline{A_4} \cdot %\overline{A_2} \cdot A_1 \\
+%\overline{Valid} &= A_7 + A_6 + A_5 + A_4 + A_3 + A_2 + A_1 + A_0
+%\end{aligned}
+%\end{equation}
+
+%(3) Snake-on-Chip finds the bit-vector (i.e., HRT) that has the largest number of leading zeros. Snake-on-Chip implements a hierarchical comparator structure with $\ceil{log_2(2E+1)}$ levels. Each comparator compares the output of two LZCs and finds the largest value. That is, we need $2E+2$ comparators, each of which is a $(\floor{log_2t}+1)$-bit comparator, for comparing the leading zero counts of $2E+1$ $t$-bit LZCs and finding the largest leading zero count. 
+%We provide in Fig. \ref{fig:comp} the proposed architecture of the 4-bit LZC comparator. 
+%\begin{figure}
+%\centerline{\includegraphics[width=\linewidth]{figures/SS-fig3.pdf}}
+%\caption{Proposed 4-bit LZC comparator.}
+%\label{fig:comp}
+%\end{figure}
+%It simply checks if at least one of the two input $Valid$ signals is set to zero (meaning that one of the two escape segments is 8-bit long), then it sets the output of the LZC comparator, $Valid$ and $C$ bit-vector, all to zero. Otherwise, if both input $Valid$ signals of both relevant LZCs are set to 1, then the LZC comparator compares the $C$ bit-vector of the first LZC with the $C$ bit-vector of the second LZC. It selects the $C$ bit-vector that has the largest value and passes it to its output $C$ bit-vector along with a $Valid$ signal of value one.
+%\begin{figure*}
+%\centerline{\includegraphics[scale=0.2]{figures/SS-fig4.pdf}}
+%\caption{Block diagram of the 11 LZCs and the hierarchical LZC comparator tree for computing the largest number of leading zeros in 11 rows.}
+%\label{fig:LZC}
+%\end{figure*}
+%Consider that we choose $t$, $E$, and $m$ to be 8 columns, 5 edits (i.e., 11 rows), and 100 characters, respectively. This results in partitioning the chip maze of size 11 $\times$ 100 into 13 subproblems, each of size 11 $\times$ 8. We need 11 LZCs and 12 comparators. 
+%We arrange the 12 comparators into 4 hierarchical levels: the first level that is closer to the LZCs has 6 comparators, the second level has 3 comparators, the third level has 2 comparators, and the last level has a single comparators.
+%This hierarchical comparator structure compares the 11 escape segments of a subproblem and produces a $Valid$ signal and a $C$ bit-vector that contains information about the length of the longest segment of consecutive zeros. 
+%We provide a block diagram of the 4-level LZC comparator tree including the 11 LZCs in} \textcolor{black}{Supplementary Materials, Fig. 10}. 
+
+%(4) After computing the length of the longest segment (the largest leading-zero count), Snake-on-Chip creates a new checkpoint in order to iterate over the HRTs once again to find the next optimal escape segment.
+%Snake-on-Chip achieves this by shifting the bits of each row (i.e., HRT) to the right-hand direction (assuming the least significant bit starts from the right-hand side). The shift amount is equal to $x$ bits, where $x$ is the length of the previously-found longest escape segment of the consecutive zeros.
+%To skip the obstacle that exists at the end of the longest escape segment, Snake-on-Chip shifts the bits of each row by an additional single step to the right-hand direction. This guarantees to exclude the previously-found longest escape segment along with a single obstacle from the new search round.
+
+%(5) As now, Snake-on-Chip preprocesses all the $2E+1$ rows and make them ready for the next search round. Snake-on-Chip repeats the previous four steps in order to find the next optimal escape segment starting from the least significant bit all the way to the most significant bit. Repeating the previous steps for each iteration requires building a new replication for the architecture design of all the four previous steps. The number of replications needed depends on the desired accuracy of the SneakySnake algorithm. If our target is to find an optimal signal net that has at most a single obstacle within each subproblem, then we need to build two replications for the three previous steps (steps 2, 3, and 4). For example, let $A$ be \lq{00010000}\rq{}, where $t = 8$. The first replication computes the value of $x$ as four zeros and updates the bits of $A$ to \lq{11111000}\rq{}. The second replication computes the value of $x$ as three zeros and updates the bits of $A$ to \lq{11111111}\rq{}. 
+
+%(6) The last step is to calculate the total number of obstacles faced along the entire optimal signal net in each subproblem. For each subproblem, Snake-on-Chip calculates the total number of obstacles as follows:
+%\begin{equation} 
+%min⁡(y,t-\sum_{k=1}^{y} x_k)
+%\end{equation}
+%where $y$ is the total number of replications included in the architecture of Snake-on-Chip and $x_k$ is the length of the longest segment of consecutive zeros found by the replication of index $k$. Hence, the total number of obstacles for the original problem of size $(2E+1) \times m$ is simply the summation of the total number of obstacles faced along the optimal signal net of all subproblems.
+
+
+\subsection{Snake-on-GPU Parallel Implementation} \label{Snake-on-GPU-Section}
+%This section is prepared by Juan
+{We} introduce our GPU implementation of the SneakySnake algorithm, called \emph{Snake-on-GPU}.
+The main idea of Snake-on-GPU is to exploit the large number (typically few thousands) of GPU threads provided by modern GPUs to solve a large number of SNR problems rapidly and concurrently. 
+In Snake-on-Chip, we explicitly divide the SNR problem into smaller non-overlapping subproblems and then solve all subproblems concurrently and independently using our specialized hardware. 
+In Snake-on-GPU, we follow a different approach than that of Snake-on-Chip by keeping the same size of the original SNR problem and solving a massive number of these SNR problems at the same time. %(depending on the available number of GPU threads [\textcolor{black}{JGL: This makes no sense. The limitation in the number of SNR problems that you can solved is not related to the number of GPU threads. In two different GPUs, you can solve the same number of problems -> rephrase: granularity that fits best}]) 
+%[\textcolor{black}{JUAN or TAHA please add reference if it is true -> It is not true and not a good sentence. It adds unnecessary confusion. We don't need to divide the SNR problem among multiple threads for an efficient GPU implementation, but this does not mean that doing it would be "very inefficient"}]. 
+Snake-on-GPU uses one single GPU thread to solve one SNR problem (i.e., comparing one query sequence to one reference sequence at a time). 
+This granularity of computation fits well the amount of resources (e.g., registers) that are available to each GPU thread and avoids the need for synchronizing several threads working on the same SNR problem. %GPUs offer more flexibility to the users to change the values of some input parameters of Snake-on-Chip without the need to build a new design as in FPGAs.
+%This approach obviates the need for assigning many threads for the same SNR problem and then collecting partial solutions from these threads for a single SNR problem, which is very inefficient for GPU implementation and time consuming
+
+%As such, we need to compare each of the query sequences to all available reference sequences to calculate their similarities. 
+%The number of query and reference sequences will typically be in the order of hundreds of thousands. 
+%For such a large number of similarity calculations, SneakySnake can benefit from the throughput-oriented, massively-parallel architecture of GPUs.
+Given the large size of the sequence pair dataset that the GPU threads need to access, we carefully design Snake-on-GPU to efficiently 1) copy the input dataset of query and reference sequences into the GPU global memory, which is the off-chip DRAM memory of GPUs~\citep{cuda-guide} and it typically fits a few GB of data and 2) allow each thread to store its own query and reference sequences using the on-chip register file to avoid unnecessary accesses to the off-chip global memory. Each thread solves the complete SNR problem for a single query sequence and a single reference  sequence.
+We provide the details of our parallel implementation of Snake-on-GPU in \textcolor{black}{Supplementary Materials, Section 9}.
+
+%Snake-on-GPU makes three key assumptions that help with providing an efficient GPU implementation. (1) The entire input dataset of query and reference sequences fits into the GPU global memory, which is the off-chip DRAM memory of GPUs~\citep{cuda-guide} and it typically fits a few GB of data. (2) We copy the entire input dataset from the CPU main memory to the GPU global memory before the GPU kernel execution starts. This enables massively-parallel computation by making large number of input sequences available in the GPU global memory. (3) We copy back the pre-alignment filtering results from the GPU global memory to the CPU main memory \emph{only} after the GPU kernel completes the computation. %and if later stages of the alignment pipeline do \emph{not} run on the GPU.
+%If the size of the input dataset exceeds the size of the GPU global memory, we divide the dataset into independent smaller datasets, each of which can fit the capacity of the GPU global memory. 
+%This approach also helps to overlap the computation performed on one small dataset with the transfer of another small dataset between the CPU memory and GPU memory~\citep{gomezluna2012}. 
+
+%Given the large size of the input dataset that the GPU threads need to access from the GPU global memory, we carefully design Snake-on-GPU to efficiently %(1) access the off-chip GPU global memory with its full bandwidth, and (2) use on-chip memories, such as registers and scratchpad memory, to store the query and reference sequences, which are  reused many times, and avoid unnecessary accesses to the off-chip global memory. %JGL: We are no longer using the scratchpad memory.
+%\juan{use the on-chip register file to store the query and the reference sequences and avoid unnecessary accesses to the off-chip global memory.}
+%[\textcolor{black}{WHY? -> Why what? We need to use registers and scratchpad to take advantage of data reuse, and avoid too many accesses to global memory.}]
+%JGL: The current implementation does not have coalesced memory accesses. This means that the access to global memory is not done in the most efficient way. With respect to the performance, the way we are accessing memory might still be ok, because we have L1 cache.
+%For an efficient access to the GPU global memory, we need to ensure that the memory accesses are \emph{coalesced}~\citep{cuda-guide}, i.e., consecutive threads access consecutive 4-byte words from the same cache line. 
+%This way of serving each memory request provides the minimum number of memory transactions and, thus, it boosts the overall performance by reducing the memory access time. 
+%Snake-on-GPU uses linear addressing for each GPU thread to read 4 bytes of the query and reference sequences, as we show in Fig.~\ref{fig:snake-on-gpu}.
+%The workflow of Snake-on-GPU includes two key steps.%, \juan{as we show in Fig.~\ref{fig:snake-on-gpu}}. %\CA{These circled numbers look UGLY.}
+%\begin{figure}
+%\centerline{\includegraphics[width=0.7\linewidth]{figures/Snake-on-GPU-Visio.pdf}}
+%\caption{Workflow of Snake-on-GPU. It includes three key steps: (1) loading reference sequences into the scratchpad memory, (2) loading the query sequences into registers, and (3) each thread solves a single SNR problem.}
+%\caption{Workflow of Snake-on-GPU. It includes three key steps: (1) each GPU thread loads a reference sequences into registers, (2) the thread loads the query sequence into registers, and (3) the thread solves a single SNR problem. \jgl{It is necessary to modify this figure to have registers for the refs too. Also, add the numbers (1), (2), (3).}}
+%\label{fig:snake-on-gpu}
+%\end{figure}
+%First ((1) in Fig.~\ref{fig:snake-on-gpu}), %Snake-on-GPU places the reference sequences in the on-chip scratchpad memory of each GPU core, which is a shared memory space for the threads running in a GPU core. 
+%1) Each thread copies a single reference sequence and another single query sequence \juan{from global memory to the on-chip registers.}
+%This enables all the threads to access the reference sequences efficiently without repeatedly transferring them from the global memory for each thread. 
+%With coalesced global memory accesses, these threads collaborate on loading into the scratchpad as many reference sequences as they can fit.
+%Second ((2) in Fig.~\ref{fig:snake-on-gpu}), %~\circled{2}, 
+%Snake-on-GPU places the query sequences into registers. 
+%\juan{each thread copies a query sequence from global memory to on-chip registers.}
+%Assuming the maximum length of a query sequence is $m$ (i.e., the maximum number of VRTs), we need $2m$ bits to encode each character of the query sequence to a unique binary representation.
+%Assuming the maximum length of a query (or reference) sequence is $m$ (i.e., the maximum number of VRTs), we need $2m$ bits to encode each character of the query (or reference) sequence to a unique binary representation. 
+%\juan{Since the size of a register is 4 bytes (32 bits), each thread needs $R = \ceil{\frac{2m}{32}}$ registers to store an entire query/reference sequence. For example, for a maximum length of $m$ = 128, $R$ = 8. This way, 16 registers are enough to store both query and reference sequence. This number is much lower than the maximum of 256 registers that each thread can use in current NVIDIA GPUs. Thus, the resources of a GPU core are not exhausted and more threads can run concurrently.}
+%\taha{If each thread loads 32 bytes (256 bits) from the GPU global memory, we need a group of $T = \ceil{\frac{2m}{32}}$ threads to load an entire query sequence with the length of $m$ in a way that each of them contains a complete read.} 
+%Third~\circled{3}, each thread solves the complete SNR problem for a single query sequence (that is loaded by the thread in its own register) and a single reference sequence (that is stored in the scratchpad memory). Each GPU thread applies the same computation of the SneakySnake algorithm to solve the SNR problem. For fast calculation of the number of consecutive zeros in GPUs, we use CLZ() function [\textcolor{black}{CITE}] that is the fastest GPU implementation [\textcolor{black}{JUAN or TAHA: PLEASE CHECK THIS and maybe talk about other functions used? -> I'm not convinced there is a need for talking about the CLZ function. Each thread applies SneakySnake as is, afaik. Or is the CLZ function exclusive of the GPU implementation?}].
+%Once the GPU threads complete solving the SNR problems for all the query sequences loaded in the registers and all the reference sequences loaded in the scratchpad memory, Snake-on-GPU repeats step~\circled{1} and then step~\circled{3} as many times as needed [\textcolor{black}{WHY NOT step 2 as well? -> Step (2) is reading the query. Once the query is loaded, the thread just keeps it forever and compares it to all references. We might better want to invert the order and make the reading of the query step (1).}].
+%2) \juan{Each thread solves the complete SNR problem for a single query sequence and a single reference sequence. Each GPU thread applies the same computation of the SneakySnake algorithm to solve the SNR problem.} 

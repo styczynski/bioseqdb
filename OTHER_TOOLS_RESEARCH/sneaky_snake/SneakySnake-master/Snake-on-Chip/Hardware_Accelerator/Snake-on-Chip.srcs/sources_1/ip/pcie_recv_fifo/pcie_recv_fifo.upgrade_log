@@ -1,0 +1,75 @@
+Copyright 1986-2015 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2015.4 (lin64) Build 1412921 Wed Nov 18 09:44:32 MST 2015
+| Date         : Tue Jun 21 04:32:22 2016
+| Host         : jalapeno running 64-bit unknown
+| Command      : upgrade_ip
+| Device       : xc7vx690tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'pcie_recv_fifo'
+
+1. Summary
+----------
+
+SUCCESS in the upgrade of pcie_recv_fifo from xilinx.com:ip:fifo_generator:12.0 (Rev. 2) to xilinx.com:ip:fifo_generator:13.0 (Rev. 1)
+
+2. Interface Information
+------------------------
+
+Detected external interface differences while upgrading IP 'pcie_recv_fifo'.
+
+
+-upgrade has added interface 'core_clk'
+
+3. Upgrade messages
+-------------------
+
+Added parameter Output_Register_Type with value Embedded_Reg (source 'default')
+Added parameter Enable_Safety_Circuit with value false (source 'default')
+Added parameter Enable_ECC_Type with value Hard_ECC (source 'default')
+WARNING: upgrade cannot set value of parameter Slave_interface_Clock_enable_memory_mapped to false : there is no parameter called Slave_interface_Clock_enable_memory_mapped
+WARNING: upgrade cannot set value of parameter Master_interface_Clock_enable_memory_mapped to false : there is no parameter called Master_interface_Clock_enable_memory_mapped
+
+
+
+
+
+
+Copyright 1986-2014 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2014.3 (lin64) Build 1034051 Fri Oct  3 16:31:15 MDT 2014
+| Date         : Fri Oct  2 12:59:23 2015
+| Host         : arthas-ubuntu running 64-bit Ubuntu 14.04.3 LTS
+| Command      : upgrade_ip
+| Device       : xc7vx690tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'pcie_recv_fifo'
+
+1. Summary
+----------
+
+SUCCESS in the update of pcie_recv_fifo (xilinx.com:ip:fifo_generator:12.0 (Rev. 2)) to current project options.
+
+
+
+
+
+
+Copyright 1986-2014 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2014.3 (lin64) Build 1034051 Fri Oct  3 16:31:15 MDT 2014
+| Date         : Fri Oct  2 12:56:30 2015
+| Host         : arthas-ubuntu running 64-bit Ubuntu 14.04.3 LTS
+| Command      : upgrade_ip
+| Device       : xc7vx485tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'pcie_recv_fifo'
+
+1. Summary
+----------
+
+SUCCESS in the upgrade of pcie_recv_fifo (xilinx.com:ip:fifo_generator:12.0) from (Rev. 3) to (Rev. 2)
+

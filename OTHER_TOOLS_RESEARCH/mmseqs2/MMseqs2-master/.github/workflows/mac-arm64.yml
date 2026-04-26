@@ -1,0 +1,37 @@
+name: Build macOS ARM64
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+
+      - name: Dependencies
+        run: |
+          brew install -f --overwrite libomp
+
+      - name: Build
+        run: |
+          mkdir -p build
+          rustup update
+          cd build
+          LIBOMP=$(brew --prefix libomp)
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOpenMP_C_FLAGS="-Xpreprocessor -fopenmp -I${LIBOMP}/include" \
+            -DOpenMP_C_LIB_NAMES=omp \
+            -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${LIBOMP}/include" \
+            -DOpenMP_CXX_LIB_NAMES=omp \
+            -DOpenMP_omp_LIBRARY=${LIBOMP}/lib/libomp.a \
+            ..
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Test
+        run: ./util/regression/run_regression.sh ./build/src/mmseqs SCRATCH
