@@ -661,31 +661,28 @@ inline void run_one_pair_samples(
 
 /// Decide whether to skip a (config, length_bucket, error_bucket) cell.
 ///
-/// We have three independent skip rules:
+/// One remaining skip rule:
 ///
-///  1. RMQ chaining + (LONG | VERY_LONG): the bioseq RMQ chaining
-///     implementation segfaults on a 50 kbp+ query (reproduced
-///     reliably on bucket=(LONG, CCS) with `bioseq KSW2 + RMQ +
-///     scalar-mm`, qlen ~52 kbp). This is a pre-existing pipeline
-///     bug independent of the bench plumbing — the previous matrix
-///     runner never reached LONG so the crash had been latent. We
-///     skip RMQ chaining for any LONG-or-larger bucket by default;
-///     opt back in via `BIOSEQ_BENCH_INCLUDE_RMQ_LONG=1` if you
-///     want to reproduce the crash. Minimap2 RMQ chaining (the C
-///     reference) is unaffected — only the bioseq RMQ port crashes.
+///  (LONG | VERY_LONG) × ONT_LEGACY/HIGH_INDEL_LOW_SUB: at 8-10%
+///  indel rate on a 50 kbp+ pair, the alignment block expands far
+///  beyond ksw2's z-drop threshold and the chaining DP fails to
+///  find a long-enough chain. Even minimap2 returns no primary in
+///  that regime (the original 26%-error HIGH bucket reproduced this
+///  for *every* length past SHORT, which is why the prior report
+///  was empty for LONG/VERY_LONG). The error-noisy buckets stay on
+///  SHORT/MEDIUM where the chain length is comfortably within
+///  range, while the lower-error HIFI / CCS / ONT_MODERN buckets
+///  run on every length so the length-vs-accuracy charts still have
+///  data. Override via `BIOSEQ_BENCH_INCLUDE_NOISY_LONG=1`.
 ///
-///  2. (LONG | VERY_LONG) × ONT_LEGACY/HIGH_INDEL_LOW_SUB: at 8-10%
-///     indel rate on a 50 kbp+ pair, the alignment block expands far
-///     beyond ksw2's z-drop threshold and the chaining DP fails to
-///     find a long-enough chain. Even minimap2 returns no primary in
-///     that regime (the original 26%-error HIGH bucket reproduced this
-///     for *every* length past SHORT, which is why the prior report
-///     was empty for LONG/VERY_LONG). The error-noisy buckets stay on
-///     SHORT/MEDIUM where the chain length is comfortably within
-///     range, while the lower-error HIFI / CCS / ONT_MODERN buckets
-///     run on every length so the length-vs-accuracy charts still
-///     have data. Override via
-///     `BIOSEQ_BENCH_INCLUDE_NOISY_LONG=1`.
+/// Previous versions also skipped bioseq RMQ chaining for LONG /
+/// VERY_LONG inputs because of an AVL-tree balance corruption that
+/// segfaulted on ~50 kbp queries. That bug was tracked down to
+/// swapped (p, q) balance assignments in the double-rotation case
+/// of `RmqTree::insert` and `RmqTree::erase` (and to ancestor
+/// size/min updates that were skipped after the early-break in the
+/// rebalance loop) — see chaining_rmq.cppm. The skip rule is gone;
+/// RMQ chaining now runs to completion on every length bucket.
 [[nodiscard]] inline bool should_skip_cell(
     const AlgorithmConfig& config,
     SequenceLengthBucket length_bucket,
@@ -695,15 +692,7 @@ inline void run_one_pair_samples(
         length_bucket == SequenceLengthBucket::LONG ||
         length_bucket == SequenceLengthBucket::VERY_LONG;
 
-    // Rule 1: bioseq RMQ + LONG/VERY_LONG segfaults; minimap2 RMQ is fine.
-    if (is_long_or_longer &&
-        config.chaining_algorithm == ChainingAlgorithmType::RMQ &&
-        !config.is_minimap2_reference) {
-        const char* override_env = std::getenv("BIOSEQ_BENCH_INCLUDE_RMQ_LONG");
-        if (override_env == nullptr || override_env[0] != '1') return true;
-    }
-
-    // Rule 2: noisy × long.
+    // Noisy × long: chain too short for ksw2 to recover on 50 kbp+ pairs.
     const bool is_noisy_bucket =
         error_bucket == ErrorRateBucket::ONT_LEGACY ||
         error_bucket == ErrorRateBucket::HIGH_INDEL_LOW_SUB;
@@ -712,6 +701,8 @@ inline void run_one_pair_samples(
         if (override_env == nullptr || override_env[0] != '1') return true;
     }
 
+    // Suppress the now-unused `config` parameter warning.
+    (void)config;
     return false;
 }
 

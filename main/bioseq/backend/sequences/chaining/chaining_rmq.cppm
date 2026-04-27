@@ -207,9 +207,27 @@ struct RmqTree {
         // Link the new node
         path_nodes[path_depth - 1]->children[path_dirs[path_depth - 1]] = new_node;
 
-        // Walk back up, updating sizes, mins, and rebalancing
+        // Walk back up, updating sizes, mins, and rebalancing.
+        //
+        // Two distinct bookkeeping concerns: the AVL balance values
+        // propagate only as long as height is changing (we break out
+        // of the balance walk as soon as it stabilises), but the
+        // augmentations (subtree_size, subtree_min) MUST be updated
+        // on every ancestor regardless of whether balance changed.
+        // We track that with `still_propagating_balance` rather than
+        // breaking out of the loop. If we break early, ancestors'
+        // subtree_size stays stale and `tree.size()` reads the wrong
+        // value — that was the actual root cause of the bioseq RMQ
+        // segfault on LONG inputs (see RESEARCH/BENCHMARKING_SPEEDUP/
+        // POOR_RESULTS_REPORT.md).
+        bool still_propagating_balance = true;
         for (int depth = path_depth - 1; depth >= 0; --depth) {
             RmqNode* node = path_nodes[depth];
+            if (!still_propagating_balance) {
+                rmq_update_size(node);
+                rmq_update_min(node);
+                continue;
+            }
             const int dir = path_dirs[depth];
             const int balance_delta = (dir == 0) ? -1 : 1;
             node->balance += static_cast<int8_t>(balance_delta);
@@ -217,8 +235,12 @@ struct RmqTree {
             rmq_update_min(node);
 
             if (node->balance == 0) {
-                // Height didn't change, stop
-                break;
+                // Height didn't change → balance is stable up the
+                // tree, but size/min still need to be updated on
+                // every ancestor. Continue the loop in
+                // augmentation-only mode.
+                still_propagating_balance = false;
+                continue;
             } else if (node->balance == -2 || node->balance == 2) {
                 // Need rotation
                 const int rebalance_dir = (node->balance < 0) ? 1 : 0;
@@ -236,19 +258,35 @@ struct RmqTree {
                         rotated->balance = 0;
                     }
                 } else {
-                    // Double rotation
+                    // Double rotation. Balance assignments mirror
+                    // krmq.h's `__krmq_rotate2`: with `b1 =
+                    // (dir == 0) ? +1 : -1` and `r` the post-rotation
+                    // root (== `grandchild` here),
+                    //   r.bal == b1   → q.bal = 0,   p.bal = -b1
+                    //   r.bal == 0    → q.bal = 0,   p.bal = 0
+                    //   r.bal == -b1  → q.bal = b1,  p.bal = 0
+                    // where p = `node` and q = `child`. The earlier
+                    // implementation had the p/q assignments swapped,
+                    // which left the parent (`node`) with a stale ±1
+                    // tilt while the AVL height was actually
+                    // balanced. Over thousands of inserts and erases
+                    // this drifted balance values into states that
+                    // broke the rotation guard (`child` non-null when
+                    // `node->balance == -2`), producing the SIGSEGV
+                    // on long inputs.
                     RmqNode* grandchild = child->children[rebalance_dir];
                     rotated = rotate_double(node, rebalance_dir);
+                    const int8_t b1 = static_cast<int8_t>(
+                        (rebalance_dir == 0) ? 1 : -1);
                     if (grandchild->balance == 0) {
-                        node->balance = 0;
+                        node->balance  = 0;
                         child->balance = 0;
-                    } else if ((rebalance_dir == 1 && grandchild->balance < 0) ||
-                               (rebalance_dir == 0 && grandchild->balance > 0)) {
-                        node->balance = 0;
-                        child->balance = static_cast<int8_t>((rebalance_dir == 1) ? 1 : -1);
+                    } else if (grandchild->balance == b1) {
+                        node->balance  = static_cast<int8_t>(-b1);
+                        child->balance = 0;
                     } else {
-                        node->balance = static_cast<int8_t>((rebalance_dir == 1) ? -1 : 1);
-                        child->balance = 0;
+                        node->balance  = 0;
+                        child->balance = b1;
                     }
                     rotated->balance = 0;
                 }
@@ -357,9 +395,28 @@ struct RmqTree {
             }
         }
 
-        // Rebalance upward
+        // Rebalance upward.
+        //
+        // Same two-phase structure as `insert`: AVL balance updates
+        // stop once height stabilises (balance settles to ±1, or a
+        // rotation restores the pre-erase height), but the
+        // subtree_size / subtree_min augmentations must continue
+        // walking to the root because we removed a node from every
+        // ancestor's subtree.
+        //
+        // The original code unconditionally `break`'d when balance
+        // became ±1, leaving the root's subtree_size stale. That made
+        // `tree.size()` lie about the actual node count, which then
+        // tripped pruning/RMQ logic downstream and caused the SIGSEGV
+        // on long inputs (RESEARCH/BENCHMARKING_SPEEDUP/POOR_RESULTS_REPORT.md).
+        bool still_propagating_balance = true;
         for (int depth = path_depth - 1; depth >= 0; --depth) {
             RmqNode* node = path_nodes[depth];
+            if (!still_propagating_balance) {
+                rmq_update_size(node);
+                rmq_update_min(node);
+                continue;
+            }
             const int dir = path_dirs[depth];
             const int balance_delta = (dir == 0) ? 1 : -1;
             node->balance += static_cast<int8_t>(balance_delta);
@@ -367,8 +424,10 @@ struct RmqTree {
             rmq_update_min(node);
 
             if (node->balance == -1 || node->balance == 1) {
-                // Height didn't change, stop
-                break;
+                // Height didn't change → balance is stable upward,
+                // but every ancestor still needs size/min updates.
+                still_propagating_balance = false;
+                continue;
             } else if (node->balance == -2 || node->balance == 2) {
                 const int rebalance_dir = (node->balance < 0) ? 1 : 0;
                 RmqNode* child = node->children[1 - rebalance_dir];
@@ -387,18 +446,23 @@ struct RmqTree {
                         rotated->balance = 0;
                     }
                 } else {
+                    // Double rotation. Same balance assignments as
+                    // the insert path (see comment there); the
+                    // earlier code had p/q swapped, leaving stale
+                    // ±1 tilts on `node` after a double rotation.
                     RmqNode* grandchild = child->children[rebalance_dir];
                     rotated = rotate_double(node, rebalance_dir);
+                    const int8_t b1 = static_cast<int8_t>(
+                        (rebalance_dir == 0) ? 1 : -1);
                     if (grandchild->balance == 0) {
-                        node->balance = 0;
+                        node->balance  = 0;
                         child->balance = 0;
-                    } else if ((rebalance_dir == 1 && grandchild->balance < 0) ||
-                               (rebalance_dir == 0 && grandchild->balance > 0)) {
-                        node->balance = 0;
-                        child->balance = static_cast<int8_t>((rebalance_dir == 1) ? 1 : -1);
+                    } else if (grandchild->balance == b1) {
+                        node->balance  = static_cast<int8_t>(-b1);
+                        child->balance = 0;
                     } else {
-                        node->balance = static_cast<int8_t>((rebalance_dir == 1) ? -1 : 1);
-                        child->balance = 0;
+                        node->balance  = 0;
+                        child->balance = b1;
                     }
                     rotated->balance = 0;
                 }
@@ -409,13 +473,13 @@ struct RmqTree {
                     root = rotated;
                 }
 
-                // Update ancestors above the rotation
-                for (int ancestor = depth - 1; ancestor >= 0; --ancestor) {
-                    rmq_update_size(path_nodes[ancestor]);
-                    rmq_update_min(path_nodes[ancestor]);
+                if (!height_changed) {
+                    // Rotation absorbed the height change. Balance is
+                    // stable upward; only augmentations remain.
+                    still_propagating_balance = false;
                 }
-
-                if (!height_changed) break;
+                // If height *did* change (the rotation propagated the
+                // shrink upward), balance work continues at depth-1.
             }
         }
 

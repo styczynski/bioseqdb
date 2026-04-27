@@ -419,6 +419,41 @@ TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
 }
 
+// Regression test for the bioseq RMQ + LONG segfault.
+//
+// Before commit X (the `chaining_rmq.cppm` rebalance/double-rotation
+// fix), this test reliably crashed with SIGSEGV at the `node->balance
+// == -2 && child == nullptr` rotation guard. The pair size and seed
+// here are pinned to the exact (LONG, CCS) cell that `run_full_matrix`
+// reaches with the default base seed — the segfault was data-
+// dependent and only manifested on ~52 kbp inputs once the RMQ tree
+// had drifted into an inconsistent balance state.
+//
+// Tagged with the leading-dot pattern so the default bench run does
+// not pick it up; invoke explicitly via `[.rmq-repro]` if you want to
+// re-verify. The test now passes — all three pairs run to completion
+// and produce primaries.
+TEST_CASE("Regression: bioseq RMQ chaining on LONG inputs (was SIGSEGV)",
+          "[.rmq-repro]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    using namespace bioseq::bench::HWY_NAMESPACE;
+    AlgorithmConfig cfg;
+    cfg.label = "bioseq KSW2 + RMQ + scalar-mm (rmq-repro)";
+    cfg.is_minimap2_reference = false;
+    cfg.chaining_algorithm = ChainingAlgorithmType::RMQ;
+    cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+    cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+    cfg.kmer_size = 15;
+    cfg.window_size = 10;
+    const std::vector<AlgorithmConfig> grid{cfg};
+    run_matrix_for_bucket(SequenceLengthBucket::LONG,
+                          ErrorRateBucket::CCS,
+                          /*seed=*/18029918668030987490ull,
+                          grid);
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
+}
+
 TEST_CASE("Chart-data sweep — quick (short + medium only)",
           "[.chart-data-quick]") {
     report::reset_aggregates();
