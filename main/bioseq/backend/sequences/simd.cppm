@@ -103,8 +103,11 @@ inline void iterate_sequence_bp_simd_offsets(
 ) {
     using seq_traits = compact_sequence_range<R>::traits;
 
-	// Remove this
-	JustLog("iterate_sequence_bp_simd_offsets() context_bps={}, delays={}, seq_traits::letters_per_unit={}, seq.size={}", context_bps, std::vector<size_t>({delays...}), seq_traits::letters_per_unit, seq.size());
+	// Function-entry log gated behind BIOSEQ_HOT_TRACE_LOGS — formatting
+	// the offsets vector + sequence pretty-print costs ~5-10 us per call,
+	// dominating the steady-state mm_sketch_simd time when this fired
+	// raw on every call.
+	JustLogHot("iterate_sequence_bp_simd_offsets() context_bps={}, delays={}, seq_traits::letters_per_unit={}, seq.size={}", context_bps, std::vector<size_t>({delays...}), seq_traits::letters_per_unit, seq.size());
 	const auto& [context_units, _] = int_div_ceil(context_bps, seq_traits::letters_per_unit);
 	constexpr size_t delays_count = sizeof...(delays);
 
@@ -191,7 +194,10 @@ inline void iterate_sequence_bp_simd_offsets(
 	HWY_ALIGN std::array<VecT, delays_count> all_bp_vecs;
 	VecT base_bp_vec;
 
-	JustLog("Check here: {}, buffer_size={}, seq={}, full_chunks_count={}", offsets, buffer_size, seq, full_chunks_count);
+	// `seq` formats the entire pretty-printed sequence — for multi-megabyte
+	// targets this would push hundreds of KB into the fmtlog SPSC queue
+	// per call. Drop to JustLogHot.
+	JustLogHot("Check here: {}, buffer_size={}, seq={}, full_chunks_count={}", offsets, buffer_size, seq, full_chunks_count);
 
 	auto handle_row_bp = [&]<simd_bp_iteration_part mode>(VecT row) -> bool {
 		for (size_t bp_index = 0; bp_index < seq_traits::letters_per_unit; ++bp_index) {
@@ -311,7 +317,7 @@ inline void iterate_sequence_bp_simd_offsets(
 	// sanity bound instead of seq.bp_size().
 	DEBUG_ASSERT(static_cast<size_t>(main_counter_none) <= bps_per_lane, "Sanity check. If this fails, there's probably size_t overflow");
 
-	JustLog("CTR main_counter_none={} main_counter_only_left={} (bps_per_lane={}, (bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit)={}) (context_units={}, units_per_lane={})", main_counter_none, main_counter_only_left, bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit, context_units, units_per_lane);
+	JustLogHot("CTR main_counter_none={} main_counter_only_left={} (bps_per_lane={}, (bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit)={}) (context_units={}, units_per_lane={})", main_counter_none, main_counter_only_left, bps_per_lane, hn::Lanes(d) * seq_traits::letters_per_unit, context_units, units_per_lane);
 
 	while(true) {
 		// todo: break condition

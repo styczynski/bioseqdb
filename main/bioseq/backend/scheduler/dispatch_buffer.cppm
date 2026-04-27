@@ -394,10 +394,21 @@ public:
              * design doc) — emitting it here would produce one summary
              * per batch and accumulate duplicates on multi-batch scans.
              */
+            // Install both the full (with PMU counters) and timing-only
+            // profiler blocks. The non-templated `region(d)` / `loop(d)`
+            // call sites in chaining / kmers / minimap_port are pinned to
+            // context_args_profiling_timing_only so they short-circuit
+            // unless we also install that block here. Postgres production
+            // monitoring continues to use the full block (counters on)
+            // for any explicitly-templated `region<full_args>(d)` calls.
             using Args = bioseq::instr::context_args_profiling_full;
+            using TimingArgs = bioseq::instr::context_args_profiling_timing_only;
             auto& profiler_block =
                 bioseq::instr::persistent_profiler_block<Args>();
+            auto& timing_profiler_block =
+                bioseq::instr::persistent_profiler_block<TimingArgs>();
             bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
+            bioseq::instr::installed_profiler_scope<TimingArgs> timing_guard(timing_profiler_block);
             run_pipeline_body.template operator()<Args>();
         } else {
             using Args = bioseq::instr::context_args_no_profiling;

@@ -11,3 +11,5 @@ paradedb-experiments/target/
 **/.cache
 **/target/
 **/vcpkg_installed/
+
+**/.claude/scheduled_tasks.lock

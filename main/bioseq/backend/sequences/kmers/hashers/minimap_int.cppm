@@ -53,7 +53,9 @@ public:
 
 		constexpr traits::hasher_return_t next(traits::input_t incoming, traits::input_t outgoing) {
 			auto [key, base_strand] = base_hasher.next(std::move(incoming), std::move(outgoing));
+#ifdef BIOSEQ_HOT_TRACE_LOGS
 			auto rr = std::make_pair(static_cast<input_t>(key), base_strand);
+#endif
 
 			key = (~key + (key << shift<21>)) & mask;
 			key = key ^ key >> shift<24>;
@@ -63,7 +65,7 @@ public:
 			key = key ^ key >> shift<28>;
 			key = (key + (key << shift<31>)) & mask;
 
-			JustLog("{} -> {}", rr.first, key);
+			JustLogHot("{} -> {}", rr.first, key);
 			return std::make_pair(key, base_strand);
 			//return std::make_pair(static_cast<input_t>(key), base_strand);
 		}
@@ -94,7 +96,9 @@ public:
 
 		constexpr traits::hasher_return_t next(const traits::input_d_t& d, traits::input_vec_t incoming, traits::input_vec_t outgoing) {
 			auto key = base_hasher.next(d, std::move(incoming), std::move(outgoing));
+#ifdef BIOSEQ_HOT_TRACE_LOGS
 			const auto rr = key;
+#endif
 
 			key = hn::And(hn::Add(hn::Not(key), hn::ShiftLeft<shift<21>>(key)), mask);
 			key = hn::Xor(key, hn::ShiftRight<shift<24>>(key));
@@ -104,7 +108,7 @@ public:
 			key = hn::Xor(key, hn::ShiftRight<shift<28>>(key));
 			key = hn::And(hn::Add(key, hn::ShiftLeft<shift<31>>(key)), mask);
 
-			JustLog("{} -> {}", extract_lanes<input_t>(d, rr)[0], extract_lanes<input_t>(d, key)[0]);
+			JustLogHot("{} -> {}", extract_lanes<input_t>(d, rr)[0], extract_lanes<input_t>(d, key)[0]);
 
 			return key;
 		}

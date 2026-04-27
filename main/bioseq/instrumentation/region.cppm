@@ -107,15 +107,20 @@ inline RegionScope<Args> region(const RegionDescriptor* d) noexcept {
 }
 
 /// Non-templated convenience overload. Routes to the
-/// `context_args_profiling_full` instantiation; when the dispatch fork
-/// has not installed a profiler block (no-profiling pipeline), the
-/// per-thread `tls_profiler<context_args_profiling_full>` is null and
-/// the scope short-circuits at construction time. The cost in the
-/// non-installed path is one load + one compare + one branch.
+/// `context_args_profiling_timing_only` instantiation. This is the
+/// canonical pin for legacy EASY_BLOCK call sites in non-templated
+/// helpers (chaining, kmer extraction, KSW2). The previous default was
+/// `context_args_profiling_full`, which always read the per-thread PMU
+/// counters at scope begin/end (one sysctl on macOS, one read() syscall
+/// on Linux — ~300-400 ns per region scope). The bench's per-section
+/// region count is in the tens of thousands, so PMU reads were burning
+/// 9-27 ms per section purely on instrumentation. The timing_only
+/// variant drops PMU to leave just the clock read; PMU users can still
+/// opt back in by explicitly writing `region<context_args_profiling_full>(d)`.
 [[nodiscard, gnu::always_inline]]
-inline RegionScope<context_args_profiling_full>
+inline RegionScope<context_args_profiling_timing_only>
 region(const RegionDescriptor* d) noexcept {
-    return RegionScope<context_args_profiling_full>(d);
+    return RegionScope<context_args_profiling_timing_only>(d);
 }
 
 }  // namespace bioseq::instr

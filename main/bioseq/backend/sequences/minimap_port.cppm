@@ -2073,10 +2073,28 @@ template<
     // align_regions has a "mm_align_skeleton" region scope inside.
     if (params.do_cigar) {
         // Build unified scoring matrix for KSW2 and block aligner.
-        const auto scoring_matrix = ScoringMatrix<QueryRange>::generate(
-            static_cast<int8_t>(params.match_score),
-            static_cast<int8_t>(params.mismatch_pen),
-            static_cast<int8_t>(params.sc_ambi));
+        // Cached per-thread so a steady-state batch loop doesn't redo
+        // ~245 byte stores per pair (proposal §C.2). The cache is keyed
+        // on (match_score, mismatch_pen, sc_ambi); on key mismatch the
+        // matrix is regenerated. The static-initialiser race is safe
+        // because the cache is thread_local.
+        thread_local int8_t s_cached_match    = std::numeric_limits<int8_t>::min();
+        thread_local int8_t s_cached_mismatch = std::numeric_limits<int8_t>::min();
+        thread_local int8_t s_cached_ambi     = std::numeric_limits<int8_t>::min();
+        thread_local ScoringMatrix<QueryRange> s_cached_matrix{};
+        const int8_t want_match    = static_cast<int8_t>(params.match_score);
+        const int8_t want_mismatch = static_cast<int8_t>(params.mismatch_pen);
+        const int8_t want_ambi     = static_cast<int8_t>(params.sc_ambi);
+        if (s_cached_match != want_match
+            || s_cached_mismatch != want_mismatch
+            || s_cached_ambi != want_ambi) {
+            s_cached_matrix   = ScoringMatrix<QueryRange>::generate(
+                want_match, want_mismatch, want_ambi);
+            s_cached_match    = want_match;
+            s_cached_mismatch = want_mismatch;
+            s_cached_ambi     = want_ambi;
+        }
+        const auto& scoring_matrix = s_cached_matrix;
 
         // Sequences are passed directly — encoding of specific sub-regions
         // happens lazily inside the KSW2 core kernel. Base-alignment algorithm

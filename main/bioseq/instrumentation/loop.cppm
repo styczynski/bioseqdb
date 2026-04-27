@@ -99,10 +99,12 @@ inline LoopScope<Args> loop(const LoopDescriptor* d) noexcept {
 }
 
 /// Non-templated convenience overload — see region.cppm for rationale.
+/// Pins to `context_args_profiling_timing_only` so the per-iteration
+/// loop scope skips the PMU read on construction/destruction.
 [[nodiscard, gnu::always_inline]]
-inline LoopScope<context_args_profiling_full>
+inline LoopScope<context_args_profiling_timing_only>
 loop(const LoopDescriptor* d) noexcept {
-    return LoopScope<context_args_profiling_full>(d);
+    return LoopScope<context_args_profiling_timing_only>(d);
 }
 
 }  // namespace bioseq::instr

@@ -94,6 +94,14 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
     EvaluationParams params;
     params.position_tolerance = 10;
     params.mapq_thresholds    = {0, 10, 30, 60};
+    // The user's stated benchmarking goal is "ksw2 + DP chaining + non-SIMD
+    // minimizers as fast as minimap2". The default base aligner in
+    // Minimap2Params is BLOCK_ALIGNER, which is *not* what minimap2 uses;
+    // measuring against the default produces an apples-to-oranges
+    // comparison. Pin the bench to KSW2 so the side-by-side delta is on
+    // the same algorithm class on both sides.
+    params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     const size_t truth_target_end = truth_target_start + query.bp_size();
     const bool   truth_is_reverse = false;
@@ -183,6 +191,8 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
 
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 5;
+    evaluation_params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     BENCHMARK_ADVANCED("bioseq minimap_port (unique fragment)")(
         Catch::Benchmark::Chronometer meter)
@@ -246,6 +256,8 @@ TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL seman
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 0;
     evaluation_params.mapq_thresholds = {0};
+    evaluation_params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     BENCHMARK_ADVANCED("bioseq minimap_port batch (SEAL-exact)")(
         Catch::Benchmark::Chronometer meter)
@@ -306,6 +318,8 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 25;
     evaluation_params.mapq_thresholds = {0, 10, 30};
+    evaluation_params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     BENCHMARK_ADVANCED("bioseq minimap_port SEAL-style batch")(
         Catch::Benchmark::Chronometer meter)
