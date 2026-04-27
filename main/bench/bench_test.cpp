@@ -38,6 +38,8 @@ import bench.tool_minimap2;
 import bench.generator;
 import bench.evaluation;
 import bench.report;
+import bench.matrix_runner;
+import bench.chart_builder;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -382,6 +384,52 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
         static_cast<double>(results.minimap2.total_pairs);
     REQUIRE(bioseq_correct_fraction   >= 0.5);
     REQUIRE(minimap2_correct_fraction >= 0.9);
+}
+
+// ====================================================================
+// Chart-data sweep: full algorithm × length × error grid.
+//
+// Runs the matrix runner across every (length_bucket, error_bucket,
+// algorithm_config) combination and accumulates samples into the
+// process-wide vector that bench_main.cpp drains into report.json.
+//
+// Tagged with `[chart-data]` (no leading dot) so it is run by the
+// default `./bioseq/bioseq_bench` invocation. The smaller end of the
+// matrix is intentional — pair counts, sample counts and the
+// very-long bucket size are tuned to keep wall-clock under ~30 minutes
+// even when every algorithm config is exercised.
+//
+// `[chart-data-quick]` runs only the short + medium buckets for
+// faster iteration during chart layout work.
+// ====================================================================
+
+TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
+          "[chart-data]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    bioseq::bench::HWY_NAMESPACE::run_full_matrix();
+    JustLog("[chart-data] accumulated {} bench samples after full sweep",
+            bioseq::bench::benchmark_samples().size());
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
+}
+
+TEST_CASE("Chart-data sweep — quick (short + medium only)",
+          "[.chart-data-quick]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    using namespace bioseq::bench::HWY_NAMESPACE;
+    const auto grid = default_algorithm_grid();
+    std::uint64_t seed = 4242424242ull;
+    for (auto length_bucket : {SequenceLengthBucket::SHORT,
+                               SequenceLengthBucket::MEDIUM}) {
+        for (auto error_bucket : {ErrorRateBucket::LOW,
+                                  ErrorRateBucket::MEDIUM,
+                                  ErrorRateBucket::HIGH}) {
+            run_matrix_for_bucket(length_bucket, error_bucket, seed, grid);
+            seed = seed * 1099511628211ull + 14695981039346656037ull;
+        }
+    }
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
 }
 
 }  // namespace bioseq::bench::HWY_NAMESPACE
