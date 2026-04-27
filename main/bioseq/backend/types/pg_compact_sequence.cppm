@@ -286,6 +286,36 @@ requires is_sequence_custom_alphabet<Dst>
 	return hdr;
 }
 
+/*
+ * Re-encode a bioseq.seq varlena under a different (alphabet, width)
+ * by round-tripping through decode/encode. Returns a freshly-pallocated
+ * PgCompactSequenceHdr* on success; nullptr when src is null OR when
+ * src already matches the target typmod (callers should detect that
+ * before calling so they don't pay for a no-op recode).
+ *
+ * This helper exists in pg_compact_sequence.cppm rather than at the
+ * call site (columnar_customscan.cppm) because importing
+ * `bioseq_sequences.simd` outside this translation unit triggers
+ * arm_neon mangled-name conflicts under our LTO build. Keeping the
+ * lambda inside this module — which already imports the simd code —
+ * avoids that issue and matches how seq_cast uses the same path.
+ *
+ * Caller owns the returned pointer and is responsible for either
+ * pfree-ing it or copying the bytes into a long-lived buffer.
+ */
+/*
+ * Declared (without inline) here; defined later in this same module
+ * unit. The non-inline emission keeps the SIMD lambda template
+ * instantiations contained to this translation unit so other modules
+ * that import us do NOT silently re-emit the NEON intrinsics — that
+ * was a real arm_neon mangled-name conflict observed when the body
+ * was inline.
+ */
+export [[nodiscard]] PgCompactSequenceHdr*
+pgseq_recode_to_typmod(const PgCompactSequenceHdr* src,
+                        uint8_t target_alphabet_code,
+                        uint8_t target_width_code);
+
 } // extern "C++"
 
 // ============================================================================
@@ -822,3 +852,48 @@ Datum pg_compact_sequence_unit_len(PG_FUNCTION_ARGS)
 }
 
 } // extern "C"
+
+extern "C++" {
+
+/*
+ * Definition of pgseq_recode_to_typmod, declared near
+ * make_pg_from_seq_range above. Defined here (non-inline) so that
+ * importer modules don't pay for re-emitting decode/encode_sequence_simd
+ * NEON instantiations — placing the body inside this same module unit
+ * keeps the SIMD lambdas contained.
+ */
+[[nodiscard]] PgCompactSequenceHdr*
+pgseq_recode_to_typmod(const PgCompactSequenceHdr* src,
+                        uint8_t target_alphabet_code,
+                        uint8_t target_width_code)
+{
+	if (src == nullptr) {
+		return nullptr;
+	}
+	if (src->alphabet_code == target_alphabet_code
+	    && src->width_code == target_width_code) {
+		return nullptr;
+	}
+	const std::string decoded = dispatch_pgseq(src->alphabet_code, src->width_code,
+		[&]<class Src>() -> std::string {
+			auto range = make_seq_range_from_pg<Src>(src);
+			return bioseq::simd::N_NEON::decode_sequence_simd<Src>(range);
+		});
+	PgCompactSequenceHdr* result = dispatch_pgseq(target_alphabet_code, target_width_code,
+		[&]<class Dst>() -> PgCompactSequenceHdr* {
+			auto seq = bioseq::simd::N_NEON::encode_sequence_simd<Dst>(
+				decoded.data(), decoded.size());
+			return make_pg_from_seq_range<Dst>(seq, target_alphabet_code, target_width_code);
+		});
+	if (result != nullptr) {
+		JustLog("[bioseq] pg: pgseq_recode_to_typmod ({},{}) -> ({},{}) bp_size={}",
+		        static_cast<unsigned>(src->alphabet_code),
+		        static_cast<unsigned>(src->width_code),
+		        static_cast<unsigned>(target_alphabet_code),
+		        static_cast<unsigned>(target_width_code),
+		        result->bp_size);
+	}
+	return result;
+}
+
+} // extern "C++"

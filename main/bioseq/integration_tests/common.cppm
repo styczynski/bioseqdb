@@ -465,6 +465,40 @@ export [[nodiscard]] inline bool is_valid_cigar(std::string_view value) {
     return true;
 }
 
+// Exact-match CIGAR check: for a fully-matching alignment of length N
+// the CIGAR is canonically "{N}M" (one match run of length N). The
+// aligner emits this shape both for self-alignment (mmsearch(A, A))
+// and for an exact substring match (mmsearch(target, query) where
+// query is a contiguous substring of target). This helper is used by
+// the substring-property tests to check that the aligner returned
+// the property "match length == query length" — see §9 of
+// REPORT_POSTGRES_QUERY_BUGFIXING_1.md for the rationale.
+export [[nodiscard]] inline bool is_exact_match_cigar(std::string_view value,
+                                                      long long expected_len) {
+    if (value.empty() || expected_len <= 0) {
+        return false;
+    }
+    // Parse leading integer.
+    size_t pos = 0;
+    long long parsed = 0;
+    while (pos < value.size() &&
+           std::isdigit(static_cast<unsigned char>(value[pos]))) {
+        parsed = parsed * 10 + (value[pos] - '0');
+        ++pos;
+    }
+    if (pos == 0) {
+        return false;
+    }
+    // Must be followed by exactly one 'M' and end of string.
+    if (pos + 1 != value.size()) {
+        return false;
+    }
+    if (value[pos] != 'M') {
+        return false;
+    }
+    return parsed == expected_len;
+}
+
 // Builds a `CREATE TABLE` clause and inserts the rows verbatim. Each sequence
 // literal is emitted as `'<text>'::bioseq.seq('<alphabet>', <width>)` so the
 // extension performs the encoding via seq_in. When `using_bioseq=true` the

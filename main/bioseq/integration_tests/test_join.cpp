@@ -38,6 +38,16 @@ constexpr std::string_view kHoeJoinRight = "hoe_join_right";
 
 TEST_CASE("Self-join with mmsearch executes and stays in the seeded pk domain",
           "[join][mmsearch]") {
+    // mmsearch(t1.seq0, t2.seq1) routes through the
+    // parameterised inner-side scan path (Param-rebind) because
+    // t2 is a different range-table entry than t1. Each outer t1
+    // row drives a fresh rescan of t2 with t1.seq1 bound into
+    // arg1's Param. Strengthened assertion: any row that
+    // surfaces MUST have a non-NULL pk on both sides AND, when
+    // bioseq projections are requested in the outer SELECT,
+    // every emitted row must populate them. Returning a row with
+    // NULL bioseq.cigar / bioseq.target_start on a mmsearch path
+    // is INVALID — see §9 of REPORT_POSTGRES_QUERY_BUGFIXING_1.md.
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
 
@@ -965,6 +975,101 @@ TEST_CASE("GROUP BY pk with bioseq aggregate returns one row per matching pk",
         REQUIRE_FALSE(row[1].value().empty());
         REQUIRE(is_valid_cigar(row[1].value()));
     }
+}
+
+TEST_CASE("Param-driven primary + Const-extra mmsearch AND-stack works",
+          "[mmsearch][multi_qual][param_plus_const]") {
+    // Param + Const-extra: the primary mmsearch is a parametrized
+    // inner-side qual (Param-rebind path) AND there is an
+    // additional Const-driven mmsearch on the same column. The
+    // expected behaviour is logical AND: rows must match BOTH the
+    // per-outer-row Param query AND the literal extra.
+    //
+    // This was historically rejected with NOTICE ("Const+Const
+    // stacking only"). §9.7 of REPORT_POSTGRES_QUERY_BUGFIXING_1.md
+    // documents the relaxation: the extras (Const) live in
+    // `extra_query_varlenas` independently of the primary's
+    // rebind-on-rescan, so the AND-filter still works correctly
+    // each time the Param resolves.
+    auto ctx = fresh_context({kHoeJoinLeft, kHoeJoinRight});
+    seed_hoe_fixture(ctx, kHoeJoinLeft);
+    seed_hoe_fixture(ctx, kHoeJoinRight);
+
+    // First, baseline: Param-only — find the matches per outer
+    // row. We use mmsearch(t2.seq0, t1.seq1) — t1 is outer, t2 is
+    // inner with Param-rebind.
+    const auto rows_param_only = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk "
+            "  FROM {} t1 INNER JOIN {} t2 ON mmsearch(t2.seq0, t1.seq1) "
+            " ORDER BY t1.pk, t2.pk;",
+            kHoeJoinLeft, kHoeJoinRight));
+    REQUIRE_FALSE(rows_param_only.empty());
+
+    // What rows does the Const-extra probe match in isolation?
+    // We use a probe rooted in a different region of seq0 so the
+    // intersection with the Param-only set is provably STRICT —
+    // the goal is to catch a regression where the Const-extra is
+    // silently dropped (we'd see rows_param_plus_const equal to
+    // rows_param_only, which is a SUBSET of itself, so a plain
+    // subset-check is a tautology). The probe below matches a
+    // proper subset of pk values; combined with the Param qual,
+    // the AND must produce strictly fewer rows than Param-only.
+    constexpr std::string_view kStrictSubsetProbe =
+        "TCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCT";  // matches t2.pk=4 only
+    const auto rows_const_only = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
+            "ORDER BY pk;",
+            kHoeJoinRight, kStrictSubsetProbe));
+    REQUIRE_FALSE(rows_const_only.empty());
+    std::set<std::string> const_only_t2_pks;
+    for (const auto& row : rows_const_only) {
+        if (row[0].has_value()) const_only_t2_pks.insert(*row[0]);
+    }
+    // Sanity: const-only matches FEWER rows of t2 than the universe;
+    // otherwise our AND test below collapses to "param only".
+    REQUIRE(const_only_t2_pks.size() < 5);
+
+    const auto rows_param_plus_const = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk "
+            "  FROM {} t1 INNER JOIN {} t2 "
+            "    ON mmsearch(t2.seq0, t1.seq1) "
+            " WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 32)) "
+            " ORDER BY t1.pk, t2.pk;",
+            kHoeJoinLeft, kHoeJoinRight, kStrictSubsetProbe));
+
+    std::set<std::pair<std::string, std::string>> param_only_set;
+    for (const auto& row : rows_param_only) {
+        if (row.size() == 2 && row[0].has_value() && row[1].has_value()) {
+            param_only_set.emplace(*row[0], *row[1]);
+        }
+    }
+    // The AND-stack result MUST be a subset of the Param-only
+    // result AND every emitted t2.pk must be in the const-only
+    // matching set. If §9.4's Const-extra was silently dropped,
+    // we'd see entries with t2.pk NOT in const_only_t2_pks —
+    // catching the regression directly.
+    for (const auto& row : rows_param_plus_const) {
+        REQUIRE(row.size() == 2);
+        REQUIRE(row[0].has_value());
+        REQUIRE(row[1].has_value());
+        const auto key = std::make_pair(*row[0], *row[1]);
+        REQUIRE(param_only_set.count(key) > 0);
+        // Load-bearing assertion: t2.pk MUST also be in the
+        // const-only matching set. A regression that silently
+        // drops the Const extra would fail here.
+        REQUIRE(const_only_t2_pks.count(*row[1]) > 0);
+    }
+    // Strict-subset property: the AND result must be SMALLER than
+    // the Param-only result (the const probe matches strictly
+    // fewer rows). If they're equal, the Const extra was a
+    // no-op — the bug we're guarding against.
+    REQUIRE(rows_param_plus_const.size() < rows_param_only.size());
 }
 
 TEST_CASE("Cross-table mmsearch via INNER JOIN with bioseq.cigar projection",

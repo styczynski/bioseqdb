@@ -138,6 +138,21 @@ struct MmsearchParamRebind {
 	uint8_t    alphabet_code      = 0;
 	uint8_t    width_code         = 0;
 	std::string column_name;
+	/*
+	 * Stash a pointer to the SPECIFIC mmsearch FuncExpr that
+	 * registered this rebind. Without this, ReScanCustomScan would
+	 * use find_mmsearch_funcexpr() which returns the FIRST
+	 * mmsearch in plan.qual order — and the planner is free to
+	 * order quals differently from our priority-classified order.
+	 * For Param + Const-extra stacking the planner often places
+	 * the Const first, so find_mmsearch_funcexpr would return the
+	 * Const FuncExpr (whose arg1 is a Const) and the Param-rebind
+	 * loop would silently fall through, leaving the buffer's
+	 * primary mmsearch with stale bytes. Stashing the
+	 * Param-driving FuncExpr at register time lets ReScan resolve
+	 * the correct Param every rescan.
+	 */
+	FuncExpr*  mmsearch_fe        = nullptr;
 };
 
 /*
@@ -1632,12 +1647,25 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 		return false;
 	}
 	/*
-	 * Typmod compatibility check. Both args MUST share the same
-	 * (alphabet, width). If they don't, BeginCustomScan rejects the
-	 * qual (line search for "mmsearch typmod mismatch") and the
-	 * scan would run with no mmsearch context. We catch the mismatch
-	 * up here at planning time instead so the parameterised path is
-	 * not even generated for this qual.
+	 * Typmod compatibility check. We accept any bioseq.seq arg1
+	 * here and let BeginCustomScan decide whether (and how) to
+	 * coalesce / cross-alphabet-recompute. The classification at
+	 * runtime:
+	 *   - same (alphabet, width)    → direct dispatch
+	 *   - same alphabet, diff width → coalesce (re-encode arg1 at
+	 *                                  column's width) + index OK
+	 *   - diff alphabet, same width → coalesce (re-encode arg1 at
+	 *                                  column's alphabet) + index
+	 *                                  recompute (sidecar minimizers
+	 *                                  no longer match)
+	 *   - diff alphabet, diff width → coalesce both and recompute
+	 *
+	 * The previous version of this helper rejected any mismatch up
+	 * here, which resulted in the parameterised path never being
+	 * generated for typmod-divergent queries — and BeginCustomScan
+	 * would silently leave bioseq.* projections NULL. Letting the
+	 * planner generate the path and handling coalesce in
+	 * BeginCustomScan is what gives the user useful results.
 	 */
 	if (col_var->vartype != stub_oids.bioseq_seq_type_oid
 		|| col_var->vartypmod < 0) {
@@ -1659,10 +1687,17 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 		arg1_typoid = p->paramtype;
 	}
 	if (arg1_typoid != stub_oids.bioseq_seq_type_oid
-		|| arg1_typmod < 0
-		|| arg1_typmod != col_var->vartypmod) {
+		|| arg1_typmod < 0) {
 		return false;
 	}
+	/*
+	 * Width must always be in the supported set (8 / 16 / 32 / 64).
+	 * Alphabet must be one we know how to dispatch on (dna4 / dna5).
+	 * The pack/unpack helper will raise on truly invalid typmods, so
+	 * we keep this gate loose: anything BeginCustomScan can decode
+	 * is allowed through. Cross-typmod is a runtime concern, not a
+	 * planner-time rejection.
+	 */
 	return true;
 }
 
@@ -3161,7 +3196,11 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * per-tuple log line and buffer the right column values.
 	 */
 	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
-	runtime.buffer.clear_mmsearch_context();
+	/* Begin is the only place that should drop extras as part of the
+	 * primary reset — every Begin call repopulates them from scratch
+	 * via the qual loop. ReScan / failure paths must NOT drop extras
+	 * (see clear_mmsearch_context's comment for the §9 review fix). */
+	runtime.buffer.clear_mmsearch_context(/*clear_extras=*/true);
 	runtime.param_rebind = MmsearchParamRebind{};
 
 	Relation relation_for_attname = cscanstate->ss.ss_currentRelation;
@@ -3173,15 +3212,20 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 *
 	 * `primary_configured` flips to true once the first acceptable
 	 * mmsearch qual is installed (either via configure_mmsearch for
-	 * the literal-query case or via param_rebind for the
+	 * the literal-query case, configure_mmsearch_per_row for the
+	 * same-rel Var case, or via param_rebind for the
 	 * parametrised-NL case). Every subsequent mmsearch qual we see
-	 * is treated as an additional AND-filter — but only when:
-	 *   - the primary was Const-driven (not Param-driven; we don't
-	 *     yet support multiple Param rebinds in the same scan),
+	 * is treated as an additional AND-filter — accepted when:
+	 *   - the new qual is Const-driven (Param/Var-same-rel extras
+	 *     would need their own per-rescan resolve machinery and
+	 *     are still rejected with NOTICE),
 	 *   - the new qual's first Var is the SAME column as the
 	 *     primary's,
 	 *   - and the new qual's typmod matches the primary's.
-	 * Anything else logs a warning and is silently ignored.
+	 * Param-primary + Const-extra IS supported as of §9.4 — the
+	 * primary rebinds per-rescan and the Const extras are added
+	 * once during BeginCustomScan and intersected via match_map
+	 * filter inside `run_batch_and_build_cursors`.
 	 *
 	 * `primary_seq_attno` / `primary_typmod_packed` carry the
 	 * primary's column and typmod for these comparisons.
@@ -3191,74 +3235,100 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	AttrNumber primary_seq_attno = InvalidAttrNumber;
 	int32 primary_typmod_packed = -1;
 
+	/*
+	 * Two-pass qual processing. The previous single-pass loop
+	 * processed mmsearch quals in `cscan->scan.plan.qual` order,
+	 * which is not stable across plans (the planner is free to
+	 * reorder). For Param + Const stacking that bit us: when the
+	 * planner placed the Const first, the Const became the
+	 * primary and the Param-driven qual was rejected as an extra
+	 * (Param can't be a Const-extra). The Param qual then evaluated
+	 * as the always-true C stub and silently dropped from the AND.
+	 *
+	 * Solution: classify quals first, then pick the primary by
+	 * priority:
+	 *   - Var-same-rel  > Param  > Const
+	 * Var-same-rel and Param NEED to be the primary (their machinery
+	 * lives in the buffer's mmsearch_context / param_rebind slots
+	 * which only exist once per scan). Const can be either primary
+	 * OR an extra. So putting Param first guarantees the AND-stack
+	 * works regardless of planner qual order.
+	 *
+	 * If we discover a Var-same-rel and a Param in the same plan
+	 * we reject the Param (we only have one primary slot); same for
+	 * multi-Param or multi-Var-same-rel. The user gets a NOTICE
+	 * line and the qual still evaluates as the C stub for those
+	 * dropped cases — same behaviour as before, just made explicit.
+	 */
+	struct ClassifiedMmsearchQual {
+		FuncExpr* fe;
+		Node* arg0;
+		Node* arg1;
+		bool is_const;
+		bool is_param;
+		bool is_var_same_rel;
+	};
+	std::vector<ClassifiedMmsearchQual> classified_quals;
 	for (auto qual_node : PList<Node>(cscan->scan.plan.qual))
 	{
-		if (qual_node == nullptr || !IsA(qual_node, FuncExpr))
-		{
+		if (qual_node == nullptr || !IsA(qual_node, FuncExpr)) {
 			continue;
 		}
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(qual_node);
-		if (!is_mmsearch_funcid(fe->funcid, scan_stub_oids))
-		{
+		FuncExpr* fe_classify = reinterpret_cast<FuncExpr*>(qual_node);
+		if (!is_mmsearch_funcid(fe_classify->funcid, scan_stub_oids)) {
 			continue;
 		}
-		/*
-		 * Accept either mmsearch(seq, query) or
-		 * mmsearch(seq, query, aligner_options) — arg[0]/arg[1] are
-		 * position-stable across both overloads; arg[2] (when present)
-		 * is decoded by apply_aligner_options_override below.
-		 */
-		const int mmsearch_argc = list_length(fe->args);
-		if (mmsearch_argc != 2 && mmsearch_argc != 3)
-		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch FuncExpr has unexpected arg count={}",
-					mmsearch_argc);
+		const int argc = list_length(fe_classify->args);
+		if (argc != 2 && argc != 3) {
 			continue;
 		}
+		PList<Node> classify_args(fe_classify->args);
+		Node* a0 = classify_args.first();
+		Node* a1 = classify_args.second();
+		if (a0 == nullptr || a1 == nullptr || !IsA(a0, Var)) {
+			continue;
+		}
+		Var* v0 = reinterpret_cast<Var*>(a0);
+		const bool is_c = IsA(a1, Const);
+		const bool is_p = IsA(a1, Param);
+		const bool is_v = IsA(a1, Var)
+			&& reinterpret_cast<Var*>(a1)->varno == v0->varno
+			&& reinterpret_cast<Var*>(a1)->varattno > 0;
+		JustLog("[bioseq] pg: BeginCustomScan() classifier sees mmsearch arg1 nodeTag={} is_const={} is_param={} is_var_same_rel={}",
+				static_cast<int>(nodeTag(a1)), is_c, is_p, is_v);
+		if (!is_c && !is_p && !is_v) {
+			JustLog("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 nodeTag={} is not Const/Param/same-rel-Var)",
+					static_cast<int>(nodeTag(a1)));
+			continue;
+		}
+		classified_quals.push_back({fe_classify, a0, a1, is_c, is_p, is_v});
+	}
+	/*
+	 * Sort by priority (Var-same-rel > Param > Const) using stable
+	 * partition so quals of equal priority keep planner order. The
+	 * Var-same-rel and Param branches can each fire AT MOST ONCE per
+	 * scan (they consume the single primary slot); subsequent quals
+	 * of the same priority are rejected with a NOTICE.
+	 */
+	std::stable_sort(classified_quals.begin(), classified_quals.end(),
+		[](const ClassifiedMmsearchQual& lhs, const ClassifiedMmsearchQual& rhs) {
+			auto pri = [](const ClassifiedMmsearchQual& q) {
+				if (q.is_var_same_rel) return 0;
+				if (q.is_param)        return 1;
+				return 2;  /* Const */
+			};
+			return pri(lhs) < pri(rhs);
+		});
 
-		PList<Node> fe_args(fe->args);
-		Node* arg0 = fe_args.first();
-		Node* arg1 = fe_args.second();
-		if (arg0 == nullptr || arg1 == nullptr)
-		{
-			continue;
-		}
-		if (!IsA(arg0, Var))
-		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 is not a Var (tag={})",
-					static_cast<int>(nodeTag(arg0)));
-			continue;
-		}
-		/*
-		 * Two accepted shapes for the second arg:
-		 *   (1) Const — the literal-query case. We detoast the query
-		 *       bytes once at Begin and reuse them for every batched
-		 *       row.
-		 *   (2) Param of bioseq.seq — the parameterized-NL case used
-		 *       when the planner pushes an outer Var into the inner
-		 *       side. The query value isn't known yet, so we stash the
-		 *       Param coordinates and resolve them at every
-		 *       ReScanCustomScan via EvalParamsMutator. This is what
-		 *       enables many-to-many alignments under Nested Loop.
-		 *
-		 * Anything else (a Var that wasn't parameterized, a complex
-		 * expression, …) is currently unsupported: the qual still runs
-		 * as a tautology (mmsearch's scalar stub returns TRUE), but the
-		 * batch processor never fires so the bioseq.* projections stay
-		 * NULL. We log loudly so users can see why their cigar/score
-		 * came back blank.
-		 */
-		const bool arg1_is_const = IsA(arg1, Const);
-		const bool arg1_is_param = IsA(arg1, Param);
-		if (!arg1_is_const && !arg1_is_param)
-		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a Const or Param (tag={}); "
-					"bioseq.* projections will return NULL for this scan",
-					static_cast<int>(nodeTag(arg1)));
-			continue;
-		}
-
-		Var* col_var = reinterpret_cast<Var*>(arg0);
+	for (auto& classified : classified_quals)
+	{
+		FuncExpr* fe                 = classified.fe;
+		Node* arg0                   = classified.arg0;
+		Node* arg1                   = classified.arg1;
+		const bool arg1_is_const     = classified.is_const;
+		const bool arg1_is_param     = classified.is_param;
+		const bool arg1_is_var_same_rel = classified.is_var_same_rel;
+		Var* col_var                 = reinterpret_cast<Var*>(arg0);
 
 		if (arg1_is_const)
 		{
@@ -3271,7 +3341,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				continue;
 			}
 		}
-		else
+		else if (arg1_is_param)
 		{
 			Param* query_param = reinterpret_cast<Param*>(arg1);
 			if (query_param->paramtype != scan_stub_oids.bioseq_seq_type_oid)
@@ -3299,6 +3369,16 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				continue;
 			}
 		}
+		else /* arg1_is_var_same_rel */
+		{
+			Var* query_var = reinterpret_cast<Var*>(arg1);
+			if (query_var->vartype != scan_stub_oids.bioseq_seq_type_oid)
+			{
+				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 Var vartype={} not bioseq.seq",
+						query_var->vartype);
+				continue;
+			}
+		}
 
 		TupleDesc tuple_descriptor = RelationGetDescr(relation_for_attname);
 		if (col_var->varattno <= 0 || col_var->varattno > tuple_descriptor->natts)
@@ -3316,32 +3396,77 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		}
 
 		/*
-		 * Both arguments must share the same (alphabet, width) typmod.
-		 * Without that invariant the template dispatch in
-		 * BatchProcessor::process_sequences would need a cartesian product
-		 * of query×target instantiations; minimap_port also static_asserts
-		 * that both sequences share the same alphabet_type.
+		 * Resolve arg1's typmod and decide if a coalesce or
+		 * cross-alphabet recompute is required. Three classification
+		 * outcomes:
+		 *   - same (alphabet, width): direct dispatch, no extras.
+		 *   - same alphabet, different width: coalesce (cast arg1 to
+		 *     column's typmod). Index reuse is safe because the
+		 *     sidecar's minimizers were sketched against the
+		 *     column's alphabet — width is irrelevant for the
+		 *     dna4/dna5 minimizer hash.
+		 *   - different alphabet: coalesce AND mark for recompute.
+		 *     The sidecar minimizers are alphabet-specific (bp_size
+		 *     of dna4 = 2 bits/base, dna5 = 3 bits/base), so reusing
+		 *     them would silently produce zero seed hits.
 		 */
 		if (col_var->vartypmod < 0)
 		{
 			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; bioseq.seq columns require an explicit (alphabet,width)");
 			continue;
 		}
-		const int32 arg1_typmod = arg1_is_const
-			? reinterpret_cast<Const*>(arg1)->consttypmod
-			: reinterpret_cast<Param*>(arg1)->paramtypmod;
+		int32 arg1_typmod = -1;
+		if (arg1_is_const) {
+			arg1_typmod = reinterpret_cast<Const*>(arg1)->consttypmod;
+		} else if (arg1_is_param) {
+			arg1_typmod = reinterpret_cast<Param*>(arg1)->paramtypmod;
+		} else /* arg1_is_var_same_rel */ {
+			arg1_typmod = reinterpret_cast<Var*>(arg1)->vartypmod;
+		}
 		if (arg1_typmod < 0)
 		{
 			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
 			continue;
 		}
-		if (col_var->vartypmod != arg1_typmod)
+		const auto unpacked_typmod      = unpack_pgseq_typmod(col_var->vartypmod);
+		const auto unpacked_arg1_typmod = unpack_pgseq_typmod(arg1_typmod);
+		const bool typmod_match =
+			(unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code)
+			&& (unpacked_typmod.width_code == unpacked_arg1_typmod.width_code);
+		const bool same_alphabet =
+			unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code;
+		/*
+		 * For Param shapes (cross-table mmsearch) we historically
+		 * required exact typmod match; the runtime rebind path does
+		 * NOT have a re-encode hook today (the Param value is only
+		 * resolved during ReScan). Keep that invariant: reject
+		 * Param mismatches so users get a clear log line instead of
+		 * silent NULLs.
+		 */
+		if (arg1_is_param && !typmod_match)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch col_typmod={} arg1_typmod={}",
-					col_var->vartypmod, arg1_typmod);
+			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch (Param) col=({},{}) arg1=({},{}) — rejecting (Param coalesce not yet supported)",
+					static_cast<unsigned>(unpacked_typmod.alphabet_code),
+					static_cast<unsigned>(unpacked_typmod.width_code),
+					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
+					static_cast<unsigned>(unpacked_arg1_typmod.width_code));
 			continue;
 		}
-		const auto unpacked_typmod = unpack_pgseq_typmod(col_var->vartypmod);
+		/*
+		 * Var-same-rel ALWAYS shares the column's typmod (every Var
+		 * of column type bioseq.seq inherits the column's vartypmod
+		 * during planning), so we don't have to coalesce here. Log a
+		 * defensive mismatch in case the planner ever surprises us.
+		 */
+		if (arg1_is_var_same_rel && !typmod_match)
+		{
+			JustLog("[bioseq] pg: BeginCustomScan() unexpected same-rel Var typmod mismatch col=({},{}) arg1=({},{}) — rejecting",
+					static_cast<unsigned>(unpacked_typmod.alphabet_code),
+					static_cast<unsigned>(unpacked_typmod.width_code),
+					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
+					static_cast<unsigned>(unpacked_arg1_typmod.width_code));
+			continue;
+		}
 
 		/*
 		 * Sanity-check the primary key column: must be INT4 for the POC.
@@ -3382,10 +3507,30 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		 */
 		if (primary_configured)
 		{
-			if (!primary_is_const || !arg1_is_const) {
+			/*
+			 * Multi-mmsearch stacking rules:
+			 *   - Primary Const + Extra Const   ✓  AND-filter (already worked)
+			 *   - Primary Param + Extra Const   ✓  AND-filter — the
+			 *     primary query rebinds per-rescan via the Param
+			 *     path; the Const extras stay fixed and ride along
+			 *     as additional row filters. This was historically
+			 *     rejected with NOTICE but does not actually
+			 *     conflict with the Param-rebind path: the const
+			 *     extras only contribute to match_map filtering
+			 *     after the primary batch ran.
+			 *   - Primary Const + Extra Param   ✗  rejected (Param
+			 *     extras would need their own per-rescan resolve;
+			 *     the buffer's `extra_query_varlenas` is bytes-only
+			 *     today, no Param-coords slot exists).
+			 *   - Primary Param + Extra Param   ✗  rejected (would
+			 *     need multi-Param rebind machinery — see §9.7 of
+			 *     REPORT_POSTGRES_QUERY_BUGFIXING_1.md for the
+			 *     follow-up plan).
+			 */
+			if (!arg1_is_const) {
 				ereport(NOTICE,
-					(errmsg("bioseq: additional mmsearch qual ignored: only Const+Const stacking supported (primary_const=%d, this_const=%d)",
-							primary_is_const, arg1_is_const),
+					(errmsg("bioseq: additional mmsearch qual ignored: only Const-typed extras are supported beyond the primary qual (extra_is_const=%d)",
+							arg1_is_const),
 					 errhint("Combine quals with the same column and a literal query to AND-filter rows.")));
 				pfree(attname_cstr);
 				continue;
@@ -3449,9 +3594,60 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 										  unpacked_typmod.alphabet_code,
 										  unpacked_typmod.width_code,
 										  primary_key_attno);
+			/*
+			 * Typmod-coalesce path: when the column and literal
+			 * share the alphabet but differ in width — e.g. column
+			 * is dna4/32, literal is dna4/64 — re-encode the
+			 * literal at the column's width so the static dispatch
+			 * agrees. The sidecar's minimizers stay valid because
+			 * width does not affect dna4 minimizer hashes (the
+			 * encoder collapses storage_unit at sketch time).
+			 *
+			 * Cross-alphabet path: when alphabets differ — e.g.
+			 * column is dna4, literal is dna5 — we still re-encode
+			 * the literal at the column's typmod, but ALSO mark
+			 * the buffer for minimizer recompute. The sidecar
+			 * minimizers were sketched at dna4; a dna5 query
+			 * routes through a different bits-per-letter encoding
+			 * and the hashes are incompatible.
+			 */
+			if (!typmod_match) {
+				/*
+				 * Re-encode the literal at the column's typmod. We
+				 * have to re-detoast here because the previous
+				 * detoast scope above already pfree'd the local
+				 * copy. apply_typmod_coalesce stores the result
+				 * inside the buffer's mmsearch_context.
+				 */
+				PgCompactSequenceHdr* src_hdr2 =
+					reinterpret_cast<PgCompactSequenceHdr*>(
+						PG_DETOAST_DATUM(query_const->constvalue));
+				PgCompactSequenceHdr* recoded =
+					pgseq_recode_to_typmod(
+						src_hdr2,
+						unpacked_typmod.alphabet_code,
+						unpacked_typmod.width_code);
+				if (reinterpret_cast<void*>(src_hdr2)
+					!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
+					pfree(src_hdr2);
+				}
+				if (recoded != nullptr) {
+					const size_t recoded_bytes = static_cast<size_t>(VARSIZE(recoded));
+					std::vector<char> coalesced_bytes(recoded_bytes);
+					std::memcpy(coalesced_bytes.data(), recoded, recoded_bytes);
+					pfree(recoded);
+					runtime.buffer.apply_typmod_coalesce(std::move(coalesced_bytes));
+					if (!same_alphabet) {
+						runtime.buffer.mark_alphabet_mismatch_recompute();
+						JustLog("[bioseq] pg: BeginCustomScan() cross-alphabet recompute set; col_alphabet={} arg1_alphabet={}",
+								static_cast<unsigned>(unpacked_typmod.alphabet_code),
+								static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code));
+					}
+				}
+			}
 			primary_is_const = true;
 		}
-		else
+		else if (arg1_is_param)
 		{
 			/*
 			 * Parameterized-query case. Stash the Param coordinates so
@@ -3471,11 +3667,39 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			runtime.param_rebind.alphabet_code     = unpacked_typmod.alphabet_code;
 			runtime.param_rebind.width_code        = unpacked_typmod.width_code;
 			runtime.param_rebind.primary_key_attno = primary_key_attno;
+			runtime.param_rebind.mmsearch_fe       = fe;
 			primary_is_const = false;
 			JustLog("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
 					query_param->paramid, static_cast<int>(query_param->paramkind),
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
 					static_cast<unsigned>(unpacked_typmod.width_code));
+		}
+		else /* arg1_is_var_same_rel */
+		{
+			/*
+			 * Per-row alignment — each row contributes its own
+			 * arg1 column value. Same-Var (varattno equal) is the
+			 * `mmsearch(t.seq, t.seq)` self-alignment shape;
+			 * different varattno is `mmsearch(t.seq, t.seq2)`
+			 * sibling-column shape. Both go through the same
+			 * dispatch path.
+			 */
+			Var* query_var = reinterpret_cast<Var*>(arg1);
+			const bool self_alignment =
+				query_var->varattno == col_var->varattno;
+			runtime.buffer.configure_mmsearch_per_row(
+				col_var->varattno,
+				std::string(attname_cstr),
+				query_var->varattno,
+				self_alignment,
+				unpacked_typmod.alphabet_code,
+				unpacked_typmod.width_code,
+				primary_key_attno);
+			primary_is_const = false;
+			JustLog("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
+					static_cast<int>(col_var->varattno),
+					static_cast<int>(query_var->varattno),
+					self_alignment);
 		}
 
 		primary_configured = true;
@@ -4556,8 +4780,16 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 			runtime.buffer.clear_mmsearch_context();
 		} else {
 		const BioseqStubOids& scan_stub_oids = get_cached_stub_oids();
-		FuncExpr* mmsearch_fe = find_mmsearch_funcexpr(
-			cscan->scan.plan.qual, scan_stub_oids);
+		(void)scan_stub_oids;
+		/*
+		 * Use the stashed Param FuncExpr from BeginCustomScan rather
+		 * than re-walking plan.qual. With multi-mmsearch stacking
+		 * (Param primary + Const extra), `find_mmsearch_funcexpr`
+		 * may return the wrong FuncExpr (the planner is free to put
+		 * the Const first), and that would silently leave the
+		 * Param-driven primary unresolved on rescan.
+		 */
+		FuncExpr* mmsearch_fe = runtime.param_rebind.mmsearch_fe;
 		ExprContext* econtext = node->ss.ps.ps_ExprContext;
 		bool reconfigured = false;
 		if (mmsearch_fe != nullptr && list_length(mmsearch_fe->args) >= 2)
@@ -4587,6 +4819,7 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 						std::vector<char> query_varlena_bytes(query_total_bytes);
 						std::memcpy(query_varlena_bytes.data(), query_hdr,
 									query_total_bytes);
+						const uint32_t bp_size = query_hdr->bp_size;
 						if (reinterpret_cast<void*>(query_hdr)
 							!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
 							pfree(query_hdr);
@@ -4599,7 +4832,9 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 							runtime.param_rebind.width_code,
 							runtime.param_rebind.primary_key_attno);
 						reconfigured = true;
-						JustLog("[bioseq] pg: ReScanCustomScan() rebound mmsearch query from Param paramid={}",
+						JustLog("[bioseq] pg: ReScanCustomScan() rebound mmsearch query bp_size={} extras_count={} from Param paramid={}",
+								bp_size,
+								runtime.buffer.extra_query_count(),
 								runtime.param_rebind.paramid);
 					}
 					else if (query_const->constisnull)
@@ -4851,20 +5086,94 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				 * user can see exactly what the pipeline did (or will
 				 * do): fetched = min(presence, 1), recomputed = 1 -
 				 * fetched. The two lines sum to 100%.
+				 *
+				 * The cross-alphabet recompute path overrides everything
+				 * here: a query against a different alphabet than the
+				 * column's makes the sidecar's minimizers structurally
+				 * incompatible (different bits-per-letter encoding), so
+				 * the buffer's `recompute_due_to_alphabet_mismatch` flag
+				 * forces a 100% recompute regardless of how full the
+				 * sidecar actually is. We surface this with an explicit
+				 * "Performance reduced" hint so users understand why a
+				 * sidecar-backed scan suddenly gets slower.
 				 */
 				const float index_presence =
 					bioseq::sidecar::estimate_index_presence(user_relid, rel_tuples);
 				float fetched_pct    = 0.0f;
 				float recomputed_pct = 100.0f;
-				if (bioseq_read_sequence_index) {
+				const bool runtime_alphabet_recompute =
+					(explain_runtime != nullptr)
+					&& explain_runtime->buffer.recompute_due_to_alphabet_mismatch();
+				const bool runtime_coalesce_active =
+					(explain_runtime != nullptr)
+					&& explain_runtime->buffer.coalesce_active();
+				if (runtime_alphabet_recompute) {
+					/*
+					 * Cross-alphabet path: always 100% recompute. Print
+					 * the explanatory note next to the line so the user
+					 * sees WHY the sidecar didn't apply. We accept that
+					 * the message reaches into runtime state (raw vs
+					 * coalesced typmod) which EXPLAIN-without-ANALYZE
+					 * may not have populated yet.
+					 */
+					StringInfoData recompute_buf;
+					initStringInfo(&recompute_buf);
+					appendStringInfo(&recompute_buf, "minimizers 100%%");
+					ExplainPropertyText("Bioseq Recomputed", recompute_buf.data, es);
+					pfree(recompute_buf.data);
+
+					if (explain_runtime != nullptr) {
+						const auto raw_alpha = explain_runtime->buffer.raw_query_alphabet_code();
+						const auto raw_width = explain_runtime->buffer.raw_query_width_code();
+						const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
+						const auto col_width = explain_runtime->buffer.mmsearch_width_code();
+						const auto fmt_alphabet_name = [](uint8_t code) {
+							return code == 0 ? "dna4" : code == 1 ? "dna5" : "?";
+						};
+						const auto width_to_bits = [](uint8_t code) {
+							return static_cast<unsigned>(8u << code);
+						};
+						StringInfoData hint_buf;
+						initStringInfo(&hint_buf);
+						appendStringInfo(&hint_buf,
+							"column is seq('%s', %u), but query is seq('%s', %u), so index needs to be recomputed",
+							fmt_alphabet_name(col_alpha), width_to_bits(col_width),
+							fmt_alphabet_name(raw_alpha), width_to_bits(raw_width));
+						ExplainPropertyText("Performance reduced", hint_buf.data, es);
+						pfree(hint_buf.data);
+					}
+				} else if (bioseq_read_sequence_index) {
 					fetched_pct    = index_presence * 100.0f;
 					recomputed_pct = (1.0f - index_presence) * 100.0f;
 					if (fetched_pct > 0.0f) {
 						StringInfoData presence_buf;
 						initStringInfo(&presence_buf);
 						appendStringInfo(&presence_buf,
-										 "minimizers (index presence: %.0f%%)",
+										 "minimizers (index presence: %.0f%%",
 										 static_cast<double>(fetched_pct));
+						if (runtime_coalesce_active && explain_runtime != nullptr) {
+							/*
+							 * Surface the typmod-coalesce decision next to
+							 * the index-presence percentage so users can
+							 * see "we re-encoded your literal at the
+							 * column's typmod, then used the prebuilt
+							 * minimizer index". Without this line the user
+							 * sees a successful scan and has no idea their
+							 * literal was silently re-encoded.
+							 */
+							const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
+							const auto col_width = explain_runtime->buffer.mmsearch_width_code();
+							const auto fmt_alphabet_name = [](uint8_t code) {
+								return code == 0 ? "dna4" : code == 1 ? "dna5" : "?";
+							};
+							const auto width_to_bits = [](uint8_t code) {
+								return static_cast<unsigned>(8u << code);
+							};
+							appendStringInfo(&presence_buf,
+								", coalesce to seq('%s', %u)",
+								fmt_alphabet_name(col_alpha), width_to_bits(col_width));
+						}
+						appendStringInfoString(&presence_buf, ")");
 						ExplainPropertyText("Bioseq Fetched From Sequence Index",
 											presence_buf.data, es);
 						pfree(presence_buf.data);
@@ -5039,7 +5348,63 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				print_step("Compute mapping quality");
 			}
 
-			print_submit("Submit results");
+			/*
+			 * Surface the per-batch execution counters from the
+			 * BatchProcessor stats. Only meaningful after ANALYZE has
+			 * actually run the scan (`last_stats.targets_considered`
+			 * is zero before the first batch). Format:
+			 *   `* Submit results [N batches, M results]`
+			 * The "batches" / "results" labels echo the §2 prompt
+			 * mockup; we keep them concise so a one-shot scan still
+			 * fits the existing tree shape.
+			 */
+			if (explain_runtime != nullptr) {
+				const auto& stats = explain_runtime->buffer.execution_stats();
+				if (stats.targets_considered > 0) {
+					StringInfoData submit_label;
+					initStringInfo(&submit_label);
+					appendStringInfo(&submit_label,
+						"Submit results [targets=%zu prebuilt_index=%zu recomputed=%zu]",
+						stats.targets_considered,
+						stats.targets_with_prebuilt_index,
+						stats.targets_recomputed_minimizers);
+					print_submit(submit_label.data);
+					pfree(submit_label.data);
+				} else {
+					print_submit("Submit results");
+				}
+			} else {
+				print_submit("Submit results");
+			}
+
+			/*
+			 * When bioseq.aligner.enable_profiling is on, append a
+			 * "Runtime:" block summarising the bioseq::instr::access
+			 * profiler counters. The actual high-resolution timings
+			 * still go to the JustLog summary at scan-end (see
+			 * EndCustomScan); EXPLAIN ANALYZE only shows the
+			 * coarse-grained per-stage call counts so users can see
+			 * which pipeline steps dominated without leaving the
+			 * query output.
+			 */
+			if (params.enable_profiling) {
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfoString(es->str, "Runtime:\n");
+				++es->indent;
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"profiling: enabled (see JustLog for per-stage μs/ns counters)\n");
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				if (explain_runtime != nullptr) {
+					const auto& stats = explain_runtime->buffer.execution_stats();
+					appendStringInfo(es->str,
+						"batch summary: targets_considered=%zu, prebuilt_index=%zu, recomputed=%zu\n",
+						stats.targets_considered,
+						stats.targets_with_prebuilt_index,
+						stats.targets_recomputed_minimizers);
+				}
+				--es->indent;
+			}
 
 			es->indent -= 2;
 			(void) features;  // currently only has_mmsearch is load-bearing
