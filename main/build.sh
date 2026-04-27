@@ -54,3 +54,7 @@ fi
 if has_token bench; then
     ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[.benchmark-evaluation]"
 fi
+
+if has_token lol; then
+    ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[lol]"
+fi
