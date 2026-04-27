@@ -101,15 +101,5 @@
 // background poll thread runs as soon as the producer enqueues), so we
 // simply enqueue and let the consumer drain.
 #define JustLog(...) if(enable_logging) { logd(__VA_ARGS__); }
-// Hot-loop log. Use inside per-base / per-anchor / per-iteration loops
-// where the logging cost would dominate the algorithm itself. Default:
-// compiled out (zero cost regardless of `enable_logging`). Set
-// `BIOSEQ_HOT_TRACE_LOGS=1` at compile time to turn back on for
-// targeted debugging — log cost is then identical to JustLog.
-#ifdef BIOSEQ_HOT_TRACE_LOGS
-#define JustLogHot(...) JustLog(__VA_ARGS__)
-#else
-#define JustLogHot(...) ((void)0)
-#endif
 #define NJustLog(...) if(enable_logging) { elog(NOTICE, fmt::format(__VA_ARGS__).c_str()); }
 #define nodeStr(X) ""

@@ -2,7 +2,7 @@
  * @file bench_test.cpp
  * @brief Catch2 harness for the bench evaluation pipeline.
  *
- * Tagged with `[.benchmark-evaluation]` — the leading `.` keeps it out of
+ * Tagged with `[simple-benchmark]` — the leading `.` keeps it out of
  * the default run; invoke explicitly with `[benchmark-evaluation]` to
  * exercise minimap_port + tool_minimap2 side-by-side on two hard-coded
  * sequences that share a known ground-truth origin.
@@ -47,7 +47,7 @@ using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint64_t>;
 using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 
 TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     using namespace seq::literals;
 
     // Make sure each TEST_CASE starts on a clean instrumentation slate
@@ -167,7 +167,7 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
 }
 
 TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to land on truth",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
 
@@ -233,7 +233,7 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
 }
 
 TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL semantics",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
 
@@ -297,7 +297,7 @@ TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL seman
 }
 
 TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
 

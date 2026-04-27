@@ -52,7 +52,7 @@ if has_token integration; then
 fi
 
 if has_token bench; then
-    ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[.benchmark-evaluation]"
+    ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
 fi
 
 if has_token lol; then
