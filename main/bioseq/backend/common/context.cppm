@@ -49,6 +49,7 @@ module;
 #include <span>
 #include <type_traits>
 #include <functional>
+#include <vector>
 
 export module context;
 
@@ -191,35 +192,44 @@ public:
     //
     // The returned span is owned by the matching arena; callers must not
     // retain the pointer across the corresponding scope unwind.
+    //
+    // Two implementation details that resolve the foonathan_memory bugs
+    // documented in RESEARCH/BENCHMARKING_SPEEDUP/REPORT_FOONATHAN_MEM_BUGS.md:
+    //
+    //   1. Allocations larger than `kHeapFallbackThreshold` bypass the
+    //      memory_stack and use posix_memalign instead, with the pointer
+    //      stashed in a per-arena tracker for free() at context teardown.
+    //      memory_stack throws `bad_allocation_size` when a single
+    //      allocation exceeds the next growable block — common on long /
+    //      very-long bench inputs where BlockTrace can be tens of MiB.
+    //
+    //   2. The arena fast-path calls `arena.allocate(size, alignment)`
+    //      directly, bypassing `allocator_traits::allocate_node`. The
+    //      traits-wrapper version calls `state.on_allocate(size)` which
+    //      bumps the leak tracker, but our raw-array calls have no
+    //      matching `deallocate_node` (the memory is freed by `unwind`
+    //      / `~memory_stack`, neither of which decrement the tracker),
+    //      so every raw-array call appeared as a "leaked X bytes"
+    //      warning at process exit. Containers (chain_vector etc.) keep
+    //      using the traits path because they call `deallocate_node`
+    //      from their destructor and stay tracker-balanced.
     // -----------------------------------------------------------------
     template<typename T, std::size_t Alignment = alignof(T)>
     [[nodiscard]] std::span<T> alloc_align_array(std::size_t count) {
-        static constexpr std::size_t effective_align = Alignment < alignof(T) ? alignof(T) : Alignment;
-        if (count == 0) return {};
-        const std::size_t bytes = count * sizeof(T);
-        void* raw = memory::allocator_traits<detail::align_arena_t>::allocate_node(
-            align_arena_, bytes, effective_align);
-        return std::span<T>(static_cast<T*>(raw), count);
+        return alloc_array_impl<T, Alignment>(
+            align_arena_, large_align_blocks_, count);
     }
 
     template<typename T, std::size_t Alignment = alignof(T)>
     [[nodiscard]] std::span<T> alloc_chain_array(std::size_t count) {
-        static constexpr std::size_t effective_align = Alignment < alignof(T) ? alignof(T) : Alignment;
-        if (count == 0) return {};
-        const std::size_t bytes = count * sizeof(T);
-        void* raw = memory::allocator_traits<detail::chain_arena_t>::allocate_node(
-            chain_arena_, bytes, effective_align);
-        return std::span<T>(static_cast<T*>(raw), count);
+        return alloc_array_impl<T, Alignment>(
+            chain_arena_, large_chain_blocks_, count);
     }
 
     template<typename T, std::size_t Alignment = alignof(T)>
     [[nodiscard]] std::span<T> alloc_scratch_array(std::size_t count) {
-        static constexpr std::size_t effective_align = Alignment < alignof(T) ? alignof(T) : Alignment;
-        if (count == 0) return {};
-        const std::size_t bytes = count * sizeof(T);
-        void* raw = memory::allocator_traits<detail::scratch_arena_t>::allocate_node(
-            scratch_arena_, bytes, effective_align);
-        return std::span<T>(static_cast<T*>(raw), count);
+        return alloc_array_impl<T, Alignment>(
+            scratch_arena_, large_scratch_blocks_, count);
     }
 
     // -----------------------------------------------------------------
@@ -276,12 +286,88 @@ public:
         return align_arena_.capacity_left();
     }
 
+    /// Destructor frees the heap-fallback blocks tracked by the
+    /// per-arena vectors. The foonathan arenas free themselves via
+    /// their own destructors. Non-noexcept because std::vector
+    /// destruction is conditionally noexcept on T's destructor — but
+    /// `heap_block` has a trivial destructor so this is fine in
+    /// practice; left without `noexcept` only because of the explicit
+    /// `std::free` calls.
+    ~context() {
+        free_heap_blocks(large_align_blocks_);
+        free_heap_blocks(large_chain_blocks_);
+        free_heap_blocks(large_scratch_blocks_);
+    }
+
 private:
+    /// Single oversize-fallback threshold, applied per arena. Anything
+    /// larger goes through the heap path; anything smaller through the
+    /// arena fast-path. 1 MiB comfortably fits MEDIUM-bench BlockTrace
+    /// arrays (~700 KiB) and KSW2 DP state, while routing LONG-bench
+    /// (~13 MiB BlockTrace) and VERY_LONG-bench (~320 MiB) through
+    /// posix_memalign so memory_stack never sees an over-block-size
+    /// request.
+    static constexpr std::size_t kHeapFallbackThreshold = std::size_t{1} << 20;  // 1 MiB
+
+    /// Tracker entry for a single heap-fallback allocation.
+    struct heap_block {
+        void*       ptr;
+        std::size_t bytes;
+    };
+
+    template<typename T, std::size_t Alignment, typename Arena>
+    [[nodiscard]] std::span<T> alloc_array_impl(
+        Arena& arena,
+        std::vector<heap_block>& heap_tracker,
+        std::size_t count)
+    {
+        static constexpr std::size_t requested_align =
+            Alignment < alignof(T) ? alignof(T) : Alignment;
+        if (count == 0) return {};
+        const std::size_t bytes = count * sizeof(T);
+        if (bytes <= kHeapFallbackThreshold) {
+            // Arena fast-path. Bypass allocator_traits to skip the
+            // memory_stack leak tracker (see class-doc rationale).
+            void* raw = arena.allocate(bytes, requested_align);
+            return std::span<T>(static_cast<T*>(raw), count);
+        }
+        // Heap fallback. posix_memalign requires alignment to be a
+        // multiple of sizeof(void*) and a power of 2. alignof(T) is
+        // always a power of 2; clamp to >= sizeof(void*).
+        constexpr std::size_t min_align = sizeof(void*);
+        constexpr std::size_t effective_align =
+            requested_align < min_align ? min_align : requested_align;
+        void* raw = nullptr;
+        const int rc = ::posix_memalign(&raw, effective_align, bytes);
+        if (rc != 0 || raw == nullptr) {
+            JustLog("[context] heap fallback FAILED: bytes={} align={} rc={}",
+                    bytes, effective_align, rc);
+            std::abort();
+        }
+        heap_tracker.push_back({raw, bytes});
+        return std::span<T>(static_cast<T*>(raw), count);
+    }
+
+    static void free_heap_blocks(std::vector<heap_block>& blocks) noexcept {
+        for (auto& block : blocks) std::free(block.ptr);
+        blocks.clear();
+    }
+
     detail::scratch_arena_t scratch_arena_;
     detail::chain_arena_t   chain_arena_;
     detail::align_arena_t   align_arena_;
     detail::result_arena_t  result_arena_;
     detail::hash_arena_t    hash_arena_;
+
+    /// Per-arena heap-fallback trackers. `~context()` walks each and
+    /// frees the underlying pointer. Vectors live in std::allocator
+    /// (not foonathan) on purpose — they're rarely touched (a handful
+    /// of entries per query at most) and bootstrapping them on a
+    /// foonathan arena would re-introduce the same tracker problem we
+    /// just sidestepped.
+    std::vector<heap_block> large_align_blocks_;
+    std::vector<heap_block> large_chain_blocks_;
+    std::vector<heap_block> large_scratch_blocks_;
 };
 
 // =====================================================================
