@@ -407,7 +407,13 @@ TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
           "[chart-data]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
+    // Default-grid sweep first so SHORT/MEDIUM cells are populated for
+    // every algorithm before the longer LONG/VERY_LONG cells start.
     bioseq::bench::HWY_NAMESPACE::run_full_matrix();
+    // k/w parameter sweep (Problem 3 in the request). Runs only on the
+    // MEDIUM/CCS bucket so the dedicated heatmaps in the report depend
+    // only on (k, w), not on length / error.
+    bioseq::bench::HWY_NAMESPACE::run_kw_sweep();
     JustLog("[chart-data] accumulated {} bench samples after full sweep",
             bioseq::bench::benchmark_samples().size());
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
@@ -422,13 +428,19 @@ TEST_CASE("Chart-data sweep — quick (short + medium only)",
     std::uint64_t seed = 4242424242ull;
     for (auto length_bucket : {SequenceLengthBucket::SHORT,
                                SequenceLengthBucket::MEDIUM}) {
-        for (auto error_bucket : {ErrorRateBucket::LOW,
-                                  ErrorRateBucket::MEDIUM,
-                                  ErrorRateBucket::HIGH}) {
+        for (auto error_bucket : {ErrorRateBucket::HIFI,
+                                  ErrorRateBucket::CCS,
+                                  ErrorRateBucket::ONT_MODERN,
+                                  ErrorRateBucket::ONT_LEGACY,
+                                  ErrorRateBucket::HIGH_INDEL_LOW_SUB,
+                                  ErrorRateBucket::HIGH_SUB_LOW_INDEL}) {
             run_matrix_for_bucket(length_bucket, error_bucket, seed, grid);
             seed = seed * 1099511628211ull + 14695981039346656037ull;
         }
     }
+    // Run the k/w sweep too so the quick bench produces a complete
+    // report.json (with k/w heatmaps populated) for chart-layout work.
+    run_kw_sweep();
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
 }
 

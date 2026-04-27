@@ -252,6 +252,481 @@ inline void emit_report(JsonWriter& writer) {
     };
 
     // ================================================================
+    // Headline algorithm subset.
+    //
+    // The default 14-algo grid is too crowded for the "are we faster
+    // / more accurate than minimap2?" headline charts; the reader's
+    // eye gets lost across overlapping traces. We pick four traces
+    // for the headline charts: the two minimap2 baselines + the two
+    // bioseq KSW2 variants whose chaining choice (scalar-DP, SIMD-DP)
+    // matches what minimap2's mm_chain_dp does. These are the
+    // apples-to-apples comparisons. The full-grid charts further down
+    // the report show every variant for users that want the detail.
+    //
+    // Note: SIMD-mm minimizer variants are deliberately excluded from
+    // the headline. Production output documented in
+    // CODE_GUIDELINES.md §9 uses scalar minimizers (the SIMD path is
+    // a separate experiment), and the previous bench run showed the
+    // SIMD-mm variants at notably worse accuracy on SHORT/MEDIUM —
+    // they belong in the full-grid charts where the regression is
+    // visible, not in the headline answer.
+    static constexpr std::array<std::string_view, 4> headline_algorithms = {
+        "minimap2 (DP chaining)",
+        "minimap2 (RMQ chaining)",
+        "bioseq KSW2 + scalar-DP + scalar-mm",
+        "bioseq KSW2 + SIMD-DP + scalar-mm",
+    };
+
+    auto is_headline_algorithm = [](std::string_view label) {
+        for (const auto& candidate : headline_algorithms) {
+            if (candidate == label) return true;
+        }
+        return false;
+    };
+
+    auto headline_algorithm_labels = [&]() {
+        std::vector<std::string> out;
+        for (const auto& label : algorithm_labels) {
+            if (is_headline_algorithm(label)) out.push_back(label);
+        }
+        return out;
+    }();
+
+    // ================================================================
+    // Headline 1: How fast is bioseq vs. minimap2 by length bucket?
+    //
+    // Per (algorithm, length-bucket) cell we plot the mean per-pair
+    // latency in ms. Only the four headline algorithms participate so
+    // the chart reads as a 1-glance speedometer rather than the dense
+    // 14-trace soup of the full-grid version.
+    // ================================================================
+    emit_chart("headline_speed_vs_minimap2",
+        "Headline: mean alignment latency vs. minimap2 (4 algorithms)",
+        "First chart by design — the headline 'how fast are we vs. "
+        "minimap2?' answer. Y axis: mean per-pair alignment latency in "
+        "milliseconds (lower is better, log scale). X axis: sequence "
+        "length bucket (SHORT/MEDIUM/LONG/VERY_LONG). Only the two "
+        "minimap2 baselines and the two bioseq KSW2 variants whose "
+        "chaining matches minimap2 (scalar-DP, SIMD-DP) participate, "
+        "so the visual comparison is apples-to-apples. The full 14-"
+        "algorithm grid is plotted further down (`seq_length_vs_speed_mean`) "
+        "for users who want every variant.",
+        [&]() {
+            writer.key("data");
+            writer.begin_array();
+            for (const auto& algorithm_label : headline_algorithm_labels) {
+                std::map<int, std::vector<double>> bucket_latencies;
+                for (const auto& s : samples) {
+                    if (s.algorithm_label != algorithm_label) continue;
+                    if (s.sample_latencies_ns.empty()) continue;
+                    bucket_latencies[static_cast<int>(s.length_bucket)]
+                        .push_back(detail::mean_of(s.sample_latencies_ns) / 1e6);
+                }
+                if (bucket_latencies.empty()) continue;
+                std::vector<std::string> xs;
+                std::vector<double> ys;
+                for (const auto& [bucket, latencies] : bucket_latencies) {
+                    if (latencies.empty()) continue;
+                    xs.push_back(std::string{sequence_length_bucket_name(
+                        static_cast<SequenceLengthBucket>(bucket))});
+                    ys.push_back(detail::mean_of(latencies));
+                }
+                writer.begin_object();
+                writer.kv_string("type", "scatter");
+                writer.kv_string("mode", "lines+markers");
+                writer.kv_string("name", algorithm_label);
+                writer.kv_string_array("x", xs);
+                writer.kv_double_array("y", ys);
+                emit_marker(algorithm_label);
+                writer.end_object();
+            }
+            writer.end_array();
+            emit_layout(
+                "Headline: mean latency by length bucket — bioseq vs. minimap2",
+                "length bucket", false,
+                "mean latency per call (ms, log)", true);
+        });
+
+    // ================================================================
+    // Headline 2: How accurate is bioseq vs. minimap2 by length?
+    // ================================================================
+    emit_chart("headline_accuracy_vs_minimap2_per_length",
+        "Headline: position accuracy vs. minimap2 (by length bucket)",
+        "Position-accuracy fraction by length bucket for the two "
+        "minimap2 baselines and the two bioseq KSW2 variants. A flat "
+        "line at 1.0 means the algorithm is indifferent to read "
+        "length; a downward slope at the long end usually points at "
+        "chaining failures or seed drop-out. Buckets the runner "
+        "skipped (the `should_skip_cell` rules — see `matrix_runner.cppm`) "
+        "show as missing points; lines connect across the gap.",
+        [&]() {
+            constexpr std::array<SequenceLengthBucket, 4> all_buckets = {
+                SequenceLengthBucket::SHORT,
+                SequenceLengthBucket::MEDIUM,
+                SequenceLengthBucket::LONG,
+                SequenceLengthBucket::VERY_LONG,
+            };
+            writer.key("data");
+            writer.begin_array();
+            for (const auto& algorithm_label : headline_algorithm_labels) {
+                std::array<std::pair<std::size_t, std::size_t>, 4> per_bucket{};
+                for (const auto& s : samples) {
+                    if (s.algorithm_label != algorithm_label) continue;
+                    auto& counts = per_bucket[static_cast<std::size_t>(s.length_bucket)];
+                    counts.second++;
+                    if (s.position_correct) counts.first++;
+                }
+                bool any = false;
+                for (const auto& [c, t] : per_bucket) if (t > 0) { any = true; break; }
+                if (!any) continue;
+                writer.begin_object();
+                writer.kv_string("type", "scatter");
+                writer.kv_string("mode", "lines+markers");
+                writer.kv_string("name", algorithm_label);
+                writer.key("x");
+                writer.begin_array();
+                for (auto bucket : all_buckets) {
+                    writer.value_string(sequence_length_bucket_name(bucket));
+                }
+                writer.end_array();
+                writer.key("y");
+                writer.begin_array();
+                for (std::size_t i = 0; i < 4; ++i) {
+                    if (per_bucket[i].second == 0) {
+                        writer.value_null();
+                    } else {
+                        writer.value_double(
+                            static_cast<double>(per_bucket[i].first) /
+                            static_cast<double>(per_bucket[i].second));
+                    }
+                }
+                writer.end_array();
+                writer.kv_bool("connectgaps", false);
+                emit_marker(algorithm_label);
+                writer.end_object();
+            }
+            writer.end_array();
+            emit_layout(
+                "Headline: position accuracy by length bucket",
+                "length bucket", false,
+                "fraction of correctly-placed primaries", false);
+        });
+
+    // ================================================================
+    // Headline 3: How robust is bioseq vs. minimap2 across error rates?
+    //
+    // Pivots on error_bucket on x-axis with one trace per headline
+    // algorithm. Reads as the 'SEAL-style robustness curve' across
+    // simulated error rates from HIFI to ONT_LEGACY.
+    // ================================================================
+    emit_chart("headline_accuracy_vs_minimap2_per_error",
+        "Headline: position accuracy vs. minimap2 (by error rate bucket)",
+        "Position-accuracy fraction across the six error-rate buckets, "
+        "ordered HIFI -> CCS -> ONT_MODERN -> ONT_LEGACY -> "
+        "HIGH_INDEL_LOW_SUB -> HIGH_SUB_LOW_INDEL. The first four "
+        "buckets are calibrated against published long-read error "
+        "profiles (see SOME_BENCHMARKING_PAPERS.md and the "
+        "ErrorRateBucket enum in matrix_runner.cppm); the last two "
+        "are exotic indel-only / sub-only stress tests inspired by "
+        "the PeerJ Fig. 7 sweep. Watch for accuracy collapse at the "
+        "ONT_LEGACY / HIGH_INDEL crossover — that's where minimap2's "
+        "default k/w (15, 10) starts to lose seeds.",
+        [&]() {
+            constexpr std::array<ErrorRateBucket, 6> all_errors = {
+                ErrorRateBucket::HIFI,
+                ErrorRateBucket::CCS,
+                ErrorRateBucket::ONT_MODERN,
+                ErrorRateBucket::ONT_LEGACY,
+                ErrorRateBucket::HIGH_INDEL_LOW_SUB,
+                ErrorRateBucket::HIGH_SUB_LOW_INDEL,
+            };
+            writer.key("data");
+            writer.begin_array();
+            for (const auto& algorithm_label : headline_algorithm_labels) {
+                std::array<std::pair<std::size_t, std::size_t>, 6> per_bucket{};
+                for (const auto& s : samples) {
+                    if (s.algorithm_label != algorithm_label) continue;
+                    auto& counts = per_bucket[static_cast<std::size_t>(s.error_bucket)];
+                    counts.second++;
+                    if (s.position_correct) counts.first++;
+                }
+                bool any = false;
+                for (const auto& [c, t] : per_bucket) if (t > 0) { any = true; break; }
+                if (!any) continue;
+                writer.begin_object();
+                writer.kv_string("type", "scatter");
+                writer.kv_string("mode", "lines+markers");
+                writer.kv_string("name", algorithm_label);
+                writer.key("x");
+                writer.begin_array();
+                for (auto bucket : all_errors) {
+                    writer.value_string(error_rate_bucket_name(bucket));
+                }
+                writer.end_array();
+                writer.key("y");
+                writer.begin_array();
+                for (std::size_t i = 0; i < 6; ++i) {
+                    if (per_bucket[i].second == 0) {
+                        writer.value_null();
+                    } else {
+                        writer.value_double(
+                            static_cast<double>(per_bucket[i].first) /
+                            static_cast<double>(per_bucket[i].second));
+                    }
+                }
+                writer.end_array();
+                writer.kv_bool("connectgaps", false);
+                emit_marker(algorithm_label);
+                writer.end_object();
+            }
+            writer.end_array();
+            emit_layout(
+                "Headline: position accuracy by error rate",
+                "error rate bucket", false,
+                "fraction of correctly-placed primaries", false);
+        });
+
+    // ================================================================
+    // Headline 4: Pareto — best-of-both view restricted to the four
+    // headline algorithms. This is the same shape as the full Pareto
+    // chart further down, but with only 4 algorithms × 4 length
+    // buckets = up to 16 markers, so the frontier is readable.
+    // ================================================================
+    emit_chart("headline_pareto_speed_vs_accuracy",
+        "Headline: speed vs. accuracy Pareto (4 algorithms)",
+        "Per (algorithm, length-bucket) marker: X is mean latency in "
+        "ms (lower is better), Y is position-accuracy fraction "
+        "(higher is better). Points in the upper-left dominate "
+        "(faster AND more accurate); points in the lower-right are "
+        "dominated. The full 14-algorithm Pareto further down "
+        "(`pareto_accuracy_vs_latency`) preserves every variant.",
+        [&]() {
+            writer.key("data");
+            writer.begin_array();
+            const std::array<std::string_view, 4> length_symbols = {
+                "circle", "square", "diamond", "triangle-up"};
+            for (const auto& algorithm_label : headline_algorithm_labels) {
+                std::array<std::pair<std::vector<double>, std::vector<double>>, 4> per_bucket;
+                std::array<std::pair<std::size_t, std::size_t>, 4> correctness;
+                for (const auto& s : samples) {
+                    if (s.algorithm_label != algorithm_label) continue;
+                    if (s.sample_latencies_ns.empty()) continue;
+                    const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    per_bucket[bidx].first.push_back(detail::mean_of(s.sample_latencies_ns) / 1e6);
+                    correctness[bidx].second++;
+                    if (s.position_correct) correctness[bidx].first++;
+                }
+                for (std::size_t i = 0; i < 4; ++i) {
+                    if (per_bucket[i].first.empty()) continue;
+                    const double mean_latency_ms = detail::mean_of(per_bucket[i].first);
+                    const double accuracy = correctness[i].second > 0
+                        ? static_cast<double>(correctness[i].first) /
+                          static_cast<double>(correctness[i].second)
+                        : 0.0;
+                    writer.begin_object();
+                    writer.kv_string("type", "scatter");
+                    writer.kv_string("mode", "markers");
+                    writer.kv_string("name",
+                        algorithm_label + " — " +
+                        std::string{detail::length_bucket_short_label(
+                            static_cast<SequenceLengthBucket>(i))});
+                    writer.kv_string("legendgroup", algorithm_label);
+                    writer.key("x");
+                    writer.begin_array(); writer.value_double(mean_latency_ms); writer.end_array();
+                    writer.key("y");
+                    writer.begin_array(); writer.value_double(accuracy); writer.end_array();
+                    writer.key("marker");
+                    writer.begin_object();
+                    writer.kv_string("color", detail::colour_for(algorithm_label));
+                    writer.kv_int("size", 13);
+                    writer.kv_string("symbol", length_symbols[i]);
+                    writer.end_object();
+                    writer.end_object();
+                }
+            }
+            writer.end_array();
+            emit_layout(
+                "Headline: speed vs. accuracy Pareto",
+                "mean latency per call (ms, log)", true,
+                "position-accuracy fraction", false);
+        });
+
+    // ================================================================
+    // k/w sweep charts. These come from a separate test case
+    // (`run_kw_sweep`) that runs a small set of (kmer_size,
+    // window_size) configurations on a fixed length×error bucket so
+    // the resulting accuracy/speed depends only on (k, w).
+    //
+    // The chart filters samples to those whose `algorithm_label`
+    // matches the k/w-sweep label pattern (`(k=...,w=...)` suffix).
+    // The default-grid samples — which all share k=15, w=10 — are
+    // excluded; mixing them in would conflate "default grid baseline"
+    // with "k=15,w=10 from the sweep" and the heatmap rows would
+    // double up.
+    // ================================================================
+
+    auto is_kw_sweep_label = [](std::string_view label) {
+        // The k/w-sweep labels end with ` (k=..,w=..)`; the default
+        // grid never injects parentheses into its labels.
+        return label.find("(k=") != std::string_view::npos &&
+               label.find(",w=") != std::string_view::npos;
+    };
+
+    auto emit_kw_heatmap = [&](
+        std::string_view chart_id,
+        std::string_view short_description,
+        std::string_view long_description,
+        std::string_view algorithm_kind_filter,
+        bool emit_accuracy)
+    {
+        emit_chart(chart_id, short_description, long_description, [&]() {
+            // Distinct k and w values pulled from the samples.
+            std::set<int32_t> kmer_set, window_set;
+            for (const auto& s : samples) {
+                if (!is_kw_sweep_label(s.algorithm_label)) continue;
+                if (s.algorithm_kind != algorithm_kind_filter) continue;
+                kmer_set.insert(s.kmer_size);
+                window_set.insert(s.window_size);
+            }
+            std::vector<int32_t> kmer_axis(kmer_set.begin(), kmer_set.end());
+            std::vector<int32_t> window_axis(window_set.begin(), window_set.end());
+            // (kmer × window) cell -> (correct, total) for accuracy
+            // or sum/count of mean latencies for speed.
+            const std::size_t n_k = kmer_axis.size();
+            const std::size_t n_w = window_axis.size();
+            std::vector<std::vector<std::pair<std::size_t, std::size_t>>> accuracy_grid(
+                n_k, std::vector<std::pair<std::size_t, std::size_t>>(n_w));
+            std::vector<std::vector<std::vector<double>>> latency_grid(
+                n_k, std::vector<std::vector<double>>(n_w));
+            for (const auto& s : samples) {
+                if (!is_kw_sweep_label(s.algorithm_label)) continue;
+                if (s.algorithm_kind != algorithm_kind_filter) continue;
+                const auto k_it = std::find(kmer_axis.begin(), kmer_axis.end(), s.kmer_size);
+                const auto w_it = std::find(window_axis.begin(), window_axis.end(), s.window_size);
+                if (k_it == kmer_axis.end() || w_it == window_axis.end()) continue;
+                const std::size_t kk = static_cast<std::size_t>(std::distance(kmer_axis.begin(), k_it));
+                const std::size_t ww = static_cast<std::size_t>(std::distance(window_axis.begin(), w_it));
+                accuracy_grid[kk][ww].second++;
+                if (s.position_correct) accuracy_grid[kk][ww].first++;
+                if (!s.sample_latencies_ns.empty()) {
+                    latency_grid[kk][ww].push_back(detail::mean_of(s.sample_latencies_ns) / 1e6);
+                }
+            }
+            // String labels for axes — Plotly heatmaps want strings to
+            // disambiguate categorical axes; otherwise they auto-scale
+            // and the (10, 5) and (15, 10) cells render at unequal
+            // pixel widths.
+            std::vector<std::string> kmer_labels;
+            for (auto k : kmer_axis) kmer_labels.push_back("k=" + std::to_string(k));
+            std::vector<std::string> window_labels;
+            for (auto w : window_axis) window_labels.push_back("w=" + std::to_string(w));
+            writer.key("data");
+            writer.begin_array();
+            writer.begin_object();
+            writer.kv_string("type", "heatmap");
+            writer.kv_string("colorscale", emit_accuracy ? "Viridis" : "Cividis");
+            writer.kv_string_array("x", window_labels);
+            writer.kv_string_array("y", kmer_labels);
+            writer.key("z");
+            writer.begin_array();
+            for (std::size_t kk = 0; kk < n_k; ++kk) {
+                writer.begin_array();
+                for (std::size_t ww = 0; ww < n_w; ++ww) {
+                    if (emit_accuracy) {
+                        const auto [correct, total] = accuracy_grid[kk][ww];
+                        if (total == 0) {
+                            writer.value_null();
+                        } else {
+                            writer.value_double(static_cast<double>(correct) /
+                                               static_cast<double>(total));
+                        }
+                    } else {
+                        const auto& latencies = latency_grid[kk][ww];
+                        if (latencies.empty()) {
+                            writer.value_null();
+                        } else {
+                            writer.value_double(detail::mean_of(latencies));
+                        }
+                    }
+                }
+                writer.end_array();
+            }
+            writer.end_array();
+            if (emit_accuracy) {
+                writer.kv_double("zmin", 0.0);
+                writer.kv_double("zmax", 1.0);
+            }
+            writer.key("colorbar");
+            writer.begin_object();
+            writer.key("title");
+            writer.begin_object();
+            writer.kv_string("text", emit_accuracy
+                ? "fraction correct" : "mean latency (ms)");
+            writer.end_object();
+            writer.end_object();
+            writer.end_object();
+            writer.end_array();
+            emit_layout(
+                std::string{short_description},
+                "window size (w)", false,
+                "k-mer size (k)", false);
+        });
+    };
+
+    emit_kw_heatmap(
+        "kmer_window_accuracy_minimap2",
+        "k/w sweep — accuracy heatmap (minimap2 reference)",
+        "Accuracy fraction for the C minimap2 reference as (k, w) "
+        "vary over the canonical preset combinations: k in {10, 15, "
+        "19, 21, 25}, w in {5, 10, 11}. Run on the MEDIUM/CCS bucket "
+        "(5 kbp pairs at ~1.5% error) so that every cell completes in "
+        "seconds and the signal isolates the parameter impact. "
+        "Brighter (higher) cells = better accuracy. Sweep cells with "
+        "zero samples render as missing (Plotly null); see "
+        "`run_kw_sweep` in matrix_runner.cppm for which (k, w) "
+        "combinations are exercised.",
+        "minimap2",
+        true);
+
+    emit_kw_heatmap(
+        "kmer_window_accuracy_bioseq",
+        "k/w sweep — accuracy heatmap (bioseq KSW2 + scalar-DP + scalar-mm)",
+        "Same axes as the minimap2 k/w heatmap, restricted to the "
+        "bioseq KSW2 + scalar-DP + scalar-mm variant (the closest "
+        "algorithmic match to minimap2's default chain+align "
+        "pipeline). Direct compare: a cell that's brighter here than "
+        "in the minimap2 heatmap means our port is more sensitive at "
+        "that (k, w) point; darker = less sensitive. Use to spot "
+        "(k, w) regions where the port has a bug or has gained an "
+        "advantage.",
+        "bioseq",
+        true);
+
+    emit_kw_heatmap(
+        "kmer_window_speed_minimap2",
+        "k/w sweep — mean latency heatmap (minimap2 reference)",
+        "Mean per-pair latency (ms) for the C minimap2 reference as "
+        "(k, w) vary. Cividis colourmap — darker = faster. Smaller k "
+        "produces more minimizers (denser hit table, slower seeding); "
+        "smaller w produces more minimizers per window (denser still). "
+        "Read together with the accuracy heatmap to pick the "
+        "(k, w) point with the best sensitivity / speed trade-off.",
+        "minimap2",
+        false);
+
+    emit_kw_heatmap(
+        "kmer_window_speed_bioseq",
+        "k/w sweep — mean latency heatmap (bioseq KSW2 + scalar-DP + scalar-mm)",
+        "Same axes as the minimap2 k/w speed heatmap, restricted to "
+        "the bioseq KSW2 + scalar-DP + scalar-mm variant. Compare to "
+        "the minimap2 version above: cells where bioseq is darker "
+        "(faster) indicate the port has a real speed advantage at "
+        "that (k, w); cells where bioseq is lighter (slower) are the "
+        "candidates for further optimization work.",
+        "bioseq",
+        false);
+
+    // ================================================================
     // Chart 1: sequence length vs. mean speed (latency / pair).
     // Each algorithm contributes one trace; x is per-pair effective
     // query length, y is the mean of that pair's sample latencies.
@@ -1126,42 +1601,63 @@ inline void emit_report(JsonWriter& writer) {
     // 50% — the failure is invisible. This second heatmap rows-by-
     // algorithm, columns-by-(length × error) so the cell granularity
     // matches the matrix actually executed.
+    //
+    // Now sized 4 lengths × 6 error buckets = 24 cells — sparse cells
+    // (e.g. ONT_LEGACY × VERY_LONG, skipped by `should_skip_cell`)
+    // render as 0 with `total == 0`; the colour-scale floor at 0 means
+    // those skipped combinations show up as the same dark colour as
+    // genuine 0% accuracy cells. To distinguish a "we never ran it"
+    // cell from a "we ran but the aligner failed" one, look at the
+    // hover tooltip — `customdata` carries the per-cell sample count.
     // ================================================================
     emit_chart("accuracy_heatmap_algorithm_vs_length_error",
         "Accuracy heatmap (algorithm × (length, error))",
         "Heatmap rows are algorithm configurations; columns are the "
-        "12 (length-bucket, error-rate) cells in the sweep matrix. "
+        "(length-bucket, error-rate) cells in the sweep matrix. "
         "Cell colour encodes the position-accuracy fraction in that "
         "cell. Unlike the algorithm × length-only heatmap, this view "
         "preserves the error-rate axis — a configuration that's "
-        "perfect on LOW-error but collapses on HIGH-error appears as "
-        "two distinct columns rather than averaging to 50%.",
+        "perfect on HIFI-error but collapses on ONT_LEGACY-error "
+        "appears as two distinct columns rather than averaging to "
+        "50%. Cells the runner skipped (ONT_LEGACY/HIGH_INDEL × LONG, "
+        "RMQ × VERY_LONG, etc.) show up as 0 — hover for the "
+        "per-cell sample count to disambiguate.",
         [&]() {
+            constexpr std::array<SequenceLengthBucket, 4> all_lengths = {
+                SequenceLengthBucket::SHORT,
+                SequenceLengthBucket::MEDIUM,
+                SequenceLengthBucket::LONG,
+                SequenceLengthBucket::VERY_LONG,
+            };
+            constexpr std::array<ErrorRateBucket, 6> all_errors = {
+                ErrorRateBucket::HIFI,
+                ErrorRateBucket::CCS,
+                ErrorRateBucket::ONT_MODERN,
+                ErrorRateBucket::ONT_LEGACY,
+                ErrorRateBucket::HIGH_INDEL_LOW_SUB,
+                ErrorRateBucket::HIGH_SUB_LOW_INDEL,
+            };
+            constexpr std::size_t kCellCount = all_lengths.size() * all_errors.size();
             std::vector<std::string> col_labels;
-            std::array<std::pair<int, int>, 12> col_keys;
+            std::array<std::pair<int, int>, kCellCount> col_keys;
             std::size_t idx = 0;
-            for (auto length_bucket : {SequenceLengthBucket::SHORT,
-                                       SequenceLengthBucket::MEDIUM,
-                                       SequenceLengthBucket::LONG,
-                                       SequenceLengthBucket::VERY_LONG}) {
-                for (auto error_bucket : {ErrorRateBucket::LOW,
-                                          ErrorRateBucket::MEDIUM,
-                                          ErrorRateBucket::HIGH}) {
+            for (auto length_bucket : all_lengths) {
+                for (auto error_bucket : all_errors) {
                     col_keys[idx] = {static_cast<int>(length_bucket),
                                      static_cast<int>(error_bucket)};
                     col_labels.push_back(
                         std::string{detail::length_bucket_short_label(length_bucket)} +
-                        "/" + error_rate_bucket_name(error_bucket));
+                        "/" + error_rate_bucket_short_label(error_bucket));
                     idx++;
                 }
             }
             std::vector<std::vector<double>> z;
             std::vector<std::string> row_labels;
             for (const auto& algorithm_label : algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 12> per_cell{};
+                std::array<std::pair<std::size_t, std::size_t>, kCellCount> per_cell{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
-                    for (std::size_t k = 0; k < 12; ++k) {
+                    for (std::size_t k = 0; k < kCellCount; ++k) {
                         if (col_keys[k].first == static_cast<int>(s.length_bucket) &&
                             col_keys[k].second == static_cast<int>(s.error_bucket)) {
                             per_cell[k].second++;
