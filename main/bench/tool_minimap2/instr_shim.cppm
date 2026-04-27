@@ -37,12 +37,13 @@ import bioseq_instr;
 
 namespace bench::tool_minimap2_instr_shim {
 
-// Pin the trampolines to the canonical "profile everything" args. The
-// bench harness installs `tls_profiler<context_args_profiling_full>` once
-// per benchmark run; the trampolines short-circuit when no block is
-// installed (i.e., outside the bench harness or when profiling was
-// runtime-disabled via set_runtime_enabled(false)).
-using args_t = bioseq::instr::context_args_profiling_full;
+// Pin the trampolines to the canonical "timing only" args — the same
+// args the bench harness now installs (see report.cppm). Both sides of
+// the side-by-side comparison go through the same args so the per-region
+// overhead is identical and the delta is honest. The trampolines
+// short-circuit when no block is installed (i.e., outside the bench
+// harness or when profiling was runtime-disabled via set_runtime_enabled(false)).
+using args_t = bioseq::instr::context_args_profiling_timing_only;
 
 }  // namespace bench::tool_minimap2_instr_shim
 

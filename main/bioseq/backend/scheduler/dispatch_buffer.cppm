@@ -394,10 +394,21 @@ public:
              * design doc) — emitting it here would produce one summary
              * per batch and accumulate duplicates on multi-batch scans.
              */
+            // Install both the full (with PMU counters) and timing-only
+            // profiler blocks. The non-templated `region(d)` / `loop(d)`
+            // call sites in chaining / kmers / minimap_port are pinned to
+            // context_args_profiling_timing_only so they short-circuit
+            // unless we also install that block here. Postgres production
+            // monitoring continues to use the full block (counters on)
+            // for any explicitly-templated `region<full_args>(d)` calls.
             using Args = bioseq::instr::context_args_profiling_full;
+            using TimingArgs = bioseq::instr::context_args_profiling_timing_only;
             auto& profiler_block =
                 bioseq::instr::persistent_profiler_block<Args>();
+            auto& timing_profiler_block =
+                bioseq::instr::persistent_profiler_block<TimingArgs>();
             bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
+            bioseq::instr::installed_profiler_scope<TimingArgs> timing_guard(timing_profiler_block);
             run_pipeline_body.template operator()<Args>();
         } else {
             using Args = bioseq::instr::context_args_no_profiling;
@@ -431,11 +442,75 @@ public:
         uint8_t width_code             = 0;
         bool active                    = false;
 
+        /*
+         * Per-row-query attno. Set when the mmsearch second argument is a
+         * Var of the SAME relation (e.g. `mmsearch(t1.seq, t1.seq)` for
+         * self-alignment, or `mmsearch(t1.seq, t1.seq2)` for sibling-
+         * column alignment). The planner does not parameterize same-rel
+         * Vars (no Param injection happens) so the existing Const/Param
+         * paths reject the qual; instead we extract the value of this
+         * column at submit_scan time and store it per-row in
+         * BufferedScanEntry::per_row_query_varlena. Run-batch then
+         * dispatches process_sequences once per entry against that
+         * row's own query — which is the only correct semantics for
+         * per-row mmsearch (broadcasting one row's query to other rows
+         * is exactly the bug §9 of REPORT_POSTGRES_QUERY_BUGFIXING_1.md
+         * documents).
+         *
+         * `per_row_self_alignment` is the special case where the
+         * arg1 Var has the SAME varattno as the arg0 Var (same column).
+         * mmsearch(seq, seq) is then equivalent to "every row aligns
+         * against itself" — guaranteed full-length match. We still
+         * dispatch through the aligner so the produced MatchResult is
+         * the byte-for-byte alignment that the user can inspect via
+         * bioseq.cigar / target_start / etc.
+         */
+        AttrNumber per_row_query_attno      = InvalidAttrNumber;
+        bool       per_row_self_alignment   = false;
+
+        /*
+         * Typmod coalesce: when the column and the query have the same
+         * alphabet but different widths (e.g. column is dna4/32 and
+         * query is dna4/64), the bytes in the query header carry the
+         * larger width. The bioseq pipeline templates on
+         * (alphabet_code, width_code) and dispatches via
+         * dispatch_pgseq, so the query and target MUST agree on both.
+         * `coalesced_query_varlena` holds the query bytes re-encoded
+         * at the COLUMN's (alphabet, width). The non-coalesced
+         * `query_varlena` is preserved for the EXPLAIN line so users
+         * see what the original literal was; the dispatch helper
+         * `effective_query_hdr()` returns the coalesced bytes when
+         * available, and the original ones otherwise.
+         */
+        std::vector<char> coalesced_query_varlena;
+        bool       coalesce_active          = false;
+        uint8_t    raw_query_alphabet_code  = 0;
+        uint8_t    raw_query_width_code     = 0;
+
+        /*
+         * Cross-alphabet recompute: when the column and the query
+         * differ in alphabet (e.g. column is dna4/32, query is
+         * dna5/32), the sidecar minimizers — sketched at INSERT time
+         * under the COLUMN's alphabet — are hash-incompatible with the
+         * query. We can still align (dispatch on the column's
+         * alphabet, after coalescing the query bytes), but the
+         * sidecar must be ignored so we recompute minimizers per row.
+         * `recompute_due_to_alphabet_mismatch` is set at
+         * configure_mmsearch time and consumed by run_batch when
+         * deciding whether to pass the index_blobs array through.
+         * EXPLAIN reads the same flag to print the
+         * "Bioseq Recomputed" line with an explanatory "Performance
+         * reduced" note.
+         */
+        bool       recompute_due_to_alphabet_mismatch = false;
+
         [[nodiscard]] const PgCompactSequenceHdr* query_hdr() const {
-            if (!active || query_varlena.empty()) {
+            const std::vector<char>& bytes =
+                coalesce_active ? coalesced_query_varlena : query_varlena;
+            if (!active || bytes.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const PgCompactSequenceHdr*>(query_varlena.data());
+            return reinterpret_cast<const PgCompactSequenceHdr*>(bytes.data());
         }
     };
 
@@ -470,11 +545,33 @@ public:
          */
         std::vector<char> sidecar_index_blob;
 
+        /*
+         * Per-row mmsearch query, populated only when MmsearchContext's
+         * `per_row_query_attno` is set (i.e. the qual is
+         * `mmsearch(this_rel.seq_a, this_rel.seq_b)` where the second
+         * arg is a Var of the same relation). Holds the detoasted
+         * bioseq.seq varlena bytes for THIS row's `seq_b` column — so
+         * each row aligns against its own query. The bytes are stored
+         * in the column's typmod (no coalesce needed: arg1 must be a
+         * column of the same relation, which means it shares the
+         * column's alphabet/width via the same Var resolution path).
+         */
+        std::vector<char> per_row_query_varlena;
+        bool            per_row_query_is_null = true;
+
         [[nodiscard]] const PgCompactSequenceHdr* seq_hdr() const {
             if (seq_is_null || seq_varlena.empty()) {
                 return nullptr;
             }
             return reinterpret_cast<const PgCompactSequenceHdr*>(seq_varlena.data());
+        }
+
+        [[nodiscard]] const PgCompactSequenceHdr* per_row_query_hdr() const {
+            if (per_row_query_is_null || per_row_query_varlena.empty()) {
+                return nullptr;
+            }
+            return reinterpret_cast<const PgCompactSequenceHdr*>(
+                per_row_query_varlena.data());
         }
     };
 
@@ -533,6 +630,24 @@ private:
     std::vector<OutputCursor> output_cursors;
     int output_position = -1;
 
+    /*
+     * Additional Const-only mmsearch quals that share the primary
+     * mmsearch_context's seq column and (alphabet, width) typmod.
+     * Each entry holds the detoasted bioseq.seq varlena bytes for one
+     * extra query. After the primary batch runs, run_batch_and_build_cursors
+     * dispatches process_sequences once per extra query and intersects
+     * the per-entry match presence so output_cursors only emit rows
+     * that match every mmsearch qual (logical AND).
+     *
+     * Only the FIRST mmsearch context drives projection placeholders
+     * (bioseq.cigar / score / target_*); the extra queries are pure
+     * filters. Param-driven (cross-table) extras and same-column-but-
+     * different-typmod extras are not supported in this iteration —
+     * they are detected and rejected at BeginCustomScan with a log
+     * line so the user sees why the qual didn't apply.
+     */
+    std::vector<std::vector<char>> extra_query_varlenas;
+
 public:
     explicit TupleDispatchBuffer(const size_t estimated_tuple_count) {
         buffered_entries.reserve(estimated_tuple_count * 2);
@@ -562,6 +677,12 @@ public:
      * Record the mmsearch column / pk / query triple extracted from the
      * plan. Called once per scan from ColumnarScan_BeginCustomScan.
      * query_varlena_bytes owns the detoasted varlena — moved in.
+     *
+     * (alphabet_code, width_code) is the COLUMN's typmod — the
+     * dispatch typmod for the whole batch. The query bytes may be
+     * carried at a different (alphabet, width); the caller is
+     * responsible for re-encoding if a coalesce is needed. See
+     * `apply_typmod_coalesce()` below.
      */
     void configure_mmsearch(AttrNumber seq_attno,
                             std::string column_name,
@@ -575,6 +696,24 @@ public:
         mmsearch_context.query_varlena      = std::move(query_varlena_bytes);
         mmsearch_context.alphabet_code      = alphabet_code;
         mmsearch_context.width_code         = width_code;
+        mmsearch_context.coalesce_active    = false;
+        mmsearch_context.coalesced_query_varlena.clear();
+        mmsearch_context.recompute_due_to_alphabet_mismatch = false;
+        mmsearch_context.per_row_query_attno = InvalidAttrNumber;
+        mmsearch_context.per_row_self_alignment = false;
+        /* Capture the raw query's typmod from the header (best-effort: the
+         * header may be empty if the caller passed bogus bytes, in which
+         * case the configure_mmsearch fast-path already logs and skips.) */
+        if (!mmsearch_context.query_varlena.empty()) {
+            const PgCompactSequenceHdr* hdr =
+                reinterpret_cast<const PgCompactSequenceHdr*>(
+                    mmsearch_context.query_varlena.data());
+            mmsearch_context.raw_query_alphabet_code = hdr->alphabet_code;
+            mmsearch_context.raw_query_width_code    = hdr->width_code;
+        } else {
+            mmsearch_context.raw_query_alphabet_code = alphabet_code;
+            mmsearch_context.raw_query_width_code    = width_code;
+        }
         mmsearch_context.active             = true;
 
         uint32_t query_bp_size = 0;
@@ -590,8 +729,171 @@ public:
                 query_bp_size);
     }
 
-    void clear_mmsearch_context() {
+    /*
+     * Configure the per-row-query mode. Called by
+     * ColumnarScan_BeginCustomScan when the mmsearch second arg is a
+     * Var of the SAME relation — i.e. each row aligns against its
+     * own value of `per_row_query_attno`. No global query varlena
+     * is captured up front; submit_scan extracts the per-row bytes
+     * for every passing tuple, and run_batch dispatches once per
+     * entry.
+     *
+     * `per_row_self_alignment` is purely informational here (used
+     * only by EXPLAIN to surface "self-alignment" instead of
+     * "per-row alignment"). Both modes go through the same
+     * dispatch path; we never short-circuit the aligner.
+     */
+    void configure_mmsearch_per_row(AttrNumber seq_attno,
+                                    std::string column_name,
+                                    AttrNumber per_row_query_attno,
+                                    bool per_row_self_alignment,
+                                    uint8_t alphabet_code,
+                                    uint8_t width_code,
+                                    AttrNumber primary_key_attno) {
+        mmsearch_context.seq_attno              = seq_attno;
+        mmsearch_context.primary_key_attno      = primary_key_attno;
+        mmsearch_context.column_name            = std::move(column_name);
+        mmsearch_context.query_varlena.clear();
+        mmsearch_context.coalesced_query_varlena.clear();
+        mmsearch_context.coalesce_active        = false;
+        mmsearch_context.alphabet_code          = alphabet_code;
+        mmsearch_context.width_code             = width_code;
+        mmsearch_context.raw_query_alphabet_code = alphabet_code;
+        mmsearch_context.raw_query_width_code    = width_code;
+        mmsearch_context.per_row_query_attno    = per_row_query_attno;
+        mmsearch_context.per_row_self_alignment = per_row_self_alignment;
+        mmsearch_context.recompute_due_to_alphabet_mismatch = false;
+        mmsearch_context.active                 = true;
+
+        JustLog("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} typmod=({},{})",
+                static_cast<int>(seq_attno),
+                static_cast<int>(per_row_query_attno),
+                per_row_self_alignment,
+                static_cast<unsigned>(alphabet_code),
+                static_cast<unsigned>(width_code));
+    }
+
+    /*
+     * Re-encode the literal query under (target_alphabet,
+     * target_width) so the BatchProcessor's static dispatch agrees
+     * with the column's typmod. Caller passes the detoasted bytes
+     * of the re-encoded value (typically built via the same
+     * dispatch_pgseq + encode_sequence_simd path used by seq_in /
+     * seq_cast).
+     *
+     * The ORIGINAL query_varlena is preserved (so EXPLAIN can
+     * surface the literal the user wrote) and `query_hdr()`
+     * returns the coalesced bytes whenever `coalesce_active` is
+     * true.
+     */
+    void apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
+        mmsearch_context.coalesced_query_varlena = std::move(coalesced_bytes);
+        mmsearch_context.coalesce_active = true;
+        JustLog("[bioseq] pg: TupleDispatchBuffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
+                static_cast<unsigned>(mmsearch_context.raw_query_alphabet_code),
+                static_cast<unsigned>(mmsearch_context.raw_query_width_code),
+                static_cast<unsigned>(mmsearch_context.alphabet_code),
+                static_cast<unsigned>(mmsearch_context.width_code),
+                mmsearch_context.query_varlena.size(),
+                mmsearch_context.coalesced_query_varlena.size());
+    }
+
+    /*
+     * Toggle: in cross-alphabet recompute mode the run-batch path
+     * MUST recompute minimizers for every target. Sidecar blobs are
+     * sketched under the column's alphabet, but the alignment now
+     * runs against a query that lives in a different alphabet —
+     * minimizer hashes are not cross-alphabet compatible. Setting
+     * this disables the index-blob fast path until the next
+     * configure_mmsearch.
+     */
+    void mark_alphabet_mismatch_recompute() {
+        mmsearch_context.recompute_due_to_alphabet_mismatch = true;
+        JustLog("[bioseq] pg: TupleDispatchBuffer::mark_alphabet_mismatch_recompute() set");
+    }
+
+    [[nodiscard]] bool per_row_mode() const {
+        return mmsearch_context.active
+            && mmsearch_context.per_row_query_attno != InvalidAttrNumber;
+    }
+    [[nodiscard]] AttrNumber per_row_query_attno() const {
+        return mmsearch_context.per_row_query_attno;
+    }
+    [[nodiscard]] bool coalesce_active() const {
+        return mmsearch_context.coalesce_active;
+    }
+    [[nodiscard]] bool recompute_due_to_alphabet_mismatch() const {
+        return mmsearch_context.recompute_due_to_alphabet_mismatch;
+    }
+    [[nodiscard]] bool per_row_self_alignment() const {
+        return mmsearch_context.per_row_self_alignment;
+    }
+    [[nodiscard]] uint8_t mmsearch_alphabet_code() const {
+        return mmsearch_context.alphabet_code;
+    }
+    [[nodiscard]] uint8_t mmsearch_width_code() const {
+        return mmsearch_context.width_code;
+    }
+    [[nodiscard]] uint8_t raw_query_alphabet_code() const {
+        return mmsearch_context.raw_query_alphabet_code;
+    }
+    [[nodiscard]] uint8_t raw_query_width_code() const {
+        return mmsearch_context.raw_query_width_code;
+    }
+
+    /*
+     * Reset the primary mmsearch context. Used by:
+     *   - BeginCustomScan as a defensive reset before re-installing
+     *     the per-query primary (extras get added in the same Begin
+     *     pass; clearing them here is correct because BeginCustomScan
+     *     re-populates everything from scratch).
+     *   - ReScanCustomScan ONLY when the per-rescan Param-rebind
+     *     fails (Param resolved to NULL / wrong paramkind). After §9.4
+     *     enabled Param-primary + Const-extras, the extras must
+     *     SURVIVE a temporary primary failure: a NL where outer row
+     *     #1 has a NULL Param and outer row #2 has a non-NULL one
+     *     should still apply the extras for row #2. The extras are
+     *     registered ONCE in BeginCustomScan and never re-added on
+     *     rescan, so clearing them here would silently lose them
+     *     for every later rescan — the §9 review caught this.
+     *
+     * `clear_extras=true` is the historical full-reset semantics
+     * (used by BeginCustomScan defensive init only). Default is
+     * false so ReScanCustomScan and any other caller preserves the
+     * extras list across rebinds.
+     */
+    void clear_mmsearch_context(bool clear_extras = false) {
         mmsearch_context = MmsearchContext{};
+        if (clear_extras) {
+            extra_query_varlenas.clear();
+        }
+    }
+
+    /*
+     * Append another Const-driven mmsearch query that shares the
+     * primary context's column and typmod. The caller (BeginCustomScan)
+     * is responsible for validating the column / typmod match before
+     * calling — we only own ownership of the bytes here.
+     *
+     * The accepted shape is exactly one same-column same-typmod
+     * mmsearch beyond the first. Any extra query with a different
+     * column or typmod must be rejected by the caller; if added here
+     * it would silently get dispatched against the first context's
+     * (seq, alphabet, width) and produce nonsense matches.
+     */
+    void add_extra_const_query(std::vector<char> query_varlena_bytes) {
+        const PgCompactSequenceHdr* hdr =
+            reinterpret_cast<const PgCompactSequenceHdr*>(
+                query_varlena_bytes.data());
+        const uint32_t bp_size = (query_varlena_bytes.empty() || hdr == nullptr)
+            ? 0u : hdr->bp_size;
+        JustLog("[bioseq] pg: TupleDispatchBuffer::add_extra_const_query() bp_size={} (extra index #{})",
+                bp_size, extra_query_varlenas.size());
+        extra_query_varlenas.push_back(std::move(query_varlena_bytes));
+    }
+
+    [[nodiscard]] size_t extra_query_count() const {
+        return extra_query_varlenas.size();
     }
 
     /*
@@ -676,6 +978,39 @@ public:
             } else {
                 entry.primary_key = DatumGetInt32(pk_datum);
                 entry.primary_key_is_null = false;
+            }
+        }
+
+        /*
+         * Per-row-query mode: extract the value of the OTHER bioseq.seq
+         * column referenced by the mmsearch second arg. For
+         * self-alignment (`per_row_self_alignment` true and
+         * per_row_query_attno == seq_attno) this is literally the same
+         * column we just buffered — we still re-extract so the path is
+         * uniform between sibling-column and self-column shapes.
+         * Per-row-query bytes carry the column's typmod (no coalesce
+         * needed here because both arg0 and arg1 are Vars of the same
+         * relation, so both inherit the same column typmod).
+         */
+        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+            bool query_null = true;
+            Datum query_datum = slot_getattr(scan_slot,
+                mmsearch_context.per_row_query_attno, &query_null);
+            if (query_null) {
+                entry.per_row_query_is_null = true;
+            } else {
+                PgCompactSequenceHdr* src_hdr =
+                    reinterpret_cast<PgCompactSequenceHdr*>(
+                        PG_DETOAST_DATUM(query_datum));
+                const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
+                entry.per_row_query_varlena.assign(
+                    reinterpret_cast<const char*>(src_hdr),
+                    reinterpret_cast<const char*>(src_hdr) + total_bytes);
+                entry.per_row_query_is_null = false;
+                if (reinterpret_cast<void*>(src_hdr)
+                    != reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
+                    pfree(src_hdr);
+                }
             }
         }
 
@@ -772,11 +1107,26 @@ public:
          * for the full batch and no extra copy happens. Rows without a
          * sidecar blob stay at the default-constructed {nullptr, 0}
          * pair, which the batch processor interprets as "recompute".
+         *
+         * We use the buffer entry index `i` as the BatchProcessor's
+         * key rather than the row's primary_key column. The PK from
+         * the user's table is only available when the targetlist
+         * includes a bioseq.<projection>(pk) FuncExpr (which is what
+         * BeginCustomScan walks to discover `primary_key_attno`).
+         * For queries without such a projection — e.g. plain
+         * `SELECT t.pk FROM t WHERE mmsearch(t.seq, ...)` or
+         * cross-table mmsearch joins where the qual is the only
+         * bioseq surface — primary_key_attno stays
+         * InvalidAttrNumber and every row would map to query_id=-1,
+         * letting the std::map key collapse all matches into one
+         * bucket. Using the entry index as the key keeps each row
+         * uniquely identifiable inside the batch regardless of
+         * targetlist shape.
          */
         for (size_t i = 0; i < batch_size; ++i) {
             const BufferedScanEntry& entry = buffered_entries[i];
             target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
-            query_ids[i]   = entry.primary_key_is_null ? -1 : entry.primary_key;
+            query_ids[i]   = static_cast<int32_t>(i);
             if (!entry.sidecar_index_blob.empty()) {
                 index_blobs[i].data  = entry.sidecar_index_blob.data();
                 index_blobs[i].bytes = entry.sidecar_index_blob.size();
@@ -785,42 +1135,199 @@ public:
 
         const PgCompactSequenceHdr* query_hdr = mmsearch_context.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
-        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={}",
+        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={} alphabet_recompute={}",
                 batch_size,
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.width_code),
                 query_bp_size,
-                read_sequence_index_active);
+                read_sequence_index_active,
+                per_row_mode(),
+                mmsearch_context.recompute_due_to_alphabet_mismatch);
 
         last_stats = BatchExecutionStats{};
+        /*
+         * Index-blob fast path conditions:
+         *   - GUC bioseq.read_sequence_index is on (read_sequence_index_active)
+         *   - We are NOT recomputing due to alphabet mismatch — the
+         *     sidecar's minimizers were sketched in the column's
+         *     alphabet, but a cross-alphabet query (`'X'::seq('dna5',
+         *     32)` against a `seq('dna4', 32)` column) routes through
+         *     a different hashing alphabet so reusing the blob would
+         *     produce no seed hits.
+         */
+        const bool blobs_eligible =
+            read_sequence_index_active
+            && !mmsearch_context.recompute_due_to_alphabet_mismatch;
         const std::array<typename BatchProcessor::TargetIndexBlobRef,
                          kDispatchBatchCapacity>* blob_arg =
-            read_sequence_index_active ? &index_blobs : nullptr;
+            blobs_eligible ? &index_blobs : nullptr;
 
-        match_map = processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
-            batch_size,
-            mmsearch_context.alphabet_code,
-            mmsearch_context.width_code,
-            query_hdr,
-            target_hdrs, query_ids,
-            base_params,
-            blob_arg,
-            last_stats);
+        if (per_row_mode()) {
+            /*
+             * Per-row dispatch: each entry aligns against its own
+             * `per_row_query_varlena`. We loop over entries and run
+             * process_sequences with batch_size=1 each. This is O(N)
+             * dispatches instead of O(1) but is the only correct
+             * shape: the BatchProcessor's signature takes a single
+             * shared query_hdr, and we cannot legally broadcast one
+             * row's query to other rows.
+             *
+             * Future optimisation: group entries by query bytes
+             * identity (when many rows share the same arg1 value)
+             * and dispatch one batch per group.
+             */
+            for (size_t i = 0; i < batch_size; ++i) {
+                const BufferedScanEntry& entry = buffered_entries[i];
+                const PgCompactSequenceHdr* per_row_hdr = entry.per_row_query_hdr();
+                if (per_row_hdr == nullptr || target_hdrs[i] == nullptr) {
+                    continue;
+                }
+                std::array<const PgCompactSequenceHdr*, kDispatchBatchCapacity>
+                    single_targets{};
+                std::array<int32_t, kDispatchBatchCapacity> single_ids{};
+                std::array<typename BatchProcessor::TargetIndexBlobRef,
+                           kDispatchBatchCapacity> single_blobs{};
+                single_targets[0] = target_hdrs[i];
+                single_ids[0]     = static_cast<int32_t>(i);
+                single_blobs[0]   = index_blobs[i];
+                BatchExecutionStats single_stats{};
+                const std::array<typename BatchProcessor::TargetIndexBlobRef,
+                                 kDispatchBatchCapacity>* single_blob_arg =
+                    blobs_eligible ? &single_blobs : nullptr;
+                auto single_match =
+                    processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
+                        1,
+                        mmsearch_context.alphabet_code,
+                        mmsearch_context.width_code,
+                        per_row_hdr,
+                        single_targets, single_ids,
+                        base_params,
+                        single_blob_arg,
+                        single_stats);
+                last_stats.targets_considered           += single_stats.targets_considered;
+                last_stats.targets_with_prebuilt_index  += single_stats.targets_with_prebuilt_index;
+                last_stats.targets_recomputed_minimizers += single_stats.targets_recomputed_minimizers;
+                last_stats.last_effective_params         = single_stats.last_effective_params;
+                for (auto& [k, v] : single_match) {
+                    match_map[k] = std::move(v);
+                }
+            }
+        } else {
+            match_map = processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
+                batch_size,
+                mmsearch_context.alphabet_code,
+                mmsearch_context.width_code,
+                query_hdr,
+                target_hdrs, query_ids,
+                base_params,
+                blob_arg,
+                last_stats);
+        }
+
+        /*
+         * For every extra mmsearch qual the caller registered we run
+         * an independent process_sequences pass over the same
+         * buffered targets, then logically AND the matches into the
+         * primary `match_map`: an entry index that fails to match
+         * any extra query is ERASED from `match_map`, so it never
+         * makes it into output_cursors below. This is the simple
+         * AND semantics the user asked for ("multiple mmsearch
+         * quals filter the row through ALL of them"). We do NOT
+         * carry the extra queries' MatchResults through to
+         * placeholder consts — only the first context drives the
+         * bioseq.* projections. That keeps the output projection
+         * shape single-valued; if a future iteration wants to
+         * surface per-qual cigars we'd need to extend the
+         * placeholder Const inventory.
+         */
+        for (size_t extra_idx = 0; extra_idx < extra_query_varlenas.size();
+             ++extra_idx) {
+            const std::vector<char>& extra_bytes =
+                extra_query_varlenas[extra_idx];
+            if (extra_bytes.empty()) {
+                continue;
+            }
+            const PgCompactSequenceHdr* extra_hdr =
+                reinterpret_cast<const PgCompactSequenceHdr*>(
+                    extra_bytes.data());
+            BatchExecutionStats discarded_stats{};
+            auto extra_match_map =
+                processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
+                    batch_size,
+                    mmsearch_context.alphabet_code,
+                    mmsearch_context.width_code,
+                    extra_hdr,
+                    target_hdrs, query_ids,
+                    base_params,
+                    blob_arg,
+                    discarded_stats);
+            JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} produced matches for {} entries",
+                    extra_idx, extra_match_map.size());
+            for (auto it = match_map.begin(); it != match_map.end(); ) {
+                if (extra_match_map.find(it->first) == extra_match_map.end()) {
+                    /*
+                     * This entry matched the primary mmsearch but not
+                     * the current extra qual — drop it from the
+                     * primary match_map so the output cursor build
+                     * below skips it.
+                     */
+                    it = match_map.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
 
         output_cursors.clear();
         for (size_t i = 0; i < buffered_entries.size(); ++i) {
             const BufferedScanEntry& entry = buffered_entries[i];
-            if (entry.primary_key_is_null) {
-                JustLog("[bioseq] pg: batch skip: null primary key for entry {}", i);
-                continue;
-            }
-            auto hit = match_map.find(entry.primary_key);
+            /*
+             * Match map is keyed on the entry index (see comment in
+             * the loop above that built `query_ids[i] = i`). Skip
+             * entries whose index is not in the map — those rows had
+             * no usable target sequence (NULL seq column) or the
+             * aligner produced zero matches; either way `WHERE
+             * mmsearch(...)` evaluates to FALSE for them.
+             */
+            auto hit = match_map.find(static_cast<int32_t>(i));
             if (hit == match_map.end()) {
-                JustLog("[bioseq] pg: batch miss for PK={}; WHERE mmsearch evaluates to FALSE",
-                        entry.primary_key);
+                JustLog("[bioseq] pg: batch miss for entry index={}; WHERE mmsearch evaluates to FALSE",
+                        i);
                 continue;
             }
+            /*
+             * Filter degenerate matches. The aligner can return a
+             * MatchResult that has a chain pinned in the seed pass
+             * but no usable base alignment (`has_cigar == false` or
+             * `cigar` empty). When the user requested a CIGAR via
+             * `bioseq.cigar(...)`, an empty/no-cigar match is the
+             * fuzzy-search equivalent of "no real hit": surfacing it
+             * as a row would mean WHERE mmsearch(...) acts more like
+             * a tautology than a filter, which contradicts the
+             * substring-match semantics users expect of mmsearch.
+             *
+             * Skipping these here filters them out at output-cursor
+             * build time; the row never reaches the projection
+             * pipeline, so its bioseq.cigar / bioseq.target_start /
+             * etc. would have come back as the placeholder Const's
+             * default-NULL state — exactly the kind of "row but
+             * empty fields" output the user reported as undesired.
+             *
+             * When `do_cigar` is false (the user only projects e.g.
+             * bioseq.target_start / bioseq.score), we don't have a
+             * cigar to inspect; in that case we keep every match
+             * the chainer surfaced because the chain itself is
+             * meaningful (passed `min_seed_count` / `min_chain_score`).
+             */
             for (size_t m = 0; m < hit->second.size(); ++m) {
+                const MatchResult& match_candidate = hit->second[m];
+                if (base_params.do_cigar
+                    && (!match_candidate.has_cigar
+                        || match_candidate.cigar.empty())) {
+                    JustLog("[bioseq] pg: batch skip: degenerate match for entry index={} cursor m={} (do_cigar=true but cigar empty)",
+                            i, m);
+                    continue;
+                }
                 output_cursors.push_back({ i, m });
             }
         }
@@ -846,9 +1353,10 @@ public:
             return std::nullopt;
         }
         BufferedScanEntry& entry = buffered_entries[cursor.scan_entry_index];
-        auto hit = match_map.find(entry.primary_key);
+        auto hit = match_map.find(static_cast<int32_t>(cursor.scan_entry_index));
         if (hit == match_map.end() || cursor.match_index >= hit->second.size()) {
-            JustLog("[bioseq] pg: cursor references missing match for PK={}", entry.primary_key);
+            JustLog("[bioseq] pg: cursor references missing match for entry index={}",
+                    cursor.scan_entry_index);
             return std::nullopt;
         }
         return NextOutput{ &entry, &hit->second[cursor.match_index] };
@@ -905,9 +1413,19 @@ public:
         output_position = -1;
     }
 
+    /*
+     * Total-reset shorthand: drop every buffered slot, the
+     * mmsearch primary AND every registered Const-extra. Equivalent
+     * to "as if the buffer had never been configured". This is
+     * stricter than `clear_mmsearch_context()` (which preserves
+     * extras across rescans by default — see §9.4 / §9-review fix).
+     * Kept for symmetry with the pre-§9 API; not used by any live
+     * caller today, but the explicit `true` makes the contract
+     * loud rather than relying on the default's semantics.
+     */
     [[gnu::always_inline]] void clear() {
         clear_slots();
-        clear_mmsearch_context();
+        clear_mmsearch_context(/*clear_extras=*/true);
     }
 };
 

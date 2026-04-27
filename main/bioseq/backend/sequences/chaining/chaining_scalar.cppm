@@ -17,6 +17,7 @@ module;
 #include "common.h"
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 #include <algorithm>
 #include <limits>
@@ -71,20 +72,34 @@ namespace bioseq::chaining {
 
     // DP arrays — chain arena (SPEC §5.2). All four die at function exit,
     // so the scope-anchored arena recycles them for every chaining call.
+    //
+    // The previous implementation created four std::vector<T, foonathan>
+    // objects via make_chain_vector and then resize()'d / assign()'d each
+    // one to value-init the elements. resize() / assign() on a foonathan
+    // vector touches every element via placement-new, so for arrays whose
+    // contents are written-before-read (best_scores, peak_scores,
+    // predecessors[i] also overwritten before the read in the second
+    // global_best_idx loop) the zero-fill is wasted work.
+    //
+    // Replace with `alloc_chain_array<T>` bump allocations (no zero-fill,
+    // no allocator-state-carrying vector wrapper). best_scores and
+    // peak_scores stay uninitialised: they're written on every iteration
+    // of the forward DP pass before being read. predecessors and visited
+    // are initialised to -1 / 0 via memset — one syscall-level memset
+    // beats N placement-new copies.
     auto dp_scope = context::current().push<context::Arena::Chain>();
     auto& dp_ctx = context::current();
-    auto best_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
-    auto predecessors_v = dp_ctx.make_chain_vector<int64_t>(anchor_count);
-    auto peak_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
-    auto visited_v      = dp_ctx.make_chain_vector<int32_t>(anchor_count);
-    best_scores_v.resize(anchor_count);
-    predecessors_v.assign(anchor_count, -1);
-    peak_scores_v.resize(anchor_count);
-    visited_v.assign(anchor_count, 0);
-    auto best_scores  = std::span<int32_t>(best_scores_v);
-    auto predecessors = std::span<int64_t>(predecessors_v);
-    auto peak_scores  = std::span<int32_t>(peak_scores_v);
-    auto visited      = std::span<int32_t>(visited_v);
+    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(anchor_count);
+    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(anchor_count);
+    auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(anchor_count);
+    auto visited      = dp_ctx.alloc_chain_array<int32_t>(anchor_count);
+    // predecessors[] = -1 (the "no predecessor" sentinel checked at line
+    // 143 below) — int64_t -1 is all-ones, so memset(0xff) does the job.
+    std::memset(predecessors.data(), 0xff,
+                static_cast<std::size_t>(anchor_count) * sizeof(int64_t));
+    // visited[] = 0 (the "not visited" sentinel checked at line 137).
+    std::memset(visited.data(), 0,
+                static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
     int64_t window_start = 0;
     int64_t global_best_idx = -1;
@@ -115,6 +130,13 @@ namespace bioseq::chaining {
 
         int64_t search_end = window_start;
 
+        // Cache the pair_score for the current `global_best_idx` so the
+        // post-loop fallback below can reuse it instead of calling
+        // compute_chaining_score a second time. Negative initialisation
+        // sentinel: only used when the matching candidate_idx is hit.
+        int32_t cached_global_pair_score = std::numeric_limits<int32_t>::min();
+        bool global_pair_score_cached = false;
+
         // Search backwards for best predecessor
         for (int64_t candidate_idx = current_idx - 1;
              candidate_idx >= window_start; --candidate_idx)
@@ -125,6 +147,15 @@ namespace bioseq::chaining {
                 params.gap_penalty, params.skip_penalty);
             if (pair_score == std::numeric_limits<int32_t>::min()) {
                 continue;
+            }
+
+            // Stash the pair_score for global_best_idx — we may need it
+            // again right after this loop. compute_chaining_score is
+            // ~5-10 % of the chaining loop's CPU cost, so avoiding a
+            // second invocation per outer iter is a measurable win.
+            if (candidate_idx == global_best_idx) {
+                cached_global_pair_score = pair_score;
+                global_pair_score_cached = true;
             }
 
             const int32_t total_score = pair_score + best_scores[candidate_idx];
@@ -158,12 +189,19 @@ namespace bioseq::chaining {
                     global_best_idx = scan_idx;
                 }
             }
+            // global_best_idx changed — the cache is stale.
+            global_pair_score_cached = false;
         }
         if (global_best_idx >= 0 && global_best_idx < search_end) {
-            const int32_t global_pair_score = compute_chaining_score(
-                anchors[current_idx], anchors[global_best_idx],
-                max_dist_x, max_dist_y, params.bandwidth,
-                params.gap_penalty, params.skip_penalty);
+            // Use cached pair_score from pass 1 if available; otherwise
+            // recompute (early-exit case where the inner loop broke past
+            // global_best_idx, or a fresh global_best_idx from the rescan).
+            const int32_t global_pair_score = global_pair_score_cached
+                ? cached_global_pair_score
+                : compute_chaining_score(
+                    anchors[current_idx], anchors[global_best_idx],
+                    max_dist_x, max_dist_y, params.bandwidth,
+                    params.gap_penalty, params.skip_penalty);
             if (global_pair_score != std::numeric_limits<int32_t>::min()
                 && best_score < global_pair_score + best_scores[global_best_idx])
             {

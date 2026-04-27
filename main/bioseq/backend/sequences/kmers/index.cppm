@@ -39,17 +39,11 @@ import bioseq_instr;
 #define UNION_FIELD_WIDTH(T, union_field_name, property_name) \
     GET_BIT_FIELD_WIDTH(decltype(std::declval<T>().union_field_name), property_name)
 
-static inline uint64_t hash64(uint64_t key, uint64_t mask)
-{
-	key = (~key + (key << 21)) & mask; // key = (key << 21) - key - 1;
-	key = key ^ key >> 24;
-	key = ((key + (key << 3)) + (key << 8)) & mask; // key * 265
-	key = key ^ key >> 14;
-	key = ((key + (key << 2)) + (key << 4)) & mask; // key * 21
-	key = key ^ key >> 28;
-	key = (key + (key << 31)) & mask;
-	return key;
-};
+// (The standalone `hash64(key, mask)` definition that used to live here
+// was dead code — the live hashing path goes through
+// `minimap_int_hasher::scalar_hash::next()` in
+// `kmers/hashers/minimap_int.cppm`. Removed to drop redundant I-cache
+// pressure during the sketch hot loop.)
 
 export {
 
@@ -143,18 +137,38 @@ struct sketch_type {
 //     }
 // };
 
-class MinimapSketch : public sketch_type<MinimapSketch, MinimapSketchData> {};
+// `alignas(16)` ensures the 16 B union sits on a 16 B boundary, so the
+// hot-loop `current_min <= buffer.last()` compare and the per-step
+// 128-bit slot writes (see `circular_append_buffer::push_back(T)`)
+// emit a single aligned `str q0, [...]` / `ldr q0, [...]` instead of a
+// pair of 8 B accesses or a misaligned 16 B that crosses a cache line.
+class alignas(16) MinimapSketch : public sketch_type<MinimapSketch, MinimapSketchData> {};
 
+// MinimapSketch must remain an aggregate (no user-provided ctors): the
+// `consteval getMax()` factory uses brace-init through the
+// `sketch_union_t` member, which is illegal once the type stops being
+// an aggregate. Trivial-default-constructibility holds implicitly
+// because all subobjects are trivial (the base's union-of-bitfields
+// member is implicitly trivially constructible via the canonical
+// active-member rule).
 static_assert(std::is_standard_layout_v<MinimapSketch> == true);
 static_assert(sizeof(MinimapSketch) == 16);
+static_assert(alignof(MinimapSketch) == 16);
+static_assert(std::is_trivially_copyable_v<MinimapSketch> == true);
+static_assert(std::is_trivially_destructible_v<MinimapSketch> == true);
 
 struct sketch_collector {
 private:
     std::vector<MinimapSketch> sketches;
 public:
-    sketch_collector() : sketches() {
-        sketches.reserve(10000);
-    };
+    // Earlier we reserved 10 000 entries up front (~160 KB of system-heap
+    // storage per collector). Two collectors are built per pair × 400 pairs
+    // = ~128 MB of allocator traffic per bench section, of which only ~5 %
+    // is actually filled (typical sketches are 50-200 entries). Drop the
+    // upfront reserve; std::vector's geometric growth handles the few
+    // realloc steps cheaply at small N. If callers know the expected count
+    // they can call `.reserve()` themselves.
+    sketch_collector() : sketches() {};
 
     [[always_inline]] constexpr void collect(MinimapSketch&& sketch) {
         sketches.push_back(std::move(sketch));
@@ -169,8 +183,15 @@ public:
     }
 
     constexpr std::vector<MinimapSketchData> extract_sketches_data() const {
+        // Earlier this function did `for (auto el : sketches)` (per-element
+        // copy of a 16 B union) and `data.push_back(...)` without
+        // `reserve()` (forcing a log2(N) chain of geometric-realloc memcpys).
+        // For a 200 bp fragment with ~150 minimizers across 4 fragments × 100
+        // BENCHMARK iters × 2 sequences/pair this added up to ~120 000
+        // copies per section. Reserve once and use a const reference.
         std::vector<MinimapSketchData> data;
-        for (auto el : sketches) {
+        data.reserve(sketches.size());
+        for (const auto& el : sketches) {
             data.push_back(el.sketch.sketch);
         }
         return data;
@@ -214,7 +235,6 @@ inline void collect_minimizers(
 
 	using seq_traits = compact_sequence_range<R>::traits;
 	using hasher_t = scalar_hash_t<typename seq_traits::alphabet_type>::template scalar_hash<hash_val_t>;
-	JustLog("bio_collect_minimizers2()");
 
 	constexpr uint64_t max_span = 1 << UNION_FIELD_WIDTH(MinimapSketch, sketch.sketch, span);
 	constexpr uint32_t rid = 0;
@@ -238,22 +258,19 @@ inline void collect_minimizers(
 	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
 		for(; iter != end && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
 			const auto nucl = *iter;
-
-            // dump everything
-            if (pos >= w+k) {
-                JustLog("Next step {}", pos);
-                buffer.unsafe_filled_for_each([&collector, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
-					JustLog("| {}: pos={} kmer={}", static_cast<int64_t>(_index), el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
-				});
-            }
-
 			// Support ambigious?
 			if(seq_traits::bits_per_char > 2 && nucl >= 4) {
 				// fuck!
 				buffer.push_back(MinimapSketch::getMax());
 				pos = 0;
 			} else {
-				const auto [c_hash, c_strand] = hasher.next(static_cast<hash_val_t>(*iter), static_cast<hash_val_t>(*iter));
+				// Reuse the already-dereferenced `nucl`. The previous code did
+				// `*iter` twice more — for non-trivial iterators (the
+				// `proper_container` variant routes through seqan3::to_rank
+				// which is not always inlined at -O2 without LTO) each deref
+				// is a 5-15 ns hit, multiplied by the ~200-2000 outer
+				// iterations per sketch call. See proposal-2 §F2.
+				const auto [c_hash, c_strand] = hasher.next(static_cast<hash_val_t>(nucl), static_cast<hash_val_t>(nucl));
 
 				// NOTE: minimap2 skips "symmetric k-mers" (fwd == rc palindromes) by
 				// `continue`ing past the push/update logic — the iteration disappears from
@@ -291,24 +308,18 @@ inline void collect_minimizers(
 				buffer.unsafe_filled_for_each([&collector, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
 					if (MinimapSketch::does_sketch_match(current_min, el)) {
 						collector.collect(el);
-                        const size_t x = el.sketch.sketch.last_pos;
-                        JustLog("A! push_min {} on {}", x, seq_pos);
 					}
 				});
 			}
 			if (buffer.last() <= current_min) { // a new minimum; then write the old min
 				if ((pos >= w + k || !IS_INIT) && !current_min.is_max()) {
 					collector.collect(current_min);
-                    const size_t x = current_min.sketch.sketch.last_pos;
-                    JustLog("B! push_min {} on {}", x, seq_pos);
 				}
 				current_min_pos = buffer.last_write_pos();
 				current_min = buffer.last();
 			} else if (buffer.last_write_pos() == current_min_pos) {
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) {
 					collector.collect(current_min);
-                    const size_t x = current_min.sketch.sketch.last_pos;
-                    JustLog("C! push_min {} on {}", x, seq_pos);
 				}
 
 				current_min.set_max();
@@ -323,8 +334,6 @@ inline void collect_minimizers(
 					buffer.unsafe_filled_for_each([&collector, &current_min, &current_min_pos, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
 						if (MinimapSketch::does_sketch_match(current_min, el)) {
 							collector.collect(el);
-                            const size_t x = el.sketch.sketch.last_pos;
-                            JustLog("D! push_min {} on {}", x, seq_pos);
 						}
 					});
 				}
@@ -332,23 +341,22 @@ inline void collect_minimizers(
 		}
 	};
 
-    auto start = std::chrono::high_resolution_clock::now();
-	// First kmers
+	// First kmers. Walk the prefix in INIT mode (until the first window
+	// is fully populated), then the rest in non-INIT mode.
 	handler(std::bool_constant<true>{});
 	assert(pos == w+k);
 	handler(std::bool_constant<false>{});
 
-	//JustLog("is_max?");
 	if (!current_min.is_max()) {
 		collector.collect(current_min);
 	}
-
-	auto stop = std::chrono::high_resolution_clock::now();
-	auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(stop - start);
-
-    // for (auto const& el : results) {
-    //     JustLog("{} -> {}", el.sketch.sketch.last_pos, el.sketch.sketch.kmer);
-    // }
+	// (Previously two `std::chrono::high_resolution_clock::now()` reads
+	// bracketed this body and computed `duration` — but `duration` was
+	// never used. On macOS arm64 each chrono read is ~50-100 ns; the
+	// `instr::region("mm_sketch")` scope at function entry already
+	// captures wall-clock via `bioseq::instr::clock::now_ns()`
+	// (mach_absolute_time fast-path), so the chrono reads were a pure
+	// duplicate. Removed per proposal-2 §N1.)
 }
 
 template<
@@ -427,7 +435,6 @@ inline void collect_minimizers_simd(
                     const size_t current_pos = static_cast<storage_unit>(buffer.last_write_pos());
                     const size_t distance = (current_pos > temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
-                    JustLog("% pushmin {} pos={}, off={}, dist={}", real_pos, pos, offsets[i] * seq_traits::letters_per_unit, distance);
                     if (last_pushed_position != real_pos) {
                         collector.collect(std::move(MinimapSketch({
                             .sketch { .sketch {
@@ -482,8 +489,6 @@ inline void collect_minimizers_simd(
         //JustLog("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
         //JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
-
-        JustLog("BASE STEP {} (offsets={}, lpu={})", pos, offsets, seq_traits::letters_per_unit);
 
 		// Mask off lanes that are no longer iterating over valid sequence bytes (partial-matrix tail
 		// past the sequence end). Without this, the lane hasher still processes padding bytes and

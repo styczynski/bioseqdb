@@ -2,7 +2,6 @@
 #include "common_tests.h"
 #include "common.h"
 
-
 import bioseq_simd.utils;
 import testing;
 

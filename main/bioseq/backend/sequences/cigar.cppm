@@ -118,21 +118,43 @@ class BlockCigar {
 public:
     BlockCigar() = default;
 
-    explicit BlockCigar(size_t max_len)
-        : ops_(max_len + 5, BlockCigarEntry{BlockCigarOp::Sentinel, 0})
-        , idx_(1) {}
+    explicit BlockCigar(size_t max_len) {
+        // Reserve without value-init: the previous implementation
+        // value-initialised every entry up to `max_len + 5`, which for a
+        // 200x200 alignment is ~16 KB of zero-fill per call. The actual
+        // working set is `idx_..len()` which is bounded by the number of
+        // backtrack steps the aligner emits — usually <100. resize() is
+        // still needed because indexed writes happen inside `add(...)`,
+        // but we keep the working set tight by sentinelling only the
+        // first slot the algorithm reads on the very first add(...) call.
+        ops_.reserve(max_len + 5);
+        ops_.resize(1);
+        ops_[0] = BlockCigarEntry{BlockCigarOp::Sentinel, 0};
+        idx_   = 1;
+    }
 
     void clear() {
-        std::fill(ops_.begin(), ops_.end(),
-                  BlockCigarEntry{BlockCigarOp::Sentinel, 0});
+        // Reset to a single sentinel; downstream `add(...)` calls
+        // resize ops_ implicitly via push-style growth.
+        ops_.resize(1);
+        ops_[0] = BlockCigarEntry{BlockCigarOp::Sentinel, 0};
         idx_ = 1;
     }
 
     void add(BlockCigarOp op) {
-        const size_t add = (op != ops_[idx_ - 1].op) ? 1 : 0;
-        idx_ += add;
-        ops_[idx_ - 1].op = op;
-        ops_[idx_ - 1].len += 1;
+        // Grow the working set as the backtrack writes new entries; the
+        // initial slot is the sentinel set by the constructor / clear()
+        // path. Without this, ops_[idx_] is past-end and writing it is UB.
+        if (op != ops_[idx_ - 1].op) {
+            if (idx_ >= ops_.size()) {
+                ops_.resize(idx_ + 1, BlockCigarEntry{BlockCigarOp::Sentinel, 0});
+            }
+            ++idx_;
+            ops_[idx_ - 1].op = op;
+            ops_[idx_ - 1].len = 1;
+        } else {
+            ops_[idx_ - 1].len += 1;
+        }
     }
 
     void reverse() {

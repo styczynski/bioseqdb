@@ -11,7 +11,13 @@
     "highway",
     "libassert",
     "reflectcpp",
+    {
+      "name": "sqlgen",
+      "features": [
+        "postgres"
+      ]
+    },
     "zlib",
-    {"name": "sqlgen", "features": ["postgres"]}
+    "simdjson"
   ]
 }

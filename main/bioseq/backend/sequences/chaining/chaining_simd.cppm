@@ -514,10 +514,15 @@ void simd_dp_forward_pass(
         score_storage_span.size() * sizeof(int32_t));
     int32_t* padded_best_scores = score_storage_span.data() + max_lane_count;
 
-    auto predecessors_v = context::current().make_chain_vector<int64_t>(anchor_count);
-    auto peak_scores_v  = context::current().make_chain_vector<int32_t>(anchor_count);
-    predecessors_v.assign(anchor_count, -1);
-    peak_scores_v.resize(anchor_count);
+    // Same arena-bump pattern the scalar path uses (proposal-1 §A.3):
+    // skip the make_chain_vector + assign/resize churn; the DP body
+    // writes peak_scores before reading it. predecessors needs the -1
+    // sentinel for the read-before-write check, so memset(0xff) once
+    // beats per-element placement-new through the vector wrapper.
+    auto predecessors = context::current().alloc_chain_array<int64_t>(anchor_count);
+    auto peak_scores  = context::current().alloc_chain_array<int32_t>(anchor_count);
+    std::memset(predecessors.data(), 0xff,
+                static_cast<std::size_t>(anchor_count) * sizeof(int64_t));
 
     {
         static const auto* _fwd_desc =
@@ -529,7 +534,7 @@ void simd_dp_forward_pass(
         // count — region-style timing is sufficient at this granularity.
         (void)_fwd_scope;
         simd_dp_forward_pass(d_int, anchors, soa,
-            padded_best_scores, predecessors_v, peak_scores_v, params);
+            padded_best_scores, predecessors, peak_scores, params);
     }
 
     JustLog("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
@@ -539,8 +544,8 @@ void simd_dp_forward_pass(
     auto _bt_scope = bioseq::instr::region(_bt_desc);
     return backtrack_chains(anchors,
         std::span<const int32_t>(padded_best_scores, anchor_count),
-        std::span<const int64_t>(predecessors_v),
-        std::span<const int32_t>(peak_scores_v),
+        std::span<const int64_t>(predecessors),
+        std::span<const int32_t>(peak_scores),
         params.min_chain_score, params.min_seed_count);
 }
 

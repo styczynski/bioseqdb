@@ -243,10 +243,16 @@ inline std::string render_name(const bioseq::instr::RegionDescriptor* desc) noex
 
 // ---------------------------------------------------------------------
 // Aggregate-side accessors. We pin to the canonical
-// context_args_profiling_full block — the only one the bench installs.
+// context_args_profiling_timing_only block — the bench installs it via
+// InstalledProfiler so all the non-templated `region(...)` / `loop(...)`
+// call sites in the chaining / kmers / minimap_port code paths see a
+// non-null tls_profiler<context_args_profiling_timing_only>. Counters
+// (PMU) are deliberately disabled in the bench config so per-region
+// overhead is timing-only — see config.cppm and the engineer note in
+// SPEC_BENCHMARKING_SPEEDUP_PROPOSAL_1.md §1.2.
 // ---------------------------------------------------------------------
 
-using args_t = bioseq::instr::context_args_profiling_full;
+using args_t = bioseq::instr::context_args_profiling_timing_only;
 
 /// Walk every registered descriptor and call `visitor(desc, region_agg,
 /// loop_agg)`. region_agg / loop_agg are nullable; loop_agg is non-null

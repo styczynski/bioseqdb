@@ -17,6 +17,7 @@ module;
 #include "common.h"
 
 #include <cstdint>
+#include <cstring>
 #include <cmath>
 #include <bit>
 #include <span>
@@ -27,6 +28,7 @@ module;
 export module bioseq_sequences.chaining.utils;
 
 import mlogging;
+import context;
 
 export {
 namespace bioseq::chaining {
@@ -77,14 +79,25 @@ struct AnchorQueryFields {
 ///
 /// Uses unions to provide both clean bitfield access (ref/query structs) and
 /// raw uint64_t access (ref_bits/query_bits) for sorting and arithmetic.
+///
+/// The unions previously defaulted to `= 0`. This forced a full 16 B
+/// zero-store on every `Anchor anchor;` declaration — even though
+/// `collect_seed_hits` immediately overwrote all four nested fields in
+/// both code branches (see `minimap_port.cppm:619-643`). The zero-store
+/// is a dead write the compiler can't elide because the writes go
+/// through a *different* union member (`anchor.ref.ref_position` vs the
+/// `ref_bits = 0` raw u64). With ~500-1500 anchors per pair and 400
+/// pairs per bench section, the dead stores added up to ~2-4 ms per
+/// section. Removed per proposal-2 §N3 — callers must write every
+/// field they read, which is the existing behaviour.
 struct Anchor {
     union {
         AnchorRefFields ref;
-        uint64_t ref_bits = 0;    ///< Raw value for sorting/arithmetic on reference data
+        uint64_t ref_bits;    ///< Raw value for sorting/arithmetic on reference data
     };
     union {
         AnchorQueryFields query;
-        uint64_t query_bits = 0;  ///< Raw value for sorting/arithmetic on query data
+        uint64_t query_bits;  ///< Raw value for sorting/arithmetic on query data
     };
 };
 
@@ -184,22 +197,31 @@ struct ChainingParams {
     int32_t max_ref_dist, int32_t max_query_dist, int32_t chain_bandwidth,
     float gap_penalty, float skip_penalty)
 {
+    // The previous form had three sequential `if (...) return INT32_MIN;`
+    // branches. Each one was a hard branch on the validity check
+    // followed by a separate compute step, and the caller's `continue`
+    // logic added a fourth `cmp` against INT32_MIN. With ~2500 calls per
+    // chain × 400 pairs = ~1M chained branches per section, the branch
+    // misprediction cost is real even when the inner arithmetic is
+    // cheap. Restructure: compute every dependent value up-front and
+    // combine the validity checks into one OR'd predicate. A single
+    // branch + a single cmov-friendly select-on-INT32_MIN path replaces
+    // the three early-exits. Per proposal-2 §N4.
     const int32_t query_distance = static_cast<int32_t>(current_anchor.query.query_position)
                                  - static_cast<int32_t>(predecessor_anchor.query.query_position);
-    if (query_distance <= 0 || query_distance > max_ref_dist) {
-        return std::numeric_limits<int32_t>::min();
-    }
-
     const int32_t ref_distance = static_cast<int32_t>(
         current_anchor.ref_bits - predecessor_anchor.ref_bits);
-    if (ref_distance == 0 || query_distance > max_query_dist) {
-        return std::numeric_limits<int32_t>::min();
-    }
-
     const int32_t diagonal_deviation = (ref_distance > query_distance)
         ? ref_distance - query_distance
         : query_distance - ref_distance;
-    if (diagonal_deviation > chain_bandwidth) {
+
+    const bool invalid =
+        (query_distance <= 0)
+      | (query_distance > max_ref_dist)
+      | (ref_distance == 0)
+      | (query_distance > max_query_dist)
+      | (diagonal_deviation > chain_bandwidth);
+    if (invalid) [[unlikely]] {
         return std::numeric_limits<int32_t>::min();
     }
 
@@ -323,7 +345,16 @@ struct ChainingParams {
                   return left.score < right.score;
               });
 
-    std::vector<int32_t> visited(anchor_count, 0);
+    // `visited` was previously a `std::vector<int32_t>(anchor_count, 0)` —
+    // a fresh malloc + zero-fill on every chaining call. Move into the
+    // chain arena so the per-pair allocator traffic disappears. The
+    // chain arena's scope is owned by the calling chain_anchors_*; the
+    // span lives until that scope drops, which is after this function
+    // returns to the caller — safe.
+    auto& bt_ctx = context::current();
+    auto visited = bt_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
+    std::memset(visited.data(), 0,
+                static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
     std::vector<Chain> chains;
     std::vector<Anchor> reordered_anchors;
     std::vector<int64_t> chain_anchor_indices;

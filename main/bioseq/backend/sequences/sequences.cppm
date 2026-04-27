@@ -594,6 +594,16 @@ struct compact_sequence_range_base {
      * the destination from its own align arena and passes the span in.
      *
      * The destination span must be at least `bp_to - bp_from` bytes.
+     *
+     * Implementation note: the previous implementation iterated from
+     * pos = 0 and used `if (pos >= bp_from)` as a filter, so encoding a
+     * 200 bp window inside a 2 kbp target took O(L) iterator
+     * dereferences instead of O(bp_to - bp_from). KSW2 hits this hot
+     * for every alignment region (3 calls per region), so the cost was
+     * meaningful — see SPEC_BENCHMARKING_SPEEDUP_PROPOSAL_1.md §B.1.
+     * The current implementation seeks directly to `bp_from` via index
+     * arithmetic on the bit-packed storage, then walks exactly
+     * `region_length` letters.
      */
     template<bool is_reversed>
     void to_encoded_into(std::span<uint8_t> dst, size_t bp_from, size_t bp_to) const {
@@ -601,30 +611,83 @@ struct compact_sequence_range_base {
         const size_t region_length = bp_to - bp_from;
         if (dst.size() < region_length) return;
 
-        if constexpr (!is_reversed) {
-            size_t write_pos = 0;
-            size_t pos = 0;
-            for (const auto& bp_rank : iterable<BP>()) {
-                if (pos >= bp_to) break;
-                if (pos >= bp_from) {
-                    dst[write_pos++] = static_cast<uint8_t>(bp_rank);
+        constexpr size_t lpu = traits::letters_per_unit;
+        constexpr size_t bpc = traits::bits_per_char;
+
+        // Translate to forward-domain coordinates. The is_reversed branch
+        // outputs revcomp[bp_from..bp_to) which corresponds to
+        // original[L-bp_to..L-bp_from) read forward, complemented, written
+        // in reverse.
+        const size_t fwd_from = is_reversed ? (bp_size() - bp_to)   : bp_from;
+        const size_t fwd_to   = is_reversed ? (bp_size() - bp_from) : bp_to;
+
+        auto base_iter = super()->cbegin();
+        std::advance(base_iter, fwd_from / lpu);
+        size_t bit_no = fwd_from % lpu;
+        // For the letters_per_unit == 1 case, every unit holds exactly one
+        // letter; the iter<BP>() abstraction is just a thin wrapper around
+        // dereferencing the underlying storage. For multi-letter units,
+        // pre-shift the unit so the bp_from-th letter sits in the bottom
+        // char_mask bits — same invariant the bp_scalar_iter holds.
+        typename traits::storage_unit unit_val{};
+        if constexpr (lpu == 1) {
+            unit_val = static_cast<typename traits::storage_unit>(*base_iter);
+        } else {
+            unit_val = static_cast<typename traits::storage_unit>(*base_iter);
+            unit_val = static_cast<typename traits::storage_unit>(
+                unit_val >> (bit_no * bpc));
+        }
+
+        auto next_letter = [&]() -> typename traits::storage_unit {
+            const typename traits::storage_unit out =
+                static_cast<typename traits::storage_unit>(unit_val & traits::char_mask);
+            if constexpr (lpu == 1) {
+                ++base_iter;
+                // Defer dereference to the next iteration's read; only
+                // refresh `unit_val` if we're going to read it.
+                unit_val = 0;
+            } else {
+                ++bit_no;
+                if (bit_no == lpu) {
+                    bit_no = 0;
+                    ++base_iter;
+                    unit_val = static_cast<typename traits::storage_unit>(0);
+                } else {
+                    unit_val = static_cast<typename traits::storage_unit>(
+                        unit_val >> bpc);
                 }
-                ++pos;
+            }
+            return out;
+        };
+
+        // Refresh the unit at the *start* of each new storage word; the
+        // letters_per_unit == 1 path needs this on every step, the multi
+        // path only when bit_no wraps to 0.
+        auto refresh_unit_if_needed = [&](size_t step_idx) {
+            if constexpr (lpu == 1) {
+                unit_val = static_cast<typename traits::storage_unit>(*base_iter);
+            } else {
+                if (bit_no == 0 && step_idx + 1 < region_length) {
+                    unit_val = static_cast<typename traits::storage_unit>(*base_iter);
+                }
+            }
+        };
+
+        if constexpr (!is_reversed) {
+            for (size_t i = 0; i < region_length; ++i) {
+                dst[i] = static_cast<uint8_t>(next_letter());
+                refresh_unit_if_needed(i);
             }
         } else {
-            const size_t L = bp_size();
-            const size_t orig_from = L - bp_to;
-            const size_t orig_to = L - bp_from;
+            // Walk the forward window; complement each letter and emit
+            // it to the descending write pointer so the destination ends
+            // up holding the reverse-complement of the requested span.
             size_t write_pos = region_length;
-            size_t pos = 0;
-            for (const auto& bp_rank : iterable<BP>()) {
-                if (pos >= orig_to) break;
-                if (pos >= orig_from) {
-                    --write_pos;
-                    dst[write_pos] = static_cast<uint8_t>(
-                        traits::letter_complement(static_cast<storage_unit_t>(bp_rank)));
-                }
-                ++pos;
+            for (size_t i = 0; i < region_length; ++i) {
+                --write_pos;
+                dst[write_pos] = static_cast<uint8_t>(
+                    traits::letter_complement(next_letter()));
+                refresh_unit_if_needed(i);
             }
         }
     }

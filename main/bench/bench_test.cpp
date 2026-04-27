@@ -2,7 +2,7 @@
  * @file bench_test.cpp
  * @brief Catch2 harness for the bench evaluation pipeline.
  *
- * Tagged with `[.benchmark-evaluation]` — the leading `.` keeps it out of
+ * Tagged with `[simple-benchmark]` — the leading `.` keeps it out of
  * the default run; invoke explicitly with `[benchmark-evaluation]` to
  * exercise minimap_port + tool_minimap2 side-by-side on two hard-coded
  * sequences that share a known ground-truth origin.
@@ -38,6 +38,8 @@ import bench.tool_minimap2;
 import bench.generator;
 import bench.evaluation;
 import bench.report;
+import bench.matrix_runner;
+import bench.chart_builder;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -47,7 +49,7 @@ using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint64_t>;
 using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 
 TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     using namespace seq::literals;
 
     // Make sure each TEST_CASE starts on a clean instrumentation slate
@@ -94,6 +96,14 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
     EvaluationParams params;
     params.position_tolerance = 10;
     params.mapq_thresholds    = {0, 10, 30, 60};
+    // The user's stated benchmarking goal is "ksw2 + DP chaining + non-SIMD
+    // minimizers as fast as minimap2". The default base aligner in
+    // Minimap2Params is BLOCK_ALIGNER, which is *not* what minimap2 uses;
+    // measuring against the default produces an apples-to-oranges
+    // comparison. Pin the bench to KSW2 so the side-by-side delta is on
+    // the same algorithm class on both sides.
+    params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     const size_t truth_target_end = truth_target_start + query.bp_size();
     const bool   truth_is_reverse = false;
@@ -159,7 +169,7 @@ TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
 }
 
 TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to land on truth",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
 
@@ -183,6 +193,8 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
 
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 5;
+    evaluation_params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     BENCHMARK_ADVANCED("bioseq minimap_port (unique fragment)")(
         Catch::Benchmark::Chronometer meter)
@@ -223,7 +235,7 @@ TEST_CASE("Benchmark evaluation — unique single fragment requires bioseq to la
 }
 
 TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL semantics",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
 
@@ -246,6 +258,8 @@ TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL seman
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 0;
     evaluation_params.mapq_thresholds = {0};
+    evaluation_params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     BENCHMARK_ADVANCED("bioseq minimap_port batch (SEAL-exact)")(
         Catch::Benchmark::Chronometer meter)
@@ -285,7 +299,7 @@ TEST_CASE("Benchmark evaluation — SEAL-exact tolerance=0 reproduces SEAL seman
 }
 
 TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
-          "[.benchmark-evaluation]") {
+          "[simple-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
 
@@ -306,6 +320,8 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
     EvaluationParams evaluation_params;
     evaluation_params.position_tolerance = 25;
     evaluation_params.mapq_thresholds = {0, 10, 30};
+    evaluation_params.aligner_params.base_alignment_algorithm =
+        bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2;
 
     BENCHMARK_ADVANCED("bioseq minimap_port SEAL-style batch")(
         Catch::Benchmark::Chronometer meter)
@@ -368,6 +384,52 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
         static_cast<double>(results.minimap2.total_pairs);
     REQUIRE(bioseq_correct_fraction   >= 0.5);
     REQUIRE(minimap2_correct_fraction >= 0.9);
+}
+
+// ====================================================================
+// Chart-data sweep: full algorithm × length × error grid.
+//
+// Runs the matrix runner across every (length_bucket, error_bucket,
+// algorithm_config) combination and accumulates samples into the
+// process-wide vector that bench_main.cpp drains into report.json.
+//
+// Tagged with `[chart-data]` (no leading dot) so it is run by the
+// default `./bioseq/bioseq_bench` invocation. The smaller end of the
+// matrix is intentional — pair counts, sample counts and the
+// very-long bucket size are tuned to keep wall-clock under ~30 minutes
+// even when every algorithm config is exercised.
+//
+// `[chart-data-quick]` runs only the short + medium buckets for
+// faster iteration during chart layout work.
+// ====================================================================
+
+TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
+          "[chart-data]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    bioseq::bench::HWY_NAMESPACE::run_full_matrix();
+    JustLog("[chart-data] accumulated {} bench samples after full sweep",
+            bioseq::bench::benchmark_samples().size());
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
+}
+
+TEST_CASE("Chart-data sweep — quick (short + medium only)",
+          "[.chart-data-quick]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    using namespace bioseq::bench::HWY_NAMESPACE;
+    const auto grid = default_algorithm_grid();
+    std::uint64_t seed = 4242424242ull;
+    for (auto length_bucket : {SequenceLengthBucket::SHORT,
+                               SequenceLengthBucket::MEDIUM}) {
+        for (auto error_bucket : {ErrorRateBucket::LOW,
+                                  ErrorRateBucket::MEDIUM,
+                                  ErrorRateBucket::HIGH}) {
+            run_matrix_for_bucket(length_bucket, error_bucket, seed, grid);
+            seed = seed * 1099511628211ull + 14695981039346656037ull;
+        }
+    }
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
 }
 
 }  // namespace bioseq::bench::HWY_NAMESPACE

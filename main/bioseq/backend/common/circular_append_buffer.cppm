@@ -3,6 +3,10 @@ module;
 #include "common.h"
 #include <boost/serialization/strong_typedef.hpp>
 
+#include <concepts>
+#include <type_traits>
+#include <utility>
+
 
 export module algo.circular_append_buffer;
 
@@ -72,12 +76,6 @@ public:
 		return _capacity - _buf_pos;
 	}
 
-	[[nodiscard]] void print_ptrs() const {
-		JustLog("print_ptrs():");
-		JustLog("current buffer pointer = (base)={}, cur={}, next={}", (uint64_t)(_buffer.get()), (uint64_t)(&_buffer[_buf_pos]), (uint64_t)(&_buffer[_buf_pos+1]));
-		JustLog("END");
-	}
-
     [[always_inline]] constexpr void increment_iter(iterator& iter, size_t increment = 1) requires (!p_fixed_capacity) {
         static_assert(std::is_same_v<decltype(_capacity), iterator>);
         iter += increment;
@@ -90,17 +88,30 @@ public:
         iter = (iter + increment) & size_mask;
     }
 
-	// void push_back(const T value) {
-	// 	_prev_pos = _buf_pos;
-	// 	_buffer[_buf_pos] = value;
-	// 	increment_iter(_buf_pos);
-	// };
+    // The previous signature was `void push_back(T&& value)` — strict
+    // rvalue ref + lvalue-from-rvalue-ref copy in the body. For the
+    // 16 B trivially-copyable `MinimapSketch` case (the dominant
+    // instantiation), pass-by-value lets the call site emit a single
+    // 128-bit store directly into the slot via the standard ABI's
+    // return-slot convention, without binding through a named ref.
+    // For non-trivial T's, the forwarding-ref overload below covers
+    // perfect-forwarding move semantics with the same single-store
+    // codegen at -O2.
+    [[always_inline]] void push_back(T value)
+        requires std::is_trivially_copyable_v<T>
+    {
+        _prev_pos = _buf_pos;
+        _buffer[_buf_pos] = value;
+        increment_iter(_buf_pos);
+    }
 
-    void push_back(T&& value) {
-		_prev_pos = _buf_pos;
-		_buffer[_buf_pos] = value;
-		increment_iter(_buf_pos);
-	};
+    template<typename U>
+        requires (!std::is_trivially_copyable_v<T>) && std::convertible_to<U, T>
+    [[always_inline]] void push_back(U&& value) {
+        _prev_pos = _buf_pos;
+        _buffer[_buf_pos] = std::forward<U>(value);
+        increment_iter(_buf_pos);
+    }
 
 	[[always_inline]] [[nodiscard]] iterator last_write_pos() const {
 		return _prev_pos;

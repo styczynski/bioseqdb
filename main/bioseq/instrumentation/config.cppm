@@ -63,4 +63,23 @@ struct context_args_profiling_full {
 };
 static_assert(is_context_args<context_args_profiling_full>);
 
+/// Timing-only profiling args. enable_counters is false so the per-region
+/// PMU read (~300-400 ns sysctl on macOS, ~200-400 ns read() on Linux) is
+/// skipped. Picked by the bench harness so that the per-region overhead
+/// drops to ~30 ns (one clock read + one TLS load) — important when
+/// counting tens of thousands of region scopes per benchmark section.
+/// The Postgres extension keeps using context_args_profiling_full so
+/// production telemetry is unchanged.
+struct context_args_profiling_timing_only {
+    static constexpr bool     enable_profiling      = true;
+    static constexpr bool     enable_counters       = false;
+    static constexpr bool     enable_tracing        = true;
+    static constexpr bool     enable_sampling       = true;
+    static constexpr bool     enable_arena_tracking = true;
+    static constexpr unsigned snap_capacity         = 32;
+    static constexpr unsigned trace_capacity        = 256;
+    static constexpr unsigned aggr_block_size       = 256;
+};
+static_assert(is_context_args<context_args_profiling_timing_only>);
+
 }  // namespace bioseq::instr

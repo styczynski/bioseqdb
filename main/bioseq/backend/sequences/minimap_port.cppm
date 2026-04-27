@@ -105,6 +105,19 @@ enum class BaseAlignmentAlgorithmType : uint8_t {
     BLOCK_ALIGNER = 1,
 };
 
+/// Minimizer-extraction algorithm — scalar `collect_minimizers` (the
+/// default, used for backwards compatibility with the test reference
+/// output) vs the Highway-vectorised `collect_minimizers_simd`. Selected
+/// at runtime; the `minimap_port` entry point dispatches on this enum
+/// with a runtime branch (cannot use constexpr-if because both paths
+/// instantiate the same templates, just with the simd_hash vs
+/// scalar_hash inner type, and the kmer index module's `requires`
+/// clauses already enforce the correct concept).
+enum class MinimizerAlgorithmType : uint8_t {
+    SCALAR = 0,
+    SIMD   = 1,
+};
+
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
     switch (mode) {
         case ChainingAlgorithmType::SCALAR_MM2: return "Minimap2 Scalar";
@@ -118,6 +131,14 @@ enum class BaseAlignmentAlgorithmType : uint8_t {
     switch (mode) {
         case BaseAlignmentAlgorithmType::KSW2:          return "KSW2";
         case BaseAlignmentAlgorithmType::BLOCK_ALIGNER: return "Block Aligner";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] constexpr const char* minimizer_algorithm_name(MinimizerAlgorithmType mode) {
+    switch (mode) {
+        case MinimizerAlgorithmType::SCALAR: return "Scalar Minimizers";
+        case MinimizerAlgorithmType::SIMD:   return "SIMD Minimizers";
     }
     return "unknown";
 }
@@ -186,6 +207,11 @@ struct Minimap2Params {
     ChainingAlgorithmType        chaining_algorithm        = ChainingAlgorithmType::SCALAR_MM2;
     /// Runtime base-alignment algorithm selector.
     BaseAlignmentAlgorithmType   base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    /// Runtime minimizer-extraction algorithm selector. The default is
+    /// scalar to match the reference output documented in
+    /// CODE_GUIDELINES.md §9; the bench harness flips it to SIMD when
+    /// measuring the Highway-vectorised path.
+    MinimizerAlgorithmType       minimizer_algorithm       = MinimizerAlgorithmType::SCALAR;
 
     /// Runtime profiler toggle. Driven by bioseq.aligner.enable_profiling
     /// GUC. When true, BatchProcessor::process_sequences instantiates the
@@ -2073,10 +2099,28 @@ template<
     // align_regions has a "mm_align_skeleton" region scope inside.
     if (params.do_cigar) {
         // Build unified scoring matrix for KSW2 and block aligner.
-        const auto scoring_matrix = ScoringMatrix<QueryRange>::generate(
-            static_cast<int8_t>(params.match_score),
-            static_cast<int8_t>(params.mismatch_pen),
-            static_cast<int8_t>(params.sc_ambi));
+        // Cached per-thread so a steady-state batch loop doesn't redo
+        // ~245 byte stores per pair (proposal §C.2). The cache is keyed
+        // on (match_score, mismatch_pen, sc_ambi); on key mismatch the
+        // matrix is regenerated. The static-initialiser race is safe
+        // because the cache is thread_local.
+        thread_local int8_t s_cached_match    = std::numeric_limits<int8_t>::min();
+        thread_local int8_t s_cached_mismatch = std::numeric_limits<int8_t>::min();
+        thread_local int8_t s_cached_ambi     = std::numeric_limits<int8_t>::min();
+        thread_local ScoringMatrix<QueryRange> s_cached_matrix{};
+        const int8_t want_match    = static_cast<int8_t>(params.match_score);
+        const int8_t want_mismatch = static_cast<int8_t>(params.mismatch_pen);
+        const int8_t want_ambi     = static_cast<int8_t>(params.sc_ambi);
+        if (s_cached_match != want_match
+            || s_cached_mismatch != want_mismatch
+            || s_cached_ambi != want_ambi) {
+            s_cached_matrix   = ScoringMatrix<QueryRange>::generate(
+                want_match, want_mismatch, want_ambi);
+            s_cached_match    = want_match;
+            s_cached_mismatch = want_mismatch;
+            s_cached_ambi     = want_ambi;
+        }
+        const auto& scoring_matrix = s_cached_matrix;
 
         // Sequences are passed directly — encoding of specific sub-regions
         // happens lazily inside the KSW2 core kernel. Base-alignment algorithm
@@ -2154,15 +2198,27 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     const size_t k = static_cast<size_t>(params.kmer_size);
 
     // ---- Minimizer extraction: target (same block name as minimap2 mm_sketch) ----
+    // Dispatch on params.minimizer_algorithm. The two collectors have
+    // identical post-conditions (sketch_collector populated with the
+    // (last_pos, kmer) pairs in the same order) — the kmers test suite
+    // pins this contract. Branch is per-call (twice per minimap_port
+    // invocation) so the runtime cost is negligible vs the sketch work.
     sketch_collector target_collector;
     {
         static const auto* _mm_sketch_target_desc =
             bioseq::instr::register_region_static("mm_sketch");
         auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
-        collect_minimizers<minimap_int_hasher>(
-            target_collector, target_seq,
-            target_seq.begin(), target_seq.end(),
-            w, k);
+        if (params.minimizer_algorithm == MinimizerAlgorithmType::SIMD) {
+            collect_minimizers_simd<minimap_int_hasher>(
+                target_collector, target_seq,
+                target_seq.begin(), target_seq.end(),
+                w, k);
+        } else {
+            collect_minimizers<minimap_int_hasher>(
+                target_collector, target_seq,
+                target_seq.begin(), target_seq.end(),
+                w, k);
+        }
     }
     const auto target_minimizers = target_collector.extract_sketches_data();
     JustLog("[minimap_port] target_minimizers: {}", target_minimizers.size());
@@ -2173,10 +2229,17 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         static const auto* _mm_sketch_query_desc =
             bioseq::instr::register_region_static("mm_sketch");
         auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
-        collect_minimizers<minimap_int_hasher>(
-            query_collector, query_seq,
-            query_seq.begin(), query_seq.end(),
-            w, k);
+        if (params.minimizer_algorithm == MinimizerAlgorithmType::SIMD) {
+            collect_minimizers_simd<minimap_int_hasher>(
+                query_collector, query_seq,
+                query_seq.begin(), query_seq.end(),
+                w, k);
+        } else {
+            collect_minimizers<minimap_int_hasher>(
+                query_collector, query_seq,
+                query_seq.begin(), query_seq.end(),
+                w, k);
+        }
     }
     const auto query_minimizers = query_collector.extract_sketches_data();
     JustLog("[minimap_port] query_minimizers: {}", query_minimizers.size());
