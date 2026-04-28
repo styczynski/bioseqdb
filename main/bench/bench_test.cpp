@@ -480,15 +480,16 @@ TEST_CASE("Chart-data sweep — quick (short + medium only)",
 }
 
 // ====================================================================
-// Long-only fast iteration sweep — focuses on the three configs the
-// optimisation target cares about and runs them on LONG and VERY_LONG
-// buckets only. Used to drive performance tuning rounds where the
+// Long-only fast iteration sweep — focuses on the configs the
+// optimisation target cares about and runs them on LONG / VERY_LONG /
+// XL buckets only. Used to drive performance tuning rounds where the
 // full matrix is too slow to iterate on.
 //
-// Three rows compared:
+// Rows compared:
 //   * minimap2 (DP chaining)                         — baseline
 //   * bioseq KSW2 + scalar-DP + scalar-mm           — must be ±10% of baseline
 //   * bioseq KSW2 + SIMD-DP + SIMD-mm               — must be ≥10% faster than scalar
+//   * bioseq KSW2 + SIMD-DP + two-stack SIMD-mm     — V4 candidate for goal #2
 //
 // Tagged `[.quick-long-sequence-benchmark]` so `./build.sh bench` does
 // not pick it up; invoke explicitly with the tag literal. After the
@@ -501,7 +502,7 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
     report::InstalledProfiler _profiler_guard{};
     using namespace bioseq::bench::HWY_NAMESPACE;
 
-    // Build the three-row grid by hand so we don't waste samples on
+    // Build the row grid by hand so we don't waste samples on
     // configurations we don't track for the goal.
     std::vector<AlgorithmConfig> grid;
     {
@@ -528,6 +529,14 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
         simd_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         simd_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD;
         grid.push_back(std::move(simd_cfg));
+
+        AlgorithmConfig two_stack_cfg;
+        two_stack_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-mm";
+        two_stack_cfg.is_minimap2_reference = false;
+        two_stack_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        two_stack_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        two_stack_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK;
+        grid.push_back(std::move(two_stack_cfg));
     }
 
     // Pin the same seed across iterations so before/after deltas are not
@@ -554,6 +563,88 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
         for (double v : sample.sample_latencies_ns) sum_ns += v;
         const double mean_ms = (sum_ns / static_cast<double>(sample.sample_latencies_ns.size())) / 1.0e6;
         JustLog("[long-bench] {} length={} pair_q={}bp t={}bp samples={} mean_ms={:.3f}",
+                sample.algorithm_label,
+                sample.length_bucket_label,
+                sample.effective_query_length,
+                sample.target_length,
+                sample.sample_latencies_ns.size(),
+                mean_ms);
+    }
+}
+
+// ====================================================================
+// Two-stack iteration bench — runs ONLY VERY_LONG (~900 kbp) on a
+// small grid (scalar baseline + SIMD baseline + two-stack candidate).
+// The deliberately-narrow scope lets each optimisation round of the
+// SIMD-Minimizers two-stack collector finish in well under a minute,
+// so we can iterate freely on the inner loop. Tagged
+// `[.quick-long-sequence-benchmark-two-stack]` — invoke via
+// `./build.sh bench-two-stack`.
+//
+// IMPORTANT: this case is the *only* signal we trust during V4
+// iteration — `bench-long` is significantly slower because it also
+// runs LONG (~50 kbp) and XL (~5 Mbp) and runs minimap2 as a fourth
+// row. For final goal verification re-run `bench-long` and compare
+// with the report committed to ENGINEERING_REPORT.md.
+// ====================================================================
+TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
+          "[.quick-long-sequence-benchmark-two-stack]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    using namespace bioseq::bench::HWY_NAMESPACE;
+
+    std::vector<AlgorithmConfig> grid;
+    {
+        AlgorithmConfig scalar_cfg;
+        scalar_cfg.label = "bioseq KSW2 + scalar-DP + scalar-mm";
+        scalar_cfg.is_minimap2_reference = false;
+        scalar_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+        scalar_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        scalar_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+        grid.push_back(std::move(scalar_cfg));
+
+        AlgorithmConfig simd_cfg;
+        simd_cfg.label = "bioseq KSW2 + SIMD-DP + SIMD-mm";
+        simd_cfg.is_minimap2_reference = false;
+        simd_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        simd_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        simd_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD;
+        grid.push_back(std::move(simd_cfg));
+
+        AlgorithmConfig two_stack_cfg;
+        two_stack_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-mm";
+        two_stack_cfg.is_minimap2_reference = false;
+        two_stack_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        two_stack_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        two_stack_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK;
+        grid.push_back(std::move(two_stack_cfg));
+    }
+
+    // Cover both VERY_LONG (~900 kbp) and XL (~5 Mbp) so the user's
+    // stated "1 M – 20 M" range is fully exercised. The XL bucket
+    // exposes better SIMD-vs-scalar lane-parallelism behaviour because
+    // the sketch and chaining workloads scale linearly while the chain-
+    // backtracking and KSW2 alignment phases stay roughly constant in
+    // their relative share of the wall clock. Skipping the noisy MM2
+    // reference row sidesteps the pre-existing fmtlog flood that the
+    // sister `[.quick-long-sequence-benchmark]` case suffers from at
+    // the >900 kbp end (sketch.c's per-minimizer DBG dump fires once
+    // per minimap2 reference call, drowning the queue and silently
+    // truncating later buckets' output).
+    const std::uint64_t seed = 0xBEEFCAFE12345678ull;
+    for (auto length_bucket : {SequenceLengthBucket::VERY_LONG,
+                               SequenceLengthBucket::XL}) {
+        run_matrix_for_bucket(length_bucket, ErrorRateBucket::CCS, seed, grid);
+    }
+
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
+
+    for (const auto& sample : bioseq::bench::benchmark_samples()) {
+        if (sample.sample_latencies_ns.empty()) continue;
+        double sum_ns = 0.0;
+        for (double v : sample.sample_latencies_ns) sum_ns += v;
+        const double mean_ms = (sum_ns / static_cast<double>(sample.sample_latencies_ns.size())) / 1.0e6;
+        JustLog("[two-stack-bench] {} length={} pair_q={}bp t={}bp samples={} mean_ms={:.3f}",
                 sample.algorithm_label,
                 sample.length_bucket_label,
                 sample.effective_query_length,

@@ -87,6 +87,15 @@ if has_token bench-long; then
         "[.quick-long-sequence-benchmark]"
 fi
 
+if has_token bench-two-stack; then
+    # Hyper-quick V4 iteration sweep — runs only VERY_LONG bucket for
+    # scalar / SIMD / two-stack-SIMD minimizer configs. Used to drive
+    # the SIMD-Minimizers paper port iteration loop.
+    BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-two-stack.json}" \
+        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
+        "[.quick-long-sequence-benchmark-two-stack]"
+fi
+
 if has_token lol; then
     ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[lol]"
 fi

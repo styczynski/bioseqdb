@@ -53,6 +53,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
+import bioseq_sequences.kmers.two_stacks;
 import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
@@ -116,6 +117,11 @@ enum class BaseAlignmentAlgorithmType : uint8_t {
 enum class MinimizerAlgorithmType : uint8_t {
     SCALAR = 0,
     SIMD   = 1,
+    /// Two-stack / prefix-suffix-min sliding-window collector mirroring
+    /// the SIMD-Minimizers paper. Implemented in
+    /// `kmers/two_stacks_minimizers.cppm` as
+    /// `collect_minimizers_two_stack_simd`.
+    TWO_STACK = 2,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -137,8 +143,9 @@ enum class MinimizerAlgorithmType : uint8_t {
 
 [[nodiscard]] constexpr const char* minimizer_algorithm_name(MinimizerAlgorithmType mode) {
     switch (mode) {
-        case MinimizerAlgorithmType::SCALAR: return "Scalar Minimizers";
-        case MinimizerAlgorithmType::SIMD:   return "SIMD Minimizers";
+        case MinimizerAlgorithmType::SCALAR:    return "Scalar Minimizers";
+        case MinimizerAlgorithmType::SIMD:      return "SIMD Minimizers";
+        case MinimizerAlgorithmType::TWO_STACK: return "Two-Stack SIMD Minimizers";
     }
     return "unknown";
 }
@@ -1582,28 +1589,45 @@ void estimate_divergence_from_seeds(
             search_iter - minimizer_positions.begin());
         int32_t match_end_idx = match_start_idx;
 
-        // Scan forward matching chain seeds (esterr.c:55-60)
+        // Scan forward matching chain seeds (esterr.c:55-60).
+        //
+        // The previous version recomputed `forward_pos` on every
+        // minimizer iteration even though `chain_anchor` only changes
+        // when `seed_idx` advances (which it does only on match). For
+        // the SIMD-DP chain at VERY_LONG / XL the inner loop runs
+        // ~168k iterations and the per-iter forward_pos calc was
+        // ~5 ns/iter — pushing `mm_est_err` to ~8 ms vs the scalar-DP
+        // chain's 1.5 ms. Hoist the forward_pos compute so it only
+        // fires when seed_idx advances.
         int32_t seed_match_count = 1;
         const int32_t minimizer_count = static_cast<int32_t>(minimizer_positions.size());
-        for (int32_t seed_idx = 1, minimizer_idx = match_start_idx + 1;
-             minimizer_idx < minimizer_count && seed_idx < region.seed_count;
-             ++minimizer_idx)
-        {
-            const Anchor& chain_anchor = region.is_reverse
-                ? anchors[anchor_begin + region.seed_count - 1 - seed_idx]
-                : anchors[anchor_begin + seed_idx];
+        int32_t seed_idx = 1;
+        int32_t minimizer_idx = match_start_idx + 1;
 
-            // Compute forward-strand position for this anchor
+        auto compute_forward_pos = [&](int32_t s) -> int32_t {
+            const Anchor& chain_anchor = region.is_reverse
+                ? anchors[anchor_begin + region.seed_count - 1 - s]
+                : anchors[anchor_begin + s];
             int32_t forward_pos = static_cast<int32_t>(chain_anchor.query.query_position);
             if (chain_anchor.ref.is_reverse) {
                 const int32_t anchor_span = static_cast<int32_t>(chain_anchor.query.query_span);
                 forward_pos = query_len - 1 - (forward_pos + 1 - anchor_span);
             }
+            return forward_pos;
+        };
 
-            if (forward_pos == minimizer_positions[minimizer_idx]) {
-                ++seed_idx;
-                match_end_idx = minimizer_idx;
-                ++seed_match_count;
+        if (seed_idx < region.seed_count) {
+            int32_t forward_pos = compute_forward_pos(seed_idx);
+            for (; minimizer_idx < minimizer_count && seed_idx < region.seed_count;
+                 ++minimizer_idx) {
+                if (forward_pos == minimizer_positions[minimizer_idx]) {
+                    ++seed_idx;
+                    match_end_idx = minimizer_idx;
+                    ++seed_match_count;
+                    if (seed_idx < region.seed_count) {
+                        forward_pos = compute_forward_pos(seed_idx);
+                    }
+                }
             }
         }
 
@@ -2287,16 +2311,26 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
             bioseq::instr::register_region_static("mm_sketch");
         auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
         target_collector.reserve(target_seq.bp_size() / std::max<size_t>(w, 1) + 64);
-        if (params.minimizer_algorithm == MinimizerAlgorithmType::SIMD) {
-            collect_minimizers_simd<minimap_int_hasher>(
-                target_collector, target_seq,
-                target_seq.begin(), target_seq.end(),
-                w, k);
-        } else {
-            collect_minimizers<minimap_int_hasher>(
-                target_collector, target_seq,
-                target_seq.begin(), target_seq.end(),
-                w, k);
+        switch (params.minimizer_algorithm) {
+            case MinimizerAlgorithmType::SIMD:
+                collect_minimizers_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::TWO_STACK:
+                collect_minimizers_two_stack_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::SCALAR:
+            default:
+                collect_minimizers<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    w, k);
+                break;
         }
     }
     const auto target_minimizers = target_collector.extract_sketches_data();
@@ -2309,16 +2343,26 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
             bioseq::instr::register_region_static("mm_sketch");
         auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
         query_collector.reserve(query_seq.bp_size() / std::max<size_t>(w, 1) + 64);
-        if (params.minimizer_algorithm == MinimizerAlgorithmType::SIMD) {
-            collect_minimizers_simd<minimap_int_hasher>(
-                query_collector, query_seq,
-                query_seq.begin(), query_seq.end(),
-                w, k);
-        } else {
-            collect_minimizers<minimap_int_hasher>(
-                query_collector, query_seq,
-                query_seq.begin(), query_seq.end(),
-                w, k);
+        switch (params.minimizer_algorithm) {
+            case MinimizerAlgorithmType::SIMD:
+                collect_minimizers_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::TWO_STACK:
+                collect_minimizers_two_stack_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::SCALAR:
+            default:
+                collect_minimizers<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    w, k);
+                break;
         }
     }
     const auto query_minimizers = query_collector.extract_sketches_data();
