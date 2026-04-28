@@ -1,0 +1,457 @@
+\documentclass[a4paper]{article}
+\usepackage{amsmath}
+\usepackage{lipsum}
+\usepackage{graphicx}
+\usepackage{xspace}
+\usepackage{multirow}
+\usepackage{color,soul}
+% \pagenumbering{gobble} % Disable page numbering
+\DeclareMathOperator*{\argmax}{argmax}
+\usepackage{pdflscape}
+\usepackage{changepage}
+\usepackage{rotating} 
+\usepackage[english]{babel}
+\usepackage[utf8x]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{afterpage} 
+\usepackage{fancyhdr}
+\usepackage{mwe}
+% \usepackage{subcaption}
+\usepackage{adjustbox}
+\usepackage{booktabs} 
+\usepackage{float}
+\usepackage{hhline}
+\usepackage{pbox}
+% \usepackage{xr}
+\usepackage[a4paper,top=3cm,bottom=2cm,left=2.5cm,right=2.5cm,marginparwidth=1.5cm]{geometry}
+\usepackage[colorinlistoftodos]{todonotes}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+
+\newcommand{\TextUnderscore}{\rule{.4em}{.4pt}}
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+%% A new environment to rotate page, margins, and page number 
+\newenvironment{lscapenum} 
+{ 
+   \clearpage 
+   \changepage{%insert appropriate changes here, see changepage docs%} 
+   \begin{landscape} 
+     \pagestyle{fancy} 
+     \fancyhead{} % clear all header fields 
+     \fancyfoot{} % clear all footer fields 
+     \renewcommand{\headrulewidth}{0pt} 
+     \rfoot{ 
+       % Since the header and footer are unrotated, we must manually 
+       % place the page number.  The picture environment is included 
+in 
+       % standard LaTeX. 
+       \setlength{\unitlength}{\textheight} 
+       \begin{picture}(0,0) 
+           \put(%xshift%,%yshift%){\begin{sideways}\thepage\end 
+{sideways}} 
+       \end{picture} 
+     } 
+} 
+{ 
+   \end{landscape} 
+   % The \textheight is too large leaving landscape environment 
+   %  since we invoked the \changepage.  We manually reduce it. 
+   \addtolength{\textheight}{-\myoldfootskip} 
+
+   % \textheight controls 3 other variables, which must be updated. 
+   % See \endlandscape definition in lscape.sty 
+   \global\@colht=\textheight 
+   \global\vsize=\textheight 
+   \global\@colroom=\textheight 
+
+   \pagestyle{plain} 
+} 
+
+% Metadata Information
+\newcommand{\versionnum}[0]{2.1 ~ 22.10.2018 ~ 22:10}
+
+\fancyhead{}
+ \fancyhead[C]{\textcolor{blue}{\emph{Version \versionnum~---~}}}%\today, \ampmtime}}}
+ \fancypagestyle{firststyle}
+ {
+   \fancyhead[C]{\textcolor{blue}{\emph{Version \versionnum~---~}}}%%\today, \ampmtime}}}
+   \fancyfoot[C]{\thepage}
+ }
+ \thispagestyle{firststyle}
+ \pagestyle{firststyle}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 
+
+\title{Supplementary Material for\\ 
+Apollo: a profile HMM-based universal assembly polishing algorithm}
+\author{%
+Can Firtina,
+Damla Senol Cali,
+Mohammed Alser, 
+A. Ercument Cicek,\\ 
+Can Alkan, and 
+Onur Mutlu
+}
+
+% to disable the date
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Constructing a profile hidden Markov model} \label{suppsec:phmm}
+
+A pHMM-graph includes states and directed transitions from a state to another. There are two type of probabilities that the graph contains: (1) emission and (2) transition probabilities. First, each state has emission probabilities for emitting the certain characters where each is associated with a probability in range $[0,1]$. Second, each transition is associated with a probability in range $[0,1]$. Now, we will explain the structure of the graph in detail. For an assembly contig $C$, let us define the pHMM-graph that represents the contig $C$ as $G(V,E)$. Let us also define the length of the contig $C$ as $n = |C|$. A basepair $C[t]$  has one of the letters in the alphabet set $\Sigma=\{A,C,G,T\}$. Thus, a state emits one of the characters in $\Sigma$ with a certain probability. For a state $i$, We denote the emission probability of a basepair $c \in \Sigma$ as $e_{i}(c) \in [0,1]$ where $\sum\limits_{c \in \Sigma} e_{i}(c) = 1$. We denote the transition probability from a state, i, to another state, j, as $\alpha_{ij} \in [0,1]$. For the set of the states that the state $i$ has an outgoing transition to, $V_{i}$, we have $\sum\limits_{j \in V_{i}} \alpha_{ij} = 1$. Now let us define in four steps how Apollo constructs the states and the transitions of the graph $G(V,E)$:
+
+First, Apollo constructs a start state, $v_{start} \in V$, and an end state $v_{end} \in V$. Second, for each basepair $C[t]$ where $1 \leq t \leq n$, Apollo constructs a match state as follows (Figure~\ref{fig:match}):
+\begin{itemize}
+    \item A \textit{match state} that we denote as $M_{t}$ for the basepair $C[t]$ where $M = C[t]$ s.t. $C[t] \in \Sigma$ and $M_{t} \in V$ (i.e., if the $t_{th}$ basepair of the contig $C$ is $G$, then the corresponding match state is $G_t$). For the following steps, let us assume $i = M_{t}$
+    \item A \textit{match emission} with the probability $\beta$, for the basepair $C[t]$ s.t. $e_i(C[t]) = \beta$. $\beta$ is a parameter to Apollo. 
+    \item A \textit{substitution emission} with the probability $\delta$, for each basepair $c \in \Sigma$ and $c \neq C[t]$ s.t. $e_i(c) = \delta$ (Note that $\beta + 3\delta = 1$). $\delta$ is a parameter to Apollo.
+    \item A \textit{match transition} with the probability $\alpha_{M}$, from the match state $M_t = i$ to the next match state $M_{t+1} = j$ s.t. $\alpha_{ij} = \alpha_{M}$. $\alpha_{M}$ is a parameter to Apollo.
+\end{itemize}
+
+\begin{figure}
+\centerline{\includegraphics[scale=0.4]{figures/MatchAndSubs_small.png}}
+\caption{Two match states. Here, the contig includes the basepairs $G$ and $A$ at the locations $t$ and $t+1$, respectively. The corresponding match states are labeled with the basepairs that they correspond to (i.e., the match state $G_{t}$ represents the basepair $G$ at the location $t$). Each match state has a match transition to the next match state with the initial probability $\alpha_{M}$. A match state has a match emission probability, $\beta$, for the basepair it is labeled with. The remaining three basepairs have equal substitution emission probability $\delta$. The figure is taken from Hercules \cite{Firtina2018}.}
+\label{fig:match}
+\end{figure}
+
+Third, for each basepair $C[t]$ where $1 \leq t \leq n$, Apollo constructs the insertion states as follows (Figure~\ref{fig:insertion}):
+\begin{itemize}
+    \item There are $l$ many \textit{insertion states}, $I_{t}^{1}$, $I_{t}^{2}$, \dots, $I_{t}^{l}$, where $I_{t}^{i} \in V$, $1 \leq i \leq l$ and $l$ is a parameter to Apollo
+    \item The match state, $M_{t} = i$, has an \textit{insertion transition} to $I_{t}^{1} = j$, with the probability $\alpha_{I}$ s.t. $\alpha_{ij} = \alpha_{I}$
+    \item For each $i$ where $1 \leq i < l$, the insertion state $I_{t}^{i} = k$ has an insertion transition to the next insertion state $I_{t}^{i+1} = j$ with the probability $\alpha_{I}$ s.t. $\alpha_{kj} = \alpha_{I}$
+    \item For each $i$ where $1 \leq i < l$, the insertion state $I_{t}^{i} = k$ has a match transition to the match state of the next basepair $M_{t+1} = j$ with the probability $\alpha_{M}$ s.t. $\alpha_{kj} = \alpha_{M}$
+    \item The last insertion state, $I_{t}^{l}$, has no further insertion transitions. Instead, it has a transition to the match state of the next basepair $M_{t+1} = j$ with the probability $\alpha_{M} + \alpha_{I}$ s.t. $\alpha_{kj} = \alpha_{M} + \alpha_{I}$
+    \item For each $i$ where $1 \leq i \leq l$, each basepair $c \in \Sigma$ and $c \neq C[t+1]$ has an \textit{insertion emission} probability $1/3 \approx 0.33$ for the insertion state $I_{t}^{i} = k$ s.t. $e_k(c) = 0.33$ and $e_k(C[t+1]) = 0$. Note that $\sum\limits_{c \in \Sigma} e_{k}(c) = 1$. (i.e., if the basepair at the location $t+1$ is T, then $e_{k}(A) = 0.33$, $e_{k}(T) = 0$, $e_{k}(G) = 0.33$, and $e_{k}(C) = 0.33$).
+\end{itemize}
+
+\begin{figure}
+\centerline{\includegraphics[scale=0.4]{figures/Insertions_small.png}}
+\caption{$l$ many insertion states for the basepair at location $t$. Here, the contig includes the basepairs $C$ and $T$ at the locations $t$ and $t+1$, respectively. The corresponding match states are labeled with the basepairs that they correspond to. Each insertion state has an insertion transition to the next insertion state with the initial probability $\alpha_{I}$ and a match transition to the next match state at the location $t+1$ with the initial probability $\alpha_{M}$. However, the last insertion state, $I_{t}^{l}$, does not have a transition to the next insertion state as it is the last one. Instead, it has a match transition to the next match state $T_{t+1}$ with the probability $\alpha_{M} + \alpha_{I}$. The emission probability of the basepair $T$ is $0$ as it appears in the next position ($t+1$) of the contig. The figure is taken from Hercules \cite{Firtina2018}.}
+\label{fig:insertion}
+\end{figure}
+
+Fourth step for finalizing the complete structure of the pHMM graph, for each \textit{state} $i \in V$, Apollo constructs the deletion transitions as follows (Figure~\ref{fig:deletion}):
+
+\begin{itemize}
+    \item Let us define $\alpha_{del} = 1 - (\alpha_{M} - \alpha_{I})$, which is the overall deletion transition probability.
+    \item There are $k$ many deletion transitions from the state $i$, to the further \textit{match} states. $k$ is a parameter to Apollo.
+    \item We assume that a transition deletes the basepairs if it skips the corresponding match states of the basepairs. We denote the transition probability of a deletion transition as $\alpha_{D}^{x}$ s.t. $1 \leq x \leq k$, if it deletes $x$ many basepairs in a row in one transition. Apollo calculates the deletion transition probability $\alpha_{D}^{x}$ using the normalized version of a polynomial distribution where $f \in [0, \infty)$ is a factor value for the equation:
+    
+    \begin{equation}
+        \alpha_{D}^{x} = \dfrac{f^{k-x}\alpha_{del}}{\sum\limits_{j=0}^{k-1} f^{j}}\quad 1 \leq x     \leq k \tag{S1} \label{eq:deletion}
+    \end{equation}
+    
+    \item If the $f$ value is set to $1$, then the each deletion transition is equally likely (i.e., $\alpha_{D}^{1} = \alpha_{D}^{10}$, if $k \geq 10$). As the $f$ value increases, the probability of deleting more basepairs in one transition decreases accordingly (i.e., $\alpha_{D}^{1} \gg \alpha_{D}^{10}$, if $k \geq 10$). $f$ is a parameter to Apollo.
+\end{itemize}
+
+\begin{figure}
+\centerline{\includegraphics[scale=0.5]{figures/Deletions_small.png}}
+\caption{Deletion transitions of the match and each insertion states at location $t$. For the match and insertion states at location $t$, we show only the deletion transitions (red). Note that a deletion transition from the position $t$ to the match state of the position $t+x+1$ removes $x$ many basepairs with the probability $\alpha_{D}^{x}$ as it skips $x$ many match states where $1 \leq x \leq k$. The figure is taken from Hercules \cite{Firtina2018}.}
+\label{fig:deletion}
+\end{figure}
+
+We note that the start state $v_{start}$ also has a match transition to $M_{1}$ and deletion transitions as defined previously. There are al $l$ many insertion states, $I_{0}^{1}$, $I_{0}^{2}$, \dots, $I_{0}^{l}$, between the start state and the first match state $M_{1}$. The transitions of these insertion states are also identical to what we described before. We would also like to note that the end state $v_{end}$ has no outgoing transition. The prior states consider $v_{end}$ as a match state and connect to it accordingly. The start and end states have no emission probabilities.
+
+\section{The Forward-Backward Algorithm}\label{suppsec:fwbw}
+
+Apollo trains the pHMM of the contig per each read that aligns to the contig. It uses the alignment location and the sequence of the read in order to train the pHMM-graph. First, per each aligned read sequence $r$, Apollo extracts the sub-graph $G_s(V_s,E_s)$ that corresponds to the aligned region of the contig where we have $v_{start}$, $v_{end}$, match and insertion states, and the transitions as described in the Supplementary Section~\ref{suppsec:phmm}. Each transition from state $i \in V_{s}$ to state $j \in V_{s}$, $E_{ij} \in E_s$, is associated with a transition probability $\alpha_{ij}$. For every pair of states, $i \in V_s$ and $j \in V_s$, the transition probability $\alpha_{ij} = 0$ if $E_{ij} \not\in E_s$. Let us define the length of the aligned read, $r$, as $m = |r|$. Second, it calculates the forward and backward probabilities of each state based on the aligned read, $r$.
+
+Let us assume that the forward probability of a state $j$ that observes $t^{th}$ basepair of the aligned read, $r[t]$, is $F_{t}(j)$. For the forward probability, observing the $t^{th}$ basepair at the state $j$ means that all the previous basepairs ($r[1] \dots r[t-1]$ and $1 < t \leq m$) have been observed by following a path starting from the start state to the state $j$ and $j$ observes the next basepair, $r[t]$. All possible transitions that lead to state $j$ to observe the basepair $r[t]$ contribute to the probability with (1) the forward probability of the origin state $i$ calculated with the $(t-1)^{th}$ basepair of $r$, $F_{t-1}(i)$, (2) multiplied by the probability of the transition from $i$ to $j$, $\alpha_{ij}$, (3) multiplied by the probability of emitting the basepair $r[t]$ at state $j$, $e_j(r[t])$.
+
+Let us denote the start state $v_{start}$ with the index value of $0$ (i.e., $v_{start} = 0$). For each state $j \in V_{s}$, we calculate the forward probability, $F_{t}(j)$, as follows where $F_{1}(j)$ is the initialization step:
+
+\begin{equation}
+F_{1}(j) = \alpha_{0j}e_j(r[1]) \quad s.t. \quad j \in V_{s}, \quad E_{0j} \in E_s \tag{S2.1} \label{suppeq:initforward}
+\end{equation}
+
+\begin{equation}
+F_{t}(j) = \sum_{i \in V_{s}} F_{t-1}(i)\alpha_{ij}e_j(r[t]) \quad j \in V_{s}, \quad 1 < t \leq m \tag{S2.2} \label{suppeq:forward}
+\end{equation}
+
+Let us assume that the backward probability of a state $i$ that observes $t^{th}$ basepair of the aligned read, $r[t]$, is $B_{t}(i)$. For the backward probability, observing the $t^{th}$ basepair at the state $i$ means that all the further basepairs ($r[t+1] \dots r[m]$ and $1 \leq t < m$) have been observed by following a path starting from the end state to the state $i$ (backwards) and $i$ observes the previous basepair, $r[t]$. All possible transitions that lead to state $i$ to observe the basepair $r[t]$ contribute to the probability with (1) the backward probability of the next state $j$ calculated with the $(t+1)^{th}$ basepair of $r$, $B_{t+1}(j)$, (2) multiplied by the probability of the transition from $i$ to $j$, $\alpha_{ij}$, (3) multiplied by the probability of emitting the basepair $r[t+1]$ at state $j$, $e_j(r[t+1])$.
+
+Let us denote the end state $v_{end}$ with the index value of $m+1$ (i.e., $v_{end} = m+1$). For each state $j \in V_{s}$, we calculate the backward probability, $B_{t}(i)$, as follows where $B_{m}(i)$ is the initialization step:
+
+\begin{equation}
+B_{m}(i) = \alpha_{i(m+1)}\quad i \in V_{s}, \quad E_{i(m+1)} \in E_s\tag{S3.1} \label{suppeq:initbackward}
+\end{equation}
+\begin{equation}
+B_{t}(i) = \sum_{j \in V_{s}} \alpha_{ij}e_j(r[t+1])B_{t+1}(j) \quad j \in V_{s}, ~1 \leq t < m \tag{S3.2} \label{suppeq:backward}
+\end{equation}
+
+After calculation of the forward and backward probabilities, Apollo calculates the posterior transition and the emission probabilities of the sub-graph, $G_s$, as shown in equations~\ref{suppeq:emissionupd} and~\ref{suppeq:transitionupd}, respectively. 
+
+\begin{equation}
+e^{*}_i(X) = \dfrac{\sum\limits_{t=1}^m F_{t}(i)B_t(i)(r[t] == X)}
+             {\sum\limits_{t=1}^m F_{t}(i)B_t(i)} \quad \forall X \in \Sigma, \forall i \in V_{s} \tag{S4} \label{suppeq:emissionupd}
+\end{equation}
+
+\begin{equation}
+\alpha^{*}_{ij} = \dfrac{\sum\limits_{t=1}^{m-1} \alpha_{ij}e_{j}(r[t+1])F_{t}(i)B_{t+1}(j)}
+     {\sum\limits_{t=1}^{m-1}\sum\limits_{x \in V_{s}} \alpha_{ix}e_{x}(r[t+1])F_{t}(i)B_{t+1}(x)} \quad \forall E_{ij} \in E_{s}
+\tag{S5} \label{suppeq:transitionupd} 
+\end{equation}
+
+\section{Joining Posterior Probabilities}\label{suppsec:join}
+As we explain in the Supplementary Section~\ref{suppsec:fwbw}, for each read that aligns to the contig, Apollo extracts a sub-graph $G_s$ and uses the Forward-Backward algorithm to train the sub-graph. It is possible that there can be overlaps between two or many sub-graphs such that the sub-graphs can include the same states and the transitions. However, the updates on the overlapping states and the transitions are exclusive between the sub-graphs such that no two update in separate graphs affect each other while calculating the Forward or the Backward probabilities. Each sub-graph uses the initial probabilities to calculate the posterior probabilities. In order to handle training of the overlapping states and the transitions, Apollo takes the average of the posterior probabilities and reports the average probability as the final posterior probability for the entire pHMM-graph.
+
+Let us assume that the set of sub-graphs $S$ includes the same state $i \in V$. For each $G_{s}$ in $S$, we obtain a $e^{*}_i(X)$, where $\forall X \in \Sigma$, which denotes the posterior emission probability as we explain in the Supplementary Section~\ref{suppsec:fwbw}. We denote $e^*_i(X)$ that belongs to $G_{s}$ as $e^{*,G_{s}}_i(X)$. Then, Apollo finds the final emission value $\hat{e}_i(X)$ as follows: 
+
+\begin{equation}
+\hat{e}_i(X) = \dfrac{\sum\limits_{G_{s} \in S} e^{*,G_{s}}_{i}(X)}{\mid S \mid} \quad \forall X \in \Sigma
+\tag{S6}\label{suppeq:emissioncapupd}
+\end{equation}
+
+Similarly, let us assume that the set of sub-graphs $S$ includes the same transition edge $E_{ij} \in E$.  For each $G_{s}$ in $S$, we obtain an $\alpha^{*}_{ij}$ that denotes the posterior transition value. We define $\alpha^{*}_{ij}$ that belongs to $G_{s}$ as $\alpha^{*,G_{s}}_{ij}$. Apollo finds the final transition value $\hat{\alpha}_{ij}$ as follows: 
+
+\begin{equation}
+\hat{\alpha}_{ij} = \dfrac{\sum\limits_{G_{s} \in S} \alpha^{*,G_{s}}_{ij}}{\mid S \mid}
+\tag{S7} \label{suppeq:transitioncapupd} 
+\end{equation}
+
+If a state in $V$ or an edge in $E$ is not covered by a read then Apollo retains the initial emission and transition probabilities and uses as posterior probabilities, respectively.
+
+\section{Decoding with the Viterbi Algorithm}\label{suppsec:decoding}
+
+Apollo uses the Viterbi algorithm to reveal the polished assembly by finding the most likely path starting from the start state, $v_{start}$ of the graph $G$ to the end state $v_{end}$. For each state $j$, the Viterbi algorithm calculates $v_{t}(j)$, which is the maximum marginal forward probability $j$ obtained from following a path starting from the start state when emitting the $t^{th}$ basepair of the polished contig. It also keeps a back pointer, $b_{t}(j)$, which keeps track of the predecessor state $i$ that yields the $v_{t}(j)$ value.
+
+Let $X' \in \Sigma$ be the basepair that has the highest posterior emission probability for the state $j$ and $T$ be the length of the decoded sequence, which is initially unknown. The algorithm recursively calculates $v$ values for each position $t$ of a decoded sequence as described in the equations ~\ref{suppeq:vitinitial} and ~\ref{suppeq:vitrec}. The algorithm stops at iteration $T^{*}$ such that for the last $iter$ iterations, the maximum value we have observed for $v(end)$ cannot be improved and $iter$ is a parameter and set to 100 by default. $T$ is then set to $t^{*}$ such that $v_{t^{*}}(end)$ is the maximum among all iterations $1 \leq t \leq T^{*} $.
+
+\begin{enumerate}
+\item Initialization
+\begin{equation}
+v_{1}(j) = \hat{a}_{start-j}\hat{e}_{j}(X') \quad \forall j \in V \tag{S8.1} \label{suppeq:vitinitial} \\
+\end{equation}
+
+\begin{equation}
+b_{1}(j) = start \tag{S8.2} 
+\quad \forall j \in V \label{suppeq:backtraceinitial}
+\end{equation}
+
+\item Recursion
+\begin{equation}
+v_{t}(j) = \max_{i \in V} v_{t-1}(i)\hat{\alpha}_{ij}\hat{e}_{j}(X') \quad \forall j \in V, 1 < t \leq T \tag{S8.3} \label{suppeq:vitrec}
+\end{equation}
+
+\begin{equation}
+b_{t}(j) = \argmax_{i \in V} v_{t-1}(i)\hat{\alpha}_{ij}\hat{e}_{j}(X') \quad \forall j \in V, 1 < t \leq T  \tag{S8.4} \label{suppeq:backtracerec}
+\end{equation}
+
+\item Termination
+\begin{equation}
+v_{T}(end) = \max_{i \in V} v_{T}(i)\hat{\alpha}_{i-end} \tag{S8.5} \label{suppeq:vitterm}
+\end{equation}
+
+\begin{equation}
+b_{T}(end) = \argmax_{i \in V} v_{T}(i)\hat{\alpha}_{i-end} \tag{S8.6} \label{suppeq:backtraceterm}
+\end{equation}
+\end{enumerate}
+
+\clearpage
+
+\section{Performance of the Assembly Polishing Algorithms}
+
+In Tables ~\ref{supptab:ecolik12} and ~\ref{supptab:chm1}, we compare the assembly polishing performance of Apollo with the competing algorithms.
+
+\begin{table}[htb]
+\begin{center}
+\caption{Assembly polishing performance of the tools for E.Coli K-12 data set}
+\label{supptab:ecolik12}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{|l|l|l|l|l||rrr|rr|}
+\hline Sequencing Tech. & Assembler & Aligner & Sequencing Tech. & Polishing & Aligned & Coverage & Avg. & Run Time & Memory\\
+of the Assembly & & & of the Aligned Reads & Algorithm & Bases & (\%) & Identity (\%) & & (GB) \\\hline
+ONT & Miniasm & - & - & - & 4,103,234 & 86.43 & 85.15 & 14m 45s & \\%\hline
+ONT & Miniasm & Minimap2 & ONT & Apollo & 4,552,848 & 96.97 & 91.16 & 26h 34m 02s & 25.45 \\%\hline
+ONT & Miniasm & Minimap2 & ONT & Nanopolish & 4,616,602 & 94.36 & 91.67 & 301h 42m 14s & 8.98 \\%\hline
+ONT & Miniasm & Minimap2 & ONT & Racon & 4,911,410 & 99.22 & \textbf{97.66} & \textbf{15m 23s} & \textbf{3.65} \\\hhline{|=|=|=|=|=|===|==|}
+ONT & Canu & - & - & - & 4,611,653 & 99.98 & 97.93 & 35h 36m 58s & \\%\hline
+ONT & Canu & Minimap2 & ONT & Apollo & 4,613,425 & 99.99 & 97.99 & 68h 26m 55s & 31.39 \\%\hline
+ONT & Canu & Minimap2 & ONT & Nanopolish & 4,689,609 & 99.99 & \textbf{99.24} & 19h 49m 10s & \textbf{3.20} \\%\hline
+ONT & Canu & Minimap2 & ONT & Racon & 4,656,091 & 100.00 & 98.40 & \textbf{19m 07s} & 3.81 \\\hhline{|=|=|=|=|=|===|==|}
+ONT (30X) & Canu & - & - & - & 3,771,861 & 100.00 & 97.11 & 27m 23s & \\%\hline
+ONT (30X) & Canu & Minimap2 & ONT (30X) & Apollo & 3,771,288 & 99.99 & 97.14 & 2h 03m 09s & 1.37 \\%\hline
+ONT (30X) & Canu & Minimap2 & ONT (30X) - Corrected & Apollo & 3,784,380 & 99.99 & 97.50 & 2h 48m 43s & 1.29 \\%\hline
+ONT (30X) & Canu & Minimap2 & ONT (30X) & Nanopolish & 3,829,723 & 100.00 & \textbf{98.39} & 5h 25m 50s & 1.30 \\%\hline
+ONT (30X) & Canu & Minimap2 & ONT (30X) & Racon & 3,827,938 & 100.00 & 98.30 & 45s & 0.42 \\%\hline
+ONT (30X) & Canu & Minimap2 & ONT (30X) - Corrected & Racon & 3,811,164 & 100.00 & 98.09 & \textbf{20s} & \textbf{0.33}\\\hline
+\end{tabular}}
+\end{center}
+{\footnotesize We generate the assembly using the reads (E.Coli K-12) sequenced from Oxford Nanopore Technologies (ONT) (319X coverage) as specified in \textit{Sequencing Tech. of the Assembly}. We subsample ONT reads into 30X coverage and generate the assembly using the sub-sampled reads that we show as "ONT (30X)". We use Canu and Miniasm assemblers as specified under \textit{Assembler}. Here, the reads specified under \textit{Sequencing Tech. of the Aligned Reads} are sequenced by the specified sequencing technology and are aligned to the assembly using the \textit{Aligner}. Canu-corrected long reads are labeled as "Corrected". We report the performance of the tools in terms of the number of bases aligned to the reference (\textit{Aligned Bases}), the percentage of the whole assembly that can align to the reference (\textit{Coverage}), and its \textit{Average Identity} (accuracy) as calculated by dnadiff.  We report the running time and the memory requirements of the assembly polishing tools. We report the performance of the assemblers in the rows where we do not specify a \textit{Polishing Algorithm}. We highlight the best result in each performance metric.}
+\end{table}
+
+\begin{table}[htb]
+\begin{center}
+\caption{Assembly polishing performance of the tools for CHM1 (Homo Sapiens) data set}
+\label{supptab:chm1}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{|l|l|l|l|l||rrr|rr|}
+\hline Sequencing Tech. & Assembler & Aligner & Sequencing Tech. & Polishing & Aligned & Coverage & Avg. & Run Time & Memory\\
+of the Assembly & & & of the Aligned Reads & Algorithm & Bases & (\%) & Identity (\%) & & (GB) \\\hline
+PacBio & Miniasm & - & - & - & 1,800,151 & 50.30 & 79.92 & 8h 52m 43s & \\%\hline
+PacBio & Miniasm & Minimap2 & PacBio & Apollo & 1,868,006 & 53.65 & \textbf{81.79} & 6h 58m 05s & \textbf{2.99} \\%\hline
+PacBio & Miniasm & Minimap2 & PacBio & Racon & 1,882,827 & 57.29 & 78.50 & \textbf{16m 46s} & 15.42\\\hhline{|=|=|=|=|=|===|==|}
+PacBio & Miniasm & pbalign & PacBio & Quiver & 1,918,464 & 54.13 & \textbf{82.99} & \textbf{3m 58s} & \textbf{0.50} \\\hhline{|=|=|=|=|=|===|==|}
+PacBio & Canu & - & - & - & 1,891,967 & 89.14 & \textbf{90.31} & 64h 10m 02s & \\%\hline
+PacBio & Canu & Minimap2 & PacBio & Apollo & 1,875,435 & 88.85 & 89.49 & 10h 45m 01s & 2.61  \\%\hline
+PacBio & Canu & Minimap2 & PacBio - Corrected & Apollo & 1,880,259 & 89.04 & 89.77 & 11h 07m 35s & \textbf{2.34} \\%\hline
+PacBio & Canu & Minimap2 & PacBio & Racon & 1,929,488 & 89.93 & 87.44 & 1h 15m 10s & 13.41 \\%\hline
+PacBio & Canu & Minimap2 & PacBio - Corrected & Racon & 1,909,958 & 90.04 & 87.95 & \textbf{1h 12m 37s} & 11.83\\\hhline{|=|=|=|=|=|===|==|}
+PacBio & Canu & pbalign & PacBio & Quiver & 1,900,762 & 89.48 & 89.25 & \textbf{1m 54s} & \textbf{0.53} \\\hline
+\end{tabular}}
+\end{center}
+{\footnotesize We generate the assembly using the reads (CHM1) sequenced from PacBio (2.6X coverage) as specified in \textit{Sequencing Tech. of the Assembly}. We use Canu and Miniasm assemblers as specified in \textit{Assembler}. Here, the reads specified under \textit{Sequencing Tech. of the Aligned Reads} are sequenced by the specified sequencing technology and are aligned to the assembly using the \textit{Aligner}. Canu-corrected long reads are labeled as "Corrected". We report the performance of the tools in terms of the number of bases aligned to the reference (\textit{Aligned Bases}), the percentage of the whole assembly that can align to the reference (\textit{Coverage}), and its \textit{Average Identity} (accuracy) as calculated by BLASR. We report the running time and the memory requirements of the assembly polishing tools. We report the performance of the assemblers in the rows where we do not specify a \textit{Polishing Algorithm}. We highlight the best result in each performance metric.}
+\end{table}
+
+\clearpage
+
+\section{Performance of the Aligners}
+
+Here in Table ~\ref{supptab:aligner}, we show the performances of the aligners in terms of number of alignments that the aligners generate given the assembly and the reads to align, run time (wall clock), and the memory requirement.
+
+\begin{table}[htb]
+\begin{center}
+\caption{\small Performance of the aligners}
+\label{supptab:aligner}
+\resizebox{\textwidth}{!}{
+\begin{tabular}{|l|l|l|l|rrr|}
+\hline Data Set for & Assembler & Aligner & Platform of the & Number of & Run Time & Memory\\
+the Assembly & & & Aligned Reads & Alignments & & (GB) \\\hline
+E.Coli K-12 - ONT & Miniasm & Minimap2 & ONT & 1,464,840 & 2m 08s & 1.77 \\%\hline
+E.Coli K-12 - ONT & Canu & Minimap2 & ONT & 1,662,418 & 1m 41s & 1.76 \\%\hline
+E.Coli K-12 - ONT(30X)& Canu & Minimap2 & ONT(30X) & 147,590 & 12s & 0.56 \\\hhline{|=|=|=|=|===|}
+E.Coli O157 - PacBio & Miniasm & Minimap2 & PacBio & 739,715 & 1m 06s & 1.62 \\%\hline
+E.Coli O157 - PacBio & Miniasm & Minimap2 & Illumina & 21,970,540 & 2m 38s & 3.00 \\%\hline
+E.Coli O157 - PacBio & Miniasm & Minimap2 & PacBio + Illumina & 26,140,933 & 2m 58s & 3.22 \\%\hline
+E.Coli O157 - PacBio & Canu & Minimap2 & PacBio & 741,626 & 1m 11s & 1.55 \\%\hline
+E.Coli O157 - PacBio(30x)& Canu & Minimap2 & PacBio(30X) & 148,256 & 14s & 0.48 \\%\hline
+E.Coli O157 - PacBio & Miniasm & BWA-MEM & Illumina & 19,661,998 & 7m 25s & 0.77 \\%\hline
+E.Coli O157 - PacBio & Miniasm & BWA-MEM & PacBio + Illumina & 20,401,713 & 8m 12s & 0.79 \\%\hline
+E.Coli O157 - PacBio & Canu & BWA-MEM & Illumina & 23,334,235 & 3m & 0.67 \\%\hline
+E.Coli O157 - PacBio(30X)& Canu & BWA-MEM & Illumina & 23,326,199 & 3m 42s & 0.69 \\%\hline
+E.Coli O157 - PacBio & Miniasm & pbalign & PacBio & 46,447 & 104h 10m 43s & 29.44 \\%\hline
+E.Coli O157 - PacBio & Canu & pbalign & PacBio & 51,987 & 37m 03s & 61.10 \\\hhline{|=|=|=|=|===|}
+CHM1 - PacBio & Miniasm & Minimap2 & PacBio & 2,140,172 & 20m 24s & 1.62 \\%\hline
+CHM1 - PacBio & Canu & Minimap2 & PacBio & 3,309,401 & 8m 11s & 1.63 \\%\hline
+CHM1 - PacBio & Miniasm & pbalign & PacBio & 98,985 & 98h 01m 55s & 21.30 \\%\hline
+CHM1 - PacBio & Canu & pbalign & PacBio & 48,934 & 98h 01m 59s & 57.14\\\hline
+\end{tabular}}
+\end{center}
+{\small We generate the assembly using the reads specified under \textit{Data Set for the Assembly}. We use Canu \cite{Koren2017} and Miniasm \cite{Li2016a} assemblers as specified in \textit{Assembler}. Here, the reads specified under \textit{Platform of the Aligned Reads} are aligned to the assembly using the \textit{Aligner}. We use Minimap2 \cite{Li2018} aligner for aligning both long and short reads to the assembly and BWA-MEM \cite{Li2009} aligner to align the short reads to the assembly. We report the performance of the aligners in terms of the number of the aligners (\textit{Number of Alignments}), the run time (\textit{Run Time}), and the maximum memory requirement \textit{Memory}.}
+\end{table}
+
+\clearpage
+\section{Robustness of Apollo}
+
+\begin{table}[htb]
+\begin{center}
+\caption{Apollo's robustness based on the chunk size of the long read and the contig}
+\label{supptab:chunk}
+\begin{tabular}{|l|l|rrr|}
+\hline Long Read & Contig Chunk & Aligned & Coverage & Avg.\\
+Chunk Size & Size & Bases & (\%) & Identity (\%) \\\hline
+1000  & Original & 5,708,747 & 98.05 & 97.90 \\%\hline
+1000  & 25000 & 5,487,736 & 94.46 & 97.33 \\%\hline
+1000  & 50000 & 5,689,120 & 97.95 & 97.28 \\%\hline
+1000  & 100000 & 5,493,663 & 94.52 & 97.27 \\%\hline
+5000  & 25000 & 5,430,700 & 93.06 & 89.74 \\%\hline
+5000  & 50000 & 5,411,163 & 92.68 & 89.71 \\%\hline
+5000  & 100000 & 5,516,599 & 94.49 & 89.70 \\%\hline
+10000  & 25000 & 5,415,333 & 92.65 & 89.18 \\%\hline
+10000  & 50000 & 5,423,340 & 92.75 & 89.14 \\%\hline
+10000  & 100000 & 5,474,159 & 93.61 & 89.14 \\\hline
+\end{tabular}
+\end{center}
+{\small Here we divide the long reads and the assembly into smaller chunks. We use E.coli O157 data set where Miniasm generates the assembly. We divide long reads into smaller reads with lengths 1000, 5000, and 10000. Similarly, we divide the assembly contigs into smaller contigs with lengths 25000, 50000, and 100000. We align each chunked read to each chunked contig. We report the performance of Apollo given the chunked assembly and chunked reads.}
+\end{table}
+
+Here in Tables ~\ref{supptab:chunk}, ~\ref{supptab:deletion}, ~\ref{supptab:insertion}, ~\ref{supptab:transition}, we show the robustness of Apollo based on the parameters that has a direct affect on the machine learning algorithm. In each of the tables we show that Apollo is robust to different set of parameters.
+
+\begin{table}[htb]
+\begin{center}
+\caption{Apollo's robustness based on the maximum deletion and filter size parameters}
+\label{supptab:deletion}
+\begin{tabular}{|l|l|rrr|}
+\hline Max & Filter & Aligned & Coverage & Avg.\\
+Deletion (-d) & Size (-f) & Bases & (\%) & Identity (\%) \\\hline
+3  & 100 & 5,699,182 & 97.91 & 97.39 \\%\hline
+5  & 100 & 5,696,138 & 97.93 & 97.35 \\%\hline
+15  & 100 & 5,678,838 & 97.90 & 97.31 \\%\hline
+3  & 200 & 5,705,130 & 98.12 & 97.51 \\%\hline
+5  & 200 & 5,704,582 & 98.12 & 97.50 \\%\hline
+15  & 200 & 5,702,478 & 98.14 & 97.51 \\\hline
+\end{tabular}
+\end{center}
+{\small Performance of Apollo with respect to the parameter that defines the maximum number of deletion in one transition ($d=3$, $d=5$, $d=15$). We also adjust the filter size ($f=100$, $f=200$)}
+\end{table}
+
+\begin{table}[htb]
+\begin{center}
+\caption{Apollo's robustness based on the maximum insertion and filter size parameters}
+\label{supptab:insertion}
+\begin{tabular}{|l|l|rrr|}
+\hline Max & Filter & Aligned & Coverage & Avg.\\
+Insertion (-s) & Size (-f) & Bases & (\%) & Identity (\%) \\\hline
+1  & 100 & 5,685,635 & 97.89 & 96.60 \\%\hline
+5  & 100 & 5,638,585 & 97.62 & 96.96 \\%\hline
+10  & 100 & 5,365,978 & 95.54 & 95.31 \\%\hline
+1  & 200 & 5,685,040 & 98.02 & 96.68 \\%\hline
+5  & 200 & 5,692,813 & 98.07 & 97.40 \\%\hline
+10  & 200 & 5,623,736 & 97.62 & 97.01 \\\hline
+\end{tabular}
+\end{center}
+{\small Performance of Apollo with respect to the parameter that defines the maximum number of insertion states for each basepair ($i=1$, $i=5$, $i=10$). We also adjust the filter size ($f=100$, $f=200$)}
+\end{table}
+
+\begin{table}[htb]
+\begin{center}
+\caption{Apollo's robustness based on the match transition, insertion transition probabilities, and the filter size parameters}
+\label{supptab:transition}
+\begin{tabular}{|l|l|l|rrr|}
+\hline Match Transition & Insertion Transition & Filter & Aligned & Coverage & Avg.\\
+Probability (-tm) & Probability (-ti) & Size (-f) & Bases & (\%) & Identity (\%) \\\hline
+0.60  & 0.25 & 100 & 5,670,852 & 97.95 & 96.25 \\%\hline
+0.60  & 0.30 & 100 & 5,660,957 & 97.90 & 95.96 \\%\hline
+0.80  & 0.10 & 100 & 5,699,660 & 98.02 & 97.88 \\%\hline
+0.90  & 0.05 & 100 & 5,685,770 & 97.89 & 97.74 \\%\hline
+0.60  & 0.25 & 200 & 5,682,512 & 98.10 & 96.44 \\%\hline
+0.60  & 0.30 & 200 & 5,681,993 & 98.13 & 96.18 \\%\hline
+0.80  & 0.10 & 200 & 5,707,293 & 98.16 & 98.03 \\%\hline
+0.90  & 0.05 & 200 & 5,695,902 & 98.05 & 97.89 \\\hline
+\end{tabular}
+\end{center}
+{\small Performance of Apollo with respect to the parameters that define the match and insertion transition probabilities ($tm=60$ - $ti=0.25$, $tm=60$ - $ti=0.30$, $tm=80$ - $ti=0.10$, $tm=90$ - $ti=0.05$). We also adjust the filter size ($f=100$, $f=200$)}
+\end{table}
+
+\clearpage
+
+\section{Parameters}
+
+We show the parameter settings of the aligners that we used to align the reads to the assembly in Table ~\ref{supptab:aligner-params}.
+
+\begin{table}[htb]
+\begin{center}
+\caption{List of the parameters that are used to align the reads to the assemblies}
+\label{supptab:aligner-params}
+\begin{tabular}{|l|c|}
+\hline Aligner &  Parameters \\\hline
+BWA-MEM & -t 10\\\hline
+Minimap2 (for PacBio) & -x map-pb -a -k15 -w5 -t 10 -p 0.6\\\hline
+Minimap2 (for ONT) & -x map-ont -a -k15 -w5 -t 10 -p 0.6\\\hline
+pbalign & --nproc 10 \\\hline
+\end{tabular}
+\end{center}
+% {\small Aligner parameters used for aligning the reads to the assembly.}
+\end{table}
+
+\clearpage
+
+\bibliographystyle{unsrt}
+\bibliography{document}
+
+\end{document}
