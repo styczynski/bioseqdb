@@ -22,6 +22,8 @@ import mlogging;
 import bioseq_table;
 import config;
 import pg_utils;
+import bioseq_metadata_admin;
+import bioseq_sidecar;
 
 extern "C++" {
 
@@ -128,6 +130,13 @@ bioseq_init()
 	bioseq_guc_init();
 	bioseq_tableam_init();
 	bioseq_planner_init();
+	/* MetadataKindRegistry: idempotent init followed by per-module
+	 * registrations. The registry singleton is empty until populated
+	 * here; future modules (e.g., a sneaky_snake prefilter or BWA-FM
+	 * index module) can chain their own register_*_metadata_kinds()
+	 * calls right after sidecar's. */
+	bioseq::metadata_admin::init_registry();
+	bioseq::sidecar::register_default_metadata_kinds();
 }
 
 

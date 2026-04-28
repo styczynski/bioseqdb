@@ -142,6 +142,35 @@ inline Relation try_safe_relation_open(Oid relation_id, LOCKMODE lock_mode) {
 }
 
 /*
+ * find_primary_key_oid discovers the OID of the primary-key btree on
+ * `rel`, or InvalidOid when the relation has none. Walks the relation's
+ * index list and returns the first index whose pg_index.indisprimary is
+ * true. Used by every bioseq read path that wants O(log n) lookups by
+ * (key1, key2, ...) on a small heap-AM table (sidecar PK lookups,
+ * metadata_age_log PK lookups). Centralised here so the sidecar and
+ * metadata_admin modules share one source of truth without introducing
+ * a circular module dependency.
+ */
+export [[nodiscard]] inline Oid find_primary_key_oid(Relation rel) {
+    Oid pk_index_oid = InvalidOid;
+    List* index_list = RelationGetIndexList(rel);
+    ListCell* lc;
+    foreach (lc, index_list) {
+        const Oid index_oid = lfirst_oid(lc);
+        Relation index_rel = index_open(index_oid, AccessShareLock);
+        if (index_rel->rd_index != nullptr && index_rel->rd_index->indisprimary) {
+            pk_index_oid = index_oid;
+        }
+        index_close(index_rel, AccessShareLock);
+        if (OidIsValid(pk_index_oid)) {
+            break;
+        }
+    }
+    list_free(index_list);
+    return pk_index_oid;
+}
+
+/*
  * CopyPlanCosts propagates the subset of Plan fields that describe planner
  * cost estimates (parallel awareness, startup/total cost, rowcount/width)
  * from source onto destination. Used when wrapping an existing Plan in a

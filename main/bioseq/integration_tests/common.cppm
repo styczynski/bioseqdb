@@ -380,10 +380,13 @@ export inline void reset_extension(const connection_test_context& ctx,
     }
     // Stale sidecar rows from dropped relids leak — the index/meta tables
     // live in the extension and survive DROP TABLE CASCADE on the user's
-    // table. Truncate so per-test row counts start at 0.
+    // table. Truncate so per-test row counts start at 0. metadata_age_log
+    // is in the same boat: a row written by the previous test under a
+    // since-recycled OID would skew bioseq.list_metadata() age values.
     exec_sql(ctx,
              "TRUNCATE bioseq_internal.index_sidecar, "
-             "        bioseq_internal.meta_sidecar;");
+             "        bioseq_internal.meta_sidecar, "
+             "        bioseq_internal.metadata_age_log;");
 }
 
 // Same as the span overload, but accepts an initializer list so callers can
