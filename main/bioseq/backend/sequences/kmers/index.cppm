@@ -170,6 +170,17 @@ public:
     // they can call `.reserve()` themselves.
     sketch_collector() : sketches() {};
 
+    /// Pre-reserve capacity to avoid the geometric realloc chain on
+    /// long sequences. Used by `minimap_port` when it knows the sequence
+    /// length up front: expected minimizer count is roughly `N/w` where
+    /// `N` is the sequence length and `w` is the window size; we add a
+    /// small safety margin to avoid edge-of-window reallocs. For a 1 Mbp
+    /// pair this side-steps ~17 doubling reallocations of the underlying
+    /// buffer (each one a memcpy of the previous contents).
+    void reserve(size_t expected_count) {
+        sketches.reserve(expected_count);
+    }
+
     [[always_inline]] constexpr void collect(MinimapSketch&& sketch) {
         sketches.push_back(std::move(sketch));
     }
@@ -540,18 +551,16 @@ inline void collect_minimizers_simd(
 		const hash_mask_t strand_mask = hasher.get_strand_mask(d);
 		hash_vec_t strand_vec = hn::IfThenElse(strand_mask, one_vec, zero_vec);
 
-		// Single combined valid-mask: a lane survives iff it has live data
-		// (mask) AND the k-mer it produced is non-palindromic. The palindrome
-		// check (`state_forward == state_reverse_compl` inside the lexic
-		// hasher) was previously evaluated twice — once for hash, once for
-		// strand — and both calls re-derived the mask from the hasher state.
-		// Combining them into one AndNot saves: one redundant
-		// `get_palindrome_mask` call (an Eq SIMD compare), two IfThenElse
-		// SIMD ops, and the dead-lane strand IfThenElse. For mm_sketch_simd
-		// this is the dominant per-iteration cost on dna4 inputs once the
-		// hasher itself is reduced to a single Xor (see lexic.cppm). See
-		// REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md.
-		const hash_mask_t valid_mask = hn::AndNot(hasher.get_palindrome_mask(d), mask);
+		// Cache the palindrome mask once. The lexic hasher implements
+		// `get_palindrome_mask` as an SIMD `Eq` between the per-lane
+		// forward/reverse states; calling it twice (once for hash, once for
+		// strand) used to fall through to two separate compares because the
+		// hasher caches state internally per lane and the compiler did not
+		// CSE across the call boundary. Hoisting saves one SIMD compare per
+		// iteration of the outer loop. See V3 report — the per-iteration
+		// constant pressure shows up as ~10 % of the kernel's SIMD ops.
+		const hash_mask_t palindrome_mask = hasher.get_palindrome_mask(d);
+		const hash_mask_t valid_mask = hn::AndNot(palindrome_mask, mask);
 		hash_vec = hn::IfThenElse(valid_mask, hash_vec, max_vec);
 		// Strand only needs to be cleared for palindromes that pass the live
 		// `mask` filter (they would otherwise carry a stale strand bit that a
@@ -559,7 +568,7 @@ inline void collect_minimizers_simd(
 		// (mask=false) is handled by the hash sentinel + emit guard.
 		// Equivalent to `IfThenElse(palindrome_mask & mask, zero, strand)`.
 		strand_vec = hn::IfThenZeroElse(
-			hn::And(hasher.get_palindrome_mask(d), mask), strand_vec);
+			hn::And(palindrome_mask, mask), strand_vec);
 
 		// The scalar collect_minimizers increments its `pos` BEFORE this push check (so its first
 		// real k-mer is pushed at scalar-iter `k - 1`, where the hasher holds chars[0..k-1]).
@@ -590,11 +599,19 @@ inline void collect_minimizers_simd(
 		// (slot_of_current_min - slot_now) wraparound distance maps back to the correct
 		// real_pos. After the emit the lane's state is reset to max_val so neither the
 		// subsequent-iteration logic nor finish_fn re-emits the same pair.
+		// Cache `buffer.last_write_pos()` once per iteration. The previous
+		// code called it three times — for the just-masked reset, for the
+		// new_min_pos_val, and for the elapsed-min check. Each call returns
+		// the same scalar; stamping a SIMD vector via `hn::Set` for each
+		// is wasted work in the per-iteration hot loop.
+		const auto last_write_pos_scalar = static_cast<storage_unit>(buffer.last_write_pos());
+		const hash_vec_t last_write_pos_vec = hn::Set(d, last_write_pos_scalar);
+
 		hash_mask_t just_masked = hn::And(prev_mask, hn::Not(mask));
 		if (!hn::AllFalse(d, just_masked)) {
 			submit_results.template operator()<true>(d, offsets, 0, just_masked, current_min_strand);
 			current_min = hn::IfThenElse(just_masked, max_vec, current_min);
-			current_min_pos = hn::IfThenElse(just_masked, hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos())), current_min_pos);
+			current_min_pos = hn::IfThenElse(just_masked, last_write_pos_vec, current_min_pos);
 			// Reset the strand alongside the hash so a subsequent emit on this lane
 			// can't read a stale strand from before the lane went inactive.
 			current_min_strand = hn::IfThenElse(just_masked, zero_vec, current_min_strand);
@@ -632,7 +649,7 @@ inline void collect_minimizers_simd(
 			});
 		}
 		hash_mask_t new_min_mask = hn::Le(buffer.last(), current_min);
-		hash_vec_t new_min_pos_val = hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos()));
+		const hash_vec_t new_min_pos_val = last_write_pos_vec;
 		// buffer.last()
 
 
@@ -650,8 +667,8 @@ inline void collect_minimizers_simd(
 		// drag the rescan path through a phantom update. A masked lane has nothing valid
 		// left to emit, and its buffer slot has been overwritten with `max_vec`, so we
 		// must not treat it as having an elapsed minimum at all.
-		hash_vec_t last_write_pos = hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos()));
-		hash_mask_t has_elapsed_min = hn::And(mask, hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos)));
+		// last_write_pos_vec was hoisted above, reuse here.
+		hash_mask_t has_elapsed_min = hn::And(mask, hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos_vec)));
 		const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
 
 		// JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));

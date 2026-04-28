@@ -45,7 +45,7 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::bench::HWY_NAMESPACE {
 
-using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint64_t>;
+using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint32_t>;
 using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 
 TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
@@ -477,6 +477,90 @@ TEST_CASE("Chart-data sweep — quick (short + medium only)",
     // report.json (with k/w heatmaps populated) for chart-layout work.
     run_kw_sweep();
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
+}
+
+// ====================================================================
+// Long-only fast iteration sweep — focuses on the three configs the
+// optimisation target cares about and runs them on LONG and VERY_LONG
+// buckets only. Used to drive performance tuning rounds where the
+// full matrix is too slow to iterate on.
+//
+// Three rows compared:
+//   * minimap2 (DP chaining)                         — baseline
+//   * bioseq KSW2 + scalar-DP + scalar-mm           — must be ±10% of baseline
+//   * bioseq KSW2 + SIMD-DP + SIMD-mm               — must be ≥10% faster than scalar
+//
+// Tagged `[.quick-long-sequence-benchmark]` so `./build.sh bench` does
+// not pick it up; invoke explicitly with the tag literal. After the
+// sweep completes we print a one-line summary line per (length, config)
+// to stderr so the optimisation iterator can grep timings without
+// loading report.json.
+// ====================================================================
+TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    using namespace bioseq::bench::HWY_NAMESPACE;
+
+    // Build the three-row grid by hand so we don't waste samples on
+    // configurations we don't track for the goal.
+    std::vector<AlgorithmConfig> grid;
+    {
+        AlgorithmConfig mm2_cfg;
+        mm2_cfg.label = "minimap2 (DP chaining)";
+        mm2_cfg.is_minimap2_reference = true;
+        mm2_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+        mm2_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        mm2_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+        grid.push_back(std::move(mm2_cfg));
+
+        AlgorithmConfig scalar_cfg;
+        scalar_cfg.label = "bioseq KSW2 + scalar-DP + scalar-mm";
+        scalar_cfg.is_minimap2_reference = false;
+        scalar_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+        scalar_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        scalar_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+        grid.push_back(std::move(scalar_cfg));
+
+        AlgorithmConfig simd_cfg;
+        simd_cfg.label = "bioseq KSW2 + SIMD-DP + SIMD-mm";
+        simd_cfg.is_minimap2_reference = false;
+        simd_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        simd_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        simd_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD;
+        grid.push_back(std::move(simd_cfg));
+    }
+
+    // Pin the same seed across iterations so before/after deltas are not
+    // confounded by a different RNG state. CCS error rate matches the V3
+    // report's MEDIUM/CCS comparison and is the cleanest signal regime.
+    //
+    // The user's stated optimisation range is sequences >1 Mbp and <20 Mbp,
+    // so the LONG bucket (~50 kbp) is included only for trend visibility —
+    // it is below the lower bound of the goal range. VERY_LONG (~900 kbp)
+    // and XL (~5 Mbp) cover the goal range proper.
+    const std::uint64_t seed = 0xBEEFCAFE12345678ull;
+    for (auto length_bucket : {SequenceLengthBucket::LONG,
+                               SequenceLengthBucket::VERY_LONG,
+                               SequenceLengthBucket::XL}) {
+        run_matrix_for_bucket(length_bucket, ErrorRateBucket::CCS, seed, grid);
+    }
+
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
+
+    // Print a compact summary the iteration loop can grep ("[long-bench]").
+    for (const auto& sample : bioseq::bench::benchmark_samples()) {
+        if (sample.sample_latencies_ns.empty()) continue;
+        double sum_ns = 0.0;
+        for (double v : sample.sample_latencies_ns) sum_ns += v;
+        const double mean_ms = (sum_ns / static_cast<double>(sample.sample_latencies_ns.size())) / 1.0e6;
+        JustLog("[long-bench] {} length={} pair_q={}bp t={}bp samples={} mean_ms={:.3f}",
+                sample.algorithm_label,
+                sample.length_bucket_label,
+                sample.effective_query_length,
+                sample.target_length,
+                sample.sample_latencies_ns.size(),
+                mean_ms);
+    }
 }
 
 }  // namespace bioseq::bench::HWY_NAMESPACE

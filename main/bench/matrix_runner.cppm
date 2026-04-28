@@ -93,7 +93,12 @@ enum class SequenceLengthBucket : uint8_t {
     SHORT     = 0,  ///< [0, 1000)        — typical Illumina read territory
     MEDIUM    = 1,  ///< [1000, 10000)    — moderately long reads / contigs
     LONG      = 2,  ///< [10000, 1000000) — PacBio / Nanopore
-    VERY_LONG = 3,  ///< [1000000, ...]   — assembly-to-assembly
+    VERY_LONG = 3,  ///< [1000000, 3M)    — assembly-to-assembly
+    XL        = 4,  ///< [5M, 15M)        — chromosome-scale assemblies
+                    ///<                    Used by the long-only iteration
+                    ///<                    bench to verify the user's stated
+                    ///<                    range (>1M, <20M); not part of the
+                    ///<                    default sweep.
 };
 
 [[nodiscard]] constexpr const char* sequence_length_bucket_name(SequenceLengthBucket bucket) {
@@ -102,6 +107,7 @@ enum class SequenceLengthBucket : uint8_t {
         case SequenceLengthBucket::MEDIUM:    return "medium (1k-10k)";
         case SequenceLengthBucket::LONG:      return "long (10k-1M)";
         case SequenceLengthBucket::VERY_LONG: return "very long (1M-3M)";
+        case SequenceLengthBucket::XL:        return "xl (5M-15M)";
     }
     return "unknown";
 }
@@ -394,6 +400,15 @@ namespace detail {
             params.reference_length       = 1'500'000;
             params.fragment_count         = 1;
             break;
+        case SequenceLengthBucket::XL:
+            // ~5 Mbp fragments out of a 7 Mbp reference — squarely in the
+            // user's stated >1 Mbp / <20 Mbp range. One pair per seed so the
+            // long-only iteration bench finishes in a few minutes per pass.
+            params.fragment_length_mean   = 5'000'000;
+            params.fragment_length_stddev = 100'000.0;
+            params.reference_length       = 7'000'000;
+            params.fragment_count         = 1;
+            break;
     }
 
     // Error rates and split between substitutions / insertions / deletions
@@ -489,7 +504,13 @@ namespace detail {
         case SequenceLengthBucket::SHORT:     return 8;
         case SequenceLengthBucket::MEDIUM:    return 5;
         case SequenceLengthBucket::LONG:      return 3;
-        case SequenceLengthBucket::VERY_LONG: return 1;
+        // VERY_LONG / XL — bumped from 1 to multiple samples so the
+        // per-pair mean has lower noise. With the per-seed-pair gap-fill
+        // optimisation in `align_regions`, both VERY_LONG and XL fit
+        // comfortably under the 600 s wall-clock budget at these sample
+        // counts.
+        case SequenceLengthBucket::VERY_LONG: return 3;
+        case SequenceLengthBucket::XL:        return 2;
     }
     return 1;
 }

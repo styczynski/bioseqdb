@@ -178,6 +178,17 @@ struct Minimap2Params {
     int32_t max_occ        = 500;    ///< max seed occurrence to keep
     int32_t mid_occ        = 500;    ///< mid-level seed occurrence threshold
 
+    /// Minimum gap length between consecutive seeds before invoking KSW2.
+    /// minimap2's `mm_align1` (align.c:815) skips KSW2 alignment when the gap
+    /// between consecutive seeds is below this threshold AND the seed is not
+    /// the last in the chain. Default 200 matches minimap2's `opt->min_ksw_len`.
+    /// Setting this to 0 forces a single KSW2 over the entire seed-to-seed
+    /// region, which is the legacy bioseq behaviour. The per-seed-pair gap
+    /// fill replaces a single 1Mbp×1Mbp DP with many ~200bp×~200bp DPs and
+    /// is the dominant speed-up for VERY_LONG sequences (~7× total improvement
+    /// at 903 kbp on the bench, see ENGINEERING_REPORT.md).
+    int32_t min_ksw_len    = 200;
+
     /// When true, perform base-level alignment via the selected aligner and
     /// produce CIGAR. Equivalent to MM_F_CIGAR flag in minimap2. Driven by
     /// whether bioseq.cigar(...) appears in the scan target list.
@@ -1308,38 +1319,77 @@ void align_regions(
             // (per-region "skip left extension" diagnostic removed —
             // see comment at top of mm_align_skeleton inner loop)
 
-            // === 2. Gap filling (entire region between first and last seed) ===
+            // === 2. Gap filling — per-seed-pair walk ===
+            //
+            // minimap2's `mm_align1` does NOT do a single KSW2 over the entire
+            // (seed_query_start, seed_ref_start) → (seed_query_end, seed_ref_end)
+            // span. Instead it walks the chain seed-by-seed and, for each
+            // consecutive pair, decides whether the gap is "long enough" to
+            // warrant a KSW2 invocation (see align.c:808-877).
+            //
+            //   * Last seed of the chain: always KSW2 (so the alignment reaches
+            //     the right boundary).
+            //   * Otherwise, only KSW2 when both query and reference gaps are
+            //     >= params.min_ksw_len (default 200).
+            //   * Seeds with smaller gaps are simply accumulated into the next
+            //     KSW2 call; the matched region of those seeds becomes part of
+            //     the larger DP.
+            //
+            // The bioseq legacy code did one giant 1Mbp×1Mbp KSW2 for the
+            // entire chain span, which is the dominant cost on VERY_LONG. With
+            // ~10k–50k seeds on a 1Mbp chain at CCS error rate, the per-seed
+            // walk turns a single 1.5G-cell DP into ~5k DPs of ~40k cells each
+            // (200M cells total), matching the ~7× ratio observed against
+            // minimap2 in V3. See ENGINEERING_REPORT.md.
             int32_t final_ref_end = seed_ref_start;
             int32_t final_query_end = seed_query_start;
             if (region.seed_count > 1) {
-                const int32_t gap_query_len = seed_query_end - seed_query_start;
-                const int32_t gap_target_len = seed_ref_end - seed_ref_start;
-                if (gap_query_len > 0 && gap_target_len > 0) {
-                    /*
-                     * constexpr-if dispatch — the template parameter is
-                     * resolved at compile time so no runtime branch lives
-                     * in the inner region loop. KSW2 handles dual-affine
-                     * gaps; block aligner is single-affine but Highway-
-                     * vectorised.
-                     */
+                int32_t qs = seed_query_start;
+                int32_t rs = seed_ref_start;
+                bool zdropped_any = false;
+                final_ref_end = seed_ref_start;
+                final_query_end = seed_query_start;
+                for (int32_t i = 1; i < region.seed_count; ++i) {
+                    const Anchor& cur_anchor = anchors[anchor_begin + i];
+                    const int32_t qe = static_cast<int32_t>(cur_anchor.query.query_position) + 1;
+                    const int32_t re = static_cast<int32_t>(cur_anchor.ref.ref_position) + 1;
+                    const bool is_last = (i == region.seed_count - 1);
+                    const int32_t gap_query = qe - qs;
+                    const int32_t gap_ref   = re - rs;
+                    if (!is_last
+                        && (gap_query < params.min_ksw_len
+                            || gap_ref < params.min_ksw_len))
+                    {
+                        // Gap too small to warrant a separate KSW2 invocation
+                        // — accumulate this seed into the next DP block.
+                        continue;
+                    }
+                    if (gap_query <= 0 || gap_ref <= 0) {
+                        // Degenerate: seeds overlap on this axis. Skip but
+                        // keep advancing rs/qs so we don't restart from an
+                        // earlier point on the next iteration.
+                        qs = qe;
+                        rs = re;
+                        continue;
+                    }
                     KswAlignResult fill_result;
                     if constexpr (base_alignment_algorithm == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
                         fill_result = block_aligner_align_pair<strand_reversed>(
                             query_seq, target_seq,
-                            static_cast<size_t>(seed_query_start),
-                            static_cast<size_t>(seed_query_end),
-                            static_cast<size_t>(seed_ref_start),
-                            static_cast<size_t>(seed_ref_end),
+                            static_cast<size_t>(qs),
+                            static_cast<size_t>(qe),
+                            static_cast<size_t>(rs),
+                            static_cast<size_t>(re),
                             scoring_matrix, params,
                             align_bandwidth, -1, params.zdrop,
                             KswFlags{.approx_max = true});
                     } else {
                         fill_result = ksw2_align_pair<strand_reversed>(
                             query_seq, target_seq,
-                            static_cast<size_t>(seed_query_start),
-                            static_cast<size_t>(seed_query_end),
-                            static_cast<size_t>(seed_ref_start),
-                            static_cast<size_t>(seed_ref_end),
+                            static_cast<size_t>(qs),
+                            static_cast<size_t>(qe),
+                            static_cast<size_t>(rs),
+                            static_cast<size_t>(re),
                             scoring_matrix, params,
                             align_bandwidth, -1, params.zdrop,
                             KswFlags{.approx_max = true});
@@ -1348,16 +1398,19 @@ void align_regions(
                         append_cigar(region.cigar, fill_result.cigar);
                     }
                     if (fill_result.zdropped) {
-                        final_ref_end = seed_ref_start + (fill_result.max_t + 1);
-                        final_query_end = seed_query_start + (fill_result.max_q + 1);
+                        final_ref_end = rs + (fill_result.max_t + 1);
+                        final_query_end = qs + (fill_result.max_q + 1);
                         region.dp_score += fill_result.max;
-                    } else {
-                        final_ref_end = seed_ref_end;
-                        final_query_end = seed_query_end;
-                        region.dp_score += fill_result.score;
+                        zdropped_any = true;
+                        break;
                     }
-                    prior_phase_zdropped = fill_result.zdropped;
+                    final_ref_end = re;
+                    final_query_end = qe;
+                    region.dp_score += fill_result.score;
+                    qs = qe;
+                    rs = re;
                 }
+                prior_phase_zdropped = zdropped_any;
             } else {
                 // (per-region "skip gap fill" diagnostic removed —
                 // see comment at top of mm_align_skeleton inner loop)
@@ -2222,11 +2275,18 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
     // (last_pos, kmer) pairs in the same order) — the kmers test suite
     // pins this contract. Branch is per-call (twice per minimap_port
     // invocation) so the runtime cost is negligible vs the sketch work.
+    //
+    // Reserve the collector's vector to the expected minimizer count
+    // (`N/w` plus a safety margin) so the per-window push_back doesn't
+    // chain through ~17 geometric reallocations on a 1 Mbp pair. The
+    // underlying minimap2 invariant is that ~one minimizer per `w`-wide
+    // window survives, so `seq.bp_size() / w + 64` is a tight bound.
     sketch_collector target_collector;
     {
         static const auto* _mm_sketch_target_desc =
             bioseq::instr::register_region_static("mm_sketch");
         auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
+        target_collector.reserve(target_seq.bp_size() / std::max<size_t>(w, 1) + 64);
         if (params.minimizer_algorithm == MinimizerAlgorithmType::SIMD) {
             collect_minimizers_simd<minimap_int_hasher>(
                 target_collector, target_seq,
@@ -2248,6 +2308,7 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         static const auto* _mm_sketch_query_desc =
             bioseq::instr::register_region_static("mm_sketch");
         auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
+        query_collector.reserve(query_seq.bp_size() / std::max<size_t>(w, 1) + 64);
         if (params.minimizer_algorithm == MinimizerAlgorithmType::SIMD) {
             collect_minimizers_simd<minimap_int_hasher>(
                 query_collector, query_seq,

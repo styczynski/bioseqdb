@@ -78,6 +78,15 @@ if has_token bench; then
     ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
 fi
 
+if has_token bench-long; then
+    # Quick iteration sweep — runs only LONG / VERY_LONG buckets for the three
+    # optimisation-target configs (minimap2 DP, bioseq scalar, bioseq SIMD).
+    # Defined in bench_test.cpp under tag [.quick-long-sequence-benchmark].
+    BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-long.json}" \
+        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
+        "[.quick-long-sequence-benchmark]"
+fi
+
 if has_token lol; then
     ./bioseq/bioseq_aligner_tests_exec --reporter console::out=-::colour-mode=ansi "[lol]"
 fi

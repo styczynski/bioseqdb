@@ -152,6 +152,7 @@ namespace detail {
         case SequenceLengthBucket::MEDIUM:    return "medium";
         case SequenceLengthBucket::LONG:      return "long";
         case SequenceLengthBucket::VERY_LONG: return "very_long";
+        case SequenceLengthBucket::XL:        return "xl";
     }
     return "?";
 }

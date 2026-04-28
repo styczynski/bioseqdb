@@ -41,10 +41,25 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::bench::HWY_NAMESPACE {
 
-/// Alphabet config used by the benchmark pipeline — dna4 packed into
-/// uint64_t storage units, matching what `minimap_port` receives from
-/// the aligner binary today.
-using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint64_t>;
+/// Alphabet config used by the benchmark pipeline.
+///
+/// Originally `sequence_custom_alphabet<seq::dna4, uint64_t>` (32 letters
+/// per uint64_t). Switched to `uint32_t` storage (16 letters per uint32_t):
+///
+/// 1. `unit_leftover_bits == 0` for both — bit-packed encoding stays the
+///    same, V3 unit-aligned `to_encoded_into` fast path stays in scope.
+/// 2. `hn::ScalableTag<uint32_t>` gives 4 lanes per 128-bit vector instead
+///    of 2 for uint64_t. The `mm_sketch_simd` rolling-window kernel runs
+///    4× independent streams instead of 2×, halving the iteration count.
+/// 3. `uint32_t` is wide enough to hold the 30-bit k-mer hash for k ≤ 15
+///    (default minimap2 `map-ont` preset), so the templated hash inside
+///    `simd_hash<storage_unit, dd_t>` stays correct without overrides.
+///    For larger k a uint64_t hash override would be needed; not in scope
+///    for the long-sequence bench.
+///
+/// Memory footprint per 1 Mbp sequence is unchanged (250 kB in either
+/// layout — 8 bits per pair stored, just at different word granularity).
+using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint32_t>;
 using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 
 /**
