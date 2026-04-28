@@ -68,6 +68,11 @@ import bioseq_sequences.minimap_port;
 import bench.tool_minimap2;
 import bench.generator;
 import bench.evaluation;
+import bioseq_instr;
+import bioseq_instr.config;
+import bioseq_instr.descriptor;
+import bioseq_instr.aggregate;
+import bioseq_instr.thread_state;
 
 export {
 
@@ -238,6 +243,16 @@ struct BenchSample {
     bool produced_primary = false;
     int  primary_mapq     = 0;
     int  position_offset_bp = 0;
+
+    /// Per-pipeline-phase mean nanoseconds per timed sample. Populated by
+    /// snapshotting the persistent profiler aggregates (`mm_sketch`,
+    /// `mg_lchain_*`, `mm_align_skeleton`, etc.) before and after the timed
+    /// sample loop and dividing the delta by `sample_latencies_ns.size()`.
+    /// First element is the phase descriptor name (matches the
+    /// `register_region_static` literal in the source); second is the mean
+    /// ns per sample for that phase. Empty when no timed samples were
+    /// captured (e.g. the per-pair budget tripped or an exception fired).
+    std::vector<std::pair<std::string, double>> phase_mean_ns_per_sample;
 };
 
 /**
@@ -574,6 +589,29 @@ inline void run_one_pair_samples(
     record.strand_correct    = produced_primary &&
         primary_is_reverse == pair.is_reverse;
 
+    // ---- Snapshot per-phase aggregates before the timed loop. ----
+    // The persistent profiler block accumulates region totals across the
+    // entire bench run, so per-pair phase totals are computed as the
+    // (after - before) delta around the timed loop. We deliberately
+    // exclude the warm-up above (its allocator-cold sample is what
+    // pollutes the percentile estimates and we treat it the same way for
+    // phase accounting). The snapshot type matches the bench's
+    // `args_t = context_args_profiling_timing_only` so the tls_profiler
+    // pointer the bench installed at TEST_CASE start lines up.
+    using phase_args_t = bioseq::instr::context_args_profiling_timing_only;
+    auto& phase_prof = bioseq::instr::persistent_profiler_block<phase_args_t>();
+    const std::uint32_t phase_descriptor_count =
+        bioseq::instr::descriptor_count();
+    std::vector<std::uint64_t> phase_baseline_ns(phase_descriptor_count + 1, 0);
+    for (std::uint32_t id = 1; id <= phase_descriptor_count; ++id) {
+        if (auto* la = phase_prof.loop_aggregates.try_get(id)) {
+            phase_baseline_ns[id] += la->total_ns;
+        }
+        if (auto* ra = phase_prof.aggregates.try_get(id)) {
+            phase_baseline_ns[id] += ra->total_ns;
+        }
+    }
+
     // ---- Timed sample loop ----
     for (std::size_t sample_index = 0; sample_index < n_samples; ++sample_index) {
         const auto rss_baseline = current_resident_bytes();
@@ -598,6 +636,38 @@ inline void run_one_pair_samples(
         // delta is still subject to allocator round-trips.
         record.sample_peak_rss_delta_bytes.push_back(
             rss_delta_bytes > 0 ? static_cast<double>(rss_delta_bytes) : 0.0);
+    }
+
+    // ---- Snapshot per-phase aggregates after the timed loop. ----
+    // The mean phase ns per sample is the delta divided by sample count.
+    // We only record phases that registered any time during this loop
+    // (delta > 0); idle phases stay out of the JSON so the chart layer
+    // doesn't render zero-height bars. Phase names are taken from the
+    // descriptor's `name` field exactly as registered in
+    // `register_region_static("...")` so the chart legend matches the
+    // existing instrumentation summary tables.
+    if (!record.sample_latencies_ns.empty()) {
+        const double samples_d =
+            static_cast<double>(record.sample_latencies_ns.size());
+        record.phase_mean_ns_per_sample.reserve(16);
+        for (std::uint32_t id = 1; id <= phase_descriptor_count; ++id) {
+            std::uint64_t after_ns = 0;
+            if (auto* la = phase_prof.loop_aggregates.try_get(id)) {
+                after_ns += la->total_ns;
+            }
+            if (auto* ra = phase_prof.aggregates.try_get(id)) {
+                after_ns += ra->total_ns;
+            }
+            if (after_ns <= phase_baseline_ns[id]) {
+                continue;
+            }
+            const std::uint64_t delta_ns = after_ns - phase_baseline_ns[id];
+            const auto* desc = bioseq::instr::descriptor_lookup(id);
+            if (desc == nullptr || desc->name == nullptr) continue;
+            record.phase_mean_ns_per_sample.emplace_back(
+                std::string{desc->name},
+                static_cast<double>(delta_ns) / samples_d);
+        }
     }
 }
 

@@ -111,6 +111,14 @@ public:
 			return base_hasher.get_palindrome_mask(d);
 		}
 
+		// Same forwarding rationale as get_palindrome_mask: the integer scramble is
+		// applied to whichever of (forward, reverse_complement) the base hasher's
+		// `Min` selected, so the per-lane strand decision is determined entirely by
+		// the lexic state.
+		[[nodiscard]] constexpr hn::Mask<d_t> get_strand_mask(const d_t& d) const {
+			return base_hasher.get_strand_mask(d);
+		}
+
 
 	};
 

@@ -395,11 +395,28 @@ inline void collect_minimizers_simd(
 	using hash_vec_t = hn::Vec<outp_d_t>;
 	using hash_mask_t = hn::Mask<outp_d_t>;
 	circular_append_buffer<hash_vec_t, 256, HWY_MAX_BYTES> buffer(w);
+	// Parallel buffer holding the per-lane strand bit (0=forward, 1=reverse-complement)
+	// for the same slot the hash buffer above stores. The previous SIMD
+	// implementation always emitted strand=0 because the simd hasher's `next()` only
+	// returned `min(forward, rc)` without revealing which one was selected. Once seed
+	// hits in `collect_seed_hits` go through `(target_strand == query_strand) ? FWD : RC`,
+	// hardcoded strand=0 collapses ~50% of seed hits onto the wrong orientation —
+	// reproducing the ~50% accuracy drop observed for SIMD-mm in the bench. We now
+	// derive strand per lane via `hasher.get_strand_mask(d)` and carry it through the
+	// rolling-window state alongside the hash so the rescan path can recover the
+	// strand of an arbitrary buffer slot too.
+	circular_append_buffer<hash_vec_t, 256, HWY_MAX_BYTES> strand_buffer(w);
 
 	constexpr auto max_val = static_cast<seq_traits::storage_unit>(-1);
 	const hash_vec_t max_vec = hn::Set(dd, max_val);
+	const hash_vec_t one_vec = hn::Set(dd, static_cast<storage_unit>(1));
+	const hash_vec_t zero_vec = hn::Zero(dd);
 	hash_vec_t current_min = hn::Set(dd, max_val);
 	hash_vec_t current_min_pos = hn::Set(dd, static_cast<storage_unit>(buffer.get_begin()));
+	// Strand of the per-lane current_min. Mirrors the IfThenElse cascade applied to
+	// `current_min` so the two never go out of sync. Initial value doesn't matter
+	// (the emit guard `temp_buffer1[i] != max_val` skips the sentinel anyway).
+	hash_vec_t current_min_strand = zero_vec;
 
 	size_t output_size = 0;
 	HWY_ALIGN storage_unit output_vals[256];
@@ -408,14 +425,30 @@ inline void collect_minimizers_simd(
 	HWY_ALIGN storage_unit temp_buffer1[32];
 	HWY_ALIGN storage_unit temp_buffer2[32];
     HWY_ALIGN storage_unit temp_buffer3[32];
+    HWY_ALIGN storage_unit temp_buffer4[32];
     size_t last_pushed_position = 0;
 
-    auto submit_results = [&]<bool ignore_distance>(const dd_t& d, auto const& offsets, const size_t distance, const hash_mask_t& min_mask){
+    // submit_results emits one MinimapSketch per lane in `min_mask`, drawing the
+    // hash from `current_min` and the strand from `strand_to_emit` (which lets the
+    // duplicate-hash buffer-walk paths emit the per-slot strand instead of the
+    // current_min's strand). Most call sites pass `current_min_strand`; the
+    // first-window and rescan duplicate-emit paths pass the strand stored at the
+    // matching buffer slot — exactly mirroring the scalar `collector.collect(el)`
+    // behaviour where the buffer slot's full sketch (including its own strand) is
+    // emitted, not the running current_min's strand.
+    auto submit_results = [&]<bool ignore_distance>(
+        const dd_t& d,
+        auto const& offsets,
+        const size_t distance,
+        const hash_mask_t& min_mask,
+        const hash_vec_t& strand_to_emit
+    ){
         hn::StoreU(current_min, d, temp_buffer1);
         hn::StoreU(hn::VecFromMask(d, min_mask), d, temp_buffer2);
         if constexpr (ignore_distance) {
             hn::StoreU(current_min_pos, d, temp_buffer3);
         }
+        hn::StoreU(strand_to_emit, d, temp_buffer4);
         for(size_t i=0; i<hn::Lanes(d); ++i) {
             // Skip lanes whose current_min was reset to max_val by a prior emit (mask
             // transition emit in particular). Without this, once a lane's "final" min
@@ -423,6 +456,12 @@ inline void collect_minimizers_simd(
             // finish_fn tail emit) would publish (real_pos, max_val) as a phantom pair
             // whose hash is the sentinel.
             if (temp_buffer2[i] && temp_buffer1[i] != max_val) {
+                // Strand stored as a per-lane storage_unit (0 or 1). The MinimapSketch
+                // bitfield `strand: 1` truncates anything wider, so an explicit `& 1`
+                // is not required, but we mask defensively in case future code paths
+                // ever stash anything other than 0/1 in the strand lane.
+                const uint64_t strand_bit =
+                    static_cast<uint64_t>(temp_buffer4[i]) & 0x1ULL;
                 if constexpr (ignore_distance) {
                     // The current_min for lane `i` was stored at buffer slot `temp_buffer3[i]` in a
                     // PREVIOUS iteration. `current_pos` is the slot just written in THIS iteration.
@@ -442,7 +481,7 @@ inline void collect_minimizers_simd(
                                 .span = k,
                                 .rid = 0,
                                 .last_pos = real_pos,
-                                .strand = 0,
+                                .strand = strand_bit,
                             } }
                         })));
                         last_pushed_position = real_pos;
@@ -456,7 +495,7 @@ inline void collect_minimizers_simd(
                                 .span = k,
                                 .rid = 0,
                                 .last_pos = real_pos,
-                                .strand = 0,
+                                .strand = strand_bit,
                             } }
                         })));
                         last_pushed_position = real_pos;
@@ -490,11 +529,23 @@ inline void collect_minimizers_simd(
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
         //JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
 
+		// Per-lane strand (1 = reverse-complement chosen, 0 = forward chosen).
+		// Captured BEFORE the palindrome / out-of-range masks rewrite the hash to
+		// max_val so the strand snapshot stays in sync with whichever state the
+		// hasher's `Min` selected this iteration. Dead lanes (mask false) and
+		// palindromic lanes will have their strand re-zeroed by IfThenElse below
+		// for tidy state, but the only lane-state that ever reaches an emit is
+		// gated on `temp_buffer1[i] != max_val` so the dead-lane strand never
+		// matters in practice.
+		const hash_mask_t strand_mask = hasher.get_strand_mask(d);
+		hash_vec_t strand_vec = hn::IfThenElse(strand_mask, one_vec, zero_vec);
+
 		// Mask off lanes that are no longer iterating over valid sequence bytes (partial-matrix tail
 		// past the sequence end). Without this, the lane hasher still processes padding bytes and
 		// feeds their garbage hashes into `new_min_mask` / `current_min` via later Le checks —
 		// producing phantom minimizers at positions beyond `seq.bp_size()`.
 		hash_vec = hn::IfThenElse(mask, hash_vec, max_vec);
+		strand_vec = hn::IfThenElse(mask, strand_vec, zero_vec);
 		// Also mask palindromic k-mers (lanes where state_forward == state_reverse_compl).
 		// The scalar path pushes `MinimapSketch::getMax()` for EQUAL strand to mirror
 		// minimap2's palindrome skip while keeping pos alignment (see comment in
@@ -503,6 +554,7 @@ inline void collect_minimizers_simd(
 		// (uint8_t) where the effective k-mer is short enough that palindromic 2/4-mers
 		// appear frequently in the test sequences.
 		hash_vec = hn::IfThenElse(hasher.get_palindrome_mask(d), max_vec, hash_vec);
+		strand_vec = hn::IfThenElse(hasher.get_palindrome_mask(d), zero_vec, strand_vec);
 
 		// The scalar collect_minimizers increments its `pos` BEFORE this push check (so its first
 		// real k-mer is pushed at scalar-iter `k - 1`, where the hasher holds chars[0..k-1]).
@@ -513,8 +565,10 @@ inline void collect_minimizers_simd(
 		// below (`w + k - 2`, `w + k - 1`) are shifted by the same -1 for the same reason.
 		if ((pos >= k - 1 || !IS_INIT)) {
 			buffer.push_back(std::move(hash_vec));
+			strand_buffer.push_back(std::move(strand_vec));
 		} else {
 			buffer.push_back(std::move(hash_vec_t(max_vec)));
+			strand_buffer.push_back(std::move(hash_vec_t(zero_vec)));
 		}
 
 		// Flush pending current_min for lanes that just became inactive. Equivalent to the
@@ -533,9 +587,12 @@ inline void collect_minimizers_simd(
 		// subsequent-iteration logic nor finish_fn re-emits the same pair.
 		hash_mask_t just_masked = hn::And(prev_mask, hn::Not(mask));
 		if (!hn::AllFalse(d, just_masked)) {
-			submit_results.template operator()<true>(d, offsets, 0, just_masked);
+			submit_results.template operator()<true>(d, offsets, 0, just_masked, current_min_strand);
 			current_min = hn::IfThenElse(just_masked, max_vec, current_min);
 			current_min_pos = hn::IfThenElse(just_masked, hn::Set(d, static_cast<storage_unit>(buffer.last_write_pos())), current_min_pos);
+			// Reset the strand alongside the hash so a subsequent emit on this lane
+			// can't read a stale strand from before the lane went inactive.
+			current_min_strand = hn::IfThenElse(just_masked, zero_vec, current_min_strand);
 		}
 		prev_mask = mask;
 
@@ -562,7 +619,10 @@ inline void collect_minimizers_simd(
 				// Check if hash is the same, but position different
 				hash_mask_t values_to_append_mask = hn::And(offset_zero_mask, hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos)));
 				if (!hn::AllFalse(d, values_to_append_mask)) {
-                    submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask);
+                    // Emit the slot's own strand (mirrors scalar's `collector.collect(el)`
+                    // which collects the buffer slot including its own strand bit, not
+                    // the running current_min's strand).
+                    submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask, strand_buffer.get_value_iter(index));
 				}
 			});
 		}
@@ -594,7 +654,7 @@ inline void collect_minimizers_simd(
 
 		// Push current min
 		if (need_to_push_current_min) [[unlikely]] {
-            submit_results.template operator()<true>(d, offsets, 0, new_min_mask);
+            submit_results.template operator()<true>(d, offsets, 0, new_min_mask, current_min_strand);
 		}
 
 		// Always apply the "new min arrived" update to every lane whose new_min_mask
@@ -606,11 +666,15 @@ inline void collect_minimizers_simd(
 		// and the elapsed-lane rescan below touch disjoint sets of lanes.
 		current_min_pos = hn::IfThenElse(new_min_mask, new_min_pos_val, current_min_pos);
 		current_min = hn::IfThenElse(new_min_mask, buffer.last(), current_min);
+		// Strand follows the same IfThenElse cascade as the hash so the per-lane
+		// (kmer, strand) pair stays consistent. The strand snapshot for THIS slot
+		// was just stored in `strand_buffer.last()` above.
+		current_min_strand = hn::IfThenElse(new_min_mask, strand_buffer.last(), current_min_strand);
 
 		if (need_to_rescan) [[unlikely]] {
 
             if ((pos >= w + k - 2 || !IS_INIT)) {
-                submit_results.template operator()<false>(d, offsets, buffer.capacity(), has_elapsed_min);
+                submit_results.template operator()<false>(d, offsets, buffer.capacity(), has_elapsed_min, current_min_strand);
             }
 
 			// Only reset current_min for lanes that need rescanning. Masked or non-elapsed
@@ -620,11 +684,23 @@ inline void collect_minimizers_simd(
 			// still-valid current_min in a masked (padding-only) lane by running it
 			// through the max_vec-reset-and-rescan sequence below.
 			current_min = hn::IfThenElse(has_elapsed_min, max_vec, current_min);
+			// Walk both buffers in lockstep — the strand at slot `index` lives at
+			// `strand_buffer.get_value_iter(index)`, which is exposed via the same
+			// `unsafe_filled_for_each` callback shape on the dual buffer below.
+			// Keep the existing `unsafe_filled_for_each` over `buffer` as the
+			// driver for slot indices and just look up the strand by the same
+			// `index` so we reuse the cache-hot pass.
 			buffer.unsafe_filled_for_each([&](const auto& index, const auto& el, const auto& _distance) {
 				hash_mask_t rescan_new_mask = hn::And(has_elapsed_min, hn::Le(el, current_min));
 				hash_vec_t new_min_pos_val = hn::Set(d, static_cast<storage_unit>(index));
 				current_min_pos = hn::IfThenElse(rescan_new_mask, new_min_pos_val, current_min_pos);
 				current_min = hn::IfThenElse(rescan_new_mask, el, current_min);
+				// Pull the strand for slot `index` from the parallel buffer so the
+				// rescan's recovered current_min has the matching strand attached.
+				current_min_strand = hn::IfThenElse(
+					rescan_new_mask,
+					strand_buffer.get_value_iter(index),
+					current_min_strand);
 			});
             if ((pos >= w + k - 2 || !IS_INIT)) {
                 // Need to push any value equal to new min
@@ -634,7 +710,10 @@ inline void collect_minimizers_simd(
                     // equals emitted.
                     hash_mask_t values_to_append_mask = hn::And(has_elapsed_min, hn::And(hn::Eq(el, current_min), hn::Ne(hn::Set(d, static_cast<storage_unit>(index)), current_min_pos)));
                     if (!hn::AllFalse(d, values_to_append_mask)) {
-                        submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask);
+                        // Emit the slot's own strand (same rationale as the first-window
+                        // duplicate-emit above — scalar's `collector.collect(el)` carries
+                        // the slot's strand, not the rescan's recovered current_min strand).
+                        submit_results.template operator()<false>(d, offsets, distance, values_to_append_mask, strand_buffer.get_value_iter(index));
                     }
                 });
             }
@@ -662,11 +741,11 @@ inline void collect_minimizers_simd(
         //     because the lane never had a new-min flip in the last iter).
         hash_mask_t just_set_mask = hn::And(last_lane_mask, prev_new_min_mask);
         if (!hn::AllFalse(d, just_set_mask)) {
-            submit_results.template operator()<false>(d, offsets, 0, just_set_mask);
+            submit_results.template operator()<false>(d, offsets, 0, just_set_mask, current_min_strand);
         }
         hash_mask_t older_mask = hn::And(last_lane_mask, hn::Not(prev_new_min_mask));
         if (!hn::AllFalse(d, older_mask)) {
-            submit_results.template operator()<true>(d, offsets, 0, older_mask);
+            submit_results.template operator()<true>(d, offsets, 0, older_mask, current_min_strand);
         }
     }, 0); //k-1);
 

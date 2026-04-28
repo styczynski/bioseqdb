@@ -132,6 +132,16 @@ public:
 			return hn::Eq(state_forward, state_reverse_compl);
 		}
 
+		// Returns per-lane mask where `true` means the reverse-complement state is the
+		// minimum (so `min(forward, rc)` chose the rc — strand=1 / SEQUENCE_STRAND_REVERSE_COMPLEMENT)
+		// and `false` means the forward state was the minimum (strand=0 / SEQUENCE_STRAND_FORWARD).
+		// Mirrors `select_min_hash_strand`'s `forward < reverse_complement ? FORWARD : REVERSE_COMPLEMENT`
+		// classification — palindromic lanes (forward == reverse_complement) report `false` here but
+		// the caller separately masks them out via `get_palindrome_mask` and pushes a sentinel hash.
+		[[nodiscard]] constexpr hn::Mask<d_t> get_strand_mask(const d_t& d) const {
+			return hn::Lt(state_reverse_compl, state_forward);
+		}
+
 
 	};
 

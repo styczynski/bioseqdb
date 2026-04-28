@@ -64,11 +64,27 @@ public:
         return iterator(0);
     }
 
-    [[always_inline]] [[nodiscard]] constexpr T& get_value_iter(const iterator& iter) const {
+    // Const overload returns a const ref so callers like `collect_minimizers_simd`'s
+    // strand-buffer lookup can read a slot without dropping the const qualifier on
+    // T. The previous unified accessor returned `T&` from a `const` method which
+    // silently passed the type-system check only when T was implicitly convertible
+    // (e.g. integral types). For Highway `Vec<D>` instantiations the compiler
+    // correctly diagnoses the const-violation and refuses to build, so the
+    // accessor is split here. Mutating callers fall through to the second
+    // overload.
+    [[always_inline]] [[nodiscard]] constexpr const T& get_value_iter(const iterator& iter) const {
         return _buffer[iter];
     }
 
-    [[always_inline]] [[nodiscard]] constexpr T* get_ptr_iter(const iterator& iter) const {
+    [[always_inline]] [[nodiscard]] constexpr T& get_value_iter(const iterator& iter) {
+        return _buffer[iter];
+    }
+
+    [[always_inline]] [[nodiscard]] constexpr const T* get_ptr_iter(const iterator& iter) const {
+        return &_buffer[iter];
+    }
+
+    [[always_inline]] [[nodiscard]] constexpr T* get_ptr_iter(const iterator& iter) {
         return &_buffer[iter];
     }
 

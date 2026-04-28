@@ -1773,6 +1773,215 @@ inline void emit_report(JsonWriter& writer) {
         });
 
     // ================================================================
+    // Chart 16.5: per-phase pipeline-time breakdown.
+    //
+    // Stacked bar chart, one chart per length_bucket. X axis lists the
+    // bioseq algorithm configurations (the C minimap2 reference rows are
+    // intentionally skipped — minimap2's instrumentation aggregates aren't
+    // attributed via our `register_region_static` API and would render as
+    // a single "minimap2 (DP chaining)" total without phase decomposition).
+    // Y axis is the mean wall-clock per timed sample in milliseconds, with
+    // each bar stacked by pipeline phase (`mm_sketch`, `target_index_build`,
+    // `collect_seed_hits`, `mg_lchain_*`, `mm_align_skeleton`, `mm_set_mapq`,
+    // etc.). The visual answers "for THIS algorithm at THIS length, where
+    // does the wall-clock time go?" — and is the primary chart to consult
+    // when triaging "long sequences are slow" reports. The phase totals
+    // come from `BenchSample::phase_mean_ns_per_sample`, which is filled
+    // by snapshotting the persistent profiler block before/after the
+    // timed sample loop in `matrix_runner.cppm`.
+    // ================================================================
+    {
+        auto emit_phase_breakdown_chart = [&](
+            std::string_view chart_id,
+            std::string_view long_description_extra,
+            SequenceLengthBucket bucket)
+        {
+            const std::string chart_title = fmt::format(
+                "Pipeline phase breakdown — {} sequences",
+                sequence_length_bucket_name(bucket));
+            const std::string short_desc = fmt::format(
+                "Per-pipeline-phase mean ns per timed sample, stacked, for "
+                "every bioseq config in the {} length bucket",
+                sequence_length_bucket_name(bucket));
+            const std::string long_desc = fmt::format(
+                "Stacked bar chart with one X-axis category per bioseq "
+                "algorithm config (minimap2 reference rows omitted — their "
+                "instrumentation aggregates are not attributed by phase). "
+                "Each stack segment is a pipeline phase ({}, {}, {}, {}, "
+                "{}, ... — taken from the `register_region_static` literals "
+                "in the source) and its height is the mean ns per timed "
+                "sample for that phase, averaged across every pair in the "
+                "{} length bucket. Total bar height ≈ end-to-end mean "
+                "latency for that config. Use this chart first when "
+                "investigating 'why is bioseq slow on {}-length inputs?': "
+                "the dominant segment is the bottleneck. {}",
+                "mm_sketch", "target_index_build", "collect_seed_hits",
+                "mg_lchain_*", "mm_align_skeleton",
+                sequence_length_bucket_name(bucket),
+                sequence_length_bucket_name(bucket),
+                long_description_extra);
+
+            emit_chart(chart_id, short_desc, long_desc, [&]() {
+                // Pivot the samples to (algorithm, phase) → list of mean ns.
+                // Algorithms get sorted in the same order as `algorithm_labels`
+                // for legend continuity with the rest of the report.
+                std::vector<std::string> algos;
+                for (const auto& algorithm_label : algorithm_labels) {
+                    bool any_for_bucket = false;
+                    bool is_minimap2 = false;
+                    for (const auto& s : samples) {
+                        if (s.algorithm_label != algorithm_label) continue;
+                        if (s.length_bucket != bucket) continue;
+                        if (!s.phase_mean_ns_per_sample.empty()) {
+                            any_for_bucket = true;
+                        }
+                        if (s.algorithm_kind == "minimap2") {
+                            is_minimap2 = true;
+                        }
+                    }
+                    // Skip configs that produced no phase data on this
+                    // bucket (e.g. minimap2 reference rows whose C-side
+                    // regions don't go through our `register_region_static`
+                    // API, or configs that hit the per-call budget skip).
+                    if (!any_for_bucket || is_minimap2) continue;
+                    algos.push_back(algorithm_label);
+                }
+
+                // The aggregate snapshot includes the outer "wrapper" regions
+                // (`minimap_port`, `minimap2_port`, `minimap2_port_with_index`)
+                // and the "sub-region" decomposition of bigger phases
+                // (`target_index_lookup`, `collect_seed_hits_sort`,
+                // `mg_lchain_dp_forward`, etc.) — naively stacking all of
+                // them double-counts time, because a wrapper's `total_ns`
+                // already covers its children. Restrict to a hand-picked
+                // set of leaf-level phase names that approximate disjoint
+                // time slices of one minimap_port call. The set covers
+                // ~all observed wall-clock; phases not listed here either
+                // double-count an ancestor or are too small to show as a
+                // legible stack segment.
+                static const std::vector<std::string_view> kLeafPhases = {
+                    // Sketching: scalar (`mm_sketch`) and SIMD (`mm_sketch_simd`)
+                    // are mutually exclusive per call — only one fires per
+                    // (target/query) sketch — so summing in the chart works.
+                    "mm_sketch",
+                    "mm_sketch_simd",
+                    // Index construction (target side).
+                    "target_index_build",
+                    // Anchor seeding (covers the per-minimizer hash lookup
+                    // loop and the post-loop sort).
+                    "collect_seed_hits",
+                    // Chaining variants: only one of these fires per call,
+                    // determined by `Minimap2Params::chaining_algorithm`.
+                    "mg_lchain_dp",
+                    "mg_lchain_rmq",
+                    "mg_lchain_simd",
+                    // Region generation + classification + filtering.
+                    "mm_gen_regs",
+                    "mm_set_parent",
+                    "mm_select_sub",
+                    // Divergence estimation (gated on
+                    // `Minimap2Params::compute_divergence`; off for some
+                    // configs so the segment will be missing).
+                    "mm_est_err",
+                    // Base-level alignment.
+                    "mm_align_skeleton",
+                    // MAPQ.
+                    "mm_set_mapq",
+                };
+
+                // Discover the union of leaf phase names that actually fired
+                // on this bucket. Iteration order matches `kLeafPhases` so
+                // the stack reads bottom-up in pipeline order (sketch first,
+                // then index, then seeding, ..., then mapq).
+                std::vector<std::string> phase_names;
+                for (const auto& candidate : kLeafPhases) {
+                    bool fired = false;
+                    for (const auto& algorithm_label : algos) {
+                        if (fired) break;
+                        for (const auto& s : samples) {
+                            if (s.algorithm_label != algorithm_label) continue;
+                            if (s.length_bucket != bucket) continue;
+                            for (const auto& [name, ns] : s.phase_mean_ns_per_sample) {
+                                if (name == candidate) { fired = true; break; }
+                            }
+                            if (fired) break;
+                        }
+                    }
+                    if (fired) phase_names.emplace_back(candidate);
+                }
+
+                writer.key("data");
+                writer.begin_array();
+                // One trace per phase. Each trace is a bar going across
+                // every algorithm on the X axis. Bars stack via
+                // `barmode="stack"` in the layout block below.
+                for (const auto& phase : phase_names) {
+                    std::vector<double> ms_per_algo;
+                    ms_per_algo.reserve(algos.size());
+                    for (const auto& algorithm_label : algos) {
+                        // Mean across pairs (each pair contributed one
+                        // mean-ns-per-sample reading via the snapshot in
+                        // matrix_runner). Empty pair means "no time"; skip
+                        // and treat as zero — the stack just doesn't grow
+                        // on that segment for that algo.
+                        double sum_ns = 0.0;
+                        std::size_t count = 0;
+                        for (const auto& s : samples) {
+                            if (s.algorithm_label != algorithm_label) continue;
+                            if (s.length_bucket != bucket) continue;
+                            for (const auto& [name, ns] : s.phase_mean_ns_per_sample) {
+                                if (name == phase) {
+                                    sum_ns += ns;
+                                    ++count;
+                                    break;
+                                }
+                            }
+                        }
+                        ms_per_algo.push_back(count == 0 ? 0.0
+                            : (sum_ns / static_cast<double>(count)) / 1e6);
+                    }
+                    writer.begin_object();
+                    writer.kv_string("type", "bar");
+                    writer.kv_string("name", phase);
+                    writer.kv_string_array("x", algos);
+                    writer.kv_double_array("y", ms_per_algo);
+                    writer.end_object();
+                }
+                writer.end_array();
+                emit_layout(
+                    chart_title,
+                    "algorithm config", false,
+                    "mean wall-clock ms per sample (stacked by phase)", false,
+                    "stack");
+            });
+        };
+        emit_phase_breakdown_chart("phase_breakdown_short",
+            "Short sequences (<1kb) — the alignment phase tends to be "
+            "negligible here; bottlenecks usually surface in seed-hit "
+            "collection and chaining setup.",
+            SequenceLengthBucket::SHORT);
+        emit_phase_breakdown_chart("phase_breakdown_medium",
+            "Medium sequences (1k-10k) — the working point most "
+            "long-read benchmarks publish in. Sketching and chaining "
+            "should dominate; if `mm_align_skeleton` is the tallest "
+            "segment, the base aligner is a candidate for tuning.",
+            SequenceLengthBucket::MEDIUM);
+        emit_phase_breakdown_chart("phase_breakdown_long",
+            "Long sequences (10k-1M) — `mm_align_skeleton` typically "
+            "moves into the dominant slot. Compare KSW2 vs Block "
+            "aligner stacks to see whether the align phase or the "
+            "chaining phase explains the gap to minimap2.",
+            SequenceLengthBucket::LONG);
+        emit_phase_breakdown_chart("phase_breakdown_very_long",
+            "Very long sequences (1M-3M) — for assembly-to-assembly "
+            "pairs. Even the cheapest phase blows up here; the "
+            "stacked breakdown reveals whether the slowdown is the "
+            "alignment, the chain DP, or the per-sketch hashing "
+            "amortising poorly across millions of bases.",
+            SequenceLengthBucket::VERY_LONG);
+    }
+
+    // ================================================================
     // Chart 17: per-algorithm summary table — counts, mean ms, median
     // ms, P99 ms, accuracy. Plotly `table` trace renders this as a
     // grid in the report.
