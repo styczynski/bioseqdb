@@ -10,7 +10,8 @@ set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version
 # Find packages go here.
 find_package(
   PostgreSQL ${POSTGRESQL_VERSION} REQUIRED
-  #PATHS "/Applications/Postgres.app/Contents/Versions/latest"
+  PATHS "/Applications/Postgres.app/Contents/Versions/latest"
+  # PATHS "/usr/local/opt/postgresql@18"
 )
 
 # Helper command to add extensions

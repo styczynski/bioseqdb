@@ -136,7 +136,7 @@ if(PostgreSQL_FOUND)
   if (NOT TARGET PostgreSQL::PostgreSQL)
     add_library(PostgreSQL::PostgreSQL UNKNOWN IMPORTED)
   endif()
-  
+
   # The RELEASE variant should be listed first in the property so that the variant is chosen
   # if the user uses a configuration which is not an exact match for any listed IMPORTED_CONFIGURATIONS.
   if (PostgreSQL_LIBRARY_RELEASE)
@@ -182,7 +182,7 @@ mark_as_advanced(
 # _INCLUDE_DIRS     ?
 # _CFLAGS           ?
 # _CFLAGS_OTHER     required non-include-dir CFLAGS to stdout
-# 
+#
 # _VERSION          full version of found package
 # _PREFIX           ?
 # _INCLUDEDIR       ?

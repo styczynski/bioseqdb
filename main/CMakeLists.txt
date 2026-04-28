@@ -21,20 +21,24 @@
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
 
-set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
-set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
+# Change this:
+set(CMAKE_NAMED_ENV_TYPE "W") # suppported: "W", "H"
 
-#set(CMAKE_C_COMPILER /usr/local/opt/llvm@21/bin/clang)
-#set(CMAKE_CXX_COMPILER /usr/local/opt/llvm@21/bin/clang++)
+if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
+  set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
+  set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
+  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "W")
+  set(CMAKE_C_COMPILER /usr/local/opt/llvm@21/bin/clang)
+  set(CMAKE_CXX_COMPILER /usr/local/opt/llvm@21/bin/clang++)
+  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+else()
+  message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
+endif()
 
 set(CMAKE_CXX_FLAGS_DEBUG "-g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
-# Suport CXX modules
-# 4.2.1
-set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
-# 4.3.1
-#set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
 message("CMAKE is ${CMAKE_VERSION}")
 set(CMAKE_CXX_MODULE_STD ON)
 set(CMAKE_CXX_STANDARD 26)
