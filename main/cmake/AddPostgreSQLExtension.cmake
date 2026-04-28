@@ -8,11 +8,15 @@ set(SUPPORTED_TARGET_TYPES
 set(POSTGRESQL_VERSION $ENV{POSTGRESQL_VERSION} CACHE STRING "PostgreSQL version major")
 
 # Find packages go here.
-find_package(
-  PostgreSQL ${POSTGRESQL_VERSION} REQUIRED
-  PATHS "/Applications/Postgres.app/Contents/Versions/latest"
-  # PATHS "/usr/local/opt/postgresql@18"
-)
+#
+# Note: do NOT pass `PATHS` here. With CMake's full-signature semantics,
+# supplying PATHS forces find_package into CONFIG-only mode, which bypasses
+# our custom MODULE-mode FindPostgreSQL.cmake (under cmake/) and instead hits
+# the vcpkg-provided libpq cmake-wrapper that has no Config file. The custom
+# Find module already discovers Postgres via pg_config and honours
+# PostgreSQL_ROOT / hints below for non-system install locations
+# (e.g. Postgres.app, Homebrew's postgresql@N).
+find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 
 # Helper command to add extensions
 function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)

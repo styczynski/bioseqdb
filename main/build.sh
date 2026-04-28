@@ -20,9 +20,32 @@ MODE="${2:-dev-opt-pg}"
 
 mkdir build 2>/dev/null >/dev/null || true
 
-rm -f /Applications/Postgres.app/Contents/Versions/17/lib/postgresql/bioseq.dylib
-rm -f /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bioseq.control
-rm -f /Applications/Postgres.app/Contents/Versions/17/share/postgresql/extension/bioseq--1.0.sql
+# Wipe any previously-installed extension artefacts from the active Postgres tree
+# so that `cmake --build . --target install` writes a fresh copy. We resolve the
+# directories from `pg_config` so this works for whichever version the
+# CMakeLists.txt picked up (Postgres.app 18 today, but version-agnostic).
+PG_CONFIG="${PG_CONFIG:-}"
+if [ -z "${PG_CONFIG}" ]; then
+    for candidate in \
+        /Applications/Postgres.app/Contents/Versions/latest/bin/pg_config \
+        /opt/homebrew/opt/postgresql@18/bin/pg_config \
+        /usr/local/opt/postgresql@18/bin/pg_config; do
+        if [ -x "${candidate}" ]; then
+            PG_CONFIG="${candidate}"
+            break
+        fi
+    done
+fi
+if [ -z "${PG_CONFIG}" ] && command -v pg_config >/dev/null 2>&1; then
+    PG_CONFIG="$(command -v pg_config)"
+fi
+if [ -n "${PG_CONFIG}" ]; then
+    PG_PKGLIBDIR="$("${PG_CONFIG}" --pkglibdir)"
+    PG_SHAREDIR="$("${PG_CONFIG}" --sharedir)"
+    rm -f "${PG_PKGLIBDIR}/bioseq.dylib"
+    rm -f "${PG_SHAREDIR}/extension/bioseq.control"
+    rm -f "${PG_SHAREDIR}/extension/bioseq--1.0.sql"
+fi
 
 export CMAKE_EXPORT_COMPILE_COMMANDS=1
 cd build
