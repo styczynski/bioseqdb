@@ -259,6 +259,21 @@ struct BenchSample {
     /// ns per sample for that phase. Empty when no timed samples were
     /// captured (e.g. the per-pair budget tripped or an exception fired).
     std::vector<std::pair<std::string, double>> phase_mean_ns_per_sample;
+
+    /// Per-phase mean PMU counters per timed sample. Same key as
+    /// `phase_mean_ns_per_sample` (the descriptor name); fields are mean
+    /// cycles / instructions / branches / branch_misses *per call*. The
+    /// values are zero on platforms without PMU access (Linux without
+    /// CAP_PERFMON, macOS without root). The chart layer treats all-zero
+    /// columns as "PMU not available — hide the chart".
+    struct PhaseCounters {
+        std::string name;
+        double mean_cycles_per_sample        = 0.0;
+        double mean_instructions_per_sample  = 0.0;
+        double mean_branches_per_sample      = 0.0;
+        double mean_branch_misses_per_sample = 0.0;
+    };
+    std::vector<PhaseCounters> phase_counters_per_sample;
 };
 
 /**
@@ -623,13 +638,35 @@ inline void run_one_pair_samples(
     auto& phase_prof = bioseq::instr::persistent_profiler_block<phase_args_t>();
     const std::uint32_t phase_descriptor_count =
         bioseq::instr::descriptor_count();
-    std::vector<std::uint64_t> phase_baseline_ns(phase_descriptor_count + 1, 0);
+    // We capture timing AND PMU counters (cycles / instructions /
+    // branches / branch_misses) for every region — the bench's args
+    // has enable_counters=true now, so the RegionAggregate fields are
+    // populated when the kernel grants PMU access. We snapshot four
+    // separate baselines per id alongside total_ns so the post-loop
+    // delta is a clean (after - before) for each metric.
+    struct PhaseBaseline {
+        std::uint64_t total_ns          = 0;
+        std::uint64_t cycles            = 0;
+        std::uint64_t instructions      = 0;
+        std::uint64_t branches          = 0;
+        std::uint64_t branch_misses     = 0;
+    };
+    std::vector<PhaseBaseline> phase_baseline(phase_descriptor_count + 1);
     for (std::uint32_t id = 1; id <= phase_descriptor_count; ++id) {
+        auto& base = phase_baseline[id];
         if (auto* la = phase_prof.loop_aggregates.try_get(id)) {
-            phase_baseline_ns[id] += la->total_ns;
+            base.total_ns          += la->total_ns;
+            base.cycles            += la->total_cycles;
+            base.instructions      += la->total_instructions;
+            base.branches          += la->total_branches;
+            base.branch_misses     += la->total_branch_misses;
         }
         if (auto* ra = phase_prof.aggregates.try_get(id)) {
-            phase_baseline_ns[id] += ra->total_ns;
+            base.total_ns          += ra->total_ns;
+            base.cycles            += ra->total_cycles;
+            base.instructions      += ra->total_instructions;
+            base.branches          += ra->total_branches;
+            base.branch_misses     += ra->total_branch_misses;
         }
     }
 
@@ -680,28 +717,61 @@ inline void run_one_pair_samples(
     // doesn't render zero-height bars. Phase names are taken from the
     // descriptor's `name` field exactly as registered in
     // `register_region_static("...")` so the chart legend matches the
-    // existing instrumentation summary tables.
+    // existing instrumentation summary tables. PMU counters (cycles,
+    // instructions, branches, branch_misses) are captured alongside
+    // timing so the chart layer can render counter-comparison charts
+    // beside the wall-clock chart.
     if (!record.sample_latencies_ns.empty()) {
         const double samples_d =
             static_cast<double>(record.sample_latencies_ns.size());
         record.phase_mean_ns_per_sample.reserve(16);
+        record.phase_counters_per_sample.reserve(16);
         for (std::uint32_t id = 1; id <= phase_descriptor_count; ++id) {
-            std::uint64_t after_ns = 0;
+            std::uint64_t after_ns          = 0;
+            std::uint64_t after_cycles      = 0;
+            std::uint64_t after_instructions = 0;
+            std::uint64_t after_branches    = 0;
+            std::uint64_t after_branch_miss = 0;
             if (auto* la = phase_prof.loop_aggregates.try_get(id)) {
-                after_ns += la->total_ns;
+                after_ns          += la->total_ns;
+                after_cycles      += la->total_cycles;
+                after_instructions += la->total_instructions;
+                after_branches    += la->total_branches;
+                after_branch_miss += la->total_branch_misses;
             }
             if (auto* ra = phase_prof.aggregates.try_get(id)) {
-                after_ns += ra->total_ns;
+                after_ns          += ra->total_ns;
+                after_cycles      += ra->total_cycles;
+                after_instructions += ra->total_instructions;
+                after_branches    += ra->total_branches;
+                after_branch_miss += ra->total_branch_misses;
             }
-            if (after_ns <= phase_baseline_ns[id]) {
+            if (after_ns <= phase_baseline[id].total_ns) {
                 continue;
             }
-            const std::uint64_t delta_ns = after_ns - phase_baseline_ns[id];
+            const auto& base = phase_baseline[id];
+            const std::uint64_t delta_ns      = after_ns          - base.total_ns;
+            const std::uint64_t d_cycles      = after_cycles      >= base.cycles
+                ? after_cycles - base.cycles : 0ull;
+            const std::uint64_t d_instr       = after_instructions >= base.instructions
+                ? after_instructions - base.instructions : 0ull;
+            const std::uint64_t d_branches    = after_branches    >= base.branches
+                ? after_branches - base.branches : 0ull;
+            const std::uint64_t d_branch_miss = after_branch_miss >= base.branch_misses
+                ? after_branch_miss - base.branch_misses : 0ull;
             const auto* desc = bioseq::instr::descriptor_lookup(id);
             if (desc == nullptr || desc->name == nullptr) continue;
+            std::string phase_name{desc->name};
             record.phase_mean_ns_per_sample.emplace_back(
-                std::string{desc->name},
+                phase_name,
                 static_cast<double>(delta_ns) / samples_d);
+            BenchSample::PhaseCounters pc;
+            pc.name                          = std::move(phase_name);
+            pc.mean_cycles_per_sample        = static_cast<double>(d_cycles)      / samples_d;
+            pc.mean_instructions_per_sample  = static_cast<double>(d_instr)       / samples_d;
+            pc.mean_branches_per_sample      = static_cast<double>(d_branches)    / samples_d;
+            pc.mean_branch_misses_per_sample = static_cast<double>(d_branch_miss) / samples_d;
+            record.phase_counters_per_sample.push_back(std::move(pc));
         }
     }
 }
@@ -760,6 +830,22 @@ inline void run_one_pair_samples(
                 push_bioseq(aligner, chaining, minimizer);
             }
         }
+    }
+    // The "fastest" bioseq config (KSW2 + SIMD-DP + two-stack-mm) is the
+    // V4 candidate currently being tuned to beat scalar-mm by ≥10 %. Add
+    // it once at the end so it appears in every chart that pivots on
+    // algorithm without bloating the grid into the full 18-row Cartesian.
+    // The two-stack collector is implemented in
+    // `kmers/two_stacks_minimizers.cppm` and dispatched in
+    // `minimap_port.cppm` via `MinimizerAlgorithmType::TWO_STACK`.
+    {
+        AlgorithmConfig cfg;
+        cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-mm";
+        cfg.is_minimap2_reference        = false;
+        cfg.chaining_algorithm           = ChainingAlgorithmType::SIMD_MM2;
+        cfg.base_alignment_algorithm     = BaseAlignmentAlgorithmType::KSW2;
+        cfg.minimizer_algorithm          = MinimizerAlgorithmType::TWO_STACK;
+        grid.push_back(std::move(cfg));
     }
     return grid;
 }

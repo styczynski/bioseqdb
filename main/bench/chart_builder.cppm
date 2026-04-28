@@ -58,6 +58,8 @@ module;
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -361,19 +363,22 @@ inline void emit_report(JsonWriter& writer) {
         "skipped (the `should_skip_cell` rules — see `matrix_runner.cppm`) "
         "show as missing points; lines connect across the gap.",
         [&]() {
-            constexpr std::array<SequenceLengthBucket, 4> all_buckets = {
+            constexpr std::array<SequenceLengthBucket, 5> all_buckets = {
                 SequenceLengthBucket::SHORT,
                 SequenceLengthBucket::MEDIUM,
                 SequenceLengthBucket::LONG,
                 SequenceLengthBucket::VERY_LONG,
+                SequenceLengthBucket::XL,
             };
             writer.key("data");
             writer.begin_array();
             for (const auto& algorithm_label : headline_algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 4> per_bucket{};
+                std::array<std::pair<std::size_t, std::size_t>, 5> per_bucket{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
-                    auto& counts = per_bucket[static_cast<std::size_t>(s.length_bucket)];
+                    const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    if (bidx >= per_bucket.size()) continue;
+                    auto& counts = per_bucket[bidx];
                     counts.second++;
                     if (s.position_correct) counts.first++;
                 }
@@ -392,7 +397,7 @@ inline void emit_report(JsonWriter& writer) {
                 writer.end_array();
                 writer.key("y");
                 writer.begin_array();
-                for (std::size_t i = 0; i < 4; ++i) {
+                for (std::size_t i = 0; i < per_bucket.size(); ++i) {
                     if (per_bucket[i].second == 0) {
                         writer.value_null();
                     } else {
@@ -504,20 +509,26 @@ inline void emit_report(JsonWriter& writer) {
         [&]() {
             writer.key("data");
             writer.begin_array();
-            const std::array<std::string_view, 4> length_symbols = {
-                "circle", "square", "diamond", "triangle-up"};
+            // 5 symbols: SHORT, MEDIUM, LONG, VERY_LONG, XL — keeping
+            // the array sized to match the SequenceLengthBucket enum
+            // ensures `bidx` indexing below stays in-bounds when the
+            // bench's XL bucket is included (e.g. by the long-only
+            // iteration benches).
+            const std::array<std::string_view, 5> length_symbols = {
+                "circle", "square", "diamond", "triangle-up", "star"};
             for (const auto& algorithm_label : headline_algorithm_labels) {
-                std::array<std::pair<std::vector<double>, std::vector<double>>, 4> per_bucket;
-                std::array<std::pair<std::size_t, std::size_t>, 4> correctness;
+                std::array<std::pair<std::vector<double>, std::vector<double>>, 5> per_bucket;
+                std::array<std::pair<std::size_t, std::size_t>, 5> correctness;
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     if (s.sample_latencies_ns.empty()) continue;
                     const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    if (bidx >= per_bucket.size()) continue;
                     per_bucket[bidx].first.push_back(detail::mean_of(s.sample_latencies_ns) / 1e6);
                     correctness[bidx].second++;
                     if (s.position_correct) correctness[bidx].first++;
                 }
-                for (std::size_t i = 0; i < 4; ++i) {
+                for (std::size_t i = 0; i < per_bucket.size(); ++i) {
                     if (per_bucket[i].first.empty()) continue;
                     const double mean_latency_ms = detail::mean_of(per_bucket[i].first);
                     const double accuracy = correctness[i].second > 0
@@ -924,19 +935,22 @@ inline void emit_report(JsonWriter& writer) {
         "de-facto upper bound — bioseq variants below them indicate a "
         "regression in the corresponding phase.",
         [&]() {
-            constexpr std::array<SequenceLengthBucket, 4> all_buckets = {
+            constexpr std::array<SequenceLengthBucket, 5> all_buckets = {
                 SequenceLengthBucket::SHORT,
                 SequenceLengthBucket::MEDIUM,
                 SequenceLengthBucket::LONG,
                 SequenceLengthBucket::VERY_LONG,
+                SequenceLengthBucket::XL,
             };
             writer.key("data");
             writer.begin_array();
             for (const auto& algorithm_label : algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 4> per_bucket{};
+                std::array<std::pair<std::size_t, std::size_t>, 5> per_bucket{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
-                    auto& counts = per_bucket[static_cast<std::size_t>(s.length_bucket)];
+                    const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    if (bidx >= per_bucket.size()) continue;
+                    auto& counts = per_bucket[bidx];
                     counts.second++;
                     if (s.position_correct) counts.first++;
                 }
@@ -955,7 +969,7 @@ inline void emit_report(JsonWriter& writer) {
                 writer.end_array();
                 writer.key("y");
                 writer.begin_array();
-                for (std::size_t i = 0; i < 4; ++i) {
+                for (std::size_t i = 0; i < per_bucket.size(); ++i) {
                     if (per_bucket[i].second == 0) {
                         writer.value_null();
                     } else {
@@ -1053,15 +1067,18 @@ inline void emit_report(JsonWriter& writer) {
                 sequence_length_bucket_name(SequenceLengthBucket::MEDIUM),
                 sequence_length_bucket_name(SequenceLengthBucket::LONG),
                 sequence_length_bucket_name(SequenceLengthBucket::VERY_LONG),
+                sequence_length_bucket_name(SequenceLengthBucket::XL),
             };
             // z[row][col] — outer rows = algorithms, inner = buckets.
             std::vector<std::vector<double>> z;
             std::vector<std::string> row_labels;
             for (const auto& algorithm_label : algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 4> per_bucket{};
+                std::array<std::pair<std::size_t, std::size_t>, 5> per_bucket{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
-                    auto& counts = per_bucket[static_cast<std::size_t>(s.length_bucket)];
+                    const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    if (bidx >= per_bucket.size()) continue;
+                    auto& counts = per_bucket[bidx];
                     counts.second++;
                     if (s.position_correct) counts.first++;
                 }
@@ -1369,10 +1386,12 @@ inline void emit_report(JsonWriter& writer) {
                     algorithm_label == "minimap2 (RMQ chaining)") continue;
                 // Per (length_bucket): collect the per-cell paired ratios
                 // and emit their mean as the bar height.
-                std::array<std::vector<double>, 4> per_length_ratios;
+                std::array<std::vector<double>, 5> per_length_ratios;
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     if (s.sample_latencies_ns.empty()) continue;
+                    const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    if (bidx >= per_length_ratios.size()) continue;
                     const cell_key key{static_cast<int>(s.length_bucket),
                                        static_cast<int>(s.error_bucket)};
                     auto baseline_it = baseline_cell_avg.find(key);
@@ -1380,12 +1399,11 @@ inline void emit_report(JsonWriter& writer) {
                         baseline_it->second <= 0.0) continue;
                     const double variant_mean = detail::mean_of(s.sample_latencies_ns);
                     if (variant_mean <= 0.0) continue;
-                    per_length_ratios[static_cast<std::size_t>(s.length_bucket)]
-                        .push_back(baseline_it->second / variant_mean);
+                    per_length_ratios[bidx].push_back(baseline_it->second / variant_mean);
                 }
                 std::vector<std::string> xs;
                 std::vector<double> ys;
-                for (std::size_t i = 0; i < 4; ++i) {
+                for (std::size_t i = 0; i < per_length_ratios.size(); ++i) {
                     if (per_length_ratios[i].empty()) continue;
                     xs.push_back(detail::length_bucket_short_label(
                         static_cast<SequenceLengthBucket>(i)));
@@ -1546,20 +1564,21 @@ inline void emit_report(JsonWriter& writer) {
         [&]() {
             writer.key("data");
             writer.begin_array();
-            const std::array<std::string_view, 4> length_symbols = {
-                "circle", "square", "diamond", "triangle-up"};
+            const std::array<std::string_view, 5> length_symbols = {
+                "circle", "square", "diamond", "triangle-up", "star"};
             for (const auto& algorithm_label : algorithm_labels) {
-                std::array<std::pair<std::vector<double>, std::vector<double>>, 4> per_bucket;
-                std::array<std::pair<std::size_t, std::size_t>, 4> correctness;
+                std::array<std::pair<std::vector<double>, std::vector<double>>, 5> per_bucket;
+                std::array<std::pair<std::size_t, std::size_t>, 5> correctness;
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     if (s.sample_latencies_ns.empty()) continue;
                     const auto bidx = static_cast<std::size_t>(s.length_bucket);
+                    if (bidx >= per_bucket.size()) continue;
                     per_bucket[bidx].first.push_back(detail::mean_of(s.sample_latencies_ns) / 1e6);
                     correctness[bidx].second++;
                     if (s.position_correct) correctness[bidx].first++;
                 }
-                for (std::size_t i = 0; i < 4; ++i) {
+                for (std::size_t i = 0; i < per_bucket.size(); ++i) {
                     if (per_bucket[i].first.empty()) continue;
                     const double mean_latency_ms = detail::mean_of(per_bucket[i].first);
                     const double accuracy = correctness[i].second > 0
@@ -1624,11 +1643,12 @@ inline void emit_report(JsonWriter& writer) {
         "RMQ × VERY_LONG, etc.) show up as 0 — hover for the "
         "per-cell sample count to disambiguate.",
         [&]() {
-            constexpr std::array<SequenceLengthBucket, 4> all_lengths = {
+            constexpr std::array<SequenceLengthBucket, 5> all_lengths = {
                 SequenceLengthBucket::SHORT,
                 SequenceLengthBucket::MEDIUM,
                 SequenceLengthBucket::LONG,
                 SequenceLengthBucket::VERY_LONG,
+                SequenceLengthBucket::XL,
             };
             constexpr std::array<ErrorRateBucket, 6> all_errors = {
                 ErrorRateBucket::HIFI,
@@ -1980,6 +2000,639 @@ inline void emit_report(JsonWriter& writer) {
             "alignment, the chain DP, or the per-sketch hashing "
             "amortising poorly across millions of bases.",
             SequenceLengthBucket::VERY_LONG);
+    }
+
+    // ================================================================
+    // Largest-bucket head-to-head charts.
+    //
+    // Compare bioseq vs minimap2 STAGE-BY-STAGE on the largest sequence
+    // bucket the bench produced data for (typically VERY_LONG, with XL
+    // taking precedence when present). Per the user's V4 task: we want
+    // the same blocks visible on both sides so the reader can spot the
+    // bottleneck at a glance — wall-clock per stage *plus* PMU counter
+    // data (instructions, branches, branch-misses, cycles) — for the
+    // fastest bioseq config and minimap2.
+    //
+    // The "logical stage" abstraction joins phase names from each
+    // algorithm's source (e.g. bioseq's `mm_sketch` and `mm_sketch_simd`
+    // both contribute to the "Minimizer generation" stage; minimap2's
+    // `tool_minimap2.mm_sketch` and `tool_minimap2.base_collect_minimizers`
+    // both contribute to the same stage). This lets the
+    // bar-and-table view show "the chaining stage takes X ms here, Y ms
+    // there" without requiring perfect 1:1 phase-name parity, which the
+    // two pipelines do not have (e.g. minimap2 runs `mg_lchain_dp` only,
+    // bioseq runs one of {mg_lchain_dp, mg_lchain_simd, mg_lchain_rmq}
+    // depending on config; both should fold into "Chaining").
+    // ================================================================
+    {
+        // ---- Stage definition: name + the phase aliases that count
+        //      toward it on each side. Both sides may contribute zero
+        //      or more phases; the cell value is the sum across all
+        //      matching phases.
+        struct LogicalStage {
+            std::string_view              display_name;
+            std::vector<std::string_view> phase_aliases;
+        };
+        const std::vector<LogicalStage> kLogicalStages = {
+            {"Minimizer generation", {
+                "mm_sketch", "mm_sketch_simd",
+                "tool_minimap2.mm_sketch",
+                "tool_minimap2.base_collect_minimizers"}},
+            {"Target index build", {
+                "target_index_build",
+                "tool_minimap2.target_index_build"}},
+            {"Seed collection", {
+                "collect_seed_hits",
+                "tool_minimap2.collect_seed_hits"}},
+            {"Chaining", {
+                "mg_lchain_dp", "mg_lchain_simd", "mg_lchain_rmq",
+                "tool_minimap2.mg_lchain_dp",
+                "tool_minimap2.mg_lchain_rmq"}},
+            {"Region generation/filtering", {
+                "mm_gen_regs", "mm_set_parent", "mm_select_sub",
+                "tool_minimap2.mm_gen_regs",
+                "tool_minimap2.mm_set_parent",
+                "tool_minimap2.mm_select_sub"}},
+            {"Divergence estimation", {
+                "mm_est_err",
+                "tool_minimap2.mm_est_err"}},
+            {"Alignment", {
+                "mm_align_skeleton",
+                "tool_minimap2.mm_align_skeleton"}},
+            {"MAPQ", {
+                "mm_set_mapq",
+                "tool_minimap2.mm_set_mapq"}},
+        };
+
+        // Pick the largest length bucket present in the samples. XL
+        // wins over VERY_LONG which wins over LONG. The chart layer
+        // rebuilds the chart with the same data when no samples
+        // exist (the bar arrays end up empty and Plotly renders a
+        // blank chart with the title — the legend still tells the
+        // reader what was *meant* to be shown).
+        auto pick_largest_bucket = [&]() -> SequenceLengthBucket {
+            std::array<bool, 5> have = {false, false, false, false, false};
+            for (const auto& s : samples) {
+                have[static_cast<int>(s.length_bucket)] = true;
+            }
+            if (have[static_cast<int>(SequenceLengthBucket::XL)])        return SequenceLengthBucket::XL;
+            if (have[static_cast<int>(SequenceLengthBucket::VERY_LONG)]) return SequenceLengthBucket::VERY_LONG;
+            if (have[static_cast<int>(SequenceLengthBucket::LONG)])      return SequenceLengthBucket::LONG;
+            if (have[static_cast<int>(SequenceLengthBucket::MEDIUM)])    return SequenceLengthBucket::MEDIUM;
+            return SequenceLengthBucket::SHORT;
+        };
+        const SequenceLengthBucket largest_bucket = pick_largest_bucket();
+
+        // Mean phase data (timing + counters) per (algorithm, phase).
+        // Aggregate per algorithm by averaging across all pairs in the
+        // bucket. Phases not seen on this (algo, bucket) cell are
+        // simply not added — we treat them as 0 for sum purposes,
+        // exactly as the existing phase-breakdown chart does.
+        struct PhaseStats {
+            double mean_ns          = 0.0;
+            double mean_cycles      = 0.0;
+            double mean_instructions = 0.0;
+            double mean_branches    = 0.0;
+            double mean_branch_misses = 0.0;
+        };
+        // Indexed by [algorithm_label][phase_name]
+        std::map<std::string, std::map<std::string, PhaseStats>> per_algo_phase;
+        for (const auto& s : samples) {
+            if (s.length_bucket != largest_bucket) continue;
+            // For each phase, accumulate by averaging across pairs.
+            // Build a lookup by name from phase_counters_per_sample so
+            // we can pair timing + counters in a single pass.
+            std::unordered_map<std::string, const BenchSample::PhaseCounters*> ctr_by_name;
+            for (const auto& pc : s.phase_counters_per_sample) {
+                ctr_by_name[pc.name] = &pc;
+            }
+            for (const auto& [name, ns] : s.phase_mean_ns_per_sample) {
+                auto& acc = per_algo_phase[s.algorithm_label][name];
+                acc.mean_ns += ns;
+                if (auto it = ctr_by_name.find(name); it != ctr_by_name.end()) {
+                    acc.mean_cycles        += it->second->mean_cycles_per_sample;
+                    acc.mean_instructions  += it->second->mean_instructions_per_sample;
+                    acc.mean_branches      += it->second->mean_branches_per_sample;
+                    acc.mean_branch_misses += it->second->mean_branch_misses_per_sample;
+                }
+            }
+        }
+        // Divide by sample count per (algo, phase) to get the mean.
+        // Track sample count separately because phases that didn't fire
+        // for a given pair shouldn't drag the mean to zero — only
+        // sample-count *of pairs that emitted this phase at least once*
+        // is the correct denominator, mirroring the phase_breakdown
+        // chart's behaviour.
+        std::map<std::string, std::map<std::string, std::size_t>> per_algo_phase_count;
+        for (const auto& s : samples) {
+            if (s.length_bucket != largest_bucket) continue;
+            for (const auto& [name, _ns] : s.phase_mean_ns_per_sample) {
+                per_algo_phase_count[s.algorithm_label][name] += 1;
+            }
+        }
+        for (auto& [algo, phases] : per_algo_phase) {
+            auto& counts = per_algo_phase_count[algo];
+            for (auto& [phase, st] : phases) {
+                const std::size_t n = counts[phase];
+                if (n == 0) continue;
+                st.mean_ns          /= static_cast<double>(n);
+                st.mean_cycles      /= static_cast<double>(n);
+                st.mean_instructions /= static_cast<double>(n);
+                st.mean_branches    /= static_cast<double>(n);
+                st.mean_branch_misses /= static_cast<double>(n);
+            }
+        }
+
+        // Reduce to logical stages: sum the matching phases per stage.
+        // `stage_value(algo, stage, metric)` returns the mean of the
+        // chosen metric across all phases in that stage.
+        auto stage_value = [&](const std::string& algo,
+                               const LogicalStage& stage,
+                               int metric_id) -> double {
+            const auto algo_it = per_algo_phase.find(algo);
+            if (algo_it == per_algo_phase.end()) return 0.0;
+            double total = 0.0;
+            for (const auto& alias : stage.phase_aliases) {
+                const auto it = algo_it->second.find(std::string{alias});
+                if (it == algo_it->second.end()) continue;
+                switch (metric_id) {
+                    case 0: total += it->second.mean_ns;          break;  // ns
+                    case 1: total += it->second.mean_cycles;      break;
+                    case 2: total += it->second.mean_instructions; break;
+                    case 3: total += it->second.mean_branches;    break;
+                    case 4: total += it->second.mean_branch_misses; break;
+                }
+            }
+            return total;
+        };
+
+        // Choose the algorithms to display in the head-to-head charts.
+        // 1. minimap2 (DP chaining) is always the baseline.
+        // 2. Then every bioseq config that produced phase data on this
+        //    bucket — sorted in the same order as `algorithm_labels`
+        //    so the chart legend matches the rest of the report.
+        const std::string mm2_dp_label = "minimap2 (DP chaining)";
+        std::vector<std::string> head_to_head_algos;
+        if (per_algo_phase.contains(mm2_dp_label)) {
+            head_to_head_algos.push_back(mm2_dp_label);
+        }
+        for (const auto& algo : algorithm_labels) {
+            if (algo == mm2_dp_label) continue;
+            // Skip the second minimap2 reference; the bar chart is
+            // already cluttered with all bioseq variants and the user's
+            // primary baseline is `minimap2 (DP chaining)`. The "RMQ"
+            // variant is still in the table further down.
+            if (!per_algo_phase.contains(algo)) continue;
+            head_to_head_algos.push_back(algo);
+        }
+
+        // Determine which bioseq configs to highlight in the bar chart.
+        // The user's V4 task is to make two-stack-mm fast — but until
+        // it actually wins, we want both the V4 iteration target *and*
+        // the current fastest bioseq config to show up beside minimap2,
+        // so the reader can see whether the iteration is closing the
+        // gap. We emit:
+        //   1. minimap2 (DP chaining) — the canonical baseline
+        //   2. The "fastest bioseq" (lowest total wall-clock among
+        //      bioseq variants in the report). This is the practical
+        //      "best we have today" for the largest bucket.
+        //   3. The V4 target (`bioseq KSW2 + SIMD-DP + two-stack-mm`)
+        //      whenever it's in the report. May coincide with #2; in
+        //      that case the bar chart de-dups so #3 is suppressed.
+        auto total_ns_for_algo = [&](const std::string& algo) {
+            double total = 0.0;
+            for (const auto& stage : kLogicalStages) {
+                total += stage_value(algo, stage, 0);
+            }
+            return total;
+        };
+        std::string fastest_bioseq_label;
+        {
+            double fastest_bioseq_total_ns = std::numeric_limits<double>::infinity();
+            for (const auto& algo : head_to_head_algos) {
+                if (algo.find("minimap2") != std::string::npos) continue;
+                const double t = total_ns_for_algo(algo);
+                if (t > 0.0 && t < fastest_bioseq_total_ns) {
+                    fastest_bioseq_total_ns = t;
+                    fastest_bioseq_label = algo;
+                }
+            }
+        }
+        const std::string two_stack_label = "bioseq KSW2 + SIMD-DP + two-stack-mm";
+        const bool v4_present = per_algo_phase.contains(two_stack_label);
+
+        // ---- Chart: per-stage time bar chart (bioseq fastest vs minimap2 DP)
+        const std::string headline_chart_id =
+            "headline_largest_per_stage_time";
+        const std::string headline_title = fmt::format(
+            "Per-stage wall-clock — fastest bioseq vs minimap2 ({} bucket)",
+            sequence_length_bucket_name(largest_bucket));
+        emit_chart(headline_chart_id,
+            "Headline: per-stage wall-clock comparison, fastest bioseq vs minimap2 on largest sequences",
+            "Two grouped bars per logical stage (Minimizer generation, "
+            "Chaining, Alignment, ...) — left bar is minimap2 (DP "
+            "chaining), right bar is the fastest bioseq config (lowest "
+            "summed wall-clock across stages). Y is mean wall-clock ms "
+            "per call on the largest sequence bucket the bench ran. Use "
+            "this chart to spot which stage is dragging bioseq behind "
+            "minimap2 (or where bioseq has already overtaken).",
+            [&]() {
+                std::vector<std::string> stage_names;
+                stage_names.reserve(kLogicalStages.size());
+                for (const auto& stage : kLogicalStages) {
+                    stage_names.emplace_back(stage.display_name);
+                }
+                auto algo_stage_ms = [&](const std::string& algo) {
+                    std::vector<double> out;
+                    out.reserve(kLogicalStages.size());
+                    for (const auto& stage : kLogicalStages) {
+                        out.push_back(stage_value(algo, stage, 0) / 1e6);
+                    }
+                    return out;
+                };
+                writer.key("data");
+                writer.begin_array();
+                // Bar 1: minimap2 baseline.
+                writer.begin_object();
+                writer.kv_string("type", "bar");
+                writer.kv_string("name", mm2_dp_label);
+                writer.kv_string_array("x", stage_names);
+                writer.kv_double_array("y", algo_stage_ms(mm2_dp_label));
+                writer.end_object();
+                // Bar 2: the fastest bioseq variant currently in the
+                // report (always emitted when any bioseq config exists).
+                if (!fastest_bioseq_label.empty()) {
+                    writer.begin_object();
+                    writer.kv_string("type", "bar");
+                    writer.kv_string("name",
+                        fmt::format("fastest bioseq: {}", fastest_bioseq_label));
+                    writer.kv_string_array("x", stage_names);
+                    writer.kv_double_array("y", algo_stage_ms(fastest_bioseq_label));
+                    writer.end_object();
+                }
+                // Bar 3: the V4 target (two-stack) — only when present
+                // in the report and not already represented as the
+                // "fastest bioseq" bar above. Letting the user see the
+                // V4 candidate beside the canonical fastest bar makes
+                // it obvious whether the iteration loop has closed the
+                // gap to minimap2 (and to the scalar-mm baseline).
+                if (v4_present && fastest_bioseq_label != two_stack_label) {
+                    writer.begin_object();
+                    writer.kv_string("type", "bar");
+                    writer.kv_string("name",
+                        fmt::format("V4 target: {}", two_stack_label));
+                    writer.kv_string_array("x", stage_names);
+                    writer.kv_double_array("y", algo_stage_ms(two_stack_label));
+                    writer.end_object();
+                }
+                writer.end_array();
+                emit_layout(headline_title,
+                    "logical stage", false,
+                    "mean ms / call", false,
+                    "group");
+            });
+
+        // ---- Chart helper: per-stage counter bar chart for an arbitrary
+        //      metric (cycles, instructions, branches, branch_misses).
+        //      Identical structure to the timing chart above.
+        auto emit_counter_chart = [&](
+            std::string_view chart_id,
+            std::string_view chart_short_desc,
+            std::string_view chart_long_desc,
+            std::string_view y_axis_label,
+            int metric_id,
+            double scale)
+        {
+            emit_chart(chart_id, chart_short_desc, chart_long_desc, [&]() {
+                std::vector<std::string> stage_names;
+                stage_names.reserve(kLogicalStages.size());
+                for (const auto& stage : kLogicalStages) {
+                    stage_names.emplace_back(stage.display_name);
+                }
+                writer.key("data");
+                writer.begin_array();
+                for (const auto& algo : head_to_head_algos) {
+                    std::vector<double> ys;
+                    ys.reserve(kLogicalStages.size());
+                    for (const auto& stage : kLogicalStages) {
+                        ys.push_back(stage_value(algo, stage, metric_id) * scale);
+                    }
+                    writer.begin_object();
+                    writer.kv_string("type", "bar");
+                    writer.kv_string("name", algo);
+                    writer.kv_string_array("x", stage_names);
+                    writer.kv_double_array("y", ys);
+                    writer.end_object();
+                }
+                writer.end_array();
+                emit_layout(
+                    fmt::format("Per-stage {} ({} bucket)",
+                                y_axis_label,
+                                sequence_length_bucket_name(largest_bucket)),
+                    "logical stage", false,
+                    y_axis_label, false,
+                    "group");
+            });
+        };
+        // metric_id: 1=cycles, 2=instructions, 3=branches, 4=branch_misses
+        emit_counter_chart(
+            "headline_largest_per_stage_cycles",
+            "Per-stage CPU cycles (every algorithm) — largest sequences",
+            "Grouped bar chart: one bar per algorithm per logical stage, "
+            "Y is mean PMU 'cycles' counter delta per call. Zero bars on "
+            "every algo indicate the host has no PMU access (macOS without "
+            "root, Linux with perf_event_paranoid > 1). Compare the bar "
+            "heights side by side to see which algorithm is paying more "
+            "CPU cycles for the same logical stage.",
+            "mean CPU cycles / call",
+            1, 1.0);
+        emit_counter_chart(
+            "headline_largest_per_stage_instructions",
+            "Per-stage retired instructions (every algorithm) — largest sequences",
+            "Same shape as the cycles chart but Y is mean retired-"
+            "instruction counter per call. Useful complement to cycles "
+            "for IPC analysis: instructions / cycles ≈ IPC.",
+            "mean instructions / call",
+            2, 1.0);
+        emit_counter_chart(
+            "headline_largest_per_stage_branches",
+            "Per-stage retired branches (every algorithm) — largest sequences",
+            "Same shape as the cycles chart but Y is mean branch-"
+            "instruction counter per call. Read this beside the branch-"
+            "misses chart to compute branch miss rate per stage.",
+            "mean branches / call",
+            3, 1.0);
+        emit_counter_chart(
+            "headline_largest_per_stage_branch_misses",
+            "Per-stage branch mispredictions (every algorithm) — largest sequences",
+            "Same shape as the cycles chart but Y is mean branch-"
+            "mispredict counter per call. The bigger the bar, the more "
+            "the stage is hurt by branch prediction noise. SIMD code "
+            "with horizontal mask reductions (e.g. SIMD-mm) typically "
+            "shows up as taller bars than its scalar peers — that is the "
+            "exact bottleneck the V4 two-stack rewrite is trying to fix.",
+            "mean branch mispredicts / call",
+            4, 1.0);
+        // Branch miss rate (branch_misses / branches) per stage. Useful
+        // because it normalises out the absolute call count and surfaces
+        // the underlying branch-prediction quality. Computed inline
+        // because it isn't a single PMU counter.
+        emit_chart(
+            "headline_largest_per_stage_branch_miss_rate",
+            "Per-stage branch miss rate (every algorithm) — largest sequences",
+            "Branch-miss rate = mispredicts / branches per stage and "
+            "algorithm. Normalises out the per-stage call count so "
+            "two algorithms running the same number of calls can be "
+            "compared on prediction quality. A 5% miss rate on chaining "
+            "is bad; a 1% miss rate on minimizer generation is normal.",
+            [&]() {
+                std::vector<std::string> stage_names;
+                stage_names.reserve(kLogicalStages.size());
+                for (const auto& stage : kLogicalStages) {
+                    stage_names.emplace_back(stage.display_name);
+                }
+                writer.key("data");
+                writer.begin_array();
+                for (const auto& algo : head_to_head_algos) {
+                    std::vector<double> ys;
+                    ys.reserve(kLogicalStages.size());
+                    for (const auto& stage : kLogicalStages) {
+                        const double br  = stage_value(algo, stage, 3);
+                        const double bm  = stage_value(algo, stage, 4);
+                        ys.push_back(br > 0.0 ? (bm / br) : 0.0);
+                    }
+                    writer.begin_object();
+                    writer.kv_string("type", "bar");
+                    writer.kv_string("name", algo);
+                    writer.kv_string_array("x", stage_names);
+                    writer.kv_double_array("y", ys);
+                    writer.end_object();
+                }
+                writer.end_array();
+                emit_layout(
+                    fmt::format("Per-stage branch miss rate ({} bucket)",
+                                sequence_length_bucket_name(largest_bucket)),
+                    "logical stage", false,
+                    "branch_misses / branches", false,
+                    "group");
+            });
+
+        // ---- Table: stage × algorithm grid with green→red coloring per row.
+        //
+        // The user's request: "color cells in the table to mark the
+        // slowest ones and fastest ones like in the histogram (green to
+        // red)". The plotly `table` trace supports per-cell fill colours
+        // via `cells.fill.color = [[col0_row0, col0_row1, ...], ...]`.
+        // We compute a colour per cell based on the rank of its value
+        // within its row (across all algorithms), interpolating from
+        // green (fastest) through yellow to red (slowest). Rows where
+        // every algorithm reports zero (e.g. the divergence-estimation
+        // row when `compute_divergence` is off) get a neutral grey
+        // background so the reader doesn't read a colour signal where
+        // there isn't one.
+        //
+        // Cell content shows the dominant phase (longest-firing on
+        // that side) plus the time. Format: "<phase>: XXX ms". Falls
+        // back to "—" when no data is present for that (stage, algo)
+        // cell.
+        auto fmt_phase_label = [](std::string_view raw) -> std::string {
+            // Drop the "tool_minimap2." prefix so the cell label reads
+            // like "mm_sketch: 13.2 ms" not
+            // "tool_minimap2.mm_sketch: 13.2 ms" — saves horizontal
+            // table space.
+            constexpr std::string_view kMm2Prefix = "tool_minimap2.";
+            if (raw.size() > kMm2Prefix.size() &&
+                raw.substr(0, kMm2Prefix.size()) == kMm2Prefix) {
+                return std::string{raw.substr(kMm2Prefix.size())};
+            }
+            return std::string{raw};
+        };
+
+        auto cell_text = [&](const std::string& algo, const LogicalStage& stage) {
+            // Find the dominant phase that fired for this algorithm
+            // within this logical stage, then format
+            // "<dominant_phase>: XX.X ms". Total cell time is the sum
+            // across all phases; we annotate which phase dominates so
+            // the reader can see whether (e.g.) "Chaining" is from
+            // mg_lchain_dp or mg_lchain_simd.
+            const auto algo_it = per_algo_phase.find(algo);
+            if (algo_it == per_algo_phase.end()) return std::string{"—"};
+            double total_ns = 0.0;
+            std::string dominant_phase;
+            double dominant_ns = 0.0;
+            for (const auto& alias : stage.phase_aliases) {
+                const auto p_it = algo_it->second.find(std::string{alias});
+                if (p_it == algo_it->second.end()) continue;
+                total_ns += p_it->second.mean_ns;
+                if (p_it->second.mean_ns > dominant_ns) {
+                    dominant_ns = p_it->second.mean_ns;
+                    dominant_phase = std::string{alias};
+                }
+            }
+            if (total_ns <= 0.0) return std::string{"—"};
+            return fmt::format("{}: {:.2f} ms",
+                fmt_phase_label(dominant_phase), total_ns / 1e6);
+        };
+
+        // Colour helper. value in [vmin, vmax] → hex string.
+        // Linear interpolation: green (#2ca02c) for vmin → yellow
+        // (#ffeb3b) for the median → red (#d62728) for vmax. Returns a
+        // light grey for missing data (dash text); plotly accepts
+        // either string colours or RGB arrays — strings are simpler.
+        auto interp_color = [](double value, double vmin, double vmax) -> std::string {
+            if (!(vmax > vmin)) {
+                return std::string{"#e0e0e0"};
+            }
+            double t = (value - vmin) / (vmax - vmin);
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            // Two-segment lerp green→yellow→red.
+            // green:  (44, 160, 44)
+            // yellow: (255, 235, 59)
+            // red:    (214, 39, 40)
+            int r, g, b;
+            if (t <= 0.5) {
+                const double s = t / 0.5;
+                r = static_cast<int>(44   + s * (255 - 44));
+                g = static_cast<int>(160  + s * (235 - 160));
+                b = static_cast<int>(44   + s * (59  - 44));
+            } else {
+                const double s = (t - 0.5) / 0.5;
+                r = static_cast<int>(255 + s * (214 - 255));
+                g = static_cast<int>(235 + s * (39  - 235));
+                b = static_cast<int>(59  + s * (40  - 59));
+            }
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "#%02x%02x%02x",
+                          r & 0xff, g & 0xff, b & 0xff);
+            return std::string{buf};
+        };
+
+        const std::string table_chart_id =
+            "headline_largest_stage_table";
+        const std::string table_title = fmt::format(
+            "Stage × algorithm head-to-head ({} bucket)",
+            sequence_length_bucket_name(largest_bucket));
+        emit_chart(table_chart_id,
+            "Headline: stage × algorithm comparison table (largest sequences, color-coded green→red)",
+            "Each row is a logical pipeline stage; each column is one "
+            "algorithm. Cells contain the dominant phase name + the "
+            "mean wall-clock per call (e.g. 'mm_sketch_simd: 13.45 ms'). "
+            "Cell background colour is a per-row gradient — green for "
+            "the fastest algorithm in that stage, red for the slowest, "
+            "yellow in the middle. Rows where every algorithm reports "
+            "zero are coloured grey. Use this table to spot which "
+            "stages bioseq dominates and which still trail minimap2.",
+            [&]() {
+                writer.key("data");
+                writer.begin_array();
+                writer.begin_object();
+                writer.kv_string("type", "table");
+
+                // Column 0 is the stage name; columns 1..N are the algorithms.
+                std::vector<std::string> header_values;
+                header_values.emplace_back("Stage");
+                for (const auto& algo : head_to_head_algos) {
+                    header_values.push_back(algo);
+                }
+                writer.key("header");
+                writer.begin_object();
+                writer.kv_string_array("values", header_values);
+                writer.kv_string("align", "left");
+                writer.end_object();
+
+                // cells.values is column-major: one inner array per column.
+                // cells.fill.color is also column-major, same shape.
+                writer.key("cells");
+                writer.begin_object();
+                writer.key("values");
+                writer.begin_array();
+
+                // Stage column — contains all the row labels.
+                writer.begin_array();
+                for (const auto& stage : kLogicalStages) {
+                    writer.value_string(stage.display_name);
+                }
+                writer.end_array();
+
+                // Per-algorithm columns.
+                for (const auto& algo : head_to_head_algos) {
+                    writer.begin_array();
+                    for (const auto& stage : kLogicalStages) {
+                        writer.value_string(cell_text(algo, stage));
+                    }
+                    writer.end_array();
+                }
+                writer.end_array();
+
+                // cells.fill.color — per-row colour, computed from the
+                // mean ns of each (stage, algo) cell. Plotly expects
+                // column-major arrays here too, so we emit one array
+                // per column with the per-row colours.
+                writer.key("fill");
+                writer.begin_object();
+                writer.key("color");
+                writer.begin_array();
+
+                // Stage column gets a fixed light-grey backing so the
+                // reader's eye reads it as "row label" not "datum".
+                writer.begin_array();
+                for (std::size_t i = 0; i < kLogicalStages.size(); ++i) {
+                    writer.value_string("#f5f5f5");
+                }
+                writer.end_array();
+
+                // Per-algo cell colours.
+                for (const auto& algo : head_to_head_algos) {
+                    writer.begin_array();
+                    for (const auto& stage : kLogicalStages) {
+                        // Compute the row's vmin/vmax across all
+                        // algorithms in head_to_head_algos so the
+                        // gradient is consistent within a row.
+                        double vmin = std::numeric_limits<double>::infinity();
+                        double vmax = -std::numeric_limits<double>::infinity();
+                        bool any_value = false;
+                        for (const auto& other : head_to_head_algos) {
+                            const double v = stage_value(other, stage, 0);
+                            if (v <= 0.0) continue;
+                            any_value = true;
+                            if (v < vmin) vmin = v;
+                            if (v > vmax) vmax = v;
+                        }
+                        const double v = stage_value(algo, stage, 0);
+                        if (!any_value || v <= 0.0) {
+                            writer.value_string("#e0e0e0");
+                        } else if (vmax == vmin) {
+                            // Every algorithm reports the same value —
+                            // colour neutral so we don't manufacture a
+                            // signal.
+                            writer.value_string("#cccccc");
+                        } else {
+                            writer.value_string(interp_color(v, vmin, vmax));
+                        }
+                    }
+                    writer.end_array();
+                }
+
+                writer.end_array();
+                writer.end_object();  // fill
+
+                writer.kv_string("align", "left");
+                writer.end_object();  // cells
+
+                writer.end_object();  // table trace
+                writer.end_array();   // data
+
+                // Table layout — set a height so the reader can see all rows.
+                writer.key("layout");
+                writer.begin_object();
+                writer.key("title");
+                writer.begin_object();
+                writer.kv_string("text", table_title);
+                writer.end_object();
+                writer.kv_string("template", "plotly_white");
+                writer.end_object();
+            });
     }
 
     // ================================================================

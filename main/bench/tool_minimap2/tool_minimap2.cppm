@@ -268,13 +268,27 @@ template<
     detail::NativeMinimap2Handles handles;
     const char* target_ptr  = target_acgt.c_str();
     const char* target_name = "target";
-    handles.index = mm_idx_str(
-        idx_opt.w, idx_opt.k,
-        (idx_opt.flag & MM_I_HPC) ? 1 : 0,
-        idx_opt.bucket_bits,
-        1,
-        &target_ptr,
-        &target_name);
+    // Wrap mm_idx_str inside its own region so the bench's per-phase
+    // accounting can attribute the index-build cost on the minimap2 side
+    // — without this, target index construction inside mm_idx_str (which
+    // hashes every k-mer of the target and bins them into the minimizer
+    // index) was hidden inside `tool_minimap2.run` and showed up as
+    // "wrapper overhead" only. Mirrors `target_index_build` in
+    // `minimap_port.cppm` so the chart layer can pair them up cell for
+    // cell. The `mm_sketch` calls inside `mm_idx_str` register their
+    // own region (`tool_minimap2.mm_sketch`) and nest under this one.
+    static const auto* _tool_minimap2_idx_desc =
+        bioseq::instr::register_region_static("tool_minimap2.target_index_build");
+    {
+        auto _idx_scope = bioseq::instr::region(_tool_minimap2_idx_desc);
+        handles.index = mm_idx_str(
+            idx_opt.w, idx_opt.k,
+            (idx_opt.flag & MM_I_HPC) ? 1 : 0,
+            idx_opt.bucket_bits,
+            1,
+            &target_ptr,
+            &target_name);
+    }
     if (handles.index == nullptr) {
         JustLog("[tool_minimap2] mm_idx_str returned nullptr");
         return MatchResultCollection{};
