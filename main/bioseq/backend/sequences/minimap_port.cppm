@@ -861,12 +861,21 @@ void classify_primary_secondary(
         regions[region_idx].region_id = static_cast<int32_t>(region_idx);
     }
 
-    // primary_indices holds indices of primary alignments
+    // primary_indices holds indices of primary alignments. Reserve up
+    // front so the first push_back doesn't trigger a 1→2→4→… growth
+    // chain through `region_count` worth of pushes when the chains
+    // happen to be all primary. Sized at region_count (the upper bound
+    // — every region is primary in the degenerate case).
     std::vector<size_t> primary_indices;
+    primary_indices.reserve(region_count);
     primary_indices.push_back(0);
     regions[0].parent = 0;
 
+    // coverage_intervals is cleared+refilled on every secondary check,
+    // capped at primary_indices.size() entries. Pre-reserve at
+    // region_count too so the inner loop never triggers realloc.
     std::vector<uint64_t> coverage_intervals;
+    coverage_intervals.reserve(region_count);
 
     for (size_t region_idx = 1; region_idx < region_count; ++region_idx) {
         AlignRegion& current_region = regions[region_idx];
@@ -1255,7 +1264,16 @@ void align_regions(
         region.dp_score = 0;
         bool prior_phase_zdropped = false;
 
-        JustLog("[minimap_port] Align regions. Determine actions.");
+        // Per-region diagnostic logs were previously emitted on every region
+        // boundary (left-extension skipped, gap-fill skipped, right-extension
+        // skipped, "determine actions" entry). Each fmtlog enqueue + format
+        // is ~1-5us, and the bench harness installs `enable_logging = true`
+        // via `log_configure(true)` so they fire during measurement runs.
+        // For very-long pairs with many regions this stacks up to ~ms of
+        // overhead per timed sample. Removed — the same information can be
+        // derived from `region.cigar.empty()` and the seed/outer span fields
+        // by any debugger-driven introspection without polluting the
+        // bench wall-clock. See REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_3.md.
 
         // Dispatch the three alignment phases based on strand orientation.
         // The is_reversed template parameter selects reverse-complement query
@@ -1286,9 +1304,9 @@ void align_regions(
                     ? seed_query_start - outer_query_start : left_result.max_q + 1;
                 final_query_start = seed_query_start - left_query_offset;
                 prior_phase_zdropped = left_result.zdropped;
-            } else {
-                JustLog("[minimap_port] Skip left extension: seed_query_start={} > outer_query_start={} && seed_ref_start={} > outer_ref_start={}", seed_query_start, outer_query_start, seed_ref_start, outer_ref_start);
             }
+            // (per-region "skip left extension" diagnostic removed —
+            // see comment at top of mm_align_skeleton inner loop)
 
             // === 2. Gap filling (entire region between first and last seed) ===
             int32_t final_ref_end = seed_ref_start;
@@ -1341,7 +1359,8 @@ void align_regions(
                     prior_phase_zdropped = fill_result.zdropped;
                 }
             } else {
-                JustLog("[minimap_port] Skip gap filling: region.seed_count={} > 1", region.seed_count);
+                // (per-region "skip gap fill" diagnostic removed —
+                // see comment at top of mm_align_skeleton inner loop)
                 final_ref_end = seed_ref_end;
                 final_query_end = seed_query_end;
             }
@@ -1370,9 +1389,9 @@ void align_regions(
                 const int32_t right_query_offset = right_result.reach_end
                     ? outer_query_end - seed_query_end : right_result.max_q + 1;
                 final_query_end = seed_query_end + right_query_offset;
-            } else {
-                JustLog("[minimap_port] Skip right extension: !prior_phase_zdropped={} && seed_query_end={} < outer_query_end={} && seed_ref_end={} < outer_ref_end={}", !prior_phase_zdropped, seed_query_end, outer_query_end, seed_ref_end, outer_ref_end);
             }
+            // (per-region "skip right extension" diagnostic removed —
+            // see comment at top of mm_align_skeleton inner loop)
 
             // Set final coordinates from alignment extent (align.c:897-899)
             region.ref_start = final_ref_start;
