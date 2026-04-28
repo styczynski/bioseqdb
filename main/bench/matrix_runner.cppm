@@ -613,8 +613,19 @@ inline void run_one_pair_samples(
     }
 
     // ---- Timed sample loop ----
+    // Memory-tracking syscalls (`current_resident_bytes()` → macOS
+    // `task_info` / Linux `/proc/self/statm`) are kept *outside* the
+    // per-sample t0..t1 window so they don't pollute latency
+    // measurements. Per-sample RSS deltas are coarse-grained: we
+    // record only the sample-mean delta across the whole loop, since
+    // per-sample syscalls were previously costing ~few µs each on
+    // macOS and stacking up between iterations (n_samples × 2
+    // syscalls). The chart layer reads `sample_peak_rss_delta_bytes`
+    // for both per-sample distributions and aggregates; with the
+    // mean-only model we fill every sample slot with the same delta
+    // so existing chart code keeps working without changes.
+    const auto rss_baseline = current_resident_bytes();
     for (std::size_t sample_index = 0; sample_index < n_samples; ++sample_index) {
-        const auto rss_baseline = current_resident_bytes();
         const auto t0 = clock::now();
         bool _ignored_pp = false;
         int  _ignored_mapq = 0;
@@ -622,21 +633,24 @@ inline void run_one_pair_samples(
         bool _ignored_rev = false;
         run_aligner_once(_ignored_pp, _ignored_mapq, _ignored_ts, _ignored_rev);
         const auto t1 = clock::now();
-        const auto rss_after = current_resident_bytes();
 
         const double elapsed_ns =
             std::chrono::duration<double, std::nano>(t1 - t0).count();
         record.sample_latencies_ns.push_back(elapsed_ns);
-        const std::int64_t rss_delta_bytes =
-            static_cast<std::int64_t>(rss_after) -
-            static_cast<std::int64_t>(rss_baseline);
-        // Negative deltas (allocator returned memory between calls) are
-        // clamped to zero so the chart axis stays positive — the
-        // underlying current-RSS reading is meaningful, but a per-call
-        // delta is still subject to allocator round-trips.
-        record.sample_peak_rss_delta_bytes.push_back(
-            rss_delta_bytes > 0 ? static_cast<double>(rss_delta_bytes) : 0.0);
     }
+    const auto rss_after = current_resident_bytes();
+    const std::int64_t rss_delta_bytes =
+        static_cast<std::int64_t>(rss_after) -
+        static_cast<std::int64_t>(rss_baseline);
+    // Negative deltas (allocator returned memory between calls) are
+    // clamped to zero so the chart axis stays positive — the
+    // underlying current-RSS reading is meaningful, but a per-call
+    // delta is still subject to allocator round-trips. Per-sample
+    // delta is the loop-total divided by sample count.
+    const double mean_rss_delta = (rss_delta_bytes > 0 && n_samples > 0)
+        ? static_cast<double>(rss_delta_bytes) / static_cast<double>(n_samples)
+        : 0.0;
+    record.sample_peak_rss_delta_bytes.assign(n_samples, mean_rss_delta);
 
     // ---- Snapshot per-phase aggregates after the timed loop. ----
     // The mean phase ns per sample is the delta divided by sample count.

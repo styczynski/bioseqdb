@@ -120,6 +120,128 @@ enum IteratorMode {
     SYMBOL
 };
 
+// =====================================================================
+// Bit-packed unit decomposition helpers
+//
+// For an alphabet whose bits_per_char divides storage_unit cleanly
+// (`unit_leftover_bits == 0`), every bit of a storage_unit holds a
+// letter. This means we can extract all letters_per_unit symbols out of
+// one storage word with constexpr-templated mask + shift, no iteration
+// over individual bits, and let the compiler unroll fully.
+//
+// IMPORTANT — bioseq's encoding (CODE_GUIDELINES.md §10) places the
+// FIRST input letter (sequence position 0) at the *low* bits of a fully
+// loaded unit. The legacy `bp_scalar_iter::increment` (sequences.cppm)
+// walks `unit_val & char_mask` then `unit_val >>= bits_per_char` —
+// LSB-first. `_convert` produces this layout: each new input letter is
+// shifted in at the top, then the unit is right-shifted for the next
+// one, so by the time the unit is fully populated the FIRST letter
+// sits at bit 0..bits_per_char-1 (LSB end) and the LAST letter sits at
+// the MSB end. Hand-traced for `dna4 / uint64_t`, sequence "ACGT…32":
+// A (rank 0) → bits 0-1, C (rank 1) → bits 2-3, …, last letter (the
+// 32nd) → bits 62-63.
+//
+// `extract_letters_from_unit<Value, bits_per_letter>(val)` therefore
+// returns a `std::array<Value, letters_per_unit>` where index 0 holds
+// the LSB-slot letter (= first input letter when the unit is fully
+// loaded) and index `letters_per_unit - 1` holds the MSB-slot letter
+// (= last input letter). Walking the array in increasing index order
+// reproduces the same letter sequence as the scalar `bp_scalar_iter`.
+//
+// The intent is to pre-compute these arrays for the unit-aligned bulk
+// of a region and then stream the letters into a destination buffer
+// (KSW2 state.target_bytes / state.query_reversed) — avoiding the
+// per-letter scalar shift loop that the previous `to_encoded_into`
+// walked.
+// =====================================================================
+
+namespace bit_pack_detail {
+
+template<typename Value, std::size_t... Is>
+[[nodiscard]] constexpr Value get_bitmask_seq(std::index_sequence<Is...>) noexcept {
+    return ((static_cast<Value>(1) << static_cast<Value>(Is)) | ...);
+}
+
+}  // namespace bit_pack_detail
+
+template<typename Value, std::size_t bits_per_letter>
+[[nodiscard]] consteval Value get_unit_bitmask() noexcept {
+    return bit_pack_detail::get_bitmask_seq<Value>(
+        std::make_index_sequence<bits_per_letter>{});
+}
+
+/**
+ * @brief Extract a single letter from a storage word.
+ *
+ * `letter_no` indexes from the *low* end of the unit (index 0 = bottom
+ * `bits_per_letter` bits). bioseq's encoding (LSB-first; see header
+ * comment above the helpers) places the FIRST input letter at slot
+ * 0, so `extract_unit_letter<…, 0>(unit)` returns the first letter
+ * directly.
+ */
+template<typename Value, std::size_t bits_per_letter, std::size_t letter_no>
+[[always_inline]] [[nodiscard]] constexpr Value extract_unit_letter(const Value& val) noexcept {
+    static_assert(letter_no * bits_per_letter < sizeof(Value) * 8,
+        "letter_no out of range for the storage_unit width "
+        "(would shift past the high bit of Value)");
+    constexpr Value letter_bit_shift =
+        static_cast<Value>(bits_per_letter * letter_no);
+    constexpr Value mask = get_unit_bitmask<Value, bits_per_letter>() << letter_bit_shift;
+    return (val & mask) >> letter_bit_shift;
+}
+
+namespace bit_pack_detail {
+
+template<typename Value, std::size_t bits_per_letter, std::size_t letter_count, std::size_t... Is>
+[[always_inline]] [[nodiscard]] constexpr auto extract_letters_from_unit_impl(
+    std::index_sequence<Is...>, const Value& val) noexcept
+    -> std::array<Value, sizeof...(Is)>
+{
+    // Index 0 reads from bit slot 0 (the LSB end). bioseq's encoding
+    // puts the FIRST input letter at bit slot 0, the SECOND at slot 1,
+    // etc., so walking the returned array in order matches the
+    // input-sequence order — same contract as `bp_scalar_iter`.
+    return std::array<Value, sizeof...(Is)>{
+        extract_unit_letter<Value, bits_per_letter, Is>(val)...
+    };
+}
+
+}  // namespace bit_pack_detail
+
+/**
+ * @brief Decompose one storage_unit into its constituent letters.
+ *
+ * Returns a fixed-size array of letter values, ordered to match
+ * bioseq's canonical encoding: index 0 is the symbol stored at the
+ * unit's low bits, which (for a fully populated unit) is the
+ * symbol that comes FIRST in the original input sequence.
+ *
+ * The whole expansion is constexpr — at runtime this compiles down to
+ * a small fixed sequence of mask+shift instructions that the compiler
+ * can fully unroll.
+ *
+ * Use this in performance-critical paths where you want to avoid the
+ * scalar `for (bit_no = 0..letters_per_unit) { mask; shift }` loop;
+ * the compiler can vectorize the fixed-size array fill into SIMD
+ * stores when the destination is contiguous. See
+ * `to_encoded_into` (the unit-aligned fast path) in this file.
+ *
+ * Only valid for alphabets with `unit_leftover_bits == 0`. The default
+ * `letter_count` template argument matches `letters_per_unit` for the
+ * given (Value, bits_per_letter) pair.
+ */
+template<
+    typename Value,
+    std::size_t bits_per_letter,
+    std::size_t letter_count = (sizeof(Value) * 8) / bits_per_letter
+>
+[[always_inline]] [[nodiscard]] constexpr auto extract_letters_from_unit(const Value& val) noexcept
+    -> std::array<Value, letter_count>
+{
+    return bit_pack_detail::extract_letters_from_unit_impl<Value, bits_per_letter, letter_count>(
+        std::make_index_sequence<letter_count>{}, val);
+}
+
 template<
     typename derived_t,
     typename alphabet_t,
@@ -640,11 +762,129 @@ struct compact_sequence_range_base {
         // produces the canonical rc; write_reversed only changes the
         // destination write order, not the source coordinates.
         const size_t fwd_from = is_reversed ? (bp_size() - bp_to)   : bp_from;
-        const size_t fwd_to   = is_reversed ? (bp_size() - bp_from) : bp_to;
+        [[maybe_unused]] const size_t fwd_to =
+            is_reversed ? (bp_size() - bp_from) : bp_to;
+
+        // The four orientations collapse to two output orderings in this
+        // implementation: <true, false> and <false, true> both write
+        // descending; <false, false> and <true, true> both write ascending.
+        // Letter complement is applied iff is_reversed (mirroring how the
+        // forward-window is interpreted). Branch is constexpr so the
+        // generated code paths stay specialised per call site.
+        constexpr bool descending_write = (is_reversed && !write_reversed)
+            || (!is_reversed && write_reversed);
+
+        // -----------------------------------------------------------
+        // Fast path: alphabet packs exactly into storage_unit
+        // (`unit_leftover_bits == 0`) and the requested window is at
+        // least one full unit. Decompose each storage_unit via the
+        // constexpr `extract_letters_from_unit<>` helper and stream
+        // into the destination buffer with no per-letter shift loop.
+        //
+        // For dna4 / sequence_custom_alphabet<dna4, uint64_t> this is
+        // 32 letters per uint64_t, so a 1 Mbp KSW2 region encode
+        // collapses ~62k unit reads + 62k inlined decompositions
+        // into a tight loop the compiler can keep in registers and
+        // vectorize against the destination span.
+        //
+        // The fallback below handles dna5 (5 letters → 3 bits has 2
+        // leftover bits per uint8) and any future alphabet that
+        // doesn't pack cleanly. Both code paths are gated by
+        // `if constexpr` so each instantiation gets exactly one body.
+        // -----------------------------------------------------------
+        constexpr bool unit_aligned = (traits::unit_leftover_bits == 0);
 
         auto base_iter = super()->cbegin();
         std::advance(base_iter, fwd_from / lpu);
         size_t bit_no = fwd_from % lpu;
+
+        if constexpr (unit_aligned) {
+            // The fast path requires the source iterator to be
+            // unit-aligned at the start. If `bp_from` lands mid-unit
+            // we walk a few letters scalar-style until we reach the
+            // next unit boundary, then switch to the unit-decomposed
+            // bulk loop. Same idea on the tail.
+            size_t produced = 0;
+
+            auto emit_letter = [&](typename traits::storage_unit raw) {
+                const auto letter = is_reversed
+                    ? static_cast<uint8_t>(traits::letter_complement(raw))
+                    : static_cast<uint8_t>(raw);
+                if constexpr (descending_write) {
+                    dst[region_length - 1 - produced] = letter;
+                } else {
+                    dst[produced] = letter;
+                }
+                ++produced;
+            };
+
+            // Walk to the next unit boundary, scalar-shift style.
+            // bioseq encodes the FIRST input letter at the unit's LSB
+            // slot (see `extract_letters_from_unit` header comment).
+            // To advance past `bit_no` previously-read letters we drop
+            // the bottom `bit_no * bpc` bits and continue masking the
+            // LSB — same invariant `bp_scalar_iter::increment` holds.
+            if (bit_no != 0 && produced < region_length) {
+                typename traits::storage_unit unit_val =
+                    static_cast<typename traits::storage_unit>(*base_iter);
+                unit_val = static_cast<typename traits::storage_unit>(
+                    unit_val >> (bit_no * bpc));
+                while (bit_no < lpu && produced < region_length) {
+                    emit_letter(static_cast<typename traits::storage_unit>(
+                        unit_val & traits::char_mask));
+                    unit_val = static_cast<typename traits::storage_unit>(
+                        unit_val >> bpc);
+                    ++bit_no;
+                }
+                // Only advance to the next unit if we consumed the
+                // current one. Otherwise (region ended mid-unit) stay
+                // put — the bulk loop has bulk_units==0 in that case
+                // and the tail loop also has produced==region_length,
+                // so no dereference happens; we keep the iterator
+                // valid as a defensive measure for future refactors.
+                if (bit_no == lpu) {
+                    ++base_iter;
+                    bit_no = 0;
+                }
+            }
+
+            // Bulk loop: each iteration consumes one entire unit and
+            // emits `lpu` letters. The decomposition is fully
+            // constexpr — the compiler unrolls into a fixed pattern
+            // of mask + shift + store instructions per unit.
+            const size_t bulk_units = (region_length - produced) / lpu;
+            for (size_t u = 0; u < bulk_units; ++u) {
+                const auto letters = extract_letters_from_unit<
+                    typename traits::storage_unit, bpc, lpu>(
+                        static_cast<typename traits::storage_unit>(*base_iter));
+                // Index 0 of `letters` is the *left-most* symbol of the
+                // unit — this matches the canonical sequence order.
+                for (size_t k = 0; k < lpu; ++k) {
+                    emit_letter(letters[k]);
+                }
+                ++base_iter;
+            }
+
+            // Tail: a final partial unit, if region_length wasn't a
+            // multiple of lpu after the alignment walk above.
+            if (produced < region_length) {
+                typename traits::storage_unit unit_val =
+                    static_cast<typename traits::storage_unit>(*base_iter);
+                while (produced < region_length) {
+                    emit_letter(static_cast<typename traits::storage_unit>(
+                        unit_val & traits::char_mask));
+                    unit_val = static_cast<typename traits::storage_unit>(
+                        unit_val >> bpc);
+                }
+            }
+            return;
+        }
+
+        // -----------------------------------------------------------
+        // Generic path (alphabets with leftover bits, e.g. dna5 in
+        // uint8). Walks letter-by-letter via a scalar shift loop —
+        // same correctness contract as the previous implementation.
+        // -----------------------------------------------------------
         // For the letters_per_unit == 1 case, every unit holds exactly one
         // letter; the iter<BP>() abstraction is just a thin wrapper around
         // dereferencing the underlying storage. For multi-letter units,
@@ -694,14 +934,6 @@ struct compact_sequence_range_base {
             }
         };
 
-        // The four orientations collapse to two output orderings in this
-        // implementation: <true, false> and <false, true> both write
-        // descending; <false, false> and <true, true> both write ascending.
-        // Letter complement is applied iff is_reversed (mirroring how the
-        // forward-window is interpreted). Branch is constexpr so the
-        // generated code paths stay specialised per call site.
-        constexpr bool descending_write = (is_reversed && !write_reversed)
-            || (!is_reversed && write_reversed);
         if constexpr (!descending_write) {
             for (size_t i = 0; i < region_length; ++i) {
                 if constexpr (is_reversed) {
