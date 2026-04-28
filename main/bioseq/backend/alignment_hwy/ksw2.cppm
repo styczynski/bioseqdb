@@ -222,7 +222,7 @@ public:
     KswDpState() = default;
 
     KswDpState(size_t target_len, size_t query_len, size_t vec_bytes)
-        : KswDpState(target_len, query_len, vec_bytes, 5) {}
+        : KswDpState(target_len, query_len, vec_bytes, 5, /*zero_state_arrays=*/true) {}
 
     [[nodiscard]] int target_vec_count() const noexcept { return target_vec_count_; }
     [[nodiscard]] int query_vec_count()  const noexcept { return query_vec_count_; }
@@ -243,7 +243,17 @@ protected:
     // zero the DP-state prefix of the slab; target_bytes / query_reversed
     // are immediately overwritten by the encode step, so skipping the
     // zero-fill there (SPEC §6.44) saves ~20 KiB of writes per region.
-    KswDpState(size_t target_len, size_t query_len, size_t vec_bytes, int state_count)
+    //
+    // The `zero_state_arrays` constructor switch lets the dual-affine
+    // subclass opt out of the broad memset(0): KswDpStateDual immediately
+    // overwrites arrays 0..3 with `-q-e` and arrays 4..5 with
+    // `-q2-e2`, so zeroing them first is wasted bandwidth — for very-long
+    // alignments this is megabyte-scale memset traffic per call. The
+    // diag_score array (the last DP-state slot) is still zero-filled
+    // because the generic-score code path may read it before writing,
+    // and it's only one stride wide.
+    KswDpState(size_t target_len, size_t query_len, size_t vec_bytes,
+               int state_count, bool zero_state_arrays)
         : target_vec_count_(static_cast<int>((target_len + vec_bytes - 1) / vec_bytes))
         , query_vec_count_(static_cast<int>((query_len + vec_bytes - 1) / vec_bytes))
         , vec_bytes_(vec_bytes)
@@ -253,7 +263,14 @@ protected:
                               + static_cast<size_t>(query_vec_count_) + 1) * vec_bytes;
         storage_ = context::current().alloc_align_array<int8_t, 64>(total);
         const size_t dp_bytes = static_cast<size_t>(state_count) * stride;
-        std::memset(storage_.data(), 0, dp_bytes);
+        if (zero_state_arrays) {
+            std::memset(storage_.data(), 0, dp_bytes);
+        } else {
+            // Only zero the diag_score slot (the last state slab). Arrays
+            // 0..(state_count-2) are filled by the caller before first read.
+            std::memset(storage_.data() + static_cast<size_t>(state_count - 1) * stride,
+                        0, stride);
+        }
         // Wipe the single extra byte that diag_score_base writes read just
         // past the DP-state arrays to keep the boundary deterministic.
         if (storage_.size() > dp_bytes) {
@@ -291,7 +308,13 @@ public:
     KswDpStateDual() = default;
 
     KswDpStateDual(size_t target_len, size_t query_len, size_t vec_bytes)
-        : KswDpState(target_len, query_len, vec_bytes, 7)
+        // Skip the broad zero-fill: ksw2_core_align fills arrays 0..5
+        // explicitly via fill_first_n_arrays(4, -q-e) +
+        // fill_array(x2|y2, -q2-e2) right after construction. The
+        // diag_score slot (array 6) still gets a one-stride zero-fill
+        // inside the parent constructor.
+        : KswDpState(target_len, query_len, vec_bytes, 7,
+                     /*zero_state_arrays=*/false)
     {
         gap_e2_offset_base = array_ptr(4);
         gap_f2_offset_base = array_ptr(5);
@@ -379,6 +402,19 @@ inline void ksw_backtrack_cigar(
     std::vector<uint32_t>& out_cigar)
 {
     out_cigar.clear();
+    // The traceback walks (start_row + start_col + 1) cells. Each cell
+    // emits one packed-cigar push, but `push_packed_cigar` merges with
+    // the previous op when the opcode matches — so for a typical
+    // low-error long-read alignment the final CIGAR is ~5 ops per 100 bp
+    // (~5 % of cells emit a fresh op). Reserve `(cells + 7) / 8` to
+    // sidestep the geometric-realloc chain during the backward build:
+    // every doubling realloc memcpys the previous contents, which on a
+    // 1 Mbp alignment dominates the traceback wall-clock. Slight over-
+    // estimation is fine — the vector is short-lived (lives on the
+    // result struct, returned by value) and the alternative is the
+    // log2(N) realloc storm we've been paying.
+    const size_t cell_estimate = static_cast<size_t>(start_row + start_col + 1);
+    out_cigar.reserve(std::max<size_t>(64, (cell_estimate + 7) / 8));
 
     const uint8_t* bt = matrix.bytes();
     const std::span<const int32_t> off = matrix.band_starts();
@@ -762,24 +798,43 @@ template<
     }
 
     // --- Prepare sequences -------------------------------------------------
-    // Encode directly into caller-provided spans (SPEC §6.7). The
-    // scratch query/target buffers are short-lived, so they live in the
-    // align arena alongside the DP state, avoiding two system mallocs
-    // per phase.
-    auto& encode_ctx = context::current();
-    auto query_enc  = encode_ctx.alloc_align_array<uint8_t>(query_len);
-    auto target_enc = encode_ctx.alloc_align_array<uint8_t>(target_len);
-    query_seq.template to_encoded_into<is_reversed>(query_enc, query_start, query_end);
-    target_seq.template to_encoded_into<false>(target_enc, target_start, target_end);
-
+    // The DP body reads a "reversed query" (qr in minimap2's notation) and
+    // an "ordered target" (sf). The previous implementation allocated two
+    // scratch encoded buffers (`query_enc`, `target_enc`), encoded into
+    // them, and then mirror-copied into `state.query_reversed` /
+    // `state.target_bytes`. For very-long alignments that mirror copy is
+    // O(qlen + tlen) of memcpy traffic per call (see
+    // REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md
+    // §KSW2 mirror buffer). We instead use the new <is_reversed,
+    // write_reversed> overload of `to_encoded_into` to emit each
+    // orientation directly into the DP-state buffer.
+    //
+    // KSW2 orientation matrix (qr/sf relative to the source region):
+    //   normal:        qr = reverse(query),               sf = target
+    //   reverse_cigar: qr = query (already aligned),      sf = reverse(target)
+    //
+    // The strand-template is_reversed flips the query letters (rc); the
+    // write_reversed flag flips the destination ordering. Both axes
+    // independently controlled by the new template parameter.
+    std::span<uint8_t> query_dst(state.query_reversed, query_len);
+    std::span<uint8_t> target_dst(state.target_bytes, target_len);
     if (flags.reverse_cigar) {
-        std::memcpy(state.query_reversed, query_enc.data(), query_len);
-        for (size_t i = 0; i < target_len; ++i)
-            state.target_bytes[i] = target_enc[target_len - 1 - i];
+        // qr stays in source order — no extra mirror.
+        query_seq.template to_encoded_into<is_reversed, false>(
+            query_dst, query_start, query_end);
+        // Target reversed; no rc on target, so the second template arg is
+        // the only orientation flip.
+        target_seq.template to_encoded_into<false, true>(
+            target_dst, target_start, target_end);
     } else {
-        for (size_t i = 0; i < query_len; ++i)
-            state.query_reversed[i] = query_enc[query_len - 1 - i];
-        std::memcpy(state.target_bytes, target_enc.data(), target_len);
+        // qr = reverse(encoded query). For the strand-reversed case the
+        // existing <true, false> path produced rc(query); we want rc then
+        // reverse-again, which is just complement-only. Captured as
+        // <true, true> (see overload comment).
+        query_seq.template to_encoded_into<is_reversed, true>(
+            query_dst, query_start, query_end);
+        target_seq.template to_encoded_into<false, false>(
+            target_dst, target_start, target_end);
     }
 
     // --- Approximate max tracking ------------------------------------------

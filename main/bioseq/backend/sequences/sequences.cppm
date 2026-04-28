@@ -605,7 +605,7 @@ struct compact_sequence_range_base {
      * arithmetic on the bit-packed storage, then walks exactly
      * `region_length` letters.
      */
-    template<bool is_reversed>
+    template<bool is_reversed, bool write_reversed = false>
     void to_encoded_into(std::span<uint8_t> dst, size_t bp_from, size_t bp_to) const {
         if (bp_from >= bp_to) return;
         const size_t region_length = bp_to - bp_from;
@@ -614,10 +614,31 @@ struct compact_sequence_range_base {
         constexpr size_t lpu = traits::letters_per_unit;
         constexpr size_t bpc = traits::bits_per_char;
 
-        // Translate to forward-domain coordinates. The is_reversed branch
-        // outputs revcomp[bp_from..bp_to) which corresponds to
-        // original[L-bp_to..L-bp_from) read forward, complemented, written
-        // in reverse.
+        // The output of this method is the cross product of two flips:
+        //   * letter complement (is_reversed)
+        //   * write-pointer direction (the canonical rc has both flipped)
+        //
+        // To make the matrix legible:
+        //
+        //   <false, false>  forward     dst[i] = src[from+i]
+        //   <false, true>   reverse     dst[i] = src[to-1-i]              (no rc, just mirror)
+        //   <true,  false>  rc          dst[i] = complement(src[to-1-i])  (canonical rc; legacy default)
+        //   <true,  true>   complement  dst[i] = complement(src[from+i])  (rc twice cancels)
+        //
+        // The KSW2 / Block aligner pipelines pre-reverse the query before the
+        // DP loop. When the alignment region is on the reverse strand
+        // (is_reversed == true) the existing code path materialised a
+        // reverse-complement buffer and then mirror-copied it into the DP
+        // state — a wasteful round trip. With this template parameter we can
+        // emit the alignment-ready orientation directly: the DP query buffer
+        // wants the *complement only* form (rc twice = identity on order),
+        // which is exactly <true, true> below. See
+        // REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md.
+        //
+        // Translate to forward-domain coordinates. is_reversed reads through
+        // the mirrored window of the source so that "complement + mirror"
+        // produces the canonical rc; write_reversed only changes the
+        // destination write order, not the source coordinates.
         const size_t fwd_from = is_reversed ? (bp_size() - bp_to)   : bp_from;
         const size_t fwd_to   = is_reversed ? (bp_size() - bp_from) : bp_to;
 
@@ -673,20 +694,34 @@ struct compact_sequence_range_base {
             }
         };
 
-        if constexpr (!is_reversed) {
+        // The four orientations collapse to two output orderings in this
+        // implementation: <true, false> and <false, true> both write
+        // descending; <false, false> and <true, true> both write ascending.
+        // Letter complement is applied iff is_reversed (mirroring how the
+        // forward-window is interpreted). Branch is constexpr so the
+        // generated code paths stay specialised per call site.
+        constexpr bool descending_write = (is_reversed && !write_reversed)
+            || (!is_reversed && write_reversed);
+        if constexpr (!descending_write) {
             for (size_t i = 0; i < region_length; ++i) {
-                dst[i] = static_cast<uint8_t>(next_letter());
+                if constexpr (is_reversed) {
+                    dst[i] = static_cast<uint8_t>(
+                        traits::letter_complement(next_letter()));
+                } else {
+                    dst[i] = static_cast<uint8_t>(next_letter());
+                }
                 refresh_unit_if_needed(i);
             }
         } else {
-            // Walk the forward window; complement each letter and emit
-            // it to the descending write pointer so the destination ends
-            // up holding the reverse-complement of the requested span.
             size_t write_pos = region_length;
             for (size_t i = 0; i < region_length; ++i) {
                 --write_pos;
-                dst[write_pos] = static_cast<uint8_t>(
-                    traits::letter_complement(next_letter()));
+                if constexpr (is_reversed) {
+                    dst[write_pos] = static_cast<uint8_t>(
+                        traits::letter_complement(next_letter()));
+                } else {
+                    dst[write_pos] = static_cast<uint8_t>(next_letter());
+                }
                 refresh_unit_if_needed(i);
             }
         }

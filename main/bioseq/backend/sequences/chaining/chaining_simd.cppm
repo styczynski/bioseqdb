@@ -8,14 +8,28 @@
  *
  * Key design decisions:
  *   - Structure-of-Arrays (SoA) layout for SIMD-friendly memory access
- *   - No max_skip in the SIMD path (TAL reference deliberately removes it)
+ *   - **Approximate max_skip**: after every batch with no lane-improvement we
+ *     bump a counter; once batches_without_improvement * L exceeds
+ *     params.max_chain_skip we break out of the predecessor scan. The TAL
+ *     reference deliberately removes max_skip because for short reads the
+ *     vectorized brute-force scan is fast enough; for long reads (>100 kbp)
+ *     where windows hold thousands of anchors the unbounded scan dominates
+ *     wall-clock and runs ~6x slower than the scalar path. The
+ *     batch-granularity check is conservative (we only break *after* a full
+ *     batch passes with no improvement) so the choice of best predecessor
+ *     stays close to scalar's; if a single later lane would have improved we
+ *     miss it, but for the parameter regime minimap2 ships in (max_skip = 25,
+ *     max_iter = 5000) the chain quality is unaffected on benchmark inputs.
  *   - Scalar fallback for small ranges (candidate_idx - window_start <= 5)
  *   - Global-best long-range optimization remains scalar
  *   - skip_penalty must be zero (asserted at entry)
  *
- * Complexity: O(n * max_iter / L) where L is the SIMD lane count.
+ * Complexity: O(n * min(max_iter, n_anchors_until_skip) / L) where L is the
+ * SIMD lane count.
  *
- * Reference: Intel TAL parallel_chaining_v2_22.h
+ * Reference: Intel TAL parallel_chaining_v2_22.h, with the max_skip
+ * optimization re-introduced for long-read regimes per
+ * REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md.
  */
 module;
 
@@ -29,6 +43,7 @@ module;
 #include <span>
 #include <cstring>
 #include <limits>
+#include <algorithm>
 
 export module bioseq_sequences.chaining.simd;
 
@@ -202,6 +217,14 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
         hn::Or(hn::Gt(diagonal_deviation_vec, zero),
                hn::Gt(gap_length_vec, predecessor_span_vec)));
 
+    // Fast path: when no lane needs a penalty, skip the (expensive) log2
+    // and float-conversion chain entirely. For very long sequences with
+    // many invalid pairs this trims the ~10 vector ops per lane otherwise
+    // wasted on a result that will be masked to zero.
+    if (hn::AllFalse(d_int, needs_gap_penalty)) {
+        return chaining_score_vec;
+    }
+
     // linear_penalty = gap_penalty * diagonal_deviation
     const auto linear_penalty_vec = hn::Mul(
         gap_penalty_vec, hn::ConvertTo(d_float, diagonal_deviation_vec));
@@ -286,6 +309,17 @@ void simd_dp_forward_pass(
     HWY_ALIGN int32_t best_score_lanes[hn::MaxLanes(d_int)];
     HWY_ALIGN int32_t best_predecessor_lanes[hn::MaxLanes(d_int)];
 
+    // Approximate max_skip: cap the number of consecutive batches with no
+    // lane-improvement before we bail. Equivalent in spirit to the scalar
+    // path's `n_skip > max_skip` break, but at batch granularity rather
+    // than per-pair (the SIMD pipeline does not maintain the
+    // `t[]`/`visited` array).
+    const int32_t max_chain_skip = params.max_chain_skip;
+    const int64_t max_consecutive_skip_batches = max_chain_skip > 0
+        ? std::max<int64_t>(1, static_cast<int64_t>(max_chain_skip)
+                                / std::max<int64_t>(1, static_cast<int64_t>(lane_count)) + 1)
+        : std::numeric_limits<int64_t>::max();
+
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
         int32_t best_predecessor = -1;
         int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
@@ -314,6 +348,7 @@ void simd_dp_forward_pass(
                 d_int, static_cast<int32_t>(soa_query[current_idx]));
             auto best_score_vec = hn::Set(d_int, best_score);
             auto best_predecessor_vec = no_predecessor_vec;
+            int64_t consecutive_skip_batches = 0;
 
             // Full-vector iterations: scan backwards in steps of L lanes
             for (; (candidate_idx - (lanes - 1)) >= window_start; candidate_idx -= lanes) {
@@ -344,6 +379,23 @@ void simd_dp_forward_pass(
                 best_score_vec = hn::Max(total_score_vec, best_score_vec);
                 best_predecessor_vec = hn::IfThenElse(
                     is_improvement, predecessor_indices_vec, best_predecessor_vec);
+
+                // Approximate max_skip: bail when this batch (and the
+                // previous ones in `consecutive_skip_batches`) produced no
+                // improvement at all. Cheap mask reduction; the broadcast
+                // result is identical across lanes so the AllFalse short
+                // circuits early on every architecture.
+                if (hn::AllFalse(d_int, is_improvement)) {
+                    if (++consecutive_skip_batches >= max_consecutive_skip_batches) {
+                        // Pretend we've consumed the whole window. The
+                        // global_best_idx fallback below still gets a shot
+                        // at finding a long-range chain target.
+                        candidate_idx = window_start - 1;
+                        break;
+                    }
+                } else {
+                    consecutive_skip_batches = 0;
+                }
             }
 
             // Partial tail: candidate_idx >= window_start but candidate_idx-(lanes-1) < window_start

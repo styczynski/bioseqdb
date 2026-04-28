@@ -533,28 +533,33 @@ inline void collect_minimizers_simd(
 		// Captured BEFORE the palindrome / out-of-range masks rewrite the hash to
 		// max_val so the strand snapshot stays in sync with whichever state the
 		// hasher's `Min` selected this iteration. Dead lanes (mask false) and
-		// palindromic lanes will have their strand re-zeroed by IfThenElse below
-		// for tidy state, but the only lane-state that ever reaches an emit is
-		// gated on `temp_buffer1[i] != max_val` so the dead-lane strand never
-		// matters in practice.
+		// palindromic lanes have their hash forced to max_val below — the emit
+		// guard `temp_buffer1[i] != max_val` then skips them so their strand
+		// value never matters; we therefore skip the redundant strand mask too,
+		// saving one IfThenElse per lane per iteration.
 		const hash_mask_t strand_mask = hasher.get_strand_mask(d);
 		hash_vec_t strand_vec = hn::IfThenElse(strand_mask, one_vec, zero_vec);
 
-		// Mask off lanes that are no longer iterating over valid sequence bytes (partial-matrix tail
-		// past the sequence end). Without this, the lane hasher still processes padding bytes and
-		// feeds their garbage hashes into `new_min_mask` / `current_min` via later Le checks —
-		// producing phantom minimizers at positions beyond `seq.bp_size()`.
-		hash_vec = hn::IfThenElse(mask, hash_vec, max_vec);
-		strand_vec = hn::IfThenElse(mask, strand_vec, zero_vec);
-		// Also mask palindromic k-mers (lanes where state_forward == state_reverse_compl).
-		// The scalar path pushes `MinimapSketch::getMax()` for EQUAL strand to mirror
-		// minimap2's palindrome skip while keeping pos alignment (see comment in
-		// collect_minimizers's else-branch). We do the same here so that scalar and
-		// SIMD produce identical minimizer sets even on narrow storage_unit widths
-		// (uint8_t) where the effective k-mer is short enough that palindromic 2/4-mers
-		// appear frequently in the test sequences.
-		hash_vec = hn::IfThenElse(hasher.get_palindrome_mask(d), max_vec, hash_vec);
-		strand_vec = hn::IfThenElse(hasher.get_palindrome_mask(d), zero_vec, strand_vec);
+		// Single combined valid-mask: a lane survives iff it has live data
+		// (mask) AND the k-mer it produced is non-palindromic. The palindrome
+		// check (`state_forward == state_reverse_compl` inside the lexic
+		// hasher) was previously evaluated twice — once for hash, once for
+		// strand — and both calls re-derived the mask from the hasher state.
+		// Combining them into one AndNot saves: one redundant
+		// `get_palindrome_mask` call (an Eq SIMD compare), two IfThenElse
+		// SIMD ops, and the dead-lane strand IfThenElse. For mm_sketch_simd
+		// this is the dominant per-iteration cost on dna4 inputs once the
+		// hasher itself is reduced to a single Xor (see lexic.cppm). See
+		// REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md.
+		const hash_mask_t valid_mask = hn::AndNot(hasher.get_palindrome_mask(d), mask);
+		hash_vec = hn::IfThenElse(valid_mask, hash_vec, max_vec);
+		// Strand only needs to be cleared for palindromes that pass the live
+		// `mask` filter (they would otherwise carry a stale strand bit that a
+		// later submit_results could read). The dead-lane case
+		// (mask=false) is handled by the hash sentinel + emit guard.
+		// Equivalent to `IfThenElse(palindrome_mask & mask, zero, strand)`.
+		strand_vec = hn::IfThenZeroElse(
+			hn::And(hasher.get_palindrome_mask(d), mask), strand_vec);
 
 		// The scalar collect_minimizers increments its `pos` BEFORE this push check (so its first
 		// real k-mer is pushed at scalar-iter `k - 1`, where the hasher holds chars[0..k-1]).

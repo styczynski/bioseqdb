@@ -92,21 +92,48 @@ public:
 		}
 		static constexpr std::array<input_t, traits::alphabet_size> compl_lut = build_compl_lut();
 
-		// Compute `complement(outgoing)` per lane using a cascade of IfThenElse
-		// over compile-time-known complement values. alphabet_size is small
-		// (≤ 5 in practice), so this is a few comparisons and selects and
-		// generates identical code to the old XOR path when the alphabet is dna4.
+		// Detect XOR-complement alphabets at compile time. dna4 is the
+		// production case: complement pairs are {0,3} and {1,2}, both of
+		// which are flipped by XOR with the value `alphabet_size - 1 = 3`.
+		// One vector XOR is dramatically cheaper than the (alphabet_size-1)
+		// chained IfThenElse cascade the LUT path falls back to — for dna4
+		// this is one of the dominant per-iteration costs of mm_sketch_simd.
+		// dna5 fails this predicate ({0,4} flips ok, {1,2} flips ok, {3,3}
+		// — N — must stay at 3 but `3 ^ 4 = 7`) so the LUT remains the
+		// fallback for non-power-of-2 alphabets.
+		// See REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_2.md
+		// for measurement notes.
+		static constexpr bool is_xor_complement = []() constexpr {
+			using sw = typename traits::storage_unit;
+			constexpr sw xor_mask = static_cast<sw>(traits::alphabet_size - 1);
+			for (size_t r = 0; r < traits::alphabet_size; ++r) {
+				const sw expected = static_cast<sw>(r) ^ xor_mask;
+				const sw actual = static_cast<sw>(traits::letter_complement(static_cast<sw>(r)));
+				if (expected != actual) return false;
+			}
+			return true;
+		}();
+
+		// Compute `complement(outgoing)` per lane. For dna4 a single Xor with
+		// (alphabet_size - 1) suffices; for non-XOR alphabets we fall back to
+		// the IfThenElse cascade over the compile-time LUT. The branch is
+		// `if constexpr` so each instantiation gets exactly one code path.
 		[[always_inline]] static constexpr typename traits::input_vec_t
 		apply_complement(const typename traits::input_d_t& d, typename traits::input_vec_t rank) {
-			typename traits::input_vec_t result = hn::Set(d, compl_lut[traits::alphabet_size - 1]);
-			for (int r = static_cast<int>(traits::alphabet_size) - 2; r >= 0; --r) {
-				result = hn::IfThenElse(
-					hn::Eq(rank, hn::Set(d, static_cast<input_t>(r))),
-					hn::Set(d, compl_lut[r]),
-					result
-				);
+			if constexpr (is_xor_complement) {
+				return hn::Xor(rank, hn::Set(d,
+					static_cast<input_t>(traits::alphabet_size - 1)));
+			} else {
+				typename traits::input_vec_t result = hn::Set(d, compl_lut[traits::alphabet_size - 1]);
+				for (int r = static_cast<int>(traits::alphabet_size) - 2; r >= 0; --r) {
+					result = hn::IfThenElse(
+						hn::Eq(rank, hn::Set(d, static_cast<input_t>(r))),
+						hn::Set(d, compl_lut[r]),
+						result
+					);
+				}
+				return result;
 			}
-			return result;
 		}
 
 	public:
