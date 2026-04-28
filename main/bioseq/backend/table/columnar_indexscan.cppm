@@ -499,16 +499,16 @@ ColumnarIndexScan_ExecIndexScanInitializeDSM(IndexScanState* node,
     EState* estate = node->ss.ps.state;
     ParallelIndexScanDesc piscan = static_cast<ParallelIndexScanDesc>(coordinate);
 
-    index_parallelscan_initialize(node->ss.ss_currentRelation,
-                                  node->iss_RelationDesc,
-                                  estate->es_snapshot,
-                                  piscan);
+    index_parallelscan_initialize_compat(node->ss.ss_currentRelation,
+                                         node->iss_RelationDesc,
+                                         estate->es_snapshot,
+                                         piscan);
 
-    node->iss_ScanDesc = index_beginscan_parallel(node->ss.ss_currentRelation,
-                                                  node->iss_RelationDesc,
-                                                  node->iss_NumScanKeys,
-                                                  node->iss_NumOrderByKeys,
-                                                  piscan);
+    node->iss_ScanDesc = index_beginscan_parallel_compat(node->ss.ss_currentRelation,
+                                                         node->iss_RelationDesc,
+                                                         node->iss_NumScanKeys,
+                                                         node->iss_NumOrderByKeys,
+                                                         piscan);
 
     if (node->iss_NumRuntimeKeys == 0 || node->iss_RuntimeKeysReady)
         index_rescan(node->iss_ScanDesc,
@@ -522,11 +522,11 @@ ColumnarIndexScan_ExecIndexScanInitializeWorker(IndexScanState* node, void* coor
 {
     ParallelIndexScanDesc piscan = static_cast<ParallelIndexScanDesc>(coordinate);
 
-    node->iss_ScanDesc = index_beginscan_parallel(node->ss.ss_currentRelation,
-                                                  node->iss_RelationDesc,
-                                                  node->iss_NumScanKeys,
-                                                  node->iss_NumOrderByKeys,
-                                                  piscan);
+    node->iss_ScanDesc = index_beginscan_parallel_compat(node->ss.ss_currentRelation,
+                                                         node->iss_RelationDesc,
+                                                         node->iss_NumScanKeys,
+                                                         node->iss_NumOrderByKeys,
+                                                         piscan);
 
     if (node->iss_NumRuntimeKeys == 0 || node->iss_RuntimeKeysReady)
         index_rescan(node->iss_ScanDesc,

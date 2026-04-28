@@ -106,7 +106,7 @@ ExtractTupleFromVectorSlot(TupleTableSlot* output_slot, VectorTupleTableSlot* ve
 {
 	foreach_int(attribute_number, attr_needed_list)
 	{
-		if (!output_slot->tts_tupleDescriptor->attrs[attribute_number].attisdropped)
+		if (!TupleDescAttr(output_slot->tts_tupleDescriptor, attribute_number)->attisdropped)
 		{
 			VectorColumn* column = reinterpret_cast<VectorColumn*>(vector_slot->tts.tts_values[attribute_number]);
 			int8_t* raw_column_data = reinterpret_cast<int8_t*>(column->value) + column->columnTypeLen * row_index;

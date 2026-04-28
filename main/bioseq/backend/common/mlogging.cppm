@@ -1554,7 +1554,22 @@ export inline void log_configure(const bool is_testing_mode = false) {
     fmtlog::setLogFile(stderr, false);
   } else {
   #ifndef NO_POSTGRES
-    fmtlog::setLogFile("/Users/styczynski/Code/bioseqdb/main/loglog.log", true);   /* truncate=true: clear log on _PG_init so each backend start has a clean slate */
+    /*
+     * Resolve log path from BIOSEQ_LOG_FILE, falling back to /tmp so the
+     * extension does not abort _PG_init on machines whose layout differs
+     * from the original developer's. If the file cannot be opened, route
+     * logs to stderr (which lands in the postgres server log) instead of
+     * letting fmt::report_error throw and crash the backend.
+     */
+    const char* log_file = std::getenv("BIOSEQ_LOG_FILE");
+    if (log_file == nullptr || *log_file == '\0') {
+      log_file = "/tmp/bioseq_loglog.log";
+    }
+    if (FILE* fp = std::fopen(log_file, "w"); fp != nullptr) {
+      fmtlog::setLogFile(fp, true);
+    } else {
+      fmtlog::setLogFile(stderr, false);
+    }
     fmtlog::setFlushDelay(0);
   #endif
     fmtlog::setLogLevel(fmtlog::DBG);

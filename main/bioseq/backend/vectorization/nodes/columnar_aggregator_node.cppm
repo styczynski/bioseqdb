@@ -1964,11 +1964,10 @@ initialize_hash_entry(AggState *aggstate, TupleHashTable hashtable,
 	if (aggstate->numtrans == 0)
 		return;
 
-	pergroup = (AggStatePerGroup)
-		MemoryContextAlloc(hashtable->tablecxt,
-						   sizeof(AggStatePerGroupData) * aggstate->numtrans);
-
-	entry->additional = pergroup;
+	pergroup = static_cast<AggStatePerGroup>(
+		tuple_hash_entry_alloc_additional_compat(
+			hashtable, entry,
+			sizeof(AggStatePerGroupData) * aggstate->numtrans));
 
 	/*
 	 * Initialize aggregates for new tuple group, lookup_hash_entries()
@@ -2032,7 +2031,8 @@ lookup_hash_entries(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, hashtable, entry);
-			pergroup[setno] = static_cast<AggStatePerGroupData*>(entry->additional);
+			pergroup[setno] = static_cast<AggStatePerGroupData*>(
+				tuple_hash_entry_get_additional_compat(hashtable, entry));
 		}
 		else
 		{
@@ -2615,7 +2615,8 @@ agg_refill_hash_table(AggState *aggstate)
 		{
 			if (isnew)
 				initialize_hash_entry(aggstate, perhash->hashtable, entry);
-			aggstate->hash_pergroup[batch->setno] = static_cast<AggStatePerGroupData*>(entry->additional);
+			aggstate->hash_pergroup[batch->setno] = static_cast<AggStatePerGroupData*>(
+				tuple_hash_entry_get_additional_compat(perhash->hashtable, entry));
 			advance_aggregates(aggstate);
 		}
 		else
@@ -2795,7 +2796,8 @@ agg_retrieve_hash_table_in_memory(AggState *aggstate)
 		}
 		ExecStoreVirtualTuple(firstSlot);
 
-		pergroup = static_cast<AggStatePerGroup>(entry->additional);
+		pergroup = static_cast<AggStatePerGroup>(
+			tuple_hash_entry_get_additional_compat(perhash->hashtable, entry));
 
 		/*
 		 * Use the representative input tuple for any references to

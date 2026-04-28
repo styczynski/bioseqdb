@@ -568,10 +568,10 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipLis
 			{
 				values[Anum_bioseq_chunk_minimum_value - 1] =
 					PointerGetDatum(DatumToBytea(chunk->minimumValue,
-												 &tupleDescriptor->attrs[columnIndex]));
+												 TupleDescAttr(tupleDescriptor, columnIndex)));
 				values[Anum_bioseq_chunk_maximum_value - 1] =
 					PointerGetDatum(DatumToBytea(chunk->maximumValue,
-												 &tupleDescriptor->attrs[columnIndex]));
+												 TupleDescAttr(tupleDescriptor, columnIndex)));
 			}
 			else
 			{
@@ -820,9 +820,9 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 				datumArray[Anum_bioseq_chunk_maximum_value - 1]);
 
 			chunk->minimumValue =
-				ByteaToDatum(minValue, &tupleDescriptor->attrs[columnIndex]);
+				ByteaToDatum(minValue, TupleDescAttr(tupleDescriptor, columnIndex));
 			chunk->maximumValue =
-				ByteaToDatum(maxValue, &tupleDescriptor->attrs[columnIndex]);
+				ByteaToDatum(maxValue, TupleDescAttr(tupleDescriptor, columnIndex));
 
 			chunk->hasMinMax = true;
 		}
@@ -1760,14 +1760,16 @@ CompleteStripeReservation(Relation rel, uint64_t stripeId, uint64_t sizeBytes,
  * stripeId according to given newValues and update arrays.
  * Note that this function shouldn't be used for the cases where any indexes
  * of stripe metadata should be updated according to modifications done.
+ *
+ * This was originally implemented on top of heap_inplace_update(), which was
+ * removed in PG-18. The systable_inplace_update_* API is available in both
+ * PG-17 and PG-18 and is the upstream-recommended replacement, so we use it
+ * unconditionally rather than maintaining two versions of the function body.
  */
 static StripeMetadata *
 UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 						Datum *newValues)
 {
-	SnapshotData dirtySnapshot;
-	InitDirtySnapshot(dirtySnapshot);
-
 	ScanKeyData scanKey[2];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
@@ -1775,49 +1777,45 @@ UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripeId));
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
-
 	Relation columnarStripes = table_open(columnarStripesOid, AccessShareLock);
-	Relation columnarStripePkeyIndex = index_open(ColumnarStripePKeyIndexRelationId(),
-												  AccessShareLock);
+	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes,
-															columnarStripePkeyIndex,
-															&dirtySnapshot, 2, scanKey);
+	Oid indexId = ColumnarStripePKeyIndexRelationId();
+	bool indexOk = OidIsValid(indexId);
 
-	HeapTuple oldTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
+	void *state = nullptr;
+	HeapTuple oldTuple = nullptr;
+	systable_inplace_update_begin(columnarStripes, indexId, indexOk,
+								  /* snapshot */ nullptr,
+								  2, scanKey, &oldTuple, &state);
+
 	if (!HeapTupleIsValid(oldTuple))
 	{
+		systable_inplace_update_cancel(state);
+		table_close(columnarStripes, AccessShareLock);
 		pg_log(ERROR, "attempted to modify an unexpected stripe, columnar storage with id={} does not have stripe with id={}", storageId, stripeId);
 	}
 
 	/*
-	 * heap_inplace_update already doesn't allow changing size of the original
-	 * tuple, so we don't allow setting any Datum's to NULL values.
+	 * systable_inplace_update_finish doesn't allow changing the size of the
+	 * original tuple, so we don't allow setting any Datum's to NULL values.
 	 */
 	bool newNulls[Natts_bioseq_stripe] = { false };
-	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
 	HeapTuple modifiedTuple = heap_modify_tuple(oldTuple, tupleDescriptor,
 												newValues, newNulls, update);
 
-	heap_inplace_update(columnarStripes, modifiedTuple);
+	systable_inplace_update_finish(state, modifiedTuple);
 
 	/*
-	 * Existing tuple now contains modifications, because we used
-	 * heap_inplace_update().
-	 */
-	HeapTuple newTuple = oldTuple;
-
-	/*
-	 * Must not pass modifiedTuple, because BuildStripeMetadata expects a real
-	 * heap tuple with MVCC fields.
+	 * BuildStripeMetadata expects a real heap tuple with MVCC fields, which
+	 * is what oldTuple is — the in-place update preserved its header.
 	 */
 	StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripes,
-																 newTuple);
+																 modifiedTuple);
 
 	CommandCounterIncrement();
 
-	systable_endscan_ordered(scanDescriptor);
-	index_close(columnarStripePkeyIndex, AccessShareLock);
+	heap_freetuple(modifiedTuple);
 	table_close(columnarStripes, AccessShareLock);
 
 	/* return StripeMetadata object built from modified tuple */
@@ -2201,7 +2199,7 @@ create_estate_for_relation(Relation rel)
 
 	List *perminfos = NIL;
 	addRTEPermissionInfo(&perminfos, rte);
-	ExecInitRangeTable(estate, list_make1(rte), perminfos);
+	ExecInitRangeTable_compat(estate, list_make1(rte), perminfos);
 
 
 

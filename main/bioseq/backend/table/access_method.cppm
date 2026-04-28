@@ -1386,7 +1386,7 @@ NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed)
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
-		if (tupdesc->attrs[i].attisdropped)
+		if (TupleDescAttr(tupdesc, i)->attisdropped)
 		{
 			continue;
 		}
@@ -1660,15 +1660,44 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 	bool frozenxid_updated;
 	bool minmulti_updated;
 
+	/*
+	 * PG-18 added a `num_all_frozen_pages` parameter between
+	 * `num_all_visible_pages` and `hasindex`. Columnar storage doesn't
+	 * track per-page visibility/freezing so the value is always 0,
+	 * matching the behaviour we already report for `new_rel_allvisible`.
+	 */
+#if PG_VERSION_NUM >= PG_VERSION_18
+	BlockNumber new_rel_allfrozen = 0;
+	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
+						new_rel_allvisible, new_rel_allfrozen,
+						nindexes > 0,
+						newRelFrozenXid, newRelminMxid,
+						&frozenxid_updated, &minmulti_updated, false);
+#else
 	vac_update_relstats(rel, new_rel_pages, new_live_tuples,
 						new_rel_allvisible, nindexes > 0,
 						newRelFrozenXid, newRelminMxid,
 						&frozenxid_updated, &minmulti_updated, false);
+#endif
 
+	/*
+	 * PG-18 added a `starttime` argument so pg_stat_progress_vacuum can
+	 * report how long the vacuum has been running. We don't have a real
+	 * start time here (the columnar vacuum is bookkeeping only) so pass 0
+	 * which the stats subsystem treats as "unknown".
+	 */
+#if PG_VERSION_NUM >= PG_VERSION_18
+	pgstat_report_vacuum(RelationGetRelid(rel),
+							rel->rd_rel->relisshared,
+							std::max<int64_t>(new_live_tuples, 0),
+							0,
+							0 /* starttime */);
+#else
 	pgstat_report_vacuum(RelationGetRelid(rel),
 							rel->rd_rel->relisshared,
 							std::max<int64_t>(new_live_tuples, 0),
 							0);
+#endif
 	pgstat_progress_end_command();
 }
 
@@ -1709,7 +1738,7 @@ LogRelationStats(Relation rel, int elevel)
 														  GetTransactionSnapshot());
 			for (uint32_t column = 0; column < skiplist->columnCount; column++)
 			{
-				bool attrDropped = tupdesc->attrs[column].attisdropped;
+				bool attrDropped = TupleDescAttr(tupdesc, column)->attisdropped;
 				for (uint32_t chunk = 0; chunk < skiplist->chunkCount; chunk++)
 				{
 					ColumnChunkSkipNode *skipnode =
@@ -2818,7 +2847,14 @@ export const TableAmRoutine bioseq_am_methods = {
 
 	.relation_estimate_size = bioseq_estimate_rel_size,
 
+/*
+ * PG-18 dropped the per-block callback (scan_bitmap_next_block) from the
+ * TableAmRoutine when bitmap-heap-scan was reorganised; only the per-tuple
+ * callback remains. Keep the PG-17 field for backwards compatibility.
+ */
+#if PG_VERSION_NUM < PG_VERSION_18
 	.scan_bitmap_next_block = NULL,
+#endif
 	.scan_bitmap_next_tuple = NULL,
 	.scan_sample_next_block = bioseq_scan_sample_next_block,
 	.scan_sample_next_tuple = bioseq_scan_sample_next_tuple
@@ -2856,7 +2892,7 @@ detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
 
 	for (int i = 0; i < tupleDesc->natts; i++)
 	{
-		if (!isnull[i] && tupleDesc->attrs[i].attlen == -1 &&
+		if (!isnull[i] && TupleDescAttr(tupleDesc, i)->attlen == -1 &&
 			VARATT_IS_EXTENDED(values[i]))
 		{
 			/* make a copy */

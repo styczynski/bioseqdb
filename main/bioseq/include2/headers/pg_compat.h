@@ -1,8 +1,5 @@
 #pragma once
 
-#undef PG_VERSION_NUM
-#define PG_VERSION_NUM 170000
-
 #define DEPRECATED_PG_VERSION_13 160000
 #define DEPRECATED_PG_VERSION_14 160000
 #define DEPRECATED_PG_VERSION_15 160000
@@ -12,11 +9,6 @@
 #define PG_VERSION_17 170000
 #define PG_VERSION_18 180000
 #define PG_VERSION_19 190000
-
-#if PG_VERSION_NUM < PG_VERSION_17
-#error "Unsupported Postgres version lower than 17"
-#include notexisting.h
-#endif
 
 #ifdef __cplusplus
 #undef HAVE__BUILTIN_TYPES_COMPATIBLE_P
@@ -65,6 +57,11 @@ extern "C" {
 #include "c.h"
 #include "citus_version.h"
 #include "postgres.h"
+
+#if PG_VERSION_NUM < PG_VERSION_17
+#error "Unsupported Postgres version lower than 17"
+#endif
+
 #include "storage/relfilelocator.h"
 #include "utils/array.h"
 #include "optimizer/tlist.h"
@@ -424,6 +421,16 @@ extern "C" {
 #include "common/pg_lzcompress.h"
 #include "nodes/supportnodes.h"
 
+/*
+ * In PG18, ExplainProperty{Text,Integer,UInteger,Float,Bool,List,...} were
+ * moved out of commands/explain.h into a dedicated commands/explain_format.h
+ * header. Pull it in unconditionally on PG18 so call sites compile without
+ * needing to add the new include locally.
+ */
+#if PG_VERSION_NUM >= PG_VERSION_18
+#include "commands/explain_format.h"
+#endif
+
 
 // OLD COMPAT
 
@@ -524,6 +531,23 @@ extern "C" {
 
 /* PG-18 unified row-compare operator codes under COMPARE_* */
 #define ROWCOMPARE_NE COMPARE_NE
+
+/*
+ * PG-18 dropped the "Ext" suffix and inserted a `TupleTableSlotOps *inputOps`
+ * parameter between `inputDesc` and `numCols`. Provide a 13-arg compat macro
+ * matching the PG-17 BuildTupleHashTableExt signature; pass the
+ * MinimalTuple-shaped slot ops on PG-18 since aggregate hashing always feeds
+ * MinimalTuple-derived slots into the table (matches what nodeAgg.c does
+ * upstream).
+ */
+#define BuildTupleHashTableExt(parent, inputDesc, numCols, keyColIdx, eqfuncoids, \
+							   hashfunctions, collations, nbuckets, additionalsize, \
+							   metacxt, tablecxt, tempcxt, use_variable_hash_iv) \
+		BuildTupleHashTable((parent), (inputDesc), &TTSOpsMinimalTuple, \
+							(numCols), (keyColIdx), (eqfuncoids), \
+							(hashfunctions), (collations), (nbuckets), \
+							(additionalsize), (metacxt), (tablecxt), \
+							(tempcxt), (use_variable_hash_iv))
 
 #elif PG_VERSION_NUM >= PG_VERSION_17
 #define create_foreignscan_path_compat(a, b, c, d, e, f, g, h, i, j, k) \
@@ -959,6 +983,105 @@ getStxstattarget_compat(HeapTuple tup)
 		"CREATE %sSEQUENCE IF NOT EXISTS %s AS %s INCREMENT BY " INT64_FORMAT \
 		" MINVALUE " INT64_FORMAT " MAXVALUE " INT64_FORMAT \
 		" START WITH " INT64_FORMAT " CACHE " INT64_FORMAT " %sCYCLE"
+
+/*
+ * ============================================================
+ * PG-18 API drift shims.
+ * ============================================================
+ *
+ * The block below defines a small set of *_compat helpers that paper over
+ * source-level breakage between PG-17 and PG-18. Each helper is documented
+ * with the underlying API change so call sites stay readable.
+ */
+
+/*
+ * ExecInitRangeTable: PG-18 added a fourth `Bitmapset *unpruned_relids`
+ * argument used by runtime-pruning bookkeeping. Pass NULL on PG-18 for the
+ * "no prune info available" case (matches what e.g. CopyFrom does); on
+ * PG-17 the 3-arg form is still correct.
+ */
+#if PG_VERSION_NUM >= PG_VERSION_18
+#define ExecInitRangeTable_compat(estate, rangeTable, permInfos) \
+		ExecInitRangeTable((estate), (rangeTable), (permInfos), NULL)
+#else
+#define ExecInitRangeTable_compat(estate, rangeTable, permInfos) \
+		ExecInitRangeTable((estate), (rangeTable), (permInfos))
+#endif
+
+/*
+ * index_beginscan_parallel: PG-18 inserted an
+ * `IndexScanInstrumentation *instrument` parameter between the index
+ * relation and `nkeys`. Pass NULL on PG-18 to opt out of instrumentation.
+ */
+#if PG_VERSION_NUM >= PG_VERSION_18
+#define index_beginscan_parallel_compat(heaprel, indexrel, nkeys, norderbys, pscan) \
+		index_beginscan_parallel((heaprel), (indexrel), NULL, (nkeys), (norderbys), (pscan))
+#else
+#define index_beginscan_parallel_compat(heaprel, indexrel, nkeys, norderbys, pscan) \
+		index_beginscan_parallel((heaprel), (indexrel), (nkeys), (norderbys), (pscan))
+#endif
+
+/*
+ * index_parallelscan_initialize: PG-18 expanded this from
+ *   (heap, idx, snap, target)
+ * to
+ *   (heap, idx, snap, instrument, parallel_aware, nworkers,
+ *    sharedinfo, target)
+ * to thread the new instrumentation/parallel-aware bookkeeping through to
+ * the AM. The compat helper keeps the old call sites working by passing
+ * NULL/0/false defaults that disable the new behaviour.
+ */
+#if PG_VERSION_NUM >= PG_VERSION_18
+#define index_parallelscan_initialize_compat(heap, idx, snap, target) \
+		index_parallelscan_initialize((heap), (idx), (snap), \
+									  false /* instrument     */, \
+									  false /* parallel_aware */, \
+									  0     /* nworkers       */, \
+									  NULL  /* sharedinfo out */, \
+									  (target))
+#else
+#define index_parallelscan_initialize_compat(heap, idx, snap, target) \
+		index_parallelscan_initialize((heap), (idx), (snap), (target))
+#endif
+
+/*
+ * TupleHashEntry::additional: PG-18 removed the public `additional` field
+ * from TupleHashEntryData and replaced it with a hashtable-aware accessor
+ * (`TupleHashEntryGetAdditional(hashtable, entry)`). The "additional"
+ * memory is now allocated as part of the entry itself, sized by the
+ * `additionalsize` argument passed to BuildTupleHashTable.
+ *
+ *   - tuple_hash_entry_get_additional_compat(hashtable, entry)
+ *       Reads the additional pointer (works on both versions).
+ *   - tuple_hash_entry_alloc_additional_compat(hashtable, entry, size)
+ *       Returns a pointer to writable per-entry memory of the requested
+ *       size. On PG-17 it palloc's into hashtable->tablecxt and stashes
+ *       the pointer in entry->additional. On PG-18 the storage is already
+ *       reserved alongside the entry (provided BuildTupleHashTable was
+ *       called with additionalsize >= size), so the helper simply returns
+ *       the existing accessor pointer.
+ */
+#if PG_VERSION_NUM >= PG_VERSION_18
+#define tuple_hash_entry_get_additional_compat(hashtable, entry) \
+		TupleHashEntryGetAdditional((hashtable), (entry))
+#define tuple_hash_entry_alloc_additional_compat(hashtable, entry, size) \
+		TupleHashEntryGetAdditional((hashtable), (entry))
+#else
+#define tuple_hash_entry_get_additional_compat(hashtable, entry) \
+		((entry)->additional)
+#define tuple_hash_entry_alloc_additional_compat(hashtable, entry, size) \
+		((entry)->additional = MemoryContextAlloc((hashtable)->tablecxt, (size)))
+#endif
+
+/*
+ * heap_inplace_update: PG-18 split the in-place update into the lock/finish
+ * pair `heap_inplace_lock` + `heap_inplace_update_and_unlock`, and exposed
+ * a higher-level systable scan wrapper (`systable_inplace_update_*`) which
+ * is also available in PG-17 and is the upstream recommendation. Call
+ * sites should migrate to the systable_inplace_update_* API directly; no
+ * macro shim is provided here because the call shape changes substantially
+ * (begin/finish/cancel state machine).
+ */
 
 #pragma GCC diagnostic pop
 }
