@@ -350,6 +350,31 @@ COMMENT ON TABLE bioseq.meta_sidecar IS
     'Per-sequence symbol counts. symbol_counts[rank+1] is the count for '
     'the rank-th letter in the alphabet identified by alphabet_code.';
 
+-- ============================================================================
+-- METADATA AGE LOG.
+--
+-- Tracks the most recent (recompute, INSERT-batch) timestamp per
+-- (user_relid, kind). Read by bioseq.list_metadata(); written by
+-- bioseq.update_index() and (throttled to once per minute via a
+-- backend-local in-memory cache) by sidecar_after_insert. The throttle
+-- keeps high-throughput INSERT workloads off this single row.
+--
+-- Plain heap-AM table on purpose: writes here must NOT trigger the
+-- bioseq AM's sidecar_after_insert hook (which would recurse). When a
+-- future bioseq-AM table needs an age log, the recursion guard in
+-- sidecar_after_insert will need to cover it explicitly.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS bioseq.metadata_age_log (
+    user_relid    oid          NOT NULL,
+    kind          text         NOT NULL,
+    last_updated  timestamptz  NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_relid, kind)
+);
+COMMENT ON TABLE bioseq.metadata_age_log IS
+    'Last update timestamp per (user_relid, metadata kind). Read by '
+    'bioseq.list_metadata(); written by bioseq.update_index() and '
+    '(throttled) by sidecar_after_insert.';
+
 -- rename bioseq schema to bioseq_internal and tighten security
 
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA bioseq FROM PUBLIC;
@@ -1140,4 +1165,61 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq,
     LANGUAGE C IMMUTABLE
     SUPPORT mmsearch_support
     PARALLEL SAFE;
+
+-- ============================================================================
+-- bioseq.list_metadata — set-returning function listing every
+-- (user_relid, metadata_kind) pair the extension knows about. The kind
+-- set is populated at _PG_init() by the C++ MetadataKindRegistry; today's
+-- set is {minimizers, symbol_counts}. Future kinds (e.g. sneaky_snake
+-- runtime, bwa_fm_index, hnsw_minimizer_index) appear automatically when
+-- their owning module registers them.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION bioseq.list_metadata()
+    RETURNS TABLE (
+        table_name      regclass,
+        name            text,
+        mode            text,        -- 'PER_ROW' or 'PER_TABLE'
+        insert_support  boolean,
+        size            text,        -- pg_size_pretty output, e.g. '5.1 GB'
+        age             interval     -- now() - last_updated; NULL if never updated
+    )
+    AS 'MODULE_PATHNAME', 'bioseq_list_metadata'
+    LANGUAGE C VOLATILE PARALLEL SAFE;
+
+COMMENT ON FUNCTION bioseq.list_metadata() IS
+    'Enumerate every (user table, metadata kind) pair the extension '
+    'manages, with mode (PER_ROW/PER_TABLE), insert-trigger support, '
+    'estimated on-disk size, and estimated age since last update.';
+
+-- ============================================================================
+-- bioseq.update_index — bulk recompute / create the named metadata kind
+-- for a given user table.
+--
+-- The first argument is regclass; pass the table name as a quoted text
+-- literal (`bioseq.update_index('my_table', 'minimizers')`) or with an
+-- explicit cast (`bioseq.update_index('my_table'::regclass,
+-- 'minimizers')`). PG implicitly converts text → regclass via the
+-- regclassin input function in the first form.
+--
+-- The function:
+--   * raises ERRCODE_INVALID_PARAMETER_VALUE if `kind` is not registered;
+--   * raises ERRCODE_INSUFFICIENT_PRIVILEGE if the caller cannot SELECT
+--     from the user relation or INSERT into the backing sidecar;
+--   * deletes any pre-existing entries for this (rel, kind) pair;
+--   * scans the user relation and writes new entries;
+--   * updates bioseq_internal.metadata_age_log;
+--   * returns the count of entries written (PER_ROW: row count,
+--     PER_TABLE: 1).
+--
+-- Not PARALLEL SAFE: writes to sidecars and the age-log.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION bioseq.update_index(rel regclass, kind text)
+    RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_update_index'
+    LANGUAGE C VOLATILE STRICT;
+
+COMMENT ON FUNCTION bioseq.update_index(regclass, text) IS
+    'Recompute (or create) the named metadata kind for the given table. '
+    'Returns the number of entries written. Used to backfill metadata '
+    'after bulk INSERTs were run with bioseq.update_index_on_insert = off.';
 

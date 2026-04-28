@@ -24,6 +24,7 @@ import pg_utils;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sequences;
 import bioseq_sidecar;
+import bioseq_metadata_admin;
 import sequan_compat;
 
 extern "C" {
@@ -425,5 +426,26 @@ Datum bioseq_placeholder_support(PG_FUNCTION_ARGS) {
 		reinterpret_cast<SupportRequestSimplify*>(request);
 	Node* wrapped = try_wrap_in_placeholder(simplify);
 	PG_RETURN_POINTER(wrapped);
+}
+
+/*
+ * bioseq.list_metadata() — set-returning function listing every
+ * (user_relid, metadata_kind) pair the extension manages, with
+ * (mode, insert_support, size, age) columns. Forwards into the
+ * bioseq::metadata_admin module which owns the registry walk.
+ */
+CXX_PG_FUNCTION_INFO_V1(bioseq_list_metadata);
+Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
+	return bioseq::metadata_admin::list_metadata_impl(fcinfo);
+}
+
+/*
+ * bioseq.update_index(rel regclass, kind text) — bulk recompute or
+ * create the named metadata kind for the given user table. Returns the
+ * count of entries written. Forwards into bioseq::metadata_admin.
+ */
+CXX_PG_FUNCTION_INFO_V1(bioseq_update_index);
+Datum bioseq_update_index(PG_FUNCTION_ARGS) {
+	return bioseq::metadata_admin::update_index_impl(fcinfo);
 }
 }

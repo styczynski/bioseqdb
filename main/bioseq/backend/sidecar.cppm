@@ -35,6 +35,13 @@ extern "C" {
 #include "utils/inval.h"
 #include "utils/array.h"
 #include "catalog/pg_type.h"
+#include "executor/spi.h"
+#include "storage/lmgr.h"
+#include "access/relation.h"
+#include "access/table.h"
+#include "access/tableam.h"
+#include "access/heapam.h"
+#include "utils/snapmgr.h"
 }
 
 #include <algorithm>
@@ -57,6 +64,7 @@ import bioseq_sequences.kmers.hashers.minimap_int;
 import bioseq_sequences.minimap_port;
 import bioseq_types.pg_compact_sequence;
 import sequan_compat;
+import bioseq_metadata_admin;
 
 /* Pull TargetIndex / sketch_collector / collect_minimizers / minimap_int_hasher
  * / dispatch_pgseq / make_seq_range_from_pg / compact_sequence_range /
@@ -78,6 +86,12 @@ using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
  * the edge would cause a circular import). */
 extern "C++" uint64_t ColumnarTableRowCount(Relation relation);
 extern "C++" bool     IsColumnarTableAmTable(Oid relationId);
+/* tid_to_row_number is the inverse of row_number_to_tid (defined in
+ * backend/table/access_method.cppm). Used by recompute_per_row_*_for_relid
+ * below to recover the writtenRowNumber assigned by ColumnarWriteRow at
+ * INSERT time. Declared via extern "C++" for the same reason as the two
+ * symbols above (avoids a circular import on bioseq_table). */
+extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
 /* dispatch_pgseq / make_seq_range_from_pg / compact_sequence_range /
  * PgCompactSequenceHdr live in the root namespace (the pg_compact_sequence
  * module doesn't wrap in HWY_BEFORE_NAMESPACE). They are reachable directly. */
@@ -340,6 +354,23 @@ export void sidecar_after_insert(Relation user_rel,
 		return;          /* recursion guard — sidecars must not self-reference */
 	}
 
+	/* Coarse-granularity age-log update for the two PER_ROW kinds owned by
+	 * this module. The helper is steady-state O(1) (one std::unordered_map
+	 * lookup); the actual heap write fires only at the throttle boundary
+	 * (~once per 60 s per (rel, kind) pair). Placed BEFORE the GUC early
+	 * return so the age log keeps tracking even when the GUC is off — an
+	 * operator who flips the GUC for a bulk load still sees the right
+	 * "rel was last touched recently" signal in bioseq.list_metadata().
+	 *
+	 * The two literal kind names are the v1 set: both are PER_ROW with
+	 * insert_support = true. A future PER_TABLE kind with
+	 * insert_support = false would NOT want age-log updates from INSERTs;
+	 * when that lands, replace these two calls with a registry-driven
+	 * loop over MetadataKindRegistry::instance().kinds() that filters by
+	 * `insert_support`. */
+	bioseq::metadata_admin::age_log::note_per_insert(rel_oid, "minimizers");
+	bioseq::metadata_admin::age_log::note_per_insert(rel_oid, "symbol_counts");
+
 	/* Both sidecars are gated on bioseq.update_index_on_insert. When OFF,
 	 * neither meta nor index sidecars are written; the scalar bioseq.
 	 * symbol_count still returns correct results because it falls back to
@@ -382,27 +413,10 @@ export void sidecar_after_insert(Relation user_rel,
 /* Read helpers                                                     */
 /* ---------------------------------------------------------------- */
 
-/* Discover the OID of the primary-key btree on `rel`, or InvalidOid when
- * the relation has none. Factored so both sidecar read paths can call the
- * same logic and stay in sync. */
-[[nodiscard]] static Oid find_primary_key_oid(Relation rel) {
-	Oid pk_index_oid = InvalidOid;
-	List* ilist = RelationGetIndexList(rel);
-	ListCell* lc;
-	foreach (lc, ilist) {
-		Oid ioid = lfirst_oid(lc);
-		Relation irel = index_open(ioid, AccessShareLock);
-		if (irel->rd_index != nullptr && irel->rd_index->indisprimary) {
-			pk_index_oid = ioid;
-		}
-		index_close(irel, AccessShareLock);
-		if (pk_index_oid != InvalidOid) {
-			break;
-		}
-	}
-	list_free(ilist);
-	return pk_index_oid;
-}
+/* find_primary_key_oid moved to pg_utils so metadata_admin.cppm can
+ * share the same helper without introducing a circular module
+ * dependency. The unqualified name resolves to the global ::find_primary_key_oid
+ * via standard C++ name lookup. */
 
 /* Read path: load one row (user_relid, rowno) -> serialized blob. Returns
  * empty optional when missing. Uses the PK btree via indexOK=true so the
@@ -719,6 +733,228 @@ export [[nodiscard]] inline int letter_to_rank(uint8_t alphabet_code, char lette
 	}
 	const auto& table = detail::letter_rank_table();
 	return static_cast<int>(table[alphabet_code][static_cast<uint8_t>(letter)]);
+}
+
+/* ---------------------------------------------------------------- */
+/* PER_ROW recompute helpers — used by bioseq.update_index().       */
+/* ---------------------------------------------------------------- */
+
+/* Loop body shared by both PER_ROW recomputes. Walks the user table once,
+ * pre-deletes any existing rows for `user_relid` from the backing sidecar,
+ * and writes one fresh blob per surviving user-table tuple via the supplied
+ * writer callable.
+ *
+ * Invariant: caller (update_index_impl) has verified user_relid uses the
+ * bioseq columnar AM. tid_to_row_number is the inverse of row_number_to_tid
+ * and is correct only for the bioseq AM.
+ *
+ * Locking: takes ShareRowExclusiveLock on the backing sidecar so concurrent
+ * update_index calls on the same (rel, kind) pair serialise instead of
+ * racing into duplicate-key errors. Plain SELECTs (AccessShareLock) on the
+ * sidecar continue uninterrupted. */
+template <typename WriteOne>
+[[nodiscard]] static int64_t recompute_per_row_for_relid_impl(
+	Oid user_relid, Oid backing_sidecar_relid,
+	const char* delete_sql, const char* progress_label,
+	WriteOne&& write_one)
+{
+	if (!OidIsValid(backing_sidecar_relid)) {
+		return 0;
+	}
+
+	LockRelationOid(backing_sidecar_relid, ShareRowExclusiveLock);
+
+	if (SPI_connect() != SPI_OK_CONNECT) {
+		ereport(ERROR, (errmsg("bioseq.update_index: SPI_connect failed")));
+	}
+	Oid   delete_arg_types[1]  = { OIDOID };
+	Datum delete_arg_values[1] = { ObjectIdGetDatum(user_relid) };
+	int64_t pre_existing = 0;
+	if (SPI_execute_with_args(delete_sql, 1, delete_arg_types, delete_arg_values,
+							  /*Nulls=*/nullptr,
+							  /*read_only=*/false, /*tcount=*/0) != SPI_OK_DELETE) {
+		SPI_finish();
+		ereport(ERROR,
+				(errmsg("bioseq.update_index: DELETE failed for sidecar oid=%u",
+						static_cast<unsigned>(backing_sidecar_relid))));
+	}
+	pre_existing = static_cast<int64_t>(SPI_processed);
+	SPI_finish();
+
+	const SidecarOids& oids = get_sidecar_oids();
+
+	Relation user_rel = try_safe_relation_open(user_relid, AccessShareLock);
+	if (user_rel == nullptr) {
+		return 0;
+	}
+	TupleDesc user_td = RelationGetDescr(user_rel);
+
+	AttrNumber seq_attno = InvalidAttrNumber;
+	for (int i = 0; i < user_td->natts; ++i) {
+		Form_pg_attribute attr = TupleDescAttr(user_td, i);
+		if (attr->atttypid == oids.bioseq_seq_type_oid) {
+			seq_attno = static_cast<AttrNumber>(i + 1);
+			break;
+		}
+	}
+	if (seq_attno == InvalidAttrNumber) {
+		relation_close(user_rel, AccessShareLock);
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TABLE_DEFINITION),
+				 errmsg("bioseq.update_index: relation %s has no "
+						"bioseq.seq column", get_rel_name(user_relid))));
+	}
+
+	Snapshot snapshot = GetActiveSnapshot();
+	TableScanDesc scan = table_beginscan_strat(
+		user_rel, snapshot, /*nkeys=*/0, /*key=*/nullptr,
+		/*allow_strat=*/true, /*allow_sync=*/true);
+	TupleTableSlot* slot = MakeSingleTupleTableSlot(
+		user_td, table_slot_callbacks(user_rel));
+
+	int64_t written = 0;
+	while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
+		slot_getallattrs(slot);
+		bool isnull = false;
+		Datum dat = slot_getattr(slot, seq_attno, &isnull);
+		if (isnull) {
+			continue;
+		}
+
+		const PgCompactSequenceHdr* hdr =
+			reinterpret_cast<const PgCompactSequenceHdr*>(
+				PG_DETOAST_DATUM(dat));
+
+		const int64_t rowno = static_cast<int64_t>(
+			tid_to_row_number(slot->tts_tid));
+
+		write_one(user_relid, rowno, hdr);
+		++written;
+
+		if ((written & 0x3FFF) == 0) {
+			JustLog("[bioseq] update_index: {} progress relid={} written={}",
+					progress_label,
+					static_cast<unsigned>(user_relid), written);
+		}
+
+		if (reinterpret_cast<const void*>(hdr)
+			!= reinterpret_cast<const void*>(DatumGetPointer(dat))) {
+			pfree(const_cast<PgCompactSequenceHdr*>(hdr));
+		}
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+	table_endscan(scan);
+	relation_close(user_rel, AccessShareLock);
+
+	JustLog("[bioseq] update_index: {} DONE relid={} pre_existing={} written={}",
+			progress_label, static_cast<unsigned>(user_relid),
+			pre_existing, written);
+	return written;
+}
+
+/* Scan `user_relid` once and write one (user_relid, rowno, blob) tuple
+ * into bioseq_internal.index_sidecar per surviving row. Pre-deletes any
+ * existing rows for `user_relid` so the result is idempotent regardless
+ * of prior state. Returns the count of rows written. */
+export [[nodiscard]] int64_t recompute_per_row_index_for_relid(Oid user_relid) {
+	const SidecarOids& oids = get_sidecar_oids();
+	return recompute_per_row_for_relid_impl(
+		user_relid, oids.index_sidecar_relid,
+		"DELETE FROM bioseq_internal.index_sidecar WHERE user_relid = $1",
+		"minimizers",
+		[](Oid relid, int64_t rowno, const PgCompactSequenceHdr* hdr) {
+			sidecar_compute_and_write_index(relid, rowno, hdr);
+		});
+}
+
+/* Same shape, but writes meta_sidecar rows. */
+export [[nodiscard]] int64_t recompute_per_row_meta_for_relid(Oid user_relid) {
+	const SidecarOids& oids = get_sidecar_oids();
+	return recompute_per_row_for_relid_impl(
+		user_relid, oids.meta_sidecar_relid,
+		"DELETE FROM bioseq_internal.meta_sidecar WHERE user_relid = $1",
+		"symbol_counts",
+		[](Oid relid, int64_t rowno, const PgCompactSequenceHdr* hdr) {
+			sidecar_compute_and_write_meta(relid, rowno, hdr);
+		});
+}
+
+/* ---------------------------------------------------------------- */
+/* MetadataKind descriptors — bound to the metadata_admin registry. */
+/* ---------------------------------------------------------------- */
+
+namespace {
+
+[[nodiscard]] Oid minimizers_backing_relation_oid() noexcept {
+	return get_sidecar_oids().index_sidecar_relid;
+}
+
+[[nodiscard]] Oid symbol_counts_backing_relation_oid() noexcept {
+	return get_sidecar_oids().meta_sidecar_relid;
+}
+
+[[nodiscard]] int64_t minimizers_estimate_size_bytes(Oid user_relid) {
+	return bioseq::metadata_admin::estimate_blob_size_for_relid(
+		minimizers_backing_relation_oid(),
+		/*blob_attno=*/3, /* index_sidecar.target_index */
+		user_relid);
+}
+
+[[nodiscard]] int64_t symbol_counts_estimate_size_bytes(Oid user_relid) {
+	return bioseq::metadata_admin::estimate_blob_size_for_relid(
+		symbol_counts_backing_relation_oid(),
+		/*blob_attno=*/4, /* meta_sidecar.symbol_counts */
+		user_relid);
+}
+
+void minimizers_enumerate_user_relids(
+	bioseq::metadata_admin::UserRelidEmitter emit) {
+	bioseq::metadata_admin::enumerate_distinct_user_relids(
+		minimizers_backing_relation_oid(), emit);
+}
+
+void symbol_counts_enumerate_user_relids(
+	bioseq::metadata_admin::UserRelidEmitter emit) {
+	bioseq::metadata_admin::enumerate_distinct_user_relids(
+		symbol_counts_backing_relation_oid(), emit);
+}
+
+[[nodiscard]] int64_t minimizers_recompute_for_relid(Oid user_relid) {
+	return recompute_per_row_index_for_relid(user_relid);
+}
+
+[[nodiscard]] int64_t symbol_counts_recompute_for_relid(Oid user_relid) {
+	return recompute_per_row_meta_for_relid(user_relid);
+}
+
+}  // namespace
+
+/* Called once from bioseq_init() (via bioseq::sidecar::register_default_metadata_kinds).
+ * Adds the 'minimizers' and 'symbol_counts' kinds to the process-global
+ * registry. noexcept: the registry is fixed-capacity and register_kind
+ * cannot throw. */
+export void register_default_metadata_kinds() noexcept {
+	namespace mda = bioseq::metadata_admin;
+	auto& registry = mda::MetadataKindRegistry::instance();
+	registry.register_kind({
+		.name                  = "minimizers",
+		.mode                  = mda::MetadataMode::PER_ROW,
+		.insert_support        = true,
+		.backing_relation_oid  = &minimizers_backing_relation_oid,
+		.estimate_size_bytes   = &minimizers_estimate_size_bytes,
+		.enumerate_user_relids = &minimizers_enumerate_user_relids,
+		.recompute_for_relid   = &minimizers_recompute_for_relid,
+	});
+	registry.register_kind({
+		.name                  = "symbol_counts",
+		.mode                  = mda::MetadataMode::PER_ROW,
+		.insert_support        = true,
+		.backing_relation_oid  = &symbol_counts_backing_relation_oid,
+		.estimate_size_bytes   = &symbol_counts_estimate_size_bytes,
+		.enumerate_user_relids = &symbol_counts_enumerate_user_relids,
+		.recompute_for_relid   = &symbol_counts_recompute_for_relid,
+	});
 }
 
 } // namespace bioseq::sidecar
