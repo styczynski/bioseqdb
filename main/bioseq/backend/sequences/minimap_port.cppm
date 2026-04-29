@@ -122,6 +122,11 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// `kmers/two_stacks_minimizers.cppm` as
     /// `collect_minimizers_two_stack_simd`.
     TWO_STACK = 2,
+    /// V9 two-stack with hand-inlined matrix iteration (bypasses the
+    /// `iterate_sequence_bp_simd_offsets` lambda capture so the ring
+    /// buffer arrays stay in NEON registers across iterations).
+    /// Implemented as `collect_minimizers_two_stack_nthash_simd`.
+    TWO_STACK_NTHASH = 3,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -143,9 +148,10 @@ enum class MinimizerAlgorithmType : uint8_t {
 
 [[nodiscard]] constexpr const char* minimizer_algorithm_name(MinimizerAlgorithmType mode) {
     switch (mode) {
-        case MinimizerAlgorithmType::SCALAR:    return "Scalar Minimizers";
-        case MinimizerAlgorithmType::SIMD:      return "SIMD Minimizers";
-        case MinimizerAlgorithmType::TWO_STACK: return "Two-Stack SIMD Minimizers";
+        case MinimizerAlgorithmType::SCALAR:           return "Scalar Minimizers";
+        case MinimizerAlgorithmType::SIMD:             return "SIMD Minimizers";
+        case MinimizerAlgorithmType::TWO_STACK:        return "Two-Stack SIMD Minimizers";
+        case MinimizerAlgorithmType::TWO_STACK_NTHASH: return "Two-Stack nthash SIMD Minimizers";
     }
     return "unknown";
 }
@@ -1585,7 +1591,7 @@ void estimate_divergence_from_seeds(
         if (search_iter == minimizer_positions.end() || *search_iter != first_forward_pos) {
             continue; // Position not found — skip
         }
-        const int32_t match_start_idx = static_cast<int32_t>(
+        int32_t match_start_idx = static_cast<int32_t>(
             search_iter - minimizer_positions.begin());
         int32_t match_end_idx = match_start_idx;
 
@@ -1640,38 +1646,97 @@ void estimate_divergence_from_seeds(
         // minimizer-index lookup. We binary-search the LAST chain
         // anchor's forward_pos to find `match_end_idx` and skip the
         // per-seed loop entirely.
+        //
+        // V10 fix: forward_pos for FORWARD chains is monotonically
+        // INCREASING in the chain index `s`; for REVERSE chains it's
+        // monotonically DECREASING (the reverse-strand transform
+        // `forward_pos = query_len - 1 - (query_pos + 1 - span)` flips
+        // the order). Earlier versions hardcoded the search lower-bound
+        // at `match_start_idx + 1`, which is correct only for forward
+        // chains. For reverse chains the next forward_pos is *below*
+        // `match_start_idx`, the lower_bound starts past the target,
+        // and the slow-path merge-walk silently fails for every chain
+        // seed — producing a wrong `seed_match_count` and triggering
+        // the +7 ms regression in `mm_est_err` for the SIMD-DP pipeline
+        // (SIMD-DP happens to pick more reverse chains in our bench
+        // than the scalar-DP path).
         if (region.seed_count >= 1) {
             const int32_t last_seed_pos =
                 compute_forward_pos(region.seed_count - 1);
+            // For reverse chains last_seed_pos < first_forward_pos, so
+            // the candidate iterator must lie BEFORE match_start_idx in
+            // the ascending minimizer_positions array. Search the full
+            // [begin, match_start_idx + 1) range in that case; for
+            // forward chains keep the tighter [match_start_idx, end)
+            // range to minimise compares.
+            auto search_begin = region.is_reverse
+                ? minimizer_positions.begin()
+                : minimizer_positions.begin() + match_start_idx;
+            auto search_end = region.is_reverse
+                ? minimizer_positions.begin() + match_start_idx + 1
+                : minimizer_positions.end();
             auto last_it = std::lower_bound(
-                minimizer_positions.begin() + match_start_idx,
-                minimizer_positions.end(),
-                last_seed_pos);
-            if (last_it != minimizer_positions.end()
-                && *last_it == last_seed_pos)
+                search_begin, search_end, last_seed_pos);
+            if (last_it != search_end && *last_it == last_seed_pos)
             {
-                match_end_idx = static_cast<int32_t>(
+                const int32_t last_seed_idx = static_cast<int32_t>(
                     last_it - minimizer_positions.begin());
+                if (region.is_reverse) {
+                    // Span runs from last_seed_idx (smaller) up to
+                    // match_start_idx (larger). Order match_end_idx so
+                    // the `match_end_idx - match_start_idx + 1` arith
+                    // remains positive.
+                    match_end_idx = match_start_idx;
+                    match_start_idx = last_seed_idx;
+                } else {
+                    match_end_idx = last_seed_idx;
+                }
                 seed_match_count = region.seed_count;
             } else {
                 // Fallback: not all chain anchors are minimizers. Run
-                // the merge-walk over the chain.
-                int32_t search_lo = match_start_idx + 1;
-                for (int32_t s = 1; s < region.seed_count; ++s) {
-                    const int32_t fp = compute_forward_pos(s);
-                    auto begin_it = minimizer_positions.begin() + search_lo;
-                    auto end_it = minimizer_positions.end();
-                    auto found = std::lower_bound(begin_it, end_it, fp);
-                    if (found == end_it || *found != fp) {
-                        continue;
+                // the merge-walk over the chain. Use a direction-aware
+                // cursor: forward chains advance to higher indices,
+                // reverse chains advance to lower indices.
+                if (region.is_reverse) {
+                    int32_t search_hi = match_start_idx;
+                    for (int32_t s = 1; s < region.seed_count; ++s) {
+                        const int32_t fp = compute_forward_pos(s);
+                        auto begin_it = minimizer_positions.begin();
+                        auto end_it = minimizer_positions.begin() + search_hi;
+                        auto found = std::lower_bound(begin_it, end_it, fp);
+                        if (found == end_it || *found != fp) {
+                            continue;
+                        }
+                        const int32_t found_idx = static_cast<int32_t>(
+                            found - minimizer_positions.begin());
+                        // For reverse chains, found_idx ranges from
+                        // (large) match_start_idx down to (small).
+                        // Track min as match_start_idx (LOW edge) and
+                        // hold match_end_idx at the original first match.
+                        if (found_idx < match_start_idx) {
+                            match_start_idx = found_idx;
+                        }
+                        search_hi = found_idx;
+                        ++seed_match_count;
                     }
-                    const int32_t found_idx =
-                        static_cast<int32_t>(found - minimizer_positions.begin());
-                    if (found_idx > match_end_idx) {
-                        match_end_idx = found_idx;
+                } else {
+                    int32_t search_lo = match_start_idx + 1;
+                    for (int32_t s = 1; s < region.seed_count; ++s) {
+                        const int32_t fp = compute_forward_pos(s);
+                        auto begin_it = minimizer_positions.begin() + search_lo;
+                        auto end_it = minimizer_positions.end();
+                        auto found = std::lower_bound(begin_it, end_it, fp);
+                        if (found == end_it || *found != fp) {
+                            continue;
+                        }
+                        const int32_t found_idx =
+                            static_cast<int32_t>(found - minimizer_positions.begin());
+                        if (found_idx > match_end_idx) {
+                            match_end_idx = found_idx;
+                        }
+                        search_lo = found_idx + 1;
+                        ++seed_match_count;
                     }
-                    search_lo = found_idx + 1;
-                    ++seed_match_count;
                 }
             }
         }
@@ -2369,6 +2434,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                     target_seq.begin(), target_seq.end(),
                     w, k);
                 break;
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH:
+                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    w, k);
+                break;
             case MinimizerAlgorithmType::SCALAR:
             default:
                 collect_minimizers<minimap_int_hasher>(
@@ -2397,6 +2468,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                 break;
             case MinimizerAlgorithmType::TWO_STACK:
                 collect_minimizers_two_stack_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH:
+                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     w, k);

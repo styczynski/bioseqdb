@@ -50,6 +50,22 @@
         }
       },
       {
+        "name": "bench-opt",
+        "displayName": "Benchmark-tuned optimisation config",
+         "description": "Like dev-opt-pg but -O3 and NDEBUG so the bench runs at production-grade optimisation while still allowing module-build incremental rebuilds.",
+        "generator": "Ninja",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
         "name": "prod",
         "displayName": "Default release config",
          "description": "Default build using Ninja generator",

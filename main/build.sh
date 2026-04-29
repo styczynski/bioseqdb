@@ -16,7 +16,15 @@
 set -euo pipefail
 
 TESTS="${1:-unit+integration}"
-MODE="${2:-dev-opt-pg}"
+# Default to bench-opt (-O3 + NDEBUG) when the user runs anything that
+# matches a `bench` token, so the long-sequence benchmark always uses the
+# release-grade optimisation level by default. Other workflows keep the
+# safer dev-opt-pg (-O2) preset.
+DEFAULT_MODE="dev-opt-pg"
+case "${TESTS}" in
+    *bench*) DEFAULT_MODE="bench-opt" ;;
+esac
+MODE="${2:-${DEFAULT_MODE}}"
 
 mkdir build 2>/dev/null >/dev/null || true
 
