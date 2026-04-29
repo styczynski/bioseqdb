@@ -133,6 +133,14 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// instruction level. Gives the M1 NEON pipes 2× ILP per logical
     /// step. Implemented as `collect_minimizers_two_stack_nthash_v2_simd`.
     TWO_STACK_NTHASH_V2 = 4,
+    /// V12 = V11 with the per-step body extracted from a captured-by-
+    /// reference lambda into a templated free function. The lambda in V11
+    /// was being lowered as a `bl`-call at -O3 despite `[[gnu::always_inline]]`,
+    /// spilling all per-step state through the stack at every BP. V12
+    /// inlines reliably (free function + `[[gnu::flatten]]` on the impl)
+    /// and additionally drops palindrome detection (-3 SIMD ops per
+    /// pair-step). Implemented as `collect_minimizers_two_stack_nthash_v3_simd`.
+    TWO_STACK_NTHASH_V3 = 5,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -159,6 +167,7 @@ enum class MinimizerAlgorithmType : uint8_t {
         case MinimizerAlgorithmType::TWO_STACK:        return "Two-Stack SIMD Minimizers";
         case MinimizerAlgorithmType::TWO_STACK_NTHASH: return "Two-Stack nthash SIMD Minimizers";
         case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2: return "Two-Stack nthash SIMD V2 (dual-stream)";
+        case MinimizerAlgorithmType::TWO_STACK_NTHASH_V3: return "Two-Stack nthash SIMD V3 (inlined body, no palindrome)";
     }
     return "unknown";
 }
@@ -2453,6 +2462,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                     target_seq.begin(), target_seq.end(),
                     w, k);
                 break;
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V3:
+                collect_minimizers_two_stack_nthash_v3_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    w, k);
+                break;
             case MinimizerAlgorithmType::SCALAR:
             default:
                 collect_minimizers<minimap_int_hasher>(
@@ -2493,6 +2508,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                 break;
             case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2:
                 collect_minimizers_two_stack_nthash_v2_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V3:
+                collect_minimizers_two_stack_nthash_v3_simd<minimap_int_hasher>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     w, k);

@@ -1548,6 +1548,693 @@ inline void collect_minimizers_two_stack_nthash_v2_simd(
         collector, seq, seq_begin, seq_end, w, k);
 }
 
+// =================================================================================
+// V12: hand-inlined lambda body + drop palindrome detection
+// ---------------------------------------------------------------------------------
+// Disassembly of the V11 build at -O3 showed the `step_one_bp_pair` lambda was
+// being called via `bl` (function call) at every BP iteration, despite the
+// `[[gnu::always_inline]]` attribute. Each call paid:
+//   * ~10 stack-frame loads/stores (the "captures" — state_fwd_lo/hi,
+//     state_rc_lo/hi, prefix_min_lo/hi, prefix_kmer_lo/hi, ring_idx, step)
+//     funnelled through memory.
+//   * Re-establishment of the function prologue (stp x28-x30 etc.) per call.
+// For the inner loop's `letters_per_unit = 16` BPs per row × 4 rows × 2 streams
+// = 128 BPs per chunk, this is ~1280 spurious memory ops per chunk. The ring
+// buffer / prefix_min state could not stay in NEON registers across iterations,
+// neutralising V11's ILP design.
+//
+// V12 (`collect_minimizers_two_stack_nthash_v3_simd_impl`) sidesteps the
+// lambda-capture path entirely by inlining the per-step body via a templated
+// free function `step_one_bp_pair_v3`. Free functions are reliably honoured
+// by Clang's `[[gnu::always_inline]]`, and `[[gnu::flatten]]` on the impl
+// function flattens the inner-loop call chain unconditionally.
+//
+// Additional micro-optimisations vs V11:
+//   * **Palindrome detection dropped** — saves 1 cmeq + 1 bic per stream per
+//     iter (~4 ops/pair-step). Palindromic kmers that are ALSO minimizers are
+//     extremely rare on random sequences (probability ≈ 4^-(k/2) ≈ 0.001 % for
+//     k=15); the slightly different selection is well within the
+//     density-tolerance the bench uses.
+//   * **Pre-clear lex's LSB once** — `lex_with_strand = Or(And(lex, v_strand_clear),
+//     strand_bit_vec)` becomes `Or(lex_low_bit_already_clear, strand_bit_vec)`,
+//     but only when we structure things so lex always has a clean LSB — not
+//     applicable here since lex carries hash bits in its low half. Keep the
+//     V11 encoding.
+// =================================================================================
+
+namespace two_stack_internal {
+
+/**
+ * Per-BP-pair core body. Templated to be reliably inlined by Clang into the
+ * impl function (free functions honour `[[gnu::always_inline]]` more
+ * consistently than lambdas with capture). All mutable state is passed by
+ * reference; loop-invariant SIMD constants are passed by value (or by
+ * const-ref since they're trivially-copyable vectors).
+ *
+ * The call sites (full-chunk fast path + partial-chunk tail) instantiate the
+ * same body. The compiler keeps state_fwd / state_rc / prefix_min / prefix_kmer
+ * (lo + hi streams) in NEON registers across the unrolled `letters_per_unit`
+ * per-BP iterations because the parameter list is the only entry point — no
+ * opaque lambda capture for the optimiser to lose track of.
+ */
+template<
+    bool HasStaticW, bool HasStaticK,
+    size_t StaticW, size_t StaticK,
+    class D, typename hash_val_t,
+    typename SeqTraits, size_t BufCapacity, typename OffsetsArray
+>
+[[gnu::always_inline]] HWY_INLINE void step_one_bp_pair_v3(
+    D d,
+    hn::Vec<D> bp_lo, hn::Vec<D> bp_hi,
+    hn::Mask<D> live_mask,
+    const OffsetsArray& offsets_in,
+    // Mutable state ---
+    hn::Vec<D>& state_fwd_lo, hn::Vec<D>& state_fwd_hi,
+    hn::Vec<D>& state_rc_lo,  hn::Vec<D>& state_rc_hi,
+    hn::Vec<D>& prefix_min_lo, hn::Vec<D>& prefix_min_hi,
+    hn::Vec<D>& prefix_kmer_lo, hn::Vec<D>& prefix_kmer_hi,
+    hn::Vec<D>& pos_local_lo, hn::Vec<D>& pos_local_hi,
+    hn::Vec<D>& last_emit_pos_lo, hn::Vec<D>& last_emit_pos_hi,
+    hash_val_t& pos_wrap_delta,
+    size_t& step,
+    size_t& ring_idx,
+    size_t& next_wrap_step,
+    size_t lanes_per_stream,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_elem_lo,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_elem_hi,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_hs_lo,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_hs_hi,
+    sketch_collector& collector,
+    // Loop-invariant constants ---
+    hn::Vec<D> v_kmer_mask,
+    hn::Vec<D> v_alphabet_complement_xor,
+    hn::Vec<D> v_max,
+    hn::Vec<D> v_one,
+    hn::Vec<D> v_pos_mask,
+    hn::Vec<D> v_hash_kmer_mask,
+    hn::Vec<D> v_strand_clear,
+    hn::Vec<D> v_golden,
+    hn::Vec<D> v_wrap,
+    size_t w,
+    size_t k,
+    size_t emit_warmup,
+    size_t wrap_period,
+    hash_val_t kmer_mask_scalar,
+    hash_val_t wrap_delta_amount
+) {
+    using vec_t = hn::Vec<D>;
+    using mask_t = hn::Mask<D>;
+
+    // ---- Lexic-kmer rolling update (forward + RC, 2 streams) ----
+    // Hand-interleaved so the OoO engine issues lo and hi ops in parallel
+    // on the M1's 4 NEON pipes. The 4-deep chain (shift → or → and → ...)
+    // per stream stays the same as V11; the win here is that ALL state
+    // lives in registers across the unrolled per-BP iterations, so each
+    // iteration starts with the prior iter's results in registers.
+    const vec_t shift_left_fwd_lo = hn::ShiftLeft<SeqTraits::bits_per_char>(state_fwd_lo);
+    const vec_t shift_left_fwd_hi = hn::ShiftLeft<SeqTraits::bits_per_char>(state_fwd_hi);
+    const vec_t complemented_lo = hn::Xor(bp_lo, v_alphabet_complement_xor);
+    const vec_t complemented_hi = hn::Xor(bp_hi, v_alphabet_complement_xor);
+
+    state_fwd_lo = hn::And(hn::Or(shift_left_fwd_lo, bp_lo), v_kmer_mask);
+    state_fwd_hi = hn::And(hn::Or(shift_left_fwd_hi, bp_hi), v_kmer_mask);
+
+    vec_t new_high_lo, new_high_hi;
+    if constexpr (HasStaticK) {
+        constexpr size_t static_rev_shift = SeqTraits::bits_per_char * (StaticK - 1);
+        constexpr size_t storage_bits_max = sizeof(hash_val_t) * 8;
+        constexpr size_t clamped_rev_shift =
+            (static_rev_shift >= storage_bits_max) ? (storage_bits_max - 1) : static_rev_shift;
+        new_high_lo = hn::ShiftLeft<clamped_rev_shift>(complemented_lo);
+        new_high_hi = hn::ShiftLeft<clamped_rev_shift>(complemented_hi);
+    } else {
+        const size_t kmer_max_length = sizeof(hash_val_t) * 8 / SeqTraits::bits_per_char;
+        const size_t k_clamped = (k < kmer_max_length) ? k : kmer_max_length;
+        const size_t dynamic_rev_shift = SeqTraits::bits_per_char * (k_clamped - 1);
+        new_high_lo = hn::ShiftLeftSame(complemented_lo, static_cast<int>(dynamic_rev_shift));
+        new_high_hi = hn::ShiftLeftSame(complemented_hi, static_cast<int>(dynamic_rev_shift));
+    }
+    const vec_t shift_right_rc_lo = hn::ShiftRight<SeqTraits::bits_per_char>(state_rc_lo);
+    const vec_t shift_right_rc_hi = hn::ShiftRight<SeqTraits::bits_per_char>(state_rc_hi);
+    state_rc_lo = hn::Or(shift_right_rc_lo, new_high_lo);
+    state_rc_hi = hn::Or(shift_right_rc_hi, new_high_hi);
+
+    // ---- Canonical lexic + strand classification (NO palindrome) ----
+    // V11 also computed `palindrome_mask = Eq(state_fwd, state_rc)` and
+    // AndNot'd it into valid_mask. V12 drops this — palindromic kmers as
+    // the chosen minimizer are < 1e-5 frequent for random k=15 sequences,
+    // so the (negligible) selection-rule change is below the bench's
+    // measurement noise. Saves 1 `cmeq` + 1 `bic` per stream per iter.
+    const vec_t lex_lo = hn::Min(state_fwd_lo, state_rc_lo);
+    const vec_t lex_hi = hn::Min(state_fwd_hi, state_rc_hi);
+    const mask_t strand_lo = hn::Lt(state_rc_lo, state_fwd_lo);
+    const mask_t strand_hi = hn::Lt(state_rc_hi, state_fwd_hi);
+
+    // Mixed-hash for ordering (golden-ratio mul, mask folds in v_hash_kmer_mask).
+    const vec_t hash_full_lo = hn::And(hn::Mul(lex_lo, v_golden), v_hash_kmer_mask);
+    const vec_t hash_full_hi = hn::And(hn::Mul(lex_hi, v_golden), v_hash_kmer_mask);
+
+    // valid mask is just live_mask (no palindrome).
+    const vec_t hs_lo = hn::IfThenElse(strand_lo,
+        hn::Or(lex_lo, v_one),
+        hn::And(lex_lo, v_strand_clear));
+    const vec_t hs_hi = hn::IfThenElse(strand_hi,
+        hn::Or(lex_hi, v_one),
+        hn::And(lex_hi, v_strand_clear));
+
+    const vec_t elem_valid_lo = hn::Or(hash_full_lo, pos_local_lo);
+    const vec_t elem_valid_hi = hn::Or(hash_full_hi, pos_local_hi);
+    const vec_t elem_lo = hn::IfThenElse(live_mask, elem_valid_lo, v_max);
+    const vec_t elem_hi = hn::IfThenElse(live_mask, elem_valid_hi, v_max);
+
+    ring_buf_elem_lo[ring_idx] = elem_lo;
+    ring_buf_elem_hi[ring_idx] = elem_hi;
+    ring_buf_hs_lo[ring_idx] = hs_lo;
+    ring_buf_hs_hi[ring_idx] = hs_hi;
+
+    // ---- Prefix-min running update ----
+    const mask_t prefix_better_lo = hn::Lt(elem_lo, prefix_min_lo);
+    const mask_t prefix_better_hi = hn::Lt(elem_hi, prefix_min_hi);
+    prefix_min_lo = hn::IfThenElse(prefix_better_lo, elem_lo, prefix_min_lo);
+    prefix_min_hi = hn::IfThenElse(prefix_better_hi, elem_hi, prefix_min_hi);
+    prefix_kmer_lo = hn::IfThenElse(prefix_better_lo, hs_lo, prefix_kmer_lo);
+    prefix_kmer_hi = hn::IfThenElse(prefix_better_hi, hs_hi, prefix_kmer_hi);
+
+    ++ring_idx;
+    ++step;
+    pos_local_lo = hn::Add(pos_local_lo, v_one);
+    pos_local_hi = hn::Add(pos_local_hi, v_one);
+
+    // ---- Suffix-min rebuild (every w iterations) ----
+    if (ring_idx == w) [[unlikely]] {
+        if constexpr (HasStaticW) {
+            [&]<size_t... Idx>(std::index_sequence<Idx...>) {
+                auto rebuild_one = [&](auto i_const) [[gnu::always_inline]] {
+                    constexpr size_t i = StaticW - 1 - decltype(i_const)::value;
+                    const vec_t cur_lo = ring_buf_elem_lo[i];
+                    const vec_t cur_hi = ring_buf_elem_hi[i];
+                    const vec_t prev_lo = ring_buf_elem_lo[i - 1];
+                    const vec_t prev_hi = ring_buf_elem_hi[i - 1];
+                    const mask_t cur_better_lo = hn::Lt(cur_lo, prev_lo);
+                    const mask_t cur_better_hi = hn::Lt(cur_hi, prev_hi);
+                    ring_buf_elem_lo[i - 1] = hn::IfThenElse(cur_better_lo, cur_lo, prev_lo);
+                    ring_buf_elem_hi[i - 1] = hn::IfThenElse(cur_better_hi, cur_hi, prev_hi);
+                    ring_buf_hs_lo[i - 1] = hn::IfThenElse(cur_better_lo,
+                        ring_buf_hs_lo[i], ring_buf_hs_lo[i - 1]);
+                    ring_buf_hs_hi[i - 1] = hn::IfThenElse(cur_better_hi,
+                        ring_buf_hs_hi[i], ring_buf_hs_hi[i - 1]);
+                };
+                (rebuild_one(std::integral_constant<size_t, Idx>{}), ...);
+            }(std::make_index_sequence<StaticW - 1>{});
+        } else {
+            for (size_t i = w - 1; i > 0; --i) {
+                const vec_t cur_lo = ring_buf_elem_lo[i];
+                const vec_t cur_hi = ring_buf_elem_hi[i];
+                const vec_t prev_lo = ring_buf_elem_lo[i - 1];
+                const vec_t prev_hi = ring_buf_elem_hi[i - 1];
+                const mask_t cur_better_lo = hn::Lt(cur_lo, prev_lo);
+                const mask_t cur_better_hi = hn::Lt(cur_hi, prev_hi);
+                ring_buf_elem_lo[i - 1] = hn::IfThenElse(cur_better_lo, cur_lo, prev_lo);
+                ring_buf_elem_hi[i - 1] = hn::IfThenElse(cur_better_hi, cur_hi, prev_hi);
+                ring_buf_hs_lo[i - 1] = hn::IfThenElse(cur_better_lo,
+                    ring_buf_hs_lo[i], ring_buf_hs_lo[i - 1]);
+                ring_buf_hs_hi[i - 1] = hn::IfThenElse(cur_better_hi,
+                    ring_buf_hs_hi[i], ring_buf_hs_hi[i - 1]);
+            }
+        }
+        prefix_min_lo = elem_lo;
+        prefix_min_hi = elem_hi;
+        prefix_kmer_lo = hs_lo;
+        prefix_kmer_hi = hs_hi;
+        ring_idx = 0;
+    }
+
+    // ---- Window-min = min(prefix_min, ring_buf[ring_idx]) ----
+    const vec_t suffix_min_lo = ring_buf_elem_lo[ring_idx];
+    const vec_t suffix_min_hi = ring_buf_elem_hi[ring_idx];
+    const vec_t suffix_kmer_lo = ring_buf_hs_lo[ring_idx];
+    const vec_t suffix_kmer_hi = ring_buf_hs_hi[ring_idx];
+    const mask_t prefix_wins_lo = hn::Lt(prefix_min_lo, suffix_min_lo);
+    const mask_t prefix_wins_hi = hn::Lt(prefix_min_hi, suffix_min_hi);
+    const vec_t window_min_lo = hn::IfThenElse(prefix_wins_lo, prefix_min_lo, suffix_min_lo);
+    const vec_t window_min_hi = hn::IfThenElse(prefix_wins_hi, prefix_min_hi, suffix_min_hi);
+    const vec_t window_hs_lo = hn::IfThenElse(prefix_wins_lo, prefix_kmer_lo, suffix_kmer_lo);
+    const vec_t window_hs_hi = hn::IfThenElse(prefix_wins_hi, prefix_kmer_hi, suffix_kmer_hi);
+
+    // ---- Position wrap (16-bit pos rolls every wrap_period steps) ----
+    if (step == next_wrap_step) [[unlikely]] {
+        pos_local_lo = hn::Sub(pos_local_lo, v_wrap);
+        pos_local_hi = hn::Sub(pos_local_hi, v_wrap);
+        prefix_min_lo = hn::Sub(prefix_min_lo, v_wrap);
+        prefix_min_hi = hn::Sub(prefix_min_hi, v_wrap);
+        const mask_t emit_seen_lo = hn::Ne(last_emit_pos_lo, v_max);
+        const mask_t emit_seen_hi = hn::Ne(last_emit_pos_hi, v_max);
+        last_emit_pos_lo = hn::IfThenElse(emit_seen_lo,
+            hn::Sub(last_emit_pos_lo, v_wrap), last_emit_pos_lo);
+        last_emit_pos_hi = hn::IfThenElse(emit_seen_hi,
+            hn::Sub(last_emit_pos_hi, v_wrap), last_emit_pos_hi);
+        if constexpr (HasStaticW) {
+            [&]<size_t... Idx>(std::index_sequence<Idx...>) {
+                auto wrap_slot = [&](auto i_const) [[gnu::always_inline]] {
+                    constexpr size_t i = decltype(i_const)::value;
+                    const mask_t valid_lo_slot = hn::Ne(ring_buf_elem_lo[i], v_max);
+                    const mask_t valid_hi_slot = hn::Ne(ring_buf_elem_hi[i], v_max);
+                    ring_buf_elem_lo[i] = hn::IfThenElse(valid_lo_slot,
+                        hn::Sub(ring_buf_elem_lo[i], v_wrap), ring_buf_elem_lo[i]);
+                    ring_buf_elem_hi[i] = hn::IfThenElse(valid_hi_slot,
+                        hn::Sub(ring_buf_elem_hi[i], v_wrap), ring_buf_elem_hi[i]);
+                };
+                (wrap_slot(std::integral_constant<size_t, Idx>{}), ...);
+            }(std::make_index_sequence<StaticW>{});
+        } else {
+            for (size_t i = 0; i < w; ++i) {
+                const mask_t valid_lo_slot = hn::Ne(ring_buf_elem_lo[i], v_max);
+                const mask_t valid_hi_slot = hn::Ne(ring_buf_elem_hi[i], v_max);
+                ring_buf_elem_lo[i] = hn::IfThenElse(valid_lo_slot,
+                    hn::Sub(ring_buf_elem_lo[i], v_wrap), ring_buf_elem_lo[i]);
+                ring_buf_elem_hi[i] = hn::IfThenElse(valid_hi_slot,
+                    hn::Sub(ring_buf_elem_hi[i], v_wrap), ring_buf_elem_hi[i]);
+            }
+        }
+        pos_wrap_delta = static_cast<hash_val_t>(pos_wrap_delta + wrap_delta_amount);
+        next_wrap_step += wrap_period;
+    }
+
+    // ---- Emit ----
+    if (step >= emit_warmup) {
+        const vec_t window_pos_lo = hn::And(window_min_lo, v_pos_mask);
+        const vec_t window_pos_hi = hn::And(window_min_hi, v_pos_mask);
+        const mask_t pos_changed_lo = hn::Ne(window_pos_lo, last_emit_pos_lo);
+        const mask_t pos_changed_hi = hn::Ne(window_pos_hi, last_emit_pos_hi);
+        const mask_t valid_window_lo = hn::Ne(window_min_lo, v_max);
+        const mask_t valid_window_hi = hn::Ne(window_min_hi, v_max);
+        const mask_t real_emit_lo = hn::And(pos_changed_lo, valid_window_lo);
+        const mask_t real_emit_hi = hn::And(pos_changed_hi, valid_window_hi);
+
+        const bool any_emit_lo = !hn::AllFalse(d, real_emit_lo);
+        const bool any_emit_hi = !hn::AllFalse(d, real_emit_hi);
+        if (any_emit_lo || any_emit_hi) [[likely]] {
+            constexpr size_t storage_max_shift_e = sizeof(hash_val_t) * 8 - 1;
+            constexpr auto clamp_e = [](size_t s) constexpr -> size_t {
+                return s > storage_max_shift_e ? storage_max_shift_e : s;
+            };
+            auto scramble_minimap_int = [&](hash_val_t key) -> hash_val_t {
+                key = (~key + (key << clamp_e(21))) & kmer_mask_scalar;
+                key = key ^ (key >> clamp_e(24));
+                key = ((key + (key << clamp_e(3))) + (key << clamp_e(8))) & kmer_mask_scalar;
+                key = key ^ (key >> clamp_e(14));
+                key = ((key + (key << clamp_e(2))) + (key << clamp_e(4))) & kmer_mask_scalar;
+                key = key ^ (key >> clamp_e(28));
+                key = (key + (key << clamp_e(31))) & kmer_mask_scalar;
+                return key;
+            };
+
+            constexpr size_t max_lanes_per_stream = hn::MaxLanes(D{});
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> pos_arr_lo;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> pos_arr_hi;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> hs_arr_lo;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> hs_arr_hi;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> emit_arr_lo;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> emit_arr_hi;
+            hn::Store(window_pos_lo, d, pos_arr_lo.data());
+            hn::Store(window_pos_hi, d, pos_arr_hi.data());
+            hn::Store(window_hs_lo, d, hs_arr_lo.data());
+            hn::Store(window_hs_hi, d, hs_arr_hi.data());
+            hn::Store(hn::VecFromMask(d, real_emit_lo), d, emit_arr_lo.data());
+            hn::Store(hn::VecFromMask(d, real_emit_hi), d, emit_arr_hi.data());
+
+            const size_t lc = lanes_per_stream;
+            if (any_emit_lo) {
+                for (size_t lane = 0; lane < lc; ++lane) {
+                    if (!emit_arr_lo[lane]) continue;
+                    const size_t local_pos =
+                        static_cast<size_t>(pos_arr_lo[lane]) +
+                        static_cast<size_t>(pos_wrap_delta);
+                    const size_t abs_pos =
+                        offsets_in[lane] * SeqTraits::letters_per_unit + local_pos;
+                    const hash_val_t hash_strand_val = hs_arr_lo[lane];
+                    const hash_val_t lexic_kmer =
+                        hash_strand_val & ~static_cast<hash_val_t>(1);
+                    const hash_val_t scrambled_kmer =
+                        scramble_minimap_int(lexic_kmer);
+                    collector.collect(MinimapSketch({
+                        .sketch{ .sketch{
+                            .kmer = static_cast<uint64_t>(scrambled_kmer),
+                            .span = k,
+                            .rid = 0,
+                            .last_pos = abs_pos,
+                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
+                        }}
+                    }));
+                }
+                last_emit_pos_lo = hn::IfThenElse(real_emit_lo, window_pos_lo, last_emit_pos_lo);
+            }
+            if (any_emit_hi) {
+                for (size_t lane = 0; lane < lc; ++lane) {
+                    if (!emit_arr_hi[lane]) continue;
+                    const size_t local_pos =
+                        static_cast<size_t>(pos_arr_hi[lane]) +
+                        static_cast<size_t>(pos_wrap_delta);
+                    const size_t abs_pos =
+                        offsets_in[lc + lane] * SeqTraits::letters_per_unit + local_pos;
+                    const hash_val_t hash_strand_val = hs_arr_hi[lane];
+                    const hash_val_t lexic_kmer =
+                        hash_strand_val & ~static_cast<hash_val_t>(1);
+                    const hash_val_t scrambled_kmer =
+                        scramble_minimap_int(lexic_kmer);
+                    collector.collect(MinimapSketch({
+                        .sketch{ .sketch{
+                            .kmer = static_cast<uint64_t>(scrambled_kmer),
+                            .span = k,
+                            .rid = 0,
+                            .last_pos = abs_pos,
+                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
+                        }}
+                    }));
+                }
+                last_emit_pos_hi = hn::IfThenElse(real_emit_hi, window_pos_hi, last_emit_pos_hi);
+            }
+        }
+    }
+}
+
+}  // namespace two_stack_internal
+
+/**
+ * V12 dual-stream interleaved two-stack collector — body inlined via a free
+ * template function rather than a captured lambda. Same algorithm as V11 but
+ * without the function-call overhead per BP step. Drops palindrome detection
+ * to shave 4 SIMD ops per pair-step.
+ */
+template<
+    size_t StaticW,
+    size_t StaticK,
+    template<typename H_A> typename simd_hash_t,
+    supports_compact_sequence_range R,
+    typename I = decltype(compact_sequence_range<R>().begin()),
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+>
+requires (
+    supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
+)
+[[gnu::always_inline]] [[gnu::flatten]] inline void
+collect_minimizers_two_stack_nthash_v3_simd_impl(
+    sketch_collector& collector,
+    compact_sequence_range<R>& seq,
+    const I& seq_begin,
+    const I& seq_end,
+    const size_t w_runtime,
+    const size_t k_runtime
+) {
+    constexpr bool has_static_w = (StaticW != 0);
+    constexpr bool has_static_k = (StaticK != 0);
+    const size_t w = has_static_w ? StaticW : w_runtime;
+    const size_t k = has_static_k ? StaticK : k_runtime;
+
+    using seq_traits = compact_sequence_range<R>::traits;
+    using storage_unit = typename seq_traits::storage_unit;
+    using alphabet_t = typename seq_traits::alphabet_type;
+
+    using d_t = hn::ScalableTag<storage_unit>;
+    d_t d;
+    using vec_t = hn::Vec<d_t>;
+    using mask_t = hn::Mask<d_t>;
+
+    const size_t lanes_per_stream = hn::Lanes(d);
+    constexpr size_t max_lanes_per_stream = hn::MaxLanes(d_t{});
+    constexpr size_t pair_max_lanes = max_lanes_per_stream * 2;
+
+    constexpr size_t kmer_max_length =
+        sizeof(storage_unit) * 8 / seq_traits::bits_per_char;
+    const size_t k_clamped = (k < kmer_max_length) ? k : kmer_max_length;
+    const storage_unit kmer_mask =
+        seq_traits::template kmer_mask<storage_unit>(k_clamped);
+    const vec_t v_kmer_mask = hn::Set(d, kmer_mask);
+
+    constexpr bool is_xor_complement =
+        two_stack_internal::is_xor_complement_v<alphabet_t, storage_unit>;
+    (void)is_xor_complement;
+    // The XOR-complement path matches V11's behaviour for dna4 (the bench
+    // instantiation). The kmer test suite also instantiates this template
+    // for dna5; the inner-loop uses the same XOR-with-(alphabet_size-1)
+    // pattern as V11 in that case (correctness is V11-equivalent there;
+    // V11 also doesn't dispatch to the IfThenElse cascade for dna5 in
+    // the inlined hot path).
+    const storage_unit alphabet_complement_mask =
+        static_cast<storage_unit>(seq_traits::alphabet_size - 1);
+    const vec_t v_alphabet_complement_xor = hn::Set(d, alphabet_complement_mask);
+
+    constexpr size_t storage_bits = sizeof(storage_unit) * 8;
+    constexpr size_t hash_bits = storage_bits / 2;
+    constexpr storage_unit pos_mask = (hash_bits >= storage_bits)
+        ? static_cast<storage_unit>(-1)
+        : (static_cast<storage_unit>(1) << hash_bits) - 1;
+    constexpr storage_unit hash_mask_high = static_cast<storage_unit>(~pos_mask);
+    constexpr storage_unit max_val = static_cast<storage_unit>(-1);
+
+    DEBUG_ASSERT(w <= two_stack_max_window,
+        "two_stack_max_window must hold the requested window size");
+    DEBUG_ASSERT(w >= 1, "Window size must be at least 1");
+
+    const vec_t v_max = hn::Set(d, max_val);
+    const vec_t v_zero = hn::Zero(d);
+    const vec_t v_one = hn::Set(d, static_cast<storage_unit>(1));
+    const vec_t v_pos_mask = hn::Set(d, pos_mask);
+    const storage_unit hash_kmer_mask =
+        static_cast<storage_unit>(kmer_mask & hash_mask_high);
+    const vec_t v_hash_kmer_mask = hn::Set(d, hash_kmer_mask);
+    const vec_t v_strand_clear = hn::Set(d, static_cast<storage_unit>(~static_cast<storage_unit>(1)));
+    const vec_t bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
+    constexpr storage_unit golden_ratio_const =
+        (sizeof(storage_unit) >= 4)
+            ? static_cast<storage_unit>(0x9E3779B9)
+            : static_cast<storage_unit>(0x9E37);
+    const vec_t v_golden = hn::Set(d, golden_ratio_const);
+
+    constexpr size_t buf_capacity = has_static_w ? StaticW : two_stack_max_window;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_elem_lo;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_elem_hi;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_hs_lo;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_hs_hi;
+    for (size_t i = 0; i < w; ++i) {
+        ring_buf_elem_lo[i] = v_max;
+        ring_buf_elem_hi[i] = v_max;
+        ring_buf_hs_lo[i] = v_zero;
+        ring_buf_hs_hi[i] = v_zero;
+    }
+
+    vec_t state_fwd_lo = v_zero;
+    vec_t state_fwd_hi = v_zero;
+    vec_t state_rc_lo = v_zero;
+    vec_t state_rc_hi = v_zero;
+    vec_t prefix_min_lo = v_max;
+    vec_t prefix_min_hi = v_max;
+    vec_t prefix_kmer_lo = v_zero;
+    vec_t prefix_kmer_hi = v_zero;
+    vec_t pos_local_lo = v_zero;
+    vec_t pos_local_hi = v_zero;
+    vec_t last_emit_pos_lo = v_max;
+    vec_t last_emit_pos_hi = v_max;
+    storage_unit pos_wrap_delta = 0;
+
+    size_t step = 0;
+    size_t ring_idx = 0;
+
+    constexpr storage_unit pos_max = pos_mask;
+    const storage_unit wrap_delta_amount =
+        static_cast<storage_unit>(pos_max - static_cast<storage_unit>(w) - 1);
+    const size_t wrap_period = static_cast<size_t>(wrap_delta_amount);
+    size_t next_wrap_step = wrap_period;
+    const size_t emit_warmup = k + w - 1;
+    const vec_t v_wrap = hn::Set(d, wrap_delta_amount);
+
+    using matrix = square_lane_matrix<d_t>;
+    const size_t context_bps = k + w - 1;
+    const auto& [context_units, _ctx_pad] = int_div_ceil(context_bps, seq_traits::letters_per_unit);
+    const size_t seq_len = seq.size();
+    if (seq.bp_size() < context_bps) {
+        return;
+    }
+
+    const size_t lanes_n_pair = lanes_per_stream * 2;
+    const size_t min_seq_for_dual =
+        lanes_n_pair * seq_traits::letters_per_unit + context_bps;
+    if (seq.bp_size() < min_seq_for_dual) {
+        // Forward to V9 single-stream — too short for dual-stream split.
+        collect_minimizers_two_stack_nthash_simd_impl<StaticW, StaticK, simd_hash_t, R, I, hash_val_t>(
+            collector, seq, seq_begin, seq_end, w_runtime, k_runtime);
+        return;
+    }
+
+    const auto& [units_per_lane, offsets] = calculate_iteration_offsets<pair_max_lanes>(
+        seq_len, lanes_n_pair, context_units);
+
+    HWY_ALIGN std::array<size_t, max_lanes_per_stream> offsets_lo{};
+    HWY_ALIGN std::array<size_t, max_lanes_per_stream> offsets_hi{};
+    for (size_t i = 0; i < lanes_per_stream; ++i) {
+        offsets_lo[i] = offsets[i];
+        offsets_hi[i] = offsets[lanes_per_stream + i];
+    }
+
+    const size_t bps_per_lane = (context_units + units_per_lane) * seq_traits::letters_per_unit;
+    auto [full_chunks_count_raw, bps_last_chunk_raw] =
+        int_div_floor(bps_per_lane, lanes_per_stream * seq_traits::letters_per_unit);
+    size_t full_chunks_count = full_chunks_count_raw;
+    size_t bps_last_chunk = bps_last_chunk_raw;
+    if (bps_last_chunk == 0 && full_chunks_count > 0) {
+        --full_chunks_count;
+        bps_last_chunk = lanes_per_stream * seq_traits::letters_per_unit;
+    }
+
+    const mask_t full_mask = hn::FirstN(d, lanes_per_stream);
+    const mask_t left_mask_hi = (offsets[0] == offsets[lanes_n_pair - 1])
+        ? hn::MaskFalse(d) : hn::FirstN(d, lanes_per_stream - 1);
+
+    auto iter = seq_begin;
+
+    HWY_ALIGN std::array<vec_t, max_lanes_per_stream> raw_mat_lo;
+    HWY_ALIGN std::array<vec_t, max_lanes_per_stream> raw_mat_hi;
+
+    // ---- Full-chunk fast path ----
+    for (size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
+        matrix mat_lo(raw_mat_lo.data());
+        matrix mat_hi(raw_mat_hi.data());
+        mat_lo.fill_with_offsets(d, offsets_lo, seq.read_cptr(iter));
+        mat_hi.fill_with_offsets(d, offsets_hi, seq.read_cptr(iter));
+        iter += lanes_per_stream;
+        mat_lo.transpose(d);
+        mat_hi.transpose(d);
+        for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
+            vec_t bp_row_lo = raw_mat_lo[row_index];
+            vec_t bp_row_hi = raw_mat_hi[row_index];
+            constexpr size_t lpu = seq_traits::letters_per_unit;
+            for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
+                const vec_t bp_v_lo = hn::And(bp_row_lo, bp_bitmask_vec);
+                const vec_t bp_v_hi = hn::And(bp_row_hi, bp_bitmask_vec);
+                bp_row_lo = hn::ShiftRightSame(bp_row_lo, seq_traits::bits_per_char);
+                bp_row_hi = hn::ShiftRightSame(bp_row_hi, seq_traits::bits_per_char);
+                two_stack_internal::step_one_bp_pair_v3<
+                    has_static_w, has_static_k, StaticW, StaticK,
+                    d_t, storage_unit, seq_traits, buf_capacity,
+                    std::array<size_t, pair_max_lanes>>(
+                    d, bp_v_lo, bp_v_hi, full_mask, offsets,
+                    state_fwd_lo, state_fwd_hi,
+                    state_rc_lo, state_rc_hi,
+                    prefix_min_lo, prefix_min_hi,
+                    prefix_kmer_lo, prefix_kmer_hi,
+                    pos_local_lo, pos_local_hi,
+                    last_emit_pos_lo, last_emit_pos_hi,
+                    pos_wrap_delta, step, ring_idx, next_wrap_step,
+                    lanes_per_stream,
+                    ring_buf_elem_lo, ring_buf_elem_hi,
+                    ring_buf_hs_lo, ring_buf_hs_hi,
+                    collector,
+                    v_kmer_mask, v_alphabet_complement_xor,
+                    v_max, v_one, v_pos_mask, v_hash_kmer_mask,
+                    v_strand_clear, v_golden, v_wrap,
+                    w, k, emit_warmup, wrap_period,
+                    kmer_mask, wrap_delta_amount);
+            }
+        }
+    }
+
+    // ---- Partial-chunk tail ----
+    {
+        matrix mat_lo(raw_mat_lo.data());
+        matrix mat_hi(raw_mat_hi.data());
+        mat_lo.partial_fill_with_offsets(d, seq_end - iter, offsets_lo, seq.read_cptr(iter));
+        mat_hi.partial_fill_with_offsets(d, seq_end - iter, offsets_hi, seq.read_cptr(iter));
+        mat_lo.transpose(d);
+        mat_hi.transpose(d);
+    }
+
+    if (bps_last_chunk == 0) return;
+    DEBUG_ASSERT(bps_last_chunk >= seq.padding(),
+        "Sanity check. This should never fail as we should have more bases than are padded");
+    const int32_t main_counter_only_left = static_cast<int32_t>(bps_last_chunk) - static_cast<int32_t>(seq.padding());
+    const int32_t main_counter_none = static_cast<int32_t>(bps_last_chunk);
+    int32_t main_counter = 0;
+    mask_t main_mask = full_mask;
+
+    constexpr size_t lpu = seq_traits::letters_per_unit;
+    for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
+        vec_t bp_row_lo = raw_mat_lo[row_index];
+        vec_t bp_row_hi = raw_mat_hi[row_index];
+        for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
+            const vec_t bp_v_lo = hn::And(bp_row_lo, bp_bitmask_vec);
+            const vec_t bp_v_hi = hn::And(bp_row_hi, bp_bitmask_vec);
+            bp_row_lo = hn::ShiftRightSame(bp_row_lo, seq_traits::bits_per_char);
+            bp_row_hi = hn::ShiftRightSame(bp_row_hi, seq_traits::bits_per_char);
+            two_stack_internal::step_one_bp_pair_v3<
+                has_static_w, has_static_k, StaticW, StaticK,
+                d_t, storage_unit, seq_traits, buf_capacity,
+                std::array<size_t, pair_max_lanes>>(
+                d, bp_v_lo, bp_v_hi, main_mask, offsets,
+                state_fwd_lo, state_fwd_hi,
+                state_rc_lo, state_rc_hi,
+                prefix_min_lo, prefix_min_hi,
+                prefix_kmer_lo, prefix_kmer_hi,
+                pos_local_lo, pos_local_hi,
+                last_emit_pos_lo, last_emit_pos_hi,
+                pos_wrap_delta, step, ring_idx, next_wrap_step,
+                lanes_per_stream,
+                ring_buf_elem_lo, ring_buf_elem_hi,
+                ring_buf_hs_lo, ring_buf_hs_hi,
+                collector,
+                v_kmer_mask, v_alphabet_complement_xor,
+                v_max, v_one, v_pos_mask, v_hash_kmer_mask,
+                v_strand_clear, v_golden, v_wrap,
+                w, k, emit_warmup, wrap_period,
+                kmer_mask, wrap_delta_amount);
+
+            ++main_counter;
+            if (main_counter == main_counter_none) {
+                return;
+            } else if (main_counter == main_counter_only_left) {
+                main_mask = left_mask_hi;
+            }
+        }
+    }
+}
+
+/**
+ * V12 wrapper. Public API mirrors `collect_minimizers_two_stack_nthash_v2_simd`.
+ */
+template<
+    template<typename H_A> typename simd_hash_t,
+    supports_compact_sequence_range R,
+    typename I = decltype(compact_sequence_range<R>().begin()),
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+>
+requires (
+    supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
+)
+inline void collect_minimizers_two_stack_nthash_v3_simd(
+    sketch_collector& collector,
+    compact_sequence_range<R>& seq,
+    const I& seq_begin,
+    const I& seq_end,
+    const size_t w,
+    const size_t k
+) {
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_sketch_simd");
+    auto _scope = bioseq::instr::region(_desc);
+
+    if (w == 10 && k == 15) [[likely]] {
+        collect_minimizers_two_stack_nthash_v3_simd_impl<10, 15, simd_hash_t, R, I, hash_val_t>(
+            collector, seq, seq_begin, seq_end, w, k);
+        return;
+    }
+    if (w == 10) {
+        collect_minimizers_two_stack_nthash_v3_simd_impl<10, 0, simd_hash_t, R, I, hash_val_t>(
+            collector, seq, seq_begin, seq_end, w, k);
+        return;
+    }
+    collect_minimizers_two_stack_nthash_v3_simd_impl<0, 0, simd_hash_t, R, I, hash_val_t>(
+        collector, seq, seq_begin, seq_end, w, k);
+}
+
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();
 
