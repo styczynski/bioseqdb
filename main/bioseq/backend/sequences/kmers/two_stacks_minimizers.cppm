@@ -1691,6 +1691,20 @@ template<
     const mask_t strand_hi = hn::Lt(state_rc_hi, state_fwd_hi);
 
     // Mixed-hash for ordering (golden-ratio mul, mask folds in v_hash_kmer_mask).
+    //
+    // V13 attempt: Pre-XOR'd lex with a constant to break the all-A
+    // (lex=0) fixed point of golden-ratio multiplication, hoping to
+    // reduce AT-bias. Result: collect_seed_hits stayed at ~11–12 ms
+    // (no change vs V12's 11.0 ms), so the AT-bias regression is not
+    // dominated by the all-A fixed point alone — likely it's the
+    // density-of-AT-rich-kmers across the bench's CCS error profile,
+    // which a multiplicative hash cannot fix without losing precision.
+    // A true ntHash with `tbl.16b` lookups + (c_new, c_old) delay
+    // infrastructure (V12 report's future work item #1) would lift the
+    // bias but requires ~12 SIMD ops per stream per BP — net wall-clock
+    // gain unclear without measurement, and the (c_new, c_old) delay
+    // infrastructure is a substantial rewrite. Reverted; V13 stays on
+    // V12's `(lex * golden) & mask` for the inner-loop hash.
     const vec_t hash_full_lo = hn::And(hn::Mul(lex_lo, v_golden), v_hash_kmer_mask);
     const vec_t hash_full_hi = hn::And(hn::Mul(lex_hi, v_golden), v_hash_kmer_mask);
 
