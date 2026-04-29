@@ -8,11 +8,23 @@
 #           Recognised tokens: unit, integration, bench. Default: "unit+integration".
 #   mode    cmake configure preset (see CMakePresets.json). Default: "dev-opt-pg".
 #
+# Each preset gets its own build tree under build/<mode>/, so flipping between
+# e.g. dev-opt-pg ↔ bench-opt no longer triggers a full rebuild — incremental
+# state is preserved per preset. The active mode's compile_commands.json is
+# symlinked at build/compile_commands.json so clangd / IDE integrations keep
+# working without any reconfiguration.
+#
 # Examples:
 #   ./build.sh                              # build + run unit + integration suites
 #   ./build.sh integration+bench+unit       # all three suites in order
 #   ./build.sh bench+unit dev-opt           # different preset, no integration tests
 #   ./build.sh "" dev                       # build only, no tests
+#
+# Optional env overrides:
+#   JOBS=N    forwarded as `--parallel N` to cmake/ninja. Defaults to 32, which
+#             oversubscribes the 10-core box on purpose — C++ module compiles
+#             stall often enough that the extra slack helps. Lower it if you
+#             want headroom (e.g. while running a benchmark on the same box).
 set -euo pipefail
 
 TESTS="${1:-unit+integration}"
@@ -26,7 +38,10 @@ case "${TESTS}" in
 esac
 MODE="${2:-${DEFAULT_MODE}}"
 
-mkdir build 2>/dev/null >/dev/null || true
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
+BUILD_ROOT="${PROJECT_ROOT}/build"
+BUILD_DIR="${BUILD_ROOT}/${MODE}"
+mkdir -p "${BUILD_DIR}"
 
 # Wipe any previously-installed extension artefacts from the active Postgres tree
 # so that `cmake --build . --target install` writes a fresh copy. We resolve the
@@ -56,10 +71,22 @@ if [ -n "${PG_CONFIG}" ]; then
 fi
 
 export CMAKE_EXPORT_COMPILE_COMMANDS=1
-cd build
-cmake --preset "${MODE}" ..
-cmake --build .
-cmake --build . --target install
+cd "${PROJECT_ROOT}"
+cmake --preset "${MODE}"
+
+JOBS="${JOBS:-32}"
+cmake --build "${BUILD_DIR}" --parallel "${JOBS}"
+cmake --build "${BUILD_DIR}" --target install --parallel "${JOBS}"
+
+# Point build/compile_commands.json at the most-recently-built mode so clangd
+# (which probes build/ by default) always sees the active preset's flags.
+if [ -f "${BUILD_DIR}/compile_commands.json" ]; then
+    ln -sfn "${MODE}/compile_commands.json" "${BUILD_ROOT}/compile_commands.json"
+fi
+
+# Tests run from the per-mode build dir — keeps `./bioseq/...` working and
+# ensures BIOSEQ_BENCH_REPORT_PATH defaults land alongside that mode's binary.
+cd "${BUILD_DIR}"
 
 # Tokenise the requested test list once so each component runs at most once.
 IFS='+' read -ra TEST_TOKENS <<< "${TESTS}"

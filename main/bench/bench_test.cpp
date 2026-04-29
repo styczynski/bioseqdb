@@ -561,6 +561,39 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
         two_stack_nthash_v3_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         two_stack_nthash_v3_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V3;
         grid.push_back(std::move(two_stack_nthash_v3_cfg));
+
+        AlgorithmConfig two_stack_nthash_v4_cfg;
+        two_stack_nthash_v4_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-v4-mm";
+        two_stack_nthash_v4_cfg.is_minimap2_reference = false;
+        two_stack_nthash_v4_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        two_stack_nthash_v4_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        two_stack_nthash_v4_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V4;
+        grid.push_back(std::move(two_stack_nthash_v4_cfg));
+
+        // V15 — chaining V2 (dual-batch unrolled SIMD inner loop) paired
+        // with V13 (TWO_STACK_NTHASH_V3) minimizer. Two rows so we can
+        // see V1→V2 chaining delta in isolation:
+        //   * `chain-v2 + nth-v3-mm` is the production-candidate row
+        //     (best minimizer + V2 chaining)
+        //   * `chain-v2 + SIMD-mm` reuses the baseline minimizer so the
+        //     mg_lchain_simd column compares apples-to-apples vs
+        //     `SIMD-mm` row above (same minimizer kmers, same anchor
+        //     count, only chaining changed).
+        AlgorithmConfig chain_v2_simd_mm_cfg;
+        chain_v2_simd_mm_cfg.label = "bioseq KSW2 + SIMD-DP-v2 + SIMD-mm";
+        chain_v2_simd_mm_cfg.is_minimap2_reference = false;
+        chain_v2_simd_mm_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2_V2;
+        chain_v2_simd_mm_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        chain_v2_simd_mm_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD;
+        grid.push_back(std::move(chain_v2_simd_mm_cfg));
+
+        AlgorithmConfig chain_v2_v3_mm_cfg;
+        chain_v2_v3_mm_cfg.label = "bioseq KSW2 + SIMD-DP-v2 + two-stack-nthash-v3-mm";
+        chain_v2_v3_mm_cfg.is_minimap2_reference = false;
+        chain_v2_v3_mm_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2_V2;
+        chain_v2_v3_mm_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        chain_v2_v3_mm_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V3;
+        grid.push_back(std::move(chain_v2_v3_mm_cfg));
     }
 
     // Pin the same seed across iterations so before/after deltas are not
@@ -666,6 +699,31 @@ TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
         two_stack_nthash_v3_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         two_stack_nthash_v3_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V3;
         grid.push_back(std::move(two_stack_nthash_v3_cfg));
+
+        AlgorithmConfig two_stack_nthash_v4_cfg;
+        two_stack_nthash_v4_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-v4-mm";
+        two_stack_nthash_v4_cfg.is_minimap2_reference = false;
+        two_stack_nthash_v4_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        two_stack_nthash_v4_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        two_stack_nthash_v4_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V4;
+        grid.push_back(std::move(two_stack_nthash_v4_cfg));
+
+        // V15 chaining V2 rows — see the bench-long grid for rationale.
+        AlgorithmConfig chain_v2_simd_mm_cfg;
+        chain_v2_simd_mm_cfg.label = "bioseq KSW2 + SIMD-DP-v2 + SIMD-mm";
+        chain_v2_simd_mm_cfg.is_minimap2_reference = false;
+        chain_v2_simd_mm_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2_V2;
+        chain_v2_simd_mm_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        chain_v2_simd_mm_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD;
+        grid.push_back(std::move(chain_v2_simd_mm_cfg));
+
+        AlgorithmConfig chain_v2_v3_mm_cfg;
+        chain_v2_v3_mm_cfg.label = "bioseq KSW2 + SIMD-DP-v2 + two-stack-nthash-v3-mm";
+        chain_v2_v3_mm_cfg.is_minimap2_reference = false;
+        chain_v2_v3_mm_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2_V2;
+        chain_v2_v3_mm_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        chain_v2_v3_mm_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V3;
+        grid.push_back(std::move(chain_v2_v3_mm_cfg));
     }
 
     // Cover both VERY_LONG (~900 kbp) and XL (~5 Mbp) so the user's

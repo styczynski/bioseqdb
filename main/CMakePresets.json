@@ -6,6 +6,7 @@
         "displayName": "Default development config",
          "description": "Default build using Ninja generator",
         "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
@@ -21,6 +22,7 @@
         "displayName": "Default development config",
          "description": "Default build using Ninja generator",
         "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
@@ -38,6 +40,7 @@
         "displayName": "Default development config",
          "description": "Default build using Ninja generator",
         "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
@@ -54,6 +57,7 @@
         "displayName": "Benchmark-tuned optimisation config",
          "description": "Like dev-opt-pg but -O3 and NDEBUG so the bench runs at production-grade optimisation while still allowing module-build incremental rebuilds.",
         "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
@@ -70,6 +74,7 @@
         "displayName": "Default release config",
          "description": "Default build using Ninja generator",
         "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Release",

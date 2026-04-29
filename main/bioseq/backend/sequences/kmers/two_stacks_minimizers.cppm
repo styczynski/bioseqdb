@@ -2249,6 +2249,961 @@ inline void collect_minimizers_two_stack_nthash_v3_simd(
         collector, seq, seq_begin, seq_end, w, k);
 }
 
+// =================================================================================
+// V14: V13 chassis + true ntHash via Lookup8 for the ordering hash
+// ---------------------------------------------------------------------------------
+// V13 used `(lex × golden) & v_hash_kmer_mask` as the ordering hash. That
+// `lex × golden` is a multiplicative hash of the lexicographic kmer; on
+// CCS-like AT-rich error profiles it is biased toward dense low-bit
+// minimizers and inflates `collect_seed_hits` by ~5 ms per pair (V13's
+// negative-result table). The bias is structural — multiplicative
+// hashing cannot fix it without losing precision.
+//
+// V14 replaces the ordering hash with **canonical ntHash**:
+//   * Forward ntHash chain `hash_fwd` and reverse-complement chain `hash_rc`.
+//   * Per-step rolling update via 4 byte-indexed seed lookups (`hn::Lookup8`)
+//     plus 4 rotates and 4 XORs — exactly the cost the V13 future-work
+//     section estimated.
+//   * c_old derived from the top 2 bits of `state_fwd` *before* the
+//     state update via `ShiftRight<2*(k-1)>`. Confirmed sufficient by
+//     V13.
+//   * Initial hash state precomputed so that the first `k` rolling
+//     iterations (where `c_old = 0` because `state_fwd` has not filled
+//     up yet) produce the canonical ntHash of the very first kmer at
+//     iter k-1, with no per-step warmup branch.
+//   * Ordering value = `min(hash_fwd, hash_rc)` (canonical ntHash) AND
+//     v_hash_kmer_mask, then OR'd with the position low bits — same elem
+//     encoding as V13, only the high bits change.
+//
+// `state_fwd` / `state_rc` and the lex emit kmer (`hash_strand_val &
+// ~0x1`) are unchanged from V13, so `target_index_build` keys remain the
+// scrambled lex kmer (`scramble_minimap_int(lex)`) and the rest of the
+// pipeline does not see any layout change. Only the *selection* of which
+// kmer wins each window changes — and ntHash distributes uniformly
+// regardless of base composition, removing the AT-bias regression.
+//
+// Per-stream additional cost: 4 Lookup8 + 4 rotates + 4 XORs + 1 Min ≈
+// 13 SIMD ops per BP (plus 1 Xor for c_old complement and 1 ShiftRight
+// for c_old extraction). Replaces V13's 2 ops (Mul + And) for the hash
+// proper. Goal: collect_seed_hits drops to scalar parity (~7 ms vs
+// V13's ~12 ms) because hash buckets stop overflowing on AT-rich kmers.
+// =================================================================================
+
+namespace two_stack_internal {
+
+/// 32-bit cyclic rotate for compile-time evaluation. Required because
+/// `<<` / `>>` on bit-widths ≥ storage width is undefined behaviour and
+/// cannot survive `constexpr` evaluation.
+template<typename storage_unit>
+constexpr storage_unit rol_constexpr(storage_unit x, unsigned n) {
+    constexpr unsigned bits = sizeof(storage_unit) * 8;
+    n %= bits;
+    if (n == 0) return x;
+    return static_cast<storage_unit>(
+        (static_cast<storage_unit>(x << n)) |
+        static_cast<storage_unit>(x >> (bits - n)));
+}
+
+template<typename storage_unit>
+constexpr storage_unit ror_constexpr(storage_unit x, unsigned n) {
+    constexpr unsigned bits = sizeof(storage_unit) * 8;
+    n %= bits;
+    if (n == 0) return x;
+    return static_cast<storage_unit>(
+        static_cast<storage_unit>(x >> n) |
+        static_cast<storage_unit>(x << (bits - n)));
+}
+
+/// Per-character ntHash seed table. Standard ntHash uses 64-bit seeds;
+/// for storage units narrower than 64 bits we keep the high bits since
+/// they have the strongest entropy. Hard-coded for dna4 (4 chars) — the
+/// only alphabet the bench instantiates. The 8-entry padding lets the
+/// table also be valid for dna5 (5 chars) with a benign zero seed for N
+/// — the V4 inner loop is only meaningfully exercised on dna4 in the
+/// bench, but the wider table avoids out-of-bounds when dna5
+/// instantiations of `minimap_port` reach the V4 dispatch branch.
+inline constexpr std::array<uint64_t, 8> nthash_seeds_64 = {
+    0x3c8bfbb395c60474ULL,  // A
+    0x3193c1840987b96bULL,  // C
+    0x20323ed082572324ULL,  // G
+    0x295549f54be24456ULL,  // T
+    0x0000000000000000ULL,  // N (dna5; zero is fine because dna5 isn't bench-hot)
+    0x0000000000000000ULL,  // padding
+    0x0000000000000000ULL,  // padding
+    0x0000000000000000ULL,  // padding
+};
+
+template<typename storage_unit>
+constexpr std::array<storage_unit, 8> nthash_seeds_for_storage() {
+    std::array<storage_unit, 8> out{};
+    for (size_t i = 0; i < 8; ++i) {
+        if constexpr (sizeof(storage_unit) == 8) {
+            out[i] = static_cast<storage_unit>(nthash_seeds_64[i]);
+        } else if constexpr (sizeof(storage_unit) == 4) {
+            out[i] = static_cast<storage_unit>(nthash_seeds_64[i] >> 32);
+        } else if constexpr (sizeof(storage_unit) == 2) {
+            out[i] = static_cast<storage_unit>(nthash_seeds_64[i] >> 48);
+        } else {
+            out[i] = static_cast<storage_unit>(nthash_seeds_64[i] >> 56);
+        }
+    }
+    return out;
+}
+
+/// Compile-time precomputation of the initial `hash_fwd` value such that
+/// after K rolling iterations with `c_old = 0` (which is what happens
+/// during the warmup phase before `state_fwd` has filled up), the chain
+/// holds canonical_ntHash(c_0..c_{K-1}). Without this initialisation the
+/// ntHash chain accumulates `K` rotated copies of `f(0)` that never
+/// disappear, making the same kmer hash to different values at different
+/// stream positions. With the init, the chain matches the true ntHash
+/// for every kmer from position K-1 onward.
+template<typename storage_unit, size_t K>
+constexpr storage_unit nthash_warmup_cancel_fwd() {
+    constexpr auto seeds = nthash_seeds_for_storage<storage_unit>();
+    storage_unit extras = 0;
+    const storage_unit f0 = seeds[0];
+    for (size_t i = 0; i < K; ++i) {
+        extras = static_cast<storage_unit>(
+            extras ^ rol_constexpr<storage_unit>(f0, K + i));
+    }
+    return ror_constexpr<storage_unit>(extras, K);
+}
+
+template<typename storage_unit, size_t K, size_t ComplementRank>
+constexpr storage_unit nthash_warmup_cancel_rc() {
+    constexpr auto seeds = nthash_seeds_for_storage<storage_unit>();
+    storage_unit extras = 0;
+    const storage_unit g0 = seeds[ComplementRank];
+    for (size_t i = 1; i <= K; ++i) {
+        extras = static_cast<storage_unit>(
+            extras ^ ror_constexpr<storage_unit>(g0, i));
+    }
+    return rol_constexpr<storage_unit>(extras, K);
+}
+
+/**
+ * V14 per-BP-pair body. Same control flow as V13's `step_one_bp_pair_v3`
+ * with two differences:
+ *
+ * 1.  Maintains independent `hash_fwd` / `hash_rc` ntHash chains per
+ *     stream. The chains are rolled per BP using 4 byte-indexed lookups
+ *     (`hn::Lookup8` over the `f_table` seed array) plus 4 rotates and
+ *     4 XORs.
+ * 2.  The ordering hash that flows into `elem` is
+ *     `min(hash_fwd, hash_rc) & v_hash_kmer_mask` (canonical ntHash)
+ *     instead of `(lex × golden) & v_hash_kmer_mask`. The lex kmer is
+ *     still emitted unchanged so target_index keys remain stable.
+ *
+ * The c_old extraction is `ShiftRight<2*(k-1)>(state_fwd_lo)` performed
+ * before the state_fwd update — V13 confirmed this gives the correct
+ * "character that just fell out". For warmup iterations (step < k) the
+ * extracted value is 0 (because state_fwd has not filled up yet), which
+ * the precomputed init constants compensate for.
+ */
+template<
+    bool HasStaticW, bool HasStaticK,
+    size_t StaticW, size_t StaticK,
+    class D, typename hash_val_t,
+    typename SeqTraits, size_t BufCapacity, typename OffsetsArray
+>
+[[gnu::always_inline]] HWY_INLINE void step_one_bp_pair_v4_nthash(
+    D d,
+    hn::Vec<D> bp_lo, hn::Vec<D> bp_hi,
+    hn::Mask<D> live_mask,
+    const OffsetsArray& offsets_in,
+    // Mutable state ---
+    hn::Vec<D>& state_fwd_lo, hn::Vec<D>& state_fwd_hi,
+    hn::Vec<D>& state_rc_lo,  hn::Vec<D>& state_rc_hi,
+    hn::Vec<D>& hash_fwd_lo, hn::Vec<D>& hash_fwd_hi,
+    hn::Vec<D>& hash_rc_lo, hn::Vec<D>& hash_rc_hi,
+    hn::Vec<D>& prefix_min_lo, hn::Vec<D>& prefix_min_hi,
+    hn::Vec<D>& prefix_kmer_lo, hn::Vec<D>& prefix_kmer_hi,
+    hn::Vec<D>& pos_local_lo, hn::Vec<D>& pos_local_hi,
+    hn::Vec<D>& last_emit_pos_lo, hn::Vec<D>& last_emit_pos_hi,
+    hash_val_t& pos_wrap_delta,
+    size_t& step,
+    size_t& ring_idx,
+    size_t& next_wrap_step,
+    size_t lanes_per_stream,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_elem_lo,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_elem_hi,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_hs_lo,
+    std::array<hn::Vec<D>, BufCapacity>& ring_buf_hs_hi,
+    sketch_collector& collector,
+    // Loop-invariant constants ---
+    hn::Vec<D> v_kmer_mask,
+    hn::Vec<D> v_alphabet_complement_xor,
+    hn::Vec<D> v_max,
+    hn::Vec<D> v_one,
+    hn::Vec<D> v_pos_mask,
+    hn::Vec<D> v_hash_kmer_mask,
+    hn::Vec<D> v_strand_clear,
+    hn::Vec<D> v_wrap,
+    hn::Vec<D> v_f_table,
+    size_t w,
+    size_t k,
+    size_t emit_warmup,
+    size_t wrap_period,
+    hash_val_t kmer_mask_scalar,
+    hash_val_t wrap_delta_amount
+) {
+    using vec_t = hn::Vec<D>;
+    using mask_t = hn::Mask<D>;
+
+    // ---- c_old extraction (BEFORE state_fwd update) ----
+    // state_fwd_lo currently encodes the kmer c_{-1}, c_0, ..., c_{k-2}
+    // with c_{-1} at the top 2 bits within kmer_mask. ShiftRight<2*(k-1)>
+    // moves those 2 bits to lane bits [0,1] giving the rank that's about
+    // to fall out. During warmup (step < k) state_fwd is not yet filled
+    // and the extracted value is zero — the precomputed
+    // `nthash_warmup_cancel_*` initialisation compensates.
+    vec_t c_old_lo, c_old_hi;
+    if constexpr (HasStaticK) {
+        constexpr size_t static_old_shift = SeqTraits::bits_per_char * (StaticK - 1);
+        constexpr size_t storage_bits_max = sizeof(hash_val_t) * 8;
+        constexpr size_t clamped_old_shift =
+            (static_old_shift >= storage_bits_max) ? (storage_bits_max - 1) : static_old_shift;
+        c_old_lo = hn::ShiftRight<clamped_old_shift>(state_fwd_lo);
+        c_old_hi = hn::ShiftRight<clamped_old_shift>(state_fwd_hi);
+    } else {
+        const size_t kmer_max_length = sizeof(hash_val_t) * 8 / SeqTraits::bits_per_char;
+        const size_t k_clamped = (k < kmer_max_length) ? k : kmer_max_length;
+        const size_t dyn_old_shift = SeqTraits::bits_per_char * (k_clamped - 1);
+        c_old_lo = hn::ShiftRightSame(state_fwd_lo, static_cast<int>(dyn_old_shift));
+        c_old_hi = hn::ShiftRightSame(state_fwd_hi, static_cast<int>(dyn_old_shift));
+    }
+    const vec_t c_old_compl_lo = hn::Xor(c_old_lo, v_alphabet_complement_xor);
+    const vec_t c_old_compl_hi = hn::Xor(c_old_hi, v_alphabet_complement_xor);
+
+    // ---- Lexic-kmer rolling update (forward + RC, 2 streams) ----
+    // Identical to V13. Computed first so c_old above used the OLD
+    // value of state_fwd.
+    const vec_t shift_left_fwd_lo = hn::ShiftLeft<SeqTraits::bits_per_char>(state_fwd_lo);
+    const vec_t shift_left_fwd_hi = hn::ShiftLeft<SeqTraits::bits_per_char>(state_fwd_hi);
+    const vec_t complemented_lo = hn::Xor(bp_lo, v_alphabet_complement_xor);
+    const vec_t complemented_hi = hn::Xor(bp_hi, v_alphabet_complement_xor);
+
+    state_fwd_lo = hn::And(hn::Or(shift_left_fwd_lo, bp_lo), v_kmer_mask);
+    state_fwd_hi = hn::And(hn::Or(shift_left_fwd_hi, bp_hi), v_kmer_mask);
+
+    vec_t new_high_lo, new_high_hi;
+    if constexpr (HasStaticK) {
+        constexpr size_t static_rev_shift = SeqTraits::bits_per_char * (StaticK - 1);
+        constexpr size_t storage_bits_max = sizeof(hash_val_t) * 8;
+        constexpr size_t clamped_rev_shift =
+            (static_rev_shift >= storage_bits_max) ? (storage_bits_max - 1) : static_rev_shift;
+        new_high_lo = hn::ShiftLeft<clamped_rev_shift>(complemented_lo);
+        new_high_hi = hn::ShiftLeft<clamped_rev_shift>(complemented_hi);
+    } else {
+        const size_t kmer_max_length = sizeof(hash_val_t) * 8 / SeqTraits::bits_per_char;
+        const size_t k_clamped = (k < kmer_max_length) ? k : kmer_max_length;
+        const size_t dynamic_rev_shift = SeqTraits::bits_per_char * (k_clamped - 1);
+        new_high_lo = hn::ShiftLeftSame(complemented_lo, static_cast<int>(dynamic_rev_shift));
+        new_high_hi = hn::ShiftLeftSame(complemented_hi, static_cast<int>(dynamic_rev_shift));
+    }
+    const vec_t shift_right_rc_lo = hn::ShiftRight<SeqTraits::bits_per_char>(state_rc_lo);
+    const vec_t shift_right_rc_hi = hn::ShiftRight<SeqTraits::bits_per_char>(state_rc_hi);
+    state_rc_lo = hn::Or(shift_right_rc_lo, new_high_lo);
+    state_rc_hi = hn::Or(shift_right_rc_hi, new_high_hi);
+
+    // ---- Canonical lex + strand classification (NO palindrome) ----
+    const vec_t lex_lo = hn::Min(state_fwd_lo, state_rc_lo);
+    const vec_t lex_hi = hn::Min(state_fwd_hi, state_rc_hi);
+    const mask_t strand_lo = hn::Lt(state_rc_lo, state_fwd_lo);
+    const mask_t strand_hi = hn::Lt(state_rc_hi, state_fwd_hi);
+
+    // ---- ntHash f-table lookups (4 per stream per BP) ----
+    // For dna4 with XOR-complement (`bp ^ 3 == complement(bp)` rank-wise)
+    // we reuse `complemented_lo/hi` as the input for the RC-chain f-lookup,
+    // saving an explicit `g(c)` table. The f-table sits in the lanes of
+    // `v_f_table` (load once in the wrapper) and `TableLookupLanes`
+    // performs a per-lane gather; on NEON this is one TBL instruction.
+    const vec_t f_new_fwd_lo =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, bp_lo));
+    const vec_t f_new_fwd_hi =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, bp_hi));
+    const vec_t f_new_rc_lo =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, complemented_lo));
+    const vec_t f_new_rc_hi =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, complemented_hi));
+    const vec_t f_old_fwd_lo =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, c_old_lo));
+    const vec_t f_old_fwd_hi =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, c_old_hi));
+    const vec_t f_old_rc_lo =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, c_old_compl_lo));
+    const vec_t f_old_rc_hi =
+        hn::TableLookupLanes(v_f_table, hn::IndicesFromVec(d, c_old_compl_hi));
+
+    // ---- Roll ntHash chains ----
+    //   h_fwd_new = ROL(h_fwd_old, 1) ^ ROL(f_old_fwd, k) ^ f_new_fwd
+    //   h_rc_new  = ROR(h_rc_old, 1)  ^ ROR(f_old_rc, 1) ^ ROL(f_new_rc, k-1)
+    // For static k, all amounts compile to single rotate ops on NEON.
+    if constexpr (HasStaticK) {
+        constexpr size_t storage_bits = sizeof(hash_val_t) * 8;
+        constexpr size_t k_mod = StaticK % storage_bits;
+        constexpr size_t km1_mod = (StaticK - 1) % storage_bits;
+        // Avoid the `RotateLeft<0>` corner case (some Highway targets
+        // disallow N == 0). For storage widths > k that's not relevant
+        // (k_mod == k > 0); the static_assert below documents the
+        // assumption.
+        static_assert(StaticK >= 1, "ntHash needs k >= 1");
+        static_assert(k_mod > 0,
+            "ntHash V14 requires k < storage_bits so RotateLeft<k> is well-defined.");
+        const vec_t hash_fwd_rolled_lo = hn::RotateLeft<1>(hash_fwd_lo);
+        const vec_t hash_fwd_rolled_hi = hn::RotateLeft<1>(hash_fwd_hi);
+        const vec_t f_old_fwd_rolled_lo = hn::RotateLeft<k_mod>(f_old_fwd_lo);
+        const vec_t f_old_fwd_rolled_hi = hn::RotateLeft<k_mod>(f_old_fwd_hi);
+        hash_fwd_lo = hn::Xor(hn::Xor(hash_fwd_rolled_lo, f_old_fwd_rolled_lo), f_new_fwd_lo);
+        hash_fwd_hi = hn::Xor(hn::Xor(hash_fwd_rolled_hi, f_old_fwd_rolled_hi), f_new_fwd_hi);
+
+        if constexpr (km1_mod == 0) {
+            // k == 1 + storage_bits·n — degenerate; fall back to runtime rotate.
+            hash_rc_lo = hn::Xor(hn::Xor(hn::RotateRight<1>(hash_rc_lo),
+                                         hn::RotateRight<1>(f_old_rc_lo)),
+                                 f_new_rc_lo);
+            hash_rc_hi = hn::Xor(hn::Xor(hn::RotateRight<1>(hash_rc_hi),
+                                         hn::RotateRight<1>(f_old_rc_hi)),
+                                 f_new_rc_hi);
+        } else {
+            hash_rc_lo = hn::Xor(hn::Xor(hn::RotateRight<1>(hash_rc_lo),
+                                         hn::RotateRight<1>(f_old_rc_lo)),
+                                 hn::RotateLeft<km1_mod>(f_new_rc_lo));
+            hash_rc_hi = hn::Xor(hn::Xor(hn::RotateRight<1>(hash_rc_hi),
+                                         hn::RotateRight<1>(f_old_rc_hi)),
+                                 hn::RotateLeft<km1_mod>(f_new_rc_hi));
+        }
+    } else {
+        constexpr size_t storage_bits = sizeof(hash_val_t) * 8;
+        const size_t k_mod = static_cast<size_t>(k) % storage_bits;
+        const size_t km1_mod = static_cast<size_t>(k - 1) % storage_bits;
+        hash_fwd_lo = hn::Xor(hn::Xor(hn::RotateLeftSame(hash_fwd_lo, 1),
+                                      hn::RotateLeftSame(f_old_fwd_lo, static_cast<int>(k_mod))),
+                              f_new_fwd_lo);
+        hash_fwd_hi = hn::Xor(hn::Xor(hn::RotateLeftSame(hash_fwd_hi, 1),
+                                      hn::RotateLeftSame(f_old_fwd_hi, static_cast<int>(k_mod))),
+                              f_new_fwd_hi);
+        hash_rc_lo = hn::Xor(hn::Xor(hn::RotateRightSame(hash_rc_lo, 1),
+                                     hn::RotateRightSame(f_old_rc_lo, 1)),
+                             hn::RotateLeftSame(f_new_rc_lo, static_cast<int>(km1_mod)));
+        hash_rc_hi = hn::Xor(hn::Xor(hn::RotateRightSame(hash_rc_hi, 1),
+                                     hn::RotateRightSame(f_old_rc_hi, 1)),
+                             hn::RotateLeftSame(f_new_rc_hi, static_cast<int>(km1_mod)));
+    }
+
+    // ---- Canonical ntHash for ordering ----
+    // The "smaller of fwd / rc" gives the strand-invariant minimizer
+    // hash — the exact contract minimap2 / ntHash papers describe.
+    const vec_t canonical_hash_lo = hn::Min(hash_fwd_lo, hash_rc_lo);
+    const vec_t canonical_hash_hi = hn::Min(hash_fwd_hi, hash_rc_hi);
+    const vec_t hash_full_lo = hn::And(canonical_hash_lo, v_hash_kmer_mask);
+    const vec_t hash_full_hi = hn::And(canonical_hash_hi, v_hash_kmer_mask);
+
+    // valid mask is just live_mask (no palindrome).
+    const vec_t hs_lo = hn::IfThenElse(strand_lo,
+        hn::Or(lex_lo, v_one),
+        hn::And(lex_lo, v_strand_clear));
+    const vec_t hs_hi = hn::IfThenElse(strand_hi,
+        hn::Or(lex_hi, v_one),
+        hn::And(lex_hi, v_strand_clear));
+
+    const vec_t elem_valid_lo = hn::Or(hash_full_lo, pos_local_lo);
+    const vec_t elem_valid_hi = hn::Or(hash_full_hi, pos_local_hi);
+    const vec_t elem_lo = hn::IfThenElse(live_mask, elem_valid_lo, v_max);
+    const vec_t elem_hi = hn::IfThenElse(live_mask, elem_valid_hi, v_max);
+
+    ring_buf_elem_lo[ring_idx] = elem_lo;
+    ring_buf_elem_hi[ring_idx] = elem_hi;
+    ring_buf_hs_lo[ring_idx] = hs_lo;
+    ring_buf_hs_hi[ring_idx] = hs_hi;
+
+    // ---- Prefix-min running update ----
+    const mask_t prefix_better_lo = hn::Lt(elem_lo, prefix_min_lo);
+    const mask_t prefix_better_hi = hn::Lt(elem_hi, prefix_min_hi);
+    prefix_min_lo = hn::IfThenElse(prefix_better_lo, elem_lo, prefix_min_lo);
+    prefix_min_hi = hn::IfThenElse(prefix_better_hi, elem_hi, prefix_min_hi);
+    prefix_kmer_lo = hn::IfThenElse(prefix_better_lo, hs_lo, prefix_kmer_lo);
+    prefix_kmer_hi = hn::IfThenElse(prefix_better_hi, hs_hi, prefix_kmer_hi);
+
+    ++ring_idx;
+    ++step;
+    pos_local_lo = hn::Add(pos_local_lo, v_one);
+    pos_local_hi = hn::Add(pos_local_hi, v_one);
+
+    // ---- Suffix-min rebuild (every w iterations) ----
+    if (ring_idx == w) [[unlikely]] {
+        if constexpr (HasStaticW) {
+            [&]<size_t... Idx>(std::index_sequence<Idx...>) {
+                auto rebuild_one = [&](auto i_const) [[gnu::always_inline]] {
+                    constexpr size_t i = StaticW - 1 - decltype(i_const)::value;
+                    const vec_t cur_lo = ring_buf_elem_lo[i];
+                    const vec_t cur_hi = ring_buf_elem_hi[i];
+                    const vec_t prev_lo = ring_buf_elem_lo[i - 1];
+                    const vec_t prev_hi = ring_buf_elem_hi[i - 1];
+                    const mask_t cur_better_lo = hn::Lt(cur_lo, prev_lo);
+                    const mask_t cur_better_hi = hn::Lt(cur_hi, prev_hi);
+                    ring_buf_elem_lo[i - 1] = hn::IfThenElse(cur_better_lo, cur_lo, prev_lo);
+                    ring_buf_elem_hi[i - 1] = hn::IfThenElse(cur_better_hi, cur_hi, prev_hi);
+                    ring_buf_hs_lo[i - 1] = hn::IfThenElse(cur_better_lo,
+                        ring_buf_hs_lo[i], ring_buf_hs_lo[i - 1]);
+                    ring_buf_hs_hi[i - 1] = hn::IfThenElse(cur_better_hi,
+                        ring_buf_hs_hi[i], ring_buf_hs_hi[i - 1]);
+                };
+                (rebuild_one(std::integral_constant<size_t, Idx>{}), ...);
+            }(std::make_index_sequence<StaticW - 1>{});
+        } else {
+            for (size_t i = w - 1; i > 0; --i) {
+                const vec_t cur_lo = ring_buf_elem_lo[i];
+                const vec_t cur_hi = ring_buf_elem_hi[i];
+                const vec_t prev_lo = ring_buf_elem_lo[i - 1];
+                const vec_t prev_hi = ring_buf_elem_hi[i - 1];
+                const mask_t cur_better_lo = hn::Lt(cur_lo, prev_lo);
+                const mask_t cur_better_hi = hn::Lt(cur_hi, prev_hi);
+                ring_buf_elem_lo[i - 1] = hn::IfThenElse(cur_better_lo, cur_lo, prev_lo);
+                ring_buf_elem_hi[i - 1] = hn::IfThenElse(cur_better_hi, cur_hi, prev_hi);
+                ring_buf_hs_lo[i - 1] = hn::IfThenElse(cur_better_lo,
+                    ring_buf_hs_lo[i], ring_buf_hs_lo[i - 1]);
+                ring_buf_hs_hi[i - 1] = hn::IfThenElse(cur_better_hi,
+                    ring_buf_hs_hi[i], ring_buf_hs_hi[i - 1]);
+            }
+        }
+        prefix_min_lo = elem_lo;
+        prefix_min_hi = elem_hi;
+        prefix_kmer_lo = hs_lo;
+        prefix_kmer_hi = hs_hi;
+        ring_idx = 0;
+    }
+
+    // ---- Window-min = min(prefix_min, ring_buf[ring_idx]) ----
+    const vec_t suffix_min_lo = ring_buf_elem_lo[ring_idx];
+    const vec_t suffix_min_hi = ring_buf_elem_hi[ring_idx];
+    const vec_t suffix_kmer_lo = ring_buf_hs_lo[ring_idx];
+    const vec_t suffix_kmer_hi = ring_buf_hs_hi[ring_idx];
+    const mask_t prefix_wins_lo = hn::Lt(prefix_min_lo, suffix_min_lo);
+    const mask_t prefix_wins_hi = hn::Lt(prefix_min_hi, suffix_min_hi);
+    const vec_t window_min_lo = hn::IfThenElse(prefix_wins_lo, prefix_min_lo, suffix_min_lo);
+    const vec_t window_min_hi = hn::IfThenElse(prefix_wins_hi, prefix_min_hi, suffix_min_hi);
+    const vec_t window_hs_lo = hn::IfThenElse(prefix_wins_lo, prefix_kmer_lo, suffix_kmer_lo);
+    const vec_t window_hs_hi = hn::IfThenElse(prefix_wins_hi, prefix_kmer_hi, suffix_kmer_hi);
+
+    // ---- Position wrap (16-bit pos rolls every wrap_period steps) ----
+    if (step == next_wrap_step) [[unlikely]] {
+        pos_local_lo = hn::Sub(pos_local_lo, v_wrap);
+        pos_local_hi = hn::Sub(pos_local_hi, v_wrap);
+        prefix_min_lo = hn::Sub(prefix_min_lo, v_wrap);
+        prefix_min_hi = hn::Sub(prefix_min_hi, v_wrap);
+        const mask_t emit_seen_lo = hn::Ne(last_emit_pos_lo, v_max);
+        const mask_t emit_seen_hi = hn::Ne(last_emit_pos_hi, v_max);
+        last_emit_pos_lo = hn::IfThenElse(emit_seen_lo,
+            hn::Sub(last_emit_pos_lo, v_wrap), last_emit_pos_lo);
+        last_emit_pos_hi = hn::IfThenElse(emit_seen_hi,
+            hn::Sub(last_emit_pos_hi, v_wrap), last_emit_pos_hi);
+        if constexpr (HasStaticW) {
+            [&]<size_t... Idx>(std::index_sequence<Idx...>) {
+                auto wrap_slot = [&](auto i_const) [[gnu::always_inline]] {
+                    constexpr size_t i = decltype(i_const)::value;
+                    const mask_t valid_lo_slot = hn::Ne(ring_buf_elem_lo[i], v_max);
+                    const mask_t valid_hi_slot = hn::Ne(ring_buf_elem_hi[i], v_max);
+                    ring_buf_elem_lo[i] = hn::IfThenElse(valid_lo_slot,
+                        hn::Sub(ring_buf_elem_lo[i], v_wrap), ring_buf_elem_lo[i]);
+                    ring_buf_elem_hi[i] = hn::IfThenElse(valid_hi_slot,
+                        hn::Sub(ring_buf_elem_hi[i], v_wrap), ring_buf_elem_hi[i]);
+                };
+                (wrap_slot(std::integral_constant<size_t, Idx>{}), ...);
+            }(std::make_index_sequence<StaticW>{});
+        } else {
+            for (size_t i = 0; i < w; ++i) {
+                const mask_t valid_lo_slot = hn::Ne(ring_buf_elem_lo[i], v_max);
+                const mask_t valid_hi_slot = hn::Ne(ring_buf_elem_hi[i], v_max);
+                ring_buf_elem_lo[i] = hn::IfThenElse(valid_lo_slot,
+                    hn::Sub(ring_buf_elem_lo[i], v_wrap), ring_buf_elem_lo[i]);
+                ring_buf_elem_hi[i] = hn::IfThenElse(valid_hi_slot,
+                    hn::Sub(ring_buf_elem_hi[i], v_wrap), ring_buf_elem_hi[i]);
+            }
+        }
+        pos_wrap_delta = static_cast<hash_val_t>(pos_wrap_delta + wrap_delta_amount);
+        next_wrap_step += wrap_period;
+    }
+
+    // ---- Emit ----
+    if (step >= emit_warmup) {
+        const vec_t window_pos_lo = hn::And(window_min_lo, v_pos_mask);
+        const vec_t window_pos_hi = hn::And(window_min_hi, v_pos_mask);
+        const mask_t pos_changed_lo = hn::Ne(window_pos_lo, last_emit_pos_lo);
+        const mask_t pos_changed_hi = hn::Ne(window_pos_hi, last_emit_pos_hi);
+        const mask_t valid_window_lo = hn::Ne(window_min_lo, v_max);
+        const mask_t valid_window_hi = hn::Ne(window_min_hi, v_max);
+        const mask_t real_emit_lo = hn::And(pos_changed_lo, valid_window_lo);
+        const mask_t real_emit_hi = hn::And(pos_changed_hi, valid_window_hi);
+
+        const bool any_emit_lo = !hn::AllFalse(d, real_emit_lo);
+        const bool any_emit_hi = !hn::AllFalse(d, real_emit_hi);
+        if (any_emit_lo || any_emit_hi) [[likely]] {
+            constexpr size_t storage_max_shift_e = sizeof(hash_val_t) * 8 - 1;
+            constexpr auto clamp_e = [](size_t s) constexpr -> size_t {
+                return s > storage_max_shift_e ? storage_max_shift_e : s;
+            };
+            auto scramble_minimap_int = [&](hash_val_t key) -> hash_val_t {
+                key = (~key + (key << clamp_e(21))) & kmer_mask_scalar;
+                key = key ^ (key >> clamp_e(24));
+                key = ((key + (key << clamp_e(3))) + (key << clamp_e(8))) & kmer_mask_scalar;
+                key = key ^ (key >> clamp_e(14));
+                key = ((key + (key << clamp_e(2))) + (key << clamp_e(4))) & kmer_mask_scalar;
+                key = key ^ (key >> clamp_e(28));
+                key = (key + (key << clamp_e(31))) & kmer_mask_scalar;
+                return key;
+            };
+
+            constexpr size_t max_lanes_per_stream = hn::MaxLanes(D{});
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> pos_arr_lo;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> pos_arr_hi;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> hs_arr_lo;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> hs_arr_hi;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> emit_arr_lo;
+            HWY_ALIGN std::array<hash_val_t, max_lanes_per_stream> emit_arr_hi;
+            hn::Store(window_pos_lo, d, pos_arr_lo.data());
+            hn::Store(window_pos_hi, d, pos_arr_hi.data());
+            hn::Store(window_hs_lo, d, hs_arr_lo.data());
+            hn::Store(window_hs_hi, d, hs_arr_hi.data());
+            hn::Store(hn::VecFromMask(d, real_emit_lo), d, emit_arr_lo.data());
+            hn::Store(hn::VecFromMask(d, real_emit_hi), d, emit_arr_hi.data());
+
+            const size_t lc = lanes_per_stream;
+            if (any_emit_lo) {
+                for (size_t lane = 0; lane < lc; ++lane) {
+                    if (!emit_arr_lo[lane]) continue;
+                    const size_t local_pos =
+                        static_cast<size_t>(pos_arr_lo[lane]) +
+                        static_cast<size_t>(pos_wrap_delta);
+                    const size_t abs_pos =
+                        offsets_in[lane] * SeqTraits::letters_per_unit + local_pos;
+                    const hash_val_t hash_strand_val = hs_arr_lo[lane];
+                    const hash_val_t lexic_kmer =
+                        hash_strand_val & ~static_cast<hash_val_t>(1);
+                    const hash_val_t scrambled_kmer =
+                        scramble_minimap_int(lexic_kmer);
+                    collector.collect(MinimapSketch({
+                        .sketch{ .sketch{
+                            .kmer = static_cast<uint64_t>(scrambled_kmer),
+                            .span = k,
+                            .rid = 0,
+                            .last_pos = abs_pos,
+                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
+                        }}
+                    }));
+                }
+                last_emit_pos_lo = hn::IfThenElse(real_emit_lo, window_pos_lo, last_emit_pos_lo);
+            }
+            if (any_emit_hi) {
+                for (size_t lane = 0; lane < lc; ++lane) {
+                    if (!emit_arr_hi[lane]) continue;
+                    const size_t local_pos =
+                        static_cast<size_t>(pos_arr_hi[lane]) +
+                        static_cast<size_t>(pos_wrap_delta);
+                    const size_t abs_pos =
+                        offsets_in[lc + lane] * SeqTraits::letters_per_unit + local_pos;
+                    const hash_val_t hash_strand_val = hs_arr_hi[lane];
+                    const hash_val_t lexic_kmer =
+                        hash_strand_val & ~static_cast<hash_val_t>(1);
+                    const hash_val_t scrambled_kmer =
+                        scramble_minimap_int(lexic_kmer);
+                    collector.collect(MinimapSketch({
+                        .sketch{ .sketch{
+                            .kmer = static_cast<uint64_t>(scrambled_kmer),
+                            .span = k,
+                            .rid = 0,
+                            .last_pos = abs_pos,
+                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
+                        }}
+                    }));
+                }
+                last_emit_pos_hi = hn::IfThenElse(real_emit_hi, window_pos_hi, last_emit_pos_hi);
+            }
+        }
+    }
+}
+
+}  // namespace two_stack_internal
+
+/**
+ * V14 dual-stream interleaved two-stack collector — V13 chassis with
+ * canonical ntHash for the ordering hash.
+ */
+template<
+    size_t StaticW,
+    size_t StaticK,
+    template<typename H_A> typename simd_hash_t,
+    supports_compact_sequence_range R,
+    typename I = decltype(compact_sequence_range<R>().begin()),
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+>
+requires (
+    supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
+)
+[[gnu::always_inline]] [[gnu::flatten]] inline void
+collect_minimizers_two_stack_nthash_v4_simd_impl(
+    sketch_collector& collector,
+    compact_sequence_range<R>& seq,
+    const I& seq_begin,
+    const I& seq_end,
+    const size_t w_runtime,
+    const size_t k_runtime
+) {
+    constexpr bool has_static_w = (StaticW != 0);
+    constexpr bool has_static_k = (StaticK != 0);
+    const size_t w = has_static_w ? StaticW : w_runtime;
+    const size_t k = has_static_k ? StaticK : k_runtime;
+
+    using seq_traits = compact_sequence_range<R>::traits;
+    using storage_unit = typename seq_traits::storage_unit;
+    using alphabet_t = typename seq_traits::alphabet_type;
+
+    using d_t = hn::ScalableTag<storage_unit>;
+    d_t d;
+    using vec_t = hn::Vec<d_t>;
+    using mask_t = hn::Mask<d_t>;
+
+    const size_t lanes_per_stream = hn::Lanes(d);
+    constexpr size_t max_lanes_per_stream = hn::MaxLanes(d_t{});
+    constexpr size_t pair_max_lanes = max_lanes_per_stream * 2;
+
+    constexpr size_t kmer_max_length =
+        sizeof(storage_unit) * 8 / seq_traits::bits_per_char;
+    const size_t k_clamped = (k < kmer_max_length) ? k : kmer_max_length;
+    const storage_unit kmer_mask =
+        seq_traits::template kmer_mask<storage_unit>(k_clamped);
+    const vec_t v_kmer_mask = hn::Set(d, kmer_mask);
+
+    constexpr bool is_xor_complement =
+        two_stack_internal::is_xor_complement_v<alphabet_t, storage_unit>;
+    (void)is_xor_complement;
+    const storage_unit alphabet_complement_mask =
+        static_cast<storage_unit>(seq_traits::alphabet_size - 1);
+    const vec_t v_alphabet_complement_xor = hn::Set(d, alphabet_complement_mask);
+
+    constexpr size_t storage_bits = sizeof(storage_unit) * 8;
+    constexpr size_t hash_bits = storage_bits / 2;
+    constexpr storage_unit pos_mask = (hash_bits >= storage_bits)
+        ? static_cast<storage_unit>(-1)
+        : (static_cast<storage_unit>(1) << hash_bits) - 1;
+    constexpr storage_unit hash_mask_high = static_cast<storage_unit>(~pos_mask);
+    constexpr storage_unit max_val = static_cast<storage_unit>(-1);
+
+    DEBUG_ASSERT(w <= two_stack_max_window,
+        "two_stack_max_window must hold the requested window size");
+    DEBUG_ASSERT(w >= 1, "Window size must be at least 1");
+
+    const vec_t v_max = hn::Set(d, max_val);
+    const vec_t v_zero = hn::Zero(d);
+    const vec_t v_one = hn::Set(d, static_cast<storage_unit>(1));
+    const vec_t v_pos_mask = hn::Set(d, pos_mask);
+    const storage_unit hash_kmer_mask =
+        static_cast<storage_unit>(kmer_mask & hash_mask_high);
+    const vec_t v_hash_kmer_mask = hn::Set(d, hash_kmer_mask);
+    const vec_t v_strand_clear = hn::Set(d, static_cast<storage_unit>(~static_cast<storage_unit>(1)));
+    const vec_t bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
+
+    // ---- ntHash f-table ----
+    // Pack the per-character ntHash seeds into a SIMD vector lane-wise
+    // so that `TableLookupLanes` performs a per-lane gather over the
+    // 4-entry table (the alphabet is dna4; lanes 4..N-1 hold sentinels
+    // never selected by valid 2-bit ranks).
+    static constexpr auto f_table_storage =
+        two_stack_internal::nthash_seeds_for_storage<storage_unit>();
+    HWY_ALIGN std::array<storage_unit, max_lanes_per_stream> f_table_padded;
+    f_table_padded.fill(static_cast<storage_unit>(0));
+    for (size_t i = 0; i < 4; ++i) {
+        f_table_padded[i] = f_table_storage[i];
+    }
+    const vec_t v_f_table = hn::Load(d, f_table_padded.data());
+
+    constexpr size_t buf_capacity = has_static_w ? StaticW : two_stack_max_window;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_elem_lo;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_elem_hi;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_hs_lo;
+    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_hs_hi;
+    for (size_t i = 0; i < w; ++i) {
+        ring_buf_elem_lo[i] = v_max;
+        ring_buf_elem_hi[i] = v_max;
+        ring_buf_hs_lo[i] = v_zero;
+        ring_buf_hs_hi[i] = v_zero;
+    }
+
+    vec_t state_fwd_lo = v_zero;
+    vec_t state_fwd_hi = v_zero;
+    vec_t state_rc_lo = v_zero;
+    vec_t state_rc_hi = v_zero;
+
+    // ---- ntHash chains: warmup-cancellation initialisation ----
+    // After k iterations with c_old = 0 (the warmup phase), these
+    // initial values produce hash_fwd[k-1] = canonical_hash_fwd of the
+    // first kmer and hash_rc[k-1] = canonical_hash_rc. From iteration k
+    // onward the rolling formula is exact, so all emitted kmers see the
+    // true ntHash without per-step warmup branching. The constants are
+    // alphabet-aware: `complement(0)` is the rank `alphabet_size - 1`
+    // for XOR-complement alphabets (dna4 and dna5; the only ones used).
+    constexpr size_t complement_rank_zero =
+        seq_traits::alphabet_size - 1;
+    vec_t hash_fwd_lo;
+    vec_t hash_fwd_hi;
+    vec_t hash_rc_lo;
+    vec_t hash_rc_hi;
+    if constexpr (has_static_k) {
+        constexpr storage_unit init_fwd =
+            two_stack_internal::nthash_warmup_cancel_fwd<storage_unit, StaticK>();
+        constexpr storage_unit init_rc =
+            two_stack_internal::nthash_warmup_cancel_rc<
+                storage_unit, StaticK, complement_rank_zero>();
+        hash_fwd_lo = hn::Set(d, init_fwd);
+        hash_fwd_hi = hn::Set(d, init_fwd);
+        hash_rc_lo = hn::Set(d, init_rc);
+        hash_rc_hi = hn::Set(d, init_rc);
+    } else {
+        // Dynamic k: compute init via runtime helpers. The cost is
+        // amortised over the entire sequence so the small loop is fine.
+        const auto seeds_arr =
+            two_stack_internal::nthash_seeds_for_storage<storage_unit>();
+        storage_unit extras_fwd = 0;
+        const storage_unit f0 = seeds_arr[0];
+        for (size_t i = 0; i < k; ++i) {
+            extras_fwd ^= two_stack_internal::rol_constexpr<storage_unit>(
+                f0, static_cast<unsigned>(k + i));
+        }
+        const storage_unit init_fwd =
+            two_stack_internal::ror_constexpr<storage_unit>(
+                extras_fwd, static_cast<unsigned>(k));
+        storage_unit extras_rc = 0;
+        const storage_unit g0 = seeds_arr[complement_rank_zero];
+        for (size_t i = 1; i <= k; ++i) {
+            extras_rc ^= two_stack_internal::ror_constexpr<storage_unit>(
+                g0, static_cast<unsigned>(i));
+        }
+        const storage_unit init_rc =
+            two_stack_internal::rol_constexpr<storage_unit>(
+                extras_rc, static_cast<unsigned>(k));
+        hash_fwd_lo = hn::Set(d, init_fwd);
+        hash_fwd_hi = hn::Set(d, init_fwd);
+        hash_rc_lo = hn::Set(d, init_rc);
+        hash_rc_hi = hn::Set(d, init_rc);
+    }
+
+    vec_t prefix_min_lo = v_max;
+    vec_t prefix_min_hi = v_max;
+    vec_t prefix_kmer_lo = v_zero;
+    vec_t prefix_kmer_hi = v_zero;
+    vec_t pos_local_lo = v_zero;
+    vec_t pos_local_hi = v_zero;
+    vec_t last_emit_pos_lo = v_max;
+    vec_t last_emit_pos_hi = v_max;
+    storage_unit pos_wrap_delta = 0;
+
+    size_t step = 0;
+    size_t ring_idx = 0;
+
+    constexpr storage_unit pos_max = pos_mask;
+    const storage_unit wrap_delta_amount =
+        static_cast<storage_unit>(pos_max - static_cast<storage_unit>(w) - 1);
+    const size_t wrap_period = static_cast<size_t>(wrap_delta_amount);
+    size_t next_wrap_step = wrap_period;
+    const size_t emit_warmup = k + w - 1;
+    const vec_t v_wrap = hn::Set(d, wrap_delta_amount);
+
+    using matrix = square_lane_matrix<d_t>;
+    const size_t context_bps = k + w - 1;
+    const auto& [context_units, _ctx_pad] = int_div_ceil(context_bps, seq_traits::letters_per_unit);
+    const size_t seq_len = seq.size();
+    if (seq.bp_size() < context_bps) {
+        return;
+    }
+
+    const size_t lanes_n_pair = lanes_per_stream * 2;
+    const size_t min_seq_for_dual =
+        lanes_n_pair * seq_traits::letters_per_unit + context_bps;
+    if (seq.bp_size() < min_seq_for_dual) {
+        // Forward to V9 single-stream — too short for dual-stream split.
+        // V9 uses (lex × golden); for sub-min sequences this is fine
+        // because they are tiny relative to the bench's hot path.
+        collect_minimizers_two_stack_nthash_simd_impl<StaticW, StaticK, simd_hash_t, R, I, hash_val_t>(
+            collector, seq, seq_begin, seq_end, w_runtime, k_runtime);
+        return;
+    }
+
+    const auto& [units_per_lane, offsets] = calculate_iteration_offsets<pair_max_lanes>(
+        seq_len, lanes_n_pair, context_units);
+
+    HWY_ALIGN std::array<size_t, max_lanes_per_stream> offsets_lo{};
+    HWY_ALIGN std::array<size_t, max_lanes_per_stream> offsets_hi{};
+    for (size_t i = 0; i < lanes_per_stream; ++i) {
+        offsets_lo[i] = offsets[i];
+        offsets_hi[i] = offsets[lanes_per_stream + i];
+    }
+
+    const size_t bps_per_lane = (context_units + units_per_lane) * seq_traits::letters_per_unit;
+    auto [full_chunks_count_raw, bps_last_chunk_raw] =
+        int_div_floor(bps_per_lane, lanes_per_stream * seq_traits::letters_per_unit);
+    size_t full_chunks_count = full_chunks_count_raw;
+    size_t bps_last_chunk = bps_last_chunk_raw;
+    if (bps_last_chunk == 0 && full_chunks_count > 0) {
+        --full_chunks_count;
+        bps_last_chunk = lanes_per_stream * seq_traits::letters_per_unit;
+    }
+
+    const mask_t full_mask = hn::FirstN(d, lanes_per_stream);
+    const mask_t left_mask_hi = (offsets[0] == offsets[lanes_n_pair - 1])
+        ? hn::MaskFalse(d) : hn::FirstN(d, lanes_per_stream - 1);
+
+    auto iter = seq_begin;
+
+    HWY_ALIGN std::array<vec_t, max_lanes_per_stream> raw_mat_lo;
+    HWY_ALIGN std::array<vec_t, max_lanes_per_stream> raw_mat_hi;
+
+    // ---- Full-chunk fast path ----
+    for (size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
+        matrix mat_lo(raw_mat_lo.data());
+        matrix mat_hi(raw_mat_hi.data());
+        mat_lo.fill_with_offsets(d, offsets_lo, seq.read_cptr(iter));
+        mat_hi.fill_with_offsets(d, offsets_hi, seq.read_cptr(iter));
+        iter += lanes_per_stream;
+        mat_lo.transpose(d);
+        mat_hi.transpose(d);
+        for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
+            vec_t bp_row_lo = raw_mat_lo[row_index];
+            vec_t bp_row_hi = raw_mat_hi[row_index];
+            constexpr size_t lpu = seq_traits::letters_per_unit;
+            for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
+                const vec_t bp_v_lo = hn::And(bp_row_lo, bp_bitmask_vec);
+                const vec_t bp_v_hi = hn::And(bp_row_hi, bp_bitmask_vec);
+                bp_row_lo = hn::ShiftRightSame(bp_row_lo, seq_traits::bits_per_char);
+                bp_row_hi = hn::ShiftRightSame(bp_row_hi, seq_traits::bits_per_char);
+                two_stack_internal::step_one_bp_pair_v4_nthash<
+                    has_static_w, has_static_k, StaticW, StaticK,
+                    d_t, storage_unit, seq_traits, buf_capacity,
+                    std::array<size_t, pair_max_lanes>>(
+                    d, bp_v_lo, bp_v_hi, full_mask, offsets,
+                    state_fwd_lo, state_fwd_hi,
+                    state_rc_lo, state_rc_hi,
+                    hash_fwd_lo, hash_fwd_hi,
+                    hash_rc_lo, hash_rc_hi,
+                    prefix_min_lo, prefix_min_hi,
+                    prefix_kmer_lo, prefix_kmer_hi,
+                    pos_local_lo, pos_local_hi,
+                    last_emit_pos_lo, last_emit_pos_hi,
+                    pos_wrap_delta, step, ring_idx, next_wrap_step,
+                    lanes_per_stream,
+                    ring_buf_elem_lo, ring_buf_elem_hi,
+                    ring_buf_hs_lo, ring_buf_hs_hi,
+                    collector,
+                    v_kmer_mask, v_alphabet_complement_xor,
+                    v_max, v_one, v_pos_mask, v_hash_kmer_mask,
+                    v_strand_clear, v_wrap,
+                    v_f_table,
+                    w, k, emit_warmup, wrap_period,
+                    kmer_mask, wrap_delta_amount);
+            }
+        }
+    }
+
+    // ---- Partial-chunk tail ----
+    {
+        matrix mat_lo(raw_mat_lo.data());
+        matrix mat_hi(raw_mat_hi.data());
+        mat_lo.partial_fill_with_offsets(d, seq_end - iter, offsets_lo, seq.read_cptr(iter));
+        mat_hi.partial_fill_with_offsets(d, seq_end - iter, offsets_hi, seq.read_cptr(iter));
+        mat_lo.transpose(d);
+        mat_hi.transpose(d);
+    }
+
+    if (bps_last_chunk == 0) return;
+    DEBUG_ASSERT(bps_last_chunk >= seq.padding(),
+        "Sanity check. This should never fail as we should have more bases than are padded");
+    const int32_t main_counter_only_left = static_cast<int32_t>(bps_last_chunk) - static_cast<int32_t>(seq.padding());
+    const int32_t main_counter_none = static_cast<int32_t>(bps_last_chunk);
+    int32_t main_counter = 0;
+    mask_t main_mask = full_mask;
+
+    constexpr size_t lpu = seq_traits::letters_per_unit;
+    for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
+        vec_t bp_row_lo = raw_mat_lo[row_index];
+        vec_t bp_row_hi = raw_mat_hi[row_index];
+        for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
+            const vec_t bp_v_lo = hn::And(bp_row_lo, bp_bitmask_vec);
+            const vec_t bp_v_hi = hn::And(bp_row_hi, bp_bitmask_vec);
+            bp_row_lo = hn::ShiftRightSame(bp_row_lo, seq_traits::bits_per_char);
+            bp_row_hi = hn::ShiftRightSame(bp_row_hi, seq_traits::bits_per_char);
+            two_stack_internal::step_one_bp_pair_v4_nthash<
+                has_static_w, has_static_k, StaticW, StaticK,
+                d_t, storage_unit, seq_traits, buf_capacity,
+                std::array<size_t, pair_max_lanes>>(
+                d, bp_v_lo, bp_v_hi, main_mask, offsets,
+                state_fwd_lo, state_fwd_hi,
+                state_rc_lo, state_rc_hi,
+                hash_fwd_lo, hash_fwd_hi,
+                hash_rc_lo, hash_rc_hi,
+                prefix_min_lo, prefix_min_hi,
+                prefix_kmer_lo, prefix_kmer_hi,
+                pos_local_lo, pos_local_hi,
+                last_emit_pos_lo, last_emit_pos_hi,
+                pos_wrap_delta, step, ring_idx, next_wrap_step,
+                lanes_per_stream,
+                ring_buf_elem_lo, ring_buf_elem_hi,
+                ring_buf_hs_lo, ring_buf_hs_hi,
+                collector,
+                v_kmer_mask, v_alphabet_complement_xor,
+                v_max, v_one, v_pos_mask, v_hash_kmer_mask,
+                v_strand_clear, v_wrap,
+                v_f_table,
+                w, k, emit_warmup, wrap_period,
+                kmer_mask, wrap_delta_amount);
+
+            ++main_counter;
+            if (main_counter == main_counter_none) {
+                return;
+            } else if (main_counter == main_counter_only_left) {
+                main_mask = left_mask_hi;
+            }
+        }
+    }
+}
+
+/**
+ * V14 wrapper. Public API mirrors `collect_minimizers_two_stack_nthash_v3_simd`.
+ */
+template<
+    template<typename H_A> typename simd_hash_t,
+    supports_compact_sequence_range R,
+    typename I = decltype(compact_sequence_range<R>().begin()),
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+>
+requires (
+    supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
+)
+inline void collect_minimizers_two_stack_nthash_v4_simd(
+    sketch_collector& collector,
+    compact_sequence_range<R>& seq,
+    const I& seq_begin,
+    const I& seq_end,
+    const size_t w,
+    const size_t k
+) {
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_sketch_simd");
+    auto _scope = bioseq::instr::region(_desc);
+
+    if (w == 10 && k == 15) [[likely]] {
+        collect_minimizers_two_stack_nthash_v4_simd_impl<10, 15, simd_hash_t, R, I, hash_val_t>(
+            collector, seq, seq_begin, seq_end, w, k);
+        return;
+    }
+    if (w == 10) {
+        collect_minimizers_two_stack_nthash_v4_simd_impl<10, 0, simd_hash_t, R, I, hash_val_t>(
+            collector, seq, seq_begin, seq_end, w, k);
+        return;
+    }
+    collect_minimizers_two_stack_nthash_v4_simd_impl<0, 0, simd_hash_t, R, I, hash_val_t>(
+        collector, seq, seq_begin, seq_end, w, k);
+}
+
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();
 
