@@ -1,0 +1,70 @@
+%!TEX root = ../../../../build/bioseqdb_thesis/_assembly/main.tex
+% type: thesis
+% title:
+%   pl: Zintegrowane i praktyczne rozwiązanie bazodanowe do przechowywania i wydajnego przetwarzania dużych zbiorów danych genomicznych
+%   en: An integrated and practical database solution for storage and efficient processing of large genomic datasets
+% major: Computer Science
+% supervisor: mgr. XYZ
+% subject: !socrateserasmus 11.3
+% classification:
+%   - Applied computing
+%   - Life and medical sciences
+%   - Bioinformatics
+% keywords:
+%   - sequence alignment
+%   - bioinformatics
+%   - BWA
+%   - PostgreSQL
+%   - databases
+%   - short read mapping
+% author:
+%   name: Piotr Styczyński
+%   id: 386038
+% created: 2024-12-08
+% languages:
+%   - en-US
+% chapters:
+%   - !partial
+%     title: Biological and bioinformatical context
+%     path: chapters/biology
+%     description: Test test
+%   - !partial
+%     title: PostgreSQL
+%     path: chapters/postgres
+%     description: Test test
+% xrenderonly: postgres
+
+\newtheorem{defi}{Definicja}[section]
+
+\if\dataeq{renderonly}{??}
+
+\begin{abstract}
+    With the rise of the next-generation sequencing methods, the size and complexity of genomic datasets have increased to the point of overwhelming classic genomic analysis tools and workflows. They suffer from poor interoperability, limited scope, use of legacy formats, and most importantly, the amount of programming knowledge required to perform novel kinds of analyses. In this work, we present an integrated solution for storage and processing of genomic sequences, based on PostgreSQL. We research and integrate the BWA-MEM algorithm, enabling performing the key operation of sequence alignment from within the integrated environment. We then optimize and extend the resulting interface to benefit from the high performance, extensibility, and accessibility of PostgreSQL, achieving results superior or comparable to existing tool. Finally, we perform an example analysis of genomic sequences using the solution and demonstrate the benefits of compatibility with the broader PostgreSQL software ecosystem.
+\end{abstract}
+
+\tableofcontents
+
+\chapter*{Introduction}
+    \addcontentsline{toc}{chapter}{Introduction}
+    With the rise of the next-generation sequencing methods, the size and complexity of genomic datasets have increased to the point of overwhelming classic genomic analysis tools and workflows. Commonly used ones such as BLAST [1] are often outdated, do not support metadata storage, and do not provide API, hence they badly integrate with other tools. Others, like SeqAn [2], require extensive programming knowledge and so are hard to use for researchers.
+    To overcome these issues, we propose a PostgreSQL-based [3] platform that connects extensibility, high performance, and ease of use. It allows for efficient storage of genomic sequences along with all kinds of metadata and performing complex analyses using regular SQL queries. The main supported operation is sequence alignment since it is one of the most crucial problems in bioinformatics. We have chosen the BWA-MEM algorithm for our solution because it provides optimal performance for a wide range of read lengths.
+    \begin{itemize}
+        \foreachdata{chapters}{\chapteri} {
+            \chapterbrief{r:\data{chapters.\chapteri.ref}}{\data{chapters.\chapteri.description}}
+        }
+    \end{itemize}
+
+\foreachdata{chapters}{\chapteri} {
+    \defchapter{\data{chapters.\chapteri.title}}{r:\data{chapters.\chapteri.ref}}
+    \datapartial{chapters.\chapteri}
+}
+
+\else
+\foreachdata{chapters}{\chapteri} {
+    \ddef\renderedchr{renderonly}
+    \if\dataeq{chapters.\chapteri.ref}\renderedchr
+        \datapartial{chapters.\chapteri}
+    \fi
+}
+\fi
+

@@ -1,0 +1,49 @@
+\input{vars.tex}
+% \newcommand{\nop}[1]{}
+
+% \def\gettexliveversion#1(#2 #3 #4#5#6#7#8)#9\relax{#4#5#6#7}
+% \edef\texliveversion{\expandafter\gettexliveversion\pdftexbanner\relax}
+
+% \def\bthandled{0}
+% \def\btunhandled{0}
+
+\if\dataeq{docpreamble}{empty}
+    % Throw error normally
+    \PackageError{preamble}{Unrecognized type of document: '\data{type}'}{}
+    % change interaction mode (if not yet in batchmode)
+    \batchmode
+    % ask for terminal input (which would be stored in the macro `\foo`)
+    \read-1 to \foo
+\else
+  \datainput{docpreamble}
+\fi
+
+% \if\dataeq{type}{thesis}
+%     \def\bthandled{1}
+%     \input{preamble/thesis.tex}
+% \fi
+
+% \if\dataeq{type}{cv}
+%     \def\bthandled{1}
+%     \input{preamble/cv.tex}
+% \fi
+
+% \if\dataeq{type}{problems}
+%     \def\bthandled{1}
+%     \input{preamble/problems.tex}
+% \fi
+
+% \if\dataeq{type}{technicalslides}
+%     \def\bthandled{1}
+%     \input{preamble/technicalslides.tex}
+% \fi
+
+
+% \ifx\bthandled\btunhandled
+%     % Throw error normally
+%     \PackageError{preamble}{Unrecognized type of document: '\data{type}'}{}
+%     % change interaction mode (if not yet in batchmode)
+%     \batchmode
+%     % ask for terminal input (which would be stored in the macro `\foo`)
+%     \read-1 to \foo
+% \fi

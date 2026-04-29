@@ -1,0 +1,9 @@
+PyYAML==6.0.2
+pyyaml-include==2.2
+pymoment==0.0.6
+python-dateutil==2.9.0.post0
+Pygments==2.19.1
+numpy==2.2.5
+matplotlib==3.10.1
+latexminted==0.5.1
+click==8.1.8

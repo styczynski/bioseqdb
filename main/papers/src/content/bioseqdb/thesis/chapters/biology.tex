@@ -1,0 +1,12 @@
+\section{Alignments}
+
+One of the most fundamental problems in bioinformatics is sequence (e.g. DNA) alignment. It consists of aligning sequences by adding gaps in a way that maximizes a given score function that resembles similarity between them. High similarity between parts of sequences can indicate that they serve a common purpose or have the same evolutionary origin. By comparing newly found sequences to already researched ones, we can deduce lots of relevant biological data.
+
+We will consider nonempty finite strings over the alphabet containing letters A, C, T, and G. A gap is a symbol indicated by '-'. An alignment is a process of adding gaps to the sequences so that they are of the same length and at the same time, there is no index where a gap occurs in both sequences.
+
+As an example, let us present an alignment of GATCAGATA and CATTCAATCA.
+One of the possible alignments is:
+\begin{verbatim}
+GAT-CAGAT-A
+CATTCA-ATCA
+\end{verbatim}

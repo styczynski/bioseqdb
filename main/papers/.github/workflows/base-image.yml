@@ -1,0 +1,13 @@
+name: Build base image
+on: workflow_dispatch
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - name: build-and-deploy-base-image
+              shell: bash
+              run: |
+                 GH_PROFILE_TOKEN="${{ secrets.github_token }}" ./src/conf/build_docker_image.sh
+

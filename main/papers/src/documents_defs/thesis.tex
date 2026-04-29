@@ -1,0 +1,53 @@
+\documentclass[]{thesis}
+
+\usepackage{tikz}
+\if\dataeq{languagesnames..}{??}
+    \def\langs{main=english}
+    \def\langdefault{english}
+\else
+    \edef\langs{main=\expanded{\data{languagesnames..}}}
+    \edef\langdefault{\data{languagesnames.0}}
+\fi
+\usepackage[\langs]{babel}
+\RequirePackage[utf8]{inputenc}
+
+\autor{\data{author.name}}{\data{author.id}}
+\titleen{\data{title.en}}
+\titlepl{\data{title.pl}}
+\kierunek{\data{major}}
+\opiekun{\data{supervisor}}
+\date{\data{created}}
+\dziedzina{\data{subject.text}}
+\klasyfikacja{
+    \foreachdata{classification}{\c}{
+        \data{classification.\c} \\
+    }
+}
+\keywords{\data{keywords..}}
+
+\edef\subjecttext{\data{major} thesis: \data{classification..}}
+
+\def\buildpdftitle{\data{title.en}}
+\def\buildpdfsubject{\subjecttext}
+\def\buildpdfauthor{\data{author.name}}
+\def\buildpdfkeywords{\data{keywords..}}
+\def\buildpdfcreator{\data{author.name}}
+\def\buildpdfproducer{LuaLateX=\luatexversion; CMake=\data{cmakeversion}; Template=\data{type}(customized article class)}
+
+\if\dataeq{hasbibliography}{true}
+    \usepackage[backend=biber, style=authortitle]{biblatex}
+    \addbibresource{main.bib}
+    \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
+\fi
+
+\input{common.tex}
+\begin{document}
+
+% FIXME: Don't know why this doesn't work
+%\foreachdata{languagesnames}{\langi}{
+%    \babelprovide[transforms = oneletter.nobreak]{\data{languagesnames.\langi}} 
+%}
+%\selectlanguage\langdefault
+%\selectlanguage{\data{languagesnames.0}}
+
+\maketitle

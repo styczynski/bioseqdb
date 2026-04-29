@@ -1,0 +1,55 @@
+name: Latex build
+on: [push]
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        container:
+            image: ghcr.io/styczynski/go-cv-generator:1.0.0
+            credentials:
+              username: ${{ github.actor }}
+              password: ${{ secrets.github_token }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                sparse-checkout: |
+                  .github
+                  src
+                  CMakeLists.txt
+                  ltex.config.json
+                  requirements.txt
+            - name: Copy base image files
+              shell: bash
+              working-directory: /data
+              run: mkdir -p $GITHUB_WORKSPACE && cp -a ./latex.lock $GITHUB_WORKSPACE
+            - name: CMake cache cleanup
+              shell: bash
+              run: |
+                 rm -f CMakeCache.txt 2> /dev/null || true
+                 if [ ! -f latex.lock ]; then
+                    echo "Latex.lock does not exist"
+                    exit 20
+                 fi
+            - name: Install Tex Packages
+              shell: bash
+              run: |
+                 python3 ./src/conf/tlmgr_install.py "./latex.lock" "./src/**/*.tex" "./src/**/*.cls"
+            - name: Regenerate CMake build
+              shell: bash
+              run: |
+                 cmake -G Ninja .
+            - name: Build via Ninja
+              shell: bash
+              run: ninja
+            - name: Release Latex generated files
+              uses: AXDOOMER/copy_file_to_another_repo_action@e54ae5087212906dac7ef96dee19e31190913257
+              if: github.ref == 'refs/heads/main'
+              env:
+                API_TOKEN_GITHUB: ${{ secrets.API_TOKEN_GITHUB }}
+              with:
+                source_file: 'pdf'
+                destination_repo: 'styczynski/_-artifacts-_'
+                destination_folder: 'latex_documents'
+                user_email: 'piotr@styczynski.in'
+                user_name: ${{ github.actor }}
+                commit_message: 'Release Latex files ${{ github.head_ref }} sha ${{ github.sha }}'

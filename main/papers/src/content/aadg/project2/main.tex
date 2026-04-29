@@ -1,0 +1,412 @@
+%!TEX root = ../../../../build/aadg_project2/_assembly/main.tex
+% type: technicalslides
+% title: Fast Python sequence classification
+% created: 2024-12-12
+
+\begin{frame}[fragile]
+  \frametitle{Execution times}
+
+  \begin{CacheMeCode}{pyplot}
+      def mbsize(x):
+          return asizeof(x) // 1000 // 1000
+
+      def npmbsize(x):
+          return x.nbytes // 1000 // 1000
+
+      def measure_sizes(n):
+          from pympler.asizeof import asizeof
+          mags = set()
+          magd = dict()
+          magl = []
+          magnpa = np.array([274877906943] * n)
+          for i in range(n):
+              mags.add(274877906943+i)
+              magd[274877906943+i] = 274877906943+i*1302805
+              magl.append(274877906943+i)
+              magnpa[i] = 274877906943+i
+          return {
+              "Set[int]": mbsize(mags),
+              "Dict[int,int]": mbsize(magd),
+              "List[int]": mbsize(magl),
+              "np.NDArray[int]": npmbsize(magnpa),
+          }
+
+      cases = [500000, 1000000, 2000000, 4000000]
+      width = 0.25
+      multiplier = 0
+      x = np.arange(len(cases))
+      cases_data = dict()
+      if False:
+          for case in cases:
+            cases_data[case] = measure_sizes(case)
+          print(cases_data)
+      cases_data = {500000: {'Set[int]': 32, 'Dict[int,int]': 52, 'List[int]': 20, 'np.NDArray[int]': 4}, 1000000: {'Set[int]': 65, 'Dict[int,int]': 105, 'List[int]': 40, 'np.NDArray[int]': 8}, 2000000: {'Set[int]': 131, 'Dict[int,int]': 211, 'List[int]': 81, 'np.NDArray[int]': 16}, 4000000: {'Set[int]': 262, 'Dict[int,int]': 423, 'List[int]': 162, 'np.NDArray[int]': 32}}
+
+      programs = list(cases_data[cases[0]].keys())
+      for program in programs:
+        offset = width * multiplier
+        rects = ax.bar(x + offset, [cases_data[case][program] for case in cases], width, label=program)
+        ax.bar_label(rects, padding=3)
+        multiplier += 1
+
+      ax.set_xticks(x + width/2)
+      ax.set_xticklabels([f"n={case}" for case in cases])
+      ax.set_ylabel('Occupied memory [MB]')
+      ax.set_title("Memory usage for Python datastructures")
+      ax.legend(title='Structure')
+  \end{CacheMeCode}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Encoding tuples onto 64-bit numbers}
+  \fboxsep=0pt
+  \noindent
+  \begin{minipage}[t]{0.48\linewidth}
+    \vspace{0.8cm}
+    \begin{enumerate}
+      \scriptsize
+      \item (1 bit) Flag for min/max
+      \item (45 bits) Kmer hash value
+      \item (16 bits) Number of occurences
+      \item (1 bit) Flags for margin test/train
+    \end{enumerate}
+
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.48\linewidth}
+    \begin{algorithm}[H]
+      \captionsetup{font=scriptsize}
+      \caption{Test}
+      \scriptsize
+      \begin{algorithmic}
+        \State $x \gets kmer\_{hash} \BitAnd mask_{kmer}$
+        \State $x \gets x \ShiftLeft 16$
+        \State $x \gets x \BitOr (kmer\_{count} \BitAnd mask_{count})$
+        \State $x \gets x \ShiftLeft 1$
+        \State $x \gets x \BitOr kmer_{is\_test}$
+        \State $x \gets x \BitOr (kmer_{is\_max} \ShiftLeft 62)$
+      \end{algorithmic}
+    \end{algorithm}
+  \end{minipage}
+
+  \begin{center}
+    \vspace{0.4cm}
+    \begin{bytefield}[bitwidth=0.027\linewidth]{38}
+      \bithead{1}{1} & \bithead{20}{45} &
+      \bithead{7}{16} & \bithead{1}{1}\\
+      \bitbox{1}{} & \bitbox{20}{20-mer} &
+      \bitbox{7}{Occ Count} & \bitbox{1}{}\\
+      \bitbox[]{1}{$\smallunderbrace{\hspace{0.027\linewidth}}_{\mathrlap{\text{\normalsize Train/Test}}}$} & \bitbox[]{20}{} &
+      \bitbox[]{7}{} & \bitbox[]{1}{$\smallunderbrace{\hspace{0.027\linewidth}}_{\mathllap{\text{\normalsize Min/Max}}}$}\\
+    \end{bytefield}
+  \end{center}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Efficient packing}
+
+  \begin{minted}[fontsize=\tiny]{python}
+      kmers = uadd.accumulate(seq_arr, dtype=object).astype(int)
+      kmers = column_stack(unique(kmers, return_counts=True))      
+      kmers = kmers[kmers[:,0].argsort()]      
+
+      for (kmer, occ_count) in kmers[:sig_per_step].tolist():
+          part_sig1[kmer] = part_sig1.get(kmer, 0) + occ_count
+      for (kmer, occ_count) in kmers[-sig_per_step:].tolist():
+          part_sig2[kmer] = part_sig2.get(kmer, 0) + occ_count
+
+      if (split_no != total_reads // 200000) or len(line) == 1:
+          split_no = total_reads // 200000
+          if is_test:
+              sig = concatenate((
+                  sig,
+                  array([
+                    ( (((kmer << OCC_MASK_LEN) | ((occ) & occ_mask)) << 1) | 1 )
+                    for (kmer, occ) in part_sig1.items()
+                  ], dtype=int64),
+                  array([
+                    ( (((kmer << OCC_MASK_LEN) | ((occ) & occ_mask)) << 1) | 1 | signo_mask )
+                    for (kmer, occ) in part_sig2.items()
+                  ], dtype=int64)
+              ), dtype=int64)
+          else:
+              ...
+          del part_sig1
+          del part_sig2
+          part_sig1, part_sig2 = dict(), dict()
+          gc_collect()
+  \end{minted}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Efficient unpacking}
+
+  \begin{minted}[fontsize=\tiny]{python}
+      for class_data in classes:
+        combine = sort(concatenate((class_data, test_data), dtype=int64))
+        split_pos = argmax((combine & signo_mask) != 0)
+        for (sig_start, sig_end) in [(0, split_pos), (split_pos, len(combine))]:
+            fragment = combine[sig_start:sig_end]
+            kmers = (((fragment >> 1) & mask) >> OCC_MASK_LEN).tolist()
+            occs = ((fragment >> 1) & occ_mask).tolist()
+            is_tests = (fragment & 1).tolist()
+            for i in range(frag_len):
+                process(kmers[i], occs[i], is_tests[i])
+  \end{minted}
+\end{frame}
+
+
+\begin{frame}[fragile]
+  \frametitle{Efficient packing}
+
+  \begin{CacheMeCode}{pyplot}
+    width = 0.1
+    multiplier = 0
+    cases_data = {
+      "k=20": {
+        "Auckland": (45.3, 5663027),
+        "Berlin": (55.86, 6982863),
+        "Birmingham": (37.28, 4660105),
+        "Kyiv": (53.89, 6737451),
+        "London": (55.91, 6737451),
+        "Singapore": (55.43, 6929521),
+        "Tokyo": (55.0, 6875886),
+      },
+      "k=15": {                                                                                                                                                                                                                               
+        "Auckland": (43.71, 5464333),                                                                                                                                                                                                         
+        "Berlin": (53.29, 6661569),                                                                                                                                                                                                           
+        "Birmingham": (36.86, 4608672),                                                                                                                                                                                                       
+        "Kyiv": (51.64, 6454992),                                                                                                                                                                                                             
+        "London": (52.94, 6617867),                                                                                                                                                                                                           
+        "Singapore": (52.36, 6545885),                                                                                                                                                                                                        
+        "Tokyo": (53.13, 6641927),                                                                                                                                                                                                            
+      },
+    }
+
+    cases=list(cases_data.keys())
+    x = np.arange(len(cases))
+    programs = list(cases_data[cases[0]].keys())
+    for program in programs:
+      offset = width * multiplier
+      rects = ax.bar(x + offset, [cases_data[case][program][0] for case in cases], width, label=program)
+      ax.bar_label(rects, color='white', label_type='center', labels=[f"l={cases_data[case][program][1]//10000/100}M" for case in cases], rotation=90)
+      multiplier += 1
+
+    ax.set_xticks(x + width/2)
+    ax.set_xticklabels([f"{case}" for case in cases])
+    ax.set_ylabel('Occupied memory per class [MB]/Length')
+    ax.set_title("Memory usage for class signatures")
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2),
+        ncol=2, fancybox=False, shadow=False, prop={'size': 6}, frameon=False)
+  \end{CacheMeCode}
+\end{frame}
+
+
+\begin{frame}[fragile]
+  \frametitle{Efficient packing}
+
+  \begin{CacheMeCode}{pyplot}
+    width = 0.3
+    multiplier = 0
+    cases_data = {
+      "t=9.7M": {
+        "All": (511.37, 9910099),
+      },
+      "t=6.8M": {                                                                                                                                                                                                                               
+        "All": (358.67, 6989081),                                                                                                                                                                                                         
+      },
+      "t=4.9M": {
+        "All": (256.21, 4988864),
+      },
+      "t=2.9M": {
+        "All": (153.63, 2987503),
+      },
+    }
+
+    cases=list(cases_data.keys())
+    x = np.arange(len(cases))
+    programs = list(cases_data[cases[0]].keys())
+    for program in programs:
+      offset = width * multiplier
+      rects = ax.bar(x + offset, [cases_data[case][program][0] for case in cases], width, label=program)
+      ax.bar_label(rects, weight="bold", color='white', label_type='center', labels=[f"{cases_data[case][program][1]//10000/100}M" for case in cases], rotation=90)
+      multiplier += 1
+
+    ax.set_xticks(x + width/2)
+    ax.set_xticklabels([f"{case}" for case in cases])
+    ax.set_ylabel('Total occupied memory [MB]/Max sig len')
+    ax.set_title("Train memory usage vs. total kmers collected")
+    if False:
+      ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2),
+          ncol=2, fancybox=False, shadow=False, prop={'size': 6}, frameon=False)
+  \end{CacheMeCode}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Classifier algorithm description (training)}
+  \begin{enumerate}
+    \scriptsize
+    \item Build signatures on per-class basis
+    \begin{enumerate}
+      \scriptsize
+      \item For each dataset associated with the class we open the gzip archive
+      \item We concatenate each sequence into a buffer and append $N$ fragment of size $KMER\_LEN$ each time
+      \item If we have enough sequences i.e loaded $DATASET\_CHUNK\_SIZE = 60000$ reads, then:
+      \begin{enumerate}
+        \scriptsize
+        \item We generate kmers of length $KMER\_LEN = 20$ using simple binary shifts (lexicographic ordering)
+        \item We sort and get unique kmer values along number of occurences
+        \item We get $sig\_per\_step = 70000$ minimums and the same number of maximum kmer values
+        \item We save that into two dictionaries $kmer -> occurences\_no$
+      \end{enumerate}
+      \item If we loaded at least $200000$ reads since the last time we also do the following:
+      \begin{enumerate}
+        \scriptsize
+        \item Convert the dictionary into a numpy array of $np.int_{64}$ and merge it into single document signature
+      \end{enumerate}
+    \end{enumerate}
+    \item Load test cases
+  \end{enumerate}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Classifier algorithm description (evaluation)}
+  \begin{enumerate}
+    \scriptsize
+    \item For each dataset we do the same thing as for the classes, but all the chunk sizes are $x10$ greater
+    \item Classify sequences i.e for each class do the following:
+    \begin{enumerate}
+      \scriptsize
+      \item Merge signature of test dataset and class together
+      \item Sort it (ascending)
+      \item Split it in half using bit flags (discussed later) into ascending lists of min and max kmers occurences
+      \item For each of two such lists convert them back into number of numpy arrays (converted again into lists)
+      \item By iterating over lists collect each kmer that occured $occ_1$ times in train data class and $occ_2$ in the tested sample
+      \item Calculate the contribution to the overall score:
+      \begin{enumerate}
+        \scriptsize
+        \item For $occ_1 > 0$ and $occ_2 > 0$ we set $points \pluseq len(bin(min(occ_1, occ_2))); points_all \pluseq len(bin(max(occ_1, occ_2)))$
+        \item For $occ_1 > 0$ and $occ_2 == 0$ we set $points_{all} \pluseq len(bin(occ_1))$
+        \item For $occ_1 == 0$ and $occ_2 > 0$ we set $points_{all} \pluseq len(bin(occ_2))$
+      \end{enumerate}
+      \item Similarity score is then incremented by: $score \pluseq points / points_{all}$
+    \end{enumerate}
+  \end{enumerate}
+\end{frame}
+
+
+\begin{frame}[fragile]
+  \frametitle{Predictions vs downsampling (train)}
+
+  \begin{CacheMeCode}{pyplot}
+    data = {
+      "100": {"per_class": {"Auckland": 0.8722222222222222, "Berlin": 0.68375, "Birmingham": 1.0, "Kyiv": 0.5672757475083056, "London": 0.7785087719298246, "Singapore": 0.9005681818181818, "Tokyo": 0.7916666666666666}, "avg": 0.7991416557350287},
+      "90": {"per_class": {"Auckland": 0.8711111111111112, "Berlin": 0.684375, "Birmingham": 0.9415760869565217, "Kyiv": 0.5622923588039868, "London": 0.7757675438596491, "Singapore": 0.9053030303030303, "Tokyo": 0.790719696969697}, "avg": 0.7901635468577137},
+      "80": {"per_class": {"Auckland": 0.9044444444444444, "Berlin": 0.684375, "Birmingham": 1.0, "Kyiv": 0.5963455149501661, "London": 0.8075657894736842, "Singapore": 0.9100378787878788, "Tokyo": 0.8058712121212122}, "avg": 0.8155199771110551},
+      "70": {"per_class": {"Auckland": 0.9177777777777777, "Berlin": 0.7, "Birmingham": 1.0, "Kyiv": 0.5797342192691031, "London": 0.8031798245614035, "Singapore": 0.9109848484848485, "Tokyo": 0.8087121212121212}, "avg": 0.8171983987578935},
+      "60": {"per_class": {"Auckland": 0.9255555555555555, "Berlin": 0.70875, "Birmingham": 1.0, "Kyiv": 0.5681063122923589, "London": 0.8031798245614035, "Singapore": 0.915719696969697, "Tokyo": 0.8058712121212122}, "avg": 0.818168943071461},
+      "50": {"per_class": {"Auckland": 0.9099999999999999, "Berlin": 0.6831250000000001, "Birmingham": 1.0, "Kyiv": 0.5822259136212624, "London": 0.8009868421052633, "Singapore": 0.9043560606060606, "Tokyo": 0.8068181818181819}, "avg": 0.8125017140215383},
+      "40": {"per_class": {"Auckland": 0.9, "Berlin": 0.6725, "Birmingham": 1.0, "Kyiv": 0.5930232558139535, "London": 0.7845394736842105, "Singapore": 0.8958333333333333, "Tokyo": 0.7982954545454546}, "avg": 0.806313073910993},
+      "30": {"per_class": {"Auckland": 0.8777777777777778, "Berlin": 0.66875, "Birmingham": 1.0, "Kyiv": 0.5614617940199336, "London": 0.7209429824561404, "Singapore": 0.8693181818181819, "Tokyo": 0.7897727272727273}, "avg": 0.7840033519063944},
+      "20": {"per_class": {"Auckland": 0.7933333333333333, "Berlin": 0.569375, "Birmingham": 0.998641304347826, "Kyiv": 0.5299003322259136, "London": 0.6370614035087719, "Singapore": 0.8248106060606061, "Tokyo": 0.7774621212121212}, "avg": 0.7329405858126531},
+      "10": {"per_class": {"Auckland": 0.74, "Berlin": 0.5431250000000001, "Birmingham": 0.9904891304347826, "Kyiv": 0.5282392026578073, "London": 0.5964912280701754, "Singapore": 0.7945075757575758, "Tokyo": 0.7585227272727273}, "avg": 0.7073392663132957},
+    }
+
+    cases_x = []
+    cases_y = []
+    cases_e1 = []
+    cases_e2 = []
+    for (ds_value, ds_data) in data.items():
+        y1 = min(list(ds_data["per_class"].values()))
+        y2 = max(list(ds_data["per_class"].values()))
+        y = ds_data["avg"]
+        cases_x.append(f"{ds_value}%")
+        cases_e1.append(abs(y1-y))
+        cases_e2.append(abs(y2-y))
+        cases_y.append(y)
+
+    ax.errorbar(cases_x, cases_y, yerr=(cases_e1, cases_e2), fmt='o')
+    ax.set_ylim([0, 1])
+    ax.set_ylabel('AUC-ROC best/worst [0-1]')
+    ax.set_title("Predictions vs downsampling (% of train dataset)")
+  \end{CacheMeCode}
+\end{frame}
+
+\begin{frame}[fragile]
+  \frametitle{Predictions vs downsampling (test)}
+
+  \begin{CacheMeCode}{pyplot}
+    data = {
+      "100": {"per_class": {"Auckland": 0.8722222222222222, "Berlin": 0.68375, "Birmingham": 1.0, "Kyiv": 0.5672757475083056, "London": 0.7785087719298246, "Singapore": 0.9005681818181818, "Tokyo": 0.7916666666666666}, "avg": 0.7991416557350287},
+      "90": {"per_class": {"Auckland": 0.8766666666666667, "Berlin": 0.6756249999999999, "Birmingham": 1.0, "Kyiv": 0.5672757475083056, "London": 0.7763157894736843, "Singapore": 0.8901515151515151, "Tokyo": 0.7907196969696969}, "avg": 0.7966792022528385},
+      "80": {"per_class": {"Auckland": 0.88, "Berlin": 0.67125, "Birmingham": 1.0, "Kyiv": 0.5556478405315615, "London": 0.7724780701754386, "Singapore": 0.8892045454545454, "Tokyo": 0.7869318181818181}, "avg": 0.7936446106204806},
+      "70": {"per_class": {"Auckland": 0.8822222222222222, "Berlin": 0.65, "Birmingham": 1.0, "Kyiv": 0.5182724252491695, "London": 0.7708333333333333, "Singapore": 0.8958333333333333, "Tokyo": 0.7537878787878788}, "avg": 0.781564170417991},
+      "60": {"per_class": {"Auckland": 0.8977777777777778, "Berlin": 0.620625, "Birmingham": 0.985054347826087, "Kyiv": 0.49667774086378735, "London": 0.7702850877192983, "Singapore": 0.884469696969697, "Tokyo": 0.7272727272727273}, "avg": 0.768880339775625},
+      "50": {"per_class": {"Auckland": 0.9011111111111111, "Berlin": 0.58625, "Birmingham": 0.9782608695652174, "Kyiv": 0.48421926910299, "London": 0.7774122807017543, "Singapore": 0.8541666666666666, "Tokyo": 0.709280303030303}, "avg": 0.7558143571682917},
+      "40": {"per_class": {"Auckland": 0.9044444444444444, "Berlin": 0.585, "Birmingham": 0.9769021739130435, "Kyiv": 0.47425249169435213, "London": 0.7708333333333333, "Singapore": 0.7935606060606061, "Tokyo": 0.7206439393939393}, "avg": 0.7465195698342456},
+      "30": {"per_class": {"Auckland": 0.9066666666666667, "Berlin": 0.59125, "Birmingham": 0.9932065217391304, "Kyiv": 0.4750830564784053, "London": 0.7648026315789473, "Singapore": 0.7869318181818182, "Tokyo": 0.7395833333333333}, "avg": 0.7510748611397572},
+      "20": {"per_class": {"Auckland": 0.9044444444444445, "Berlin": 0.595625, "Birmingham": 1.0, "Kyiv": 0.46511627906976744, "London": 0.7505482456140351, "Singapore": 0.7660984848484848, "Tokyo": 0.7679924242424243}, "avg": 0.7499749826027367},
+      "10": {"per_class": {"Auckland": 0.841111111111111, "Berlin": 0.589375, "Birmingham": 1.0, "Kyiv": 0.45514950166112955, "London": 0.7192982456140351, "Singapore": 0.7301136363636364, "Tokyo": 0.7992424242424243}, "avg": 0.7334699884274768},
+    }
+
+    cases_x = []
+    cases_y = []
+    cases_e1 = []
+    cases_e2 = []
+    for (ds_value, ds_data) in data.items():
+        y1 = min(list(ds_data["per_class"].values()))
+        y2 = max(list(ds_data["per_class"].values()))
+        y = ds_data["avg"]
+        cases_x.append(f"{ds_value}%")
+        cases_e1.append(abs(y1-y))
+        cases_e2.append(abs(y2-y))
+        cases_y.append(y)
+
+    ax.errorbar(cases_x, cases_y, yerr=(cases_e1, cases_e2), fmt='o')
+    ax.set_ylim([0, 1])
+    ax.set_ylabel('AUC-ROC best/worst [0-1]')
+    ax.set_title("Predictions vs downsampling (% of test dataset)")
+  \end{CacheMeCode}
+\end{frame}
+
+
+\begin{frame}[fragile]
+  \frametitle{MEEEGA}
+
+  \begin{CacheMeCode}{pyplot}
+    width = 0.3
+    multiplier = 0
+    cases_data = {
+      "t=9.7M": {
+        "All": (511.37, 9910099),
+      },
+      "t=6.8M": {                                                                                                                                                                                                                               
+        "All": (358.67, 6989081),                                                                                                                                                                                                         
+      },
+      "t=4.9M": {
+        "All": (256.21, 4988864),
+      },
+      "t=2.9M": {
+        "All": (153.63, 2987503),
+      },
+    }
+
+    cases=list(cases_data.keys())
+    x = np.arange(len(cases))
+    programs = list(cases_data[cases[0]].keys())
+    for program in programs:
+      offset = width * multiplier
+      rects = ax.bar(x + offset, [cases_data[case][program][0] for case in cases], width, label=program)
+      ax.bar_label(rects, weight="bold", color='white', label_type='center', labels=[f"{cases_data[case][program][1]//10000/100}M" for case in cases], rotation=90)
+      multiplier += 1
+
+    ax.set_xticks(x + width/2)
+    ax.set_xticklabels([f"{case}" for case in cases])
+    ax.set_ylabel('Total occupied memory [MB]/Max sig len')
+    ax.set_title("Train memory usage vs. total kmers collected")
+    if False:
+      ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.2),
+          ncol=2, fancybox=False, shadow=False, prop={'size': 6}, frameon=False)
+  \end{CacheMeCode}
+\end{frame}
+

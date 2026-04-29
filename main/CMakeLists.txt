@@ -22,7 +22,7 @@
 cmake_minimum_required(VERSION 3.20..3.24)
 
 # Change this:
-set(CMAKE_NAMED_ENV_TYPE "W") # suppported: "W", "H"
+set(CMAKE_NAMED_ENV_TYPE "H") # suppported: "W", "H"
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
@@ -106,6 +106,7 @@ endif()
 #add_subdirectory(include)
 add_subdirectory(bioseq)
 add_subdirectory(vendor)
+add_subdirectory(papers)
 #add_subdirectory(h3_postgis)
 
 # Add target that bundles for pgxn

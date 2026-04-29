@@ -1,0 +1,12 @@
+_old_
+_experiments
+build
+CMakeFiles
+pdf
+*log
+*.ninja
+*.cmake
+Makefile
+__pycache__
+.vscode
+CMakeCache.txt

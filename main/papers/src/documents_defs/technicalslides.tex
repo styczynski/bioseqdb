@@ -1,0 +1,42 @@
+\documentclass{beamer}
+
+\usepackage{tikz}
+\if\dataeq{languagesnames..}{??}
+    \def\langs{main=english}
+    \def\langdefault{english}
+\else
+    \edef\langs{main=\expanded{\data{languagesnames..}}}
+    \edef\langdefault{\data{languagesnames.0}}
+\fi
+\usepackage[\langs]{babel}
+\RequirePackage[utf8]{inputenc}
+
+\author{\data{author}}
+\institute{\data{institute}}
+\date{\data{created}\hspace*{0.5cm}(updated: \data{date})}
+\title{\data{title}}
+
+\def\buildpdftitle{\data{title}}
+\def\buildpdfsubject{Technical slide deck}
+\def\buildpdfauthor{\data{author}}
+\def\buildpdfkeywords{}
+\def\buildpdfcreator{\data{author} - \data{institute}}
+\def\buildpdfproducer{LuaLateX=\luatexversion; CMake=\data{cmakeversion}; Template=\data{type}(beamer)}
+
+\if\dataeq{hasbibliography}{true}
+    \usepackage[backend=biber, style=authortitle]{biblatex}
+    \addbibresource{main.bib}
+    \AtEveryCitekey{\iffootnote{\scriptsize}{\footnotesize}}
+    \setbeamertemplate{navigation symbols}{}
+\fi
+\setbeamertemplate{frametitle}[default][center]
+
+\input{common.tex}
+\begin{document}
+
+\foreachdata{languagesnames}{\langi}{
+    \babelprovide[transforms = oneletter.nobreak]{\data{languagesnames.\langi}} 
+}
+\selectlanguage\langdefault
+
+\frame{\titlepage}
