@@ -1589,20 +1589,35 @@ void estimate_divergence_from_seeds(
             search_iter - minimizer_positions.begin());
         int32_t match_end_idx = match_start_idx;
 
-        // Scan forward matching chain seeds (esterr.c:55-60).
+        // Match chain seeds against the sorted minimizer_positions.
         //
-        // The previous version recomputed `forward_pos` on every
-        // minimizer iteration even though `chain_anchor` only changes
-        // when `seed_idx` advances (which it does only on match). For
-        // the SIMD-DP chain at VERY_LONG / XL the inner loop runs
-        // ~168k iterations and the per-iter forward_pos calc was
-        // ~5 ns/iter — pushing `mm_est_err` to ~8 ms vs the scalar-DP
-        // chain's 1.5 ms. Hoist the forward_pos compute so it only
-        // fires when seed_idx advances.
+        // Chain anchors are derived from `collect_seed_hits` which
+        // looks up query minimizers in the target index — so EVERY
+        // chain anchor's query forward_pos is by construction one of
+        // the entries in `minimizer_positions`. We exploit this: for
+        // each chain anchor we binary-search its forward_pos in
+        // `minimizer_positions` (~17 compares for the bench's ~90 k
+        // minimizers) instead of walking the position array linearly
+        // until the trailing chain seed is reached.
+        //
+        // Earlier versions ran a linear merge-walk (O(minimizer_count
+        // + seed_count) per region). When SIMD-DP chains span the
+        // full sequence the walk visits ~minimizer_count entries per
+        // region; with a handful of regions per pair that pushes
+        // `mm_est_err` to ~8 ms vs scalar-DP's 0.7 ms.
+        //
+        // V8 lookup-on-each-seed scheme: cost is O(seed_count *
+        // log minimizer_count). For seed_count up to ~5 k and
+        // minimizer_count ~90 k that's ~85 k per region (vs ~90 k
+        // in the linear walk) but with much smaller constant factors
+        // because the binary searches share the cache-hot
+        // minimizer_positions slice.
+        //
+        // The `search_lo` cursor advances monotonically — chain
+        // forward_positions are in increasing order in chain index
+        // (true for both forward and reverse chains because the
+        // forward_pos transform inverts the order for reverse chains).
         int32_t seed_match_count = 1;
-        const int32_t minimizer_count = static_cast<int32_t>(minimizer_positions.size());
-        int32_t seed_idx = 1;
-        int32_t minimizer_idx = match_start_idx + 1;
 
         auto compute_forward_pos = [&](int32_t s) -> int32_t {
             const Anchor& chain_anchor = region.is_reverse
@@ -1616,17 +1631,47 @@ void estimate_divergence_from_seeds(
             return forward_pos;
         };
 
-        if (seed_idx < region.seed_count) {
-            int32_t forward_pos = compute_forward_pos(seed_idx);
-            for (; minimizer_idx < minimizer_count && seed_idx < region.seed_count;
-                 ++minimizer_idx) {
-                if (forward_pos == minimizer_positions[minimizer_idx]) {
-                    ++seed_idx;
-                    match_end_idx = minimizer_idx;
-                    ++seed_match_count;
-                    if (seed_idx < region.seed_count) {
-                        forward_pos = compute_forward_pos(seed_idx);
+        // Fast path: shortcut for the (very common) case where the
+        // entire chain is composed of query minimizers. The original
+        // minimap2 algorithm assumes this anyway — `seed_match_count`
+        // is always equal to the count of chain seeds that the linear
+        // walk found, but for our pipeline that's effectively
+        // `region.seed_count` because each chain anchor came from a
+        // minimizer-index lookup. We binary-search the LAST chain
+        // anchor's forward_pos to find `match_end_idx` and skip the
+        // per-seed loop entirely.
+        if (region.seed_count >= 1) {
+            const int32_t last_seed_pos =
+                compute_forward_pos(region.seed_count - 1);
+            auto last_it = std::lower_bound(
+                minimizer_positions.begin() + match_start_idx,
+                minimizer_positions.end(),
+                last_seed_pos);
+            if (last_it != minimizer_positions.end()
+                && *last_it == last_seed_pos)
+            {
+                match_end_idx = static_cast<int32_t>(
+                    last_it - minimizer_positions.begin());
+                seed_match_count = region.seed_count;
+            } else {
+                // Fallback: not all chain anchors are minimizers. Run
+                // the merge-walk over the chain.
+                int32_t search_lo = match_start_idx + 1;
+                for (int32_t s = 1; s < region.seed_count; ++s) {
+                    const int32_t fp = compute_forward_pos(s);
+                    auto begin_it = minimizer_positions.begin() + search_lo;
+                    auto end_it = minimizer_positions.end();
+                    auto found = std::lower_bound(begin_it, end_it, fp);
+                    if (found == end_it || *found != fp) {
+                        continue;
                     }
+                    const int32_t found_idx =
+                        static_cast<int32_t>(found - minimizer_positions.begin());
+                    if (found_idx > match_end_idx) {
+                        match_end_idx = found_idx;
+                    }
+                    search_lo = found_idx + 1;
+                    ++seed_match_count;
                 }
             }
         }
