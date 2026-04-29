@@ -1,0 +1,35 @@
+[workspace]
+members = ["bench"]
+
+[profile.release]
+lto = "thin"
+incremental = true
+debug = true
+
+[workspace.dependencies]
+packed-seq = "4.2.0"
+seq-hash = "0.1.1"
+
+[package]
+name = "simd-minimizers"
+version = "2.3.1"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/rust-seq/simd-minimizers"
+keywords = ["minimizers", "simd", "dna", "bioinformatics"]
+categories = ["compression", "data-structures", "science::bioinformatics"]
+authors = ["Ragnar Groot Koerkamp", "Igor Martayan"]
+description = "A SIMD-accelerated library to compute random minimizers"
+
+[dependencies]
+clap = { version = "4.5.47", features = ["derive"] }
+itertools = "0.14"
+packed-seq.workspace = true
+seq-hash.workspace = true
+wide = "0.7"
+
+[dev-dependencies]
+rand = "0.9"
+
+[features]
+scalar = ["packed-seq/scalar"]

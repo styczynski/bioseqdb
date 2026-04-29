@@ -1,0 +1,6 @@
+pre-release-replacements = [
+  {file="CHANGELOG.md", search="## git", replace="## {{version}}", exactly=1},
+  {file="CHANGELOG.md", search="<!-- next-header -->", replace="<!-- next-header -->\n\n## git", exactly=1},
+]
+shared-version = true
+pre-release-commit-message = "v{{version}}"

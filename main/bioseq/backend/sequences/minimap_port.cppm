@@ -127,6 +127,12 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// buffer arrays stay in NEON registers across iterations).
     /// Implemented as `collect_minimizers_two_stack_nthash_simd`.
     TWO_STACK_NTHASH = 3,
+    /// V11 dual-stream two-stack: same hash + ring layout as V9, but
+    /// splits the input into 2 × Lanes(d) chunks (8 on NEON 128-bit)
+    /// and runs two independent 4-lane streams interleaved at the
+    /// instruction level. Gives the M1 NEON pipes 2× ILP per logical
+    /// step. Implemented as `collect_minimizers_two_stack_nthash_v2_simd`.
+    TWO_STACK_NTHASH_V2 = 4,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -152,6 +158,7 @@ enum class MinimizerAlgorithmType : uint8_t {
         case MinimizerAlgorithmType::SIMD:             return "SIMD Minimizers";
         case MinimizerAlgorithmType::TWO_STACK:        return "Two-Stack SIMD Minimizers";
         case MinimizerAlgorithmType::TWO_STACK_NTHASH: return "Two-Stack nthash SIMD Minimizers";
+        case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2: return "Two-Stack nthash SIMD V2 (dual-stream)";
     }
     return "unknown";
 }
@@ -2440,6 +2447,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                     target_seq.begin(), target_seq.end(),
                     w, k);
                 break;
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2:
+                collect_minimizers_two_stack_nthash_v2_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    w, k);
+                break;
             case MinimizerAlgorithmType::SCALAR:
             default:
                 collect_minimizers<minimap_int_hasher>(
@@ -2474,6 +2487,12 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                 break;
             case MinimizerAlgorithmType::TWO_STACK_NTHASH:
                 collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    w, k);
+                break;
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2:
+                collect_minimizers_two_stack_nthash_v2_simd<minimap_int_hasher>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     w, k);

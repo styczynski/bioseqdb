@@ -545,6 +545,14 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
         two_stack_nthash_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         two_stack_nthash_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
         grid.push_back(std::move(two_stack_nthash_cfg));
+
+        AlgorithmConfig two_stack_nthash_v2_cfg;
+        two_stack_nthash_v2_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-v2-mm";
+        two_stack_nthash_v2_cfg.is_minimap2_reference = false;
+        two_stack_nthash_v2_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        two_stack_nthash_v2_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        two_stack_nthash_v2_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V2;
+        grid.push_back(std::move(two_stack_nthash_v2_cfg));
     }
 
     // Pin the same seed across iterations so before/after deltas are not
@@ -634,6 +642,14 @@ TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
         two_stack_nthash_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         two_stack_nthash_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
         grid.push_back(std::move(two_stack_nthash_cfg));
+
+        AlgorithmConfig two_stack_nthash_v2_cfg;
+        two_stack_nthash_v2_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-v2-mm";
+        two_stack_nthash_v2_cfg.is_minimap2_reference = false;
+        two_stack_nthash_v2_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        two_stack_nthash_v2_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        two_stack_nthash_v2_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH_V2;
+        grid.push_back(std::move(two_stack_nthash_v2_cfg));
     }
 
     // Cover both VERY_LONG (~900 kbp) and XL (~5 Mbp) so the user's
