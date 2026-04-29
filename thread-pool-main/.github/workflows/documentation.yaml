@@ -1,0 +1,40 @@
+name: Documentation
+
+on:
+  push:
+    tags:
+      - "*"
+
+env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/cpm_modules
+
+jobs:
+  build:
+    name: Build and publish documentation
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/cache@v3
+        with:
+          path: "**/cpm_modules"
+          key: ${{ github.workflow }}-cpm-modules-${{ hashFiles('**/CMakeLists.txt', '**/*.cmake') }}
+
+      - name: Install dependencies
+        run: |
+          brew install doxygen
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install jinja2 Pygments
+
+      - name: Build
+        run: |
+          source venv/bin/activate
+          cmake -S documentation -B build
+          cmake --build build --target GenerateDocs
+
+      - name: Publish
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/doxygen/html

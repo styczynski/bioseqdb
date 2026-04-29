@@ -1,0 +1,1247 @@
+CREATE EXTENSION pg_background;
+DROP TABLE IF EXISTS t;
+NOTICE:  table "t" does not exist, skipping
+CREATE TABLE t(id integer);
+-- ----------------------------------------------------------------------
+-- v1: basic launch + result
+-- ----------------------------------------------------------------------
+SELECT pg_background_launch('INSERT INTO t SELECT 1') AS pid \gset
+SELECT * FROM pg_background_result(:pid) AS (result TEXT);
+   result   
+------------
+ INSERT 0 1
+(1 row)
+
+SELECT * FROM t ORDER BY id;
+ id 
+----
+  1
+(1 row)
+
+-- ----------------------------------------------------------------------
+-- v1: detach should not crash the session
+-- ----------------------------------------------------------------------
+SELECT pg_background_launch('SELECT 1') AS pid \gset
+SELECT pg_background_detach(:pid);
+ pg_background_detach 
+----------------------
+ 
+(1 row)
+
+-- ----------------------------------------------------------------------
+-- v2: launch + detach, worker should still commit its work
+-- ----------------------------------------------------------------------
+SELECT (h).pid AS v2_pid, (h).cookie AS v2_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t SELECT 2', 65536) AS h) s
+\gset
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_background_detach_v2(:v2_pid, :v2_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+-- give worker a moment to finish and commit
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT * FROM t ORDER BY id;
+ id 
+----
+  1
+  2
+(2 rows)
+
+-- ----------------------------------------------------------------------
+-- v2: cancel should prevent later statements from committing
+-- We run: sleep then insert, cancel during sleep, verify 99 not inserted.
+-- ----------------------------------------------------------------------
+SELECT (h).pid AS c_pid, (h).cookie AS c_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t SELECT 99', 65536) AS h) s
+\gset
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_background_cancel_v2(:c_pid, :c_cookie);
+ pg_background_cancel_v2 
+-------------------------
+ 
+(1 row)
+
+-- allow time for termination/cleanup
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT count(*) AS canceled_insert_count
+FROM t
+WHERE id = 99;
+ canceled_insert_count 
+-----------------------
+                     0
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1 + v2 detach is fire-and-forget (no cancel): inserts should happen
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_detach_v1;
+NOTICE:  table "t_detach_v1" does not exist, skipping
+CREATE TABLE t_detach_v1(id int);
+SELECT pg_background_detach(
+  pg_background_launch('INSERT INTO t_detach_v1 SELECT 1', 65536)
+);
+ pg_background_detach 
+----------------------
+ 
+(1 row)
+
+SELECT pg_sleep(1.0);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT count(*) FROM t_detach_v1;
+ count 
+-------
+     1
+(1 row)
+
+DROP TABLE IF EXISTS t_detach_v2;
+NOTICE:  table "t_detach_v2" does not exist, skipping
+CREATE TABLE t_detach_v2(id int);
+DO $$
+DECLARE h public.pg_background_handle;
+BEGIN
+  SELECT * INTO h FROM pg_background_launch_v2('INSERT INTO t_detach_v2 SELECT 1', 65536);
+  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END;
+$$;
+SELECT pg_sleep(1.0);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT count(*) FROM t_detach_v2;
+ count 
+-------
+     1
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- wait_v2 (1.6 API): timeout + then success
+--   - pg_background_wait_v2_timeout(pid,cookie,timeout_ms) -> bool
+--   - pg_background_wait_v2(pid,cookie) -> void (blocking)
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_wait;
+NOTICE:  table "t_wait" does not exist, skipping
+CREATE TABLE t_wait(id int);
+DO $$
+DECLARE h public.pg_background_handle;
+DECLARE ok bool;
+BEGIN
+  SELECT * INTO h
+  FROM pg_background_launch_v2('SELECT pg_sleep(2); INSERT INTO t_wait VALUES (1)', 65536);
+
+  -- Short wait should time out (false)
+  ok := pg_background_wait_v2_timeout(h.pid, h.cookie, 200);
+  RAISE NOTICE 'wait_short=%', ok;
+
+  -- Long wait should succeed (true)
+  ok := pg_background_wait_v2_timeout(h.pid, h.cookie, 5000);
+  RAISE NOTICE 'wait_long=%', ok;
+
+  -- cleanup bookkeeping (worker is already finished, but we detach handle)
+  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END;
+$$;
+NOTICE:  wait_short=f
+NOTICE:  wait_long=t
+SELECT count(*) FROM t_wait;
+ count 
+-------
+     1
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- cancel_v2 (1.6 API): should prevent the INSERT
+--   - pg_background_cancel_v2_grace(pid,cookie,grace_ms) is available too
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_cancel;
+NOTICE:  table "t_cancel" does not exist, skipping
+CREATE TABLE t_cancel(id int);
+DO $$
+DECLARE h public.pg_background_handle;
+BEGIN
+  SELECT * INTO h
+  FROM pg_background_launch_v2('SELECT pg_sleep(5); INSERT INTO t_cancel VALUES (1)', 65536);
+
+  -- Explicit cancel; detach is not cancel.
+  PERFORM pg_background_cancel_v2_grace(h.pid, h.cookie, 500);
+
+  -- Give server time to process cancel/terminate
+  PERFORM pg_sleep(0.5);
+
+  -- Detach handle bookkeeping
+  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END;
+$$;
+SELECT count(*) FROM t_cancel;
+ count 
+-------
+     0
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v2: list_v2 should show running job, then disappear after cleanup
+-- -------------------------------------------------------------------------
+-- create a long-running job so list_v2 can observe it
+SELECT (h).pid AS l_pid, (h).cookie AS l_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(2)', 65536) AS h) s
+\gset
+-- give it a moment to enter running state
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- list should include our pid/cookie (at least once)
+SELECT COUNT(*) AS  list_contains_launched_job
+FROM pg_background_list_v2()
+  AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
+      queue_size int4, state text, sql_preview text, last_error text, consumed bool)
+WHERE pid = :l_pid
+  AND cookie = :l_cookie
+  AND queue_size = 65536
+  AND user_id IS NOT NULL
+  AND launched_at IS NOT NULL
+  AND state IN ('starting', 'running', 'stopped', 'canceled');
+ list_contains_launched_job 
+----------------------------
+                          1
+(1 row)
+
+-- cleanup explicitly (even if it already stopped)
+SELECT pg_background_cancel_v2(:l_pid, :l_cookie);
+ pg_background_cancel_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT pg_background_detach_v2(:l_pid, :l_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+-- should be gone from list after detach
+SELECT COUNT(*) AS list_contains_after_detach
+FROM pg_background_list_v2()
+  AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
+      queue_size int4, state text, sql_preview text, last_error text, consumed bool)
+WHERE pid = :l_pid
+  AND cookie = :l_cookie;
+ list_contains_after_detach 
+----------------------------
+                          0
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v2: submit_v2 is fire-and-forget and should commit
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_submit;
+NOTICE:  table "t_submit" does not exist, skipping
+CREATE TABLE t_submit(id int);
+SELECT (h).pid AS s_pid, (h).cookie AS s_cookie
+FROM (SELECT pg_background_submit_v2('INSERT INTO t_submit VALUES (1)', 65536) AS h) s
+\gset
+-- submit may detach internally; still allow time to commit
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT count(*) AS submit_count FROM t_submit;
+ submit_count 
+--------------
+            1
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v2: wait_v2_timeout times out, then succeeds; wait_v2 blocks to completion
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_wait2;
+NOTICE:  table "t_wait2" does not exist, skipping
+CREATE TABLE t_wait2(id int);
+SELECT (h).pid AS w_pid, (h).cookie AS w_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(1); INSERT INTO t_wait2 VALUES (1)', 65536) AS h) s
+\gset
+-- should time out quickly
+SELECT pg_background_wait_v2_timeout(:w_pid, :w_cookie, 50) AS wait_short;
+ wait_short 
+------------
+ f
+(1 row)
+
+-- should succeed with longer timeout
+SELECT pg_background_wait_v2_timeout(:w_pid, :w_cookie, 5000) AS wait_long;
+ wait_long 
+-----------
+ t
+(1 row)
+
+-- wait_v2 should now return immediately (already done), but it must work
+SELECT pg_background_wait_v2(:w_pid, :w_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+-- detach bookkeeping
+SELECT pg_background_detach_v2(:w_pid, :w_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT count(*) AS wait2_count FROM t_wait2;
+ wait2_count 
+-------------
+           1
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v2: cancel_v2_grace should prevent later statements from committing
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_cancel2;
+NOTICE:  table "t_cancel2" does not exist, skipping
+CREATE TABLE t_cancel2(id int);
+SELECT (h).pid AS cx_pid, (h).cookie AS cx_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_cancel2 VALUES (1)', 65536) AS h) s
+\gset
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_background_cancel_v2_grace(:cx_pid, :cx_cookie, 500);
+ pg_background_cancel_v2_grace 
+-------------------------------
+ 
+(1 row)
+
+-- allow termination
+SELECT pg_sleep(0.5);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- detach handle bookkeeping
+SELECT pg_background_detach_v2(:cx_pid, :cx_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT count(*) AS cancel2_count FROM t_cancel2;
+ cancel2_count 
+---------------
+             0
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- ops: detach all stopped workers returned by list
+-- -------------------------------------------------------------------------
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT *
+    FROM pg_background_list_v2()
+      AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
+          queue_size int4, state text, sql_preview text, last_error text, consumed bool)
+    WHERE state IN ('stopped',  'canceled')
+  LOOP
+    PERFORM pg_background_detach_v2(r.pid, r.cookie);
+  END LOOP;
+END $$;
+SELECT *
+FROM pg_background_list_v2()
+  AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
+      queue_size int4, state text, sql_preview text, last_error text, consumed bool);
+ pid | cookie | launched_at | user_id | queue_size | state | sql_preview | last_error | consumed 
+-----+--------+-------------+---------+------------+-------+-------------+------------+----------
+(0 rows)
+
+-- -------------------------------------------------------------------------
+-- v1.8: GUC settings
+-- -------------------------------------------------------------------------
+-- Show default GUC values
+SHOW pg_background.max_workers;
+ pg_background.max_workers 
+---------------------------
+ 16
+(1 row)
+
+SHOW pg_background.default_queue_size;
+ pg_background.default_queue_size 
+----------------------------------
+ 64kB
+(1 row)
+
+SHOW pg_background.worker_timeout;
+ pg_background.worker_timeout 
+------------------------------
+ 0
+(1 row)
+
+-- Test max_workers limit
+SET pg_background.max_workers = 2;
+SHOW pg_background.max_workers;
+ pg_background.max_workers 
+---------------------------
+ 2
+(1 row)
+
+-- Reset to default
+RESET pg_background.max_workers;
+-- -------------------------------------------------------------------------
+-- v1.8: stats_v2 - session statistics
+-- -------------------------------------------------------------------------
+-- Stats should show some activity from previous tests
+SELECT
+  workers_launched > 0 AS has_launched,
+  workers_completed >= 0 AS has_completed_field,
+  workers_failed >= 0 AS has_failed_field,
+  workers_canceled >= 0 AS has_canceled_field,
+  workers_active >= 0 AS has_active_field,
+  avg_execution_ms >= 0 AS has_avg_time,
+  max_workers > 0 AS has_max_workers
+FROM pg_background_stats_v2();
+ has_launched | has_completed_field | has_failed_field | has_canceled_field | has_active_field | has_avg_time | has_max_workers 
+--------------+---------------------+------------------+--------------------+------------------+--------------+-----------------
+ t            | t                   | t                | t                  | t                | t            | t
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.8: progress reporting
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_progress;
+NOTICE:  table "t_progress" does not exist, skipping
+CREATE TABLE t_progress(id int);
+-- Launch worker that reports progress
+SELECT (h).pid AS p_pid, (h).cookie AS p_cookie
+FROM (SELECT pg_background_launch_v2($$
+  SELECT pg_background_progress(0, 'Starting');
+  SELECT pg_sleep(0.1);
+  SELECT pg_background_progress(50, 'Halfway');
+  SELECT pg_sleep(0.1);
+  SELECT pg_background_progress(100, 'Done');
+  INSERT INTO t_progress VALUES (1);
+$$, 65536) AS h) s
+\gset
+-- Give worker time to start and report progress
+SELECT pg_sleep(0.15);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Check progress (should be >= 0 if reported)
+SELECT
+  CASE WHEN progress_pct >= 0 THEN 'progress_reported' ELSE 'no_progress' END AS progress_status
+FROM pg_background_get_progress_v2(:p_pid, :p_cookie);
+  progress_status  
+-------------------
+ progress_reported
+(1 row)
+
+-- Wait for completion
+SELECT pg_background_wait_v2_timeout(:p_pid, :p_cookie, 5000) AS progress_worker_done;
+ progress_worker_done 
+----------------------
+ t
+(1 row)
+
+-- Verify work was done
+SELECT count(*) AS progress_insert_count FROM t_progress;
+ progress_insert_count 
+-----------------------
+                     1
+(1 row)
+
+-- Cleanup
+SELECT pg_background_detach_v2(:p_pid, :p_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.8: max_workers enforcement
+-- -------------------------------------------------------------------------
+-- Set very low limit
+SET pg_background.max_workers = 1;
+-- Launch one worker (should succeed)
+SELECT (h).pid AS mw_pid, (h).cookie AS mw_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(2)', 65536) AS h) s
+\gset
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Try to launch another (should fail due to limit)
+DO $$
+BEGIN
+  PERFORM pg_background_launch_v2('SELECT 1', 65536);
+  RAISE NOTICE 'max_workers_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'max_workers_test=correctly_limited';
+END;
+$$;
+NOTICE:  max_workers_test=correctly_limited
+-- Cancel and cleanup the first worker
+SELECT pg_background_cancel_v2(:mw_pid, :mw_cookie);
+ pg_background_cancel_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_background_detach_v2(:mw_pid, :mw_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+-- Reset limit
+RESET pg_background.max_workers;
+-- -------------------------------------------------------------------------
+-- v1.8: worker_timeout GUC
+-- -------------------------------------------------------------------------
+-- Test that worker_timeout can be set
+SET pg_background.worker_timeout = '1s';
+SHOW pg_background.worker_timeout;
+ pg_background.worker_timeout 
+------------------------------
+ 1s
+(1 row)
+
+RESET pg_background.worker_timeout;
+-- -------------------------------------------------------------------------
+-- v1.9: Worker labels
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_label;
+NOTICE:  table "t_label" does not exist, skipping
+CREATE TABLE t_label(id int);
+-- Launch worker with label
+SELECT (h).pid AS lbl_pid, (h).cookie AS lbl_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_label VALUES (1)', 0, 'test-label') AS h) s
+\gset
+-- Wait for worker to complete (deterministic, not timing-dependent)
+SELECT pg_background_wait_v2(:lbl_pid, :lbl_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+-- Verify worker with label completed successfully
+SELECT
+  completed AS label_worker_completed,
+  has_error AS label_worker_has_error
+FROM pg_background_result_info_v2(:lbl_pid, :lbl_cookie);
+ label_worker_completed | label_worker_has_error 
+------------------------+------------------------
+ t                      | f
+(1 row)
+
+-- Verify label is exposed through list_v2
+SELECT label AS visible_label
+FROM pg_background_list_v2()
+  AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
+      queue_size int4, state text, sql_preview text, last_error text,
+      consumed bool, label text)
+WHERE pid = :lbl_pid AND cookie = :lbl_cookie;
+ visible_label 
+---------------
+ test-label
+(1 row)
+
+-- Cleanup
+SELECT pg_background_detach_v2(:lbl_pid, :lbl_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT count(*) AS label_insert_count FROM t_label;
+ label_insert_count 
+--------------------
+                  1
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.9: Submit with label
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_submit_label;
+NOTICE:  table "t_submit_label" does not exist, skipping
+CREATE TABLE t_submit_label(id int);
+SELECT (h).pid AS slbl_pid, (h).cookie AS slbl_cookie
+FROM (SELECT pg_background_submit_v2('INSERT INTO t_submit_label VALUES (1)', 0, 'submit-label') AS h) s
+\gset
+-- Wait for worker to complete (deterministic)
+SELECT pg_background_wait_v2(:slbl_pid, :slbl_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+SELECT count(*) AS submit_label_count FROM t_submit_label;
+ submit_label_count
+--------------------
+                  1
+(1 row)
+
+-- Cleanup: explicitly detach to avoid affecting later batch tests
+SELECT pg_background_detach_v2(:slbl_pid, :slbl_cookie);
+ pg_background_detach_v2
+-------------------------
+
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.9: Result info without consuming results
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_result_info;
+NOTICE:  table "t_result_info" does not exist, skipping
+CREATE TABLE t_result_info(id int);
+SELECT (h).pid AS ri_pid, (h).cookie AS ri_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_result_info SELECT generate_series(1,5)') AS h) s
+\gset
+-- Wait for worker to complete (deterministic)
+SELECT pg_background_wait_v2(:ri_pid, :ri_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+-- Check result info (should show completed with row_count=5, command_tag='INSERT')
+SELECT
+  row_count AS ri_row_count,
+  command_tag AS ri_command_tag,
+  completed AS ri_completed,
+  has_error AS ri_has_error
+FROM pg_background_result_info_v2(:ri_pid, :ri_cookie);
+ ri_row_count | ri_command_tag | ri_completed | ri_has_error 
+--------------+----------------+--------------+--------------
+            5 | INSERT         | t            | f
+(1 row)
+
+SELECT pg_background_detach_v2(:ri_pid, :ri_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT count(*) AS result_info_count FROM t_result_info;
+ result_info_count 
+-------------------
+                 5
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.9: Structured error info
+-- -------------------------------------------------------------------------
+-- Launch worker that will fail
+SELECT (h).pid AS err_pid, (h).cookie AS err_cookie
+FROM (SELECT pg_background_launch_v2('SELECT 1/0') AS h) s
+\gset
+-- Wait for worker to complete (will error, but still completes)
+SELECT pg_background_wait_v2(:err_pid, :err_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+-- Check result info shows error
+SELECT
+  completed AS err_completed,
+  has_error AS err_has_error
+FROM pg_background_result_info_v2(:err_pid, :err_cookie);
+ err_completed | err_has_error 
+---------------+---------------
+ t             | t
+(1 row)
+
+-- Get structured error (should have sqlstate for division by zero)
+SELECT
+  CASE WHEN sqlstate IS NOT NULL THEN 'has_sqlstate' ELSE 'no_sqlstate' END AS error_sqlstate_check,
+  CASE WHEN message IS NOT NULL THEN 'has_message' ELSE 'no_message' END AS error_message_check
+FROM pg_background_error_info_v2(:err_pid, :err_cookie);
+ error_sqlstate_check | error_message_check 
+----------------------+---------------------
+ has_sqlstate         | has_message
+(1 row)
+
+SELECT pg_background_detach_v2(:err_pid, :err_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.9: Batch detach
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_batch;
+NOTICE:  table "t_batch" does not exist, skipping
+CREATE TABLE t_batch(id int);
+-- Launch multiple workers (use launch_v2 so we can wait deterministically)
+SELECT (h).pid AS b1_pid, (h).cookie AS b1_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_batch VALUES (1)', NULL, 'batch-1') AS h) s
+\gset
+SELECT (h).pid AS b2_pid, (h).cookie AS b2_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_batch VALUES (2)', NULL, 'batch-2') AS h) s
+\gset
+-- Wait for both workers to complete (deterministic, avoids timing-based flakiness)
+SELECT pg_background_wait_v2(:b1_pid, :b1_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+SELECT pg_background_wait_v2(:b2_pid, :b2_cookie);
+ pg_background_wait_v2 
+-----------------------
+ 
+(1 row)
+
+-- Detach all at once
+SELECT pg_background_detach_all_v2() AS batch_detach_count;
+ batch_detach_count
+--------------------
+                  2
+(1 row)
+
+SELECT count(*) AS batch_insert_count FROM t_batch;
+ batch_insert_count 
+--------------------
+                  2
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- v1.9: Batch cancel
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_batch_cancel;
+NOTICE:  table "t_batch_cancel" does not exist, skipping
+CREATE TABLE t_batch_cancel(id int);
+-- Launch multiple long-running workers
+SELECT (h).pid AS bc1_pid, (h).cookie AS bc1_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_cancel VALUES (1)') AS h) s
+\gset
+SELECT (h).pid AS bc2_pid, (h).cookie AS bc2_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_cancel VALUES (2)') AS h) s
+\gset
+-- Brief pause to ensure workers have started their pg_sleep
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- Cancel all at once
+SELECT pg_background_cancel_all_v2() AS batch_cancel_count;
+ batch_cancel_count 
+--------------------
+                  2
+(1 row)
+
+-- Wait for each worker to stop (deterministic, with timeout)
+SELECT pg_background_wait_v2_timeout(:bc1_pid, :bc1_cookie, 5000) AS bc1_stopped;
+ bc1_stopped 
+-------------
+ t
+(1 row)
+
+SELECT pg_background_wait_v2_timeout(:bc2_pid, :bc2_cookie, 5000) AS bc2_stopped;
+ bc2_stopped 
+-------------
+ t
+(1 row)
+
+-- Detach remaining
+SELECT pg_background_detach_all_v2() AS batch_cancel_detach_count;
+ batch_cancel_detach_count 
+---------------------------
+                         2
+(1 row)
+
+-- Inserts should not have happened
+SELECT count(*) AS batch_cancel_insert_count FROM t_batch_cancel;
+ batch_cancel_insert_count 
+---------------------------
+                         0
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Error Path: Cookie mismatch detection
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS t_cookie_mismatch;
+NOTICE:  table "t_cookie_mismatch" does not exist, skipping
+CREATE TABLE t_cookie_mismatch(id int);
+-- Store handle in temp table for DO block access
+DROP TABLE IF EXISTS _test_cm_handle;
+NOTICE:  table "_test_cm_handle" does not exist, skipping
+CREATE TEMP TABLE _test_cm_handle AS
+SELECT (h).pid, (h).cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_cookie_mismatch VALUES (1)') AS h) s;
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_cm_handle;
+  PERFORM pg_background_wait_v2(v_pid, v_cookie);
+END;
+$$;
+-- Try operation with wrong cookie (should error)
+DO $$
+DECLARE v_pid int;
+BEGIN
+  SELECT pid INTO v_pid FROM _test_cm_handle;
+  -- Use deliberately wrong cookie
+  PERFORM pg_background_wait_v2(v_pid, 9999999999999999);
+  RAISE NOTICE 'cookie_mismatch_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'cookie_mismatch_test=correctly_errored';
+END;
+$$;
+NOTICE:  cookie_mismatch_test=correctly_errored
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_cm_handle;
+  PERFORM pg_background_detach_v2(v_pid, v_cookie);
+END;
+$$;
+SELECT count(*) AS cookie_mismatch_insert_count FROM t_cookie_mismatch;
+ cookie_mismatch_insert_count 
+------------------------------
+                            1
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Error Path: Result consumption guard (double-consume)
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS _test_rc_handle;
+NOTICE:  table "_test_rc_handle" does not exist, skipping
+CREATE TEMP TABLE _test_rc_handle AS
+SELECT (h).pid, (h).cookie
+FROM (SELECT pg_background_launch_v2('SELECT 42 AS answer') AS h) s;
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_rc_handle;
+  PERFORM pg_background_wait_v2(v_pid, v_cookie);
+END;
+$$;
+-- First consumption should succeed (use direct query, not DO block)
+SELECT answer FROM (
+  SELECT * FROM pg_background_result_v2(
+    (SELECT pid FROM _test_rc_handle),
+    (SELECT cookie FROM _test_rc_handle)
+  ) AS (answer int)
+) sub;
+ answer 
+--------
+     42
+(1 row)
+
+-- Second consumption should error (worker auto-detached after result consumed)
+-- Expect SQLSTATE 42704 (UNDEFINED_OBJECT) for "PID not attached to this session"
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_rc_handle;
+  PERFORM * FROM pg_background_result_v2(v_pid, v_cookie) AS (answer int);
+  RAISE NOTICE 'result_consumed_test=should_have_failed';
+EXCEPTION WHEN undefined_object THEN
+  -- Expected: "PID %d is not attached to this session"
+  RAISE NOTICE 'result_consumed_test=correctly_errored (SQLSTATE=42704)';
+WHEN OTHERS THEN
+  -- Unexpected error - report it for debugging
+  RAISE NOTICE 'result_consumed_test=unexpected_error (SQLSTATE=%, %)', SQLSTATE, SQLERRM;
+END;
+$$;
+NOTICE:  result_consumed_test=correctly_errored (SQLSTATE=42704)
+-- No explicit detach needed - worker is auto-detached after result consumption
+-- -------------------------------------------------------------------------
+-- Error Path: Invalid handle (detached worker)
+-- -------------------------------------------------------------------------
+DROP TABLE IF EXISTS _test_dh_handle;
+NOTICE:  table "_test_dh_handle" does not exist, skipping
+CREATE TEMP TABLE _test_dh_handle AS
+SELECT (h).pid, (h).cookie
+FROM (SELECT pg_background_launch_v2('SELECT 1') AS h) s;
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_dh_handle;
+  PERFORM pg_background_detach_v2(v_pid, v_cookie);
+END;
+$$;
+-- Operations on detached handle should error
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_dh_handle;
+  PERFORM pg_background_wait_v2(v_pid, v_cookie);
+  RAISE NOTICE 'detached_handle_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'detached_handle_test=correctly_errored';
+END;
+$$;
+NOTICE:  detached_handle_test=correctly_errored
+-- -------------------------------------------------------------------------
+-- Privilege Model: pgbackground_role exists
+-- -------------------------------------------------------------------------
+SELECT
+  CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role')
+       THEN 'PASS' ELSE 'FAIL' END AS pgbackground_role_exists;
+ pgbackground_role_exists 
+--------------------------
+ PASS
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: PUBLIC has no direct access
+-- -------------------------------------------------------------------------
+SELECT
+  CASE WHEN NOT has_function_privilege('public', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS public_no_launch_access;
+ public_no_launch_access 
+-------------------------
+ PASS
+(1 row)
+
+SELECT
+  CASE WHEN NOT has_function_privilege('public', 'pg_background_result_v2(int4, int8)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS public_no_result_access;
+ public_no_result_access 
+-------------------------
+ PASS
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: pgbackground_role has access
+-- -------------------------------------------------------------------------
+SELECT
+  CASE WHEN has_function_privilege('pgbackground_role', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS role_has_launch_access;
+ role_has_launch_access 
+------------------------
+ PASS
+(1 row)
+
+SELECT
+  CASE WHEN has_function_privilege('pgbackground_role', 'pg_background_result_v2(int4, int8)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS role_has_result_access;
+ role_has_result_access 
+------------------------
+ PASS
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: Grant/Revoke helpers work
+-- -------------------------------------------------------------------------
+DROP ROLE IF EXISTS test_priv_user;
+NOTICE:  role "test_priv_user" does not exist, skipping
+CREATE ROLE test_priv_user NOLOGIN;
+-- Should not have access initially
+SELECT
+  CASE WHEN NOT has_function_privilege('test_priv_user', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS user_no_initial_access;
+ user_no_initial_access 
+------------------------
+ PASS
+(1 row)
+
+-- Grant privileges
+SELECT grant_pg_background_privileges('test_priv_user', false) AS grant_result;
+ grant_result 
+--------------
+ t
+(1 row)
+
+-- Should have access after grant
+SELECT
+  CASE WHEN has_function_privilege('test_priv_user', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS user_has_access_after_grant;
+ user_has_access_after_grant 
+-----------------------------
+ PASS
+(1 row)
+
+-- Revoke privileges
+SELECT revoke_pg_background_privileges('test_priv_user', false) AS revoke_result;
+ revoke_result 
+---------------
+ t
+(1 row)
+
+-- Should not have access after revoke
+SELECT
+  CASE WHEN NOT has_function_privilege('test_priv_user', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS user_no_access_after_revoke;
+ user_no_access_after_revoke 
+-----------------------------
+ PASS
+(1 row)
+
+DROP ROLE test_priv_user;
+-- -------------------------------------------------------------------------
+-- Bounds Validation: cancel_v2_grace grace_ms bounds
+-- -------------------------------------------------------------------------
+-- Test that very large grace_ms is handled (capped at 1 hour = 3600000ms)
+SELECT (h).pid AS bg_pid, (h).cookie AS bg_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10)') AS h) s
+\gset
+SELECT pg_sleep(0.1);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+-- This should work without error (grace_ms capped internally)
+SELECT pg_background_cancel_v2_grace(:bg_pid, :bg_cookie, 999999999);
+ pg_background_cancel_v2_grace 
+-------------------------------
+ 
+(1 row)
+
+SELECT pg_sleep(0.3);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_background_detach_v2(:bg_pid, :bg_cookie);
+ pg_background_detach_v2 
+-------------------------
+ 
+(1 row)
+
+SELECT 'PASS' AS grace_bounds_test;
+ grace_bounds_test 
+-------------------
+ PASS
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Semantic test: detach allows worker to complete (does NOT cancel)
+-- This is already tested by t_detach_v1/t_detach_v2 above, but we add
+-- an explicit comment for clarity. The earlier tests verify that after
+-- detach, workers still commit their transactions.
+-- -------------------------------------------------------------------------
+SELECT 'PASS' AS detach_semantic_verified;
+ detach_semantic_verified 
+--------------------------
+ PASS
+(1 row)
+
+-- -------------------------------------------------------------------------
+-- Error propagation SQLSTATE tests (v1.9 bugfix)
+--
+-- Pattern: launch_v2 -> wait_v2 -> error_info_v2 -> detach_v2
+-- Do NOT call result_v2 for error cases: it ereport(ERROR)s in launcher,
+-- which aborts the transaction and destroys error_info_v2 data.
+-- -------------------------------------------------------------------------
+-- Test 3.1: Division by zero — SQLSTATE 22012 (execute path)
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('SELECT 1/0');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '22012' THEN
+        RAISE EXCEPTION 'test 3.1: expected sqlstate 22012, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.1 (22012 division_by_zero) OK';
+END$$;
+NOTICE:  test 3.1 (22012 division_by_zero) OK
+-- Test 3.2: RAISE EXCEPTION — SQLSTATE P0001 (execute path)
+-- Use a helper function instead of nested dollar-quoting to avoid psql parsing issues.
+CREATE OR REPLACE FUNCTION pgbg_test_raise_p0001() RETURNS void
+    LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''custom error''; END';
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('SELECT pgbg_test_raise_p0001()');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM 'P0001' THEN
+        RAISE EXCEPTION 'test 3.2: expected sqlstate P0001, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.2 (P0001 raise_exception) OK';
+END$$;
+NOTICE:  test 3.2 (P0001 raise_exception) OK
+DROP FUNCTION pgbg_test_raise_p0001();
+-- Test 3.3: NOT NULL violation — SQLSTATE 23502 (execute path)
+-- Note: temp tables are NOT visible to background workers (separate backend).
+-- Use a regular table with a unique prefix.
+DROP TABLE IF EXISTS pgbg_test_nn_23502;
+NOTICE:  table "pgbg_test_nn_23502" does not exist, skipping
+CREATE TABLE pgbg_test_nn_23502(c int NOT NULL);
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('INSERT INTO pgbg_test_nn_23502 VALUES (NULL)');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '23502' THEN
+        RAISE EXCEPTION 'test 3.3: expected sqlstate 23502, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.3 (23502 not_null_violation) OK';
+END$$;
+NOTICE:  test 3.3 (23502 not_null_violation) OK
+DROP TABLE pgbg_test_nn_23502;
+-- Test 3.4: Deferred FK violation — SQLSTATE 23503 (commit path)
+-- FK is INITIALLY DEFERRED, so INSERT succeeds but COMMIT fails.
+-- The error fires in the commit-wrapper PG_CATCH (Phase 2 path).
+DROP TABLE IF EXISTS pgbg_test_fk_child_23503;
+NOTICE:  table "pgbg_test_fk_child_23503" does not exist, skipping
+DROP TABLE IF EXISTS pgbg_test_fk_parent_23503;
+NOTICE:  table "pgbg_test_fk_parent_23503" does not exist, skipping
+CREATE TABLE pgbg_test_fk_parent_23503(id int PRIMARY KEY);
+CREATE TABLE pgbg_test_fk_child_23503(
+    id int PRIMARY KEY,
+    parent_id int,
+    CONSTRAINT fk_23503_parent
+        FOREIGN KEY (parent_id) REFERENCES pgbg_test_fk_parent_23503(id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    -- Worker runs INSERT in its own auto-transaction.
+    -- INITIALLY DEFERRED FK fires at CommitTransactionCommand (commit-wrapper PG_CATCH).
+    -- Do NOT pass BEGIN/COMMIT: worker already runs in its own transaction.
+    h := pg_background_launch_v2(
+        'INSERT INTO pgbg_test_fk_child_23503 VALUES (1, 999)'
+    );
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '23503' THEN
+        RAISE EXCEPTION 'test 3.4: expected sqlstate 23503, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.4 (23503 foreign_key_violation deferred) OK';
+END$$;
+NOTICE:  test 3.4 (23503 foreign_key_violation deferred) OK
+DROP TABLE pgbg_test_fk_child_23503;
+DROP TABLE pgbg_test_fk_parent_23503;
+-- Test 3.5: Cancel — SQLSTATE 57014 (execute path, query_canceled)
+-- Uses pg_sleep(30) to ensure worker is truly sleeping before cancel.
+-- Positive sync via pg_stat_activity: cancel is only sent after the worker
+-- is confirmed to be actively executing pg_sleep. Without this sync, cancel
+-- could land before SPI_execute starts (early-failure path) and the
+-- launcher would see 08006 instead of 57014.
+DO $$
+DECLARE
+    h     pg_background_handle;
+    w_pid int4;
+    s     text;
+    done  boolean;
+    cnt   int;
+BEGIN
+    h := pg_background_launch_v2('SELECT pg_sleep(30)');
+    w_pid := h.pid;
+    /* Positive sync: let the worker fork and reach SPI_execute, then
+       confirm it is actively running via pg_stat_activity.  An initial
+       sleep gives the OS scheduler time to start the child process;
+       afterwards we poll at 100 ms intervals for up to ~5 s total. */
+    PERFORM pg_sleep(0.1);
+    FOR i IN 1..55 LOOP
+        SELECT count(*) INTO cnt
+          FROM pg_stat_activity
+         WHERE pid = w_pid
+           AND state = 'active';
+        EXIT WHEN cnt > 0;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    IF cnt = 0 THEN
+        RAISE EXCEPTION
+            'test 3.5: worker not active within 5.6s — test not valid';
+    END IF;
+    /* Worker is past pq_redirect_to_shm_mq and executing SQL; cancel
+       will be caught by the execute-phase PG_CATCH and produce 57014. */
+    PERFORM pg_background_cancel_v2_grace(h.pid, h.cookie, 100);
+    -- Wait for worker to stop after cancel (should be fast)
+    done := pg_background_wait_v2_timeout(h.pid, h.cookie, 5000);
+    IF NOT done THEN
+        RAISE EXCEPTION 'test 3.5: worker did not stop within 5s after cancel';
+    END IF;
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '57014' THEN
+        RAISE EXCEPTION 'test 3.5: expected sqlstate 57014, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.5 (57014 query_canceled) OK';
+END$$;
+NOTICE:  test 3.5 (57014 query_canceled) OK
+-- -------------------------------------------------------------------------
+-- Final stats check: exact counts covering the full test suite.
+-- Baseline (master): 26 launched, 17 completed, 1 failed, 8 canceled, 0 active.
+-- Tests 3.1-3.4 add 4 failed workers; test 3.5 adds 1 canceled worker.
+-- -------------------------------------------------------------------------
+SELECT
+  workers_launched  AS total_launched,
+  workers_completed AS total_completed,
+  workers_failed    AS total_failed,
+  workers_canceled  AS total_canceled,
+  workers_active    AS currently_active
+FROM pg_background_stats_v2();
+ total_launched | total_completed | total_failed | total_canceled | currently_active 
+----------------+-----------------+--------------+----------------+------------------
+             31 |              17 |            5 |              9 |                0
+(1 row)
+
