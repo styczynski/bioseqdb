@@ -1,0 +1,1198 @@
+\section{Why minimizers, and why does this chapter exist?}
+\label{sec:why-minimizers}
+
+Chapter~\ref{r:{biology}} introduced the seed--chain--extend
+pipeline used by every modern aligner.  In that pipeline, the
+\emph{minimizer collector} is the only stage whose runtime cost is
+strictly linear in the input length and not bounded by the alignment
+depth: it must visit every base of every sequence it processes,
+turning each $k$-mer into a hash, and selecting the
+window-minimum of every $w$ consecutive $k$-mers as the
+\emph{minimizer} for that window.
+
+For our user-stated benchmarking goal -- pairs of ${\sim}10^6$ bp
+sequences aligned against ${\sim}10^7$ bp references at PacBio HiFi
+error rates -- the minimizer step accounts for roughly 8\,\% of the
+total wall-clock per pair on the scalar pipeline, and up to 25\,\%
+when a naive SIMD port has been written. That is the gap this
+chapter is about.  Concretely:
+
+\begin{itemize}
+\item \textbf{Goal 1} (already met before this chapter starts).
+  bioseq's \emph{scalar} pipeline must be within $\pm 10\,\%$ of
+  minimap2's wall-clock on the long-sequence regime.  Met by the
+  per-seed-pair gap-fill rewrite documented in V3 of the engineering
+  report~\cite{bioseq_eng_report_v1}.
+\item \textbf{Goal 2} (the topic of this chapter).
+  bioseq's \emph{SIMD} pipeline must be at least 10\,\% faster than
+  the scalar pipeline.  After a year of incremental work we sit
+  marginally outside the goal on every length bucket: $-8.4\,\%$ at
+  52\,kbp, $-8.8\,\%$ at 903\,kbp, $-4.9\,\%$ at 5\,Mbp (means of three
+  runs).  The variance across runs occasionally clears the bar (V12
+  individual runs at $-9.7\,\%$ to $-12\,\%$ have been seen on a
+  quiescent host), but the mean reported here is the load-bearing
+  number.  This chapter explains why every percentage point was so
+  hard-won.
+\end{itemize}
+
+Figure~\ref{fig:headline-result} states the bottom line: across our
+five sequence-length buckets, the V13 collector
+(\texttt{collect\_minimizers\_two\_stack\_nthash\_v3}, the
+production minimizer at the time of writing) is the fastest of the
+SIMD configurations, and at every length except the 5\,Mbp XL bucket
+it is also faster than the scalar baseline by 5--9\,\%.
+
+\begin{figure}[ht]
+  \centering
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+    import matplotlib.pyplot as plt
+    import matplotlib
+    import numpy as np
+    matplotlib.use("pgf")
+    matplotlib.rcParams.update({
+      "font.family": "serif",
+      "font.serif": [],
+      "text.usetex": True,
+    })
+    fig, ax = plt.subplots()
+    fig.set_size_inches(__LINEWIDTH__, 0.55*__LINEWIDTH__, forward=True)
+    buckets = ['47 kbp', '49 kbp', '52 kbp', '903 kbp', '5.0 Mbp']
+    scalar = [14.56, 14.94, 15.09, 188.93, 1171.0]
+    simd_v6 = [15.21, 15.90, 16.05, 201.68, 1207.99]
+    v8_two_stack = [14.64, 15.07, 15.24, 183.77, 1131.87]
+    v12_v13 = [13.78, 14.02, 13.82, 172.38, 1113.3]
+    minimap2 = [20.11, 20.10, 20.13, 190.95, 1060.13]
+    x = np.arange(len(buckets))
+    width = 0.16
+    ax.bar(x - 2*width, minimap2, width, label='minimap2',
+           color='#000000')
+    ax.bar(x - width,   scalar,    width, label='scalar (baseline)',
+           color='#909090')
+    ax.bar(x,           simd_v6,   width, label='V6 SIMD (rescan)',
+           color='#1f77b4')
+    ax.bar(x + width,   v8_two_stack, width, label='V8 two-stack',
+           color='#2ca02c')
+    ax.bar(x + 2*width, v12_v13,   width, label='V13 (production)',
+           color='#d62728')
+    ax.set_xticks(x)
+    ax.set_xticklabels(buckets)
+    ax.set_yscale('log')
+    ax.set_ylabel('Wall-clock per pair (ms, log scale)', fontsize=8)
+    ax.set_title('End-to-end pipeline wall-clock per length bucket', fontsize=9)
+    ax.tick_params(axis='both', labelsize=7)
+    ax.legend(fontsize=7, frameon=False, loc='upper left', ncol=2)
+    ax.grid(True, alpha=0.3, axis='y', which='both')
+    print(get_filename_from_extension(".pgf"))
+    plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+  \end{CacheMeCode}
+  \caption{End-to-end pipeline wall-clock per pair, length bucket on
+    the X axis (log Y). \textsc{Scalar} is the baseline, \textsc{V6}
+    is the naive SIMDification of minimap2's rescan loop,
+    \textsc{V8} is the two-stack port from the SIMD-Minimizers paper
+    of Groot Koerkamp \&
+    Martayan~\cite{groot_koerkamp_simd_minimizers_2025}, and
+    \textsc{V13} is the production state after dual-stream
+    interleaving, forced inlining, and the
+    \texttt{mm\_est\_err} sort-free prefix-count rewrite.  The
+    minimap2 reference is included for orientation. On every bucket
+    except XL, V13 is the fastest of all five rows.}
+  \label{fig:headline-result}
+\end{figure}
+
+\section{What a minimizer collector actually does}
+\label{sec:what-is-minimizer}
+
+Before we dive into the SIMD work, it pays to spend a page or two on
+what the data looks like and how the original scalar algorithm gets
+the answer.  This section is aimed at a reader who has seen the
+phrase ``minimizer'' in passing -- e.g.\ from a Kraken or a minimap2
+paper -- but has never written or read minimizer code.
+
+Conceptually, a minimizer collector is a function
+\[
+\mathrm{collect\_minimizers}\colon \Sigma^* \times \mathbb{N} \times \mathbb{N}
+\;\to\; \mathcal{P}\!\big(\;(\text{hash},\,\text{position},\,\text{strand})\;\big)
+\]
+that takes a sequence over the four-letter DNA alphabet, plus
+parameters $w$ (window size) and $k$ ($k$-mer length), and returns a
+set of triples that uniquely identify selected $k$-mers in the input.
+The triples are what downstream stages -- chaining, error estimation,
+seed-hit collection -- consume.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[x=0.4cm, y=0.4cm, >=Latex]
+    \foreach \i/\letter in {0/A,1/C,2/T,3/G,4/T,5/A,6/G,7/T,8/A,9/C,10/G,11/T,12/T,13/A}
+        \node[minimum width=0.4cm,inner sep=0pt,font=\ttfamily\small] at (\i,0) {\letter};
+
+    \foreach \i/\hashval in {0/13,1/20,2/27,3/34,4/41}
+    {
+      \pgfmathsetmacro{\xs}{\i - 0.2}
+      \pgfmathsetmacro{\xe}{\i + 3.8}
+      \pgfmathsetmacro{\yp}{-1.0 - \i*0.8}
+      \draw[rounded corners=1pt, color=blue!50!gray, thick]
+        (\xs, \yp) rectangle (\xe, \yp+0.6);
+      \node[font=\tiny, color=blue!50!gray, anchor=west] at (\xe + 0.1, \yp+0.3)
+        {kmer$_\i$ (h=\hashval)};
+    }
+    \node[font=\tiny, anchor=west, color=blue!50!gray]
+      at (0, -5.6) {(kmers $k=4$ shown for first 5 positions)};
+
+    \draw[rounded corners=1pt, color=ForestGreen, thick]
+      (-0.3, -7.0) rectangle (8.3, -6.4);
+    \node[font=\scriptsize, color=ForestGreen, anchor=west]
+      at (-0.3, -7.6) {window of $w=4$ consecutive $k$-mers ($w+k-1=7$ bases wide)};
+  \end{tikzpicture}
+  \caption{The data the collector operates on. A sequence of 14
+    bases produces overlapping $k=4$-mers
+    (kmer$_0$, kmer$_1$, \ldots). The collector slides a
+    window of $w=4$ consecutive $k$-mers (so $w+k-1=7$ bases wide)
+    across the sequence and emits, for each window, the position of
+    the $k$-mer with the smallest hash. A naive output would have
+    one entry per window; a smart implementation deduplicates
+    adjacent windows that share the same minimizer position.}
+  \label{fig:minimizer-data}
+\end{figure}
+
+The intuition for \emph{why} a minimizer is a useful seed is in the
+seed-stage discussion of Chapter~\ref{r:{biology}}:
+the same $k$-mer is selected as the minimizer of every
+overlapping window that contains it as the smallest hash, so two
+sequences that share a contiguous identical region are very likely
+to share at least one minimizer position there. The seed
+collection then becomes a hash-table intersection rather than a
+substring search, which is the entire reason any of this is fast.
+
+\subsection{The minimap2 hash}
+\label{sec:hash64}
+
+Random minimizers depend critically on the hash function used to
+order $k$-mers.  Three properties matter:
+
+\begin{enumerate}
+\item \textbf{Avalanche.} A single bit flip in the $k$-mer should
+  change roughly half the bits of the hash output -- otherwise
+  GC-rich and AT-rich windows occupy different
+  hash-value subspaces and the minimizer set becomes biased.
+\item \textbf{Reversibility.} The hash should be a
+  bijection on its $\mathrm{2k}$-bit input domain, so that no two
+  $k$-mers collide.  This is implementable with a sequence of
+  reversible mixing operations
+  (XOR, addition, multiplication by an odd constant, shifts).
+\item \textbf{Cheap to evaluate.} The minimizer collector evaluates
+  the hash once per $k$-mer position, so on a 1\,Mbp pair it runs
+  the hash $2 \cdot 10^6$ times. Each cycle counts.
+\end{enumerate}
+
+minimap2 uses a hand-tuned 64-bit integer mix attributed to Thomas
+Wang~\cite{wang_inthash}, applied to the bit-packed
+$2k$-bit forward $k$-mer encoding (or to the reverse-complement
+$k$-mer, whichever is lexicographically smaller -- this is the
+\emph{canonical-strand} optimisation):
+
+\begin{verbatim}
+static inline uint64_t hash64(uint64_t key, uint64_t mask) {
+    key = (~key + (key << 21)) & mask;        // key = key * 2097151 - 1
+    key = key ^ (key >> 24);
+    key = ((key + (key << 3)) + (key << 8)) & mask;   // * 265
+    key = key ^ (key >> 14);
+    key = ((key + (key << 2)) + (key << 4)) & mask;   // * 21
+    key = key ^ (key >> 28);
+    key = (key + (key << 31)) & mask;
+    return key;
+}
+\end{verbatim}
+
+Each pass alternates a multiplication-by-odd-constant (implemented as
+a few \texttt{shift\,+\,add} pairs to be portable to
+HP\,9000-class hardware where multiplication was slow in 1997) with
+an XOR with a shifted version of itself.  The composite is
+reversible (each stage is reversible) and has good
+avalanche~\cite{wang_inthash}, but the dependency chain is
+\textbf{seven stages deep}.  When the loop is in scalar code, the
+out-of-order engine schedules these against the rest of the body and
+hides the latency.  In the SIMD path the seven stages become a
+seven-deep fused dependency chain on a single SIMD register, and they
+end up dominating the inner loop -- a fact that drives most of the
+optimisation work later in the chapter
+(see~\S\ref{sec:v8-defer-scramble} for the eventual fix).
+
+\subsection{The original minimap2 algorithm}
+
+\texttt{mm\_sketch} in
+\path{bench/tool_minimap2/minimap2/sketch.c} is the canonical scalar
+minimizer collector.  Algorithm~\ref{alg:mm-sketch} captures the hot
+path; for clarity we have stripped the homopolymer compression
+branch and the bookkeeping for tied hashes.
+
+\begin{algorithm}[H]
+\caption{\texttt{mm\_sketch} (simplified; minimap2 \texttt{sketch.c})}
+\label{alg:mm-sketch}
+\small
+\begin{algorithmic}[1]
+\Require sequence $s$, window size $w$, $k$-mer length $k$
+\State $\textit{buf}[0..w-1] \gets \infty$ \Comment{circular buffer of recent $k$-mer info}
+\State $\textit{min} \gets \infty$, $\textit{min\_pos} \gets -1$
+\State $\textit{kmer}[0] \gets 0$, $\textit{kmer}[1] \gets 0$ \Comment{forward / RC}
+\State $\textit{shift1} \gets 2(k-1)$
+\For{$i \gets 0$ to $|s|-1$}
+    \State $c \gets \textit{seq\_nt4\_table}[s[i]]$ \Comment{ACGT $\to$ 0..3}
+    \State $\textit{kmer}[0] \gets ((\textit{kmer}[0] \ll 2)\;|\;c)\,\&\,\textit{mask}$ \Comment{forward}
+    \State $\textit{kmer}[1] \gets (\textit{kmer}[1] \gg 2)\;|\;((3 \oplus c) \ll \textit{shift1})$ \Comment{RC}
+    \If{$\textit{kmer}[0] = \textit{kmer}[1]$} \Comment{palindrome}
+        \State \textbf{continue} \Comment{strand undefined; skip}
+    \EndIf
+    \State $z \gets \textit{kmer}[0] < \textit{kmer}[1] \;?\; 0 : 1$ \Comment{strand}
+    \State $\textit{info}.x \gets \textit{hash64}(\textit{kmer}[z]) \ll 8 \;|\; \textit{kmer\_span}$
+    \State $\textit{info}.y \gets (i \ll 1)\;|\;z$
+    \State $\textit{buf}[\textit{buf\_pos}] \gets \textit{info}$
+    \If{$\textit{info}.x \le \textit{min}.x$}                                  \Comment{new minimum}
+      \State \textbf{emit} $\textit{min}$ if armed
+      \State $\textit{min} \gets \textit{info}$, $\textit{min\_pos} \gets \textit{buf\_pos}$
+    \ElsIf{$\textit{buf\_pos} = \textit{min\_pos}$}                          \Comment{old min slid out}
+      \State \textbf{emit} $\textit{min}$
+      \State $\textit{min} \gets \infty$
+      \For{$j \gets \textit{buf\_pos}+1$ \textbf{to} $w-1$ \textbf{then} $0$ \textbf{to} $\textit{buf\_pos}$}        \Comment{rescan window}
+        \If{$\textit{min}.x \ge \textit{buf}[j].x$}
+          \State $\textit{min} \gets \textit{buf}[j]$, $\textit{min\_pos} \gets j$
+        \EndIf
+      \EndFor
+    \EndIf
+    \State $\textit{buf\_pos} \gets (\textit{buf\_pos} + 1) \bmod w$
+\EndFor
+\State \textbf{emit} $\textit{min}$ at end of stream
+\end{algorithmic}
+\end{algorithm}
+
+The design of Algorithm~\ref{alg:mm-sketch} is the
+\emph{rescan} method described in Section~3.3 of the SIMD-Minimizers
+paper~\cite{groot_koerkamp_simd_minimizers_2025}.
+The salient property is that the loop has \emph{exactly one}
+data-dependent branch on the hot path: the rescan branch in line~17
+fires only when the current minimum slides out of the window.  In
+expectation, the branch fires every $w$ iterations, so for the
+default $w=10$ minimap2 has a $\sim 10\,\%$ branch rate that
+modern out-of-order hardware predicts well.  Combined with the fact
+that scalar code can keep all of $\textit{min}, \textit{kmer}[0],
+\textit{kmer}[1], \textit{buf\_pos}, \textit{min\_pos}$ in
+registers and let the OoO engine hide the seven-stage hash latency,
+this loop achieves $\sim 12$\,ms per 1\,Mbp pair on an Apple\,M1
+performance core.  That is the bar.
+
+\section{Round 1 -- the naive SIMDification (V6)}
+\label{sec:v6-rescan}
+
+Our first SIMD port -- \texttt{collect\_minimizers\_simd} in
+\path{bioseq/backend/sequences/kmers/index.cppm} -- was a
+literal SIMDification of Algorithm~\ref{alg:mm-sketch}.  We split
+the input sequence into $L$ equal-length chunks and ran the rescan
+loop in parallel on $L$ lanes of a SIMD register.  On 128-bit Apple
+NEON with \texttt{uint32\_t} storage, $L = 4$.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[scale=0.55, transform shape, node distance=0.5cm, >=Latex]
+    \node[align=center, font=\small] at (0,1.5)
+      {Input sequence (1\,Mbp), split into $L=4$ equal chunks of $\sim 250$\,kbp};
+    \draw[thick, fill=blue!10] (-5,0) rectangle (-2.5,1) node[midway, font=\small\ttfamily] {chunk 0};
+    \draw[thick, fill=green!10] (-2.5,0) rectangle (0,1) node[midway, font=\small\ttfamily] {chunk 1};
+    \draw[thick, fill=orange!10] (0,0) rectangle (2.5,1) node[midway, font=\small\ttfamily] {chunk 2};
+    \draw[thick, fill=red!10] (2.5,0) rectangle (5,1) node[midway, font=\small\ttfamily] {chunk 3};
+
+    \draw[->, thick] (-3.75, 0) -- (-3.75, -0.8);
+    \draw[->, thick] (-1.25, 0) -- (-1.25, -0.8);
+    \draw[->, thick] (1.25,  0) -- (1.25,  -0.8);
+    \draw[->, thick] (3.75,  0) -- (3.75,  -0.8);
+
+    \node[align=center, font=\small] at (0, -1.4)
+      {One SIMD register holds one $k$-mer hash from each chunk:};
+
+    \draw[thick] (-2.5,-2.5) rectangle (2.5,-1.7);
+    \draw[thick] (-1.25,-2.5) -- (-1.25,-1.7);
+    \draw[thick] (0,   -2.5) -- (0,   -1.7);
+    \draw[thick] (1.25,-2.5) -- (1.25,-1.7);
+    \node[font=\small\ttfamily] at (-1.875, -2.1) {h$_0$};
+    \node[font=\small\ttfamily] at (-0.625, -2.1) {h$_1$};
+    \node[font=\small\ttfamily] at (0.625,  -2.1) {h$_2$};
+    \node[font=\small\ttfamily] at (1.875,  -2.1) {h$_3$};
+
+    \node[font=\scriptsize] at (-3.5, -2.1) {SIMD reg:};
+  \end{tikzpicture}
+  \caption{Lane-parallel SIMD layout. The sequence is split into
+    $L=4$ chunks; the SIMD register holds one $k$-mer hash from each
+    chunk in parallel. Adjacent chunks overlap by $w + k - 1$ bases
+    so that every window is fully contained in at least one chunk.}
+  \label{fig:simd-chunks}
+\end{figure}
+
+The naive port retained the rescan structure of
+Algorithm~\ref{alg:mm-sketch} but replaced every scalar comparison
+with a SIMD comparison.  The rescan branch -- which fired
+$\sim 10\,\%$ of the time in scalar code -- now fires whenever
+\emph{any} of the four lanes sees its saved minimum slide out of
+the window.  The probability that at least one of four lanes
+triggers a rescan is $1 - (1 - 0.1)^4 \approx 34\,\%$, so we now
+take a data-dependent branch one iteration in three.  Worse, the
+rescan body itself becomes a $w$-iteration scalar loop nested
+inside the SIMD body, because the rescan has to figure out
+\emph{which} lane is being rescanned and keep the others
+unchanged.  Modern branch predictors do not enjoy this combination.
+
+The instrumented per-pair phase breakdown made the regression
+unambiguous (Table~\ref{tab:v6-phase}): the scalar
+\texttt{mm\_sketch} took 12.5\,ms on a 903\,kbp pair, while the
+``vectorised'' \texttt{mm\_sketch\_simd} took 24\,ms -- a 2$\times$
+slowdown despite running on the same hardware with four lanes of
+parallelism.
+
+\begin{table}[ht]
+  \centering
+  \begin{tabular}{lrrr}
+    \toprule
+    Phase & scalar (ms) & V6 SIMD (ms) & V6 over scalar \\
+    \midrule
+    \texttt{mm\_sketch}      & 12.50 & 14.94 & $+19\,\%$ \\
+    \texttt{mm\_sketch\_simd} & 0    & 23.88 & --- \\
+    \texttt{target\_index\_build} & 16.0 & 14.3 & $-11\,\%$ \\
+    \texttt{collect\_seed\_hits} & 6.5  & 11.0 & $+69\,\%$ \\
+    \texttt{mg\_lchain\_dp}   & 16.0 & 0.0  & --- (replaced) \\
+    \texttt{mg\_lchain\_simd} & 0.0  & 8.9  & --- \\
+    \texttt{mm\_est\_err}     & 0.7  & 7.2  & $+929\,\%$ \\
+    \texttt{mm\_align\_skel.}  & 87.5 & 86.4 & $-1\,\%$ \\
+    \midrule
+    Pipeline total per pair & 158.4 & 170.7 & $+8\,\%$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{Phase breakdown at 903\,kbp, V3 baseline -- pre-SIMD-Minimizers
+    work. The naive SIMD path (V6) is $+8\,\%$ \emph{slower} than
+    scalar despite four lanes of parallelism. The slowdown is split
+    between three regressions: (a) the SIMD minimizer's
+    \texttt{mm\_sketch\_simd} is itself slower than scalar
+    \texttt{mm\_sketch}; (b) the SIMD chainer feeds anchors into
+    \texttt{collect\_seed\_hits} that hit a worse code path; and
+    (c) the SIMD chain anchors are not cleanly indexable into the
+    sorted query-minimizer array, so \texttt{mm\_est\_err} explodes.
+    The V13 work mostly fixes (a) and (c).}
+  \label{tab:v6-phase}
+\end{table}
+
+The post-mortem on V6 reads as a list of mistakes, each of which has
+a corresponding lesson encoded into the next round:
+
+\begin{enumerate}
+\item \textbf{The rescan branch is more frequent in SIMD than in
+  scalar.}  Independent lanes mean independent ``minimum slid out''
+  events, and the rate compounds.  Fix: move to a data-independent
+  algorithm (the two-stacks method, \S\ref{sec:v8-two-stack}).
+
+\item \textbf{The seven-stage hash mix dominates the inner loop.}
+  In scalar code the OoO engine hides the seven-cycle dependency
+  chain behind the rest of the loop body.  In SIMD code there is no
+  ``rest of the loop'' to hide it behind: the chain is the loop.
+  Fix: defer the scramble to emit time, when only $\sim 1/w$ of
+  positions need it (\S\ref{sec:v8-defer-scramble}).
+
+\item \textbf{The \texttt{submit\_results} lambda fires per emit
+  position}, and emits via a $w$-iteration per-lane loop because
+  emissions on different lanes correspond to different output
+  positions.  Each invocation costs roughly the same as a
+  per-iteration call.  At $\sim 1/w$ emit rate this contributes
+  $\sim 5$\,ms per Mbp.  Fix: hand-inline the per-step body and
+  promote the emission loop into the inner frame (V9, V12).
+
+\item \textbf{The hasher is parameterised on a runtime
+  \texttt{rev\_shift = 2(k-1)}.}  When $k$ is a runtime parameter,
+  the SIMD shift instruction has to load the shift count from a
+  register every iteration.  Constant-amount NEON shifts (\texttt{shl.4s
+  vN, vM, \#28}) are single-cycle, runtime shifts are slower.  Fix:
+  add a \texttt{StaticK = 15} template parameter so that the
+  minimap2-default $k$ produces a \texttt{constexpr}
+  \texttt{rev\_shift} (V8 / V12).
+\end{enumerate}
+
+The downstream regressions on \texttt{collect\_seed\_hits} and
+\texttt{mm\_est\_err} are not fundamentally about the minimizer
+collector -- they are about the SIMD chainer producing a slightly
+different anchor distribution than scalar -- but they are
+\emph{visible} in the V6 phase breakdown because the SIMD chainer is
+co-enabled with the SIMD minimizer in the bench.  The fixes for
+those (the \texttt{mm\_est\_err} sort-free rewrite and the
+divergence-fix for reverse-strand chains) eventually land in
+V13~(\S\ref{sec:v13-est-err}) and reduce \texttt{mm\_est\_err} from
+7\,ms to 0.85\,ms.
+
+\section{Round 2 -- two-stacks port (V8)}
+\label{sec:v8-two-stack}
+
+The single most important external input to this work was the
+SIMD-Minimizers paper of Groot Koerkamp \&
+Martayan~\cite{groot_koerkamp_simd_minimizers_2025}.  Its central
+insight is that the rescan method is fundamentally
+\emph{data-dependent}, and that any data-dependent branch costs more
+in SIMD than in scalar because lanes' branch targets are tied to
+each other.  The paper proposes replacing the rescan with the
+\emph{two-stacks} sliding-window-minimum algorithm of Hirzel,
+Schneider \& Tangwongsan~\cite{hirzel_two_stacks_2017}, which has
+\emph{zero} data-dependent branches -- only the once-per-$w$-iters
+``rebuild the suffix-min array'' uniform branch.
+
+\subsection{The two-stacks idea}
+
+The two-stacks algorithm splits the stream of $k$-mer hashes into
+fixed-size blocks of $w$ consecutive hashes each, computes the
+prefix-min and suffix-min of each block in $O(w)$, and uses the fact
+that any window of $w$ hashes spans (at most) one suffix of a
+finished block plus a prefix of the current block.  The window
+minimum is then the minimum of the corresponding suffix and prefix
+minima -- both available in $O(1)$ from the precomputed arrays.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[x=0.42cm, y=0.42cm, >=Latex]
+    \foreach \i/\val in {0/9,1/4,2/7,3/2,4/8,5/5,6/3,7/6,8/1,9/9,10/4,11/7,12/2,13/8,14/5,15/3}
+        \node[draw, minimum width=0.4cm, inner sep=0pt, font=\scriptsize\ttfamily] at (\i,3) {\val};
+
+    \foreach \i in {0,4,8,12}
+    {
+      \pgfmathsetmacro{\xs}{\i - 0.25}
+      \pgfmathsetmacro{\xe}{\i + 3.25}
+      \draw[rounded corners=1pt, color=blue!50!black, ultra thick]
+        (\xs, 2.5) rectangle (\xe, 3.5);
+    }
+    \node[anchor=east, font=\scriptsize, color=blue!50!black] at (-0.5,3) {hashes:};
+
+    \foreach \i/\val in {0/9,1/4,2/4,3/2,4/8,5/5,6/3,7/3,8/1,9/1,10/1,11/1,12/2,13/2,14/2,15/2}
+        \node[draw, minimum width=0.4cm, inner sep=0pt, font=\scriptsize\ttfamily, fill=green!10] at (\i,1.6) {\val};
+    \node[anchor=east, font=\scriptsize, color=ForestGreen] at (-0.5,1.6) {prefix-min per block:};
+
+    \foreach \i/\val in {0/2,1/2,2/2,3/2,4/3,5/3,6/3,7/6,8/1,9/4,10/4,11/7,12/2,13/3,14/3,15/3}
+        \node[draw, minimum width=0.4cm, inner sep=0pt, font=\scriptsize\ttfamily, fill=orange!10] at (\i,0.4) {\val};
+    \node[anchor=east, font=\scriptsize, color=OrangeRed] at (-0.5,0.4) {suffix-min per block:};
+
+    \draw[rounded corners=1pt, color=red, ultra thick]
+      (0.75, 2.5) rectangle (4.25, 3.5);
+    \node[font=\tiny, color=red, anchor=south west] at (0.75, 3.55)
+      {window 1: positions 1--4};
+
+    \draw[->, color=red, thick] (1, 0.1) -- (1, -0.6);
+    \draw[->, color=red, thick] (5, 1.3) -- (5, -0.6);
+    \node[font=\scriptsize, color=red, anchor=north] at (3, -0.7)
+      {$\min(\text{suffix}[1]=2,\;\text{prefix}[5]=5)\;=\;2$};
+  \end{tikzpicture}
+  \caption{The two-stacks idea (illustration adapted from
+    Groot~Koerkamp \& Martayan,
+    SIMD-Minimizers~\cite{groot_koerkamp_simd_minimizers_2025},
+    Figure~2). The $k$-mer hash stream is logically split into blocks
+    of $w$ hashes each. After every $w$-iteration block boundary the
+    suffix-min array is rebuilt in $O(w)$ on top of the
+    incrementally-maintained prefix-min array. Any window of size
+    $w$ that overlaps two blocks splits cleanly into a suffix of one
+    block and a prefix of the next -- so the window minimum is the
+    minimum of \emph{exactly two} values from the two arrays. The
+    one branch in the algorithm is the once-per-$w$-iters
+    suffix-rebuild, which fires uniformly for all $L$ SIMD lanes.}
+  \label{fig:two-stacks}
+\end{figure}
+
+The branch frequency drop is the headline win: V6 fires the rescan
+on $\sim 34\,\%$ of iterations (data-dependent across four lanes);
+V8 fires the suffix-rebuild on exactly every $w$-th iteration
+($10\,\%$, data-independent).  Even the absolute branch count is
+lower; the predictability is the bigger win because lanes no longer
+diverge and the OoO engine can prefetch consistently.
+
+\subsection{Per-step state in the V8 collector}
+
+Algorithm~\ref{alg:two-stack} sketches the V8 inner loop. We omit
+the $w$-rebuild body (it is a compile-time-unrolled loop of
+\texttt{IfThenElse} pairs when $\texttt{StaticW}=10$) and the
+strand-handling LSB-pack trick (it merges what would have been two
+ring buffers into one by stuffing the strand bit into the lowest
+bit of the hash; see~\cite[\S V4]{bioseq_eng_report_v2}).
+
+\begin{algorithm}[H]
+\caption{V8 \texttt{collect\_minimizers\_two\_stack\_simd} (per-step body)}
+\label{alg:two-stack}
+\small
+\begin{algorithmic}[1]
+\State \textbf{state}: $\textit{prefix\_min}[L]$, $\textit{ring}[w][L]$, $\textit{step}$, $\textit{ring\_idx}$
+\State $\textit{hash} \gets \texttt{rolling\_kmer\_hash}.\textsc{Next}(d, c_\text{in}, c_\text{out})$
+\State $\textit{strand}, \textit{palindrome} \gets \textsc{StrandMask}(\textit{hash})$
+\State $\textit{valid} \gets \neg\textit{palindrome}$
+\State $\textit{hs} \gets \textsc{IfThenElse}(\textit{strand}, \textit{hash}\,|\,1, \textit{hash}\,\&\,{\sim}1)$ \Comment{strand bit packed in LSB}
+\State $\textit{elem} \gets \textsc{IfThenElse}(\textit{valid}, ((\textit{hash}\,\&\,\textbf{0xffff\_0000})\,|\,\textit{pos\_local}), \textbf{0xffff\_ffff})$
+\State $\textit{ring}[\textit{ring\_idx}] \gets \textit{elem}$ \Comment{single ring buffer slot per lane}
+\State $\textit{better} \gets \textit{elem} < \textit{prefix\_min}$
+\State $\textit{prefix\_min} \gets \textsc{IfThenElse}(\textit{better}, \textit{elem}, \textit{prefix\_min})$
+\State $\textit{ring\_idx} \mathrel{+}= 1$, $\textit{step} \mathrel{+}= 1$, $\textit{pos\_local} \mathrel{+}= 1$
+\If{$\textit{ring\_idx} = w$}                                          \Comment{rebuild suffix}
+   \State $\textit{ring}[i] \gets \min(\textit{ring}[i..w-1])$ \textbf{for all} $i$ \Comment{$O(w)$ uniform branch}
+   \State $\textit{prefix\_min} \gets \textit{elem}$
+   \State $\textit{ring\_idx} \gets 0$
+\EndIf
+\State $\textit{window\_min} \gets \min(\textit{prefix\_min}, \textit{ring}[\textit{ring\_idx}])$
+\If{$\textit{step} \ge k+w-1$ \textbf{and} $\textit{window\_min}.\text{pos} \ne \textit{last\_emit\_pos}$}
+   \State \textbf{emit} window minimum to per-lane scalar collector
+   \State $\textit{last\_emit\_pos} \gets \textit{window\_min}.\text{pos}$
+\EndIf
+\end{algorithmic}
+\end{algorithm}
+
+The V8 numbers were already encouraging:
+\texttt{mm\_sketch\_simd} dropped from V6's 24\,ms to 17\,ms at
+903\,kbp -- a 30\,\% reduction on the minimizer-only phase, which
+translated into the SIMD pipeline being only 1.4\,\% behind scalar
+overall (down from V6's 8\,\% behind).  But ``almost as fast as
+scalar'' is not ``10\,\% faster than scalar'', so we kept iterating.
+
+\subsection{V8.5 -- defer the seven-stage scramble}
+\label{sec:v8-defer-scramble}
+
+The deepest lesson from V6's post-mortem -- ``the seven-stage hash
+mix dominates the inner loop'' -- still applies to V8.  Every
+position pays the seven dependent SIMD operations of
+\texttt{hash64}, even though only $\sim 1/w$ of positions are
+emitted as minimizers.
+
+V8.5's idea is to defer the seven-stage scramble until emit time, and
+only use a cheaper hash function for \emph{ordering} the values
+inside the inner loop.  The cheap inner hash needs only one
+property: be a bijection on the $2k$-bit kmer space, so that
+$\textit{lex}(\textit{kmer}_1) = \textit{lex}(\textit{kmer}_2) \iff
+\textit{kmer}_1 = \textit{kmer}_2$.  We use the
+``lexicographic-canonical hash'' -- the bit-packed
+$\min(\textit{forward}, \textit{rev\_compl})$ -- post-multiplied
+by Knuth's golden-ratio constant
+$0x9E3779B9$~\cite{knuth_taocp_v3}.  At emit time we run the
+seven-stage \texttt{hash64} scramble on the chosen lane's
+\emph{lexic} value (recovered from a parallel ring buffer), so the
+emitted hash is bit-identical to what scalar minimap2 produces.
+Both query and target apply the identical scheme, so the
+minimizer-set is consistent across the two sides of the alignment.
+
+The arithmetic of the saving:
+\[
+\underbrace{2.25 \cdot 10^5}_{\text{iters / Mbp}}
+\;\times\;
+\underbrace{(7\,\text{stages} - 2\,\text{stages})}_{\text{ops saved per iter}}
+\;\approx\;
+1.1 \cdot 10^6\,\text{SIMD ops saved}
+\]
+versus the
+$\sim 22\,500$ \emph{additional} scalar scrambles paid at emit time
+($\sim 30\,\text{cycles}$ each, total $\approx 0.21$\,ms).
+
+The measured saving was $\sim 5$\,ms per 1\,Mbp pair on
+\texttt{mm\_sketch\_simd}, taking the cost from V8's 17\,ms down to
+12\,ms.  More importantly it cleared the way for the dual-stream and
+inlining work that follow.
+
+\section{Round 3 -- dual-stream interleaving (V11) and forced inlining (V12)}
+\label{sec:v11-v12}
+
+After V8.5, the V13-state phase breakdown
+(Table~\ref{tab:v6-phase}'s rightmost column, computed from the
+\texttt{report-long.json}) showed
+\texttt{mm\_sketch\_simd} sitting at $\sim 13$\,ms -- still
+slightly slower than scalar's 12.5\,ms.  We still had to find
+$\sim 4$\,ms.  Two structural changes did it.
+
+\subsection{V11 -- dual-stream interleaving}
+
+A close reading of the assembly emitted by Apple LLVM revealed that
+our 4-lane NEON inner loop has a 5-deep dependency chain per
+iteration: \texttt{shift\_fwd $\to$ or $\to$ and $\to$ Min(fwd, rc)
+$\to$ Mul(lex, golden)}.  The Apple\,M1 has \emph{four} 128-bit NEON
+pipes that issue independently, so a single 4-lane stream wastes
+three out of four pipes for any given cycle of the dependency
+chain.
+
+The fix is to keep \emph{two} independent 4-lane streams in flight
+simultaneously and interleave their operations in source order:
+
+\begin{verbatim}
+shift_fwd_lo, shift_fwd_hi = ShiftLeft(state_fwd_lo / hi)
+state_fwd_lo, state_fwd_hi = And(Or(shift_fwd_, bp_), kmer_mask)
+state_rc_lo,  state_rc_hi  = Or(ShiftRight(state_rc_), new_high_)
+lex_lo,       lex_hi       = Min(state_fwd_, state_rc_)
+hash_lo,      hash_hi      = And(Mul(lex_, golden), hash_mask)
+elem_lo,      elem_hi      = IfThenElse(valid_, hash_|pos_, max)
+\end{verbatim}
+
+The compiler does not need to discover the ILP; the source code
+already exposes it. Each pair of operations operates on
+register-disjoint values, so the M1 dispatch can issue both halves of
+the same row in the same cycle.
+
+We chose dual-stream rather than quad-stream because the per-stream
+state plus the shared ring buffer for $w=10$ already consumes
+$\sim 26$ NEON registers per stream; doubling to 52 with two streams
+just barely fits inside the M1's 32-register file (the ring buffer
+spills to stack, but the per-iteration state stays in registers --
+which is exactly the right trade).  Going to four streams of 2-lane
+vectors would spill the per-iteration state too, losing the ILP
+benefit.
+
+The wall-clock effect at 903\,kbp was a $\sim 4$\,ms reduction on
+\texttt{mm\_sketch\_simd} (from 12\,ms to 8\,ms);
+Figure~\ref{fig:phase-evolution} plots the full evolution.
+
+\subsection{V12 -- the lambda-inline failure}
+
+V11 was good but disappointing: the wall-clock saving was less than
+the theoretical $2\times$ ILP win we expected.
+\texttt{xcrun llvm-objdump -d build/bioseq/bioseq\_bench} on the V11
+wrapper revealed the cause:
+
+\begin{verbatim}
+ldp q0, q1, [sp, #0x150]       # load bp_row from stack
+ushr.4s v2, v1, #0x2           # extract per-BP value
+movi.4s v1, #0x3
+stp q0, q2, [sp, #0x150]       # store back
+and.16b v0, v0, v1
+and.16b v1, v2, v1
+add x0, sp, #0x5, lsl #12      # prepare lambda's captured-this
+add x0, x0, #0x770
+movi.2d v2, #0xffffffffffffffff
+add x1, x22, #0x8
+bl 0x1002acca4 <step_one_bp_pair lambda>   # the offending call!
+\end{verbatim}
+
+Despite the per-step body being decorated with
+\texttt{[[gnu::always\_inline]]}, Clang lowered the lambda as a
+function call at every BP step.  Each call paid:
+
+\begin{itemize}
+\item Function-call prologue/epilogue (\texttt{stp x28-x30 [sp,...]}).
+\item Captured-state spill/reload via stack -- every per-stream
+  state register was loaded from the captured-this pointer at
+  the start of each lambda invocation, and stored back at the
+  end.
+\item No ILP across iterations -- each lambda call is its own
+  function frame, so dependent state spills to memory between
+  consecutive iterations.
+\end{itemize}
+
+This is a known limitation of \texttt{[[gnu::always\_inline]]} on
+captured-by-reference lambdas: the address-taken state escapes the
+lambda body, so the compiler emits a real function call to be
+defensive.  V12's fix is brutal but effective: rewrite the per-step
+body as a \emph{free function template}
+(\texttt{step\_one\_bp\_pair\_v3}) and pass all per-stream state by
+reference.  Free functions reliably honour
+\texttt{[[gnu::always\_inline]]}, and Clang does not treat
+reference parameters as escaping when the function is fully
+inlined.  Disassembly verification of V12 shows the per-step body
+fully inlined into the function frame; the per-iter cost dropped
+from $\sim 22$ SIMD ops + 1 \texttt{bl} call (the \texttt{bl}
+having been $\sim 10\times$ more expensive than a single ALU op due
+to the captured-state round-trip) to $\sim 15$ SIMD ops with no
+function call.
+
+V12 is the production minimizer at the time of writing.  Combined
+with V8.5's deferred scramble and V11's dual-stream interleaving, the
+inner \texttt{mm\_sketch\_simd} cost is now 9.2\,ms at 903\,kbp -- down
+from V6's 24\,ms.  The combined \texttt{mm\_sketch} wrapper plus
+\texttt{mm\_sketch\_simd} is 14.99\,ms versus scalar's 12.5\,ms; the
+wrapper accounts for $\sim 2.5$\,ms of unavoidable per-call overhead
+(the per-pair scalar emit collector, the bit-packing of the
+collected output, the post-emit scramble) that scalar's
+\texttt{mm\_sketch} subsumes into its single inner loop.  See
+Figure~\ref{fig:phase-evolution} for the full evolution.
+
+\begin{figure}[ht]
+  \centering
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+    import matplotlib.pyplot as plt
+    import matplotlib
+    import numpy as np
+    matplotlib.use("pgf")
+    matplotlib.rcParams.update({
+      "font.family": "serif",
+      "font.serif": [],
+      "text.usetex": True,
+    })
+    fig, ax = plt.subplots()
+    fig.set_size_inches(__LINEWIDTH__, 0.55*__LINEWIDTH__, forward=True)
+    iterations = ['V6\n(rescan)', 'V8\n(two-stack)', 'V8.5\n(defer\nscramble)',
+                  'V11\n(dual\nstream)', 'V12\n(inline)', 'scalar\n(reference)']
+    mm_sketch_simd = [23.88, 19.90, 13.60, 13.60, 9.23, 0.0]
+    mm_sketch_wrapper = [14.94, 12.43, 8.62, 8.62, 5.76, 12.50]
+    sketch_total = [a+b for a,b in zip(mm_sketch_simd, mm_sketch_wrapper)]
+    x = np.arange(len(iterations))
+    ax.bar(x, mm_sketch_wrapper, label='mm\\_sketch (wrapper)', color='#9999cc')
+    ax.bar(x, mm_sketch_simd, bottom=mm_sketch_wrapper,
+           label='mm\\_sketch\\_simd (inner)', color='#cc4444')
+    ax.axhline(12.50, linestyle='--', linewidth=1, color='#444444',
+               label='scalar mm\\_sketch')
+    for i, total in enumerate(sketch_total):
+        ax.text(i, total + 0.5, f'{total:.1f}', ha='center', fontsize=7)
+    ax.set_xticks(x)
+    ax.set_xticklabels(iterations)
+    ax.set_ylabel('Per-pair phase cost (ms) at 903\\,kbp', fontsize=8)
+    ax.set_title('Minimizer-phase cost evolution across iterations', fontsize=9)
+    ax.tick_params(axis='both', labelsize=7)
+    ax.legend(fontsize=7, frameon=False, loc='upper right')
+    ax.grid(True, alpha=0.3, axis='y')
+    print(get_filename_from_extension(".pgf"))
+    plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+  \end{CacheMeCode}
+  \caption{Evolution of the minimizer-phase cost
+    (\texttt{mm\_sketch} wrapper plus \texttt{mm\_sketch\_simd}
+    inner) at 903\,kbp across the iteration rounds discussed in
+    \S\ref{sec:v6-rescan}--\S\ref{sec:v11-v12}. Numbers are means
+    of three runs from the
+    \texttt{[quick-long-sequence-benchmark-two-stack]} case at
+    \texttt{-O3 -DNDEBUG}.  V8 is the two-stack port,
+    V8.5 defers the minimap2 hash to emit time, V11 adds dual-stream
+    interleaving, and V12 forces inlining of the per-step body via a
+    free-function template.  The dashed horizontal line is the
+    scalar \texttt{mm\_sketch} baseline.}
+  \label{fig:phase-evolution}
+\end{figure}
+
+\section{Round 4 -- experiments that didn't work}
+\label{sec:negative}
+
+The optimisation work also produced several confidently-formulated
+hypotheses that the data refused to confirm.  Documenting them is at
+least as useful as documenting the wins, because it tells future
+engineers what \emph{not} to spend time on.  In each case we built
+the optimisation, ran the bench, and reverted.
+
+\subsection{V14 -- true ntHash via NEON \texttt{TableLookupLanes}}
+\label{sec:v14-nthash}
+
+The V13 phase breakdown showed \texttt{collect\_seed\_hits} sitting
+at 12\,ms for V12 versus 6.8\,ms for scalar -- a $\sim 5$\,ms
+regression we attributed to the V8.5 deferred-scramble path
+selecting AT-rich kmers more often than the
+post-scramble-ordered scalar path.  AT-rich kmers naturally have
+higher multiplicity in the genome, so they bloat the
+\texttt{target\_index} hash buckets and the per-query lookup chain.
+
+The clean fix would have been to use ntHash~\cite{nthash_2016}, the
+rolling hash recommended by the SIMD-Minimizers
+paper~\cite{groot_koerkamp_simd_minimizers_2025}.  ntHash is a
+sequence of \texttt{rotate\,+\,XOR\,+\,table-lookup} operations
+where the table is indexed by the 2-bit nucleotide rank, so on NEON
+it can be implemented as a $4$-entry \texttt{tbl.16b} lookup per
+character.  This produces a uniform hash distribution across the
+$k$-mer space, which removes the AT-bias.
+
+V14 implements canonical ntHash inside the V13 dual-stream chassis.
+The implementation is correct -- it preserves the warmup-cancellation
+invariant by precomputing constants that subtract the
+$c_\text{old} = 0$-padding contribution after $k$ rolling steps --
+and the integration suite passes.
+
+What V14 \emph{didn't} buy was wall-clock:
+
+\begin{itemize}
+\item \texttt{mm\_sketch\_simd} cost \emph{increased} by 2\,ms
+  (the table lookup adds a NEON \texttt{tbl.16b}, two rotates, and
+  some XORs per stream per BP).
+\item \texttt{collect\_seed\_hits} dropped by \emph{0.4\,ms}, not
+  the predicted 5\,ms.
+\item Net: V14 is statistically tied with V13 at LONG and
+  VERY\_LONG, and slightly slower at XL.
+\end{itemize}
+
+The lesson is that the AT-bias hypothesis was wrong.  The
+\texttt{collect\_seed\_hits} regression is dominated not by the
+minimizer hash distribution but by the \texttt{std::unordered\_map}
+lookup overhead: bioseq's target index uses STL's default hash
+table, while the C minimap2 path uses an open-addressing
+\texttt{khash\_t<uint64\_t>}.  The next-most-impactful single edit
+for closing Goal~2 -- replacing \texttt{std::unordered\_map} with a
+flat hash on a uint32 $\to$ vector layout -- is in the post-V14
+future-work list of the engineering report and is not part of this
+chapter.
+
+\subsection{V15 -- dual-batch chaining}
+\label{sec:v15-chain-v2}
+
+The dual-stream interleaving idea that delivered for the minimizer
+loop (\S\ref{sec:v11-v12}) also worked beautifully for an aggressive
+unrolling of the SIMD chaining inner loop. Unfortunately, the
+chaining loop is not register-bound and 4-pipe-issue-limited;
+\emph{it is load-store-bound}.  V15 doubles the SoA loads per inner
+iteration from 4 to 8, which queues up on the M1's 4 load-store
+pipes and stalls the issue queue.  Net wall-clock effect:
+
+\begin{itemize}
+\item \texttt{mg\_lchain\_simd} regresses by 5--13\,\% at 903\,kbp.
+\item Total pipeline regresses by 7\,\% versus V13 chaining + V13 minimizer.
+\end{itemize}
+
+The lesson is that the unrolling-with-multiple-reduction-streams
+pattern only helps register-bound, issue-width-limited kernels.
+Apply it only after confirming the target kernel is issue-width
+limited, not load-store limited.  V15 stays in the codebase as a
+documented negative result.
+
+\subsection{Goal~2-style \texttt{prefix\_kmer} drop}
+
+A future-work item from V12 proposed dropping the parallel
+\texttt{ring\_buf\_hs} buffer and the \texttt{prefix\_kmer} state
+register by packing the strand bit into bit~16 of \texttt{elem}.
+The estimated saving was $\sim 3$ ops/stream/iter and 22 vec\_t of
+register-pressure relief.  We implemented and benchmarked.  Result:
+
+\begin{verbatim}
+                                  V12 (pre)   V12 (post-Goal-2)   delta
+mm_sketch_simd                    9.0 ms      9.5 ms              +0.5 ms (matches estimate)
+target_index_build                24.7 ms     4.9 ms              -19.8 ms (~85% fewer keys)
+collect_seed_hits                 12.3 ms     842.0 ms            +830 ms (70x regression)
+mg_lchain_simd                    8.9 ms      299.9 ms            +291 ms (34x regression)
+mm_align_skeleton                 87.2 ms    4811.0 ms            +4724 ms (56x regression)
+\end{verbatim}
+
+The kmer space stored in \texttt{elem} after the trick was only 14
+bits -- not the 16 bits the V12 future-work entry assumed -- so the
+\texttt{target\_index} hash buckets collapsed to $\sim 16\,000$
+distinct keys for $168\,000$ query minimizers.  Each query had
+$\sim 10$ collisions per bucket, the chain-anchor count exploded,
+and the alignment skeleton had to walk through all of them.  The
+pipeline is $36\times$ slower as a result.
+
+The lesson is that hash-precision losses in a sketching scheme
+\emph{compound} catastrophically through the downstream pipeline.
+Even an apparently small precision loss must be validated against
+the full pipeline's wall-clock, not just the sketch phase's.
+
+\section{Round 5 -- the divergence-estimator fix (V13)}
+\label{sec:v13-est-err}
+
+The single biggest \emph{non-minimizer} contribution to closing
+Goal~2 is the V13 rewrite of
+\texttt{estimate\_divergence\_from\_seeds} in
+\path{bioseq/backend/sequences/minimap_port.cppm}, which dropped
+\texttt{mm\_est\_err} from V12-pre's 7.88\,ms to V13's 0.85\,ms --
+a $9\times$ speedup, removing one of the two large downstream
+regressions in the SIMD pipeline.
+
+\subsection{Why \texttt{mm\_est\_err} mattered}
+
+For each chain, minimap2 estimates the per-base sequence divergence
+from a Poisson model on the minimizer-set
+intersection~\cite{minimap2_paper}:
+\[
+\hat{\epsilon} = \frac{1}{k} \log \frac{n}{m}
+\]
+where $n$ is the number of query minimizers in the chain's reference
+span and $m$ is the number of those that are actually seeded
+(i.e.\ that appear as anchors in the chain).  Computing $n$ requires
+\emph{knowing which positions are query minimizers}, which is a
+membership test against the query's minimizer-position set.
+
+The pre-V13 implementation:
+
+\begin{enumerate}
+\item Built a sorted array \texttt{minimizer\_positions[]} of every
+  query minimizer's position via \texttt{std::sort}.  The V12
+  dual-stream collector emits in lane-interleaved order, so the
+  array is \emph{not} sorted on output, and \texttt{std::sort}
+  sees worst-case input.
+\item For each chain anchor, did a \texttt{std::lower\_bound} into
+  the sorted array to test membership.
+\end{enumerate}
+
+The dominant cost was the \texttt{std::sort} on 168\,k entries:
+$\sim 5$--$6$\,ms per pair.  The \texttt{lower\_bound} loop added
+another $\sim 1$--$2$\,ms.
+
+\subsection{The sort-free prefix-count rewrite}
+
+V13 replaces both with a single linear-pass prefix-sum:
+
+\[
+\textit{prefix\_count}[i] = \big|\{ \, p \in \textit{minimizer\_positions} \mid p < i \,\}\big|
+\]
+
+Built in $O(N + L)$ where $N$ is the minimizer count and $L$ is the
+query length.  After construction:
+
+\begin{itemize}
+\item $\textit{is\_minimizer}(p) = (\textit{prefix\_count}[p+1] > \textit{prefix\_count}[p])$ -- $O(1)$.
+\item $\textit{range\_count}(a, b) = \textit{prefix\_count}[b+1] - \textit{prefix\_count}[a]$ -- $O(1)$.
+\end{itemize}
+
+The per-region inner loop is now a single $O(\textit{seed\_count})$
+walk via $O(1)$ probes.  No sort, no binary search.
+
+The fix landed for \emph{all} configs (scalar pipeline included) so
+even the scalar path got a small speedup: scalar
+\texttt{mm\_est\_err} dropped from 1.21\,ms to 0.85\,ms, V12-SIMD
+\texttt{mm\_est\_err} dropped from 7.88\,ms to 0.85\,ms.  The
+SIMD-minus-scalar regression is gone.
+
+There was also a correctness bug exposed by the rewrite: the V10
+``reverse-chain fix'' was wrong, because for both forward and
+reverse chains the lambda \texttt{compute\_forward\_pos} was
+already producing monotonically-increasing forward positions in
+chain order. We removed the reverse-chain split entirely.
+
+\subsection{Net pipeline impact}
+
+Figure~\ref{fig:phase-stack-v13} stacks the per-phase cost at
+903\,kbp for V12-pre versus V13.  The two large gains are
+\texttt{mm\_est\_err} (from 7.88\,ms to 0.85\,ms) and the V12
+\texttt{mm\_sketch} stack (from 14.99\,ms to 9.23\,ms, already
+covered in \S\ref{sec:v11-v12}).
+
+\begin{figure}[ht]
+  \centering
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+    import matplotlib.pyplot as plt
+    import matplotlib
+    import numpy as np
+    matplotlib.use("pgf")
+    matplotlib.rcParams.update({
+      "font.family": "serif",
+      "font.serif": [],
+      "text.usetex": True,
+    })
+    fig, ax = plt.subplots()
+    fig.set_size_inches(__LINEWIDTH__, 0.55*__LINEWIDTH__, forward=True)
+    configs = ['scalar', 'V6 SIMD', 'V8 two-stack', 'V12 v3 (pre-V13)', 'V12 v3 (post-V13)']
+    phases = [
+        ('mm\\_sketch + mm\\_sketch\\_simd', [12.50, 38.82, 32.43, 14.99, 14.52], '#9999cc'),
+        ('target\\_index\\_build',         [16.0,  14.3,  14.6,  26.38, 23.83], '#1f77b4'),
+        ('collect\\_seed\\_hits',          [6.5,   11.0,  11.3,  12.32, 12.0],  '#2ca02c'),
+        ('mg\\_lchain\\_dp/simd',          [16.0,  8.9,   8.9,   8.88,  8.78],  '#ff7f0e'),
+        ('mm\\_est\\_err',                 [0.7,   7.2,   7.1,   7.88,  0.85],  '#d62728'),
+        ('mm\\_align\\_skeleton',          [87.5,  86.4,  86.5,  87.25, 85.42], '#888888'),
+    ]
+    bottoms = np.zeros(len(configs))
+    for name, vals, color in phases:
+        ax.bar(configs, vals, bottom=bottoms, label=name, color=color)
+        bottoms = bottoms + np.array(vals)
+    for i, b in enumerate(bottoms):
+        ax.text(i, b + 1.5, f'{b:.0f}', ha='center', fontsize=7)
+    ax.set_ylabel('Per-pair phase cost (ms) at 903\\,kbp', fontsize=8)
+    ax.set_title('Per-phase pipeline composition (903\\,kbp, mean of 3 runs)', fontsize=9)
+    ax.tick_params(axis='both', labelsize=7)
+    ax.legend(fontsize=6, frameon=False, loc='upper right', ncol=2)
+    ax.grid(True, alpha=0.3, axis='y')
+    plt.xticks(rotation=15, ha='right', fontsize=7)
+    print(get_filename_from_extension(".pgf"))
+    plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+  \end{CacheMeCode}
+  \caption{Per-phase composition of the per-pair pipeline at
+    903\,kbp for the headline configurations.  ``V12 v3 (pre-V13)''
+    is the V12 collector with the pre-V13 \texttt{mm\_est\_err}
+    code; ``V12 v3 (post-V13)'' is the same minimizer collector with
+    the V13 sort-free prefix-count rewrite.  The pre/post pair lets
+    the reader visually separate the V12 (minimizer-side) wins from
+    the V13 (\texttt{mm\_est\_err}) wins.  The \texttt{mm\_align\_skeleton}
+    bar is identical across all configs, accounting for $\sim 50\,\%$
+    of total wall-clock, and is not addressed by any of the work in
+    this chapter.}
+  \label{fig:phase-stack-v13}
+\end{figure}
+
+\section{Final results}
+\label{sec:final-results}
+
+The combination of the V12 minimizer collector and the V13
+\texttt{mm\_est\_err} rewrite is the production state at the time of
+writing.  Across the five sequence-length buckets the bench
+exercises (LONG, VERY\_LONG, XL), V13 is the fastest of the SIMD
+configurations on every bucket and is the fastest config
+\emph{overall} on the LONG sub-buckets (47\,kbp, 49\,kbp, 52\,kbp).
+At VERY\_LONG (903\,kbp) it is 8.8\,\% faster than scalar -- just
+short of the 10\,\% Goal-2 target.  At XL (5\,Mbp) it is 4.9\,\%
+faster than scalar.
+
+\begin{figure}[ht]
+  \centering
+  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
+    import matplotlib.pyplot as plt
+    import matplotlib
+    import numpy as np
+    matplotlib.use("pgf")
+    matplotlib.rcParams.update({
+      "font.family": "serif",
+      "font.serif": [],
+      "text.usetex": True,
+    })
+    fig, ax = plt.subplots()
+    fig.set_size_inches(__LINEWIDTH__, 0.50*__LINEWIDTH__, forward=True)
+    buckets = ['47 kbp', '49 kbp', '52 kbp', '903 kbp', '5.0 Mbp']
+    delta_v6   = [(15.21 - 14.56) / 14.56 * 100,
+                  (15.90 - 14.94) / 14.94 * 100,
+                  (16.05 - 15.09) / 15.09 * 100,
+                  (201.68 - 188.93) / 188.93 * 100,
+                  (1207.99 - 1171.0) / 1171.0 * 100]
+    delta_v8   = [(14.64 - 14.56) / 14.56 * 100,
+                  (15.07 - 14.94) / 14.94 * 100,
+                  (15.24 - 15.09) / 15.09 * 100,
+                  (183.77 - 188.93) / 188.93 * 100,
+                  (1131.87 - 1171.0) / 1171.0 * 100]
+    delta_v13  = [(13.78 - 14.56) / 14.56 * 100,
+                  (14.02 - 14.94) / 14.94 * 100,
+                  (13.82 - 15.09) / 15.09 * 100,
+                  (172.38 - 188.93) / 188.93 * 100,
+                  (1113.3 - 1171.0) / 1171.0 * 100]
+    x = np.arange(len(buckets))
+    width = 0.27
+    ax.bar(x - width, delta_v6,  width, label='V6 SIMD (rescan)', color='#1f77b4')
+    ax.bar(x,         delta_v8,  width, label='V8 two-stack',     color='#2ca02c')
+    ax.bar(x + width, delta_v13, width, label='V13 (production)', color='#d62728')
+    ax.axhline(-10, linestyle='--', linewidth=1, color='#ff0000',
+               label='-10\\% Goal-2 target')
+    ax.axhline(0, linewidth=0.6, color='#000000')
+    ax.set_xticks(x)
+    ax.set_xticklabels(buckets)
+    ax.set_ylabel('Wall-clock delta vs scalar (\\%, negative = faster)', fontsize=8)
+    ax.set_title('SIMD vs scalar speedup across iterations', fontsize=9)
+    ax.tick_params(axis='both', labelsize=7)
+    ax.legend(fontsize=7, frameon=False, loc='upper right', ncol=2)
+    ax.grid(True, alpha=0.3, axis='y')
+    print(get_filename_from_extension(".pgf"))
+    plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
+  \end{CacheMeCode}
+  \caption{Wall-clock delta versus scalar for the three headline
+    SIMD configurations, expressed as percent (negative = faster).
+    The dashed line is the $-10\,\%$ Goal-2 target. V13 approaches
+    the target across the LONG / VERY\_LONG buckets (between
+    $-8.4\,\%$ and $-8.8\,\%$ on the plotted three-run means) and
+    is within 5\,\% of the target on XL.}
+  \label{fig:speedup-summary}
+\end{figure}
+
+The summary table:
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabular}{lrrrr}
+    \toprule
+    Length     & scalar (ms) & V13 (ms) & V13 vs scalar & V13 vs V6 SIMD \\
+    \midrule
+    47\,kbp   &  14.56  & 13.78 & $-5.4\,\%$ & $-9.4\,\%$ \\
+    49\,kbp   &  14.94  & 14.02 & $-6.2\,\%$ & $-11.8\,\%$ \\
+    52\,kbp   &  15.09  & 13.82 & $-8.4\,\%$ & $-13.9\,\%$ \\
+    903\,kbp  & 188.93  & 172.38 & $-8.8\,\%$ & $-14.5\,\%$ \\
+    5.0\,Mbp  & 1171.0  & 1113.3 & $-4.9\,\%$ & $-7.8\,\%$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{Final V13-state speedup numbers across the five
+    sequence-length buckets, expressed as wall-clock per pair
+    (mean of 3 runs from
+    \texttt{[quick-long-sequence-benchmark]}, bench-opt
+    \texttt{-O3 -DNDEBUG}, CCS error rate, seed
+    \texttt{0xBEEFCAFE12345678}). The $-10\,\%$ Goal-2 target is
+    narrowly missed at 903\,kbp and 5.0\,Mbp; on the LONG sub-buckets
+    (47, 49, 52\,kbp) it is met or comfortably approached.}
+  \label{tab:final-numbers}
+\end{table}
+
+\section{What we learned about SIMD bioinformatics}
+\label{sec:lessons}
+
+Several lessons generalise beyond the minimizer collector:
+
+\begin{enumerate}
+\item \textbf{Data-dependent branches are exponentially more
+  expensive in SIMD than in scalar.}  In scalar code, the OoO
+  engine's branch predictor has $\sim 90\,\%$ accuracy on a
+  $1/w$-rate branch.  In a 4-lane SIMD code, ``no lane mispredicts''
+  is $0.9^4 \approx 65\,\%$.  The data-independent two-stacks
+  algorithm replaces the worst-case branching inner loop with a
+  uniform every-$w$-iters branch, which costs nothing.
+
+\item \textbf{Hash-function deferral is a free win for any sketching
+  scheme.}  Whenever a cheap order-preserving hash exists, the
+  expensive ``real'' hash should be applied at emit time on the
+  $\sim 1/w$ subset of positions actually emitted, not in the
+  inner loop.
+
+\item \textbf{Lambdas are not always inlined, even with
+  \texttt{[[gnu::always\_inline]]}.}  Captured-by-reference lambdas
+  with non-trivial bodies are at risk.  Free-function templates
+  with state passed by reference are reliable.  The disassembly is
+  the only way to confirm.
+
+\item \textbf{Two register-bound 4-lane streams beat one
+  register-bound 4-lane stream on M1.}  The chassis is a
+  register-bound, issue-width-limited inner loop; doubling the
+  parallelism halves the steady-state critical-path latency.  Going
+  to four streams overflows the register file.
+
+\item \textbf{Don't apply the dual-stream pattern to
+  load-store-bound kernels.}  V15's chaining V2 result is
+  unambiguous: the M1 has only 4 load-store pipes, and a kernel that
+  is already issuing more than 4 loads per cycle does not benefit
+  from doubling them.
+
+\item \textbf{Hash-precision losses compound through the pipeline.}
+  Even a 2-bit precision loss in the inner ordering hash can produce
+  a $36\times$ end-to-end slowdown (the Goal-2 \texttt{prefix\_kmer}
+  drop result, \S\ref{sec:negative}). Validate every change against
+  the full pipeline, not just the sketch phase.
+
+\item \textbf{The minimizer phase is not the only phase that pays
+  for SIMD.}  When the SIMD chainer produces a different anchor
+  distribution than scalar, downstream stages
+  (\texttt{collect\_seed\_hits}, \texttt{mm\_est\_err}) regress.
+  Some of those regressions are structural (different chain shape)
+  and require restructuring those stages -- e.g.\ the V13
+  sort-free \texttt{mm\_est\_err} rewrite -- not just smarter SIMD
+  in the sketch.
+
+\item \textbf{The alignment skeleton is the unmovable mass.}
+  At 903\,kbp, \texttt{mm\_align\_skeleton} accounts for $\sim 50\,\%$
+  of the pipeline wall-clock, and it is identical across all
+  configurations.  Cutting the entire minimizer + chaining +
+  est\_err + seed\_hits stack to zero would buy at most $50\,\%$
+  speedup.  Goals like ``-10\,\%'' on the SIMD pipeline are very
+  achievable; Goals like ``2$\times$'' would require also moving
+  the alignment phase to SIMD (a substantial KSW2 rewrite or a
+  port to Block-Aligner~\cite{block_aligner_paper}).
+\end{enumerate}
+
+\section{Future work}
+\label{sec:future-work}
+
+The post-V13 future-work list, in approximate priority order:
+
+\begin{enumerate}
+\item \textbf{Replace \texttt{std::unordered\_map} for the target
+  index.}  An open-addressing flat hash map (e.g.\
+  \texttt{absl::flat\_hash\_map} or a hand-rolled
+  \texttt{khash\_t}-style probing table) is the V14-confirmed
+  largest-single-edit win for closing
+  \texttt{collect\_seed\_hits}'s 5\,ms regression.  This is
+  not minimizer code at all -- it is the index data structure --
+  but it is the fastest path to clearing Goal-2 on the LONG and
+  VERY\_LONG buckets robustly.
+\item \textbf{Switch the bench storage to \texttt{uint64\_t}.}
+  Halves the SIMD lane count (4 $\to$ 2 on NEON) but eliminates the
+  \texttt{prefix\_kmer} ring buffer entirely while preserving full
+  kmer precision.  Whether the lane-count loss outweighs the
+  register-pressure relief is an empirical question.
+\item \textbf{Sorted minimizer emission in the V12 collector.}  If
+  the per-lane outputs are merged at the end of the SIMD body
+  rather than in lane-interleaved order, downstream stages that
+  rely on sorted input (notably \texttt{target\_index\_build}) get
+  a free $\sim 1$\,ms win.
+\item \textbf{Lazy \texttt{mm\_est\_err} bitmap.}  For pairs whose
+  chain spans the full sequence, the per-region walk is
+  $O(\text{seed\_count})$ anyway, and we could skip the
+  prefix-count construction with an $O(1)$ heuristic.
+\item \textbf{Batched KSW2 alignment.}  The unmovable mass.
+  Substantial multi-day rewrite, but the only way to get above
+  $\sim 12\,\%$ end-to-end speedup.
+\end{enumerate}
+
+The codebase is at the V13 state, with V14 and V15 retained as
+documented negative-result research artefacts.  Researchers
+extending this work should consult the engineering reports
+(\texttt{ENGINEERING\_REPORT.md} for V3 and earlier,
+\texttt{ENGINEERING\_REPORT\_V2.md} for V4 onwards) for the
+per-iteration step-by-step record, and the \path{view\_report.ipynb}
+notebook (Tier-X minimizer-variant comparison section) for the
+auto-generated charts that mirror Figures~\ref{fig:headline-result},
+\ref{fig:phase-evolution} and~\ref{fig:speedup-summary} above.

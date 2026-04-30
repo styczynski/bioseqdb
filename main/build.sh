@@ -110,25 +110,35 @@ if has_token integration; then
 fi
 
 if has_token bench; then
-    ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
+    # Default bench: pick up *all* tagged cases, including what used to
+    # be the leading-dot "[.quick-long-sequence-benchmark]" /
+    # "[.quick-long-sequence-benchmark-two-stack]" cases. The leading
+    # dots were removed from bench_test.cpp so a single `./build.sh
+    # bench` produces a full comparison grid (every minimizer / chaining
+    # variant on every length bucket) on each run. This is what the
+    # engineering report visualises.
+    BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report.json}" \
+        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
 fi
 
 if has_token bench-long; then
-    # Quick iteration sweep — runs only LONG / VERY_LONG buckets for the three
-    # optimisation-target configs (minimap2 DP, bioseq scalar, bioseq SIMD).
-    # Defined in bench_test.cpp under tag [.quick-long-sequence-benchmark].
+    # Iteration sweep — LONG / VERY_LONG / XL buckets for the
+    # optimisation-target configs (minimap2 DP, bioseq scalar, bioseq SIMD,
+    # plus all two-stack SIMD-mm variants). The tag now lives without a
+    # leading dot so the case is also part of the default `bench` run.
     BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-long.json}" \
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
-        "[.quick-long-sequence-benchmark]"
+        "[quick-long-sequence-benchmark]"
 fi
 
 if has_token bench-two-stack; then
-    # Hyper-quick V4 iteration sweep — runs only VERY_LONG bucket for
-    # scalar / SIMD / two-stack-SIMD minimizer configs. Used to drive
-    # the SIMD-Minimizers paper port iteration loop.
+    # Focused two-stack iteration sweep — VERY_LONG + XL only for the
+    # scalar / SIMD / two-stack-mm grid. Same as before but the case tag
+    # is now `[quick-long-sequence-benchmark-two-stack]` (no leading
+    # dot) so the case is also picked up by the default `bench` run.
     BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-two-stack.json}" \
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
-        "[.quick-long-sequence-benchmark-two-stack]"
+        "[quick-long-sequence-benchmark-two-stack]"
 fi
 
 if has_token lol; then
