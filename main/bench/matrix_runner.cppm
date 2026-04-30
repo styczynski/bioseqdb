@@ -514,20 +514,45 @@ namespace detail {
 }
 
 /// How many sample timings per (algorithm, pair) to collect.
+///
+/// Per the sort-performance report §6, the previous baseline (8/5/3/3/2)
+/// produced a ±5% run-to-run noise floor that was too coarse to attribute
+/// single-step wins. The Catch2 BENCHMARK rows themselves run fast (the
+/// dominant cost in `./build.sh bench` is compilation), so we collect
+/// `BIOSEQ_BENCH_SAMPLES_MULTIPLIER × base_count` samples per pair. The
+/// default multiplier is 20× — that drops the standard error on the
+/// per-pair mean by ~√20 ≈ 4.5×, which lifts the detection threshold
+/// from ±5% to ~±1%. Set the env var to a smaller value (e.g. 1) to
+/// reproduce the old single-sample behaviour during quick iteration.
+[[nodiscard]] inline std::size_t bench_samples_multiplier() noexcept {
+    const char* env = std::getenv("BIOSEQ_BENCH_SAMPLES_MULTIPLIER");
+    if (env == nullptr || env[0] == '\0') {
+        return 20;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(env, &end, 10);
+    if (end == env || parsed == 0) {
+        return 20;
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 [[nodiscard]] inline std::size_t samples_per_pair(SequenceLengthBucket bucket) noexcept {
+    const std::size_t multiplier = bench_samples_multiplier();
+    std::size_t base = 1;
     switch (bucket) {
-        case SequenceLengthBucket::SHORT:     return 8;
-        case SequenceLengthBucket::MEDIUM:    return 5;
-        case SequenceLengthBucket::LONG:      return 3;
+        case SequenceLengthBucket::SHORT:     base = 8; break;
+        case SequenceLengthBucket::MEDIUM:    base = 5; break;
+        case SequenceLengthBucket::LONG:      base = 3; break;
         // VERY_LONG / XL — bumped from 1 to multiple samples so the
         // per-pair mean has lower noise. With the per-seed-pair gap-fill
         // optimisation in `align_regions`, both VERY_LONG and XL fit
         // comfortably under the 600 s wall-clock budget at these sample
         // counts.
-        case SequenceLengthBucket::VERY_LONG: return 3;
-        case SequenceLengthBucket::XL:        return 2;
+        case SequenceLengthBucket::VERY_LONG: base = 3; break;
+        case SequenceLengthBucket::XL:        base = 2; break;
     }
-    return 1;
+    return base * multiplier;
 }
 
 /// Apply the algorithm config onto a fresh `Minimap2Params` instance.

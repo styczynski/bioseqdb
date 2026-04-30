@@ -306,9 +306,6 @@ void simd_dp_forward_pass(
     int64_t window_start = 0;
     int64_t global_best_idx = -1;
 
-    HWY_ALIGN int32_t best_score_lanes[hn::MaxLanes(d_int)];
-    HWY_ALIGN int32_t best_predecessor_lanes[hn::MaxLanes(d_int)];
-
     // Approximate max_skip: cap the number of consecutive batches with no
     // lane-improvement before we bail. Equivalent in spirit to the scalar
     // path's `n_skip > max_skip` break, but at batch granularity rather
@@ -436,19 +433,40 @@ void simd_dp_forward_pass(
                     is_improvement, predecessor_indices_vec, best_predecessor_vec);
             }
 
-            // Horizontal reduction: extract scalar best_score and best_predecessor
-            hn::Store(best_score_vec, d_int, best_score_lanes);
-            hn::Store(best_predecessor_vec, d_int, best_predecessor_lanes);
-            for (int64_t lane = static_cast<int64_t>(lane_count) - 1; lane >= 0; --lane) {
-                if (best_score_lanes[lane] > best_score) {
-                    best_score = best_score_lanes[lane];
-                    best_predecessor = best_predecessor_lanes[lane];
-                } else if (best_score_lanes[lane] == best_score) {
-                    best_predecessor = std::max(best_predecessor, best_predecessor_lanes[lane]);
-                    if (best_score == static_cast<int32_t>(anchors[current_idx].query.query_span)) {
-                        best_predecessor = -1;
-                    }
-                }
+            // In-register horizontal reduction (REPORT.md §15.x.4 follow-up).
+            // Old version: store both vectors, scan lanes scalar — burned a
+            // store-then-load round-trip plus a 4-iteration branchy loop on
+            // every chain DP step. New version: two `ReduceMax` ops keep the
+            // running top-1 in registers.
+            //
+            // Semantics replicated:
+            //   1. best_score = max(best_score, max(best_score_lanes)).
+            //      Because best_score_vec was initialized to the trivial
+            //      query_span score, ReduceMax(best_score_vec) ≥ best_score
+            //      always — strict `>` indicates at least one lane found a
+            //      genuine improvement. When all lanes still hold the
+            //      trivial score we leave best_score / best_predecessor
+            //      untouched, matching the old scalar loop's net effect.
+            //   2. tie-break on max predecessor index among lanes whose
+            //      score equals the reduced max. Mask non-max lanes' indices
+            //      to INT32_MIN before the second ReduceMax so they cannot
+            //      win the tie.
+            //   3. If the reduced max equals the trivial init (no lane
+            //      improved over query_span), best_predecessor stays at -1.
+            //      This is automatic — when reduced_max == best_score the
+            //      `>` test is false and we don't enter the branch.
+            const int32_t reduced_max_score = hn::ReduceMax(d_int, best_score_vec);
+            if (reduced_max_score > best_score) {
+                best_score = reduced_max_score;
+                const auto max_score_broadcast =
+                    hn::Set(d_int, reduced_max_score);
+                const auto is_max_lane =
+                    hn::Eq(best_score_vec, max_score_broadcast);
+                const auto masked_predecessor_vec = hn::IfThenElse(
+                    is_max_lane,
+                    best_predecessor_vec,
+                    hn::Set(d_int, std::numeric_limits<int32_t>::min()));
+                best_predecessor = hn::ReduceMax(d_int, masked_predecessor_vec);
             }
             search_end = window_start;
 

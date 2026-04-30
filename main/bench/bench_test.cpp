@@ -26,6 +26,7 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -565,18 +566,39 @@ TEST_CASE("Long-only fast iteration sweep", "[quick-long-sequence-benchmark]") {
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
 
     // Print a compact summary the iteration loop can grep ("[long-bench]").
+    // sample.sample_latencies_ns is already sorted ascending by
+    // run_one_pair_samples, so percentile reads are O(1).
     for (const auto& sample : bioseq::bench::benchmark_samples()) {
         if (sample.sample_latencies_ns.empty()) continue;
+        const auto& latencies = sample.sample_latencies_ns;
+        const std::size_t n = latencies.size();
         double sum_ns = 0.0;
-        for (double v : sample.sample_latencies_ns) sum_ns += v;
-        const double mean_ms = (sum_ns / static_cast<double>(sample.sample_latencies_ns.size())) / 1.0e6;
-        JustLog("[long-bench] {} length={} pair_q={}bp t={}bp samples={} mean_ms={:.3f}",
+        for (double v : latencies) sum_ns += v;
+        const double mean_ns = sum_ns / static_cast<double>(n);
+        double sq_sum = 0.0;
+        for (double v : latencies) {
+            const double d = v - mean_ns;
+            sq_sum += d * d;
+        }
+        const double stddev_ns = (n > 1)
+            ? std::sqrt(sq_sum / static_cast<double>(n - 1))
+            : 0.0;
+        const double median_ns = latencies[n / 2];
+        const double p99_ns = latencies[(n * 99 + 99) / 100 < n
+            ? (n * 99 + 99) / 100 : n - 1];
+        const double min_ns = latencies.front();
+        const double max_ns = latencies.back();
+        const double cv_pct = mean_ns > 0.0 ? (stddev_ns * 100.0 / mean_ns) : 0.0;
+        JustLog("[long-bench] {} length={} pair_q={}bp t={}bp samples={} "
+                "mean_ms={:.3f} median_ms={:.3f} stddev_ms={:.3f} cv%={:.2f} "
+                "p99_ms={:.3f} min_ms={:.3f} max_ms={:.3f}",
                 sample.algorithm_label,
                 sample.length_bucket_label,
                 sample.effective_query_length,
                 sample.target_length,
-                sample.sample_latencies_ns.size(),
-                mean_ms);
+                n,
+                mean_ns / 1.0e6, median_ns / 1.0e6, stddev_ns / 1.0e6, cv_pct,
+                p99_ns / 1.0e6, min_ns / 1.0e6, max_ns / 1.0e6);
     }
 }
 
@@ -664,16 +686,35 @@ TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
 
     for (const auto& sample : bioseq::bench::benchmark_samples()) {
         if (sample.sample_latencies_ns.empty()) continue;
+        const auto& latencies = sample.sample_latencies_ns;
+        const std::size_t n = latencies.size();
         double sum_ns = 0.0;
-        for (double v : sample.sample_latencies_ns) sum_ns += v;
-        const double mean_ms = (sum_ns / static_cast<double>(sample.sample_latencies_ns.size())) / 1.0e6;
-        JustLog("[two-stack-bench] {} length={} pair_q={}bp t={}bp samples={} mean_ms={:.3f}",
+        for (double v : latencies) sum_ns += v;
+        const double mean_ns = sum_ns / static_cast<double>(n);
+        double sq_sum = 0.0;
+        for (double v : latencies) {
+            const double d = v - mean_ns;
+            sq_sum += d * d;
+        }
+        const double stddev_ns = (n > 1)
+            ? std::sqrt(sq_sum / static_cast<double>(n - 1))
+            : 0.0;
+        const double median_ns = latencies[n / 2];
+        const double p99_ns = latencies[(n * 99 + 99) / 100 < n
+            ? (n * 99 + 99) / 100 : n - 1];
+        const double min_ns = latencies.front();
+        const double max_ns = latencies.back();
+        const double cv_pct = mean_ns > 0.0 ? (stddev_ns * 100.0 / mean_ns) : 0.0;
+        JustLog("[two-stack-bench] {} length={} pair_q={}bp t={}bp samples={} "
+                "mean_ms={:.3f} median_ms={:.3f} stddev_ms={:.3f} cv%={:.2f} "
+                "p99_ms={:.3f} min_ms={:.3f} max_ms={:.3f}",
                 sample.algorithm_label,
                 sample.length_bucket_label,
                 sample.effective_query_length,
                 sample.target_length,
-                sample.sample_latencies_ns.size(),
-                mean_ms);
+                n,
+                mean_ns / 1.0e6, median_ns / 1.0e6, stddev_ns / 1.0e6, cv_pct,
+                p99_ns / 1.0e6, min_ns / 1.0e6, max_ns / 1.0e6);
     }
 }
 
