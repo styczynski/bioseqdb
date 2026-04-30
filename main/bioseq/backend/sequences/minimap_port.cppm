@@ -29,6 +29,7 @@ module;
 
 #include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
+#include <hwy/cache_control.h>  // hwy::Prefetch (§11.3 permute-loop prefetch)
 
 #include "common.h"
 
@@ -682,10 +683,58 @@ template <MinimizerIndex IndexT>
     // is removed. Concatenation order is forward → reverse, which preserves
     // the original "ref_bits ascending" final order because the is_reverse
     // bit is the high bit of ref_bits.
+    //
+    // §11.1 / §11.2 master toggle. When `false` (the default on
+    // M1/NEON-128, bench-tuned), each construction-loop strand branch
+    // pushes a matching K32V32 inline so `sort_bucket`'s Tier-1 path
+    // can sort directly without re-reading `ref_bits`. When `true`
+    // (recommended on AVX-512 hosts), the inline push is skipped and
+    // `sort_bucket` instead invokes `pack_keys_simd_load_interleaved2`
+    // — which uses `hn::LoadInterleaved2` to read 8 u64 lanes at a
+    // time. **Both `kUseSimdPackKeys` references — here and in
+    // `sort_bucket` — must move together.** They are kept consistent
+    // by being declared `constexpr` in the same compilation unit, so
+    // the dead branch folds at compile time on either setting.
+    constexpr bool kUseSimdPackKeys = false;
+
     std::vector<Anchor> forward_anchors;
     std::vector<Anchor> reverse_anchors;
+    // Pre-pack K32V32 entries (key = ref_position [lo32 of ref_bits],
+    // value = bucket-local anchor index) inline with the anchor push so the
+    // sort phase can skip the second read of `ref_bits` (§11.1 of
+    // SORTING_PERFORMANCE_REPORT.md). The vectors stay 1:1 with their
+    // anchor companions: `forward_keys[i].value == i` (and likewise for
+    // reverse). Tier-1 sort consumes them directly; Tier-2 fallback
+    // (multi-reference bucket / N below threshold) ignores them. The
+    // wasted writes for those rare paths are cheap (~one scalar store
+    // per anchor). The K32V32 layout is `{value @ offset 0, key @ 4}`,
+    // so unsigned `(key<<32)|value` ordering matches the K32V32
+    // comparator's Compare1 / Compare which both shift out the value
+    // (`ShiftRight<32>`) before testing — i.e. the kernel sorts by the
+    // upper 32 bits only. **K32V32 VQSort is *not* stable on tied
+    // keys**: `OrderAscendingKV64` in `traits-inl.h` documents this
+    // explicitly. The tied-key cleanup pass below restores
+    // `query_bits`-ascending order within ref_position runs before the
+    // chain DP backtracking sees them — that pass exists precisely
+    // because the sort is unstable. Earlier comments here erroneously
+    // claimed a "value tiebreak" preserved input order; it does not.
+    //
+    // §11.2 of the report shipped a `pack_keys_simd_load_interleaved2`
+    // helper as a SIMD alternative (vld2q_u64-based), measured ~1-3%
+    // slower than this inline scalar push on M1/NEON-128 because NEON
+    // exposes only 2 u64 lanes per vector and the post-construction
+    // re-read of `ref_bits` is the hot work the inline path eliminates.
+    // The helper is kept in the sort scope below for AVX-512 hosts (8
+    // u64 lanes / vector — the regime where the SIMD pack actually
+    // wins); see `kUseSimdPackKeys` in `sort_bucket`.
+    std::vector<hwy::K32V32> forward_keys;
+    std::vector<hwy::K32V32> reverse_keys;
     forward_anchors.reserve(query_minimizers.size() * 2);
     reverse_anchors.reserve(query_minimizers.size() / 2);
+    if constexpr (!kUseSimdPackKeys) {
+        forward_keys.reserve(query_minimizers.size() * 2);
+        reverse_keys.reserve(query_minimizers.size() / 2);
+    }
 
     // Target-index lookup is the hot per-minimizer operation. We wrap the
     // whole loop (not each lookup) to avoid profiler overhead dominating
@@ -721,6 +770,12 @@ template <MinimizerIndex IndexT>
                 anchor.query.query_span = query_span_value;
                 anchor.query.flags = 0;
                 anchor.query.segment_id = 0;
+                if constexpr (!kUseSimdPackKeys) {
+                    hwy::K32V32 forward_key;
+                    forward_key.key = static_cast<uint32_t>(ref_position);
+                    forward_key.value = static_cast<uint32_t>(forward_anchors.size());
+                    forward_keys.push_back(forward_key);
+                }
                 forward_anchors.push_back(anchor);
             } else {
                 // Reverse strand hit
@@ -734,6 +789,12 @@ template <MinimizerIndex IndexT>
                 anchor.query.query_span = query_span_value;
                 anchor.query.flags = 0;
                 anchor.query.segment_id = 0;
+                if constexpr (!kUseSimdPackKeys) {
+                    hwy::K32V32 reverse_key;
+                    reverse_key.key = static_cast<uint32_t>(ref_position);
+                    reverse_key.value = static_cast<uint32_t>(reverse_anchors.size());
+                    reverse_keys.push_back(reverse_key);
+                }
                 reverse_anchors.push_back(anchor);
             }
         }
@@ -756,10 +817,11 @@ template <MinimizerIndex IndexT>
     //  call, branchless), so it dominates `std::sort`'s comparison-based
     //  pdqsort across the bench's [256, 100k]-key bucket size range. Then
     //  walk the sorted (key, value) pairs and gather Anchors back into
-    //  the bucket using `value` as the source index. Tied keys retain
-    //  the input order via the K32V32 unsigned-`>>32` comparator's
-    //  natural value tiebreak — that lets us recover (or close enough)
-    //  the chain-DP-relevant sub-ordering without a second sort pass.
+    //  the bucket using `value` as the source index. **The kernel is
+    //  NOT stable on tied keys** (`OrderAscendingKV64::Compare` shifts
+    //  out the value before comparing, see `traits-inl.h:444-447`),
+    //  so `query_bits`-ascending sub-ordering within ref_position
+    //  runs is restored by the explicit tied-key cleanup pass below.
     //
     //  Tier 2 (fallback — multi-reference bucket or very small N):
     //  std::sort on Anchor with the original (ref_bits, query_bits) lex
@@ -778,6 +840,76 @@ template <MinimizerIndex IndexT>
         return left.ref_bits < right.ref_bits
             || (left.ref_bits == right.ref_bits && left.query_bits < right.query_bits);
     };
+
+    // SIMD K32V32 pack helper (§11.2 of SORTING_PERFORMANCE_REPORT.md).
+    //
+    // Reads the AoS Anchor stream `Lanes(u64)` lanes at a time via
+    // `hn::LoadInterleaved2`, deinterleaving each pair of `(ref_bits,
+    // query_bits)` u64s into separate `v_ref` / `v_query` vectors. Then,
+    // entirely in-register:
+    //   - mask `v_ref` to the lo32 (= ref_position inside a single-
+    //     reference bucket, by the Tier-1 detector below);
+    //   - shift the masked value into the high half of a u64;
+    //   - OR with `hn::Iota(d, base_index)` to embed the bucket-local
+    //     index in the low half;
+    //   - store the resulting u64 vector into `keys`. The K32V32 LE
+    //     layout is `{value @ offset 0, key @ offset 4}`, so a u64 store
+    //     of `(key << 32) | value` produces a valid K32V32 pair.
+    //
+    // The construction loop above pushes only the Anchor and never reads
+    // `ref_bits` a second time (§11.1's "fold pack into lookup loop" goal
+    // is preserved — the second pass that 11.2 introduces is one
+    // streamed SIMD-friendly read instead of N scalar reads). LoadInterleaved2
+    // lowers to `vld2q_u64` on NEON-128 (one instruction, zero shuffle
+    // overhead), to four 32-byte gather-pairs on AVX-512, and to a
+    // generic emulation everywhere else; in every case it dominates the
+    // scalar `keys[i].key = bucket[i].ref_bits` loop we replace.
+    auto pack_keys_simd_load_interleaved2 = [](
+        const std::vector<Anchor>& bucket,
+        std::vector<hwy::K32V32>& keys)
+    {
+        const std::size_t bucket_count = bucket.size();
+        keys.resize(bucket_count);
+        if (bucket_count == 0) {
+            return;
+        }
+
+        const hn::ScalableTag<std::uint64_t> tag_u64;
+        const std::size_t lane_count = hn::Lanes(tag_u64);
+        const auto v_mask_lo32 =
+            hn::Set(tag_u64, static_cast<std::uint64_t>(0xFFFFFFFFull));
+
+        const std::uint64_t* HWY_RESTRICT in_ptr =
+            reinterpret_cast<const std::uint64_t*>(bucket.data());
+        std::uint64_t* HWY_RESTRICT out_ptr =
+            reinterpret_cast<std::uint64_t*>(keys.data());
+
+        std::size_t anchor_idx = 0;
+        for (; anchor_idx + lane_count <= bucket_count; anchor_idx += lane_count) {
+            hn::Vec<decltype(tag_u64)> v_ref;
+            hn::Vec<decltype(tag_u64)> v_query;
+            hn::LoadInterleaved2(tag_u64, in_ptr + 2 * anchor_idx,
+                                 v_ref, v_query);
+
+            const auto v_ref_lo32 = hn::And(v_ref, v_mask_lo32);
+            const auto v_key_high = hn::ShiftLeft<32>(v_ref_lo32);
+            const auto v_iota_idx =
+                hn::Iota(tag_u64, static_cast<std::uint64_t>(anchor_idx));
+            const auto v_packed_kv = hn::Or(v_key_high, v_iota_idx);
+            hn::StoreU(v_packed_kv, tag_u64, out_ptr + anchor_idx);
+        }
+
+        // Scalar tail for the trailing `< lane_count` anchors that the
+        // SIMD body did not consume. Same arithmetic, just one element
+        // at a time.
+        for (; anchor_idx < bucket_count; ++anchor_idx) {
+            keys[anchor_idx].key =
+                static_cast<std::uint32_t>(bucket[anchor_idx].ref_bits);
+            keys[anchor_idx].value =
+                static_cast<std::uint32_t>(anchor_idx);
+        }
+    };
+
     // Below this N, `std::sort` on a 16 B Anchor beats a K32V32 pack +
     // VQSort + permute round-trip. Picked empirically: at N=8 the
     // pack/sort/permute touches 8×(8+16+16) = 320 B which fits in one
@@ -786,7 +918,8 @@ template <MinimizerIndex IndexT>
     // small buckets (~1-50 anchors, common at the SHORT length bucket)
     // still take the std::sort path.
     constexpr std::size_t k32v32_min_n = 64;
-    auto sort_bucket = [&](std::vector<Anchor>& bucket) {
+    auto sort_bucket = [&](std::vector<Anchor>& bucket,
+                           std::vector<hwy::K32V32>& sort_keys) {
         const std::size_t bucket_count = bucket.size();
         if (bucket_count < 2) {
             return;
@@ -819,20 +952,23 @@ template <MinimizerIndex IndexT>
             return;
         }
 
-        // Tier-1 path. Pack into K32V32 with the bucket-local index as
-        // the value so we can permute Anchors back without an extra
-        // index array. We tried `thread_local` reuse for the sort_keys
-        // and reordered buffers; the TLS access wrapper on
-        // macos/clang+arm64 added ~1 % to the hot loop and the
-        // allocator (jemalloc / system free-list) reuses these
-        // mid-megabyte allocations efficiently anyway, so the local
-        // `std::vector` is the clearer formulation.
-        std::vector<hwy::K32V32> sort_keys(bucket_count);
-        for (std::size_t anchor_idx = 0; anchor_idx < bucket_count; ++anchor_idx) {
-            sort_keys[anchor_idx].key   =
-                static_cast<std::uint32_t>(bucket[anchor_idx].ref_bits);
-            sort_keys[anchor_idx].value =
-                static_cast<std::uint32_t>(anchor_idx);
+        // Tier-1 path. Default: consume the K32V32 entries that the
+        // construction loop pre-packed (§11.1) — bench-measured to be
+        // ~1-3% faster than the SIMD pack alternative on M1/NEON-128
+        // because NEON exposes only 2 u64 lanes per vector and the
+        // construction-time scalar push is already in cache.
+        //
+        // The function-scope `kUseSimdPackKeys` constexpr flips the
+        // path to call `pack_keys_simd_load_interleaved2` (§11.2 of
+        // the report) at sort time, rebuilding the keys via
+        // `hn::LoadInterleaved2` from the finalized Anchor array. The
+        // SIMD path is the win on AVX-512 hosts (8 u64 lanes per
+        // vector) and any future target where the scalar inline push
+        // contention dominates. The construction loop above is gated
+        // on the same flag, so when SIMD pack is active it is the only
+        // producer of the K32V32 array (no wasted scalar writes).
+        if constexpr (kUseSimdPackKeys) {
+            pack_keys_simd_load_interleaved2(bucket, sort_keys);
         }
         bioseq::simd::sorting::sort_k32v32_ascending(
             sort_keys.data(), bucket_count);
@@ -840,8 +976,51 @@ template <MinimizerIndex IndexT>
         // Permute Anchors via the sorted value column. We allocate a
         // contiguous output buffer once and gather; `bucket = std::move(out)`
         // lets the original bucket storage be reused on the next call.
+        //
+        // The gather is to unpredictable bucket offsets — the sorted
+        // `value` column is by construction a permutation, so consecutive
+        // `out_idx` values pull from non-adjacent cache lines. On M1/NEON
+        // the bucket fits in L2 (50 k × 16 B = 800 KiB ≪ 12 MiB L2) but
+        // each access still misses L1 and pays ~10 cycles of L2 latency
+        // per anchor. §11.3 of SORTING_PERFORMANCE_REPORT.md prescribes
+        // a `hwy::Prefetch` at distance 32 — the M1 P-core's sustained-
+        // loop budget hides L2 latency at that depth. Highway's
+        // `Prefetch` lowers to `__builtin_prefetch(p, 0, 3)` on
+        // clang/GCC (keep in caches) and `_mm_prefetch(_MM_HINT_T0)` on
+        // x86, so this is target-portable.
+        //
+        // We deliberately do NOT prefetch `sort_keys[pf_idx]` itself: the
+        // sort_keys array is read sequentially in this loop and the M1
+        // hardware stream prefetcher already keeps it ahead of the load
+        // pointer. A redundant `Prefetch(&sort_keys[pf_idx])` only adds
+        // a TLB-port competing access without further benefit, and was
+        // bench-measured to regress VERY_LONG / XL buckets by ~2-4 %.
+        // The single bucket-prefetch below is the right shape: the
+        // sort_keys load that computes the prefetch address is already
+        // in L1 by the time it's needed (hardware-prefetched), so this
+        // is a clean indirect-prefetch.
+        //
+        // `kUsePermutePrefetch` is the §11.3 master toggle. Default
+        // **off** on M1/NEON-128: the M1 P-core's hardware stream and
+        // indirect prefetchers already keep the gather addresses warm
+        // for our 50 k–500 k anchor range (bucket is L2-resident,
+        // 800 KiB ≪ 12 MiB L2), and bench measurement on the LONG /
+        // VL / XL grid shows the explicit prefetch lands inside the
+        // ±1–3 % run-to-run noise floor with a slight VL/XL bias
+        // toward regression (TLB-port contention with the actual
+        // gather load). On x86 hosts where the indirect prefetcher is
+        // weaker, flip to `true` and re-measure — the report's
+        // expected savings (~50–100 µs / VL call) live in that regime.
+        constexpr bool kUsePermutePrefetch = false;
+        constexpr std::size_t kPermutePrefetchDistance = 32;
         std::vector<Anchor> reordered(bucket_count);
         for (std::size_t out_idx = 0; out_idx < bucket_count; ++out_idx) {
+            if constexpr (kUsePermutePrefetch) {
+                const std::size_t pf_idx = out_idx + kPermutePrefetchDistance;
+                if (pf_idx < bucket_count) [[likely]] {
+                    hwy::Prefetch(&bucket[sort_keys[pf_idx].value]);
+                }
+            }
             reordered[out_idx] = bucket[sort_keys[out_idx].value];
         }
 
@@ -874,8 +1053,8 @@ template <MinimizerIndex IndexT>
         }
         bucket = std::move(reordered);
     };
-    sort_bucket(forward_anchors);
-    sort_bucket(reverse_anchors);
+    sort_bucket(forward_anchors, forward_keys);
+    sort_bucket(reverse_anchors, reverse_keys);
     }  // end collect_seed_hits_sort scope
 
     // Concatenate: forward (is_reverse=0) bucket first, reverse bucket
