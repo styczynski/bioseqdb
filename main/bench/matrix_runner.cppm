@@ -800,6 +800,14 @@ inline void run_one_pair_samples(
     push_minimap2("minimap2 (DP chaining)", ChainingAlgorithmType::SCALAR_MM2);
     push_minimap2("minimap2 (RMQ chaining)", ChainingAlgorithmType::RMQ);
 
+    auto minimizer_short_label = [](MinimizerAlgorithmType minimizer) {
+        switch (minimizer) {
+            case MinimizerAlgorithmType::SCALAR:             return "scalar-mm";
+            case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW: return "SIMD-minimap2-slow-mm";
+            case MinimizerAlgorithmType::TWO_STACK_NTHASH:   return "two-stack-nthash-mm";
+        }
+        return "?-mm";
+    };
     auto push_bioseq = [&](
         BaseAlignmentAlgorithmType aligner,
         ChainingAlgorithmType chaining,
@@ -816,36 +824,30 @@ inline void run_one_pair_samples(
             + (chaining == ChainingAlgorithmType::SCALAR_MM2 ? "scalar-DP"
                : chaining == ChainingAlgorithmType::SIMD_MM2 ? "SIMD-DP" : "RMQ")
             + " + "
-            + (minimizer == MinimizerAlgorithmType::SIMD ? "SIMD-mm" : "scalar-mm");
+            + minimizer_short_label(minimizer);
         grid.push_back(std::move(cfg));
     };
 
+    // Scalar / RMQ chaining only support scalar minimizers in the
+    // production build (the SIMD minimizer collectors target the SIMD-DP
+    // chain output specifically). Iterate the scalar/RMQ chains with
+    // SCALAR-mm only; the SIMD-DP chain gets all three minimizer
+    // variants so the SIMD vs scalar minimizer comparison is captured.
     for (auto aligner : {BaseAlignmentAlgorithmType::KSW2,
                          BaseAlignmentAlgorithmType::BLOCK_ALIGNER}) {
         for (auto chaining : {ChainingAlgorithmType::SCALAR_MM2,
-                              ChainingAlgorithmType::SIMD_MM2,
                               ChainingAlgorithmType::RMQ}) {
-            for (auto minimizer : {MinimizerAlgorithmType::SCALAR,
-                                   MinimizerAlgorithmType::SIMD}) {
-                push_bioseq(aligner, chaining, minimizer);
-            }
+            push_bioseq(aligner, chaining, MinimizerAlgorithmType::SCALAR);
         }
-    }
-    // The "fastest" bioseq config (KSW2 + SIMD-DP + two-stack-mm) is the
-    // V4 candidate currently being tuned to beat scalar-mm by ≥10 %. Add
-    // it once at the end so it appears in every chart that pivots on
-    // algorithm without bloating the grid into the full 18-row Cartesian.
-    // The two-stack collector is implemented in
-    // `kmers/two_stacks_minimizers.cppm` and dispatched in
-    // `minimap_port.cppm` via `MinimizerAlgorithmType::TWO_STACK`.
-    {
-        AlgorithmConfig cfg;
-        cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-mm";
-        cfg.is_minimap2_reference        = false;
-        cfg.chaining_algorithm           = ChainingAlgorithmType::SIMD_MM2;
-        cfg.base_alignment_algorithm     = BaseAlignmentAlgorithmType::KSW2;
-        cfg.minimizer_algorithm          = MinimizerAlgorithmType::TWO_STACK;
-        grid.push_back(std::move(cfg));
+        // SIMD-DP chain: scalar baseline, slow-SIMD legacy, and the
+        // production two-stack-nthash collector. The latter is the row
+        // we expect to be the fastest bioseq config across every length
+        // bucket (see RESEARCH/ENGINEERING_REPORT_V2.md).
+        for (auto minimizer : {MinimizerAlgorithmType::SCALAR,
+                               MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW,
+                               MinimizerAlgorithmType::TWO_STACK_NTHASH}) {
+            push_bioseq(aligner, ChainingAlgorithmType::SIMD_MM2, minimizer);
+        }
     }
     return grid;
 }

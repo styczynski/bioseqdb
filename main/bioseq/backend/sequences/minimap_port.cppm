@@ -96,12 +96,6 @@ enum class ChainingAlgorithmType : uint8_t {
     SCALAR_MM2 = 0,
     SIMD_MM2   = 1,
     RMQ        = 2,
-    /// V2 SIMD chaining — same algorithm as SIMD_MM2 but the inner
-    /// predecessor-scan loop is manually unrolled by 2 with two
-    /// independent reduction streams (interleaved at instruction level)
-    /// to widen ILP for the M1 NEON pipes. Implemented as
-    /// `chain_anchors_simd_v2` in `chaining/chaining_simd.cppm`.
-    SIMD_MM2_V2 = 3,
 };
 
 /// Base-level alignment algorithm — KSW2 dual-affine DP (minimap2 default)
@@ -112,49 +106,34 @@ enum class BaseAlignmentAlgorithmType : uint8_t {
     BLOCK_ALIGNER = 1,
 };
 
-/// Minimizer-extraction algorithm — scalar `collect_minimizers` (the
-/// default, used for backwards compatibility with the test reference
-/// output) vs the Highway-vectorised `collect_minimizers_simd`. Selected
-/// at runtime; the `minimap_port` entry point dispatches on this enum
-/// with a runtime branch (cannot use constexpr-if because both paths
-/// instantiate the same templates, just with the simd_hash vs
-/// scalar_hash inner type, and the kmer index module's `requires`
-/// clauses already enforce the correct concept).
+/// Minimizer-extraction algorithm. Selected at runtime; the
+/// `minimap_port` entry point dispatches on this enum with a runtime
+/// branch (cannot use constexpr-if because both paths instantiate the
+/// same templates, just with the simd_hash vs scalar_hash inner type,
+/// and the kmer index module's `requires` clauses already enforce the
+/// correct concept).
 enum class MinimizerAlgorithmType : uint8_t {
+    /// Scalar `collect_minimizers` — the original reference path,
+    /// used for backwards compatibility with the test reference
+    /// output documented in CODE_GUIDELINES.md §9.
     SCALAR = 0,
-    SIMD   = 1,
-    /// Two-stack / prefix-suffix-min sliding-window collector mirroring
-    /// the SIMD-Minimizers paper. Implemented in
+    /// Original Highway-vectorised collector (`collect_minimizers_simd`).
+    /// Branchless SIMDification of minimap2's running-min + per-step
+    /// rescan loop. Kept around as a slow reference point — it has
+    /// been measured to be slower than the scalar baseline on the
+    /// VERY_LONG / XL benchmark buckets because the rescan fires
+    /// whenever ANY lane's saved min slides off the window, which is
+    /// `Lanes(d)` times more frequent than the scalar branch.
+    SIMD_MINIMAP2_SLOW = 1,
+    /// Production minimizer collector. Two-stack / prefix-suffix-min
+    /// sliding-window with dual-stream interleaved per-step body
+    /// (mirrors the SIMD-Minimizers paper) and ntHash-style mix +
+    /// deferred minimap_int scramble. Implemented in
     /// `kmers/two_stacks_minimizers.cppm` as
-    /// `collect_minimizers_two_stack_simd`.
-    TWO_STACK = 2,
-    /// V9 two-stack with hand-inlined matrix iteration (bypasses the
-    /// `iterate_sequence_bp_simd_offsets` lambda capture so the ring
-    /// buffer arrays stay in NEON registers across iterations).
-    /// Implemented as `collect_minimizers_two_stack_nthash_simd`.
-    TWO_STACK_NTHASH = 3,
-    /// V11 dual-stream two-stack: same hash + ring layout as V9, but
-    /// splits the input into 2 × Lanes(d) chunks (8 on NEON 128-bit)
-    /// and runs two independent 4-lane streams interleaved at the
-    /// instruction level. Gives the M1 NEON pipes 2× ILP per logical
-    /// step. Implemented as `collect_minimizers_two_stack_nthash_v2_simd`.
-    TWO_STACK_NTHASH_V2 = 4,
-    /// V12 = V11 with the per-step body extracted from a captured-by-
-    /// reference lambda into a templated free function. The lambda in V11
-    /// was being lowered as a `bl`-call at -O3 despite `[[gnu::always_inline]]`,
-    /// spilling all per-step state through the stack at every BP. V12
-    /// inlines reliably (free function + `[[gnu::flatten]]` on the impl)
-    /// and additionally drops palindrome detection (-3 SIMD ops per
-    /// pair-step). Implemented as `collect_minimizers_two_stack_nthash_v3_simd`.
-    TWO_STACK_NTHASH_V3 = 5,
-    /// V14 = V13 chassis + canonical ntHash (true ntHash via byte-indexed
-    /// `hn::Lookup8` lookups for f(c) and rolling cyclic XOR / rotate
-    /// updates) for the ordering hash. Replaces V13's `(lex × golden) &
-    /// hash_kmer_mask` to remove the AT-bias `collect_seed_hits`
-    /// regression observed in V13. Same elem encoding (lex emit kmer
-    /// unchanged, hash high bits + pos low bits), so target_index
-    /// keys remain the scrambled lex kmer.
-    TWO_STACK_NTHASH_V4 = 6,
+    /// `collect_minimizers_two_stack_nthash_simd`. See
+    /// RESEARCH/ENGINEERING_REPORT_V2.md for the full evolution
+    /// history (was TWO_STACK_NTHASH_V3 in the iteration log).
+    TWO_STACK_NTHASH = 2,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -162,7 +141,6 @@ enum class MinimizerAlgorithmType : uint8_t {
         case ChainingAlgorithmType::SCALAR_MM2: return "Minimap2 Scalar";
         case ChainingAlgorithmType::SIMD_MM2:   return "Minimap2 SIMD";
         case ChainingAlgorithmType::RMQ:        return "Minimap2 RMQ";
-        case ChainingAlgorithmType::SIMD_MM2_V2: return "Minimap2 SIMD V2 (dual-batch unrolled)";
     }
     return "unknown";
 }
@@ -177,13 +155,9 @@ enum class MinimizerAlgorithmType : uint8_t {
 
 [[nodiscard]] constexpr const char* minimizer_algorithm_name(MinimizerAlgorithmType mode) {
     switch (mode) {
-        case MinimizerAlgorithmType::SCALAR:           return "Scalar Minimizers";
-        case MinimizerAlgorithmType::SIMD:             return "SIMD Minimizers";
-        case MinimizerAlgorithmType::TWO_STACK:        return "Two-Stack SIMD Minimizers";
-        case MinimizerAlgorithmType::TWO_STACK_NTHASH: return "Two-Stack nthash SIMD Minimizers";
-        case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2: return "Two-Stack nthash SIMD V2 (dual-stream)";
-        case MinimizerAlgorithmType::TWO_STACK_NTHASH_V3: return "Two-Stack nthash SIMD V3 (inlined body, no palindrome)";
-        case MinimizerAlgorithmType::TWO_STACK_NTHASH_V4: return "Two-Stack nthash SIMD V4 (canonical ntHash via Lookup8)";
+        case MinimizerAlgorithmType::SCALAR:             return "Scalar Minimizers";
+        case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW: return "SIMD Minimap2 (slow reference)";
+        case MinimizerAlgorithmType::TWO_STACK_NTHASH:   return "Two-Stack nthash SIMD Minimizers";
     }
     return "unknown";
 }
@@ -293,7 +267,6 @@ struct Minimap2Params {
         cp.chain_skip_scale = chain_skip_scale;
         switch (chaining_algorithm) {
             case ChainingAlgorithmType::SIMD_MM2:   cp.chaining_mode = ChainingMode::SIMD_DP; break;
-            case ChainingAlgorithmType::SIMD_MM2_V2: cp.chaining_mode = ChainingMode::SIMD_DP; break;
             case ChainingAlgorithmType::RMQ:        cp.chaining_mode = ChainingMode::RMQ;     break;
             case ChainingAlgorithmType::SCALAR_MM2:
             default:                                cp.chaining_mode = ChainingMode::SCALAR_DP; break;
@@ -2127,11 +2100,6 @@ template<
                         BaseAlignmentAlgorithmType::KSW2,
                         ChainingAlgorithmType::SIMD_MM2>(
                         query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-                case ChainingAlgorithmType::SIMD_MM2_V2:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::SIMD_MM2_V2>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
                 case ChainingAlgorithmType::RMQ:
                     return minimap2_port_with_index_impl<
                         BaseAlignmentAlgorithmType::KSW2,
@@ -2151,11 +2119,6 @@ template<
                     return minimap2_port_with_index_impl<
                         BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
                         ChainingAlgorithmType::SIMD_MM2>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-                case ChainingAlgorithmType::SIMD_MM2_V2:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::SIMD_MM2_V2>(
                         query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
                 case ChainingAlgorithmType::RMQ:
                     return minimap2_port_with_index_impl<
@@ -2244,8 +2207,6 @@ template<
     {
         if constexpr (chaining_algorithm == ChainingAlgorithmType::SIMD_MM2) {
             return chain_anchors_simd(anchors, chaining_params);
-        } else if constexpr (chaining_algorithm == ChainingAlgorithmType::SIMD_MM2_V2) {
-            return chain_anchors_simd_v2(anchors, chaining_params);
         } else if constexpr (chaining_algorithm == ChainingAlgorithmType::RMQ) {
             return chain_anchors_rmq(anchors, chaining_params);
         } else {
@@ -2405,38 +2366,14 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
         target_collector.reserve(target_seq.bp_size() / std::max<size_t>(w, 1) + 64);
         switch (params.minimizer_algorithm) {
-            case MinimizerAlgorithmType::SIMD:
+            case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
                 collect_minimizers_simd<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK:
-                collect_minimizers_two_stack_simd<minimap_int_hasher>(
                     target_collector, target_seq,
                     target_seq.begin(), target_seq.end(),
                     w, k);
                 break;
             case MinimizerAlgorithmType::TWO_STACK_NTHASH:
                 collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2:
-                collect_minimizers_two_stack_nthash_v2_simd<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V3:
-                collect_minimizers_two_stack_nthash_v3_simd<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V4:
-                collect_minimizers_two_stack_nthash_v4_simd<minimap_int_hasher>(
                     target_collector, target_seq,
                     target_seq.begin(), target_seq.end(),
                     w, k);
@@ -2461,38 +2398,14 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
         auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
         query_collector.reserve(query_seq.bp_size() / std::max<size_t>(w, 1) + 64);
         switch (params.minimizer_algorithm) {
-            case MinimizerAlgorithmType::SIMD:
+            case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
                 collect_minimizers_simd<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK:
-                collect_minimizers_two_stack_simd<minimap_int_hasher>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     w, k);
                 break;
             case MinimizerAlgorithmType::TWO_STACK_NTHASH:
                 collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V2:
-                collect_minimizers_two_stack_nthash_v2_simd<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V3:
-                collect_minimizers_two_stack_nthash_v3_simd<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH_V4:
-                collect_minimizers_two_stack_nthash_v4_simd<minimap_int_hasher>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     w, k);
