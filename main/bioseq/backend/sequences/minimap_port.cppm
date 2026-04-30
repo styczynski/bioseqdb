@@ -62,6 +62,7 @@ import bioseq_sequences.chaining.utils;
 import bioseq_sequences.chaining.scalar;
 import bioseq_sequences.chaining.simd;
 import bioseq_sequences.chaining.rmq;
+import bioseq_simd.sorting;
 import context;
 import bioseq_instr;
 
@@ -725,16 +726,42 @@ template <MinimizerIndex IndexT>
     }
     }  // end target_index_lookup scope
 
-    // Sort by reference position (ref_bits field), same as radix_sort_128x
+    // Sort by reference position (ref_bits field), same as radix_sort_128x.
+    //
+    // We pack each Anchor into a transient `hwy::uint128_t` array with
+    // (lo = query_bits, hi = ref_bits) — the layout `Lt128` expects
+    // (primary key in the upper 64-bit lane). VQSort then yields the same
+    // (ref_bits, query_bits) ascending order as the std::sort lambda
+    // would. Below the ~6 400-key cutover we keep std::sort: the per-call
+    // VQSort overhead (TLS RNG init + 9-chunk pivot sample) absorbs the
+    // asymptotic win on small inputs.
     {
     static const auto* _sort_desc =
         bioseq::instr::register_region_static("collect_seed_hits_sort");
     auto _sort_scope = bioseq::instr::region(_sort_desc);
-    std::sort(anchors.begin(), anchors.end(),
-              [](const Anchor& left, const Anchor& right) {
-                  return left.ref_bits < right.ref_bits
-                      || (left.ref_bits == right.ref_bits && left.query_bits < right.query_bits);
-              });
+    constexpr std::size_t anchor_vqsort_threshold =
+        bioseq::simd::sorting::vqsort_threshold_keys<hwy::uint128_t>;
+    if (anchors.size() < anchor_vqsort_threshold) [[likely]] {
+        std::sort(anchors.begin(), anchors.end(),
+                  [](const Anchor& left, const Anchor& right) {
+                      return left.ref_bits < right.ref_bits
+                          || (left.ref_bits == right.ref_bits && left.query_bits < right.query_bits);
+                  });
+    } else {
+        const std::size_t anchor_count_local = anchors.size();
+        std::vector<hwy::uint128_t> sort_keys(anchor_count_local);
+        for (std::size_t anchor_idx = 0; anchor_idx < anchor_count_local; ++anchor_idx) {
+            // Lt128 reads `hi` first → put the primary key (ref_bits) in `hi`.
+            sort_keys[anchor_idx].lo = anchors[anchor_idx].query_bits;
+            sort_keys[anchor_idx].hi = anchors[anchor_idx].ref_bits;
+        }
+        bioseq::simd::sorting::sort_u128_ascending(
+            sort_keys.data(), sort_keys.size());
+        for (std::size_t anchor_idx = 0; anchor_idx < anchor_count_local; ++anchor_idx) {
+            anchors[anchor_idx].query_bits = sort_keys[anchor_idx].lo;
+            anchors[anchor_idx].ref_bits   = sort_keys[anchor_idx].hi;
+        }
+    }
     }  // end collect_seed_hits_sort scope
 
     JustLog("[minimap_port] Collected {} seed anchors from {} query minimizers",
@@ -859,9 +886,36 @@ void set_region_coordinates(
         return {};
     }
 
-    // Sort chains by score descending
-    std::sort(chains.begin(), chains.end(),
-              [](const Chain& left, const Chain& right) { return left.score > right.score; });
+    // Sort chains by score descending. Chain N is small (50–500 in the
+    // bench corpus) so the threshold gate keeps std::sort permanently for
+    // the production workload; the VQSort K32V32 path is wired in for
+    // synthetic / future-large workloads. Sign-bias the int32 score by
+    // XOR-flipping the sign bit (`^ 0x80000000u`) so Highway's
+    // unsigned-`>>32` comparator matches the intended descending-signed
+    // order. The XOR form avoids signed-arithmetic UB and is self-inverse.
+    {
+    constexpr std::size_t chain_vqsort_threshold =
+        bioseq::simd::sorting::vqsort_threshold_keys<hwy::K32V32>;
+    if (chains.size() < chain_vqsort_threshold) [[likely]] {
+        std::sort(chains.begin(), chains.end(),
+                  [](const Chain& left, const Chain& right) { return left.score > right.score; });
+    } else {
+        const std::size_t chain_count_local = chains.size();
+        std::vector<hwy::K32V32> chain_kv(chain_count_local);
+        for (std::uint32_t chain_idx = 0; chain_idx < chain_count_local; ++chain_idx) {
+            const std::uint32_t score_biased =
+                static_cast<std::uint32_t>(chains[chain_idx].score) ^ 0x80000000u;
+            chain_kv[chain_idx].key   = score_biased;
+            chain_kv[chain_idx].value = chain_idx;
+        }
+        bioseq::simd::sorting::sort_k32v32_descending(chain_kv.data(), chain_count_local);
+        std::vector<Chain> chains_reordered(chain_count_local);
+        for (std::size_t out_idx = 0; out_idx < chain_count_local; ++out_idx) {
+            chains_reordered[out_idx] = chains[chain_kv[out_idx].value];
+        }
+        chains = std::move(chains_reordered);
+    }
+    }
 
     std::vector<AlignRegion> regions(chains.size());
     for (size_t region_idx = 0; region_idx < chains.size(); ++region_idx) {
@@ -955,7 +1009,20 @@ void classify_primary_secondary(
         }
 
         if (!coverage_intervals.empty()) {
-            std::sort(coverage_intervals.begin(), coverage_intervals.end());
+            // Per the SIMD-sort report §3.3 the per-call N is typically 1-10
+            // (one entry per primary alignment), well below the 12 800-key
+            // VQSort cutover. The threshold gate is wired so synthetic
+            // workloads with hundreds of primaries fall through to VQSort
+            // automatically; for the bench corpus we always take the
+            // std::sort branch and the cost of the gate is one compare.
+            constexpr std::size_t coverage_vqsort_threshold =
+                bioseq::simd::sorting::vqsort_threshold_keys<std::uint64_t>;
+            if (coverage_intervals.size() < coverage_vqsort_threshold) [[likely]] {
+                std::sort(coverage_intervals.begin(), coverage_intervals.end());
+            } else {
+                bioseq::simd::sorting::sort_u64_ascending(
+                    coverage_intervals.data(), coverage_intervals.size());
+            }
             int32_t coverage_pos = current_query_start;
             for (const uint64_t interval : coverage_intervals) {
                 const int32_t interval_start = static_cast<int32_t>(interval >> 32);
