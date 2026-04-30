@@ -2187,18 +2187,17 @@ inline void emit_report(JsonWriter& writer) {
         }
 
         // Determine which bioseq configs to highlight in the bar chart.
-        // The user's V4 task is to make two-stack-mm fast — but until
-        // it actually wins, we want both the V4 iteration target *and*
-        // the current fastest bioseq config to show up beside minimap2,
-        // so the reader can see whether the iteration is closing the
-        // gap. We emit:
+        // The production minimizer (the dual-stream two-stack nthash
+        // collector) is exposed under
+        // `bioseq KSW2 + SIMD-DP + two-stack-nthash-mm`. We emit:
         //   1. minimap2 (DP chaining) — the canonical baseline
         //   2. The "fastest bioseq" (lowest total wall-clock among
         //      bioseq variants in the report). This is the practical
         //      "best we have today" for the largest bucket.
-        //   3. The V4 target (`bioseq KSW2 + SIMD-DP + two-stack-mm`)
-        //      whenever it's in the report. May coincide with #2; in
-        //      that case the bar chart de-dups so #3 is suppressed.
+        //   3. The production target
+        //      (`bioseq KSW2 + SIMD-DP + two-stack-nthash-mm`) whenever
+        //      it's in the report. May coincide with #2; in that case
+        //      the bar chart de-dups so #3 is suppressed.
         auto total_ns_for_algo = [&](const std::string& algo) {
             double total = 0.0;
             for (const auto& stage : kLogicalStages) {
@@ -2218,8 +2217,8 @@ inline void emit_report(JsonWriter& writer) {
                 }
             }
         }
-        const std::string two_stack_label = "bioseq KSW2 + SIMD-DP + two-stack-mm";
-        const bool v4_present = per_algo_phase.contains(two_stack_label);
+        const std::string two_stack_label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-mm";
+        const bool production_present = per_algo_phase.contains(two_stack_label);
 
         // ---- Chart: per-stage time bar chart (bioseq fastest vs minimap2 DP)
         const std::string headline_chart_id =
@@ -2270,17 +2269,17 @@ inline void emit_report(JsonWriter& writer) {
                     writer.kv_double_array("y", algo_stage_ms(fastest_bioseq_label));
                     writer.end_object();
                 }
-                // Bar 3: the V4 target (two-stack) — only when present
-                // in the report and not already represented as the
-                // "fastest bioseq" bar above. Letting the user see the
-                // V4 candidate beside the canonical fastest bar makes
-                // it obvious whether the iteration loop has closed the
-                // gap to minimap2 (and to the scalar-mm baseline).
-                if (v4_present && fastest_bioseq_label != two_stack_label) {
+                // Bar 3: the production target (two-stack nthash) —
+                // only when present in the report and not already
+                // represented as the "fastest bioseq" bar above. Showing
+                // the production candidate beside the canonical fastest
+                // bar makes it obvious whether the production minimizer
+                // is in fact winning across stages.
+                if (production_present && fastest_bioseq_label != two_stack_label) {
                     writer.begin_object();
                     writer.kv_string("type", "bar");
                     writer.kv_string("name",
-                        fmt::format("V4 target: {}", two_stack_label));
+                        fmt::format("production: {}", two_stack_label));
                     writer.kv_string_array("x", stage_names);
                     writer.kv_double_array("y", algo_stage_ms(two_stack_label));
                     writer.end_object();
@@ -2368,9 +2367,11 @@ inline void emit_report(JsonWriter& writer) {
             "Same shape as the cycles chart but Y is mean branch-"
             "mispredict counter per call. The bigger the bar, the more "
             "the stage is hurt by branch prediction noise. SIMD code "
-            "with horizontal mask reductions (e.g. SIMD-mm) typically "
-            "shows up as taller bars than its scalar peers — that is the "
-            "exact bottleneck the V4 two-stack rewrite is trying to fix.",
+            "with horizontal mask reductions (e.g. the slow legacy "
+            "SIMD-mm) typically shows up as taller bars than its scalar "
+            "peers — the production two-stack-nthash path mostly avoids "
+            "this by using a uniform per-w rebuild instead of a "
+            "data-dependent rescan.",
             "mean branch mispredicts / call",
             4, 1.0);
         // Branch miss rate (branch_misses / branches) per stage. Useful

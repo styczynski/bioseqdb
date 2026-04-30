@@ -123,19 +123,19 @@ fi
 
 if has_token bench-long; then
     # Iteration sweep — LONG / VERY_LONG / XL buckets for the
-    # optimisation-target configs (minimap2 DP, bioseq scalar, bioseq SIMD,
-    # plus all two-stack SIMD-mm variants). The tag now lives without a
-    # leading dot so the case is also part of the default `bench` run.
+    # production grid: minimap2 DP, bioseq scalar, bioseq SIMD-minimap2-slow,
+    # bioseq production two-stack-nthash. The tag has no leading dot
+    # so the case is also part of the default `bench` run.
     BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-long.json}" \
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
         "[quick-long-sequence-benchmark]"
 fi
 
 if has_token bench-two-stack; then
-    # Focused two-stack iteration sweep — VERY_LONG + XL only for the
-    # scalar / SIMD / two-stack-mm grid. Same as before but the case tag
-    # is now `[quick-long-sequence-benchmark-two-stack]` (no leading
-    # dot) so the case is also picked up by the default `bench` run.
+    # Focused two-stack iteration sweep — VERY_LONG + XL only on the
+    # scalar / SIMD-slow / two-stack-nthash grid. Same as before but
+    # without the leading-dot tag so the case is picked up by the default
+    # `bench` run too.
     BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-two-stack.json}" \
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
         "[quick-long-sequence-benchmark-two-stack]"
