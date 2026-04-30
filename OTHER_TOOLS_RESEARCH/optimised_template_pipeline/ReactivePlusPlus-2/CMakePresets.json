@@ -1,0 +1,381 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "cmake-pedantic",
+      "hidden": true,
+      "warnings": {
+        "dev": true,
+        "deprecated": true,
+        "uninitialized": true,
+        "unusedCli": true,
+        "systemVars": false
+      },
+      "errors": {
+        "dev": false,
+        "deprecated": false
+      }
+    },
+    {
+      "name": "ci-flags",
+      "hidden" : true,
+      "inherits" : "cmake-pedantic",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS" : "ON",
+        "CMAKE_CXX_EXTENSIONS": "OFF",
+        "CMAKE_CXX_STANDARD": "20",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "RPP_DEVELOPER_MODE": "ON",
+        "CMAKE_POLICY_VERSION_MINIMUM": "3.5"
+      }
+    },
+    {
+      "name": "flags-unix",
+      "inherits" : ["ci-flags"],
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fno-rtti -Wall -Werror -Wextra -Wpedantic -Wcast-qual -Wformat=2 -Wundef -Werror=float-equal -Wno-gnu-zero-variadic-macro-arguments -Wno-error=maybe-uninitialized -Wno-error=uninitialized -Wno-unknown-warning-option -Wno-missing-template-arg-list-after-template-kw"
+      }
+    },
+    {
+      "name": "flags-windows",
+      "description": "Note that all the flags after /W4 are required for MSVC to conform to the language standard",
+      "inherits" : ["ci-flags"],
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "/utf-8 /W4 /permissive- /volatile:iso /Zc:preprocessor /EHsc /Zc:__cplusplus /Zc:externConstexpr /Zc:throwingNew /bigobj /GR-"
+      }
+    },
+    {
+      "name": "ci-unix",
+      "generator": "Unix Makefiles",
+      "hidden": true,
+      "inherits": ["flags-unix"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "ci-win64",
+      "inherits": ["flags-windows"],
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "hidden": true
+    },
+
+
+
+    {
+      "name": "cppcheck",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_CPPCHECK": "cppcheck;--inline-suppr;--std=c++20;--enable=all;--suppressions-list=${sourceDir}/cppcheck.supp"
+      }
+    },
+    {
+      "name": "clang-tidy",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_CXX_CLANG_TIDY": "clang-tidy;-header-filter=${sourceDir}/src/.*;-checks=-*,bugprone-*,concurrency-*,performance-*,-macro*,-bugprone-exception-escape;-warnings-as-errors=*;-extra-arg=-std=c++20"
+      }
+    },
+    {
+      "name": "ci-gcc",
+      "hidden": true,
+      "environment": {
+        "CC" : "gcc-10",
+        "CXX": "g++-10"
+      },
+      "cacheVariables": {
+        "RPP_GCOV_TOOL" : "/usr/bin/gcov-10"
+      }
+    },
+    {
+      "name": "ci-clang",
+      "hidden": true,
+      "environment": {
+        "CC" : "clang-14",
+        "CXX": "clang++-14"
+      }
+    },
+    {
+      "name" : "build-tests",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_TESTS" : "ON"
+      }
+    },
+    {
+      "name" : "build-examples",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_EXAMPLES" : "ON"
+      }
+    },
+    {
+      "name" : "build-benchmarks",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_RXCPP" : "ON",
+        "RPP_BUILD_BENCHMARKS" : "ON"
+      }
+    },
+    {
+      "name" : "build-sfml",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_SFML_CODE" : "OFF"
+      }
+    },
+    {
+      "name" : "build-qt",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_QT_CODE" : "ON"
+      }
+    },
+    {
+      "name" : "build-grpc",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_GRPC_CODE" : "ON"
+      }
+    },
+    {
+      "name" : "build-asio",
+      "hidden": true,
+      "cacheVariables": {
+        "RPP_BUILD_ASIO_CODE" : "ON"
+      }
+    },
+    {
+      "name" : "use-conan",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_PROJECT_TOP_LEVEL_INCLUDES": "cmake/conan_provider.cmake",
+        "CONAN_ARGS": "",
+        "CONAN_INSTALL_ARGS": "--build=missing;-s:a compiler.cppstd=20;-c tools.system.package_manager:mode=install;-c tools.system.package_manager:sudo=True"
+      }
+    },
+    {
+      "name": "build-dir",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build"
+    },
+
+
+
+    {
+      "name": "ci-build",
+      "inherits" : ["build-dir", "use-conan"]
+    },
+    {
+      "name": "ci-coverage-clang",
+      "inherits": ["ci-build", "build-tests", "build-qt", "build-grpc", "build-asio", "ci-unix", "ci-clang"],
+      "cacheVariables": {
+        "RPP_ENABLE_COVERAGE": "ON",
+        "CMAKE_CXX_FLAGS": "-O0 -g -fprofile-instr-generate -fcoverage-mapping",
+        "RPP_BUILD_TESTS_TOGETHER" : true
+      }
+    },
+    {
+      "name": "ci-sanitize-tsan",
+      "inherits": ["ci-build", "build-tests", "build-benchmarks", "build-qt", "build-asio", "ci-unix", "ci-clang"],
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -g -O1"
+      }
+    },
+    {
+      "name": "ci-sanitize-asan",
+      "inherits": ["ci-build", "build-tests", "build-benchmarks", "build-qt", "build-grpc", "build-asio", "ci-unix", "ci-clang"],
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-optimize-sibling-calls -fsanitize-address-use-after-scope -fno-omit-frame-pointer -g -O1"
+      }
+    },
+    {
+      "name": "ci-sanitize-lsan",
+      "inherits": ["ci-build", "build-tests", "build-benchmarks", "build-qt", "build-grpc", "build-asio", "ci-unix", "ci-clang"],
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=leak -fno-omit-frame-pointer -g -O1"
+      }
+    },
+    {
+      "name": "ci-sanitize-msan",
+      "inherits": ["ci-build", "build-tests", "build-benchmarks", "build-qt", "build-grpc", "build-asio", "ci-unix", "ci-clang"],
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=memory -fno-optimize-sibling-calls -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -g -O2"
+      }
+    },
+    {
+      "name": "ci-sanitize-ubsan",
+      "inherits": ["ci-build", "build-tests", "build-benchmarks", "build-qt", "build-grpc", "build-asio", "ci-unix", "ci-clang"],
+      "cacheVariables": {
+        "CMAKE_CXX_FLAGS": "-fsanitize=undefined"
+      }
+    },
+    {
+      "name": "ci-macos-tests",
+      "inherits": ["ci-build", "build-tests", "build-examples", "build-qt", "build-grpc", "build-asio", "build-sfml", "ci-unix"]
+    },
+    {
+      "name": "ci-ubuntu-clang-tests",
+      "inherits": ["ci-build", "build-tests", "build-examples", "build-qt", "build-grpc", "build-asio", "build-sfml", "ci-unix", "ci-clang", "cppcheck", "clang-tidy"]
+    },
+    {
+      "name": "ci-ubuntu-gcc-tests",
+      "inherits": ["ci-build", "build-tests", "build-examples", "build-qt", "build-grpc", "build-asio", "build-sfml", "ci-unix", "ci-gcc", "cppcheck", "clang-tidy"]
+    },
+    {
+      "name": "ci-windows-tests",
+      "inherits": ["ci-build", "build-tests", "build-examples", "build-qt", "build-grpc", "build-asio", "build-sfml", "ci-win64"]
+    },
+    {
+      "name": "ci-ubuntu-clang-tests-no-checks",
+      "inherits": ["ci-build", "build-tests", "build-examples", "build-qt", "build-grpc", "build-asio", "build-sfml", "ci-unix", "ci-clang" ]
+    },
+
+
+
+    {
+      "name": "ci-macos-benchmarks",
+      "inherits": ["ci-build", "build-benchmarks", "ci-unix"]
+    },
+    {
+      "name": "ci-ubuntu-clang-benchmarks",
+      "inherits": ["ci-build", "build-benchmarks",  "ci-unix", "ci-clang", "cppcheck", "clang-tidy"]
+    },
+    {
+      "name": "ci-ubuntu-gcc-benchmarks",
+      "inherits": ["ci-build", "build-benchmarks",  "ci-unix", "ci-gcc", "cppcheck",  "clang-tidy"]
+    },
+    {
+      "name": "ci-windows-benchmarks",
+      "inherits": ["ci-build", "build-benchmarks", "ci-win64"]
+    },
+
+
+    {
+      "name": "user-macos-tests",
+      "inherits": [
+          "build-dir",
+          "build-tests",
+          "build-examples",
+          "ci-unix"
+      ]
+    },
+    {
+        "name": "user-ubuntu-clang-tests",
+        "inherits": [
+            "build-dir",
+            "build-tests",
+            "build-examples",
+            "ci-unix",
+            "ci-clang"
+        ]
+    },
+    {
+        "name": "user-ubuntu-gcc-tests",
+        "inherits": [
+            "build-dir",
+            "build-tests",
+            "build-examples",
+            "ci-unix",
+            "ci-gcc"
+        ]
+    },
+    {
+        "name": "user-windows-tests",
+        "inherits": [
+            "build-dir",
+            "build-tests",
+            "build-examples",
+            "ci-win64"
+        ]
+    },
+    {
+        "name": "user-macos-benchmarks",
+        "inherits": [
+            "build-dir",
+            "build-benchmarks",
+            "ci-unix"
+        ]
+    },
+    {
+        "name": "user-ubuntu-clang-benchmarks",
+        "inherits": [
+            "build-dir",
+            "build-benchmarks",
+            "ci-unix",
+            "ci-clang"
+        ]
+    },
+    {
+        "name": "user-ubuntu-gcc-benchmarks",
+        "inherits": [
+            "build-dir",
+            "build-benchmarks",
+            "ci-unix",
+            "ci-gcc"
+        ]
+    },
+    {
+        "name": "user-windows-benchmarks",
+        "inherits": [
+            "build-dir",
+            "build-benchmarks",
+            "ci-win64"
+        ]
+    }
+  ],
+  "buildPresets" :[
+    {
+      "name" : "ci-build",
+      "jobs" : 2,
+      "configurePreset" : "ci-build"
+    }
+  ]
+  ,
+  "testPresets": [
+    {
+      "name": "ci-tests-base",
+      "hidden": true,
+      "configurePreset" : "ci-build",
+      "environment": {
+        "QT_QPA_PLATFORM": "offscreen"
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "timeout": 60
+      }
+    },
+    {
+      "name": "ci-tests",
+      "inherits": ["ci-tests-base"],
+      "configuration": "Release"
+    },
+    {
+      "name": "ci-tests-debug",
+      "inherits": ["ci-tests-base"],
+      "configuration": "Debug",
+      "execution": {
+        "timeout": 120
+      }
+    },
+    {
+      "name": "ci-sanitize",
+      "inherits" : ["ci-tests"],
+      "environment": {
+        "ASAN_OPTIONS": "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1:detect_leaks=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1",
+        "TSAN_OPTIONS": "second_deadlock_stack=1"
+      }
+    }
+  ]
+}
