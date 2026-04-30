@@ -1,0 +1,13 @@
+*
+!.gitignore
+!sorts.h
+!sorts.cpp
+!README.md
+!sort2a.asm
+!sort3a.asm
+!sort4a.asm
+!sort5a.asm
+!sort6a.asm
+!simdsort4a.asm
+!simdsort4a_noconstants.asm
+!simdsort4a_nofloat.asm
