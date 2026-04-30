@@ -415,12 +415,19 @@ struct BlockAlignerScratch {
         , temp_buf1(64), temp_buf2(64) {}
 
     template<class D>
-    void clear(D d, size_t qlen, size_t rlen, size_t max_sz, bool do_trace) {
+    void clear(D d, size_t qlen, size_t rlen, size_t init_block_sz, bool do_trace) {
+        // Only the first `init_block_sz` cells of each border buffer are
+        // ever read before being written by the DP. Subsequent positions
+        // are overwritten by `ba_place_block` on the first column /
+        // direction transition. Zeroing only the initial slice instead
+        // of the full `max_sz` cuts the per-call clear cost from
+        // O(8 * max_sz) to O(4 * init_block_sz) — typically a 16x
+        // reduction (max_sz=1024, init_block_sz=64). The ckpt buffers
+        // are never read until the first checkpoint save copies into
+        // them, so they don't need pre-clearing at all.
         if (do_trace) trace.clear(qlen, rlen);
-        D_col.clear(d, max_sz); C_col.clear(d, max_sz);
-        D_row.clear(d, max_sz); R_row.clear(d, max_sz);
-        D_col_ckpt.clear(d, max_sz); C_col_ckpt.clear(d, max_sz);
-        D_row_ckpt.clear(d, max_sz); R_row_ckpt.clear(d, max_sz);
+        D_col.clear(d, init_block_sz); C_col.clear(d, init_block_sz);
+        D_row.clear(d, init_block_sz); R_row.clear(d, init_block_sz);
         const size_t L = hn::Lanes(d);
         temp_buf1.clear(d, L); temp_buf2.clear(d, L);
     }
@@ -501,6 +508,22 @@ HWY_INLINE hn::Vec<D> ba_prefix_scan(
 // Trace recording — compress DP cell decisions into bitmasks
 // =============================================================================
 
+/// Spread 16 low bits of `lo` into the even bit positions of a 32-bit
+/// result (bits 0,2,4,...,30) and the 16 low bits of `hi` into the odd
+/// bit positions (bits 1,3,5,...,31). Used by the trace recorder to
+/// pack two parallel mask vectors into a single TraceType word.
+HWY_INLINE constexpr uint32_t ba_interleave_lo_bits_16(uint32_t lo, uint32_t hi) {
+    auto spread = [](uint32_t x) -> uint32_t {
+        x &= 0xFFFFu;
+        x = (x | (x << 8)) & 0x00FF00FFu;
+        x = (x | (x << 4)) & 0x0F0F0F0Fu;
+        x = (x | (x << 2)) & 0x33333333u;
+        x = (x | (x << 1)) & 0x55555555u;
+        return x;
+    };
+    return spread(lo) | (spread(hi) << 1);
+}
+
 template<class D>
 HWY_INLINE void ba_record_trace(
     D d, BlockTrace& trace,
@@ -509,37 +532,31 @@ HWY_INLINE void ba_record_trace(
     hn::Vec<D>& prev_trace_R,
     [[maybe_unused]] int16_t relative_zero)
 {
-    const size_t L = hn::Lanes(d);
+    [[maybe_unused]] const size_t L = hn::Lanes(d);
     // TraceType is uint32_t (32 bits). With 2 bits per lane, max L = 16.
     // AVX-512 (L=32) would need uint64_t traces.
     DEBUG_ASSERT(L <= 16, "Trace bitmask overflow: L > 16 not supported");
 
-    auto trace_D_C = hn::VecFromMask(d, hn::Eq(D11, C11));
-    auto trace_D_R = hn::VecFromMask(d, hn::Eq(D11, R11));
-
-    HWY_ALIGN int16_t dc_arr[hn::MaxLanes(d)], dr_arr[hn::MaxLanes(d)];
-    hn::Store(trace_D_C, d, dc_arr);
-    hn::Store(trace_D_R, d, dr_arr);
-
-    BlockTrace::TraceType trace_data = 0;
-    for (size_t k = 0; k < L; ++k) {
-        trace_data |= ((static_cast<uint16_t>(dc_arr[k]) >> 15) & 1u) << (2 * k);
-        trace_data |= ((static_cast<uint16_t>(dr_arr[k]) >> 15) & 1u) << (2 * k + 1);
-    }
+    // Per-lane "score came from" decisions: BitsFromMask compresses one
+    // mask bit per lane into a uint64_t, lowering to PMOVMSKB on x86 and
+    // a 1-cycle reduce on NEON. Avoids the previous 4 stack stores +
+    // 32 scalar shifts per cell of the production TRACE=true path.
+    const auto mask_DC = hn::Eq(D11, C11);
+    const auto mask_DR = hn::Eq(D11, R11);
+    const uint32_t bits_DC = static_cast<uint32_t>(hn::BitsFromMask(d, mask_DC));
+    const uint32_t bits_DR = static_cast<uint32_t>(hn::BitsFromMask(d, mask_DR));
+    const BlockTrace::TraceType trace_data =
+        ba_interleave_lo_bits_16(bits_DC, bits_DR);
 
     auto temp_trace_R = hn::VecFromMask(d, hn::Eq(R11, D11_open));
     auto trace_R_shifted = lanes_shift_left_1_borrow(d, temp_trace_R, prev_trace_R);
-    auto trace_C_open = hn::VecFromMask(d, hn::Eq(C11, C11_open));
+    const auto mask_C_open = hn::Eq(C11, C11_open);
+    const auto mask_R_shifted = hn::MaskFromVec(trace_R_shifted);
+    const uint32_t bits_C_open = static_cast<uint32_t>(hn::BitsFromMask(d, mask_C_open));
+    const uint32_t bits_R_shifted = static_cast<uint32_t>(hn::BitsFromMask(d, mask_R_shifted));
+    const BlockTrace::TraceType trace_data2 =
+        ba_interleave_lo_bits_16(bits_C_open, bits_R_shifted);
 
-    HWY_ALIGN int16_t co_arr[hn::MaxLanes(d)], tr_arr[hn::MaxLanes(d)];
-    hn::Store(trace_C_open, d, co_arr);
-    hn::Store(trace_R_shifted, d, tr_arr);
-
-    BlockTrace::TraceType trace_data2 = 0;
-    for (size_t k = 0; k < L; ++k) {
-        trace_data2 |= ((static_cast<uint16_t>(co_arr[k]) >> 15) & 1u) << (2 * k);
-        trace_data2 |= ((static_cast<uint16_t>(tr_arr[k]) >> 15) & 1u) << (2 * k + 1);
-    }
     prev_trace_R = temp_trace_R;
     trace.add_trace(trace_data, trace_data2);
 }
@@ -592,6 +609,11 @@ HWY_INLINE auto ba_place_block(
 
     hn::Vec<D> D11{}, R11{};
 
+    // The origin (start_i+i==0, start_j+j==0) cell can only fire on the
+    // very first place_block call of the very first block. Hoist the
+    // condition out of the per-cell branch.
+    const bool can_have_origin = (start_i == 0 && start_j == 0);
+
     for (size_t j = 0; j < width; ++j) {
         auto R01 = min_vec;
         D11 = min_vec;
@@ -599,6 +621,13 @@ HWY_INLINE auto ba_place_block(
         [[maybe_unused]] auto prev_trace_R = min_vec;
 
         const uint8_t c = reference.get(start_j + j);
+        // Per-column-invariant scoring LUT: load the 16-byte row for `c`
+        // once, reuse for every `i` in this column. Without this hoist
+        // the LoadDup128 fires on every cell (height/L times per column).
+        const auto score_lut = matrix.load_score_lut(d, c);
+
+        // Origin can only land on j == 0 when can_have_origin is true.
+        const bool col_can_have_origin = can_have_origin && (j == 0);
 
         for (size_t i = 0; i < height; i += L) {
             auto D10 = hn::Load(d, D_col + i);
@@ -608,14 +637,17 @@ HWY_INLINE auto ba_place_block(
             auto D00 = lanes_shift_left_1_borrow(d, D10, D_corner);
             D_corner = D10;
 
-            // Score lookup
-            auto scores = matrix.get_scores(d, c, query.ptr_at(start_i + i));
+            // Score lookup (LUT pre-loaded above; no per-cell row load)
+            auto scores = matrix.get_scores_with_lut(
+                d, score_lut, query.ptr_at(start_i + i));
 
             // Match/mismatch
             D11 = hn::SaturatedAdd(D00, scores);
 
-            // Origin cell: insert relative_zero at lane 0
-            if (start_i + i == 0 && start_j + j == 0) {
+            // Origin cell: insert relative_zero at lane 0 — the inner
+            // condition is only reachable when `i == 0` (since
+            // start_i + i == 0 requires both start_i == 0 and i == 0).
+            if (col_can_have_origin && i == 0) {
                 D11 = insert_first(d, D11, relative_zero);
             }
 
@@ -1266,35 +1298,42 @@ public:
             -(static_cast<int>(params.gap_open) + params.gap_extend));
         const int8_t gap_extend_neg = static_cast<int8_t>(-params.gap_extend);
 
-        // Build encoded byte sequences into align-arena spans (SPEC §6.7).
-        auto& enc_ctx = context::current();
-        auto query_enc  = enc_ctx.alloc_align_array<uint8_t>(query_len);
-        auto target_enc = enc_ctx.alloc_align_array<uint8_t>(target_len);
-        query_seq.template to_encoded_into<is_reversed>(
-            query_enc, query_start, query_end);
-        target_seq.template to_encoded_into<false>(
-            target_enc, target_start, target_end);
-
         const uint8_t null_byte = ScoringMatrix<QueryRange>::NULL_BYTE;
 
         BlockPaddedBytes query_padded, ref_padded;
         if (params.flags.reverse_cigar) {
-            // Left extension: reverse both sequences
+            // Left-extension path. We still need the temp encoded
+            // buffers because fill_from_encoded_reversed scalar-walks
+            // them in reverse — there is no encode-and-reverse-in-one
+            // primitive yet.
+            auto& enc_ctx = context::current();
+            auto query_enc  = enc_ctx.alloc_align_array<uint8_t>(query_len);
+            auto target_enc = enc_ctx.alloc_align_array<uint8_t>(target_len);
+            query_seq.template to_encoded_into<is_reversed>(
+                query_enc, query_start, query_end);
+            target_seq.template to_encoded_into<false>(
+                target_enc, target_start, target_end);
             query_padded.fill_from_encoded_reversed(
                 query_enc.data(), query_len, max_size, null_byte);
             ref_padded.fill_from_encoded_reversed(
                 target_enc.data(), target_len, max_size, null_byte);
         } else {
-            query_padded.fill_from_encoded(
-                query_enc.data(), query_len, max_size, null_byte);
-            ref_padded.fill_from_encoded(
-                target_enc.data(), target_len, max_size, null_byte);
+            // Hot path (gap-fill): encode the sub-region directly into
+            // the padded buffer. Saves one arena allocation and one
+            // memcpy per query/target compared to the previous
+            // encode-then-pad pipeline.
+            query_padded.template fill<is_reversed, AlphabetDim>(
+                query_seq, query_start, query_end, max_size);
+            ref_padded.template fill<false, AlphabetDim>(
+                target_seq, target_start, target_end, max_size);
         }
 
         // Allocate scratch space
         const bool do_trace = !params.flags.score_only;
         BlockAlignerScratch scratch(query_len, target_len, max_size, do_trace);
-        scratch.clear(d, query_len, target_len, max_size, do_trace);
+        // Pass min_size — only the first block_size cells of each
+        // border buffer are read before being written by the DP.
+        scratch.clear(d, query_len, target_len, min_size, do_trace);
 
         int32_t score = 0;
         size_t out_qi = 0, out_ri = 0;

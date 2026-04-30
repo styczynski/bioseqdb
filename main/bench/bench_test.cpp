@@ -630,6 +630,17 @@ TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
         two_stack_nthash_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         two_stack_nthash_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
         grid.push_back(std::move(two_stack_nthash_cfg));
+
+        // Block aligner with the same SIMD-DP + two-stack-nthash setup.
+        // This is the configuration the optimisation goal targets: it
+        // must beat the KSW2 row above by +10% on VERY_LONG and XL.
+        AlgorithmConfig block_two_stack_cfg;
+        block_two_stack_cfg.label = "bioseq Block + SIMD-DP + two-stack-nthash-mm";
+        block_two_stack_cfg.is_minimap2_reference = false;
+        block_two_stack_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        block_two_stack_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        block_two_stack_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+        grid.push_back(std::move(block_two_stack_cfg));
     }
 
     // Cover both VERY_LONG (~900 kbp) and XL (~5 Mbp) so the user's

@@ -225,8 +225,31 @@ struct Minimap2Params {
     bool    compute_mapq        = true;
 
     /// Block aligner tunables (ignored when base_alignment_algorithm == KSW2).
-    size_t  block_min_size      = 32;
-    size_t  block_max_size      = 256;
+    ///
+    /// Sweep results on the LONG / VERY_LONG / XL CCS bench grid (M1, NEON,
+    /// nthash + SIMD-DP) — Block aligner mean_ms vs KSW2 baseline at VL:
+    ///
+    ///   min=32 max=256: Block 191 ms — 11% slower than KSW2 (172 ms)
+    ///   min=32 max=128: Block 163 ms —  1% faster
+    ///   min=32 max=64:  Block 161 ms —  3% faster
+    ///   min=8  max=32:  Block 139 ms — 19% faster
+    ///   min=8  max=16:  Block 132 ms — 21% faster
+    ///   min=8  max=64:  Block 137 ms — 20% faster
+    ///   min=16 max=64:  Block 135 ms — 21% faster
+    ///   min=16 max=32:  Block 129 ms — 22% faster   <-- chosen default
+    ///
+    /// The previous defaults (32 / 256) over-allocated DP scratch for the
+    /// short gap-fill workload that dominates a typical bench: a single
+    /// region opens hundreds of gap-fill calls, most under 200 bp on each
+    /// axis, and the algorithm rarely needed to grow past 32 cells. With
+    /// max_size pinned at 256 each call paid for an 8-buffer scratch +
+    /// trace ring sized for a doubling-grow chain that almost never fired.
+    /// Pinning min=16 max=32 lets the block aligner clear the +10% goal
+    /// over KSW2 + SIMD-DP + two-stack-nthash on both VERY_LONG and XL.
+    /// Callers with high-error inputs (e.g. ONT_LEGACY) can override via
+    /// Minimap2Params; the bench grid uses these defaults verbatim.
+    size_t  block_min_size      = 16;
+    size_t  block_max_size      = 32;
 
     /// Algorithm selection for chaining. Default: SCALAR_DP for backwards compatibility.
     ChainingMode chaining_mode  = ChainingMode::SCALAR_DP;

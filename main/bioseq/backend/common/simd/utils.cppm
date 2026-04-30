@@ -18,19 +18,29 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 template<class D, size_t index = 0, typename stored_type = hn::TFromD<D>>
-inline constexpr stored_type extract_last(D d, hn::Vec<D> v) {
-    HWY_ALIGN stored_type tmp[hn::MaxLanes(d)];
-    hn::Store(v, d, tmp);
-    return tmp[hn::Lanes(d) - 1 - index];
+HWY_INLINE stored_type extract_last(D d, hn::Vec<D> v) {
+    // ExtractLane on a constant index lowers to a single hardware extract
+    // (e.g. NEON `vgetq_lane_s16(v, 7)`), avoiding the previous round-trip
+    // through a stack-resident HWY_ALIGN array.
+    return hn::ExtractLane(v, hn::Lanes(d) - 1 - index);
 }
 
 template<typename D, size_t index = 0>
-inline constexpr hn::Vec<D> broadcast_last(D d, hn::Vec<D> v) {
-    return hn::Set(d, extract_last<D, index>(d, v));
+HWY_INLINE hn::Vec<D> broadcast_last(D d, hn::Vec<D> v) {
+    // BroadcastLane requires a compile-time lane index. On NEON / SSE / AVX
+    // (our targets), Lanes == MaxLanes, so MaxLanes-1 is the runtime last
+    // lane and lowers to a single instruction (e.g. `vdupq_laneq_s16(v, 7)`
+    // or `vpbroadcastw`). Leave the safe fallback for SVE/RVV in place.
+    constexpr size_t lane_idx = hn::MaxLanes(d) - 1 - index;
+    if constexpr (hn::MaxLanes(d) <= 64) {
+        return hn::BroadcastLane<lane_idx>(v);
+    } else {
+        return hn::Set(d, extract_last<D, index>(d, v));
+    }
 }
 
 template<class D, size_t first_count = 1, typename stored_type = hn::TFromD<D>>
-inline constexpr hn::Vec<D> insert_first(D d, hn::Vec<D> v, stored_type val) {
+HWY_INLINE hn::Vec<D> insert_first(D d, hn::Vec<D> v, stored_type val) {
     return hn::IfThenElse(hn::FirstN(d, first_count), hn::Set(d, val), v);
 }
 
@@ -60,14 +70,22 @@ HWY_INLINE hn::Vec<D> lanes_shift_left_zero(D d, hn::Vec<D> v) {
 
 /// Shift vector `a` left by 1 lane, borrowing the last lane from `b`.
 /// Result[0] = b[L-1], Result[i>0] = a[i-1].
+///
+/// Implemented via CombineShiftRightLanes<L-1>(a, b): concatenates [a:b] and
+/// shifts right by L-1 lanes — equivalent to a single hardware EXT/PALIGNR.
+/// Avoids the previous Store-then-Load round-trip through a stack array.
 template<class D, typename stored_type = hn::TFromD<D>>
 HWY_INLINE hn::Vec<D> lanes_shift_left_1_borrow(D d, hn::Vec<D> a, hn::Vec<D> b) {
-    auto shifted = hn::SlideUpLanes(d, a, 1);
-    HWY_ALIGN stored_type tmp[hn::MaxLanes(d)];
-    hn::Store(b, d, tmp);
-    return hn::IfThenElse(hn::FirstN(d, 1),
-                          hn::Set(d, tmp[hn::Lanes(d) - 1]),
-                          shifted);
+    constexpr size_t shift_n = hn::MaxLanes(d) - 1;
+    if constexpr (hn::MaxLanes(d) <= 64) {
+        return hn::CombineShiftRightLanes<shift_n>(d, a, b);
+    } else {
+        // SVE/RVV fallback (we don't currently target these).
+        auto shifted = hn::SlideUpLanes(d, a, 1);
+        return hn::IfThenElse(hn::FirstN(d, 1),
+                              broadcast_last(d, b),
+                              shifted);
+    }
 }
 
 // template <class D, class VecT>

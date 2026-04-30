@@ -96,18 +96,59 @@ struct ScoringMatrix {
     }
 
     /// Score lookup: for reference char c and L query chars at query_ptr,
-    /// return L i16 scores. Uses scalar loop (PSHUFB optimisation TODO).
+    /// return L i16 scores.
+    ///
+    /// Hot path inside the block-aligner inner loop — every DP cell pays
+    /// one call. Implemented as a single PSHUFB-class table lookup over
+    /// the 16-byte SIMD row followed by a sign-extending PromoteTo to
+    /// int16. The previous scalar fallback round-tripped through a stack
+    /// array (~2x slower on M1).
+    /// Load the 16-byte SIMD scoring row for reference char `c` into a
+    /// LUT vector that can be reused across many query positions. Pull
+    /// this out of the inner DP loop and call once per column iteration —
+    /// the LUT only depends on `c`, not on the query offset.
+    template<class D>
+    HWY_INLINE auto load_score_lut(D d, uint8_t c) const {
+        static_assert(std::is_same_v<hn::TFromD<D>, int16_t>,
+                      "load_score_lut expects an int16_t SIMD tag.");
+        const hn::Rebind<uint8_t, D> du8;
+        const hn::Twice<decltype(du8)> du8_twice;
+        return hn::LoadDup128(
+            du8_twice, reinterpret_cast<const uint8_t*>(simd_row_ptr(c)));
+    }
+
+    /// Score lookup: with a pre-loaded `lut` from load_score_lut, look up
+    /// L i16 scores for the L query bytes at query_ptr.
+    ///
+    /// Hot path inside the block-aligner inner loop — every DP cell pays
+    /// one call. Implemented as a single PSHUFB-class table lookup over
+    /// the 16-byte SIMD row followed by a sign-extending PromoteTo to
+    /// int16. Hoisting the row load out of the inner loop saves one
+    /// LoadDup128 per cell.
+    template<class D, class LUT>
+    HWY_INLINE hn::Vec<D> get_scores_with_lut(
+        D d, LUT lut, const uint8_t* query_ptr) const
+    {
+        static_assert(std::is_same_v<hn::TFromD<D>, int16_t>,
+                      "get_scores_with_lut expects an int16_t SIMD tag.");
+        const hn::Rebind<uint8_t, D> du8;
+        const auto query_vec = hn::LoadU(du8, query_ptr);
+        const auto scores_u8 = hn::TableLookupBytes(lut, query_vec);
+        // Sign-extend i8 -> i16. Reinterpret the looked-up bytes as
+        // signed first so PromoteTo replicates the sign bit (some matrix
+        // entries — and the NULL row — are INT8_MIN).
+        const hn::Rebind<int8_t, D> di8;
+        return hn::PromoteTo(d, hn::BitCast(di8, scores_u8));
+    }
+
+    /// Convenience overload: load LUT and look up in one call. Use
+    /// load_score_lut + get_scores_with_lut directly for tight inner
+    /// loops where the LUT is invariant.
     template<class D>
     HWY_INLINE hn::Vec<D> get_scores(
         D d, uint8_t c, const uint8_t* query_ptr) const
     {
-        const size_t L = hn::Lanes(d);
-        const int8_t* row = simd_row_ptr(c);
-        HWY_ALIGN int16_t result[hn::MaxLanes(d)];
-        for (size_t i = 0; i < L; ++i) {
-            result[i] = static_cast<int16_t>(row[query_ptr[i]]);
-        }
-        return hn::Load(d, result);
+        return get_scores_with_lut(d, load_score_lut(d, c), query_ptr);
     }
 
     // --- Factory ---
