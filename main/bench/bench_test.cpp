@@ -429,12 +429,12 @@ TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
 // dependent and only manifested on ~52 kbp inputs once the RMQ tree
 // had drifted into an inconsistent balance state.
 //
-// Tagged with the leading-dot pattern so the default bench run does
-// not pick it up; invoke explicitly via `[.rmq-repro]` if you want to
-// re-verify. The test now passes — all three pairs run to completion
-// and produce primaries.
+// Tag changed from leading-dot `[.rmq-repro]` to `[rmq-repro]` so the
+// default `./build.sh bench` run picks it up — see the engineering
+// report's task brief for the rationale (we want all benchmarks
+// surfacing comparison data when the user runs `bench`).
 TEST_CASE("Regression: bioseq RMQ chaining on LONG inputs (was SIGSEGV)",
-          "[.rmq-repro]") {
+          "[rmq-repro]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
     using namespace bioseq::bench::HWY_NAMESPACE;
@@ -455,7 +455,7 @@ TEST_CASE("Regression: bioseq RMQ chaining on LONG inputs (was SIGSEGV)",
 }
 
 TEST_CASE("Chart-data sweep — quick (short + medium only)",
-          "[.chart-data-quick]") {
+          "[chart-data-quick]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
     using namespace bioseq::bench::HWY_NAMESPACE;
@@ -491,13 +491,14 @@ TEST_CASE("Chart-data sweep — quick (short + medium only)",
 //   * bioseq KSW2 + SIMD-DP + SIMD-mm               — must be ≥10% faster than scalar
 //   * bioseq KSW2 + SIMD-DP + two-stack SIMD-mm     — V4 candidate for goal #2
 //
-// Tagged `[.quick-long-sequence-benchmark]` so `./build.sh bench` does
-// not pick it up; invoke explicitly with the tag literal. After the
-// sweep completes we print a one-line summary line per (length, config)
-// to stderr so the optimisation iterator can grep timings without
-// loading report.json.
+// Tag changed from leading-dot `[.quick-long-sequence-benchmark]` to
+// `[quick-long-sequence-benchmark]` so that `./build.sh bench` runs
+// it by default; the user wants the entire comparison data emitted on
+// every bench invocation. After the sweep completes we print a
+// one-line summary line per (length, config) to stderr so the
+// optimisation iterator can grep timings without loading report.json.
 // ====================================================================
-TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") {
+TEST_CASE("Long-only fast iteration sweep", "[quick-long-sequence-benchmark]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
     using namespace bioseq::bench::HWY_NAMESPACE;
@@ -635,8 +636,10 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
 // The deliberately-narrow scope lets each optimisation round of the
 // SIMD-Minimizers two-stack collector finish in well under a minute,
 // so we can iterate freely on the inner loop. Tagged
-// `[.quick-long-sequence-benchmark-two-stack]` — invoke via
-// `./build.sh bench-two-stack`.
+// `[quick-long-sequence-benchmark-two-stack]` — invoke via
+// `./build.sh bench-two-stack` or run as part of the default
+// `./build.sh bench` because the leading dot was removed (see task
+// brief — the user wants the full comparison grid every run).
 //
 // IMPORTANT: this case is the *only* signal we trust during V4
 // iteration — `bench-long` is significantly slower because it also
@@ -645,7 +648,7 @@ TEST_CASE("Long-only fast iteration sweep", "[.quick-long-sequence-benchmark]") 
 // with the report committed to ENGINEERING_REPORT.md.
 // ====================================================================
 TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
-          "[.quick-long-sequence-benchmark-two-stack]") {
+          "[quick-long-sequence-benchmark-two-stack]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
     using namespace bioseq::bench::HWY_NAMESPACE;

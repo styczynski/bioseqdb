@@ -27,11 +27,15 @@
 %   - !partial
 %     title: Biological and bioinformatical context
 %     path: chapters/biology
-%     description: Test test
+%     description: introduces the reader to sequence alignment, the seed-chain-extend pipeline, and where minimizers fit into modern aligners.
+%   - !partial
+%     title: SIMD minimizer engineering
+%     path: chapters/minimizers
+%     description: documents the iterative work to port minimap2's scalar minimizer collector to a SIMD-friendly two-stack design, including loop unrolling, dual-stream interleaving, and the downstream knock-on effects on error estimation and seed-hit collection.
 %   - !partial
 %     title: PostgreSQL
 %     path: chapters/postgres
-%     description: Test test
+%     description: covers the PostgreSQL integration -- TOAST-backed sequence storage, the SQL-callable minimizer-index function, and query planning. (Placeholder; out of scope for this round.)
 % xrenderonly: postgres
 
 \newtheorem{defi}{Definicja}[section]
