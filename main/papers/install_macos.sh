@@ -2,7 +2,7 @@
 set -e
 
 brew install pandoc
-brew tap homebrew/cask
+#brew tap homebrew/cask
 brew install --cask basictex
 eval "$(/usr/libexec/path_helper)"
 # Update $PATH to include `/usr/local/texlive/2022basic/bin/universal-darwin`

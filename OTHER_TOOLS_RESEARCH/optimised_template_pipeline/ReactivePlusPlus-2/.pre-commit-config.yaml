@@ -1,0 +1,30 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+- repo: https://github.com/sirosen/check-jsonschema
+  rev: 0.37.1
+  hooks:
+    - id: check-github-actions
+    - id: check-github-workflows
+
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    -   id: check-added-large-files # prevents giant files from being committed.
+    -   id: check-case-conflict # checks for files that would conflict in case-insensitive filesystems.
+    -   id: check-merge-conflict # checks for files that contain merge conflict strings.
+    -   id: check-yaml # checks yaml files for parseable syntax.
+    -   id: detect-private-key # detects the presence of private keys.
+    -   id: end-of-file-fixer # ensures that a file is either empty, or ends with one newline.
+    -   id: fix-byte-order-marker # removes utf-8 byte order marker.
+    -   id: mixed-line-ending # replaces or checks mixed line ending.
+    -   id: requirements-txt-fixer # sorts entries in requirements.txt.
+    -   id: trailing-whitespace # trims trailing whitespace.
+
+-   repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: 'v22.1.2'
+    hooks:
+    -   id: clang-format
+        args: ["-style=file", "-i"]
+        types_or: [c++, c]
+        require_serial: true

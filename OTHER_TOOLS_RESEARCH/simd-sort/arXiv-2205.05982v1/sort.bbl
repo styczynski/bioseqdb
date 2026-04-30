@@ -1,0 +1,139 @@
+\begin{thebibliography}{10}
+\providecommand \doibase [0]{http://dx.doi.org/}%
+
+\bibitem{sortEnergy}
+Inoue H. {How SIMD width affects energy efficiency: A case study on sorting}.
+  {\it {IEEE Symposium in Low-Power and High-Speed Chips (COOL CHIPS)}}
+  2016\string: 1--3.
+
+\bibitem{steam}
+\mbox{Valve Corporation.} {Steam Hardware and Software Survey}. 2021.
+\newblock
+  \url{https://store.steampowered.com/hwsurvey/Steam-Hardware-Software-Survey-Welcome-to-Steam}.
+
+\bibitem{autovecPC}
+Personal communication, ex-ARM compiler engineer.
+
+\bibitem{merge2008}
+Chhugani J, Nguyen AD, Lee VW, et al. {Efficient implementation of sorting on
+  multi-core SIMD CPU architecture}. {\it Proceedings of the VLDB Endowment}
+  2008\string; 1(2)\string: 1313--1324.
+
+\bibitem{bertilMerge}
+Yin Z, Zhang T, M{\"{u}}ller A, et al. Efficient Parallel Sort on AVX-512-Based
+  Multi-Core and Many-Core Architectures. {\it {IEEE International Conference
+  on High Performance Computing and Communications; IEEE International
+  Conference on Smart City; IEEE International Conference on Data Science and
+  Systems (HPCC/SmartCity/DSS)}} 2019\string: 168--176.
+
+\bibitem{blacherSEA}
+Blacher M, Giesen J, Kuehne L. {Fast and Robust Vectorized In-Place Sorting of
+  Primitive Types}. {\it {Symposium on Experimental Algorithms (SEA)}}
+  2021\string: 3:1--3:16.
+
+\bibitem{vecRadix}
+Zagha M, Blelloch GE. Radix sort for vector multiprocessors. {\it
+  {International Conference for High Performance Computing, Networking, Storage
+  and Analysis (SC)}} 1991\string: 712--721.
+
+\bibitem{vmcSort}
+Wassenberg J, Sanders P. {Engineering a Multi-core Radix Sort}. {\it
+  {International Conference on Parallel Processing (Euro-Par)}} 2011\string:
+  160--169.
+
+\bibitem{qvecStar}
+Stone HS. Sorting on {STAR}. {\it {IEEE Transactions on Software Engineering}}
+  1978\string; 4(2)\string: 138--146.
+
+\bibitem{qvecLevin}
+Levin SA. A fully vectorized quicksort. {\it Parallel Computing} 1990\string;
+  16(2-3)\string: 369--373.
+
+\bibitem{gueron}
+Gueron S, Krasnov V. {Fast Quicksort Implementation Using AVX Instructions}.
+  {\it The Computer Journal} 2016\string; 59(1)\string: 83--90.
+
+\bibitem{bramasAVX}
+Bramas B. {A Novel Hybrid Quicksort Algorithm Vectorized using AVX-512 on Intel
+  Skylake}. {\it CoRR} 2017\string; abs/1704.08579.
+
+\bibitem{ips4o}
+Axtmann M, Witt S, Ferizovic D, Sanders P. Engineering In-place (Shared-memory)
+  Sorting Algorithms. {\it CoRR} 2020\string; abs/2009.13569.
+
+\bibitem{vqsortCode}
+\mbox{Google LLC.} vqsort implementation. 2022.
+\newblock \url{https://github.com/google/highway/tree/master/hwy/contrib/sort}.
+
+\bibitem{adversary}
+McIlroy MD. A Killer Adversary for Quicksort. {\it Software - Practice and
+  Experience} 1999\string; 29(4)\string: 341--344.
+
+\bibitem{badCases}
+Hartmann G. A numerical analysis of Quicksort: How many cases are bad cases?.
+  {\it CoRR} 2015\string; abs/1507.04220.
+
+\bibitem{numpyIssues}
+\url{https://github.com/numpy/numpy/issues/16313}.
+
+\bibitem{unbiasing}
+O'Neill M. Efficiently Generating a Number in a Range. 2018.
+\newblock \url{https://www.pcg-random.org/posts/bounded-rands.html}.
+
+\bibitem{llvmIssues}
+\url{https://bugs.llvm.org/show_bug.cgi?id=20837}.
+
+\bibitem{binaryQS}
+Daoud AM, Abdel{-}jaber H, Ababneh J. {Efficient Non-Quadratic Quick Sort
+  (NQQuickSort)}. {\it {Conference on Digital Enterprise and Information
+  Systems - International (DEIS)}} 2011\string: 667--675.
+
+\bibitem{randen}
+Wassenberg J, Obryk R, Alakuijala J, Mogenet E. Randen - fast
+  backtracking-resistant random generator with AES+Feistel+Reverie. {\it CoRR}
+  2018\string; abs/1810.02227.
+
+\bibitem{detSelect}
+Alexandrescu A. {Fast Deterministic Selection}.  2017\string: 24:1--24:19.
+
+\bibitem{bingNetwork}
+Bingmann T, Marianczuk J, Sanders P. Engineering faster sorters for small sets
+  of items. {\it Software - Practice and Experience} 2021\string; 51(5)\string:
+  965--1004.
+
+\bibitem{amdRef}
+\mbox{Advanced Micro Devices Inc.} {AMD64 Architecture Programmer’s Manual}.
+  2021.
+\newblock \url{https://www.amd.com/system/files/TechDocs/40332.pdf}.
+
+\bibitem{autoNet}
+Hou K, Wang H, Feng W. {A Framework for the Automatic Vectorization of Parallel
+  Sort on x86-Based Processors}. {\it {IEEE Transactions on Parallel and
+  Distributed Systems}} 2018\string; 29(5)\string: 958--972.
+
+\bibitem{batcher1968}
+Batcher KE. {Sorting Networks and Their Applications}. {\it {Spring Joint
+  Computer Conference}} 1968\string: 307--314.
+
+\bibitem{knuth1998}
+Knuth DE. {\it The Art of Computer Programming: Volume 3: Sorting and
+  Searching}.
+\newblock Addison-Wesley.
+\newblock 2nd~ed. 1998.
+
+\bibitem{codish2016}
+Codish M, Cruz{-}Filipe L, Ehlers T, M{\"{u}}ller M, Schneider{-}Kamp P.
+  {Sorting networks: To the end and back again}. {\it Journal of Computer and
+  System Sciences} 2019\string; 104\string: 184--201.
+
+\bibitem{specChar}
+Limaye A, Adegbija T. {A Workload Characterization of the SPEC CPU2017
+  Benchmark Suite}. {\it {IEEE International Symposium on Performance Analysis
+  of Systems and Software (ISPASS)}} 2018\string: 149--158.
+
+\bibitem{multiPiv}
+Kushagra S, L{\'{o}}pez{-}Ortiz A, Qiao A, Munro JI. {Multi-Pivot Quicksort:
+  Theory and Experiments}. {\it {Workshop on Algorithm Engineering and
+  Experiments (ALENEX)}} 2014\string: 47--60.
+
+\end{thebibliography}

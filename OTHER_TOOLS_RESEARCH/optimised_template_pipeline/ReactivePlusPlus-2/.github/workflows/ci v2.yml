@@ -1,0 +1,280 @@
+name: CI v2
+
+on:
+  push:
+    branches:
+    - v2
+
+  pull_request:
+    branches:
+    - v2
+
+  schedule:
+    - cron: '0 0 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CONAN_HOME: "${{ github.workspace }}/release/"
+
+jobs:
+  cache_deps:
+    strategy:
+      matrix:
+        config: [{name: ci-ubuntu-gcc,  os: ubuntu-22.04},
+                {name: ci-ubuntu-clang, os: ubuntu-22.04},
+                # {name: ci-windows,      os: windows-latest},
+                {name: ci-macos,        os: macos-latest}]
+        build_type: [{config: Release}, {config: Debug}]
+
+    timeout-minutes: 120
+    runs-on: ${{ matrix.config.os }}
+    name: Cache deps on ${{ matrix.config.name }} for ${{ matrix.build_type.config }}
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+          fetch-depth: 0
+
+    - uses: actions/setup-python@v6
+      with: { python-version: "3.8" }
+
+    - name: get conan
+      uses: turtlebrowser/get-conan@main
+
+    - name: check cache
+      uses: actions/cache/restore@v5
+      id: check_cache
+      with:
+          path: ${{ env.CONAN_HOME }}
+          key: deps-${{ matrix.config.name }}-${{ matrix.build_type.config }}-${{ hashFiles('**/conanfile.py') }}-${{ hashFiles('**/CMakePresets.json') }}
+          restore-keys: deps-${{ matrix.config.name }}-${{ matrix.build_type.config }}
+          lookup-only: true
+
+    - name: Install Qt
+      if: steps.check_cache.outputs.cache-hit != 'true' || github.event_name == 'schedule'
+      uses: jurplel/install-qt-action@v4
+      with:
+        cache: true
+        version: "6.2.*"
+
+    - name: conan detect profile
+      if: steps.check_cache.outputs.cache-hit != 'true' || github.event_name == 'schedule'
+      run: |
+        conan profile detect --force
+
+    - name: Run CMake
+      if: steps.check_cache.outputs.cache-hit != 'true' || github.event_name == 'schedule'
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: ${{ matrix.config.name }}-tests
+        configurePresetAdditionalArgs: "['-DCMAKE_BUILD_TYPE=${{ matrix.build_type.config }}', '-DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type.config }}']"
+
+    - name: Force Save Cache
+      if: steps.check_cache.outputs.cache-hit != 'true' || github.event_name == 'schedule'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ env.CONAN_HOME }}
+        key: deps-${{ matrix.config.name }}-${{ matrix.build_type.config }}-${{ hashFiles('**/conanfile.py') }}-${{ hashFiles('**/CMakePresets.json') }}
+
+  sanitize:
+    needs: ["cache_deps"]
+
+    strategy:
+      matrix:
+        sanitizer: ["tsan", "asan", "lsan", "ubsan"]
+
+    name: Sanitize - ${{ matrix.sanitizer }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    # Work around https://github.com/actions/runner-images/issues/8659
+    # - name: "Remove GCC 13 from runner image (workaround)"
+    #   shell: bash
+    #   run: |
+    #       sudo apt-get update
+    #       sudo apt-get purge -y g++-13 gcc-13 libstdc++-13-dev
+    #       sudo apt-get install -y --allow-downgrades libstdc++-12-dev libstdc++6=12.* libgcc-s1=12.*
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        cache: true
+        version: "6.2.*"
+
+    - name: get conan
+      uses: turtlebrowser/get-conan@main
+
+    - name: cache deps
+      uses: actions/cache@v5
+      with:
+          path: ${{ env.CONAN_HOME }}
+          key: deps-ci-ubuntu-clang-Release-${{ hashFiles('**/conanfile.py') }}-${{ hashFiles('**/CMakePresets.json') }}
+          restore-keys: deps-ci-ubuntu-clang-Release
+
+    - name: conan detect profile
+      run: |
+        conan profile detect --force
+
+    - shell: bash
+      run: |
+          # GH-40558: reduce ASLR to avoid ASAN/LSAN crashes
+          sudo sysctl -w vm.mmap_rnd_bits=28
+
+    - name: Run CMake
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: ci-sanitize-${{ matrix.sanitizer }}
+        buildPreset: ci-build
+        testPreset: ci-sanitize
+
+  tests:
+    needs: ["cache_deps"]
+
+    strategy:
+      matrix:
+        config: [{name: ci-ubuntu-gcc,  os: ubuntu-22.04},
+                {name: ci-ubuntu-clang, os: ubuntu-22.04},
+                # {name: ci-windows,      os: windows-latest},
+                {name: ci-macos,        os: macos-latest}]
+        type: [tests, benchmarks]
+        build_type: [{config: Release, test_preset: ci-tests}, {config: Debug, test_preset: ci-tests-debug}]
+        optimization_disabled: [{mode: 0, postfix: ""}, {mode: 1, postfix: " (Optimizations disabled)"}]
+
+    timeout-minutes: 20
+    runs-on: ${{ matrix.config.os }}
+    name: ${{ matrix.type }} ${{ matrix.config.name }} ${{ matrix.build_type.config }}${{ matrix.optimization_disabled.postfix}}
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+          fetch-depth: 0
+
+    # Work around https://github.com/actions/runner-images/issues/8659
+    # - name: "Remove GCC 13 from runner image (workaround)"
+    #   if: matrix.config.os == 'ubuntu-22.04'
+    #   shell: bash
+    #   run: |
+    #       sudo apt-get update
+    #       sudo apt-get purge -y g++-13 gcc-13 libstdc++-13-dev
+    #       sudo apt-get install -y --allow-downgrades libstdc++-12-dev libstdc++6=12.* libgcc-s1=12.*
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ matrix.type }}-${{ matrix.config.name }}-${{ matrix.build_type.config }}
+
+    - name: Install deps
+      if: matrix.config.os == 'ubuntu-22.04'
+      run: |
+        sudo apt-get update -q && sudo apt-get install clang-tidy cppcheck -y -q
+        pip install pyyaml
+
+    - name: Cmake version
+      run: cmake --version
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        cache: true
+        version: "6.2.*"
+
+    - name: get conan
+      uses: turtlebrowser/get-conan@main
+
+    - name: cache deps
+      uses: actions/cache@v5
+      with:
+          path: ${{ env.CONAN_HOME }}
+          key: deps-${{ matrix.config.name }}-${{ matrix.build_type.config }}-${{ hashFiles('**/conanfile.py') }}-${{ hashFiles('**/CMakePresets.json') }}
+          restore-keys: deps-${{ matrix.config.name }}-${{ matrix.build_type.config }}
+
+    - name: conan detect profile
+      run: |
+        conan profile detect --force
+
+    - name: Run CMake
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: ${{ matrix.config.name }}-${{ matrix.type }}
+        configurePresetAdditionalArgs: "['-DCMAKE_BUILD_TYPE=${{ matrix.build_type.config }}', '-DCMAKE_CONFIGURATION_TYPES=${{ matrix.build_type.config }}', '-DRPP_DISABLE_DISPOSABLES_OPTIMIZATION=${{matrix.optimization_disabled.mode}}']"
+        buildPreset: ci-build
+        buildPresetAdditionalArgs: "['--config ${{ matrix.build_type.config }}']"
+        testPreset: ${{matrix.build_type.test_preset}}
+
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v7
+      if: matrix.type == 'benchmarks' && matrix.build_type.config == 'Release'
+      with:
+        name: ${{ matrix.config.name }}${{ matrix.optimization_disabled.postfix}}
+        path: ${{github.workspace}}/build/test_results/benchmarks_results.json
+
+  docs:
+    name: Build Doxygen Docs
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: true
+
+    - uses: actions/setup-python@v6
+      with: { python-version: "3.8" }
+
+    - uses: ssciwr/doxygen-install@v2
+
+    - name: Install deps
+      run: |
+        pip3 install rxmarbles
+        sudo apt-get update && sudo apt-get install texlive-font-utils
+        doxygen --version
+
+    - name: Doxygen
+      run: doxygen
+
+    - name: Deploy
+      uses: peaceiris/actions-gh-pages@v4
+      if: github.event_name == 'push' && github.repository_owner == 'victimsnino'
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./gen_docs
+        destination_dir: v2/docs
+
+  use_rpp_as_package:
+    timeout-minutes: 20
+
+    runs-on: ubuntu-22.04
+    name: Test RPP as package - ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+          fetch-depth: 0
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        cache: true
+        version: "6.2.*"
+
+    - name: Install project and build
+      env:
+        CC: gcc-10
+        CXX: g++-10
+      run: |
+        cmake -B build
+        sudo cmake --build build --target install --parallel 2 --config Release
+
+        cmake -B sample_build -S src/examples/rpp/package
+        cmake --build sample_build --parallel 2 --config Release
+
+        # cmake -B qt_sample_build -S src/examples/rppqt/package
+        # cmake --build qt_sample_build --parallel 2 --config Release

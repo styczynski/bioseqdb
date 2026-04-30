@@ -1,0 +1,165 @@
+name: Analyzers/sanitizers
+
+on:
+  workflow_run:
+    workflows:
+      - "CI v2"
+    types:
+      - completed
+
+env:
+  CONAN_HOME: "${{ github.workspace }}/release/"
+
+jobs:
+  pvs:
+    if: github.repository_owner == 'victimsnino' && github.event.workflow_run.conclusion == 'success' && false
+
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+    - uses: haya14busa/action-workflow_run-status@main
+
+    - uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+        repository: ${{ github.event.workflow_run.head_repository.full_name }}
+        ref: ${{ github.event.workflow_run.head_branch }}
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        cache: true
+        version: "6.2.*"
+
+    - name: get conan
+      uses: turtlebrowser/get-conan@main
+
+    - name: cache deps
+      uses: actions/cache@v5
+      with:
+          path: ${{ env.CONAN_HOME }}
+          key: deps-ci-ubuntu-clang-Release-${{ hashFiles('**/conanfile.py') }}-${{ hashFiles('**/CMakePresets.json') }}
+          restore-keys: deps-ci-ubuntu-clang-Release
+
+    - name: conan detect profile
+      run: |
+        conan profile detect --force
+
+    - name: Install tools
+      id: setup
+      continue-on-error: true
+      run: |
+        wget -q -O - https://files.pvs-studio.com/etc/pubkey.txt \
+          | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/PVS.gpg --import
+        sudo apt-key adv --refresh-keys
+        sudo chmod 644 /etc/apt/trusted.gpg.d/PVS.gpg
+        sudo wget -O /etc/apt/sources.list.d/viva64.list \
+          https://files.pvs-studio.com/etc/viva64.list
+        sudo apt update
+        sudo apt install pvs-studio
+        pvs-studio-analyzer credentials ${{ secrets.PVS_STUDIO_CREDENTIALS }}
+
+    - name: Run CMake
+      if: steps.setup.outcome == 'success' && steps.setup.conclusion == 'success'
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: ci-ubuntu-clang-tests-no-checks
+        buildPreset: ci-build
+
+    - name: Analyze and prepare report
+      if: steps.setup.outcome == 'success' && steps.setup.conclusion == 'success'
+      run: |
+          pvs-studio-analyzer analyze -f build/compile_commands.json -j -e build/_deps/
+          plog-converter -t sarif -o pvs-report.sarif PVS-Studio.log
+
+    - name: Publish report
+      if: steps.setup.outcome == 'success' && steps.setup.conclusion == 'success'
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: pvs-report.sarif
+        category: PVS-Studio
+
+  sonarcloud_and_coverage:
+    runs-on: ubuntu-22.04
+
+    if: github.repository_owner == 'victimsnino' && github.event.workflow_run.conclusion == 'success' && false
+
+    steps:
+    - uses: haya14busa/action-workflow_run-status@main
+
+    - uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+        repository: ${{ github.event.workflow_run.head_repository.full_name }}
+        ref: ${{ github.event.workflow_run.head_branch }}
+
+    - name: Install llvm
+      run: sudo apt-get update -q && sudo apt-get install llvm -q -y
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        cache: true
+        version: "6.2.*"
+
+    - name: get conan
+      uses: turtlebrowser/get-conan@main
+
+    - name: cache deps
+      uses: actions/cache@v5
+      with:
+          path: ${{ env.CONAN_HOME }}
+          key: deps-ci-ubuntu-clang-Release-${{ hashFiles('**/conanfile.py') }}-${{ hashFiles('**/CMakePresets.json') }}
+          restore-keys: deps-ci-ubuntu-clang-Release
+
+    - name: conan detect profile
+      run: |
+        conan profile detect --force
+
+    - name:  Install sonar-scanner and build-wrapper
+      uses: sonarsource/sonarcloud-github-c-cpp@v3
+
+    - name: Run CMake
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: ci-coverage-clang
+        buildPreset: ci-build
+        testPreset: ci-tests
+
+    - name: Process coverage info
+      run: cmake --build build -t coverage
+
+    - name: "Get PR information"
+      uses: potiuk/get-workflow-origin@v1_3
+      id: source-run-info
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        sourceRunId: ${{ github.event.workflow_run.id }}
+
+    - name: Submit to codecov.io
+      uses: codecov/codecov-action@v6
+      with:
+        file: build/test_results/coverage.txt
+        override_branch: ${{ github.event.workflow_run.head_branch }}
+        override_pr: ${{ steps.source-run-info.outputs.pullRequestNumber }}
+        override_commit: ${{ github.event.workflow_run.head_sha }}
+        token: ${{ secrets.CODECOV_TOKEN }} # required
+
+    - name: Run sonar-scanner on PUSH
+      if: github.event.workflow_run.event == 'push'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        sonar-scanner --define sonar.scm.revision=${{ github.event.workflow_run.head_sha }}
+
+    - name: Run sonar-scanner on PullRequest
+      if: github.event.workflow_run.event == 'pull_request'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        sonar-scanner --define sonar.scm.revision=${{ github.event.workflow_run.head_sha }} --define sonar.pullrequest.key=${{ steps.source-run-info.outputs.pullRequestNumber }} --define sonar.pullrequest.branch=${{ steps.source-run-info.outputs.sourceHeadBranch }} --define sonar.pullrequest.base=${{ steps.source-run-info.outputs.targetBranch }}

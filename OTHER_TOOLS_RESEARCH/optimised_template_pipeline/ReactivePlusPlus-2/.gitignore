@@ -1,0 +1,17 @@
+.idea/
+.vs/
+.vscode/
+.cache/
+build/
+_build/
+old_build/
+cmake/open-cpp-coverage.cmake
+cmake-build-*/
+prefix/
+CMakeLists.txt.user
+CMakeUserPresets.json
+*.code-workspace
+*.workspace
+
+gen_docs/
+gen_images/
