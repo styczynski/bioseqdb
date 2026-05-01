@@ -23,6 +23,7 @@ find_package(reflectcpp CONFIG REQUIRED)
 find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)
 find_package(sqlgen REQUIRED)
+find_package(ftxui REQUIRED)
 
 # AddCommonTarget(
 #   postgresql_bioseq
@@ -134,6 +135,9 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
+    ftxui::component
+    ftxui::dom
+    ftxui::screen
   SOURCES
     ${BENCH_SRC_FILES}
   SUPPORT_CXX_MODULES

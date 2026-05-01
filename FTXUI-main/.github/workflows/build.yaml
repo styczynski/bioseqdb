@@ -1,0 +1,221 @@
+name: Build
+
+on:
+  # On new commits to main:
+  push:
+    branches:
+      - main
+
+  # On pull requests:
+  pull_request:
+    branches:
+      - main
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+
+  test_bazel:
+    name: "Bazel, ${{ matrix.cxx }}, ${{ matrix.os }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cxx: g++
+            cc: gcc
+
+          - os: ubuntu-latest
+            cxx: clang++
+            cc: clang
+
+          - os: macos-latest
+            cxx: g++
+            cc: gcc
+
+          - os: macos-latest
+            cxx: clang++
+            cc: clang
+
+          - os: windows-latest
+            cxx: cl
+            cc: cl
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Build with Bazel"
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: bazel build ...
+
+      - name: "Tests with Bazel"
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: bazel test --test_output=all ...
+
+      - name: "Bazel Smoke test"
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: bazel build //... --enable_bzlmod --override_module=ftxui=../..
+        working-directory: bazel/test
+
+  test_cmake:
+    name: "CMake, ${{ matrix.compiler }}, ${{ matrix.os }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GCC
+            os: ubuntu-latest
+            compiler: gcc
+
+          - name: Linux Clang
+            os: ubuntu-latest
+            compiler: llvm
+            gcov_executable: "llvm-cov gcov"
+
+          - name: MacOS clang
+            os: macos-latest
+            compiler: llvm
+            gcov_executable: "llvm-cov gcov"
+
+          - name: Windows MSVC
+            os: windows-latest
+            compiler: cl
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Get number of CPU cores
+        uses: SimenB/github-actions-cpu-cores@v1
+        id: cpu-cores
+
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Setup Cpp"
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: ${{ matrix.compiler }}
+          vcvarsall: ${{ contains(matrix.os, 'windows' )}}
+          cmake: true
+          ninja: true
+          clangtidy: false
+          cppcheck: false
+          gcovr: "5.0"
+          opencppcoverage: true
+
+      # make sure coverage is only enabled for Debug builds, since it sets -O0
+      # to make sure coverage has meaningful results
+      - name: "Configure CMake"
+        run: >
+          cmake -S .
+          -B ./build
+          -DCMAKE_BUILD_TYPE:STRING=Debug
+          -DCMAKE_BUILD_PARALLEL_LEVEL=${{ steps.cpu-cores.outputs.count }}
+          -DFTXUI_ENABLE_COVERAGE:BOOL=ON
+          -DFTXUI_BUILD_DOCS:BOOL=OFF
+          -DFTXUI_BUILD_EXAMPLES:BOOL=ON
+          -DFTXUI_BUILD_TESTS:BOOL=ON
+          -DFTXUI_BUILD_TESTS_FUZZER:BOOL=OFF
+          -DFTXUI_ENABLE_INSTALL:BOOL=ON
+          -DFTXUI_DEV_WARNINGS:BOOL=ON ;
+
+      - name: "Build"
+        run: >
+          cmake
+          --build ./build
+
+      - name: Unix - Test
+        if: runner.os != 'Windows'
+        working-directory: ./build
+        run: >
+          ctest -C Debug --rerun-failed --output-on-failure;
+
+      - name: Unix - coverage
+        if: matrix.gcov_executable != ''
+        working-directory: ./build
+        run: >
+          gcovr
+          -j ${{env.nproc}}
+          --delete
+          --root ../
+          --exclude "../examples"
+          --exclude ".*google.*"
+          --exclude ".*test.*"
+          --exclude-unreachable-branches
+          --exclude-throw-branches
+          --sort-uncovered
+          --print-summary
+          --xml-pretty
+          --xml
+          coverage.xml
+          .
+          --gcov-executable '${{ matrix.gcov_executable }}';
+
+      - name: Windows - Test and coverage
+        if: runner.os == 'Windows'
+        working-directory: ./build
+        run: >
+          OpenCppCoverage.exe
+          --export_type cobertura:coverage.xml
+          --cover_children
+          --
+          ctest -C Debug --rerun-failed --output-on-failure;
+
+      - name: Publish to codecov
+        uses: codecov/codecov-action@v4
+        with:
+          flags: ${{ runner.os }}
+          name: ${{ runner.os }}-coverage
+          files: ./build/coverage.xml
+
+  test_modules:
+    name: "Test modules"
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            compiler: llvm
+          # TODO add gcc / msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Setup Cpp"
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: ${{ matrix.compiler }}
+          vcvarsall: ${{ contains(matrix.os, 'windows' )}}
+          cmake: true
+          ninja: true
+          clangtidy: false
+          cppcheck: false
+          opencppcoverage: false
+
+      - name: "Generate ./examples_modules"
+        run: >
+          ./tools/generate_examples_modules.sh
+
+      - name: "Build modules"
+        run: >
+          mkdir build;
+          cd build;
+          cmake ..
+          -DCMAKE_GENERATOR=Ninja
+          -DFTXUI_BUILD_MODULES=ON
+          -DFTXUI_BUILD_EXAMPLES=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DFTXUI_BUILD_DOCS=OFF
+          -DFTXUI_BUILD_TESTS=OFF
+          -DFTXUI_BUILD_TESTS_FUZZER=OFF
+          -DFTXUI_ENABLE_INSTALL=ON
+          -DFTXUI_DEV_WARNINGS=ON ;
+          cmake --build .

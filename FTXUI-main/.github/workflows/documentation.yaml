@@ -1,0 +1,76 @@
+name: Documentation
+
+on:
+  # On new commits to main:
+  push:
+    branches:
+      - main
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  documentation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Need full history.
+          fetch-tags: true # Need tags.
+
+
+      - name: "Install cmake"
+        uses: lukka/get-cmake@latest
+
+      - name: "Install emsdk"
+        uses: mymindstorm/setup-emsdk@v7
+
+      - name: "Install Doxygen"
+        uses: ssciwr/doxygen-install@v1
+        with:
+          version: '1.12.0'
+
+      - name: "Install Graphviz"
+        run: >
+          sudo apt-get update;
+          sudo apt-get install graphviz;
+
+      - name: "Build documentation"
+        run: |
+          python3 ./tools/build_multiversion_doc.py
+
+      - name: "Build examples"
+        run: >
+          mkdir -p multiversion_docs/main/examples;
+          mkdir build;
+          cd build;
+          emcmake cmake ..
+          -DCMAKE_BUILD_TYPE=Release
+          -DFTXUI_BUILD_DOCS=ON
+          -DFTXUI_BUILD_EXAMPLES=ON
+          -DFTXUI_BUILD_TESTS=OFF
+          -DFTXUI_BUILD_TESTS_FUZZER=OFF
+          -DFTXUI_ENABLE_INSTALL=OFF
+          -DFTXUI_DEV_WARNINGS=OFF;
+          cmake --build .;
+          rsync -amv
+          --include='*/'
+          --include='*.html'
+          --include='*.css'
+          --include='*.mjs'
+          --include='*.js'
+          --include='*.wasm'
+          --exclude='*'
+          examples
+          ../multiversion_docs/
+
+      - name: "Deploy"
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: multiversion_docs
+          enable_jekyll: false
+          allow_empty_commit: false
+          force_orphan: true
+          publish_branch: gh-pages

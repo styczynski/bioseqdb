@@ -1,0 +1,74 @@
+# ftxui_common.bzl
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# Microsoft terminal is a bit buggy ¯\_(ツ)_/¯ and MSVC uses bad defaults.
+def windows_copts():
+    MSVC_COPTS = [
+      # Microsoft Visual Studio must decode sources files as UTF-8.
+      "/utf-8",
+
+      # Microsoft Visual Studio must interpret the codepoint using unicode.
+      "/DUNICODE",
+      "/D_UNICODE",
+    ]
+
+    WINDOWS_COPTS = [];
+    
+    return select({
+        # MSVC:
+        "@rules_cc//cc/compiler:msvc-cl": MSVC_COPTS,
+        "@rules_cc//cc/compiler:clang-cl": MSVC_COPTS,
+        "@platforms//os:windows": WINDOWS_COPTS,
+        "//conditions:default": [],
+    })
+
+def ftxui_cc_library(
+        name,
+        srcs = [],
+        hdrs = [],
+        linkopts = [],
+        visibility = ["//visibility:public"],
+        deps = []):
+
+    cc_library(
+        name = name,
+        srcs = srcs,
+        hdrs = hdrs,
+        linkopts = linkopts,
+        deps = deps,
+        strip_include_prefix = "include",
+        includes = [
+            "src",
+        ],
+        copts = windows_copts(),
+        visibility = visibility,
+    )
+
+# Compile all the examples in the examples/ directory.
+# This is useful to check the Bazel is always synchronized against CMake
+# definitions.
+def generate_examples():
+    cpp_files = native.glob(["examples/**/*.cpp"])
+
+    for src in cpp_files:
+        # Skip failing examples due to the color_info_sorted_2d.ipp dependency.
+        if src == "examples/component/homescreen.cpp" or \
+           src == "examples/dom/color_info_palette256.cpp" or \
+           src == "examples/dom/color_gallery.cpp":
+            continue
+
+        # Turn "examples/component/button.cpp" → "example_component_button"
+        name = src.replace("/", "_").replace(".cpp", "")
+
+        cc_binary(
+            name = name,
+            srcs = [src],
+            deps = [
+              ":component",
+              ":dom",
+              ":screen",
+            ],
+            copts = windows_copts(),
+        )

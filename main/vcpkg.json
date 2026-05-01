@@ -10,6 +10,7 @@
     "highway",
     "libassert",
     "reflectcpp",
+    "simdjson",
     {
       "name": "sqlgen",
       "features": [
@@ -17,6 +18,6 @@
       ]
     },
     "zlib",
-    "simdjson"
+    "ftxui"
   ]
 }
