@@ -106,13 +106,13 @@ public:
 
     // The previous signature was `void push_back(T&& value)` — strict
     // rvalue ref + lvalue-from-rvalue-ref copy in the body. For the
-    // 16 B trivially-copyable `MinimapSketch` case (the dominant
-    // instantiation), pass-by-value lets the call site emit a single
-    // 128-bit store directly into the slot via the standard ABI's
-    // return-slot convention, without binding through a named ref.
-    // For non-trivial T's, the forwarding-ref overload below covers
-    // perfect-forwarding move semantics with the same single-store
-    // codegen at -O2.
+    // 8 B trivially-copyable `MinimizerRepr` case (the dominant
+    // instantiation, was 16 B before the compact-minimizer rewrite),
+    // pass-by-value lets the call site emit a single 64-bit store
+    // directly into the slot via the standard ABI's return-slot
+    // convention, without binding through a named ref. For non-trivial
+    // T's, the forwarding-ref overload below covers perfect-forwarding
+    // move semantics with the same single-store codegen at -O2.
     [[always_inline]] void push_back(T value)
         requires std::is_trivially_copyable_v<T>
     {
