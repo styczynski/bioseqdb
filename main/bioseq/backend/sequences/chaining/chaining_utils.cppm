@@ -14,11 +14,8 @@
  */
 module;
 
-#include <hwy/highway.h>
-
 #include "common.h"
 
-#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
@@ -32,7 +29,6 @@ export module bioseq_sequences.chaining.utils;
 
 import mlogging;
 import context;
-import bioseq_simd.sorting;
 
 export {
 namespace bioseq::chaining {
@@ -84,18 +80,6 @@ struct AnchorQueryFields {
 /// Uses unions to provide both clean bitfield access (ref/query structs) and
 /// raw uint64_t access (ref_bits/query_bits) for sorting and arithmetic.
 ///
-/// **Memory layout** (kept identical to the pre-VQSort baseline): the
-/// lower 64-bit lane (offset 0) holds `ref_bits` (sort primary key); the
-/// upper 64-bit lane (offset 8) holds `query_bits` (sort secondary key).
-/// This is *opposite* to Highway's `Lt128` contract — `Lt128` would read
-/// the upper lane first as the primary key — so the VQSort u128 path in
-/// `minimap_port.cppm:collect_seed_hits_sort` packs the keys into a
-/// transient `std::vector<hwy::uint128_t>` with the lanes swapped before
-/// calling the kernel. The temp-buffer staging measurably outperforms
-/// the alternative (rearranging the union order so the Anchor matches
-/// Lt128 directly) — see SORTING_PERFORMANCE_REPORT.md §4.1 for the
-/// empirical comparison.
-///
 /// The unions previously defaulted to `= 0`. This forced a full 16 B
 /// zero-store on every `Anchor anchor;` declaration — even though
 /// `collect_seed_hits` immediately overwrote all four nested fields in
@@ -116,14 +100,6 @@ struct Anchor {
         uint64_t query_bits;  ///< Raw value for sorting/arithmetic on query data
     };
 };
-
-static_assert(sizeof(Anchor) == 16,
-              "Anchor must remain a 128-bit composite for VQSort u128 dispatch.");
-static_assert(offsetof(Anchor, ref_bits)   == 0,
-              "ref_bits must occupy the LE low lane (matches the upstream "
-              "minimap2 mm128_t / radix_sort_128x layout).");
-static_assert(offsetof(Anchor, query_bits) == 8,
-              "query_bits must occupy the LE high lane.");
 
 /// One chain of anchors, with metadata.
 ///
@@ -363,47 +339,11 @@ struct ChainingParams {
         }
     }
 
-    // Sort by score ascending so we process highest-scoring chains last->first.
-    // We pack `(score, anchor_index)` into K32V32 and rely on Highway's
-    // unsigned-`>>32` comparator + a `+0x80000000` sign-bias to recover the
-    // signed-ascending semantics the std::sort lambda has. Composite keys
-    // ensure the sort is stable on `anchor_index` (which is unique per
-    // record) — equal-score chains are processed in the same order as the
-    // original pdqsort would produce after its tiebreak randomisation. The
-    // threshold gate keeps std::sort for the bench corpus (`scored_indices`
-    // is typically 1 k–10 k entries) and only switches to VQSort once the
-    // surviving-anchor count clears the 12 800-key cutover at runtime.
-    {
-        constexpr std::size_t scored_vqsort_threshold =
-            bioseq::simd::sorting::vqsort_threshold_keys<hwy::K32V32>;
-        if (scored_indices.size() < scored_vqsort_threshold ||
-            anchor_count >= static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) [[likely]]
-        {
-            std::sort(scored_indices.begin(), scored_indices.end(),
-                      [](const ScoredAnchorIndex& left, const ScoredAnchorIndex& right) {
-                          return left.score < right.score;
-                      });
-        } else {
-            const std::size_t scored_count_local = scored_indices.size();
-            std::vector<hwy::K32V32> scored_kv(scored_count_local);
-            for (std::size_t scored_idx = 0; scored_idx < scored_count_local; ++scored_idx) {
-                // XOR-flip-sign-bit is the self-inverse mapping that makes
-                // unsigned `>>32` comparison match signed-ascending order.
-                const std::uint32_t score_biased =
-                    static_cast<std::uint32_t>(scored_indices[scored_idx].score) ^ 0x80000000u;
-                scored_kv[scored_idx].key   = score_biased;
-                scored_kv[scored_idx].value = static_cast<std::uint32_t>(
-                    scored_indices[scored_idx].anchor_index);
-            }
-            bioseq::simd::sorting::sort_k32v32_ascending(scored_kv.data(), scored_count_local);
-            for (std::size_t scored_idx = 0; scored_idx < scored_count_local; ++scored_idx) {
-                scored_indices[scored_idx].score = static_cast<std::int32_t>(
-                    scored_kv[scored_idx].key ^ 0x80000000u);
-                scored_indices[scored_idx].anchor_index =
-                    static_cast<std::int64_t>(scored_kv[scored_idx].value);
-            }
-        }
-    }
+    // Sort by score ascending so we process highest-scoring chains last->first
+    std::sort(scored_indices.begin(), scored_indices.end(),
+              [](const ScoredAnchorIndex& left, const ScoredAnchorIndex& right) {
+                  return left.score < right.score;
+              });
 
     // `visited` was previously a `std::vector<int32_t>(anchor_count, 0)` —
     // a fresh malloc + zero-fill on every chaining call. Move into the
