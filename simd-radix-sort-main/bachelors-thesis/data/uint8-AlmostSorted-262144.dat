@@ -1,0 +1,9 @@
+sort_method nanoseconds_per_element
+STLSort 3.651326
+MoellerSeq 1.640701
+RadixSeq 1.636420
+IPPRadix 1.316850
+RadixSIMD 0.518909
+MoellerCompress 0.503773
+RadixSIMDNoCmp 0.476140
+

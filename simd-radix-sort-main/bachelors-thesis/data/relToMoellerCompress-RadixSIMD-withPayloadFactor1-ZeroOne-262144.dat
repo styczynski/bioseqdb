@@ -1,0 +1,7 @@
+key_payloads speedup
+float 0.733818
+double 0.481264
+int8 0.819313
+int16 0.663325
+int32 0.506382
+int64 0.459801

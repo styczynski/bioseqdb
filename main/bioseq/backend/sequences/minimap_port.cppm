@@ -46,6 +46,8 @@ module;
 #include <span>
 #include <string>
 
+#include <boost/unordered/unordered_flat_map.hpp>
+
 export module bioseq_sequences.minimap_port;
 
 import mlogging;
@@ -391,7 +393,17 @@ struct AlignRegion {
  * For single-target, rid = 0.
  */
 struct TargetIndex {
-    std::unordered_map<uint64_t, std::vector<uint64_t>> table;
+    // Flat layout — open-addressing hash maps each kmer to a packed
+    // (offset:32 | count:32) pair pointing into a flat positions array.
+    // Replaces the legacy `std::unordered_map<uint64_t, std::vector<uint64_t>>`
+    // (one heap-allocation per distinct minimizer + chained-bucket lookup),
+    // matching minimap2's khash-style layout. For a 1 Mbp pair with ~100 k
+    // distinct kmers this drops ~200 k small allocations per pair down to
+    // ~3 (one for the table, one for the positions, one for the count
+    // builder) and lifts lookup throughput because boost::unordered_flat_map
+    // is open-addressing with SSE2/NEON-accelerated probing.
+    boost::unordered_flat_map<uint64_t, uint64_t> table;
+    std::vector<uint64_t>                          positions;
     int32_t target_len = 0;
 
     static constexpr uint32_t kSerializeMagic   = 0xB1000001u;
@@ -440,14 +452,54 @@ struct TargetIndex {
         auto _scope = bioseq::instr::region(_desc);
         target_len = target_length;
         table.clear();
-        table.reserve(target_minimizers.size());
+        positions.clear();
+
+        const std::size_t total = target_minimizers.size();
+        if (total == 0) {
+            return;
+        }
+
+        // Pass 1: bump per-kmer count. The packed value temporarily holds
+        //         count in the low 32 bits and 0 in the high 32 bits; the
+        //         sentinel offset value is rewritten in pass 2.
+        table.reserve(total);
         for (const auto& minimizer : target_minimizers) {
-            const uint64_t hash_key = minimizer.kmer;
+            ++table[minimizer.kmer];
+        }
+
+        // Pass 2: convert per-kmer counts into (offset, count) pairs.
+        positions.resize(total);
+        uint32_t running_offset = 0;
+        for (auto& kv : table) {
+            const uint32_t count = static_cast<uint32_t>(kv.second);
+            kv.second = (static_cast<uint64_t>(running_offset) << 32) | count;
+            running_offset += count;
+        }
+
+        // Pass 3: write each minimizer into its bucket using a per-kmer
+        //         "next-free" cursor stashed in the high bits temporarily.
+        //         We re-use the table's value field as a write cursor by
+        //         counting backward from base+count down to base+0; doing so
+        //         avoids a second hash map (the V14 future-work item #5
+        //         hypothesised this win would need a side cursor map but it
+        //         is unnecessary with the in-place trick).
+        for (auto& kv : table) {
+            // High 32 bits stay as the offset; clear the low 32 (count)
+            // and use them as a per-kmer write cursor that we'll restore
+            // back to `count` once we're done.
+            kv.second &= 0xFFFFFFFF00000000ull;
+        }
+        for (const auto& minimizer : target_minimizers) {
             const uint64_t encoded_position =
                 (static_cast<uint64_t>(minimizer.last_pos) << 1)
                 | static_cast<uint64_t>(minimizer.strand);
-            table[hash_key].push_back(encoded_position);
+            auto iter = table.find(minimizer.kmer);
+            const uint32_t base_offset = static_cast<uint32_t>(iter->second >> 32);
+            const uint32_t cursor      = static_cast<uint32_t>(iter->second);
+            positions[base_offset + cursor] = encoded_position;
+            iter->second = (static_cast<uint64_t>(base_offset) << 32) | (cursor + 1);
         }
+
         JustLog("[minimap_port] Built target index: {} distinct minimizers from {} total",
                 table.size(), target_minimizers.size());
     }
@@ -457,7 +509,10 @@ struct TargetIndex {
         if (iter == table.end()) {
             return {};
         }
-        return std::span<const uint64_t>(iter->second);
+        const uint64_t packed = iter->second;
+        const uint32_t off    = static_cast<uint32_t>(packed >> 32);
+        const uint32_t count  = static_cast<uint32_t>(packed);
+        return std::span<const uint64_t>(positions.data() + off, count);
     }
 
     [[nodiscard]] int32_t target_length() const { return target_len; }
@@ -475,21 +530,14 @@ struct TargetIndex {
     // --------------------------------------------------------------------
 
     [[nodiscard]] std::size_t serialize_binary_size() const {
-        std::size_t total_positions = 0;
-        for (const auto& kv : table) {
-            total_positions += kv.second.size();
-        }
         return kSerializeHeaderBytes
              + kSerializeBucketBytes * table.size()
-             + 8 * total_positions;
+             + 8 * positions.size();
     }
 
     void serialize_to_binary(char* output) const {
-        const uint32_t bucket_count = static_cast<uint32_t>(table.size());
-        uint64_t total_positions = 0;
-        for (const auto& kv : table) {
-            total_positions += kv.second.size();
-        }
+        const uint32_t bucket_count    = static_cast<uint32_t>(table.size());
+        const uint64_t total_positions = static_cast<uint64_t>(positions.size());
 
         /* One aligned memcpy for the whole 24-byte header beats five
          * field-by-field stores: the compiler emits a single pair of
@@ -505,24 +553,22 @@ struct TargetIndex {
 
         char* bucket_cursor   = output + kSerializeHeaderBytes;
         char* position_cursor = bucket_cursor + kSerializeBucketBytes * bucket_count;
-        uint32_t position_offset = 0;
 
         for (const auto& kv : table) {
-            const uint32_t count = static_cast<uint32_t>(kv.second.size());
-            const SerializedBucket bucket{ kv.first, position_offset, count };
+            const uint64_t packed   = kv.second;
+            const uint32_t pos_off  = static_cast<uint32_t>(packed >> 32);
+            const uint32_t pos_cnt  = static_cast<uint32_t>(packed);
+            const SerializedBucket bucket{ kv.first, pos_off, pos_cnt };
             std::memcpy(bucket_cursor, &bucket, sizeof(bucket));
             bucket_cursor += kSerializeBucketBytes;
+        }
 
-            if (count > 0) {
-                /* Positions are a flat run of uint64_t already; one memcpy
-                 * becomes a single memcpy/rep movsq which is the fastest
-                 * available for cache-cold bulk copies on both target
-                 * ISAs. AVX-512 scatter is not the right tool here — it
-                 * assumes unaligned random offsets; ours are contiguous. */
-                std::memcpy(position_cursor, kv.second.data(), count * 8);
-                position_cursor += count * 8;
-            }
-            position_offset += count;
+        if (total_positions > 0) {
+            /* Positions live in a single contiguous flat array; one memcpy
+             * becomes the fastest available cache-cold bulk copy on both
+             * target ISAs. The on-disk position layout is identical to v2:
+             * each bucket stores (pos_offset, pos_count) into this array. */
+            std::memcpy(position_cursor, positions.data(), total_positions * 8);
         }
     }
 
@@ -563,10 +609,10 @@ struct TargetIndex {
                  expected_size, input_size);
         }
 
-        /* Top-level header is validated; two per-bucket bounds checks remain
+        /* Top-level header is validated; per-bucket bounds checks remain
          * inside the loop below (pos_offset + pos_count <= total_positions).
          * Those checks also use elog(ERROR) and must fire BEFORE the bucket
-         * is emplaced so no std::unordered_map bucket is leaked on longjmp. */
+         * is emplaced so no hash-map bucket is leaked on longjmp. */
         TargetIndex idx;
         idx.target_len = header.target_len;
         idx.table.reserve(header.bucket_count);
@@ -574,14 +620,24 @@ struct TargetIndex {
         const char* bucket_cursor   = input + kSerializeHeaderBytes;
         const char* position_cursor = bucket_cursor + kSerializeBucketBytes * header.bucket_count;
 
+        // Slurp the positions array in one bulk memcpy. The on-disk layout
+        // already matches the in-memory flat layout, so no per-bucket
+        // sub-vectors need to be built.
+        idx.positions.resize(header.total_positions);
+        if (header.total_positions > 0) {
+            std::memcpy(idx.positions.data(),
+                        position_cursor,
+                        header.total_positions * 8);
+        }
+
         for (uint32_t b = 0; b < header.bucket_count; ++b) {
             SerializedBucket bucket{};
             std::memcpy(&bucket, bucket_cursor, sizeof(bucket));
             bucket_cursor += kSerializeBucketBytes;
 
-            /* Bounds check before the memcpy — otherwise a crafted blob with
-             * pos_offset = 0xFFFFFFF0 can read well past the end of input.
-             * Uses uint64_t arithmetic to avoid uint32 wrap. */
+            /* Bounds check before the emplace — otherwise a crafted blob with
+             * pos_offset = 0xFFFFFFF0 can produce a span that overflows the
+             * positions array. Uses uint64_t arithmetic to avoid uint32 wrap. */
             if (static_cast<uint64_t>(bucket.pos_offset) + bucket.pos_count > header.total_positions) {
                 elog(ERROR,
                      "bioseq: TargetIndex deserialize: bucket %u range (offset=%u count=%u) "
@@ -590,14 +646,10 @@ struct TargetIndex {
                      static_cast<unsigned long long>(header.total_positions));
             }
 
-            std::vector<uint64_t> positions;
-            positions.resize(bucket.pos_count);
-            if (bucket.pos_count > 0) {
-                std::memcpy(positions.data(),
-                            position_cursor + 8 * bucket.pos_offset,
-                            bucket.pos_count * 8);
-            }
-            idx.table.emplace(bucket.hash, std::move(positions));
+            const uint64_t packed =
+                (static_cast<uint64_t>(bucket.pos_offset) << 32)
+                | static_cast<uint64_t>(bucket.pos_count);
+            idx.table.emplace(bucket.hash, packed);
         }
 
         return idx;
