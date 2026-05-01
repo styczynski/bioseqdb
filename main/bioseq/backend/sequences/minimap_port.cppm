@@ -468,37 +468,45 @@ struct TargetIndex {
             ++table[minimizer.kmer];
         }
 
-        // Pass 2: convert per-kmer counts into (offset, count) pairs.
+        // Pass 2: convert per-kmer counts into a (offset, cursor) pair —
+        // the high 32 bits hold the bucket's base offset and the low 32 bits
+        // are pre-zeroed to act as a per-kmer write cursor for Pass 3. The
+        // legacy code wrote `(offset << 32) | count` here and then needed a
+        // separate sweep to clear the low 32 bits before Pass 3; since
+        // Pass 3 doesn't consult the count and only ever writes the cursor,
+        // we just emit `offset << 32` directly and drop the prep sweep.
+        // (After Pass 3 the cursor naturally lands at `count`, which is
+        // what `lookup()` reads back.)
         positions.resize(total);
         uint32_t running_offset = 0;
         for (auto& kv : table) {
             const uint32_t count = static_cast<uint32_t>(kv.second);
-            kv.second = (static_cast<uint64_t>(running_offset) << 32) | count;
+            kv.second = static_cast<uint64_t>(running_offset) << 32;
             running_offset += count;
         }
 
         // Pass 3: write each minimizer into its bucket using a per-kmer
-        //         "next-free" cursor stashed in the high bits temporarily.
-        //         We re-use the table's value field as a write cursor by
-        //         counting backward from base+count down to base+0; doing so
-        //         avoids a second hash map (the V14 future-work item #5
-        //         hypothesised this win would need a side cursor map but it
-        //         is unnecessary with the in-place trick).
-        for (auto& kv : table) {
-            // High 32 bits stay as the offset; clear the low 32 (count)
-            // and use them as a per-kmer write cursor that we'll restore
-            // back to `count` once we're done.
-            kv.second &= 0xFFFFFFFF00000000ull;
-        }
+        // "next-free" cursor stashed in the low 32 bits. Each iteration:
+        //   * derive the encoded position (last_pos << 1) | strand from the
+        //     low 29 bits of the packed minimizer value (the layout puts
+        //     strand at bit 0 and last_pos at bits 1..28, so this is
+        //     literally `value & ~kKmerMask` — no shift+mask per field);
+        //   * fetch the bucket's (base_offset, cursor) pair via one hash
+        //     map probe;
+        //   * splat into positions[base_offset + cursor] and bump cursor.
+        // The bucket entry now stores `(base_offset << 32) | (cursor+1)`;
+        // a single `++iter->second` works because the cursor occupies the
+        // low 32 bits and a unsigned-32 count cannot overflow into the
+        // base_offset region for any realistic genome.
         for (const auto& minimizer : target_minimizers) {
             const uint64_t encoded_position =
-                (static_cast<uint64_t>(minimizer.last_pos) << 1)
-                | static_cast<uint64_t>(minimizer.strand);
+                minimizer.value & ~MinimapSketchData::kKmerMask;
             auto iter = table.find(minimizer.kmer);
-            const uint32_t base_offset = static_cast<uint32_t>(iter->second >> 32);
-            const uint32_t cursor      = static_cast<uint32_t>(iter->second);
+            const uint64_t packed = iter->second;
+            const uint32_t base_offset = static_cast<uint32_t>(packed >> 32);
+            const uint32_t cursor      = static_cast<uint32_t>(packed);
             positions[base_offset + cursor] = encoded_position;
-            iter->second = (static_cast<uint64_t>(base_offset) << 32) | (cursor + 1);
+            ++iter->second;
         }
 
         JustLog("[minimap_port] Built target index: {} distinct minimizers from {} total",
@@ -718,7 +726,8 @@ template <MinimizerIndex IndexT>
     const std::vector<MinimapSketchData>& query_minimizers,
     const IndexT& target_index,
     int32_t query_len,
-    int32_t max_occ)
+    int32_t max_occ,
+    int32_t kmer_size)
 {
     static const auto* _seed_hits_desc =
         bioseq::instr::register_region_static("collect_seed_hits");
@@ -733,15 +742,26 @@ template <MinimizerIndex IndexT>
     static const auto* _idx_lookup_desc =
         bioseq::instr::register_region_static("target_index_lookup");
     auto _idx_lookup_scope = bioseq::instr::region(_idx_lookup_desc);
+    // The compact MinimapSketchData no longer carries a per-minimizer
+    // span field — for the dna4 bench path span is identically equal to
+    // the configured kmer size, so we hoist it from `kmer_size` once
+    // outside the loop instead of reading a now-removed bitfield.
+    const uint32_t query_span_value = static_cast<uint32_t>(kmer_size);
     for (const auto& query_minimizer : query_minimizers) {
         const auto target_hits = target_index.lookup(query_minimizer.kmer);
         if (target_hits.empty() || static_cast<int32_t>(target_hits.size()) > max_occ) {
             continue;
         }
 
+        // The legacy `(last_pos << 1) | strand` encoding is exactly the low
+        // 29 bits of the packed `value` (strand at bit 0, last_pos at bits
+        // 1..28, kmer at bits 29..63 — see MinimapSketchData layout).
+        // One masked load instead of two bitfield extracts + a shift + an OR.
         const uint32_t query_pos_encoded = static_cast<uint32_t>(
-            (query_minimizer.last_pos << 1) | query_minimizer.strand);
-        const uint32_t query_span_value = static_cast<uint32_t>(query_minimizer.span);
+            query_minimizer.value & ~MinimapSketchData::kKmerMask);
+        // S5: hoist the strand bit out of the inner per-hit loop — it's
+        // constant across `target_hits`.
+        const uint32_t query_strand_bit = query_pos_encoded & 1u;
 
         for (const uint64_t target_hit : target_hits) {
             const int32_t ref_position = static_cast<int32_t>(
@@ -749,7 +769,7 @@ template <MinimizerIndex IndexT>
             const uint32_t target_reference_id = static_cast<uint32_t>(target_hit >> 32);
 
             Anchor anchor;
-            const bool strands_match = ((target_hit & 1) == (query_pos_encoded & 1));
+            const bool strands_match = ((target_hit & 1) == query_strand_bit);
 
             if (strands_match) {
                 // Forward strand hit — set reference fields via bitfields
@@ -1643,7 +1663,6 @@ void estimate_divergence_from_seeds(
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_est_err");
     auto _scope = bioseq::instr::region(_desc);
-    (void)kmer_size;
     if (query_minimizers.empty()) {
         return;
     }
@@ -1678,11 +1697,13 @@ void estimate_divergence_from_seeds(
     // was structurally wrong (last_seed_pos > first_forward_pos for both
     // directions — V10 fix was a no-op at best, broken-fast-path at worst).
     // ----------------------------------------------------------------------
-    float span_sum = 0.0f;
-    for (const auto& query_min : query_minimizers) {
-        span_sum += static_cast<float>(query_min.span);
-    }
-    const float avg_kmer_span = span_sum / static_cast<float>(query_minimizers.size());
+    // The compact MinimapSketchData no longer carries a per-minimizer
+    // span field — for dna4 (the only bench alphabet) every minimizer's
+    // span is identically equal to the configured kmer size. The
+    // legacy `span_sum / count` average therefore degenerates to the
+    // constant `kmer_size`, which we use directly instead of touching
+    // a now-removed bitfield.
+    const float avg_kmer_span = static_cast<float>(kmer_size);
 
     // Build the prefix-count array in two linear passes:
     //   1. mini_pos_count[p + 1] += #(minimizers at last_pos == p)
@@ -2278,7 +2299,8 @@ template<
 
     // ---- Phase 2: Collect seed hits ----
     auto anchors = collect_seed_hits(
-        query_minimizers, prebuilt_target_index, query_len, params.max_occ);
+        query_minimizers, prebuilt_target_index, query_len, params.max_occ,
+        params.kmer_size);
 
     if (anchors.empty()) {
         JustLog("[minimap_port] No seed hits found — returning no results");
@@ -2480,7 +2502,11 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                 break;
         }
     }
-    const auto target_minimizers = target_collector.extract_sketches_data();
+    // Move the vector out of the collector — target_collector is dead after
+    // this point, so we drop a ~N*8B memcpy per pair (the legacy code
+    // returned by-value through extract_sketches_data, which built up as a
+    // ~150 kB copy on VERY_LONG inputs).
+    const auto target_minimizers = std::move(target_collector).extract_sketches_data();
     JustLog("[minimap_port] target_minimizers: {}", target_minimizers.size());
 
     // ---- Minimizer extraction: query ----
@@ -2512,7 +2538,8 @@ template<supports_compact_sequence_range QueryRange, supports_compact_sequence_r
                 break;
         }
     }
-    const auto query_minimizers = query_collector.extract_sketches_data();
+    // Move the vector out of the collector for the same reason as above.
+    const auto query_minimizers = std::move(query_collector).extract_sketches_data();
     JustLog("[minimap_port] query_minimizers: {}", query_minimizers.size());
 
     // ---- Remainder of the pipeline: target index, chaining, alignment, MAPQ ----

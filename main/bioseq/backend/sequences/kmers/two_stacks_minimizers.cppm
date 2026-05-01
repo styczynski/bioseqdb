@@ -376,15 +376,10 @@ requires (
                         hash_strand_val & ~static_cast<storage_unit>(1);
                     const storage_unit scrambled_kmer =
                         scramble_minimap_int(lexic_kmer);
-                    collector.collect(MinimapSketch({
-                        .sketch{ .sketch{
-                            .kmer = static_cast<uint64_t>(scrambled_kmer),
-                            .span = k,
-                            .rid = 0,
-                            .last_pos = abs_pos,
-                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
-                        }}
-                    }));
+                    collector.collect(MinimapSketch(
+                        /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
+                        /*last_pos=*/abs_pos,
+                        /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
                 }
                 last_emit_pos = hn::IfThenElse(real_emit, window_pos, last_emit_pos);
             }
@@ -815,15 +810,10 @@ template<
                         hash_strand_val & ~static_cast<hash_val_t>(1);
                     const hash_val_t scrambled_kmer =
                         scramble_minimap_int(lexic_kmer);
-                    collector.collect(MinimapSketch({
-                        .sketch{ .sketch{
-                            .kmer = static_cast<uint64_t>(scrambled_kmer),
-                            .span = k,
-                            .rid = 0,
-                            .last_pos = abs_pos,
-                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
-                        }}
-                    }));
+                    collector.collect(MinimapSketch(
+                        /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
+                        /*last_pos=*/abs_pos,
+                        /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
                 }
                 last_emit_pos_lo = hn::IfThenElse(real_emit_lo, window_pos_lo, last_emit_pos_lo);
             }
@@ -840,15 +830,10 @@ template<
                         hash_strand_val & ~static_cast<hash_val_t>(1);
                     const hash_val_t scrambled_kmer =
                         scramble_minimap_int(lexic_kmer);
-                    collector.collect(MinimapSketch({
-                        .sketch{ .sketch{
-                            .kmer = static_cast<uint64_t>(scrambled_kmer),
-                            .span = k,
-                            .rid = 0,
-                            .last_pos = abs_pos,
-                            .strand = static_cast<uint64_t>(hash_strand_val) & 0x1ULL,
-                        }}
-                    }));
+                    collector.collect(MinimapSketch(
+                        /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
+                        /*last_pos=*/abs_pos,
+                        /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
                 }
                 last_emit_pos_hi = hn::IfThenElse(real_emit_hi, window_pos_hi, last_emit_pos_hi);
             }

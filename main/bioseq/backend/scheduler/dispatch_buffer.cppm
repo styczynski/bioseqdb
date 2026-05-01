@@ -352,8 +352,12 @@ public:
                                     static_cast<size_t>(params.window_size),
                                     static_cast<size_t>(params.kmer_size));
                             }
+                            // Move the vector out of the collector — the
+                            // collector goes out of scope at the end of the
+                            // surrounding `if`, so the move avoids a copy
+                            // proportional to the query minimizer count.
                             cached_query_minimizers.emplace(
-                                query_collector.extract_sketches_data());
+                                std::move(query_collector).extract_sketches_data());
                         }
                         TargetIndex prebuilt_idx = TargetIndex::deserialize_from_binary(
                             (*index_blobs)[i].data, (*index_blobs)[i].bytes);

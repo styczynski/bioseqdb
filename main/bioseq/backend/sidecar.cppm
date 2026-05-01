@@ -280,7 +280,8 @@ export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
 			collect_minimizers<minimap_int_hasher>(
 				collector, seq, seq.begin(), seq.end(),
 				/*w=*/10, /*k=*/15);
-			auto minimizers = collector.extract_sketches_data();
+			// Move the vector — collector dies at lambda exit.
+			auto minimizers = std::move(collector).extract_sketches_data();
 
 			idx.build(minimizers, static_cast<int32_t>(seq.bp_size()));
 			blob_bytes = idx.serialize_binary_size();
