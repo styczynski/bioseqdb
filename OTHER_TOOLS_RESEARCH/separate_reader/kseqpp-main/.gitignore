@@ -1,0 +1,69 @@
+# Build directory
+build/
+
+# Binary directory
+bin/
+
+# Generated Makefiles
+src/.d/
+test/.d/
+
+# Generated files
+include/kseq++/config.hpp
+kseq++.pc
+
+# Log files
+*.log
+
+# Performance reports
+**/callgrind.out.*
+**/perf.data
+
+# ctags
+tags
+
+# compile flags
+compile_commands.json
+
+# Local config files
+.envrc
+
+## GitHub defaults ##
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Backups
+*.bak
+*~
+
+# Doxygen files
+doc/html/*
+doc/latex/*
+doc/doxygen_sqlite3.db

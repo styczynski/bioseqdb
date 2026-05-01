@@ -1,0 +1,44 @@
+[package]
+name = "seq_io"
+version = "0.3.4"
+rust-version = "1.61.0"
+edition = "2021"
+authors = ["<markschl19@gmail.com>"]
+description = "Fast FASTA and FASTQ readers"
+license = "MIT"
+repository = "https://github.com/markschl/seq_io"
+documentation = "https://docs.rs/seq_io"
+readme = "README.md"
+keywords = ["bio", "fasta", "fastq", "parser"]
+exclude = [
+    "bench_results/*",
+]
+
+[dependencies]
+memchr = "2.7"
+buffer-redux = { version = "~1.0.1", default-features = false }
+scoped_threadpool = "0.1"
+crossbeam-utils = "0.8"
+serde = "1.0"
+serde_derive = "1.0"
+
+[dev-dependencies]
+bio = { version = "2.2", default-features = false }
+fastq = "0.6"
+matches = "0.1.10"
+lazy_static = "1.5"
+rand = "0.9"
+rand_distr = "0.5"
+rand_isaac = "0.4"
+criterion = { version = "0.5", default-features = false, features = ["csv_output"] }
+
+[profile.bench]
+lto = true
+
+[[bench]]
+name = "fasta"
+harness = false
+
+[[bench]]
+name = "fastq"
+harness = false

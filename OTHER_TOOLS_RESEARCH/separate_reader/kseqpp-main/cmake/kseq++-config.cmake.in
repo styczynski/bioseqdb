@@ -1,0 +1,15 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(ZLIB REQUIRED)
+find_dependency(BZip2 REQUIRED)
+find_dependency(Threads REQUIRED)
+
+if(NOT TARGET kseq++::kseq++)
+  include("${CMAKE_CURRENT_LIST_DIR}/kseq++-targets.cmake")
+endif()
+
+check_required_components(kseq++)
+
+include("${CMAKE_CURRENT_LIST_DIR}/kseq++-config-version.cmake")
+message(STATUS "Found kseq++ (version ${PACKAGE_VERSION})")

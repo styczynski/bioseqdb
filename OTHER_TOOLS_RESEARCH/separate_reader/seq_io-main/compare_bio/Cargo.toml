@@ -1,0 +1,8 @@
+[package]
+name = "compare_bio"
+version = "0.1.1"
+authors = ["markschl"]
+
+[dependencies]
+bio = { version = "2.2", default-features = false }
+seq_io = { path = ".." }

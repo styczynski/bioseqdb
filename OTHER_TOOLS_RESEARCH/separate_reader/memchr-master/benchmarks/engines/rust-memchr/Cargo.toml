@@ -1,0 +1,23 @@
+[package]
+publish = false
+name = "main"
+version = "2.7.6"  # should match current 'memchr' version
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.100"
+memchr = { version = "*", path = "../../../" }
+
+[dependencies.shared]
+path = "../../shared"
+
+[[bin]]
+name = "main"
+path = "main.rs"
+
+[profile.release]
+debug = true
+codegen-units = 1
+lto = "fat"
