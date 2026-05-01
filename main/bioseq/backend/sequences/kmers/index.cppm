@@ -36,154 +36,356 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 // ============================================================================
-// Compact minimizer representation (64-bit packed)
+// Templated minimizer representation — `MinimizerRepr<MaxSeqLog2, KmerLen>`
 // ============================================================================
 //
-// Replaces the legacy 16-byte MinimapSketchData (which carried unused .rid
-// (always 0) and .span (always == k for dna4) plus a 56-bit hash for k <= 28
-// where only 2*k bits are ever populated by minimap_int_hasher).
+// Picks 16/32/64/128-bit storage automatically based on the bit-packing
+// algorithm in PROMPT_4.md:
 //
-// New layout (64 bits, little-endian bitfield order — high bits = kmer):
+//   strand_bits   = 1
+//   pos_bits      = MaxSeqLog2
+//   min_hash_bits = min(56, 2 * KmerLen)
 //
-//      [kmer:35 | last_pos:28 | strand:1]
-//        bit 63..29   bit 28..1   bit 0
+//   storage_bits is the smallest of {16, 32, 64, 128} for which
+//   (storage_bits - strand_bits - pos_bits[ - span_bits]) >= min_hash_bits.
+//   span_bits is 8 only in the 128-bit fallback (preserved for dna5
+//   ambiguity); for dna4 the span field is always == k and is dropped.
 //
-// Coverage:
-//   * kmer: 35 bits — covers any K up to 17 (minimap_int_hasher masks to
-//     2*k bits; for K=15 only 30 bits are used). For K beyond 17 this
-//     truncates the hash and would re-collide some k-mers, so the bench's
-//     default K=15 path is fully covered while exotic K>17 callers fall
-//     back through the legacy path (kept off-bench for now).
-//   * last_pos: 28 bits — covers sequences up to 2^28 = 256 Mbp. The bench
-//     XXL bucket peaks at 150 Mbp, so this is sufficient.
-//   * strand: 1 bit — fwd/rc bit, identical semantics to legacy.
+// The bench grid uses K = 15 + max_seq_len up to 150 Mbp ⇒ pos_bits ∈
+// [10, 28] ⇒ storage_bits == 64 always.  Different MaxSeqLog2 buckets
+// shift bits between hash and pos but stay within 64-bit storage.
 //
-// Removed fields:
-//   * rid (was 32 bits, always 0): only meaningful for multi-target
-//     index/indexing flows that bioseq does not exercise.
-//   * span (was 8 bits, always k for dna4): callers that needed it now
-//     read params.kmer_size directly. The single dna5 caller (with
-//     ambiguity-driven span < k) is not on the bench grid.
+// Goal B: the struct holds ONE raw `storage_t value_` with explicit
+// accessor methods (`kmer()`, `last_pos()`, `strand()`,
+// `pos_strand_encoded()`).  No union, no bitfields — the compiler can't
+// emit redundant masks on field reads through a bitfield + uint cast
+// because the field accesses are now plain shift+mask operations.
 //
-// Sentinel: value == UINT64_MAX. The kmer-bits-only `is_max()` predicate
-// returns true whenever every kmer bit is set; minimap_int hashes are
-// masked to 2*k bits, so for K<=17 the high (35-2k) kmer bits are always
-// 0 in real values and the sentinel is unambiguous.
-//
-// Comparison: kmer-only ordering, mirroring the legacy `data[0]`-only
-// `<=>`. The rolling-window minimum in `collect_minimizers` relies on
-// "same kmer == equal" to detect duplicate-kmer windows; preserving
-// kmer-only `==` keeps `does_sketch_match()` and the duplicate-emission
-// paths byte-for-byte equivalent to the legacy struct's behaviour.
-struct MinimapSketchData {
-    static constexpr unsigned kStrandBits = 1;
-    static constexpr unsigned kPosBits    = 28;
-    static constexpr unsigned kKmerBits   = 35;
-    static_assert(kStrandBits + kPosBits + kKmerBits == 64,
-                  "MinimapSketchData must pack into a single uint64_t");
+// Sentinel: hash bits all-1, pos/strand bits zero.  `is_max()` checks
+// only the hash bits (mirrors the legacy `(value & kKmerMask) == kKmerMask`).
+// Comparison: kmer-only ordering — `<=>` and `==` mask off pos/strand
+// bits before comparing, so the rolling-window minimum in
+// `collect_minimizers` keeps the legacy "same kmer == equal" semantics
+// that `does_sketch_match()` and the duplicate-emission paths rely on.
 
-    static constexpr unsigned kKmerShift = kStrandBits + kPosBits;  // 29
-    // High mask covering exactly the kmer bits — `(value & kKmerMask)` extracts
-    // the kmer-only key in one masked load with no shift.
-    static constexpr uint64_t kKmerMask  = ~((uint64_t{1} << kKmerShift) - 1);
-    static constexpr uint64_t kPosMask   = ((uint64_t{1} << kPosBits) - 1) << kStrandBits;
-    static constexpr uint64_t kStrandMask = (uint64_t{1} << kStrandBits) - 1;
-    static constexpr uint64_t kKmerFieldMask = (uint64_t{1} << kKmerBits) - 1;
-    static constexpr uint64_t kPosFieldMask  = (uint64_t{1} << kPosBits) - 1;
+template<size_t MaxSeqLog2, size_t KmerLen>
+struct MinimizerLayout {
+    static constexpr unsigned strand_bits = 1;
+    static constexpr unsigned pos_bits    = MaxSeqLog2;
+    // Hash needs at least 2*K bits to losslessly identify the kmer; capped
+    // at 56 because minimap_int_hasher's scramble fits inside 56 bits and
+    // wider fields don't give us more discriminating power.
+    static constexpr unsigned min_hash_bits =
+        (2u * KmerLen < 56u) ? static_cast<unsigned>(2u * KmerLen) : 56u;
 
-    union {
-        // Bitfield view — preserved for direct `.kmer` / `.last_pos` /
-        // `.strand` access on the consumer side. Layout mirrors the legacy
-        // MinimapSketchData semantics but in a single 8-byte storage unit.
-        struct {
-            uint64_t strand   : kStrandBits;
-            uint64_t last_pos : kPosBits;
-            uint64_t kmer     : kKmerBits;
-        };
-        // Raw uint view for fast comparison and sentinel check.
-        uint64_t value;
-    };
+    // Hash bits available in each storage size — signed because pos_bits +
+    // strand_bits can already exceed 16.
+    static constexpr int val16_hash  = 16  - 1 - static_cast<int>(pos_bits);
+    static constexpr int val32_hash  = 32  - 1 - static_cast<int>(pos_bits);
+    static constexpr int val64_hash  = 64  - 1 - static_cast<int>(pos_bits);
+    // 128-bit fallback also reserves 8 bits for span (dna5 ambiguity).
+    static constexpr int val128_hash = 128 - 1 - static_cast<int>(pos_bits) - 8;
 
-    // Aggregate-like default; value=0 means strand=0, pos=0, kmer=0.
-    constexpr MinimapSketchData() noexcept : value(0) {}
+    static constexpr unsigned storage_bits =
+        (val16_hash  >= static_cast<int>(min_hash_bits)) ? 16u :
+        (val32_hash  >= static_cast<int>(min_hash_bits)) ? 32u :
+        (val64_hash  >= static_cast<int>(min_hash_bits)) ? 64u :
+                                                          128u;
 
-    // Pack from explicit fields. The mask on kmer guards against callers
-    // that pass a wider hash than fits in kKmerBits — the high bits are
-    // dropped silently rather than corrupting position/strand bits.
-    constexpr MinimapSketchData(uint64_t kmer_v, uint64_t pos_v, uint64_t strand_v) noexcept
-        : value(((kmer_v & kKmerFieldMask) << kKmerShift)
-              | ((pos_v & kPosFieldMask) << kStrandBits)
-              | (strand_v & kStrandMask))
+    static constexpr unsigned hash_bits =
+        (storage_bits == 16u)  ? static_cast<unsigned>(val16_hash)  :
+        (storage_bits == 32u)  ? static_cast<unsigned>(val32_hash)  :
+        (storage_bits == 64u)  ? static_cast<unsigned>(val64_hash)  :
+                                static_cast<unsigned>(val128_hash);
+
+    static constexpr unsigned span_bits = (storage_bits == 128u) ? 8u : 0u;
+
+    // storage_t for 16/32/64 — `void` for 128-bit (we use a 2x uint64
+    // specialisation there).
+    using storage_t =
+        std::conditional_t<storage_bits == 16u, uint16_t,
+        std::conditional_t<storage_bits == 32u, uint32_t,
+        std::conditional_t<storage_bits == 64u, uint64_t,
+                          void>>>;
+};
+
+// Primary template + 128-bit specialisation toggled via Layout::storage_bits.
+template<size_t MaxSeqLog2, size_t KmerLen,
+         bool Is128 =
+             (MinimizerLayout<MaxSeqLog2, KmerLen>::storage_bits == 128u)>
+struct MinimizerRepr;
+
+// 16/32/64-bit primary specialisation — the only one the bench grid ever
+// instantiates.  Single integer storage, direct shift-mask accessors.
+template<size_t MaxSeqLog2, size_t KmerLen>
+struct MinimizerRepr<MaxSeqLog2, KmerLen, false> {
+    using layout_t  = MinimizerLayout<MaxSeqLog2, KmerLen>;
+    using storage_t = typename layout_t::storage_t;
+    static_assert(!std::is_void_v<storage_t>,
+                  "Primary specialisation must have a non-void storage_t");
+
+    // Bit positions inside `value_` (low → high): strand, pos, kmer.
+    static constexpr unsigned strand_shift = 0u;
+    static constexpr unsigned pos_shift    = layout_t::strand_bits;
+    static constexpr unsigned hash_shift   =
+        layout_t::strand_bits + layout_t::pos_bits;
+
+    // Field-width masks (low-aligned). Each is the bit-pattern (1<<bits)-1.
+    // `static_cast<storage_t>(...)` keeps the constants narrow when storage_t
+    // is uint16/uint32 so we don't accidentally promote to 64-bit ops.
+    static constexpr storage_t hash_field_mask =
+        (layout_t::hash_bits >= sizeof(storage_t) * 8u)
+            ? static_cast<storage_t>(~storage_t{0})
+            : static_cast<storage_t>(
+                  (storage_t{1} << layout_t::hash_bits) - storage_t{1});
+    static constexpr storage_t pos_field_mask =
+        (layout_t::pos_bits >= sizeof(storage_t) * 8u)
+            ? static_cast<storage_t>(~storage_t{0})
+            : static_cast<storage_t>(
+                  (storage_t{1} << layout_t::pos_bits) - storage_t{1});
+    static constexpr storage_t strand_field_mask = static_cast<storage_t>(1);
+
+    // Shifted-into-place masks. `hash_mask` covers exactly the kmer bits;
+    // `pos_strand_mask` is its bitwise complement and covers the low
+    // (pos_bits + 1) bits — the encoded `(last_pos << 1) | strand` form.
+    static constexpr storage_t hash_mask =
+        static_cast<storage_t>(hash_field_mask << hash_shift);
+    static constexpr storage_t pos_strand_mask =
+        static_cast<storage_t>(~hash_mask);
+
+    // Sole data member — Goal B: no union, no bitfield.  Plain integer.
+    storage_t value_;
+
+    // ---- Construction --------------------------------------------------
+
+    constexpr MinimizerRepr() noexcept : value_(0) {}
+
+    // Pack from explicit fields.  Each input is masked to its bit width
+    // before OR-ing so a caller passing a wider value silently truncates
+    // instead of clobbering an adjacent field.  For the bench
+    // (minimap_int's 30-bit hash, pos < 2^28, strand ∈ {0,1}) every mask
+    // is dead code that the optimiser folds away.
+    constexpr MinimizerRepr(uint64_t kmer_v,
+                            uint64_t pos_v,
+                            uint64_t strand_v) noexcept
+        : value_(static_cast<storage_t>(
+              ((static_cast<storage_t>(kmer_v) & hash_field_mask) << hash_shift)
+            | ((static_cast<storage_t>(pos_v)  & pos_field_mask)  << pos_shift)
+            | (static_cast<storage_t>(strand_v) & strand_field_mask)))
     {}
 
-    // Static factory for construction from the raw uint — used by the
-    // sentinel and by SIMD-rescan code that already has a packed value.
-    static constexpr MinimapSketchData from_value(uint64_t v) noexcept {
-        MinimapSketchData m;
-        m.value = v;
+    // Reconstruct from a raw `storage_t` — used by SIMD rescan paths that
+    // already have the packed value in a vector lane.
+    [[nodiscard]] static constexpr MinimizerRepr from_raw_storage(storage_t v) noexcept {
+        MinimizerRepr m;
+        m.value_ = v;
         return m;
     }
 
-    // Sentinel: kmer-bits all 1s (greater than any real hash for K<=17),
-    // pos and strand bits cleared so a leaked sentinel produces a clean
-    // (last_pos=0, strand=0) view rather than a phantom 0xFFFFFFF
-    // last_pos that would surface as a fake minimizer if extract_pairs()
-    // or any other downstream consumer ever read field state without
-    // first checking is_max(). Mirrors the legacy `data[0] = UINT64_MAX`
-    // semantics where data[1] (carrying last_pos/strand/rid) was never
-    // touched by set_max().
-    static constexpr MinimapSketchData getMax() noexcept {
-        return from_value(kKmerMask);
+    // ---- Field accessors (Goal B: methods, not bitfields) -------------
+
+    [[nodiscard]] constexpr uint64_t kmer() const noexcept {
+        // hash sits in the high (hash_bits) bits of `value_`, so a single
+        // shift-right extracts it with no mask.  For storage_t < uint64
+        // we widen first so the right-shift produces a uint64.
+        return static_cast<uint64_t>(value_) >> hash_shift;
     }
 
-    constexpr bool is_max() const noexcept {
-        return (value & kKmerMask) == kKmerMask;
+    [[nodiscard]] constexpr uint64_t last_pos() const noexcept {
+        return (static_cast<uint64_t>(value_) >> pos_shift)
+             & static_cast<uint64_t>(pos_field_mask);
+    }
+
+    [[nodiscard]] constexpr uint64_t strand() const noexcept {
+        return static_cast<uint64_t>(value_) & 1ULL;
+    }
+
+    // Encoded `(last_pos << 1) | strand` — exactly the legacy
+    // `value & ~kKmerMask` view used by `collect_seed_hits` and
+    // `TargetIndex::build` for the postgres positions array.
+    [[nodiscard]] constexpr uint64_t pos_strand_encoded() const noexcept {
+        return static_cast<uint64_t>(value_) & static_cast<uint64_t>(pos_strand_mask);
+    }
+
+    // Raw storage view — kept narrow (uint16/uint32/uint64).  Consumers that
+    // want a uint64_t can `static_cast<uint64_t>(repr.raw_value())`.
+    [[nodiscard]] constexpr storage_t raw_value() const noexcept {
+        return value_;
+    }
+
+    // ---- Sentinel ------------------------------------------------------
+
+    [[nodiscard]] static constexpr MinimizerRepr getMax() noexcept {
+        return from_raw_storage(hash_mask);
+    }
+
+    [[nodiscard]] constexpr bool is_max() const noexcept {
+        return (value_ & hash_mask) == hash_mask;
     }
 
     constexpr void set_max() noexcept {
-        value = kKmerMask;
+        value_ = hash_mask;
     }
 
-    // Kmer-only ordering. With kmer in the high 35 bits and
-    // (value & kKmerMask) clearing the low 29, `(a & mask) <=> (b & mask)`
-    // is one and-and-compare per side — no shift needed.
-    constexpr auto operator<=>(const MinimapSketchData& other) const noexcept {
-        return (value & kKmerMask) <=> (other.value & kKmerMask);
+    // ---- Comparison (kmer-only — same semantics as legacy data[0]) ----
+
+    [[nodiscard]] constexpr auto operator<=>(const MinimizerRepr& other) const noexcept {
+        return (value_ & hash_mask) <=> (other.value_ & hash_mask);
     }
 
-    constexpr bool operator==(const MinimapSketchData& other) const noexcept {
-        return (value & kKmerMask) == (other.value & kKmerMask);
+    [[nodiscard]] constexpr bool operator==(const MinimizerRepr& other) const noexcept {
+        return (value_ & hash_mask) == (other.value_ & hash_mask);
     }
 
-    // Same kmer but different identity (different position or strand).
-    // `(a.value ^ b.value) & kKmerMask == 0` <=> kmers are equal;
-    // `a.value != b.value` <=> not the literal same minimizer slot.
-    static constexpr bool does_sketch_match(
-        const MinimapSketchData& a,
-        const MinimapSketchData& b) noexcept
+    // Same kmer (high bits equal) but different identity (literal value
+    // differs) — used by the duplicate-emission paths in `collect_minimizers`.
+    [[nodiscard]] static constexpr bool does_sketch_match(
+        const MinimizerRepr& a,
+        const MinimizerRepr& b) noexcept
     {
-        return ((a.value ^ b.value) & kKmerMask) == 0
-            && a.value != b.value;
+        return ((a.value_ ^ b.value_) & hash_mask) == 0
+            && a.value_ != b.value_;
     }
 };
 
+// 128-bit fallback — used only when the (size, kmer) pair leaves no room
+// for the hash inside 64-bit storage (typically K >= 28 + large genome).
+// Layout (high → low): [hash:hash_bits | span:8 | pos:pos_bits | strand:1].
+// Stored as two uint64s so the Goal B accessor methods `data_low_64()` and
+// `data_high_64()` give cheap raw-bit access for SIMD rescan paths.
+template<size_t MaxSeqLog2, size_t KmerLen>
+struct MinimizerRepr<MaxSeqLog2, KmerLen, true> {
+    using layout_t = MinimizerLayout<MaxSeqLog2, KmerLen>;
+
+    static_assert(layout_t::pos_bits + 1 <= 64,
+                  "128-bit MinimizerRepr requires pos_bits + 1 <= 64; "
+                  "no realistic genome exceeds 2^63 letters");
+
+    // Bit positions:
+    //   low_  = (last_pos << 1) | strand            (pos_bits + 1 ≤ 64 bits)
+    //   high_ = (kmer << 8) | span                  (hash_bits + 8 ≤ 64 bits)
+    static constexpr unsigned span_shift_high = 0u;
+    static constexpr unsigned hash_shift_high = 8u;
+
+    static constexpr uint64_t hash_field_mask =
+        (layout_t::hash_bits >= 64u)
+            ? ~uint64_t{0}
+            : ((uint64_t{1} << layout_t::hash_bits) - uint64_t{1});
+    static constexpr uint64_t pos_field_mask =
+        (layout_t::pos_bits >= 64u)
+            ? ~uint64_t{0}
+            : ((uint64_t{1} << layout_t::pos_bits) - uint64_t{1});
+    static constexpr uint64_t span_field_mask = uint64_t{0xFFu};
+
+    static constexpr uint64_t high_hash_mask = hash_field_mask << hash_shift_high;
+    static constexpr uint64_t low_pos_mask   = pos_field_mask << 1;
+
+    // Two-half storage.  `low_` carries pos+strand; `high_` carries
+    // hash+span.  A single 16-byte struct so trivially copyable.
+    uint64_t low_;
+    uint64_t high_;
+
+    constexpr MinimizerRepr() noexcept : low_(0), high_(0) {}
+
+    constexpr MinimizerRepr(uint64_t kmer_v,
+                            uint64_t pos_v,
+                            uint64_t strand_v,
+                            uint64_t span_v = static_cast<uint64_t>(KmerLen)) noexcept
+        : low_(((pos_v & pos_field_mask) << 1) | (strand_v & 1ULL)),
+          high_(((kmer_v & hash_field_mask) << hash_shift_high)
+              | (span_v & span_field_mask))
+    {}
+
+    // ---- Goal B: explicit raw-half accessors --------------------------
+    [[nodiscard]] constexpr uint64_t data_low_64()  const noexcept { return low_; }
+    [[nodiscard]] constexpr uint64_t data_high_64() const noexcept { return high_; }
+
+    [[nodiscard]] constexpr uint64_t kmer()     const noexcept { return high_ >> hash_shift_high; }
+    [[nodiscard]] constexpr uint64_t span()     const noexcept { return high_ & span_field_mask; }
+    [[nodiscard]] constexpr uint64_t last_pos() const noexcept { return (low_ >> 1) & pos_field_mask; }
+    [[nodiscard]] constexpr uint64_t strand()   const noexcept { return low_ & 1ULL; }
+
+    [[nodiscard]] constexpr uint64_t pos_strand_encoded() const noexcept { return low_; }
+
+    [[nodiscard]] static constexpr MinimizerRepr getMax() noexcept {
+        MinimizerRepr m;
+        m.high_ = high_hash_mask;
+        return m;
+    }
+
+    [[nodiscard]] constexpr bool is_max() const noexcept {
+        return (high_ & high_hash_mask) == high_hash_mask;
+    }
+
+    constexpr void set_max() noexcept {
+        high_ = high_hash_mask;
+        low_  = 0;
+    }
+
+    [[nodiscard]] constexpr auto operator<=>(const MinimizerRepr& other) const noexcept {
+        return (high_ & high_hash_mask) <=> (other.high_ & high_hash_mask);
+    }
+
+    [[nodiscard]] constexpr bool operator==(const MinimizerRepr& other) const noexcept {
+        return (high_ & high_hash_mask) == (other.high_ & high_hash_mask);
+    }
+
+    [[nodiscard]] static constexpr bool does_sketch_match(
+        const MinimizerRepr& a,
+        const MinimizerRepr& b) noexcept
+    {
+        // Mask span out of the inequality compare so a same-(kmer, pos,
+        // strand) pair with different span (only possible in dna5
+        // ambiguity) does not get mis-classified as a duplicate.
+        constexpr uint64_t identity_high_mask =
+            static_cast<uint64_t>(~span_field_mask);
+        return ((a.high_ ^ b.high_) & high_hash_mask) == 0
+            && ((a.high_ & identity_high_mask) != (b.high_ & identity_high_mask)
+                || a.low_ != b.low_);
+    }
+};
+
+// `MinimapSketchData` is the canonical minimizer struct used by the
+// postgres sidecar/dispatch_buffer paths.  Pinned to (MSL=28, KL=15) so
+// the on-disk TargetIndex serialisation, the cached query-minimizers
+// vector, and every `std::vector<MinimapSketchData>` API in the
+// postgres-facing modules keeps a fixed shape.  The bench-side
+// (`minimap_port`) entry separately dispatches on size buckets and may
+// instantiate other `MinimizerRepr<...>` shapes.
+using MinimapSketchData = MinimizerRepr<28u, 15u>;
+
 static_assert(sizeof(MinimapSketchData) == 8,
-              "MinimapSketchData must remain a single uint64_t");
+              "Canonical MinimapSketchData must remain a single uint64_t");
 static_assert(alignof(MinimapSketchData) == 8);
 static_assert(std::is_standard_layout_v<MinimapSketchData>);
 static_assert(std::is_trivially_copyable_v<MinimapSketchData>);
 static_assert(std::is_trivially_destructible_v<MinimapSketchData>);
 
-// MinimapSketch is now a transparent alias — the legacy two-layer wrapper
-// (sketch_type<MinimapSketch, MinimapSketchData> with embedded `.sketch.data[N]`
-// union view) was needed when the sketch was wider than a single uint64_t.
-// With the 8-byte compact representation, all comparison/sentinel
-// machinery folds back into MinimapSketchData itself.
+// Sanity check: the canonical layout matches the prior hand-rolled
+// constants exactly.  Future MSL/KL choices route through MinimizerRepr.
+static_assert(MinimapSketchData::layout_t::pos_bits == 28u);
+static_assert(MinimapSketchData::layout_t::hash_bits == 35u);
+static_assert(MinimapSketchData::layout_t::strand_bits == 1u);
+static_assert(MinimapSketchData::hash_shift == 29u);
+static_assert(MinimapSketchData::hash_mask == 0xFFFFFFFFE0000000ULL);
+
+// Legacy alias kept for transition: `MinimapSketch` was the wrapper
+// type before the compact 8-byte rewrite.  Now a transparent typedef
+// that downstream code uses interchangeably with MinimapSketchData.
 using MinimapSketch = MinimapSketchData;
 
-struct sketch_collector {
+// Templated sketch collector — parameterised on the minimizer
+// representation type.  The bench-side dispatch picks a `MinimizerRepr`
+// instantiation matching the sequence size bucket; the postgres side
+// uses the canonical `MinimapSketchData` alias.
+//
+// The default template arg keeps every existing call site
+// (`sketch_collector collector;`) compiling unchanged — the alias
+// `sketch_collector` below is `sketch_collector_t<MinimapSketchData>`.
+template<class MinimizerT = MinimapSketchData>
+struct sketch_collector_t {
 private:
-    std::vector<MinimapSketch> sketches;
+    std::vector<MinimizerT> sketches;
 public:
     // Earlier we reserved 10 000 entries up front (~160 KB of system-heap
     // storage per collector). Two collectors are built per pair × 400 pairs
@@ -192,7 +394,7 @@ public:
     // upfront reserve; std::vector's geometric growth handles the few
     // realloc steps cheaply at small N. If callers know the expected count
     // they can call `.reserve()` themselves.
-    sketch_collector() : sketches() {};
+    sketch_collector_t() : sketches() {};
 
     /// Pre-reserve capacity to avoid the geometric realloc chain on
     /// long sequences. Used by `minimap_port` when it knows the sequence
@@ -205,15 +407,15 @@ public:
         sketches.reserve(expected_count);
     }
 
-    [[always_inline]] constexpr void collect(MinimapSketch&& sketch) {
+    [[always_inline]] constexpr void collect(MinimizerT&& sketch) {
         sketches.push_back(std::move(sketch));
     }
 
-    [[always_inline]] constexpr void collect(const MinimapSketch& sketch) {
+    [[always_inline]] constexpr void collect(const MinimizerT& sketch) {
         sketches.push_back(sketch);
     }
 
-    constexpr std::vector<MinimapSketch> extract_sketches() const {
+    constexpr std::vector<MinimizerT> extract_sketches() const {
         return sketches;
     }
 
@@ -221,18 +423,18 @@ public:
     // legacy "extract a separate `data[]` vector" pass is now a no-op
     // identity copy. Callers either move the storage out via the rvalue
     // overload (zero-copy) or get a plain copy of the same type.
-    constexpr const std::vector<MinimapSketchData>& extract_sketches_data() const & {
+    constexpr const std::vector<MinimizerT>& extract_sketches_data() const & {
         return sketches;
     }
 
-    constexpr std::vector<MinimapSketchData> extract_sketches_data() && {
+    constexpr std::vector<MinimizerT> extract_sketches_data() && {
         return std::move(sketches);
     }
 
     constexpr auto extract_pairs() const {
         auto pairs = sketches
-               | std::ranges::views::transform([](const MinimapSketch& el) -> std::pair<size_t, uint64_t> {
-                     return std::make_pair(static_cast<size_t>(el.last_pos), static_cast<uint64_t>(el.kmer));
+               | std::ranges::views::transform([](const MinimizerT& el) -> std::pair<size_t, uint64_t> {
+                     return std::make_pair(static_cast<size_t>(el.last_pos()), el.kmer());
                  })
                | std::ranges::to<std::vector>();
         std::ranges::sort(pairs);
@@ -246,8 +448,13 @@ public:
     }
 };
 
+// Default alias — matches the postgres on-disk + cached-in-memory
+// MinimapSketchData layout (28-bit pos, 35-bit hash, 1-bit strand).
+using sketch_collector = sketch_collector_t<MinimapSketchData>;
+
 template<
 	template<typename H_A> typename scalar_hash_t,
+	class MinimizerT,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin()),
     typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
@@ -256,7 +463,7 @@ requires (
 	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>
 )
 inline void collect_minimizers(
-    sketch_collector& collector,
+    sketch_collector_t<MinimizerT>& collector,
 	compact_sequence_range<R>& seq,
 	const I& seq_begin,
 	const I& seq_end,
@@ -284,9 +491,9 @@ inline void collect_minimizers(
 
 	hasher_t hasher(k);
 
-	circular_append_buffer<MinimapSketch, max_span> buffer(w);
+	circular_append_buffer<MinimizerT, max_span> buffer(w);
 
-	MinimapSketch current_min = MinimapSketch::getMax();
+	MinimizerT current_min = MinimizerT::getMax();
 	auto current_min_pos = buffer.get_begin();
 
 	size_t pos = 0;
@@ -300,7 +507,7 @@ inline void collect_minimizers(
 			// Support ambigious?
 			if(seq_traits::bits_per_char > 2 && nucl >= 4) {
 				// fuck!
-				buffer.push_back(MinimapSketch::getMax());
+				buffer.push_back(MinimizerT::getMax());
 				pos = 0;
 			} else {
 				// Reuse the already-dereferenced `nucl`. The previous code did
@@ -325,28 +532,28 @@ inline void collect_minimizers(
 				++pos;
 
 				if (c_strand == SEQUENCE_STRAND_EQUAL) {
-					buffer.push_back(MinimapSketch::getMax());
+					buffer.push_back(MinimizerT::getMax());
 				} else if ((pos >= k || !IS_INIT)) {
 					// Drop the unused (.span, .rid, kmer_span) trio: the
-					// compact MinimapSketch is just (kmer, last_pos, strand).
+					// compact MinimizerT is just (kmer, last_pos, strand).
 					// kmer_span and rid are still computed for parity with
 					// the legacy reference but no longer round-trip through
 					// the struct. (kmer_span is reduced to a [[maybe_unused]]
 					// local; the C++ compiler will DCE it.)
 					(void)kmer_span;
-					buffer.push_back(MinimapSketch(
+					buffer.push_back(MinimizerT(
 						/*kmer=*/c_hash,
 						/*last_pos=*/seq_pos,
 						/*strand=*/c_strand));
 				} else {
-					buffer.push_back(MinimapSketch::getMax());
+					buffer.push_back(MinimizerT::getMax());
 				}
 			}
 
 			if ((pos == w + k - 1 && IS_INIT) && !current_min.is_max()) { // special case for the first window - because identical k-mers are not stored yet
 				//&results, &current_min, current_min_pos
 				buffer.unsafe_filled_for_each([&collector, &current_min, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
-					if (MinimapSketch::does_sketch_match(current_min, el)) {
+					if (MinimizerT::does_sketch_match(current_min, el)) {
 						collector.collect(el);
 					}
 				});
@@ -372,7 +579,7 @@ inline void collect_minimizers(
 
 				if ((pos >= w + k - 1 || !IS_INIT) && !current_min.is_max()) { // write identical k-mers
 					buffer.unsafe_filled_for_each([&collector, &current_min, &current_min_pos, seq_pos](const auto& _index, const auto& el, const auto& _distance) {
-						if (MinimapSketch::does_sketch_match(current_min, el)) {
+						if (MinimizerT::does_sketch_match(current_min, el)) {
 							collector.collect(el);
 						}
 					});
@@ -401,6 +608,7 @@ inline void collect_minimizers(
 
 template<
 	template<typename H_A> typename simd_hash_t,
+	class MinimizerT,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin()),
     typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
@@ -409,7 +617,7 @@ requires (
 	supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
 inline void collect_minimizers_simd(
-    sketch_collector& collector,
+    sketch_collector_t<MinimizerT>& collector,
 	compact_sequence_range<R>& seq,
 	const I& seq_begin,
 	const I& seq_end,
@@ -496,10 +704,11 @@ inline void collect_minimizers_simd(
             // finish_fn tail emit) would publish (real_pos, max_val) as a phantom pair
             // whose hash is the sentinel.
             if (temp_buffer2[i] && temp_buffer1[i] != max_val) {
-                // Strand stored as a per-lane storage_unit (0 or 1). The MinimapSketch
-                // bitfield `strand: 1` truncates anything wider, so an explicit `& 1`
-                // is not required, but we mask defensively in case future code paths
-                // ever stash anything other than 0/1 in the strand lane.
+                // Strand stored as a per-lane storage_unit (0 or 1). The MinimizerT
+                // strand field is 1 bit, so an explicit `& 1` is not strictly
+                // required for the canonical layout, but we mask defensively in case
+                // future code paths ever stash anything other than 0/1 in the strand
+                // lane.
                 const uint64_t strand_bit =
                     static_cast<uint64_t>(temp_buffer4[i]) & 0x1ULL;
                 if constexpr (ignore_distance) {
@@ -515,7 +724,7 @@ inline void collect_minimizers_simd(
                     const size_t distance = (current_pos > temp_buffer3[i]) ? (current_pos - temp_buffer3[i]) : (buffer.capacity() - temp_buffer3[i] + current_pos);
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
                     if (last_pushed_position != real_pos) {
-                        collector.collect(MinimapSketch(
+                        collector.collect(MinimizerT(
                             /*kmer=*/temp_buffer1[i],
                             /*last_pos=*/real_pos,
                             /*strand=*/strand_bit));
@@ -524,7 +733,7 @@ inline void collect_minimizers_simd(
                 } else {
                     const size_t real_pos = pos + offsets[i] * seq_traits::letters_per_unit - distance;
                     if (last_pushed_position != real_pos) {
-                        collector.collect(MinimapSketch(
+                        collector.collect(MinimizerT(
                             /*kmer=*/temp_buffer1[i],
                             /*last_pos=*/real_pos,
                             /*strand=*/strand_bit));

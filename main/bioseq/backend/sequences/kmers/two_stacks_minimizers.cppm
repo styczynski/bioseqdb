@@ -84,6 +84,7 @@ template<
     size_t StaticW,
     size_t StaticK,
     template<typename H_A> typename simd_hash_t,
+    class MinimizerT,
     supports_compact_sequence_range R,
     typename I = decltype(compact_sequence_range<R>().begin()),
     typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
@@ -92,7 +93,7 @@ requires (
     supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
 [[gnu::always_inline]] inline void collect_minimizers_two_stack_nthash_single_stream_simd_impl(
-    sketch_collector& collector,
+    sketch_collector_t<MinimizerT>& collector,
     compact_sequence_range<R>& seq,
     const I& seq_begin,
     const I& seq_end,
@@ -376,7 +377,7 @@ requires (
                         hash_strand_val & ~static_cast<storage_unit>(1);
                     const storage_unit scrambled_kmer =
                         scramble_minimap_int(lexic_kmer);
-                    collector.collect(MinimapSketch(
+                    collector.collect(MinimizerT(
                         /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
                         /*last_pos=*/abs_pos,
                         /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
@@ -520,7 +521,8 @@ template<
     bool HasStaticW, bool HasStaticK,
     size_t StaticW, size_t StaticK,
     class D, typename hash_val_t,
-    typename SeqTraits, size_t BufCapacity, typename OffsetsArray
+    typename SeqTraits, size_t BufCapacity, typename OffsetsArray,
+    class MinimizerT
 >
 [[gnu::always_inline]] HWY_INLINE void step_one_bp_pair(
     D d,
@@ -543,7 +545,7 @@ template<
     std::array<hn::Vec<D>, BufCapacity>& ring_buf_elem_hi,
     std::array<hn::Vec<D>, BufCapacity>& ring_buf_hs_lo,
     std::array<hn::Vec<D>, BufCapacity>& ring_buf_hs_hi,
-    sketch_collector& collector,
+    sketch_collector_t<MinimizerT>& collector,
     // Loop-invariant constants ---
     hn::Vec<D> v_kmer_mask,
     hn::Vec<D> v_alphabet_complement_xor,
@@ -810,7 +812,7 @@ template<
                         hash_strand_val & ~static_cast<hash_val_t>(1);
                     const hash_val_t scrambled_kmer =
                         scramble_minimap_int(lexic_kmer);
-                    collector.collect(MinimapSketch(
+                    collector.collect(MinimizerT(
                         /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
                         /*last_pos=*/abs_pos,
                         /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
@@ -830,7 +832,7 @@ template<
                         hash_strand_val & ~static_cast<hash_val_t>(1);
                     const hash_val_t scrambled_kmer =
                         scramble_minimap_int(lexic_kmer);
-                    collector.collect(MinimapSketch(
+                    collector.collect(MinimizerT(
                         /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
                         /*last_pos=*/abs_pos,
                         /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
@@ -853,6 +855,7 @@ template<
     size_t StaticW,
     size_t StaticK,
     template<typename H_A> typename simd_hash_t,
+    class MinimizerT,
     supports_compact_sequence_range R,
     typename I = decltype(compact_sequence_range<R>().begin()),
     typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
@@ -862,7 +865,7 @@ requires (
 )
 [[gnu::always_inline]] [[gnu::flatten]] inline void
 collect_minimizers_two_stack_nthash_simd_impl(
-    sketch_collector& collector,
+    sketch_collector_t<MinimizerT>& collector,
     compact_sequence_range<R>& seq,
     const I& seq_begin,
     const I& seq_end,
@@ -984,7 +987,8 @@ collect_minimizers_two_stack_nthash_simd_impl(
         lanes_n_pair * seq_traits::letters_per_unit + context_bps;
     if (seq.bp_size() < min_seq_for_dual) {
         // Forward to single-stream fallback — too short for dual-stream split.
-        collect_minimizers_two_stack_nthash_single_stream_simd_impl<StaticW, StaticK, simd_hash_t, R, I, hash_val_t>(
+        collect_minimizers_two_stack_nthash_single_stream_simd_impl<
+            StaticW, StaticK, simd_hash_t, MinimizerT, R, I, hash_val_t>(
             collector, seq, seq_begin, seq_end, w_runtime, k_runtime);
         return;
     }
@@ -1039,7 +1043,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
                 two_stack_internal::step_one_bp_pair<
                     has_static_w, has_static_k, StaticW, StaticK,
                     d_t, storage_unit, seq_traits, buf_capacity,
-                    std::array<size_t, pair_max_lanes>>(
+                    std::array<size_t, pair_max_lanes>, MinimizerT>(
                     d, bp_v_lo, bp_v_hi, full_mask, offsets,
                     state_fwd_lo, state_fwd_hi,
                     state_rc_lo, state_rc_hi,
@@ -1091,7 +1095,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
             two_stack_internal::step_one_bp_pair<
                 has_static_w, has_static_k, StaticW, StaticK,
                 d_t, storage_unit, seq_traits, buf_capacity,
-                std::array<size_t, pair_max_lanes>>(
+                std::array<size_t, pair_max_lanes>, MinimizerT>(
                 d, bp_v_lo, bp_v_hi, main_mask, offsets,
                 state_fwd_lo, state_fwd_hi,
                 state_rc_lo, state_rc_hi,
@@ -1124,9 +1128,14 @@ collect_minimizers_two_stack_nthash_simd_impl(
  * Public API for the dual-stream two-stack nthash collector. Dispatches to
  * the static-w / static-k specialization for the minimap2 default
  * `w == 10, k == 15`, falling back to runtime-w/k paths otherwise.
+ *
+ * `MinimizerT` is deduced from the collector argument so call sites stay
+ * the same shape as before — only `sketch_collector` (which is
+ * `sketch_collector_t<MinimapSketchData>`) changed under the hood.
  */
 template<
     template<typename H_A> typename simd_hash_t,
+    class MinimizerT,
     supports_compact_sequence_range R,
     typename I = decltype(compact_sequence_range<R>().begin()),
     typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
@@ -1135,7 +1144,7 @@ requires (
     supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
 inline void collect_minimizers_two_stack_nthash_simd(
-    sketch_collector& collector,
+    sketch_collector_t<MinimizerT>& collector,
     compact_sequence_range<R>& seq,
     const I& seq_begin,
     const I& seq_end,
@@ -1147,16 +1156,19 @@ inline void collect_minimizers_two_stack_nthash_simd(
     auto _scope = bioseq::instr::region(_desc);
 
     if (w == 10 && k == 15) [[likely]] {
-        collect_minimizers_two_stack_nthash_simd_impl<10, 15, simd_hash_t, R, I, hash_val_t>(
+        collect_minimizers_two_stack_nthash_simd_impl<
+            10, 15, simd_hash_t, MinimizerT, R, I, hash_val_t>(
             collector, seq, seq_begin, seq_end, w, k);
         return;
     }
     if (w == 10) {
-        collect_minimizers_two_stack_nthash_simd_impl<10, 0, simd_hash_t, R, I, hash_val_t>(
+        collect_minimizers_two_stack_nthash_simd_impl<
+            10, 0, simd_hash_t, MinimizerT, R, I, hash_val_t>(
             collector, seq, seq_begin, seq_end, w, k);
         return;
     }
-    collect_minimizers_two_stack_nthash_simd_impl<0, 0, simd_hash_t, R, I, hash_val_t>(
+    collect_minimizers_two_stack_nthash_simd_impl<
+        0, 0, simd_hash_t, MinimizerT, R, I, hash_val_t>(
         collector, seq, seq_begin, seq_end, w, k);
 }
 
