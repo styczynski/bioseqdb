@@ -84,8 +84,10 @@ if [ -f "${BUILD_DIR}/compile_commands.json" ]; then
     ln -sfn "${MODE}/compile_commands.json" "${BUILD_ROOT}/compile_commands.json"
 fi
 
-# Tests run from the per-mode build dir — keeps `./bioseq/...` working and
-# ensures BIOSEQ_BENCH_REPORT_PATH defaults land alongside that mode's binary.
+# Tests run from the per-mode build dir — keeps `./bioseq/...` working.
+# The bench writes its report into `main/reporting/` regardless of cwd
+# (the path is baked in via BIOSEQ_BENCH_REPORT_DIR at compile time);
+# only the unit / integration runners care about cwd.
 cd "${BUILD_DIR}"
 
 # Tokenise the requested test list once so each component runs at most once.
@@ -112,28 +114,35 @@ fi
 if has_token bench; then
     # Single bench command — runs the full algorithm grid across every
     # length bucket (SHORT/MEDIUM/LONG/VERY_LONG/XL/XXL) and every
-    # error bucket in parallel (cpu/2 threads by default — see
-    # `bench_thread_count` in matrix_runner.cppm). The
-    # `[bench-full-matrix]` TEST_CASE drives the runner; on completion
-    # bench_main.cpp loads `regression_thresholds.json`, computes
-    # regression violations, writes them into the next available
-    # `report_build_<N>.json` (commit hash + violations array
-    # embedded), prints a console table, and returns a non-zero exit
-    # code if any rule was violated.
+    # error bucket in parallel. The `[bench-full-matrix]` TEST_CASE
+    # drives the runner; on completion bench_main.cpp computes regression
+    # violations, writes a numbered `report_build_<N>.json` into
+    # `main/reporting/` (commit hash + violations array embedded),
+    # prints a console table, and returns a non-zero exit code if any
+    # rule was violated.
     #
-    # We deliberately do NOT pin BIOSEQ_BENCH_REPORT_PATH: each run
-    # produces a fresh report_build_<N>.json so before/after diffs
-    # stay possible after agents redirect stdout. Override only when
-    # you have a specific external pipeline that needs a fixed path.
+    # The bench accepts two project-specific flags (parsed before
+    # everything else is forwarded to Catch2):
+    #   --everything   include the (k, w) Cartesian sweep and noisy×long
+    #                  error/length combos that are otherwise skipped.
+    #   --fast         3-4× fewer samples + full hardware concurrency.
     #
-    # BIOSEQ_GIT_COMMIT is read from `git rev-parse HEAD` and stamped
-    # into the report so reviewers can match a JSON file back to the
-    # source state that produced it. Falls back to "unknown" outside
-    # a git checkout.
-    GIT_COMMIT_HASH="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
-    BIOSEQ_GIT_COMMIT="${BIOSEQ_GIT_COMMIT:-${GIT_COMMIT_HASH}}" \
-    BIOSEQ_BENCH_REGRESSION_THRESHOLDS="${BIOSEQ_BENCH_REGRESSION_THRESHOLDS:-${PROJECT_ROOT}/bench/regression_thresholds.json}" \
+    # All other arguments to this script after the test list and the
+    # build mode are forwarded to the bench binary, so `./build.sh bench
+    # bench-opt --fast` is a one-liner for "build and run a fast bench".
+    #
+    # All previous BIOSEQ_BENCH_* env vars are gone — every knob lives
+    # on the CLI or in `regression_thresholds.json`. The git commit is
+    # resolved by the bench binary itself via `git -C $repo rev-parse
+    # HEAD`, so we no longer pre-export it here.
+    # Forward any extra args after the test list and build mode (so
+    # `./build.sh bench bench-opt --fast` reaches the bench). The
+    # `${...:+...}` form keeps `set -u` happy when no extras were passed.
+    if [ "$#" -gt 2 ]; then
+        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi "${@:3}"
+    else
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
+    fi
 fi
 
 if has_token lol; then

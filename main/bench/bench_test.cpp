@@ -41,6 +41,7 @@ import bench.evaluation;
 import bench.report;
 import bench.matrix_runner;
 import bench.chart_builder;
+import bench.run_config;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -414,26 +415,22 @@ TEST_CASE("Full bench matrix — all length × error × algorithm cells",
     report::InstalledProfiler _profiler_guard{};
     using namespace bioseq::bench::HWY_NAMESPACE;
 
-    const auto grid = default_algorithm_grid();
-    std::uint64_t seed = 1234567ull;
-    for (auto length_bucket : {SequenceLengthBucket::SHORT,
-                               SequenceLengthBucket::MEDIUM,
-                               SequenceLengthBucket::LONG,
-                               SequenceLengthBucket::VERY_LONG,
-                               SequenceLengthBucket::XL,
-                               SequenceLengthBucket::XXL}) {
-        for (auto error_bucket : {ErrorRateBucket::HIFI,
-                                  ErrorRateBucket::CCS,
-                                  ErrorRateBucket::ONT_MODERN,
-                                  ErrorRateBucket::ONT_LEGACY,
-                                  ErrorRateBucket::HIGH_INDEL_LOW_SUB,
-                                  ErrorRateBucket::HIGH_SUB_LOW_INDEL}) {
-            run_matrix_for_bucket(length_bucket, error_bucket, seed, grid);
-            seed = seed * 1099511628211ull + 14695981039346656037ull;
-        }
+    // Drive the full matrix sweep through `run_full_matrix` so the
+    // bucket order (and the seed-mixing rule) lives in exactly one
+    // place. The matrix runner walks SHORT → XXL × HIFI → HIGH_SUB
+    // and registers each bucket with the live progress dashboard.
+    run_full_matrix(/*base_seed=*/1234567ull, default_algorithm_grid());
+
+    // The (k, w) sweep is gated behind `--everything`. Without that
+    // flag the bench skips the heatmap entirely — most performance
+    // investigations don't vary k or w, and the sweep adds 30 algorithm
+    // rows × 6 pairs × tens of samples to the MEDIUM/CCS bucket.
+    if (bioseq::bench::bench_run_config().include_kw_sweep) {
+        JustLog("[bench-full-matrix] --everything passed: running k/w sweep");
+        run_kw_sweep();
+    } else {
+        JustLog("[bench-full-matrix] k/w sweep skipped (pass --everything to enable)");
     }
-    // k/w sweep populates the dedicated heatmap charts in report.json.
-    run_kw_sweep();
     JustLog("[bench-full-matrix] accumulated {} bench samples after full sweep",
             bioseq::bench::benchmark_samples().size());
     REQUIRE(!bioseq::bench::benchmark_samples().empty());

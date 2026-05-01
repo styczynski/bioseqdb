@@ -931,20 +931,19 @@ inline void print_violations_table(const std::vector<RegressionViolation>& viola
 /**
  * @brief Pick the regression-thresholds path.
  *
- * Reads `BIOSEQ_BENCH_REGRESSION_THRESHOLDS` if set; otherwise falls
- * back to `<source>/bench/regression_thresholds.json` if compiled
- * with `-DBIOSEQ_BENCH_REGRESSION_THRESHOLDS_PATH=...` (CMake-side
- * convenience), otherwise just `regression_thresholds.json` in the
- * current working directory. The bench is invoked from
- * `build/<mode>/` so a relative path cannot find the file by itself —
- * the env var is the canonical way to override.
+ * The path is baked in at compile time as `BIOSEQ_BENCH_THRESHOLDS_PATH`
+ * (a CMake target compile definition pointing at
+ * `${CMAKE_CURRENT_LIST_DIR}/../bench/regression_thresholds.json`). The
+ * previous `BIOSEQ_BENCH_REGRESSION_THRESHOLDS` env-var override is
+ * gone; if you need different thresholds, edit the JSON file directly.
+ *
+ * The bench is invoked from `build/<mode>/`, so a relative fallback
+ * cannot find the file by itself — relying on the build-time define
+ * keeps the binary self-contained.
  */
 [[nodiscard]] inline std::string resolve_thresholds_path() {
-    if (const char* env = std::getenv("BIOSEQ_BENCH_REGRESSION_THRESHOLDS")) {
-        if (env[0] != '\0') return std::string{env};
-    }
-#ifdef BIOSEQ_BENCH_REGRESSION_THRESHOLDS_PATH
-    return std::string{BIOSEQ_BENCH_REGRESSION_THRESHOLDS_PATH};
+#ifdef BIOSEQ_BENCH_THRESHOLDS_PATH
+    return std::string{BIOSEQ_BENCH_THRESHOLDS_PATH};
 #else
     return std::string{"regression_thresholds.json"};
 #endif

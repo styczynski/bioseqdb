@@ -151,6 +151,18 @@ AddCommonTargetX(
   HWY 1.3.0
 )
 
+# Bake repo paths into the bench binary so it does not need any env
+# vars at runtime to find its companion files. Reports always land in
+# `main/reporting/`; the regression-thresholds JSON sits next to the
+# bench source; the git commit is resolved by spawning `git -C ${SOURCE}`
+# from inside `bench_main`.
+target_compile_definitions(bioseq_bench
+  PRIVATE
+    "BIOSEQ_BENCH_REPORT_DIR=\"${CMAKE_CURRENT_LIST_DIR}/../reporting\""
+    "BIOSEQ_BENCH_SOURCE_DIR=\"${CMAKE_CURRENT_LIST_DIR}/..\""
+    "BIOSEQ_BENCH_THRESHOLDS_PATH=\"${CMAKE_CURRENT_LIST_DIR}/../bench/regression_thresholds.json\""
+)
+
 AddCommonTargetX(
   bioseq_aligner
   TYPE EXEC
