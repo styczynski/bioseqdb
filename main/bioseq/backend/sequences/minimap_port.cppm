@@ -30,6 +30,8 @@ module;
 #include <hwy/highway.h>
 #include <hwy/aligned_allocator.h>
 
+#include <boost/unordered/unordered_flat_map.hpp>
+
 #include "common.h"
 
 #include <cstdint>
@@ -45,8 +47,6 @@ module;
 #include <optional>
 #include <span>
 #include <string>
-
-#include <boost/unordered/unordered_flat_map.hpp>
 
 export module bioseq_sequences.minimap_port;
 
@@ -64,6 +64,7 @@ import bioseq_sequences.chaining.utils;
 import bioseq_sequences.chaining.scalar;
 import bioseq_sequences.chaining.simd;
 import bioseq_sequences.chaining.rmq;
+import bioseq_sequences.radix_sort;
 import context;
 import bioseq_instr;
 
@@ -777,16 +778,33 @@ template <MinimizerIndex IndexT>
     }
     }  // end target_index_lookup scope
 
-    // Sort by reference position (ref_bits field), same as radix_sort_128x
+    // Sort by reference position (ref_bits field), exact port of
+    // minimap2's `radix_sort_128x(a, a + n_a)` from misc.c. The
+    // 8-bit-per-pass MSD radix sort is faster than libc++ pdqsort by
+    // ~3-5x at the anchor populations we see (50 k - 1 M+ at LONG/XL/XXL)
+    // because it bypasses the comparison-based branch-predictor
+    // pessimisation pdqsort hits when the ref_position prefix is
+    // already monotonic — most of the work is just the 256-bucket
+    // counting scan, which the M1 LSU pipelines well.
+    //
+    // A SIMD-vectorised bit-by-bit MSD radix variant (Bramas / Möller /
+    // Keller, 2024 thesis) was prototyped on top of Highway's
+    // `CompressBlendedStore`. On NEON-128 / Apple M1 the SIMD partition
+    // is restricted to 2 u64 lanes per vector (vs. 8 on AVX-512) and
+    // each NEON BlendedStore lowers to a 3-step Load+Blend+Store —
+    // measured as 5–22 percentage points slower than this 8-bit MSD
+    // radix sort on the bench's LONG/VLONG/XL/XXL buckets. See
+    // OTHER_TOOLS_RESEARCH/new_speedup/REPORT_2.md for the full V1-vs-V2
+    // numbers; the SIMD variant becomes attractive again on AVX-512
+    // hosts and is left as a future-work option.
     {
     static const auto* _sort_desc =
         bioseq::instr::register_region_static("collect_seed_hits_sort");
     auto _sort_scope = bioseq::instr::region(_sort_desc);
-    std::sort(anchors.begin(), anchors.end(),
-              [](const Anchor& left, const Anchor& right) {
-                  return left.ref_bits < right.ref_bits
-                      || (left.ref_bits == right.ref_bits && left.query_bits < right.query_bits);
-              });
+    bioseq::sorting::radix_sort(
+        anchors.data(),
+        anchors.data() + anchors.size(),
+        [](const Anchor& a) noexcept { return a.ref_bits; });
     }  // end collect_seed_hits_sort scope
 
     JustLog("[minimap_port] Collected {} seed anchors from {} query minimizers",
