@@ -388,34 +388,53 @@ TEST_CASE("Benchmark evaluation — SEAL-style generated fragment batch",
 }
 
 // ====================================================================
-// Chart-data sweep: full algorithm × length × error grid.
+// Full bench matrix — the only sweep test case driven by `./build.sh
+// bench`. Walks every (length_bucket × error_bucket × algorithm_config)
+// combination with the production grid, plus the dedicated k/w sweep.
 //
-// Runs the matrix runner across every (length_bucket, error_bucket,
-// algorithm_config) combination and accumulates samples into the
-// process-wide vector that bench_main.cpp drains into report.json.
+// Length coverage: SHORT, MEDIUM, LONG, VERY_LONG, XL, XXL. The user's
+// regression rules in `regression_thresholds.json` apply across every
+// bucket, so XXL (50-150 Mbp pairs) must participate too — single
+// pair, low sample count, parallel worker pool keeps runtime bounded
+// by the per-call budget. Noisy × long combinations are skipped by
+// `should_skip_cell` so the matrix doesn't waste hours on cells where
+// even minimap2 fails to produce a primary.
 //
-// Tagged with `[chart-data]` (no leading dot) so it is run by the
-// default `./bioseq/bioseq_bench` invocation. The smaller end of the
-// matrix is intentional — pair counts, sample counts and the
-// very-long bucket size are tuned to keep wall-clock under ~30 minutes
-// even when every algorithm config is exercised.
+// Error coverage: HIFI, CCS, ONT_MODERN, ONT_LEGACY, HIGH_INDEL_LOW_SUB,
+// HIGH_SUB_LOW_INDEL — same six buckets `run_full_matrix` already uses.
 //
-// `[chart-data-quick]` runs only the short + medium buckets for
-// faster iteration during chart layout work.
+// On completion the bench accumulator (`benchmark_samples()`) holds
+// every (algorithm, length, error, pair) measurement; bench_main.cpp
+// then runs the regression check, prints the violation table, and
+// writes report.json with the violations array embedded.
 // ====================================================================
-
-TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
-          "[chart-data]") {
+TEST_CASE("Full bench matrix — all length × error × algorithm cells",
+          "[bench-full-matrix]") {
     report::reset_aggregates();
     report::InstalledProfiler _profiler_guard{};
-    // Default-grid sweep first so SHORT/MEDIUM cells are populated for
-    // every algorithm before the longer LONG/VERY_LONG cells start.
-    bioseq::bench::HWY_NAMESPACE::run_full_matrix();
-    // k/w parameter sweep (Problem 3 in the request). Runs only on the
-    // MEDIUM/CCS bucket so the dedicated heatmaps in the report depend
-    // only on (k, w), not on length / error.
-    bioseq::bench::HWY_NAMESPACE::run_kw_sweep();
-    JustLog("[chart-data] accumulated {} bench samples after full sweep",
+    using namespace bioseq::bench::HWY_NAMESPACE;
+
+    const auto grid = default_algorithm_grid();
+    std::uint64_t seed = 1234567ull;
+    for (auto length_bucket : {SequenceLengthBucket::SHORT,
+                               SequenceLengthBucket::MEDIUM,
+                               SequenceLengthBucket::LONG,
+                               SequenceLengthBucket::VERY_LONG,
+                               SequenceLengthBucket::XL,
+                               SequenceLengthBucket::XXL}) {
+        for (auto error_bucket : {ErrorRateBucket::HIFI,
+                                  ErrorRateBucket::CCS,
+                                  ErrorRateBucket::ONT_MODERN,
+                                  ErrorRateBucket::ONT_LEGACY,
+                                  ErrorRateBucket::HIGH_INDEL_LOW_SUB,
+                                  ErrorRateBucket::HIGH_SUB_LOW_INDEL}) {
+            run_matrix_for_bucket(length_bucket, error_bucket, seed, grid);
+            seed = seed * 1099511628211ull + 14695981039346656037ull;
+        }
+    }
+    // k/w sweep populates the dedicated heatmap charts in report.json.
+    run_kw_sweep();
+    JustLog("[bench-full-matrix] accumulated {} bench samples after full sweep",
             bioseq::bench::benchmark_samples().size());
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
 }
@@ -425,15 +444,11 @@ TEST_CASE("Chart-data sweep — full algorithm × length × error matrix",
 // Before commit X (the `chaining_rmq.cppm` rebalance/double-rotation
 // fix), this test reliably crashed with SIGSEGV at the `node->balance
 // == -2 && child == nullptr` rotation guard. The pair size and seed
-// here are pinned to the exact (LONG, CCS) cell that `run_full_matrix`
-// reaches with the default base seed — the segfault was data-
-// dependent and only manifested on ~52 kbp inputs once the RMQ tree
-// had drifted into an inconsistent balance state.
-//
-// Tag changed from leading-dot `[.rmq-repro]` to `[rmq-repro]` so the
-// default `./build.sh bench` run picks it up — see the engineering
-// report's task brief for the rationale (we want all benchmarks
-// surfacing comparison data when the user runs `bench`).
+// here are pinned to the exact (LONG, CCS) cell that surfaced the bug
+// — the segfault was data-dependent and only manifested on ~52 kbp
+// inputs once the RMQ tree had drifted into an inconsistent balance
+// state. Kept as a separate TEST_CASE so the failure mode is
+// self-documenting in the bench output.
 TEST_CASE("Regression: bioseq RMQ chaining on LONG inputs (was SIGSEGV)",
           "[rmq-repro]") {
     report::reset_aggregates();
@@ -453,269 +468,6 @@ TEST_CASE("Regression: bioseq RMQ chaining on LONG inputs (was SIGSEGV)",
                           /*seed=*/18029918668030987490ull,
                           grid);
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
-}
-
-TEST_CASE("Chart-data sweep — quick (short + medium only)",
-          "[chart-data-quick]") {
-    report::reset_aggregates();
-    report::InstalledProfiler _profiler_guard{};
-    using namespace bioseq::bench::HWY_NAMESPACE;
-    const auto grid = default_algorithm_grid();
-    std::uint64_t seed = 4242424242ull;
-    for (auto length_bucket : {SequenceLengthBucket::SHORT,
-                               SequenceLengthBucket::MEDIUM}) {
-        for (auto error_bucket : {ErrorRateBucket::HIFI,
-                                  ErrorRateBucket::CCS,
-                                  ErrorRateBucket::ONT_MODERN,
-                                  ErrorRateBucket::ONT_LEGACY,
-                                  ErrorRateBucket::HIGH_INDEL_LOW_SUB,
-                                  ErrorRateBucket::HIGH_SUB_LOW_INDEL}) {
-            run_matrix_for_bucket(length_bucket, error_bucket, seed, grid);
-            seed = seed * 1099511628211ull + 14695981039346656037ull;
-        }
-    }
-    // Run the k/w sweep too so the quick bench produces a complete
-    // report.json (with k/w heatmaps populated) for chart-layout work.
-    run_kw_sweep();
-    REQUIRE(!bioseq::bench::benchmark_samples().empty());
-}
-
-// ====================================================================
-// Long-only fast iteration sweep — focuses on the configs the
-// optimisation target cares about and runs them on LONG / VERY_LONG /
-// XL buckets only. Used to drive performance tuning rounds where the
-// full matrix is too slow to iterate on.
-//
-// Rows compared (production grid after engineering report cleanup):
-//   * minimap2 (DP chaining)                              — baseline
-//   * bioseq KSW2 + scalar-DP + scalar-mm                — must be ±10% of baseline
-//   * bioseq KSW2 + SIMD-DP + SIMD-minimap2-slow-mm      — slow legacy SIMD path
-//   * bioseq KSW2 + SIMD-DP + two-stack-nthash-mm        — production minimizer
-//
-// Tag is `[quick-long-sequence-benchmark]` (no leading dot) so
-// `./build.sh bench` runs it by default; the user wants the entire
-// comparison data emitted on every bench invocation. After the sweep
-// completes we print a one-line summary line per (length, config) to
-// stderr so the optimisation iterator can grep timings without loading
-// report.json.
-// ====================================================================
-TEST_CASE("Long-only fast iteration sweep", "[quick-long-sequence-benchmark]") {
-    report::reset_aggregates();
-    report::InstalledProfiler _profiler_guard{};
-    using namespace bioseq::bench::HWY_NAMESPACE;
-
-    // Build the row grid by hand so we don't waste samples on
-    // configurations we don't track for the goal.
-    std::vector<AlgorithmConfig> grid;
-    {
-        AlgorithmConfig mm2_cfg;
-        mm2_cfg.label = "minimap2 (DP chaining)";
-        mm2_cfg.is_minimap2_reference = true;
-        mm2_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
-        mm2_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        mm2_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
-        grid.push_back(std::move(mm2_cfg));
-
-        AlgorithmConfig scalar_cfg;
-        scalar_cfg.label = "bioseq KSW2 + scalar-DP + scalar-mm";
-        scalar_cfg.is_minimap2_reference = false;
-        scalar_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
-        scalar_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        scalar_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
-        grid.push_back(std::move(scalar_cfg));
-
-        // Slow legacy SIMD minimizer kept around as a comparison
-        // reference. Empirically slower than the production two-stack
-        // collector across every length bucket on M1 (see
-        // RESEARCH/ENGINEERING_REPORT_V2.md).
-        AlgorithmConfig simd_slow_cfg;
-        simd_slow_cfg.label = "bioseq KSW2 + SIMD-DP + SIMD-minimap2-slow-mm";
-        simd_slow_cfg.is_minimap2_reference = false;
-        simd_slow_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
-        simd_slow_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        simd_slow_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW;
-        grid.push_back(std::move(simd_slow_cfg));
-
-        // Production minimizer — dual-stream interleaved two-stack
-        // nthash collector (was TWO_STACK_NTHASH_V3 in the iteration
-        // log). Best across every length bucket on M1.
-        AlgorithmConfig two_stack_nthash_cfg;
-        two_stack_nthash_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-mm";
-        two_stack_nthash_cfg.is_minimap2_reference = false;
-        two_stack_nthash_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
-        two_stack_nthash_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        two_stack_nthash_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
-        grid.push_back(std::move(two_stack_nthash_cfg));
-    }
-
-    // Pin the same seed across iterations so before/after deltas are not
-    // confounded by a different RNG state. CCS error rate matches the V3
-    // report's MEDIUM/CCS comparison and is the cleanest signal regime.
-    //
-    // The user's stated optimisation range is sequences >1 Mbp and <20 Mbp,
-    // so the LONG bucket (~50 kbp) is included only for trend visibility —
-    // it is below the lower bound of the goal range. VERY_LONG (~900 kbp)
-    // and XL (~5 Mbp) cover the goal range proper.
-    const std::uint64_t seed = 0xBEEFCAFE12345678ull;
-    for (auto length_bucket : {SequenceLengthBucket::LONG,
-                               SequenceLengthBucket::VERY_LONG,
-                               SequenceLengthBucket::XL}) {
-        run_matrix_for_bucket(length_bucket, ErrorRateBucket::CCS, seed, grid);
-    }
-
-    REQUIRE(!bioseq::bench::benchmark_samples().empty());
-
-    // Print a compact summary the iteration loop can grep ("[long-bench]").
-    // sample.sample_latencies_ns is already sorted ascending by
-    // run_one_pair_samples, so percentile reads are O(1).
-    for (const auto& sample : bioseq::bench::benchmark_samples()) {
-        if (sample.sample_latencies_ns.empty()) continue;
-        const auto& latencies = sample.sample_latencies_ns;
-        const std::size_t n = latencies.size();
-        double sum_ns = 0.0;
-        for (double v : latencies) sum_ns += v;
-        const double mean_ns = sum_ns / static_cast<double>(n);
-        double sq_sum = 0.0;
-        for (double v : latencies) {
-            const double d = v - mean_ns;
-            sq_sum += d * d;
-        }
-        const double stddev_ns = (n > 1)
-            ? std::sqrt(sq_sum / static_cast<double>(n - 1))
-            : 0.0;
-        const double median_ns = latencies[n / 2];
-        const double p99_ns = latencies[(n * 99 + 99) / 100 < n
-            ? (n * 99 + 99) / 100 : n - 1];
-        const double min_ns = latencies.front();
-        const double max_ns = latencies.back();
-        const double cv_pct = mean_ns > 0.0 ? (stddev_ns * 100.0 / mean_ns) : 0.0;
-        JustLog("[long-bench] {} length={} pair_q={}bp t={}bp samples={} "
-                "mean_ms={:.3f} median_ms={:.3f} stddev_ms={:.3f} cv%={:.2f} "
-                "p99_ms={:.3f} min_ms={:.3f} max_ms={:.3f}",
-                sample.algorithm_label,
-                sample.length_bucket_label,
-                sample.effective_query_length,
-                sample.target_length,
-                n,
-                mean_ns / 1.0e6, median_ns / 1.0e6, stddev_ns / 1.0e6, cv_pct,
-                p99_ns / 1.0e6, min_ns / 1.0e6, max_ns / 1.0e6);
-    }
-}
-
-// ====================================================================
-// Two-stack iteration bench — runs ONLY VERY_LONG (~900 kbp) on a
-// small grid (scalar baseline + SIMD baseline + two-stack candidate).
-// The deliberately-narrow scope lets each optimisation round of the
-// SIMD-Minimizers two-stack collector finish in well under a minute,
-// so we can iterate freely on the inner loop. Tagged
-// `[quick-long-sequence-benchmark-two-stack]` — invoke via
-// `./build.sh bench-two-stack` or run as part of the default
-// `./build.sh bench` because the leading dot was removed (see task
-// brief — the user wants the full comparison grid every run).
-//
-// IMPORTANT: this case is the *only* signal we trust during V4
-// iteration — `bench-long` is significantly slower because it also
-// runs LONG (~50 kbp) and XL (~5 Mbp) and runs minimap2 as a fourth
-// row. For final goal verification re-run `bench-long` and compare
-// with the report committed to ENGINEERING_REPORT.md.
-// ====================================================================
-TEST_CASE("Two-stack iteration bench (VERY_LONG only)",
-          "[quick-long-sequence-benchmark-two-stack]") {
-    report::reset_aggregates();
-    report::InstalledProfiler _profiler_guard{};
-    using namespace bioseq::bench::HWY_NAMESPACE;
-
-    std::vector<AlgorithmConfig> grid;
-    {
-        AlgorithmConfig scalar_cfg;
-        scalar_cfg.label = "bioseq KSW2 + scalar-DP + scalar-mm";
-        scalar_cfg.is_minimap2_reference = false;
-        scalar_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
-        scalar_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        scalar_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
-        grid.push_back(std::move(scalar_cfg));
-
-        // Slow legacy SIMD minimizer — kept for comparison only.
-        AlgorithmConfig simd_slow_cfg;
-        simd_slow_cfg.label = "bioseq KSW2 + SIMD-DP + SIMD-minimap2-slow-mm";
-        simd_slow_cfg.is_minimap2_reference = false;
-        simd_slow_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
-        simd_slow_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        simd_slow_cfg.minimizer_algorithm = MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW;
-        grid.push_back(std::move(simd_slow_cfg));
-
-        // Production minimizer.
-        AlgorithmConfig two_stack_nthash_cfg;
-        two_stack_nthash_cfg.label = "bioseq KSW2 + SIMD-DP + two-stack-nthash-mm";
-        two_stack_nthash_cfg.is_minimap2_reference = false;
-        two_stack_nthash_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
-        two_stack_nthash_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
-        two_stack_nthash_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
-        grid.push_back(std::move(two_stack_nthash_cfg));
-
-        // Block aligner with the same SIMD-DP + two-stack-nthash setup.
-        // This is the configuration the optimisation goal targets: it
-        // must beat the KSW2 row above by +10% on VERY_LONG and XL.
-        AlgorithmConfig block_two_stack_cfg;
-        block_two_stack_cfg.label = "bioseq Block + SIMD-DP + two-stack-nthash-mm";
-        block_two_stack_cfg.is_minimap2_reference = false;
-        block_two_stack_cfg.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
-        block_two_stack_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
-        block_two_stack_cfg.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
-        grid.push_back(std::move(block_two_stack_cfg));
-    }
-
-    // Cover both VERY_LONG (~900 kbp) and XL (~5 Mbp) so the user's
-    // stated "1 M – 20 M" range is fully exercised. The XL bucket
-    // exposes better SIMD-vs-scalar lane-parallelism behaviour because
-    // the sketch and chaining workloads scale linearly while the chain-
-    // backtracking and KSW2 alignment phases stay roughly constant in
-    // their relative share of the wall clock. Skipping the noisy MM2
-    // reference row sidesteps the pre-existing fmtlog flood that the
-    // sister `[.quick-long-sequence-benchmark]` case suffers from at
-    // the >900 kbp end (sketch.c's per-minimizer DBG dump fires once
-    // per minimap2 reference call, drowning the queue and silently
-    // truncating later buckets' output).
-    const std::uint64_t seed = 0xBEEFCAFE12345678ull;
-    for (auto length_bucket : {SequenceLengthBucket::VERY_LONG,
-                               SequenceLengthBucket::XL}) {
-        run_matrix_for_bucket(length_bucket, ErrorRateBucket::CCS, seed, grid);
-    }
-
-    REQUIRE(!bioseq::bench::benchmark_samples().empty());
-
-    for (const auto& sample : bioseq::bench::benchmark_samples()) {
-        if (sample.sample_latencies_ns.empty()) continue;
-        const auto& latencies = sample.sample_latencies_ns;
-        const std::size_t n = latencies.size();
-        double sum_ns = 0.0;
-        for (double v : latencies) sum_ns += v;
-        const double mean_ns = sum_ns / static_cast<double>(n);
-        double sq_sum = 0.0;
-        for (double v : latencies) {
-            const double d = v - mean_ns;
-            sq_sum += d * d;
-        }
-        const double stddev_ns = (n > 1)
-            ? std::sqrt(sq_sum / static_cast<double>(n - 1))
-            : 0.0;
-        const double median_ns = latencies[n / 2];
-        const double p99_ns = latencies[(n * 99 + 99) / 100 < n
-            ? (n * 99 + 99) / 100 : n - 1];
-        const double min_ns = latencies.front();
-        const double max_ns = latencies.back();
-        const double cv_pct = mean_ns > 0.0 ? (stddev_ns * 100.0 / mean_ns) : 0.0;
-        JustLog("[two-stack-bench] {} length={} pair_q={}bp t={}bp samples={} "
-                "mean_ms={:.3f} median_ms={:.3f} stddev_ms={:.3f} cv%={:.2f} "
-                "p99_ms={:.3f} min_ms={:.3f} max_ms={:.3f}",
-                sample.algorithm_label,
-                sample.length_bucket_label,
-                sample.effective_query_length,
-                sample.target_length,
-                n,
-                mean_ns / 1.0e6, median_ns / 1.0e6, stddev_ns / 1.0e6, cv_pct,
-                p99_ns / 1.0e6, min_ns / 1.0e6, max_ns / 1.0e6);
-    }
 }
 
 }  // namespace bioseq::bench::HWY_NAMESPACE

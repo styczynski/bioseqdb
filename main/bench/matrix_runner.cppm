@@ -38,6 +38,7 @@ module;
 #include "common.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -45,8 +46,10 @@ module;
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -95,10 +98,11 @@ enum class SequenceLengthBucket : uint8_t {
     LONG      = 2,  ///< [10000, 1000000) — PacBio / Nanopore
     VERY_LONG = 3,  ///< [1000000, 3M)    — assembly-to-assembly
     XL        = 4,  ///< [5M, 15M)        — chromosome-scale assemblies
-                    ///<                    Used by the long-only iteration
-                    ///<                    bench to verify the user's stated
-                    ///<                    range (>1M, <20M); not part of the
-                    ///<                    default sweep.
+    XXL       = 5,  ///< [50M, 150M)      — full chromosome-grade pairs
+                    ///<                    (10× XL by user request); single
+                    ///<                    pair per error bucket, sample
+                    ///<                    count clamped low. Skipped for
+                    ///<                    every "noisy" error bucket.
 };
 
 [[nodiscard]] constexpr const char* sequence_length_bucket_name(SequenceLengthBucket bucket) {
@@ -108,6 +112,7 @@ enum class SequenceLengthBucket : uint8_t {
         case SequenceLengthBucket::LONG:      return "long (10k-1M)";
         case SequenceLengthBucket::VERY_LONG: return "very long (1M-3M)";
         case SequenceLengthBucket::XL:        return "xl (5M-15M)";
+        case SequenceLengthBucket::XXL:       return "xxl (50M-150M)";
     }
     return "unknown";
 }
@@ -424,6 +429,16 @@ namespace detail {
             params.reference_length       = 7'000'000;
             params.fragment_count         = 1;
             break;
+        case SequenceLengthBucket::XXL:
+            // ~50 Mbp fragments out of a 70 Mbp reference — 10× XL.
+            // Single pair, low sample count so even with cpu/2 worker
+            // threads the bucket completes in a few minutes (parallel
+            // mode shines here; sequential could push 30 min+).
+            params.fragment_length_mean   = 50'000'000;
+            params.fragment_length_stddev = 1'000'000.0;
+            params.reference_length       = 70'000'000;
+            params.fragment_count         = 1;
+            break;
     }
 
     // Error rates and split between substitutions / insertions / deletions
@@ -551,6 +566,13 @@ namespace detail {
         // counts.
         case SequenceLengthBucket::VERY_LONG: base = 3; break;
         case SequenceLengthBucket::XL:        base = 2; break;
+        // XXL (50-150 Mbp): clamp to a single sample even with the
+        // multiplier so a full XXL × algorithm × error sweep stays
+        // bounded by the per-call budget. The wall-clock per call is
+        // already 10× XL; doubling samples would push the bucket past
+        // the bench's stated 10-15 minute envelope.
+        case SequenceLengthBucket::XXL:
+            return std::max<std::size_t>(1, multiplier);
     }
     return base * multiplier;
 }
@@ -583,6 +605,14 @@ namespace detail {
 /// window passed in by the caller — defaults to
 /// `EvaluationParams::position_tolerance` (10 bp) for consistency
 /// with the rest of the bench harness.
+///
+/// `collect_phase_counters` enables the begin/end snapshot of the
+/// process-wide profiler block. The snapshot is meaningful only when
+/// a single thread runs aligners at a time — in parallel mode every
+/// worker would see deltas polluted by concurrent threads and the
+/// resulting per-phase numbers would be nonsense, so the parallel
+/// runner passes `false` and the chart layer treats empty
+/// `phase_mean_ns_per_sample` as "no breakdown available".
 template<class Pair>
 inline void run_one_pair_samples(
     Pair& pair,
@@ -590,7 +620,8 @@ inline void run_one_pair_samples(
     const Minimap2Params& aligner_params,
     std::size_t n_samples,
     std::int32_t position_tolerance_bp,
-    BenchSample& record)
+    BenchSample& record,
+    bool collect_phase_counters = true)
 {
     using clock = std::chrono::steady_clock;
 
@@ -659,10 +690,15 @@ inline void run_one_pair_samples(
     // phase accounting). The snapshot type matches the bench's
     // `args_t = context_args_profiling_timing_only` so the tls_profiler
     // pointer the bench installed at TEST_CASE start lines up.
+    //
+    // In parallel mode (`collect_phase_counters = false`) the snapshot is
+    // skipped entirely — concurrent workers all increment the same
+    // process-wide aggregates, so the per-pair delta would conflate
+    // multiple threads' contributions and produce nonsense numbers.
     using phase_args_t = bioseq::instr::context_args_profiling_timing_only;
     auto& phase_prof = bioseq::instr::persistent_profiler_block<phase_args_t>();
     const std::uint32_t phase_descriptor_count =
-        bioseq::instr::descriptor_count();
+        collect_phase_counters ? bioseq::instr::descriptor_count() : 0u;
     // We capture timing AND PMU counters (cycles / instructions /
     // branches / branch_misses) for every region — the bench's args
     // has enable_counters=true now, so the RegionAggregate fields are
@@ -677,21 +713,23 @@ inline void run_one_pair_samples(
         std::uint64_t branch_misses     = 0;
     };
     std::vector<PhaseBaseline> phase_baseline(phase_descriptor_count + 1);
-    for (std::uint32_t id = 1; id <= phase_descriptor_count; ++id) {
-        auto& base = phase_baseline[id];
-        if (auto* la = phase_prof.loop_aggregates.try_get(id)) {
-            base.total_ns          += la->total_ns;
-            base.cycles            += la->total_cycles;
-            base.instructions      += la->total_instructions;
-            base.branches          += la->total_branches;
-            base.branch_misses     += la->total_branch_misses;
-        }
-        if (auto* ra = phase_prof.aggregates.try_get(id)) {
-            base.total_ns          += ra->total_ns;
-            base.cycles            += ra->total_cycles;
-            base.instructions      += ra->total_instructions;
-            base.branches          += ra->total_branches;
-            base.branch_misses     += ra->total_branch_misses;
+    if (collect_phase_counters) {
+        for (std::uint32_t id = 1; id <= phase_descriptor_count; ++id) {
+            auto& base = phase_baseline[id];
+            if (auto* la = phase_prof.loop_aggregates.try_get(id)) {
+                base.total_ns          += la->total_ns;
+                base.cycles            += la->total_cycles;
+                base.instructions      += la->total_instructions;
+                base.branches          += la->total_branches;
+                base.branch_misses     += la->total_branch_misses;
+            }
+            if (auto* ra = phase_prof.aggregates.try_get(id)) {
+                base.total_ns          += ra->total_ns;
+                base.cycles            += ra->total_cycles;
+                base.instructions      += ra->total_instructions;
+                base.branches          += ra->total_branches;
+                base.branch_misses     += ra->total_branch_misses;
+            }
         }
     }
 
@@ -746,7 +784,7 @@ inline void run_one_pair_samples(
     // instructions, branches, branch_misses) are captured alongside
     // timing so the chart layer can render counter-comparison charts
     // beside the wall-clock chart.
-    if (!record.sample_latencies_ns.empty()) {
+    if (collect_phase_counters && !record.sample_latencies_ns.empty()) {
         const double samples_d =
             static_cast<double>(record.sample_latencies_ns.size());
         record.phase_mean_ns_per_sample.reserve(16);
@@ -906,9 +944,14 @@ inline void run_one_pair_samples(
     SequenceLengthBucket length_bucket,
     ErrorRateBucket error_bucket) noexcept
 {
+    // LONG (~50 kbp) / VERY_LONG (~1 Mbp) / XL (~5 Mbp) / XXL (~50 Mbp) —
+    // every bucket past LONG falls into the same "chain too short for
+    // ksw2 to recover at high indel rate" failure mode.
     const bool is_long_or_longer =
         length_bucket == SequenceLengthBucket::LONG ||
-        length_bucket == SequenceLengthBucket::VERY_LONG;
+        length_bucket == SequenceLengthBucket::VERY_LONG ||
+        length_bucket == SequenceLengthBucket::XL ||
+        length_bucket == SequenceLengthBucket::XXL;
 
     // Noisy × long: chain too short for ksw2 to recover on 50 kbp+ pairs.
     const bool is_noisy_bucket =
@@ -938,7 +981,94 @@ inline void run_one_pair_samples(
 }
 
 /**
+ * @brief Number of worker threads for the parallel bench runner.
+ *
+ * Defaults to `hardware_concurrency() / 2`, matching the user's
+ * "spawn cpu/2 threads" request — leaves the other half free for
+ * background OS work and avoids hyperthread-induced contention on
+ * the shared L1/L2 cache lines that minimap2's tight inner loops
+ * touch. Override via `BIOSEQ_BENCH_THREADS=N`; pass 1 to fall back
+ * to fully sequential mode (which preserves per-pair phase counter
+ * aggregation — see `run_one_pair_samples` for why parallel mode
+ * skips it).
+ */
+[[nodiscard]] inline std::size_t bench_thread_count() noexcept {
+    if (const char* env = std::getenv("BIOSEQ_BENCH_THREADS"); env && env[0] != '\0') {
+        char* end = nullptr;
+        const unsigned long parsed = std::strtoul(env, &end, 10);
+        if (end != env && parsed > 0) return static_cast<std::size_t>(parsed);
+    }
+    const auto hw = std::thread::hardware_concurrency();
+    if (hw == 0) return 1;
+    return std::max<std::size_t>(1u, hw / 2u);
+}
+
+/**
+ * @brief Populate the metadata fields of a `BenchSample` for one
+ *        (config, pair) combination — everything the chart layer needs
+ *        besides the timed-loop output. Pulled out as a helper so the
+ *        sequential and parallel paths can share the boilerplate.
+ */
+template<class Pair>
+inline void populate_bench_sample_meta(
+    BenchSample& record,
+    const AlgorithmConfig& config,
+    SequenceLengthBucket length_bucket,
+    ErrorRateBucket      error_bucket,
+    Pair&                pair)
+{
+    record.algorithm_label = config.label;
+    record.algorithm_kind  = config.is_minimap2_reference ? "minimap2" : "bioseq";
+    record.kmer_size       = config.kmer_size;
+    record.window_size     = config.window_size;
+    if (config.is_minimap2_reference) {
+        record.chaining_label = config.chaining_algorithm ==
+            bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ
+            ? "RMQ" : "DP";
+    } else {
+        record.chaining_label =
+            bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
+                config.chaining_algorithm);
+    }
+    record.aligner_label = config.is_minimap2_reference
+        ? std::string{"n/a"}
+        : std::string{bioseq::simd::HWY_NAMESPACE::base_alignment_algorithm_name(
+            config.base_alignment_algorithm)};
+    record.minimizer_label = config.is_minimap2_reference
+        ? std::string{"n/a"}
+        : std::string{bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
+            config.minimizer_algorithm)};
+    record.length_bucket       = length_bucket;
+    record.error_bucket        = error_bucket;
+    record.length_bucket_label = sequence_length_bucket_name(length_bucket);
+    record.error_bucket_label  = error_rate_bucket_name(error_bucket);
+    record.requested_query_length = pair.original_query_length;
+    record.effective_query_length = pair.query.bp_size();
+    record.target_length          = pair.target.bp_size();
+    record.effective_error_rate   = pair.effective_error_rate;
+}
+
+/**
  * @brief Run the full algorithm grid for one (length_bucket, error_bucket).
+ *
+ * Workload split: the runner builds a flat `(config_idx, pair_idx)`
+ * task list, filters it through `should_skip_cell`, then dispatches to
+ * `bench_thread_count()` workers. Each worker pulls one task at a
+ * time from a shared atomic counter, runs `run_one_pair_samples`, and
+ * deposits the result into a per-task slot. The main thread merges
+ * the slots into the global accumulator afterwards in deterministic
+ * (config, pair) order so chart output stays reproducible.
+ *
+ * Phase counter snapshotting is disabled when more than one worker is
+ * active — the persistent profiler block is process-wide, so concurrent
+ * before/after deltas would conflate threads. Pass
+ * `BIOSEQ_BENCH_THREADS=1` if you need the breakdown for one-off
+ * profiling work.
+ *
+ * The wall-clock budget aborts the *rest of a config's pairs* once
+ * any pair exceeds the budget. With multiple workers, the abort
+ * decision is shared via an atomic flag per config so concurrent
+ * tasks for the same config bail out promptly.
  */
 inline void run_matrix_for_bucket(
     SequenceLengthBucket length_bucket,
@@ -987,75 +1117,68 @@ inline void run_matrix_for_bucket(
     // — sourced from the EvaluationParams default so the chart layer
     // and the SEAL-style `[simple-benchmark]` cases agree on the rule.
     constexpr std::int32_t position_tolerance_bp = 10;
+    const std::size_t n_threads = bench_thread_count();
+    const bool collect_phase_counters = (n_threads <= 1);
 
-    JustLog("[bench.matrix_runner] bucket=({}, {}): {} pairs × {} samples × {} configs (budget {}s/call)",
+    JustLog("[bench.matrix_runner] bucket=({}, {}): {} pairs × {} samples × {} configs (budget {}s/call, threads={})",
             sequence_length_bucket_name(length_bucket),
             error_rate_bucket_name(error_bucket),
-            pairs.size(), n_samples, algorithm_grid.size(), budget_s);
+            pairs.size(), n_samples, algorithm_grid.size(), budget_s, n_threads);
 
-    for (const auto& config : algorithm_grid) {
+    // Build the task list deterministically so the merge step at the
+    // end produces stable (config_idx, pair_idx) ordering regardless
+    // of how the workers pick tasks up.
+    struct Task {
+        std::size_t config_idx;
+        std::size_t pair_idx;
+    };
+    std::vector<Task> tasks;
+    tasks.reserve(algorithm_grid.size() * pairs.size());
+    for (std::size_t cfg_idx = 0; cfg_idx < algorithm_grid.size(); ++cfg_idx) {
+        const auto& config = algorithm_grid[cfg_idx];
         if (should_skip_cell(config, length_bucket, error_bucket)) {
-            JustLog("[bench.matrix_runner] SKIP {} for bucket {}/{} (RMQ+very_long or noisy+long; set BIOSEQ_BENCH_INCLUDE_RMQ_VERY_LONG / BIOSEQ_BENCH_INCLUDE_NOISY_LONG to override)",
+            JustLog("[bench.matrix_runner] SKIP {} for bucket {}/{} (noisy×long; set BIOSEQ_BENCH_INCLUDE_NOISY_LONG=1 to override)",
                     config.label,
                     sequence_length_bucket_name(length_bucket),
                     error_rate_bucket_name(error_bucket));
             continue;
         }
-        if (verbose) {
-            std::fprintf(stderr, "[matrix_runner.config_start] %s for bucket %s/%s\n",
-                         config.label.c_str(),
-                         sequence_length_bucket_name(length_bucket),
-                         error_rate_bucket_name(error_bucket));
-            std::fflush(stderr);
+        for (std::size_t pair_idx = 0; pair_idx < pairs.size(); ++pair_idx) {
+            tasks.push_back({cfg_idx, pair_idx});
         }
-        const auto aligner_params = detail::build_aligner_params(config);
-        bool config_aborted = false;
-        std::size_t pair_index = 0;
-        for (auto& pair : pairs) {
-            if (config_aborted) break;
-            if (verbose) {
-                std::fprintf(stderr, "[matrix_runner.pair_start] %s pair %zu/%zu (qlen=%zu, tlen=%zu)\n",
-                             config.label.c_str(), pair_index + 1, pairs.size(),
-                             pair.query.bp_size(), pair.target.bp_size());
-                std::fflush(stderr);
+    }
+    if (tasks.empty()) return;
+
+    // Per-task output slot + per-config abort flag (set when one of a
+    // config's pairs blows the wall-clock budget so that concurrent
+    // tasks for the same config bail out instead of doubling down).
+    std::vector<BenchSample> records(tasks.size());
+    std::vector<std::atomic<std::uint8_t>> aborted_per_config(algorithm_grid.size());
+    for (auto& flag : aborted_per_config) flag.store(0u, std::memory_order_relaxed);
+    std::atomic<std::size_t> next_task{0};
+
+    // Pre-compute aligner params (cheap, but pulling it out of the
+    // hot loop avoids re-running the params builder on every task).
+    std::vector<Minimap2Params> aligner_params_cache(algorithm_grid.size());
+    for (std::size_t i = 0; i < algorithm_grid.size(); ++i) {
+        aligner_params_cache[i] = detail::build_aligner_params(algorithm_grid[i]);
+    }
+
+    auto worker = [&]() {
+        while (true) {
+            const std::size_t idx = next_task.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= tasks.size()) return;
+            const auto [cfg_idx, pair_idx] = tasks[idx];
+            const auto& config = algorithm_grid[cfg_idx];
+            if (aborted_per_config[cfg_idx].load(std::memory_order_relaxed) != 0u) {
+                // Another worker already blew the budget on this config —
+                // skip silently. The slot stays default-initialised so
+                // the merge step drops it.
+                continue;
             }
-            ++pair_index;
-            BenchSample record;
-            record.algorithm_label   = config.label;
-            record.algorithm_kind    = config.is_minimap2_reference ? "minimap2" : "bioseq";
-            record.kmer_size         = config.kmer_size;
-            record.window_size       = config.window_size;
-            // For the minimap2 reference rows the chaining choice is
-            // a knob on the C library, not a "bioseq chaining
-            // algorithm" — render it as DP / RMQ instead of the
-            // bioseq enum name to avoid the misleading "Minimap2
-            // Scalar" label on a row whose `algorithm_label` already
-            // says "minimap2 (DP chaining)".
-            if (config.is_minimap2_reference) {
-                record.chaining_label = config.chaining_algorithm ==
-                    bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ
-                    ? "RMQ" : "DP";
-            } else {
-                record.chaining_label =
-                    bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
-                        config.chaining_algorithm);
-            }
-            record.aligner_label     = config.is_minimap2_reference
-                ? std::string{"n/a"}
-                : std::string{bioseq::simd::HWY_NAMESPACE::base_alignment_algorithm_name(
-                    config.base_alignment_algorithm)};
-            record.minimizer_label   = config.is_minimap2_reference
-                ? std::string{"n/a"}
-                : std::string{bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
-                    config.minimizer_algorithm)};
-            record.length_bucket     = length_bucket;
-            record.error_bucket      = error_bucket;
-            record.length_bucket_label = sequence_length_bucket_name(length_bucket);
-            record.error_bucket_label  = error_rate_bucket_name(error_bucket);
-            record.requested_query_length = pair.original_query_length;
-            record.effective_query_length = pair.query.bp_size();
-            record.target_length          = pair.target.bp_size();
-            record.effective_error_rate   = pair.effective_error_rate;
+            auto& pair = pairs[pair_idx];
+            BenchSample& record = records[idx];
+            populate_bench_sample_meta(record, config, length_bucket, error_bucket, pair);
 
             const auto pair_t0 = std::chrono::steady_clock::now();
             // The bioseq pipeline can throw allocator exceptions
@@ -1063,22 +1186,16 @@ inline void run_matrix_for_bucket(
             // size exceeds supported maximum of allocator") on inputs
             // it doesn't expect. Catching here means one bad
             // (config, pair) drops a single record instead of
-            // aborting the whole sweep — the rest of the matrix
-            // still produces meaningful chart data. The exception
-            // shape is documented in
-            // RESEARCH/BENCHMARKING_SPEEDUP/REPORT_PLOTLY_JSON_DATA.md.
+            // aborting the whole sweep.
             try {
                 detail::run_one_pair_samples(
-                    pair, config, aligner_params, n_samples,
-                    position_tolerance_bp, record);
+                    pair, config, aligner_params_cache[cfg_idx], n_samples,
+                    position_tolerance_bp, record, collect_phase_counters);
             } catch (const std::exception& ex) {
                 JustLog("[bench.matrix_runner] EXCEPTION on {} bucket {} pair query={}bp: {}",
                         config.label,
                         sequence_length_bucket_name(length_bucket),
                         pair.query.bp_size(), ex.what());
-                // Record the failure but keep iterating to the next
-                // pair; the chart layer treats empty
-                // sample_latencies_ns as "skip this row".
                 record.sample_latencies_ns.clear();
                 record.sample_peak_rss_delta_bytes.clear();
                 record.produced_primary = false;
@@ -1094,21 +1211,40 @@ inline void run_matrix_for_bucket(
             const auto pair_t1 = std::chrono::steady_clock::now();
             const double pair_seconds =
                 std::chrono::duration<double>(pair_t1 - pair_t0).count();
+
             // Sort once so percentile reads on the chart side are O(1).
             std::sort(record.sample_latencies_ns.begin(),
                       record.sample_latencies_ns.end());
             std::sort(record.sample_peak_rss_delta_bytes.begin(),
                       record.sample_peak_rss_delta_bytes.end());
-            benchmark_samples().push_back(std::move(record));
 
             if (budget_s > 0.0 && pair_seconds > budget_s) {
                 JustLog("[bench.matrix_runner] ABORT {} on bucket {} after {:.1f}s (>{:.1f}s budget)",
                         config.label,
                         sequence_length_bucket_name(length_bucket),
                         pair_seconds, budget_s);
-                config_aborted = true;
+                aborted_per_config[cfg_idx].store(1u, std::memory_order_relaxed);
             }
         }
+    };
+
+    if (n_threads <= 1) {
+        worker();
+    } else {
+        std::vector<std::thread> workers;
+        workers.reserve(n_threads);
+        for (std::size_t t = 0; t < n_threads; ++t) workers.emplace_back(worker);
+        for (auto& th : workers) th.join();
+    }
+
+    // Merge results into the global accumulator in deterministic order.
+    // Records whose sample_latencies_ns is empty come from the
+    // populate_bench_sample_meta default-init slot of an aborted task —
+    // we drop them so the chart layer sees only real measurements.
+    auto& global_samples = benchmark_samples();
+    for (auto& record : records) {
+        if (record.algorithm_label.empty()) continue;  // never picked up by any worker
+        global_samples.push_back(std::move(record));
     }
 }
 
@@ -1131,7 +1267,9 @@ inline void run_full_matrix(std::uint64_t base_seed = 1234567ull,
     for (auto length_bucket : {SequenceLengthBucket::SHORT,
                                SequenceLengthBucket::MEDIUM,
                                SequenceLengthBucket::LONG,
-                               SequenceLengthBucket::VERY_LONG}) {
+                               SequenceLengthBucket::VERY_LONG,
+                               SequenceLengthBucket::XL,
+                               SequenceLengthBucket::XXL}) {
         for (auto error_bucket : {ErrorRateBucket::HIFI,
                                   ErrorRateBucket::CCS,
                                   ErrorRateBucket::ONT_MODERN,

@@ -73,6 +73,7 @@ export module bench.chart_builder;
 import mlogging;
 import bench.matrix_runner;
 import bench.json_writer;
+import bench.regression_check;
 
 export {
 
@@ -155,6 +156,7 @@ namespace detail {
         case SequenceLengthBucket::LONG:      return "long";
         case SequenceLengthBucket::VERY_LONG: return "very_long";
         case SequenceLengthBucket::XL:        return "xl";
+        case SequenceLengthBucket::XXL:       return "xxl";
     }
     return "?";
 }
@@ -164,15 +166,36 @@ namespace detail {
 /**
  * @brief Top-level emitter — populates the writer with the full
  *        `report.json` document.
+ *
+ * The optional `violations` vector is forwarded straight into a
+ * top-level `violations` array so dashboards and CI scripts can pivot
+ * on it without re-running the regression checker themselves. Empty
+ * vectors still emit `"violations": []` so consumers can tell "no
+ * violations found" apart from "schema missing the field".
+ *
+ * `commit_hash` is the git SHA the build script captured before
+ * launching the bench. It lands at the top of the document so reports
+ * can be matched back to the source state that produced them. Pass
+ * "unknown" when running outside a git checkout.
  */
-inline void emit_report(JsonWriter& writer) {
+inline void emit_report(
+    JsonWriter& writer,
+    const std::vector<RegressionViolation>& violations = {},
+    std::string_view commit_hash = "unknown")
+{
     const auto& samples = benchmark_samples();
     const auto algorithm_labels = detail::ordered_algorithm_labels(samples);
 
     writer.begin_object();  // root
     writer.kv_string("schema", "bioseq-bench-report-v1");
+    writer.kv_string("commit_hash", commit_hash);
     writer.kv_uint("sample_count", samples.size());
     writer.kv_uint("algorithm_count", algorithm_labels.size());
+
+    // Surface violations near the top of the document so a quick
+    // `head report.json` shows the regression status before the
+    // multi-megabyte chart payload.
+    emit_violations_json(writer, violations);
 
     writer.key("charts");
     writer.begin_object();  // charts
@@ -363,17 +386,18 @@ inline void emit_report(JsonWriter& writer) {
         "skipped (the `should_skip_cell` rules — see `matrix_runner.cppm`) "
         "show as missing points; lines connect across the gap.",
         [&]() {
-            constexpr std::array<SequenceLengthBucket, 5> all_buckets = {
+            constexpr std::array<SequenceLengthBucket, 6> all_buckets = {
                 SequenceLengthBucket::SHORT,
                 SequenceLengthBucket::MEDIUM,
                 SequenceLengthBucket::LONG,
                 SequenceLengthBucket::VERY_LONG,
                 SequenceLengthBucket::XL,
+                SequenceLengthBucket::XXL,
             };
             writer.key("data");
             writer.begin_array();
             for (const auto& algorithm_label : headline_algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 5> per_bucket{};
+                std::array<std::pair<std::size_t, std::size_t>, 6> per_bucket{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     const auto bidx = static_cast<std::size_t>(s.length_bucket);
@@ -518,7 +542,7 @@ inline void emit_report(JsonWriter& writer) {
                 "circle", "square", "diamond", "triangle-up", "star"};
             for (const auto& algorithm_label : headline_algorithm_labels) {
                 std::array<std::pair<std::vector<double>, std::vector<double>>, 5> per_bucket;
-                std::array<std::pair<std::size_t, std::size_t>, 5> correctness;
+                std::array<std::pair<std::size_t, std::size_t>, 6> correctness;
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     if (s.sample_latencies_ns.empty()) continue;
@@ -935,17 +959,18 @@ inline void emit_report(JsonWriter& writer) {
         "de-facto upper bound — bioseq variants below them indicate a "
         "regression in the corresponding phase.",
         [&]() {
-            constexpr std::array<SequenceLengthBucket, 5> all_buckets = {
+            constexpr std::array<SequenceLengthBucket, 6> all_buckets = {
                 SequenceLengthBucket::SHORT,
                 SequenceLengthBucket::MEDIUM,
                 SequenceLengthBucket::LONG,
                 SequenceLengthBucket::VERY_LONG,
                 SequenceLengthBucket::XL,
+                SequenceLengthBucket::XXL,
             };
             writer.key("data");
             writer.begin_array();
             for (const auto& algorithm_label : algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 5> per_bucket{};
+                std::array<std::pair<std::size_t, std::size_t>, 6> per_bucket{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     const auto bidx = static_cast<std::size_t>(s.length_bucket);
@@ -1068,12 +1093,13 @@ inline void emit_report(JsonWriter& writer) {
                 sequence_length_bucket_name(SequenceLengthBucket::LONG),
                 sequence_length_bucket_name(SequenceLengthBucket::VERY_LONG),
                 sequence_length_bucket_name(SequenceLengthBucket::XL),
+                sequence_length_bucket_name(SequenceLengthBucket::XXL),
             };
             // z[row][col] — outer rows = algorithms, inner = buckets.
             std::vector<std::vector<double>> z;
             std::vector<std::string> row_labels;
             for (const auto& algorithm_label : algorithm_labels) {
-                std::array<std::pair<std::size_t, std::size_t>, 5> per_bucket{};
+                std::array<std::pair<std::size_t, std::size_t>, 6> per_bucket{};
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     const auto bidx = static_cast<std::size_t>(s.length_bucket);
@@ -1568,7 +1594,7 @@ inline void emit_report(JsonWriter& writer) {
                 "circle", "square", "diamond", "triangle-up", "star"};
             for (const auto& algorithm_label : algorithm_labels) {
                 std::array<std::pair<std::vector<double>, std::vector<double>>, 5> per_bucket;
-                std::array<std::pair<std::size_t, std::size_t>, 5> correctness;
+                std::array<std::pair<std::size_t, std::size_t>, 6> correctness;
                 for (const auto& s : samples) {
                     if (s.algorithm_label != algorithm_label) continue;
                     if (s.sample_latencies_ns.empty()) continue;
@@ -1643,12 +1669,13 @@ inline void emit_report(JsonWriter& writer) {
         "RMQ × VERY_LONG, etc.) show up as 0 — hover for the "
         "per-cell sample count to disambiguate.",
         [&]() {
-            constexpr std::array<SequenceLengthBucket, 5> all_lengths = {
+            constexpr std::array<SequenceLengthBucket, 6> all_lengths = {
                 SequenceLengthBucket::SHORT,
                 SequenceLengthBucket::MEDIUM,
                 SequenceLengthBucket::LONG,
                 SequenceLengthBucket::VERY_LONG,
                 SequenceLengthBucket::XL,
+                SequenceLengthBucket::XXL,
             };
             constexpr std::array<ErrorRateBucket, 6> all_errors = {
                 ErrorRateBucket::HIFI,
@@ -2064,17 +2091,18 @@ inline void emit_report(JsonWriter& writer) {
                 "tool_minimap2.mm_set_mapq"}},
         };
 
-        // Pick the largest length bucket present in the samples. XL
-        // wins over VERY_LONG which wins over LONG. The chart layer
+        // Pick the largest length bucket present in the samples. XXL
+        // wins over XL which wins over VERY_LONG, etc. The chart layer
         // rebuilds the chart with the same data when no samples
         // exist (the bar arrays end up empty and Plotly renders a
         // blank chart with the title — the legend still tells the
         // reader what was *meant* to be shown).
         auto pick_largest_bucket = [&]() -> SequenceLengthBucket {
-            std::array<bool, 5> have = {false, false, false, false, false};
+            std::array<bool, 6> have = {false, false, false, false, false, false};
             for (const auto& s : samples) {
                 have[static_cast<int>(s.length_bucket)] = true;
             }
+            if (have[static_cast<int>(SequenceLengthBucket::XXL)])       return SequenceLengthBucket::XXL;
             if (have[static_cast<int>(SequenceLengthBucket::XL)])        return SequenceLengthBucket::XL;
             if (have[static_cast<int>(SequenceLengthBucket::VERY_LONG)]) return SequenceLengthBucket::VERY_LONG;
             if (have[static_cast<int>(SequenceLengthBucket::LONG)])      return SequenceLengthBucket::LONG;
@@ -2737,10 +2765,21 @@ inline void emit_report(JsonWriter& writer) {
 /**
  * @brief Convenience: build the report directly into a JsonWriter and
  *        write it to disk. Returns false on I/O failure.
+ *
+ * `violations` is the regression-checker output (see
+ * `bench.regression_check`); pass an empty vector when there are no
+ * violations or when the bench is being run without rule enforcement.
+ *
+ * `commit_hash` is stamped into the document so report files keep
+ * their provenance after agents move them between directories.
  */
-[[nodiscard]] inline bool write_report_json_to_file(const std::string& path) {
+[[nodiscard]] inline bool write_report_json_to_file(
+    const std::string& path,
+    const std::vector<RegressionViolation>& violations = {},
+    std::string_view commit_hash = "unknown")
+{
     JsonWriter writer;
-    emit_report(writer);
+    emit_report(writer, violations, commit_hash);
     if (!writer.write_to_file(path)) {
         JustLog("[bench.chart_builder] FAILED to write report.json to {}", path);
         return false;

@@ -110,35 +110,30 @@ if has_token integration; then
 fi
 
 if has_token bench; then
-    # Default bench: pick up *all* tagged cases, including what used to
-    # be the leading-dot "[.quick-long-sequence-benchmark]" /
-    # "[.quick-long-sequence-benchmark-two-stack]" cases. The leading
-    # dots were removed from bench_test.cpp so a single `./build.sh
-    # bench` produces a full comparison grid (every minimizer / chaining
-    # variant on every length bucket) on each run. This is what the
-    # engineering report visualises.
-    BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report.json}" \
+    # Single bench command — runs the full algorithm grid across every
+    # length bucket (SHORT/MEDIUM/LONG/VERY_LONG/XL/XXL) and every
+    # error bucket in parallel (cpu/2 threads by default — see
+    # `bench_thread_count` in matrix_runner.cppm). The
+    # `[bench-full-matrix]` TEST_CASE drives the runner; on completion
+    # bench_main.cpp loads `regression_thresholds.json`, computes
+    # regression violations, writes them into the next available
+    # `report_build_<N>.json` (commit hash + violations array
+    # embedded), prints a console table, and returns a non-zero exit
+    # code if any rule was violated.
+    #
+    # We deliberately do NOT pin BIOSEQ_BENCH_REPORT_PATH: each run
+    # produces a fresh report_build_<N>.json so before/after diffs
+    # stay possible after agents redirect stdout. Override only when
+    # you have a specific external pipeline that needs a fixed path.
+    #
+    # BIOSEQ_GIT_COMMIT is read from `git rev-parse HEAD` and stamped
+    # into the report so reviewers can match a JSON file back to the
+    # source state that produced it. Falls back to "unknown" outside
+    # a git checkout.
+    GIT_COMMIT_HASH="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+    BIOSEQ_GIT_COMMIT="${BIOSEQ_GIT_COMMIT:-${GIT_COMMIT_HASH}}" \
+    BIOSEQ_BENCH_REGRESSION_THRESHOLDS="${BIOSEQ_BENCH_REGRESSION_THRESHOLDS:-${PROJECT_ROOT}/bench/regression_thresholds.json}" \
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
-fi
-
-if has_token bench-long; then
-    # Iteration sweep — LONG / VERY_LONG / XL buckets for the
-    # production grid: minimap2 DP, bioseq scalar, bioseq SIMD-minimap2-slow,
-    # bioseq production two-stack-nthash. The tag has no leading dot
-    # so the case is also part of the default `bench` run.
-    BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-long.json}" \
-        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
-        "[quick-long-sequence-benchmark]"
-fi
-
-if has_token bench-two-stack; then
-    # Focused two-stack iteration sweep — VERY_LONG + XL only on the
-    # scalar / SIMD-slow / two-stack-nthash grid. Same as before but
-    # without the leading-dot tag so the case is picked up by the default
-    # `bench` run too.
-    BIOSEQ_BENCH_REPORT_PATH="${BIOSEQ_BENCH_REPORT_PATH:-report-two-stack.json}" \
-        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi \
-        "[quick-long-sequence-benchmark-two-stack]"
 fi
 
 if has_token lol; then
