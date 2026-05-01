@@ -457,7 +457,15 @@ template<
 	class MinimizerT,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin()),
-    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+    // Default hash state width to uint64_t — wide enough for any K up to
+    // 32 (dna4) or 21 (dna5).  The previous default tracked the seq's
+    // storage_unit (uint32_t in the bench) which silently clamped K to
+    // 16 inside the lexic hasher's `min(K, max_kmer_length)`, producing
+    // incorrect minimizers at K=27 when the canonical bench-grid storage
+    // unit is uint32.  The scalar hasher's state lives in scalar registers
+    // and uint64_t arithmetic costs the same as uint32_t on AArch64, so
+    // there's no penalty for the wider default.
+    typename hash_val_t = uint64_t
 >
 requires (
 	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>

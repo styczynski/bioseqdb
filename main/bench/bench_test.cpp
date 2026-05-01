@@ -436,6 +436,108 @@ TEST_CASE("Full bench matrix — all length × error × algorithm cells",
     REQUIRE(!bioseq::bench::benchmark_samples().empty());
 }
 
+// MinimizerRepr 32-bit + 128-bit storage exercise.
+//
+// The bench grid runs at K=15 + dna4 + max ≤ 256 Mbp, which always
+// lands on the 64-bit `MinimizerRepr<28, 15>` specialisation.  These
+// two extra cases steer the dispatch into the smaller and larger
+// storage classes so the templated infrastructure is actually
+// exercised on the bench:
+//
+//   * K=7 + MEDIUM (~30 kbp ref) → `MinimizerRepr<15, 7>` = uint32
+//     storage (val32_hash = 16 ≥ min_hash_bits = 14).
+//   * K=27 + XXL (~50 Mbp ref)   → `MinimizerRepr<28, 27>` = 2×uint64
+//     storage (val64_hash = 35 < min_hash_bits = 54 forces the 128-bit
+//     fallback that exposes `data_low_64()` / `data_high_64()`).
+//
+// Both K values are odd — required by the C minimap2 reference's
+// `mm_sketch` palindrome assertion (see the comment in
+// `default_kw_sweep_grid`). The HIFI error bucket (~0.2 % effective)
+// keeps minimap2's accuracy at 1.0 even at K=27 (per-kmer match
+// probability ≈ 0.998^27 ≈ 94.6 %), so the bench has a minimap2 DP
+// baseline to compare bioseq against.
+//
+// The grid is intentionally minimal — minimap2 (DP) baseline + the
+// two production bioseq paths — so the new cases add only ~minutes
+// to the bench wall-clock, not the full 13×6 matrix re-run.
+TEST_CASE("MinimizerRepr storage exercise — K=7/MEDIUM (32-bit) and K=27/XXL (128-bit)",
+          "[repr-storage-cases]") {
+    report::reset_aggregates();
+    report::InstalledProfiler _profiler_guard{};
+    using namespace bioseq::bench::HWY_NAMESPACE;
+
+    auto build_grid = [](int32_t k, const char* repr_tag,
+                         MinimizerAlgorithmType minimizer_algo,
+                         const char* minimizer_label) {
+        std::vector<AlgorithmConfig> grid;
+
+        AlgorithmConfig mm2_cfg;
+        mm2_cfg.label = fmt::format("minimap2 (DP, K={}) [{}]", k, repr_tag);
+        mm2_cfg.is_minimap2_reference = true;
+        mm2_cfg.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+        mm2_cfg.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        mm2_cfg.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+        mm2_cfg.kmer_size = k;
+        mm2_cfg.window_size = 10;
+        grid.push_back(std::move(mm2_cfg));
+
+        AlgorithmConfig bioseq_ksw2;
+        bioseq_ksw2.label = fmt::format(
+            "bioseq KSW2 + SIMD-DP + {} (K={}) [{}]", minimizer_label, k, repr_tag);
+        bioseq_ksw2.is_minimap2_reference = false;
+        bioseq_ksw2.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+        bioseq_ksw2.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        bioseq_ksw2.minimizer_algorithm = minimizer_algo;
+        bioseq_ksw2.kmer_size = k;
+        bioseq_ksw2.window_size = 10;
+        grid.push_back(bioseq_ksw2);
+
+        AlgorithmConfig bioseq_block = bioseq_ksw2;
+        bioseq_block.label = fmt::format(
+            "bioseq Block + SIMD-DP + {} (K={}) [{}]", minimizer_label, k, repr_tag);
+        bioseq_block.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        grid.push_back(bioseq_block);
+
+        return grid;
+    };
+
+    // 32-bit case — K=7/MEDIUM. Storage: MinimizerRepr<15, 7>.
+    // K=7 fits comfortably in the SIMD two-stack collector's storage_unit / 2
+    // hash field (2*K = 14 ≤ 32), so the production two-stack-nthash-mm path
+    // is exercised end-to-end here.
+    {
+        const auto grid_32bit = build_grid(
+            /*k=*/7, /*repr_tag=*/"32-bit-repr",
+            MinimizerAlgorithmType::TWO_STACK_NTHASH,
+            /*minimizer_label=*/"two-stack-nthash-mm");
+        run_matrix_for_bucket(SequenceLengthBucket::MEDIUM,
+                              ErrorRateBucket::HIFI,
+                              /*seed=*/24681012ull,
+                              grid_32bit);
+    }
+
+    // 128-bit case — K=27/XXL. Storage: MinimizerRepr<28, 27>.
+    // The SIMD two-stack-nthash collector packs the inner-loop hash into
+    // storage_unit/2 = 32 bits, so K beyond 16 (where 2*K > 32) trips
+    // hash-collision-driven minimum-selection drift and produces 0
+    // accuracy.  This case therefore uses the SCALAR minimizer collector
+    // (no inner-loop hash truncation) so we still get a meaningful
+    // bioseq vs minimap2 comparison while genuinely exercising the
+    // 128-bit MinimizerRepr instantiation.
+    {
+        const auto grid_128bit = build_grid(
+            /*k=*/27, /*repr_tag=*/"128-bit-repr",
+            MinimizerAlgorithmType::SCALAR,
+            /*minimizer_label=*/"scalar-mm");
+        run_matrix_for_bucket(SequenceLengthBucket::XXL,
+                              ErrorRateBucket::HIFI,
+                              /*seed=*/13579246ull,
+                              grid_128bit);
+    }
+
+    REQUIRE(!bioseq::bench::benchmark_samples().empty());
+}
+
 // Regression test for the bioseq RMQ + LONG segfault.
 //
 // Before commit X (the `chaining_rmq.cppm` rebalance/double-rotation

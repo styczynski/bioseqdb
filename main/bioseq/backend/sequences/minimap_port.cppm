@@ -2621,6 +2621,32 @@ template<supports_compact_sequence_range QueryRange,
             query_seq, target_seq, params);
     }
 
+    // K=7 + small genomes opt into 32-bit storage (Goal A — actually
+    // exercises a non-64-bit MinimizerRepr).  val32_hash = 31 - 15 = 16
+    // ≥ min_hash_bits = 14, so MinimizerRepr<15, 7> picks uint32_t
+    // storage with hash:16 / pos:15 / strand:1.  minimap_int's mask
+    // produces 2*K = 14-bit hashes which fit comfortably.  K must be
+    // odd to avoid the palindromic-kmer assertion failure in the
+    // minimap2 C reference's `mm_sketch` (see comment in
+    // `default_kw_sweep_grid`); K = 7 is the smallest odd value that
+    // still lets MEDIUM-sized sequences land on 32-bit storage.
+    if (k == 7 && max_len <= (size_t{1} << 15)) {
+        return minimap_port_with_repr<MinimizerRepr<15u, 7u>>(
+            query_seq, target_seq, params);
+    }
+
+    // K=27 forces the 128-bit fallback (val64_hash = 63 - pos_bits = 35
+    // < min_hash_bits = 54), exercising the dual-uint64 specialisation
+    // with `data_low_64()` / `data_high_64()` accessors (Goal A + B).
+    // Used by the XXL_KMER_27 bench case; pos_bits = 28 covers the
+    // bench's XXL pair (≤ 150 Mbp ≈ 2^27.16).  K = 27 is odd (palindrome
+    // safety for the C reference) and matches typical assembly-grade
+    // long-K presets (`-x asm10` runs K = 19, the next odd up is K = 21).
+    if (k == 27) {
+        return minimap_port_with_repr<MinimizerRepr<28u, 27u>>(
+            query_seq, target_seq, params);
+    }
+
     // Non-canonical K — fall back to the canonical MinimapSketchData
     // (MinimizerRepr<28, 15>).  Truncates the hash if K > 17 but the
     // bench grid never reaches that path; exotic-K callers can add
