@@ -45,7 +45,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.report;
+export module bench.aligners.report;
 
 // Pull fmt in via the mlogging module — it owns the fmt module
 // attachment in this codebase. Including <fmt/format.h> directly here
@@ -53,8 +53,9 @@ export module bench.report;
 // mlogging's existing attachment.
 import mlogging;
 import bioseq_instr;
-import bench.evaluation;
-import bench.generator;
+import bench.aligners.evaluation;
+import bench.aligners.generator;
+import bench.scheduler.stats;
 
 // The bench evaluator types (EvaluationResults, SingleEvalResult,
 // AlignerAggregatedStats) live in `bioseq::bench::HWY_NAMESPACE` —
@@ -83,27 +84,10 @@ inline std::string fmt_duration_10(std::uint64_t ns) noexcept {
     return fmt::format("{:>7.3f} s", static_cast<double>(ns) / 1'000'000'000.0);
 }
 
-/// Insert thousands separators (single-quote per ISO-C++14) into a
-/// non-negative integer's decimal representation. Locale-independent so
-/// the report stays bit-identical across hosts.
-inline std::string with_thousands_separator(std::uint64_t value) noexcept {
-    std::string digits = fmt::format("{}", value);
-    if (digits.size() <= 3) return digits;
-    std::string out;
-    out.reserve(digits.size() + digits.size() / 3);
-    const std::size_t lead = digits.size() % 3;
-    std::size_t i = 0;
-    if (lead != 0) {
-        out.append(digits, 0, lead);
-        i = lead;
-    }
-    while (i < digits.size()) {
-        if (!out.empty()) out.push_back('\'');
-        out.append(digits, i, 3);
-        i += 3;
-    }
-    return out;
-}
+/// `with_thousands_separator` lives in `bench.scheduler.stats` —
+/// every bench harness uses the same locale-independent formatter,
+/// so we alias it here rather than maintaining a parallel copy.
+using bioseq::bench_scheduler::stats::with_thousands_separator;
 
 /// Format a count to a right-aligned, width-padded, thousands-separated
 /// string.

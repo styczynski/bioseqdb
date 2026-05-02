@@ -90,11 +90,11 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.progress_ui;
+export module bench.scheduler.progress_ui;
 
 export {
 
-namespace bioseq::bench::progress {
+namespace bioseq::bench_scheduler::progress {
 
 /// Render every 250 ms — fast enough to feel "live" on short tasks, slow
 /// enough that the FTXUI dom build (a few hundred small allocations per
@@ -865,6 +865,6 @@ private:
     return d;
 }
 
-}  // namespace bioseq::bench::progress
+}  // namespace bioseq::bench_scheduler::progress
 
 }  // export

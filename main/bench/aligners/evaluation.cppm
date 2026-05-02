@@ -37,7 +37,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.evaluation;
+export module bench.aligners.evaluation;
 
 import mlogging;
 import sequan_compat;
@@ -46,7 +46,7 @@ import bioseq_sequences.minimap_port;
 import bioseq_cigar;
 import bioseq_instr;
 import bench.tool_minimap2;
-import bench.generator;
+import bench.aligners.generator;
 
 export {
 

@@ -482,7 +482,7 @@ def _run_build_worker(mode: str) -> int:
                     break
                 raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
 
-        report_path = _newest_report(pre_reports) if mode_details.is_bench_mode else None
+        report_path = _newest_report(pre_reports, mode) if mode_details.is_bench_mode else None
         completed_at = time.time()
         _update_entry(
             mode,

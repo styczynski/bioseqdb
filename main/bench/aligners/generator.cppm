@@ -29,7 +29,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.generator;
+export module bench.aligners.generator;
 
 import mlogging;
 import sequan_compat;

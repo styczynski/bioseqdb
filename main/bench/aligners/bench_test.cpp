@@ -36,12 +36,13 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bench.tool_minimap2;
-import bench.generator;
-import bench.evaluation;
-import bench.report;
-import bench.matrix_runner;
-import bench.chart_builder;
-import bench.run_config;
+import bench.aligners.generator;
+import bench.aligners.evaluation;
+import bench.aligners.report;
+import bench.aligners.matrix_runner;
+import bench.aligners.chart_builder;
+import bench.aligners.run_config;
+import bench.aligners.samples;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -425,7 +426,7 @@ TEST_CASE("Full bench matrix — all length × error × algorithm cells",
     // flag the bench skips the heatmap entirely — most performance
     // investigations don't vary k or w, and the sweep adds 30 algorithm
     // rows × 6 pairs × tens of samples to the MEDIUM/CCS bucket.
-    if (bioseq::bench::bench_run_config().include_kw_sweep) {
+    if (bioseq::bench::aligner_run_config().include_kw_sweep) {
         JustLog("[bench-full-matrix] --everything passed: running k/w sweep");
         run_kw_sweep();
     } else {

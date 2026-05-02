@@ -62,17 +62,21 @@ module;
 #include <unistd.h>
 #endif
 
-export module bench.matrix_runner;
+export module bench.aligners.matrix_runner;
 
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bench.tool_minimap2;
-import bench.generator;
-import bench.evaluation;
-import bench.progress_ui;
-import bench.run_config;
+import bench.aligners.generator;
+import bench.aligners.evaluation;
+import bench.aligners.run_config;
+import bench.aligners.samples;
+import bench.scheduler.options;
+import bench.scheduler.parallel_runner;
+import bench.scheduler.progress_ui;
+import bench.scheduler.run_config;
 import bioseq_instr;
 import bioseq_instr.config;
 import bioseq_instr.descriptor;
@@ -81,219 +85,15 @@ import bioseq_instr.thread_state;
 
 export {
 
+// HWY-agnostic data types (BenchSample, length / error buckets,
+// `benchmark_samples()` accumulator) live in `bench.aligners.samples`
+// — extracted so the chart builder and regression glue can read them
+// without dragging this HWY-bound runner into their translation unit.
+// Importers of this module get those types transitively via
+// `import bench.aligners.samples` above.
+
 namespace bioseq::bench {
 
-// =====================================================================
-// HWY-agnostic data types — visible to chart_builder.cppm.
-// =====================================================================
-
-/**
- * @brief Coarse buckets for the sequence-length axis.
- *
- * Sized to match the prompt: short < 1k, medium 1k-10k, long 10k-1M,
- * very long 1M-3M. Stored as an enum + helper so chart code can iterate
- * the buckets in display order without having to re-derive the cutoffs.
- */
-enum class SequenceLengthBucket : uint8_t {
-    SHORT     = 0,  ///< [0, 1000)        — typical Illumina read territory
-    MEDIUM    = 1,  ///< [1000, 10000)    — moderately long reads / contigs
-    LONG      = 2,  ///< [10000, 1000000) — PacBio / Nanopore
-    VERY_LONG = 3,  ///< [1000000, 3M)    — assembly-to-assembly
-    XL        = 4,  ///< [5M, 15M)        — chromosome-scale assemblies
-    XXL       = 5,  ///< [50M, 150M)      — full chromosome-grade pairs
-                    ///<                    (10× XL by user request); single
-                    ///<                    pair per error bucket, sample
-                    ///<                    count clamped low. Skipped for
-                    ///<                    every "noisy" error bucket.
-};
-
-[[nodiscard]] constexpr const char* sequence_length_bucket_name(SequenceLengthBucket bucket) {
-    switch (bucket) {
-        case SequenceLengthBucket::SHORT:     return "short (<1kb)";
-        case SequenceLengthBucket::MEDIUM:    return "medium (1k-10k)";
-        case SequenceLengthBucket::LONG:      return "long (10k-1M)";
-        case SequenceLengthBucket::VERY_LONG: return "very long (1M-3M)";
-        case SequenceLengthBucket::XL:        return "xl (5M-15M)";
-        case SequenceLengthBucket::XXL:       return "xxl (50M-150M)";
-    }
-    return "unknown";
-}
-
-/**
- * @brief Buckets for the error-rate axis.
- *
- * Replaces the original 3-bucket low/medium/high split (which was
- * pinned to 0.6%, 5.6%, 26% effective error). The original HIGH at
- * 26% was harsh enough that even minimap2 lost the alignment for
- * everything past the SHORT bucket — see
- * `RESEARCH/BENCHMARKING_SPEEDUP/POOR_RESULTS_REPORT.md` for the full
- * cause analysis.
- *
- * The new buckets are calibrated against three published benchmarking
- * studies that explicitly characterise long-read sequencing error
- * profiles:
- *
- *  * Prodanov & Bansal (Nucleic Acids Res. 2020 — DuploMap) use SimLoRD's
- *    default PacBio CLR profile of 0.11 ins / 0.04 del / 0.01 sub
- *    (~16% total) and a "high error" profile of 0.15/0.09/0.04 (~28%).
- *    Insertions dominate by a factor of ~10 over substitutions in raw
- *    PacBio CLR — the inverse of what NGS data exhibits.
- *
- *  * Rohmer, Touzet & Limasset (PeerJ 2024 — MSA_Limit) sweep error
- *    rates from 1% to 30% in 1, 2, 5, 10, 15, 20, 25, 30 steps and
- *    document an ONT MIX model of 23% subs / 31% ins / 46% dels (so
- *    deletions are the largest error type for ONT R9). They also
- *    benchmark four real datasets ranging from 6.6% (Human / T2T) to
- *    17.28% (E. coli HiFi reference + ONT reads).
- *
- *  * Ruffalo & LaFramboise (SEAL — Bioinformatics 2011) sweep
- *    NGS-style error rates from 0% to 10% with separate indel-frequency
- *    sweeps from 1e-5 to 1e-2; their canonical NGS profile is
- *    sub-dominated (~1% sub, indels rare).
- *
- * Buckets in display order:
- *   HIFI                — modern PacBio HiFi / NGS Illumina (~0.2% effective,
- *                         substitutions slightly dominate); the floor of
- *                         what real-world data exhibits today.
- *   CCS                 — PacBio CCS (multi-pass) / typical Illumina mix
- *                         (~1.5%, balanced sub/ins/del).
- *   ONT_MODERN          — ONT R10 / late R9.4 (~5%, indels ~9× subs);
- *                         matches the Human dataset in PeerJ Table 1.
- *   ONT_LEGACY          — ONT R9 / PacBio CLR (~10%, indels ~9× subs);
- *                         straddles SimLoRD's default 16% case but a
- *                         touch tamer so minimap2 still recovers.
- *   HIGH_INDEL_LOW_SUB  — exotic / adversarial: ~8% effective, but ALL
- *                         from indels with a near-zero substitution
- *                         component. Models pathological homopolymer-
- *                         heavy ONT runs and tests how aligners handle
- *                         pure gap structure (PeerJ "INS"+"DEL"-only
- *                         datasets at 5-10% — Fig. 7 of that paper).
- *   HIGH_SUB_LOW_INDEL  — exotic / adversarial: ~5% but ALL from
- *                         substitutions (the inverse of the above).
- *                         Reproduces the SEAL substitution-only sweeps
- *                         and probes how chaining handles dense SNV
- *                         clusters with no gaps.
- */
-enum class ErrorRateBucket : uint8_t {
-    HIFI                = 0,
-    CCS                 = 1,
-    ONT_MODERN          = 2,
-    ONT_LEGACY          = 3,
-    HIGH_INDEL_LOW_SUB  = 4,
-    HIGH_SUB_LOW_INDEL  = 5,
-};
-
-[[nodiscard]] constexpr const char* error_rate_bucket_name(ErrorRateBucket bucket) {
-    switch (bucket) {
-        case ErrorRateBucket::HIFI:                return "hifi (~0.2%)";
-        case ErrorRateBucket::CCS:                 return "ccs (~1.5%)";
-        case ErrorRateBucket::ONT_MODERN:          return "ont_modern (~5%)";
-        case ErrorRateBucket::ONT_LEGACY:          return "ont_legacy (~10%)";
-        case ErrorRateBucket::HIGH_INDEL_LOW_SUB:  return "high_indel_low_sub (~8%)";
-        case ErrorRateBucket::HIGH_SUB_LOW_INDEL:  return "high_sub_low_indel (~5%)";
-    }
-    return "unknown";
-}
-
-/// Short label without the parenthetical effective error rate — used
-/// where chart real estate is tight (heatmap column headers, etc.).
-[[nodiscard]] constexpr const char* error_rate_bucket_short_label(ErrorRateBucket bucket) {
-    switch (bucket) {
-        case ErrorRateBucket::HIFI:                return "hifi";
-        case ErrorRateBucket::CCS:                 return "ccs";
-        case ErrorRateBucket::ONT_MODERN:          return "ont_modern";
-        case ErrorRateBucket::ONT_LEGACY:          return "ont_legacy";
-        case ErrorRateBucket::HIGH_INDEL_LOW_SUB:  return "high_indel";
-        case ErrorRateBucket::HIGH_SUB_LOW_INDEL:  return "high_sub";
-    }
-    return "?";
-}
-
-/**
- * @brief One measurement row.
- *
- * Captures every axis the chart builder pivots on plus the per-sample
- * latency vector so the builder can compute mean / P50 / P99 without
- * re-running the workload.
- */
-struct BenchSample {
-    std::string algorithm_label;
-    std::string algorithm_kind;        ///< "bioseq" or "minimap2"
-    std::string chaining_label;        ///< e.g. "Minimap2 RMQ"
-    std::string aligner_label;         ///< e.g. "KSW2", "Block Aligner", or "n/a"
-    std::string minimizer_label;       ///< e.g. "SIMD Minimizers", or "n/a"
-
-    SequenceLengthBucket length_bucket = SequenceLengthBucket::SHORT;
-    ErrorRateBucket      error_bucket  = ErrorRateBucket::HIFI;
-    std::string length_bucket_label;
-    std::string error_bucket_label;
-
-    std::size_t requested_query_length = 0;
-    std::size_t effective_query_length = 0;
-    std::size_t target_length          = 0;
-
-    double effective_error_rate = 0.0;
-
-    /// Per-sample minimizer parameters. Recorded so the chart layer
-    /// can pivot on (k, w) for the parameter-sweep charts. For the
-    /// default algorithm grid these are pinned to (15, 10) — the
-    /// minimap2 `map-ont` preset values; the dedicated k/w-sweep
-    /// configurations vary them across the canonical short-read,
-    /// long-read and assembly presets.
-    int32_t kmer_size   = 15;
-    int32_t window_size = 10;
-
-    /// Per-sample wall-clock latencies for this (algorithm, pair)
-    /// measurement. Sorted ascending after collection.
-    std::vector<double> sample_latencies_ns;
-
-    /// Per-sample peak-RSS *delta* (current - baseline at sample
-    /// start), in bytes. Same length as `sample_latencies_ns`.
-    std::vector<double> sample_peak_rss_delta_bytes;
-
-    bool position_correct = false;
-    bool strand_correct   = false;
-    bool produced_primary = false;
-    int  primary_mapq     = 0;
-    int  position_offset_bp = 0;
-
-    /// Per-pipeline-phase mean nanoseconds per timed sample. Populated by
-    /// snapshotting the persistent profiler aggregates (`mm_sketch`,
-    /// `mg_lchain_*`, `mm_align_skeleton`, etc.) before and after the timed
-    /// sample loop and dividing the delta by `sample_latencies_ns.size()`.
-    /// First element is the phase descriptor name (matches the
-    /// `register_region_static` literal in the source); second is the mean
-    /// ns per sample for that phase. Empty when no timed samples were
-    /// captured (e.g. the per-pair budget tripped or an exception fired).
-    std::vector<std::pair<std::string, double>> phase_mean_ns_per_sample;
-
-    /// Per-phase mean PMU counters per timed sample. Same key as
-    /// `phase_mean_ns_per_sample` (the descriptor name); fields are mean
-    /// cycles / instructions / branches / branch_misses *per call*. The
-    /// values are zero on platforms without PMU access (Linux without
-    /// CAP_PERFMON, macOS without root). The chart layer treats all-zero
-    /// columns as "PMU not available — hide the chart".
-    struct PhaseCounters {
-        std::string name;
-        double mean_cycles_per_sample        = 0.0;
-        double mean_instructions_per_sample  = 0.0;
-        double mean_branches_per_sample      = 0.0;
-        double mean_branch_misses_per_sample = 0.0;
-    };
-    std::vector<PhaseCounters> phase_counters_per_sample;
-};
-
-/**
- * @brief Process-wide accumulator for `BenchSample` rows.
- *
- * Lives in the non-HWY namespace so the chart builder (which runs
- * outside any HWY dispatch context) and the matrix runner (HWY-bound)
- * see the same singleton.
- */
-inline std::vector<BenchSample>& benchmark_samples() {
-    static std::vector<BenchSample> samples;
-    return samples;
-}
 
 }  // namespace bioseq::bench
 
@@ -557,7 +357,7 @@ namespace detail {
 /// All values are hardcoded — no env-var indirection. The legacy
 /// `BIOSEQ_BENCH_SAMPLES_MULTIPLIER` is gone; pass `--fast` instead.
 [[nodiscard]] inline std::size_t samples_per_pair(SequenceLengthBucket bucket) noexcept {
-    const SampleProfile profile = bench_run_config().sample_profile;
+    const SampleProfile profile = aligner_run_config().sample_profile;
     switch (profile) {
         case SampleProfile::DEFAULT:
             switch (bucket) {
@@ -947,7 +747,6 @@ inline void run_one_pair_samples(
 /// rebalance loop) — see chaining_rmq.cppm. The skip rule is gone;
 /// RMQ chaining now runs to completion on every length bucket.
 [[nodiscard]] inline bool should_skip_cell(
-    const AlgorithmConfig& config,
     SequenceLengthBucket length_bucket,
     ErrorRateBucket error_bucket) noexcept
 {
@@ -965,40 +764,37 @@ inline void run_one_pair_samples(
         error_bucket == ErrorRateBucket::ONT_LEGACY ||
         error_bucket == ErrorRateBucket::HIGH_INDEL_LOW_SUB;
     if (is_noisy_bucket && is_long_or_longer) {
-        if (!bench_run_config().include_noisy_long) return true;
+        if (!aligner_run_config().include_noisy_long) return true;
     }
-
-    // Suppress the now-unused `config` parameter warning.
-    (void)config;
     return false;
 }
 
 /// Per-call wall-clock budget (seconds). A single (algorithm, pair)
 /// measurement that exceeds this budget aborts the rest of that config's
 /// pairs — the partial record is still emitted. 0 disables the budget.
-/// Pulled from the resolved run config (no env-var fallback).
+/// Pulled from the scheduler's generic core run-config; the matching
+/// CLI flag is `--fast`.
 [[nodiscard]] inline double per_call_budget_seconds() noexcept {
-    return bench_run_config().per_call_budget_s;
+    return bench_scheduler::core_run_config().per_call_budget_s;
 }
 
 /**
  * @brief Number of worker threads for the parallel bench runner.
  *
- * Resolved from `bench_run_config()`:
+ * Resolved from `bench_scheduler::core_run_config()`:
  *
- *   * `--fast`:     full `hardware_concurrency()` (saturate the box).
- *   * default:      `hardware_concurrency() / 2` — leaves the other
- *                   half free for OS work and avoids hyperthread-induced
- *                   cache-line contention on minimap2's tight inner
- *                   loops.
+ *   * `--fast`:  full `hardware_concurrency()` (saturate the box).
+ *   * default:   `hardware_concurrency() / 2` — leaves the other half
+ *                free for OS work and avoids hyperthread-induced
+ *                cache-line contention on minimap2's tight inner loops.
  *
  * Always at least 1. The previous `BIOSEQ_BENCH_THREADS=N` env-var
  * override is gone; if you genuinely need a single-threaded bench
- * for the per-pair phase-counter breakdown, edit `bench_run_config()`
- * before `session.run()`.
+ * for the per-pair phase-counter breakdown, edit
+ * `bench_scheduler::core_run_config()` before `session.run()`.
  */
 [[nodiscard]] inline std::size_t bench_thread_count() noexcept {
-    return resolve_thread_count(bench_run_config());
+    return bench_scheduler::resolve_thread_count(bench_scheduler::core_run_config());
 }
 
 /**
@@ -1060,7 +856,7 @@ inline void populate_bench_sample_meta(
  * Phase counter snapshotting is disabled when more than one worker is
  * active — the persistent profiler block is process-wide, so concurrent
  * before/after deltas would conflate threads. Set
- * `bench_run_config().threads = 1` (and rebuild) if you need the
+ * `bench_scheduler::core_run_config().threads = 1` (and rebuild) if you need the
  * breakdown for one-off profiling work.
  *
  * The wall-clock budget aborts the *rest of a config's pairs* once
@@ -1108,7 +904,7 @@ inline void run_matrix_for_bucket(
     std::size_t skipped_config_count = 0;
     for (std::size_t cfg_idx = 0; cfg_idx < algorithm_grid.size(); ++cfg_idx) {
         const auto& config = algorithm_grid[cfg_idx];
-        if (should_skip_cell(config, length_bucket, error_bucket)) {
+        if (should_skip_cell(length_bucket, error_bucket)) {
             JustLog("[bench.matrix_runner] SKIP {} for bucket {}/{} (noisy×long; pass --everything to override)",
                     config.label,
                     sequence_length_bucket_name(length_bucket),
@@ -1121,31 +917,33 @@ inline void run_matrix_for_bucket(
         }
     }
 
-    // Register the bucket with the live progress dashboard *after* the
-    // skip-rules have been applied so the gauge denominator matches
-    // what we are actually about to run. We register even an empty
-    // bucket so the dashboard surfaces "this length×error combination
-    // produced 0 work, here's why" via the notice log above.
-    auto& dash = progress::dashboard();
+    // Bucket display label is built up-front so the skip-config notice
+    // (posted before the scheduler dispatches) reads with the same
+    // bucket label that the dashboard will use later.
+    auto& dash = bench_scheduler::progress::dashboard();
     const std::string bucket_label =
         std::string{sequence_length_bucket_name(length_bucket)} + " / " +
         error_rate_bucket_short_label(error_bucket);
-    const std::size_t bucket_id = dash.register_bucket(bucket_label, tasks.size());
     if (skipped_config_count > 0) {
         dash.post_notice(
             std::string{"["} + bucket_label + "] skipped " +
             std::to_string(skipped_config_count) + " config(s) (noisy×long)");
     }
-    if (tasks.empty()) return;
-    dash.register_workers(n_threads);
+    if (tasks.empty()) {
+        // Register the empty bucket so the dashboard surfaces the skip
+        // notice next to a coherent zero-progress gauge — the operator
+        // sees "this combo produced 0 work, here's why".
+        (void)dash.register_bucket(bucket_label, 0);
+        return;
+    }
 
-    // Per-task output slot + per-config abort flag (set when one of a
-    // config's pairs blows the wall-clock budget so that concurrent
-    // tasks for the same config bail out instead of doubling down).
-    std::vector<BenchSample> records(tasks.size());
+    // Per-config abort flag. Set when a config's first pair blows
+    // the wall-clock budget so that concurrent tasks for the same
+    // config bail out cooperatively. Lives in this function's scope
+    // (not in the scheduler) because it's a caller-specific grouping
+    // concept; the scheduler only knows about flat case indices.
     std::vector<std::atomic<std::uint8_t>> aborted_per_config(algorithm_grid.size());
     for (auto& flag : aborted_per_config) flag.store(0u, std::memory_order_relaxed);
-    std::atomic<std::size_t> next_task{0};
 
     // Pre-compute aligner params (cheap, but pulling it out of the
     // hot loop avoids re-running the params builder on every task).
@@ -1154,41 +952,44 @@ inline void run_matrix_for_bucket(
         aligner_params_cache[i] = detail::build_aligner_params(algorithm_grid[i]);
     }
 
-    auto worker = [&](std::size_t worker_id) {
-        while (true) {
-            const std::size_t idx = next_task.fetch_add(1, std::memory_order_relaxed);
-            if (idx >= tasks.size()) return;
-            const auto [cfg_idx, pair_idx] = tasks[idx];
+    // Translate the human-facing `CoreRunConfig` into a resolved
+    // `SchedulerOptions` (thread count baked in, no hardware queries
+    // on the hot path).
+    const auto sched_opts = bench_scheduler::to_scheduler_options(
+        bench_scheduler::core_run_config());
+
+    // Hand the parallel runner an executor lambda that closes over
+    // `tasks`, the algorithm grid, the per-pair sample state, and the
+    // shared abort flags. The runner times each call, posts to the
+    // dashboard, and routes exceptions into the per-slot failure
+    // signal. The lambda returns a `BenchSample` per task; the runner
+    // assembles them into a vector indexed by case.
+    auto outcome = bench_scheduler::run_parallel_indexed<BenchSample>(
+        tasks.size(), bucket_label, sched_opts, dash,
+        [&](std::size_t case_idx, bench_scheduler::TaskContext& ctx) -> BenchSample {
+            const auto [cfg_idx, pair_idx] = tasks[case_idx];
             const auto& config = algorithm_grid[cfg_idx];
             auto& pair = pairs[pair_idx];
-            BenchSample& record = records[idx];
-            // Populate metadata first so a later abort still produces a
-            // record the chart layer can show as "this cell was aborted
-            // by the per-call budget" — empty `sample_latencies_ns` is
-            // the chart layer's signal for that. Doing this before the
-            // abort check also keeps dashboard counters honest: the
-            // `dash.record_task_skipped` call below would otherwise
-            // bump the gauge for a row that gets dropped at merge time.
+            BenchSample record;
+            // Populate metadata up front so even a later abort surfaces
+            // a record the chart layer can show as "this cell was
+            // aborted by the per-call budget"; empty
+            // `sample_latencies_ns` is the chart layer's signal for that.
             populate_bench_sample_meta(record, config, length_bucket, error_bucket, pair);
             if (aborted_per_config[cfg_idx].load(std::memory_order_relaxed) != 0u) {
-                // Another worker already blew the budget on this config.
-                // Surface the skip in the dashboard so the gauge
-                // advances; clear the per-sample buffers so the merge
-                // step keeps the metadata-only row.
-                record.sample_latencies_ns.clear();
-                record.sample_peak_rss_delta_bytes.clear();
-                dash.record_task_skipped(bucket_id);
-                continue;
+                // Another task already tripped this config's budget;
+                // mark this slot skipped (gauge advances via
+                // `record_task_skipped`) and return the metadata-only
+                // record. The merge step below drops it because
+                // `sample_latencies_ns` is still empty.
+                ctx.mark_skipped();
+                return record;
             }
 
-            // Push a "this worker is now running X" label into the
-            // dashboard. The label is the algorithm + pair length so
-            // the operator can see at a glance whether one worker is
-            // wedged on the same XL pair while others fly through
-            // SHORT. Built via string concat (not snprintf) because
-            // the separator character is multi-byte UTF-8 — a fixed
-            // byte buffer would risk truncating mid-codepoint and
-            // produce garbled output for very long algorithm labels.
+            // Build the worker label for the dashboard. String concat
+            // (not snprintf) because the separator is multi-byte
+            // UTF-8 — a fixed byte buffer would risk truncating
+            // mid-codepoint on very long algorithm labels.
             std::string task_label;
             task_label.reserve(config.label.size() + 64);
             task_label.append(config.label);
@@ -1201,39 +1002,18 @@ inline void run_matrix_for_bucket(
             task_label.append(" (");
             task_label.append(std::to_string(pair.query.bp_size()));
             task_label.append(" bp)");
-            dash.record_task_started(bucket_id, worker_id, std::move(task_label));
+            ctx.set_label(std::move(task_label));
 
-            bool task_failed = false;
             const auto pair_t0 = std::chrono::steady_clock::now();
-            // The bioseq pipeline can throw allocator exceptions
-            // (foonathan_memory::bad_node_size — "allocation node
-            // size exceeds supported maximum of allocator") on inputs
-            // it doesn't expect. Catching here means one bad
-            // (config, pair) drops a single record instead of
-            // aborting the whole sweep.
-            try {
-                detail::run_one_pair_samples(
-                    pair, config, aligner_params_cache[cfg_idx], n_samples,
-                    position_tolerance_bp, record, collect_phase_counters);
-            } catch (const std::exception& ex) {
-                JustLog("[bench.matrix_runner] EXCEPTION on {} bucket {} pair query={}bp: {}",
-                        config.label,
-                        sequence_length_bucket_name(length_bucket),
-                        pair.query.bp_size(), ex.what());
-                record.sample_latencies_ns.clear();
-                record.sample_peak_rss_delta_bytes.clear();
-                record.produced_primary = false;
-                task_failed = true;
-            } catch (...) {
-                JustLog("[bench.matrix_runner] UNKNOWN EXCEPTION on {} bucket {} pair query={}bp",
-                        config.label,
-                        sequence_length_bucket_name(length_bucket),
-                        pair.query.bp_size());
-                record.sample_latencies_ns.clear();
-                record.sample_peak_rss_delta_bytes.clear();
-                record.produced_primary = false;
-                task_failed = true;
-            }
+            // The bioseq pipeline can throw allocator exceptions on
+            // unexpected inputs (foonathan_memory bad_node_size). Let
+            // them propagate to the scheduler — its catch block sets
+            // the slot's failure flag and the merge step below drops
+            // the empty record. Local catch blocks here would just
+            // duplicate that behaviour.
+            detail::run_one_pair_samples(
+                pair, config, aligner_params_cache[cfg_idx], n_samples,
+                position_tolerance_bp, record, collect_phase_counters);
             const auto pair_t1 = std::chrono::steady_clock::now();
             const double pair_seconds =
                 std::chrono::duration<double>(pair_t1 - pair_t0).count();
@@ -1243,54 +1023,37 @@ inline void run_matrix_for_bucket(
                       record.sample_latencies_ns.end());
             std::sort(record.sample_peak_rss_delta_bytes.begin(),
                       record.sample_peak_rss_delta_bytes.end());
-
-            const std::size_t samples_collected = record.sample_latencies_ns.size();
-            dash.record_task_finished(bucket_id, worker_id, pair_seconds,
-                                      samples_collected, task_failed);
+            ctx.add_samples_collected(record.sample_latencies_ns.size());
 
             if (budget_s > 0.0 && pair_seconds > budget_s) {
-                JustLog("[bench.matrix_runner] ABORT {} on bucket {} after {:.1f}s (>{:.1f}s budget)",
+                JustLog("[bench.aligners.matrix_runner] ABORT {} on bucket {} after {:.1f}s (>{:.1f}s budget)",
                         config.label,
                         sequence_length_bucket_name(length_bucket),
                         pair_seconds, budget_s);
-                dash.post_notice(
+                ctx.post_notice(
                     std::string{"ABORT "} + config.label + " on " +
                     bucket_label + " after " +
                     std::to_string(static_cast<int>(pair_seconds)) + "s");
                 aborted_per_config[cfg_idx].store(1u, std::memory_order_relaxed);
             }
-        }
-    };
-
-    if (n_threads <= 1) {
-        worker(/*worker_id=*/0);
-    } else {
-        std::vector<std::thread> workers;
-        workers.reserve(n_threads);
-        for (std::size_t t = 0; t < n_threads; ++t) {
-            workers.emplace_back([t, &worker]() { worker(t); });
-        }
-        for (auto& th : workers) th.join();
-    }
+            return record;
+        });
 
     // Merge results into the global accumulator in deterministic order.
     //
-    // We drop two kinds of records here:
-    //   1. `algorithm_label.empty()` — the slot was never populated
-    //      (no worker ever picked the task up; only possible if
-    //      `next_task` overshoots the task list, which our `idx >=
-    //      tasks.size()` guard prevents — kept as a defensive check).
+    // Drop conditions:
+    //   1. `algorithm_label.empty()` — the executor never populated
+    //      the slot's metadata. Defensive only — should not happen.
     //   2. `sample_latencies_ns.empty()` — the task was either
-    //      budget-aborted before any timed sample landed, or the
-    //      bioseq pipeline threw an allocator exception. The
-    //      metadata is populated (so the dashboard can show the
-    //      attempt) but no usable measurement exists; passing an
-    //      empty-latency record on to the aggregator would inflate
-    //      `total_pairs` for the algorithm without contributing a
-    //      `correct` count, falsely tripping the wildcard
-    //      `accuracy=equal_to` rule.
+    //      budget-skipped before timing started, or the executor
+    //      threw and the scheduler caught. The metadata is populated
+    //      (so the dashboard can show the attempt) but no usable
+    //      measurement exists; passing an empty-latency record on to
+    //      the aggregator would inflate `total_pairs` for the
+    //      algorithm without contributing a `correct` count, falsely
+    //      tripping the wildcard `accuracy=equal_to` rule.
     auto& global_samples = benchmark_samples();
-    for (auto& record : records) {
+    for (auto& record : outcome.results) {
         if (record.algorithm_label.empty()) continue;
         if (record.sample_latencies_ns.empty()) continue;
         global_samples.push_back(std::move(record));

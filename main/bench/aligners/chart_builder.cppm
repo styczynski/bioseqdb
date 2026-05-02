@@ -68,83 +68,61 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.chart_builder;
+export module bench.aligners.chart_builder;
 
 import mlogging;
-import bench.matrix_runner;
-import bench.json_writer;
-import bench.regression_check;
+import bench.aligners.matrix_runner;
+import bench.aligners.samples;
+import bench.scheduler.json_writer;
+import bench.scheduler.regression;
+import bench.scheduler.charting;
+import bench.scheduler.stats;
+import bench.scheduler.report_envelope;
 
 export {
 
 namespace bioseq::bench {
 
+// Aliases for types relocated into bench_scheduler. Keeping the
+// unqualified names lets the chart-emit code below read like a normal
+// translation unit; only the boundary types (writer, violation) and
+// the violations-array helper need this routing.
+using JsonWriter           = bioseq::bench_scheduler::JsonWriter;
+using RegressionViolation  = bioseq::bench_scheduler::regression::Violation;
+using bioseq::bench_scheduler::regression::emit_violations_json;
+
 namespace detail {
 
-/// Linear interpolation percentile estimator over a pre-sorted vector.
-/// Returns 0.0 when the vector is empty so the caller can short-circuit
-/// without separate guard logic.
-[[nodiscard]] inline double percentile_sorted(
-    const std::vector<double>& sorted_values, double percentile) noexcept
-{
-    if (sorted_values.empty()) return 0.0;
-    if (sorted_values.size() == 1) return sorted_values.front();
-    const double rank = percentile * static_cast<double>(sorted_values.size() - 1);
-    const std::size_t low_index = static_cast<std::size_t>(std::floor(rank));
-    const std::size_t high_index = static_cast<std::size_t>(std::ceil(rank));
-    const double fraction = rank - static_cast<double>(low_index);
-    return sorted_values[low_index] +
-           (sorted_values[high_index] - sorted_values[low_index]) * fraction;
-}
+/// Aliases for the generic helpers now living in `bench.scheduler.*`.
+/// Keeping the unqualified names lets the chart-emit code below read
+/// like before; only this aliasing block knows the helpers came from
+/// the scheduler module.
+using bench_scheduler::stats::percentile_sorted;
+using bench_scheduler::stats::mean_of;
 
-[[nodiscard]] inline double mean_of(const std::vector<double>& values) noexcept {
-    if (values.empty()) return 0.0;
-    double sum = 0.0;
-    for (double v : values) sum += v;
-    return sum / static_cast<double>(values.size());
-}
+/// Re-export the scheduler's deterministic palette helper under the
+/// `detail::` namespace so per-chart bodies keep reading
+/// `detail::colour_for_key(algorithm_label)` rather than the longer
+/// `bench_scheduler::charting::colour_for_key(...)`. Pure aliasing —
+/// zero overhead, no wrapper function.
+using bench_scheduler::charting::colour_for_key;
 
-/// Stable ordering of algorithm labels, with the two minimap2 baselines
+/// Stable ordering of algorithm labels with the two minimap2 baselines
 /// pinned to the front so chart legends always read "baselines first,
 /// then bioseq variants" regardless of insertion order in the sample
-/// vector.
+/// vector. The "pin some labels first" primitive is generic; the
+/// specific labels we pin are aligner-specific.
 [[nodiscard]] inline std::vector<std::string> ordered_algorithm_labels(
     const std::vector<BenchSample>& samples)
 {
     std::set<std::string> seen;
     for (const auto& s : samples) seen.insert(s.algorithm_label);
-    std::vector<std::string> out;
-    out.reserve(seen.size());
-    auto take = [&](std::string_view label) {
-        const std::string label_str{label};
-        if (seen.contains(label_str)) {
-            out.push_back(label_str);
-            seen.erase(label_str);
-        }
-    };
-    take("minimap2 (DP chaining)");
-    take("minimap2 (RMQ chaining)");
-    out.insert(out.end(), seen.begin(), seen.end());
-    return out;
-}
-
-/// Map an algorithm label to a stable colour. Keeps each algorithm's
-/// trace colour consistent across charts so the reader can follow the
-/// same line across the deck.
-[[nodiscard]] inline std::string colour_for(std::string_view algorithm_label) noexcept {
-    static constexpr std::array<std::string_view, 16> palette = {
-        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-        "#bcbd22", "#17becf", "#393b79", "#637939",
-        "#8c6d31", "#843c39", "#7b4173", "#3182bd"};
-    // Deterministic hash based on string contents — std::hash is fine
-    // since we do not need cryptographic stability.
-    std::size_t hash_val = 1469598103934665603ull;
-    for (char c : algorithm_label) {
-        hash_val ^= static_cast<std::size_t>(static_cast<unsigned char>(c));
-        hash_val *= 1099511628211ull;
-    }
-    return std::string{palette[hash_val % palette.size()]};
+    std::vector<std::string> ordered{seen.begin(), seen.end()};
+    static constexpr std::array<std::string_view, 2> pinned = {
+        "minimap2 (DP chaining)",
+        "minimap2 (RMQ chaining)"};
+    bench_scheduler::charting::pin_labels_first(ordered, pinned);
+    return ordered;
 }
 
 [[nodiscard]] inline std::string length_bucket_short_label(
@@ -186,95 +164,51 @@ inline void emit_report(
     const auto& samples = benchmark_samples();
     const auto algorithm_labels = detail::ordered_algorithm_labels(samples);
 
-    writer.begin_object();  // root
-    writer.kv_string("schema", "bioseq-bench-report-v1");
-    writer.kv_string("commit_hash", commit_hash);
-    writer.kv_uint("sample_count", samples.size());
-    writer.kv_uint("algorithm_count", algorithm_labels.size());
+    bench_scheduler::ReportMetadata meta;
+    meta.schema          = "bioseq-bench-report-v1";
+    meta.commit_hash     = commit_hash;
+    meta.sample_count    = samples.size();
+    meta.algorithm_count = algorithm_labels.size();
+    meta.violations      = std::span<const RegressionViolation>{violations};
 
-    // Surface violations near the top of the document so a quick
-    // `head report.json` shows the regression status before the
-    // multi-megabyte chart payload.
-    emit_violations_json(writer, violations);
-
-    writer.key("charts");
-    writer.begin_object();  // charts
+    bench_scheduler::emit_report_envelope(writer, meta,
+        [&]() {
+            // The envelope opens the `charts` object before the body
+            // runs and closes it after; charts emit one entry each
+            // via the helpers below. The writer is captured so the
+            // per-chart code reads exactly like the pre-refactor
+            // `writer.kv_*` chain.
 
     // ----------------------------------------------------------------
-    // Helper: emit one chart entry { short_description, long_description,
-    // plotly: {data, layout} }. The body callback is responsible for
-    // emitting the `data` and `layout` members.
+    // Local lambdas — thin wrappers over the scheduler's chart
+    // primitives so the per-chart bodies below stay readable. The
+    // lambdas pre-bind the writer reference; the scheduler helpers
+    // take it explicitly so they can be reused outside this function.
     // ----------------------------------------------------------------
-    auto emit_chart = [&](
+    auto emit_chart = [&writer](
         std::string_view chart_id,
         std::string_view short_description,
         std::string_view long_description,
         auto&& body)
     {
-        writer.key(chart_id);
-        writer.begin_object();
-        writer.kv_string("short_description", short_description);
-        writer.kv_string("long_description",  long_description);
-        writer.key("plotly");
-        writer.begin_object();
-        body();  // emits data + layout members of the plotly figure
-        writer.end_object();
-        writer.end_object();
+        bench_scheduler::charting::emit_chart_envelope(
+            writer, chart_id, short_description, long_description,
+            std::forward<decltype(body)>(body));
     };
 
-    // Helper: emit a layout block with shared {title, xaxis, yaxis,
-    // legend} settings. Caller passes axis titles + scale.
-    auto emit_layout = [&](
+    auto emit_layout = [&writer](
         std::string_view title,
         std::string_view x_title, bool x_log,
         std::string_view y_title, bool y_log,
         std::string_view barmode = "")
     {
-        writer.key("layout");
-        writer.begin_object();
-        writer.key("title");
-        writer.begin_object();
-        writer.kv_string("text", title);
-        writer.end_object();
-        writer.key("xaxis");
-        writer.begin_object();
-        writer.key("title");
-        writer.begin_object();
-        writer.kv_string("text", x_title);
-        writer.end_object();
-        if (x_log) writer.kv_string("type", "log");
-        writer.end_object();
-        writer.key("yaxis");
-        writer.begin_object();
-        writer.key("title");
-        writer.begin_object();
-        writer.kv_string("text", y_title);
-        writer.end_object();
-        if (y_log) writer.kv_string("type", "log");
-        writer.end_object();
-        writer.key("legend");
-        writer.begin_object();
-        writer.kv_string("orientation", "v");
-        writer.end_object();
-        writer.kv_bool("showlegend", true);
-        if (!barmode.empty()) writer.kv_string("barmode", barmode);
-        writer.kv_string("template", "plotly_white");
-        writer.end_object();
+        bench_scheduler::charting::emit_plotly_layout(
+            writer, title, x_title, x_log, y_title, y_log, barmode);
     };
 
-    // Helper: emit a marker object with a deterministic colour pulled
-    // from the per-algorithm palette. Used by every scatter/bar trace.
-    auto emit_marker = [&](std::string_view algorithm_label) {
-        writer.key("marker");
-        writer.begin_object();
-        writer.kv_string("color", detail::colour_for(algorithm_label));
-        writer.kv_int("size", 7);
-        writer.end_object();
-        writer.key("line");
-        writer.begin_object();
-        writer.kv_string("color", detail::colour_for(algorithm_label));
-        writer.kv_int("width", 2);
-        writer.end_object();
+    auto emit_marker = [&writer](std::string_view algorithm_label) {
+        bench_scheduler::charting::emit_plotly_marker(
+            writer, bench_scheduler::charting::colour_for_key(algorithm_label));
     };
 
     // ================================================================
@@ -573,7 +507,7 @@ inline void emit_report(
                     writer.begin_array(); writer.value_double(accuracy); writer.end_array();
                     writer.key("marker");
                     writer.begin_object();
-                    writer.kv_string("color", detail::colour_for(algorithm_label));
+                    writer.kv_string("color", detail::colour_for_key(algorithm_label));
                     writer.kv_int("size", 13);
                     writer.kv_string("symbol", length_symbols[i]);
                     writer.end_object();
@@ -869,13 +803,13 @@ inline void emit_report(
                 writer.kv_double_array("y", p99s);
                 writer.key("line");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.kv_string("dash", "dash");
                 writer.kv_int("width", 2);
                 writer.end_object();
                 writer.key("marker");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.kv_int("size", 7);
                 writer.kv_string("symbol", "circle-open");
                 writer.end_object();
@@ -1059,7 +993,7 @@ inline void emit_report(
                 writer.kv_double_array("y", ys);
                 writer.key("marker");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.end_object();
                 writer.end_object();
             }
@@ -1199,7 +1133,7 @@ inline void emit_report(
                 writer.kv_double_array("y", ys);
                 writer.key("marker");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.end_object();
                 writer.end_object();
             }
@@ -1355,7 +1289,7 @@ inline void emit_report(
                 writer.end_object();
                 writer.key("marker");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.end_object();
                 writer.end_object();
             }
@@ -1443,7 +1377,7 @@ inline void emit_report(
                 writer.kv_double_array("y", ys);
                 writer.key("marker");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.end_object();
                 writer.end_object();
             }
@@ -1495,7 +1429,7 @@ inline void emit_report(
                 writer.end_object();
                 writer.key("marker");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.end_object();
                 writer.end_object();
             }
@@ -1555,7 +1489,7 @@ inline void emit_report(
                 writer.kv_double_array("y", ys);
                 writer.key("line");
                 writer.begin_object();
-                writer.kv_string("color", detail::colour_for(algorithm_label));
+                writer.kv_string("color", detail::colour_for_key(algorithm_label));
                 writer.kv_int("width", 2);
                 writer.end_object();
                 writer.end_object();
@@ -1625,7 +1559,7 @@ inline void emit_report(
                     writer.begin_array(); writer.value_double(accuracy); writer.end_array();
                     writer.key("marker");
                     writer.begin_object();
-                    writer.kv_string("color", detail::colour_for(algorithm_label));
+                    writer.kv_string("color", detail::colour_for_key(algorithm_label));
                     writer.kv_int("size", 11);
                     writer.kv_string("symbol", length_symbols[i]);
                     writer.end_object();
@@ -2746,20 +2680,14 @@ inline void emit_report(
             writer.end_object();
             writer.end_object();
             writer.end_array();
-            // Tables don't use xaxis/yaxis but Plotly accepts a layout
-            // block; emit a minimal one for chart-title consistency.
-            writer.key("layout");
-            writer.begin_object();
-            writer.key("title");
-            writer.begin_object();
-            writer.kv_string("text", "Per-algorithm summary table");
-            writer.end_object();
-            writer.kv_string("template", "plotly_white");
-            writer.end_object();
+            // Tables don't use xaxis/yaxis; the title-only layout
+            // helper keeps `template = "plotly_white"` consistent
+            // with every other chart.
+            bench_scheduler::charting::emit_plotly_layout_titled(
+                writer, "Per-algorithm summary table");
         });
 
-    writer.end_object();  // charts
-    writer.end_object();  // root
+        });  // end of charts_body lambda passed to emit_report_envelope
 }
 
 /**
@@ -2780,13 +2708,8 @@ inline void emit_report(
 {
     JsonWriter writer;
     emit_report(writer, violations, commit_hash);
-    if (!writer.write_to_file(path)) {
-        JustLog("[bench.chart_builder] FAILED to write report.json to {}", path);
-        return false;
-    }
-    JustLog("[bench.chart_builder] Wrote report.json ({} bytes) to {}",
-            writer.str().size(), path);
-    return true;
+    return bench_scheduler::write_report_to_file(
+        writer, path, "bench.aligners.chart_builder");
 }
 
 }  // namespace bioseq::bench
