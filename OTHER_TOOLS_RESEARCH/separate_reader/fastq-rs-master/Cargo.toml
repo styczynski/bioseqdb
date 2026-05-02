@@ -1,0 +1,18 @@
+[package]
+name = "fastq"
+version = "0.6.0"
+authors = ["Adrian Seyboldt <adrian.seyboldt@gmail.com>"]
+description = "A parser for fastq"
+license = "MIT"
+repository = "https://github.com/aseyboldt/fastq-rs"
+documentation = "https://docs.rs/fastq"
+readme = "README.md"
+keywords = ["bio", "fastq", "parser"]
+
+[dependencies]
+memchr = ">=0.1"
+niffler = { version = ">=2.4.0" }
+
+[dev-dependencies]
+parasailors = ">=0.3"
+bio = ">=0.10"

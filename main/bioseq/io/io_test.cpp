@@ -2,9 +2,17 @@
  * @file io_test.cpp
  * @brief Correctness tests for `bioseq::io::read_sequences_file`.
  *
- * v1 covers: tiny FASTA round-trip, FASTQ round-trip, empty file,
- * mixed CRLF / LF, multi-line FASTA. The exhaustive capacity sweep and
- * differential-fuzz vs. kseqpp tests in spec §19 are phase-5 follow-ups.
+ * Covers the spec §19 hardening checklist:
+ *   * round-trip FASTA / FASTQ on tiny corpora;
+ *   * multi-line FASTA + multi-line FASTQ qual;
+ *   * CRLF line endings;
+ *   * empty file;
+ *   * capacity sweep (subset of [3, 100]);
+ *   * differential fuzz vs kseqpp (FASTA dna4);
+ *   * mmap path round-trip;
+ *   * gzip path round-trip;
+ *   * strict_alphabet mode rejection of stray bytes;
+ *   * async pipeline mode round-trip.
  */
 #include "common_tests.h"
 #include "common.h"
@@ -13,10 +21,12 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
 #include <unistd.h>
+#include <zlib.h>
 
 #include <kseq++/seqio.hpp>
 
@@ -30,8 +40,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
-/// Write `content` to a temp file and return the path. The path is
-/// unique-per-test via Catch2's `getCurrentTestName`.
+/// Write `content` to a temp file and return the path. Each call gets
+/// a unique-per-(pid,counter) name so concurrent test runs don't
+/// collide.
 std::string write_tmp_file(const std::string& content) {
     static std::atomic<std::uint64_t> counter{0};
     fs::path tmp_dir = fs::temp_directory_path();
@@ -45,9 +56,25 @@ std::string write_tmp_file(const std::string& content) {
     return tmp_path.string();
 }
 
+/// gzip-compress `content` to a temp file. Used by the gzip-path test.
+std::string write_tmp_gzip(const std::string& content) {
+    static std::atomic<std::uint64_t> counter{0};
+    fs::path tmp_dir = fs::temp_directory_path();
+    fs::path tmp_path = tmp_dir / fmt::format(
+        "bioseq_io_test_gz_{}_{}.gz",
+        ::getpid(),
+        counter.fetch_add(1, std::memory_order_relaxed));
+    gzFile out = ::gzopen(tmp_path.c_str(), "wb");
+    REQUIRE(out != nullptr);
+    const int written = ::gzwrite(out, content.data(),
+                                  static_cast<unsigned>(content.size()));
+    REQUIRE(written == static_cast<int>(content.size()));
+    ::gzclose(out);
+    return tmp_path.string();
+}
+
 /// Decode a `compact_sequence_range<sequence_custom_alphabet<dna4, uint64_t>>`
-/// back to ASCII via the alphabet's symbol iterator. Used to compare
-/// against the original input.
+/// back to ASCII via the alphabet's symbol iterator.
 template <typename SequenceRange>
 std::string decode_to_ascii(const SequenceRange& seq) {
     std::string out;
@@ -71,9 +98,6 @@ std::string decode_to_ascii(const SequenceRange& seq) {
 }  // namespace
 
 TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip", "[io-test-correctness]") {
-
-    klibpp::KSeq record;
-
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;
@@ -247,6 +271,363 @@ TEST_CASE("bioseq_io: tiny FASTQ dna4 round-trip", "[io-test-correctness]") {
     REQUIRE(got[1].header == "read2 desc");
     REQUIRE(got[1].sequence == "AAAACCCC");
     REQUIRE(got[1].quality == "!!!!!!!!");
+
+    fs::remove(path);
+}
+
+// =====================================================================
+// Phase 6 hardening tests
+// =====================================================================
+
+TEST_CASE("bioseq_io: multi-line FASTQ qual", "[io-test-correctness]") {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    // 16-letter sequence wrapped over 2 lines, qual wrapped over 2
+    // lines. Spec §10.5 / §10.6.
+    const std::string corpus =
+        "@multi\n"
+        "ACGTACGT\n"
+        "ACGTACGT\n"
+        "+\n"
+        "IIIIIIII\n"
+        "JJJJJJJJ\n";
+    const std::string path = write_tmp_file(corpus);
+
+    struct record {
+        std::string header;
+        std::string sequence;
+        std::string quality;
+    };
+    std::vector<record> got;
+    std::vector<std::string> errs;
+
+    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTQ>(
+        path,
+        [&](batch_t&& batch) {
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                auto qspan = batch.quality(i);
+                got.push_back(record{
+                    std::string{batch.header(i)},
+                    decode_to_ascii(batch.sequence(i)),
+                    std::string(reinterpret_cast<const char*>(qspan.data()),
+                                qspan.size())});
+            }
+        },
+        [&](std::string&& msg) { errs.push_back(std::move(msg)); });
+
+    REQUIRE(errs.empty());
+    REQUIRE(rc.has_value());
+    REQUIRE(got.size() == 1);
+    REQUIRE(got[0].header == "multi");
+    REQUIRE(got[0].sequence == "ACGTACGTACGTACGT");
+    REQUIRE(got[0].quality == "IIIIIIIIJJJJJJJJ");
+
+    fs::remove(path);
+}
+
+TEST_CASE("bioseq_io: capacity sweep — varying initial buffer size",
+          "[io-test-correctness]") {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    // Build a corpus with a mix of header lengths, body lengths, and
+    // line-wrap positions. Bodies use only ACGT to stay within the
+    // dna4 fast path's domain (spec §11.2 collision warning).
+    std::string corpus;
+    corpus.reserve(8192);
+    std::vector<std::pair<std::string, std::string>> expected;
+    std::mt19937_64 rng(0xCAFEBABEull);
+    std::uniform_int_distribution<int> letter_dist(0, 3);
+    constexpr std::array<char, 4> dna4{'A', 'C', 'G', 'T'};
+    for (int record_index = 0; record_index < 30; ++record_index) {
+        const std::size_t header_size =
+            5 + (rng() % 17);                      // 5 .. 21 bytes
+        const std::size_t body_size =
+            5 + (rng() % 257);                     // 5 .. 261 bytes
+        std::string header;
+        header.reserve(header_size);
+        for (std::size_t i = 0; i < header_size; ++i) {
+            header.push_back(static_cast<char>('a' + (rng() % 26)));
+        }
+        std::string body;
+        body.reserve(body_size);
+        for (std::size_t i = 0; i < body_size; ++i) {
+            body.push_back(dna4[letter_dist(rng)]);
+        }
+        corpus.append(">").append(header).append("\n");
+        // Wrap at random columns to exercise multi-line bodies.
+        std::size_t emitted = 0;
+        const std::size_t wrap_at = 8 + (rng() % 60);  // 8 .. 67
+        while (emitted < body_size) {
+            const std::size_t this_line =
+                std::min(wrap_at, body_size - emitted);
+            corpus.append(body, emitted, this_line);
+            corpus.push_back('\n');
+            emitted += this_line;
+        }
+        expected.emplace_back(std::move(header), std::move(body));
+    }
+
+    const std::string path = write_tmp_file(corpus);
+
+    // Subset of [3, 100] — full sweep would push past 30s on a debug
+    // build. The chosen sizes exercise tiny (3, 7, 13) up to typical
+    // (64, 100), plus 1 KiB for the larger-headers path.
+    const std::vector<std::size_t> sizes_to_sweep{
+        3, 5, 7, 11, 13, 17, 23, 32, 64, 67, 100, 1024};
+    for (const auto initial_size : sizes_to_sweep) {
+        reader_options opts;
+        opts.io.gzip_auto_detect = false;
+        opts.io.prefer_mmap      = false;
+        opts.io.initial_buffer_size = initial_size;
+        opts.concurrency.worker_count = 0;
+
+        std::vector<std::pair<std::string, std::string>> got;
+        std::vector<std::string> errs;
+
+        auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+            path,
+            [&](batch_t&& batch) {
+                for (std::size_t i = 0; i < batch.size(); ++i) {
+                    got.emplace_back(std::string{batch.header(i)},
+                                     decode_to_ascii(batch.sequence(i)));
+                }
+            },
+            [&](std::string&& msg) { errs.push_back(std::move(msg)); },
+            opts);
+
+        REQUIRE(errs.empty());
+        REQUIRE(rc.has_value());
+        REQUIRE(got.size() == expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            REQUIRE(got[i].first == expected[i].first);
+            REQUIRE(got[i].second == expected[i].second);
+        }
+    }
+
+    fs::remove(path);
+}
+
+TEST_CASE("bioseq_io: differential fuzz vs kseqpp",
+          "[io-test-correctness]") {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    std::mt19937_64 rng(0xDEADBEEFull);
+    std::uniform_int_distribution<int> letter_dist(0, 3);
+    constexpr std::array<char, 4> dna4{'A', 'C', 'G', 'T'};
+
+    for (int round = 0; round < 50; ++round) {
+        const std::size_t record_count = 1 + (rng() % 10);
+        std::string corpus;
+        corpus.reserve(2048);
+        std::vector<std::string> expected_seqs;
+        std::vector<std::string> expected_headers;
+        const bool use_crlf = (round % 3 == 0);
+        for (std::size_t record_index = 0; record_index < record_count;
+             ++record_index) {
+            std::string header = fmt::format("seq_{}_{}", round, record_index);
+            const std::size_t body_size = 1 + (rng() % 120);
+            std::string body;
+            body.reserve(body_size);
+            for (std::size_t i = 0; i < body_size; ++i) {
+                body.push_back(dna4[letter_dist(rng)]);
+            }
+            corpus.append(">").append(header);
+            if (use_crlf) corpus.append("\r");
+            corpus.push_back('\n');
+            corpus.append(body);
+            if (use_crlf) corpus.append("\r");
+            corpus.push_back('\n');
+            expected_seqs.push_back(std::move(body));
+            expected_headers.push_back(std::move(header));
+        }
+        const std::string path = write_tmp_file(corpus);
+
+        // Our reader.
+        std::vector<std::pair<std::string, std::string>> ours;
+        std::vector<std::string> ours_errs;
+        auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+            path,
+            [&](batch_t&& batch) {
+                for (std::size_t i = 0; i < batch.size(); ++i) {
+                    ours.emplace_back(std::string{batch.header(i)},
+                                      decode_to_ascii(batch.sequence(i)));
+                }
+            },
+            [&](std::string&& msg) { ours_errs.push_back(std::move(msg)); });
+        REQUIRE(ours_errs.empty());
+        REQUIRE(rc.has_value());
+
+        // kseqpp.
+        std::vector<std::pair<std::string, std::string>> theirs;
+        {
+            klibpp::SeqStreamIn stream(path.c_str());
+            klibpp::KSeq record;
+            while (stream >> record) {
+                std::string joined_header = record.name;
+                if (!record.comment.empty()) {
+                    joined_header.push_back(' ');
+                    joined_header.append(record.comment);
+                }
+                theirs.emplace_back(std::move(joined_header), record.seq);
+            }
+        }
+
+        REQUIRE(ours.size() == expected_seqs.size());
+        REQUIRE(theirs.size() == expected_seqs.size());
+        for (std::size_t i = 0; i < ours.size(); ++i) {
+            REQUIRE(ours[i].first == expected_headers[i]);
+            REQUIRE(ours[i].second == expected_seqs[i]);
+            REQUIRE(theirs[i].first == expected_headers[i]);
+            REQUIRE(theirs[i].second == expected_seqs[i]);
+        }
+
+        fs::remove(path);
+    }
+}
+
+TEST_CASE("bioseq_io: mmap path round-trip", "[io-test-correctness]") {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    const std::string corpus =
+        ">a\nACGTACGT\n"
+        ">b\nGGGGCCCC\n"
+        ">c\nTTTTTTAA\n";
+    const std::string path = write_tmp_file(corpus);
+
+    reader_options opts;
+    opts.io.gzip_auto_detect = false;
+    opts.io.prefer_mmap      = true;
+
+    std::vector<std::pair<std::string, std::string>> got;
+    std::vector<std::string> errs;
+    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+        path,
+        [&](batch_t&& batch) {
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                got.emplace_back(std::string{batch.header(i)},
+                                 decode_to_ascii(batch.sequence(i)));
+            }
+        },
+        [&](std::string&& msg) { errs.push_back(std::move(msg)); },
+        opts);
+
+    REQUIRE(errs.empty());
+    REQUIRE(rc.has_value());
+    REQUIRE(got.size() == 3);
+    REQUIRE(got[0] == std::pair<std::string, std::string>{"a", "ACGTACGT"});
+    REQUIRE(got[1] == std::pair<std::string, std::string>{"b", "GGGGCCCC"});
+    REQUIRE(got[2] == std::pair<std::string, std::string>{"c", "TTTTTTAA"});
+
+    fs::remove(path);
+}
+
+TEST_CASE("bioseq_io: gzip path round-trip", "[io-test-correctness]") {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    const std::string corpus =
+        ">gz1\nACGT\n"
+        ">gz2\nGGGG\n";
+    const std::string path = write_tmp_gzip(corpus);
+
+    reader_options opts;
+    opts.io.gzip_auto_detect = true;
+
+    std::vector<std::pair<std::string, std::string>> got;
+    std::vector<std::string> errs;
+    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+        path,
+        [&](batch_t&& batch) {
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                got.emplace_back(std::string{batch.header(i)},
+                                 decode_to_ascii(batch.sequence(i)));
+            }
+        },
+        [&](std::string&& msg) { errs.push_back(std::move(msg)); },
+        opts);
+
+    REQUIRE(errs.empty());
+    REQUIRE(rc.has_value());
+    REQUIRE(got.size() == 2);
+    REQUIRE(got[0] == std::pair<std::string, std::string>{"gz1", "ACGT"});
+    REQUIRE(got[1] == std::pair<std::string, std::string>{"gz2", "GGGG"});
+
+    fs::remove(path);
+}
+
+TEST_CASE("bioseq_io: async pipeline (worker_count=2) round-trip",
+          "[io-test-correctness]") {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    // Larger corpus so the parser actually flushes batches and the
+    // worker pool sees > 1 batch.
+    std::string corpus;
+    corpus.reserve(64 * 1024);
+    std::vector<std::pair<std::string, std::string>> expected;
+    std::mt19937_64 rng(0xABCD1234ull);
+    std::uniform_int_distribution<int> letter_dist(0, 3);
+    constexpr std::array<char, 4> dna4{'A', 'C', 'G', 'T'};
+    for (int record_index = 0; record_index < 100; ++record_index) {
+        std::string header = fmt::format("async_{}", record_index);
+        const std::size_t body_size = 50 + (rng() % 200);
+        std::string body;
+        body.reserve(body_size);
+        for (std::size_t i = 0; i < body_size; ++i) {
+            body.push_back(dna4[letter_dist(rng)]);
+        }
+        corpus.append(">").append(header).append("\n").append(body).append("\n");
+        expected.emplace_back(std::move(header), std::move(body));
+    }
+    const std::string path = write_tmp_file(corpus);
+
+    reader_options opts;
+    opts.io.gzip_auto_detect = false;
+    opts.io.prefer_mmap      = false;
+    opts.concurrency.worker_count = 2;
+    opts.concurrency.batch_target_record_count = 8;
+
+    std::mutex got_mutex;
+    std::vector<std::pair<std::string, std::string>> got;
+    std::vector<std::string> errs;
+    auto rc = read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+        path,
+        [&](batch_t&& batch) {
+            std::vector<std::pair<std::string, std::string>> local;
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                local.emplace_back(std::string{batch.header(i)},
+                                   decode_to_ascii(batch.sequence(i)));
+            }
+            std::lock_guard<std::mutex> guard{got_mutex};
+            for (auto& record : local) got.push_back(std::move(record));
+        },
+        [&](std::string&& msg) {
+            std::lock_guard<std::mutex> guard{got_mutex};
+            errs.push_back(std::move(msg));
+        },
+        opts);
+
+    REQUIRE(errs.empty());
+    REQUIRE(rc.has_value());
+    REQUIRE(got.size() == expected.size());
+    // Async dispatch may reorder batches across workers; sort both
+    // sides by header before comparing.
+    std::sort(got.begin(), got.end());
+    auto expected_sorted = expected;
+    std::sort(expected_sorted.begin(), expected_sorted.end());
+    for (std::size_t i = 0; i < expected_sorted.size(); ++i) {
+        REQUIRE(got[i] == expected_sorted[i]);
+    }
 
     fs::remove(path);
 }

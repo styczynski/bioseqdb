@@ -153,7 +153,7 @@ MODES: Dict[str, ModeDefinition] = {
     ),
     "bench-io": ModeDefinition(
         lock_group="bench",
-        expected_duration_min=17.0,
+        expected_duration_min=2.0,
         label="Benchmark for bioseq IO module",
         docs="Run benchmark for IO module residing in io/ directory. Note this is separate benchmark dedicated only to IO interfaces",
         is_verb_plular=False,

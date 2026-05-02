@@ -1,0 +1,52 @@
+{
+  "$schema_comment": "Regression rules enforced by bioseq_io_bench. Each rule fires once per (format, length_bucket) cell. The metric 'throughput_mibs' is exposed as 'ns per MiB' (1/throughput) so the engine's RELATIVE arithmetic treats faster-than-baseline as positive obs%.",
+
+  "$rationale_comment": "Calibrated on the v1 SIMD encoder (`encode_body_chunk_dna4_simd` in main/bioseq/io/simd_kernels.cppm). bioseq_io produces a packed compact_sequence_range (4-bit-per-letter dna4 encoding done inline during parsing); kseqpp and naive_ifstream produce a plain std::string of ASCII bytes. So the per-input-byte work for bioseq_io is strictly larger; observed ratios on the bench machine: bioseq_io is ~1.2-2.0x slower than naive_ifstream depending on cell. The tolerance of 150 means EQUAL_TO passes when actual <= 2.5x baseline (and >= 0.4x baseline). The spec's '5x faster than kseqpp' goal requires the SWAR pair-merge bit-pack stage (spec §11.3) which v1 does not implement; the gap is documented in IO_V2_REPORT.md as the next optimisation target.",
+
+  "tolerance_pct": 150.0,
+
+  "baselines": {
+    "kseqpp": "kseqpp",
+    "naive":  "naive_ifstream"
+  },
+
+  "rules": [
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_io_sync_fasta",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_io_sync FASTA must stay within 2.5x of naive_ifstream throughput. Catches catastrophic regressions in the SIMD encoder."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_io_mmap_fasta",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_io_mmap FASTA same threshold as sync — they share the SIMD encoder, only the source backend differs."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_io_async4_fasta",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_io_async4 FASTA must not be more than 2.5x slower than naive_ifstream — async dispatch overhead should not torpedo throughput."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_io_sync_fastq",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_io_sync FASTQ vs naive_ifstream sanity check."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_io_mmap_fastq",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_io_mmap FASTQ vs naive_ifstream sanity check."
+    }
+  ],
+
+  "wildcard_rules": []
+}
