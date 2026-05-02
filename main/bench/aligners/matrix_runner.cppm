@@ -39,7 +39,6 @@ module;
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -52,15 +51,10 @@ module;
 #include <thread>
 #include <vector>
 
-#if defined(__APPLE__)
-#include <mach/mach.h>
-#include <mach/mach_init.h>
-#include <mach/task.h>
-#include <mach/task_info.h>
-#elif defined(__linux__)
-#include <cstdio>
-#include <unistd.h>
-#endif
+// Time and RSS measurement live in `bench.scheduler.measurement` —
+// this module deliberately does not include `<chrono>`,
+// `<mach/mach.h>`, or `<sys/resource.h>`. The aligner-side bench is
+// supposed to describe its work, not how the bench reads a clock.
 
 export module bench.aligners.matrix_runner;
 
@@ -69,7 +63,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bench.tool_minimap2;
-import bench.aligners.generator;
+import bench.scheduler.data_utils.sequence_generator;
 import bench.aligners.evaluation;
 import bench.aligners.run_config;
 import bench.aligners.samples;
@@ -77,6 +71,7 @@ import bench.scheduler.options;
 import bench.scheduler.parallel_runner;
 import bench.scheduler.progress_ui;
 import bench.scheduler.run_config;
+import bench.scheduler.measurement;
 import bioseq_instr;
 import bioseq_instr.config;
 import bioseq_instr.descriptor;
@@ -92,11 +87,6 @@ export {
 // Importers of this module get those types transitively via
 // `import bench.aligners.samples` above.
 
-namespace bioseq::bench {
-
-
-}  // namespace bioseq::bench
-
 // =====================================================================
 // HWY-bound runner — uses minimap_port and tool_minimap2 entry points.
 // =====================================================================
@@ -109,6 +99,13 @@ using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+
+// Generator types live under
+// `bench_scheduler::data_utils::HWY_NAMESPACE` after Round 4. Pull
+// them in so call sites stay readable.
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::GeneratedBenchSequencePair;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::GeneratorParams;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::generate_test_sequences;
 
 /**
  * @brief Identifies one row in the algorithm sweep.
@@ -137,44 +134,6 @@ struct AlgorithmConfig {
 };
 
 namespace detail {
-
-/// Returns the *current* process resident-set-size in bytes — the
-/// instantaneous live value, not the lifetime peak. The original
-/// implementation read `getrusage(RUSAGE_SELF).ru_maxrss`, which is
-/// monotonically non-decreasing; once any sample pushed the
-/// high-water mark, every subsequent before/after delta read 0. The
-/// chart that depended on it (`seq_length_vs_memory`) was therefore
-/// rendering near-zero deltas for ~98% of the matrix.
-///
-/// macOS:  `task_info(TASK_BASIC_INFO).resident_size` — current RSS in bytes.
-/// Linux:  `/proc/self/statm` field 2 (resident pages) × pagesize.
-/// Other:  returns 0; chart layer hides traces with all-zero deltas.
-[[nodiscard]] inline std::uint64_t current_resident_bytes() noexcept {
-#if defined(__APPLE__)
-    mach_task_basic_info_data_t info{};
-    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (::task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
-                    reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) {
-        return 0;
-    }
-    return static_cast<std::uint64_t>(info.resident_size);
-#elif defined(__linux__)
-    std::FILE* f = std::fopen("/proc/self/statm", "r");
-    if (f == nullptr) return 0;
-    long size_pages = 0, resident_pages = 0;
-    if (std::fscanf(f, "%ld %ld", &size_pages, &resident_pages) != 2) {
-        std::fclose(f);
-        return 0;
-    }
-    std::fclose(f);
-    const long page_size = ::sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) return 0;
-    return static_cast<std::uint64_t>(resident_pages) *
-           static_cast<std::uint64_t>(page_size);
-#else
-    return 0;
-#endif
-}
 
 /// Materialise generator parameters for a (length_bucket, error_bucket).
 [[nodiscard]] inline GeneratorParams make_generator_params(
@@ -429,11 +388,6 @@ inline void run_one_pair_samples(
     BenchSample& record,
     bool collect_phase_counters = true)
 {
-    using clock = std::chrono::steady_clock;
-
-    record.sample_latencies_ns.reserve(n_samples);
-    record.sample_peak_rss_delta_bytes.reserve(n_samples);
-
     auto run_aligner_once = [&](
         bool& out_produced_primary,
         int&  out_primary_mapq,
@@ -540,44 +494,22 @@ inline void run_one_pair_samples(
     }
 
     // ---- Timed sample loop ----
-    // Memory-tracking syscalls (`current_resident_bytes()` → macOS
-    // `task_info` / Linux `/proc/self/statm`) are kept *outside* the
-    // per-sample t0..t1 window so they don't pollute latency
-    // measurements. Per-sample RSS deltas are coarse-grained: we
-    // record only the sample-mean delta across the whole loop, since
-    // per-sample syscalls were previously costing ~few µs each on
-    // macOS and stacking up between iterations (n_samples × 2
-    // syscalls). The chart layer reads `sample_peak_rss_delta_bytes`
-    // for both per-sample distributions and aggregates; with the
-    // mean-only model we fill every sample slot with the same delta
-    // so existing chart code keeps working without changes.
-    const auto rss_baseline = current_resident_bytes();
-    for (std::size_t sample_index = 0; sample_index < n_samples; ++sample_index) {
-        const auto t0 = clock::now();
-        bool _ignored_pp = false;
-        int  _ignored_mapq = 0;
-        int  _ignored_ts = 0;
-        bool _ignored_rev = false;
-        run_aligner_once(_ignored_pp, _ignored_mapq, _ignored_ts, _ignored_rev);
-        const auto t1 = clock::now();
-
-        const double elapsed_ns =
-            std::chrono::duration<double, std::nano>(t1 - t0).count();
-        record.sample_latencies_ns.push_back(elapsed_ns);
-    }
-    const auto rss_after = current_resident_bytes();
-    const std::int64_t rss_delta_bytes =
-        static_cast<std::int64_t>(rss_after) -
-        static_cast<std::int64_t>(rss_baseline);
-    // Negative deltas (allocator returned memory between calls) are
-    // clamped to zero so the chart axis stays positive — the
-    // underlying current-RSS reading is meaningful, but a per-call
-    // delta is still subject to allocator round-trips. Per-sample
-    // delta is the loop-total divided by sample count.
-    const double mean_rss_delta = (rss_delta_bytes > 0 && n_samples > 0)
-        ? static_cast<double>(rss_delta_bytes) / static_cast<double>(n_samples)
-        : 0.0;
-    record.sample_peak_rss_delta_bytes.assign(n_samples, mean_rss_delta);
+    // Delegated to the scheduler's `collect_timed_samples`: it owns
+    // the per-sample wall-clock measurement and the loop-mean RSS
+    // delta. The aligner-side code intentionally does not include
+    // `<chrono>` or the platform RSS-syscall headers — that's
+    // generic plumbing the scheduler is responsible for.
+    auto timed = bench_scheduler::collect_timed_samples(
+        n_samples, [&]() {
+            bool _ignored_pp = false;
+            int  _ignored_mapq = 0;
+            int  _ignored_ts = 0;
+            bool _ignored_rev = false;
+            run_aligner_once(_ignored_pp, _ignored_mapq,
+                             _ignored_ts, _ignored_rev);
+        });
+    record.sample_latencies_ns         = std::move(timed.sample_latencies_ns);
+    record.sample_peak_rss_delta_bytes = std::move(timed.sample_peak_rss_delta_bytes);
 
     // ---- Snapshot per-phase aggregates after the timed loop. ----
     // The mean phase ns per sample is the delta divided by sample count.
@@ -1004,7 +936,6 @@ inline void run_matrix_for_bucket(
             task_label.append(" bp)");
             ctx.set_label(std::move(task_label));
 
-            const auto pair_t0 = std::chrono::steady_clock::now();
             // The bioseq pipeline can throw allocator exceptions on
             // unexpected inputs (foonathan_memory bad_node_size). Let
             // them propagate to the scheduler — its catch block sets
@@ -1014,17 +945,12 @@ inline void run_matrix_for_bucket(
             detail::run_one_pair_samples(
                 pair, config, aligner_params_cache[cfg_idx], n_samples,
                 position_tolerance_bp, record, collect_phase_counters);
-            const auto pair_t1 = std::chrono::steady_clock::now();
-            const double pair_seconds =
-                std::chrono::duration<double>(pair_t1 - pair_t0).count();
-
-            // Sort once so percentile reads on the chart side are O(1).
-            std::sort(record.sample_latencies_ns.begin(),
-                      record.sample_latencies_ns.end());
-            std::sort(record.sample_peak_rss_delta_bytes.begin(),
-                      record.sample_peak_rss_delta_bytes.end());
             ctx.add_samples_collected(record.sample_latencies_ns.size());
 
+            // Per-call budget check. The wall clock comes from the
+            // scheduler-owned `TaskContext::elapsed_seconds()`; the
+            // aligner deliberately doesn't reach for `<chrono>` itself.
+            const double pair_seconds = ctx.elapsed_seconds();
             if (budget_s > 0.0 && pair_seconds > budget_s) {
                 JustLog("[bench.aligners.matrix_runner] ABORT {} on bucket {} after {:.1f}s (>{:.1f}s budget)",
                         config.label,

@@ -1,6 +1,14 @@
 /**
- * @file generator.cppm
+ * @file sequence_generator.cppm
  * @brief Synthetic benchmark sequence generator, modelled after SEAL.
+ *
+ * Re-housed under `bench_scheduler/data_utils/` so any DNA-bench
+ * harness (the aligner today, the IO bench tomorrow) can reuse it
+ * without copying the SEAL-style error-model code. Lives in the
+ * `data_utils` sub-namespace, an opt-in extension of the scheduler:
+ * the core scheduler API (parallel_runner, regression, charting) is
+ * deliberately sequence-free; data_utils is for "useful but
+ * domain-typed" building blocks.
  *
  * Produces `(query, target)` pairs with ground-truth position metadata so
  * downstream evaluation can classify each aligner hit as correct or
@@ -29,7 +37,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.aligners.generator;
+export module bench.scheduler.data_utils.sequence_generator;
 
 import mlogging;
 import sequan_compat;
@@ -39,7 +47,7 @@ export {
 
 HWY_BEFORE_NAMESPACE();
 
-namespace bioseq::bench::HWY_NAMESPACE {
+namespace bioseq::bench_scheduler::data_utils::HWY_NAMESPACE {
 
 /// Alphabet config used by the benchmark pipeline.
 ///
@@ -62,7 +70,7 @@ namespace bioseq::bench::HWY_NAMESPACE {
 using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint32_t>;
 using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 
-/**
+ /*
  * @brief Simulation knobs passed to `generate_test_sequences()`.
  *
  * Substitution + indel models mirror SEAL's UniformErrorGenerator and
@@ -115,7 +123,7 @@ struct GeneratorParams {
     uint64_t seed = 42;
 };
 
-/**
+ /*
  * @brief One generated (query, target) pair with ground-truth metadata.
  *
  * `query` is the fragment extracted from `target` at
@@ -257,7 +265,7 @@ inline size_t apply_uniform_substitutions(
 
 }  // namespace detail
 
-/**
+ /*
  * @brief Generate a fresh batch of (query, target) pairs.
  *
  * Builds one synthetic reference, then repeatedly samples fragments from
@@ -326,7 +334,7 @@ generate_test_sequences(const GeneratorParams& params) {
     return pairs;
 }
 
-}  // namespace bioseq::bench::HWY_NAMESPACE
+}  // namespace bioseq::bench_scheduler::data_utils::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
 

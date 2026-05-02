@@ -36,7 +36,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bench.tool_minimap2;
-import bench.aligners.generator;
+import bench.scheduler.data_utils.sequence_generator;
 import bench.aligners.evaluation;
 import bench.aligners.report;
 import bench.aligners.matrix_runner;
@@ -48,8 +48,16 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::bench::HWY_NAMESPACE {
 
-using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint32_t>;
-using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
+// Re-import the generator types into this TU so per-test-case bodies
+// don't need the long `bench_scheduler::data_utils::HWY_NAMESPACE::`
+// qualifier. The data layout (DNA-4, packed into uint32_t storage)
+// is the same as the in-scheduler definition; the local typedefs
+// below would otherwise shadow them and cause compile errors.
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::GeneratedBenchSequencePair;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::GeneratorParams;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::generate_test_sequences;
+using bench_alphabet_config = bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::bench_alphabet_config;
+using bench_sequence_range  = bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::bench_sequence_range;
 
 TEST_CASE("Benchmark evaluation — bioseq minimap_port vs. reference minimap2",
           "[simple-benchmark]") {

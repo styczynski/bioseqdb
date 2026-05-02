@@ -83,6 +83,7 @@ public:
         : dashboard_{&dashboard}
         , bucket_id_{bucket_id}
         , worker_id_{worker_id}
+        , started_at_{std::chrono::steady_clock::now()}
     {}
 
     TaskContext(const TaskContext&) = delete;
@@ -130,6 +131,15 @@ public:
         samples_collected_ += n;
     }
 
+    /// Wall-clock seconds since this task's executor started. Lets
+    /// caller-side budget checks ("did I run too long?") avoid
+    /// pulling `<chrono>` into the domain code — the scheduler owns
+    /// every clock read in the bench-fast hot path.
+    [[nodiscard]] double elapsed_seconds() const noexcept {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started_at_).count();
+    }
+
     /// Internal accessors used by `run_parallel_indexed`.
     [[nodiscard]] bool failed() const noexcept { return failed_; }
     [[nodiscard]] bool skipped() const noexcept { return skipped_; }
@@ -143,6 +153,7 @@ private:
     progress::Dashboard* dashboard_;
     std::size_t bucket_id_;
     std::size_t worker_id_;
+    std::chrono::steady_clock::time_point started_at_{};
     bool failed_ = false;
     bool skipped_ = false;
     bool label_set_ = false;
@@ -167,13 +178,16 @@ inline void run_worker(
     std::size_t bucket_id,
     ExecFn& executor)
 {
-    using clock = std::chrono::steady_clock;
     while (true) {
         const std::size_t case_idx = next_case.fetch_add(1, std::memory_order_relaxed);
         if (case_idx >= case_count) return;
 
+        // `TaskContext` records the wall-clock start time in its
+        // constructor and exposes `elapsed_seconds()` for the
+        // executor's own budget checks. The runner reads the same
+        // accessor for the dashboard handoff — single source of
+        // truth for the timing that surrounds the executor body.
         TaskContext ctx{dashboard, bucket_id, worker_id};
-        const auto t0 = clock::now();
         try {
             results[case_idx] = executor(case_idx, ctx);
         } catch (const std::exception& ex) {
@@ -185,8 +199,7 @@ inline void run_worker(
                     case_idx);
             ctx.mark_failed();
         }
-        const auto t1 = clock::now();
-        const double seconds = std::chrono::duration<double>(t1 - t0).count();
+        const double seconds = ctx.elapsed_seconds();
 
         const bool failed = ctx.failed();
         const bool skipped = ctx.skipped();

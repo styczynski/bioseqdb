@@ -62,6 +62,7 @@ module;
 #include <limits>
 #include <map>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -158,7 +159,7 @@ using bench_scheduler::charting::colour_for_key;
  */
 inline void emit_report(
     JsonWriter& writer,
-    const std::vector<RegressionViolation>& violations = {},
+    std::span<const RegressionViolation> violations = {},
     std::string_view commit_hash = "unknown")
 {
     const auto& samples = benchmark_samples();
@@ -169,7 +170,7 @@ inline void emit_report(
     meta.commit_hash     = commit_hash;
     meta.sample_count    = samples.size();
     meta.algorithm_count = algorithm_labels.size();
-    meta.violations      = std::span<const RegressionViolation>{violations};
+    meta.violations      = violations;
 
     bench_scheduler::emit_report_envelope(writer, meta,
         [&]() {
@@ -2703,7 +2704,7 @@ inline void emit_report(
  */
 [[nodiscard]] inline bool write_report_json_to_file(
     const std::string& path,
-    const std::vector<RegressionViolation>& violations = {},
+    std::span<const RegressionViolation> violations = {},
     std::string_view commit_hash = "unknown")
 {
     JsonWriter writer;

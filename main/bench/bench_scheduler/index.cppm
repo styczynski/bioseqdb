@@ -49,3 +49,15 @@ export import bench.scheduler.report_files;
 export import bench.scheduler.report_envelope;
 export import bench.scheduler.charting;
 export import bench.scheduler.stats;
+export import bench.scheduler.measurement;
+export import bench.scheduler.catch_listener;
+export import bench.scheduler.harness;
+export import bench.scheduler.format;
+export import bench.scheduler.instrumentation_report;
+// data_utils is intentionally NOT re-exported from the façade: the
+// core scheduler is sequence-free; harnesses that want the SEAL-style
+// generator import `bench.scheduler.data_utils.sequence_generator`
+// explicitly. Keeping the core API import-free of `bioseq_sequences`
+// lets harnesses with no sequence concept (a hypothetical CPU-only
+// micro-bench) use the scheduler without dragging the alphabet
+// machinery in.

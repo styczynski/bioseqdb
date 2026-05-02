@@ -28,7 +28,6 @@ module;
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -46,7 +45,8 @@ import bioseq_sequences.minimap_port;
 import bioseq_cigar;
 import bioseq_instr;
 import bench.tool_minimap2;
-import bench.aligners.generator;
+import bench.scheduler.data_utils.sequence_generator;
+import bench.scheduler.measurement;
 
 export {
 
@@ -57,6 +57,16 @@ namespace bioseq::bench::HWY_NAMESPACE {
 using bioseq::simd::HWY_NAMESPACE::MatchResult;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+
+// Pull the generator types into the aligner-bench namespace so the
+// existing call sites (`GeneratedBenchSequencePair`, etc.) keep
+// reading without the long
+// `bench_scheduler::data_utils::HWY_NAMESPACE::` qualifier.
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::GeneratedBenchSequencePair;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::GeneratorParams;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::bench_alphabet_config;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::bench_sequence_range;
+using bioseq::bench_scheduler::data_utils::HWY_NAMESPACE::generate_test_sequences;
 
 /**
  * @brief Knobs controlling what counts as a "correct" alignment and
@@ -421,26 +431,27 @@ template<
     bool   truth_is_reverse,
     const EvaluationParams& params = EvaluationParams{})
 {
-    using clock = std::chrono::steady_clock;
+    // Time each aligner via the scheduler's single-shot timer. The
+    // aligner side never imports `<chrono>` directly — every clock
+    // read in the bench routes through `bench_scheduler::measurement`.
+    bioseq::simd::HWY_NAMESPACE::MatchResultCollection bioseq_results;
+    const double bioseq_elapsed_ns = bench_scheduler::measure_elapsed_ns([&]() {
+        bioseq_results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+            query_seq, target_seq, params.aligner_params);
+    });
 
-    const auto bioseq_start = clock::now();
-    auto bioseq_results = bioseq::simd::HWY_NAMESPACE::minimap_port(
-        query_seq, target_seq, params.aligner_params);
-    const auto bioseq_end = clock::now();
-
-    const auto minimap2_start = clock::now();
-    auto minimap2_results = tool_minimap2(
-        query_seq, target_seq, params.aligner_params);
-    const auto minimap2_end = clock::now();
+    bioseq::simd::HWY_NAMESPACE::MatchResultCollection minimap2_results;
+    const double minimap2_elapsed_ns = bench_scheduler::measure_elapsed_ns([&]() {
+        minimap2_results = tool_minimap2(
+            query_seq, target_seq, params.aligner_params);
+    });
 
     SingleEvalResult result = compare_alignments(
         bioseq_results, minimap2_results,
         truth_target_start, truth_target_end, truth_is_reverse, params);
 
-    result.bioseq.elapsed_ns =
-        std::chrono::duration<double, std::nano>(bioseq_end - bioseq_start).count();
-    result.minimap2.elapsed_ns =
-        std::chrono::duration<double, std::nano>(minimap2_end - minimap2_start).count();
+    result.bioseq.elapsed_ns   = bioseq_elapsed_ns;
+    result.minimap2.elapsed_ns = minimap2_elapsed_ns;
 
     JustLog("[bench.evaluation] pair: bioseq correct={} offset={} mapq={} | "
             "minimap2 correct={} offset={} mapq={} | truth=[{},{}) rev={}",
