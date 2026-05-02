@@ -3,6 +3,11 @@
 
 message(WARNING "PAPIESZ HENLO IO MODULE '${CMAKE_CURRENT_LIST_DIR}'")
 
+include(FetchContent)
+set(BUILD_TESTING OFF)
+FetchContent_Declare(kseq++ GIT_REPOSITORY https://github.com/cartoonist/kseqpp.git GIT_TAG v1.1.2)
+FetchContent_MakeAvailable(kseq++)
+
 # === bioseq_io_bench target — sequence I/O reader bench/test binary ===
 # Sources live under ../io/. Mirrors the bench-target wiring pattern.
 file(GLOB_RECURSE IO_BENCH_SRC_FILES
@@ -50,7 +55,8 @@ AddCommonTargetX(
     ftxui::component
     ftxui::dom
     ftxui::screen
-    simdjson
+    simdjson::simdjson
+    kseq++::kseq++
   SOURCES
     ${IO_BENCH_SRC_FILES}
   SUPPORT_CXX_MODULES

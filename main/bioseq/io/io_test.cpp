@@ -18,6 +18,8 @@
 #include <vector>
 #include <unistd.h>
 
+#include <kseq++/seqio.hpp>
+
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
@@ -69,6 +71,9 @@ std::string decode_to_ascii(const SequenceRange& seq) {
 }  // namespace
 
 TEST_CASE("bioseq_io: tiny FASTA dna4 round-trip", "[io-test-correctness]") {
+
+    klibpp::KSeq record;
+
     using namespace bioseq::io;
     using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using batch_t = sequence_batch<alphabet_config>;

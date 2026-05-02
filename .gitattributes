@@ -1,0 +1,2 @@
+main/data/homo_sapiens_GRCh38_dna4.fasta filter=lfs diff=lfs merge=lfs -text
+main/data/homo_sapiens_GRCh38_dna5.fasta filter=lfs diff=lfs merge=lfs -text
