@@ -50,6 +50,7 @@ AddCommonTargetX(
     ftxui::component
     ftxui::dom
     ftxui::screen
+    simdjson
   SOURCES
     ${IO_BENCH_SRC_FILES}
   SUPPORT_CXX_MODULES

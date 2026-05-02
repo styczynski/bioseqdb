@@ -24,6 +24,7 @@ find_package(libassert CONFIG REQUIRED)
 find_package(foonathan_memory CONFIG REQUIRED)
 find_package(sqlgen REQUIRED)
 find_package(ftxui REQUIRED)
+find_package(simdjson REQUIRED)
 
 # AddCommonTarget(
 #   postgresql_bioseq
@@ -141,6 +142,7 @@ AddCommonTargetX(
     ftxui::component
     ftxui::dom
     ftxui::screen
+    simdjson
   SOURCES
     ${BENCH_SRC_FILES}
   SUPPORT_CXX_MODULES
