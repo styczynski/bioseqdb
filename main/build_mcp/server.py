@@ -158,7 +158,7 @@ MODES: Dict[str, ModeDefinition] = {
         docs="Run benchmark for IO module residing in io/ directory. Note this is separate benchmark dedicated only to IO interfaces",
         is_verb_plular=False,
         targets=["bioseq_io_bench"],
-        commands=[[str(BIN_DIR / "bioseq_bench"),
+        commands=[[str(BIN_DIR / "bioseq_io_bench"),
                  "--reporter", "console::out=-::colour-mode=ansi"]],
         reporting_subdir_name="bioseq_io_bench",
         is_bench_mode=True,
@@ -617,7 +617,7 @@ def tool_start_build(mode: str) -> str:
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} log={log_path}")
 
-    return (f"{mode_details.label} {mode_details.verb} scheduled. "
+    return (f"{mode_details.label} {mode_details.verb_is} scheduled. "
             f"Predicted finish in {_format_minutes(mode_details.expected_duration_min, plural_int=True)}.")
 
 
