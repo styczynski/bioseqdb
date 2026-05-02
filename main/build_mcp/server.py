@@ -7,10 +7,7 @@ the Python stdlib. Exposes two tools:
     start_build(mode)    schedule a build/test/bench run
     status(mode)         report progress, predicted finish, log + report paths
 
-Modes:
-    unit+integration   build & run bioseq_aligner_tests_exec + bioseq_aligner_int_tests_exec
-    bench              build & run bioseq_bench
-    bench-fast         build & run bioseq_bench --fast
+For modes list see MODES dict.
 
 Concurrency rules:
     - At most one run per "lock group" at a time.
@@ -38,6 +35,8 @@ benefit. Logging goes to stderr; stdout is reserved for protocol output.
 
 from __future__ import annotations
 
+from typing import List, Dict, Set, Optional
+
 import argparse
 import contextlib
 import errno
@@ -50,6 +49,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # --------------------------- configuration ---------------------------------
@@ -59,6 +59,8 @@ BUILD_PRESET = "bench-opt"
 BUILD_DIR = PROJECT_ROOT / "build" / BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
 
+BIN_DIR = BUILD_DIR / "bioseq"
+
 STATE_FILE = Path("/tmp/bioseq_build_mcp_state.json")
 LOCK_FILE = Path("/tmp/bioseq_build_mcp.lock")
 LOG_DIR = Path("/tmp")
@@ -67,35 +69,106 @@ CMAKE_PARALLEL_JOBS = 32
 HARD_TIMEOUT_MIN = 35.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 
-VALID_MODES = ("unit+integration", "bench", "bench-fast")
+@dataclass
+class ModeDefinition:
+    """
+    Two runs with the same lock group cannot run in parallel. bench and
+    bench-fast share the same binary + reporting/ directory, so they're
+    grouped together; unit+integration is its own group.
+    """
+    lock_group: str
+    """
+    Per-mode predicted wall clock (minutes). Used for ETAs in messages and
+    kept slightly under the hard timeout so a healthy run never reports a
+    negative ETA before being killed.
+    """
+    expected_duration_min: float
+    """Human-readable name of this mode"""
+    label: str
+    """Adjusts verbs so messages read naturally"""
+    is_verb_plular: bool
+    """Targets we need to build via CMake"""
+    targets: List[str]
+    """Commands we want to run"""
+    commands: List[List[str]]
+    """Extra documentation"""
+    docs: str
+    """This applies only to benchmarks. Defines subdirectory within REPORTING_DIR where benchmark report is saved"""
+    reporting_subdir_name: Optional[str] = None
+    """This applies only to benchmark. Is this benchmark target?"""
+    is_bench_mode: bool = False
 
-# Two runs with the same lock group cannot run in parallel. bench and
-# bench-fast share the same binary + reporting/ directory, so they're
-# grouped together; unit+integration is its own group.
-LOCK_GROUPS = {
-    "unit+integration": "tests",
-    "bench": "bench",
-    "bench-fast": "bench",
+    @property
+    def verb_is(self) -> str:
+        return "are" if self.is_verb_plular else "is"
+
+    @property
+    def verb_was(self) -> str:
+        return "were" if self.is_verb_plular else "was"
+
+    @property
+    def reporting_dir(self) -> str:
+        if not self.is_bench_mode or not self.reporting_subdir_name:
+            return REPORTING_DIR / "__does_not_exist__"
+        return REPORTING_DIR / self.reporting_subdir_name
+
+MODES: Dict[str, ModeDefinition] = {
+    "unit+integration": ModeDefinition(
+        lock_group="tests",
+        expected_duration_min=10.0,
+        label="Unit/integration tests",
+        docs="Run all bioseq unit and integration tests",
+        is_verb_plular=True,
+        targets=["bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"],
+        commands=[
+            [str(BIN_DIR / "bioseq_aligner_tests_exec"),
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            [str(BIN_DIR / "bioseq_aligner_int_tests_exec"),
+             "--reporter", "console::out=-::colour-mode=ansi"],
+        ],
+    ),
+    "bench": ModeDefinition(
+        lock_group="bench",
+        expected_duration_min=25.0,
+        label="Benchmark for bioseq",
+        docs="Run primary bioseq benchmark",
+        is_verb_plular=False,
+        targets=["bioseq_bench"],
+        commands=[[str(BIN_DIR / "bioseq_bench"),
+                 "--reporter", "console::out=-::colour-mode=ansi"]],
+        reporting_subdir_name="bioseq_bench",
+        is_bench_mode=True,
+    ),
+    "bench-fast": ModeDefinition(
+        lock_group="bench",
+        expected_duration_min=20.0,
+        label="Benchmark for bioseq (--fast)",
+        docs="Run primary bioseq benchmark in fast mode for faster iteration",
+        is_verb_plular=False,
+        targets=["bioseq_bench"],
+        commands=[[str(BIN_DIR / "bioseq_bench"),
+                 "--reporter", "console::out=-::colour-mode=ansi", "--fast"]],
+        reporting_subdir_name="bioseq_bench",
+        is_bench_mode=True,
+    ),
+    "bench-io": ModeDefinition(
+        lock_group="bench",
+        expected_duration_min=17.0,
+        label="Benchmark for bioseq IO module",
+        docs="Run benchmark for IO module residing in io/ directory. Note this is separate benchmark dedicated only to IO interfaces",
+        is_verb_plular=False,
+        targets=["bioseq_io_bench"],
+        commands=[[str(BIN_DIR / "bioseq_bench"),
+                 "--reporter", "console::out=-::colour-mode=ansi"]],
+        reporting_subdir_name="bioseq_io_bench",
+        is_bench_mode=True,
+    ),
 }
+VALID_MODES: Set[str] = set(MODES.keys())
 
-# Per-mode predicted wall clock (minutes). Used for ETAs in messages and
-# kept slightly under the hard timeout so a healthy run never reports a
-# negative ETA before being killed.
-EXPECTED_DURATION_MIN = {
-    "unit+integration": 10.0,
-    "bench": 25.0,
-    "bench-fast": 20.0,
-}
-
-# Subject-verb pairs so message strings read naturally:
-#   "Benchmark is already scheduled" (singular)
-#   "Unit/integration tests are already scheduled" (plural)
-LABELS = {
-    "unit+integration": {"label": "Unit/integration tests", "is": "are", "was": "were"},
-    "bench":            {"label": "Benchmark",              "is": "is",  "was": "was"},
-    "bench-fast":       {"label": "Benchmark (--fast)",     "is": "is",  "was": "was"},
-}
-
+def get_modes_short_documentation() -> str:
+    modes_list_str = ", ".join([f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min)" for mode in VALID_MODES])
+    return f"Modes: {modes_list_str}";
 
 def _log(msg: str) -> None:
     """Server-side log line. Always stderr — stdout is JSON-RPC only."""
@@ -197,37 +270,6 @@ def _refresh(state: dict, mode: str) -> dict | None:
         state[mode] = entry
         _save_state(state)
     return entry
-
-
-# --------------------------- mode → cmake plan -----------------------------
-
-def _targets_for_mode(mode: str) -> list[str]:
-    if mode == "unit+integration":
-        return ["bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"]
-    if mode == "bench":
-        return ["bioseq_bench"]
-    if mode == "bench-fast":
-        return ["bioseq_bench"]
-    raise ValueError(f"unknown mode: {mode}")
-
-
-def _run_commands_for_mode(mode: str) -> list[list[str]]:
-    bin_dir = BUILD_DIR / "bioseq"
-    if mode == "unit+integration":
-        return [
-            [str(bin_dir / "bioseq_aligner_tests_exec"),
-             "--reporter", "console::out=-::colour-mode=ansi"],
-            [str(bin_dir / "bioseq_aligner_int_tests_exec"),
-             "--reporter", "console::out=-::colour-mode=ansi"],
-        ]
-    if mode == "bench":
-        return [[str(bin_dir / "bioseq_bench"),
-                 "--reporter", "console::out=-::colour-mode=ansi"]]
-    if mode == "bench-fast":
-        return [[str(bin_dir / "bioseq_bench"),
-                 "--reporter", "console::out=-::colour-mode=ansi", "--fast"]]
-    raise ValueError(f"unknown mode: {mode}")
-
 
 # --------------------------- subprocess streaming --------------------------
 
@@ -340,12 +382,13 @@ def _report_index(filename: str) -> int:
         return -1
 
 
-def _newest_report(snapshot_paths: set[Path]) -> Path | None:
+def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
     """Return the highest-numbered report file produced after `snapshot_paths`
     was taken (i.e. one not in the snapshot)."""
-    if not REPORTING_DIR.exists():
+    mode_details = MODES[mode]
+    if not mode_details.reporting_dir.exists():
         return None
-    current = set(REPORTING_DIR.glob("report_build_*.json"))
+    current = set(mode_details.reporting_dir.glob("report_build_*.json"))
     new = current - snapshot_paths
     if not new:
         return None
@@ -381,9 +424,11 @@ def _run_build_worker(mode: str) -> int:
     )
     log_handle.flush()
 
+    mode_details = MODES[mode]
+
     pre_reports: set[Path] = set()
-    if "bench" in mode and REPORTING_DIR.exists():
-        pre_reports = set(REPORTING_DIR.glob("report_build_*.json"))
+    if mode_details.is_bench_mode and mode_details.reporting_dir.exists():
+        pre_reports = set(mode_details.reporting_dir.glob("report_build_*.json"))
 
     env = os.environ.copy()
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
@@ -398,7 +443,7 @@ def _run_build_worker(mode: str) -> int:
             raise RuntimeError(f"cmake configure exited with code {rc}")
 
         _update_entry(mode, step="building")
-        for tgt in _targets_for_mode(mode):
+        for tgt in mode_details.targets:
             rc = _stream_subprocess(
                 ["cmake", "--build", str(BUILD_DIR), "--target", tgt,
                  "--parallel", str(CMAKE_PARALLEL_JOBS)],
@@ -421,7 +466,7 @@ def _run_build_worker(mode: str) -> int:
                 pass
 
         _update_entry(mode, step="running")
-        for cmd in _run_commands_for_mode(mode):
+        for cmd in mode_details.commands:
             rc = _stream_subprocess(
                 cmd, log_handle, deadline, cwd=BUILD_DIR, env=env,
             )
@@ -431,13 +476,13 @@ def _run_build_worker(mode: str) -> int:
                 # so this is a "completed with violations" outcome rather
                 # than a worker failure. The console log already explains
                 # the violations.
-                if "bench" in mode and rc == 2:
+                if mode_details.is_bench_mode and rc == 2:
                     _log(f"bench reported regression violations (exit {rc}); "
                          "treating as completed-with-violations")
                     break
                 raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
 
-        report_path = _newest_report(pre_reports) if "bench" in mode else None
+        report_path = _newest_report(pre_reports) if mode_details.is_bench_mode else None
         completed_at = time.time()
         _update_entry(
             mode,
@@ -463,7 +508,7 @@ def _run_build_worker(mode: str) -> int:
             exit_code=None,
             notes=str(e),
         )
-        log_handle.write(f"\n# killed by 35-min hard timeout: {e}\n")
+        log_handle.write(f"\n# killed by {HARD_TIMEOUT_MIN}-min hard timeout: {e}\n")
         return 124
 
     except Exception as e:
@@ -505,14 +550,14 @@ def _running_in_same_group(state: dict, mode: str) -> tuple[str | None, dict | N
     LOCK_GROUPS — bench and bench-fast share a group so starting bench while
     bench-fast is running is rejected.
     """
-    target_group = LOCK_GROUPS[mode]
+    mode_details = MODES[mode]
     for other_mode in VALID_MODES:
         entry = _refresh(state, other_mode)
         if not entry:
             continue
         if entry.get("status") != "running":
             continue
-        if LOCK_GROUPS.get(other_mode) == target_group:
+        if MODES[other_mode].lock_group == mode_details.lock_group:
             return other_mode, entry
     return None, None
 
@@ -522,6 +567,8 @@ def tool_start_build(mode: str) -> str:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
+    mode_details = MODES[mode]
+
     with _global_lock():
         state = _load_state()
         running_mode, running_entry = _running_in_same_group(state, mode)
@@ -529,11 +576,10 @@ def tool_start_build(mode: str) -> str:
             elapsed_min = (time.time() - running_entry["started_at"]) / 60.0
             eta_min = max(
                 0.0,
-                EXPECTED_DURATION_MIN[running_mode] - elapsed_min,
+                mode_details.expected_duration_min - elapsed_min,
             )
-            label = LABELS[running_mode]
             step = running_entry.get("step", "running")
-            return (f"{label['label']} {label['is']} already scheduled. "
+            return (f"{mode_details.label} {mode_details.verb_is} already scheduled. "
                     f"Current step: {step}. "
                     f"Predicted finish in {_format_minutes(eta_min)}")
 
@@ -571,23 +617,21 @@ def tool_start_build(mode: str) -> str:
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} log={log_path}")
 
-    label = LABELS[mode]
-    expected = EXPECTED_DURATION_MIN[mode]
-    return (f"{label['label']} {label['was']} scheduled. "
-            f"Predicted finish in {_format_minutes(expected, plural_int=True)}.")
+    return (f"{mode_details.label} {mode_details.verb} scheduled. "
+            f"Predicted finish in {_format_minutes(mode_details.expected_duration_min, plural_int=True)}.")
 
 
 def tool_status(mode: str) -> str:
-    if mode not in VALID_MODES:
+    if mode not in MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
 
     state = _load_state()
     entry = _refresh(state, mode)
-    label = LABELS[mode]
+    mode_details = MODES[mode]
 
     if not entry:
-        return (f"{label['label']} {label['was']} never scheduled. "
+        return (f"{mode_details.label} {mode_details.verb_was} never scheduled. "
                 f"Use start_build to start a run.")
 
     log_path = entry.get("log_file") or "(no log file)"
@@ -595,9 +639,9 @@ def tool_status(mode: str) -> str:
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
-        eta_min = max(0.0, EXPECTED_DURATION_MIN[mode] - elapsed_min)
+        eta_min = max(0.0, mode_details.expected_duration_min - elapsed_min)
         step = entry.get("step", "running")
-        return (f"{label['label']} {label['is']} already scheduled. "
+        return (f"{mode_details.label} {mode_details.verb_is} already scheduled. "
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"Log: {log_path}")
@@ -606,7 +650,7 @@ def tool_status(mode: str) -> str:
     duration_min = (completed_at - entry["started_at"]) / 60.0
 
     if status == "completed":
-        msg = (f"{label['label']} {label['was']} already completed "
+        msg = (f"{mode_details.label} {mode_details.verb_was} already completed "
                f"(total time: {_format_minutes(duration_min, plural_int=True)}). "
                f"Log: {log_path}")
         if entry.get("report_file"):
@@ -619,22 +663,22 @@ def tool_status(mode: str) -> str:
 
     if status == "failed":
         notes = entry.get("notes") or "(no notes)"
-        return (f"{label['label']} run failed after "
+        return (f"{mode_details.label} run failed after "
                 f"{_format_minutes(duration_min)}: {notes}. "
                 f"Log: {log_path}")
 
     if status == "aborted":
-        return (f"{label['label']} run was aborted (worker process died "
+        return (f"{mode_details.label} run was aborted (worker process died "
                 f"unexpectedly after {_format_minutes(duration_min)}). "
                 f"Log: {log_path}")
 
-    return f"{label['label']} status: {status}. Log: {log_path}"
+    return f"{mode_details.label} status: {status}. Log: {log_path}"
 
 
 # --------------------------- MCP protocol layer ----------------------------
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.0.0"}
+SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.0.1"}
 
 TOOL_DEFINITIONS = [
     {
@@ -642,10 +686,10 @@ TOOL_DEFINITIONS = [
         "description": (
             "Schedule a build/test/benchmark run. The build runs detached so "
             "it survives MCP server restarts. If a run of the same lock group "
-            "is already in progress (bench and bench-fast share a group), "
+            "is already in progress (can run benchmark together with tests at the same time, but not two benchmarks) "
             "returns the current status instead of starting a duplicate. "
-            "Modes: 'unit+integration' (~10 min), 'bench' (~25 min), "
-            "'bench-fast' (~20 min). Hard timeout: 35 min."
+            f"{get_modes_short_documentation()} "
+            f"Hard timeout: ~{int(HARD_TIMEOUT_MIN)} min."
         ),
         "inputSchema": {
             "type": "object",

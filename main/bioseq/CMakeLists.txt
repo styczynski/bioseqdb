@@ -73,6 +73,7 @@ file(GLOB_RECURSE BENCH_SRC_MOD_FILES
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 
@@ -85,11 +86,13 @@ file(GLOB_RECURSE A_SRC_MOD_FILES
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp)
 
 file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
@@ -158,7 +161,7 @@ AddCommonTargetX(
 # from inside `bench_main`.
 target_compile_definitions(bioseq_bench
   PRIVATE
-    "BIOSEQ_BENCH_REPORT_DIR=\"${CMAKE_CURRENT_LIST_DIR}/../reporting\""
+    "BIOSEQ_BENCH_REPORT_DIR=\"${CMAKE_CURRENT_LIST_DIR}/../reporting/bioseq_bench\""
     "BIOSEQ_BENCH_SOURCE_DIR=\"${CMAKE_CURRENT_LIST_DIR}/..\""
     "BIOSEQ_BENCH_THRESHOLDS_PATH=\"${CMAKE_CURRENT_LIST_DIR}/../bench/regression_thresholds.json\""
 )
@@ -247,3 +250,5 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+
+include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")

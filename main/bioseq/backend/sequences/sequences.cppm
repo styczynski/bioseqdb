@@ -1178,6 +1178,23 @@ public:
         _padding = std::move(z.second);
     }
 
+    /// Build a compact_sequence_range directly from already-packed storage
+    /// produced by an external encoder (e.g. the `bioseq_io.encoder`
+    /// SIMD pipeline). The caller MUST pack letter 0 at the LSB end of
+    /// the first storage unit and use `padding` to count empty letter
+    /// slots in the trailing unit (matches the layout `_convert` would
+    /// produce). See SEQUENCES_IO_READER_TECH_SPEC.md §14.1.
+    [[nodiscard]] static constexpr compact_sequence_range from_packed(
+        base_container&& packed,
+        size_t padding) noexcept {
+        DEBUG_ASSERT(padding < traits::letters_per_unit,
+                     "from_packed: padding must be < letters_per_unit");
+        compact_sequence_range result;
+        result._data = std::move(packed);
+        result._padding = padding;
+        return result;
+    }
+
     constexpr size_t padding() const {
         return _padding;
     }

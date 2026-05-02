@@ -72,6 +72,7 @@ TARGETS=()
 if has_token unit;        then TARGETS+=(bioseq_aligner_tests_exec); fi
 if has_token integration; then TARGETS+=(bioseq_aligner_int_tests_exec); fi
 if has_token bench;       then TARGETS+=(bioseq_bench); fi
+if has_token io;       then TARGETS+=(bioseq_io_bench); fi
 
 for tgt in "${TARGETS[@]}"; do
     cmake --build "${BUILD_DIR}" --target "${tgt}" --parallel "${JOBS}"
@@ -105,6 +106,15 @@ if has_token bench; then
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi "${@:2}"
     else
         ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
+    fi
+fi
+
+if has_token io; then
+    # Forward any extra args after the test list
+    if [ "$#" -gt 1 ]; then
+        ./bioseq/bioseq_io_bench --reporter console::out=-::colour-mode=ansi "${@:2}"
+    else
+        ./bioseq/bioseq_io_bench --reporter console::out=-::colour-mode=ansi
     fi
 fi
 
