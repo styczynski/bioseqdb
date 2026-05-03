@@ -102,6 +102,7 @@ namespace detail {
         std::string{io_length_bucket_name(IoLengthBucket::LONG)},
         std::string{io_length_bucket_name(IoLengthBucket::VERY_LONG)},
         std::string{io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME)},
+        std::string{io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB)},
     };
 }
 
@@ -115,7 +116,9 @@ namespace detail {
         return IoLengthBucket::LONG;
     if (label == io_length_bucket_name(IoLengthBucket::VERY_LONG))
         return IoLengthBucket::VERY_LONG;
-    return IoLengthBucket::REAL_HUMAN_GENOME;
+    if (label == io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME))
+        return IoLengthBucket::REAL_HUMAN_GENOME;
+    return IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB;
 }
 
 }  // namespace detail

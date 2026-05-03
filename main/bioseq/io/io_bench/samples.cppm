@@ -76,6 +76,12 @@ enum class IoLengthBucket : std::uint8_t {
     /// the repo at `main/data/`, so the bench is reproducible across
     /// machines.
     REAL_HUMAN_GENOME = 4,
+    /// Real-data cell: `main/data/1000_genomes_human_SRR062634_sample_1_dna5.fastq`
+    /// — a ~6 GiB FASTQ file. Stresses the FASTQ hot path at sizes
+    /// that typical short-read sequencing workloads actually produce
+    /// (Illumina HiSeq runs routinely emit ~6 GiB per lane). Streamed
+    /// only when the file is present; otherwise the cell is skipped.
+    REAL_HUMAN_GENOME_LARGE_FASTQ_6GB = 5,
 };
 
 [[nodiscard]] constexpr const char* io_length_bucket_name(
@@ -86,6 +92,8 @@ enum class IoLengthBucket : std::uint8_t {
         case IoLengthBucket::LONG:              return "long (~50kbp)";
         case IoLengthBucket::VERY_LONG:         return "very long (~1Mbp)";
         case IoLengthBucket::REAL_HUMAN_GENOME: return "real human genome (~234MiB)";
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB:
+            return "real human fastq (~6GiB)";
     }
     return "?";
 }

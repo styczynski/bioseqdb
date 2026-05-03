@@ -365,6 +365,504 @@ HWY_INLINE void merge_packed_chunk_into_partial(
     }
 }
 
+// =====================================================================
+// Multi-line dna4 encoder — newline-skip via SIMD compaction
+// =====================================================================
+//
+// The single-line `encode_body_chunk_dna4_simd` is the hot path the
+// FSM calls per body line: every chunk it sees is guaranteed
+// newline-free, so the LUT never produces a skip-sentinel and the
+// fallback path is dead code in steady state.
+//
+// For mmap-direct FASTA the FSM can do better: scan the body region
+// for the next `>` once and pass the whole span (newlines included)
+// to the encoder. This collapses per-line FSM overhead — for the
+// 234-MiB human-genome corpus that's ~3 M iterations of state-machine
+// dispatch + scan + per-line encode collapsed to 24 record-level
+// dispatches.
+//
+// The challenge: the body span has `\n` and (rarely) `\r`, which the
+// dna4 LUT maps to 0xFF skip-sentinels. The single-line encoder
+// reverts to scalar fallback on any sentinel — fast for canonical
+// dna4 (no sentinels in the input the FSM gives it) but ~20× slower
+// per byte than SIMD when sentinels appear.
+//
+// The multi-line encoder keeps the SIMD path even when sentinels
+// appear by branchless lane-compaction:
+//
+//   1. Look up ranks via the low-nibble LUT (newlines → 0xFF).
+//   2. Compute the valid-lane mask (rank ≠ 0xFF).
+//   3. Compact valid ranks to the front of the vector via a
+//      precomputed shuffle table indexed by the 8-bit half-mask.
+//   4. Pack the compacted ranks via the same `Shl + SumsOf4 + Mul +
+//      ReduceSum` pipeline as the single-line path.
+//   5. Update partial-word bookkeeping by `popcount(mask)` (the actual
+//      letter count) instead of a fixed 16.
+//
+// The compaction tables (256 × 16 bytes each, two halves) are 8 KiB
+// total — fits comfortably in M1 Pro's 192 KiB L1d. The fast path
+// (chunk has no sentinels) is preserved via an `AllFalse` early-exit
+// branch so a typical 80-char-wrap line that's wholly inside one
+// chunk never pays the compaction cost.
+
+/// Build the 256-entry low-half compaction table. Each entry is the
+/// 16-byte shuffle pattern that takes a 16-byte input vector with
+/// valid bytes at lanes [0..7] (per the mask bit positions) and
+/// places them contiguously at output lanes [0..popcount-1]. Output
+/// lanes [popcount..15] are filled with 0xFF, which `vqtbl1q_u8` /
+/// `TableLookupBytes` resolves to 0 — exactly the rank that pack
+/// expects for "no letter contributed here".
+[[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
+build_compact_low_table() {
+    std::array<std::array<std::uint8_t, 16>, 256> table{};
+    for (int mask = 0; mask < 256; ++mask) {
+        std::array<std::uint8_t, 16> pattern{};
+        std::size_t out_index = 0;
+        for (int input_index = 0; input_index < 8; ++input_index) {
+            if ((mask >> input_index) & 1) {
+                pattern[out_index] = static_cast<std::uint8_t>(input_index);
+                ++out_index;
+            }
+        }
+        for (std::size_t fill = out_index; fill < 16; ++fill) {
+            pattern[fill] = std::uint8_t{0xFF};
+        }
+        table[static_cast<std::size_t>(mask)] = pattern;
+    }
+    return table;
+}
+
+/// Build the 256-entry high-half compaction table. Same idea as the
+/// low table but the input lanes are 8..15 (so the index pattern
+/// references those positions). The output is still 16 bytes with
+/// the popcount-prefix-valid layout.
+[[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 256>
+build_compact_high_table() {
+    std::array<std::array<std::uint8_t, 16>, 256> table{};
+    for (int mask = 0; mask < 256; ++mask) {
+        std::array<std::uint8_t, 16> pattern{};
+        std::size_t out_index = 0;
+        for (int input_index = 0; input_index < 8; ++input_index) {
+            if ((mask >> input_index) & 1) {
+                pattern[out_index] =
+                    static_cast<std::uint8_t>(input_index + 8);
+                ++out_index;
+            }
+        }
+        for (std::size_t fill = out_index; fill < 16; ++fill) {
+            pattern[fill] = std::uint8_t{0xFF};
+        }
+        table[static_cast<std::size_t>(mask)] = pattern;
+    }
+    return table;
+}
+
+/// Build the 9-entry "shift-left by N bytes" pattern table.
+/// Entry N maps lane i to lane i-N if i >= N, else 0xFF
+/// (out-of-bounds → 0). Used to align the compacted-high half so its
+/// first byte sits at offset `popcount(low_mask)` of the result.
+[[nodiscard]] consteval std::array<std::array<std::uint8_t, 16>, 9>
+build_shift_left_byte_table() {
+    std::array<std::array<std::uint8_t, 16>, 9> table{};
+    for (std::size_t shift = 0; shift < 9; ++shift) {
+        std::array<std::uint8_t, 16> pattern{};
+        for (std::size_t lane = 0; lane < 16; ++lane) {
+            pattern[lane] = (lane >= shift)
+                ? static_cast<std::uint8_t>(lane - shift)
+                : std::uint8_t{0xFF};
+        }
+        table[shift] = pattern;
+    }
+    return table;
+}
+
+inline constexpr auto kCompactLowTable = build_compact_low_table();
+inline constexpr auto kCompactHighTable = build_compact_high_table();
+inline constexpr auto kShiftLeftByteTable = build_shift_left_byte_table();
+
+/// Variable-count merge of a packed chunk into the partial-word
+/// accumulator. `count` is the number of valid 2-bit letter slots in
+/// `packed_chunk` (the rest of `packed_chunk` is 0). Used by the
+/// multi-line encoder where each chunk produces 0..16 valid letters.
+template <typename storage_unit_t>
+HWY_INLINE void merge_variable_chunk_into_partial(
+    storage_unit_t& local_partial_word,
+    std::size_t& local_partial_letters,
+    std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
+    std::uint32_t packed_chunk,
+    std::size_t count) noexcept {
+    if (count == 0) return;
+    const std::size_t shift_amount = 2 * local_partial_letters;
+    local_partial_word |=
+        static_cast<storage_unit_t>(packed_chunk) << shift_amount;
+    const std::size_t new_total = local_partial_letters + count;
+    if (new_total >= 32) {
+        packed_words->push_back(local_partial_word);
+        if (new_total > 32) {
+            // Bits past position 64 of the imaginary 96-bit accumulator
+            // become the next storage unit's low bits. Right-shift the
+            // packed chunk by `64 - shift_amount` (which is in
+            // [32, 62] when this branch is taken — `shift_amount > 0`
+            // because partial_letters > 0 is required for overflow at
+            // count <= 16).
+            local_partial_word =
+                static_cast<storage_unit_t>(packed_chunk) >>
+                (64 - shift_amount);
+            local_partial_letters = new_total - 32;
+        } else {
+            local_partial_word = 0;
+            local_partial_letters = 0;
+        }
+    } else {
+        local_partial_letters = new_total;
+    }
+}
+
+/// Multi-line dna4 SIMD encoder. Encodes a body span that may contain
+/// `\n` and `\r` — the LUT maps these to 0xFF and the SIMD compaction
+/// branch strips them lane-wise. The encoder writes through
+/// `state.output_storage` exactly like the single-line variant; only
+/// the per-chunk processing differs.
+///
+/// Spec section §11.3 (SWAR pair-merge / multi-line); IO_V3 design.
+
+/// Variant of `encode_body_chunk_dna4_simd_multiline` that ALSO
+/// detects an arbitrary record-end sigil byte and stops encoding
+/// at that position. Returns the number of bytes consumed — the FSM
+/// uses this to advance its cursor and transition to the next state
+/// when `consumed < body_size`. Folds what was previously a separate
+/// `simd::scan_first_byte(boundary, ...)` pass + an
+/// `encode_body_chunk_*` pass into a single body walk. Per chunk
+/// this adds a single `Eq(chunk, boundary)` + `AllFalse` (~2 cycles);
+/// the saved pass is a full memory walk (~14 ms on the 234 MiB
+/// HUMAN cell). Net win on every cell that uses the multiline path.
+/// Spec §11.3 / IO_V3.
+///
+/// Used for two boundary characters:
+///   * `>` — FASTA record start
+///   * `+` — FASTQ separator line start (within a record's seq region;
+///           `+` is not a valid dna4 / dna5 letter so any `+` in the
+///           seq region is unambiguously the separator)
+///
+/// `newline_count_out` (if non-null) accumulates the count of `\n`
+/// and `\r` bytes encountered. Used by the FASTQ FSM to derive
+/// `sequence_byte_count = consumed - newline_count` for qual length
+/// validation; FASTA callers pass nullptr.
+template <std::uint8_t BoundaryChar,
+          typename storage_unit_t,
+          std::size_t BitsPerChar,
+          std::size_t LettersPerUnit>
+[[nodiscard]] HWY_INLINE std::size_t
+encode_body_chunk_dna4_simd_multiline_until_byte(
+    bioseq::io::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    const std::uint8_t* HWY_RESTRICT body_bytes,
+    std::size_t body_size,
+    std::size_t* HWY_RESTRICT newline_count_out) {
+    static_assert(BitsPerChar == 2 && LettersPerUnit == 32 &&
+                  std::is_same_v<storage_unit_t, std::uint64_t>,
+                  "encode_body_chunk_dna4_simd_multiline_until_byte is "
+                  "specialised for dna4-into-uint64 packing");
+
+    using D = hn::FixedTag<std::uint8_t, 16>;
+    constexpr D d_byte;
+    constexpr std::size_t lanes = 16;
+
+    static constexpr auto fallback_lut =
+        bioseq::io::build_letter_to_rank_lut<seq::dna4>();
+    static constexpr auto low_nibble_lut_array =
+        bioseq::io::build_dna4_low_nibble_lut();
+
+    const auto letter_to_rank_table_vec =
+        hn::LoadDup128(d_byte, low_nibble_lut_array.data());
+    const auto low_nibble_mask = hn::Set(d_byte, std::uint8_t{0x0F});
+    const auto sentinel_marker = hn::Set(d_byte, std::uint8_t{0xFF});
+    const auto boundary_marker = hn::Set(d_byte, BoundaryChar);
+    const auto lf_marker = hn::Set(d_byte, std::uint8_t{'\n'});
+    const auto cr_marker = hn::Set(d_byte, std::uint8_t{'\r'});
+
+    storage_unit_t local_partial_word = state.partial_word;
+    std::size_t local_partial_letters = state.partial_letters;
+    std::size_t local_total_letters = state.total_letters;
+    std::size_t local_newline_count = 0;
+    auto* packed_words = state.output_storage;
+    constexpr bool track_newlines = true;  // always cheap; caller ignores via nullptr
+
+    std::size_t read_cursor = 0;
+
+    auto flush_state_and_return = [&](std::size_t consumed) {
+        state.partial_word = local_partial_word;
+        state.partial_letters = local_partial_letters;
+        state.total_letters = local_total_letters;
+        if (newline_count_out != nullptr) {
+            *newline_count_out += local_newline_count;
+        }
+        return consumed;
+    };
+
+    while (read_cursor + lanes <= body_size) {
+        const auto chunk_bytes =
+            hn::LoadU(d_byte, body_bytes + read_cursor);
+
+        // Per-chunk record-boundary detection. The `Eq(chunk, B)`
+        // is a single SIMD compare; AllFalse is a single addv on
+        // NEON. Together they add ~2 cycles per chunk vs the
+        // sentinel-only multiline encoder.
+        const auto boundary_eq = hn::Eq(chunk_bytes, boundary_marker);
+        if (HWY_UNLIKELY(!hn::AllFalse(d_byte, boundary_eq))) {
+            // Boundary byte found in this chunk — encode bytes before
+            // it scalarly (rare path; only fires once per record),
+            // then return.
+            const std::size_t boundary_position = static_cast<std::size_t>(
+                hn::FindFirstTrue(d_byte, boundary_eq));
+            const std::size_t scalar_end =
+                read_cursor + boundary_position;
+            for (std::size_t scalar_offset = read_cursor;
+                 scalar_offset < scalar_end; ++scalar_offset) {
+                const std::uint8_t b = body_bytes[scalar_offset];
+                if (b == '\n' || b == '\r') {
+                    local_newline_count += 1;
+                    continue;
+                }
+                const std::uint8_t rank = fallback_lut[b];
+                if (rank != 0xFF) {
+                    local_partial_word |=
+                        static_cast<storage_unit_t>(rank)
+                        << (BitsPerChar * local_partial_letters);
+                    local_partial_letters += 1;
+                    local_total_letters += 1;
+                    if (local_partial_letters == LettersPerUnit) {
+                        packed_words->push_back(local_partial_word);
+                        local_partial_word = 0;
+                        local_partial_letters = 0;
+                    }
+                }
+            }
+            return flush_state_and_return(scalar_end);
+        }
+
+        const auto low_nibbles = hn::And(chunk_bytes, low_nibble_mask);
+        const auto ranks =
+            hn::TableLookupBytes(letter_to_rank_table_vec, low_nibbles);
+        const auto sentinel_eq = hn::Eq(ranks, sentinel_marker);
+
+        if (HWY_LIKELY(hn::AllFalse(d_byte, sentinel_eq))) {
+            // Pure body chunk — same as single-line encoder fast path.
+            const std::uint32_t packed_chunk =
+                pack_16_dna4_to_u32(d_byte, ranks);
+            merge_packed_chunk_into_partial(
+                local_partial_word, local_partial_letters, packed_words,
+                packed_chunk);
+            local_total_letters += lanes;
+            read_cursor += lanes;
+            continue;
+        }
+
+        // Newline / CR present — compact valid lanes. Also count
+        // newlines for the FASTQ FSM's byte-count derivation.
+        const std::uint64_t bits =
+            hn::BitsFromMask(d_byte, hn::Not(sentinel_eq));
+        const std::uint8_t low_mask =
+            static_cast<std::uint8_t>(bits & 0xFFu);
+        const std::uint8_t high_mask =
+            static_cast<std::uint8_t>((bits >> 8) & 0xFFu);
+        const std::size_t low_count =
+            static_cast<std::size_t>(std::popcount(low_mask));
+        const std::size_t total_count = low_count +
+            static_cast<std::size_t>(std::popcount(high_mask));
+        if constexpr (track_newlines) {
+            const auto lf_eq = hn::Eq(chunk_bytes, lf_marker);
+            const auto cr_eq = hn::Eq(chunk_bytes, cr_marker);
+            const std::uint64_t newline_bits =
+                hn::BitsFromMask(d_byte, hn::Or(lf_eq, cr_eq));
+            local_newline_count += static_cast<std::size_t>(
+                std::popcount(newline_bits & 0xFFFFu));
+        }
+
+        if (total_count == 0) {
+            read_cursor += lanes;
+            continue;
+        }
+
+        const auto low_indices = hn::LoadU(
+            d_byte, kCompactLowTable[low_mask].data());
+        const auto high_indices = hn::LoadU(
+            d_byte, kCompactHighTable[high_mask].data());
+        const auto low_compacted =
+            hn::TableLookupBytes(ranks, low_indices);
+        const auto high_compacted =
+            hn::TableLookupBytes(ranks, high_indices);
+        const auto shift_indices = hn::LoadU(
+            d_byte, kShiftLeftByteTable[low_count].data());
+        const auto high_shifted =
+            hn::TableLookupBytes(high_compacted, shift_indices);
+        const auto compacted = hn::Or(low_compacted, high_shifted);
+
+        const std::uint32_t packed_chunk =
+            pack_16_dna4_to_u32(d_byte, compacted);
+        merge_variable_chunk_into_partial(
+            local_partial_word, local_partial_letters, packed_words,
+            packed_chunk, total_count);
+        local_total_letters += total_count;
+        read_cursor += lanes;
+    }
+
+    // Scalar tail: process remaining 0..15 bytes byte-by-byte. If
+    // we hit the boundary byte, stop and return its position.
+    while (read_cursor < body_size) {
+        const std::uint8_t current_byte = body_bytes[read_cursor];
+        if (current_byte == BoundaryChar) {
+            return flush_state_and_return(read_cursor);
+        }
+        if (current_byte == '\n' || current_byte == '\r') {
+            local_newline_count += 1;
+            read_cursor += 1;
+            continue;
+        }
+        const std::uint8_t rank = fallback_lut[current_byte];
+        if (rank != 0xFF) {
+            local_partial_word |=
+                static_cast<storage_unit_t>(rank)
+                << (BitsPerChar * local_partial_letters);
+            local_partial_letters += 1;
+            local_total_letters += 1;
+            if (local_partial_letters == LettersPerUnit) {
+                packed_words->push_back(local_partial_word);
+                local_partial_word = 0;
+                local_partial_letters = 0;
+            }
+        }
+        read_cursor += 1;
+    }
+
+    return flush_state_and_return(read_cursor);
+}
+template <typename storage_unit_t,
+          std::size_t BitsPerChar,
+          std::size_t LettersPerUnit>
+HWY_INLINE void encode_body_chunk_dna4_simd_multiline(
+    bioseq::io::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
+    const std::uint8_t* HWY_RESTRICT body_bytes,
+    std::size_t body_size) {
+    static_assert(BitsPerChar == 2 && LettersPerUnit == 32 &&
+                  std::is_same_v<storage_unit_t, std::uint64_t>,
+                  "encode_body_chunk_dna4_simd_multiline is specialised for "
+                  "dna4-into-uint64 packing (2 bits/letter, 32 letters/word)");
+
+    using D = hn::FixedTag<std::uint8_t, 16>;
+    constexpr D d_byte;
+    constexpr std::size_t lanes = 16;
+
+    static constexpr auto fallback_lut =
+        bioseq::io::build_letter_to_rank_lut<seq::dna4>();
+    static constexpr auto low_nibble_lut_array =
+        bioseq::io::build_dna4_low_nibble_lut();
+
+    const auto letter_to_rank_table_vec =
+        hn::LoadDup128(d_byte, low_nibble_lut_array.data());
+    const auto low_nibble_mask = hn::Set(d_byte, std::uint8_t{0x0F});
+    const auto sentinel_marker = hn::Set(d_byte, std::uint8_t{0xFF});
+
+    storage_unit_t local_partial_word = state.partial_word;
+    std::size_t local_partial_letters = state.partial_letters;
+    std::size_t local_total_letters = state.total_letters;
+    auto* packed_words = state.output_storage;
+
+    // Single-chunk loop. Empirically the 2-chunk unrolled variant of
+    // this loop regressed the canonical 80-char-wrap FASTA cells by
+    // 8-13% — clang generated extra spills around the 2× compaction
+    // bookkeeping vars in the slow path even with no lambda. The
+    // single-chunk shape lets the compiler keep the partial-word
+    // accumulator pinned to a register across iterations.
+    std::size_t read_cursor = 0;
+    while (read_cursor + lanes <= body_size) {
+        const auto chunk_bytes =
+            hn::LoadU(d_byte, body_bytes + read_cursor);
+        const auto low_nibbles = hn::And(chunk_bytes, low_nibble_mask);
+        const auto ranks =
+            hn::TableLookupBytes(letter_to_rank_table_vec, low_nibbles);
+        const auto sentinel_eq = hn::Eq(ranks, sentinel_marker);
+
+        if (HWY_LIKELY(hn::AllFalse(d_byte, sentinel_eq))) {
+            // Fast path: chunk is wholly inside a body line — no
+            // newlines, no CR. Identical to the single-line encoder
+            // hot path: pack 16 ranks → uint32, merge into partial.
+            const std::uint32_t packed_chunk =
+                pack_16_dna4_to_u32(d_byte, ranks);
+            merge_packed_chunk_into_partial(
+                local_partial_word, local_partial_letters, packed_words,
+                packed_chunk);
+            local_total_letters += lanes;
+            read_cursor += lanes;
+            continue;
+        }
+
+        // Slow path: chunk straddles a line boundary. Compact the
+        // valid lanes via the precomputed shuffle tables, then pack.
+        const std::uint64_t bits =
+            hn::BitsFromMask(d_byte, hn::Not(sentinel_eq));
+        const std::uint8_t low_mask =
+            static_cast<std::uint8_t>(bits & 0xFFu);
+        const std::uint8_t high_mask =
+            static_cast<std::uint8_t>((bits >> 8) & 0xFFu);
+        const std::size_t low_count =
+            static_cast<std::size_t>(std::popcount(low_mask));
+        const std::size_t high_count =
+            static_cast<std::size_t>(std::popcount(high_mask));
+        const std::size_t total_count = low_count + high_count;
+
+        if (total_count == 0) {
+            read_cursor += lanes;
+            continue;
+        }
+
+        const auto low_indices = hn::LoadU(
+            d_byte, kCompactLowTable[low_mask].data());
+        const auto high_indices = hn::LoadU(
+            d_byte, kCompactHighTable[high_mask].data());
+        const auto low_compacted =
+            hn::TableLookupBytes(ranks, low_indices);
+        const auto high_compacted =
+            hn::TableLookupBytes(ranks, high_indices);
+        const auto shift_indices = hn::LoadU(
+            d_byte, kShiftLeftByteTable[low_count].data());
+        const auto high_shifted =
+            hn::TableLookupBytes(high_compacted, shift_indices);
+        const auto compacted = hn::Or(low_compacted, high_shifted);
+
+        const std::uint32_t packed_chunk =
+            pack_16_dna4_to_u32(d_byte, compacted);
+        merge_variable_chunk_into_partial(
+            local_partial_word, local_partial_letters, packed_words,
+            packed_chunk, total_count);
+        local_total_letters += total_count;
+        read_cursor += lanes;
+    }
+
+    // Scalar tail for the trailing 0..15 bytes. Reuses the fallback
+    // LUT so we treat newlines / CR as skip-sentinels here too.
+    while (read_cursor < body_size) {
+        const std::uint8_t letter_rank =
+            fallback_lut[body_bytes[read_cursor]];
+        if (letter_rank != 0xFF) {
+            local_partial_word |=
+                static_cast<storage_unit_t>(letter_rank)
+                << (BitsPerChar * local_partial_letters);
+            local_partial_letters += 1;
+            local_total_letters += 1;
+            if (local_partial_letters == LettersPerUnit) {
+                packed_words->push_back(local_partial_word);
+                local_partial_word = 0;
+                local_partial_letters = 0;
+            }
+        }
+        read_cursor += 1;
+    }
+
+    state.partial_word = local_partial_word;
+    state.partial_letters = local_partial_letters;
+    state.total_letters = local_total_letters;
+}
+
 /// Encode a dna4 body span into the encoder state via the SIMD LUT
 /// + SIMD pack pipeline. Stages:
 ///
@@ -594,6 +1092,58 @@ void dna4_simd_encode_body_chunk(
     const std::uint8_t* body_bytes,
     std::size_t body_size) noexcept;
 
+/// Multi-line variant: same encoding contract as
+/// `dna4_simd_encode_body_chunk`, but `body_bytes` MAY contain `\n`
+/// and `\r` (the LUT maps these to skip-sentinels and the SIMD
+/// compaction path strips them lane-wise without falling back to
+/// scalar). Wins on mmap-direct FASTA where the FSM scans for the
+/// next `>` once and feeds the entire multi-line body to the encoder
+/// in one call, eliminating per-line FSM dispatch overhead. Spec §11.3.
+void dna4_simd_encode_body_chunk_multiline(
+    bioseq::io::encode_state<std::uint64_t, 2, 32>& state,
+    const std::uint8_t* body_bytes,
+    std::size_t body_size) noexcept;
+
+/// Fused multiline encode + record-end detection. Encodes from
+/// `body_bytes` up to (but not including) the first `>` byte found,
+/// returning the number of bytes consumed. If no `>` appears in
+/// `[body_bytes, body_bytes + body_size)`, encodes the whole span and
+/// returns `body_size`. Replaces a separate `scan_first_byte('>')`
+/// pass + an `encode_body_chunk_multiline()` call with a single
+/// SIMD walk over the body bytes — half the memory traffic, no
+/// dispatch overhead between the two passes. Spec §11.3 / IO_V3.
+[[nodiscard]] std::size_t dna4_simd_encode_body_chunk_multiline_until_gt(
+    bioseq::io::encode_state<std::uint64_t, 2, 32>& state,
+    const std::uint8_t* body_bytes,
+    std::size_t body_size) noexcept;
+
+/// Same fused-pass encoder but stops at `+` instead of `>`. Used by
+/// the FASTQ FSM to encode the seq region (which terminates at the
+/// `+` separator-line sigil) in a single SIMD walk. `+` is not a
+/// valid dna4/dna5 letter so any `+` in a seq region is unambiguously
+/// the separator. `newline_count_out` accumulates the count of `\n`
+/// and `\r` bytes encountered (used by the FASTQ FSM to derive
+/// `sequence_byte_count = consumed - newline_count` for qual length
+/// validation). Spec §11.3 / IO_V3.
+[[nodiscard]] std::size_t dna4_simd_encode_body_chunk_multiline_until_plus(
+    bioseq::io::encode_state<std::uint64_t, 2, 32>& state,
+    const std::uint8_t* body_bytes,
+    std::size_t body_size,
+    std::size_t* newline_count_out) noexcept;
+
+/// Find the first byte in `[data, data+size)` matching ANY of the
+/// (up to 3) needles in the array. Returns `size` if no match. The
+/// 4-needle pack is exposed via this single-arity wrapper for the
+/// FASTA FSM's `\n`-or-`>` body-end scan; it bypasses the per-call
+/// arity dispatch in `scan_first_byte_pair` so the body scan loop
+/// goes through one inline body. Spec §8.3.
+[[nodiscard]] std::size_t scan_first_byte_dispatch3(
+    std::uint8_t needle_0,
+    std::uint8_t needle_1,
+    std::uint8_t needle_2,
+    const std::uint8_t* data,
+    std::size_t size) noexcept;
+
 }  // namespace bioseq::io::simd
 
 }  // export
@@ -632,6 +1182,45 @@ void dna4_simd_encode_body_chunk(
     std::size_t body_size) noexcept {
     HWY_NAMESPACE::encode_body_chunk_dna4_simd<std::uint64_t, 2, 32>(
         state, body_bytes, body_size);
+}
+
+void dna4_simd_encode_body_chunk_multiline(
+    bioseq::io::encode_state<std::uint64_t, 2, 32>& state,
+    const std::uint8_t* body_bytes,
+    std::size_t body_size) noexcept {
+    HWY_NAMESPACE::encode_body_chunk_dna4_simd_multiline<
+        std::uint64_t, 2, 32>(state, body_bytes, body_size);
+}
+
+std::size_t dna4_simd_encode_body_chunk_multiline_until_gt(
+    bioseq::io::encode_state<std::uint64_t, 2, 32>& state,
+    const std::uint8_t* body_bytes,
+    std::size_t body_size) noexcept {
+    return HWY_NAMESPACE::encode_body_chunk_dna4_simd_multiline_until_byte<
+        std::uint8_t{'>'}, std::uint64_t, 2, 32>(
+            state, body_bytes, body_size, /*newline_count_out=*/nullptr);
+}
+
+std::size_t dna4_simd_encode_body_chunk_multiline_until_plus(
+    bioseq::io::encode_state<std::uint64_t, 2, 32>& state,
+    const std::uint8_t* body_bytes,
+    std::size_t body_size,
+    std::size_t* newline_count_out) noexcept {
+    return HWY_NAMESPACE::encode_body_chunk_dna4_simd_multiline_until_byte<
+        std::uint8_t{'+'}, std::uint64_t, 2, 32>(
+            state, body_bytes, body_size, newline_count_out);
+}
+
+std::size_t scan_first_byte_dispatch3(
+    std::uint8_t needle_0,
+    std::uint8_t needle_1,
+    std::uint8_t needle_2,
+    const std::uint8_t* data,
+    std::size_t size) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<std::uint8_t> byte_tag;
+    const std::array<std::uint8_t, 3> needles{needle_0, needle_1, needle_2};
+    return HWY_NAMESPACE::scan_for_first<3>(byte_tag, needles, data, size);
 }
 
 }  // namespace bioseq::io::simd

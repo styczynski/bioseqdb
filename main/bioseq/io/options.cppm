@@ -24,7 +24,10 @@ struct io_options {
     // headroom; on the 234-MiB human-genome cell this cuts refill
     // cycles from ~3650 → 234. Past 1 MiB the marginal win drops
     // (memcpy bandwidth dominates the syscall overhead) and very
-    // large slabs fight the page-cache prefetcher.
+    // large slabs fight the page-cache prefetcher. Empirically 4 MiB
+    // regressed across all the synthetic cells (build_26) — the
+    // additional `make_room` memmove cost on each refill outweighed
+    // the syscall amortisation.
     std::size_t initial_buffer_size = 1 * 1024 * 1024;
     std::size_t max_buffer_size = static_cast<std::size_t>(1) * 1024 * 1024 * 1024;
     bool        prefer_mmap = true;
@@ -37,12 +40,37 @@ struct io_options {
 /// Concurrency knobs (thread counts, ring sizes, batch shape).
 struct concurrency_options {
     std::size_t worker_count = 0;
-    std::size_t parser_count = 1;
+    /// Number of parsing threads for mmap parallel mode. 0 = auto
+    /// (use std::thread::hardware_concurrency capped to 8); 1 = force
+    /// sequential single-threaded mmap path; N > 1 = exactly N parser
+    /// shards. The parallel path activates only on the mmap zero-copy
+    /// path with file_size >= mmap_parallel_min_bytes.
+    std::size_t parser_count = 0;
     std::size_t io_buffer_pool_size = 8;
     std::size_t ring_capacity = 32;
     std::size_t batch_target_record_count = 0;
     std::size_t batch_min_payload_bytes = 256 * 1024;
     bool        compact_batch = true;
+    /// Minimum mmap'd file size that activates parallel sharded
+    /// parsing. Below this, the sequential mmap path runs.
+    /// Empirically: the synthetic LONG / VERY_LONG cells (≤ 16 MiB)
+    /// don't have enough records to balance shards. The 234 MiB
+    /// human-genome FASTA cell has 24 records — 8 shards = 3 records
+    /// per shard, each ~10 MiB — and the macOS `vm_map` lock
+    /// serialises the demand-zero of 8 × 30 MiB anonymous-mmap
+    /// regions per iteration, hurting throughput by ~50% vs
+    /// sequential. The 6 GiB SRR FASTQ cell has ~30 M short records
+    /// spread across 8 shards of 750 MiB each — the per-shard demand
+    /// -zero amortises across millions of records and parallel
+    /// parsing wins by ~5× over single-threaded. 1 GiB threshold
+    /// keeps the human cell sequential and the SRR cell parallel.
+    std::size_t mmap_parallel_min_bytes =
+        static_cast<std::size_t>(1024) * 1024 * 1024;
+    /// Hard cap on shard count even if hardware_concurrency is higher.
+    /// 8 perf cores on M1 Pro is the sweet spot; oversubscription past
+    /// 8 contends on the L1 ports the SIMD pack pipeline already
+    /// saturates.
+    std::size_t mmap_parallel_max_shards = 8;
 };
 
 /// Encoder knobs (alphabet validation, FASTQ strictness).

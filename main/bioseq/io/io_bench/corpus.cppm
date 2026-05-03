@@ -90,6 +90,12 @@ struct CorpusShape {
             return {/*record_count=*/0,
                     /*mean_record_length_bp=*/0,        // unused
                     /*target_bytes_on_disk=*/234 * 1024 * 1024};
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB:
+            // Real-data FASTQ. ~6 GiB on disk. Same warm-up record
+            // discovery as the FASTA real-data cell.
+            return {/*record_count=*/0,
+                    /*mean_record_length_bp=*/0,
+                    /*target_bytes_on_disk=*/static_cast<std::size_t>(6) * 1024 * 1024 * 1024};
     }
     return {};
 }
@@ -247,17 +253,22 @@ inline void delete_corpus(const CorpusHandle& handle) noexcept {
     handle.length_bucket = length_bucket;
     handle.is_real_data = true;
 
-    if (length_bucket != IoLengthBucket::REAL_HUMAN_GENOME) {
+    if (length_bucket != IoLengthBucket::REAL_HUMAN_GENOME &&
+        length_bucket != IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
         loge("[bioseq_io_bench.corpus] try_open_real_corpus called with "
              "non-real bucket");
         return handle;
     }
-    if (format != IoFormat::FASTA) {
-        // No real FASTQ corpus is shipped. Caller skips this cell.
-        return handle;
-    }
     fs::path data_root{std::string{test_data_dir}};
-    fs::path file_path = data_root / "homo_sapiens_GRCh38_dna4.fasta";
+    fs::path file_path;
+    if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME) {
+        if (format != IoFormat::FASTA) return handle;
+        file_path = data_root / "homo_sapiens_GRCh38_dna4.fasta";
+    } else {
+        if (format != IoFormat::FASTQ) return handle;
+        file_path = data_root /
+            "1000_genomes_human_SRR062634_sample_1_dna5.fastq";
+    }
     std::error_code error_code;
     if (!fs::exists(file_path, error_code)) {
         loge("[bioseq_io_bench.corpus] real-data file missing: '{}'",

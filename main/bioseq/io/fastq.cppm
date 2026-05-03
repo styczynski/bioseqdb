@@ -77,7 +77,18 @@ struct alignas(64) fastq_parser_state {
     std::size_t header_start_offset = 0;
     std::size_t quality_start_offset = 0;
     encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
-    std::size_t sequence_letter_count = 0;      // populated when seq → '+' transition fires
+    /// Raw byte count of sequence lines after newline stripping. This
+    /// is the value FASTQ qual must match — qual is one byte per
+    /// position, regardless of whether the position is a canonical
+    /// base or a skip-sentinel like `N`. Tracked independently of
+    /// `body.total_letters` because the encoder counts only
+    /// non-skip letters; dna5 inputs (with `N`) have
+    /// `body.total_letters < sequence_byte_count`.
+    std::size_t sequence_byte_count = 0;
+    /// Snapshot of `sequence_byte_count` taken at the seq → '+'
+    /// transition. Compared against qual_size to terminate qual
+    /// accumulation at the right byte count.
+    std::size_t sequence_letter_count = 0;
     /// Borrowed pointers to the batch's shared storage.
     std::vector<char>* header_storage = nullptr;
     std::vector<std::uint8_t>* quality_storage = nullptr;
@@ -85,6 +96,7 @@ struct alignas(64) fastq_parser_state {
     void reset_for_next_record() noexcept {
         progress = fastq_progress::AT_HEADER_SIGIL;
         body.reset();
+        sequence_byte_count = 0;
         sequence_letter_count = 0;
     }
 
@@ -196,12 +208,12 @@ template <
             if (parse_cursor >= slab_size) return need_more();
             const std::uint8_t leading_byte = slab_data[parse_cursor];
             if (leading_byte == '+') {
-                state.sequence_letter_count = state.body.total_letters;
+                state.sequence_letter_count = state.sequence_byte_count;
                 state.progress = fastq_progress::AT_SEP_LINE;
                 break;
             }
             if (leading_byte == '@' || leading_byte == '>') {
-                state.sequence_letter_count = state.body.total_letters;
+                state.sequence_letter_count = state.sequence_byte_count;
                 if (strict_fastq) {
                     emit_failure(failure_fn,
                                  "FASTQ record without quality at file position {}",
@@ -230,6 +242,7 @@ template <
                           bits_per_char,
                           letters_per_unit>(
             state.body, slab_data + parse_cursor, line_size);
+        state.sequence_byte_count += line_size;
         parse_cursor += newline_offset + 1;
         state.progress = fastq_progress::AT_BODY_LINE_START;
     }

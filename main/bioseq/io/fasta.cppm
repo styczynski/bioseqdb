@@ -197,49 +197,107 @@ template <
     }
 
     // Step 3 & 4: body lines, looking for the next '>' that terminates this record.
-    while (state.progress == fasta_progress::AT_BODY_LINE_START) {
-        if (cursor >= slab_size) {
-            if (is_eof) {
-                state.progress = fasta_progress::FINISHED_RECORD;
-                break;
-            }
-            return parse_step_result{parse_outcome::INCOMPLETE, cursor};
-        }
-        if (slab_data[cursor] == '>') {
-            state.progress = fasta_progress::FINISHED_RECORD;
-            break;
-        }
-        const std::size_t remaining = slab_size - cursor;
-        const std::size_t newline_offset = simd::scan_first_byte(
-            '\n', slab_data + cursor, remaining);
-        if (newline_offset == remaining) {
-            if (is_eof) {
-                std::size_t line_size = remaining;
-                if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
-                    line_size -= 1;
+    //
+    // Two strategies depending on alphabet:
+    //   * dna4 + uint64 (the canonical hot path): scan once for the
+    //     next '>' and feed the whole multi-line body span to the
+    //     SIMD encoder. The encoder's multiline path filters
+    //     newlines via its low-nibble LUT (which already maps `\n`
+    //     and `\r` to skip-sentinels) and lane-compacts the valid
+    //     bytes branchlessly. Eliminates per-line FSM overhead — for
+    //     a 234 MiB human-genome chromosome with ~125 K body lines
+    //     this is ~3 M state-machine iterations collapsed to one
+    //     pass.
+    //   * Other alphabets / storage units: fall back to the per-line
+    //     loop with the scalar encoder. This path is unchanged from
+    //     v2 — the multiline encoder is a dna4-uint64 specialisation.
+    constexpr bool use_multiline_encoder =
+        std::is_same_v<alphabet_t, seq::dna4>
+        && std::is_same_v<storage_unit_t, std::uint64_t>
+        && bits_per_char == 2 && letters_per_unit == 32;
+
+    if constexpr (use_multiline_encoder) {
+        while (state.progress == fasta_progress::AT_BODY_LINE_START) {
+            if (cursor >= slab_size) {
+                if (is_eof) {
+                    state.progress = fasta_progress::FINISHED_RECORD;
+                    break;
                 }
-                encode_body_chunk<alphabet_t,
-                                  storage_unit_t,
-                                  bits_per_char,
-                                  letters_per_unit>(
-                    state.body, slab_data + cursor, line_size);
-                cursor += remaining;
+                return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+            }
+            if (slab_data[cursor] == '>') {
+                state.progress = fasta_progress::FINISHED_RECORD;
+                break;
+            }
+            const std::size_t remaining = slab_size - cursor;
+            // Single-pass fused encode + record-boundary scan. The
+            // encoder walks the body span, packing dna4 bytes
+            // (filtering `\n` / `\r` via the low-nibble LUT) and
+            // detecting `>` per chunk. Returns the number of bytes
+            // consumed; `consumed < remaining` means a `>` was found
+            // — the FSM transitions to FINISHED_RECORD. Eliminates
+            // the previous separate `simd::scan_first_byte('>', …)`
+            // pass over the body, halving the memory traffic.
+            const std::size_t consumed =
+                simd::dna4_simd_encode_body_chunk_multiline_until_gt(
+                    state.body, slab_data + cursor, remaining);
+            cursor += consumed;
+            if (consumed < remaining) {
+                state.progress = fasta_progress::FINISHED_RECORD;
+                break;
+            }
+            // No '>' found — either EOF closes the record or we need
+            // a refill.
+            if (is_eof) {
                 state.progress = fasta_progress::FINISHED_RECORD;
                 break;
             }
             return parse_step_result{parse_outcome::INCOMPLETE, cursor};
         }
-        std::size_t line_size = newline_offset;
-        if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
-            line_size -= 1;
+    } else {
+        while (state.progress == fasta_progress::AT_BODY_LINE_START) {
+            if (cursor >= slab_size) {
+                if (is_eof) {
+                    state.progress = fasta_progress::FINISHED_RECORD;
+                    break;
+                }
+                return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+            }
+            if (slab_data[cursor] == '>') {
+                state.progress = fasta_progress::FINISHED_RECORD;
+                break;
+            }
+            const std::size_t remaining = slab_size - cursor;
+            const std::size_t newline_offset = simd::scan_first_byte(
+                '\n', slab_data + cursor, remaining);
+            if (newline_offset == remaining) {
+                if (is_eof) {
+                    std::size_t line_size = remaining;
+                    if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
+                        line_size -= 1;
+                    }
+                    encode_body_chunk<alphabet_t,
+                                      storage_unit_t,
+                                      bits_per_char,
+                                      letters_per_unit>(
+                        state.body, slab_data + cursor, line_size);
+                    cursor += remaining;
+                    state.progress = fasta_progress::FINISHED_RECORD;
+                    break;
+                }
+                return parse_step_result{parse_outcome::INCOMPLETE, cursor};
+            }
+            std::size_t line_size = newline_offset;
+            if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
+                line_size -= 1;
+            }
+            encode_body_chunk<alphabet_t,
+                              storage_unit_t,
+                              bits_per_char,
+                              letters_per_unit>(
+                state.body, slab_data + cursor, line_size);
+            cursor += newline_offset + 1;  // consume '\n'
         }
-        encode_body_chunk<alphabet_t,
-                          storage_unit_t,
-                          bits_per_char,
-                          letters_per_unit>(
-            state.body, slab_data + cursor, line_size);
-        cursor += newline_offset + 1;  // consume '\n'
-        // Loop back to AT_BODY_LINE_START.
     }
 
     // Step 5: FINISHED_RECORD — finalise, emit, reset.

@@ -159,6 +159,10 @@ struct ReaderEntry {
             case IoLengthBucket::LONG:              return 2;
             case IoLengthBucket::VERY_LONG:         return 1;
             case IoLengthBucket::REAL_HUMAN_GENOME: return 2;
+            // 6 GiB cell: a single sample is already ~1-2 s wall-clock
+            // even at 5+ GB/s; one sample under fast mode keeps the cycle
+            // tight without changing the regression signal.
+            case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 1;
         }
         return 1;
     }
@@ -168,6 +172,7 @@ struct ReaderEntry {
         case IoLengthBucket::LONG:              return 3;
         case IoLengthBucket::VERY_LONG:         return 2;
         case IoLengthBucket::REAL_HUMAN_GENOME: return 3;
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 2;
     }
     return 1;
 }
@@ -182,7 +187,8 @@ inline void run_cell(IoFormat format,
                      std::size_t samples_per_reader,
                      std::string_view test_data_dir) {
     CorpusHandle corpus;
-    if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME) {
+    if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME ||
+        length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
         corpus = try_open_real_corpus(test_data_dir, format, length_bucket);
         if (corpus.path.empty()) {
             loge("[bioseq_io_bench.matrix_runner] real-data cell {} {} skipped "
@@ -300,10 +306,11 @@ inline void run_io_bench_matrix(bool fast_mode,
                                 std::string_view test_data_dir) {
     constexpr std::array<IoFormat, 2> formats{
         IoFormat::FASTA, IoFormat::FASTQ};
-    constexpr std::array<IoLengthBucket, 5> length_buckets{
+    constexpr std::array<IoLengthBucket, 6> length_buckets{
         IoLengthBucket::SHORT, IoLengthBucket::MEDIUM,
         IoLengthBucket::LONG,  IoLengthBucket::VERY_LONG,
-        IoLengthBucket::REAL_HUMAN_GENOME};
+        IoLengthBucket::REAL_HUMAN_GENOME,
+        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB};
 
     const auto fasta_readers = default_fasta_readers();
     const auto fastq_readers = default_fastq_readers();
