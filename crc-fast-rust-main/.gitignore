@@ -1,0 +1,8 @@
+/target
+/scratch
+/test/test_*.bin
+.idea
+.DS_Store
+.git
+.vscode
+/scripts

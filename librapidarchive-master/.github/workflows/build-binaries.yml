@@ -1,0 +1,123 @@
+name: Test Building Static Binaries
+
+on:
+  push:
+    branches: "master"
+  workflow_dispatch:
+
+jobs:
+  Static-Binary-Build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_suffix: 'linux-x86_64.tar.gz'
+          - os: ubuntu-24.04-arm
+            artifact_suffix: 'linux-aarch64.tar.gz'
+          - os: macos-latest
+            artifact_suffix: 'darwin-aarch64.tar.gz'
+          - os: windows-latest
+            artifact_suffix: 'windows-x86_64.zip'
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install System Dependencies
+      if: startsWith( matrix.os, 'ubuntu' )
+      run: |
+        sudo apt update
+        sudo apt-get -y install clang-19 g++ ninja-build gzip tabix pigz gztool libarchive-dev zlib1g-dev isal nasm
+
+    - name: Install System Dependencies
+      if: startsWith( matrix.os, 'macos' )
+      run: |
+        brew install -q ninja pigz htslib
+
+    - name: Install System Dependencies
+      if: startsWith( matrix.os, 'windows' )
+      run: |
+        choco install ninja nasm
+
+    - name: Fix pip
+      run: |
+        echo "PIP_BREAK_SYSTEM_PACKAGES=1" >> "${GITHUB_ENV}"
+
+    - name: Install Python Dependencies for the Tests
+      run: |
+        python3 -m pip install --upgrade pip || true  # Fails on macOS because of homebrew
+        python3 -m pip install --upgrade-strategy eager --upgrade indexed_gzip pgzip
+
+    - name: Configure CMake
+      shell: bash
+      env:
+        LIBRAPIDARCHIVE_USE_SYSTEM_ZLIB: false
+      run: |
+        EXTRA_ARGS=()
+        EXTRA_ARGS+=( -DLIBRAPIDARCHIVE_BUILD_BENCHMARKS=OFF )
+        EXTRA_ARGS+=( -DLIBRAPIDARCHIVE_USE_SYSTEM_ZLIB=$LIBRAPIDARCHIVE_USE_SYSTEM_ZLIB )
+        EXTRA_ARGS+=( -DCMAKE_POSITION_INDEPENDENT_CODE=ON )
+        if command -v clang-19 &>/dev/null; then
+            # Use the most recent compiler for hopefully better performance.
+            # E.g., my simple std::find test only was compiled into SIMD with GCC 15.0.
+            CC=clang-19
+            CXX=clang++-19
+            export CC CXX
+            # Compiling with C++26 might improve performance thanks to better trivial relocation support.
+            EXTRA_ARGS+=( -DCMAKE_CXX_FLAGS='-std=c++2c' )
+        fi
+        if [[ "${{ matrix.os }}" =~ windows ]]; then
+            EXTRA_ARGS+=( -DCMAKE_EXE_LINKER_FLAGS='-static' )
+        elif [[ "${{ matrix.os }}" =~ ubuntu ]]; then
+            # These flags work for clang and gcc. Interestingly, clang seems to also link against libgcc.
+            # -static-libgcc errors on macOS and -static-libstdc++ gives an "unused argument" warning.
+            EXTRA_ARGS+=( -DCMAKE_EXE_LINKER_FLAGS='-static-libgcc -static-libstdc++' )
+        fi
+        if [[ "${{ matrix.os }}" =~ macos ]]; then
+            # Yields bus error in testParallelGzipReader if enabled.
+            EXTRA_ARGS+=( -DLIBRAPIDARCHIVE_WITH_ISAL=OFF )
+        else
+            EXTRA_ARGS+=( -DLIBRAPIDARCHIVE_WITH_ISAL=ON )
+        fi
+        cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo "${EXTRA_ARGS[@]}"
+
+    - name: Build
+      run: |
+        cmake --build build -v
+
+    - uses: conda-incubator/setup-miniconda@v3
+      if: startsWith( matrix.os, 'windows' )
+      with:
+        auto-update-conda: true
+
+    - name: Install Test Dependencies
+      if: startsWith( matrix.os, 'windows' )
+      run: |
+        conda install conda-forge::pigz
+
+    - name: Run Tests
+      run: |
+        cmake --build build -v -- check
+
+    - name: Package Binary
+      shell: bash
+      env:
+        ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
+      run: |
+        RAPIDGZIP=$( find build/src/tools -maxdepth 1 -type f -name 'rapidgzip*' )
+        VERSION=$( "$RAPIDGZIP" --version | sed -nE 's|.*version ([0-9.]*).*|\1|p' )
+        ARTIFACT_SUFFIX=$VERSION-$ARTIFACT_SUFFIX
+        mv "$RAPIDGZIP" .
+        if [[ "$ARTIFACT_SUFFIX" =~ *.zip ]]; then
+            zip "rapidgzip-$ARTIFACT_SUFFIX" rapidgzip*
+        else
+            tar -czf "rapidgzip-$ARTIFACT_SUFFIX" rapidgzip
+        fi
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: rapidgzip-${{ matrix.artifact_suffix }}
+        path: "rapidgzip-*${{ matrix.artifact_suffix }}"

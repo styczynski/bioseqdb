@@ -1,0 +1,130 @@
+name: Python Module Tests
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  Tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # https://devguide.python.org/versions/
+        # Oldest and newest versions should be enough. Python versions are supported 5 years from release date.
+        # 3.5 was released 2015-09-13 and end-of-life was 2020-09-13
+        # 3.6 was released 2016-12-23 and end-of-life was 2021-12-23
+        # 3.7 was released 2018-06-27 and end-of-life was 2023-06-27
+        # 3.8 was released 2019-10-14 and end-of-life will be 2024-10-14
+        # 3.9 was released 2020-10-05 and end-of-life will be 2025-10-25
+        # 3.10 was released 2021-10-04 and end-of-life will be 2026-10-04
+        # 3.11 was released 2022-10-24 and end-of-life will be 2027-10
+        # 3.12 was released 2023-10-02 and end-of-life will be 2028-10
+        # 3.13 was released 2024-10-07 and end-of-life will be 2029-10
+        # 3.14 was released 2025-10-07 and end-of-life will be 2030-10
+        # 3.15 will be released 2026-10-07 and end-of-life will be 2031-10
+        # https://raw.githubusercontent.com/actions/python-versions/main/versions-manifest.json
+        python-version: ['3.9', '3.14']
+        # 2024-04-27: macos-latest, which points to macos-14-arm64, does not work anymore because of error 134 close
+        #             towards the end when testing with parallelization=8. Could be a problem with compiling for ARM.
+        os: [macos-14, macos-15, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install Dependencies
+      if: "startsWith(matrix.os, 'ubuntu')"
+      run: |
+        sudo apt update
+        sudo apt-get -y install bzip2 pbzip2 lbzip2 g++ zlib1g-dev nasm lldb
+
+    - name: Install System Dependencies
+      if: "startsWith(matrix.os , 'macos')"
+      run: |
+        brew install -q nasm
+
+    - name: Fix pip
+      run: |
+        echo "PIP_BREAK_SYSTEM_PACKAGES=1" >> "${GITHUB_ENV}"
+
+    - name: Install Python Modules
+      run: |
+        python3 -m pip install --upgrade pip
+        python3 -m pip install --upgrade-strategy eager --upgrade cython twine numpy pytest
+
+    - name: Install Python Modules (Windows)
+      if: "startsWith(matrix.os, 'windows')"
+      run: |
+        # https://github.com/pypa/build/issues/253#issuecomment-793906474
+        # https://bugs.python.org/issue43749
+        # Only seems to be an issue with versions older than 3.9 because they did not backport the fix.
+        python3 -m pip install --upgrade build[virtualenv]
+
+    - name: Install Python Modules (Non-Windows)
+      if: "! startsWith(matrix.os, 'windows')"
+      run: |
+        python3 -m pip install --upgrade build
+
+    - name: Test indexed_bzip2 Installation From Tarball
+      working-directory: python/indexed_bzip2
+      shell: bash
+      run: |
+        python3 -m build
+        twine check dist/*
+        python3 -m pip install dist/*.tar.gz
+
+    - name: Test rapidgzip Installation From Tarball
+      working-directory: python/rapidgzip
+      shell: bash
+      run: |
+        python3 -m build
+        twine check dist/*
+        python3 -m pip install dist/*.tar.gz
+
+    - name: Test Simple Startup rapidgzip
+      run: |
+        rapidgzip --help
+        rapidgzip --version
+
+    - name: Test Simple Usage rapidgzip
+      if: "startsWith(matrix.os , 'ubuntu')"
+      run: |
+        head -c 1024 /dev/urandom | base64 | gzip > base64-1KiB.gz
+        cat base64-1KiB.gz | rapidgzip -d -c
+        rapidgzip -d -c base64-1KiB.gz
+
+    - name: Test Simple Startup ibzip2
+      run: |
+        ibzip2 --help
+        ibzip2 --version
+
+    - name: Test Python Packages
+      if: "! startsWith(matrix.os , 'windows')"
+      shell: bash
+      run: |
+        printf 'bt all\nquit 1\n' > btall.batch
+        lldb --batch -o "run" --source-on-crash btall.batch -- python3 -X dev -u -m pytest src/tests/testGIL.py
+        lldb --batch -o "run" --source-on-crash btall.batch -- python3 -X dev -u src/tests/testPythonWrappers.py
+
+    - name: Test Python Packages
+      if: "startsWith(matrix.os , 'windows')"
+      shell: bash
+      run: |
+        python3 -X dev -u -m pytest src/tests/testGIL.py
+        python3 -X dev -u src/tests/testPythonWrappers.py
+
+    - name: Test rapidgzip Installation From Tarball
+      working-directory: python/rapidgzip
+      shell: bash
+      run: |
+        python3 -m build
+        twine check dist/*
+        python3 -m pip install dist/*.tar.gz

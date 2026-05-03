@@ -1,0 +1,98 @@
+[package]
+name = "crc-fast-rust-fuzz"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.crc-fast]
+path = ".."
+
+[[bin]]
+name = "digest_crc32_autosar"
+path = "fuzz_targets/digest_crc32_autosar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "digest_crc32_bzip2"
+path = "fuzz_targets/digest_crc32_bzip2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "digest_crc32_iscsi"
+path = "fuzz_targets/digest_crc32_iscsi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "digest_crc32_iso_hdlc"
+path = "fuzz_targets/digest_crc32_iso_hdlc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "digest_crc64_ecma_182"
+path = "fuzz_targets/digest_crc64_ecma_182.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "digest_crc64_nvme"
+path = "fuzz_targets/digest_crc64_nvme.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_crc32_autosar"
+path = "fuzz_targets/checksum_crc32_autosar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_crc32_bzip2"
+path = "fuzz_targets/checksum_crc32_bzip2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_crc32_iscsi"
+path = "fuzz_targets/checksum_crc32_iscsi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_crc32_iso_hdlc"
+path = "fuzz_targets/checksum_crc32_iso_hdlc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_crc64_ecma_182"
+path = "fuzz_targets/checksum_crc64_ecma_182.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_crc64_nvme"
+path = "fuzz_targets/checksum_crc64_nvme.rs"
+test = false
+doc = false
+bench = false
