@@ -99,11 +99,12 @@ template <
     const reader_options& options) {
 
     using alphabet_config = sequence_custom_alphabet<alphabet_t, std::uint64_t>;
-    using sequence_range_t = compact_sequence_range<alphabet_config>;
-    using sequence_traits = typename sequence_range_t::traits;
+    using sequence_traits =
+        typename compact_sequence_range<alphabet_config>::traits;
 
     constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
     constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
+    constexpr bool is_fastq_format = (file_type == sequence_io_file_type::FASTQ);
 
     // ---- Worker side: per-worker queue + thread ---- //
     // Each worker holds a shared_ptr to its queue so the parser can
@@ -153,32 +154,42 @@ template <
         aborted = true;
     };
 
-    // `run_async_pipeline` is only entered when
-    // `concurrency.worker_count > 0` (see
-    // `public_api.cppm::run_pipeline_for_source`), so the dispatch
-    // path always has at least one worker.
+    const std::size_t flush_record_threshold =
+        (options.concurrency.batch_target_record_count > 0)
+            ? options.concurrency.batch_target_record_count
+            : 4096;
+
+    auto prepare_fresh_batch = [&]() {
+        current_batch.prepare(flush_record_threshold, is_fastq_format);
+        current_batch.reserve_storage(
+            /*header_bytes*/ flush_record_threshold * 32,
+            /*seq_words*/    flush_record_threshold * 8,
+            /*quality_bytes*/ is_fastq_format ? flush_record_threshold * 256 : 0);
+    };
+    prepare_fresh_batch();
+
     auto dispatch_batch = [&]() {
         if (current_batch.empty()) return;
         const std::size_t target_worker = worker_dispatch_index;
         worker_dispatch_index = (worker_dispatch_index + 1) % worker_count;
         worker_queues[target_worker]->push(std::move(current_batch));
         current_batch = batch_t{};
+        prepare_fresh_batch();
     };
-
-    const std::size_t flush_record_threshold =
-        (options.concurrency.batch_target_record_count > 0)
-            ? options.concurrency.batch_target_record_count
-            : 4096;
 
     if constexpr (file_type == sequence_io_file_type::FASTA) {
         fasta_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
+        parser_state.attach_to_batch(current_batch.header_storage(),
+                                     current_batch.seq_storage());
 
-        auto emit_fasta_record = [&](std::string&& header,
-                                     std::vector<std::uint64_t>&& packed,
+        auto emit_fasta_record = [&](std::size_t /*header_start*/,
+                                     std::size_t /*header_size*/,
+                                     std::size_t /*seq_start*/,
+                                     std::size_t /*seq_word_count*/,
                                      std::size_t padding) {
-            current_batch.append_fasta(
-                std::move(header),
-                sequence_range_t::from_packed(std::move(packed), padding));
+            current_batch.header_offsets().push_back(current_batch.header_storage().size());
+            current_batch.seq_offsets().push_back(current_batch.seq_storage().size());
+            current_batch.seq_paddings().push_back(padding);
             ++records_emitted;
             if (current_batch.size() >= flush_record_threshold) {
                 dispatch_batch();
@@ -211,6 +222,8 @@ template <
             bool need_refill = false;
             bool finished = false;
             while (!aborted) {
+                parser_state.attach_to_batch(current_batch.header_storage(),
+                                             current_batch.seq_storage());
                 const auto step =
                     parse_one_fasta_record<alphabet_t, std::uint64_t>(
                         parser_state,
@@ -247,15 +260,21 @@ template <
 
     } else {  // FASTQ
         fastq_parser_state<std::uint64_t, bits_per_char, letters_per_unit> parser_state;
+        parser_state.attach_to_batch(current_batch.header_storage(),
+                                     current_batch.seq_storage(),
+                                     current_batch.quality_storage());
 
-        auto emit_fastq_record = [&](std::string&& header,
-                                     std::vector<std::uint64_t>&& packed,
+        auto emit_fastq_record = [&](std::size_t /*header_start*/,
+                                     std::size_t /*header_size*/,
+                                     std::size_t /*seq_start*/,
+                                     std::size_t /*seq_word_count*/,
                                      std::size_t padding,
-                                     std::vector<std::uint8_t>&& quality_bytes) {
-            current_batch.append_fastq(
-                std::move(header),
-                sequence_range_t::from_packed(std::move(packed), padding),
-                std::move(quality_bytes));
+                                     std::size_t /*qual_start*/,
+                                     std::size_t /*qual_size*/) {
+            current_batch.header_offsets().push_back(current_batch.header_storage().size());
+            current_batch.seq_offsets().push_back(current_batch.seq_storage().size());
+            current_batch.seq_paddings().push_back(padding);
+            current_batch.quality_offsets().push_back(current_batch.quality_storage().size());
             ++records_emitted;
             if (current_batch.size() >= flush_record_threshold) {
                 dispatch_batch();
@@ -287,6 +306,9 @@ template <
             bool need_refill = false;
             bool finished = false;
             while (!aborted) {
+                parser_state.attach_to_batch(current_batch.header_storage(),
+                                             current_batch.seq_storage(),
+                                             current_batch.quality_storage());
                 const auto step =
                     parse_one_fastq_record<alphabet_t, std::uint64_t>(
                         parser_state,

@@ -19,7 +19,13 @@ enum class sequence_io_file_type : std::uint8_t {
 
 /// I/O backend knobs (buffer sizes, mmap thresholds, gzip auto-detection).
 struct io_options {
-    std::size_t initial_buffer_size = 64 * 1024;
+    // Larger initial buffer = fewer slab cycles + fewer kernel→user
+    // copies on the posix_read path. 1 MiB matches kseqpp's 128 KiB +
+    // headroom; on the 234-MiB human-genome cell this cuts refill
+    // cycles from ~3650 → 234. Past 1 MiB the marginal win drops
+    // (memcpy bandwidth dominates the syscall overhead) and very
+    // large slabs fight the page-cache prefetcher.
+    std::size_t initial_buffer_size = 1 * 1024 * 1024;
     std::size_t max_buffer_size = static_cast<std::size_t>(1) * 1024 * 1024 * 1024;
     bool        prefer_mmap = true;
     std::size_t max_mmap_bytes = static_cast<std::size_t>(1) << 35;

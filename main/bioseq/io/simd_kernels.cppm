@@ -13,8 +13,14 @@
  *   * **dna4 encoder** — `encode_body_chunk_dna4_simd` resolves the
  *     ASCII → rank step via a 16-entry low-nibble LUT (spec §11.2)
  *     replicated across all 128-bit blocks via `LoadDup128`. The
- *     pack stage stays scalar but stays register-resident; the
- *     headline win is the vectorised LUT lookup.
+ *     packing stage is fully SIMD: per-lane variable shift via `Shl`
+ *     places each rank into its 2-bit slot, `SumsOf4` reduces every 4
+ *     adjacent shifted bytes into one packed byte (since the shifted
+ *     2-bit slots don't overlap, sum == bitwise-OR), and a fixed
+ *     multiply + `ReduceSum` collapses 4 packed bytes into one
+ *     `uint32_t`. v2 also processes two 16-byte chunks in parallel for
+ *     instruction-level parallelism — independent loads / lookups /
+ *     packs flow through separate execution ports without WAW stalls.
  *
  * Both halves wrap content in a *single* `HWY_BEFORE_NAMESPACE() …
  * HWY_AFTER_NAMESPACE()` block inside `namespace bioseq::io::simd::
@@ -40,6 +46,7 @@ module;
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 export module bioseq_io.simd_kernels;
 
@@ -268,23 +275,122 @@ HWY_INLINE hn::Vec<D> dna4_lookup_ranks(
     return hn::TableLookupBytes(letter_to_rank_table_vec, letter_index);
 }
 
+/// Pack 16 dna4 ranks into a 32-bit word, 2 bits per letter, lowest
+/// letter at bit 0. The `ranks` vector MUST contain only values in
+/// `[0, 3]`; the caller is responsible for screening out the `0xFF`
+/// skip-sentinel before calling this. The pack pipeline is:
+///
+///   1. `Shl(ranks, [0,2,4,6, 0,2,4,6, ...])` — variable per-lane left
+///      shift places each rank into its 2-bit slot within a byte. The
+///      4 ranks within each 4-byte group land in disjoint slots so the
+///      reduction in step 2 can use sum instead of OR (single-cycle on
+///      every microarchitecture; OR on u32 lanes is equivalent but
+///      `SumsOf4` already exists as a horizontal-reduction primitive).
+///   2. `SumsOf4(shifted)` — per-block 4-lane horizontal reduction
+///      yields 4 `uint32_t` lanes, each in `[0, 255]` representing one
+///      packed byte (since the 4 shifted bytes have non-overlapping
+///      bits, sum == bitwise OR).
+///   3. `Mul + ReduceSum` with multiplier `[1, 256, 65536, 16777216]`
+///      collapses the 4 packed bytes into one `uint32_t` whose layout
+///      matches `compact_sequence_range`'s LSB-first invariant.
+///
+/// Total: 5 SIMD ops + 1 scalar reduction per 16 letters. Compare to
+/// the v1 scalar fold, which executed 16 iterations of (load, branch,
+/// shift, OR, increment) per chunk.
+template <class D>
+HWY_INLINE std::uint32_t pack_16_dna4_to_u32(
+    D d_byte,
+    hn::Vec<D> ranks) noexcept {
+    HWY_ALIGN constexpr std::uint8_t shift_pattern[16] = {
+        0, 2, 4, 6, 0, 2, 4, 6,
+        0, 2, 4, 6, 0, 2, 4, 6};
+    const auto shift_pattern_v = hn::LoadU(d_byte, shift_pattern);
+    const auto shifted = hn::Shl(ranks, shift_pattern_v);
+
+    using d_u32_t = hn::Repartition<std::uint32_t, D>;
+    d_u32_t d_u32;
+    const auto sums = hn::SumsOf4(shifted);
+
+    HWY_ALIGN constexpr std::uint32_t multiplier_pattern[4] = {
+        1u, 1u << 8, 1u << 16, 1u << 24};
+    const auto multipliers = hn::LoadU(d_u32, multiplier_pattern);
+    const auto multiplied = hn::Mul(sums, multipliers);
+    return hn::ReduceSum(d_u32, multiplied);
+}
+
+/// Detect whether any rank in the 16-byte vector equals the skip
+/// sentinel (`0xFF`). Returns `true` if the slow scalar fallback path
+/// must run for this chunk. Compiles to a single `HWY` `Eq + AllFalse`
+/// pair on every target.
+template <class D>
+HWY_INLINE bool has_skip_sentinel(
+    D d_byte,
+    hn::Vec<D> ranks) noexcept {
+    const auto sentinel_mask = hn::Eq(ranks, hn::Set(d_byte, std::uint8_t{0xFF}));
+    return !hn::AllFalse(d_byte, sentinel_mask);
+}
+
+/// Merge a freshly-packed 32-bit chunk into the partial-word
+/// accumulator. `local_partial_letters` MUST be in `[0, 32)`. After
+/// the merge, `local_partial_letters` is updated and a storage unit
+/// may be pushed into `*packed_words`.
+///
+/// The shift arithmetic relies on the invariant that the 32-bit chunk
+/// lives at bit positions `[2*partial_letters, 2*partial_letters + 32)`
+/// of an imaginary 96-bit accumulator. When the new tail crosses bit
+/// 64, the carry slides into the next storage unit.
+template <typename storage_unit_t>
+HWY_INLINE void merge_packed_chunk_into_partial(
+    storage_unit_t& local_partial_word,
+    std::size_t& local_partial_letters,
+    std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
+    std::uint32_t packed_chunk) noexcept {
+    const std::size_t shift_amount = 2 * local_partial_letters;
+    local_partial_word |= static_cast<storage_unit_t>(packed_chunk) << shift_amount;
+    const std::size_t new_letters = local_partial_letters + 16;
+    if (new_letters >= 32) {
+        packed_words->push_back(local_partial_word);
+        // Leftover bits live at positions `[64-shift_amount, 32)` of the
+        // 32-bit chunk; right-shift by `64 - shift_amount` brings them to
+        // bit 0 of the next storage unit. For `shift_amount == 32` the
+        // shift count is 32 — valid because we cast to uint64_t first
+        // (uint32_t >> 32 would be UB).
+        local_partial_word =
+            (shift_amount > 32)
+                ? (static_cast<storage_unit_t>(packed_chunk) >> (64 - shift_amount))
+                : storage_unit_t{0};
+        local_partial_letters = new_letters - 32;
+    } else {
+        local_partial_letters = new_letters;
+    }
+}
+
 /// Encode a dna4 body span into the encoder state via the SIMD LUT
-/// + scalar pack. Stages:
+/// + SIMD pack pipeline. Stages:
 ///
-///   1. Vector LoadU + low-nibble TableLookupBytes → `Lanes(d)` ranks
-///      stored to a stack scratch.
-///   2. Tight scalar fold inlined here (NOT a call into
-///      `append_ranks`) so the compiler can keep `partial_word` /
-///      `partial_letters` in registers across the entire body.
+///   1. Vector LoadU + low-nibble TableLookupBytes → 16 ranks per chunk.
+///      Two chunks are processed per iteration so independent loads /
+///      lookups / packs can flow through separate execution ports
+///      (instruction-level parallelism). On NEON this pairs the 16-byte
+///      pack with another 16-byte pack so the second chunk's load is
+///      issued before the first chunk's pack finishes.
+///   2. SIMD pack via `pack_16_dna4_to_u32` — 32 bits packed per chunk.
+///   3. Merge into the encoder's partial-word accumulator. When the
+///      accumulator crosses the 32-letter boundary, a `uint64_t`
+///      storage unit is pushed onto `state.output_storage` (the
+///      batch's shared sequence buffer).
 ///
-/// The pack step is scalar but tight — `partial_word`/`partial_letters`
-/// stay register-resident across the whole encode call instead of
-/// being store-forwarded through the `state` struct on every byte.
-/// Pre-reserves the destination vector's capacity to a small constant
-/// so the per-record allocator churn is amortised across many records
-/// (the matrix runner reports throughput sized as bytes-of-input/sec —
-/// allocator dominance was the v1 bottleneck on short-read corpora).
-/// Spec §8.8 / §11.4 / Appendix G.
+/// The pack stage is fully SIMD; the only scalar work is the
+/// partial-word arithmetic in `merge_packed_chunk_into_partial`, which
+/// runs at most twice per 32 letters. The fallback path (any chunk
+/// containing the `0xFF` skip sentinel from the LUT, e.g. `'N'` in a
+/// dna4 stream) reverts to per-byte scalar folding for that one chunk.
+///
+/// The encoder writes through `state.output_storage`, which the FSM
+/// configures to point at the batch's shared sequence vector. There
+/// is no per-record allocation: the batch's vector grows
+/// geometrically across the whole batch.
+/// Spec §8.8 / §11.2 / §11.4 / Appendix G.
 template <typename storage_unit_t,
           std::size_t BitsPerChar,
           std::size_t LettersPerUnit>
@@ -292,61 +398,131 @@ HWY_INLINE void encode_body_chunk_dna4_simd(
     bioseq::io::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit>& state,
     const std::uint8_t* HWY_RESTRICT body_bytes,
     std::size_t body_size) {
-    const hn::ScalableTag<std::uint8_t> byte_tag;
+    static_assert(BitsPerChar == 2 && LettersPerUnit == 32 &&
+                  std::is_same_v<storage_unit_t, std::uint64_t>,
+                  "encode_body_chunk_dna4_simd is specialised for "
+                  "dna4-into-uint64 packing (2 bits/letter, 32 letters/word)");
+
+    using D = hn::FixedTag<std::uint8_t, 16>;
+    constexpr D d_byte;
+    constexpr std::size_t lanes = 16;
+
+    DEBUG_ASSERT(state.output_storage != nullptr,
+                 "encode_state::output_storage must be configured before encode_body_chunk_dna4_simd");
+
     static constexpr auto fallback_lut =
         bioseq::io::build_letter_to_rank_lut<seq::dna4>();
-    constexpr std::size_t kRankScratchCapacity = hn::MaxLanes(byte_tag);
-    HWY_ALIGN std::uint8_t rank_scratch[kRankScratchCapacity];
-
     static constexpr auto low_nibble_lut_array =
         bioseq::io::build_dna4_low_nibble_lut();
-    const auto letter_to_rank_table_vec = hn::LoadDup128(
-        byte_tag, low_nibble_lut_array.data());
-    const auto low_nibble_mask = hn::Set(byte_tag, std::uint8_t{0x0F});
 
-    // Hoist the partial-word state into locals so the inner loop's
-    // store-forwarding does not bottleneck on the encoder struct
+    const auto letter_to_rank_table_vec = hn::LoadDup128(
+        d_byte, low_nibble_lut_array.data());
+    const auto low_nibble_mask = hn::Set(d_byte, std::uint8_t{0x0F});
+
+    // Hoist partial-word state into locals so the inner loop's
+    // store-forwarding does not bottleneck on the encoder struct's
     // address. The writes back to `state` happen once at the end.
     storage_unit_t local_partial_word = state.partial_word;
     std::size_t local_partial_letters = state.partial_letters;
     std::size_t local_total_letters = state.total_letters;
+    auto* packed_words = state.output_storage;
 
-    // Pre-reserve a small tail buffer so the very first body line of a
-    // record doesn't trigger 3-4 reallocs on its way to the typical
-    // short-read length (~7 words for 200 bp). Cost: ~constant on
-    // already-warm allocators; benefit: amortises the small-vector
-    // malloc churn that dominates the v1 short-read throughput.
-    constexpr std::size_t kInitialReserveWords = 8;
-    if (state.packed_words.capacity() < kInitialReserveWords) {
-        state.packed_words.reserve(kInitialReserveWords);
-    }
-    // No `HWY_RESTRICT` here — `packed_words` aliases the same vector
-    // held by `state`, so promising non-overlap to the optimiser is
-    // a lie. The pointer-to-member is just a small CSE hint.
-    auto* packed_words = &state.packed_words;
-
-    const std::size_t lanes = hn::Lanes(byte_tag);
     std::size_t read_cursor = 0;
-    while (read_cursor + lanes <= body_size) {
-        const auto chunk_bytes = hn::LoadU(byte_tag, body_bytes + read_cursor);
-        const auto letter_ranks = dna4_lookup_ranks(
-            byte_tag, letter_to_rank_table_vec, low_nibble_mask, chunk_bytes);
-        hn::Store(letter_ranks, byte_tag, rank_scratch);
-        for (std::size_t rank_index = 0; rank_index < lanes; ++rank_index) {
-            const std::uint8_t letter_rank = rank_scratch[rank_index];
-            if (letter_rank == 0xFF) continue;
-            local_partial_word |= static_cast<storage_unit_t>(letter_rank)
-                                  << (BitsPerChar * local_partial_letters);
-            local_partial_letters += 1;
-            local_total_letters += 1;
-            if (local_partial_letters == LettersPerUnit) {
-                packed_words->push_back(local_partial_word);
-                local_partial_word = 0;
-                local_partial_letters = 0;
+
+    // Two-chunk unrolled fast path. Each chunk is 16 bytes / 32
+    // packed bits; two chunks per iter is 32 bytes / 64 packed bits =
+    // exactly one `uint64_t` storage unit when partial_letters == 0,
+    // which is the common case after a previous iteration that
+    // pushed a word.
+    while (read_cursor + 2 * lanes <= body_size) {
+        const auto chunk_a = hn::LoadU(d_byte, body_bytes + read_cursor);
+        const auto chunk_b = hn::LoadU(d_byte, body_bytes + read_cursor + lanes);
+
+        const auto low_a = hn::And(chunk_a, low_nibble_mask);
+        const auto low_b = hn::And(chunk_b, low_nibble_mask);
+
+        const auto ranks_a = hn::TableLookupBytes(letter_to_rank_table_vec, low_a);
+        const auto ranks_b = hn::TableLookupBytes(letter_to_rank_table_vec, low_b);
+
+        // Slow path: any chunk with the skip sentinel falls back to
+        // per-byte scalar fold. The branch is taken only on `'N'` /
+        // unknown bytes, which are absent from canonical dna4 corpora;
+        // mispredicting once per sentinel is negligible.
+        if (HWY_UNLIKELY(has_skip_sentinel(d_byte, ranks_a) ||
+                         has_skip_sentinel(d_byte, ranks_b))) {
+            for (std::size_t scalar_offset = 0;
+                 scalar_offset < 2 * lanes; ++scalar_offset) {
+                const std::uint8_t letter_rank =
+                    fallback_lut[body_bytes[read_cursor + scalar_offset]];
+                if (letter_rank != 0xFF) {
+                    local_partial_word |=
+                        static_cast<storage_unit_t>(letter_rank)
+                        << (BitsPerChar * local_partial_letters);
+                    local_partial_letters += 1;
+                    local_total_letters += 1;
+                    if (local_partial_letters == LettersPerUnit) {
+                        packed_words->push_back(local_partial_word);
+                        local_partial_word = 0;
+                        local_partial_letters = 0;
+                    }
+                }
             }
+            read_cursor += 2 * lanes;
+            continue;
+        }
+
+        const std::uint32_t packed_a = pack_16_dna4_to_u32(d_byte, ranks_a);
+        const std::uint32_t packed_b = pack_16_dna4_to_u32(d_byte, ranks_b);
+
+        merge_packed_chunk_into_partial(local_partial_word,
+                                        local_partial_letters,
+                                        packed_words,
+                                        packed_a);
+        merge_packed_chunk_into_partial(local_partial_word,
+                                        local_partial_letters,
+                                        packed_words,
+                                        packed_b);
+        local_total_letters += 2 * lanes;
+        read_cursor += 2 * lanes;
+    }
+
+    // Single-chunk path for the trailing 16-byte block.
+    if (read_cursor + lanes <= body_size) {
+        const auto chunk_bytes = hn::LoadU(d_byte, body_bytes + read_cursor);
+        const auto low_nibbles = hn::And(chunk_bytes, low_nibble_mask);
+        const auto letter_ranks = hn::TableLookupBytes(
+            letter_to_rank_table_vec, low_nibbles);
+
+        if (HWY_UNLIKELY(has_skip_sentinel(d_byte, letter_ranks))) {
+            for (std::size_t scalar_offset = 0;
+                 scalar_offset < lanes; ++scalar_offset) {
+                const std::uint8_t letter_rank =
+                    fallback_lut[body_bytes[read_cursor + scalar_offset]];
+                if (letter_rank != 0xFF) {
+                    local_partial_word |=
+                        static_cast<storage_unit_t>(letter_rank)
+                        << (BitsPerChar * local_partial_letters);
+                    local_partial_letters += 1;
+                    local_total_letters += 1;
+                    if (local_partial_letters == LettersPerUnit) {
+                        packed_words->push_back(local_partial_word);
+                        local_partial_word = 0;
+                        local_partial_letters = 0;
+                    }
+                }
+            }
+        } else {
+            const std::uint32_t packed = pack_16_dna4_to_u32(d_byte, letter_ranks);
+            merge_packed_chunk_into_partial(local_partial_word,
+                                            local_partial_letters,
+                                            packed_words,
+                                            packed);
+            local_total_letters += lanes;
         }
         read_cursor += lanes;
     }
+
+    // Scalar tail for the final 0..15 bytes.
     while (read_cursor < body_size) {
         const std::uint8_t letter_rank = fallback_lut[body_bytes[read_cursor]];
         if (letter_rank != 0xFF) {

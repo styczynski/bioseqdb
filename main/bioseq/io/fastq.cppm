@@ -4,6 +4,12 @@
  *        Highway-backed `\n` scans hidden behind the
  *        `simd::scan_first_byte` non-inline wrapper.
  *
+ * v2 storage model: header bytes flow directly into the batch's
+ * shared `_header_storage`, sequence words into `_seq_storage`,
+ * quality bytes into `_quality_storage`. The emit-record callback
+ * only records the per-record offset / padding tuple. Per-record
+ * heap allocation count: 0.
+ *
  * The state machine is the textbook FASTQ shape extended for the two
  * subtleties spec §10 calls out:
  *
@@ -30,6 +36,7 @@ module;
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -67,22 +74,36 @@ template <typename storage_unit_t,
           std::size_t LettersPerUnit>
 struct alignas(64) fastq_parser_state {
     fastq_progress progress = fastq_progress::AT_HEADER_SIGIL;
-    std::string header;
-    std::vector<std::uint8_t> quality;          // raw Phred+33 bytes
+    std::size_t header_start_offset = 0;
+    std::size_t quality_start_offset = 0;
     encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
     std::size_t sequence_letter_count = 0;      // populated when seq → '+' transition fires
+    /// Borrowed pointers to the batch's shared storage.
+    std::vector<char>* header_storage = nullptr;
+    std::vector<std::uint8_t>* quality_storage = nullptr;
 
     void reset_for_next_record() noexcept {
         progress = fastq_progress::AT_HEADER_SIGIL;
-        header.clear();
-        quality.clear();
         body.reset();
         sequence_letter_count = 0;
+    }
+
+    void attach_to_batch(std::vector<char>& header_buf,
+                         std::vector<storage_unit_t>& seq_buf,
+                         std::vector<std::uint8_t>& quality_buf) noexcept {
+        header_storage = &header_buf;
+        body.output_storage = &seq_buf;
+        quality_storage = &quality_buf;
     }
 };
 
 /// Parse one FASTQ record from the slab. Multi-line bodies and
 /// multi-line quality strings are both supported. Spec §10.
+///
+/// `emit_record` is invoked with
+/// `(header_start, header_size, seq_start, seq_word_count, padding,
+///   qual_start, qual_size)` — offsets into the batch's shared
+/// storage plus the encoder's `(word_count, padding)` summary.
 template <
     sequence_alphabet alphabet_t,
     typename storage_unit_t = std::uint64_t,
@@ -107,6 +128,13 @@ template <
     constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
     constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
 
+    DEBUG_ASSERT(state.header_storage != nullptr,
+                 "fastq_parser_state must be attached to a batch via attach_to_batch");
+    DEBUG_ASSERT(state.body.output_storage != nullptr,
+                 "fastq_parser_state must be attached to a batch via attach_to_batch");
+    DEBUG_ASSERT(state.quality_storage != nullptr,
+                 "fastq_parser_state must be attached to a batch via attach_to_batch");
+
     std::size_t parse_cursor = cursor;
 
     auto need_more = [&]() -> parse_step_result {
@@ -127,6 +155,10 @@ template <
                          static_cast<unsigned>(slab_data[parse_cursor]));
             return parse_step_result{parse_outcome::ABORT, parse_cursor};
         }
+        // Snapshot record-start offsets for emit_record.
+        state.header_start_offset = state.header_storage->size();
+        state.body.record_start_offset = state.body.output_storage->size();
+        state.quality_start_offset = state.quality_storage->size();
         parse_cursor += 1;
         state.progress = fastq_progress::IN_HEADER;
     }
@@ -137,9 +169,10 @@ template <
         const std::size_t newline_offset = simd::scan_first_byte(
             '\n', slab_data + parse_cursor, remaining_bytes);
         if (newline_offset == remaining_bytes) {
-            state.header.append(
+            state.header_storage->insert(
+                state.header_storage->end(),
                 reinterpret_cast<const char*>(slab_data + parse_cursor),
-                remaining_bytes);
+                reinterpret_cast<const char*>(slab_data + parse_cursor + remaining_bytes));
             parse_cursor = slab_size;
             return need_more();
         }
@@ -148,9 +181,10 @@ template <
             slab_data[parse_cursor + header_size - 1] == '\r') {
             header_size -= 1;
         }
-        state.header.append(
+        state.header_storage->insert(
+            state.header_storage->end(),
             reinterpret_cast<const char*>(slab_data + parse_cursor),
-            header_size);
+            reinterpret_cast<const char*>(slab_data + parse_cursor + header_size));
         parse_cursor += newline_offset + 1;
         state.progress = fastq_progress::AT_BODY_LINE_START;
     }
@@ -174,7 +208,6 @@ template <
                                  global_offset + parse_cursor);
                     return parse_step_result{parse_outcome::ABORT, parse_cursor};
                 }
-                state.quality.clear();
                 state.progress = fastq_progress::FINISHED_RECORD;
                 break;
             }
@@ -215,10 +248,12 @@ template <
     while (state.progress == fastq_progress::IN_QUAL_LINE) {
         if (parse_cursor >= slab_size) {
             if (is_eof) {
-                if (state.quality.size() < state.sequence_letter_count) {
+                const std::size_t qual_size = state.quality_storage->size()
+                                            - state.quality_start_offset;
+                if (qual_size < state.sequence_letter_count) {
                     emit_failure(failure_fn,
                                  "truncated FASTQ record (qual={}, seq={}) at file position {}",
-                                 state.quality.size(),
+                                 qual_size,
                                  state.sequence_letter_count,
                                  global_offset + parse_cursor);
                     return parse_step_result{parse_outcome::ABORT, parse_cursor};
@@ -239,15 +274,17 @@ template <
                     slab_data[parse_cursor + line_size - 1] == '\r') {
                     line_size -= 1;
                 }
-                state.quality.insert(
-                    state.quality.end(),
+                state.quality_storage->insert(
+                    state.quality_storage->end(),
                     slab_data + parse_cursor,
                     slab_data + parse_cursor + line_size);
                 parse_cursor += remaining_bytes;
-                if (state.quality.size() < state.sequence_letter_count) {
+                const std::size_t qual_size = state.quality_storage->size()
+                                            - state.quality_start_offset;
+                if (qual_size < state.sequence_letter_count) {
                     emit_failure(failure_fn,
                                  "truncated FASTQ record (qual={}, seq={}) at file position {}",
-                                 state.quality.size(),
+                                 qual_size,
                                  state.sequence_letter_count,
                                  global_offset + parse_cursor);
                     return parse_step_result{parse_outcome::ABORT, parse_cursor};
@@ -262,16 +299,18 @@ template <
             slab_data[parse_cursor + line_size - 1] == '\r') {
             line_size -= 1;
         }
-        state.quality.insert(
-            state.quality.end(),
+        state.quality_storage->insert(
+            state.quality_storage->end(),
             slab_data + parse_cursor,
             slab_data + parse_cursor + line_size);
         parse_cursor += newline_offset + 1;
-        if (state.quality.size() >= state.sequence_letter_count) {
-            if (state.quality.size() > state.sequence_letter_count) {
+        const std::size_t qual_size = state.quality_storage->size()
+                                    - state.quality_start_offset;
+        if (qual_size >= state.sequence_letter_count) {
+            if (qual_size > state.sequence_letter_count) {
                 emit_failure(failure_fn,
                              "FASTQ qual length mismatch (qual={}, seq={}) at file position {}",
-                             state.quality.size(),
+                             qual_size,
                              state.sequence_letter_count,
                              global_offset + parse_cursor);
                 return parse_step_result{parse_outcome::ABORT, parse_cursor};
@@ -283,13 +322,22 @@ template <
 
     // ----- Step 6: FINISHED_RECORD — finalise + emit -----
     if (state.progress == fastq_progress::FINISHED_RECORD) {
-        auto finalised = finalize_encode_state<storage_unit_t,
-                                               bits_per_char,
-                                               letters_per_unit>(state.body);
-        emit_record(std::move(state.header),
-                    std::move(finalised.first),
-                    finalised.second,
-                    std::move(state.quality));
+        const std::size_t header_size =
+            state.header_storage->size() - state.header_start_offset;
+        const std::size_t seq_start = state.body.record_start_offset;
+        const auto [seq_word_count, padding] =
+            finalize_encode_state<storage_unit_t,
+                                  bits_per_char,
+                                  letters_per_unit>(state.body);
+        const std::size_t qual_size = state.quality_storage->size()
+                                    - state.quality_start_offset;
+        emit_record(state.header_start_offset,
+                    header_size,
+                    seq_start,
+                    seq_word_count,
+                    padding,
+                    state.quality_start_offset,
+                    qual_size);
         state.reset_for_next_record();
         return parse_step_result{parse_outcome::COMPLETE, parse_cursor};
     }

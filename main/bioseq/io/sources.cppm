@@ -251,6 +251,28 @@ public:
 
     [[nodiscard]] std::string last_error_message() const { return _last_error_message; }
 
+    /// Direct view of the mapped region. Used by the zero-copy fast
+    /// path in `run_sync_pipeline_mmap_direct` (public_api.cppm) to
+    /// hand the parser the whole file in one contiguous span without
+    /// the slab refill / `make_room` memmove overhead. The leading
+    /// UTF-8 BOM is stripped from the returned `(ptr, size)` pair.
+    [[nodiscard]] std::pair<const std::uint8_t*, std::size_t>
+    direct_view() noexcept {
+        const std::uint8_t* base = static_cast<const std::uint8_t*>(_addr);
+        std::size_t total = _size;
+        if (!_bom_consumed && total >= 3 &&
+            base[0] == 0xEF && base[1] == 0xBB && base[2] == 0xBF) {
+            base += 3;
+            total -= 3;
+        }
+        _bom_consumed = true;
+        _cursor = _size;  // mark fully consumed
+        return {base, total};
+    }
+
+    /// Total mapped size, for reservation-hint purposes.
+    [[nodiscard]] std::size_t mapped_size() const noexcept { return _size; }
+
 private:
     void release() noexcept {
         if (_addr != nullptr) {

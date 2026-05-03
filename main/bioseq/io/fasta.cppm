@@ -6,6 +6,14 @@
  * record boundaries. The encoder pipeline lives in `bioseq_io.encoder`
  * + `bioseq_io.encoder_dispatch`; this module is the FSM glue.
  *
+ * v2 storage model: the FSM appends header bytes directly into the
+ * batch's shared `_header_storage`, and the encoder pushes packed
+ * sequence words directly into the batch's shared `_seq_storage`. The
+ * emit-record callback only records the per-record offset / padding
+ * triple. There is NO per-record `std::string` or `std::vector`
+ * allocation on this path — the batch's three backing vectors grow
+ * geometrically across thousands of records.
+ *
  * No `<hwy/highway.h>` here — the Highway primitives the FSM needs are
  * exposed as non-inline wrappers from `simd_kernels` so this module's
  * BMI doesn't pull Highway's per-target inline operator overloads
@@ -22,9 +30,11 @@ module;
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 export module bioseq_io.fasta;
 
@@ -74,13 +84,30 @@ template <typename storage_unit_t,
           std::size_t LettersPerUnit>
 struct alignas(64) fasta_parser_state {
     fasta_progress progress = fasta_progress::AT_HEADER_SIGIL;
-    std::string header;  // accumulated across refills
+    /// Offset into the batch's `_header_storage` where the current
+    /// record's header bytes start. Captured at the AT_HEADER_SIGIL →
+    /// IN_HEADER transition. Used by the emit_record callback.
+    std::size_t header_start_offset = 0;
     encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
+    /// Borrowed pointer to the batch's shared header buffer. The FSM
+    /// pushes header bytes into this directly to avoid the v1
+    /// per-record `std::string` allocation.
+    std::vector<char>* header_storage = nullptr;
 
     void reset_for_next_record() noexcept {
         progress = fasta_progress::AT_HEADER_SIGIL;
-        header.clear();
         body.reset();
+    }
+
+    /// Called by the FSM driver to point this state at the active
+    /// batch's storage. Re-bound at the top of every parse iteration
+    /// so a `make_room` slide on the producer side that triggers a
+    /// realloc on the batch's vector is observed before the next
+    /// emit-record.
+    void attach_to_batch(std::vector<char>& header_buf,
+                         std::vector<storage_unit_t>& seq_buf) noexcept {
+        header_storage = &header_buf;
+        body.output_storage = &seq_buf;
     }
 };
 
@@ -91,6 +118,11 @@ struct alignas(64) fasta_parser_state {
 ///
 /// `is_eof` is the producer's "no more bytes coming" flag for this
 /// slab; lets us emit the trailing record cleanly.
+///
+/// `emit_record` is invoked with
+/// `(header_start_offset, header_size, seq_start_offset, seq_word_count, padding)`
+/// — offsets into the batch's shared storage, plus the encoder's
+/// `(word_count, padding)` summary.
 template <
     sequence_alphabet alphabet_t,
     typename storage_unit_t = std::uint64_t,
@@ -114,6 +146,11 @@ template <
     constexpr std::size_t bits_per_char = sequence_traits::bits_per_char;
     constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
 
+    DEBUG_ASSERT(state.header_storage != nullptr,
+                 "fasta_parser_state must be attached to a batch via attach_to_batch");
+    DEBUG_ASSERT(state.body.output_storage != nullptr,
+                 "fasta_parser_state must be attached to a batch via attach_to_batch");
+
     // Step 1: AT_HEADER_SIGIL — expect '>' or EOF.
     if (state.progress == fasta_progress::AT_HEADER_SIGIL) {
         if (cursor >= slab_size) {
@@ -128,6 +165,9 @@ template <
                          static_cast<unsigned>(slab_data[cursor]));
             return parse_step_result{parse_outcome::ABORT, cursor};
         }
+        // Snapshot offsets at the start of the record for emit_record.
+        state.header_start_offset = state.header_storage->size();
+        state.body.record_start_offset = state.body.output_storage->size();
         cursor += 1;  // consume '>'
         state.progress = fasta_progress::IN_HEADER;
     }
@@ -138,16 +178,20 @@ template <
         const std::size_t newline_offset = simd::scan_first_byte(
             '\n', slab_data + cursor, remaining);
         if (newline_offset == remaining) {
-            state.header.append(reinterpret_cast<const char*>(slab_data + cursor),
-                                remaining);
+            state.header_storage->insert(
+                state.header_storage->end(),
+                reinterpret_cast<const char*>(slab_data + cursor),
+                reinterpret_cast<const char*>(slab_data + cursor + remaining));
             return parse_step_result{parse_outcome::INCOMPLETE, slab_size};
         }
         std::size_t header_size = newline_offset;
         if (header_size > 0 && slab_data[cursor + header_size - 1] == '\r') {
             header_size -= 1;
         }
-        state.header.append(reinterpret_cast<const char*>(slab_data + cursor),
-                            header_size);
+        state.header_storage->insert(
+            state.header_storage->end(),
+            reinterpret_cast<const char*>(slab_data + cursor),
+            reinterpret_cast<const char*>(slab_data + cursor + header_size));
         cursor += newline_offset + 1;  // consume '\n'
         state.progress = fasta_progress::AT_BODY_LINE_START;
     }
@@ -200,12 +244,18 @@ template <
 
     // Step 5: FINISHED_RECORD — finalise, emit, reset.
     if (state.progress == fasta_progress::FINISHED_RECORD) {
-        auto finalised = finalize_encode_state<storage_unit_t,
-                                               bits_per_char,
-                                               letters_per_unit>(state.body);
-        emit_record(std::move(state.header),
-                    std::move(finalised.first),
-                    finalised.second);
+        const std::size_t header_size =
+            state.header_storage->size() - state.header_start_offset;
+        const std::size_t seq_start = state.body.record_start_offset;
+        const auto [seq_word_count, padding] =
+            finalize_encode_state<storage_unit_t,
+                                  bits_per_char,
+                                  letters_per_unit>(state.body);
+        emit_record(state.header_start_offset,
+                    header_size,
+                    seq_start,
+                    seq_word_count,
+                    padding);
         state.reset_for_next_record();
         return parse_step_result{parse_outcome::COMPLETE, cursor};
     }
