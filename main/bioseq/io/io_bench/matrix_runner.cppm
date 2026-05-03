@@ -23,22 +23,32 @@ module;
 #include "common.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <random>
+#include <span>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 export module bioseq_io_bench.matrix_runner;
 
 import mlogging;
+import sequan_compat;
+import bioseq_sequences;
 import bench.scheduler.measurement;
 import bench.scheduler.parallel_runner;
 import bench.scheduler.progress_ui;
 import bench.scheduler.run_config;
 import bench.scheduler.options;
+import bioseq_io.public_api;
+import bioseq_io.options;
 import bioseq_io_bench.samples;
 import bioseq_io_bench.corpus;
 import bioseq_io_bench.runners;
@@ -291,6 +301,319 @@ inline void run_cell(IoFormat format,
     }
 
     delete_corpus(corpus);
+}
+
+// =====================================================================
+// Writer-side matrix
+// =====================================================================
+//
+// Mirrors `ReaderEntry` for the writer. Each entry holds a label and
+// a callable that takes (in-memory corpus, output path) and returns
+// a `WriteOutcome`. The matrix runner times every entry against the
+// pre-loaded corpus.
+
+using BenchAlphabet = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+
+struct WriterEntry {
+    std::string label;
+    std::string kind;             // "bioseq_writer" / "naive"
+    std::size_t worker_count = 0;
+    std::function<WriteOutcome(
+        const WriterCorpus<BenchAlphabet>&,
+        const std::string& /*output_path*/)> run;
+};
+
+/// Pre-defined writer inventory for FASTA dna4. Includes the bioseq
+/// writer (sync + 4-thread parallel) and the naive ofstream baseline.
+[[nodiscard]] inline std::vector<WriterEntry> default_fasta_writers() {
+    std::vector<WriterEntry> writers;
+    writers.push_back(WriterEntry{
+        .label = "bioseq_writer_sync_fasta",
+        .kind  = "bioseq_writer",
+        .worker_count = 0,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_bioseq_writer_sync_fasta(corpus, path);
+        },
+    });
+    writers.push_back(WriterEntry{
+        .label = "bioseq_writer_parallel4_fasta",
+        .kind  = "bioseq_writer",
+        .worker_count = 4,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_bioseq_writer_parallel_fasta(corpus, path, 4);
+        },
+    });
+    writers.push_back(WriterEntry{
+        .label = "bioseq_writer_parallel8_fasta",
+        .kind  = "bioseq_writer",
+        .worker_count = 8,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_bioseq_writer_parallel_fasta(corpus, path, 8);
+        },
+    });
+    writers.push_back(WriterEntry{
+        .label = "naive_ofstream_fasta",
+        .kind  = "naive",
+        .worker_count = 0,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_naive_ofstream_fasta(corpus, path);
+        },
+    });
+    return writers;
+}
+
+[[nodiscard]] inline std::vector<WriterEntry> default_fastq_writers() {
+    std::vector<WriterEntry> writers;
+    writers.push_back(WriterEntry{
+        .label = "bioseq_writer_sync_fastq",
+        .kind  = "bioseq_writer",
+        .worker_count = 0,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_bioseq_writer_sync_fastq(corpus, path);
+        },
+    });
+    writers.push_back(WriterEntry{
+        .label = "bioseq_writer_parallel4_fastq",
+        .kind  = "bioseq_writer",
+        .worker_count = 4,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_bioseq_writer_parallel_fastq(corpus, path, 4);
+        },
+    });
+    writers.push_back(WriterEntry{
+        .label = "bioseq_writer_parallel8_fastq",
+        .kind  = "bioseq_writer",
+        .worker_count = 8,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_bioseq_writer_parallel_fastq(corpus, path, 8);
+        },
+    });
+    writers.push_back(WriterEntry{
+        .label = "naive_ofstream_fastq",
+        .kind  = "naive",
+        .worker_count = 0,
+        .run = [](const WriterCorpus<BenchAlphabet>& corpus,
+                  const std::string& path) {
+            return run_naive_ofstream_fastq(corpus, path);
+        },
+    });
+    return writers;
+}
+
+/// Lighter sample budget for the writer matrix — the writer cycle is
+/// (slurp once + N timed write+roundtrip iterations). The 6 GiB FASTQ
+/// cell at 4 GB/s = 1.5 s per iteration plus ~1.2 s roundtrip read,
+/// so 1-2 samples is enough.
+[[nodiscard]] inline std::size_t writer_samples_per_cell(
+    IoLengthBucket bucket, bool fast_mode) noexcept {
+    if (fast_mode) {
+        switch (bucket) {
+            case IoLengthBucket::SHORT:             return 4;
+            case IoLengthBucket::MEDIUM:            return 3;
+            case IoLengthBucket::LONG:              return 2;
+            case IoLengthBucket::VERY_LONG:         return 1;
+            case IoLengthBucket::REAL_HUMAN_GENOME: return 2;
+            case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 1;
+        }
+        return 1;
+    }
+    switch (bucket) {
+        case IoLengthBucket::SHORT:             return 6;
+        case IoLengthBucket::MEDIUM:            return 4;
+        case IoLengthBucket::LONG:              return 3;
+        case IoLengthBucket::VERY_LONG:         return 2;
+        case IoLengthBucket::REAL_HUMAN_GENOME: return 3;
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 2;
+    }
+    return 1;
+}
+
+/// Validate the writer's output by re-reading it via the bioseq
+/// reader and counting records. Returns the observed record count.
+template <bool IsFasta>
+[[nodiscard]] inline std::size_t roundtrip_validate(
+    const std::string& output_path) {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+    constexpr auto file_type = IsFasta
+        ? sequence_io_file_type::FASTA
+        : sequence_io_file_type::FASTQ;
+    std::atomic<std::size_t> records{0};
+    auto handler_fn = [&records](batch_t&& batch) {
+        records.fetch_add(batch.size(), std::memory_order_relaxed);
+    };
+    auto failure_fn = [&output_path](std::string&& msg) {
+        loge("[bioseq_io_bench.matrix_runner.roundtrip] failure on '{}': {}",
+             output_path, msg);
+    };
+    bioseq::io::reader_options reader_opts;
+    reader_opts.io.gzip_auto_detect = false;
+    reader_opts.io.prefer_mmap      = true;
+    reader_opts.concurrency.worker_count = 0;
+    auto rc = read_sequences_file<seq::dna4, file_type>(
+        output_path, handler_fn, failure_fn, reader_opts);
+    if (!rc.has_value()) {
+        loge("[bioseq_io_bench.matrix_runner.roundtrip] reader error: {}",
+             rc.error());
+    }
+    return records.load(std::memory_order_relaxed);
+}
+
+/// Run one writer cell: load corpus once via reader, time every
+/// writer N times, validate roundtrip on the first iteration, append
+/// samples.
+inline void run_writer_cell(IoFormat format,
+                             IoLengthBucket length_bucket,
+                             std::span<const WriterEntry> writers,
+                             std::uint64_t corpus_seed,
+                             std::size_t samples_per_writer,
+                             std::string_view test_data_dir) {
+    CorpusHandle source;
+    if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME ||
+        length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
+        source = try_open_real_corpus(test_data_dir, format, length_bucket);
+        if (source.path.empty()) {
+            loge("[bioseq_io_bench.writer_matrix] real-data cell {} {} skipped "
+                 "— file missing under '{}'",
+                 io_format_name(format), io_length_bucket_name(length_bucket),
+                 test_data_dir);
+            return;
+        }
+    } else {
+        source = generate_corpus(format, length_bucket, corpus_seed);
+        if (source.bytes_on_disk == 0) {
+            loge("[bioseq_io_bench.writer_matrix] empty corpus for {} {} — skipping",
+                 io_format_name(format), io_length_bucket_name(length_bucket));
+            delete_corpus(source);
+            return;
+        }
+    }
+
+    // Slurp the corpus into memory ONCE outside the timed loop so the
+    // writer benches measure pure write throughput.
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    WriterCorpus<alphabet_config> corpus;
+    if (format == IoFormat::FASTA) {
+        corpus = slurp_corpus_dna4<true>(source.path);
+    } else {
+        corpus = slurp_corpus_dna4<false>(source.path);
+    }
+    if (corpus.batches.empty()) {
+        loge("[bioseq_io_bench.writer_matrix] slurp produced 0 batches "
+             "for {} {} — skipping cell",
+             io_format_name(format), io_length_bucket_name(length_bucket));
+        delete_corpus(source);
+        return;
+    }
+    JustLog("[bioseq_io_bench.writer_matrix] slurped {} batches / {} records "
+            "/ {} body letters for cell {} {}",
+            corpus.batches.size(), corpus.record_count,
+            corpus.total_body_letters,
+            io_format_name(format), io_length_bucket_name(length_bucket));
+
+    namespace fs = std::filesystem;
+    for (const auto& writer : writers) {
+        // Allocate a unique temp output path for this writer.
+        static std::atomic<std::uint64_t> writer_counter{0};
+        const fs::path temp_dir = fs::temp_directory_path();
+        const fs::path out_path = temp_dir / fmt::format(
+            "bioseq_io_writer_bench_{}_{}_{}_{}",
+            writer.label,
+            ::getpid(),
+            writer_counter.fetch_add(1, std::memory_order_relaxed),
+            std::random_device{}() & 0xFFFFFFu);
+        const std::string out_path_str = out_path.string();
+
+        // Warm-up + roundtrip validation run.
+        const auto warm_outcome = writer.run(corpus, out_path_str);
+        std::size_t roundtrip_count = 0;
+        if (warm_outcome.bytes_written > 0) {
+            roundtrip_count = (format == IoFormat::FASTA)
+                ? roundtrip_validate<true>(out_path_str)
+                : roundtrip_validate<false>(out_path_str);
+        }
+        if (roundtrip_count != corpus.record_count) {
+            loge("[bioseq_io_bench.writer_matrix] roundtrip mismatch for "
+                 "writer '{}': wrote {} records, read back {} (cell {} {})",
+                 writer.label, corpus.record_count, roundtrip_count,
+                 io_format_name(format), io_length_bucket_name(length_bucket));
+        }
+
+        WriterSample sample;
+        sample.writer_label = writer.label;
+        sample.writer_kind  = writer.kind;
+        sample.format       = format;
+        sample.length_bucket = length_bucket;
+        sample.worker_count  = writer.worker_count;
+        sample.format_label  = io_format_name(format);
+        sample.length_bucket_label = io_length_bucket_name(length_bucket);
+        sample.corpus_path  = source.path;
+        sample.bytes_written = warm_outcome.bytes_written;
+        sample.record_count  = corpus.record_count;
+        sample.roundtrip_record_count = roundtrip_count;
+
+        const auto outcome = bioseq::bench_scheduler::collect_timed_samples(
+            samples_per_writer, [&]() {
+                const auto run_outcome = writer.run(corpus, out_path_str);
+                (void)run_outcome;
+            });
+        sample.sample_latencies_ns = std::move(outcome.sample_latencies_ns);
+        sample.sample_peak_rss_delta_bytes =
+            std::move(outcome.sample_peak_rss_delta_bytes);
+
+        io_bench_writer_samples().push_back(std::move(sample));
+
+        std::error_code ec;
+        fs::remove(out_path, ec);
+    }
+
+    delete_corpus(source);
+}
+
+inline void run_writer_bench_matrix(bool fast_mode,
+                                     std::uint64_t base_seed,
+                                     std::string_view test_data_dir) {
+    constexpr std::array<IoFormat, 2> formats{
+        IoFormat::FASTA, IoFormat::FASTQ};
+    constexpr std::array<IoLengthBucket, 6> length_buckets{
+        IoLengthBucket::SHORT, IoLengthBucket::MEDIUM,
+        IoLengthBucket::LONG,  IoLengthBucket::VERY_LONG,
+        IoLengthBucket::REAL_HUMAN_GENOME,
+        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB};
+
+    const auto fasta_writers = default_fasta_writers();
+    const auto fastq_writers = default_fastq_writers();
+
+    JustLog("[bioseq_io_bench.writer_matrix] starting writer matrix sweep "
+            "(fast_mode={})",
+            fast_mode ? "true" : "false");
+
+    std::size_t cell_index = 0;
+    for (auto format : formats) {
+        const auto& writers = (format == IoFormat::FASTA)
+            ? fasta_writers : fastq_writers;
+        for (auto length_bucket : length_buckets) {
+            const std::size_t samples_per_writer =
+                writer_samples_per_cell(length_bucket, fast_mode);
+            const std::uint64_t cell_seed = base_seed
+                + cell_index * 0xC2B2AE3D27D4EB4Full;
+            run_writer_cell(format, length_bucket,
+                             std::span<const WriterEntry>{writers},
+                             cell_seed, samples_per_writer,
+                             test_data_dir);
+            cell_index += 1;
+        }
+    }
+    JustLog("[bioseq_io_bench.writer_matrix] sweep complete: {} samples accumulated",
+            io_bench_writer_samples().size());
 }
 
 /// Walk every (format × length_bucket) cell, dispatch through the

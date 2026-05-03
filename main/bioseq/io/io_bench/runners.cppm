@@ -27,12 +27,16 @@ module;
 
 #include <kseq++/seqio.hpp>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 export module bioseq_io_bench.runners;
@@ -42,6 +46,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_io.public_api;
 import bioseq_io.options;
+import bioseq_io.writer;
 
 export {
 
@@ -284,6 +289,302 @@ template <bool IsFasta>
         }
     }
     return outcome;
+}
+
+// =====================================================================
+// Writer side
+// =====================================================================
+//
+// The writer bench follows the same shape as the reader bench: each
+// runner takes an input corpus and an output path, formats the bytes,
+// and returns a `WriteOutcome`. The corpus is loaded once into memory
+// (a vector of sequence_batch) outside the timed window so the writer
+// benches measure pure write throughput.
+
+/// Per-batch corpus the writer benches loop over. Owns the parsed
+/// records so the timed loop touches only the writer.
+template <typename C>
+struct WriterCorpus {
+    std::vector<bioseq::io::sequence_batch<C>> batches;
+    std::size_t record_count = 0;
+    std::size_t total_body_letters = 0;
+};
+
+/// Outcome of one writer iteration. Mirrors `RunOutcome` for the
+/// reader side: `record_count` carries the input record count
+/// (sanity-checked across runs), `total_body_bytes` carries the
+/// on-disk file size after the flush completed.
+struct WriteOutcome {
+    std::size_t record_count = 0;
+    std::size_t bytes_written = 0;
+};
+
+/// Slurp a file's records into memory once via the bioseq reader.
+/// Used by every writer runner as a fixed input corpus.
+template <bool IsFasta>
+[[nodiscard]] inline WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>
+slurp_corpus_dna4(const std::string& path) {
+    using namespace bioseq::io;
+    using alphabet_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using batch_t = sequence_batch<alphabet_config>;
+    constexpr auto file_type = IsFasta
+        ? sequence_io_file_type::FASTA
+        : sequence_io_file_type::FASTQ;
+
+    WriterCorpus<alphabet_config> corpus;
+    auto handler_fn = [&](batch_t&& batch) {
+        const std::size_t n_records = batch.size();
+        for (std::size_t record_index = 0; record_index < n_records;
+             ++record_index) {
+            const auto seq_view = batch.sequence(record_index);
+            corpus.total_body_letters += packed_letter_count(seq_view);
+        }
+        corpus.record_count += n_records;
+        corpus.batches.push_back(std::move(batch));
+    };
+    auto failure_fn = [&path](std::string&& msg) {
+        loge("[bioseq_io_bench.runners.slurp] failure on '{}': {}",
+             path, msg);
+    };
+    bioseq::io::reader_options reader_opts;
+    reader_opts.io.gzip_auto_detect = false;
+    reader_opts.io.prefer_mmap      = true;
+    reader_opts.concurrency.worker_count = 0;
+    auto rc = read_sequences_file<seq::dna4, file_type>(
+        path, handler_fn, failure_fn, reader_opts);
+    if (!rc.has_value()) {
+        loge("[bioseq_io_bench.runners.slurp] read_sequences_file error: {}",
+             rc.error());
+    }
+    return corpus;
+}
+
+namespace detail {
+
+/// Single-thread writer runner. The fixed corpus is iterated
+/// sequentially through `write_batch`; the writer's atomic-offset
+/// pwrite path runs uncontended.
+template <bool IsFasta>
+[[nodiscard]] inline WriteOutcome run_bioseq_writer_sync_with_options(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path,
+    const bioseq::io::writer_options& opts) {
+    using namespace bioseq::io;
+    constexpr auto file_type = IsFasta
+        ? sequence_io_file_type::FASTA
+        : sequence_io_file_type::FASTQ;
+    auto writer_or_err =
+        sequence_writer<seq::dna4, file_type>::open(output_path, opts);
+    if (!writer_or_err) {
+        loge("[bioseq_io_bench.runners.writer_sync] open('{}') failed: {}",
+             output_path, writer_or_err.error());
+        return {};
+    }
+    auto& writer = *writer_or_err;
+    for (const auto& batch : corpus.batches) {
+        if (!writer.write_batch(batch)) {
+            loge("[bioseq_io_bench.runners.writer_sync] write_batch failed");
+            (void)writer.close();
+            return {};
+        }
+    }
+    auto close_outcome = writer.close();
+    if (!close_outcome) {
+        loge("[bioseq_io_bench.runners.writer_sync] close failed: {}",
+             close_outcome.error());
+        return {};
+    }
+    WriteOutcome outcome;
+    outcome.record_count = corpus.record_count;
+    std::error_code ec;
+    outcome.bytes_written = std::filesystem::file_size(output_path, ec);
+    return outcome;
+}
+
+/// Multi-thread writer runner. The fixed corpus is sharded across
+/// `thread_count` threads; each thread calls `write_batch` on its
+/// shard concurrently. The writer's per-thread chunk + atomic-offset
+/// pwrite path keeps the syscalls disjoint.
+template <bool IsFasta>
+[[nodiscard]] inline WriteOutcome run_bioseq_writer_parallel_with_options(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path,
+    const bioseq::io::writer_options& opts,
+    std::size_t thread_count) {
+    using namespace bioseq::io;
+    constexpr auto file_type = IsFasta
+        ? sequence_io_file_type::FASTA
+        : sequence_io_file_type::FASTQ;
+    auto writer_or_err =
+        sequence_writer<seq::dna4, file_type>::open(output_path, opts);
+    if (!writer_or_err) {
+        loge("[bioseq_io_bench.runners.writer_parallel] open('{}') failed: {}",
+             output_path, writer_or_err.error());
+        return {};
+    }
+    auto& writer = *writer_or_err;
+    const std::size_t batches_total = corpus.batches.size();
+    if (thread_count == 0) thread_count = 1;
+    if (thread_count > batches_total && batches_total > 0) {
+        thread_count = batches_total;
+    }
+    std::atomic<bool> any_failure{false};
+
+    auto run_shard = [&](std::size_t shard_index) {
+        const std::size_t shard_start =
+            (batches_total * shard_index) / thread_count;
+        const std::size_t shard_end =
+            (batches_total * (shard_index + 1)) / thread_count;
+        for (std::size_t batch_index = shard_start; batch_index < shard_end;
+             ++batch_index) {
+            if (!writer.write_batch(corpus.batches[batch_index])) {
+                any_failure.store(true, std::memory_order_relaxed);
+                return;
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    for (std::size_t shard_index = 0; shard_index < thread_count;
+         ++shard_index) {
+        threads.emplace_back(run_shard, shard_index);
+    }
+    for (auto& thread : threads) thread.join();
+
+    auto close_outcome = writer.close();
+    if (any_failure.load(std::memory_order_relaxed) || !close_outcome) {
+        loge("[bioseq_io_bench.runners.writer_parallel] write/close failed");
+        if (!close_outcome) {
+            loge("[bioseq_io_bench.runners.writer_parallel] close error: {}",
+                 close_outcome.error());
+        }
+        return {};
+    }
+    WriteOutcome outcome;
+    outcome.record_count = corpus.record_count;
+    std::error_code ec;
+    outcome.bytes_written = std::filesystem::file_size(output_path, ec);
+    return outcome;
+}
+
+}  // namespace detail
+
+[[nodiscard]] inline WriteOutcome run_bioseq_writer_sync_fasta(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path) {
+    bioseq::io::writer_options opts;
+    return detail::run_bioseq_writer_sync_with_options<true>(
+        corpus, output_path, opts);
+}
+
+[[nodiscard]] inline WriteOutcome run_bioseq_writer_sync_fastq(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path) {
+    bioseq::io::writer_options opts;
+    return detail::run_bioseq_writer_sync_with_options<false>(
+        corpus, output_path, opts);
+}
+
+[[nodiscard]] inline WriteOutcome run_bioseq_writer_parallel_fasta(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path,
+    std::size_t thread_count) {
+    bioseq::io::writer_options opts;
+    return detail::run_bioseq_writer_parallel_with_options<true>(
+        corpus, output_path, opts, thread_count);
+}
+
+[[nodiscard]] inline WriteOutcome run_bioseq_writer_parallel_fastq(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path,
+    std::size_t thread_count) {
+    bioseq::io::writer_options opts;
+    return detail::run_bioseq_writer_parallel_with_options<false>(
+        corpus, output_path, opts, thread_count);
+}
+
+/// Naive `std::ofstream` writer. The "every other writer is at least
+/// this fast" floor — single-threaded, byte-by-byte ASCII emission
+/// straight from the in-memory corpus. Mirrors `run_naive_ifstream`
+/// for the reader side. Decodes the packed sequence the same way the
+/// bioseq writer does (so input data is identical) but uses
+/// `std::ofstream::write` for output.
+template <bool IsFasta>
+[[nodiscard]] inline WriteOutcome run_naive_ofstream_with_corpus(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path) {
+    std::ofstream out(output_path, std::ios::binary);
+    if (!out) {
+        loge("[bioseq_io_bench.runners.naive_writer] failed to open '{}'",
+             output_path);
+        return {};
+    }
+    constexpr std::array<char, 4> rank_to_ascii{'A', 'C', 'G', 'T'};
+    std::string scratch;
+    scratch.reserve(64 * 1024);
+    constexpr std::size_t fasta_wrap = 80;
+    for (const auto& batch : corpus.batches) {
+        const std::size_t n_records = batch.size();
+        for (std::size_t record_index = 0; record_index < n_records;
+             ++record_index) {
+            scratch.clear();
+            const auto seq_view = batch.sequence(record_index);
+            const auto header_view = batch.header(record_index);
+            const std::size_t total_letters =
+                seq_view.size() * 32 - seq_view.padding();
+            scratch.push_back(IsFasta ? '>' : '@');
+            scratch.append(header_view);
+            scratch.push_back('\n');
+            std::size_t in_line_count = 0;
+            for (std::size_t letter_index = 0; letter_index < total_letters;
+                 ++letter_index) {
+                const std::uint64_t word = seq_view.data()[letter_index / 32];
+                const std::size_t letter_in_word = letter_index % 32;
+                const std::uint8_t rank = static_cast<std::uint8_t>(
+                    (word >> (2 * letter_in_word)) & 0x3u);
+                scratch.push_back(rank_to_ascii[rank]);
+                if (IsFasta && fasta_wrap > 0) {
+                    ++in_line_count;
+                    if (in_line_count == fasta_wrap &&
+                        letter_index + 1 < total_letters) {
+                        scratch.push_back('\n');
+                        in_line_count = 0;
+                    }
+                }
+            }
+            if constexpr (!IsFasta) {
+                scratch.push_back('\n');
+                scratch.push_back('+');
+                scratch.push_back('\n');
+                const auto quality_view = batch.quality(record_index);
+                scratch.append(reinterpret_cast<const char*>(quality_view.data()),
+                                quality_view.size());
+            }
+            scratch.push_back('\n');
+            out.write(scratch.data(),
+                      static_cast<std::streamsize>(scratch.size()));
+        }
+    }
+    out.flush();
+    out.close();
+    WriteOutcome outcome;
+    outcome.record_count = corpus.record_count;
+    std::error_code ec;
+    outcome.bytes_written = std::filesystem::file_size(output_path, ec);
+    return outcome;
+}
+
+[[nodiscard]] inline WriteOutcome run_naive_ofstream_fasta(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path) {
+    return run_naive_ofstream_with_corpus<true>(corpus, output_path);
+}
+
+[[nodiscard]] inline WriteOutcome run_naive_ofstream_fastq(
+    const WriterCorpus<sequence_custom_alphabet<seq::dna4, std::uint64_t>>& corpus,
+    const std::string& output_path) {
+    return run_naive_ofstream_with_corpus<false>(corpus, output_path);
 }
 
 }  // namespace bioseq::io_bench

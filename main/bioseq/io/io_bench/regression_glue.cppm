@@ -132,6 +132,45 @@ using IoCellTable = std::map<IoCellKey,
     return out;
 }
 
+/// Compute throughput in MiB/s from a single WriterSample.
+[[nodiscard]] inline std::optional<double> compute_writer_throughput_mibs(
+    const WriterSample& sample,
+    double latency_ns_value) noexcept {
+    if (latency_ns_value <= 0.0) return std::nullopt;
+    if (sample.bytes_written == 0) return std::nullopt;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    constexpr double kNsPerSec = 1e9;
+    const double bytes_double = static_cast<double>(sample.bytes_written);
+    return (bytes_double / kMiB) * (kNsPerSec / latency_ns_value);
+}
+
+/// Merge `WriterSample` rows into a cell table the regression engine
+/// can consume. The writer label becomes the algorithm key; the cell
+/// key is `(format, length_bucket)`. The same cell may end up holding
+/// both reader and writer entries — the writer rules name distinct
+/// algorithm labels (`bioseq_writer_*`, `naive_ofstream_*`) so the
+/// reader rules' lookups never collide.
+inline void merge_writer_samples_into(
+    IoCellTable& cells,
+    std::span<const WriterSample> samples) {
+    for (const auto& sample : samples) {
+        const IoCellKey key{sample.format, sample.length_bucket};
+        auto& cell = cells[key][sample.writer_label];
+        for (const double latency_ns : sample.sample_latencies_ns) {
+            const auto throughput =
+                compute_writer_throughput_mibs(sample, latency_ns);
+            if (throughput.has_value()) {
+                cell.throughput_mibs_sum += *throughput;
+                cell.throughput_mibs_count += 1;
+            }
+        }
+        for (const double rss_delta : sample.sample_peak_rss_delta_bytes) {
+            cell.rss_delta_bytes_sum += rss_delta;
+            cell.rss_delta_bytes_count += 1;
+        }
+    }
+}
+
 /**
  * @brief Build the metric lookup for the regression engine.
  *
@@ -216,6 +255,17 @@ make_io_cell_label_fn(std::span<const ReaderSample> samples) {
     cfg.tolerance_pct = 150.0;
     cfg.baselines["kseqpp"] = "kseqpp";
     cfg.baselines["naive"]  = "naive_ifstream";
+    // The writer side uses different algorithm labels; the reader's
+    // `naive` baseline is `naive_ifstream` (a reader). For writer
+    // rules we need `naive_ofstream_fasta` / `_fastq` — but the rule
+    // lookup is per-(cell, algorithm) and the cell key includes
+    // format, so a single `naive` key still works at lookup time
+    // because only the writer rule referencing the FASTA cell
+    // resolves `naive` against `naive_ofstream_fasta` (provided we
+    // override the baseline map for writer rules). We keep `naive`
+    // for the reader rules and add format-specific writer baselines.
+    cfg.baselines["naive_writer_fasta"] = "naive_ofstream_fasta";
+    cfg.baselines["naive_writer_fastq"] = "naive_ofstream_fastq";
 
     auto add_rule = [&](
         std::string_view reader_label, std::string_view baseline_key,
@@ -247,6 +297,24 @@ make_io_cell_label_fn(std::span<const ReaderSample> samples) {
     add_rule("bioseq_io_mmap_fastq",   "naive",
              "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
              "bioseq_io_mmap FASTQ vs naive_ifstream sanity check.");
+    add_rule("bioseq_writer_sync_fasta",       "naive_writer_fasta",
+             "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
+             "bioseq_writer_sync FASTA sanity floor vs naive_ofstream.");
+    add_rule("bioseq_writer_parallel4_fasta",  "naive_writer_fasta",
+             "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
+             "bioseq_writer_parallel4 FASTA must beat naive_ofstream.");
+    add_rule("bioseq_writer_parallel8_fasta",  "naive_writer_fasta",
+             "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
+             "bioseq_writer_parallel8 FASTA must beat naive_ofstream.");
+    add_rule("bioseq_writer_sync_fastq",       "naive_writer_fastq",
+             "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
+             "bioseq_writer_sync FASTQ sanity floor vs naive_ofstream.");
+    add_rule("bioseq_writer_parallel4_fastq",  "naive_writer_fastq",
+             "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
+             "bioseq_writer_parallel4 FASTQ must beat naive_ofstream.");
+    add_rule("bioseq_writer_parallel8_fastq",  "naive_writer_fastq",
+             "throughput_mibs", CompareKind::RELATIVE, RuleKind::EQUAL_TO, 0.0,
+             "bioseq_writer_parallel8 FASTQ must beat naive_ofstream.");
     return cfg;
 }
 

@@ -38,3 +38,14 @@ TEST_CASE("IO bench matrix — every (format × length × reader) cell",
         /*test_data_dir=*/std::string_view{BIOSEQ_IO_TEST_DATA_DIR});
     REQUIRE(!bioseq::io_bench::io_bench_samples().empty());
 }
+
+TEST_CASE("IO bench writer matrix — every (format × length × writer) cell",
+          "[io-bench-writer-matrix]") {
+    const bool fast_mode =
+        bioseq::bench_scheduler::core_run_config().fast_mode;
+    bioseq::io_bench::run_writer_bench_matrix(
+        fast_mode,
+        /*base_seed=*/1234567890ull,
+        /*test_data_dir=*/std::string_view{BIOSEQ_IO_TEST_DATA_DIR});
+    REQUIRE(!bioseq::io_bench::io_bench_writer_samples().empty());
+}

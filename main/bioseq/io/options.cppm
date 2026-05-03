@@ -97,4 +97,61 @@ struct reader_options {
 
 inline constexpr reader_options default_reader_options{};
 
+/// Knobs for the FASTA / FASTQ writer. The writer's hot path is
+/// (a) decode packed sequence words → ASCII, (b) inject newlines for
+/// FASTA wrap, (c) pwrite the per-thread output chunk to the file's
+/// disjoint range claimed via an atomic offset. The defaults are
+/// calibrated for the bench's largest cells (234 MiB human FASTA,
+/// 6 GiB SRR FASTQ).
+struct writer_options {
+    /// Per-line width for FASTA bodies (letters before a `\n`). 0 = no
+    /// wrapping (one giant line per record). Default 0 = no wrapping
+    /// for maximum throughput; the FASTA spec accepts arbitrary line
+    /// lengths and bioseq's reader handles single-line bodies fine.
+    /// Set to 80 for kseq++-canonical output.
+    std::size_t fasta_line_width = 0;
+
+    /// Size (in bytes) of one producer-thread's output chunk. The
+    /// chunk fills with formatted bytes; once it crosses
+    /// `flush_threshold_bytes` the thread reserves a disjoint file
+    /// range via atomic-fetch-add and pwrites the chunk in one
+    /// syscall. 64 MiB strikes a balance between syscall amortisation
+    /// (only ~96 syscalls for the 6 GiB FASTQ cell) and per-thread
+    /// memory footprint (with 8 producer threads, peak working set
+    /// is 512 MiB).
+    std::size_t chunk_capacity_bytes = 64 * 1024 * 1024;
+
+    /// Threshold at which a producer thread flushes its chunk. Below
+    /// the chunk capacity by a small margin so that a single record's
+    /// formatting can't overrun the chunk in one write call.
+    std::size_t flush_threshold_bytes = 64 * 1024 * 1024 - 64 * 1024;
+
+    /// When the format is FASTQ, refuse to write a record whose
+    /// quality span length doesn't match the sequence's letter count.
+    /// Default false: real-world FASTQ corpora (e.g. SRR datasets)
+    /// occasionally contain records where the qual string is one byte
+    /// off from the sequence; the writer truncates qual to the
+    /// sequence's letter count instead of aborting. Set true to
+    /// enforce strict matching.
+    bool strict_fastq_quality_length = false;
+
+    /// If true, a record larger than `chunk_capacity_bytes` is
+    /// streamed in pieces (multiple pwrite calls per record). If
+    /// false, oversize records bypass the chunk entirely and pwrite
+    /// directly. Default true keeps thread-local behaviour predictable.
+    bool stream_oversize_records = true;
+
+    /// Pre-allocate the output file to this size and mmap it for
+    /// writing. The writer's per-thread chunks then commit via
+    /// userspace memcpy into the mapped region (no kernel pwrite
+    /// memcpy). After close, the file is `ftruncate`d down to the
+    /// actual bytes written. Set to 0 (default) to use the
+    /// pwrite-based sink (no size-hint required). When non-zero, the
+    /// hint MUST be a generous upper bound on the output file size
+    /// — exceeding it surfaces as a writer error at flush time.
+    std::size_t output_capacity_hint = 0;
+};
+
+inline constexpr writer_options default_writer_options{};
+
 }  // namespace bioseq::io

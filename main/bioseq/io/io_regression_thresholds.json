@@ -45,6 +45,48 @@
       "baseline":  "naive",
       "rule":      "equal_to",
       "comment":   "bioseq_io_mmap FASTQ vs naive_ifstream sanity check."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_writer_sync_fasta",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_writer_sync FASTA must stay within 2.5x of naive_ofstream throughput. Sanity floor; the absolute >=4 GB/s target is checked via the writer matrix."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_writer_parallel4_fasta",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_writer_parallel4 FASTA — parallel writer on 4 threads vs naive_ofstream baseline."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_writer_parallel8_fasta",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_writer_parallel8 FASTA — parallel writer on 8 threads vs naive_ofstream baseline."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_writer_sync_fastq",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_writer_sync FASTQ sanity check vs naive_ofstream."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_writer_parallel4_fastq",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_writer_parallel4 FASTQ — parallel writer on 4 threads vs naive_ofstream baseline."
+    },
+    {
+      "metric":    "throughput_mibs",
+      "algorithm": "bioseq_writer_parallel8_fastq",
+      "baseline":  "naive",
+      "rule":      "equal_to",
+      "comment":   "bioseq_writer_parallel8 FASTQ — parallel writer on 8 threads vs naive_ofstream baseline."
     }
   ],
 

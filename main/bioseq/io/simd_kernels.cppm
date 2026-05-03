@@ -1042,6 +1042,217 @@ HWY_INLINE void encode_body_chunk_dna4_simd(
     state.total_letters = local_total_letters;
 }
 
+// =====================================================================
+// dna4 SIMD decoder — packed uint64 → ASCII
+// =====================================================================
+//
+// Inverse of `pack_16_dna4_to_u32`: takes packed-rank words (2 bits per
+// letter, 32 letters per uint64) and emits ASCII bytes (`A`/`C`/`G`/`T`).
+// Used by the FASTA / FASTQ writer to materialise the on-disk body.
+//
+// Per word the decoder needs to:
+//   1. Spread the 32 ranks (2 bits each) across 32 byte lanes — i.e.
+//      take 8 source bytes and emit 32 destination bytes, where output
+//      byte 4*b + r holds (input_byte[b] >> (2*r)) & 0x03.
+//   2. Map each rank in [0..3] to its ASCII letter via a 4-entry LUT
+//      replicated to fill the 16-byte tag (ranks 4..15 are unreachable
+//      so the table's tail bytes are don't-care).
+//
+// The first stage is the interesting one. We use four `Shr` + `And`
+// operations per 16-byte half (= 64 letters per call), then interleave
+// four 16-byte vectors into 64 contiguous bytes via two
+// `InterleaveLower`/`InterleaveUpper` rounds. On NEON (16-byte tag) the
+// pipeline is ~10 SIMD ops per 64 ASCII bytes — bandwidth-bound on the
+// dst stream rather than compute-bound.
+//
+// The decoder is specialised for the canonical (dna4, uint64_t, 2 bits,
+// 32 letters/word) shape that the reader produces. Other shapes go
+// through the scalar path.
+
+/// Build the 16-entry rank → ASCII table for dna4 — indexed by the
+/// 4 ranks defined in `seqan3::dna4` (A=0, C=1, G=2, T=3); the trailing
+/// 12 entries are 0 (unreachable when input ranks are well-formed).
+[[nodiscard]] consteval std::array<std::uint8_t, 16>
+build_dna4_rank_to_ascii_lut() {
+    std::array<std::uint8_t, 16> lut{};
+    lut[0] = static_cast<std::uint8_t>('A');
+    lut[1] = static_cast<std::uint8_t>('C');
+    lut[2] = static_cast<std::uint8_t>('G');
+    lut[3] = static_cast<std::uint8_t>('T');
+    return lut;
+}
+
+/// Decode 16 packed dna4 source bytes (= 2 packed words = 64 letters)
+/// into 64 ASCII bytes via SIMD spread + LUT.
+///
+/// Strategy: for each input byte b, we emit four output bytes at
+/// indices 4b, 4b+1, 4b+2, 4b+3 holding ranks
+///   (b >> 0) & 3, (b >> 2) & 3, (b >> 4) & 3, (b >> 6) & 3.
+///
+/// We compute four 16-byte vectors `r0` (low bits), `r1`, `r2`, `r3`
+/// (high bits) by per-lane right-shift + mask. Interleaving them
+/// pairwise with `InterleaveLower`/`InterleaveUpper` weaves the bytes
+/// into the desired output order (output byte 4b+0 in lane 0 of low
+/// half, output byte 4b+1 in lane 1, etc.).
+///
+/// Then a single `TableLookupBytes` against the broadcast 16-entry
+/// rank-to-ASCII LUT converts the 16 ranks per chunk into ASCII.
+template <class D>
+HWY_INLINE void unpack_16_bytes_to_64_ascii(
+    D d_byte,
+    hn::Vec<D> packed_bytes,
+    hn::Vec<D> rank_to_ascii_lut,
+    std::uint8_t* HWY_RESTRICT dst) noexcept {
+    const auto mask_low_2 = hn::Set(d_byte, std::uint8_t{0x03});
+
+    // r0..r3: per-lane ranks at positions 0, 1, 2, 3 within each input
+    // byte. Output byte 4b+r holds rank r of input byte b.
+    const auto r0 = hn::And(packed_bytes, mask_low_2);
+    const auto r1 = hn::And(hn::ShiftRight<2>(packed_bytes), mask_low_2);
+    const auto r2 = hn::And(hn::ShiftRight<4>(packed_bytes), mask_low_2);
+    const auto r3 = hn::And(hn::ShiftRight<6>(packed_bytes), mask_low_2);
+
+    // Interleave (r0, r1) lane-wise and (r2, r3) lane-wise:
+    //   InterleaveLower(r0, r1) = [r0[0], r1[0], r0[1], r1[1], ..., r0[7], r1[7]]
+    // Then interleave the (r0,r1) and (r2,r3) results pairwise on the
+    // 16-bit-grouped view to produce
+    //   [r0[0], r1[0], r2[0], r3[0], r0[1], r1[1], r2[1], r3[1], ...]
+    using d_u16_t = hn::Repartition<std::uint16_t, D>;
+    d_u16_t d_u16;
+
+    const auto r01_lo = hn::InterleaveLower(d_byte, r0, r1);
+    const auto r01_hi = hn::InterleaveUpper(d_byte, r0, r1);
+    const auto r23_lo = hn::InterleaveLower(d_byte, r2, r3);
+    const auto r23_hi = hn::InterleaveUpper(d_byte, r2, r3);
+
+    const auto chunk0 = hn::BitCast(
+        d_byte,
+        hn::InterleaveLower(d_u16,
+                             hn::BitCast(d_u16, r01_lo),
+                             hn::BitCast(d_u16, r23_lo)));
+    const auto chunk1 = hn::BitCast(
+        d_byte,
+        hn::InterleaveUpper(d_u16,
+                             hn::BitCast(d_u16, r01_lo),
+                             hn::BitCast(d_u16, r23_lo)));
+    const auto chunk2 = hn::BitCast(
+        d_byte,
+        hn::InterleaveLower(d_u16,
+                             hn::BitCast(d_u16, r01_hi),
+                             hn::BitCast(d_u16, r23_hi)));
+    const auto chunk3 = hn::BitCast(
+        d_byte,
+        hn::InterleaveUpper(d_u16,
+                             hn::BitCast(d_u16, r01_hi),
+                             hn::BitCast(d_u16, r23_hi)));
+
+    const auto ascii0 = hn::TableLookupBytes(rank_to_ascii_lut, chunk0);
+    const auto ascii1 = hn::TableLookupBytes(rank_to_ascii_lut, chunk1);
+    const auto ascii2 = hn::TableLookupBytes(rank_to_ascii_lut, chunk2);
+    const auto ascii3 = hn::TableLookupBytes(rank_to_ascii_lut, chunk3);
+
+    constexpr std::size_t lanes_per_chunk = 16;
+    hn::StoreU(ascii0, d_byte, dst + 0 * lanes_per_chunk);
+    hn::StoreU(ascii1, d_byte, dst + 1 * lanes_per_chunk);
+    hn::StoreU(ascii2, d_byte, dst + 2 * lanes_per_chunk);
+    hn::StoreU(ascii3, d_byte, dst + 3 * lanes_per_chunk);
+}
+
+/// Decode `total_letters` letters from packed dna4 words into `dst`.
+/// `words` points to ⌈total_letters/32⌉ uint64 packed words; `dst`
+/// MUST have at least `total_letters` byte capacity.
+///
+/// The function processes whole words (16 packed bytes = 64 letters)
+/// per SIMD iteration; the trailing partial word is handled scalarly.
+HWY_INLINE void decode_dna4_words_to_ascii(
+    const std::uint64_t* HWY_RESTRICT words,
+    std::uint8_t* HWY_RESTRICT dst,
+    std::size_t total_letters) noexcept {
+    using D = hn::FixedTag<std::uint8_t, 16>;
+    constexpr D d_byte;
+
+    static constexpr auto rank_to_ascii_lut_array =
+        build_dna4_rank_to_ascii_lut();
+    const auto rank_to_ascii_lut = hn::LoadDup128(
+        d_byte, rank_to_ascii_lut_array.data());
+
+    // Process 64 letters (= 2 packed words = 16 packed bytes) per iter.
+    constexpr std::size_t letters_per_iter = 64;
+    constexpr std::size_t bytes_per_iter = 16;
+
+    std::size_t letters_emitted = 0;
+    std::size_t word_cursor = 0;
+    const auto* packed_bytes_base =
+        reinterpret_cast<const std::uint8_t*>(words);
+
+    while (letters_emitted + letters_per_iter <= total_letters) {
+        const auto packed_bytes = hn::LoadU(
+            d_byte, packed_bytes_base + word_cursor * 8);
+        unpack_16_bytes_to_64_ascii(d_byte, packed_bytes,
+                                     rank_to_ascii_lut, dst + letters_emitted);
+        letters_emitted += letters_per_iter;
+        word_cursor += 2;
+        (void)bytes_per_iter;  // unused except for documentation
+    }
+
+    // Trailing partial: 0..63 letters remain. Process scalar per byte
+    // — this is the rare path (at most ~63 letters per record).
+    while (letters_emitted < total_letters) {
+        const std::size_t word_index = letters_emitted / 32;
+        const std::size_t letter_in_word = letters_emitted % 32;
+        const std::uint64_t word = words[word_index];
+        const std::uint8_t rank = static_cast<std::uint8_t>(
+            (word >> (2 * letter_in_word)) & 0x3u);
+        dst[letters_emitted] = rank_to_ascii_lut_array[rank];
+        ++letters_emitted;
+    }
+}
+
+/// Variant of `decode_dna4_words_to_ascii` that injects newline bytes
+/// every `wrap_width` letters. The decoded body is laid out as
+///   <wrap_width letters> '\n' <wrap_width letters> '\n' ... <tail letters>
+/// with no trailing newline (the caller adds the terminating `\n`).
+///
+/// `letters_in_current_line` is an in/out cursor: on entry, the count
+/// of letters already emitted into the current line (so callers can
+/// resume mid-line across multiple decode batches); on exit, the new
+/// count (modulo wrap_width).
+///
+/// Strategy: decode into a thread-local scratch (the caller's `scratch`
+/// buffer of size 64 + wrap_width to handle stride underflow), then
+/// memcpy from scratch to `dst` in `wrap_width`-sized strides separated
+/// by `\n`. Two-pass over the body bytes is unavoidable when wrap_width
+/// is not a SIMD-friendly multiple; we accept the ~2× memory traffic
+/// because the destination cache line is hot anyway (consecutive
+/// bytes), and the L2 hit rate is high.
+HWY_INLINE std::size_t decode_dna4_words_to_ascii_wrapped(
+    const std::uint64_t* HWY_RESTRICT words,
+    std::size_t total_letters,
+    std::size_t wrap_width,
+    std::size_t letters_in_current_line,
+    std::uint8_t* HWY_RESTRICT scratch,
+    std::uint8_t* HWY_RESTRICT dst) noexcept {
+    if (total_letters == 0) return letters_in_current_line;
+    decode_dna4_words_to_ascii(words, scratch, total_letters);
+    std::size_t in_cursor = 0;
+    std::size_t out_cursor = 0;
+    std::size_t line_position = letters_in_current_line;
+    while (in_cursor < total_letters) {
+        const std::size_t room_in_line = wrap_width - line_position;
+        const std::size_t this_run = std::min(room_in_line,
+                                                total_letters - in_cursor);
+        std::memcpy(dst + out_cursor, scratch + in_cursor, this_run);
+        out_cursor += this_run;
+        in_cursor += this_run;
+        line_position += this_run;
+        if (line_position == wrap_width) {
+            dst[out_cursor++] = static_cast<std::uint8_t>('\n');
+            line_position = 0;
+        }
+    }
+    return line_position;
+}
+
 }  // namespace bioseq::io::simd::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
@@ -1144,6 +1355,33 @@ void dna4_simd_encode_body_chunk_multiline(
     const std::uint8_t* data,
     std::size_t size) noexcept;
 
+/// dna4 SIMD decoder entry point — unpacks `total_letters` packed
+/// 2-bit-rank letters (stored 32 letters per uint64) into ASCII bytes
+/// at `dst`. The output buffer MUST have at least `total_letters`
+/// bytes of capacity; the function emits exactly that many bytes (no
+/// trailing newline). Used by the writer to materialise on-disk
+/// FASTA / FASTQ bodies. Inverse of `dna4_simd_encode_body_chunk`.
+void dna4_simd_decode_words_to_ascii(
+    const std::uint64_t* words,
+    std::uint8_t* dst,
+    std::size_t total_letters) noexcept;
+
+/// Same as `dna4_simd_decode_words_to_ascii` but injects `\n` every
+/// `wrap_width` letters (no trailing newline). `letters_in_current_line`
+/// is the number of letters already emitted on the current line on
+/// entry; the function returns the new line-position counter so callers
+/// can resume mid-line across multiple decode batches. `scratch` MUST
+/// have at least `total_letters` bytes of capacity (used as an
+/// intermediate buffer; the SIMD decoder writes there first, then the
+/// memcpy step injects newlines into `dst`).
+[[nodiscard]] std::size_t dna4_simd_decode_words_to_ascii_wrapped(
+    const std::uint64_t* words,
+    std::size_t total_letters,
+    std::size_t wrap_width,
+    std::size_t letters_in_current_line,
+    std::uint8_t* scratch,
+    std::uint8_t* dst) noexcept;
+
 }  // namespace bioseq::io::simd
 
 }  // export
@@ -1221,6 +1459,25 @@ std::size_t scan_first_byte_dispatch3(
     const hn::ScalableTag<std::uint8_t> byte_tag;
     const std::array<std::uint8_t, 3> needles{needle_0, needle_1, needle_2};
     return HWY_NAMESPACE::scan_for_first<3>(byte_tag, needles, data, size);
+}
+
+void dna4_simd_decode_words_to_ascii(
+    const std::uint64_t* words,
+    std::uint8_t* dst,
+    std::size_t total_letters) noexcept {
+    HWY_NAMESPACE::decode_dna4_words_to_ascii(words, dst, total_letters);
+}
+
+std::size_t dna4_simd_decode_words_to_ascii_wrapped(
+    const std::uint64_t* words,
+    std::size_t total_letters,
+    std::size_t wrap_width,
+    std::size_t letters_in_current_line,
+    std::uint8_t* scratch,
+    std::uint8_t* dst) noexcept {
+    return HWY_NAMESPACE::decode_dna4_words_to_ascii_wrapped(
+        words, total_letters, wrap_width,
+        letters_in_current_line, scratch, dst);
 }
 
 }  // namespace bioseq::io::simd

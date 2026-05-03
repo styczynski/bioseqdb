@@ -364,6 +364,211 @@ inline void emit_throughput_table_chart(
         });
 }
 
+// =====================================================================
+// Writer-side charts
+// =====================================================================
+
+namespace detail {
+
+[[nodiscard]] inline double mean_writer_throughput_mibs(
+    const WriterSample& sample) noexcept {
+    if (sample.sample_latencies_ns.empty()) return 0.0;
+    if (sample.bytes_written == 0) return 0.0;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    constexpr double kNsPerSec = 1e9;
+    double sum_throughput = 0.0;
+    std::size_t valid_count = 0;
+    for (double latency_ns : sample.sample_latencies_ns) {
+        if (latency_ns <= 0.0) continue;
+        sum_throughput += (static_cast<double>(sample.bytes_written) / kMiB)
+                        * (kNsPerSec / latency_ns);
+        ++valid_count;
+    }
+    if (valid_count == 0) return 0.0;
+    return sum_throughput / static_cast<double>(valid_count);
+}
+
+[[nodiscard]] inline std::string writer_trace_name(
+    const WriterSample& sample) {
+    return fmt::format("{} ({})", sample.writer_label,
+                       io_format_name(sample.format));
+}
+
+}  // namespace detail
+
+inline void emit_writer_throughput_by_length_chart(
+    bench_scheduler::JsonWriter& writer,
+    std::span<const WriterSample> samples) {
+    charting::emit_chart_envelope(
+        writer,
+        "writer_throughput_by_length",
+        "Writer throughput per length bucket",
+        "Mean MiB/s for each (writer, format) trace across the four "
+        "length buckets. Higher is better. Computed as "
+        "bytes_written / mean(per-iteration wall_clock).",
+        [&]() {
+            std::map<std::string, std::vector<const WriterSample*>> traces;
+            for (const auto& sample : samples) {
+                traces[detail::writer_trace_name(sample)].push_back(&sample);
+            }
+            const auto x_labels = detail::length_bucket_axis_labels();
+            writer.key("data");
+            writer.begin_array();
+            for (auto& [trace_label, sample_ptrs] : traces) {
+                writer.begin_object();
+                writer.kv_string("type", "bar");
+                writer.kv_string("name", trace_label);
+                writer.key("x");
+                writer.begin_array();
+                for (const auto& bucket_label : x_labels) {
+                    writer.value_string(bucket_label);
+                }
+                writer.end_array();
+                writer.key("y");
+                writer.begin_array();
+                for (const auto& bucket_label : x_labels) {
+                    const auto target_bucket =
+                        detail::bucket_from_label(bucket_label);
+                    double sum_mibs = 0.0;
+                    std::size_t hits = 0;
+                    for (const auto* sample_ptr : sample_ptrs) {
+                        if (sample_ptr->length_bucket != target_bucket) continue;
+                        sum_mibs +=
+                            detail::mean_writer_throughput_mibs(*sample_ptr);
+                        ++hits;
+                    }
+                    writer.value_double(
+                        hits > 0 ? sum_mibs / static_cast<double>(hits) : 0.0);
+                }
+                writer.end_array();
+                charting::emit_plotly_marker(
+                    writer, charting::colour_for_key(trace_label));
+                writer.end_object();
+            }
+            writer.end_array();
+            charting::emit_plotly_layout(
+                writer,
+                "Writer throughput per length bucket",
+                "length bucket", false,
+                "MiB/s", false,
+                "group");
+        });
+}
+
+inline void emit_writer_throughput_table_chart(
+    bench_scheduler::JsonWriter& writer,
+    std::span<const WriterSample> samples) {
+    charting::emit_chart_envelope(
+        writer,
+        "writer_throughput_table",
+        "Per-cell writer throughput table",
+        "One row per (writer, format, length_bucket) with mean / "
+        "stddev MiB/s and round-trip record-count agreement.",
+        [&]() {
+            std::vector<std::string> cells_writer;
+            std::vector<std::string> cells_format;
+            std::vector<std::string> cells_bucket;
+            std::vector<double> cells_mean_mibs;
+            std::vector<double> cells_stddev_mibs;
+            std::vector<std::size_t> cells_record_count;
+            std::vector<std::size_t> cells_roundtrip_record_count;
+            std::vector<double> cells_output_mb;
+
+            for (const auto& sample : samples) {
+                if (sample.sample_latencies_ns.empty()) continue;
+                std::vector<double> per_iteration_mibs;
+                per_iteration_mibs.reserve(sample.sample_latencies_ns.size());
+                constexpr double kMiB = 1024.0 * 1024.0;
+                constexpr double kNsPerSec = 1e9;
+                for (double latency_ns : sample.sample_latencies_ns) {
+                    if (latency_ns <= 0.0) continue;
+                    per_iteration_mibs.push_back(
+                        (static_cast<double>(sample.bytes_written) / kMiB)
+                        * (kNsPerSec / latency_ns));
+                }
+                if (per_iteration_mibs.empty()) continue;
+                const double mean_mibs = std::accumulate(
+                    per_iteration_mibs.begin(),
+                    per_iteration_mibs.end(), 0.0)
+                    / static_cast<double>(per_iteration_mibs.size());
+                double sum_sq = 0.0;
+                for (double v : per_iteration_mibs) {
+                    const double centred = v - mean_mibs;
+                    sum_sq += centred * centred;
+                }
+                const double stddev_mibs = (per_iteration_mibs.size() > 1)
+                    ? std::sqrt(sum_sq / static_cast<double>(
+                        per_iteration_mibs.size() - 1))
+                    : 0.0;
+                cells_writer.push_back(sample.writer_label);
+                cells_format.push_back(sample.format_label);
+                cells_bucket.push_back(sample.length_bucket_label);
+                cells_mean_mibs.push_back(mean_mibs);
+                cells_stddev_mibs.push_back(stddev_mibs);
+                cells_record_count.push_back(sample.record_count);
+                cells_roundtrip_record_count.push_back(
+                    sample.roundtrip_record_count);
+                cells_output_mb.push_back(
+                    static_cast<double>(sample.bytes_written)
+                        / (1024.0 * 1024.0));
+            }
+
+            writer.key("data");
+            writer.begin_array();
+            writer.begin_object();
+            writer.kv_string("type", "table");
+            writer.key("header");
+            writer.begin_object();
+            writer.key("values");
+            writer.begin_array();
+            writer.value_string("writer");
+            writer.value_string("format");
+            writer.value_string("length_bucket");
+            writer.value_string("mean MiB/s");
+            writer.value_string("stddev MiB/s");
+            writer.value_string("record_count");
+            writer.value_string("roundtrip_record_count");
+            writer.value_string("output_MB");
+            writer.end_array();
+            writer.end_object();
+            writer.key("cells");
+            writer.begin_object();
+            writer.key("values");
+            writer.begin_array();
+            auto emit_string_column = [&](const std::vector<std::string>& column) {
+                writer.begin_array();
+                for (const auto& cell : column) writer.value_string(cell);
+                writer.end_array();
+            };
+            auto emit_double_column = [&](const std::vector<double>& column) {
+                writer.begin_array();
+                for (double cell : column) writer.value_double(cell);
+                writer.end_array();
+            };
+            auto emit_int_column = [&](const std::vector<std::size_t>& column) {
+                writer.begin_array();
+                for (std::size_t cell : column) {
+                    writer.value_int(static_cast<std::int64_t>(cell));
+                }
+                writer.end_array();
+            };
+            emit_string_column(cells_writer);
+            emit_string_column(cells_format);
+            emit_string_column(cells_bucket);
+            emit_double_column(cells_mean_mibs);
+            emit_double_column(cells_stddev_mibs);
+            emit_int_column   (cells_record_count);
+            emit_int_column   (cells_roundtrip_record_count);
+            emit_double_column(cells_output_mb);
+            writer.end_array();
+            writer.end_object();
+            writer.end_object();
+            writer.end_array();
+            charting::emit_plotly_layout_titled(
+                writer, "Per-cell writer throughput table");
+        });
+}
+
 /// Top-level emitter for the IO bench report. Builds the standard
 /// envelope (schema / commit_hash / sample_count / reader_count /
 /// violations / charts) via `bench.scheduler.report_envelope`.
@@ -372,25 +577,34 @@ inline void emit_io_report(
     std::span<const bench_scheduler::regression::Violation> violations,
     std::string_view commit_hash) {
     const auto& samples = io_bench_samples();
-    std::vector<std::string> readers_seen;
+    const auto& writer_samples = io_bench_writer_samples();
+    std::vector<std::string> labels_seen;
     for (const auto& sample : samples) {
-        if (std::find(readers_seen.begin(), readers_seen.end(),
-                      sample.reader_label) == readers_seen.end()) {
-            readers_seen.push_back(sample.reader_label);
+        if (std::find(labels_seen.begin(), labels_seen.end(),
+                      sample.reader_label) == labels_seen.end()) {
+            labels_seen.push_back(sample.reader_label);
+        }
+    }
+    for (const auto& sample : writer_samples) {
+        if (std::find(labels_seen.begin(), labels_seen.end(),
+                      sample.writer_label) == labels_seen.end()) {
+            labels_seen.push_back(sample.writer_label);
         }
     }
 
     bench_scheduler::ReportMetadata metadata;
     metadata.schema = "bioseq-io-bench-report-v1";
     metadata.commit_hash = commit_hash;
-    metadata.sample_count = samples.size();
-    metadata.algorithm_count = readers_seen.size();
+    metadata.sample_count = samples.size() + writer_samples.size();
+    metadata.algorithm_count = labels_seen.size();
     metadata.violations = violations;
 
     bench_scheduler::emit_report_envelope(writer, metadata, [&]() {
         emit_throughput_by_length_chart(writer, samples);
         emit_record_throughput_chart(writer, samples);
         emit_throughput_table_chart(writer, samples);
+        emit_writer_throughput_by_length_chart(writer, writer_samples);
+        emit_writer_throughput_table_chart(writer, writer_samples);
     });
 }
 
