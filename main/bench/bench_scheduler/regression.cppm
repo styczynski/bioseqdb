@@ -106,12 +106,20 @@ enum class CompareKind : std::uint8_t {
 enum class RuleKind : std::uint8_t {
     EQUAL_TO              = 0,
     FASTER_BY_AT_LEAST_PCT = 1,
+    /// Hard absolute floor: passes when `actual_value >= min_value`
+    /// (with `tolerance_pct` of slack on the floor). No baseline lookup
+    /// — the rule is self-contained. Useful for "design goal" checks
+    /// where the comparison shouldn't drift with the baseline (e.g. a
+    /// gzip reader's decompressed-MiB/s target shouldn't relax just
+    /// because the kseqpp baseline got slower).
+    MIN_ABSOLUTE           = 2,
 };
 
 [[nodiscard]] constexpr const char* rule_kind_name(RuleKind kind) noexcept {
     switch (kind) {
         case RuleKind::EQUAL_TO:               return "equal_to";
         case RuleKind::FASTER_BY_AT_LEAST_PCT: return "faster_by_at_least_pct";
+        case RuleKind::MIN_ABSOLUTE:           return "min_absolute";
     }
     return "?";
 }
@@ -119,6 +127,7 @@ enum class RuleKind : std::uint8_t {
 [[nodiscard]] constexpr std::optional<RuleKind> parse_rule_kind(std::string_view name) noexcept {
     if (name == "equal_to")               return RuleKind::EQUAL_TO;
     if (name == "faster_by_at_least_pct") return RuleKind::FASTER_BY_AT_LEAST_PCT;
+    if (name == "min_absolute")           return RuleKind::MIN_ABSOLUTE;
     return std::nullopt;
 }
 
@@ -140,6 +149,9 @@ struct Rule {
     CompareKind compare = CompareKind::RELATIVE;
     RuleKind    kind    = RuleKind::EQUAL_TO;
     double      value_pct = 0.0;
+    /// Floor used by MIN_ABSOLUTE rules. Read from the JSON's
+    /// `min_value` key. Native units of the rule's metric (e.g. MiB/s).
+    double      min_value = 0.0;
     std::string comment;
 };
 
@@ -300,6 +312,7 @@ namespace detail {
         else                                 out.compare = default_compare_for(out.metric);
     }
     out.value_pct = double_or(obj, "value_pct", 0.0);
+    out.min_value = double_or(obj, "min_value", 0.0);
     out.comment   = string_or(obj, "comment",  "");
     return true;
 }
@@ -417,11 +430,40 @@ namespace detail {
     return std::fabs(out_observed_pct) > tolerance_pct;
 }
 
+/// Hard floor: violation when `actual_value < min_value * (1 - slack)`.
+/// Sign convention for `out_observed_pct`: percent above (positive) /
+/// below (negative) the floor, i.e. `(actual - min) / min * 100`.
+///
+/// The global `tolerance_pct` is calibrated for `EQUAL_TO` semantics
+/// where 150% loosens the comparison to a 2.5× window — applied
+/// directly to a hard floor it lets any positive value pass. Hard
+/// floors instead use `min(tolerance_pct, 5)` so a small amount of
+/// run-to-run noise (≤5%) doesn't fire the rule, but the floor
+/// remains meaningful even under loose-EQUAL_TO configs.
+[[nodiscard]] inline bool is_violation_min_absolute(
+    const Rule& rule, double tolerance_pct,
+    double actual_value, double& out_observed_pct)
+{
+    if (rule.min_value <= 0.0 || actual_value <= 0.0) {
+        out_observed_pct = 0.0;
+        return false;  // missing data — inconclusive, never flag
+    }
+    out_observed_pct = 100.0 * (actual_value - rule.min_value) / rule.min_value;
+    constexpr double kMinAbsoluteMaxSlackPct = 5.0;
+    const double effective_slack_pct =
+        std::min(tolerance_pct, kMinAbsoluteMaxSlackPct);
+    return actual_value < rule.min_value * (1.0 - effective_slack_pct / 100.0);
+}
+
 [[nodiscard]] inline bool is_violation(
     const Rule& rule, double tolerance_pct,
     double baseline_value, double actual_value,
     double& out_observed_pct)
 {
+    if (rule.kind == RuleKind::MIN_ABSOLUTE) {
+        return is_violation_min_absolute(rule, tolerance_pct,
+                                         actual_value, out_observed_pct);
+    }
     if (rule.compare == CompareKind::RELATIVE) {
         return is_violation_relative(rule, tolerance_pct, baseline_value,
                                      actual_value, out_observed_pct);
@@ -507,6 +549,25 @@ template<typename CellKey>
     // ---- Explicit rules --------------------------------------------
     for (const auto& rule : cfg.rules) {
         if (rule.algorithm_label.empty()) continue;
+        // MIN_ABSOLUTE rules have no baseline — they assert a hard
+        // floor on the algorithm's own value. Everything else needs a
+        // baseline lookup.
+        if (rule.kind == RuleKind::MIN_ABSOLUTE) {
+            for (const auto& cell : cells) {
+                const auto algo_value = lookup(cell, rule.algorithm_label,
+                                               rule.metric);
+                if (!algo_value.has_value()) continue;
+                // Pass `min_value` as the "baseline" so the table /
+                // JSON columns render the floor next to the actual
+                // value. is_violation_min_absolute ignores this value
+                // (it reads `rule.min_value` directly).
+                build_violation(rule, rule.algorithm_label,
+                                std::string{"(min_absolute floor)"},
+                                cell, /*baseline_value=*/rule.min_value,
+                                *algo_value);
+            }
+            continue;
+        }
         const std::string baseline_label = resolve_baseline(rule.baseline_key);
         if (baseline_label.empty()) {
             JustLog("[bench.scheduler.regression] rule for '{}' references unknown baseline '{}' — skipping",
@@ -625,7 +686,15 @@ namespace detail {
     return out;
 }
 
-[[nodiscard]] inline std::string format_metric_value(CompareKind compare, double value) noexcept {
+[[nodiscard]] inline std::string format_metric_value(
+    CompareKind compare, RuleKind kind, double value) noexcept {
+    if (kind == RuleKind::MIN_ABSOLUTE) {
+        // MIN_ABSOLUTE values are in the metric's native unit (e.g.
+        // MiB/s for throughput floors). The engine doesn't know the
+        // unit, so render the raw number — the rule's `comment`
+        // documents the unit for the human reader.
+        return fmt::format("{:.2f}", value);
+    }
     if (compare == CompareKind::RELATIVE) {
         // For relative comparisons the metric is most often a wall-clock
         // duration in nanoseconds; render it as milliseconds so columns
@@ -643,6 +712,16 @@ namespace detail {
     if (v.kind == RuleKind::FASTER_BY_AT_LEAST_PCT) {
         return fmt::format(">= {:.1f}% faster (tol {:.1f}%)",
                            v.threshold_pct, v.tolerance_pct);
+    }
+    if (v.kind == RuleKind::MIN_ABSOLUTE) {
+        // Match `is_violation_min_absolute`'s clamp: the global
+        // tolerance can be too loose for a hard floor, so the engine
+        // caps it at 5% internally. Show the same effective number
+        // here so the table matches the rule that actually fired.
+        const double effective_tol_pct =
+            std::min(v.tolerance_pct, 5.0);
+        return fmt::format(">= {:.2f} floor (tol {:.1f}%)",
+                           v.baseline_value, effective_tol_pct);
     }
     return fmt::format("equal to baseline (tol {:.1f}%)", v.tolerance_pct);
 }
@@ -715,8 +794,10 @@ inline void print_violations_table(std::span<const Violation> violations) {
                  static_cast<int>(obs_w),   "obs%");
     print_separator();
     for (const auto& v : violations) {
-        const std::string baseline_v = detail::format_metric_value(v.compare, v.baseline_value);
-        const std::string actual_v   = detail::format_metric_value(v.compare, v.actual_value);
+        const std::string baseline_v = detail::format_metric_value(
+            v.compare, v.kind, v.baseline_value);
+        const std::string actual_v   = detail::format_metric_value(
+            v.compare, v.kind, v.actual_value);
         const std::string obs_pct    = fmt::format("{:+.2f}", v.observed_pct);
         const std::string rule_summary = detail::format_rule_summary(v);
         std::fprintf(stderr, " %-*s | %-*s | %-*s",

@@ -82,6 +82,11 @@ enum class IoLengthBucket : std::uint8_t {
     /// (Illumina HiSeq runs routinely emit ~6 GiB per lane). Streamed
     /// only when the file is present; otherwise the cell is skipped.
     REAL_HUMAN_GENOME_LARGE_FASTQ_6GB = 5,
+    /// Same SRR062634 corpus but gzipped. ~1.96 GiB compressed. Drives
+    /// the new `bioseq_io_pgzip_*` and `bioseq_io_zlib_*` runners; the
+    /// reader-skip rule in matrix_runner restricts the cell to
+    /// gzip-aware readers.
+    REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ = 6,
 };
 
 [[nodiscard]] constexpr const char* io_length_bucket_name(
@@ -94,23 +99,27 @@ enum class IoLengthBucket : std::uint8_t {
         case IoLengthBucket::REAL_HUMAN_GENOME: return "real human genome (~234MiB)";
         case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB:
             return "real human fastq (~6GiB)";
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ:
+            return "real human fastq (~1.9GiB gz)";
     }
     return "?";
 }
 
 /// I/O backend axis.
 enum class IoSourceKind : std::uint8_t {
-    POSIX_READ = 0,
-    MMAP       = 1,
-    GZIP       = 2,
+    POSIX_READ    = 0,
+    MMAP          = 1,
+    GZIP          = 2,
+    PARALLEL_GZIP = 3,
 };
 
 [[nodiscard]] constexpr const char* io_source_kind_name(
     IoSourceKind kind) noexcept {
     switch (kind) {
-        case IoSourceKind::POSIX_READ: return "posix_read";
-        case IoSourceKind::MMAP:       return "mmap";
-        case IoSourceKind::GZIP:       return "gzip";
+        case IoSourceKind::POSIX_READ:    return "posix_read";
+        case IoSourceKind::MMAP:          return "mmap";
+        case IoSourceKind::GZIP:          return "gzip";
+        case IoSourceKind::PARALLEL_GZIP: return "parallel_gzip";
     }
     return "?";
 }
@@ -151,6 +160,12 @@ struct ReaderSample {
     /// Bytes-on-disk in the corpus. Used to compute throughput from
     /// wall-clock latency.
     std::size_t corpus_bytes_on_disk = 0;
+
+    /// Decompressed corpus size — only differs from
+    /// `corpus_bytes_on_disk` for compressed cells. The chart layer
+    /// pivots compressed-cell throughput on this value (decompressed
+    /// MiB/s).
+    std::size_t corpus_decompressed_bytes = 0;
 
     /// Total record count across the corpus.
     std::size_t record_count = 0;

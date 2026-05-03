@@ -74,8 +74,35 @@ import bioseq_io.fastq;
 import bioseq_io.simd_kernels;
 import bioseq_io.sources;
 import bioseq_io.pipeline;
+import bioseq_io.compression.parallel_gzip_source;
 
 export namespace bioseq::io {
+
+/// Which I/O backend the dispatcher in `read_sequences_file` actually
+/// chose for a given call. The dispatcher's branch tree depends on
+/// magic-byte sniff + the runtime options + size thresholds, so the
+/// backend that really ran can differ from what the caller "asked
+/// for" via `reader_options`. Bench harnesses use this so they can
+/// label samples with the path that actually executed instead of the
+/// runner's nominal source kind.
+enum class read_backend : std::uint8_t {
+    UNKNOWN = 0,    ///< pre-dispatch / failed before a backend was selected
+    MMAP,           ///< plain `mmap_source`
+    POSIX_READ,     ///< `posix_read_source` (mmap unavailable / disabled)
+    GZIP,           ///< single-thread `gzip_source` (zlib)
+    PARALLEL_GZIP,  ///< multi-producer `parallel_gzip_source`
+};
+
+[[nodiscard]] constexpr const char* read_backend_name(read_backend b) noexcept {
+    switch (b) {
+        case read_backend::UNKNOWN:        return "unknown";
+        case read_backend::MMAP:           return "mmap";
+        case read_backend::POSIX_READ:     return "posix_read";
+        case read_backend::GZIP:           return "gzip";
+        case read_backend::PARALLEL_GZIP:  return "parallel_gzip";
+    }
+    return "?";
+}
 
 /// View of one record's packed sequence inside a batch's shared
 /// `_seq_storage`. Models the same surface used by the v1
@@ -1104,26 +1131,88 @@ template <
     PathLike&& file_path,
     handler_fn_t&& handler_fn,
     failure_fn_t&& failure_fn,
-    const reader_options& options = default_reader_options) {
+    const reader_options& options = default_reader_options,
+    read_backend* observed_backend = nullptr) {
 
     static_assert(std::convertible_to<PathLike, std::string_view>,
                   "file_path must be convertible to std::string_view");
     const std::string_view path_view = std::string_view{
         std::forward<PathLike>(file_path)};
 
-    // Backend dispatch:
-    //   1. If gzip auto-detect is on, try gzip first — zlib's
-    //      transparent mode handles plain files too, so this is the
-    //      safe catch-all.
-    //   2. Else if mmap is preferred, try mmap and fall back to POSIX
-    //      read on failure (file too large, no FS support, ...).
-    //   3. Else POSIX read.
+    const auto record_backend = [&](read_backend backend) noexcept {
+        if (observed_backend) *observed_backend = backend;
+    };
+    record_backend(read_backend::UNKNOWN);
+
+    // Backend dispatch (spec §8.1):
+    //   1. If `prefer_mmap` is set: open with magic-byte sniff.
+    //      - Gzipped + parallel + size>=min → parallel_gzip_source.
+    //      - Gzipped, fallback path → gzip_source.
+    //      - Plain → existing mmap pipeline.
+    //   2. mmap failed / large file → posix_read_source.
+    //   3. Legacy `gzip_auto_detect=true` without prefer_mmap →
+    //      gzip_source (covers the "user explicitly asked for gzip
+    //      auto-detect on a non-mmap'd reader" path).
+    if (options.io.prefer_mmap) {
+        auto mmap_or_err =
+            mmap_source::try_open_with_magic(path_view, options);
+        if (mmap_or_err) {
+            if (mmap_or_err->is_gzipped) {
+                const bool size_ok = mmap_or_err->file_size >=
+                    options.io.parallel_gzip_min_compressed_bytes;
+                if (options.io.parallel_gzip_enabled && size_ok) {
+                    auto pgz_or_err =
+                        parallel_gzip_source::try_open_from_mmap(
+                            std::move(mmap_or_err->source), options);
+                    if (pgz_or_err) {
+                        record_backend(read_backend::PARALLEL_GZIP);
+                        return detail::run_pipeline_for_source<
+                            alphabet_t, file_type, parallel_gzip_source>(
+                            std::move(*pgz_or_err),
+                            std::forward<handler_fn_t>(handler_fn),
+                            std::forward<failure_fn_t>(failure_fn),
+                            options);
+                    }
+                    JustLog("[bioseq_io] parallel_gzip_source failed for "
+                            "'{}': {}; falling back to single-thread "
+                            "gzip_source",
+                            path_view, pgz_or_err.error());
+                }
+                // Construction-time fallback. Mid-stream errors are
+                // TERMINAL — never restart from byte 0; that would
+                // re-emit records.
+                auto gz_or_err = gzip_source::try_open(path_view);
+                if (!gz_or_err) {
+                    failure_fn(std::string{gz_or_err.error()});
+                    return std::unexpected(gz_or_err.error());
+                }
+                record_backend(read_backend::GZIP);
+                return detail::run_pipeline_for_source<
+                    alphabet_t, file_type, gzip_source>(
+                    std::move(*gz_or_err),
+                    std::forward<handler_fn_t>(handler_fn),
+                    std::forward<failure_fn_t>(failure_fn),
+                    options);
+            }
+            record_backend(read_backend::MMAP);
+            return detail::run_pipeline_for_source<
+                alphabet_t, file_type, mmap_source>(
+                std::move(mmap_or_err->source),
+                std::forward<handler_fn_t>(handler_fn),
+                std::forward<failure_fn_t>(failure_fn),
+                options);
+        }
+        JustLog("[bioseq_io] mmap_source unavailable for '{}': {}; "
+                "falling back to posix_read_source",
+                path_view, mmap_or_err.error());
+    }
     if (options.io.gzip_auto_detect) {
         auto gzip_source_or_err = gzip_source::try_open(path_view);
         if (!gzip_source_or_err) {
             failure_fn(std::string{gzip_source_or_err.error()});
             return std::unexpected(gzip_source_or_err.error());
         }
+        record_backend(read_backend::GZIP);
         return detail::run_pipeline_for_source<
             alphabet_t, file_type, gzip_source>(
             std::move(*gzip_source_or_err),
@@ -1131,26 +1220,12 @@ template <
             std::forward<failure_fn_t>(failure_fn),
             options);
     }
-    if (options.io.prefer_mmap) {
-        auto mmap_source_or_err = mmap_source::try_open(path_view, options);
-        if (mmap_source_or_err) {
-            return detail::run_pipeline_for_source<
-                alphabet_t, file_type, mmap_source>(
-                std::move(*mmap_source_or_err),
-                std::forward<handler_fn_t>(handler_fn),
-                std::forward<failure_fn_t>(failure_fn),
-                options);
-        }
-        // mmap failed (file too large, MAP_FAILED, ...); fall through
-        // to POSIX read which always works on a regular file.
-        JustLog("[bioseq_io] mmap_source unavailable for '{}': {}; falling back to posix_read_source",
-                path_view, mmap_source_or_err.error());
-    }
     auto posix_source_or_err = posix_read_source::try_open(path_view);
     if (!posix_source_or_err) {
         failure_fn(std::string{posix_source_or_err.error()});
         return std::unexpected(posix_source_or_err.error());
     }
+    record_backend(read_backend::POSIX_READ);
     return detail::run_pipeline_for_source<
         alphabet_t, file_type, posix_read_source>(
         std::move(*posix_source_or_err),

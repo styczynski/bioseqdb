@@ -87,6 +87,41 @@
       "baseline":  "naive",
       "rule":      "equal_to",
       "comment":   "bioseq_writer_parallel8 FASTQ — parallel writer on 8 threads vs naive_ofstream baseline."
+    },
+    {
+      "metric":    "throughput_decompressed_mibs",
+      "algorithm": "bioseq_io_pgzip_fastq",
+      "baseline":  "kseqpp",
+      "rule":      "equal_to",
+      "comment":   "Parallel gzip FASTQ vs kseqpp single-thread zlib. Decompressed-bytes basis."
+    },
+    {
+      "metric":    "throughput_decompressed_mibs",
+      "algorithm": "bioseq_io_zlib_fastq",
+      "baseline":  "kseqpp",
+      "rule":      "equal_to",
+      "comment":   "zlib-fallback FASTQ vs kseqpp baseline. Sanity floor."
+    },
+    {
+      "metric":    "throughput_decompressed_mibs",
+      "algorithm": "bioseq_io_pgzip_fasta",
+      "baseline":  "kseqpp",
+      "rule":      "equal_to",
+      "comment":   "Parallel gzip FASTA vs kseqpp baseline."
+    },
+    {
+      "metric":    "throughput_decompressed_mibs",
+      "algorithm": "bioseq_io_zlib_fasta",
+      "baseline":  "kseqpp",
+      "rule":      "equal_to",
+      "comment":   "zlib-fallback FASTA vs kseqpp baseline."
+    },
+    {
+      "metric":    "throughput_decompressed_mibs_raw",
+      "algorithm": "bioseq_io_pgzip_fastq",
+      "rule":      "min_absolute",
+      "min_value": 1228.0,
+      "comment":   "Spec §13 acceptance criterion #5: decompressed throughput >= 1.2 GB/s (1228 MiB/s) on the gz cell. The kseqpp-relative rule above passes when the implementation is within 2.5x of kseqpp's ~57 MiB/s (compressed) basis, which is silent about the design goal. This hard floor is what the bench must clear for the gzip reader to be considered done; expected to fire until the marker-mode DEFLATE decoder lands."
     }
   ],
 

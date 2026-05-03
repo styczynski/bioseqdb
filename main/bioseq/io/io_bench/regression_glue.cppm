@@ -83,6 +83,12 @@ struct IoCellStats {
     double throughput_mibs_sum = 0.0;
     std::size_t throughput_mibs_count = 0;
 
+    /// Same shape as `throughput_mibs_sum`, but pivoted on
+    /// `corpus_decompressed_bytes` for the gz cell. Populated only on
+    /// samples whose `corpus_decompressed_bytes != corpus_bytes_on_disk`.
+    double throughput_decompressed_mibs_sum = 0.0;
+    std::size_t throughput_decompressed_mibs_count = 0;
+
     double rss_delta_bytes_sum = 0.0;
     std::size_t rss_delta_bytes_count = 0;
 };
@@ -107,6 +113,24 @@ using IoCellTable = std::map<IoCellKey,
     return (bytes_double / kMiB) * (kNsPerSec / latency_ns_value);
 }
 
+/// Throughput in MiB/s pivoted on the decompressed corpus size. For
+/// non-compressed cells this matches `compute_sample_throughput_mibs`
+/// because `corpus_decompressed_bytes == corpus_bytes_on_disk`.
+[[nodiscard]] inline std::optional<double>
+compute_sample_throughput_decompressed_mibs(
+    const ReaderSample& sample,
+    double latency_ns_value) noexcept {
+    if (latency_ns_value <= 0.0) return std::nullopt;
+    const std::size_t basis_bytes = (sample.corpus_decompressed_bytes != 0)
+        ? sample.corpus_decompressed_bytes
+        : sample.corpus_bytes_on_disk;
+    if (basis_bytes == 0) return std::nullopt;
+    constexpr double kMiB = 1024.0 * 1024.0;
+    constexpr double kNsPerSec = 1e9;
+    const double bytes_double = static_cast<double>(basis_bytes);
+    return (bytes_double / kMiB) * (kNsPerSec / latency_ns_value);
+}
+
 /**
  * @brief Aggregate `io_bench_samples()` into per-cell × per-reader stats.
  */
@@ -122,6 +146,13 @@ using IoCellTable = std::map<IoCellKey,
             if (throughput.has_value()) {
                 cell.throughput_mibs_sum += *throughput;
                 cell.throughput_mibs_count += 1;
+            }
+            const auto decompressed_throughput =
+                compute_sample_throughput_decompressed_mibs(sample, latency_ns);
+            if (decompressed_throughput.has_value()) {
+                cell.throughput_decompressed_mibs_sum +=
+                    *decompressed_throughput;
+                cell.throughput_decompressed_mibs_count += 1;
             }
         }
         for (const double rss_delta : sample.sample_peak_rss_delta_bytes) {
@@ -198,6 +229,33 @@ make_io_metric_lookup(const IoCellTable& cells) {
                 / static_cast<double>(stats.throughput_mibs_count);
             if (mean_throughput <= 0.0) return std::nullopt;
             return 1.0 / mean_throughput;
+        }
+        if (metric == "throughput_decompressed_mibs") {
+            if (stats.throughput_decompressed_mibs_count == 0) return std::nullopt;
+            const double mean_throughput =
+                stats.throughput_decompressed_mibs_sum
+                / static_cast<double>(stats.throughput_decompressed_mibs_count);
+            if (mean_throughput <= 0.0) return std::nullopt;
+            return 1.0 / mean_throughput;
+        }
+        // Raw throughput (no inversion). For MIN_ABSOLUTE rules where
+        // the floor is expressed in MiB/s; inverting would make the
+        // floor unintelligible.
+        if (metric == "throughput_decompressed_mibs_raw") {
+            if (stats.throughput_decompressed_mibs_count == 0) return std::nullopt;
+            const double mean_throughput =
+                stats.throughput_decompressed_mibs_sum
+                / static_cast<double>(stats.throughput_decompressed_mibs_count);
+            if (mean_throughput <= 0.0) return std::nullopt;
+            return mean_throughput;
+        }
+        if (metric == "throughput_mibs_raw") {
+            if (stats.throughput_mibs_count == 0) return std::nullopt;
+            const double mean_throughput =
+                stats.throughput_mibs_sum
+                / static_cast<double>(stats.throughput_mibs_count);
+            if (mean_throughput <= 0.0) return std::nullopt;
+            return mean_throughput;
         }
         if (metric == "rss_delta_bytes") {
             if (stats.rss_delta_bytes_count == 0) return std::nullopt;

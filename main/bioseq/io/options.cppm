@@ -35,6 +35,22 @@ struct io_options {
     bool        mmap_zero_copy = true;
     bool        stream_madvise = true;
     bool        gzip_auto_detect = true;
+
+    // ---------------------------------------------------------------
+    // Parallel-gzip knobs (spec §2.2). The dispatcher activates the
+    // parallel decoder when (a) the file is gzipped (magic-byte sniff
+    // in `mmap_source::try_open`), (b) the file size meets
+    // `parallel_gzip_min_compressed_bytes`, and (c)
+    // `parallel_gzip_enabled` is true. Falls back to single-thread
+    // `gzip_source` otherwise.
+    // ---------------------------------------------------------------
+    bool        parallel_gzip_enabled              = true;
+    std::size_t parallel_gzip_min_compressed_bytes = 16ULL * 1024 * 1024;
+    /// 0 = use kDefaultParallelGzipChunkSize = 4 MiB.
+    std::size_t parallel_gzip_chunk_bytes          = 0;
+    /// 0 = auto (`hardware_concurrency() - 2`, capped at 6).
+    std::size_t parallel_gzip_thread_count         = 0;
+    bool        parallel_gzip_verify_crc           = true;
 };
 
 /// Concurrency knobs (thread counts, ring sizes, batch shape).

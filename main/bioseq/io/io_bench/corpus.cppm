@@ -96,6 +96,13 @@ struct CorpusShape {
             return {/*record_count=*/0,
                     /*mean_record_length_bp=*/0,
                     /*target_bytes_on_disk=*/static_cast<std::size_t>(6) * 1024 * 1024 * 1024};
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ:
+            // Gzipped FASTQ — bytes_on_disk populated at runtime via
+            // `fs::file_size` since the file shape (~1.96 GiB
+            // compressed) is environment-dependent. Sentinel 0 here.
+            return {/*record_count=*/0,
+                    /*mean_record_length_bp=*/0,
+                    /*target_bytes_on_disk=*/0};
     }
     return {};
 }
@@ -254,7 +261,8 @@ inline void delete_corpus(const CorpusHandle& handle) noexcept {
     handle.is_real_data = true;
 
     if (length_bucket != IoLengthBucket::REAL_HUMAN_GENOME &&
-        length_bucket != IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
+        length_bucket != IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB &&
+        length_bucket != IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ) {
         loge("[bioseq_io_bench.corpus] try_open_real_corpus called with "
              "non-real bucket");
         return handle;
@@ -264,10 +272,14 @@ inline void delete_corpus(const CorpusHandle& handle) noexcept {
     if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME) {
         if (format != IoFormat::FASTA) return handle;
         file_path = data_root / "homo_sapiens_GRCh38_dna4.fasta";
-    } else {
+    } else if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
         if (format != IoFormat::FASTQ) return handle;
         file_path = data_root /
             "1000_genomes_human_SRR062634_sample_1_dna5.fastq";
+    } else {
+        if (format != IoFormat::FASTQ) return handle;
+        file_path = data_root /
+            "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz";
     }
     std::error_code error_code;
     if (!fs::exists(file_path, error_code)) {

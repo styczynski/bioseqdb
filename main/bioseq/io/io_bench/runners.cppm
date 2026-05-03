@@ -64,6 +64,13 @@ struct RunOutcome {
     /// `compact_sequence_range::size() * letters_per_unit -
     /// padding`; for kseqpp / naive it's the `std::string::size()`.
     std::size_t total_body_bytes = 0;
+    /// Which backend the dispatcher actually picked. Only the
+    /// `bioseq_io_*` runners populate this — kseqpp / naive_ifstream
+    /// don't go through `read_sequences_file`, so they leave it at
+    /// `UNKNOWN` and the matrix runner falls back to the reader's
+    /// nominal source kind for those samples.
+    bioseq::io::read_backend observed_backend =
+        bioseq::io::read_backend::UNKNOWN;
 };
 
 /// Compute the byte-count of a packed `compact_sequence_range<dna4,
@@ -125,8 +132,10 @@ template <bool IsFasta>
         loge("[bioseq_io_bench.runners.bioseq] failure on '{}': {}",
              path, msg);
     };
+    bioseq::io::read_backend observed_backend =
+        bioseq::io::read_backend::UNKNOWN;
     auto result = read_sequences_file<seq::dna4, file_type>(
-        path, handler_fn, failure_fn, options);
+        path, handler_fn, failure_fn, options, &observed_backend);
     if (!result.has_value()) {
         loge("[bioseq_io_bench.runners.bioseq] read_sequences_file returned error: {}",
              result.error());
@@ -136,6 +145,7 @@ template <bool IsFasta>
         record_count_atomic.load(std::memory_order_relaxed);
     outcome.total_body_bytes =
         body_bytes_atomic.load(std::memory_order_relaxed);
+    outcome.observed_backend = observed_backend;
     return outcome;
 }
 
@@ -174,6 +184,53 @@ template <bool IsFasta>
     opts.io.gzip_auto_detect = false;
     opts.io.prefer_mmap      = true;
     opts.concurrency.worker_count = 0;
+    return detail::run_bioseq_io_with_options<false>(path, opts);
+}
+
+/// Parallel-gzip bioseq_io runner. Triggers `parallel_gzip_source` via
+/// the dispatcher when the file is gzipped and meets the size threshold.
+[[nodiscard]] inline RunOutcome run_bioseq_io_pgzip_fasta(
+    const std::string& path) {
+    bioseq::io::reader_options opts;
+    opts.io.gzip_auto_detect            = true;
+    opts.io.prefer_mmap                 = true;
+    opts.io.parallel_gzip_enabled       = true;
+    opts.io.parallel_gzip_thread_count  = 0;  // auto
+    opts.concurrency.worker_count       = 0;  // sync parser
+    return detail::run_bioseq_io_with_options<true>(path, opts);
+}
+
+[[nodiscard]] inline RunOutcome run_bioseq_io_pgzip_fastq(
+    const std::string& path) {
+    bioseq::io::reader_options opts;
+    opts.io.gzip_auto_detect            = true;
+    opts.io.prefer_mmap                 = true;
+    opts.io.parallel_gzip_enabled       = true;
+    opts.io.parallel_gzip_thread_count  = 0;
+    opts.concurrency.worker_count       = 0;
+    return detail::run_bioseq_io_with_options<false>(path, opts);
+}
+
+/// zlib-fallback bioseq_io runner. Forces `parallel_gzip_enabled=false`
+/// so the dispatcher routes to `gzip_source` (single-thread zlib). Used
+/// as the head-to-head A/B baseline for `bioseq_io_pgzip_*`.
+[[nodiscard]] inline RunOutcome run_bioseq_io_zlib_fasta(
+    const std::string& path) {
+    bioseq::io::reader_options opts;
+    opts.io.gzip_auto_detect       = true;
+    opts.io.prefer_mmap            = true;
+    opts.io.parallel_gzip_enabled  = false;
+    opts.concurrency.worker_count  = 0;
+    return detail::run_bioseq_io_with_options<true>(path, opts);
+}
+
+[[nodiscard]] inline RunOutcome run_bioseq_io_zlib_fastq(
+    const std::string& path) {
+    bioseq::io::reader_options opts;
+    opts.io.gzip_auto_detect       = true;
+    opts.io.prefer_mmap            = true;
+    opts.io.parallel_gzip_enabled  = false;
+    opts.concurrency.worker_count  = 0;
     return detail::run_bioseq_io_with_options<false>(path, opts);
 }
 

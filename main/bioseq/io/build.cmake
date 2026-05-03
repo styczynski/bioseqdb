@@ -32,6 +32,7 @@ file(GLOB_RECURSE IO_BENCH_SRC_FILES
 
 file(GLOB_RECURSE IO_BENCH_SRC_MOD_FILES
   ${CMAKE_CURRENT_LIST_DIR}/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/compression/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/io_bench/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/../backend/common/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/../backend/common/simd/*.cppm

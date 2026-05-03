@@ -42,6 +42,8 @@ module;
 
 #include "common.h"
 
+#include <zlib.h>
+
 #include <array>
 #include <bit>
 #include <cstddef>
@@ -1253,6 +1255,303 @@ HWY_INLINE std::size_t decode_dna4_words_to_ascii_wrapped(
     return line_position;
 }
 
+// =====================================================================
+// Compression-pipeline kernels — used by parallel_gzip_decoder.
+// All inside the existing HWY_BEFORE_NAMESPACE() block; no new HWY-
+// wrapped module per CODE_STYLE.md.
+// =====================================================================
+
+/// Marker resolution — for each `uint16_t` value `v` in `buffer`, if
+/// `v < 0x8000` keep low byte; else replace low byte with
+/// `window[v - 0x8000]`. Spec §5.1.
+template <class D_U16>
+HWY_INLINE void replace_markers_inplace_one_chunk(
+    D_U16               d_u16,
+    std::uint16_t*      HWY_RESTRICT buffer,
+    std::size_t                      buffer_size,
+    const std::uint8_t* HWY_RESTRICT window /* exactly 32 KiB */) noexcept {
+    const std::size_t lanes              = hn::Lanes(d_u16);
+    const auto        v_marker_threshold = hn::Set(d_u16,
+                                                    std::uint16_t{0x8000});
+
+    std::size_t cursor = 0;
+    for (; cursor + lanes <= buffer_size; cursor += lanes) {
+        const auto v_input     = hn::LoadU(d_u16, buffer + cursor);
+        const auto v_is_marker = hn::Ge(v_input, v_marker_threshold);
+        if (HWY_LIKELY(hn::AllFalse(d_u16, v_is_marker))) continue;
+
+        HWY_ALIGN std::array<std::uint16_t, hn::MaxLanes(d_u16)> inputs{};
+        HWY_ALIGN std::array<std::uint16_t, hn::MaxLanes(d_u16)> offsets{};
+        hn::StoreU(v_input,                              d_u16, inputs.data());
+        hn::StoreU(hn::Sub(v_input, v_marker_threshold), d_u16, offsets.data());
+
+        for (std::size_t lane = 0; lane < lanes; ++lane) {
+            const std::uint16_t value = inputs[lane];
+            if (value >= 0x8000) {
+                buffer[cursor + lane] = static_cast<std::uint16_t>(
+                    window[offsets[lane]]);
+            }
+        }
+    }
+    for (; cursor < buffer_size; ++cursor) {
+        const std::uint16_t value = buffer[cursor];
+        if (value >= 0x8000) {
+            buffer[cursor] = static_cast<std::uint16_t>(
+                window[value - 0x8000]);
+        }
+    }
+}
+
+/// `dst[i] = static_cast<uint8_t>(src[i])` — drop the high byte of
+/// each `uint16_t`. 4×-unrolled `DemoteTo` per main-loop iteration.
+/// Spec §5.2.
+///
+/// `Rebind<u8, D_U16>` keeps the same lane count as the u16 tag (so
+/// `DemoteTo` produces a vector with the same lane count, just half
+/// the byte width), letting `StoreU` write `lanes_u16` contiguous
+/// bytes in one op. (`Repartition` would double the lane count to
+/// fill the same byte-width register, which doesn't match what
+/// `DemoteTo` produces from a single u16 vector.)
+template <class D_U16>
+HWY_INLINE void narrow_lower_bytes_to_dst_inner(
+    D_U16                              d_u16,
+    const std::uint16_t* HWY_RESTRICT  src,
+    std::uint8_t*        HWY_RESTRICT  dst,
+    std::size_t                        count) noexcept {
+    const hn::Rebind<std::uint8_t, D_U16> d_u8_half;
+    const std::size_t lanes_u16 = hn::Lanes(d_u16);
+
+    std::size_t cursor = 0;
+    for (; cursor + 4 * lanes_u16 <= count; cursor += 4 * lanes_u16) {
+        const auto v0 = hn::LoadU(d_u16, src + cursor + 0 * lanes_u16);
+        const auto v1 = hn::LoadU(d_u16, src + cursor + 1 * lanes_u16);
+        const auto v2 = hn::LoadU(d_u16, src + cursor + 2 * lanes_u16);
+        const auto v3 = hn::LoadU(d_u16, src + cursor + 3 * lanes_u16);
+        hn::StoreU(hn::DemoteTo(d_u8_half, v0), d_u8_half,
+                   dst + cursor + 0 * lanes_u16);
+        hn::StoreU(hn::DemoteTo(d_u8_half, v1), d_u8_half,
+                   dst + cursor + 1 * lanes_u16);
+        hn::StoreU(hn::DemoteTo(d_u8_half, v2), d_u8_half,
+                   dst + cursor + 2 * lanes_u16);
+        hn::StoreU(hn::DemoteTo(d_u8_half, v3), d_u8_half,
+                   dst + cursor + 3 * lanes_u16);
+    }
+    for (; cursor + lanes_u16 <= count; cursor += lanes_u16) {
+        const auto v_chunk = hn::LoadU(d_u16, src + cursor);
+        hn::StoreU(hn::DemoteTo(d_u8_half, v_chunk), d_u8_half,
+                   dst + cursor);
+    }
+    for (; cursor < count; ++cursor) {
+        dst[cursor] = static_cast<std::uint8_t>(src[cursor]);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Huffman fast loop — decode `kHuffmanFastLoopUnroll` literal-only
+// symbols per call from a shared bit buffer. Caller refills first.
+// Spec §5.3.
+// ---------------------------------------------------------------------
+
+inline constexpr std::size_t kHuffmanFastLoopUnroll = 3;
+
+struct huffman_fast_loop_result_inner {
+    std::array<std::uint16_t, kHuffmanFastLoopUnroll> symbols{};
+    std::size_t                                       symbols_emitted = 0;
+    std::size_t                                       bits_consumed   = 0;
+};
+
+[[nodiscard]] HWY_INLINE huffman_fast_loop_result_inner
+huffman_fast_loop_inner(
+    std::uint64_t        bit_buffer,
+    const std::uint16_t* HWY_RESTRICT primary_table /* size = 1<<11 */) noexcept {
+    constexpr std::uint64_t kPrimaryMask = (std::uint64_t{1} << 11) - 1;
+    huffman_fast_loop_result_inner result{};
+    std::size_t consumed = 0;
+    for (std::size_t lane = 0; lane < kHuffmanFastLoopUnroll; ++lane) {
+        const std::uint64_t peek  = (bit_buffer >> consumed) & kPrimaryMask;
+        const std::uint16_t entry = primary_table[peek];
+        const std::uint8_t  code_length =
+            static_cast<std::uint8_t>(entry & 0x0Fu);
+        const std::uint16_t symbol      =
+            static_cast<std::uint16_t>(entry >> 4);
+        if (code_length == 0 || symbol >= 256) [[unlikely]] break;
+        result.symbols[lane] = symbol;
+        consumed            += code_length;
+        ++result.symbols_emitted;
+    }
+    result.bits_consumed = consumed;
+    return result;
+}
+
+HWY_INLINE void huffman_fast_loop_store_inner(
+    const huffman_fast_loop_result_inner& result,
+    std::uint16_t* HWY_RESTRICT           window_cursor) noexcept {
+    for (std::size_t lane = 0; lane < result.symbols_emitted; ++lane) {
+        window_cursor[lane] = result.symbols[lane];
+    }
+}
+
+// ---------------------------------------------------------------------
+// CRC-32/ISO-HDLC reflected-mode Highway kernel. Spec §5.4.
+//
+// Implementation ported from `crc-fast-rust-main/src/algorithm.rs:200-274`
+// + `src/crc32/width32_ops.rs:48-184`. `cmul_*` helpers map upstream's
+// `cmul_00 / cmul_11 / cmul_10 / cmul_01` to Highway's `CLMulLower /
+// CLMulUpper / CLMulLower(Shuffle01) / CLMulLower(Shuffle01)`.
+// ---------------------------------------------------------------------
+
+template <class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_low_low(
+    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+    return hn::CLMulLower(a, b);
+}
+template <class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_high_high(
+    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+    return hn::CLMulUpper(a, b);
+}
+template <class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_low_high(
+    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+    return hn::CLMulLower(a, hn::Shuffle01(b));
+}
+template <class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> cmul_high_low(
+    D /*d*/, hn::Vec<D> a, hn::Vec<D> b) noexcept {
+    return hn::CLMulLower(hn::Shuffle01(a), b);
+}
+
+/// Build a coefficient vector. `high_lane` lands in lane 1; `low_lane`
+/// in lane 0.
+template <class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> make_clmul_coeff(
+    D d, std::uint64_t high_lane, std::uint64_t low_lane) noexcept {
+    HWY_ALIGN std::array<std::uint64_t, 2> lanes{low_lane, high_lane};
+    return hn::Load(d, lanes.data());
+}
+
+/// Reflected fold-16. Mirrors `width32_ops.rs:48-69`.
+template <class D>
+[[nodiscard]] HWY_INLINE hn::Vec<D> crc32_fold_16_reflected(
+    D d, hn::Vec<D> state, hn::Vec<D> coeff, hn::Vec<D> data_to_xor) noexcept {
+    const auto h = cmul_low_high(d, state, coeff);
+    const auto l = cmul_high_low(d, state, coeff);
+    return hn::Xor(hn::Xor(h, l), data_to_xor);
+}
+
+template <class D>
+[[nodiscard]] HWY_INLINE std::array<hn::Vec<D>, 7>
+crc32_collapse_coefficients(
+    D d, const std::array<std::uint64_t, 23>& keys) noexcept {
+    return {
+        make_clmul_coeff(d, keys[10], keys[9]),
+        make_clmul_coeff(d, keys[12], keys[11]),
+        make_clmul_coeff(d, keys[14], keys[13]),
+        make_clmul_coeff(d, keys[16], keys[15]),
+        make_clmul_coeff(d, keys[18], keys[17]),
+        make_clmul_coeff(d, keys[20], keys[19]),
+        make_clmul_coeff(d, keys[2],  keys[1]),
+    };
+}
+
+template <class D>
+[[nodiscard]] HWY_INLINE std::uint32_t crc32_final_reduction_reflected(
+    D                                    d,
+    hn::Vec<D>                           state,
+    const std::array<std::uint64_t, 23>& keys) noexcept {
+    const auto coeff_low  = make_clmul_coeff(d, 0,       keys[5]);
+    const auto coeff_high = make_clmul_coeff(d, keys[6], 0);
+    state = hn::Xor(cmul_low_low(d, state, coeff_low),
+                    hn::ShiftRightBytes<8>(d, state));
+
+    HWY_ALIGN std::array<std::uint64_t, 2> mask2_lanes{
+        0xFFFFFFFF00000000ULL, 0xFFFFFFFFFFFFFFFFULL};
+    const auto mask2   = hn::Load(d, mask2_lanes.data());
+    const auto masked  = hn::And(state, mask2);
+    const auto shifted = hn::ShiftLeftBytes<12>(d, state);
+    const auto folded  = cmul_high_high(d, shifted, coeff_high);
+    state = hn::Xor(folded, masked);
+
+    const auto mu_poly  = make_clmul_coeff(d, keys[8], keys[7]);
+    const auto br_step1 = cmul_low_low (d, state,    mu_poly);
+    const auto br_step2 = cmul_low_high(d, br_step1, mu_poly);
+    const auto reduced  = hn::Xor(state, br_step2);
+
+    HWY_ALIGN std::array<std::uint64_t, 2> out_lanes{};
+    hn::Store(reduced, d, out_lanes.data());
+    return static_cast<std::uint32_t>(out_lanes[1]);
+}
+
+/// 128-byte SIMD-aligned chunk processor. Mirrors `algorithm.rs:200-274`.
+template <class D>
+HWY_INLINE void crc32_process_simd_chunks_reflected(
+    D                                    d,
+    hn::Vec<D>&                          running_state,
+    const std::uint8_t*                  HWY_RESTRICT first_128,
+    const std::uint8_t*                  HWY_RESTRICT rest_bytes,
+    std::size_t                          rest_chunks_of_128,
+    const std::array<std::uint64_t, 23>& keys) noexcept {
+    const hn::Repartition<std::uint8_t, D> d_b;
+    std::array<hn::Vec<D>, 8> x;
+    for (std::size_t i = 0; i < 8; ++i) {
+        x[i] = hn::BitCast(d, hn::LoadU(d_b, first_128 + i * 16));
+    }
+    x[0] = hn::Xor(x[0], running_state);
+
+    const auto coeff_4_3 = make_clmul_coeff(d, keys[4], keys[3]);
+    for (std::size_t chunk = 0; chunk < rest_chunks_of_128; ++chunk) {
+        const std::uint8_t* HWY_RESTRICT chunk_base = rest_bytes + chunk * 128;
+        for (std::size_t i = 0; i < 8; ++i) {
+            const auto y_i = hn::BitCast(d, hn::LoadU(d_b, chunk_base + i * 16));
+            x[i] = crc32_fold_16_reflected(d, x[i], coeff_4_3, y_i);
+        }
+    }
+
+    auto res = x[7];
+    const auto collapse_coeffs = crc32_collapse_coefficients(d, keys);
+    for (std::size_t i = 0; i < 7; ++i) {
+        res = crc32_fold_16_reflected(d, x[i], collapse_coeffs[i], res);
+    }
+    running_state = res;
+}
+
+/// Local helper: forward to zlib's `crc32_z` for the tail / fallback.
+[[nodiscard]] HWY_INLINE std::uint32_t crc32_z_scalar(
+    std::uint32_t running, const std::uint8_t* data, std::size_t size) noexcept {
+    return static_cast<std::uint32_t>(::crc32_z(
+        static_cast<uLong>(running),
+        reinterpret_cast<const Bytef*>(data),
+        static_cast<z_size_t>(size)));
+}
+
+template <class D>
+[[nodiscard]] HWY_INLINE std::uint32_t crc32_iso_hdlc_reflected_impl(
+    D                                    d,
+    std::uint32_t                        running,
+    const std::uint8_t*                  HWY_RESTRICT data,
+    std::size_t                          size,
+    const std::array<std::uint64_t, 23>& keys) noexcept {
+    if (size < 128) {
+        return crc32_z_scalar(running, data, size);
+    }
+    HWY_ALIGN std::array<std::uint64_t, 2> state_lanes{
+        static_cast<std::uint64_t>(running), std::uint64_t{0}};
+    auto running_state = hn::Load(d, state_lanes.data());
+
+    const std::size_t aligned_chunks = size / 128;
+    crc32_process_simd_chunks_reflected(
+        d, running_state, data, data + 128,
+        aligned_chunks > 0 ? aligned_chunks - 1 : 0, keys);
+
+    std::uint32_t crc = crc32_final_reduction_reflected(d, running_state, keys);
+
+    const std::size_t tail_offset = aligned_chunks * 128;
+    if (tail_offset < size) {
+        crc = crc32_z_scalar(crc, data + tail_offset, size - tail_offset);
+    }
+    return crc;
+}
+
 }  // namespace bioseq::io::simd::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
@@ -1382,6 +1681,61 @@ void dna4_simd_decode_words_to_ascii(
     std::uint8_t* scratch,
     std::uint8_t* dst) noexcept;
 
+// ---------------------------------------------------------------------
+// Compression-pipeline wrappers (declarations).
+// ---------------------------------------------------------------------
+
+/// Spec §5.1. In-place marker resolution. Buffer is `uint16_t[]` (the
+/// chunk arena's storage). On entry, lanes with `value < 0x8000` are
+/// already-resolved literals; lanes with `value >= 0x8000` reference
+/// `window[value - 0x8000]`. After the call, every lane's low byte is
+/// the resolved 8-bit byte.
+void replace_markers_inplace(std::uint16_t*      buffer,
+                             std::size_t         buffer_size,
+                             const std::uint8_t* window /* exactly 32 KiB */) noexcept;
+
+/// Spec §5.2. `dst[i] = static_cast<uint8_t>(src[i])` over `count`
+/// elements. 4×-unrolled SIMD demote per iteration; tail handles
+/// trailing lanes-1 elements via scalar.
+void narrow_lower_bytes_to_dst(const std::uint16_t* src,
+                               std::uint8_t*        dst,
+                               std::size_t          count) noexcept;
+
+/// Spec §5.3. Result of one Huffman fast-loop iteration. The `symbols`
+/// array holds up to 3 decoded literal-only symbols;
+/// `symbols_emitted < 3` signals the caller should fall back to the
+/// scalar path for the breaking symbol.
+inline constexpr std::size_t kHuffmanFastLoopUnroll = 3;
+
+struct huffman_fast_loop_result {
+    std::array<std::uint16_t, kHuffmanFastLoopUnroll> symbols;
+    std::size_t                                       symbols_emitted;
+    std::size_t                                       bits_consumed;
+};
+
+/// Decode up to `kHuffmanFastLoopUnroll` literal-only symbols from a
+/// bit buffer that holds at least `kHuffmanFastLoopUnroll * 15 = 45`
+/// bits. Caller is responsible for refilling before invocation.
+[[nodiscard]] huffman_fast_loop_result huffman_fast_loop(
+    std::uint64_t        bit_buffer,
+    const std::uint16_t* primary_table) noexcept;
+
+/// Drain the fast-loop result into the `_window16[]` ring. Scalar
+/// store; vectorising over `symbols_emitted` would clobber later lanes
+/// on the partial-emit path.
+void huffman_fast_loop_store(
+    const huffman_fast_loop_result& result,
+    std::uint16_t*                  window_cursor) noexcept;
+
+/// Spec §5.4. Highway CRC-32/ISO-HDLC entry point. Implemented but
+/// **not wired** into the chunk pipeline by default — the orchestrator
+/// keeps calling zlib's `crc32_z`. Same return semantics as
+/// `crc32_update` in `compression/crc32.cppm` (they are bit-exact).
+[[nodiscard]] std::uint32_t crc32_iso_hdlc_simd(
+    std::uint32_t        running,
+    const std::uint8_t*  bytes,
+    std::size_t          size) noexcept;
+
 }  // namespace bioseq::io::simd
 
 }  // export
@@ -1478,6 +1832,74 @@ std::size_t dna4_simd_decode_words_to_ascii_wrapped(
     return HWY_NAMESPACE::decode_dna4_words_to_ascii_wrapped(
         words, total_letters, wrap_width,
         letters_in_current_line, scratch, dst);
+}
+
+// ---------------------------------------------------------------------
+// Compression-pipeline wrappers (definitions). Spec §5.
+// ---------------------------------------------------------------------
+
+void replace_markers_inplace(
+    std::uint16_t*      buffer,
+    std::size_t         buffer_size,
+    const std::uint8_t* window) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<std::uint16_t> d_u16;
+    HWY_NAMESPACE::replace_markers_inplace_one_chunk(
+        d_u16, buffer, buffer_size, window);
+}
+
+void narrow_lower_bytes_to_dst(
+    const std::uint16_t* src,
+    std::uint8_t*        dst,
+    std::size_t          count) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<std::uint16_t> d_u16;
+    HWY_NAMESPACE::narrow_lower_bytes_to_dst_inner(d_u16, src, dst, count);
+}
+
+huffman_fast_loop_result huffman_fast_loop(
+    std::uint64_t        bit_buffer,
+    const std::uint16_t* primary_table) noexcept {
+    const auto inner = HWY_NAMESPACE::huffman_fast_loop_inner(
+        bit_buffer, primary_table);
+    huffman_fast_loop_result result{};
+    result.symbols         = inner.symbols;
+    result.symbols_emitted = inner.symbols_emitted;
+    result.bits_consumed   = inner.bits_consumed;
+    return result;
+}
+
+void huffman_fast_loop_store(
+    const huffman_fast_loop_result& result,
+    std::uint16_t*                  window_cursor) noexcept {
+    HWY_NAMESPACE::huffman_fast_loop_result_inner inner{};
+    inner.symbols         = result.symbols;
+    inner.symbols_emitted = result.symbols_emitted;
+    inner.bits_consumed   = result.bits_consumed;
+    HWY_NAMESPACE::huffman_fast_loop_store_inner(inner, window_cursor);
+}
+
+std::uint32_t crc32_iso_hdlc_simd(
+    std::uint32_t        running,
+    const std::uint8_t*  bytes,
+    std::size_t          size) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::Full128<std::uint64_t> d_u64;
+    // Inline the constant key-table here so simd_kernels doesn't have
+    // to import the compression module (avoids circular module deps).
+    static constexpr std::array<std::uint64_t, 23> kIsoHdlcReflectedKeys = {
+        0x0000000000000000ULL,
+        0x00000000ccaa009eULL, 0x00000001751997d0ULL, 0x000000014a7fe880ULL,
+        0x00000001e88ef372ULL, 0x00000000ccaa009eULL, 0x0000000163cd6124ULL,
+        0x00000001f7011641ULL, 0x00000001db710641ULL, 0x00000001d7cfc6acULL,
+        0x00000001ea89367eULL, 0x000000018cb44e58ULL, 0x00000000df068dc2ULL,
+        0x00000000ae0b5394ULL, 0x00000001c7569e54ULL, 0x00000001c6e41596ULL,
+        0x0000000154442bd4ULL, 0x0000000174359406ULL, 0x000000003db1ecdcULL,
+        0x000000015a546366ULL, 0x00000000f1da05aaULL, 0x00000001322d1430ULL,
+        0x000000011542778aULL,
+    };
+    return HWY_NAMESPACE::crc32_iso_hdlc_reflected_impl(
+        d_u64, running, bytes, size, kIsoHdlcReflectedKeys);
 }
 
 }  // namespace bioseq::io::simd

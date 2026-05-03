@@ -27,6 +27,7 @@ module;
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <numeric>
 #include <span>
@@ -94,7 +95,11 @@ namespace detail {
                        io_format_name(sample.format));
 }
 
-/// Stable order over the length buckets used as x-categories.
+/// Stable order over the length buckets used as x-categories. Must
+/// list every value of `IoLengthBucket` — the bar-chart loop only
+/// emits cells for buckets that appear here, so any omission silently
+/// drops samples (this previously hid the gz cell from the chart even
+/// though `throughput_table` recorded it correctly).
 [[nodiscard]] inline std::vector<std::string> length_bucket_axis_labels() {
     return {
         std::string{io_length_bucket_name(IoLengthBucket::SHORT)},
@@ -103,6 +108,7 @@ namespace detail {
         std::string{io_length_bucket_name(IoLengthBucket::VERY_LONG)},
         std::string{io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME)},
         std::string{io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB)},
+        std::string{io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ)},
     };
 }
 
@@ -118,7 +124,18 @@ namespace detail {
         return IoLengthBucket::VERY_LONG;
     if (label == io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME))
         return IoLengthBucket::REAL_HUMAN_GENOME;
-    return IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB;
+    if (label == io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB))
+        return IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB;
+    if (label == io_length_bucket_name(IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ))
+        return IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ;
+    // Unrecognised label is a programmer error — `length_bucket_axis_labels`
+    // must list every enum value, so an unknown label means a new bucket
+    // landed without updating both helpers in lockstep.
+    loge("[bioseq_io_bench.chart_builder] bucket_from_label: unknown "
+         "label '{}'; update length_bucket_axis_labels and bucket_from_label "
+         "together when a new IoLengthBucket value lands",
+         label);
+    std::abort();
 }
 
 }  // namespace detail

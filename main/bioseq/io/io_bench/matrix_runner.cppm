@@ -63,8 +63,21 @@ namespace bioseq::io_bench {
 struct ReaderEntry {
     std::string label;
     std::string kind;             // "bioseq_io" / "kseqpp" / "naive"
+    /// Nominal source-kind label. Whatever the bench's `run_cell` writes
+    /// into `sample.source_kind` is the *actually observed* backend the
+    /// dispatcher picked at run time, not this static value — see the
+    /// per-cell wiring below for how the runner reports back. Kept as a
+    /// classification axis (e.g. for the `requires_gz_input` flag).
     IoSourceKind source_kind = IoSourceKind::POSIX_READ;
     std::size_t worker_count = 0;
+    /// True when this reader can only meaningfully process gzipped input.
+    /// The bench's plain cells skip it. Without this filter the
+    /// dispatcher's magic-byte sniff falls through to plain mmap and
+    /// the runner posts mmap-speed numbers under a `parallel_gzip`
+    /// label, conflating the two paths in the bar chart.
+    /// kseqpp handles both plain and gz natively (libz handles both),
+    /// so it stays `false` and runs on every cell.
+    bool requires_gz_input = false;
     std::function<RunOutcome(const std::string&)> run;
 };
 
@@ -115,6 +128,26 @@ struct ReaderEntry {
             return run_naive_ifstream_fasta(path);
         },
     });
+    readers.push_back(ReaderEntry{
+        .label = "bioseq_io_pgzip_fasta",
+        .kind  = "bioseq_io",
+        .source_kind = IoSourceKind::PARALLEL_GZIP,
+        .worker_count = 6,
+        .requires_gz_input = true,
+        .run = [](const std::string& path) {
+            return run_bioseq_io_pgzip_fasta(path);
+        },
+    });
+    readers.push_back(ReaderEntry{
+        .label = "bioseq_io_zlib_fasta",
+        .kind  = "bioseq_io",
+        .source_kind = IoSourceKind::GZIP,
+        .worker_count = 0,
+        .requires_gz_input = true,
+        .run = [](const std::string& path) {
+            return run_bioseq_io_zlib_fasta(path);
+        },
+    });
     return readers;
 }
 
@@ -154,6 +187,26 @@ struct ReaderEntry {
             return run_naive_ifstream_fastq(path);
         },
     });
+    readers.push_back(ReaderEntry{
+        .label = "bioseq_io_pgzip_fastq",
+        .kind  = "bioseq_io",
+        .source_kind = IoSourceKind::PARALLEL_GZIP,
+        .worker_count = 6,
+        .requires_gz_input = true,
+        .run = [](const std::string& path) {
+            return run_bioseq_io_pgzip_fastq(path);
+        },
+    });
+    readers.push_back(ReaderEntry{
+        .label = "bioseq_io_zlib_fastq",
+        .kind  = "bioseq_io",
+        .source_kind = IoSourceKind::GZIP,
+        .worker_count = 0,
+        .requires_gz_input = true,
+        .run = [](const std::string& path) {
+            return run_bioseq_io_zlib_fastq(path);
+        },
+    });
     return readers;
 }
 
@@ -173,6 +226,7 @@ struct ReaderEntry {
             // even at 5+ GB/s; one sample under fast mode keeps the cycle
             // tight without changing the regression signal.
             case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 1;
+            case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ: return 1;
         }
         return 1;
     }
@@ -183,6 +237,7 @@ struct ReaderEntry {
         case IoLengthBucket::VERY_LONG:         return 2;
         case IoLengthBucket::REAL_HUMAN_GENOME: return 3;
         case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 2;
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ: return 1;
     }
     return 1;
 }
@@ -198,7 +253,8 @@ inline void run_cell(IoFormat format,
                      std::string_view test_data_dir) {
     CorpusHandle corpus;
     if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME ||
-        length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
+        length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB ||
+        length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ) {
         corpus = try_open_real_corpus(test_data_dir, format, length_bucket);
         if (corpus.path.empty()) {
             loge("[bioseq_io_bench.matrix_runner] real-data cell {} {} skipped "
@@ -217,6 +273,21 @@ inline void run_cell(IoFormat format,
         }
     }
 
+    // Symmetric filter: gzip cells only run gzip-capable readers; plain
+    // cells skip readers flagged `requires_gz_input` so the dispatcher's
+    // magic-byte sniff fall-through to plain mmap doesn't get charted as
+    // "gzip throughput". Applies to BOTH the warm-up and timed loop.
+    const bool is_gzip_cell =
+        (length_bucket ==
+         IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ);
+    const auto skip_reader = [&](const ReaderEntry& candidate) noexcept {
+        if (is_gzip_cell) {
+            return candidate.source_kind != IoSourceKind::GZIP &&
+                   candidate.source_kind != IoSourceKind::PARALLEL_GZIP;
+        }
+        return candidate.requires_gz_input;
+    };
+
     // Warm-up via every reader once so file-cache and allocator
     // first-call costs don't pollute the percentile estimate. For
     // real-data cells the corpus record_count is unknown a priori
@@ -226,6 +297,7 @@ inline void run_cell(IoFormat format,
     std::size_t reference_record_count = corpus.record_count;
     bool reference_count_set = (reference_record_count > 0);
     for (const auto& reader : readers) {
+        if (skip_reader(reader)) continue;
         const auto warm_outcome = reader.run(corpus.path);
         if (!reference_count_set) {
             reference_record_count = warm_outcome.record_count;
@@ -244,7 +316,30 @@ inline void run_cell(IoFormat format,
         }
     }
 
+    // Convert the dispatcher-reported `read_backend` (from public_api)
+    // into the bench's `IoSourceKind`. UNKNOWN means "this reader did
+    // not go through the dispatcher" (e.g. kseqpp / naive_ifstream)
+    // and we keep the reader's nominal source_kind in that case.
+    const auto observed_to_source_kind = [](
+            bioseq::io::read_backend backend,
+            IoSourceKind nominal) noexcept -> IoSourceKind {
+        switch (backend) {
+            case bioseq::io::read_backend::MMAP:
+                return IoSourceKind::MMAP;
+            case bioseq::io::read_backend::POSIX_READ:
+                return IoSourceKind::POSIX_READ;
+            case bioseq::io::read_backend::GZIP:
+                return IoSourceKind::GZIP;
+            case bioseq::io::read_backend::PARALLEL_GZIP:
+                return IoSourceKind::PARALLEL_GZIP;
+            case bioseq::io::read_backend::UNKNOWN:
+                break;
+        }
+        return nominal;
+    };
+
     for (const auto& reader : readers) {
+        if (skip_reader(reader)) continue;
         ReaderSample sample;
         sample.reader_label = reader.label;
         sample.reader_kind  = reader.kind;
@@ -257,6 +352,19 @@ inline void run_cell(IoFormat format,
         sample.source_kind_label = io_source_kind_name(reader.source_kind);
         sample.corpus_path  = corpus.path;
         sample.corpus_bytes_on_disk = corpus.bytes_on_disk;
+        // For the gzipped cell, record the decompressed byte count
+        // separately so the chart layer can pivot throughput on
+        // decompressed MiB/s. Assume 3.2x for FASTQ from the SRR cell
+        // shape (~6.0 GiB decompressed / ~1.96 GiB compressed). Real
+        // value is computed by the runner's `total_bytes_processed`
+        // counter at run time once the runner exposes it.
+        if (length_bucket ==
+            IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ) {
+            sample.corpus_decompressed_bytes =
+                static_cast<std::size_t>(corpus.bytes_on_disk * 3.2);
+        } else {
+            sample.corpus_decompressed_bytes = corpus.bytes_on_disk;
+        }
         sample.record_count = corpus.record_count;
 
         // Sanity counters: how many timed runs disagree with the
@@ -266,6 +374,13 @@ inline void run_cell(IoFormat format,
         std::size_t mismatched_body_bytes = 0;
         std::size_t reference_body_bytes = 0;
         bool body_bytes_initialised = false;
+        // Captured out of the lambda so the matrix runner can label
+        // the sample with the dispatcher's actual choice rather than
+        // the reader's nominal source_kind. Stable across timed
+        // iterations (the dispatcher decides from the file path
+        // and options, both fixed for this loop).
+        bioseq::io::read_backend last_observed_backend =
+            bioseq::io::read_backend::UNKNOWN;
 
         const auto outcome = bioseq::bench_scheduler::collect_timed_samples(
             samples_per_reader, [&]() {
@@ -279,10 +394,20 @@ inline void run_cell(IoFormat format,
                 } else if (run_outcome.total_body_bytes != reference_body_bytes) {
                     ++mismatched_body_bytes;
                 }
+                last_observed_backend = run_outcome.observed_backend;
             });
         sample.sample_latencies_ns = std::move(outcome.sample_latencies_ns);
         sample.sample_peak_rss_delta_bytes =
             std::move(outcome.sample_peak_rss_delta_bytes);
+
+        // Re-label the sample with the actual dispatcher backend if
+        // the runner reported one. kseqpp / naive_ifstream stay at
+        // their nominal source_kind because they don't go through
+        // `read_sequences_file`.
+        const IoSourceKind observed_kind = observed_to_source_kind(
+            last_observed_backend, reader.source_kind);
+        sample.source_kind        = observed_kind;
+        sample.source_kind_label  = io_source_kind_name(observed_kind);
 
         if (mismatched_record_counts > 0) {
             loge("[bioseq_io_bench.matrix_runner] reader '{}' record-count "
@@ -421,6 +546,7 @@ struct WriterEntry {
             case IoLengthBucket::VERY_LONG:         return 1;
             case IoLengthBucket::REAL_HUMAN_GENOME: return 2;
             case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 1;
+            case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ: return 1;
         }
         return 1;
     }
@@ -431,6 +557,7 @@ struct WriterEntry {
         case IoLengthBucket::VERY_LONG:         return 2;
         case IoLengthBucket::REAL_HUMAN_GENOME: return 3;
         case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB: return 2;
+        case IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ: return 1;
     }
     return 1;
 }
@@ -477,6 +604,11 @@ inline void run_writer_cell(IoFormat format,
                              std::size_t samples_per_writer,
                              std::string_view test_data_dir) {
     CorpusHandle source;
+    // The gzip cell is reader-only — writers have no compress
+    // path. Skip the cell silently when the writer matrix encounters it.
+    if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ) {
+        return;
+    }
     if (length_bucket == IoLengthBucket::REAL_HUMAN_GENOME ||
         length_bucket == IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB) {
         source = try_open_real_corpus(test_data_dir, format, length_bucket);
@@ -583,11 +715,12 @@ inline void run_writer_bench_matrix(bool fast_mode,
                                      std::string_view test_data_dir) {
     constexpr std::array<IoFormat, 2> formats{
         IoFormat::FASTA, IoFormat::FASTQ};
-    constexpr std::array<IoLengthBucket, 6> length_buckets{
+    constexpr std::array<IoLengthBucket, 7> length_buckets{
         IoLengthBucket::SHORT, IoLengthBucket::MEDIUM,
         IoLengthBucket::LONG,  IoLengthBucket::VERY_LONG,
         IoLengthBucket::REAL_HUMAN_GENOME,
-        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB};
+        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB,
+        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ};
 
     const auto fasta_writers = default_fasta_writers();
     const auto fastq_writers = default_fastq_writers();
@@ -629,11 +762,12 @@ inline void run_io_bench_matrix(bool fast_mode,
                                 std::string_view test_data_dir) {
     constexpr std::array<IoFormat, 2> formats{
         IoFormat::FASTA, IoFormat::FASTQ};
-    constexpr std::array<IoLengthBucket, 6> length_buckets{
+    constexpr std::array<IoLengthBucket, 7> length_buckets{
         IoLengthBucket::SHORT, IoLengthBucket::MEDIUM,
         IoLengthBucket::LONG,  IoLengthBucket::VERY_LONG,
         IoLengthBucket::REAL_HUMAN_GENOME,
-        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB};
+        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB,
+        IoLengthBucket::REAL_HUMAN_GENOME_LARGE_FASTQ_6GB_GZ};
 
     const auto fasta_readers = default_fasta_readers();
     const auto fastq_readers = default_fastq_readers();

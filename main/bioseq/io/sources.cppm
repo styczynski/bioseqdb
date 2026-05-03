@@ -149,6 +149,14 @@ private:
     std::string _last_error_message;
 };
 
+struct mmap_source;
+
+/// Result of `mmap_source::try_open` when extended with magic-byte
+/// sniffing (spec §8.2). Carries the freshly-mapped source plus the
+/// 2-byte magic check + total file size so the dispatcher can route
+/// gzipped files to the parallel decoder without a second `open`.
+struct mmap_source_with_magic;
+
 /// `mmap(2)`-backed source. The file is mapped read-only and `read_into`
 /// performs a `memcpy` into the caller's slab. The zero-copy direct
 /// mode (parser sees mmap'd bytes directly) is a future optimisation —
@@ -188,46 +196,19 @@ public:
 
     ~mmap_source() { release(); }
 
-    [[nodiscard]] static std::expected<mmap_source, std::string> try_open(
-        std::string_view path,
-        const reader_options& options) {
-        const std::string path_str(path);
-        const int fd = ::open(path_str.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd < 0) {
-            return std::unexpected(fmt::format(
-                "cannot open '{}': {}", path, std::strerror(errno)));
-        }
-        struct stat st{};
-        if (::fstat(fd, &st) != 0) {
-            const int saved = errno;
-            ::close(fd);
-            return std::unexpected(fmt::format(
-                "fstat failed on '{}': {}", path, std::strerror(saved)));
-        }
-        if (st.st_size <= 0 ||
-            static_cast<std::size_t>(st.st_size) > options.io.max_mmap_bytes) {
-            ::close(fd);
-            return std::unexpected(std::string{
-                "file outside mmap range; caller should use posix_read_source"});
-        }
-        const std::size_t mapped_size = static_cast<std::size_t>(st.st_size);
-        void* const addr = ::mmap(nullptr, mapped_size,
-                                  PROT_READ, MAP_PRIVATE | MAP_FILE, fd, 0);
-        if (addr == MAP_FAILED) {
-            const int saved = errno;
-            ::close(fd);
-            return std::unexpected(fmt::format(
-                "mmap failed for '{}': {}", path, std::strerror(saved)));
-        }
-        if (options.io.stream_madvise) {
-            ::madvise(addr, mapped_size, MADV_SEQUENTIAL);
-        }
-        mmap_source source;
-        source._addr = addr;
-        source._size = mapped_size;
-        source._fd = fd;
-        return source;
-    }
+    /// Plain open. The dispatcher uses `try_open_with_magic` to also
+    /// learn whether the file is gzipped; this is the convenience
+    /// shim for callers that only want the source.
+    [[nodiscard]] static std::expected<mmap_source, std::string>
+    try_open(std::string_view path, const reader_options& options);
+
+    /// Magic-byte-aware open (spec §8.2). Reads the first 2 bytes via
+    /// `pread(2)` after `fstat` and returns the source bundled with
+    /// the gzip-magic flag and the file size. Used by the dispatcher
+    /// to route gzipped files to the parallel decoder without a
+    /// second `open`.
+    [[nodiscard]] static std::expected<mmap_source_with_magic, std::string>
+    try_open_with_magic(std::string_view path, const reader_options& options);
 
     [[nodiscard]] read_result read_into(std::uint8_t* dst, std::size_t cap) noexcept {
         const std::size_t available = (_cursor < _size) ? (_size - _cursor) : 0;
@@ -292,6 +273,85 @@ private:
     bool _bom_consumed = false;
     std::string _last_error_message;
 };
+
+/// Magic-byte sniff result. The dispatcher (`public_api.cppm`) uses
+/// this to route gzipped files to the parallel decoder. Aggregate so
+/// `std::expected` can move-construct it from designated-init.
+struct mmap_source_with_magic {
+    mmap_source source;
+    bool        is_gzipped = false;
+    std::size_t file_size  = 0;
+};
+
+[[nodiscard]] inline std::expected<mmap_source, std::string>
+mmap_source::try_open(std::string_view path, const reader_options& options) {
+    auto with_magic = try_open_with_magic(path, options);
+    if (!with_magic) {
+        return std::unexpected(std::move(with_magic.error()));
+    }
+    return std::move(with_magic->source);
+}
+
+[[nodiscard]] inline std::expected<mmap_source_with_magic, std::string>
+mmap_source::try_open_with_magic(
+    std::string_view path,
+    const reader_options& options) {
+    const std::string path_str(path);
+    const int fd = ::open(path_str.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return std::unexpected(fmt::format(
+            "cannot open '{}': {}", path, std::strerror(errno)));
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) {
+        const int saved = errno;
+        ::close(fd);
+        return std::unexpected(fmt::format(
+            "fstat failed on '{}': {}", path, std::strerror(saved)));
+    }
+    if (st.st_size <= 0 ||
+        static_cast<std::size_t>(st.st_size) > options.io.max_mmap_bytes) {
+        ::close(fd);
+        return std::unexpected(std::string{
+            "file outside mmap range; caller should use posix_read_source"});
+    }
+
+    std::array<std::uint8_t, 2> magic_bytes{};
+    if (st.st_size >= 2) {
+        const ssize_t n = ::pread(fd, magic_bytes.data(), 2, 0);
+        if (n < 0) {
+            const int saved = errno;
+            ::close(fd);
+            return std::unexpected(fmt::format(
+                "magic-byte pread failed on '{}': {}", path,
+                std::strerror(saved)));
+        }
+    }
+
+    const std::size_t mapped_size = static_cast<std::size_t>(st.st_size);
+    void* const addr = ::mmap(nullptr, mapped_size,
+                              PROT_READ, MAP_PRIVATE | MAP_FILE, fd, 0);
+    if (addr == MAP_FAILED) {
+        const int saved = errno;
+        ::close(fd);
+        return std::unexpected(fmt::format(
+            "mmap failed for '{}': {}", path, std::strerror(saved)));
+    }
+    if (options.io.stream_madvise) {
+        ::madvise(addr, mapped_size, MADV_SEQUENTIAL);
+    }
+    mmap_source source;
+    source._addr = addr;
+    source._size = mapped_size;
+    source._fd = fd;
+
+    mmap_source_with_magic out;
+    out.source     = std::move(source);
+    out.is_gzipped = (st.st_size >= 2 &&
+                      magic_bytes[0] == 0x1F && magic_bytes[1] == 0x8B);
+    out.file_size  = mapped_size;
+    return out;
+}
 
 /// `gzread`-backed source. Uses zlib. zlib's `gzopen` transparently
 /// handles plain (non-gzipped) files too, so this source doubles as a

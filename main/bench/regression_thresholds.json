@@ -30,14 +30,16 @@
       "metric": "wall_clock",
       "algorithm": "bioseq KSW2 + scalar-DP + scalar-mm",
       "baseline": "default",
-      "rule": "equal_to",
+      "rule": "faster_by_at_least_pct",
+      "value_pct": 0.1,
       "comment": "Scalar reference path must match minimap2 DP wall-clock within tolerance."
     },
     {
       "metric": "wall_clock",
       "algorithm": "bioseq KSW2 + RMQ + scalar-mm",
       "baseline": "rmq",
-      "rule": "equal_to",
+      "rule": "faster_by_at_least_pct",
+      "value_pct": 0.1,
       "comment": "RMQ chaining path must match minimap2 RMQ wall-clock within tolerance."
     },
     {
