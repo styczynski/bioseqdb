@@ -40,13 +40,13 @@ struct gzip_member_state {
 class parallel_gzip_decoder {
 public:
     parallel_gzip_decoder(std::span<const std::uint8_t> compressed_view,
-                          std::size_t                   /*worker_count*/,
+                          std::size_t                   worker_count,
                           std::size_t                   chunk_decompressed_target_bytes,
                           bool                          verify_crc) noexcept
         : _compressed_view(compressed_view),
           _fetcher(compressed_view,
                    chunk_decompressed_target_bytes,
-                   /*worker_count=*/1,
+                   worker_count,
                    verify_crc),
           _verify_crc(verify_crc) {}
 

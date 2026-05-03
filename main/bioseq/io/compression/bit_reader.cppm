@@ -32,7 +32,14 @@ export namespace bioseq::io::compression {
 class bit_reader {
 public:
     static constexpr std::size_t kBufferRefillSize = 128 * 1024;
-    static constexpr std::size_t kMaxPeekBits      = sizeof(std::uint64_t) * 8 - 7;
+    /// Max bits we can guarantee the buffer holds after a `refill()`
+    /// call. Must be `<= 64 - 8` because `refill` shifts the loaded
+    /// byte by `_bits_buffered`; with `<= 57`, the case
+    /// `_bits_buffered == 57` would load a new byte at shift 57,
+    /// pushing bit 7 of that byte to position 64 (OUT of uint64_t),
+    /// silently losing it. Keeping at most `64 - 8 = 56` ensures the
+    /// loaded byte fully fits.
+    static constexpr std::size_t kMaxPeekBits      = sizeof(std::uint64_t) * 8 - 8;
 
     bit_reader() = default;
 

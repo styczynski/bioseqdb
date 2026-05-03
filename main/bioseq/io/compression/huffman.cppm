@@ -173,6 +173,12 @@ private:
             if (length > kMaxCodeBits) return false;
             ++length_counts[length];
         }
+        // RFC 1951 Appendix C: bl_count[0] must be 0 for the canonical
+        // code computation to start from `code = 0` regardless of how
+        // many entries were zero-length (zero-length means "symbol not
+        // used", not "1 0-bit code"). Without this reset, every absent
+        // symbol shifts first_code[1] by 2, corrupting the entire LUT.
+        length_counts[0] = 0;
 
         // Compute first canonical code per length (MSB-first walk).
         std::array<std::uint32_t, kMaxCodeBits + 2> next_code{};

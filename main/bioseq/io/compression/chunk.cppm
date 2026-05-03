@@ -22,8 +22,6 @@ module;
 
 #include "common.h"
 
-#include <zlib.h>
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
