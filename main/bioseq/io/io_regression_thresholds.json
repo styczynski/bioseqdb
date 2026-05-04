@@ -3,6 +3,8 @@
 
   "$rationale_comment": "Calibrated on the v1 SIMD encoder (`encode_body_chunk_dna4_simd` in main/bioseq/io/simd_kernels.cppm). bioseq_io produces a packed compact_sequence_range (4-bit-per-letter dna4 encoding done inline during parsing); kseqpp and naive_ifstream produce a plain std::string of ASCII bytes. So the per-input-byte work for bioseq_io is strictly larger; observed ratios on the bench machine: bioseq_io is ~1.2-2.0x slower than naive_ifstream depending on cell. The tolerance of 150 means EQUAL_TO passes when actual <= 2.5x baseline (and >= 0.4x baseline). The spec's '5x faster than kseqpp' goal requires the SWAR pair-merge bit-pack stage (spec §11.3) which v1 does not implement; the gap is documented in IO_V2_REPORT.md as the next optimisation target.",
 
+  "$roundtrip_match_comment": "The `roundtrip_record_match` metric (regression_glue.cppm) reports `1.0 + match_ratio` per (cell, writer) so an all-mismatch cell hits 1.0 instead of 0.0 (the engine treats `actual <= 0` as missing data and refuses to flag). Scale: 1.0 = all mismatch, 2.0 = all match. With min_value 2.0 and the engine's 5% slack the threshold lands at 1.9, firing on any cell whose match-ratio drops below ~80%.",
+
   "tolerance_pct": 150.0,
 
   "baselines": {
@@ -122,6 +124,49 @@
       "rule":      "min_absolute",
       "min_value": 1228.0,
       "comment":   "Spec §13 acceptance criterion #5: decompressed throughput >= 1.2 GB/s (1228 MiB/s) on the gz cell. The kseqpp-relative rule above passes when the implementation is within 2.5x of kseqpp's ~57 MiB/s (compressed) basis, which is silent about the design goal. This hard floor is what the bench must clear for the gzip reader to be considered done; expected to fire until the marker-mode DEFLATE decoder lands."
+    },
+
+    {
+      "metric":    "roundtrip_record_match",
+      "algorithm": "bioseq_writer_sync_fasta",
+      "rule":      "min_absolute",
+      "min_value": 2.0,
+      "comment":   "Writer roundtrip integrity: bytes written by bioseq_writer_sync FASTA must re-read to the same record count via the bioseq reader. Catches malformed-output bugs (truncated records, missing newlines) and reader-side regressions on the writer's output."
+    },
+    {
+      "metric":    "roundtrip_record_match",
+      "algorithm": "bioseq_writer_parallel4_fasta",
+      "rule":      "min_absolute",
+      "min_value": 2.0,
+      "comment":   "Writer roundtrip integrity for parallel4 FASTA. Parallel writers shard records across pwrite offsets — record-count drift here points at chunk-boundary corruption."
+    },
+    {
+      "metric":    "roundtrip_record_match",
+      "algorithm": "bioseq_writer_parallel8_fasta",
+      "rule":      "min_absolute",
+      "min_value": 2.0,
+      "comment":   "Writer roundtrip integrity for parallel8 FASTA."
+    },
+    {
+      "metric":    "roundtrip_record_match",
+      "algorithm": "bioseq_writer_sync_fastq",
+      "rule":      "min_absolute",
+      "min_value": 2.0,
+      "comment":   "Writer roundtrip integrity for FASTQ. The seq+qual length agreement is FASTQ-spec-mandatory; a regression here is usually a writer bug emitting a short qual or a stray newline."
+    },
+    {
+      "metric":    "roundtrip_record_match",
+      "algorithm": "bioseq_writer_parallel4_fastq",
+      "rule":      "min_absolute",
+      "min_value": 2.0,
+      "comment":   "Writer roundtrip integrity for parallel4 FASTQ."
+    },
+    {
+      "metric":    "roundtrip_record_match",
+      "algorithm": "bioseq_writer_parallel8_fastq",
+      "rule":      "min_absolute",
+      "min_value": 2.0,
+      "comment":   "Writer roundtrip integrity for parallel8 FASTQ."
     }
   ],
 

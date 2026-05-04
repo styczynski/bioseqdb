@@ -133,10 +133,46 @@ struct member_info {
     std::size_t header_end_bit = 0;
 };
 
+/// Lightweight validation of a dynamic-Huffman block header at the
+/// reader's current position. Mirrors `block::read_header` but skips
+/// the actual literal/distance Huffman table BUILDS — instead just
+/// runs the Kraft completeness check on each table's code lengths.
+/// ~5× faster than `read_header` for false-positive rejection.
+[[nodiscard]] inline bool validate_dynamic_huffman_only(
+    bit_reader& reader) noexcept;
+
 /// Walk `compressed_view` linearly looking for gzip-magic candidates
-/// (`0x1f 0x8b 0x08 <flags ≤ 0x1f>`). Each candidate is fed through the
-/// existing `parse_gzip_header` validator; survivors land in the
-/// returned vector.
+/// (`0x1f 0x8b 0x08 <flags ≤ 0x1f>`). Each candidate is fed through:
+///
+///   1. `parse_gzip_header` — magic bytes, method, NUL-terminated
+///      FNAME / FCOMMENT (when flagged).
+///   2. `validate_dynamic_huffman_only` at the would-be first deflate
+///      block — Kraft completeness check on the literal+distance
+///      trees.
+///
+/// Step 2 is what filters compressed-data sequences that randomly look
+/// like a gzip header. The 4-byte magic prefix `1f 8b 08 [00..1f]` has
+/// 30 valid combinations across 2^32 — at ~2 GiB of compressed data,
+/// expect ~4 prefilter hits PER FILE just from random data. With FNAME
+/// / FCOMMENT being NUL-terminated reads on random bytes,
+/// `parse_gzip_header` alone passes nearly all of them: a 1.9 GiB
+/// SRR FASTQ.gz had 19 false-positive members and 1 real one.
+///
+/// Each fake member's chunk-0 starts in DIRECT mode at a non-block bit
+/// position. The decoder reads garbage Huffman codes and eventually
+/// emits a back-reference whose `distance > _decoded_bytes + produced`,
+/// returning EXCEEDED_WINDOW_RANGE. The Kraft check at the candidate's
+/// `header_end_bit` rejects ~5e-7 of the prefilter survivors per the
+/// rapidgzip paper (tab:false_positives), bringing expected fake
+/// members per file to effectively zero.
+///
+/// COMPATIBILITY: this rejects the rare case of a real gzip member
+/// whose first deflate block is fixed-Huffman or uncompressed. Real
+/// gzip encoders (gzip, pigz, igzip, zlib level ≥ 1) emit dynamic
+/// Huffman for any payload past a few hundred bytes, so this is safe
+/// for production data. If you need to support fixed-block first
+/// members, fall back to the single-thread producer (`worker_count
+/// <= 1`).
 [[nodiscard]] inline std::expected<std::vector<member_info>, std::string>
 prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
     std::vector<member_info> members;
@@ -162,7 +198,8 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
             continue;
         }
 
-        // Full validation via `parse_gzip_header`.
+        // Step 1: parse the header itself (magic + flags + optional
+        // NUL-terminated fields).
         bit_reader probe{
             std::span<const std::uint8_t>{
                 compressed_view.data() + cursor,
@@ -176,10 +213,26 @@ prescan_members(std::span<const std::uint8_t> compressed_view) noexcept {
             ++cursor;
             continue;
         }
+        const std::size_t header_end_bit_global =
+            cursor * 8u + header_or->end_bit_offset;
+
+        // Step 2: validate the first deflate block at header_end_bit
+        // is dynamic-Huffman with Kraft-complete literal + distance
+        // trees. This is what distinguishes a real gzip member start
+        // from a 4-byte pattern that happens to live inside compressed
+        // data. Without this check, every random `1f 8b 08 <flag>`
+        // hit becomes a fake "member" whose chunk-0 decodes garbage in
+        // direct mode (EXCEEDED_WINDOW_RANGE downstream).
+        bit_reader block_probe{compressed_view};
+        block_probe.seek_to_bit(header_end_bit_global);
+        if (!validate_dynamic_huffman_only(block_probe)) {
+            ++cursor;
+            continue;
+        }
+
         member_info info;
         info.header_byte = cursor;
-        info.header_end_bit =
-            cursor * 8u + header_or->end_bit_offset;
+        info.header_end_bit = header_end_bit_global;
         members.push_back(info);
 
         // Skip past the header. The actual deflate stream starts here;
@@ -214,11 +267,6 @@ struct chunk_plan {
     bool          is_last_in_member   = false;
 };
 
-/// Lightweight validation of a dynamic-Huffman block header at the
-/// reader's current position. Mirrors `block::read_header` but skips
-/// the actual literal/distance Huffman table BUILDS — instead just
-/// runs the Kraft completeness check on each table's code lengths.
-/// ~5× faster than `read_header` for false-positive rejection.
 [[nodiscard]] inline bool validate_dynamic_huffman_only(
     bit_reader& reader) noexcept {
     if (reader.bits_buffered() < 3) reader.refill();
@@ -1272,7 +1320,19 @@ private:
             // snapshot the drain saved on this chunk. Phase 2 is
             // independent across chunks — multiple workers run it
             // concurrently while the drain marches forward sequentially.
+            //
+            // Shutdown vs phase-1-done race: drain sets `_shutdown =
+            // true` IMMEDIATELY after marking PHASE_1_DONE on the last
+            // chunk and breaking its loop. A worker that's just woken
+            // up sees BOTH predicates true. The check below has to run
+            // phase 2 anyway when PHASE_1_DONE was set on this slot —
+            // otherwise the last chunk's prefix (everything before the
+            // tail 32 KiB) never gets resolved and the consumer drops
+            // its bytes silently. Only break-without-phase-2 when
+            // shutdown was set BEFORE the drain reached this chunk
+            // (i.e. PHASE_1_DONE not set on this slot/idx).
             if (needs_phase_2) {
+                bool phase_1_ready = false;
                 {
                     std::unique_lock<std::mutex> guard(_state_mutex);
                     _state_cv.wait(guard, [this, slot, chunk_idx]() noexcept {
@@ -1281,8 +1341,12 @@ private:
                                     == detail::slot_lifecycle::PHASE_1_DONE
                                 && _slot_chunk_idx[slot] == chunk_idx);
                     });
-                    if (_shutdown.load(std::memory_order_acquire)) break;
+                    phase_1_ready =
+                        _slot_lifecycles[slot]
+                            == detail::slot_lifecycle::PHASE_1_DONE
+                        && _slot_chunk_idx[slot] == chunk_idx;
                 }
+                if (!phase_1_ready) break;
                 detail::resolve_markers_phase_2(chunk);
                 publish_to_consumer(slot);
             }

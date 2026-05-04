@@ -106,7 +106,9 @@ int main(int argc, char* argv[]) {
         bioseq::bench_scheduler::regression::load_config_from_file(
             std::string{BIOSEQ_IO_THRESHOLDS_PATH});
     const auto violations = bioseq::io_bench::compute_io_violations(
-        bioseq::io_bench::io_bench_samples(), regression_config);
+        bioseq::io_bench::io_bench_samples(),
+        bioseq::io_bench::io_bench_writer_samples(),
+        regression_config);
 
     const bioseq::bench_scheduler::BenchHarnessOptions harness_opts{
         .repo_root  = BIOSEQ_IO_SOURCE_DIR,

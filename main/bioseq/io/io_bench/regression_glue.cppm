@@ -91,6 +91,15 @@ struct IoCellStats {
 
     double rss_delta_bytes_sum = 0.0;
     std::size_t rss_delta_bytes_count = 0;
+
+    /// Roundtrip integrity for writer samples: 1.0 per sample whose
+    /// `roundtrip_record_count == record_count`, 0.0 otherwise. The
+    /// metric `roundtrip_record_match` exposes mean (matches/total)
+    /// shifted by +1.0 (range `[1, 2]`) — see make_io_metric_lookup.
+    /// Reader-only cells leave this zero-count and the metric returns
+    /// nullopt.
+    double record_match_sum = 0.0;
+    std::size_t record_match_count = 0;
 };
 
 }  // namespace detail
@@ -199,6 +208,21 @@ inline void merge_writer_samples_into(
             cell.rss_delta_bytes_sum += rss_delta;
             cell.rss_delta_bytes_count += 1;
         }
+        // Roundtrip integrity: 1.0 if the writer produced output that
+        // re-reads to the same record count, 0.0 otherwise. One
+        // observation per WriterSample (the warmup roundtrip — the
+        // matrix runner runs the validator once per writer/cell).
+        // The `roundtrip_record_match` metric (see make_io_metric_lookup)
+        // exposes the per-cell mean shifted by +1.0; a `min_absolute
+        // 2.0` rule then catches any cell whose match-ratio drops
+        // below ~80% (engine slack capped at 5%).
+        if (sample.record_count > 0) {
+            cell.record_match_sum +=
+                (sample.roundtrip_record_count == sample.record_count)
+                    ? 1.0
+                    : 0.0;
+            cell.record_match_count += 1;
+        }
     }
 }
 
@@ -261,6 +285,21 @@ make_io_metric_lookup(const IoCellTable& cells) {
             if (stats.rss_delta_bytes_count == 0) return std::nullopt;
             return stats.rss_delta_bytes_sum
                  / static_cast<double>(stats.rss_delta_bytes_count);
+        }
+        // Roundtrip integrity: writer-sample match ratio offset by 1.0
+        // so a fully-mismatched cell reports `1.0` (which the regression
+        // engine accepts as data, vs `0.0` which it interprets as
+        // "missing — never flag"). The shifted scale runs from 1.0
+        // (all samples mismatched) to 2.0 (all matched). Pair this
+        // with `min_absolute` and `min_value: 2.0`; the engine's 5%
+        // slack lands at 1.9, so any cell whose match-ratio drops
+        // below ~80% fires.
+        if (metric == "roundtrip_record_match") {
+            if (stats.record_match_count == 0) return std::nullopt;
+            const double ratio =
+                stats.record_match_sum
+                / static_cast<double>(stats.record_match_count);
+            return 1.0 + ratio;
         }
         return std::nullopt;
     };
@@ -378,13 +417,22 @@ make_io_cell_label_fn(std::span<const ReaderSample> samples) {
 
 /**
  * @brief Top-level convenience: compute violations for the live
- *        `io_bench_samples()` accumulator.
+ *        `io_bench_samples()` + `io_bench_writer_samples()` accumulators.
+ *
+ * Reader and writer samples are merged into a single cell table so a
+ * rule can name either a reader algorithm (e.g. `bioseq_io_pgzip_fastq`)
+ * or a writer algorithm (`bioseq_writer_parallel4_fastq`) and resolve
+ * against the same `(format, length_bucket)` cell. Without merging the
+ * writer samples here, writer-only metrics (`throughput_mibs` for
+ * writers, `roundtrip_record_match`) silently return `nullopt` and the
+ * rules never fire.
  */
 [[nodiscard]] inline std::vector<bench_scheduler::regression::Violation>
 compute_io_violations(std::span<const ReaderSample> samples,
+                      std::span<const WriterSample> writer_samples,
                       const bench_scheduler::regression::Config& cfg_in) {
     using namespace bench_scheduler::regression;
-    if (samples.empty()) return {};
+    if (samples.empty() && writer_samples.empty()) return {};
 
     Config effective = cfg_in;
     if (effective.rules.empty() && effective.wildcard_rules.empty()) {
@@ -392,7 +440,8 @@ compute_io_violations(std::span<const ReaderSample> samples,
         effective = io_default_config();
     }
 
-    const auto cells = aggregate_io_cells(samples);
+    auto cells = aggregate_io_cells(samples);
+    merge_writer_samples_into(cells, writer_samples);
     std::vector<IoCellKey> cell_keys;
     cell_keys.reserve(cells.size());
     std::vector<std::string> readers;
@@ -414,6 +463,18 @@ compute_io_violations(std::span<const ReaderSample> samples,
         std::span<const IoCellKey>{cell_keys},
         std::span<const std::string>{readers},
         effective, lookup, label_fn);
+}
+
+/// Backwards-compatible single-arg overload. New callers should pass
+/// the writer samples too — this overload exists so the bench harness
+/// keeps building while the writer-samples plumbing lands.
+[[nodiscard]] inline std::vector<bench_scheduler::regression::Violation>
+compute_io_violations(std::span<const ReaderSample> samples,
+                      const bench_scheduler::regression::Config& cfg_in) {
+    return compute_io_violations(
+        samples,
+        std::span<const WriterSample>{},
+        cfg_in);
 }
 
 }  // namespace bioseq::io_bench
