@@ -89,6 +89,39 @@ public:
         return decoder;
     }
 
+    /// Light-weight validity check without building any of the lookup
+    /// tables. Used by `plan_chunks` to filter false-positive block
+    /// candidates at ~5× the speed of a full `build()` — the table
+    /// fills here are a 4-13 KiB zero/store cycle that dominates
+    /// per-candidate cost. This returns the same `is_valid()` answer a
+    /// full `build()` would have set.
+    [[nodiscard]] static constexpr bool is_valid_code_lengths(
+        std::span<const std::uint8_t> code_lengths) noexcept {
+        std::array<std::uint32_t, kMaxCodeBits + 2> length_counts{};
+        for (auto length : code_lengths) {
+            if (length > kMaxCodeBits) return false;
+            ++length_counts[length];
+        }
+        length_counts[0] = 0;
+
+        std::uint32_t total_assigned = 0;
+        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+            total_assigned += length_counts[length];
+        }
+        if (total_assigned == 0) return false;
+
+        std::uint32_t kraft_sum = 0;
+        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+            kraft_sum += length_counts[length]
+                       * (std::uint32_t{1} << (kMaxCodeBits - length));
+        }
+        const std::uint32_t kraft_target =
+            std::uint32_t{1} << kMaxCodeBits;
+        const bool single_one_bit =
+            (total_assigned == 1u) && (length_counts[1] == 1u);
+        return kraft_sum == kraft_target || single_one_bit;
+    }
+
     [[nodiscard]] constexpr bool is_valid() const noexcept { return _is_valid; }
 
     /// Decode the next symbol from `reader`. Returns `kInvalidSymbol`
@@ -196,6 +229,33 @@ private:
         // Reject incomplete codes for non-trivial alphabets. A
         // single-symbol alphabet with one code of length 1 is valid.
         if (total_assigned == 0) return false;
+
+        // Completeness check (Kraft inequality). For a complete binary
+        // prefix tree, sum_{L=1..MAX} N_L · 2^(MAX-L) must equal
+        // 2^MAX exactly — anything less leaves uncovered leaves and
+        // means some bit patterns map to no symbol (kInvalidSymbol on
+        // decode). Anything more would imply collisions which the
+        // build couldn't represent. Without this, a precode-valid
+        // dynamic block can still build malformed literal/distance
+        // tables that pass `read_header` but produce invalid_huffman_code
+        // halfway through body decode.
+        //
+        // Special case: a single 1-bit code (the spec's degenerate
+        // single-symbol alphabet, e.g. an all-zeros distance table
+        // with one symbol of length 1) covers only half the tree but
+        // is still considered well-formed by RFC 1951 §3.2.7.
+        std::uint32_t kraft_sum = 0;
+        for (std::size_t length = 1; length <= kMaxCodeBits; ++length) {
+            kraft_sum += length_counts[length]
+                       * (std::uint32_t{1} << (kMaxCodeBits - length));
+        }
+        const std::uint32_t kraft_target =
+            std::uint32_t{1} << kMaxCodeBits;
+        const bool single_one_bit =
+            (total_assigned == 1u) && (length_counts[1] == 1u);
+        if (kraft_sum != kraft_target && !single_one_bit) {
+            return false;
+        }
 
         // Bucket-sort symbols by (length, symbol) to derive
         // `_canonical_symbols`.

@@ -727,3 +727,88 @@ TEST_CASE("bioseq_io: pgzip vs zlib first divergence",
     ::gzclose(ref);
     INFO("compared " << total_compared << " bytes successfully");
 }
+
+TEST_CASE("bioseq_io: pgzip multi-thread vs zlib first divergence",
+          "[.][diag-pgzip-mt-divergence]") {
+    const std::string path =
+        std::string{BIOSEQ_IO_TEST_DATA_DIR}
+        + "/1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz";
+    if (!fs::exists(path)) {
+        WARN("Diagnostic test skipped — corpus missing: " << path);
+        return;
+    }
+
+    gzFile ref = ::gzopen(path.c_str(), "rb");
+    REQUIRE(ref != nullptr);
+
+    bioseq::io::reader_options opts;
+    opts.io.gzip_auto_detect            = true;
+    opts.io.prefer_mmap                 = true;
+    opts.io.parallel_gzip_enabled       = true;
+    opts.io.parallel_gzip_thread_count  = 6;  // exercise the parallel pool
+    auto mmap_or = bioseq::io::mmap_source::try_open_with_magic(path, opts);
+    REQUIRE(mmap_or.has_value());
+    REQUIRE(mmap_or->is_gzipped);
+    auto pgz_or = bioseq::io::parallel_gzip_source::try_open_from_mmap(
+        std::move(mmap_or->source), opts);
+    REQUIRE(pgz_or.has_value());
+    auto& pgzip = *pgz_or;
+
+    constexpr std::size_t kBuf = 64 * 1024;
+    std::vector<std::uint8_t> ref_buf(kBuf);
+    std::vector<std::uint8_t> mine_buf(kBuf);
+    std::size_t total_compared = 0;
+    constexpr std::size_t kMaxBytes = 200ULL * 1024 * 1024;
+
+    while (total_compared < kMaxBytes) {
+        const std::size_t want_ref = std::min(kBuf, kMaxBytes - total_compared);
+        const int n_ref = ::gzread(ref, ref_buf.data(),
+                                    static_cast<unsigned>(want_ref));
+        REQUIRE(n_ref >= 0);
+        if (n_ref == 0) break;
+
+        std::size_t got_mine = 0;
+        while (got_mine < static_cast<std::size_t>(n_ref)) {
+            const auto outcome = pgzip.read_into(
+                mine_buf.data() + got_mine,
+                static_cast<std::size_t>(n_ref) - got_mine);
+            if (outcome.has_error) {
+                FAIL("pgzip(MT) error at byte " << total_compared + got_mine
+                     << ": " << pgzip.last_error_message());
+            }
+            got_mine += outcome.bytes_read;
+            if (outcome.is_eof && got_mine < static_cast<std::size_t>(n_ref)) {
+                FAIL("pgzip(MT) EOF too early at byte "
+                     << total_compared + got_mine
+                     << " (expected " << n_ref << ", got " << got_mine << ")");
+            }
+        }
+
+        for (std::size_t i = 0; i < static_cast<std::size_t>(n_ref); ++i) {
+            if (ref_buf[i] != mine_buf[i]) {
+                std::fprintf(stderr,
+                    "[diag-mt] FIRST DIVERGENCE at byte %zu: zlib=0x%02x mine=0x%02x\n",
+                    total_compared + i, static_cast<unsigned>(ref_buf[i]),
+                    static_cast<unsigned>(mine_buf[i]));
+                std::fprintf(stderr, "[diag-mt] context (zlib):");
+                const std::size_t ctx_start = i >= 32 ? i - 32 : 0;
+                for (std::size_t k = ctx_start; k < std::min(i + 32,
+                        static_cast<std::size_t>(n_ref)); ++k) {
+                    std::fprintf(stderr, " %02x", ref_buf[k]);
+                }
+                std::fprintf(stderr, "\n[diag-mt] context (mine):");
+                for (std::size_t k = ctx_start; k < std::min(i + 32,
+                        static_cast<std::size_t>(n_ref)); ++k) {
+                    std::fprintf(stderr, " %02x", mine_buf[k]);
+                }
+                std::fprintf(stderr, "\n");
+                FAIL("pgzip(MT) diverges from zlib at byte "
+                     << (total_compared + i));
+            }
+        }
+        total_compared += static_cast<std::size_t>(n_ref);
+    }
+
+    ::gzclose(ref);
+    INFO("compared " << total_compared << " bytes successfully");
+}

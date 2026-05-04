@@ -83,6 +83,13 @@ struct chunk_data {
     chunk_uint8_buffer  byte_storage;
     std::array<std::uint8_t, kChunkTrailingWindowBytes> trailing_window{};
     std::size_t         trailing_window_size = 0;
+    /// Snapshot of the previous chunk's last 32 KiB (drain_window at
+    /// the time this chunk's phase-1 ran). Phase-2 workers use it to
+    /// resolve the chunk's REMAINDER independently. Sized to match
+    /// `trailing_window` so phase-2 can share the same prev_window
+    /// representation as phase-1.
+    std::array<std::uint8_t, kChunkTrailingWindowBytes> prior_window_snapshot{};
+    std::size_t         prior_window_snapshot_size = 0;
     bool                is_member_final      = false;
     /// `false` = byte_storage holds the resolved bytes. `true` =
     /// marker_storage needs a `replace_markers_inplace` resolution

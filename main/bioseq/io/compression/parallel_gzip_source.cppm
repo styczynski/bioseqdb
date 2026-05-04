@@ -65,7 +65,7 @@ public:
         std::size_t worker_count = options.io.parallel_gzip_thread_count;
         if (worker_count == 0) {
             const unsigned hardware = std::thread::hardware_concurrency();
-            worker_count = (hardware > 2) ? std::min<std::size_t>(hardware - 2, 6) : 1;
+            worker_count = (hardware > 2) ? std::min<std::size_t>(hardware - 2, 8) : 1;
         }
 
         source._impl->decoder = std::make_unique<
