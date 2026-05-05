@@ -22,7 +22,7 @@
 cmake_minimum_required(VERSION 3.20..3.24)
 
 # Change this:
-set(CMAKE_NAMED_ENV_TYPE "W") # suppported: "W", "H"
+set(CMAKE_NAMED_ENV_TYPE "H") # suppported: "W", "H"
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
@@ -46,6 +46,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
+
+# set(CMAKE_CXX_CLANG_TIDY
+#   clang-tidy;
+#   --config-file=${CMAKE_SOURCE_DIR}/.clang-tidy)
 
 # Support CXX modules on MacOS correctly
 if (APPLE)
@@ -105,8 +109,9 @@ endif()
 # Include extensions and their shared code
 #add_subdirectory(include)
 add_subdirectory(bioseq)
-add_subdirectory(vendor)
+add_subdirectory(vendor SYSTEM)
 add_subdirectory(papers)
+
 #add_subdirectory(h3_postgis)
 
 # Add target that bundles for pgxn

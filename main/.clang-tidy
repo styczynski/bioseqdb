@@ -1,0 +1,4 @@
+Checks: 'modernize-*,performance-*,readability-*,abseil-*,misc-const-correctness,misc-confusable-identifiers,misc-static-assert,portability-no-assembler,portability-avoid-pragma-once,google-runtime-operator,google-runtime-int,google-runtime-float,google-explicit-constructor,hicpp-multiway-paths-covered,-readability-magic-numbers,-readability-identifier-length,-modernize-use-auto,-modernize-use-trailing-return-type,-readability-braces-around-statements,-readability-static-accessed-through-instance,-readability-function-cognitive-complexity'
+WarningsAsErrors: true
+HeaderFilterRegex: ''
+FormatStyle: google
