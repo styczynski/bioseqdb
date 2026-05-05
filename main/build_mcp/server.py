@@ -35,7 +35,7 @@ benefit. Logging goes to stderr; stdout is reserved for protocol output.
 
 from __future__ import annotations
 
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Set, Optional, Any
 
 import argparse
 import contextlib
@@ -83,6 +83,8 @@ class ModeDefinition:
     negative ETA before being killed.
     """
     expected_duration_min: float
+    """Same as expected_duration_min but estimates execution time only for compilation"""
+    build_only_expected_duration_min: float
     """Human-readable name of this mode"""
     label: str
     """Adjusts verbs so messages read naturally"""
@@ -116,6 +118,7 @@ MODES: Dict[str, ModeDefinition] = {
     "unit+integration": ModeDefinition(
         lock_group="tests",
         expected_duration_min=10.0,
+        build_only_expected_duration_min=1.5,
         label="Unit/integration tests",
         docs="Run all bioseq unit and integration tests",
         is_verb_plular=True,
@@ -130,6 +133,7 @@ MODES: Dict[str, ModeDefinition] = {
     "bench": ModeDefinition(
         lock_group="bench",
         expected_duration_min=25.0,
+         build_only_expected_duration_min=1.5,
         label="Benchmark for bioseq",
         docs="Run primary bioseq benchmark",
         is_verb_plular=False,
@@ -142,6 +146,7 @@ MODES: Dict[str, ModeDefinition] = {
     "bench-fast": ModeDefinition(
         lock_group="bench",
         expected_duration_min=20.0,
+        build_only_expected_duration_min=1.5,
         label="Benchmark for bioseq (--fast)",
         docs="Run primary bioseq benchmark in fast mode for faster iteration",
         is_verb_plular=False,
@@ -154,6 +159,7 @@ MODES: Dict[str, ModeDefinition] = {
     "bench-io": ModeDefinition(
         lock_group="bench",
         expected_duration_min=8.0,
+        build_only_expected_duration_min=1.5,
         label="Benchmark for bioseq IO module",
         docs="Run benchmark for IO module residing in io/ directory. Note this is separate benchmark dedicated only to IO interfaces",
         is_verb_plular=False,
@@ -167,7 +173,7 @@ MODES: Dict[str, ModeDefinition] = {
 VALID_MODES: Set[str] = set(MODES.keys())
 
 def get_modes_short_documentation() -> str:
-    modes_list_str = ", ".join([f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min)" for mode in VALID_MODES])
+    modes_list_str = ", ".join([f"'{mode}' (~{int(MODES[mode].expected_duration_min)} min and ~{int(MODES[mode].build_only_expected_duration_min)} min for build-only)" for mode in VALID_MODES])
     return f"Modes: {modes_list_str}";
 
 def _log(msg: str) -> None:
@@ -395,7 +401,7 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
     return max(new, key=lambda p: _report_index(p.name))
 
 
-def _run_build_worker(mode: str) -> int:
+def _run_build_worker(mode: str, build_only: bool = False) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
@@ -434,7 +440,7 @@ def _run_build_worker(mode: str) -> int:
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
 
     try:
-        _update_entry(mode, step="configuring")
+        _update_entry(mode, step="configuring", build_only=build_only)
         rc = _stream_subprocess(
             ["cmake", "--preset", BUILD_PRESET],
             log_handle, deadline, cwd=PROJECT_ROOT, env=env,
@@ -442,7 +448,7 @@ def _run_build_worker(mode: str) -> int:
         if rc != 0:
             raise RuntimeError(f"cmake configure exited with code {rc}")
 
-        _update_entry(mode, step="building")
+        _update_entry(mode, step="building", build_only=build_only)
         for tgt in mode_details.targets:
             rc = _stream_subprocess(
                 ["cmake", "--build", str(BUILD_DIR), "--target", tgt,
@@ -465,33 +471,45 @@ def _run_build_worker(mode: str) -> int:
             except OSError:
                 pass
 
-        _update_entry(mode, step="running")
-        for cmd in mode_details.commands:
-            rc = _stream_subprocess(
-                cmd, log_handle, deadline, cwd=BUILD_DIR, env=env,
+        if build_only:
+            completed_at = time.time()
+            _update_entry(
+                mode,
+                status="completed",
+                step="completed",
+                completed_at=completed_at,
+                exit_code=0,
+                report_file=None,
+                build_only=True,
             )
-            if rc != 0:
-                # Bench exits non-zero when regression rules are violated
-                # (exit code 2) — we still want to surface the report path,
-                # so this is a "completed with violations" outcome rather
-                # than a worker failure. The console log already explains
-                # the violations.
-                if mode_details.is_bench_mode and rc == 2:
-                    _log(f"bench reported regression violations (exit {rc}); "
-                         "treating as completed-with-violations")
-                    break
-                raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
-
-        report_path = _newest_report(pre_reports, mode) if mode_details.is_bench_mode else None
-        completed_at = time.time()
-        _update_entry(
-            mode,
-            status="completed",
-            step="completed",
-            completed_at=completed_at,
-            exit_code=0,
-            report_file=str(report_path) if report_path else None,
-        )
+        else:
+            _update_entry(mode, step="running")
+            for cmd in mode_details.commands:
+                rc = _stream_subprocess(
+                    cmd, log_handle, deadline, cwd=BUILD_DIR, env=env,
+                )
+                if rc != 0:
+                    # Bench exits non-zero when regression rules are violated
+                    # (exit code 2) — we still want to surface the report path,
+                    # so this is a "completed with violations" outcome rather
+                    # than a worker failure. The console log already explains
+                    # the violations.
+                    if mode_details.is_bench_mode and rc == 2:
+                        _log(f"bench reported regression violations (exit {rc}); "
+                            "treating as completed-with-violations")
+                        break
+                    raise RuntimeError(f"run failed with exit code {rc}: {' '.join(cmd)}")
+            report_path = _newest_report(pre_reports, mode) if mode_details.is_bench_mode else None
+            completed_at = time.time()
+            _update_entry(
+                mode,
+                status="completed",
+                step="completed",
+                completed_at=completed_at,
+                exit_code=0,
+                report_file=str(report_path) if report_path else None,
+                build_only=False,
+            )
         log_handle.write(
             f"\n# worker exiting cleanly at "
             f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
@@ -507,6 +525,7 @@ def _run_build_worker(mode: str) -> int:
             completed_at=completed_at,
             exit_code=None,
             notes=str(e),
+            build_only=build_only,
         )
         log_handle.write(f"\n# killed by {HARD_TIMEOUT_MIN}-min hard timeout: {e}\n")
         return 124
@@ -520,6 +539,7 @@ def _run_build_worker(mode: str) -> int:
             completed_at=completed_at,
             exit_code=None,
             notes=str(e),
+            build_only=build_only,
         )
         log_handle.write(f"\n# worker failed: {e}\n")
         return 1
@@ -562,7 +582,7 @@ def _running_in_same_group(state: dict, mode: str) -> tuple[str | None, dict | N
     return None, None
 
 
-def tool_start_build(mode: str) -> str:
+def tool_start_build(mode: str, build_only: bool = False) -> str:
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
@@ -576,7 +596,7 @@ def tool_start_build(mode: str) -> str:
             elapsed_min = (time.time() - running_entry["started_at"]) / 60.0
             eta_min = max(
                 0.0,
-                mode_details.expected_duration_min - elapsed_min,
+                (mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min) - elapsed_min,
             )
             step = running_entry.get("step", "running")
             return (f"{mode_details.label} {mode_details.verb_is} already scheduled. "
@@ -594,7 +614,7 @@ def tool_start_build(mode: str) -> str:
 
         server_path = Path(__file__).resolve()
         proc = subprocess.Popen(
-            [sys.executable, str(server_path), "--run-build", mode],
+            [sys.executable, str(server_path), "--run-build", mode, "--build-only", ("true" if build_only else "false")],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -618,7 +638,7 @@ def tool_start_build(mode: str) -> str:
         _log(f"started worker pid={proc.pid} mode={mode} log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled. "
-            f"Predicted finish in {_format_minutes(mode_details.expected_duration_min, plural_int=True)}.")
+            f"Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
 def tool_status(mode: str) -> str:
@@ -636,10 +656,11 @@ def tool_status(mode: str) -> str:
 
     log_path = entry.get("log_file") or "(no log file)"
     status = entry.get("status")
+    build_only: bool = entry.get("build_only", False)
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
-        eta_min = max(0.0, mode_details.expected_duration_min - elapsed_min)
+        eta_min = max(0.0, (mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min) - elapsed_min)
         step = entry.get("step", "running")
         return (f"{mode_details.label} {mode_details.verb_is} already scheduled. "
                 f"Current step: {step}. "
@@ -655,6 +676,8 @@ def tool_status(mode: str) -> str:
                f"Log: {log_path}")
         if entry.get("report_file"):
             msg += f". Report: {entry['report_file']}"
+        if entry.get("build_only", False):
+            msg += f". This was build-only job so targets were built, but not run (for faster iteration)."
         return msg
 
     if status == "killed_timeout":
@@ -678,7 +701,7 @@ def tool_status(mode: str) -> str:
 # --------------------------- MCP protocol layer ----------------------------
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.0.1"}
+SERVER_INFO = {"name": "bioseq-build-mcp", "version": "1.1.0"}
 
 TOOL_DEFINITIONS = [
     {
@@ -689,7 +712,8 @@ TOOL_DEFINITIONS = [
             "is already in progress (can run benchmark together with tests at the same time, but not two benchmarks) "
             "returns the current status instead of starting a duplicate. "
             f"{get_modes_short_documentation()} "
-            f"Hard timeout: ~{int(HARD_TIMEOUT_MIN)} min."
+            f"\nNote: If you want to iterate quickly then use build_only parameter."
+            f"\nHard timeout: ~{int(HARD_TIMEOUT_MIN)} min."
         ),
         "inputSchema": {
             "type": "object",
@@ -699,6 +723,11 @@ TOOL_DEFINITIONS = [
                     "enum": list(VALID_MODES),
                     "description": "Which run to start.",
                 },
+                "build_only": {
+                   "type": "boolean",
+                   "description": "Do you want only to build the target, but do not actually run any commands (like benchmarks, tests etc.). Useful for faster iteration to check if the code just compiles correctly.",
+                   "default": False,
+                }
             },
             "required": ["mode"],
         },
@@ -766,13 +795,25 @@ def _handle_initialize(params: dict) -> dict:
 def _handle_tools_list(params: dict) -> dict:
     return {"tools": TOOL_DEFINITIONS}
 
+def parse_bool(parameter_description: str, value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        value = value.lower()
+        if value not in ['true', 'false', 'y', 'n']:
+            raise RuntimeError(f"Value passed as {parameter_description} is not a valid bool. Got string '{value}' which is neither 'true' or 'false'")
+        return (value == "true" or value == "y")
+    if type(value) == bool:
+        return value
+    raise RuntimeError(f"Value passed as {parameter_description} is unsupported type '{type(value)}' (with value: '{value}')")
 
 def _handle_tools_call(params: dict) -> dict:
     name = params.get("name")
     args = params.get("arguments") or {}
     mode = args.get("mode", "")
+    build_only: bool = parse_bool("build_only", args.get("build_only", False))
     if name == "start_build":
-        text = tool_start_build(mode)
+        text = tool_start_build(mode, build_only=build_only)
     elif name == "status":
         text = tool_status(mode)
     else:
@@ -834,10 +875,16 @@ def main() -> int:
         default=None,
         help="(internal) run as a detached build worker for the given mode",
     )
+    parser.add_argument(
+        "--build-only",
+        choices=['true', 'false'],
+        default='false',
+        help="(internal) if 'true' then build will only compile target and not run any actual executables like benchmarks or tests",
+    )
     args = parser.parse_args()
-
     if args.run_build is not None:
-        return _run_build_worker(args.run_build)
+        build_only: bool = parse_bool("build_only", args.build_only)
+        return _run_build_worker(args.run_build, build_only=build_only)
 
     _serve()
     return 0

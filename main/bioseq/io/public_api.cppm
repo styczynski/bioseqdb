@@ -118,10 +118,10 @@ enum class read_backend : std::uint8_t {
 /// In practice the handler always processes the batch in scope, so
 /// this matches the v1 contract (which also returned a `const
 /// sequence_range_t&` whose lifetime ended with the batch).
-template <typename C>
+template <supports_compact_sequence_range R>
 class compact_sequence_view {
 public:
-    using traits = typename compact_sequence_range<C>::traits;
+    using traits = typename compact_sequence_range<R>::traits;
     using storage_unit = typename traits::storage_unit;
     using iterator = const storage_unit*;
     using const_iterator = const storage_unit*;
@@ -170,11 +170,11 @@ private:
 /// `std::span<const std::uint8_t>`) into the batch's shared storage.
 /// Lifetimes match v1: the returned view is valid as long as the
 /// batch is.
-template <typename C>
+template <supports_compact_sequence_range R>
 class sequence_batch {
 public:
-    using sequence_range_t = compact_sequence_range<C>;
-    using sequence_view_t = compact_sequence_view<C>;
+    using sequence_range_t = compact_sequence_range<R>;
+    using sequence_view_t = compact_sequence_view<R>;
     using storage_unit = typename sequence_view_t::storage_unit;
 
     [[nodiscard]] std::size_t size() const noexcept { return _seq_paddings.size(); }
