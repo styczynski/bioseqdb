@@ -702,7 +702,7 @@ Datum pg_compact_sequence_recv(PG_FUNCTION_ARGS)
 
 /*
  * bioseq.seq_cmp: lexicographic comparator (the btree support function).
- * Returns -1, 0, or 1 based on compare_sequences_simd (which walks bp by
+ * Returns -1, 0, or 1 based on compare_sequences_scalar (which walks bp by
  * bp — see §3.5 of the spec for why unsigned-unit compare is wrong).
  */
 } // extern "C"
@@ -724,7 +724,7 @@ namespace {
 		[&]<class Dst>() -> int {
 			auto ar = make_seq_range_from_pg<Dst>(a);
 			auto br = make_seq_range_from_pg<Dst>(b);
-			const auto ord = bioseq::simd::N_NEON::compare_sequences_simd(ar, br);
+			const auto ord = bioseq::simd::N_NEON::compare_sequences_scalar(ar, br);
 			if (ord == std::strong_ordering::less)    return -1;
 			if (ord == std::strong_ordering::greater) return  1;
 			return 0;

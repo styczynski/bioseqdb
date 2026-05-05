@@ -26,11 +26,13 @@
  * `strict_fastq` (default true) controls how the FSM reacts to a
  * missing or truncated qual section. Spec §10.1 / §10.2 / §10.3.
  *
- * No `<hwy/highway.h>` here — see `fasta.cppm`'s header comment for
- * the rationale; same constraint applies to every non-SIMD module
- * that walks slab bytes.
+ * Highway is included directly so the FSM can call
+ * `bioseq::simd::N_NEON::encode_body_chunk*` without a
+ * translation layer (mirrors `fasta.cppm`).
  */
 module;
+
+#include <hwy/highway.h>
 
 #include "common.h"
 
@@ -46,10 +48,9 @@ export module bioseq_io.fastq;
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_sequences.simd;
 import bioseq_io.options;
 import bioseq_io.errors;
-import bioseq_io.encoder;
-import bioseq_io.encoder_dispatch;
 import bioseq_io.simd_kernels;
 import bioseq_io.fasta;  // reuse parse_outcome enum
 
@@ -76,7 +77,7 @@ struct alignas(64) fastq_parser_state {
     fastq_progress progress = fastq_progress::AT_HEADER_SIGIL;
     std::size_t header_start_offset = 0;
     std::size_t quality_start_offset = 0;
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
+    bioseq::simd::N_NEON::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
     /// Raw byte count of sequence lines after newline stripping. This
     /// is the value FASTQ qual must match — qual is one byte per
     /// position, regardless of whether the position is a canonical
@@ -237,11 +238,11 @@ template <
             slab_data[parse_cursor + line_size - 1] == '\r') {
             line_size -= 1;
         }
-        encode_body_chunk<alphabet_t,
-                          storage_unit_t,
-                          bits_per_char,
-                          letters_per_unit>(
-            state.body, slab_data + parse_cursor, line_size);
+        bioseq::simd::N_NEON::encode_body_chunk<
+            alphabet_t,
+            bioseq::simd::N_NEON::unknown_byte_policy::DROP,
+            storage_unit_t, bits_per_char, letters_per_unit>(
+                state.body, slab_data + parse_cursor, line_size);
         state.sequence_byte_count += line_size;
         parse_cursor += newline_offset + 1;
         state.progress = fastq_progress::AT_BODY_LINE_START;
@@ -339,9 +340,9 @@ template <
             state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] =
-            finalize_encode_state<storage_unit_t,
-                                  bits_per_char,
-                                  letters_per_unit>(state.body);
+            bioseq::simd::N_NEON::finalize_encode_state<storage_unit_t,
+                                                  bits_per_char,
+                                                  letters_per_unit>(state.body);
         const std::size_t qual_size = state.quality_storage->size()
                                     - state.quality_start_offset;
         emit_record(state.header_start_offset,

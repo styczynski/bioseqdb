@@ -3,8 +3,9 @@
  * @brief Per-record FASTA FSM driver.
  *
  * Walks the slab via `bioseq_io.simd_kernels::scan_first_byte` to find
- * record boundaries. The encoder pipeline lives in `bioseq_io.encoder`
- * + `bioseq_io.encoder_dispatch`; this module is the FSM glue.
+ * record boundaries. The encoder pipeline lives in
+ * `bioseq_sequences.simd` (see `encode_body_chunk` and the dna4 SIMD
+ * primitives); this module is the FSM glue.
  *
  * v2 storage model: the FSM appends header bytes directly into the
  * batch's shared `_header_storage`, and the encoder pushes packed
@@ -14,17 +15,15 @@
  * allocation on this path — the batch's three backing vectors grow
  * geometrically across thousands of records.
  *
- * No `<hwy/highway.h>` here — the Highway primitives the FSM needs are
- * exposed as non-inline wrappers from `simd_kernels` so this module's
- * BMI doesn't pull Highway's per-target inline operator overloads
- * (which would otherwise trigger a "definition with same mangled
- * name" collision when a downstream TU imports two Highway-aware
- * BMIs). CODE_STYLE.md §2 requires Highway code to live inside
- * `HWY_BEFORE_NAMESPACE()` brackets — by routing through the
- * non-inline wrappers, the FASTA FSM stays Highway-free at the
- * source level.
+ * Highway is included directly so the FSM can call
+ * `bioseq::simd::N_NEON::encode_body_chunk*` without a
+ * translation layer. This mirrors the pattern in
+ * `pg_compact_sequence.cppm` and `kmers/index.cppm` (both include
+ * highway and import `bioseq_sequences.simd`).
  */
 module;
+
+//include <hwy/highway.h>
 
 #include "common.h"
 
@@ -41,10 +40,9 @@ export module bioseq_io.fasta;
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_sequences.simd;
 import bioseq_io.options;
 import bioseq_io.errors;
-import bioseq_io.encoder;
-import bioseq_io.encoder_dispatch;
 import bioseq_io.simd_kernels;
 
 export namespace bioseq::io {
@@ -88,7 +86,7 @@ struct alignas(64) fasta_parser_state {
     /// record's header bytes start. Captured at the AT_HEADER_SIGIL →
     /// IN_HEADER transition. Used by the emit_record callback.
     std::size_t header_start_offset = 0;
-    encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
+    bioseq::simd::N_NEON::encode_state<storage_unit_t, BitsPerChar, LettersPerUnit> body{};
     /// Borrowed pointer to the batch's shared header buffer. The FSM
     /// pushes header bytes into this directly to avoid the v1
     /// per-record `std::string` allocation.
@@ -239,8 +237,10 @@ template <
             // the previous separate `simd::scan_first_byte('>', …)`
             // pass over the body, halving the memory traffic.
             const std::size_t consumed =
-                simd::dna4_simd_encode_body_chunk_multiline_until_gt(
-                    state.body, slab_data + cursor, remaining);
+                bioseq::simd::N_NEON::encode_body_chunk_dna4_simd_multiline_until_byte<
+                    std::uint8_t{'>'}, std::uint64_t, 2, 32>(
+                        state.body, slab_data + cursor, remaining,
+                        /*newline_count_out=*/nullptr);
             cursor += consumed;
             if (consumed < remaining) {
                 state.progress = fasta_progress::FINISHED_RECORD;
@@ -276,11 +276,11 @@ template <
                     if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
                         line_size -= 1;
                     }
-                    encode_body_chunk<alphabet_t,
-                                      storage_unit_t,
-                                      bits_per_char,
-                                      letters_per_unit>(
-                        state.body, slab_data + cursor, line_size);
+                    bioseq::simd::N_NEON::encode_body_chunk<
+                        alphabet_t,
+                        bioseq::simd::N_NEON::unknown_byte_policy::DROP,
+                        storage_unit_t, bits_per_char, letters_per_unit>(
+                            state.body, slab_data + cursor, line_size);
                     cursor += remaining;
                     state.progress = fasta_progress::FINISHED_RECORD;
                     break;
@@ -291,11 +291,11 @@ template <
             if (line_size > 0 && slab_data[cursor + line_size - 1] == '\r') {
                 line_size -= 1;
             }
-            encode_body_chunk<alphabet_t,
-                              storage_unit_t,
-                              bits_per_char,
-                              letters_per_unit>(
-                state.body, slab_data + cursor, line_size);
+            bioseq::simd::N_NEON::encode_body_chunk<
+                alphabet_t,
+                bioseq::simd::N_NEON::unknown_byte_policy::DROP,
+                storage_unit_t, bits_per_char, letters_per_unit>(
+                    state.body, slab_data + cursor, line_size);
             cursor += newline_offset + 1;  // consume '\n'
         }
     }
@@ -306,9 +306,9 @@ template <
             state.header_storage->size() - state.header_start_offset;
         const std::size_t seq_start = state.body.record_start_offset;
         const auto [seq_word_count, padding] =
-            finalize_encode_state<storage_unit_t,
-                                  bits_per_char,
-                                  letters_per_unit>(state.body);
+            bioseq::simd::N_NEON::finalize_encode_state<storage_unit_t,
+                                                  bits_per_char,
+                                                  letters_per_unit>(state.body);
         emit_record(state.header_start_offset,
                     header_size,
                     seq_start,

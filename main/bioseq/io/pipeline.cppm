@@ -53,8 +53,6 @@ import bioseq_sequences;
 import bioseq_io.options;
 import bioseq_io.errors;
 import bioseq_io.buffer;
-import bioseq_io.encoder;
-import bioseq_io.encoder_dispatch;
 import bioseq_io.fasta;
 import bioseq_io.fastq;
 import bioseq_io.sources;

@@ -19,8 +19,10 @@
  *
  * **Decoder pipeline.** The dna4 fast path pulls 32-letter packed
  * uint64 words and emits 32 ASCII bytes per word via the
- * `dna4_simd_decode_words_to_ascii` Highway kernel. Other alphabets
- * use the scalar `decode_words_to_ascii_scalar` path.
+ * `bioseq::simd::HWY_NAMESPACE::decode_dna4_words_to_ascii` Highway
+ * kernel; the dna5+uint8 path takes the symmetric
+ * `decode_dna5_uint8_words_to_ascii`; other shapes use the scalar
+ * `decode_words_to_ascii_scalar` path.
  *
  * **Line wrapping.** FASTA bodies can be wrapped at a configurable
  * width (default 80 to match the bench corpus). The wrap is folded
@@ -37,6 +39,8 @@
  * preserve issue order trivially.
  */
 module;
+
+#include <hwy/highway.h>
 
 #include "common.h"
 
@@ -61,9 +65,9 @@ export module bioseq_io.writer;
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_sequences.simd;
 import bioseq_io.options;
 import bioseq_io.public_api;
-import bioseq_io.decoder;
 import bioseq_io.sinks;
 
 export namespace bioseq::io {
@@ -446,9 +450,9 @@ private:
                     }
                 }
                 std::uint8_t* dst = producer.chunk.extend(this_round);
-                decode_words_to_ascii<alphabet_t, storage_unit,
-                                        bits_per_char, letters_per_unit>(
-                    seq.data() + word_offset, dst, this_round);
+                bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
+                    alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                        seq.data() + word_offset, dst, this_round);
                 remaining -= this_round;
                 word_offset += this_round / letters_per_unit;
             }
@@ -461,14 +465,14 @@ private:
         producer.decode_scratch.clear();
         std::uint8_t* scratch = producer.decode_scratch.extend(total_letters);
         std::uint8_t* dst = producer.chunk.extend(output_size);
-        (void)decode_words_to_ascii_wrapped<alphabet_t, storage_unit,
-                                              bits_per_char, letters_per_unit>(
-            seq.data(),
-            total_letters,
-            wrap_width,
-            /*letters_in_current_line=*/0,
-            scratch,
-            dst);
+        (void)bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii_wrapped<
+            alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                seq.data(),
+                total_letters,
+                wrap_width,
+                /*letters_in_current_line=*/0,
+                scratch,
+                dst);
     }
 
     /// Drain a producer's chunk to the sink at a sink-reserved
