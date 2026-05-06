@@ -25,6 +25,8 @@ find_package(foonathan_memory CONFIG REQUIRED)
 find_package(sqlgen REQUIRED)
 find_package(ftxui REQUIRED)
 find_package(simdjson REQUIRED)
+find_package(nlohmann_json_schema_validator REQUIRED)
+find_package(TBB REQUIRED tbb)
 
 # AddCommonTarget(
 #   postgresql_bioseq
@@ -143,6 +145,8 @@ AddCommonTargetX(
     ftxui::dom
     ftxui::screen
     simdjson::simdjson
+    nlohmann_json_schema_validator
+    TBB::tbb
   SOURCES
     ${BENCH_SRC_FILES}
   SUPPORT_CXX_MODULES
