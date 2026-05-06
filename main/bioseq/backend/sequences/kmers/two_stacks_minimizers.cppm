@@ -147,12 +147,35 @@ requires (
     const vec_t v_zero = hn::Zero(d);
     const vec_t v_one = hn::Set(d, static_cast<storage_unit>(1));
     const vec_t v_pos_mask = hn::Set(d, pos_mask);
-    // V10b: fold the post-mul `& v_hash_mask` (which zeros the low half of
-    // the storage word so we can OR in `pos_local`) into the mul mask
-    // itself. Pre-AND-ing the constant `kmer_mask & hash_mask_high` with
-    // the mul output saves one SIMD `And` per inner-loop iteration.
-    const storage_unit hash_kmer_mask =
-        static_cast<storage_unit>(kmer_mask & hash_mask_high);
+    // V10b mask: `hash_mask_high` zeros the low `hash_bits` of the storage
+    // word so we can OR in `pos_local`.
+    //
+    // BUG FIX (FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT.md):
+    // the previous form folded `kmer_mask & hash_mask_high` into one mask
+    // as a "save-1-SIMD-op" optimisation. That fold is broken for any
+    // storage_unit where `kmer_mask` lives entirely in the *low* bits and
+    // `hash_mask_high` in the *high* bits — concretely, every uint64
+    // configuration on the bench grid:
+    //   * dna4 K=15 → kmer_mask = (1<<30)-1 = 0x3FFFFFFF (low 30 bits)
+    //   * uint64    → hash_mask_high = 0xFFFFFFFF00000000 (top 32 bits)
+    //   * intersect → 0   ← every hash collapses to zero
+    // After the bug, `elem = hash_full | pos_local` reduced to just
+    // `pos_local`, so the sliding-window-min trivially picked the leftmost
+    // *position* every step (instead of the leftmost smallest *hash*),
+    // and the per-step `pos_changed` check fired on every iteration —
+    // producing ~N emits on dna4-longer instead of the ~N/W the
+    // simd-minimizers paper guarantees. The unit_bits=64 flavour of
+    // `collect_minimizers_two_stack_nthash_simd invariants — dna4 longer`
+    // exercised exactly this regression (260 unique kmers vs the
+    // 4·N/W = 201 budget the test asks for).
+    //
+    // The right mask is `hash_mask_high` *alone*: the multiplication
+    // `lex × golden` produces a ~62-bit-wide product, and the high bits
+    // of that product are what we want to keep as the hash. The kmer-mask
+    // intersection was protecting against an ill-formed lex (which the
+    // hasher itself already guarantees never happens — `lexic_hash`
+    // is masked at construction).
+    const storage_unit hash_kmer_mask = hash_mask_high;
     const vec_t v_hash_kmer_mask = hn::Set(d, hash_kmer_mask);
     const vec_t v_strand_clear = hn::Set(d, static_cast<storage_unit>(~static_cast<storage_unit>(1)));
     const vec_t bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
@@ -926,8 +949,16 @@ collect_minimizers_two_stack_nthash_simd_impl(
     const vec_t v_zero = hn::Zero(d);
     const vec_t v_one = hn::Set(d, static_cast<storage_unit>(1));
     const vec_t v_pos_mask = hn::Set(d, pos_mask);
-    const storage_unit hash_kmer_mask =
-        static_cast<storage_unit>(kmer_mask & hash_mask_high);
+    // BUG FIX: see the matching comment block in
+    // `collect_minimizers_two_stack_nthash_single_stream_simd_impl` above
+    // for the full rationale. The previous form `kmer_mask & hash_mask_high`
+    // collapses to zero on every uint64 storage_unit configuration
+    // (because kmer_mask lives in the low bits and hash_mask_high lives in
+    // the high bits) — that's the regression captured in
+    // FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT.md. Use
+    // `hash_mask_high` alone, which is the correct top-half mask for the
+    // post-multiply hash bits.
+    const storage_unit hash_kmer_mask = hash_mask_high;
     const vec_t v_hash_kmer_mask = hn::Set(d, hash_kmer_mask);
     const vec_t v_strand_clear = hn::Set(d, static_cast<storage_unit>(~static_cast<storage_unit>(1)));
     const vec_t bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
