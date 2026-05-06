@@ -1,0 +1,105 @@
+{
+  "params": {
+    "std_sort": {
+      "size_hint": {
+        "type": "integer",
+        "default": 0,
+        "description": "passthrough hint, no effect on the algorithm"
+      }
+    },
+    "std_stable_sort": {
+      "size_hint": {
+        "type": "integer",
+        "default": 0,
+        "description": "passthrough hint, no effect on the algorithm"
+      }
+    },
+    "naive_count": {
+      "stride": {
+        "type": "integer",
+        "default": 1,
+        "description": "stride between counted elements; 1 = exact count"
+      }
+    }
+  },
+  "test_cases": {
+    "TINY": {
+      "description": "1k random integers",
+      "data": {
+        "length": 1024,
+        "seed": 13
+      }
+    },
+    "SMALL": {
+      "description": "16k random integers",
+      "data": {
+        "length": 16384,
+        "seed": 21
+      }
+    }
+  },
+  "bench_sort": {
+    "description": "Compare std::sort vs std::stable_sort latency",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": false,
+      "concurrency": true
+    },
+    "matrix": {
+      "for": {
+        "TINY": 50,
+        "SMALL": 20
+      },
+      "over": {
+        "std_sort": {},
+        "std_stable_sort": {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [
+              "stable_sort_within_3x_of_sort",
+              { "key": "std_stable_sort" },
+              { "compare": "<", "threshold%": -200, "tolerance%": 0 },
+              { "key": "std_sort" }
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "bench_count": {
+    "description": "Sanity-check the even-count algorithm",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": false,
+      "concurrency": false
+    },
+    "matrix": {
+      "for": {
+        "TINY": 5,
+        "SMALL": 3
+      },
+      "over": {
+        "naive_count": {
+          "stride": [1]
+        }
+      },
+      "by_regions": false,
+      "metrics": {
+        "even_count": {
+          "type": "evaluation",
+          "rules": [
+            [
+              "naive_count_self_consistent",
+              { "key": "naive_count" },
+              { "compare": "=", "tolerance%": 0 },
+              { "key": "naive_count" }
+            ]
+          ]
+        }
+      }
+    }
+  }
+}

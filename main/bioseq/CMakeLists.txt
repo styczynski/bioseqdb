@@ -258,3 +258,6 @@ AddCommonTargetX(
 )
 
 include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")
+
+# bench_framework — generic, algorithm-agnostic benchmark orchestration.
+include("${CMAKE_CURRENT_LIST_DIR}/../bench_framework/build.cmake")

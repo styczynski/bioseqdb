@@ -73,6 +73,7 @@ if has_token unit;        then TARGETS+=(bioseq_aligner_tests_exec); fi
 if has_token integration; then TARGETS+=(bioseq_aligner_int_tests_exec); fi
 if has_token bench;       then TARGETS+=(bioseq_bench); fi
 if has_token io;       then TARGETS+=(bioseq_io_bench); fi
+if has_token framework_example; then TARGETS+=(bioseq_bench_framework_example); fi
 
 for tgt in "${TARGETS[@]}"; do
     cmake --build "${BUILD_DIR}" --target "${tgt}" --parallel "${JOBS}"
@@ -115,6 +116,16 @@ if has_token io; then
         ./bioseq/bioseq_io_bench --reporter console::out=-::colour-mode=ansi "${@:2}"
     else
         ./bioseq/bioseq_io_bench --reporter console::out=-::colour-mode=ansi
+    fi
+fi
+
+if has_token framework_example; then
+    # bench_framework binary is NOT a Catch2 binary — pass the extra args
+    # through verbatim, no `--reporter` injection.
+    if [ "$#" -gt 1 ]; then
+        ./bioseq/bioseq_bench_framework_example "${@:2}"
+    else
+        ./bioseq/bioseq_bench_framework_example
     fi
 fi
 
