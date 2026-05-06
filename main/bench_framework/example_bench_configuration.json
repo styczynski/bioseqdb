@@ -122,5 +122,21 @@
         }
       }
     }
-  }
+  },
+  "regression_rules": [
+    {
+      "name": "wall_clock_p50_stable",
+      "metric": "wall_clock_ns",
+      "aggregate": "p50",
+      "operator": { "compare": "<", "tolerance%": 100 },
+      "exclude_cases": ["TINY"]
+    },
+    {
+      "name": "even_count_deterministic",
+      "benchmarks": ["bench_count"],
+      "metric": "even_count",
+      "aggregate": "sum",
+      "operator": { "compare": "=", "tolerance%": 0 }
+    }
+  ]
 }

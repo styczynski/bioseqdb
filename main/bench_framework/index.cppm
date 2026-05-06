@@ -596,6 +596,115 @@ struct Violation {
     std::array<double, 2> args{0.0, 0.0};
 };
 
+/// Aggregation function applied to a sample vector when evaluating a
+/// regression rule. Matches the six values allowed in the
+/// `regression_rules[*].aggregate` enum: sum / min / max / p01 / p50 / p99.
+enum class RegressionAggregate : std::uint8_t { Sum, Min, Max, P01, P50, P99 };
+
+/// One row of the aggregate registry. `percentile_fraction` is meaningful
+/// only for the three percentile entries; the other three carry NaN to
+/// signal "not a percentile". Adding a new percentile just means adding a
+/// row — no new switch arm needed in `aggregate_samples`.
+struct RegressionAggregateEntry {
+    std::string_view    name;
+    RegressionAggregate kind;
+    double              percentile_fraction;     // NaN for non-percentile aggregates
+};
+
+/// Compile-time table linking the JSON spelling to the enumerator. Single
+/// source of truth for parser, validator, report writer, and the
+/// `aggregate_samples` percentile dispatch; mirrors the
+/// `kBuiltinMetricRegistry` pattern.
+inline constexpr std::array<RegressionAggregateEntry, 6> kRegressionAggregateRegistry{ {
+    { "sum", RegressionAggregate::Sum, std::numeric_limits<double>::quiet_NaN() },
+    { "min", RegressionAggregate::Min, std::numeric_limits<double>::quiet_NaN() },
+    { "max", RegressionAggregate::Max, std::numeric_limits<double>::quiet_NaN() },
+    { "p01", RegressionAggregate::P01, 0.01 },
+    { "p50", RegressionAggregate::P50, 0.50 },
+    { "p99", RegressionAggregate::P99, 0.99 },
+} };
+
+[[nodiscard]] inline constexpr std::optional<RegressionAggregate>
+parse_regression_aggregate(std::string_view text) noexcept {
+    for (const auto& entry : kRegressionAggregateRegistry) {
+        if (entry.name == text) return entry.kind;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline constexpr std::string_view
+regression_aggregate_name(RegressionAggregate aggregate) noexcept {
+    for (const auto& entry : kRegressionAggregateRegistry) {
+        if (entry.kind == aggregate) return entry.name;
+    }
+    return "?";
+}
+
+/// Returns the percentile fraction (0.01, 0.50, 0.99) for percentile
+/// aggregates, or NaN for the additive Sum / Min / Max kinds. The NaN
+/// sentinel keeps the `aggregate_samples` switch table-driven.
+[[nodiscard]] inline constexpr double
+regression_aggregate_percentile(RegressionAggregate aggregate) noexcept {
+    for (const auto& entry : kRegressionAggregateRegistry) {
+        if (entry.kind == aggregate) return entry.percentile_fraction;
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+/// Comparator payload for a regression rule. `threshold%` is forbidden by
+/// the schema, so we only carry `tolerance%` — the underlying compare op
+/// reuses the existing `CompareOp` family.
+struct RegressionOperator {
+    CompareOp op = CompareOp::Equal;
+    double    tolerance_pct = 0.0;
+};
+
+/// Parsed `regression_rules[*]` entry. `regions` is normalised at parse
+/// time so the evaluator never has to special-case the
+/// `"all_regions"` shorthand: the literal string lands in the vector as
+/// the single element.
+struct RegressionRule {
+    std::string config_path;
+    std::string name;
+    /// Empty means "applies to every benchmark in the same config file".
+    std::vector<std::string> benchmarks{};
+    /// Always non-empty after parse. Defaults to `{"all_regions"}`.
+    std::vector<std::string> regions{};
+    std::string metric;
+    RegressionAggregate aggregate = RegressionAggregate::Sum;
+    RegressionOperator  op{};
+    /// Test cases excluded from this rule. Schema requires non-empty if
+    /// the array is present at all.
+    std::vector<std::string> exclude_cases{};
+};
+
+/// One detected regression. Mirrors the user-visible JSON shape: arrays of
+/// size 1 for `violating_tuples` / `test_cases` so the writer doesn't need
+/// to special-case singletons. `regression_since` is empty-string when
+/// the rule wants `null` in the output.
+struct RegressionEntry {
+    std::string config_path;
+    std::string benchmark;
+    std::string rule_name;
+    std::string algorithm_name;
+    ParamMap    violating_params{};
+    std::string test_case;
+    std::string region;
+    std::string metric;
+    RegressionAggregate aggregate = RegressionAggregate::Sum;
+    double      previously = 0.0;
+    double      now = 0.0;
+    /// Empty string ⇒ JSON `null`. Otherwise the file basename like
+    /// `"report_3.json"`.
+    std::string regression_since{};
+};
+
+/// Registry mapping `config_path` → list of regression rules parsed from
+/// that file. Populated lazily by the per-benchmark closure under
+/// `regression_rules_mu`; consumed by the global validator and the
+/// regression evaluator after the parallel benchmark loop has joined.
+using RegressionRulesByConfig = std::map<std::string, std::vector<RegressionRule>>;
+
 // Forward declarations used by BenchmarkContext.
 struct ProgressState;
 struct ValidationDiag;
@@ -631,6 +740,12 @@ struct BenchmarkContext {
     /// to drive the exit code.
     std::mutex*                                     diagnostics_mu = nullptr;
     std::vector<detail::ValidationDiag>*            diagnostics = nullptr;
+    /// Shared registry of regression rules keyed by config_path. The
+    /// closure inserts under `regression_rules_mu` the first time it sees
+    /// each unique config; subsequent benchmarks sharing the same config
+    /// skip parsing.
+    std::mutex*                                     regression_rules_mu = nullptr;
+    detail::RegressionRulesByConfig*                regression_rules_by_config = nullptr;
 };
 
 // ----------------- ConfigValue::from_simdjson -----------------
@@ -844,6 +959,12 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
       "examples": [
         { "SMALL": { "description": "100bp random sequence", "data": { "length": 100 } } }
       ]
+    },
+    "regression_rules": {
+      "title": "RegressionRules",
+      "description": "Optional list of regression rules. Each rule compares aggregated samples in this run to those in the immediately preceding report on disk (report_<N-1>.json) and emits a 'regressions' entry whenever the configured operator/tolerance is violated. Regression rules are global to the config file: by default they apply to every benchmark in the same file. The framework writes its run as report_<N>.json (postfixed integer starting at 1).",
+      "type": "array",
+      "items": { "$ref": "#/definitions/regression_rule" }
     }
   },
   "additionalProperties": { "$ref": "#/definitions/benchmark" },
@@ -1193,6 +1314,110 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           ]
         }
       ]
+    },
+    "regression_rule": {
+      "title": "RegressionRule",
+      "description": "One regression check. Iterates a target metric across (benchmark, execution_tuple, test_case, region) combos in the current run, aggregates the samples per the 'aggregate' field, and compares to the same combo in the previous report (report_<N-1>.json). Operator semantics are inherited from the rule comparator with 'threshold%' fixed at 0; the schema rejects any explicit 'threshold%' in the operator block.",
+      "type": "object",
+      "required": ["name", "metric", "aggregate", "operator"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Rule name. Must be unique within the config file. Reported in 'regressions' entries and the stderr summary."
+        },
+        "benchmarks": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Optional list of benchmark identifiers this rule applies to. Each entry must name a benchmark block declared in the same config file. When the field is absent, the rule applies to every benchmark in the file.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "regions": { "$ref": "#/definitions/regression_regions" },
+        "metric": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Metric name. Must be declared in the 'metrics' map of every benchmark this rule applies to (when 'benchmarks' is explicit), or in at least one benchmark in the file (when 'benchmarks' is absent)."
+        },
+        "aggregate": {
+          "type": "string",
+          "enum": ["sum", "min", "max", "p01", "p50", "p99"],
+          "description": "Reduction applied to the per-iteration sample vector before the operator runs. Percentiles use floor(p * (n - 1)) on a copy + std::nth_element."
+        },
+        "operator": { "$ref": "#/definitions/regression_operator" },
+        "exclude_cases": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Optional list of test_case names to skip when this rule fires. Useful when a metric is too small (e.g. wall-clock in nanoseconds) for the tolerance to make sense on a particular case. Cannot be empty if present.",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "examples": [
+        {
+          "name": "minimizer_count_stable",
+          "benchmarks": ["bench1"],
+          "metric": "minimizer_count",
+          "aggregate": "sum",
+          "operator": { "compare": "=", "tolerance%": 2 },
+          "exclude_cases": ["SMALL"]
+        }
+      ]
+    },
+    "regression_regions": {
+      "title": "RegressionRegions",
+      "description": "Set of region buckets to read from each cell. Either the literal string 'all_regions' (default when omitted) or a non-empty array of region names. Each entry must match a key under 'test_cases.<name>.<here>' in the report — for the synthetic combined bucket use 'all_regions'.",
+      "oneOf": [
+        { "type": "string", "const": "all_regions" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      ]
+    },
+    "regression_operator": {
+      "title": "RegressionOperator",
+      "description": "Comparator for a regression rule. Accepts the same three operators as the per-rule comparator (<, >, =) but does NOT accept 'threshold%' — that knob is implicitly zero, leaving 'tolerance%' as the only relaxation. Pass conditions (with t = tolerance% / 100): '<' passes iff now < previously*(1+t); '>' passes iff now > previously*(1-t); '=' passes iff |now - previously| <= |previously|*t.",
+      "oneOf": [
+        {
+          "title": "RegressionOrderedOperator",
+          "type": "object",
+          "required": ["compare"],
+          "additionalProperties": false,
+          "properties": {
+            "compare": { "type": "string", "enum": ["<", ">"] },
+            "tolerance%": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 0,
+              "description": "Tolerance window applied to the previous-report aggregate (additive on the comparison side). 100 makes the rule always pass — surfaced as a warning by semantic validation."
+            }
+          },
+          "examples": [
+            { "compare": "<", "tolerance%": 5 }
+          ]
+        },
+        {
+          "title": "RegressionEqualityOperator",
+          "type": "object",
+          "required": ["compare"],
+          "additionalProperties": false,
+          "properties": {
+            "compare": { "type": "string", "const": "=" },
+            "tolerance%": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 0,
+              "description": "Symmetric tolerance window around the previous-report aggregate. 100 makes the rule always pass — surfaced as a warning."
+            }
+          },
+          "examples": [
+            { "compare": "=", "tolerance%": 2 }
+          ]
+        }
+      ]
     }
   }
 })json";
@@ -1202,13 +1427,18 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
   "title": "BenchFrameworkReport",
   "description": "Output report.json produced by bioseq::bench_framework. Two top-level fields: 'rule_violations' (every rule that didn't pass) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
   "type": "object",
-  "required": ["rule_violations", "benchmarks"],
+  "required": ["rule_violations", "regressions", "benchmarks"],
   "additionalProperties": false,
   "properties": {
     "rule_violations": {
       "type": "array",
       "description": "Every rule that failed to pass. Empty when all rules were satisfied.",
       "items": { "$ref": "#/definitions/violation" }
+    },
+    "regressions": {
+      "type": "array",
+      "description": "Every regression rule violation detected against the previous report (report_<N-1>.json). Empty on the first run after a clean report_dir, when no regression rules are configured, or when nothing regressed.",
+      "items": { "$ref": "#/definitions/regression_entry" }
     },
     "benchmarks": {
       "type": "object",
@@ -1308,6 +1538,40 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       "additionalProperties": {
         "type": "array",
         "items": { "type": "number" }
+      }
+    },
+    "regression_entry": {
+      "title": "RegressionEntry",
+      "description": "One detected regression. Granularity: one entry per (rule, benchmark, algorithm, tuple, test_case, region). 'violating_tuples' and 'test_cases' are arrays of size 1 in every entry — they exist as arrays so a future aggregation pass can group entries without breaking the schema. 'regression_since' is the basename of the oldest report on disk where the rule still fails when compared to the current run, or null when the framework hit a missing report (gap) or a tuple/region that disappeared in a historical run.",
+      "type": "object",
+      "required": ["location", "benchmark", "rule_name", "algorithm_name", "violating_tuples", "test_cases", "region", "metric", "aggregate", "previously", "now", "regression_since"],
+      "additionalProperties": false,
+      "properties": {
+        "location":       { "type": "string", "description": "Path to the config file the regression rule was declared in." },
+        "benchmark":      { "type": "string", "description": "benchmark_key whose data violated the rule." },
+        "rule_name":      { "type": "string", "description": "Regression rule name as declared in 'regression_rules'." },
+        "algorithm_name": { "type": "string", "description": "Algorithm name from the violating execution tuple." },
+        "violating_tuples": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Single-element list (one entry per violation). Each item is the parameter map of the violating tuple.",
+          "items": { "$ref": "#/definitions/param_value_object" }
+        },
+        "test_cases": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Single-element list (one entry per violation). Names the violating test_case.",
+          "items": { "type": "string" }
+        },
+        "region":     { "type": "string", "description": "Region key inside the test_case bucket where the regression was detected (e.g. 'all_regions' or a custom descriptor name)." },
+        "metric":     { "type": "string", "description": "Metric name from the regression rule." },
+        "aggregate":  { "type": "string", "enum": ["sum", "min", "max", "p01", "p50", "p99"] },
+        "previously": { "type": "number", "description": "Aggregated metric value from the previous report's matching cell." },
+        "now":        { "type": "number", "description": "Aggregated metric value from the current run's matching cell." },
+        "regression_since": {
+          "type": ["string", "null"],
+          "description": "Basename of the report where the regression was first observable (oldest historical report still failing against current). Null when the walk hit a history gap."
+        }
       }
     }
   }
@@ -1587,6 +1851,34 @@ inline void drain_diagnostics_to_context(
     return selector;
 }
 
+/// Parse the `compare` op and `tolerance%` slot shared by every
+/// comparator object in the framework (per-rule and regression). Returns
+/// nullopt + flips `parse_ok` on missing / unknown `compare`. `tolerance%`
+/// defaults to 0 silently — the JSON schema enforces both bounds and
+/// presence rules upstream, so omission means "use the default".
+[[nodiscard]] inline std::optional<std::pair<CompareOp, double>>
+parse_compare_and_tolerance(
+    simdjson::dom::object op_obj,
+    std::string_view diag_label,
+    bool& parse_ok)
+{
+    std::string_view op_text;
+    if (op_obj["compare"].get(op_text) != simdjson::SUCCESS) {
+        loge("[bench_framework] {} missing 'compare'", diag_label);
+        parse_ok = false;
+        return std::nullopt;
+    }
+    const auto parsed_op = parse_compare_op(op_text);
+    if (!parsed_op.has_value()) {
+        loge("[bench_framework] {}: unknown compare op '{}'", diag_label, op_text);
+        parse_ok = false;
+        return std::nullopt;
+    }
+    double tolerance_pct = 0.0;
+    (void)op_obj["tolerance%"].get(tolerance_pct);
+    return std::pair{*parsed_op, tolerance_pct};
+}
+
 /// Parse a rule's `{ compare, threshold%, tolerance% }` triple. `compare`
 /// is mandatory; the two `%` fields default to zero. See `comparator_passes`
 /// for how the values turn into a pass/fail decision.
@@ -1595,28 +1887,14 @@ inline void drain_diagnostics_to_context(
     bool& parse_ok)
 {
     RuleComparator out;
-    std::string_view op_text;
-    if (cmp_obj["compare"].get(op_text) != simdjson::SUCCESS) {
-        loge("[bench_framework] rule comparator missing 'compare'");
-        parse_ok = false;
-        return out;
-    }
-    auto parsed_op = parse_compare_op(op_text);
-    if (!parsed_op.has_value()) {
-        loge("[bench_framework] unknown compare op '{}'", op_text);
-        parse_ok = false;
-        return out;
-    }
-    out.op = *parsed_op;
-
+    const auto compare_and_tolerance = parse_compare_and_tolerance(
+        cmp_obj, "rule comparator", parse_ok);
+    if (!compare_and_tolerance.has_value()) return out;
+    out.op = compare_and_tolerance->first;
+    out.tolerance_pct = compare_and_tolerance->second;
     double threshold_pct = 0.0;
-    if (cmp_obj["threshold%"].get(threshold_pct) == simdjson::SUCCESS) {
-        out.threshold_pct = threshold_pct;
-    }
-    double tolerance_pct = 0.0;
-    if (cmp_obj["tolerance%"].get(tolerance_pct) == simdjson::SUCCESS) {
-        out.tolerance_pct = tolerance_pct;
-    }
+    (void)cmp_obj["threshold%"].get(threshold_pct);
+    out.threshold_pct = threshold_pct;
     return out;
 }
 
@@ -1675,6 +1953,150 @@ inline void drain_diagnostics_to_context(
     rule.rhs = parse_rule_selector(rhs_obj, parse_ok);
 
     return rule;
+}
+
+/// Parse a regression rule's `operator` block. Shares the `compare` /
+/// `tolerance%` parsing path with `parse_rule_comparator` via the
+/// `parse_compare_and_tolerance` helper. The schema's
+/// `additionalProperties: false` rejects any explicit `threshold%` field
+/// before we get here, so we don't read it.
+[[nodiscard]] inline std::optional<RegressionOperator> parse_regression_operator(
+    simdjson::dom::object op_obj, bool& parse_ok)
+{
+    const auto compare_and_tolerance = parse_compare_and_tolerance(
+        op_obj, "regression operator", parse_ok);
+    if (!compare_and_tolerance.has_value()) return std::nullopt;
+    return RegressionOperator{
+        .op = compare_and_tolerance->first,
+        .tolerance_pct = compare_and_tolerance->second,
+    };
+}
+
+/// Parse the top-level `regression_rules` array. The result vector is
+/// populated even when individual entries fail; callers report the
+/// `parse_ok` flip as a hard error after walking the rest of the
+/// document. `regions` is normalised here: the literal `"all_regions"`
+/// shorthand and an array form both end up as a non-empty vector of
+/// region names.
+[[nodiscard]] inline std::vector<RegressionRule> parse_regression_rules(
+    simdjson::dom::array rules_array,
+    const std::string& config_path,
+    bool& parse_ok)
+{
+    std::vector<RegressionRule> result;
+    for (auto entry : rules_array) {
+        simdjson::dom::object rule_obj;
+        if (entry.get(rule_obj) != simdjson::SUCCESS) {
+            loge("[bench_framework] regression_rules entry is not an object");
+            parse_ok = false;
+            continue;
+        }
+
+        RegressionRule rule;
+        rule.config_path = config_path;
+
+        std::string_view name_text;
+        if (rule_obj["name"].get(name_text) != simdjson::SUCCESS) {
+            loge("[bench_framework] regression rule missing 'name'");
+            parse_ok = false;
+            continue;
+        }
+        rule.name = std::string{name_text};
+
+        simdjson::dom::array benchmarks_array;
+        if (rule_obj["benchmarks"].get(benchmarks_array) == simdjson::SUCCESS) {
+            for (auto bench_entry : benchmarks_array) {
+                std::string_view bench_key;
+                if (bench_entry.get(bench_key) != simdjson::SUCCESS) {
+                    loge("[bench_framework] regression rule '{}' benchmarks[*] is not a string",
+                         rule.name);
+                    parse_ok = false;
+                    continue;
+                }
+                rule.benchmarks.emplace_back(bench_key);
+            }
+        }
+
+        simdjson::dom::element regions_element;
+        if (rule_obj["regions"].get(regions_element) == simdjson::SUCCESS) {
+            std::string_view single_region;
+            simdjson::dom::array regions_array;
+            if (regions_element.get(single_region) == simdjson::SUCCESS) {
+                rule.regions.emplace_back(single_region);
+            } else if (regions_element.get(regions_array) == simdjson::SUCCESS) {
+                for (auto region_entry : regions_array) {
+                    std::string_view region_name;
+                    if (region_entry.get(region_name) != simdjson::SUCCESS) {
+                        loge("[bench_framework] regression rule '{}' regions[*] is not a string",
+                             rule.name);
+                        parse_ok = false;
+                        continue;
+                    }
+                    rule.regions.emplace_back(region_name);
+                }
+            } else {
+                loge("[bench_framework] regression rule '{}' regions must be a string or array",
+                     rule.name);
+                parse_ok = false;
+            }
+        }
+        if (rule.regions.empty()) {
+            // Default per spec: "all_regions". Schema oneOf only emits the
+            // array form when the user wrote one; the implicit default
+            // (or omitted field) lands here.
+            rule.regions.emplace_back("all_regions");
+        }
+
+        std::string_view metric_text;
+        if (rule_obj["metric"].get(metric_text) != simdjson::SUCCESS) {
+            loge("[bench_framework] regression rule '{}' missing 'metric'", rule.name);
+            parse_ok = false;
+            continue;
+        }
+        rule.metric = std::string{metric_text};
+
+        std::string_view aggregate_text;
+        if (rule_obj["aggregate"].get(aggregate_text) != simdjson::SUCCESS) {
+            loge("[bench_framework] regression rule '{}' missing 'aggregate'", rule.name);
+            parse_ok = false;
+            continue;
+        }
+        const auto parsed_aggregate = parse_regression_aggregate(aggregate_text);
+        if (!parsed_aggregate.has_value()) {
+            loge("[bench_framework] regression rule '{}' has unknown aggregate '{}'",
+                 rule.name, aggregate_text);
+            parse_ok = false;
+            continue;
+        }
+        rule.aggregate = *parsed_aggregate;
+
+        simdjson::dom::object op_obj;
+        if (rule_obj["operator"].get(op_obj) != simdjson::SUCCESS) {
+            loge("[bench_framework] regression rule '{}' missing 'operator'", rule.name);
+            parse_ok = false;
+            continue;
+        }
+        const auto parsed_op = parse_regression_operator(op_obj, parse_ok);
+        if (!parsed_op.has_value()) continue;
+        rule.op = *parsed_op;
+
+        simdjson::dom::array exclude_array;
+        if (rule_obj["exclude_cases"].get(exclude_array) == simdjson::SUCCESS) {
+            for (auto exclude_entry : exclude_array) {
+                std::string_view exclude_name;
+                if (exclude_entry.get(exclude_name) != simdjson::SUCCESS) {
+                    loge("[bench_framework] regression rule '{}' exclude_cases[*] is not a string",
+                         rule.name);
+                    parse_ok = false;
+                    continue;
+                }
+                rule.exclude_cases.emplace_back(exclude_name);
+            }
+        }
+
+        result.push_back(std::move(rule));
+    }
+    return result;
 }
 
 /// Parse the `matrix.metrics` block. Each entry contributes a `MetricSpec`
@@ -1878,6 +2300,12 @@ inline void drain_diagnostics_to_context(
 struct ConfigParseOutcome {
     bool ok = true;
     std::vector<ValidationDiag> diagnostics{};
+    /// Top-level `regression_rules` array, parsed and normalised. The
+    /// closure registers these into the global `RegressionRulesByConfig`
+    /// registry the first time it sees a given `config_path` (subsequent
+    /// benchmarks sharing the file see the entry already present and
+    /// skip).
+    std::vector<RegressionRule> regression_rules{};
 };
 
 [[nodiscard]] inline ConfigParseOutcome parse_config_file(
@@ -1993,6 +2421,18 @@ struct ConfigParseOutcome {
     if (!parse_benchmark_block(benchmark_obj, state.config)) {
         parse_ok = false;
     }
+
+    // 3. Optional top-level regression_rules array. Empty / absent are
+    //    both legal. Parse here so we always return a fresh copy in
+    //    `outcome.regression_rules`; the closure decides whether to
+    //    register them (only the first benchmark per config_path
+    //    succeeds; subsequent ones discard their copy via dedup).
+    simdjson::dom::array regression_rules_array;
+    if (root_obj["regression_rules"].get(regression_rules_array) == simdjson::SUCCESS) {
+        outcome.regression_rules = parse_regression_rules(
+            regression_rules_array, config_path, parse_ok);
+    }
+
     if (!parse_ok) outcome.ok = false;
     return outcome;
 }
@@ -2384,6 +2824,150 @@ struct ConfigParseOutcome {
             });
         }
     }
+    return diagnostics;
+}
+
+/// Cross-config validation for regression rules. Runs once from
+/// `run_impl` after every benchmark closure has finished registering its
+/// state. Each rule is checked against the benchmarks loaded from its
+/// own `config_path`:
+///   - Rule names must be unique within the same config file.
+///   - Every entry of `benchmarks` (when present) must name a benchmark
+///     that actually loaded from this config_path.
+///   - The metric must appear in the benchmarks the rule applies to
+///     (every listed benchmark when explicit; at least one when
+///     implicit).
+///   - Every entry of `exclude_cases` must name a declared test_case in
+///     the rule's config (test_cases are config-global, so any state
+///     sharing the config_path has the same list).
+///   - `exclude_cases` cannot cover *every* test_case the rule could
+///     possibly fire on (over-coverage). The runtime
+///     `regression_rule_matched_nothing` check still catches semantic
+///     emptiness (e.g. region listed but never visited); this catches
+///     the syntactic case at parse time.
+[[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_regression_rules(
+    const RegressionRulesByConfig& regression_rules_by_config,
+    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports) noexcept
+{
+    std::vector<ValidationDiag> diagnostics;
+    auto error = [&](std::string code, std::string location, std::string message) {
+        diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            std::move(code), std::move(location), std::move(message)
+        });
+    };
+
+    for (const auto& [config_path, rules] : regression_rules_by_config) {
+        // Collect the benchmark states loaded from this config_path.
+        std::vector<const BenchmarkExecutionState*> states_for_config;
+        for (const auto& [bench_key, state_ptr] : reports) {
+            if (state_ptr->config.config_path == config_path) {
+                states_for_config.push_back(state_ptr.get());
+            }
+        }
+
+        std::set<std::string> seen_rule_names;
+        for (const auto& rule : rules) {
+            const std::string base_loc = fmt::format(
+                "{}/regression_rules/{}", config_path, rule.name);
+
+            // 1. Rule name uniqueness within the config file.
+            if (!seen_rule_names.insert(rule.name).second) {
+                error("regression_duplicate_rule_name", base_loc,
+                    fmt::format("regression rule name '{}' is used more than once in '{}'; names must be unique within a config file",
+                                rule.name, config_path));
+            }
+
+            // 2. Determine matching benchmarks within this config_path.
+            std::vector<const BenchmarkExecutionState*> matching_states;
+            if (rule.benchmarks.empty()) {
+                matching_states = states_for_config;
+            } else {
+                for (const auto& declared_bench : rule.benchmarks) {
+                    bool found = false;
+                    for (const auto* state : states_for_config) {
+                        if (state->config.benchmark_key == declared_bench) {
+                            matching_states.push_back(state);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        error("regression_unknown_benchmark", base_loc,
+                            fmt::format("benchmark '{}' is not declared in '{}'",
+                                        declared_bench, config_path));
+                    }
+                }
+            }
+
+            // 3. Metric existence check.
+            const auto metric_in_state = [&](const BenchmarkExecutionState& state) noexcept {
+                for (const auto& metric : state.config.metrics) {
+                    if (metric.name == rule.metric) return true;
+                }
+                return false;
+            };
+            if (!rule.benchmarks.empty()) {
+                for (const auto* state : matching_states) {
+                    if (!metric_in_state(*state)) {
+                        error("regression_metric_missing_in_benchmark", base_loc,
+                            fmt::format("regression rule '{}' targets metric '{}' but benchmark '{}' (explicitly listed in 'benchmarks') does not declare it under matrix.metrics",
+                                        rule.name, rule.metric, state->config.benchmark_key));
+                    }
+                }
+            } else if (!matching_states.empty()) {
+                bool found_any = false;
+                for (const auto* state : matching_states) {
+                    if (metric_in_state(*state)) { found_any = true; break; }
+                }
+                if (!found_any) {
+                    error("regression_metric_unused", base_loc,
+                        fmt::format("regression rule '{}' (no 'benchmarks' filter) targets metric '{}' but no benchmark loaded from '{}' declares it",
+                                    rule.name, rule.metric, config_path));
+                }
+            }
+
+            // 4. exclude_cases membership check (and over-coverage).
+            //    test_cases are config-global, so any state sharing the
+            //    config_path has the full list — pick one and use its
+            //    declared set.
+            if (!matching_states.empty()) {
+                const auto& declared_test_cases = matching_states.front()->test_cases;
+                std::set<std::string> declared_names;
+                for (const auto& spec : declared_test_cases) declared_names.insert(spec.name);
+                for (const auto& excluded : rule.exclude_cases) {
+                    if (declared_names.find(excluded) == declared_names.end()) {
+                        error("regression_unknown_test_case", base_loc,
+                            fmt::format("exclude_cases entry '{}' is not declared in 'test_cases'",
+                                        excluded));
+                    }
+                }
+
+                // Over-coverage: union of every for_each in matching
+                // benchmarks minus exclude_cases must be non-empty.
+                std::set<std::string> covered_test_cases;
+                for (const auto* state : matching_states) {
+                    for (const auto& [test_case_name, _iters] : state->config.for_each) {
+                        covered_test_cases.insert(test_case_name);
+                    }
+                }
+                std::set<std::string> excluded_set(
+                    rule.exclude_cases.begin(), rule.exclude_cases.end());
+                bool any_remains = false;
+                for (const auto& tc : covered_test_cases) {
+                    if (excluded_set.find(tc) == excluded_set.end()) {
+                        any_remains = true; break;
+                    }
+                }
+                if (!any_remains && !covered_test_cases.empty()) {
+                    error("regression_excludes_all", base_loc,
+                        fmt::format("regression rule '{}' excludes every test_case its matching benchmarks would run on; the rule can never fire (use a narrower 'exclude_cases' or remove it)",
+                                    rule.name));
+                }
+            }
+        }
+    }
+
     return diagnostics;
 }
 
@@ -2985,20 +3569,25 @@ inline void run_typed_benchmark(
     return true;
 }
 
-/// Apply the rule comparator to two aggregate values. Spec semantics:
+/// Apply a comparator to two aggregate values with explicit threshold /
+/// tolerance percentages. Spec semantics:
 /// - `<` : `lhs < rhs * (1 - threshold% + tolerance%)`
 /// - `>` : `lhs > rhs * (1 + threshold% - tolerance%)` (extrapolated by
 ///         symmetry; spec only documents `<`/`=`)
 /// - `=` : `|lhs - rhs| <= rhs * tolerance%` (asymmetric on rhs as the
 ///         baseline reference, matching the spec example).
+///
+/// Used by both per-rule comparisons (with both knobs from
+/// `RuleComparator`) and regression rules (which always pass
+/// `threshold_pct = 0` because the schema forbids the field).
 [[nodiscard]] inline bool comparator_passes(
-    const RuleComparator& cmp,
-    double lhs_aggregate,
-    double rhs_aggregate) noexcept
+    CompareOp op,
+    double lhs_aggregate, double rhs_aggregate,
+    double threshold_pct, double tolerance_pct) noexcept
 {
-    const double threshold = cmp.threshold_pct / 100.0;
-    const double tolerance = cmp.tolerance_pct / 100.0;
-    switch (cmp.op) {
+    const double threshold = threshold_pct / 100.0;
+    const double tolerance = tolerance_pct / 100.0;
+    switch (op) {
         case CompareOp::LessThan:
             return lhs_aggregate < rhs_aggregate * (1.0 - threshold + tolerance);
         case CompareOp::GreaterThan:
@@ -3008,6 +3597,30 @@ inline void run_typed_benchmark(
                    <= std::abs(rhs_aggregate) * tolerance;
     }
     return false;
+}
+
+/// Convenience overload for the per-rule comparator path. Forwards into
+/// the explicit-args overload so `RuleComparator` and `RegressionOperator`
+/// share one implementation.
+[[nodiscard]] inline bool comparator_passes(
+    const RuleComparator& cmp,
+    double lhs_aggregate,
+    double rhs_aggregate) noexcept
+{
+    return comparator_passes(cmp.op, lhs_aggregate, rhs_aggregate,
+                              cmp.threshold_pct, cmp.tolerance_pct);
+}
+
+/// Convenience overload for the regression-rule path. Threshold is
+/// implicitly zero — the regression schema rejects an explicit
+/// `threshold%` field, so there's no value to forward.
+[[nodiscard]] inline bool comparator_passes(
+    const RegressionOperator& op,
+    double now_value,
+    double previously_value) noexcept
+{
+    return comparator_passes(op.op, now_value, previously_value,
+                              /*threshold_pct=*/0.0, op.tolerance_pct);
 }
 
 /// Apply every rule against every test case and collect failures.
@@ -3060,6 +3673,526 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
             }
         }
     }
+}
+
+// ----------------- Regression evaluation -----------------
+
+/// Reduce a sample vector into a single number per the regression rule's
+/// aggregate field. Empty input always returns 0.0 — by the time the
+/// evaluator reaches `aggregate_samples` it has already filtered empty
+/// vectors via the matched-cell scan, so the fallback only fires on
+/// genuinely degenerate input.
+[[nodiscard]] inline double aggregate_samples(
+    RegressionAggregate aggregate, const std::vector<double>& samples) noexcept
+{
+    if (samples.empty()) return 0.0;
+    switch (aggregate) {
+        case RegressionAggregate::Sum: {
+            double total = 0.0;
+            for (const double value : samples) total += value;
+            return total;
+        }
+        case RegressionAggregate::Min:
+            return *std::min_element(samples.begin(), samples.end());
+        case RegressionAggregate::Max:
+            return *std::max_element(samples.begin(), samples.end());
+        case RegressionAggregate::P01:
+        case RegressionAggregate::P50:
+        case RegressionAggregate::P99: {
+            // Use the same percentile convention as `median_of`: pick the
+            // sample at index `floor(p * (n - 1))` after a partial sort
+            // via std::nth_element. Matches NumPy's "lower" / "linear" with
+            // discrete indices for our small-sample case. The percentile
+            // fraction comes from the registry — adding a P95 entry there
+            // is enough to extend coverage; no new switch arm needed.
+            const double percentile_fraction =
+                regression_aggregate_percentile(aggregate);
+            std::vector<double> copy = samples;
+            const std::size_t target_index = static_cast<std::size_t>(
+                std::floor(percentile_fraction
+                           * static_cast<double>(copy.size() - 1)));
+            std::nth_element(copy.begin(),
+                             copy.begin() + static_cast<std::ptrdiff_t>(target_index),
+                             copy.end());
+            return copy[target_index];
+        }
+    }
+    return 0.0;
+}
+
+/// Pin-allocated wrapper around a parsed historical report. Holds the
+/// simdjson parser, the report body string, and the parsed root element.
+/// The body must outlive the parser; storing both inline guarantees this
+/// regardless of how the wrapper is moved (it isn't — see deleted move
+/// ctors). Heap allocation via `std::unique_ptr` (in the cache below)
+/// gives stable pointers.
+struct ParsedHistoricalReport {
+    std::string                body;
+    simdjson::dom::parser      parser;
+    simdjson::dom::element     root;
+    std::size_t                index = 0;
+
+    ParsedHistoricalReport() = default;
+    ParsedHistoricalReport(const ParsedHistoricalReport&) = delete;
+    ParsedHistoricalReport& operator=(const ParsedHistoricalReport&) = delete;
+    ParsedHistoricalReport(ParsedHistoricalReport&&) = delete;
+    ParsedHistoricalReport& operator=(ParsedHistoricalReport&&) = delete;
+};
+
+/// Resolve the path of `report_<index>.json` inside `report_dir`.
+[[nodiscard]] inline std::filesystem::path report_path_for_index(
+    const std::filesystem::path& report_dir, std::size_t index) noexcept
+{
+    return report_dir / fmt::format("report_{}.json", index);
+}
+
+/// Scan `report_dir` for files matching `^report_(\d+)\.json$`. Returns
+/// the largest index found, or `std::nullopt` when none exist (or the
+/// directory itself is missing — first run on a fresh report path).
+[[nodiscard]] inline std::optional<std::size_t> max_existing_report_index(
+    const std::filesystem::path& report_dir) noexcept
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(report_dir, ec) || ec) return std::nullopt;
+    std::optional<std::size_t> max_index;
+    for (const auto& entry : std::filesystem::directory_iterator(report_dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec) || ec) continue;
+        const auto filename = entry.path().filename().string();
+        constexpr std::string_view kPrefix = "report_";
+        constexpr std::string_view kSuffix = ".json";
+        if (filename.size() <= kPrefix.size() + kSuffix.size()) continue;
+        if (filename.compare(0, kPrefix.size(), kPrefix.data(), kPrefix.size()) != 0) continue;
+        if (filename.compare(filename.size() - kSuffix.size(),
+                              kSuffix.size(),
+                              kSuffix.data(), kSuffix.size()) != 0) continue;
+        const auto digits = filename.substr(
+            kPrefix.size(),
+            filename.size() - kPrefix.size() - kSuffix.size());
+        if (digits.empty()) continue;
+        bool digits_only = true;
+        for (const char ch : digits) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                digits_only = false; break;
+            }
+        }
+        if (!digits_only) continue;
+        // `std::stoull` may throw on overflow; we don't use exceptions, so
+        // accumulate manually with overflow guard.
+        std::size_t parsed = 0;
+        bool overflowed = false;
+        for (const char ch : digits) {
+            const std::size_t digit = static_cast<std::size_t>(ch - '0');
+            if (parsed > (std::numeric_limits<std::size_t>::max() - digit) / 10) {
+                overflowed = true; break;
+            }
+            parsed = parsed * 10 + digit;
+        }
+        if (overflowed) continue;
+        if (!max_index.has_value() || parsed > *max_index) {
+            max_index = parsed;
+        }
+    }
+    return max_index;
+}
+
+/// Load and parse `report_<index>.json` from disk. Returns nullptr when
+/// the file is missing or the JSON body fails to parse — both of which
+/// are downgraded to "history gap" by the regression evaluator.
+[[nodiscard]] inline std::unique_ptr<ParsedHistoricalReport> load_report_at_index(
+    const std::filesystem::path& report_dir, std::size_t index) noexcept
+{
+    const auto path = report_path_for_index(report_dir, index);
+    auto body = slurp_file(path);
+    if (body.empty()) return nullptr;
+    auto holder = std::make_unique<ParsedHistoricalReport>();
+    holder->index = index;
+    holder->body  = std::move(body);
+    if (holder->parser.parse(holder->body).get(holder->root) != simdjson::SUCCESS) {
+        return nullptr;
+    }
+    return holder;
+}
+
+/// Compare a JSON value (from a parsed historical report) against a
+/// `ConfigValue` (from the current run's tuple). Numbers are matched
+/// across the integer/double divide so a round-trip like 10 → 10.0 → 10
+/// still compares equal.
+[[nodiscard]] inline bool simdjson_equals_config_value(
+    simdjson::dom::element json_value, const ConfigValue& cv) noexcept
+{
+    switch (cv.kind) {
+        case ConfigValue::Kind::String: {
+            std::string_view sv;
+            return json_value.get(sv) == simdjson::SUCCESS && sv == cv.string_value;
+        }
+        case ConfigValue::Kind::Integer: {
+            std::int64_t i_value = 0;
+            if (json_value.get(i_value) == simdjson::SUCCESS) {
+                return i_value == cv.integer_value;
+            }
+            std::uint64_t u_value = 0;
+            if (json_value.get(u_value) == simdjson::SUCCESS) {
+                return static_cast<std::int64_t>(u_value) == cv.integer_value;
+            }
+            double d_value = 0.0;
+            if (json_value.get(d_value) == simdjson::SUCCESS) {
+                return d_value == static_cast<double>(cv.integer_value);
+            }
+            return false;
+        }
+        case ConfigValue::Kind::Double: {
+            double d_value = 0.0;
+            if (json_value.get(d_value) == simdjson::SUCCESS) {
+                return d_value == cv.double_value;
+            }
+            std::int64_t i_value = 0;
+            if (json_value.get(i_value) == simdjson::SUCCESS) {
+                return static_cast<double>(i_value) == cv.double_value;
+            }
+            return false;
+        }
+        case ConfigValue::Kind::Boolean: {
+            bool b_value = false;
+            return json_value.get(b_value) == simdjson::SUCCESS
+                   && b_value == cv.boolean_value;
+        }
+        case ConfigValue::Kind::NonScalar:
+            return false;
+    }
+    return false;
+}
+
+/// Try to coerce a simdjson element to a JSON object. Returns nullopt
+/// when the cast fails. Used by the report walker so the per-step
+/// boilerplate (`if (... .get(out) != SUCCESS) return nullopt;`) collapses
+/// to a single line per descent.
+[[nodiscard]] inline std::optional<simdjson::dom::object>
+try_as_object(simdjson::dom::element element) noexcept {
+    simdjson::dom::object out;
+    if (element.get(out) != simdjson::SUCCESS) return std::nullopt;
+    return out;
+}
+
+/// Helper for the same pattern at object-key entry points.
+[[nodiscard]] inline std::optional<simdjson::dom::object>
+try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
+    simdjson::dom::element child;
+    if (parent.at_key(key).get(child) != simdjson::SUCCESS) return std::nullopt;
+    return try_as_object(child);
+}
+
+/// Walk a parsed report's
+/// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric>`
+/// path and pull out the sample array. Returns nullopt on any miss
+/// (benchmark absent, no matching tuple, region missing, etc.) — the
+/// evaluator treats this as "no historical baseline for this combo".
+[[nodiscard]] inline std::optional<std::vector<double>> samples_from_report(
+    simdjson::dom::element report_root,
+    std::string_view benchmark,
+    std::string_view algorithm_name,
+    const ParamMap&  params,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric)
+{
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return std::nullopt;
+    const auto benchmarks_obj = try_get_object(*root_obj, "benchmarks");
+    if (!benchmarks_obj.has_value()) return std::nullopt;
+    const auto bench_obj = try_get_object(*benchmarks_obj, benchmark);
+    if (!bench_obj.has_value()) return std::nullopt;
+
+    simdjson::dom::array execution_tuples;
+    if ((*bench_obj)["execution_tuples"].get(execution_tuples) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+
+    for (auto tuple_record : execution_tuples) {
+        const auto record_obj = try_as_object(tuple_record);
+        if (!record_obj.has_value()) continue;
+        const auto tuple_inner = try_get_object(*record_obj, "tuple");
+        if (!tuple_inner.has_value()) continue;
+        const auto algo_params_obj = try_get_object(*tuple_inner, algorithm_name);
+        if (!algo_params_obj.has_value()) continue;
+
+        bool param_match = true;
+        for (const auto& [param_name, param_value] : params) {
+            simdjson::dom::element json_param_value;
+            if ((*algo_params_obj).at_key(param_name).get(json_param_value)
+                != simdjson::SUCCESS) {
+                param_match = false; break;
+            }
+            if (!simdjson_equals_config_value(json_param_value, param_value)) {
+                param_match = false; break;
+            }
+        }
+        if (!param_match) continue;
+
+        const auto test_cases_obj = try_get_object(*record_obj, "test_cases");
+        if (!test_cases_obj.has_value()) continue;
+        const auto test_case_obj = try_get_object(*test_cases_obj, test_case);
+        if (!test_case_obj.has_value()) continue;
+        const auto region_obj = try_get_object(*test_case_obj, region);
+        if (!region_obj.has_value()) continue;
+
+        simdjson::dom::array metric_values;
+        if ((*region_obj).at_key(metric).get(metric_values) != simdjson::SUCCESS) continue;
+
+        std::vector<double> values;
+        for (auto value_elem : metric_values) {
+            double sample_value = 0.0;
+            if (value_elem.get(sample_value) == simdjson::SUCCESS) {
+                values.push_back(sample_value);
+            }
+        }
+        return values;
+    }
+    return std::nullopt;
+}
+
+/// Evaluate every regression rule against the current run's collected
+/// samples and the on-disk historical reports. Single-threaded —
+/// invoked once from `run_impl` after the parallel benchmark loop has
+/// joined. Pushes diagnostics (warnings + matched-nothing errors) into
+/// `diagnostics_out`; returns the list of detected regressions.
+[[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
+    const RegressionRulesByConfig& regression_rules_by_config,
+    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const std::filesystem::path&   report_dir,
+    std::size_t                    current_index,
+    std::vector<ValidationDiag>&   diagnostics_out) noexcept
+{
+    std::vector<RegressionEntry> entries;
+
+    // Per-invocation cache: each report file is parsed at most once.
+    std::map<std::size_t, std::unique_ptr<ParsedHistoricalReport>> history_cache;
+    std::set<std::size_t> known_missing;
+    auto fetch_report = [&](std::size_t index) -> ParsedHistoricalReport* {
+        if (known_missing.count(index) > 0) return nullptr;
+        if (auto it = history_cache.find(index); it != history_cache.end()) {
+            return it->second.get();
+        }
+        auto loaded = load_report_at_index(report_dir, index);
+        if (loaded == nullptr) {
+            known_missing.insert(index);
+            return nullptr;
+        }
+        auto* raw = loaded.get();
+        history_cache.emplace(index, std::move(loaded));
+        return raw;
+    };
+
+    for (const auto& [config_path, rules] : regression_rules_by_config) {
+        for (const auto& rule : rules) {
+            std::size_t matched_count = 0;
+
+            std::vector<const BenchmarkExecutionState*> matching_states;
+            for (const auto& [_bench_key, state_ptr] : reports) {
+                if (state_ptr->config.config_path != config_path) continue;
+                if (!rule.benchmarks.empty()) {
+                    bool listed = false;
+                    for (const auto& declared : rule.benchmarks) {
+                        if (declared == state_ptr->config.benchmark_key) {
+                            listed = true; break;
+                        }
+                    }
+                    if (!listed) continue;
+                }
+                matching_states.push_back(state_ptr.get());
+            }
+
+            const std::set<std::string> excluded_test_cases(
+                rule.exclude_cases.begin(), rule.exclude_cases.end());
+
+            const auto rule_location = [&]() noexcept {
+                return fmt::format("{}/regression_rules/{}", config_path, rule.name);
+            };
+
+            // Build a per-state (tuple_ptr, test_case_name) → cell map
+            // once per rule so the inner walk is O(1) per combo instead
+            // of O(cells). With many tuples × test_cases × regions the
+            // earlier linear scan dominated.
+            std::map<const BenchmarkExecutionState*,
+                     std::map<std::pair<const ExecutionTuple*, std::string>, const Cell*>>
+                cells_by_state_index;
+            for (const auto* state : matching_states) {
+                auto& index = cells_by_state_index[state];
+                for (const auto& cell_ptr : state->cells) {
+                    index.emplace(
+                        std::pair{cell_ptr->tuple, cell_ptr->test_case->name},
+                        cell_ptr.get());
+                }
+            }
+
+            for (const auto* state : matching_states) {
+                const auto& cell_index = cells_by_state_index[state];
+                for (const auto& tuple : state->execution_tuples) {
+                    for (const auto& [test_case_name, _iter] : state->config.for_each) {
+                        if (excluded_test_cases.count(test_case_name) > 0) continue;
+                        for (const auto& region_name : rule.regions) {
+                            const auto cell_it = cell_index.find(
+                                std::pair{&tuple, test_case_name});
+                            if (cell_it == cell_index.end()) continue;
+                            const Cell* current_cell = cell_it->second;
+
+                            const auto region_it = current_cell->samples.find(region_name);
+                            if (region_it == current_cell->samples.end()) continue;
+                            const auto metric_it = region_it->second.find(rule.metric);
+                            if (metric_it == region_it->second.end()
+                                || metric_it->second.empty()) continue;
+
+                            // Cell has data → counts toward matched_count
+                            // regardless of baseline presence.
+                            ++matched_count;
+                            const double now_value =
+                                aggregate_samples(rule.aggregate, metric_it->second);
+
+                            if (current_index <= 1) {
+                                diagnostics_out.push_back({
+                                    ValidationDiag::Severity::Warning,
+                                    "regression_baseline_missing",
+                                    rule_location(),
+                                    fmt::format("no historical baseline available for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' (current run is index {}); rule treated as satisfied",
+                                                state->config.benchmark_key,
+                                                tuple.algorithm_name,
+                                                test_case_name, region_name,
+                                                rule.metric, current_index)
+                                });
+                                continue;
+                            }
+
+                            auto* baseline_report = fetch_report(current_index - 1);
+                            std::optional<std::vector<double>> baseline_samples;
+                            if (baseline_report != nullptr) {
+                                baseline_samples = samples_from_report(
+                                    baseline_report->root,
+                                    state->config.benchmark_key,
+                                    tuple.algorithm_name, tuple.params,
+                                    test_case_name, region_name, rule.metric);
+                            }
+                            if (!baseline_samples.has_value()
+                                || baseline_samples->empty()) {
+                                diagnostics_out.push_back({
+                                    ValidationDiag::Severity::Warning,
+                                    "regression_baseline_missing",
+                                    rule_location(),
+                                    fmt::format("no matching samples in report_{}.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
+                                                current_index - 1,
+                                                state->config.benchmark_key,
+                                                tuple.algorithm_name,
+                                                test_case_name, region_name,
+                                                rule.metric)
+                                });
+                                continue;
+                            }
+
+                            const double previously_value =
+                                aggregate_samples(rule.aggregate, *baseline_samples);
+
+                            if (comparator_passes(rule.op, now_value, previously_value)) {
+                                continue;     // no regression
+                            }
+
+                            // Walk back through history to compute
+                            // regression_since.
+                            std::size_t oldest_failing = current_index - 1;
+                            bool history_gap = false;
+                            // current_index >= 3 is required to enter the
+                            // loop: with index = 2 the first predecessor
+                            // we'd inspect is index 0 (which doesn't
+                            // exist), so the walk has nothing to do and
+                            // oldest_failing stays at 1.
+                            for (std::size_t historical_index = current_index - 2;
+                                 current_index >= 3 && historical_index >= 1;
+                                 --historical_index)
+                            {
+                                auto* hist_report = fetch_report(historical_index);
+                                if (hist_report == nullptr) {
+                                    history_gap = true; break;
+                                }
+                                auto hist_samples = samples_from_report(
+                                    hist_report->root,
+                                    state->config.benchmark_key,
+                                    tuple.algorithm_name, tuple.params,
+                                    test_case_name, region_name, rule.metric);
+                                if (!hist_samples.has_value()
+                                    || hist_samples->empty()) {
+                                    history_gap = true; break;
+                                }
+                                const double hist_value =
+                                    aggregate_samples(rule.aggregate, *hist_samples);
+                                if (comparator_passes(rule.op, now_value, hist_value)) {
+                                    break;     // found a passing report
+                                }
+                                oldest_failing = historical_index;
+                                // Decrementing past 1 underflows std::size_t;
+                                // break before the for-statement's --historical_index
+                                // can do that.
+                                if (historical_index == 1) break;
+                            }
+
+                            std::string regression_since_label;
+                            if (history_gap) {
+                                diagnostics_out.push_back({
+                                    ValidationDiag::Severity::Warning,
+                                    "regression_history_incomplete",
+                                    rule_location(),
+                                    fmt::format("could not walk full history while attributing regression for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}': a historical report was missing or did not contain matching samples",
+                                                state->config.benchmark_key,
+                                                tuple.algorithm_name,
+                                                test_case_name, region_name,
+                                                rule.metric)
+                                });
+                            } else {
+                                regression_since_label =
+                                    fmt::format("report_{}.json", oldest_failing);
+                                if (oldest_failing == 1) {
+                                    diagnostics_out.push_back({
+                                        ValidationDiag::Severity::Warning,
+                                        "regression_pre_existing",
+                                        rule_location(),
+                                        fmt::format("regression has been present in every report on disk back to report_1.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' — almost certainly not introduced by recent changes",
+                                                    state->config.benchmark_key,
+                                                    tuple.algorithm_name,
+                                                    test_case_name, region_name,
+                                                    rule.metric)
+                                    });
+                                }
+                            }
+
+                            RegressionEntry entry;
+                            entry.config_path     = config_path;
+                            entry.benchmark       = state->config.benchmark_key;
+                            entry.rule_name       = rule.name;
+                            entry.algorithm_name  = tuple.algorithm_name;
+                            entry.violating_params = tuple.params;
+                            entry.test_case       = test_case_name;
+                            entry.region          = region_name;
+                            entry.metric          = rule.metric;
+                            entry.aggregate       = rule.aggregate;
+                            entry.previously      = previously_value;
+                            entry.now             = now_value;
+                            entry.regression_since = std::move(regression_since_label);
+                            entries.push_back(std::move(entry));
+                        }
+                    }
+                }
+            }
+
+            if (matched_count == 0) {
+                diagnostics_out.push_back({
+                    ValidationDiag::Severity::Error,
+                    "regression_rule_matched_nothing",
+                    rule_location(),
+                    fmt::format("regression rule '{}' did not match any (benchmark, tuple, test_case, region) combination with current samples; check 'benchmarks', 'regions', 'metric', and 'exclude_cases'",
+                                rule.name)
+                });
+            }
+        }
+    }
+
+    return entries;
 }
 
 // ----------------- Report writing -----------------
@@ -3170,13 +4303,16 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
 }
 
 /// Serialise the per-benchmark execution state map plus the global
-/// violations list into `<report_dir>/report.json`. Returns the resolved
-/// path on success, empty string on I/O / serialisation failure. The output
-/// matches the layout in BENCH_V2_CODE.md §"Output report.json".
+/// violations and regressions lists into the supplied `output_path`.
+/// Returns the resolved path on success, empty string on I/O /
+/// serialisation failure. The framework writes one report per run as
+/// `report_<N>.json`; index allocation lives in `run_impl` so the
+/// regression evaluator and the writer agree on `current_index`.
 [[nodiscard]] inline std::string write_report(
-    const std::string& report_dir,
+    const std::filesystem::path& output_path,
     const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
-    const std::vector<Violation>& violations)
+    const std::vector<Violation>& violations,
+    const std::vector<RegressionEntry>& regressions)
 {
     constexpr std::size_t kInitialCapacity = 1u << 18;  // 256 KiB up front
     simdjson::builder::string_builder builder{kInitialCapacity};
@@ -3222,6 +4358,55 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
                 args_b.append(violation.args[1]);
                 args_b.end_array();
             });
+        });
+    };
+
+    /// Emit one regression entry. Field order mirrors the user spec:
+    /// location, benchmark, rule_name, algorithm_name, violating_tuples,
+    /// test_cases, region, metric, aggregate, previously, now,
+    /// regression_since.
+    auto emit_one_regression = [&](auto& b, const RegressionEntry& entry) {
+        emit_object_with_body(b, [&](auto& inner) {
+            emit_kv_string(inner, "location",       entry.config_path);
+            inner.append_comma();
+            emit_kv_string(inner, "benchmark",      entry.benchmark);
+            inner.append_comma();
+            emit_kv_string(inner, "rule_name",      entry.rule_name);
+            inner.append_comma();
+            emit_kv_string(inner, "algorithm_name", entry.algorithm_name);
+            inner.append_comma();
+            emit_kv_with_body(inner, "violating_tuples", [&](auto& list_b) {
+                list_b.start_array();
+                emit_param_object(list_b, entry.violating_params);
+                list_b.end_array();
+            });
+            inner.append_comma();
+            emit_kv_with_body(inner, "test_cases", [&](auto& list_b) {
+                list_b.start_array();
+                list_b.escape_and_append_with_quotes(std::string_view{entry.test_case});
+                list_b.end_array();
+            });
+            inner.append_comma();
+            emit_kv_string(inner, "region", entry.region);
+            inner.append_comma();
+            emit_kv_string(inner, "metric", entry.metric);
+            inner.append_comma();
+            emit_kv_string(inner, "aggregate",
+                std::string_view{regression_aggregate_name(entry.aggregate)});
+            inner.append_comma();
+            emit_key(inner, "previously");
+            inner.append(entry.previously);
+            inner.append_comma();
+            emit_key(inner, "now");
+            inner.append(entry.now);
+            inner.append_comma();
+            emit_key(inner, "regression_since");
+            if (entry.regression_since.empty()) {
+                inner.append_null();
+            } else {
+                inner.escape_and_append_with_quotes(
+                    std::string_view{entry.regression_since});
+            }
         });
     };
 
@@ -3345,6 +4530,15 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
             arr_b.end_array();
         });
         root_b.append_comma();
+        emit_kv_with_body(root_b, "regressions", [&](auto& arr_b) {
+            arr_b.start_array();
+            emit_range_with_commas(arr_b, regressions,
+                [&](auto& vb, const RegressionEntry& entry) {
+                    emit_one_regression(vb, entry);
+                });
+            arr_b.end_array();
+        });
+        root_b.append_comma();
         emit_kv_with_body(root_b, "benchmarks", [&](auto& benchmarks_b) {
             emit_object_with_body(benchmarks_b, [&](auto& bench_inner) {
                 emit_range_with_commas(bench_inner, reports,
@@ -3363,16 +4557,17 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
         return {};
     }
 
-    std::filesystem::create_directories(report_dir);
-    const auto report_path = std::filesystem::path{report_dir} / "report.json";
-    std::ofstream output_file(report_path, std::ios::trunc | std::ios::binary);
+    if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path());
+    }
+    std::ofstream output_file(output_path, std::ios::trunc | std::ios::binary);
     if (!output_file) {
-        loge("[bench_framework] failed to open '{}' for writing", report_path.string());
+        loge("[bench_framework] failed to open '{}' for writing", output_path.string());
         return {};
     }
     output_file.write(payload.data(), static_cast<std::streamsize>(payload.size()));
     output_file.close();
-    return report_path.string();
+    return output_path.string();
 }
 
 // ----------------- Stderr violations summary -----------------
@@ -3464,6 +4659,58 @@ inline void print_violations(const std::vector<Violation>& violations) noexcept 
                 violation.rhs_algorithm.c_str(),
                 rhs_param_text.c_str(),
                 violation.args[1]);
+        }
+        std::fprintf(stderr, "\n");
+    }
+
+    std::fprintf(stderr,
+        "============================================================\n");
+    std::fflush(stderr);
+}
+
+/// Pretty-print every detected regression to stderr. Mirrors
+/// `print_violations` for visual consistency. Uses raw stdio for the
+/// same reason — this is final-pass operator output.
+inline void print_regressions(const std::vector<RegressionEntry>& regressions) noexcept {
+    if (regressions.empty()) {
+        std::fprintf(stderr,
+            "============================================================\n"
+            "BENCH FRAMEWORK — no regressions detected (0 entries)\n"
+            "============================================================\n");
+        std::fflush(stderr);
+        return;
+    }
+
+    std::fprintf(stderr,
+        "============================================================\n"
+        "BENCH FRAMEWORK — %zu regression%s\n"
+        "============================================================\n",
+        regressions.size(), regressions.size() == 1 ? "" : "s");
+
+    for (const auto& entry : regressions) {
+        std::fprintf(stderr,
+            "[%s] %s (rule=%s, test_case=%s, region=%s, metric=%s, aggregate=%s)\n",
+            entry.benchmark.c_str(),
+            entry.algorithm_name.c_str(),
+            entry.rule_name.c_str(),
+            entry.test_case.c_str(),
+            entry.region.c_str(),
+            entry.metric.c_str(),
+            std::string{regression_aggregate_name(entry.aggregate)}.c_str());
+        const auto params_text = format_param_map(entry.violating_params);
+        std::fprintf(stderr,
+            "    tuple { %s }\n",
+            params_text.c_str());
+        std::fprintf(stderr,
+            "    previously = %.6g, now = %.6g\n",
+            entry.previously, entry.now);
+        if (entry.regression_since.empty()) {
+            std::fprintf(stderr,
+                "    regression_since = null (history incomplete)\n");
+        } else {
+            std::fprintf(stderr,
+                "    regression_since = %s\n",
+                entry.regression_since.c_str());
         }
         std::fprintf(stderr, "\n");
     }
@@ -3630,9 +4877,11 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     std::mutex        violations_mu;
     std::mutex        reports_mu;
     std::mutex        diagnostics_mu;
+    std::mutex        regression_rules_mu;
     std::vector<Violation> violations;
     std::vector<ValidationDiag> diagnostics;
     std::map<std::string, std::unique_ptr<BenchmarkExecutionState>> reports;
+    RegressionRulesByConfig regression_rules_by_config;
 
     ProgressState progress;
     progress.tty_render.store(::isatty(STDERR_FILENO) != 0, std::memory_order_relaxed);
@@ -3654,18 +4903,20 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 const std::size_t benchmark_index = static_cast<std::size_t>(
                     &erased - selected.data());
                 BenchmarkContext context;
-                context.data_dir          = data_dir;
-                context.report_dir        = report_dir;
-                context.fast_filter       = cli.fast_filter;
-                context.cross_bench_mu    = &cross_bench_mu;
-                context.progress          = &progress;
-                context.benchmark_index   = benchmark_index;
-                context.violations_mu     = &violations_mu;
-                context.violations        = &violations;
-                context.reports_mu        = &reports_mu;
-                context.reports           = &reports;
-                context.diagnostics_mu    = &diagnostics_mu;
-                context.diagnostics       = &diagnostics;
+                context.data_dir                  = data_dir;
+                context.report_dir                = report_dir;
+                context.fast_filter               = cli.fast_filter;
+                context.cross_bench_mu            = &cross_bench_mu;
+                context.progress                  = &progress;
+                context.benchmark_index           = benchmark_index;
+                context.violations_mu             = &violations_mu;
+                context.violations                = &violations;
+                context.reports_mu                = &reports_mu;
+                context.reports                   = &reports;
+                context.diagnostics_mu            = &diagnostics_mu;
+                context.diagnostics               = &diagnostics;
+                context.regression_rules_mu       = &regression_rules_mu;
+                context.regression_rules_by_config = &regression_rules_by_config;
 
                 erased.execute(context);
             });
@@ -3674,14 +4925,46 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     progress.running.store(false, std::memory_order_relaxed);
     progress_thread.join();
 
+    // Cross-config validation of regression rules. Runs serially after
+    // every closure has registered its state (so we can resolve
+    // `benchmarks` membership and metric existence in one place).
+    {
+        auto regression_validation_diags = semantic_validate_regression_rules(
+            regression_rules_by_config, reports);
+        std::lock_guard<std::mutex> guard(diagnostics_mu);
+        for (auto& diag : regression_validation_diags) {
+            diagnostics.push_back(std::move(diag));
+        }
+    }
+
     // Print all collected validation diagnostics first (config + semantic +
-    // post-run). Errors here force a non-zero exit code regardless of
-    // whether any rules failed.
+    // post-run + regression-rule). Errors here force a non-zero exit code
+    // regardless of whether any rules failed.
     const bool diagnostics_had_errors = report_diagnostics(
         std::span<const ValidationDiag>{diagnostics}, "configuration");
 
+    // Determine the index for this run. Reads existing report_<N>.json
+    // files; writes report_<max + 1>.json. First run on a clean dir → 1.
+    const std::filesystem::path report_dir_path{report_dir};
+    const std::size_t current_index =
+        max_existing_report_index(report_dir_path).value_or(0) + 1;
+    logi("[bench_framework] writing run as report_{}.json", current_index);
+
+    // Evaluate regression rules against report_<current_index - 1>.json
+    // (and walk further back as needed for `regression_since`). The
+    // evaluator never writes anything; we collect entries and flush
+    // them to the report below alongside any diagnostics it produced.
+    std::vector<ValidationDiag> regression_eval_diagnostics;
+    auto regressions = evaluate_regressions(
+        regression_rules_by_config, reports, report_dir_path,
+        current_index, regression_eval_diagnostics);
+    const bool regression_eval_had_errors = report_diagnostics(
+        std::span<const ValidationDiag>{regression_eval_diagnostics},
+        "regression");
+
     logi("[bench_framework] all benchmarks finished, writing report...");
-    const auto report_path = write_report(report_dir, reports, violations);
+    const auto output_path = report_path_for_index(report_dir_path, current_index);
+    const auto report_path = write_report(output_path, reports, violations, regressions);
     if (!report_path.empty()) {
         logi("[bench_framework] wrote {}", report_path);
     }
@@ -3700,9 +4983,12 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     }
 
     print_violations(violations);
+    print_regressions(regressions);
 
     return (violations.empty()
+            && regressions.empty()
             && !diagnostics_had_errors
+            && !regression_eval_had_errors
             && !report_schema_failed) ? 0 : 1;
 }
 
@@ -3745,6 +5031,20 @@ template<typename Input, typename Output>
             loge("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
                  erased_benchmark_key);
             return;
+        }
+
+        // 1a. Register regression rules in the global registry. The first
+        //     benchmark to load a given config_path inserts; subsequent
+        //     benchmarks sharing the file see the entry and discard their
+        //     parsed copy.
+        if (context.regression_rules_mu != nullptr
+            && context.regression_rules_by_config != nullptr) {
+            std::lock_guard<std::mutex> guard(*context.regression_rules_mu);
+            auto& registry = *context.regression_rules_by_config;
+            if (registry.find(erased_config_path) == registry.end()) {
+                registry.emplace(erased_config_path,
+                                 std::move(parse_outcome.regression_rules));
+            }
         }
 
         // 2. Semantic validation: cross-references, type-correctness in
