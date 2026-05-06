@@ -287,6 +287,63 @@ namespace detail {
 
 enum class CompareOp : std::uint8_t { LessThan, GreaterThan, Equal };
 
+/// Aggregation function applied to a sample vector when reducing it to a
+/// single value before a comparator runs. Used by both per-rule
+/// comparators (the LHS / RHS aggregates of a `Rule`) and regression
+/// rules (the `aggregate` field on a `RegressionRule`). Matches the six
+/// values allowed by the JSON enum: sum / min / max / p01 / p50 / p99.
+enum class Aggregate : std::uint8_t { Sum, Min, Max, P01, P50, P99 };
+
+/// One row of the aggregate registry. `percentile_fraction` is meaningful
+/// only for the three percentile entries; the other three carry NaN to
+/// signal "not a percentile". Adding a new percentile just means adding a
+/// row — `aggregate_samples` reads the fraction from here.
+struct AggregateEntry {
+    std::string_view    name;
+    Aggregate           kind;
+    double              percentile_fraction;     // NaN for non-percentile aggregates
+};
+
+/// Compile-time table linking the JSON spelling to the enumerator. Single
+/// source of truth for parsers, validators, the `aggregate_samples`
+/// dispatch, and the report writer; mirrors the
+/// `kBuiltinMetricRegistry` pattern.
+inline constexpr std::array<AggregateEntry, 6> kAggregateRegistry{ {
+    { "sum", Aggregate::Sum, std::numeric_limits<double>::quiet_NaN() },
+    { "min", Aggregate::Min, std::numeric_limits<double>::quiet_NaN() },
+    { "max", Aggregate::Max, std::numeric_limits<double>::quiet_NaN() },
+    { "p01", Aggregate::P01, 0.01 },
+    { "p50", Aggregate::P50, 0.50 },
+    { "p99", Aggregate::P99, 0.99 },
+} };
+
+[[nodiscard]] inline constexpr std::optional<Aggregate>
+parse_aggregate(std::string_view text) noexcept {
+    for (const auto& entry : kAggregateRegistry) {
+        if (entry.name == text) return entry.kind;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline constexpr std::string_view
+aggregate_name(Aggregate aggregate) noexcept {
+    for (const auto& entry : kAggregateRegistry) {
+        if (entry.kind == aggregate) return entry.name;
+    }
+    return "?";
+}
+
+/// Returns the percentile fraction (0.01, 0.50, 0.99) for percentile
+/// aggregates, or NaN for the additive Sum / Min / Max kinds. The NaN
+/// sentinel keeps `aggregate_samples`' percentile branch table-driven.
+[[nodiscard]] inline constexpr double
+aggregate_percentile(Aggregate aggregate) noexcept {
+    for (const auto& entry : kAggregateRegistry) {
+        if (entry.kind == aggregate) return entry.percentile_fraction;
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
 /// Every recognised metric flavour. The first batch are produced by the
 /// framework from the iteration-local `ProfilerBlock<Args>` aggregates;
 /// `Counter` and `Evaluation` route through the user's instrumentation
@@ -435,6 +492,11 @@ struct RuleComparator {
     CompareOp op = CompareOp::Equal;
     double    threshold_pct = 0.0;
     double    tolerance_pct = 0.0;
+    /// Reduction applied to each side's sample vector before the
+    /// comparator runs. Defaults to `P50` (the framework's percentile
+    /// median) for backward-compatibility with pre-V5 rules that
+    /// hardcoded median behaviour.
+    Aggregate aggregate = Aggregate::P50;
 };
 
 struct Rule {
@@ -543,6 +605,13 @@ struct Cell {
     /// counter / evaluation metric. Per-region buckets only appear when
     /// `BenchmarkConfig::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
+    /// Set of keys returned by `on_evaluate` for this cell that don't
+    /// correspond to any declared evaluation metric. Populated during
+    /// the iteration loop under `samples_mu` (same critical section as
+    /// `samples`); drained into hard-error diagnostics by
+    /// `semantic_validate_post_run`. Deduped so 1000 iterations with
+    /// the same typo collapse into a single diagnostic per cell.
+    std::set<std::string> unknown_evaluation_keys{};
     std::mutex samples_mu{};
 
     Cell() = default;
@@ -581,6 +650,22 @@ struct ParsedCli {
     std::optional<std::string> report_override{};
 };
 
+/// Identity card for one report. Captured once in `run_impl` and
+/// emitted as the first key of the output JSON. `commit` is the SHA of
+/// the working-tree HEAD (or empty if not a git repo); `dirty` is
+/// `true` whenever `git status --porcelain` reports any uncommitted
+/// changes — distinguishing a pristine SHA from a dirty-tree run is
+/// essential for `regression_since_commit` cross-reference. `created`
+/// is an ISO 8601 UTC string built from `gmtime_r` + `strftime`;
+/// `timestamp` is unix seconds for machine consumers.
+struct ReportMeta {
+    std::string  commit{};
+    bool         dirty = false;
+    std::int64_t timestamp = 0;
+    std::string  created{};
+    bool         fast = false;
+};
+
 struct Violation {
     std::string config_path;
     std::string benchmark_key;
@@ -595,61 +680,6 @@ struct Violation {
     /// `"args": [...]` field on the output.
     std::array<double, 2> args{0.0, 0.0};
 };
-
-/// Aggregation function applied to a sample vector when evaluating a
-/// regression rule. Matches the six values allowed in the
-/// `regression_rules[*].aggregate` enum: sum / min / max / p01 / p50 / p99.
-enum class RegressionAggregate : std::uint8_t { Sum, Min, Max, P01, P50, P99 };
-
-/// One row of the aggregate registry. `percentile_fraction` is meaningful
-/// only for the three percentile entries; the other three carry NaN to
-/// signal "not a percentile". Adding a new percentile just means adding a
-/// row — no new switch arm needed in `aggregate_samples`.
-struct RegressionAggregateEntry {
-    std::string_view    name;
-    RegressionAggregate kind;
-    double              percentile_fraction;     // NaN for non-percentile aggregates
-};
-
-/// Compile-time table linking the JSON spelling to the enumerator. Single
-/// source of truth for parser, validator, report writer, and the
-/// `aggregate_samples` percentile dispatch; mirrors the
-/// `kBuiltinMetricRegistry` pattern.
-inline constexpr std::array<RegressionAggregateEntry, 6> kRegressionAggregateRegistry{ {
-    { "sum", RegressionAggregate::Sum, std::numeric_limits<double>::quiet_NaN() },
-    { "min", RegressionAggregate::Min, std::numeric_limits<double>::quiet_NaN() },
-    { "max", RegressionAggregate::Max, std::numeric_limits<double>::quiet_NaN() },
-    { "p01", RegressionAggregate::P01, 0.01 },
-    { "p50", RegressionAggregate::P50, 0.50 },
-    { "p99", RegressionAggregate::P99, 0.99 },
-} };
-
-[[nodiscard]] inline constexpr std::optional<RegressionAggregate>
-parse_regression_aggregate(std::string_view text) noexcept {
-    for (const auto& entry : kRegressionAggregateRegistry) {
-        if (entry.name == text) return entry.kind;
-    }
-    return std::nullopt;
-}
-
-[[nodiscard]] inline constexpr std::string_view
-regression_aggregate_name(RegressionAggregate aggregate) noexcept {
-    for (const auto& entry : kRegressionAggregateRegistry) {
-        if (entry.kind == aggregate) return entry.name;
-    }
-    return "?";
-}
-
-/// Returns the percentile fraction (0.01, 0.50, 0.99) for percentile
-/// aggregates, or NaN for the additive Sum / Min / Max kinds. The NaN
-/// sentinel keeps the `aggregate_samples` switch table-driven.
-[[nodiscard]] inline constexpr double
-regression_aggregate_percentile(RegressionAggregate aggregate) noexcept {
-    for (const auto& entry : kRegressionAggregateRegistry) {
-        if (entry.kind == aggregate) return entry.percentile_fraction;
-    }
-    return std::numeric_limits<double>::quiet_NaN();
-}
 
 /// Comparator payload for a regression rule. `threshold%` is forbidden by
 /// the schema, so we only carry `tolerance%` — the underlying compare op
@@ -671,7 +701,7 @@ struct RegressionRule {
     /// Always non-empty after parse. Defaults to `{"all_regions"}`.
     std::vector<std::string> regions{};
     std::string metric;
-    RegressionAggregate aggregate = RegressionAggregate::Sum;
+    Aggregate aggregate = Aggregate::Sum;
     RegressionOperator  op{};
     /// Test cases excluded from this rule. Schema requires non-empty if
     /// the array is present at all.
@@ -691,12 +721,19 @@ struct RegressionEntry {
     std::string test_case;
     std::string region;
     std::string metric;
-    RegressionAggregate aggregate = RegressionAggregate::Sum;
+    Aggregate aggregate = Aggregate::Sum;
     double      previously = 0.0;
     double      now = 0.0;
     /// Empty string ⇒ JSON `null`. Otherwise the file basename like
     /// `"report_3.json"`.
     std::string regression_since{};
+    /// Commit SHA captured by the historical report identified by
+    /// `regression_since` (its `meta.commit` field). Empty string ⇒
+    /// JSON `null` — happens when `regression_since` itself is null,
+    /// when the historical report was written before V5 (no `meta`
+    /// block), or when `meta.commit` was empty in that report (the
+    /// older run wasn't in a git repo).
+    std::string regression_since_commit{};
 };
 
 /// Registry mapping `config_path` → list of regression rules parsed from
@@ -1175,7 +1212,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "metric_spec_counter": {
       "title": "CounterMetric",
-      "description": "Snapshot-based counter metric. The framework reads bioseq::instr::counter('<counter>').value before and after each iteration and records the delta. Any benchmark that uses a counter metric runs iterations SERIALLY (counters are global atomics; concurrent deltas are undefined).",
+      "description": "Snapshot-based counter metric. The framework reads bioseq::instr::counter('<counter>').value before and after each iteration and records the delta. Counters use per-thread storage as of V5, so the before/after delta on a TBB worker only reflects that worker's increments — counter benchmarks may run in parallel.",
       "type": "object",
       "required": ["type"],
       "additionalProperties": false,
@@ -1262,9 +1299,15 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         { "key": "minimap2" }
       ]
     },
+    "aggregate_enum": {
+      "title": "Aggregate",
+      "type": "string",
+      "enum": ["sum", "min", "max", "p01", "p50", "p99"],
+      "description": "Reduction applied to a per-iteration sample vector. Percentiles select the sample at index floor(p * (n - 1)) after a partial sort via std::nth_element (matches NumPy's 'lower' interpolation for discrete indices)."
+    },
     "comparator": {
       "title": "RuleComparator",
-      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
+      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nBoth sides are reduced via the optional 'aggregate' field (default 'p50' for backward compatibility with pre-V5 median behaviour).\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
       "oneOf": [
         {
           "title": "OrderedComparator",
@@ -1287,10 +1330,11 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
               "maximum": 100,
               "default": 0,
               "description": "Slack relaxing the threshold. 100 makes the rule always pass — flagged as a warning."
-            }
+            },
+            "aggregate": { "$ref": "#/definitions/aggregate_enum" }
           },
           "examples": [
-            { "compare": "<", "threshold%": 10, "tolerance%": 1 }
+            { "compare": "<", "threshold%": 10, "tolerance%": 1, "aggregate": "p99" }
           ]
         },
         {
@@ -1307,7 +1351,8 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
               "maximum": 100,
               "default": 0,
               "description": "Tolerance window around RHS, in percent. 100 makes the rule always pass — flagged as a warning."
-            }
+            },
+            "aggregate": { "$ref": "#/definitions/aggregate_enum" }
           },
           "examples": [
             { "compare": "=", "tolerance%": 1 }
@@ -1339,11 +1384,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "minLength": 1,
           "description": "Metric name. Must be declared in the 'metrics' map of every benchmark this rule applies to (when 'benchmarks' is explicit), or in at least one benchmark in the file (when 'benchmarks' is absent)."
         },
-        "aggregate": {
-          "type": "string",
-          "enum": ["sum", "min", "max", "p01", "p50", "p99"],
-          "description": "Reduction applied to the per-iteration sample vector before the operator runs. Percentiles use floor(p * (n - 1)) on a copy + std::nth_element."
-        },
+        "aggregate": { "$ref": "#/definitions/aggregate_enum" },
         "operator": { "$ref": "#/definitions/regression_operator" },
         "exclude_cases": {
           "type": "array",
@@ -1427,9 +1468,10 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
   "title": "BenchFrameworkReport",
   "description": "Output report.json produced by bioseq::bench_framework. Two top-level fields: 'rule_violations' (every rule that didn't pass) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
   "type": "object",
-  "required": ["rule_violations", "regressions", "benchmarks"],
+  "required": ["meta", "rule_violations", "regressions", "benchmarks"],
   "additionalProperties": false,
   "properties": {
+    "meta": { "$ref": "#/definitions/meta" },
     "rule_violations": {
       "type": "array",
       "description": "Every rule that failed to pass. Empty when all rules were satisfied.",
@@ -1447,6 +1489,20 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
     }
   },
   "definitions": {
+    "meta": {
+      "title": "ReportMeta",
+      "description": "Identity card for one report. Captured once at run start and emitted as the first key of the output JSON. Distinguishes reports by commit, working-tree state, wall-clock timestamp, and whether --fast was active.",
+      "type": "object",
+      "required": ["commit", "dirty", "timestamp", "created", "fast"],
+      "additionalProperties": false,
+      "properties": {
+        "commit":    { "type": "string", "description": "git rev-parse HEAD output, or empty string when the working dir is not a git repo." },
+        "dirty":     { "type": "boolean", "description": "true when git status --porcelain reported any uncommitted changes; false otherwise (also false when not a git repo)." },
+        "timestamp": { "type": "integer", "description": "Unix seconds since epoch at run start." },
+        "created":   { "type": "string", "description": "ISO 8601 UTC string built from the same instant as timestamp (e.g. 2026-05-07T12:34:56Z)." },
+        "fast":      { "type": "boolean", "description": "true when the run was launched with --fast (only fast benchmarks executed)." }
+      }
+    },
     "param_value": {
       "description": "A single parameter value. ConfigValue serialises into one of these scalar JSON types: string, number (covers integer + double), or boolean.",
       "type": ["string", "number", "boolean"]
@@ -1544,7 +1600,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       "title": "RegressionEntry",
       "description": "One detected regression. Granularity: one entry per (rule, benchmark, algorithm, tuple, test_case, region). 'violating_tuples' and 'test_cases' are arrays of size 1 in every entry — they exist as arrays so a future aggregation pass can group entries without breaking the schema. 'regression_since' is the basename of the oldest report on disk where the rule still fails when compared to the current run, or null when the framework hit a missing report (gap) or a tuple/region that disappeared in a historical run.",
       "type": "object",
-      "required": ["location", "benchmark", "rule_name", "algorithm_name", "violating_tuples", "test_cases", "region", "metric", "aggregate", "previously", "now", "regression_since"],
+      "required": ["location", "benchmark", "rule_name", "algorithm_name", "violating_tuples", "test_cases", "region", "metric", "aggregate", "previously", "now", "regression_since", "regression_since_commit"],
       "additionalProperties": false,
       "properties": {
         "location":       { "type": "string", "description": "Path to the config file the regression rule was declared in." },
@@ -1571,6 +1627,10 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         "regression_since": {
           "type": ["string", "null"],
           "description": "Basename of the report where the regression was first observable (oldest historical report still failing against current). Null when the walk hit a history gap."
+        },
+        "regression_since_commit": {
+          "type": ["string", "null"],
+          "description": "Commit SHA captured by the historical report identified by 'regression_since' (its meta.commit field). Null when 'regression_since' is null, when the historical report was written by a pre-V5 framework (no meta block), or when meta.commit was empty in that report."
         }
       }
     }
@@ -1879,9 +1939,11 @@ parse_compare_and_tolerance(
     return std::pair{*parsed_op, tolerance_pct};
 }
 
-/// Parse a rule's `{ compare, threshold%, tolerance% }` triple. `compare`
-/// is mandatory; the two `%` fields default to zero. See `comparator_passes`
-/// for how the values turn into a pass/fail decision.
+/// Parse a rule's `{ compare, threshold%, tolerance%, aggregate }`
+/// quad. `compare` is mandatory; the two `%` fields default to zero;
+/// `aggregate` defaults to `"p50"` (the legacy median behaviour for
+/// pre-V5 rules). See `comparator_passes` for how the values turn into
+/// a pass/fail decision and `aggregate_samples` for the reduction.
 [[nodiscard]] inline RuleComparator parse_rule_comparator(
     simdjson::dom::object cmp_obj,
     bool& parse_ok)
@@ -1895,6 +1957,18 @@ parse_compare_and_tolerance(
     double threshold_pct = 0.0;
     (void)cmp_obj["threshold%"].get(threshold_pct);
     out.threshold_pct = threshold_pct;
+
+    std::string_view aggregate_text;
+    if (cmp_obj["aggregate"].get(aggregate_text) == simdjson::SUCCESS) {
+        const auto parsed = parse_aggregate(aggregate_text);
+        if (!parsed.has_value()) {
+            loge("[bench_framework] rule comparator: unknown aggregate '{}'",
+                 aggregate_text);
+            parse_ok = false;
+        } else {
+            out.aggregate = *parsed;
+        }
+    }
     return out;
 }
 
@@ -2061,7 +2135,7 @@ parse_compare_and_tolerance(
             parse_ok = false;
             continue;
         }
-        const auto parsed_aggregate = parse_regression_aggregate(aggregate_text);
+        const auto parsed_aggregate = parse_aggregate(aggregate_text);
         if (!parsed_aggregate.has_value()) {
             loge("[bench_framework] regression rule '{}' has unknown aggregate '{}'",
                  rule.name, aggregate_text);
@@ -2824,6 +2898,46 @@ struct ConfigParseOutcome {
             });
         }
     }
+
+    // Hard error: every key the user's `on_evaluate` returned must
+    // correspond to a declared evaluation metric. Silent drops are
+    // not allowed — typos like `{"correctness"}` vs.
+    // `"correct_fraction"` would otherwise look successful and the
+    // user's value would never reach the report. We emit one error
+    // per (cell, unknown_key); if the same key was returned across
+    // many iterations on the same cell the dedup in
+    // `cell.unknown_evaluation_keys` collapses it to a single entry.
+    std::string declared_list;
+    {
+        bool first = true;
+        for (const auto& metric : state.config.metrics) {
+            if (metric.kind != MetricKind::Evaluation) continue;
+            if (first) { declared_list.append("["); first = false; }
+            else       { declared_list.append(", "); }
+            declared_list.append(metric.name);
+        }
+        if (declared_list.empty()) declared_list = "<none declared>";
+        else                       declared_list.append("]");
+    }
+
+    for (const auto& cell_ptr : state.cells) {
+        for (const auto& unknown_key : cell_ptr->unknown_evaluation_keys) {
+            diagnostics.push_back({
+                ValidationDiag::Severity::Error,
+                "evaluation_key_not_declared",
+                semantic_location(state,
+                    fmt::format("matrix.metrics(returned-but-undeclared)/{}",
+                                unknown_key)),
+                fmt::format("on_evaluate returned key '{}' for benchmark '{}' algorithm '{}' test_case '{}', but no metric with that name is declared in matrix.metrics with type 'evaluation' (declared evaluation metrics: {}); the value would be silently dropped — declare the metric or rename the returned key",
+                            unknown_key,
+                            state.config.benchmark_key,
+                            cell_ptr->tuple->algorithm_name,
+                            cell_ptr->test_case->name,
+                            declared_list)
+            });
+        }
+    }
+
     return diagnostics;
 }
 
@@ -3035,12 +3149,16 @@ struct ConfigParseOutcome {
     std::vector<ExecutionTuple> result;
     for (const auto& [algorithm_name, declared] : config.matrix_over) {
         auto schema_it = config.algorithm_schemas.find(algorithm_name);
-        if (schema_it == config.algorithm_schemas.end()) {
-            loge("[bench_framework] matrix.over.{} has no top-level schema in 'params'",
-                         algorithm_name);
-            expansion_ok = false;
-            continue;
-        }
+        // Invariant: every algorithm in `matrix_over` was declared in
+        // `params` — `semantic_validate_config` rejects with
+        // `unknown_algorithm` long before we get here, and the
+        // closure aborts on semantic-validation errors before invoking
+        // `expand_matrix`. The assert documents that contract; if it
+        // ever fires, the bug is upstream (a new code path bypassed
+        // semantic validation).
+        DEBUG_ASSERT(schema_it != config.algorithm_schemas.end(),
+            "matrix.over names an algorithm with no schema in params; "
+            "semantic_validate_config should have rejected this");
         auto expanded = expand_one_algorithm(algorithm_name, declared, schema_it->second,
                                               expansion_ok);
         for (auto& expansion_tuple : expanded) {
@@ -3318,6 +3436,10 @@ inline void append_iteration_samples(
     const auto descriptor_total = bioseq::instr::descriptor_count();
     std::size_t counter_index = 0;
 
+    // Walk the declared metrics; pull each declared evaluation metric
+    // out of `evaluation_metrics`. Track which keys we consumed so we
+    // can flag any returned-but-not-declared keys as unknown afterwards.
+    std::set<std::string_view> consumed_evaluation_keys;
     for (const auto& metric : metrics) {
         switch (metric.kind) {
             case MetricKind::WallClockNs:
@@ -3334,6 +3456,7 @@ inline void append_iteration_samples(
                 auto found = evaluation_metrics.find(metric.name);
                 if (found != evaluation_metrics.end()) {
                     all_regions[metric.name].push_back(found->second);
+                    consumed_evaluation_keys.insert(std::string_view{found->first});
                 } else {
                     logd("[bench_framework] evaluator did not return metric '{}'", metric.name);
                 }
@@ -3404,6 +3527,21 @@ inline void append_iteration_samples(
         // evaluator's median-of-samples handles missing iterations
         // gracefully.
     }
+
+    // Surface any keys the user's `on_evaluate` returned that don't
+    // correspond to a declared evaluation metric. These would
+    // otherwise be silently dropped — typo cases like
+    // `{"correctness", 0.99}` vs. a declared `"correct_fraction"`
+    // metric look successful at the framework level. We track them
+    // per-cell so `semantic_validate_post_run` can emit a hard error
+    // with full context (algorithm, test_case, key) once iterations
+    // finish.
+    for (const auto& [returned_key, _value] : evaluation_metrics) {
+        if (consumed_evaluation_keys.count(std::string_view{returned_key}) > 0) {
+            continue;
+        }
+        cell.unknown_evaluation_keys.insert(returned_key);
+    }
 }
 
 // ----------------- Counter snapshotting -----------------
@@ -3436,18 +3574,6 @@ inline void append_iteration_samples(
         values.push_back(bioseq::instr::counter_value(*handle));
     }
     return values;
-}
-
-// ----------------- Concurrency helpers -----------------
-
-/// True iff any metric in this benchmark is `kind == Counter`. Such
-/// benchmarks must run iterations serially so the global atomic counter
-/// snapshots produce well-defined deltas.
-[[nodiscard]] inline bool benchmark_uses_counter_metric(const BenchmarkConfig& config) noexcept {
-    for (const auto& metric : config.metrics) {
-        if (metric.kind == MetricKind::Counter) return true;
-    }
-    return false;
 }
 
 // ----------------- run_unit driver -----------------
@@ -3525,10 +3651,10 @@ inline void run_typed_benchmark(
         }
     }
 
-    const bool use_parallel = state.config.concurrency.concurrency
-                              && !benchmark_uses_counter_metric(state.config);
-
-    if (use_parallel) {
+    if (state.config.concurrency.concurrency) {
+        // Counter-bearing benchmarks no longer force serial as of V5;
+        // see counter.cppm — per-thread storage means each TBB worker's
+        // before/after snapshot only reflects its own contribution.
         oneapi::tbb::parallel_for_each(
             work_items.begin(), work_items.end(),
             [&](Cell* cell_ptr) { run_one_iteration(*cell_ptr); });
@@ -3539,18 +3665,61 @@ inline void run_typed_benchmark(
     }
 }
 
-// ----------------- Rule evaluation -----------------
+// ----------------- Sample reduction -----------------
 
-/// Return the median of a sample vector via `std::nth_element`. Empty input
-/// returns 0. Used as the rule comparison aggregator (mean is too sensitive
-/// to tail outliers — see BENCH_V2_IMPL_PLAN.md §7a).
-[[nodiscard]] inline double median_of(const std::vector<double>& samples) noexcept {
+/// Reduce a sample vector into a single number per the supplied aggregate.
+/// Used by per-rule comparators (one call per LHS / RHS) and by the
+/// regression evaluator (one call per (rule, cell, region)). Empty input
+/// always returns 0.0 — the caller is expected to filter empty vectors
+/// upstream (the rule + regression evaluators both do); the fallback only
+/// fires on genuinely degenerate input.
+[[nodiscard]] inline double aggregate_samples(
+    Aggregate aggregate, const std::vector<double>& samples) noexcept
+{
     if (samples.empty()) return 0.0;
-    std::vector<double> copy = samples;
-    const auto middle = copy.size() / 2;
-    std::nth_element(copy.begin(), copy.begin() + middle, copy.end());
-    return copy[middle];
+    switch (aggregate) {
+        case Aggregate::Sum: {
+            double total = 0.0;
+            for (const double value : samples) total += value;
+            return total;
+        }
+        case Aggregate::Min:
+            return *std::min_element(samples.begin(), samples.end());
+        case Aggregate::Max:
+            return *std::max_element(samples.begin(), samples.end());
+        case Aggregate::P01:
+        case Aggregate::P50:
+        case Aggregate::P99: {
+            // Discrete-index percentile: pick the sample at
+            // `floor(p * (n - 1))` after a partial sort via
+            // std::nth_element. Matches NumPy's "lower" interpolation
+            // mode. The percentile fraction comes from the registry —
+            // adding a P95 entry there is enough to extend coverage;
+            // no new switch arm needed.
+            //
+            // For even n, P50 selects the lower-middle element (e.g.
+            // index 1 of 4-element vectors). The pre-V5 `median_of`
+            // helper used `n/2` (the upper-middle); existing rules
+            // that previously relied on that exact choice may see
+            // a one-element shift, but tolerance-bounded rules
+            // (the only kind where the choice matters) are robust
+            // to it.
+            const double percentile_fraction =
+                aggregate_percentile(aggregate);
+            std::vector<double> copy = samples;
+            const std::size_t target_index = static_cast<std::size_t>(
+                std::floor(percentile_fraction
+                           * static_cast<double>(copy.size() - 1)));
+            std::nth_element(copy.begin(),
+                             copy.begin() + static_cast<std::ptrdiff_t>(target_index),
+                             copy.end());
+            return copy[target_index];
+        }
+    }
+    return 0.0;
 }
+
+// ----------------- Rule evaluation -----------------
 
 /// True iff `tuple` satisfies every constraint in `selector`. The selector's
 /// `algorithm_key` must equal the tuple's algorithm name, and every
@@ -3652,8 +3821,10 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
                         auto rhs_metric_it = rhs_region_it->second.find(rule.metric_name);
                         if (lhs_metric_it == lhs_region_it->second.end()
                             || rhs_metric_it == rhs_region_it->second.end()) continue;
-                        const double lhs_aggregate = median_of(lhs_metric_it->second);
-                        const double rhs_aggregate = median_of(rhs_metric_it->second);
+                        const double lhs_aggregate =
+                            aggregate_samples(rule.cmp.aggregate, lhs_metric_it->second);
+                        const double rhs_aggregate =
+                            aggregate_samples(rule.cmp.aggregate, rhs_metric_it->second);
                         if (comparator_passes(rule.cmp, lhs_aggregate, rhs_aggregate)) continue;
 
                         Violation violation;
@@ -3675,50 +3846,76 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
     }
 }
 
-// ----------------- Regression evaluation -----------------
+// ----------------- Run identity (meta block) -----------------
 
-/// Reduce a sample vector into a single number per the regression rule's
-/// aggregate field. Empty input always returns 0.0 — by the time the
-/// evaluator reaches `aggregate_samples` it has already filtered empty
-/// vectors via the matched-cell scan, so the fallback only fires on
-/// genuinely degenerate input.
-[[nodiscard]] inline double aggregate_samples(
-    RegressionAggregate aggregate, const std::vector<double>& samples) noexcept
-{
-    if (samples.empty()) return 0.0;
-    switch (aggregate) {
-        case RegressionAggregate::Sum: {
-            double total = 0.0;
-            for (const double value : samples) total += value;
-            return total;
-        }
-        case RegressionAggregate::Min:
-            return *std::min_element(samples.begin(), samples.end());
-        case RegressionAggregate::Max:
-            return *std::max_element(samples.begin(), samples.end());
-        case RegressionAggregate::P01:
-        case RegressionAggregate::P50:
-        case RegressionAggregate::P99: {
-            // Use the same percentile convention as `median_of`: pick the
-            // sample at index `floor(p * (n - 1))` after a partial sort
-            // via std::nth_element. Matches NumPy's "lower" / "linear" with
-            // discrete indices for our small-sample case. The percentile
-            // fraction comes from the registry — adding a P95 entry there
-            // is enough to extend coverage; no new switch arm needed.
-            const double percentile_fraction =
-                regression_aggregate_percentile(aggregate);
-            std::vector<double> copy = samples;
-            const std::size_t target_index = static_cast<std::size_t>(
-                std::floor(percentile_fraction
-                           * static_cast<double>(copy.size() - 1)));
-            std::nth_element(copy.begin(),
-                             copy.begin() + static_cast<std::ptrdiff_t>(target_index),
-                             copy.end());
-            return copy[target_index];
-        }
+/// Read the trimmed first 64 bytes of `command`'s stdout via popen.
+/// Returns "" on any failure (popen null, exit status nonzero, empty
+/// output). Used by `git_head_commit` and `git_working_tree_dirty` to
+/// shell out to the local git client without pulling in libgit2.
+///
+/// **Trust note.** PATH-hijacking is theoretically possible (a
+/// malicious `git` earlier in `$PATH` would run as the bench process).
+/// The framework runs in developer environments only; we treat this as
+/// the same trust boundary as any other dev tool that shells out to
+/// `git`. No user input flows into the command string, so there is no
+/// injection vector.
+[[nodiscard]] inline std::string slurp_command_stdout(const char* command) noexcept {
+    FILE* pipe = ::popen(command, "r");
+    if (pipe == nullptr) return {};
+    std::array<char, 256> buffer{};
+    std::string out;
+    while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        out.append(buffer.data());
+        if (out.size() > 4096) break;     // sanity cap; we only want a SHA or a short status
     }
-    return 0.0;
+    const int exit_code = ::pclose(pipe);
+    if (exit_code != 0) return {};
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+        out.pop_back();
+    }
+    return out;
 }
+
+/// Returns the working-tree HEAD commit, or "" if the cwd isn't a git
+/// repo (or git isn't on PATH).
+[[nodiscard]] inline std::string git_head_commit() noexcept {
+    return slurp_command_stdout("git rev-parse HEAD 2>/dev/null");
+}
+
+/// Returns true iff the working tree has any uncommitted changes
+/// (tracked-modified, staged, or untracked files visible to
+/// `git status --porcelain`). Returns false on any error so we don't
+/// spuriously flag a missing-git environment as dirty.
+[[nodiscard]] inline bool git_working_tree_dirty() noexcept {
+    const auto output = slurp_command_stdout("git status --porcelain 2>/dev/null");
+    return !output.empty();
+}
+
+/// Capture this run's identity in a single struct. Called once from
+/// `run_impl`; the resulting `ReportMeta` is forwarded to both the
+/// report writer (for the `meta` block) and the regression evaluator
+/// (which doesn't need most fields, but takes the whole struct for
+/// future-proofing).
+[[nodiscard]] inline ReportMeta capture_run_meta(bool fast_filter) noexcept {
+    ReportMeta meta;
+    meta.commit = git_head_commit();
+    meta.dirty  = git_working_tree_dirty();
+    meta.fast   = fast_filter;
+    const auto now = std::chrono::system_clock::now();
+    meta.timestamp = std::chrono::duration_cast<std::chrono::seconds>(
+        now.time_since_epoch()).count();
+    const std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_buf{};
+    ::gmtime_r(&now_time_t, &tm_buf);
+    std::array<char, 32> created_buf{};
+    const auto written = std::strftime(
+        created_buf.data(), created_buf.size(),
+        "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+    meta.created.assign(created_buf.data(), written);
+    return meta;
+}
+
+// ----------------- Regression evaluation -----------------
 
 /// Pin-allocated wrapper around a parsed historical report. Holds the
 /// simdjson parser, the report body string, and the parsed root element.
@@ -3880,6 +4077,24 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     simdjson::dom::element child;
     if (parent.at_key(key).get(child) != simdjson::SUCCESS) return std::nullopt;
     return try_as_object(child);
+}
+
+/// Pull the `meta.commit` string from a parsed report's root object.
+/// Returns "" when the report has no `meta` block (pre-V5 format), no
+/// `commit` field inside `meta`, or the field isn't a string. Used by
+/// the regression evaluator to populate `regression_since_commit`.
+[[nodiscard]] inline std::string commit_from_report(
+    simdjson::dom::element report_root) noexcept
+{
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return {};
+    const auto meta_obj = try_get_object(*root_obj, "meta");
+    if (!meta_obj.has_value()) return {};
+    std::string_view commit_text;
+    if ((*meta_obj).at_key("commit").get(commit_text) != simdjson::SUCCESS) {
+        return {};
+    }
+    return std::string{commit_text};
 }
 
 /// Walk a parsed report's
@@ -4133,6 +4348,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                             }
 
                             std::string regression_since_label;
+                            std::string regression_since_commit;
                             if (history_gap) {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
@@ -4147,6 +4363,10 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                             } else {
                                 regression_since_label =
                                     fmt::format("report_{}.json", oldest_failing);
+                                if (auto* origin_report = fetch_report(oldest_failing);
+                                    origin_report != nullptr) {
+                                    regression_since_commit = commit_from_report(origin_report->root);
+                                }
                                 if (oldest_failing == 1) {
                                     diagnostics_out.push_back({
                                         ValidationDiag::Severity::Warning,
@@ -4173,7 +4393,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                             entry.aggregate       = rule.aggregate;
                             entry.previously      = previously_value;
                             entry.now             = now_value;
-                            entry.regression_since = std::move(regression_since_label);
+                            entry.regression_since        = std::move(regression_since_label);
+                            entry.regression_since_commit = std::move(regression_since_commit);
                             entries.push_back(std::move(entry));
                         }
                     }
@@ -4310,12 +4531,32 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
 /// regression evaluator and the writer agree on `current_index`.
 [[nodiscard]] inline std::string write_report(
     const std::filesystem::path& output_path,
+    const ReportMeta& meta,
     const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
     const std::vector<Violation>& violations,
     const std::vector<RegressionEntry>& regressions)
 {
     constexpr std::size_t kInitialCapacity = 1u << 18;  // 256 KiB up front
     simdjson::builder::string_builder builder{kInitialCapacity};
+
+    /// Emit the run-identity `meta` block: commit, dirty, timestamp,
+    /// created, fast.
+    auto emit_meta = [&](auto& b) {
+        emit_object_with_body(b, [&](auto& inner) {
+            emit_kv_string(inner, "commit", meta.commit);
+            inner.append_comma();
+            emit_key(inner, "dirty");
+            inner.append(meta.dirty);
+            inner.append_comma();
+            emit_key(inner, "timestamp");
+            inner.append(meta.timestamp);
+            inner.append_comma();
+            emit_kv_string(inner, "created", meta.created);
+            inner.append_comma();
+            emit_key(inner, "fast");
+            inner.append(meta.fast);
+        });
+    };
 
     /// Emit one violation as a JSON object — exactly the shape the spec
     /// shows in BENCH_V2_CODE.md (`location`, `benchmark`, `rule_name`,
@@ -4392,7 +4633,7 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
             emit_kv_string(inner, "metric", entry.metric);
             inner.append_comma();
             emit_kv_string(inner, "aggregate",
-                std::string_view{regression_aggregate_name(entry.aggregate)});
+                std::string_view{aggregate_name(entry.aggregate)});
             inner.append_comma();
             emit_key(inner, "previously");
             inner.append(entry.previously);
@@ -4406,6 +4647,14 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
             } else {
                 inner.escape_and_append_with_quotes(
                     std::string_view{entry.regression_since});
+            }
+            inner.append_comma();
+            emit_key(inner, "regression_since_commit");
+            if (entry.regression_since_commit.empty()) {
+                inner.append_null();
+            } else {
+                inner.escape_and_append_with_quotes(
+                    std::string_view{entry.regression_since_commit});
             }
         });
     };
@@ -4521,6 +4770,12 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
     };
 
     emit_object_with_body(builder, [&](auto& root_b) {
+        // `meta` first — operators reading the report scan the top
+        // for commit / timestamp before drilling deeper.
+        emit_kv_with_body(root_b, "meta", [&](auto& meta_b) {
+            emit_meta(meta_b);
+        });
+        root_b.append_comma();
         emit_kv_with_body(root_b, "rule_violations", [&](auto& arr_b) {
             arr_b.start_array();
             emit_range_with_commas(arr_b, violations,
@@ -4696,7 +4951,7 @@ inline void print_regressions(const std::vector<RegressionEntry>& regressions) n
             entry.test_case.c_str(),
             entry.region.c_str(),
             entry.metric.c_str(),
-            std::string{regression_aggregate_name(entry.aggregate)}.c_str());
+            std::string{aggregate_name(entry.aggregate)}.c_str());
         const auto params_text = format_param_map(entry.violating_params);
         std::fprintf(stderr,
             "    tuple { %s }\n",
@@ -4709,8 +4964,11 @@ inline void print_regressions(const std::vector<RegressionEntry>& regressions) n
                 "    regression_since = null (history incomplete)\n");
         } else {
             std::fprintf(stderr,
-                "    regression_since = %s\n",
-                entry.regression_since.c_str());
+                "    regression_since = %s (commit=%s)\n",
+                entry.regression_since.c_str(),
+                entry.regression_since_commit.empty()
+                    ? "<unknown>"
+                    : entry.regression_since_commit.c_str());
         }
         std::fprintf(stderr, "\n");
     }
@@ -4846,6 +5104,15 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                                   : std::thread::hardware_concurrency() - 1u);
     logi("[bench_framework] thread_count={}", thread_count);
 
+    // Capture the run's identity once, up front. Used both by the
+    // report writer (the `meta` block) and surfaced in stderr logs so
+    // the operator can correlate a run with a commit.
+    const auto run_meta = capture_run_meta(cli.fast_filter);
+    logi("[bench_framework] commit={} dirty={} created={} fast={}",
+         run_meta.commit.empty() ? std::string_view{"<no-git>"}
+                                 : std::string_view{run_meta.commit},
+         run_meta.dirty, run_meta.created, run_meta.fast);
+
     // Filter benchmarks by --fast.
     std::vector<ErasedBenchmark> selected;
     selected.reserve(benchmarks.size());
@@ -4964,7 +5231,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
     logi("[bench_framework] all benchmarks finished, writing report...");
     const auto output_path = report_path_for_index(report_dir_path, current_index);
-    const auto report_path = write_report(output_path, reports, violations, regressions);
+    const auto report_path = write_report(output_path, run_meta, reports, violations, regressions);
     if (!report_path.empty()) {
         logi("[bench_framework] wrote {}", report_path);
     }

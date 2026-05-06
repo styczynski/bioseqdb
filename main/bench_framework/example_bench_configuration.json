@@ -61,7 +61,7 @@
             [
               "sort_within_2x_of_stable_sort",
               { "key": "std_sort" },
-              { "compare": "=", "tolerance%": 99 },
+              { "compare": "=", "tolerance%": 99, "aggregate": "p50" },
               { "key": "std_stable_sort" }
             ]
           ]
@@ -77,6 +77,10 @@
         "region_max_ns": {
           "type": "region",
           "region": "sort_run",
+          "rules": []
+        },
+        "output_size": {
+          "type": "evaluation",
           "rules": []
         }
       }
