@@ -286,21 +286,133 @@ namespace detail {
 // ----------------- shared types -----------------
 
 enum class CompareOp : std::uint8_t { LessThan, GreaterThan, Equal };
-enum class MetricKind : std::uint8_t { WallClockNs, Counter, Evaluation };
+
+/// Every recognised metric flavour. The first batch are produced by the
+/// framework from the iteration-local `ProfilerBlock<Args>` aggregates;
+/// `Counter` and `Evaluation` route through the user's instrumentation
+/// counters / evaluation lambda.
+enum class MetricKind : std::uint8_t {
+    WallClockNs,                 // outer clock around on_run
+    RegionTotalNs,
+    RegionVisits,
+    RegionMinNs,
+    RegionMaxNs,
+    RegionP50Ns,
+    RegionP99Ns,
+    RegionTotalCycles,
+    RegionTotalInstructions,
+    RegionTotalBranches,
+    RegionTotalBranchMisses,
+    RegionIpc,
+    RegionBranchMissRate,
+    LoopTotalIterations,
+    LoopTotalWork,
+    LoopEmptyVisits,
+    LoopMinPerIterNs,
+    LoopMaxPerIterNs,
+    LoopP50PerIterNs,
+    LoopP99PerIterNs,
+    LoopMeanPerIterNs,
+    LoopWorkPerIter,
+    Counter,
+    Evaluation,
+};
+
+/// Source family (drives schema validation, parsing, and which descriptor
+/// table to walk).
+enum class MetricSource : std::uint8_t {
+    OuterClock,    // WallClockNs only
+    Region,        // walks RegionAggregate
+    Loop,          // walks LoopAggregate
+    Counter,       // walks resolved Counter handles
+    Evaluation,    // walks the evaluation_metrics map
+};
+
+/// Cross-descriptor combiner (only meaningful for Region / Loop). Drives
+/// the per-iteration "fold every visited descriptor's value into one
+/// number" step in `append_iteration_samples`.
+enum class MetricCombiner : std::uint8_t {
+    Sum,                 // additive; e.g. visits, total_ns
+    HistogramSum,        // sum the 32-bucket log2 histograms then run hist_percentile
+    PmuRatio,            // (Σ instructions) / (Σ cycles); skip iteration when denom == 0
+    BranchMissRatio,     // (Σ branch_misses) / (Σ branches); skip when denom == 0
+    LoopMeanNs,          // (Σ total_ns) / (Σ total_iterations); skip when denom == 0
+    LoopWorkPerIter,     // (Σ total_work) / (Σ total_iterations); skip when denom == 0
+    RequiresRegion,      // min / max — must have explicit `region` filter; rejected at config load
+};
+
+/// Static registry of every framework-built-in metric. Schema validation,
+/// metric parsing, semantic checks, and the iteration extraction step all
+/// consume this single source of truth.
+struct BuiltinMetricEntry {
+    std::string_view name;
+    MetricKind       kind;
+    MetricSource     source;
+    MetricCombiner   combiner;
+    /// True iff the metric reads any PMU-derived field. Used by the
+    /// `pmu_unavailable` runtime warning.
+    bool             needs_pmu = false;
+    /// p-fraction for HistogramSum-combined metrics; ignored otherwise.
+    double           percentile = 0.0;
+};
+
+inline constexpr std::array<BuiltinMetricEntry, 22> kBuiltinMetricRegistry{ {
+    { "wall_clock_ns",                MetricKind::WallClockNs,             MetricSource::OuterClock, MetricCombiner::Sum, false, 0.0 },
+    { "region_total_ns",              MetricKind::RegionTotalNs,           MetricSource::Region,     MetricCombiner::Sum, false, 0.0 },
+    { "region_visits",                MetricKind::RegionVisits,            MetricSource::Region,     MetricCombiner::Sum, false, 0.0 },
+    { "region_min_ns",                MetricKind::RegionMinNs,             MetricSource::Region,     MetricCombiner::RequiresRegion, false, 0.0 },
+    { "region_max_ns",                MetricKind::RegionMaxNs,             MetricSource::Region,     MetricCombiner::RequiresRegion, false, 0.0 },
+    { "region_p50_ns",                MetricKind::RegionP50Ns,             MetricSource::Region,     MetricCombiner::HistogramSum, false, 0.50 },
+    { "region_p99_ns",                MetricKind::RegionP99Ns,             MetricSource::Region,     MetricCombiner::HistogramSum, false, 0.99 },
+    { "region_total_cycles",          MetricKind::RegionTotalCycles,       MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
+    { "region_total_instructions",    MetricKind::RegionTotalInstructions, MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
+    { "region_total_branches",        MetricKind::RegionTotalBranches,     MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
+    { "region_total_branch_misses",   MetricKind::RegionTotalBranchMisses, MetricSource::Region,     MetricCombiner::Sum, true,  0.0 },
+    { "region_ipc",                   MetricKind::RegionIpc,               MetricSource::Region,     MetricCombiner::PmuRatio, true, 0.0 },
+    { "region_branch_miss_rate",      MetricKind::RegionBranchMissRate,    MetricSource::Region,     MetricCombiner::BranchMissRatio, true, 0.0 },
+    { "loop_total_iterations",        MetricKind::LoopTotalIterations,     MetricSource::Loop,       MetricCombiner::Sum, false, 0.0 },
+    { "loop_total_work",              MetricKind::LoopTotalWork,           MetricSource::Loop,       MetricCombiner::Sum, false, 0.0 },
+    { "loop_empty_visits",            MetricKind::LoopEmptyVisits,         MetricSource::Loop,       MetricCombiner::Sum, false, 0.0 },
+    { "loop_min_per_iter_ns",         MetricKind::LoopMinPerIterNs,        MetricSource::Loop,       MetricCombiner::RequiresRegion, false, 0.0 },
+    { "loop_max_per_iter_ns",         MetricKind::LoopMaxPerIterNs,        MetricSource::Loop,       MetricCombiner::RequiresRegion, false, 0.0 },
+    { "loop_p50_per_iter_ns",         MetricKind::LoopP50PerIterNs,        MetricSource::Loop,       MetricCombiner::HistogramSum, false, 0.50 },
+    { "loop_p99_per_iter_ns",         MetricKind::LoopP99PerIterNs,        MetricSource::Loop,       MetricCombiner::HistogramSum, false, 0.99 },
+    { "loop_mean_per_iter_ns",        MetricKind::LoopMeanPerIterNs,       MetricSource::Loop,       MetricCombiner::LoopMeanNs, false, 0.0 },
+    { "loop_work_per_iter",           MetricKind::LoopWorkPerIter,         MetricSource::Loop,       MetricCombiner::LoopWorkPerIter, false, 0.0 },
+} };
+
+/// Look up a builtin metric by canonical name. Returns nullptr if absent.
+[[nodiscard]] inline constexpr const BuiltinMetricEntry* lookup_builtin_metric(
+    std::string_view metric_name) noexcept
+{
+    for (const auto& entry : kBuiltinMetricRegistry) {
+        if (entry.name == metric_name) return &entry;
+    }
+    return nullptr;
+}
 
 [[nodiscard]] inline constexpr const char* metric_kind_name(MetricKind metric_kind) noexcept {
     switch (metric_kind) {
-        case MetricKind::WallClockNs: return "builtin";
-        case MetricKind::Counter:     return "counter";
-        case MetricKind::Evaluation:  return "evaluation";
+        case MetricKind::Counter:    return "counter";
+        case MetricKind::Evaluation: return "evaluation";
+        default: break;
+    }
+    for (const auto& entry : kBuiltinMetricRegistry) {
+        if (entry.kind == metric_kind) return entry.name.data();
     }
     return "?";
 }
 
-[[nodiscard]] inline std::optional<MetricKind> parse_metric_kind(std::string_view kind_text) noexcept {
-    if (kind_text == "builtin")    return MetricKind::WallClockNs;
-    if (kind_text == "counter")    return MetricKind::Counter;
-    if (kind_text == "evaluation") return MetricKind::Evaluation;
+/// Parse the JSON `"type"` string into a source family. Returns
+/// `std::nullopt` for unrecognised strings; the caller distinguishes
+/// "counter" / "evaluation" from registry-driven sources by inspecting
+/// the source enumerator.
+[[nodiscard]] inline std::optional<MetricSource> parse_metric_type(std::string_view type_text) noexcept {
+    if (type_text == "builtin")    return MetricSource::OuterClock;
+    if (type_text == "region")     return MetricSource::Region;
+    if (type_text == "loop")       return MetricSource::Loop;
+    if (type_text == "counter")    return MetricSource::Counter;
+    if (type_text == "evaluation") return MetricSource::Evaluation;
     return std::nullopt;
 }
 
@@ -337,10 +449,25 @@ struct Rule {
 struct MetricSpec {
     std::string  name;
     MetricKind   kind = MetricKind::WallClockNs;
+    /// `"type"` string the user declared (or the implicit "builtin"
+    /// default). Stored separately from `kind` so semantic validation can
+    /// detect cross-source typos like `"type": "loop"` with key
+    /// `region_total_ns` — the registry resolves the kind from the name
+    /// regardless of `type`, but a mismatch is still a config error.
+    MetricSource declared_source = MetricSource::OuterClock;
     /// For `kind == Counter`: canonical name of the instrumentation counter
     /// to snapshot. Defaults to `name` when the config omits the explicit
     /// `"counter"` field.
     std::string  counter_name{};
+    /// For `MetricSource::Region` / `MetricSource::Loop` metrics: when
+    /// non-empty, restrict the metric to descriptors whose name equals
+    /// this string. When empty, every visited descriptor contributes via
+    /// the registry's combiner (Sum, HistogramSum, PmuRatio, etc.).
+    /// Mandatory for metrics whose combiner is `RequiresRegion`
+    /// (region_min_ns, region_max_ns, loop_min_per_iter_ns,
+    /// loop_max_per_iter_ns) — semantic_validate_config rejects those if
+    /// `region` is empty.
+    std::string  region{};
     std::vector<Rule> rules{};
 };
 
@@ -863,16 +990,18 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "metric_spec": {
       "title": "MetricSpec",
-      "description": "One metric. The 'type' field selects between three flavours. (a) BUILTIN: the framework times every iteration with bioseq::instr::clock::now_ns() around on_run and emits 'wall_clock_ns'. The metric key MUST be 'wall_clock_ns'; 'type' is optional ('builtin' is implicit). (b) COUNTER: the framework snapshots a bioseq::instr counter before/after each iteration and records the delta. Forces serial iteration. (c) EVALUATION: the value comes from the user's on_evaluate handler.",
+      "description": "One metric. 'type' selects the flavour. Five families: (a) BUILTIN — outer wall_clock_ns measured around on_run; metric key MUST be 'wall_clock_ns' and 'type' is implicit when omitted. (b) REGION — a scalar derived from one or every visited bioseq::instr::region's RegionAggregate (e.g. region_total_ns, region_visits, region_p50_ns, region_max_ns, region_total_cycles, region_total_instructions, region_total_branches, region_total_branch_misses, region_ipc, region_branch_miss_rate). (c) LOOP — a scalar from one or every visited bioseq::instr::loop's LoopAggregate (e.g. loop_total_iterations, loop_total_work, loop_p50_per_iter_ns, loop_max_per_iter_ns, loop_mean_per_iter_ns, loop_work_per_iter, loop_empty_visits). (d) COUNTER — snapshot a global bioseq::instr counter; forces serial iteration. (e) EVALUATION — value returned by the user's on_evaluate handler. The metric KEY must match one of the registered builtin names for REGION/LOOP/BUILTIN and is enforced semantically.",
       "oneOf": [
         { "$ref": "#/definitions/metric_spec_builtin" },
+        { "$ref": "#/definitions/metric_spec_region" },
+        { "$ref": "#/definitions/metric_spec_loop" },
         { "$ref": "#/definitions/metric_spec_counter" },
         { "$ref": "#/definitions/metric_spec_evaluation" }
       ]
     },
     "metric_spec_builtin": {
       "title": "BuiltinMetric",
-      "description": "Built-in wall-clock metric. The metric key MUST be 'wall_clock_ns'; the framework times every iteration with bioseq::instr::clock::now_ns() around on_run and writes the result under 'all_regions.wall_clock_ns'. The 'type' field is optional ('builtin' is implicit when omitted) but the framework refuses to treat a metric as builtin unless its key equals 'wall_clock_ns' (semantic check after schema).",
+      "description": "Built-in wall-clock metric. The metric key MUST be 'wall_clock_ns'; the framework times every iteration with bioseq::instr::clock::now_ns() around on_run and writes the result under 'all_regions.wall_clock_ns'. The 'type' field is optional ('builtin' is implicit when omitted).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -883,6 +1012,45 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         },
         "rules": { "$ref": "#/definitions/rule_array" }
       }
+    },
+    "metric_spec_region": {
+      "title": "RegionAggregateMetric",
+      "description": "A scalar derived from each iteration's bioseq::instr::region aggregates. Recognised metric keys: region_total_ns, region_visits, region_min_ns, region_max_ns, region_p50_ns, region_p99_ns, region_total_cycles, region_total_instructions, region_total_branches, region_total_branch_misses, region_ipc, region_branch_miss_rate. Without 'region', cross-descriptor combiners apply: Sum for additive metrics, summed-histogram + hist_percentile for p50/p99, event-weighted ratios for IPC and branch_miss_rate. region_min_ns / region_max_ns REQUIRE 'region' (cross-region min/max is meaningless). PMU-derived metrics (cycles, instructions, branches, branch_misses, ipc, branch_miss_rate) report 0 on platforms without PMU access; the framework warns once via the pmu_unavailable diagnostic. region_p50_ns / region_p99_ns return the upper bound of the 32-bucket log2 histogram bucket containing the requested percentile and overshoot the true percentile by up to a factor of 2 — treat them as order-of-magnitude tail-latency indicators, not exact quantiles.",
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "region" },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Restrict this metric to a single descriptor whose name equals this string (exact match). Mandatory for region_min_ns / region_max_ns; optional for other region metrics."
+        },
+        "rules": { "$ref": "#/definitions/rule_array" }
+      },
+      "examples": [
+        { "type": "region", "region": "mm_sketch", "rules": [] },
+        { "type": "region", "rules": [] }
+      ]
+    },
+    "metric_spec_loop": {
+      "title": "LoopAggregateMetric",
+      "description": "A scalar derived from each iteration's bioseq::instr::loop aggregates. Recognised metric keys: loop_total_iterations, loop_total_work, loop_empty_visits, loop_min_per_iter_ns, loop_max_per_iter_ns, loop_p50_per_iter_ns, loop_p99_per_iter_ns, loop_mean_per_iter_ns, loop_work_per_iter. Without 'region', cross-descriptor combiners apply (Sum, histogram-summed percentile, ratio-weighted). loop_min_per_iter_ns / loop_max_per_iter_ns REQUIRE 'region'. loop_p50_per_iter_ns / loop_p99_per_iter_ns are coarse percentiles from the 32-bucket log2 per-iteration histogram (bucket-upper-bound, up to factor-of-2 overshoot) — treat as order-of-magnitude only.",
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "loop" },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Restrict this metric to a single loop-descriptor whose name equals this string. Mandatory for loop_min_per_iter_ns / loop_max_per_iter_ns; optional otherwise."
+        },
+        "rules": { "$ref": "#/definitions/rule_array" }
+      },
+      "examples": [
+        { "type": "loop", "region": "mm_sketch_inner", "rules": [] }
+      ]
     },
     "metric_spec_counter": {
       "title": "CounterMetric",
@@ -1528,24 +1696,56 @@ inline void drain_diagnostics_to_context(
             continue;
         }
 
-        std::string_view kind_text = "builtin";
-        std::string_view declared_kind;
-        if (inner_obj["type"].get(declared_kind) == simdjson::SUCCESS) {
-            kind_text = declared_kind;
+        std::string_view type_text = "builtin";
+        std::string_view declared_type;
+        if (inner_obj["type"].get(declared_type) == simdjson::SUCCESS) {
+            type_text = declared_type;
         }
-        auto parsed_kind = parse_metric_kind(kind_text);
-        if (!parsed_kind.has_value()) {
-            loge("[bench_framework] metrics.{}: unknown type '{}'", field.key, kind_text);
+        const auto parsed_source = parse_metric_type(type_text);
+        if (!parsed_source.has_value()) {
+            loge("[bench_framework] metrics.{}: unknown type '{}'", field.key, type_text);
             parse_ok = false;
             continue;
         }
-        metric.kind = *parsed_kind;
+        metric.declared_source = *parsed_source;
+
+        // Map (source, metric_name) → MetricKind. Counter and Evaluation
+        // bypass the registry — their MetricKind is fixed. Builtin /
+        // Region / Loop look up the canonical entry; mismatches between
+        // the declared `type` and the entry's source are deferred to
+        // semantic_validate_config so all errors collect in one pass.
+        switch (*parsed_source) {
+            case MetricSource::Counter:
+                metric.kind = MetricKind::Counter;
+                break;
+            case MetricSource::Evaluation:
+                metric.kind = MetricKind::Evaluation;
+                break;
+            case MetricSource::OuterClock:
+            case MetricSource::Region:
+            case MetricSource::Loop: {
+                const auto* entry = lookup_builtin_metric(metric.name);
+                if (entry != nullptr) {
+                    metric.kind = entry->kind;
+                } else {
+                    // Unknown name — fall back to a placeholder that
+                    // semantic_validate_config rejects with a precise
+                    // message based on the declared `type`.
+                    metric.kind = MetricKind::WallClockNs;
+                }
+                break;
+            }
+        }
 
         std::string_view counter_name;
         if (inner_obj["counter"].get(counter_name) == simdjson::SUCCESS) {
             metric.counter_name = std::string{counter_name};
         } else {
             metric.counter_name = metric.name;
+        }
+        std::string_view region_filter_text;
+        if (inner_obj["region"].get(region_filter_text) == simdjson::SUCCESS) {
+            metric.region = std::string{region_filter_text};
         }
 
         simdjson::dom::array rules_array;
@@ -2001,16 +2201,52 @@ struct ConfigParseOutcome {
     };
 
     for (const auto& metric : config.metrics) {
-        // 4a. Builtin metric keyword check. The framework only knows how
-        //     to populate one builtin metric — wall_clock_ns. A
-        //     metric with omitted/`type: builtin` whose key is anything else
-        //     would silently produce no samples (the schema can't gate this
-        //     because the metric's key is the parent property name).
-        if (metric.kind == MetricKind::WallClockNs && metric.name != "wall_clock_ns") {
-            error("invalid_builtin_metric_name",
-                  fmt::format("matrix.metrics.{}", metric.name),
-                  fmt::format("metric '{}' is treated as builtin (no 'type' field) but only 'wall_clock_ns' is supported as a builtin key; either rename to 'wall_clock_ns' or set 'type' to 'counter' / 'evaluation'",
-                              metric.name));
+        // 4a. Builtin metric name + source compatibility. Counter and
+        //     Evaluation metrics carry user-chosen names; Region / Loop /
+        //     OuterClock metric keys must match a registry entry whose
+        //     source matches the declared `type`.
+        // (Counter / Evaluation flavours skip these checks — their metric
+        // names are user-chosen and the schema's `additionalProperties:
+        // false` already rejects a `region` field on those branches.)
+        if (metric.kind != MetricKind::Counter && metric.kind != MetricKind::Evaluation) {
+            const auto* entry = lookup_builtin_metric(metric.name);
+            if (entry == nullptr) {
+                error("invalid_builtin_metric_name",
+                      fmt::format("matrix.metrics.{}", metric.name),
+                      fmt::format("metric '{}' is not a recognised framework builtin; either rename it to a registered builtin (e.g. wall_clock_ns, region_total_ns, region_visits, region_p99_ns, loop_total_iterations, loop_p50_per_iter_ns; see the kBuiltinMetricRegistry table) or declare 'type' as 'counter' / 'evaluation'",
+                                  metric.name));
+                continue;
+            }
+            // 4b. Cross-source typo check. `type: "region"` with key
+            //     `loop_total_iterations` (or vice versa) gets rejected
+            //     before run-time so the user sees a precise message
+            //     instead of getting silently-empty samples.
+            if (entry->source != metric.declared_source) {
+                const auto declared_text =
+                    metric.declared_source == MetricSource::Region ? "region"
+                  : metric.declared_source == MetricSource::Loop   ? "loop"
+                  : metric.declared_source == MetricSource::OuterClock ? "builtin"
+                  : "?";
+                const auto entry_text =
+                    entry->source == MetricSource::Region ? "region"
+                  : entry->source == MetricSource::Loop   ? "loop"
+                  : entry->source == MetricSource::OuterClock ? "builtin"
+                  : "?";
+                error("metric_source_mismatch",
+                      fmt::format("matrix.metrics.{}", metric.name),
+                      fmt::format("metric '{}' is declared as 'type: {}' but the registry knows it as a '{}'-source metric; either change 'type' or rename the metric",
+                                  metric.name, declared_text, entry_text));
+                continue;
+            }
+            // 4c. Min / Max metrics require an explicit `region` filter —
+            //     cross-region "min of mins" / "max of maxes" would lose
+            //     meaning.
+            if (entry->combiner == MetricCombiner::RequiresRegion && metric.region.empty()) {
+                error("min_max_metric_requires_region",
+                      fmt::format("matrix.metrics.{}", metric.name),
+                      fmt::format("metric '{}' aggregates min/max across descriptors and is meaningless without a 'region' filter; add 'region': '<descriptor_name>' to the metric block",
+                                  metric.name));
+            }
         }
 
         for (const auto& rule : metric.rules) {
@@ -2068,24 +2304,83 @@ struct ConfigParseOutcome {
         return diagnostics;
     }
 
-    for (const auto& metric : state.config.metrics) {
-        if (metric.kind != MetricKind::Evaluation) continue;
-        bool seen_anywhere = false;
+    // Helper: scan every cell's all_regions bucket for a metric name.
+    const auto metric_was_emitted = [&](const std::string& metric_name) noexcept {
         for (const auto& cell_ptr : state.cells) {
             const auto region_it = cell_ptr->samples.find("all_regions");
             if (region_it == cell_ptr->samples.end()) continue;
-            if (region_it->second.find(metric.name) == region_it->second.end()) continue;
-            seen_anywhere = true;
-            break;
+            if (region_it->second.find(metric_name) != region_it->second.end()) return true;
         }
-        if (!seen_anywhere) {
+        return false;
+    };
+    // Helper: are any of a metric's collected samples non-zero? Used by
+    // the PMU-availability check below — on platforms without PMU access,
+    // the OS feeds back zeros for cycles/instructions/branches/branch_misses
+    // and we want to surface that exactly once.
+    const auto metric_has_non_zero_sample = [&](const std::string& metric_name) noexcept {
+        for (const auto& cell_ptr : state.cells) {
+            const auto region_it = cell_ptr->samples.find("all_regions");
+            if (region_it == cell_ptr->samples.end()) continue;
+            const auto values_it = region_it->second.find(metric_name);
+            if (values_it == region_it->second.end()) continue;
+            for (double sample : values_it->second) {
+                if (sample != 0.0) return true;
+            }
+        }
+        return false;
+    };
+
+    // PMU availability: if any declared region metric needs PMU, but every
+    // sample we collected for it is exactly zero, the OS denied PMU access
+    // (typical on macOS arm64 without root). Emit one warning per benchmark
+    // so the user understands why the values are degenerate.
+    bool pmu_warning_emitted = false;
+    for (const auto& metric : state.config.metrics) {
+        if (metric.kind == MetricKind::Counter || metric.kind == MetricKind::Evaluation) continue;
+        const auto* entry = lookup_builtin_metric(metric.name);
+        if (entry == nullptr || !entry->needs_pmu) continue;
+        if (metric_was_emitted(metric.name) && !metric_has_non_zero_sample(metric.name)) {
+            if (!pmu_warning_emitted) {
+                diagnostics.push_back({
+                    ValidationDiag::Severity::Warning,
+                    "pmu_unavailable",
+                    semantic_location(state, "matrix.metrics"),
+                    "PMU counters were unavailable on this platform — every sample of region_total_cycles / region_total_instructions / region_total_branches / region_total_branch_misses / region_ipc / region_branch_miss_rate read as zero. On macOS arm64 the kpc interface requires entitlements; on Linux the perf_event_open syscall may be sandbox-restricted. Re-run with the appropriate privileges or remove the PMU-derived metrics from this benchmark."
+                });
+                pmu_warning_emitted = true;
+            }
+        }
+    }
+
+    for (const auto& metric : state.config.metrics) {
+
+        if (metric.kind == MetricKind::Evaluation) {
+            if (!metric_was_emitted(metric.name)) {
+                diagnostics.push_back({
+                    ValidationDiag::Severity::Error,
+                    "missing_evaluation_metric",
+                    semantic_location(state,
+                        fmt::format("matrix.metrics.{}", metric.name)),
+                    fmt::format("metric '{}' is declared as 'type: evaluation' but the on_evaluate handler never returned this key for any iteration",
+                                metric.name)
+                });
+            }
+            continue;
+        }
+
+        // For region/loop metrics with a non-empty `region` filter, verify
+        // that the named descriptor was actually visited at least once.
+        // Without this check, a typo in the filter silently produces empty
+        // sample arrays and rules over them quietly compare median(0) ==
+        // median(0).
+        if (!metric.region.empty() && !metric_was_emitted(metric.name)) {
             diagnostics.push_back({
-                ValidationDiag::Severity::Error,
-                "missing_evaluation_metric",
+                ValidationDiag::Severity::Warning,
+                "region_filter_never_matched",
                 semantic_location(state,
                     fmt::format("matrix.metrics.{}", metric.name)),
-                fmt::format("metric '{}' is declared as 'type: evaluation' but the on_evaluate handler never returned this key for any iteration",
-                            metric.name)
+                fmt::format("metric '{}' restricts to region '{}', but no descriptor with that name was visited during the benchmark; rules over this metric will see an empty sample array",
+                            metric.name, metric.region)
             });
         }
     }
@@ -2210,15 +2505,218 @@ struct ConfigParseOutcome {
 
 // ----------------- Sample collection -----------------
 
+/// Per-descriptor scalar extraction for a region-source metric. Returns
+/// the value in the metric's natural unit (uint64 cast to double for sums,
+/// uint64 for visits, etc.). Min/Max return the field directly even though
+/// they require an explicit `region` filter — the caller's combiner handles
+/// the cross-descriptor logic.
+[[nodiscard]] inline double extract_from_region(
+    MetricKind kind,
+    const bioseq::instr::RegionAggregate& region_agg) noexcept
+{
+    using bioseq::instr::access::hist_percentile;
+    switch (kind) {
+        case MetricKind::RegionTotalNs:           return static_cast<double>(region_agg.total_ns);
+        case MetricKind::RegionVisits:            return static_cast<double>(region_agg.visits);
+        case MetricKind::RegionMinNs:             return static_cast<double>(region_agg.min_ns);
+        case MetricKind::RegionMaxNs:             return static_cast<double>(region_agg.max_ns);
+        case MetricKind::RegionP50Ns:             return static_cast<double>(hist_percentile(region_agg.ns_hist, 0.50));
+        case MetricKind::RegionP99Ns:             return static_cast<double>(hist_percentile(region_agg.ns_hist, 0.99));
+        case MetricKind::RegionTotalCycles:       return static_cast<double>(region_agg.total_cycles);
+        case MetricKind::RegionTotalInstructions: return static_cast<double>(region_agg.total_instructions);
+        case MetricKind::RegionTotalBranches:     return static_cast<double>(region_agg.total_branches);
+        case MetricKind::RegionTotalBranchMisses: return static_cast<double>(region_agg.total_branch_misses);
+        default: return 0.0;     // ratios/loop-only metrics use the
+                                  // accumulator below, never this scalar
+                                  // path.
+    }
+}
+
+[[nodiscard]] inline double extract_from_loop(
+    MetricKind kind,
+    const bioseq::instr::LoopAggregate& loop_agg) noexcept
+{
+    using bioseq::instr::access::hist_percentile;
+    switch (kind) {
+        case MetricKind::LoopTotalIterations: return static_cast<double>(loop_agg.total_iterations);
+        case MetricKind::LoopTotalWork:       return static_cast<double>(loop_agg.total_work);
+        case MetricKind::LoopEmptyVisits:     return static_cast<double>(loop_agg.empty_visits);
+        case MetricKind::LoopMinPerIterNs:    return static_cast<double>(loop_agg.min_per_iter_ns);
+        case MetricKind::LoopMaxPerIterNs:    return static_cast<double>(loop_agg.max_per_iter_ns);
+        case MetricKind::LoopP50PerIterNs:    return static_cast<double>(hist_percentile(loop_agg.per_iter_ns_hist, 0.50));
+        case MetricKind::LoopP99PerIterNs:    return static_cast<double>(hist_percentile(loop_agg.per_iter_ns_hist, 0.99));
+        default: return 0.0;
+    }
+}
+
+/// Per-descriptor ratio extraction. Used by the by_regions emit site so
+/// per-region buckets carry the actual ratio for that one descriptor
+/// rather than a literal zero from the scalar `extract_from_*` switch's
+/// default arm. Returns nullopt when the denominator is zero (the per-
+/// region sample is then suppressed).
+[[nodiscard]] inline std::optional<double> ratio_per_region(
+    MetricKind kind,
+    const bioseq::instr::RegionAggregate& region_agg) noexcept
+{
+    switch (kind) {
+        case MetricKind::RegionIpc:
+            if (region_agg.total_cycles == 0) return std::nullopt;
+            return static_cast<double>(region_agg.total_instructions)
+                 / static_cast<double>(region_agg.total_cycles);
+        case MetricKind::RegionBranchMissRate:
+            if (region_agg.total_branches == 0) return std::nullopt;
+            return static_cast<double>(region_agg.total_branch_misses)
+                 / static_cast<double>(region_agg.total_branches);
+        default:
+            return std::nullopt;     // not a region-ratio metric
+    }
+}
+
+[[nodiscard]] inline std::optional<double> ratio_per_loop(
+    MetricKind kind,
+    const bioseq::instr::LoopAggregate& loop_agg) noexcept
+{
+    switch (kind) {
+        case MetricKind::LoopMeanPerIterNs:
+            if (loop_agg.total_iterations == 0) return std::nullopt;
+            return static_cast<double>(loop_agg.total_ns)
+                 / static_cast<double>(loop_agg.total_iterations);
+        case MetricKind::LoopWorkPerIter:
+            if (loop_agg.total_iterations == 0) return std::nullopt;
+            return static_cast<double>(loop_agg.total_work)
+                 / static_cast<double>(loop_agg.total_iterations);
+        default:
+            return std::nullopt;     // not a loop-ratio metric
+    }
+}
+
+/// Running accumulator used to fold per-descriptor data into one
+/// iteration-level value for region/loop metrics. The combiner field on
+/// the registry entry decides which fields are populated and how they
+/// finalise.
+struct CrossDescriptorAccumulator {
+    double                       sum = 0.0;
+    std::uint64_t                ratio_numerator = 0;
+    std::uint64_t                ratio_denominator = 0;
+    std::array<std::uint64_t, 32> hist_sum{};   // for HistogramSum combiner
+    bool                          any_contribution = false;
+};
+
+inline void combine_region(
+    CrossDescriptorAccumulator& accumulator,
+    MetricCombiner combiner,
+    MetricKind kind,
+    const bioseq::instr::RegionAggregate& region_agg) noexcept
+{
+    accumulator.any_contribution = true;
+    switch (combiner) {
+        case MetricCombiner::Sum:
+            accumulator.sum += extract_from_region(kind, region_agg);
+            return;
+        case MetricCombiner::HistogramSum: {
+            const auto& source_hist = region_agg.ns_hist.buckets;
+            for (std::size_t i = 0; i < source_hist.size(); ++i) {
+                accumulator.hist_sum[i] += source_hist[i];
+            }
+            return;
+        }
+        case MetricCombiner::PmuRatio:
+            accumulator.ratio_numerator   += region_agg.total_instructions;
+            accumulator.ratio_denominator += region_agg.total_cycles;
+            return;
+        case MetricCombiner::BranchMissRatio:
+            accumulator.ratio_numerator   += region_agg.total_branch_misses;
+            accumulator.ratio_denominator += region_agg.total_branches;
+            return;
+        case MetricCombiner::RequiresRegion:
+            // With explicit `region` filter, only one descriptor
+            // contributes — pass the value straight through.
+            accumulator.sum = extract_from_region(kind, region_agg);
+            return;
+        case MetricCombiner::LoopMeanNs:
+        case MetricCombiner::LoopWorkPerIter:
+            return;     // not applicable to region-source metrics.
+    }
+}
+
+inline void combine_loop(
+    CrossDescriptorAccumulator& accumulator,
+    MetricCombiner combiner,
+    MetricKind kind,
+    const bioseq::instr::LoopAggregate& loop_agg) noexcept
+{
+    accumulator.any_contribution = true;
+    switch (combiner) {
+        case MetricCombiner::Sum:
+            accumulator.sum += extract_from_loop(kind, loop_agg);
+            return;
+        case MetricCombiner::HistogramSum: {
+            const auto& source_hist = loop_agg.per_iter_ns_hist.buckets;
+            for (std::size_t i = 0; i < source_hist.size(); ++i) {
+                accumulator.hist_sum[i] += source_hist[i];
+            }
+            return;
+        }
+        case MetricCombiner::LoopMeanNs:
+            accumulator.ratio_numerator   += loop_agg.total_ns;
+            accumulator.ratio_denominator += loop_agg.total_iterations;
+            return;
+        case MetricCombiner::LoopWorkPerIter:
+            accumulator.ratio_numerator   += loop_agg.total_work;
+            accumulator.ratio_denominator += loop_agg.total_iterations;
+            return;
+        case MetricCombiner::RequiresRegion:
+            accumulator.sum = extract_from_loop(kind, loop_agg);
+            return;
+        case MetricCombiner::PmuRatio:
+        case MetricCombiner::BranchMissRatio:
+            return;     // loop metrics never use PMU ratios directly.
+    }
+}
+
+/// Finalise the accumulator into a single double, or `nullopt` when the
+/// metric should be skipped this iteration (zero-denominator ratios, no
+/// contributions, etc.).
+[[nodiscard]] inline std::optional<double> finalise_combined_metric(
+    const CrossDescriptorAccumulator& accumulator,
+    MetricCombiner combiner,
+    double percentile) noexcept
+{
+    if (!accumulator.any_contribution) return std::nullopt;
+    switch (combiner) {
+        case MetricCombiner::Sum:
+        case MetricCombiner::RequiresRegion:
+            return accumulator.sum;
+        case MetricCombiner::HistogramSum: {
+            // Build a temporary Histogram16 view over the summed buckets
+            // and run the public hist_percentile helper.
+            bioseq::instr::Histogram16 summed{};
+            summed.buckets = accumulator.hist_sum;
+            return static_cast<double>(
+                bioseq::instr::access::hist_percentile(summed, percentile));
+        }
+        case MetricCombiner::PmuRatio:
+        case MetricCombiner::BranchMissRatio:
+        case MetricCombiner::LoopMeanNs:
+        case MetricCombiner::LoopWorkPerIter:
+            if (accumulator.ratio_denominator == 0) return std::nullopt;
+            return static_cast<double>(accumulator.ratio_numerator)
+                 / static_cast<double>(accumulator.ratio_denominator);
+    }
+    return std::nullopt;
+}
+
 /// Write one iteration's measurements into the cell's metric arrays:
-/// (a) iteration-level wall-clock under `all_regions["wall_clock_ns"]`;
-/// (b) per-counter delta under `all_regions[<metric_name>]`;
-/// (c) every key the evaluator returned (matched against the configured
-///     evaluation metric names);
-/// (d) when `by_regions=true`, per-region wall-clock totals from
-///     `profiler_block`.
-/// Holds `cell.samples_mu` for the duration of the append so concurrent
-/// iterations don't trample each other's vectors.
+/// - iteration-level outer `wall_clock_ns` always lands in
+///   `all_regions["wall_clock_ns"]`.
+/// - region/loop builtin metrics walk every visited descriptor, fold per
+///   descriptor through the metric's combiner, then push the finalised
+///   value into `all_regions[<metric_name>]`. When `by_regions: true`,
+///   each visited descriptor's per-descriptor value also lands in
+///   `<descriptor_name>[<metric_name>]`.
+/// - counters use the snapshotted before/after deltas.
+/// - evaluation metrics read the user's returned map.
+/// Held under `cell.samples_mu` for the duration of the append.
 inline void append_iteration_samples(
     Cell& cell,
     bool by_regions,
@@ -2233,18 +2731,20 @@ inline void append_iteration_samples(
     auto& all_regions = cell.samples["all_regions"];
     all_regions["wall_clock_ns"].push_back(iteration_wall_clock_ns);
 
+    const auto descriptor_total = bioseq::instr::descriptor_count();
     std::size_t counter_index = 0;
+
     for (const auto& metric : metrics) {
         switch (metric.kind) {
             case MetricKind::WallClockNs:
-                // Already covered by the iteration-level wall clock above.
-                break;
+                // Already pushed above.
+                continue;
             case MetricKind::Counter: {
                 const auto delta = counters_after[counter_index]
                                   - counters_before[counter_index];
                 all_regions[metric.name].push_back(static_cast<double>(delta));
                 ++counter_index;
-                break;
+                continue;
             }
             case MetricKind::Evaluation: {
                 auto found = evaluation_metrics.find(metric.name);
@@ -2253,38 +2753,72 @@ inline void append_iteration_samples(
                 } else {
                     logd("[bench_framework] evaluator did not return metric '{}'", metric.name);
                 }
-                break;
+                continue;
             }
+            default: break;     // builtin region/loop metric — fall through.
         }
-    }
 
-    if (by_regions) {
-        const auto descriptor_total = bioseq::instr::descriptor_count();
+        const auto* entry = lookup_builtin_metric(metric.name);
+        if (entry == nullptr) continue;     // already-flagged by semantic validation
+
+        CrossDescriptorAccumulator accumulator;
+        const bool restrict_to_one_region = !metric.region.empty();
+
+        // Walk every visited descriptor whose name and kind match the
+        // metric's source family.
         for (std::uint32_t descriptor_id = 1; descriptor_id <= descriptor_total; ++descriptor_id) {
             const auto* descriptor = bioseq::instr::descriptor_lookup(descriptor_id);
             if (descriptor == nullptr || descriptor->name == nullptr) continue;
+            if (restrict_to_one_region
+                && std::string_view{descriptor->name} != std::string_view{metric.region}) continue;
 
-            std::uint64_t total_ns_for_this_region = 0;
-            std::uint64_t visits = 0;
-
-            // Walk loop aggregates first (loop scopes also write into the
-            // base region table, but the loop record carries iteration data
-            // we don't need here — we just need total_ns).
-            const auto* loop_agg = profiler_block.loop_aggregates.try_get(descriptor_id);
-            if (loop_agg != nullptr && loop_agg->visits > 0) {
-                total_ns_for_this_region = loop_agg->total_ns;
-                visits = loop_agg->visits;
-            } else {
+            if (entry->source == MetricSource::Region) {
                 const auto* region_agg = profiler_block.aggregates.try_get(descriptor_id);
-                if (region_agg != nullptr && region_agg->visits > 0) {
-                    total_ns_for_this_region = region_agg->total_ns;
-                    visits = region_agg->visits;
+                if (region_agg == nullptr || region_agg->visits == 0) continue;
+                combine_region(accumulator, entry->combiner, entry->kind, *region_agg);
+                if (by_regions) {
+                    // Ratio metrics need a per-descriptor numerator/
+                    // denominator computation; the scalar `extract_*` path
+                    // only knows how to dump a single field, so it would
+                    // emit literal 0 for IPC / branch_miss_rate.
+                    if (entry->combiner == MetricCombiner::PmuRatio
+                     || entry->combiner == MetricCombiner::BranchMissRatio) {
+                        if (auto ratio = ratio_per_region(entry->kind, *region_agg);
+                            ratio.has_value()) {
+                            cell.samples[descriptor->name][metric.name].push_back(*ratio);
+                        }
+                    } else {
+                        cell.samples[descriptor->name][metric.name]
+                            .push_back(extract_from_region(entry->kind, *region_agg));
+                    }
+                }
+            } else if (entry->source == MetricSource::Loop) {
+                const auto* loop_agg = profiler_block.loop_aggregates.try_get(descriptor_id);
+                if (loop_agg == nullptr || loop_agg->visits == 0) continue;
+                combine_loop(accumulator, entry->combiner, entry->kind, *loop_agg);
+                if (by_regions) {
+                    if (entry->combiner == MetricCombiner::LoopMeanNs
+                     || entry->combiner == MetricCombiner::LoopWorkPerIter) {
+                        if (auto ratio = ratio_per_loop(entry->kind, *loop_agg);
+                            ratio.has_value()) {
+                            cell.samples[descriptor->name][metric.name].push_back(*ratio);
+                        }
+                    } else {
+                        cell.samples[descriptor->name][metric.name]
+                            .push_back(extract_from_loop(entry->kind, *loop_agg));
+                    }
                 }
             }
-            if (visits == 0) continue;
-            cell.samples[descriptor->name]["wall_clock_ns"]
-                .push_back(static_cast<double>(total_ns_for_this_region));
         }
+
+        if (auto finalised = finalise_combined_metric(accumulator, entry->combiner, entry->percentile);
+            finalised.has_value()) {
+            all_regions[metric.name].push_back(*finalised);
+        }
+        // Else: skipped this iteration (zero-denominator ratio or no
+        // contribution). The sample array stays sparse; the rule
+        // evaluator's median-of-samples handles missing iterations
+        // gracefully.
     }
 }
 

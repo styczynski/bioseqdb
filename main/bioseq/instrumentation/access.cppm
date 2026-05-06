@@ -59,6 +59,19 @@ namespace detail {
 
 }  // namespace detail
 
+/// Public re-export of the bucket-percentile helper. Estimates the p-th
+/// percentile (p in [0, 1]) of the values represented by a 32-bucket log2
+/// histogram. The result is the upper bound of the bucket that contains
+/// the cumulative-count at the requested fraction; coarse, with up to a
+/// factor-of-2 overshoot vs. the bucket midpoint. Suitable for "is the
+/// tail latency in the right order of magnitude" checks; not a substitute
+/// for full-resolution histograms when fine-grained percentiles matter.
+[[nodiscard]] inline std::uint64_t hist_percentile(
+    const Histogram16& histogram, double p) noexcept
+{
+    return detail::hist_percentile(histogram, p);
+}
+
 /// Dump every region/loop aggregate with non-zero visits to JustLog.
 /// Output format mirrors Part 48.5 of NEW_PROFILING_RESEARCH.md:
 ///   [bioseq] profile <region_name> total=<ns> visits=<n> mean=<ns> p50=<ns> p99=<ns>

@@ -30,6 +30,7 @@
 #include <vector>
 
 import mlogging;
+import bioseq_instr;
 import bench_framework;
 
 #ifndef BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_REPORT_DIR
@@ -80,12 +81,27 @@ struct SortOutput {
                                               const ParamMap& /*params*/,
                                               const SortInput& input)
 {
-    std::vector<std::int64_t> working_copy = input.values;
-    if (algorithm_name == "std_sort") {
-        std::sort(working_copy.begin(), working_copy.end());
-    } else if (algorithm_name == "std_stable_sort") {
-        std::stable_sort(working_copy.begin(), working_copy.end());
+    // One static region descriptor per algorithm so the framework's
+    // by_regions split has something to attribute samples to.
+    static const auto* const sort_region =
+        bioseq::instr::register_region_static("sort_run");
+    static const auto* const copy_region =
+        bioseq::instr::register_region_static("sort_copy_input");
+
+    std::vector<std::int64_t> working_copy;
+    {
+        auto _copy_scope = bioseq::instr::region(copy_region);
+        working_copy = input.values;
     }
+    {
+        auto _sort_scope = bioseq::instr::region(sort_region);
+        if (algorithm_name == "std_sort") {
+            std::sort(working_copy.begin(), working_copy.end());
+        } else if (algorithm_name == "std_stable_sort") {
+            std::stable_sort(working_copy.begin(), working_copy.end());
+        }
+    }
+
     SortOutput output;
     output.size = working_copy.size();
     if (!working_copy.empty()) {
@@ -145,8 +161,16 @@ struct CountOutput {
                                                 const ParamMap& /*params*/,
                                                 const CountInput& input)
 {
+    // Loop descriptor — each `tick(1)` recorded one work unit (the
+    // value we inspected). Lets the loop_total_iterations / loop_total_work
+    // metrics produce non-zero data.
+    static const auto* const count_loop =
+        bioseq::instr::register_loop_static("count_main_loop");
+
     CountOutput output;
+    auto loop_scope = bioseq::instr::loop(count_loop);
     for (const auto value : input.values) {
+        loop_scope.tick(1);
         if ((value & 1) == 0) ++output.even_count;
     }
     return output;
