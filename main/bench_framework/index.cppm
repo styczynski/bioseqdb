@@ -81,50 +81,58 @@ export namespace bioseq::bench_framework {
  * decimal spelling matches the string.
  */
 struct ConfigValue {
-    enum class Kind : std::uint8_t { String, Integer, Double, Boolean };
+    /// Recognised scalar kinds plus a sentinel `NonScalar` for arrays /
+    /// objects / nulls. The framework refuses to treat NonScalar values as
+    /// matching any declared parameter type, so semantic validation surfaces
+    /// `value_type_mismatch` for nested structures used where a scalar was
+    /// expected. `string_value` carries the source JSON spelling for
+    /// NonScalar so error messages can show what the user wrote.
+    enum class Kind : std::uint8_t { String, Integer, Double, Boolean, NonScalar };
 
     Kind         kind = Kind::String;
-    std::string  str_v{};
-    std::int64_t int_v = 0;
-    double       dbl_v = 0.0;
-    bool         bool_v = false;
+    std::string  string_value{};
+    std::int64_t integer_value = 0;
+    double       double_value = 0.0;
+    bool         boolean_value = false;
 
-    [[nodiscard]] constexpr bool is_string()  const noexcept { return kind == Kind::String; }
-    [[nodiscard]] constexpr bool is_integer() const noexcept { return kind == Kind::Integer; }
-    [[nodiscard]] constexpr bool is_double()  const noexcept { return kind == Kind::Double; }
-    [[nodiscard]] constexpr bool is_boolean() const noexcept { return kind == Kind::Boolean; }
+    [[nodiscard]] constexpr bool is_string()    const noexcept { return kind == Kind::String; }
+    [[nodiscard]] constexpr bool is_integer()   const noexcept { return kind == Kind::Integer; }
+    [[nodiscard]] constexpr bool is_double()    const noexcept { return kind == Kind::Double; }
+    [[nodiscard]] constexpr bool is_boolean()   const noexcept { return kind == Kind::Boolean; }
+    [[nodiscard]] constexpr bool is_non_scalar() const noexcept { return kind == Kind::NonScalar; }
 
-    [[nodiscard]] std::string_view as_string()  const noexcept { return str_v; }
-    [[nodiscard]] std::int64_t     as_integer() const noexcept { return int_v; }
-    [[nodiscard]] double           as_double()  const noexcept { return dbl_v; }
-    [[nodiscard]] bool             as_boolean() const noexcept { return bool_v; }
+    [[nodiscard]] std::string_view as_string()  const noexcept { return string_value; }
+    [[nodiscard]] std::int64_t     as_integer() const noexcept { return integer_value; }
+    [[nodiscard]] double           as_double()  const noexcept { return double_value; }
+    [[nodiscard]] bool             as_boolean() const noexcept { return boolean_value; }
 
     [[nodiscard]] bool operator==(std::string_view rhs) const noexcept {
-        return is_string() && str_v == rhs;
+        return is_string() && string_value == rhs;
     }
     [[nodiscard]] bool operator==(const char* rhs) const noexcept {
-        return is_string() && str_v == rhs;
+        return is_string() && string_value == rhs;
     }
     [[nodiscard]] bool operator==(std::int64_t rhs) const noexcept {
-        return is_integer() && int_v == rhs;
+        return is_integer() && integer_value == rhs;
     }
     [[nodiscard]] bool operator==(int rhs) const noexcept {
-        return is_integer() && int_v == static_cast<std::int64_t>(rhs);
+        return is_integer() && integer_value == static_cast<std::int64_t>(rhs);
     }
     [[nodiscard]] bool operator==(double rhs) const noexcept {
-        return is_double() && dbl_v == rhs;
+        return is_double() && double_value == rhs;
     }
     [[nodiscard]] bool operator==(bool rhs) const noexcept {
-        return is_boolean() && bool_v == rhs;
+        return is_boolean() && boolean_value == rhs;
     }
 
     [[nodiscard]] bool operator==(const ConfigValue& other) const noexcept {
         if (kind != other.kind) return false;
         switch (kind) {
-            case Kind::String:  return str_v == other.str_v;
-            case Kind::Integer: return int_v == other.int_v;
-            case Kind::Double:  return dbl_v == other.dbl_v;
-            case Kind::Boolean: return bool_v == other.bool_v;
+            case Kind::String:    return string_value == other.string_value;
+            case Kind::Integer:   return integer_value == other.integer_value;
+            case Kind::Double:    return double_value == other.double_value;
+            case Kind::Boolean:   return boolean_value == other.boolean_value;
+            case Kind::NonScalar: return string_value == other.string_value;
         }
         return false;
     }
@@ -137,16 +145,16 @@ struct ConfigValue {
                       || std::is_same_v<T, std::string_view>
                       || std::is_same_v<T, const char*>) {
             out.kind = ConfigValue::Kind::String;
-            out.str_v = std::string{raw_value};
+            out.string_value = std::string{raw_value};
         } else if constexpr (std::is_same_v<T, bool>) {
             out.kind = ConfigValue::Kind::Boolean;
-            out.bool_v = raw_value;
+            out.boolean_value = raw_value;
         } else if constexpr (std::is_integral_v<T>) {
             out.kind = ConfigValue::Kind::Integer;
-            out.int_v = static_cast<std::int64_t>(raw_value);
+            out.integer_value = static_cast<std::int64_t>(raw_value);
         } else if constexpr (std::is_floating_point_v<T>) {
             out.kind = ConfigValue::Kind::Double;
-            out.dbl_v = static_cast<double>(raw_value);
+            out.double_value = static_cast<double>(raw_value);
         } else {
             static_assert(sizeof(T) == 0, "unsupported ConfigValue source type");
         }
@@ -463,6 +471,7 @@ struct Violation {
 
 // Forward declarations used by BenchmarkContext.
 struct ProgressState;
+struct ValidationDiag;
 
 }  // namespace detail
 
@@ -489,6 +498,12 @@ struct BenchmarkContext {
     /// (the simdjson parser inside is non-movable). A unique_ptr moves
     /// freely (8-byte pointer relocation) so it composes with std::map.
     std::map<std::string, std::unique_ptr<detail::BenchmarkExecutionState>>* reports = nullptr;
+    /// Aggregated validation diagnostics across all benchmarks. Each
+    /// benchmark's closure appends its schema + semantic findings under
+    /// `diagnostics_mu`; `run_impl` prints them and uses the error count
+    /// to drive the exit code.
+    std::mutex*                                     diagnostics_mu = nullptr;
+    std::vector<detail::ValidationDiag>*            diagnostics = nullptr;
 };
 
 // ----------------- ConfigValue::from_simdjson -----------------
@@ -503,7 +518,7 @@ struct BenchmarkContext {
             std::int64_t parsed = 0;
             if (element.get(parsed) == simdjson::SUCCESS) {
                 out.kind  = Kind::Integer;
-                out.int_v = parsed;
+                out.integer_value = parsed;
             }
             return out;
         }
@@ -511,7 +526,7 @@ struct BenchmarkContext {
             std::uint64_t parsed = 0;
             if (element.get(parsed) == simdjson::SUCCESS) {
                 out.kind  = Kind::Integer;
-                out.int_v = static_cast<std::int64_t>(parsed);
+                out.integer_value = static_cast<std::int64_t>(parsed);
             }
             return out;
         }
@@ -519,7 +534,7 @@ struct BenchmarkContext {
             double parsed = 0.0;
             if (element.get(parsed) == simdjson::SUCCESS) {
                 out.kind  = Kind::Double;
-                out.dbl_v = parsed;
+                out.double_value = parsed;
             }
             return out;
         }
@@ -527,7 +542,7 @@ struct BenchmarkContext {
             bool parsed = false;
             if (element.get(parsed) == simdjson::SUCCESS) {
                 out.kind   = Kind::Boolean;
-                out.bool_v = parsed;
+                out.boolean_value = parsed;
             }
             return out;
         }
@@ -535,15 +550,17 @@ struct BenchmarkContext {
             std::string_view parsed{};
             if (element.get(parsed) == simdjson::SUCCESS) {
                 out.kind  = Kind::String;
-                out.str_v = std::string{parsed};
+                out.string_value = std::string{parsed};
             }
             return out;
         }
         default:
-            // Object / array / null: fall back to a stringified spelling so the
-            // value is preserved verbatim in canonical IDs and rule selectors.
-            out.kind  = Kind::String;
-            out.str_v = simdjson::to_string(element);
+            // Object / array / null: not a scalar configuration value.
+            // Mark with the NonScalar sentinel so semantic validation can
+            // refuse it against any declared parameter type. We still keep
+            // the JSON text in `string_value` for diagnostic messages.
+            out.kind  = Kind::NonScalar;
+            out.string_value = simdjson::to_string(element);
             return out;
     }
 }
@@ -573,60 +590,682 @@ struct ProgressState {
     }
 };
 
-// ----------------- Schema definition (built-in) -----------------
+// ----------------- Diagnostics -----------------
+//
+// Validation produces a flat list of `ValidationDiag` records. Both
+// schema-driven errors (from the JSON schema validator) and post-parse
+// semantic checks share this type so `report_diagnostics` can pretty-print
+// them uniformly. `Severity::Error` aborts; `Severity::Warning` is logged
+// but does not stop the run.
 
-inline constexpr std::string_view kBenchConfigSchema = R"({
+/// One validation finding — schema or semantic.
+struct ValidationDiag {
+    enum class Severity : std::uint8_t { Error, Warning };
+    Severity    severity = Severity::Error;
+    /// Short machine-readable token (e.g. "unknown_algorithm",
+    /// "value_type_mismatch", "schema").
+    std::string code;
+    /// Human-readable origin string. For schema errors this contains the
+    /// JSON Pointer into the offending document; for semantic errors it
+    /// names the config path + benchmark key + relative location.
+    std::string location;
+    std::string message;
+};
+
+/// Custom error handler that captures every validation error (vs. the
+/// default `basic_error_handler` that throws on the first). One instance
+/// per validation pass; collected entries are converted to `ValidationDiag`
+/// records by `validate_against_schema`.
+class CollectingErrorHandler : public nlohmann::json_schema::basic_error_handler {
+public:
+    void error(const nlohmann::json::json_pointer& pointer,
+               const nlohmann::json& /*instance*/,
+               const std::string& message) override
+    {
+        nlohmann::json_schema::basic_error_handler::error(pointer, {}, message);
+        captured_.push_back({pointer.to_string(), message});
+    }
+
+    struct Entry { std::string pointer; std::string message; };
+    [[nodiscard]] const std::vector<Entry>& entries() const noexcept { return captured_; }
+
+private:
+    std::vector<Entry> captured_;
+};
+
+// ----------------- Schema definitions (built-in) -----------------
+//
+// Both schemas are inlined as raw string literals so the framework has no
+// external dependency at runtime. They double as documentation: every
+// nontrivial property carries a `description` and many carry `examples`.
+//
+// Conventions inside the schemas:
+//   * `propertyNames: { minLength: 1 }` rejects empty identifiers (empty
+//     benchmark keys, empty algorithm names, empty rule names, etc.).
+//   * `oneOf` is used to make alternatives readable to a human (the metric
+//     spec's three flavours, the comparator's `<`/`>`/`=` split).
+//   * `additionalProperties: false` is preferred over open-ended objects
+//     except where the data is genuinely free-form (e.g. test_case `data`
+//     blob, rule selector partial matches, parameter values).
+//
+// Anything the schema cannot express (cross-references between
+// `matrix.over.<algo>` and `params.<algo>`, value-vs-declared-type checks,
+// per-rule duplicate-name checks) is enforced by `semantic_validate_config`.
+
+inline constexpr std::string_view kBenchConfigSchema = R"json({
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BenchFrameworkConfig",
+  "description": "Configuration for one or more benchmarks driven by bioseq::bench_framework. The top-level object always carries the keys 'params' and 'test_cases'; every other top-level key names a benchmark and matches the BenchmarkBlock schema. Benchmark identifiers must be non-empty.",
   "type": "object",
+  "required": ["params", "test_cases"],
+  "propertyNames": {
+    "minLength": 1,
+    "description": "Top-level keys (params, test_cases, plus benchmark identifiers) must be non-empty strings."
+  },
   "properties": {
     "params": {
+      "title": "AlgorithmParameterSchemas",
+      "description": "Parameter schemas grouped by algorithm. Each algorithm key is a free-form name (the same name the user passes to on_run / on_evaluate). Parameter values used in 'matrix.over' and rule selectors are validated against these declarations.",
       "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "minLength": 1 },
       "additionalProperties": {
         "type": "object",
-        "additionalProperties": {
-          "type": "object",
-          "properties": {
-            "type":        { "type": "string" },
-            "enum":        { "type": "array" },
-            "default":     {},
-            "description": { "type": "string" }
+        "minProperties": 1,
+        "description": "Per-algorithm parameter map. Each key is a parameter name; the value follows the ParamSchema definition.",
+        "propertyNames": { "minLength": 1 },
+        "additionalProperties": { "$ref": "#/definitions/param_schema" }
+      },
+      "examples": [
+        {
+          "bioseq_aligner": {
+            "MinimizerAlgorithmType": {
+              "type": "string",
+              "enum": ["SIMD", "SCALAR"],
+              "description": "Minimizer-extraction backend"
+            },
+            "w": {
+              "type": "integer",
+              "default": 10,
+              "description": "Minimizer window size"
+            }
+          }
+        }
+      ]
+    },
+    "test_cases": {
+      "title": "TestCases",
+      "description": "Abstract test cases. Each entry's 'data' field is an opaque JSON object handed verbatim to the user's on_input lambda; the framework itself does not interpret it.",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "minLength": 1 },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["data"],
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Human-readable label shown in the report. May be empty."
           },
-          "required": ["type"]
+          "data": {
+            "type": "object",
+            "description": "Application-defined object passed to on_input. Schema is up to the user."
+          }
+        }
+      },
+      "examples": [
+        { "SMALL": { "description": "100bp random sequence", "data": { "length": 100 } } }
+      ]
+    }
+  },
+  "additionalProperties": { "$ref": "#/definitions/benchmark" },
+  "definitions": {
+    "param_schema": {
+      "title": "ParamSchema",
+      "description": "Subset of JSON Schema describing one algorithm parameter. 'type' is mandatory; 'default' is required for any parameter not enumerated in 'matrix.over' (otherwise matrix expansion has nothing to fill in).",
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "integer", "number", "boolean"],
+          "description": "JSON-Schema-style type. Used to validate values supplied in 'matrix.over' and in rule selectors."
+        },
+        "default": {
+          "description": "Default value used when this parameter is not enumerated in 'matrix.over'. Must match 'type'."
+        },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Optional whitelist of allowed values. When present, every value in 'matrix.over' and every rule-selector value for this parameter must appear here."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable label for the parameter."
+        }
+      },
+      "examples": [
+        { "type": "integer", "default": 10, "description": "minimizer window size" },
+        { "type": "string", "enum": ["A", "B"], "description": "algorithm variant" }
+      ]
+    },
+    "benchmark": {
+      "title": "BenchmarkBlock",
+      "description": "Definition of one benchmark. Lives under a free-form key at the top level (e.g. 'bench_perf'). Multiple benchmark blocks may share one config file; each is invoked by a separate create_benchmark<...>(...) call referencing the matching key.",
+      "type": "object",
+      "required": ["matrix"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable summary. May be empty."
+        },
+        "fast": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, this benchmark runs only when the binary is invoked with --fast. If false (default), it runs unless --fast is passed."
+        },
+        "concurrency": { "$ref": "#/definitions/concurrency" },
+        "matrix": { "$ref": "#/definitions/matrix" }
+      },
+      "examples": [
+        {
+          "description": "Compare aligner runtimes",
+          "fast": false,
+          "concurrency": { "bench_lock": false, "concurrency": true },
+          "matrix": {
+            "for": { "SMALL": 1000 },
+            "over": { "bioseq_aligner": {} },
+            "metrics": { "wall_clock_ns": { "rules": [] } }
+          }
+        }
+      ]
+    },
+    "concurrency": {
+      "title": "ConcurrencyOptions",
+      "description": "Per-benchmark concurrency knobs. Both fields default to false / true respectively.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bench_lock": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, no other benchmark may run concurrently with this one. The framework arbitrates via a process-wide shared_mutex (this benchmark takes the unique lock; others take shared)."
+        },
+        "concurrency": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), this benchmark's iterations are distributed across TBB workers. If false, iterations run serially. NOTE: any benchmark that declares a counter-typed metric is forced serial regardless of this flag."
         }
       }
     },
-    "test_cases": {
+    "matrix": {
+      "title": "BenchmarkMatrix",
+      "description": "The cross-product specification: which test cases to run, which algorithm parameter combinations to enumerate, what to measure, and what rules to validate.",
       "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "description": { "type": "string" },
-          "data":        { "type": "object" }
+      "required": ["for", "over", "metrics"],
+      "additionalProperties": false,
+      "properties": {
+        "for": {
+          "title": "MatrixFor",
+          "type": "object",
+          "minProperties": 1,
+          "description": "Maps each test_case name to its iteration count. Keys must appear in the top-level 'test_cases' map (validated semantically; the JSON schema only enforces non-empty + non-empty-keys).",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of iterations. Zero is legal (test case is skipped) but produces a warning."
+          },
+          "examples": [ { "SMALL": 1000, "MEDIUM": 100 } ]
         },
-        "required": ["data"]
+        "over": {
+          "title": "MatrixOver",
+          "type": "object",
+          "minProperties": 1,
+          "description": "Cross-product axes per algorithm. Each top-level key is an algorithm name (must appear in top-level 'params'); each inner key is a parameter name (must appear in 'params.<algorithm>'); each value is the array of values to enumerate. Parameters not listed here use the default from 'params.<algorithm>.<param>.default'. An empty inner object {} means 'use defaults for everything'.",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": {
+            "type": "object",
+            "description": "Per-algorithm cross-product axis map. Empty {} means use only defaults.",
+            "propertyNames": { "minLength": 1 },
+            "additionalProperties": {
+              "type": "array",
+              "minItems": 1,
+              "description": "List of parameter values to enumerate. Each value must match the parameter's declared 'type' (and 'enum', if present)."
+            }
+          },
+          "examples": [
+            {
+              "bioseq_aligner": {
+                "MinimizerAlgorithmType": ["SIMD", "SCALAR"],
+                "w": [10, 15, 20]
+              }
+            }
+          ]
+        },
+        "by_regions": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, the report splits per-iteration wall_clock_ns by instrumentation region (every named bioseq::instr::region scope contributes its own bucket). When false, only the synthetic 'all_regions' bucket is emitted."
+        },
+        "metrics": {
+          "title": "MetricSpecs",
+          "type": "object",
+          "minProperties": 1,
+          "description": "Metrics to collect, keyed by metric name. The framework recognises three flavours selected via the 'type' field; see the MetricSpec oneOf for details.",
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/definitions/metric_spec" }
+        }
       }
+    },
+    "metric_spec": {
+      "title": "MetricSpec",
+      "description": "One metric. The 'type' field selects between three flavours. (a) BUILTIN: the framework times every iteration with bioseq::instr::clock::now_ns() around on_run and emits 'wall_clock_ns'. The metric key MUST be 'wall_clock_ns'; 'type' is optional ('builtin' is implicit). (b) COUNTER: the framework snapshots a bioseq::instr counter before/after each iteration and records the delta. Forces serial iteration. (c) EVALUATION: the value comes from the user's on_evaluate handler.",
+      "oneOf": [
+        { "$ref": "#/definitions/metric_spec_builtin" },
+        { "$ref": "#/definitions/metric_spec_counter" },
+        { "$ref": "#/definitions/metric_spec_evaluation" }
+      ]
+    },
+    "metric_spec_builtin": {
+      "title": "BuiltinMetric",
+      "description": "Built-in wall-clock metric. The metric key MUST be 'wall_clock_ns'; the framework times every iteration with bioseq::instr::clock::now_ns() around on_run and writes the result under 'all_regions.wall_clock_ns'. The 'type' field is optional ('builtin' is implicit when omitted) but the framework refuses to treat a metric as builtin unless its key equals 'wall_clock_ns' (semantic check after schema).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "builtin",
+          "description": "Optional; defaults to 'builtin' when absent."
+        },
+        "rules": { "$ref": "#/definitions/rule_array" }
+      }
+    },
+    "metric_spec_counter": {
+      "title": "CounterMetric",
+      "description": "Snapshot-based counter metric. The framework reads bioseq::instr::counter('<counter>').value before and after each iteration and records the delta. Any benchmark that uses a counter metric runs iterations SERIALLY (counters are global atomics; concurrent deltas are undefined).",
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "counter" },
+        "counter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical counter name to snapshot. Defaults to the metric key when omitted; provide explicitly when the counter's in-source name differs from the metric label you want in the report."
+        },
+        "rules": { "$ref": "#/definitions/rule_array" }
+      },
+      "examples": [
+        { "type": "counter", "counter": "bioseq.minimizers.emitted", "rules": [] }
+      ]
+    },
+    "metric_spec_evaluation": {
+      "title": "EvaluationMetric",
+      "description": "User-computed metric. The metric key MUST appear in the std::map<std::string,double> returned by on_evaluate — the framework reads it from there each iteration. Metrics declared but never emitted by the handler raise a post-run error.",
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "const": "evaluation" },
+        "rules": { "$ref": "#/definitions/rule_array" }
+      },
+      "examples": [
+        { "type": "evaluation", "rules": [
+            ["accuracy_above_threshold",
+             { "key": "my_algo" },
+             { "compare": ">", "threshold%": 0 },
+             { "key": "baseline" }]
+          ]
+        }
+      ]
+    },
+    "rule_array": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/rule" },
+      "description": "List of rules to evaluate against this metric. May be empty."
+    },
+    "rule": {
+      "title": "Rule",
+      "description": "A 4-tuple [name, lhs_selector, comparator, rhs_selector] expressed as a JSON array. The rule iterates over every (lhs_cell, rhs_cell) pair where the selectors match for the same test_case, takes the median of each side's metric array under 'all_regions', and applies the comparator.",
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "description": "Rule name. Reported in violations and the stderr summary. Must be unique within the benchmark."
+        },
+        { "$ref": "#/definitions/selector" },
+        { "$ref": "#/definitions/comparator" },
+        { "$ref": "#/definitions/selector" }
+      ],
+      "examples": [
+        ["bioseq_faster_than_minimap",
+         { "key": "bioseq", "MinimizerAlgorithmType": "SCALAR" },
+         { "compare": "<", "threshold%": 10, "tolerance%": 1 },
+         { "key": "minimap2" }]
+      ]
+    },
+    "selector": {
+      "title": "RuleSelector",
+      "description": "Partial-match selector for one side of a rule. The 'key' field names the algorithm; every other field is a (param_name, expected_value) constraint. Only the constrained params must match — others are wildcarded. The algorithm name and every constraint key + value are validated semantically against the algorithm's parameter schema in 'params'.",
+      "type": "object",
+      "required": ["key"],
+      "additionalProperties": true,
+      "propertyNames": {
+        "minLength": 1,
+        "description": "Selector field names ('key' plus any partial-match parameter names) cannot be empty strings."
+      },
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Algorithm name (must appear in top-level 'params')."
+        }
+      },
+      "examples": [
+        { "key": "bioseq", "MinimizerAlgorithmType": "SCALAR", "w": 10 },
+        { "key": "minimap2" }
+      ]
+    },
+    "comparator": {
+      "title": "RuleComparator",
+      "description": "Two operator families: ordered ('<' or '>') and equality ('='). Spec semantics:\n  '<': pass iff lhs < rhs * (1 - threshold%/100 + tolerance%/100).\n  '>': pass iff lhs > rhs * (1 + threshold%/100 - tolerance%/100).\n  '=': pass iff |lhs - rhs| <= rhs * tolerance%/100.\nthreshold% and tolerance% are bounded to [0, 100]. A threshold% or tolerance% of exactly 100 makes the rule trivially pass and produces a warning.",
+      "oneOf": [
+        {
+          "title": "OrderedComparator",
+          "description": "Less-than or greater-than.",
+          "type": "object",
+          "required": ["compare"],
+          "additionalProperties": false,
+          "properties": {
+            "compare": { "type": "string", "enum": ["<", ">"] },
+            "threshold%": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 0,
+              "description": "Required improvement margin as a fraction of RHS (in percent). 0 means strict less-than / greater-than."
+            },
+            "tolerance%": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 0,
+              "description": "Slack relaxing the threshold. 100 makes the rule always pass — flagged as a warning."
+            }
+          },
+          "examples": [
+            { "compare": "<", "threshold%": 10, "tolerance%": 1 }
+          ]
+        },
+        {
+          "title": "EqualityComparator",
+          "description": "Numeric equality. Does NOT take a threshold (use tolerance%).",
+          "type": "object",
+          "required": ["compare"],
+          "additionalProperties": false,
+          "properties": {
+            "compare": { "type": "string", "const": "=" },
+            "tolerance%": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 0,
+              "description": "Tolerance window around RHS, in percent. 100 makes the rule always pass — flagged as a warning."
+            }
+          },
+          "examples": [
+            { "compare": "=", "tolerance%": 1 }
+          ]
+        }
+      ]
+    }
+  }
+})json";
+
+inline constexpr std::string_view kBenchReportSchema = R"json({
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BenchFrameworkReport",
+  "description": "Output report.json produced by bioseq::bench_framework. Two top-level fields: 'rule_violations' (every rule that didn't pass) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
+  "type": "object",
+  "required": ["rule_violations", "benchmarks"],
+  "additionalProperties": false,
+  "properties": {
+    "rule_violations": {
+      "type": "array",
+      "description": "Every rule that failed to pass. Empty when all rules were satisfied.",
+      "items": { "$ref": "#/definitions/violation" }
+    },
+    "benchmarks": {
+      "type": "object",
+      "description": "Per-benchmark report data, keyed by benchmark_key (the same key passed to create_benchmark).",
+      "additionalProperties": { "$ref": "#/definitions/benchmark_report" }
     }
   },
-  "required": ["params", "test_cases"]
-})";
-
-[[nodiscard]] inline bool validate_config_against_schema(const std::string& json_text,
-                                                          const std::string& source_path) noexcept
-{
-    // The schema validator throws on error; the user-side benchmark config is
-    // not under our control, so we catch and surface the problem via JustLog.
-    try {
-        nlohmann::json document = nlohmann::json::parse(json_text);
-        nlohmann::json schema = nlohmann::json::parse(kBenchConfigSchema);
-        nlohmann::json_schema::json_validator validator;
-        validator.set_root_schema(schema);
-        validator.validate(document);
-        return true;
-    } catch (const std::exception& e) {
-        loge("[bench_framework] schema validation failed for {}: {}",
-                     source_path, e.what());
-        return false;
+  "definitions": {
+    "param_value": {
+      "description": "A single parameter value. ConfigValue serialises into one of these scalar JSON types: string, number (covers integer + double), or boolean.",
+      "type": ["string", "number", "boolean"]
+    },
+    "param_value_object": {
+      "description": "Map from parameter name to its concrete value (string / integer / number / boolean).",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/param_value" }
+    },
+    "violation": {
+      "title": "RuleViolation",
+      "description": "One failed rule, with the (LHS, RHS) execution_tuple that triggered the failure and the median aggregate values that were compared.",
+      "type": "object",
+      "required": ["location", "benchmark", "rule_name", "execution_tuple", "test_case", "metric", "args"],
+      "additionalProperties": false,
+      "properties": {
+        "location":  { "type": "string", "description": "Path to the config file the rule comes from." },
+        "benchmark": { "type": "string", "description": "benchmark_key the rule belongs to." },
+        "rule_name": { "type": "string", "description": "Rule name as declared in the config." },
+        "execution_tuple": {
+          "description": "Both LHS and RHS algorithm params that triggered this violation. 1-2 keys (LHS-only when both selectors named the same algorithm).",
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 2,
+          "additionalProperties": { "$ref": "#/definitions/param_value_object" }
+        },
+        "test_case": { "type": "string", "description": "Name of the test_case the rule fired against." },
+        "metric":    { "type": "string", "description": "Metric name compared by the rule." },
+        "args": {
+          "description": "[lhs_aggregate, rhs_aggregate]. Both numbers are the median of the metric's sample array under 'all_regions'.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "type": "number" }
+        }
+      }
+    },
+    "benchmark_report": {
+      "title": "BenchmarkReport",
+      "type": "object",
+      "required": ["title", "description", "location", "test_case_descriptions", "execution_tuples"],
+      "additionalProperties": false,
+      "properties": {
+        "title":       { "type": "string", "description": "Title from create_benchmark." },
+        "description": { "type": "string", "description": "Description from the benchmark block (may be empty)." },
+        "location":    { "type": "string", "description": "Path of the config this benchmark was loaded from." },
+        "test_case_descriptions": {
+          "type": "object",
+          "description": "Mirrors the 'description' fields from top-level 'test_cases'.",
+          "additionalProperties": { "type": "string" }
+        },
+        "execution_tuples": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/execution_tuple_record" }
+        }
+      }
+    },
+    "execution_tuple_record": {
+      "title": "ExecutionTupleRecord",
+      "description": "One (algorithm, params) row plus its measured samples. Single-key 'tuple' (one algorithm per row) — rule violations carry a 2-key version when comparing across algorithms.",
+      "type": "object",
+      "required": ["tuple", "test_cases"],
+      "additionalProperties": false,
+      "properties": {
+        "tuple": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "description": "Single key: algorithm name → its full parameter map (defaults inlined).",
+          "additionalProperties": { "$ref": "#/definitions/param_value_object" }
+        },
+        "test_cases": {
+          "type": "object",
+          "description": "Per-test-case sample buckets.",
+          "additionalProperties": { "$ref": "#/definitions/test_case_block" }
+        }
+      }
+    },
+    "test_case_block": {
+      "title": "TestCaseBlock",
+      "description": "Per-test-case sample buckets. The 'all_regions' key always exists and holds the iteration-level wall-clock plus every counter and evaluation metric. When 'by_regions' is true on the benchmark, additional keys appear — one per visited bioseq::instr region — each carrying that region's per-iteration wall_clock_ns.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/definitions/region_block" }
+    },
+    "region_block": {
+      "type": "object",
+      "description": "Map from metric name to the per-iteration sample array.",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "number" }
+      }
     }
+  }
+})json";
+
+// ----------------- Validation utilities -----------------
+
+/// Format a list of `ValidationDiag` to stderr. Returns true iff any
+/// diagnostic has Severity::Error (caller can use this to drive the exit
+/// code / abort flag).
+[[nodiscard]] inline bool report_diagnostics(
+    std::span<const ValidationDiag> diagnostics,
+    std::string_view phase_label) noexcept
+{
+    if (diagnostics.empty()) return false;
+    int error_count = 0;
+    int warning_count = 0;
+    for (const auto& diag : diagnostics) {
+        if (diag.severity == ValidationDiag::Severity::Error) ++error_count;
+        else ++warning_count;
+    }
+
+    std::fprintf(stderr,
+        "============================================================\n"
+        "BENCH FRAMEWORK — %.*s validation: %d error%s, %d warning%s\n"
+        "============================================================\n",
+        static_cast<int>(phase_label.size()), phase_label.data(),
+        error_count,   error_count   == 1 ? "" : "s",
+        warning_count, warning_count == 1 ? "" : "s");
+    for (const auto& diag : diagnostics) {
+        const char* severity_text =
+            (diag.severity == ValidationDiag::Severity::Error) ? "ERROR" : "WARN ";
+        std::fprintf(stderr, "  [%s] %s\n",
+            severity_text, diag.code.c_str());
+        std::fprintf(stderr, "          at: %s\n", diag.location.c_str());
+        std::fprintf(stderr, "          %s\n",     diag.message.c_str());
+    }
+    std::fputs("\n", stderr);
+    std::fflush(stderr);
+    return error_count > 0;
+}
+
+/// Move every diagnostic from `source` into the shared `*context.diagnostics`
+/// list under `context.diagnostics_mu`. Empty / nullptr inputs are no-ops
+/// so the call site doesn't have to guard. The source vector is cleared
+/// after the move so callers can reuse it without leaking stale entries.
+inline void drain_diagnostics_to_context(
+    BenchmarkContext& context,
+    std::vector<ValidationDiag>& source) noexcept
+{
+    if (source.empty()
+        || context.diagnostics == nullptr
+        || context.diagnostics_mu == nullptr) return;
+    std::lock_guard<std::mutex> guard(*context.diagnostics_mu);
+    for (auto& diag : source) {
+        context.diagnostics->push_back(std::move(diag));
+    }
+    source.clear();
+}
+
+/// Run a JSON document through one of the framework's hardcoded schemas
+/// and convert any findings to `ValidationDiag` records. Catches thrown
+/// `std::exception`s from the underlying nlohmann library so the framework
+/// itself stays exception-free.
+[[nodiscard]] inline std::vector<ValidationDiag> validate_against_schema(
+    const std::string& json_text,
+    std::string_view schema_text,
+    std::string_view source_label) noexcept
+{
+    std::vector<ValidationDiag> diagnostics;
+    try {
+        const auto schema_document  = nlohmann::json::parse(schema_text);
+        const auto target_document  = nlohmann::json::parse(json_text);
+        nlohmann::json_schema::json_validator validator;
+        validator.set_root_schema(schema_document);
+        CollectingErrorHandler handler;
+        validator.validate(target_document, handler);
+        for (const auto& entry : handler.entries()) {
+            // The validator's error callback delivers a JSON pointer to the
+            // failing instance. Many of nlohmann_json_schema_validator's
+            // composite errors (oneOf branch failures, propertyNames checks)
+            // report the parent pointer and embed the inner path inside the
+            // message text — so we always render the file label and append
+            // the pointer only when it adds new information beyond the
+            // message body.
+            std::string location_text = std::string{source_label};
+            if (!entry.pointer.empty()) {
+                location_text += " (";
+                location_text += entry.pointer;
+                location_text += ')';
+            }
+            diagnostics.push_back({
+                ValidationDiag::Severity::Error,
+                "schema",
+                std::move(location_text),
+                entry.message
+            });
+        }
+    } catch (const std::exception& exc) {
+        diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "schema_parse",
+            std::string{source_label},
+            exc.what()
+        });
+    }
+    return diagnostics;
+}
+
+/// Validate the user's benchmark configuration against the built-in
+/// `kBenchConfigSchema`.
+[[nodiscard]] inline std::vector<ValidationDiag> validate_config_against_schema(
+    const std::string& json_text,
+    std::string_view source_path) noexcept
+{
+    return validate_against_schema(json_text, kBenchConfigSchema, source_path);
+}
+
+/// Validate the framework's freshly-written report against the built-in
+/// `kBenchReportSchema`. Used as an internal sanity check — if this ever
+/// reports errors we have a bug in the report writer.
+[[nodiscard]] inline std::vector<ValidationDiag> validate_report_against_schema(
+    const std::string& json_text,
+    std::string_view source_path) noexcept
+{
+    return validate_against_schema(json_text, kBenchReportSchema, source_path);
 }
 
 // ----------------- Config parsing helpers -----------------
@@ -1031,67 +1670,426 @@ inline constexpr std::string_view kBenchConfigSchema = R"({
 /// resulting `BenchmarkExecutionState` owns the parser and config body so
 /// the simdjson `dom::element` views handed to the user remain valid for
 /// the entire run.
-[[nodiscard]] inline bool parse_config_file(
+/// Outcome of `parse_config_file`. `ok=true` means the parser walked the
+/// document; `diagnostics` carries every issue found (schema violations
+/// from the JSON-schema pass plus structural problems from the simdjson
+/// walk). On parse failure `ok=false` and the caller must abort *before*
+/// reading anything else from the state — the partial parse is undefined.
+struct ConfigParseOutcome {
+    bool ok = true;
+    std::vector<ValidationDiag> diagnostics{};
+};
+
+[[nodiscard]] inline ConfigParseOutcome parse_config_file(
     const std::string& config_path,
     const std::string& benchmark_key,
     BenchmarkExecutionState& state)
 {
-    state.config.config_path  = config_path;
+    ConfigParseOutcome outcome;
+    state.config.config_path   = config_path;
     state.config.benchmark_key = benchmark_key;
     state.config_body = slurp_file(config_path);
     if (state.config_body.empty()) {
-        loge("[bench_framework] config '{}' is empty or unreadable", config_path);
-        return false;
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "config_unreadable",
+            config_path,
+            "config file is empty or unreadable"
+        });
+        return outcome;
     }
 
-    if (!validate_config_against_schema(state.config_body, config_path)) {
-        return false;
+    // 1. JSON schema pass — validates structure (required fields, types,
+    //    ranges, propertyNames, oneOf branches). Schema errors do not stop
+    //    the walk: we still try to populate as much of the state as
+    //    possible so semantic_validate_config can layer further checks
+    //    on top.
+    auto schema_diagnostics = validate_config_against_schema(state.config_body, config_path);
+    for (auto& diag : schema_diagnostics) {
+        if (diag.severity == ValidationDiag::Severity::Error) outcome.ok = false;
+        outcome.diagnostics.push_back(std::move(diag));
     }
 
+    // 2. simdjson walk. If the top-level structure is unrecognisable we
+    //    bail; less catastrophic problems (missing benchmark key, etc.)
+    //    surface as additional diagnostics so the user sees one
+    //    consolidated report.
     auto root_result = state.parser.parse(state.config_body);
     simdjson::dom::element root_element;
     if (root_result.get(root_element) != simdjson::SUCCESS) {
-        loge("[bench_framework] simdjson failed to parse '{}'", config_path);
-        return false;
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "simdjson_parse",
+            config_path,
+            "simdjson failed to parse the config file"
+        });
+        return outcome;
     }
 
     simdjson::dom::object root_obj;
     if (root_element.get(root_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] config '{}' is not a JSON object", config_path);
-        return false;
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "not_object",
+            config_path,
+            "top-level value is not a JSON object"
+        });
+        return outcome;
     }
 
     bool parse_ok = true;
 
     simdjson::dom::object params_obj;
-    if (root_obj["params"].get(params_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] config '{}' missing 'params'", config_path);
-        return false;
+    if (root_obj["params"].get(params_obj) == simdjson::SUCCESS) {
+        state.config.algorithm_schemas = parse_top_level_params(params_obj, parse_ok);
+    } else {
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "missing_params",
+            config_path,
+            "config has no top-level 'params' object"
+        });
     }
-    state.config.algorithm_schemas = parse_top_level_params(params_obj, parse_ok);
 
     simdjson::dom::object test_cases_obj;
-    if (root_obj["test_cases"].get(test_cases_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] config '{}' missing 'test_cases'", config_path);
-        return false;
+    if (root_obj["test_cases"].get(test_cases_obj) == simdjson::SUCCESS) {
+        state.test_cases = parse_test_cases(test_cases_obj, parse_ok);
+    } else {
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "missing_test_cases",
+            config_path,
+            "config has no top-level 'test_cases' object"
+        });
     }
-    state.test_cases = parse_test_cases(test_cases_obj, parse_ok);
 
     simdjson::dom::element benchmark_element;
     if (root_obj[benchmark_key].get(benchmark_element) != simdjson::SUCCESS) {
-        loge("[bench_framework] config '{}' has no top-level key '{}'",
-                     config_path, benchmark_key);
-        return false;
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "missing_benchmark_block",
+            std::string{config_path} + ":" + benchmark_key,
+            "config has no top-level key for the requested benchmark"
+        });
+        return outcome;
     }
     simdjson::dom::object benchmark_obj;
     if (benchmark_element.get(benchmark_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] '{}.{}' is not an object", config_path, benchmark_key);
-        return false;
+        outcome.ok = false;
+        outcome.diagnostics.push_back({
+            ValidationDiag::Severity::Error,
+            "benchmark_not_object",
+            std::string{config_path} + ":" + benchmark_key,
+            "benchmark block is not a JSON object"
+        });
+        return outcome;
     }
     if (!parse_benchmark_block(benchmark_obj, state.config)) {
-        return false;
+        parse_ok = false;
     }
-    return parse_ok;
+    if (!parse_ok) outcome.ok = false;
+    return outcome;
+}
+
+// ----------------- Semantic config validation -----------------
+//
+// Once the JSON schema and the simdjson walk have populated
+// `BenchmarkExecutionState`, the framework runs cross-field checks the
+// schema cannot express:
+//   - matrix.over.<algorithm> references an algorithm declared in 'params'
+//   - matrix.over.<algorithm>.<parameter> references a declared parameter
+//   - every value in matrix.over.<algorithm>.<parameter> matches the
+//     parameter's declared type (and 'enum', if present)
+//   - matrix.for.<test_case> references a declared test case
+//   - rule selectors point at a declared algorithm and only mention
+//     declared parameters with type-correct values
+//   - rule names are unique within a benchmark
+//   - threshold% / tolerance% of exactly 100 raises a warning ("rule will
+//     always pass")
+//   - test_cases declared with zero iterations raise a warning
+
+/// True iff `value` matches the declared `param`. Type promotion: a
+/// `number`-typed parameter accepts both Integer and Double values.
+[[nodiscard]] inline bool value_matches_param_schema(
+    const ConfigValue& value, const ParamSchema& param) noexcept
+{
+    bool type_ok = false;
+    if      (param.json_type == "string"  && value.is_string())  type_ok = true;
+    else if (param.json_type == "integer" && value.is_integer()) type_ok = true;
+    else if (param.json_type == "number"  && (value.is_double() || value.is_integer())) type_ok = true;
+    else if (param.json_type == "boolean" && value.is_boolean()) type_ok = true;
+    if (!type_ok) return false;
+    if (param.enum_values.empty()) return true;
+    for (const auto& allowed : param.enum_values) {
+        if (allowed == value) return true;
+    }
+    return false;
+}
+
+/// Look up one parameter's schema inside an algorithm's parameter list.
+/// Returns nullptr if either the algorithm or the parameter is unknown.
+[[nodiscard]] inline const ParamSchema* find_param_schema(
+    const std::map<std::string, AlgorithmSchema>& schemas,
+    const std::string& algorithm_name,
+    const std::string& param_name) noexcept
+{
+    const auto algo_it = schemas.find(algorithm_name);
+    if (algo_it == schemas.end()) return nullptr;
+    for (const auto& param : algo_it->second.params) {
+        if (param.param_name == param_name) return &param;
+    }
+    return nullptr;
+}
+
+/// Helper for building human-readable diagnostic locations. Returns
+/// `<config_path>:<benchmark_key>/<sub_path>`.
+[[nodiscard]] inline std::string semantic_location(
+    const BenchmarkExecutionState& state, std::string_view sub_path) noexcept
+{
+    std::string out = state.config.config_path;
+    out += ':';
+    out += state.config.benchmark_key;
+    out += '/';
+    out += sub_path;
+    return out;
+}
+
+/// Render a ConfigValue's *kind* as a JSON-Schema-style type name, used by
+/// `value_type_mismatch` diagnostics so the user sees what was passed vs.
+/// what was declared.
+[[nodiscard]] inline std::string_view config_value_kind_name(const ConfigValue& value) noexcept {
+    switch (value.kind) {
+        case ConfigValue::Kind::String:    return "string";
+        case ConfigValue::Kind::Integer:   return "integer";
+        case ConfigValue::Kind::Double:    return "number";
+        case ConfigValue::Kind::Boolean:   return "boolean";
+        case ConfigValue::Kind::NonScalar: return "non-scalar (object/array/null)";
+    }
+    return "?";
+}
+
+/// Walk every cross-reference inside a parsed `BenchmarkExecutionState`
+/// and emit `ValidationDiag` records for anything inconsistent. Returns a
+/// flat vector covering every benchmark-level concern (no early-exit so
+/// the user sees every issue in one pass).
+[[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_config(
+    const BenchmarkExecutionState& state) noexcept
+{
+    std::vector<ValidationDiag> diagnostics;
+    const auto& config  = state.config;
+    const auto& schemas = config.algorithm_schemas;
+
+    auto emit = [&](ValidationDiag::Severity severity,
+                    std::string code,
+                    std::string sub_path,
+                    std::string message) {
+        diagnostics.push_back({
+            severity,
+            std::move(code),
+            semantic_location(state, sub_path),
+            std::move(message),
+        });
+    };
+    auto error   = [&](std::string code, std::string sub_path, std::string message) {
+        emit(ValidationDiag::Severity::Error,   std::move(code),
+             std::move(sub_path), std::move(message));
+    };
+    auto warning = [&](std::string code, std::string sub_path, std::string message) {
+        emit(ValidationDiag::Severity::Warning, std::move(code),
+             std::move(sub_path), std::move(message));
+    };
+
+    // 1. Cross-check `matrix.over.<algo>.<param> = [values]` against
+    //    `params.<algo>.<param>`. Every algorithm must be declared, every
+    //    parameter must be declared, every value must be type-correct.
+    for (const auto& [algorithm_name, params_axes] : config.matrix_over) {
+        if (schemas.find(algorithm_name) == schemas.end()) {
+            error("unknown_algorithm",
+                  "matrix.over." + algorithm_name,
+                  fmt::format("algorithm '{}' is not declared in top-level 'params'",
+                              algorithm_name));
+            continue;
+        }
+        for (const auto& [param_name, value_list] : params_axes) {
+            const auto* param_schema = find_param_schema(schemas, algorithm_name, param_name);
+            if (param_schema == nullptr) {
+                error("unknown_parameter",
+                      fmt::format("matrix.over.{}.{}", algorithm_name, param_name),
+                      fmt::format("parameter '{}' is not declared in 'params.{}'",
+                                  param_name, algorithm_name));
+                continue;
+            }
+            for (std::size_t i = 0; i < value_list.size(); ++i) {
+                if (!value_matches_param_schema(value_list[i], *param_schema)) {
+                    error("value_type_mismatch",
+                          fmt::format("matrix.over.{}.{}[{}]",
+                                      algorithm_name, param_name, i),
+                          fmt::format("value of type '{}' does not match declared type '{}'"
+                                      "{} for parameter '{}.{}'",
+                                      config_value_kind_name(value_list[i]),
+                                      param_schema->json_type,
+                                      param_schema->enum_values.empty()
+                                        ? std::string{}
+                                        : std::string{" (or is outside the declared 'enum')"},
+                                      algorithm_name, param_name));
+                }
+            }
+        }
+    }
+
+    // 2. Cross-check `matrix.for.<test_case>` against top-level
+    //    `test_cases`, and warn on zero iterations.
+    std::set<std::string> declared_test_cases;
+    for (const auto& spec : state.test_cases) declared_test_cases.insert(spec.name);
+    for (const auto& [test_case_name, iterations] : config.for_each) {
+        if (declared_test_cases.find(test_case_name) == declared_test_cases.end()) {
+            error("unknown_test_case",
+                  "matrix.for." + test_case_name,
+                  fmt::format("test_case '{}' is not declared in top-level 'test_cases'",
+                              test_case_name));
+        }
+        if (iterations == 0) {
+            warning("zero_iterations",
+                    "matrix.for." + test_case_name,
+                    fmt::format("test_case '{}' has 0 iterations and will not run",
+                                test_case_name));
+        }
+    }
+
+    // 3. Walk every rule. Selector validation, rule name uniqueness,
+    //    threshold/tolerance always-pass warnings.
+    std::set<std::string> seen_rule_names;
+    auto validate_selector = [&](const RuleSelector& selector,
+                                  std::string_view rule_name,
+                                  std::string_view metric_name,
+                                  std::string_view side) {
+        const auto schema_it = schemas.find(selector.algorithm_key);
+        const std::string base_loc = fmt::format(
+            "matrix.metrics.{}.rules.{}.{}", metric_name, rule_name, side);
+        if (schema_it == schemas.end()) {
+            error("unknown_algorithm",
+                  base_loc + ".key",
+                  fmt::format("rule selector references algorithm '{}' which is not declared in 'params'",
+                              selector.algorithm_key));
+            return;
+        }
+        for (const auto& [match_param, match_value] : selector.match) {
+            const auto* param_schema = find_param_schema(
+                schemas, selector.algorithm_key, match_param);
+            if (param_schema == nullptr) {
+                error("unknown_parameter",
+                      fmt::format("{}.{}", base_loc, match_param),
+                      fmt::format("rule selector for algorithm '{}' constrains unknown parameter '{}'",
+                                  selector.algorithm_key, match_param));
+                continue;
+            }
+            if (!value_matches_param_schema(match_value, *param_schema)) {
+                error("value_type_mismatch",
+                      fmt::format("{}.{}", base_loc, match_param),
+                      fmt::format("rule selector value for '{}.{}' is of type '{}' but the parameter is declared as '{}'",
+                                  selector.algorithm_key, match_param,
+                                  config_value_kind_name(match_value),
+                                  param_schema->json_type));
+            }
+        }
+    };
+
+    for (const auto& metric : config.metrics) {
+        // 4a. Builtin metric keyword check. The framework only knows how
+        //     to populate one builtin metric — wall_clock_ns. A
+        //     metric with omitted/`type: builtin` whose key is anything else
+        //     would silently produce no samples (the schema can't gate this
+        //     because the metric's key is the parent property name).
+        if (metric.kind == MetricKind::WallClockNs && metric.name != "wall_clock_ns") {
+            error("invalid_builtin_metric_name",
+                  fmt::format("matrix.metrics.{}", metric.name),
+                  fmt::format("metric '{}' is treated as builtin (no 'type' field) but only 'wall_clock_ns' is supported as a builtin key; either rename to 'wall_clock_ns' or set 'type' to 'counter' / 'evaluation'",
+                              metric.name));
+        }
+
+        for (const auto& rule : metric.rules) {
+            if (!seen_rule_names.insert(rule.name).second) {
+                error("duplicate_rule_name",
+                      fmt::format("matrix.metrics.{}.rules.{}", metric.name, rule.name),
+                      fmt::format("rule name '{}' is used more than once in this benchmark; rule names must be unique",
+                                  rule.name));
+            }
+            validate_selector(rule.lhs, rule.name, metric.name, "lhs");
+            validate_selector(rule.rhs, rule.name, metric.name, "rhs");
+
+            // Always-pass warnings.
+            if (rule.cmp.threshold_pct == 100.0) {
+                warning("threshold_max",
+                        fmt::format("matrix.metrics.{}.rules.{}.comparator", metric.name, rule.name),
+                        "threshold% is 100, the rule will always pass");
+            }
+            if (rule.cmp.tolerance_pct == 100.0) {
+                warning("tolerance_max",
+                        fmt::format("matrix.metrics.{}.rules.{}.comparator", metric.name, rule.name),
+                        "tolerance% is 100, the rule will always pass");
+            }
+        }
+    }
+
+    return diagnostics;
+}
+
+/// Post-run validation. The only check here is "every declared
+/// `type: evaluation` metric was emitted at least once by the user's
+/// `on_evaluate` handler". We can only see this after the iteration loop
+/// finished; missing keys are an error (the evaluation handler is the
+/// authoritative source for evaluation-typed metrics).
+[[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_post_run(
+    const BenchmarkExecutionState& state) noexcept
+{
+    std::vector<ValidationDiag> diagnostics;
+
+    // If no cell ran (every test_case had 0 iterations, or no test_cases were
+    // declared at all), the missing-metric check would false-positive on
+    // every evaluation metric. Skip the check entirely and emit a single
+    // warning so the situation is still surfaced.
+    bool any_iteration_ran = false;
+    for (const auto& cell_ptr : state.cells) {
+        if (!cell_ptr->samples.empty()) { any_iteration_ran = true; break; }
+    }
+    if (!any_iteration_ran) {
+        diagnostics.push_back({
+            ValidationDiag::Severity::Warning,
+            "benchmark_did_not_run",
+            semantic_location(state, "matrix"),
+            "benchmark did not execute any iteration (matrix.for entries either name unknown test cases or set iterations to 0); evaluation-metric coverage check skipped"
+        });
+        return diagnostics;
+    }
+
+    for (const auto& metric : state.config.metrics) {
+        if (metric.kind != MetricKind::Evaluation) continue;
+        bool seen_anywhere = false;
+        for (const auto& cell_ptr : state.cells) {
+            const auto region_it = cell_ptr->samples.find("all_regions");
+            if (region_it == cell_ptr->samples.end()) continue;
+            if (region_it->second.find(metric.name) == region_it->second.end()) continue;
+            seen_anywhere = true;
+            break;
+        }
+        if (!seen_anywhere) {
+            diagnostics.push_back({
+                ValidationDiag::Severity::Error,
+                "missing_evaluation_metric",
+                semantic_location(state,
+                    fmt::format("matrix.metrics.{}", metric.name)),
+                fmt::format("metric '{}' is declared as 'type: evaluation' but the on_evaluate handler never returned this key for any iteration",
+                            metric.name)
+            });
+        }
+    }
+    return diagnostics;
 }
 
 // ----------------- Matrix expansion -----------------
@@ -1543,16 +2541,25 @@ inline void emit_value_scalar(simdjson::builder::string_builder& builder,
 {
     switch (value.kind) {
         case ConfigValue::Kind::String:
-            builder.escape_and_append_with_quotes(std::string_view{value.str_v});
+            builder.escape_and_append_with_quotes(std::string_view{value.string_value});
             return;
         case ConfigValue::Kind::Integer:
-            builder.append(value.int_v);
+            builder.append(value.integer_value);
             return;
         case ConfigValue::Kind::Double:
-            builder.append(value.dbl_v);
+            builder.append(value.double_value);
             return;
         case ConfigValue::Kind::Boolean:
-            builder.append(value.bool_v);
+            builder.append(value.boolean_value);
+            return;
+        case ConfigValue::Kind::NonScalar:
+            // NonScalar values should have been rejected by semantic
+            // validation long before we reach the report writer. If we're
+            // here, validation was bypassed — emit JSON null so the report
+            // still parses (the schema's param_value_object accepts
+            // numbers/strings/booleans only, so this still flags as a bug
+            // when the report is re-validated).
+            builder.append_null();
             return;
     }
 }
@@ -1655,7 +2662,14 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
                 emit_object_with_body(tuple_b, [&](auto& tuple_inner) {
                     emit_key(tuple_inner, std::string_view{violation.lhs_algorithm});
                     emit_param_object(tuple_inner, violation.lhs_full_params);
-                    if (!violation.rhs_algorithm.empty()) {
+                    // Emit RHS as a separate JSON property only when it
+                    // names a different algorithm. When LHS and RHS share
+                    // an algorithm name (e.g. a self-comparison rule), a
+                    // second emit would produce duplicate keys → invalid
+                    // JSON. The schema's `maxProperties: 2` tolerates the
+                    // 1-key form already.
+                    if (!violation.rhs_algorithm.empty()
+                        && violation.rhs_algorithm != violation.lhs_algorithm) {
                         tuple_inner.append_comma();
                         emit_key(tuple_inner, std::string_view{violation.rhs_algorithm});
                         emit_param_object(tuple_inner, violation.rhs_full_params);
@@ -1734,6 +2748,12 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
                     for (const auto& [test_case_name, _iter] : state.config.for_each) {
                         const Cell* cell_for_pair = find_cell(state, &tuple, test_case_name);
                         if (cell_for_pair == nullptr) continue;
+                        // Skip cells that produced no samples (e.g.
+                        // matrix.for declared zero iterations). The schema
+                        // requires at least one region per emitted
+                        // test_case bucket; emitting an empty object would
+                        // fail report validation.
+                        if (cell_for_pair->samples.empty()) continue;
                         if (!first_tc_in_tuple) cases_inner.append_comma();
                         first_tc_in_tuple = false;
                         emit_kv_with_body(cases_inner,
@@ -1835,10 +2855,11 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
         result += name;
         result += "=";
         switch (value.kind) {
-            case ConfigValue::Kind::String:  result += value.str_v; break;
-            case ConfigValue::Kind::Integer: result += std::to_string(value.int_v); break;
-            case ConfigValue::Kind::Double:  result += std::to_string(value.dbl_v); break;
-            case ConfigValue::Kind::Boolean: result += value.bool_v ? "true" : "false"; break;
+            case ConfigValue::Kind::String:    result += value.string_value; break;
+            case ConfigValue::Kind::Integer:   result += std::to_string(value.integer_value); break;
+            case ConfigValue::Kind::Double:    result += std::to_string(value.double_value); break;
+            case ConfigValue::Kind::Boolean:   result += value.boolean_value ? "true" : "false"; break;
+            case ConfigValue::Kind::NonScalar: result += "<non-scalar>"; break;
         }
     }
     return result;
@@ -1883,16 +2904,33 @@ inline void print_violations(const std::vector<Violation>& violations) noexcept 
             violation.rule_name.c_str(),
             violation.test_case.c_str(),
             violation.metric.c_str());
-        std::fprintf(stderr,
-            "    LHS %s { %s }\n        median = %.6g\n",
-            violation.lhs_algorithm.c_str(),
-            format_param_map(violation.lhs_full_params).c_str(),
-            violation.args[0]);
-        std::fprintf(stderr,
-            "    RHS %s { %s }\n        median = %.6g\n",
-            violation.rhs_algorithm.c_str(),
-            format_param_map(violation.rhs_full_params).c_str(),
-            violation.args[1]);
+        const auto lhs_param_text = format_param_map(violation.lhs_full_params);
+        const auto rhs_param_text = format_param_map(violation.rhs_full_params);
+        // Mirror the JSON writer's RHS-dedup: when both selectors named the
+        // same algorithm with the same param map, print one combined line
+        // instead of two visually identical sides.
+        const bool same_side =
+            violation.lhs_algorithm == violation.rhs_algorithm
+            && lhs_param_text == rhs_param_text;
+        if (same_side) {
+            std::fprintf(stderr,
+                "    self-compare on %s { %s }\n        LHS median = %.6g\n        RHS median = %.6g\n",
+                violation.lhs_algorithm.c_str(),
+                lhs_param_text.c_str(),
+                violation.args[0],
+                violation.args[1]);
+        } else {
+            std::fprintf(stderr,
+                "    LHS %s { %s }\n        median = %.6g\n",
+                violation.lhs_algorithm.c_str(),
+                lhs_param_text.c_str(),
+                violation.args[0]);
+            std::fprintf(stderr,
+                "    RHS %s { %s }\n        median = %.6g\n",
+                violation.rhs_algorithm.c_str(),
+                rhs_param_text.c_str(),
+                violation.args[1]);
+        }
         std::fprintf(stderr, "\n");
     }
 
@@ -2057,7 +3095,9 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     std::shared_mutex cross_bench_mu;
     std::mutex        violations_mu;
     std::mutex        reports_mu;
+    std::mutex        diagnostics_mu;
     std::vector<Violation> violations;
+    std::vector<ValidationDiag> diagnostics;
     std::map<std::string, std::unique_ptr<BenchmarkExecutionState>> reports;
 
     ProgressState progress;
@@ -2090,6 +3130,8 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 context.violations        = &violations;
                 context.reports_mu        = &reports_mu;
                 context.reports           = &reports;
+                context.diagnostics_mu    = &diagnostics_mu;
+                context.diagnostics       = &diagnostics;
 
                 erased.execute(context);
             });
@@ -2098,15 +3140,36 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     progress.running.store(false, std::memory_order_relaxed);
     progress_thread.join();
 
+    // Print all collected validation diagnostics first (config + semantic +
+    // post-run). Errors here force a non-zero exit code regardless of
+    // whether any rules failed.
+    const bool diagnostics_had_errors = report_diagnostics(
+        std::span<const ValidationDiag>{diagnostics}, "configuration");
+
     logi("[bench_framework] all benchmarks finished, writing report...");
     const auto report_path = write_report(report_dir, reports, violations);
     if (!report_path.empty()) {
         logi("[bench_framework] wrote {}", report_path);
     }
 
+    // Sanity-check our own report against the output schema. Failures here
+    // mean a bug in the writer, not user error — but we still surface them.
+    bool report_schema_failed = false;
+    if (!report_path.empty()) {
+        const auto report_text = slurp_file(std::filesystem::path{report_path});
+        if (!report_text.empty()) {
+            const auto report_check_diagnostics =
+                validate_report_against_schema(report_text, report_path);
+            report_schema_failed = report_diagnostics(
+                std::span<const ValidationDiag>{report_check_diagnostics}, "report");
+        }
+    }
+
     print_violations(violations);
 
-    return violations.empty() ? 0 : 1;
+    return (violations.empty()
+            && !diagnostics_had_errors
+            && !report_schema_failed) ? 0 : 1;
 }
 
 }  // namespace detail
@@ -2138,17 +3201,38 @@ template<typename Input, typename Output>
         auto& state = *state_holder;
         state.title = erased_title;
 
-        if (!detail::parse_config_file(erased_config_path, erased_benchmark_key, state)) {
-            loge("[bench_framework] benchmark '{}' aborted (parse failure)",
-                         erased_benchmark_key);
+        // 1. Parse the config file. The outcome carries schema diagnostics
+        //    plus structural problems found during the simdjson walk.
+        auto parse_outcome = detail::parse_config_file(
+            erased_config_path, erased_benchmark_key, state);
+        const bool parse_failed = !parse_outcome.ok;
+        detail::drain_diagnostics_to_context(context, parse_outcome.diagnostics);
+        if (parse_failed) {
+            loge("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
+                 erased_benchmark_key);
             return;
         }
 
-        // --fast filter: skip if the user requested fast mode but this
-        // benchmark is not flagged fast. Without --fast we run everything.
+        // 2. Semantic validation: cross-references, type-correctness in
+        //    rules, duplicate rule names, always-pass warnings, etc.
+        auto semantic_diagnostics = detail::semantic_validate_config(state);
+        const bool semantic_failed = std::any_of(
+            semantic_diagnostics.begin(), semantic_diagnostics.end(),
+            [](const auto& diag) {
+                return diag.severity == detail::ValidationDiag::Severity::Error;
+            });
+        detail::drain_diagnostics_to_context(context, semantic_diagnostics);
+        if (semantic_failed) {
+            loge("[bench_framework] benchmark '{}' aborted (semantic validation failure)",
+                 erased_benchmark_key);
+            return;
+        }
+
+        // 3. --fast filter: skip if the user requested fast mode but this
+        //    benchmark is not flagged fast. Without --fast we run everything.
         if (context.fast_filter && !state.config.fast) {
             logi("[bench_framework] skipping '{}' under --fast (fast=false)",
-                         erased_benchmark_key);
+                 erased_benchmark_key);
             return;
         }
 
@@ -2156,7 +3240,7 @@ template<typename Input, typename Output>
         state.execution_tuples = detail::expand_matrix(state.config, expansion_ok);
         if (!expansion_ok || state.execution_tuples.empty()) {
             loge("[bench_framework] benchmark '{}' produced no execution tuples",
-                         erased_benchmark_key);
+                 erased_benchmark_key);
             return;
         }
         state.cells = detail::build_cells(state);
@@ -2182,7 +3266,11 @@ template<typename Input, typename Output>
                                                     captured_on_run,
                                                     captured_on_evaluate);
 
-        // Evaluate rules and stash this benchmark's report data.
+        // 4. Post-run validation: missing-evaluation-metric check.
+        auto post_run_diagnostics = detail::semantic_validate_post_run(state);
+        detail::drain_diagnostics_to_context(context, post_run_diagnostics);
+
+        // 5. Evaluate rules and stash this benchmark's report data.
         std::vector<detail::Violation> local_violations;
         detail::evaluate_rules(state, local_violations);
 

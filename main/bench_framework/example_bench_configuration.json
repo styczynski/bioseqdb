@@ -59,10 +59,10 @@
         "wall_clock_ns": {
           "rules": [
             [
-              "stable_sort_within_3x_of_sort",
-              { "key": "std_stable_sort" },
-              { "compare": "<", "threshold%": -200, "tolerance%": 0 },
-              { "key": "std_sort" }
+              "sort_within_2x_of_stable_sort",
+              { "key": "std_sort" },
+              { "compare": "=", "tolerance%": 99 },
+              { "key": "std_stable_sort" }
             ]
           ]
         }
