@@ -30,10 +30,21 @@ set(BENCH_FRAMEWORK_MODULE_FILES
 set(BENCH_FRAMEWORK_EXAMPLE_SOURCES
   "${BENCH_FRAMEWORK_DIR}/example_main.cpp")
 
+# Catch2 unit tests — see index_test.cpp for the test cases.
+# The TESTS argument auto-spawns a sibling target called
+# `bioseq_bench_framework_example_tests_exec`. The framework links
+# Catch2WithMain into that binary, so index_test.cpp must NOT define
+# its own main(). Run with:
+#   ninja bioseq_bench_framework_example_tests_exec
+#   ./bioseq_bench_framework_example_tests_exec
+set(BENCH_FRAMEWORK_TEST_SOURCES
+  "${BENCH_FRAMEWORK_DIR}/index_test.cpp")
+
 AddCommonTargetX(
   bioseq_bench_framework_example
   TYPE       EXEC
   CXX        26
+  MAIN       "example_main\\.cpp"
   RELOCATABLE
   NAME       bioseq_bench_framework_example
   COMMENT    "Bench framework demo binary"
@@ -61,6 +72,8 @@ AddCommonTargetX(
     TBB::tbb
   SOURCES
     ${BENCH_FRAMEWORK_EXAMPLE_SOURCES}
+  TESTS
+    ${BENCH_FRAMEWORK_TEST_SOURCES}
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${BIOSEQ_DIR}"
@@ -74,3 +87,15 @@ target_compile_definitions(bioseq_bench_framework_example
     "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bench_framework_example\""
     "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_DATA_DIR=\"${BENCH_FRAMEWORK_DIR}\""
 )
+
+# The same compile definitions also need to flow into the test
+# binary; without them the bench_framework module imports succeed
+# but anything that pulled in the example's data-dir / report-dir
+# macros (none right now, but a future test might) would break.
+if(TARGET bioseq_bench_framework_example_tests_exec)
+  target_compile_definitions(bioseq_bench_framework_example_tests_exec
+    PRIVATE
+      "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_REPORT_DIR=\"${BIOSEQ_DIR}/../reporting/bench_framework_example\""
+      "BIOSEQ_BENCH_FRAMEWORK_EXAMPLE_DATA_DIR=\"${BENCH_FRAMEWORK_DIR}\""
+  )
+endif()

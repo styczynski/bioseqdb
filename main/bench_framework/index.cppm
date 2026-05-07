@@ -230,9 +230,13 @@ namespace detail {
  *                          metric_value)` pair appended to the `all_regions`
  *                          bucket. Names that don't match any `metrics` key
  *                          declared with `type: "evaluation"` are silently
- *                          dropped (logged at DBG level so users can debug
- *                          missing-key issues). Called concurrently like
- *                          `on_run`; no shared mutable state.
+ *                          dropped — `on_evaluate` lambdas are typically
+ *                          generic across benchmarks, so emitting more keys
+ *                          than this benchmark consumes is normal. Conversely,
+ *                          if a declared evaluation metric is never returned,
+ *                          the framework emits `missing_evaluation_metric` and
+ *                          fails the run (typo guard). Called concurrently
+ *                          like `on_run`; no shared mutable state.
  */
 template<typename Input, typename Output>
 [[nodiscard]] ErasedBenchmark create_benchmark(
@@ -622,13 +626,6 @@ struct Cell {
     /// counter / evaluation metric. Per-region buckets only appear when
     /// `BenchmarkConfig::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
-    /// Set of keys returned by `on_evaluate` for this cell that don't
-    /// correspond to any declared evaluation metric. Populated during
-    /// the iteration loop under `samples_mu` (same critical section as
-    /// `samples`); drained into hard-error diagnostics by
-    /// `semantic_validate_post_run`. Deduped so 1000 iterations with
-    /// the same typo collapse into a single diagnostic per cell.
-    std::set<std::string> unknown_evaluation_keys{};
     std::mutex samples_mu{};
 
     Cell() = default;
@@ -2963,44 +2960,13 @@ struct ConfigParseOutcome {
         }
     }
 
-    // Hard error: every key the user's `on_evaluate` returned must
-    // correspond to a declared evaluation metric. Silent drops are
-    // not allowed — typos like `{"correctness"}` vs.
-    // `"correct_fraction"` would otherwise look successful and the
-    // user's value would never reach the report. We emit one error
-    // per (cell, unknown_key); if the same key was returned across
-    // many iterations on the same cell the dedup in
-    // `cell.unknown_evaluation_keys` collapses it to a single entry.
-    std::string declared_list;
-    {
-        bool first = true;
-        for (const auto& metric : state.config.metrics) {
-            if (metric.kind != MetricKind::Evaluation) continue;
-            if (first) { declared_list.append("["); first = false; }
-            else       { declared_list.append(", "); }
-            declared_list.append(metric.name);
-        }
-        if (declared_list.empty()) declared_list = "<none declared>";
-        else                       declared_list.append("]");
-    }
-
-    for (const auto& cell_ptr : state.cells) {
-        for (const auto& unknown_key : cell_ptr->unknown_evaluation_keys) {
-            diagnostics.push_back({
-                ValidationDiag::Severity::Error,
-                "evaluation_key_not_declared",
-                semantic_location(state,
-                    fmt::format("matrix.metrics(returned-but-undeclared)/{}",
-                                unknown_key)),
-                fmt::format("on_evaluate returned key '{}' for benchmark '{}' algorithm '{}' test_case '{}', but no metric with that name is declared in matrix.metrics with type 'evaluation' (declared evaluation metrics: {}); the value would be silently dropped — declare the metric or rename the returned key",
-                            unknown_key,
-                            state.config.benchmark_key,
-                            cell_ptr->tuple->algorithm_name,
-                            cell_ptr->test_case->name,
-                            declared_list)
-            });
-        }
-    }
+    // V7 note: returned-but-undeclared evaluation keys are dropped
+    // silently. The on_evaluate lambda is typically shared across
+    // multiple benchmarks (one returns `accuracy` and `latency`,
+    // another only declares `accuracy`); flagging extra keys would
+    // make sharing painful. The opposite direction — declared but
+    // not returned — is still flagged via `missing_evaluation_metric`
+    // above because that case is almost always a typo.
 
     return diagnostics;
 }
@@ -3501,9 +3467,13 @@ inline void append_iteration_samples(
     std::size_t counter_index = 0;
 
     // Walk the declared metrics; pull each declared evaluation metric
-    // out of `evaluation_metrics`. Track which keys we consumed so we
-    // can flag any returned-but-not-declared keys as unknown afterwards.
-    std::set<std::string_view> consumed_evaluation_keys;
+    // out of `evaluation_metrics`. Returned-but-undeclared keys are
+    // dropped silently here — `on_evaluate` lambdas are typically
+    // generic across benchmarks so one returning more keys than this
+    // benchmark uses is normal, not an error. Declared-but-not-returned
+    // is still surfaced (via `semantic_validate_post_run`'s
+    // `missing_evaluation_metric` check) — that direction usually means
+    // a typo in the config.
     for (const auto& metric : metrics) {
         switch (metric.kind) {
             case MetricKind::WallClockNs:
@@ -3517,13 +3487,16 @@ inline void append_iteration_samples(
                 continue;
             }
             case MetricKind::Evaluation: {
-                auto found = evaluation_metrics.find(metric.name);
-                if (found != evaluation_metrics.end()) {
+                if (auto found = evaluation_metrics.find(metric.name);
+                    found != evaluation_metrics.end())
+                {
                     all_regions[metric.name].push_back(found->second);
-                    consumed_evaluation_keys.insert(std::string_view{found->first});
-                } else {
-                    logd("[bench_framework] evaluator did not return metric '{}'", metric.name);
                 }
+                // No log on miss: `semantic_validate_post_run` emits
+                // `missing_evaluation_metric` once per cell after the
+                // iteration loop joins, which is more useful and
+                // doesn't flood the log with N copies of the same
+                // message.
                 continue;
             }
             default: break;     // builtin region/loop metric — fall through.
@@ -3590,21 +3563,6 @@ inline void append_iteration_samples(
         // contribution). The sample array stays sparse; the rule
         // evaluator's median-of-samples handles missing iterations
         // gracefully.
-    }
-
-    // Surface any keys the user's `on_evaluate` returned that don't
-    // correspond to a declared evaluation metric. These would
-    // otherwise be silently dropped — typo cases like
-    // `{"correctness", 0.99}` vs. a declared `"correct_fraction"`
-    // metric look successful at the framework level. We track them
-    // per-cell so `semantic_validate_post_run` can emit a hard error
-    // with full context (algorithm, test_case, key) once iterations
-    // finish.
-    for (const auto& [returned_key, _value] : evaluation_metrics) {
-        if (consumed_evaluation_keys.count(std::string_view{returned_key}) > 0) {
-            continue;
-        }
-        cell.unknown_evaluation_keys.insert(returned_key);
     }
 }
 
