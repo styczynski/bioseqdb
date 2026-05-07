@@ -23,6 +23,7 @@ import bioseq_sequences;
 import algo.circular_append_buffer;
 
 export import bioseq_simd.utils;
+export import bioseq_simd.vector_stream;
 
 export {
 
@@ -1005,62 +1006,69 @@ iterate_sequence_bp_simd_v2(
 
 	// (5) Full-chunk fast path.
 	//
-	// The per-row / per-bp body is INLINED here (rather than wrapped in a
-	// `handle_row_bp` lambda) so the compiler sees a single straight-line
-	// body inside the chunk loop. handler_fn is called with the BP vectors
-	// expanded as POSITIONAL ARGUMENTS via `index_sequence` (NOT as a
-	// `std::array<vec_t, NumStreams>`) so that on M1 NEON ABI each BP lands
-	// in a SIMD register (V0/V1) instead of a stack slot. This is the same
-	// shape today's dual-stream production path uses (`step_one_bp_pair(d,
-	// bp_lo, bp_hi, …)` with `bp_lo`, `bp_hi` as separate `vec_t` args).
+	// Phase-3 cleanup: per-row state lives in a `vec_stream<D, ST, NumStreams>`
+	// bundle; `handler_fn` is still called with BP vectors expanded as
+	// POSITIONAL parameter-pack arguments (Phase-1 lesson — passing a
+	// std::array reference forces stack spill on M1 NEON; the parameter-pack
+	// ABI puts each bp_v[s] in V0/V1 NEON registers). The bundle is
+	// scalar-replaced inside this helper because the [[gnu::always_inline]]
+	// + [[gnu::flatten]] annotations let SROA see through the std::array
+	// storage at compile time for W ∈ {1, 2}.
+	// Use the non-cv-qualified tag here; vec_stream's lifted ops deduce
+	// `D` via `deduce_tag` which strips cv (vector_stream.cppm line ~310),
+	// so a `vec_stream<const ScalableTag<…>, …>` declaration would not
+	// match the type returned by lift_op.
+	using d_unq_t = hn::ScalableTag<typename seq_traits::storage_unit>;
+	using vec_stream_t = vec_stream<d_unq_t,
+		typename seq_traits::storage_unit, NumStreams>;
 	for (size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
 		// Per-stream matrix construction + fill (compile-time unrolled).
-		[&]<size_t... S>(std::index_sequence<S...>) {
-			((matrix(raw_matrix_storage[S].data())
-				.fill_with_offsets(d, offsets_per_stream[S],
-					seq.read_cptr(iter))), ...);
-		}(std::make_index_sequence<NumStreams>{});
+		for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+			constexpr size_t s = decltype(stream_idx_const)::value;
+			matrix(raw_matrix_storage[s].data())
+				.fill_with_offsets(d, offsets_per_stream[s],
+					seq.read_cptr(iter));
+		});
 		// Advance iter ONCE per chunk — every stream shares the starting
 		// position; the offsets-per-stream slices encode per-stream stride.
 		iter += lanes_per_stream;
 		// Per-stream transpose.
-		[&]<size_t... S>(std::index_sequence<S...>) {
-			((matrix(raw_matrix_storage[S].data()).transpose(d)), ...);
-		}(std::make_index_sequence<NumStreams>{});
+		for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+			constexpr size_t s = decltype(stream_idx_const)::value;
+			matrix(raw_matrix_storage[s].data()).transpose(d);
+		});
 
 		for (size_t row_index = 0; row_index < lanes_per_stream;
 		     ++row_index) {
-			// Hold each stream's row-of-BPs in a NAMED scalar pack — see
-			// comment block above for the register-vs-stack rationale.
-			vec_t row_0 = raw_matrix_storage[0][row_index];
-			[[maybe_unused]] vec_t row_1;
-			if constexpr (NumStreams > 1) {
-				row_1 = raw_matrix_storage[1][row_index];
-			}
+			// Build the row bundle via array-pack construction (per the
+			// prompt's "use array constructor + integer sequence" hint).
+			// Direct const-init avoids the construct-then-assign pattern.
+			vec_stream_t row = [&]<size_t... S>(std::index_sequence<S...>) {
+				return vec_stream_t::pack(raw_matrix_storage[S][row_index]...);
+			}(std::make_index_sequence<NumStreams>{});
+
 			constexpr size_t lpu = seq_traits::letters_per_unit;
 			for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
-				const vec_t bp_v_0 = hn::And(row_0, bp_bitmask_vec);
-				row_0 = hn::ShiftRightSame(row_0, seq_traits::bits_per_char);
-				if constexpr (NumStreams == 1) {
+				const vec_stream_t bp_v = And(row, bp_bitmask_vec);
+				row = ShiftRight<seq_traits::bits_per_char>(row);
+				// Expand the bundle BACK into a parameter pack to keep the
+				// handler ABI register-safe (Phase-1 contract).
+				[&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
 					handler_fn(std::bool_constant<true>{},
-						offsets, d, full_mask, bp_v_0);
-				} else {
-					const vec_t bp_v_1 = hn::And(row_1, bp_bitmask_vec);
-					row_1 = hn::ShiftRightSame(row_1, seq_traits::bits_per_char);
-					handler_fn(std::bool_constant<true>{},
-						offsets, d, full_mask, bp_v_0, bp_v_1);
-				}
+						offsets, d, full_mask, bp_v[S]...);
+				}(std::make_index_sequence<NumStreams>{});
 			}
 		}
 	}
 
 	// (6) Partial-chunk tail.
-	[&]<size_t... S>(std::index_sequence<S...>) {
-		((matrix(raw_matrix_storage[S].data())
+	for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+		constexpr size_t s = decltype(stream_idx_const)::value;
+		matrix(raw_matrix_storage[s].data())
 			.partial_fill_with_offsets(d, end - iter,
-				offsets_per_stream[S], seq.read_cptr(iter))), ...);
-		((matrix(raw_matrix_storage[S].data()).transpose(d)), ...);
-	}(std::make_index_sequence<NumStreams>{});
+				offsets_per_stream[s], seq.read_cptr(iter));
+		matrix(raw_matrix_storage[s].data()).transpose(d);
+	});
 
 	if (main_counter_none == 0) {
 		// Sequence length was an exact full-chunk multiple — fix-up didn't
@@ -1079,24 +1087,18 @@ iterate_sequence_bp_simd_v2(
 	// Tail loop. Same body shape as the full-chunk fast path but with
 	// `main_counter` bookkeeping for the full → left → none mask transitions.
 	for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
-		vec_t row_0 = raw_matrix_storage[0][row_index];
-		[[maybe_unused]] vec_t row_1;
-		if constexpr (NumStreams > 1) {
-			row_1 = raw_matrix_storage[1][row_index];
-		}
+		vec_stream_t row = [&]<size_t... S>(std::index_sequence<S...>) {
+			return vec_stream_t::pack(raw_matrix_storage[S][row_index]...);
+		}(std::make_index_sequence<NumStreams>{});
+
 		constexpr size_t lpu = seq_traits::letters_per_unit;
 		for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
-			const vec_t bp_v_0 = hn::And(row_0, bp_bitmask_vec);
-			row_0 = hn::ShiftRightSame(row_0, seq_traits::bits_per_char);
-			if constexpr (NumStreams == 1) {
+			const vec_stream_t bp_v = And(row, bp_bitmask_vec);
+			row = ShiftRight<seq_traits::bits_per_char>(row);
+			[&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
 				handler_fn(std::bool_constant<false>{},
-					offsets, d, main_mask, bp_v_0);
-			} else {
-				const vec_t bp_v_1 = hn::And(row_1, bp_bitmask_vec);
-				row_1 = hn::ShiftRightSame(row_1, seq_traits::bits_per_char);
-				handler_fn(std::bool_constant<false>{},
-					offsets, d, main_mask, bp_v_0, bp_v_1);
-			}
+					offsets, d, main_mask, bp_v[S]...);
+			}(std::make_index_sequence<NumStreams>{});
 
 			++main_counter;
 			if (main_counter == main_counter_none) {

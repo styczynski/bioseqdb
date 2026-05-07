@@ -86,7 +86,12 @@ struct vec_stream {
     static constexpr size_t stream_width = W;
 
 private:
-    HWY_ALIGN std::array<vec_t, W> _data;
+    // No HWY_ALIGN — `vec_t` (Highway Vec<D>) carries its own alignment via
+    // the underlying SIMD ABI. Adding `alignas(…)` on the wrapping std::array
+    // can inhibit SROA: the optimizer treats the bundle as a memory object
+    // rather than scalar-replacing per-slot. The named-scalar layout from
+    // Phase 1 worked because each `vec_t` was an independent local.
+    std::array<vec_t, W> _data;
 
     // Explicit private constructor used by pack/splat factories. Since _data
     // is private, the type is non-aggregate and brace-init `vec_stream{...}`
@@ -103,26 +108,37 @@ public:
     [[nodiscard]] constexpr std::array<vec_t, W>&       data()       noexcept { return _data; }
     [[nodiscard]] constexpr const std::array<vec_t, W>& data() const noexcept { return _data; }
 
-    /// Type-safe pack — exactly W vec_t arguments.
+    /// Type-safe pack — exactly W vec_t arguments. Direct aggregate-init of
+    /// the underlying std::array; the only point of construction. NRVO-friendly.
     template <typename... Vs>
     requires (sizeof...(Vs) == W && (std::is_convertible_v<Vs, vec_t> && ...))
-    [[nodiscard]] static HWY_INLINE vec_stream pack(Vs... vs) noexcept {
+    [[nodiscard]] static HWY_INLINE constexpr vec_stream pack(Vs... vs) noexcept {
         return vec_stream{ std::array<vec_t, W>{ static_cast<vec_t>(vs)... } };
     }
 
     /// All-slots-equal factory.
+    /// Direct construction via array-initializer + parameter-pack expansion.
+    /// No "default-construct + per-slot assign" cycle — the std::array is
+    /// fully initialized in one expression so the compiler doesn't have to
+    /// reason about partial writes.
     [[nodiscard]] static HWY_INLINE vec_stream splat(tag_t d, ST value) noexcept {
-        vec_stream out;
-        const auto v = hn::Set(d, value);
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-            out[decltype(s_const)::value] = v;
-        });
-        return out;
+        return splat_impl(hn::Set(d, value),
+            std::make_index_sequence<W>{});
     }
 
     [[nodiscard]] static HWY_INLINE vec_stream splat_zero(tag_t d) noexcept {
         return splat(d, ST{0});
     }
+
+private:
+    /// Implementation helper for `splat`. Uses parameter-pack expansion
+    /// `((void)S, v)...` to repeat `v` W times in the `pack` argument list.
+    template <size_t... S>
+    [[nodiscard]] static HWY_INLINE vec_stream
+    splat_impl(vec_t v, std::index_sequence<S...>) noexcept {
+        return pack(((void)S, v)...);
+    }
+public:
 
     // Hidden-friend operators. These exist solely so Highway's generic-V
     // fallbacks `Add(V, V) { return a + b; }`, `Sub(V, V) { return a - b; }`,
@@ -140,12 +156,21 @@ public:
     // Hidden friends are found only via ADL on vec_stream args, so they don't
     // pollute the surrounding namespace.
 
+    // Hidden-friend arithmetic operators. Direct array-initializer pattern:
+    // pack expansion fills all W slots in one expression — no mutable `out`
+    // variable for the optimizer to track. With static `pack_impl<S...>`
+    // the compiler sees a single std::array aggregate-init constructor call.
+
 #define BIOSEQ_VS_HIDDEN_FRIEND_OP(OPSYM, HNNAME)                                  \
     [[nodiscard]] friend HWY_INLINE auto operator OPSYM(                            \
-        vec_stream const& a, vec_stream const& b) {                                 \
-        return for_each_index_lift(                                                 \
-            [](vec_t const& x, vec_t const& y) [[gnu::always_inline]] { return hn::HNNAME(x, y); }, \
-            a, b);                                                                  \
+        vec_stream const& a, vec_stream const& b) noexcept {                        \
+        return op_pack_impl_##HNNAME(a, b, std::make_index_sequence<W>{});          \
+    }                                                                               \
+    template <size_t... S>                                                          \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE                             \
+    vec_stream op_pack_impl_##HNNAME(                                               \
+        vec_stream const& a, vec_stream const& b, std::index_sequence<S...>) noexcept { \
+        return pack(hn::HNNAME(a[S], b[S])...);                                     \
     }
 
     BIOSEQ_VS_HIDDEN_FRIEND_OP(+,  Add)
@@ -157,13 +182,14 @@ public:
     // Comparison operators return a mask_stream<tag_t, W>.
 #define BIOSEQ_VS_HIDDEN_FRIEND_CMP(OPSYM, HNNAME)                                 \
     [[nodiscard]] friend HWY_INLINE auto operator OPSYM(                            \
-        vec_stream const& a, vec_stream const& b) {                                 \
-        mask_stream<tag_t, W> out;                                                  \
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {                \
-            constexpr size_t s = decltype(s_const)::value;                          \
-            out[s] = hn::HNNAME(a[s], b[s]);                                        \
-        });                                                                         \
-        return out;                                                                 \
+        vec_stream const& a, vec_stream const& b) noexcept {                        \
+        return cmp_pack_impl_##HNNAME(a, b, std::make_index_sequence<W>{});         \
+    }                                                                               \
+    template <size_t... S>                                                          \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE                             \
+    mask_stream<tag_t, W> cmp_pack_impl_##HNNAME(                                   \
+        vec_stream const& a, vec_stream const& b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W>::pack(hn::HNNAME(a[S], b[S])...);              \
     }
 
     BIOSEQ_VS_HIDDEN_FRIEND_CMP(==, Eq)
@@ -175,19 +201,6 @@ public:
 
 #undef BIOSEQ_VS_HIDDEN_FRIEND_CMP
 
-private:
-    // Local helper: for-each-index over W, building a vec_stream by applying
-    // a binary op slot-wise. Used by hidden-friend arithmetic operators.
-    template <typename F>
-    [[nodiscard, gnu::always_inline]] static HWY_INLINE
-    vec_stream for_each_index_lift(F&& fn, vec_stream const& a, vec_stream const& b) {
-        vec_stream out;
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-            constexpr size_t s = decltype(s_const)::value;
-            out[s] = fn(a[s], b[s]);
-        });
-        return out;
-    }
 };
 
 // ----------------------------------------------------------------------------
@@ -202,7 +215,8 @@ struct mask_stream {
     static constexpr size_t stream_width = W;
 
 private:
-    HWY_ALIGN std::array<mask_t, W> _data;
+    // See comment on vec_stream::_data — same SROA rationale.
+    std::array<mask_t, W> _data;
 
     explicit HWY_INLINE constexpr mask_stream(std::array<mask_t, W> d) noexcept
         : _data(d) {}
@@ -218,18 +232,22 @@ public:
 
     template <typename... Ms>
     requires (sizeof...(Ms) == W && (std::is_convertible_v<Ms, mask_t> && ...))
-    [[nodiscard]] static HWY_INLINE mask_stream pack(Ms... ms) noexcept {
+    [[nodiscard]] static HWY_INLINE constexpr mask_stream pack(Ms... ms) noexcept {
         return mask_stream{ std::array<mask_t, W>{ static_cast<mask_t>(ms)... } };
     }
 
     [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_t d) noexcept {
-        mask_stream out;
-        const auto m = hn::MaskFalse(d);
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-            out[decltype(s_const)::value] = m;
-        });
-        return out;
+        return splat_false_impl(hn::MaskFalse(d),
+            std::make_index_sequence<W>{});
     }
+
+private:
+    template <size_t... S>
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream
+    splat_false_impl(mask_t m, std::index_sequence<S...>) noexcept {
+        return pack(((void)S, m)...);
+    }
+public:
 };
 
 // ============================================================================
@@ -355,6 +373,51 @@ inline constexpr bool tags_consistent_v =
                      typename deduce_tag<std::remove_cvref_t<Args>...>::type>)
      && ... && true);
 
+/// Helper: evaluate `op` at slot S, with per-arg projection. Expanding the
+/// `args` pack INSIDE this helper (at depth 0) leaves only `S` to be
+/// expanded by the caller at the outer pack-expansion site. C++ pack
+/// expansion expands all packs mentioned at the same depth simultaneously
+/// (zip-style); we want cartesian, so we hide one pack behind a template
+/// barrier.
+template <size_t S, typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto lift_eval_at_slot(Op& op, Args&... args) {
+    return op(project<S>(args)...);
+}
+
+template <size_t S, typename Op, typename... Args>
+[[gnu::always_inline]] HWY_INLINE
+void lift_apply_at_slot(Op& op, Args&... args) {
+    op(project<S>(args)...);
+}
+
+/// lift_op_pack_vec: helper that does the actual pack expansion for a
+/// vec_stream-returning lift. Static so the compiler sees a single direct
+/// `vec_stream::pack(...)` call (which is `vec_stream{ std::array{...} }`
+/// — a single aggregate-init point of construction, NRVO-friendly).
+template <class D, typename ST, size_t W,
+          size_t... S, typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+vec_stream<D, ST, W> lift_op_pack_vec(
+    std::index_sequence<S...>, Op& op, Args&... args) {
+    return vec_stream<D, ST, W>::pack(lift_eval_at_slot<S>(op, args...)...);
+}
+
+template <class D, size_t W,
+          size_t... S, typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+mask_stream<D, W> lift_op_pack_mask(
+    std::index_sequence<S...>, Op& op, Args&... args) {
+    return mask_stream<D, W>::pack(lift_eval_at_slot<S>(op, args...)...);
+}
+
+template <size_t... S, typename Op, typename... Args>
+[[gnu::always_inline]] HWY_INLINE
+void lift_op_apply_void(
+    std::index_sequence<S...>, Op& op, Args&... args) {
+    (lift_apply_at_slot<S>(op, args...), ...);
+}
+
 /// lift_op: invoke `op(project<S>(args)...)` for S in [0, W) and bundle the
 /// W results into the matching stream type.
 ///
@@ -363,11 +426,13 @@ inline constexpr bool tags_consistent_v =
 ///   element result is hn::Mask<D> → mask_stream<D, W>
 ///   element result is void        → void (used by side-effect ops like StoreStream)
 ///
-/// The arguments are captured BY REFERENCE in the inner lambda. We do NOT
-/// std::forward inside the per-slot evaluation: project<S>(arg) for a non-
-/// stream returns by reference (the same lvalue every slot), so calling W
-/// times is safe. For stream arguments project<S> returns arg[S] which is
-/// also a reference into the bundle.
+/// Implementation note: each non-void path calls one of the static
+/// `lift_op_pack_*` helpers above which take a `std::index_sequence<S...>`
+/// and a parameter pack of args by reference, then build the result via
+/// `vec_stream::pack(op(project<S>(args)...)...)`. The pack form is a
+/// single direct construction (no "default-construct + per-slot assign"
+/// cycle); the optimizer sees a single std::array aggregate init and
+/// scalar-replaces the bundle's storage in the calling frame.
 template <typename Op, typename... Args>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 auto lift_op(Op&& op, Args&&... args) {
@@ -392,27 +457,15 @@ auto lift_op(Op&& op, Args&&... args) {
         using ST_from_args = typename deduce_stored<std::remove_cvref_t<Args>...>::type;
         using ST = std::conditional_t<std::is_void_v<ST_from_args>,
                                        hn::TFromD<D>, ST_from_args>;
-        vec_stream<D, ST, W> out;
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-            constexpr size_t s = decltype(s_const)::value;
-            out[s] = op(project<s>(args)...);
-        });
-        return out;
+        return lift_op_pack_vec<D, ST, W>(
+            std::make_index_sequence<W>{}, op, args...);
     } else if constexpr (std::is_same_v<elem_result_t, hn::Mask<D>>) {
-        mask_stream<D, W> out;
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-            constexpr size_t s = decltype(s_const)::value;
-            out[s] = op(project<s>(args)...);
-        });
-        return out;
+        return lift_op_pack_mask<D, W>(
+            std::make_index_sequence<W>{}, op, args...);
     } else {
         static_assert(std::is_same_v<elem_result_t, void>,
                       "lift_op: element result must be Vec<D> or Mask<D> or void");
-        for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-            constexpr size_t s = decltype(s_const)::value;
-            op(project<s>(args)...);
-        });
-        // implicit return void
+        lift_op_apply_void(std::make_index_sequence<W>{}, op, args...);
     }
 }
 
@@ -586,6 +639,23 @@ requires (is_vec_stream_v<A>)
 // Bespoke wrappers — ops whose tag/result-type cannot be inferred via lift_op.
 // ============================================================================
 
+namespace vec_stream_internal_bc {
+template <class D_to, class A, size_t S>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto bitcast_at_slot(D_to d_to, A const& a) noexcept {
+    return hn::BitCast(d_to, a[S]);
+}
+
+template <class D_to, typename ST_to, size_t W,
+          class A, size_t... S>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+vec_stream<D_to, ST_to, W> bitcast_pack_impl(
+    D_to d_to, A const& a, std::index_sequence<S...>) noexcept {
+    return vec_stream<D_to, ST_to, W>::pack(
+        bitcast_at_slot<D_to, A, S>(d_to, a)...);
+}
+}  // namespace vec_stream_internal_bc
+
 /// BitCast: takes a destination tag D_to and a vec_stream, returning a stream
 /// of the destination type. Cannot route through lift_op because the result
 /// tag is the user-supplied D_to, not the input stream's tag.
@@ -595,12 +665,8 @@ requires (is_vec_stream_v<A>)
     using ATy = std::remove_cvref_t<A>;
     constexpr size_t W = ATy::stream_width;
     using ST_to = hn::TFromD<D_to>;
-    vec_stream<D_to, ST_to, W> out;
-    for_each_index<W>([&](auto s_const) [[gnu::always_inline]] {
-        constexpr size_t s = decltype(s_const)::value;
-        out[s] = hn::BitCast(d_to, a[s]);
-    });
-    return out;
+    return vec_stream_internal_bc::bitcast_pack_impl<D_to, ST_to, W>(
+        d_to, a, std::make_index_sequence<W>{});
 }
 
 /// VecFromMask: mask_stream → vec_stream. Tag is supplied explicitly.

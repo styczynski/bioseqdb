@@ -16,6 +16,8 @@ import bioseq_sequences;
 import bioseq_sequences.simd;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers;
+import bioseq_simd.utils;            // for_each_index<W>
+import bioseq_simd.vector_stream;    // vec_stream<D, ST, W> + lifted ops
 import algo.circular_append_buffer;
 import bioseq_instr;
 
@@ -60,48 +62,40 @@ constexpr bool is_xor_complement_v = []() constexpr {
 // =================================================================================
 // Two-stack nthash collector — UNIFIED single-stream + dual-stream impl.
 // ---------------------------------------------------------------------------------
-// One templated function (NumStreams ∈ {1, 2}) replaces what used to be two
-// sibling implementations (`…_single_stream_simd_impl` for short inputs and
-// `…_simd_impl` for the dual-stream production path). Driven by the generic
-// `iterate_sequence_bp_simd_v2` from `simd.cppm`, which owns all of the
-// matrix-load / transpose / partial-chunk-mask plumbing; the per-BP body
-// here is one `[&]` lambda mirroring the simd-minimizers paper's
-// description of the two-stack queue.
+// Phase-3 layout: per-stream rolling state and the ring buffers are bundled
+// into `vec_stream<D, ST, NumStreams>` from `bioseq_simd.vector_stream`. The
+// pre-Phase-3 file used named scalars (`state_fwd_0`, `state_fwd_1`, …) under
+// `if constexpr (NumStreams > 1)` guards so the Phase-1 register-safety
+// contract held; Phase-3 hides every per-stream replication site behind the
+// vec_stream abstraction. Compile-time unrolling at W ∈ {1, 2} produces the
+// same scalar-replaced code the named layout did, but the source reads as
+// the simd-minimizers paper's pseudocode (one statement per logical op).
+//
+// The lambda boundary still receives BPs as a parameter PACK
+// (`BpVecs... bps`) — Phase-1 demonstrated that passing `std::array<vec_t, N>`
+// across this boundary forces the compiler to lose register state. The pack
+// is converted into a `vec_stream::pack(bps...)` bundle inside the lambda
+// where `[[gnu::always_inline]]` lets SROA promote the bundle's storage
+// back to the same NEON registers V0/V1 that the ABI used for the pack.
 //
 // Hash function: lexic ordering with a cheap multiplicative mix
 // (`(lex × golden_ratio) & hash_kmer_mask`) inside the inner loop; the full
 // `simd_hash_t::scramble` (e.g. minimap_int's seven-step integer mix) is
 // applied at emit time on the chosen lane's lex value (recovered from the
-// parallel `ring_buf_hash_strand_*` slot, with strand bit packed in LSB).
+// parallel `ring_buf_hash_strand` slot, with strand bit packed in LSB).
 // Both query and target apply the identical scheme so target-index lookups
 // match.
 //
-// Palindrome detection is `if constexpr (NumStreams == 1)`-gated: dropped
-// on the dual-stream production path (saves 1 cmeq + 1 bic per stream per
-// iteration; palindromic kmers that win their window are exceedingly rare
-// on random sequences ≈ 4^-(k/2) ≈ 0.001 % at k=15 and the resulting
-// selection drift sits well within the density tolerance the bench uses),
-// preserved on the single-stream fallback to match the V9 single-stream
-// behaviour byte-for-byte. The dual-stream path is V12+'s deliberate
-// performance choice; the single-stream path's palindrome detection
-// matters at short k (e.g. k=4 dna4 → 4-mer palindromes like "ACGT",
-// "AGCT", "TGCA" are real and common). Keeping the gating consistent
-// with the OLD `_single_stream_simd_impl` / `_simd_impl` split means the
-// behaviour pre/post refactor is identical at every NumStreams.
-//
-// For inputs too short to fill 2 × Lanes(d) chunks of stride the public
-// dispatch picks NumStreams=1, which still works against the same
-// templated impl.
-//
-// State layout: per-stream forward / RC rolling state, prefix-min, ring
-// buffers — all kept as flat NAMED scalars (`state_fwd_0`, `state_fwd_1`,
-// `ring_buf_elem_0`, `ring_buf_elem_1`) under `if constexpr (NumStreams > 1)`
-// guards rather than `std::array<vec_t, NumStreams>`. `std::array` would
-// force the compiler to materialise the array's address through `[&]`
-// lambda capture and tends to spill state to memory; the named-scalar
-// layout below is the same shape today's dual-stream production path uses
-// and is empirically register-safe on M1 NEON. See ENGINEERING_REPORT_V2.md
-// §V11–V13 for the historical evolution.
+// Palindrome detection is gated by the new `bool DetectPalindrome` template
+// parameter (Phase-3 decoupling). The dispatch shell sets
+// `DetectPalindrome = (NumStreams == 1)` to preserve Phase-1's byte-identity
+// — the dual-stream production path drops palindrome detection (V12+
+// optimisation: 1 cmeq + 1 bic per stream per iter saved at the cost of
+// ≈ 4^-(k/2) ≈ 0.001 % selection drift on random k=15 sequences); the
+// single-stream fallback keeps detection so short-k inputs (k=4 dna4 → 4-mer
+// palindromes like "ACGT", "AGCT", "TGCA") match the historical
+// `_single_stream_simd_impl` behaviour bit-for-bit. Decoupling lets future
+// callers opt out independently.
 //
 // V10b "kmer_mask & hash_mask_high" BUG FIX comment block is preserved
 // below verbatim — the regression it documents (every uint64 storage
@@ -114,6 +108,7 @@ template<
     size_t StaticW,
     size_t StaticK,
     size_t NumStreams,
+    bool   DetectPalindrome,
     template<typename H_A> typename simd_hash_t,
     class MinimizerT,
     supports_compact_sequence_range R,
@@ -145,6 +140,14 @@ collect_minimizers_two_stack_nthash_simd_impl(
     const d_t d;
     using vec_t  = hn::Vec<d_t>;
     using mask_t = hn::Mask<d_t>;
+
+    // NumStreams-wide bundle types. With aggressive inlining (the impl is
+    // [[gnu::always_inline]] [[gnu::flatten]] and every vec_stream operation
+    // is HWY_INLINE), the bundle's std::array<vec_t, W> storage gets
+    // scalar-replaced back to per-slot NEON registers — same machine code
+    // the named-scalar layout produced in Phase 1.
+    using vec_stream_t  = vec_stream<d_t, storage_unit, NumStreams>;
+    using mask_stream_t = mask_stream<d_t, NumStreams>;
 
     const size_t lanes_per_stream = hn::Lanes(d);
 
@@ -180,7 +183,6 @@ collect_minimizers_two_stack_nthash_simd_impl(
     DEBUG_ASSERT(w >= 1, "Window size must be at least 1");
 
     const vec_t v_max       = hn::Set(d, max_val);
-    const vec_t v_zero      = hn::Zero(d);
     const vec_t v_one       = hn::Set(d, static_cast<storage_unit>(1));
     const vec_t v_pos_mask  = hn::Set(d, pos_mask);
     // V10b mask: `hash_mask_high` zeros the low `hash_bits` of the storage
@@ -220,38 +222,30 @@ collect_minimizers_two_stack_nthash_simd_impl(
 
     constexpr size_t buf_capacity = has_static_w ? StaticW : two_stack_max_window;
 
-    // ---- Per-stream ring buffers — flat NAMED arrays under if constexpr.
-    // (See impl docstring above for the std::array-vs-named rationale.)
-    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_elem_0;
-    HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_hash_strand_0;
-    [[maybe_unused]] HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_elem_1;
-    [[maybe_unused]] HWY_ALIGN std::array<vec_t, buf_capacity> ring_buf_hash_strand_1;
-    for (size_t i = 0; i < w; ++i) {
-        ring_buf_elem_0[i]        = v_max;
-        ring_buf_hash_strand_0[i] = v_zero;
-        if constexpr (NumStreams > 1) {
-            ring_buf_elem_1[i]        = v_max;
-            ring_buf_hash_strand_1[i] = v_zero;
+    // ---- Ring buffers — slot-major bundles. Each slot holds NumStreams
+    //      vec_t's; with W = 1 or 2 and aggressive inlining the bundle's
+    //      array storage scalar-replaces into per-slot register state the
+    //      same way Phase-1's named-scalar layout did. (No HWY_ALIGN needed:
+    //      vec_stream's vec_t members carry the SIMD ABI alignment; an extra
+    //      alignas can inhibit SROA — see vector_stream.cppm comment.)
+    std::array<vec_stream_t, buf_capacity> ring_buf_elem;
+    std::array<vec_stream_t, buf_capacity> ring_buf_hash_strand;
+    {
+        const auto initial_elem = vec_stream_t::splat(d, max_val);
+        const auto initial_hs   = vec_stream_t::splat(d, static_cast<storage_unit>(0));
+        for (size_t i = 0; i < w; ++i) {
+            ring_buf_elem[i]        = initial_elem;
+            ring_buf_hash_strand[i] = initial_hs;
         }
     }
 
-    // ---- Per-stream rolling state ----
-    vec_t state_fwd_0      = v_zero;
-    vec_t state_rc_0       = v_zero;
-    vec_t prefix_min_0     = v_max;
-    vec_t prefix_kmer_0    = v_zero;
-    vec_t pos_local_0      = v_zero;
-    vec_t last_emit_pos_0  = v_max;
-    [[maybe_unused]] vec_t state_fwd_1, state_rc_1, prefix_min_1,
-                           prefix_kmer_1, pos_local_1, last_emit_pos_1;
-    if constexpr (NumStreams > 1) {
-        state_fwd_1     = v_zero;
-        state_rc_1      = v_zero;
-        prefix_min_1    = v_max;
-        prefix_kmer_1   = v_zero;
-        pos_local_1     = v_zero;
-        last_emit_pos_1 = v_max;
-    }
+    // ---- Per-stream rolling state — bundled. ----
+    vec_stream_t state_fwd      = vec_stream_t::splat(d, static_cast<storage_unit>(0));
+    vec_stream_t state_rc       = vec_stream_t::splat(d, static_cast<storage_unit>(0));
+    vec_stream_t prefix_min     = vec_stream_t::splat(d, max_val);
+    vec_stream_t prefix_kmer    = vec_stream_t::splat(d, static_cast<storage_unit>(0));
+    vec_stream_t pos_local      = vec_stream_t::splat(d, static_cast<storage_unit>(0));
+    vec_stream_t last_emit_pos  = vec_stream_t::splat(d, max_val);
 
     // ---- Shared scalar bookkeeping ----
     storage_unit pos_wrap_delta = 0;
@@ -272,52 +266,33 @@ collect_minimizers_two_stack_nthash_simd_impl(
     const hash_val_t kmer_mask_scalar = static_cast<hash_val_t>(kmer_mask);
 
     // ---- Per-BP body — the simd-minimizers paper's two-stack inner loop,
-    // generalised over NumStreams via `if constexpr` on per-stream state.
+    //      expressed bundle-uniformly. NumStreams enters only via the
+    //      template parameter on `vec_stream_t` / `mask_stream_t`; there
+    //      is NO `if constexpr (NumStreams …)` branching for per-stream
+    //      replication anywhere in this body.
     //
-    // BP vectors arrive as a parameter PACK (`BpVecs... bps`) that
-    // expands to `vec_t bp_v_0 [, vec_t bp_v_1]` — i.e. separate
-    // by-value `vec_t` parameters, NOT a `std::array<vec_t, NumStreams>`.
-    // On the M1 NEON ABI vec_t parameters land in NEON registers V0/V1,
-    // so the lambda's body sees BPs as register values from the start
-    // (matches the original `step_one_bp_pair(d, bp_lo, bp_hi, …)`
-    // shape that V11/V12 verified to compile to good code).
+    // BPs arrive as a parameter PACK (Phase-1 ABI for register safety) and
+    // are immediately bundled via `vec_stream_t::pack(bps...)`. With
+    // [[gnu::always_inline]] on this lambda + [[gnu::flatten]] on the
+    // impl, the bundle's storage scalar-replaces back to the same V0/V1
+    // NEON registers the ABI used for the pack.
     auto step_one_bp = [&]<bool is_full, typename... BpVecs>(
         std::bool_constant<is_full>,
         auto const& offsets_in,
         auto& /*d unused — captured */,
-        auto& live_mask,
+        mask_t live_mask,
         BpVecs... bps
-    ) [[gnu::always_inline]] {
+    ) [[gnu::always_inline]] [[gnu::flatten]] {
         static_assert(sizeof...(bps) == NumStreams,
             "step_one_bp lambda expects exactly NumStreams BP vectors");
-        // Pack-of-references → named locals via std::tuple. Compiler
-        // promotes these to NEON register copies because the bps... pack
-        // is itself by-value and already register-resident.
-        const auto bps_tuple = std::forward_as_tuple(bps...);
-        const vec_t bp_v_0 = std::get<0>(bps_tuple);
-        [[maybe_unused]] vec_t bp_v_1;
-        if constexpr (NumStreams > 1) {
-            bp_v_1 = std::get<1>(bps_tuple);
-        }
+        const vec_stream_t bp_v = vec_stream_t::pack(bps...);
 
         // ---- Forward / RC state update ----
-        // Hand-interleaved across the two streams via flat scalars: the
-        // OoO scheduler reorders independent ops on the M1 NEON pipes
-        // exactly as the original `step_one_bp_pair` did.
-        const vec_t shift_left_fwd_0 = hn::ShiftLeft<seq_traits::bits_per_char>(state_fwd_0);
-        const vec_t complemented_0   = hn::Xor(bp_v_0, v_alphabet_complement_xor);
-        [[maybe_unused]] vec_t shift_left_fwd_1, complemented_1;
-        if constexpr (NumStreams > 1) {
-            shift_left_fwd_1 = hn::ShiftLeft<seq_traits::bits_per_char>(state_fwd_1);
-            complemented_1   = hn::Xor(bp_v_1, v_alphabet_complement_xor);
-        }
-        state_fwd_0 = hn::And(hn::Or(shift_left_fwd_0, bp_v_0), v_kmer_mask);
-        if constexpr (NumStreams > 1) {
-            state_fwd_1 = hn::And(hn::Or(shift_left_fwd_1, bp_v_1), v_kmer_mask);
-        }
+        const vec_stream_t complemented = Xor(bp_v, v_alphabet_complement_xor);
+        state_fwd = And(Or(ShiftLeft<seq_traits::bits_per_char>(state_fwd), bp_v),
+                        v_kmer_mask);
 
-        vec_t new_high_0;
-        [[maybe_unused]] vec_t new_high_1;
+        vec_stream_t new_high;
         if constexpr (has_static_k) {
             constexpr size_t static_rev_shift =
                 seq_traits::bits_per_char * (StaticK - 1);
@@ -326,242 +301,118 @@ collect_minimizers_two_stack_nthash_simd_impl(
                 (static_rev_shift >= storage_bits_max)
                     ? (storage_bits_max - 1)
                     : static_rev_shift;
-            new_high_0 = hn::ShiftLeft<clamped_rev_shift>(complemented_0);
-            if constexpr (NumStreams > 1) {
-                new_high_1 = hn::ShiftLeft<clamped_rev_shift>(complemented_1);
-            }
+            new_high = ShiftLeft<clamped_rev_shift>(complemented);
         } else {
             const size_t dynamic_rev_shift =
                 seq_traits::bits_per_char * (k_clamped - 1);
-            new_high_0 = hn::ShiftLeftSame(complemented_0,
+            new_high = ShiftLeftSame(complemented,
                 static_cast<int>(dynamic_rev_shift));
-            if constexpr (NumStreams > 1) {
-                new_high_1 = hn::ShiftLeftSame(complemented_1,
-                    static_cast<int>(dynamic_rev_shift));
-            }
         }
-        const vec_t shift_right_rc_0 =
-            hn::ShiftRight<seq_traits::bits_per_char>(state_rc_0);
-        [[maybe_unused]] vec_t shift_right_rc_1;
-        if constexpr (NumStreams > 1) {
-            shift_right_rc_1 =
-                hn::ShiftRight<seq_traits::bits_per_char>(state_rc_1);
-        }
-        state_rc_0 = hn::Or(shift_right_rc_0, new_high_0);
-        if constexpr (NumStreams > 1) {
-            state_rc_1 = hn::Or(shift_right_rc_1, new_high_1);
-        }
+        state_rc = Or(ShiftRight<seq_traits::bits_per_char>(state_rc), new_high);
 
-        // ---- Canonical lex + strand classification ----
-        // Palindrome gating is NumStreams=1 only (see file-level docstring
-        // for the rationale). Dual-stream drops it to save 1 cmeq + 1 bic
-        // per stream per iter at the price of a ≈ 4^-(k/2) selection-drift
-        // tolerance on the dense-bench grid; single-stream keeps it so that
-        // short-k inputs (k=4 / dna4 has real 4-mer palindromes like
-        // "ACGT", "AGCT") match the historical _single_stream_simd_impl
-        // behaviour bit-for-bit.
-        const vec_t lex_0    = hn::Min(state_fwd_0, state_rc_0);
-        const mask_t strand_0 = hn::Lt(state_rc_0, state_fwd_0);
-        [[maybe_unused]] mask_t palindrome_mask_0;
-        if constexpr (NumStreams == 1) {
-            palindrome_mask_0 = hn::Eq(state_fwd_0, state_rc_0);
-        }
-        [[maybe_unused]] vec_t lex_1;
-        [[maybe_unused]] mask_t strand_1;
-        if constexpr (NumStreams > 1) {
-            lex_1    = hn::Min(state_fwd_1, state_rc_1);
-            strand_1 = hn::Lt(state_rc_1, state_fwd_1);
-        }
+        // ---- Lex + strand classification ----
+        const vec_stream_t  lex    = Min(state_fwd, state_rc);
+        const mask_stream_t strand = Lt(state_rc, state_fwd);
 
-        // Mixed-hash for ordering. See V10b BUG FIX block above for why
-        // the post-mul mask is `hash_mask_high` alone.
-        const vec_t hash_full_0 =
-            hn::And(hn::Mul(lex_0, v_golden), v_hash_kmer_mask);
-        [[maybe_unused]] vec_t hash_full_1;
-        if constexpr (NumStreams > 1) {
-            hash_full_1 = hn::And(hn::Mul(lex_1, v_golden), v_hash_kmer_mask);
-        }
+        // ---- Mixed-hash for ordering. See V10b BUG FIX block above for why
+        //      the post-mul mask is `hash_mask_high` alone.
+        const vec_stream_t hash_full = And(Mul(lex, v_golden), v_hash_kmer_mask);
 
-        // Strand-encoded lex (LSB := strand bit) for emit-time recovery.
-        const vec_t hs_0 = hn::IfThenElse(strand_0,
-            hn::Or(lex_0, v_one),
-            hn::And(lex_0, v_strand_clear));
-        [[maybe_unused]] vec_t hs_1;
-        if constexpr (NumStreams > 1) {
-            hs_1 = hn::IfThenElse(strand_1,
-                hn::Or(lex_1, v_one),
-                hn::And(lex_1, v_strand_clear));
-        }
+        // ---- Strand-encoded lex (LSB := strand bit) for emit-time recovery.
+        const vec_stream_t hash_with_strand_lex =
+            IfThenElse(strand, Or(lex, v_one), And(lex, v_strand_clear));
 
-        // (hash | pos) packed element. Live-mask gates non-padding lanes;
-        // single-stream additionally `AndNot(palindrome_mask)`-gates the
-        // live mask so palindromic lanes get the v_max sentinel.
-        const vec_t elem_valid_0 = hn::Or(hash_full_0, pos_local_0);
-        mask_t valid_mask_0;
-        if constexpr (NumStreams == 1) {
-            valid_mask_0 = hn::AndNot(palindrome_mask_0, live_mask);
+        // ---- Element pack — palindrome detection on `DetectPalindrome` path.
+        const vec_stream_t elem_valid = Or(hash_full, pos_local);
+        vec_stream_t packed_element;
+        if constexpr (DetectPalindrome) {
+            const mask_stream_t palindrome = Eq(state_fwd, state_rc);
+            const mask_stream_t valid_mask = AndNot(palindrome, live_mask);
+            packed_element = IfThenElse(valid_mask, elem_valid, v_max);
         } else {
-            valid_mask_0 = live_mask;
-        }
-        const vec_t elem_0 = hn::IfThenElse(valid_mask_0, elem_valid_0, v_max);
-        [[maybe_unused]] vec_t elem_valid_1, elem_1;
-        if constexpr (NumStreams > 1) {
-            elem_valid_1 = hn::Or(hash_full_1, pos_local_1);
-            elem_1       = hn::IfThenElse(live_mask, elem_valid_1, v_max);
+            packed_element = IfThenElse(live_mask, elem_valid, v_max);
         }
 
-        ring_buf_elem_0[ring_idx]        = elem_0;
-        ring_buf_hash_strand_0[ring_idx] = hs_0;
-        if constexpr (NumStreams > 1) {
-            ring_buf_elem_1[ring_idx]        = elem_1;
-            ring_buf_hash_strand_1[ring_idx] = hs_1;
-        }
+        ring_buf_elem[ring_idx]        = packed_element;
+        ring_buf_hash_strand[ring_idx] = hash_with_strand_lex;
 
         // ---- Prefix-min running update ----
-        const mask_t prefix_better_0 = hn::Lt(elem_0, prefix_min_0);
-        prefix_min_0  = hn::IfThenElse(prefix_better_0, elem_0, prefix_min_0);
-        prefix_kmer_0 = hn::IfThenElse(prefix_better_0, hs_0, prefix_kmer_0);
-        if constexpr (NumStreams > 1) {
-            const mask_t prefix_better_1 = hn::Lt(elem_1, prefix_min_1);
-            prefix_min_1  = hn::IfThenElse(prefix_better_1, elem_1, prefix_min_1);
-            prefix_kmer_1 = hn::IfThenElse(prefix_better_1, hs_1, prefix_kmer_1);
-        }
+        const mask_stream_t prefix_better = Lt(packed_element, prefix_min);
+        prefix_min  = IfThenElse(prefix_better, packed_element, prefix_min);
+        prefix_kmer = IfThenElse(prefix_better, hash_with_strand_lex, prefix_kmer);
 
         ++ring_idx;
         ++step;
-        pos_local_0 = hn::Add(pos_local_0, v_one);
-        if constexpr (NumStreams > 1) {
-            pos_local_1 = hn::Add(pos_local_1, v_one);
-        }
+        pos_local = Add(pos_local, v_one);
 
         // ---- Suffix-min rebuild every w iterations ----
         if (ring_idx == w) [[unlikely]] {
+            // The rebuild reads ring[i] BEFORE writing ring[i-1], so we
+            // iterate i from w-1 down to 1 inclusive. With static-w we
+            // unroll via index_sequence; with runtime-w we use a normal
+            // descending for-loop.
             if constexpr (has_static_w) {
-                [&]<size_t... Idx>(std::index_sequence<Idx...>) {
-                    auto rebuild_one = [&](auto i_const) [[gnu::always_inline]] {
-                        constexpr size_t i = StaticW - 1 - decltype(i_const)::value;
-                        const vec_t cur_0  = ring_buf_elem_0[i];
-                        const vec_t prev_0 = ring_buf_elem_0[i - 1];
-                        const mask_t cur_better_0 = hn::Lt(cur_0, prev_0);
-                        ring_buf_elem_0[i - 1] =
-                            hn::IfThenElse(cur_better_0, cur_0, prev_0);
-                        ring_buf_hash_strand_0[i - 1] =
-                            hn::IfThenElse(cur_better_0,
-                                ring_buf_hash_strand_0[i],
-                                ring_buf_hash_strand_0[i - 1]);
-                        if constexpr (NumStreams > 1) {
-                            const vec_t cur_1  = ring_buf_elem_1[i];
-                            const vec_t prev_1 = ring_buf_elem_1[i - 1];
-                            const mask_t cur_better_1 = hn::Lt(cur_1, prev_1);
-                            ring_buf_elem_1[i - 1] =
-                                hn::IfThenElse(cur_better_1, cur_1, prev_1);
-                            ring_buf_hash_strand_1[i - 1] =
-                                hn::IfThenElse(cur_better_1,
-                                    ring_buf_hash_strand_1[i],
-                                    ring_buf_hash_strand_1[i - 1]);
-                        }
-                    };
-                    (rebuild_one(std::integral_constant<size_t, Idx>{}), ...);
-                }(std::make_index_sequence<StaticW - 1>{});
+                for_each_index<StaticW - 1>([&](auto idx_const) [[gnu::always_inline]] {
+                    constexpr size_t i = StaticW - 1 - decltype(idx_const)::value;
+                    const auto current_slot      = ring_buf_elem[i];
+                    const auto previous_slot     = ring_buf_elem[i - 1];
+                    const auto current_better    = Lt(current_slot, previous_slot);
+                    ring_buf_elem[i - 1] =
+                        IfThenElse(current_better, current_slot, previous_slot);
+                    ring_buf_hash_strand[i - 1] =
+                        IfThenElse(current_better,
+                            ring_buf_hash_strand[i],
+                            ring_buf_hash_strand[i - 1]);
+                });
             } else {
                 for (size_t i = w - 1; i > 0; --i) {
-                    const vec_t cur_0  = ring_buf_elem_0[i];
-                    const vec_t prev_0 = ring_buf_elem_0[i - 1];
-                    const mask_t cur_better_0 = hn::Lt(cur_0, prev_0);
-                    ring_buf_elem_0[i - 1] =
-                        hn::IfThenElse(cur_better_0, cur_0, prev_0);
-                    ring_buf_hash_strand_0[i - 1] =
-                        hn::IfThenElse(cur_better_0,
-                            ring_buf_hash_strand_0[i],
-                            ring_buf_hash_strand_0[i - 1]);
-                    if constexpr (NumStreams > 1) {
-                        const vec_t cur_1  = ring_buf_elem_1[i];
-                        const vec_t prev_1 = ring_buf_elem_1[i - 1];
-                        const mask_t cur_better_1 = hn::Lt(cur_1, prev_1);
-                        ring_buf_elem_1[i - 1] =
-                            hn::IfThenElse(cur_better_1, cur_1, prev_1);
-                        ring_buf_hash_strand_1[i - 1] =
-                            hn::IfThenElse(cur_better_1,
-                                ring_buf_hash_strand_1[i],
-                                ring_buf_hash_strand_1[i - 1]);
-                    }
+                    const auto current_slot      = ring_buf_elem[i];
+                    const auto previous_slot     = ring_buf_elem[i - 1];
+                    const auto current_better    = Lt(current_slot, previous_slot);
+                    ring_buf_elem[i - 1] =
+                        IfThenElse(current_better, current_slot, previous_slot);
+                    ring_buf_hash_strand[i - 1] =
+                        IfThenElse(current_better,
+                            ring_buf_hash_strand[i],
+                            ring_buf_hash_strand[i - 1]);
                 }
             }
-            prefix_min_0  = elem_0;
-            prefix_kmer_0 = hs_0;
-            if constexpr (NumStreams > 1) {
-                prefix_min_1  = elem_1;
-                prefix_kmer_1 = hs_1;
-            }
+            prefix_min  = packed_element;
+            prefix_kmer = hash_with_strand_lex;
             ring_idx = 0;
         }
 
         // ---- Window-min = min(prefix_min, ring_buf[ring_idx]) ----
-        const vec_t suffix_min_0  = ring_buf_elem_0[ring_idx];
-        const vec_t suffix_kmer_0 = ring_buf_hash_strand_0[ring_idx];
-        const mask_t prefix_wins_0 = hn::Lt(prefix_min_0, suffix_min_0);
-        const vec_t window_min_0   =
-            hn::IfThenElse(prefix_wins_0, prefix_min_0, suffix_min_0);
-        const vec_t window_hs_0    =
-            hn::IfThenElse(prefix_wins_0, prefix_kmer_0, suffix_kmer_0);
-        [[maybe_unused]] vec_t window_min_1, window_hs_1;
-        if constexpr (NumStreams > 1) {
-            const vec_t suffix_min_1  = ring_buf_elem_1[ring_idx];
-            const vec_t suffix_kmer_1 = ring_buf_hash_strand_1[ring_idx];
-            const mask_t prefix_wins_1 = hn::Lt(prefix_min_1, suffix_min_1);
-            window_min_1 =
-                hn::IfThenElse(prefix_wins_1, prefix_min_1, suffix_min_1);
-            window_hs_1  =
-                hn::IfThenElse(prefix_wins_1, prefix_kmer_1, suffix_kmer_1);
-        }
+        const vec_stream_t  suffix_min  = ring_buf_elem[ring_idx];
+        const vec_stream_t  suffix_kmer = ring_buf_hash_strand[ring_idx];
+        const mask_stream_t prefix_wins = Lt(prefix_min, suffix_min);
+        const vec_stream_t  window_min  =
+            IfThenElse(prefix_wins, prefix_min, suffix_min);
+        const vec_stream_t  window_hs   =
+            IfThenElse(prefix_wins, prefix_kmer, suffix_kmer);
 
         // ---- Position wrap (storage-half-bit pos rolls every wrap_period) ----
         if (step == next_wrap_step) [[unlikely]] {
-            pos_local_0  = hn::Sub(pos_local_0, v_wrap);
-            prefix_min_0 = hn::Sub(prefix_min_0, v_wrap);
-            const mask_t emit_seen_0 = hn::Ne(last_emit_pos_0, v_max);
-            last_emit_pos_0 = hn::IfThenElse(emit_seen_0,
-                hn::Sub(last_emit_pos_0, v_wrap), last_emit_pos_0);
-            if constexpr (NumStreams > 1) {
-                pos_local_1  = hn::Sub(pos_local_1, v_wrap);
-                prefix_min_1 = hn::Sub(prefix_min_1, v_wrap);
-                const mask_t emit_seen_1 = hn::Ne(last_emit_pos_1, v_max);
-                last_emit_pos_1 = hn::IfThenElse(emit_seen_1,
-                    hn::Sub(last_emit_pos_1, v_wrap), last_emit_pos_1);
-            }
+            pos_local  = Sub(pos_local, v_wrap);
+            prefix_min = Sub(prefix_min, v_wrap);
+            const mask_stream_t emit_seen = Ne(last_emit_pos, v_max);
+            last_emit_pos = IfThenElse(emit_seen,
+                Sub(last_emit_pos, v_wrap), last_emit_pos);
+            const auto wrap_one = [&](auto idx_const) [[gnu::always_inline]] {
+                constexpr size_t i = decltype(idx_const)::value;
+                const mask_stream_t slot_valid = Ne(ring_buf_elem[i], v_max);
+                ring_buf_elem[i] = IfThenElse(slot_valid,
+                    Sub(ring_buf_elem[i], v_wrap),
+                    ring_buf_elem[i]);
+            };
             if constexpr (has_static_w) {
-                [&]<size_t... Idx>(std::index_sequence<Idx...>) {
-                    auto wrap_slot = [&](auto i_const) [[gnu::always_inline]] {
-                        constexpr size_t i = decltype(i_const)::value;
-                        const mask_t slot_valid_0 =
-                            hn::Ne(ring_buf_elem_0[i], v_max);
-                        ring_buf_elem_0[i] = hn::IfThenElse(slot_valid_0,
-                            hn::Sub(ring_buf_elem_0[i], v_wrap),
-                            ring_buf_elem_0[i]);
-                        if constexpr (NumStreams > 1) {
-                            const mask_t slot_valid_1 =
-                                hn::Ne(ring_buf_elem_1[i], v_max);
-                            ring_buf_elem_1[i] = hn::IfThenElse(slot_valid_1,
-                                hn::Sub(ring_buf_elem_1[i], v_wrap),
-                                ring_buf_elem_1[i]);
-                        }
-                    };
-                    (wrap_slot(std::integral_constant<size_t, Idx>{}), ...);
-                }(std::make_index_sequence<StaticW>{});
+                for_each_index<StaticW>(wrap_one);
             } else {
                 for (size_t i = 0; i < w; ++i) {
-                    const mask_t slot_valid_0 =
-                        hn::Ne(ring_buf_elem_0[i], v_max);
-                    ring_buf_elem_0[i] = hn::IfThenElse(slot_valid_0,
-                        hn::Sub(ring_buf_elem_0[i], v_wrap),
-                        ring_buf_elem_0[i]);
-                    if constexpr (NumStreams > 1) {
-                        const mask_t slot_valid_1 =
-                            hn::Ne(ring_buf_elem_1[i], v_max);
-                        ring_buf_elem_1[i] = hn::IfThenElse(slot_valid_1,
-                            hn::Sub(ring_buf_elem_1[i], v_wrap),
-                            ring_buf_elem_1[i]);
-                    }
+                    const mask_stream_t slot_valid = Ne(ring_buf_elem[i], v_max);
+                    ring_buf_elem[i] = IfThenElse(slot_valid,
+                        Sub(ring_buf_elem[i], v_wrap),
+                        ring_buf_elem[i]);
                 }
             }
             pos_wrap_delta =
@@ -571,53 +422,49 @@ collect_minimizers_two_stack_nthash_simd_impl(
 
         // ---- Emit ----
         if (step >= emit_warmup) {
-            const vec_t window_pos_0  = hn::And(window_min_0, v_pos_mask);
-            const mask_t pos_changed_0 = hn::Ne(window_pos_0, last_emit_pos_0);
-            const mask_t valid_window_0 = hn::Ne(window_min_0, v_max);
-            const mask_t real_emit_0    = hn::And(pos_changed_0, valid_window_0);
-            const bool any_emit_0       = !hn::AllFalse(d, real_emit_0);
+            const vec_stream_t  window_pos    = And(window_min, v_pos_mask);
+            const mask_stream_t pos_changed   = Ne(window_pos, last_emit_pos);
+            const mask_stream_t valid_window  = Ne(window_min, v_max);
+            const mask_stream_t real_emit     = And(pos_changed, valid_window);
+            // AllFalsePerStream returns true when ALL lanes are false (no
+            // emit candidate this stream). We keep the inverted bool below
+            // (`per_stream_emits`) explicit so the predicate reads naturally.
+            const auto no_emit_per_stream     = AllFalsePerStream(d, real_emit);
 
-            [[maybe_unused]] vec_t window_pos_1;
-            [[maybe_unused]] mask_t real_emit_1 = hn::MaskFalse(d);
-            [[maybe_unused]] bool any_emit_1    = false;
-            if constexpr (NumStreams > 1) {
-                window_pos_1 = hn::And(window_min_1, v_pos_mask);
-                const mask_t pos_changed_1 =
-                    hn::Ne(window_pos_1, last_emit_pos_1);
-                const mask_t valid_window_1 =
-                    hn::Ne(window_min_1, v_max);
-                real_emit_1 = hn::And(pos_changed_1, valid_window_1);
-                any_emit_1  = !hn::AllFalse(d, real_emit_1);
-            }
+            std::array<bool, NumStreams> per_stream_emits{};
+            bool any_stream_emits = false;
+            for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+                constexpr size_t s = decltype(stream_idx_const)::value;
+                per_stream_emits[s] = !no_emit_per_stream[s];
+                any_stream_emits = any_stream_emits || per_stream_emits[s];
+            });
 
-            if (any_emit_0 || any_emit_1) [[likely]] {
+            if (any_stream_emits) [[likely]] {
                 constexpr size_t max_lanes_per_stream = hn::MaxLanes(d_t{});
-                HWY_ALIGN std::array<storage_unit, max_lanes_per_stream> pos_arr_0;
-                HWY_ALIGN std::array<storage_unit, max_lanes_per_stream> hs_arr_0;
-                HWY_ALIGN std::array<storage_unit, max_lanes_per_stream> emit_arr_0;
-                hn::Store(window_pos_0, d, pos_arr_0.data());
-                hn::Store(window_hs_0,  d, hs_arr_0.data());
-                hn::Store(hn::VecFromMask(d, real_emit_0), d, emit_arr_0.data());
-                [[maybe_unused]] HWY_ALIGN std::array<storage_unit, max_lanes_per_stream>
-                    pos_arr_1, hs_arr_1, emit_arr_1;
-                if constexpr (NumStreams > 1) {
-                    hn::Store(window_pos_1, d, pos_arr_1.data());
-                    hn::Store(window_hs_1,  d, hs_arr_1.data());
-                    hn::Store(hn::VecFromMask(d, real_emit_1), d, emit_arr_1.data());
-                }
+                HWY_ALIGN std::array<std::array<storage_unit, max_lanes_per_stream>, NumStreams> pos_arr;
+                HWY_ALIGN std::array<std::array<storage_unit, max_lanes_per_stream>, NumStreams> hs_arr;
+                HWY_ALIGN std::array<std::array<storage_unit, max_lanes_per_stream>, NumStreams> emit_arr;
+                for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+                    constexpr size_t s = decltype(stream_idx_const)::value;
+                    hn::Store(window_pos[s], d, pos_arr[s].data());
+                    hn::Store(window_hs[s],  d, hs_arr[s].data());
+                    hn::Store(hn::VecFromMask(d, real_emit[s]), d, emit_arr[s].data());
+                });
 
                 const size_t lc = lanes_per_stream;
-                if (any_emit_0) {
+                for_each_index<NumStreams>([&](auto stream_idx_const) {
+                    constexpr size_t s = decltype(stream_idx_const)::value;
+                    if (!per_stream_emits[s]) return;
                     for (size_t lane = 0; lane < lc; ++lane) {
-                        if (!emit_arr_0[lane]) continue;
+                        if (!emit_arr[s][lane]) continue;
                         const size_t local_pos =
-                            static_cast<size_t>(pos_arr_0[lane]) +
+                            static_cast<size_t>(pos_arr[s][lane]) +
                             static_cast<size_t>(pos_wrap_delta);
                         const size_t abs_pos =
-                            offsets_in[lane] * seq_traits::letters_per_unit +
-                            local_pos;
+                            offsets_in[s * lc + lane] *
+                                seq_traits::letters_per_unit + local_pos;
                         const hash_val_t hash_strand_val =
-                            static_cast<hash_val_t>(hs_arr_0[lane]);
+                            static_cast<hash_val_t>(hs_arr[s][lane]);
                         const hash_val_t lexic_kmer =
                             hash_strand_val & ~static_cast<hash_val_t>(1);
                         const hash_val_t scrambled_kmer =
@@ -628,35 +475,8 @@ collect_minimizers_two_stack_nthash_simd_impl(
                             /*last_pos=*/abs_pos,
                             /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
                     }
-                    last_emit_pos_0 = hn::IfThenElse(real_emit_0,
-                        window_pos_0, last_emit_pos_0);
-                }
-                if constexpr (NumStreams > 1) {
-                    if (any_emit_1) {
-                        for (size_t lane = 0; lane < lc; ++lane) {
-                            if (!emit_arr_1[lane]) continue;
-                            const size_t local_pos =
-                                static_cast<size_t>(pos_arr_1[lane]) +
-                                static_cast<size_t>(pos_wrap_delta);
-                            const size_t abs_pos =
-                                offsets_in[lc + lane] *
-                                    seq_traits::letters_per_unit + local_pos;
-                            const hash_val_t hash_strand_val =
-                                static_cast<hash_val_t>(hs_arr_1[lane]);
-                            const hash_val_t lexic_kmer =
-                                hash_strand_val & ~static_cast<hash_val_t>(1);
-                            const hash_val_t scrambled_kmer =
-                                simd_hash_t<alphabet_t>::template scramble<hash_val_t>(
-                                    lexic_kmer, kmer_mask_scalar);
-                            collector.collect(MinimizerT(
-                                /*kmer=*/static_cast<uint64_t>(scrambled_kmer),
-                                /*last_pos=*/abs_pos,
-                                /*strand=*/static_cast<uint64_t>(hash_strand_val) & 0x1ULL));
-                        }
-                        last_emit_pos_1 = hn::IfThenElse(real_emit_1,
-                            window_pos_1, last_emit_pos_1);
-                    }
-                }
+                });
+                last_emit_pos = IfThenElse(real_emit, window_pos, last_emit_pos);
             }
         }
     };
@@ -677,9 +497,10 @@ collect_minimizers_two_stack_nthash_simd_impl(
  * Picks NumStreams ∈ {1, 2} based on `seq.bp_size()` (dual-stream needs
  * room for two parallel slices of `Lanes(d) * letters_per_unit` BPs each
  * plus the `k + w - 1` context overlap), then dispatches to
- * `collect_minimizers_two_stack_nthash_simd_impl` with the static-(w, k)
- * specialization for the minimap2 default `w == 10, k == 15` and the two
- * standard runtime-w/k fallbacks.
+ * `collect_minimizers_two_stack_nthash_simd_impl` with
+ * `DetectPalindrome = (NumStreams == 1)` (Phase-1 byte-identity contract)
+ * and the static-(w, k) specialization for the minimap2 default
+ * `w == 10, k == 15` plus the two standard runtime-w/k fallbacks.
  *
  * `MinimizerT` is deduced from the collector argument so call sites stay
  * the same shape as before — only `sketch_collector` (which is
@@ -721,12 +542,14 @@ inline void collect_minimizers_two_stack_nthash_simd(
     auto dispatch = [&]<size_t StaticW, size_t StaticK>() {
         if (use_dual) {
             collect_minimizers_two_stack_nthash_simd_impl<
-                StaticW, StaticK, /*NumStreams=*/2,
+                StaticW, StaticK,
+                /*NumStreams=*/2, /*DetectPalindrome=*/false,
                 simd_hash_t, MinimizerT, R, I, hash_val_t>(
                     collector, seq, seq_begin, seq_end, w, k);
         } else {
             collect_minimizers_two_stack_nthash_simd_impl<
-                StaticW, StaticK, /*NumStreams=*/1,
+                StaticW, StaticK,
+                /*NumStreams=*/1, /*DetectPalindrome=*/true,
                 simd_hash_t, MinimizerT, R, I, hash_val_t>(
                     collector, seq, seq_begin, seq_end, w, k);
         }

@@ -202,7 +202,7 @@
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": true },
     "matrix": {
-      "for": { "CURATED_UNIQUE_FRAGMENT": 30, "CURATED_SEAL_BATCH": 30, "XXL_HIFI": 1 },
+      "for": { "CURATED_UNIQUE_FRAGMENT": 30, "CURATED_SEAL_BATCH": 30, "XXL_HIFI": 4 },
       "over": {
         "minimap2_dp": {},
         "bioseq_ksw2_scalar_dp_scalar_mm": {},

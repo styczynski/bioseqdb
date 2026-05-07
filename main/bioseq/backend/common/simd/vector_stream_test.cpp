@@ -120,6 +120,39 @@ TEMPLATE_TEST_CASE("vec_stream binary bitwise equivalence",
         [](auto&& a, auto&& b){ return hn::AndNot(a, b); }, "AndNot");
 }
 
+TEMPLATE_TEST_CASE("mask_stream AndNot vs plain mask broadcast — Phase 3 path",
+                   "[vec_stream][mask_stream]", uint16_t, uint32_t, uint64_t) {
+    // Phase-3 consumer path: the two-stack collector palindrome branch
+    // computes `AndNot(palindrome /*mask_stream<D,1>*/, live_mask /*mask_t*/)`
+    // — a (mask_stream, mask_t) pair that the Phase-2 module routes
+    // through `BIOSEQ_VS_BINARY_WRAPPER(AndNot)` via `lift_op` projecting
+    // the plain mask as broadcast. We verify byte-equality against
+    // direct `hn::AndNot` per slot to lock the contract before the
+    // Phase-3 EXPECTED_PAIRS gate fires.
+    using ST = TestType;
+    const hn::ScalableTag<ST> d;
+
+    const auto pal_a = hn::Eq(hn::Set(d, static_cast<ST>(5)),
+                              hn::Set(d, static_cast<ST>(5)));   // all-true
+    const auto pal_b = hn::Ne(hn::Set(d, static_cast<ST>(5)),
+                              hn::Set(d, static_cast<ST>(5)));   // all-false
+    const auto live = hn::Eq(hn::Set(d, static_cast<ST>(7)),
+                             hn::Set(d, static_cast<ST>(7)));    // all-true
+
+    auto pal_stream = mask_stream<decltype(d), 2>::pack(pal_a, pal_b);
+
+    // Lifted: mask_stream ⊕ plain mask
+    auto result_stream = AndNot(pal_stream, live);
+    for (size_t s = 0; s < 2; ++s) {
+        const auto got  = hwy_to_vector<decltype(d), ST>(d,
+            hn::VecFromMask(d, result_stream[s]));
+        const auto want = hwy_to_vector<decltype(d), ST>(d,
+            hn::VecFromMask(d, hn::AndNot(pal_stream[s], live)));
+        ASSERT(got == want);
+    }
+    JustLog("[mask_stream AndNot+broadcast] OK");
+}
+
 TEMPLATE_TEST_CASE("vec_stream binary comparisons",
                    "[vec_stream]", uint16_t, uint32_t, uint64_t) {
     using ST = TestType;
