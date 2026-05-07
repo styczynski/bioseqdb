@@ -2580,18 +2580,26 @@ template<class MinimizerT,
 // Tier-1 dispatch — picks the `MinimizerRepr<MaxSeqLog2, KmerLen>`
 // instantiation matching (max(query_len, target_len), params.kmer_size).
 //
-// Bucket boundaries (K = 15):
-//   max_len <=    64 kbp  →  MinimizerRepr<16, 15>   (47-bit hash, 16-bit pos)
-//   max_len <=     1 Mbp  →  MinimizerRepr<20, 15>   (43-bit hash, 20-bit pos)
-//   max_len <=    16 Mbp  →  MinimizerRepr<24, 15>   (39-bit hash, 24-bit pos)
-//   max_len <=   256 Mbp  →  MinimizerRepr<28, 15>   (35-bit hash, 28-bit pos) — canonical
+// Each bucket's `pos_field_mask = (1 << pos_bits) - 1` MUST cover
+// `max_len`; otherwise positions silently alias and the index returns
+// wrong hits. Wider position fields shift bits away from the hash,
+// but as long as `min_hash_bits = min(56, 2*K)` still fits the layout
+// is valid — see `kmers/index.cppm` for the picker.
 //
-// Other K values fall through to the canonical MinimapSketchData =
-// MinimizerRepr<28, 15> alias (matches the postgres-side serialised
-// layout).  Exposing K = 11 / K = 21 buckets is left as a follow-up;
-// the bench grid never sets K to anything other than 15 so adding them
-// before measuring would just bloat the binary without changing the
-// reported numbers.
+// Bucket boundaries (K = 15, min_hash_bits = 30):
+//   max_len <=    64 kbp  →  MinimizerRepr<16, 15>   uint64 storage
+//   max_len <=     1 Mbp  →  MinimizerRepr<20, 15>   uint64 storage
+//   max_len <=    16 Mbp  →  MinimizerRepr<24, 15>   uint64 storage
+//   max_len <=   256 Mbp  →  MinimizerRepr<28, 15>   uint64 storage (canonical)
+//   max_len <=     4 Gbp  →  MinimizerRepr<32, 15>   uint64 storage
+//   max_len <=  256 Tbp   →  MinimizerRepr<48, 15>   128-bit fallback
+//   max_len <  ~9.2 Ebp   →  MinimizerRepr<63, 15>   128-bit fallback (widest)
+//
+// The 128-bit fallback's `static_assert(pos_bits + 1 <= 64)` caps the
+// widest position field at 63 bits, which is far beyond any
+// realistic genome. The K=7 / K=27 ladders mirror the same shape; the
+// non-canonical-K fallback also tracks a wide bucket so a request that
+// exceeds 256 Mbp is never silently truncated.
 template<supports_compact_sequence_range QueryRange,
          supports_compact_sequence_range TargetRange>
 [[nodiscard]] MatchResultCollection minimap_port(
@@ -2616,8 +2624,19 @@ template<supports_compact_sequence_range QueryRange,
             return minimap_port_with_repr<MinimizerRepr<24u, 15u>>(
                 query_seq, target_seq, params);
         }
-        // XXL fits in 28-bit pos (peaks at 150 Mbp ≈ 2^27.16).
-        return minimap_port_with_repr<MinimizerRepr<28u, 15u>>(
+        if (max_len <= (size_t{1} << 28)) {
+            return minimap_port_with_repr<MinimizerRepr<28u, 15u>>(
+                query_seq, target_seq, params);
+        }
+        if (max_len <= (size_t{1} << 32)) {
+            return minimap_port_with_repr<MinimizerRepr<32u, 15u>>(
+                query_seq, target_seq, params);
+        }
+        if (max_len <= (size_t{1} << 48)) {
+            return minimap_port_with_repr<MinimizerRepr<48u, 15u>>(
+                query_seq, target_seq, params);
+        }
+        return minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
             query_seq, target_seq, params);
     }
 
@@ -2630,28 +2649,52 @@ template<supports_compact_sequence_range QueryRange,
     // minimap2 C reference's `mm_sketch` (see comment in
     // `default_kw_sweep_grid`); K = 7 is the smallest odd value that
     // still lets MEDIUM-sized sequences land on 32-bit storage.
-    if (k == 7 && max_len <= (size_t{1} << 15)) {
-        return minimap_port_with_repr<MinimizerRepr<15u, 7u>>(
+    if (k == 7) {
+        if (max_len <= (size_t{1} << 15)) {
+            return minimap_port_with_repr<MinimizerRepr<15u, 7u>>(
+                query_seq, target_seq, params);
+        }
+        if (max_len <= (size_t{1} << 28)) {
+            return minimap_port_with_repr<MinimizerRepr<28u, 7u>>(
+                query_seq, target_seq, params);
+        }
+        if (max_len <= (size_t{1} << 48)) {
+            return minimap_port_with_repr<MinimizerRepr<48u, 7u>>(
+                query_seq, target_seq, params);
+        }
+        return minimap_port_with_repr<MinimizerRepr<63u, 7u>>(
             query_seq, target_seq, params);
     }
 
     // K=27 forces the 128-bit fallback (val64_hash = 63 - pos_bits = 35
     // < min_hash_bits = 54), exercising the dual-uint64 specialisation
     // with `data_low_64()` / `data_high_64()` accessors (Goal A + B).
-    // Used by the XXL_KMER_27 bench case; pos_bits = 28 covers the
-    // bench's XXL pair (≤ 150 Mbp ≈ 2^27.16).  K = 27 is odd (palindrome
+    // Used by the XXL_KMER_27 bench case.  K = 27 is odd (palindrome
     // safety for the C reference) and matches typical assembly-grade
     // long-K presets (`-x asm10` runs K = 19, the next odd up is K = 21).
     if (k == 27) {
-        return minimap_port_with_repr<MinimizerRepr<28u, 27u>>(
+        if (max_len <= (size_t{1} << 28)) {
+            return minimap_port_with_repr<MinimizerRepr<28u, 27u>>(
+                query_seq, target_seq, params);
+        }
+        if (max_len <= (size_t{1} << 48)) {
+            return minimap_port_with_repr<MinimizerRepr<48u, 27u>>(
+                query_seq, target_seq, params);
+        }
+        return minimap_port_with_repr<MinimizerRepr<63u, 27u>>(
             query_seq, target_seq, params);
     }
 
     // Non-canonical K — fall back to the canonical MinimapSketchData
-    // (MinimizerRepr<28, 15>).  Truncates the hash if K > 17 but the
-    // bench grid never reaches that path; exotic-K callers can add
-    // their own bucket here if they need it.
-    return minimap_port_with_repr<MinimapSketchData>(
+    // (MinimizerRepr<28, 15>) when max_len fits, else the wide K=15
+    // 128-bit fallback. Truncates the hash if K > 17 but the bench
+    // grid never reaches that path; exotic-K callers can add their
+    // own bucket here if they need it.
+    if (max_len <= (size_t{1} << 28)) {
+        return minimap_port_with_repr<MinimapSketchData>(
+            query_seq, target_seq, params);
+    }
+    return minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
         query_seq, target_seq, params);
 }
 

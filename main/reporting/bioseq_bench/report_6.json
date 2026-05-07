@@ -1,0 +1,1649 @@
+{
+    "meta": {
+        "commit": "5f65bf04e4da1e06e5849cc965486626609c21f2",
+        "dirty": true,
+        "timestamp": 1778164392,
+        "created": "2026-05-07T14:33:12Z",
+        "fast": true
+    },
+    "rule_violations": [],
+    "regressions": [
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "wall_clock_p50_no_blowup",
+            "algorithm_name": "bioseq_block_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K7_MEDIUM"
+            ],
+            "region": "all_regions",
+            "metric": "wall_clock_ns",
+            "aggregate": "p50",
+            "previously": 5693709.0,
+            "now": 11716209.0,
+            "regression_since": null,
+            "regression_since_commit": null
+        },
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "wall_clock_p50_no_blowup",
+            "algorithm_name": "bioseq_block_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K27_XL"
+            ],
+            "region": "all_regions",
+            "metric": "wall_clock_ns",
+            "aggregate": "p50",
+            "previously": 134294208.0,
+            "now": 178655917.0,
+            "regression_since": "report_4.json",
+            "regression_since_commit": "5f65bf04e4da1e06e5849cc965486626609c21f2"
+        },
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "wall_clock_p50_no_blowup",
+            "algorithm_name": "bioseq_ksw2_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K7_MEDIUM"
+            ],
+            "region": "all_regions",
+            "metric": "wall_clock_ns",
+            "aggregate": "p50",
+            "previously": 6863917.0,
+            "now": 12656375.0,
+            "regression_since": null,
+            "regression_since_commit": null
+        },
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "wall_clock_p99_no_runaway_outlier",
+            "algorithm_name": "bioseq_block_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K7_MEDIUM"
+            ],
+            "region": "all_regions",
+            "metric": "wall_clock_ns",
+            "aggregate": "p99",
+            "previously": 6476375.0,
+            "now": 12068666.0,
+            "regression_since": null,
+            "regression_since_commit": null
+        },
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "wall_clock_p99_no_runaway_outlier",
+            "algorithm_name": "bioseq_ksw2_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K7_MEDIUM"
+            ],
+            "region": "all_regions",
+            "metric": "wall_clock_ns",
+            "aggregate": "p99",
+            "previously": 7288000.0,
+            "now": 12826291.0,
+            "regression_since": null,
+            "regression_since_commit": null
+        },
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "primary_correct_fraction_no_drop",
+            "algorithm_name": "bioseq_block_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K27_XL"
+            ],
+            "region": "all_regions",
+            "metric": "primary_correct_fraction",
+            "aggregate": "p50",
+            "previously": 0.0,
+            "now": 0.0,
+            "regression_since": null,
+            "regression_since_commit": null
+        },
+        {
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "benchmark": "bench_aligners_repr_storage",
+            "rule_name": "primary_correct_fraction_no_drop",
+            "algorithm_name": "bioseq_ksw2_simd_dp_two_stack_nthash",
+            "violating_tuples": [
+                {
+                    "_": 0
+                }
+            ],
+            "test_cases": [
+                "REPR_STORAGE_K27_XL"
+            ],
+            "region": "all_regions",
+            "metric": "primary_correct_fraction",
+            "aggregate": "p50",
+            "previously": 0.0,
+            "now": 0.0,
+            "regression_since": null,
+            "regression_since_commit": null
+        }
+    ],
+    "sanity_warnings": [
+        {
+            "type": "metric_looks_constant",
+            "metric": "mean_position_offset_bp",
+            "message": "Metric 'mean_position_offset_bp' always produced the same value '0' across every benchmark, algorithm, test case, and region in this report. This might be a false positive, but more likely the instrumentation is broken (e.g. add_counter(0) everywhere, an evaluator stuck on a hardcoded constant, a frozen clock). If the constant value is genuinely correct, add at least one benchmark or test case where this metric takes a different value to silence this warning. This warning cannot be disabled.",
+            "warning_since": "report_6.json",
+            "warning_since_commit": "5f65bf04e4da1e06e5849cc965486626609c21f2"
+        }
+    ],
+    "benchmarks": {
+        "bench_aligners_curated": {
+            "title": "Curated correctness probes",
+            "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Asserts both unique-fragment primary correctness and SEAL-style batch behaviour. On purpose evaluates one sample for very long sequence (XXL_HIFI)",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "SHORT_HIFI": "300 bp fragments, ~0.2% HiFi-style error, 3 kbp reference",
+                "SHORT_CCS": "300 bp fragments, ~1.5% CCS-style error",
+                "SHORT_ONT_MODERN": "300 bp fragments, ~5% ONT-modern error",
+                "SHORT_ONT_LEGACY": "300 bp fragments, ~10% ONT-legacy error",
+                "SHORT_HIGH_INDEL_LOW_SUB": "300 bp fragments, ~8% indel-only",
+                "SHORT_HIGH_SUB_LOW_INDEL": "300 bp fragments, ~5% sub-only",
+                "MEDIUM_HIFI": "5 kbp fragments, ~0.2% HiFi-style error, 30 kbp reference",
+                "MEDIUM_CCS": "5 kbp fragments, ~1.5% CCS-style error",
+                "MEDIUM_ONT_MODERN": "5 kbp fragments, ~5% ONT-modern error",
+                "MEDIUM_ONT_LEGACY": "5 kbp fragments, ~10% ONT-legacy error",
+                "MEDIUM_HIGH_INDEL_LOW_SUB": "5 kbp fragments, ~8% indel-only",
+                "MEDIUM_HIGH_SUB_LOW_INDEL": "5 kbp fragments, ~5% sub-only",
+                "LONG_HIFI": "50 kbp fragments, ~0.2% HiFi error, 250 kbp reference",
+                "LONG_CCS": "50 kbp fragments, ~1.5% CCS error",
+                "LONG_ONT_MODERN": "50 kbp fragments, ~5% ONT-modern error",
+                "LONG_HIGH_SUB_LOW_INDEL": "50 kbp fragments, ~5% sub-only",
+                "VERY_LONG_HIFI": "1 Mbp fragments, ~0.2% HiFi error",
+                "VERY_LONG_CCS": "1 Mbp fragments, ~1.5% CCS error",
+                "VERY_LONG_ONT_MODERN": "1 Mbp fragments, ~5% ONT-modern error",
+                "VERY_LONG_HIGH_SUB_LOW_INDEL": "1 Mbp fragments, ~5% sub-only",
+                "XL_HIFI": "5 Mbp fragments, ~0.2% HiFi error",
+                "XL_CCS": "5 Mbp fragments, ~1.5% CCS error",
+                "XXL_HIFI": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error",
+                "REPR_STORAGE_K7_MEDIUM": "K=7 / MEDIUM HiFi — exercises 32-bit MinimizerRepr<15,7>",
+                "REPR_STORAGE_K27_XL": "K=27 / XL HiFi — exercises 128-bit MinimizerRepr<28,27>",
+                "RMQ_REPRO_LONG_CCS": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining",
+                "CURATED_UNIQUE_FRAGMENT": "Single error-free fragment from a 2 kbp random reference — trivial alignment",
+                "CURATED_SEAL_BATCH": "SEAL-style 8-fragment batch with mild error and reverse-complement"
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_block_simd_dp_two_stack_nthash": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "CURATED_UNIQUE_FRAGMENT": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    908417.0,
+                                    1081250.0,
+                                    1115458.0,
+                                    1314417.0,
+                                    1812750.0,
+                                    1348167.0,
+                                    1331625.0,
+                                    1192792.0,
+                                    1300209.0,
+                                    1231958.0,
+                                    1160750.0,
+                                    1200958.0,
+                                    1270709.0,
+                                    1212083.0,
+                                    1151042.0,
+                                    1273542.0,
+                                    1395542.0,
+                                    1355584.0,
+                                    1030416.0,
+                                    867750.0,
+                                    881625.0,
+                                    1037417.0,
+                                    1416750.0,
+                                    1462750.0,
+                                    2833250.0,
+                                    897000.0,
+                                    842375.0,
+                                    1387375.0,
+                                    1620916.0,
+                                    1517667.0
+                                ]
+                            }
+                        },
+                        "CURATED_SEAL_BATCH": {
+                            "all_regions": {
+                                "match_count": [
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    9581709.0,
+                                    8609084.0,
+                                    9378792.0,
+                                    8823791.0,
+                                    8715250.0,
+                                    10412708.0,
+                                    7391834.0,
+                                    11057375.0,
+                                    6922167.0,
+                                    10593792.0,
+                                    8407375.0,
+                                    8882000.0,
+                                    10324000.0,
+                                    8732959.0,
+                                    10144375.0,
+                                    7182209.0,
+                                    9137250.0,
+                                    9201833.0,
+                                    8862750.0,
+                                    9274875.0,
+                                    5827250.0,
+                                    5997625.0,
+                                    9141416.0,
+                                    7617583.0,
+                                    7568458.0,
+                                    9179583.0,
+                                    8500125.0,
+                                    9960208.0,
+                                    8258208.0,
+                                    7842292.0
+                                ]
+                            }
+                        },
+                        "XXL_HIFI": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    62268916625.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_ksw2_scalar_dp_scalar_mm": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "CURATED_UNIQUE_FRAGMENT": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    1802333.0,
+                                    1211875.0,
+                                    1139750.0,
+                                    1331292.0,
+                                    1659625.0,
+                                    1024541.0,
+                                    909292.0,
+                                    960125.0,
+                                    1397875.0,
+                                    841875.0,
+                                    1271625.0,
+                                    1302500.0,
+                                    1187375.0,
+                                    1072750.0,
+                                    967666.0,
+                                    834875.0,
+                                    731208.0,
+                                    913208.0,
+                                    940208.0,
+                                    1136167.0,
+                                    1057416.0,
+                                    1093167.0,
+                                    864208.0,
+                                    919125.0,
+                                    1247792.0,
+                                    1238416.0,
+                                    1270584.0,
+                                    1187625.0,
+                                    1023333.0,
+                                    1123417.0
+                                ]
+                            }
+                        },
+                        "CURATED_SEAL_BATCH": {
+                            "all_regions": {
+                                "match_count": [
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5962833.0,
+                                    7442375.0,
+                                    8051250.0,
+                                    8180750.0,
+                                    7456042.0,
+                                    7208667.0,
+                                    9349500.0,
+                                    9952083.0,
+                                    8381292.0,
+                                    9029958.0,
+                                    9326959.0,
+                                    9682625.0,
+                                    10381333.0,
+                                    9373000.0,
+                                    9300333.0,
+                                    9642916.0,
+                                    9521083.0,
+                                    9539000.0,
+                                    9166042.0,
+                                    8912917.0,
+                                    7638625.0,
+                                    6853708.0,
+                                    10734333.0,
+                                    7562458.0,
+                                    8224458.0,
+                                    6523417.0,
+                                    6051875.0,
+                                    3006833.0,
+                                    6251666.0,
+                                    5969292.0
+                                ]
+                            }
+                        },
+                        "XXL_HIFI": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    9892523833.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_ksw2_simd_dp_two_stack_nthash": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "CURATED_UNIQUE_FRAGMENT": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    862834.0,
+                                    857125.0,
+                                    1049000.0,
+                                    1052833.0,
+                                    1093583.0,
+                                    1050042.0,
+                                    1137625.0,
+                                    3084500.0,
+                                    1284834.0,
+                                    1230375.0,
+                                    858333.0,
+                                    1244541.0,
+                                    1235709.0,
+                                    834667.0,
+                                    1238875.0,
+                                    945417.0,
+                                    1327083.0,
+                                    1027000.0,
+                                    1294958.0,
+                                    1294708.0,
+                                    1248333.0,
+                                    1235625.0,
+                                    1203375.0,
+                                    1120083.0,
+                                    1355292.0,
+                                    1266834.0,
+                                    944875.0,
+                                    911333.0,
+                                    1083125.0,
+                                    1907833.0
+                                ]
+                            }
+                        },
+                        "CURATED_SEAL_BATCH": {
+                            "all_regions": {
+                                "match_count": [
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5621375.0,
+                                    10006417.0,
+                                    9532291.0,
+                                    10003792.0,
+                                    8516291.0,
+                                    11322667.0,
+                                    9725458.0,
+                                    10954084.0,
+                                    7113791.0,
+                                    12284333.0,
+                                    9007666.0,
+                                    6669791.0,
+                                    10293708.0,
+                                    10211084.0,
+                                    9738875.0,
+                                    9028334.0,
+                                    10304917.0,
+                                    9109083.0,
+                                    9405500.0,
+                                    9666750.0,
+                                    9538125.0,
+                                    8924375.0,
+                                    8410834.0,
+                                    8061375.0,
+                                    9913208.0,
+                                    9327458.0,
+                                    9136417.0,
+                                    6912250.0,
+                                    6132708.0,
+                                    7817541.0
+                                ]
+                            }
+                        },
+                        "XXL_HIFI": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    62398795792.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "minimap2_dp": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "CURATED_UNIQUE_FRAGMENT": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    348208.0,
+                                    223541.0,
+                                    259209.0,
+                                    225959.0,
+                                    226375.0,
+                                    220834.0,
+                                    213333.0,
+                                    204042.0,
+                                    209209.0,
+                                    231625.0,
+                                    205583.0,
+                                    212375.0,
+                                    203000.0,
+                                    205000.0,
+                                    206292.0,
+                                    203708.0,
+                                    206584.0,
+                                    210208.0,
+                                    206042.0,
+                                    207542.0,
+                                    206000.0,
+                                    202417.0,
+                                    208708.0,
+                                    206791.0,
+                                    209958.0,
+                                    212500.0,
+                                    206500.0,
+                                    203667.0,
+                                    207708.0,
+                                    268666.0
+                                ]
+                            }
+                        },
+                        "CURATED_SEAL_BATCH": {
+                            "all_regions": {
+                                "match_count": [
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0,
+                                    8.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2304208.0,
+                                    2137584.0,
+                                    2495750.0,
+                                    2226667.0,
+                                    2319167.0,
+                                    2170375.0,
+                                    2131042.0,
+                                    2194875.0,
+                                    2193167.0,
+                                    3239125.0,
+                                    2125750.0,
+                                    2173125.0,
+                                    2137375.0,
+                                    2098125.0,
+                                    2127167.0,
+                                    2109667.0,
+                                    2122917.0,
+                                    2084541.0,
+                                    2103208.0,
+                                    2595958.0,
+                                    2206375.0,
+                                    2119083.0,
+                                    4239208.0,
+                                    2218542.0,
+                                    2263583.0,
+                                    2268583.0,
+                                    2527750.0,
+                                    4220500.0,
+                                    3160083.0,
+                                    2577375.0
+                                ]
+                            }
+                        },
+                        "XXL_HIFI": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    36992902167.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "bench_aligners_repr_storage": {
+            "title": "MinimizerRepr storage exercise (K=7 / K=27)",
+            "description": "Force the 32-bit (K=7 / MEDIUM) and 128-bit (K=27 / XL) MinimizerRepr storage variants. Smaller grid (3 algorithm rows) so the bucket finishes in minutes.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "SHORT_HIFI": "300 bp fragments, ~0.2% HiFi-style error, 3 kbp reference",
+                "SHORT_CCS": "300 bp fragments, ~1.5% CCS-style error",
+                "SHORT_ONT_MODERN": "300 bp fragments, ~5% ONT-modern error",
+                "SHORT_ONT_LEGACY": "300 bp fragments, ~10% ONT-legacy error",
+                "SHORT_HIGH_INDEL_LOW_SUB": "300 bp fragments, ~8% indel-only",
+                "SHORT_HIGH_SUB_LOW_INDEL": "300 bp fragments, ~5% sub-only",
+                "MEDIUM_HIFI": "5 kbp fragments, ~0.2% HiFi-style error, 30 kbp reference",
+                "MEDIUM_CCS": "5 kbp fragments, ~1.5% CCS-style error",
+                "MEDIUM_ONT_MODERN": "5 kbp fragments, ~5% ONT-modern error",
+                "MEDIUM_ONT_LEGACY": "5 kbp fragments, ~10% ONT-legacy error",
+                "MEDIUM_HIGH_INDEL_LOW_SUB": "5 kbp fragments, ~8% indel-only",
+                "MEDIUM_HIGH_SUB_LOW_INDEL": "5 kbp fragments, ~5% sub-only",
+                "LONG_HIFI": "50 kbp fragments, ~0.2% HiFi error, 250 kbp reference",
+                "LONG_CCS": "50 kbp fragments, ~1.5% CCS error",
+                "LONG_ONT_MODERN": "50 kbp fragments, ~5% ONT-modern error",
+                "LONG_HIGH_SUB_LOW_INDEL": "50 kbp fragments, ~5% sub-only",
+                "VERY_LONG_HIFI": "1 Mbp fragments, ~0.2% HiFi error",
+                "VERY_LONG_CCS": "1 Mbp fragments, ~1.5% CCS error",
+                "VERY_LONG_ONT_MODERN": "1 Mbp fragments, ~5% ONT-modern error",
+                "VERY_LONG_HIGH_SUB_LOW_INDEL": "1 Mbp fragments, ~5% sub-only",
+                "XL_HIFI": "5 Mbp fragments, ~0.2% HiFi error",
+                "XL_CCS": "5 Mbp fragments, ~1.5% CCS error",
+                "XXL_HIFI": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error",
+                "REPR_STORAGE_K7_MEDIUM": "K=7 / MEDIUM HiFi — exercises 32-bit MinimizerRepr<15,7>",
+                "REPR_STORAGE_K27_XL": "K=27 / XL HiFi — exercises 128-bit MinimizerRepr<28,27>",
+                "RMQ_REPRO_LONG_CCS": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining",
+                "CURATED_UNIQUE_FRAGMENT": "Single error-free fragment from a 2 kbp random reference — trivial alignment",
+                "CURATED_SEAL_BATCH": "SEAL-style 8-fragment batch with mild error and reverse-complement"
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_block_simd_dp_two_stack_nthash": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "REPR_STORAGE_K7_MEDIUM": {
+                            "all_regions": {
+                                "match_count": [
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    11716209.0,
+                                    12068666.0,
+                                    12276000.0,
+                                    5043375.0,
+                                    5050250.0
+                                ]
+                            }
+                        },
+                        "REPR_STORAGE_K27_XL": {
+                            "all_regions": {
+                                "match_count": [
+                                    0.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    0.0
+                                ],
+                                "wall_clock_ns": [
+                                    178655917.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_ksw2_simd_dp_two_stack_nthash": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "REPR_STORAGE_K7_MEDIUM": {
+                            "all_regions": {
+                                "match_count": [
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    12656375.0,
+                                    12826291.0,
+                                    12893000.0,
+                                    5505875.0,
+                                    5316125.0
+                                ]
+                            }
+                        },
+                        "REPR_STORAGE_K27_XL": {
+                            "all_regions": {
+                                "match_count": [
+                                    0.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    0.0
+                                ],
+                                "wall_clock_ns": [
+                                    177526708.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "minimap2_dp": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "REPR_STORAGE_K7_MEDIUM": {
+                            "all_regions": {
+                                "match_count": [
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    19442625.0,
+                                    13760750.0,
+                                    14995125.0,
+                                    16398250.0,
+                                    13527375.0
+                                ]
+                            }
+                        },
+                        "REPR_STORAGE_K27_XL": {
+                            "all_regions": {
+                                "match_count": [
+                                    1.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    952144083.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "bench_aligners_rmq_repro": {
+            "title": "RMQ chaining LONG/CCS regression repro",
+            "description": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining (AVL rebalance bug, fixed in chaining_rmq.cppm). One row, asserts non-zero match count.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bench/bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "SHORT_HIFI": "300 bp fragments, ~0.2% HiFi-style error, 3 kbp reference",
+                "SHORT_CCS": "300 bp fragments, ~1.5% CCS-style error",
+                "SHORT_ONT_MODERN": "300 bp fragments, ~5% ONT-modern error",
+                "SHORT_ONT_LEGACY": "300 bp fragments, ~10% ONT-legacy error",
+                "SHORT_HIGH_INDEL_LOW_SUB": "300 bp fragments, ~8% indel-only",
+                "SHORT_HIGH_SUB_LOW_INDEL": "300 bp fragments, ~5% sub-only",
+                "MEDIUM_HIFI": "5 kbp fragments, ~0.2% HiFi-style error, 30 kbp reference",
+                "MEDIUM_CCS": "5 kbp fragments, ~1.5% CCS-style error",
+                "MEDIUM_ONT_MODERN": "5 kbp fragments, ~5% ONT-modern error",
+                "MEDIUM_ONT_LEGACY": "5 kbp fragments, ~10% ONT-legacy error",
+                "MEDIUM_HIGH_INDEL_LOW_SUB": "5 kbp fragments, ~8% indel-only",
+                "MEDIUM_HIGH_SUB_LOW_INDEL": "5 kbp fragments, ~5% sub-only",
+                "LONG_HIFI": "50 kbp fragments, ~0.2% HiFi error, 250 kbp reference",
+                "LONG_CCS": "50 kbp fragments, ~1.5% CCS error",
+                "LONG_ONT_MODERN": "50 kbp fragments, ~5% ONT-modern error",
+                "LONG_HIGH_SUB_LOW_INDEL": "50 kbp fragments, ~5% sub-only",
+                "VERY_LONG_HIFI": "1 Mbp fragments, ~0.2% HiFi error",
+                "VERY_LONG_CCS": "1 Mbp fragments, ~1.5% CCS error",
+                "VERY_LONG_ONT_MODERN": "1 Mbp fragments, ~5% ONT-modern error",
+                "VERY_LONG_HIGH_SUB_LOW_INDEL": "1 Mbp fragments, ~5% sub-only",
+                "XL_HIFI": "5 Mbp fragments, ~0.2% HiFi error",
+                "XL_CCS": "5 Mbp fragments, ~1.5% CCS error",
+                "XXL_HIFI": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error",
+                "REPR_STORAGE_K7_MEDIUM": "K=7 / MEDIUM HiFi — exercises 32-bit MinimizerRepr<15,7>",
+                "REPR_STORAGE_K27_XL": "K=27 / XL HiFi — exercises 128-bit MinimizerRepr<28,27>",
+                "RMQ_REPRO_LONG_CCS": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining",
+                "CURATED_UNIQUE_FRAGMENT": "Single error-free fragment from a 2 kbp random reference — trivial alignment",
+                "CURATED_SEAL_BATCH": "SEAL-style 8-fragment batch with mild error and reverse-complement"
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_ksw2_rmq_scalar_mm": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "RMQ_REPRO_LONG_CCS": {
+                            "all_regions": {
+                                "match_count": [
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0,
+                                    3.0
+                                ],
+                                "mean_position_offset_bp": [
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0,
+                                    0.0
+                                ],
+                                "primary_correct_fraction": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    29648666.0,
+                                    29981041.0,
+                                    30806791.0,
+                                    30989708.0,
+                                    31088084.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    }
+}

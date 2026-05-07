@@ -74,6 +74,7 @@ if has_token integration; then TARGETS+=(bioseq_aligner_int_tests_exec); fi
 if has_token bench;       then TARGETS+=(bioseq_bench); fi
 if has_token io;       then TARGETS+=(bioseq_io_bench); fi
 if has_token framework_example; then TARGETS+=(bioseq_bench_framework_example); fi
+if has_token lol;         then TARGETS+=(bioseq_aligner_tests_exec); fi
 
 for tgt in "${TARGETS[@]}"; do
     cmake --build "${BUILD_DIR}" --target "${tgt}" --parallel "${JOBS}"

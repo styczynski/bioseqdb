@@ -55,8 +55,6 @@ using bioseq::simd::HWY_NAMESPACE::MatchResult;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 
-namespace detail {
-
 /**
  * @brief Convert a compact_sequence_range to an ACGT string (no NUL in the
  *        middle, `bp_size()` chars long).
@@ -66,6 +64,11 @@ namespace detail {
  * `seqan3::alphabet::to_char` per rank for the final char mapping. This
  * is a single O(bp_size) pass with no intermediate `std::vector` (unlike
  * the `to_encoded_vector()` + loop pattern).
+ *
+ * Promoted out of `detail::` so bench harnesses can call it from
+ * `on_input` and pass the resulting string into `tool_minimap2`. That
+ * keeps the O(bp_size) decompression out of the per-iteration timing
+ * window — see STRANGE_TIMING_COMPREHESIVE_REPORT.md §1b for context.
  */
 template<supports_compact_sequence_range Range>
 [[nodiscard]] std::string compact_sequence_to_acgt(
@@ -82,6 +85,8 @@ template<supports_compact_sequence_range Range>
     }
     return acgt_chars;
 }
+
+namespace detail {
 
 /**
  * @brief Populate an mm_mapopt_t from our Minimap2Params.
@@ -213,44 +218,41 @@ struct NativeMinimap2Handles {
 /**
  * @brief Run the original minimap2 C pipeline and return a MatchResultCollection.
  *
- * Mirrors the signature of bioseq's native `minimap_port` so evaluation
- * harnesses can call the two interchangeably. Sequences are converted to
- * ACGT text, handed to `mm_idx_str` for in-memory index construction, and
- * then aligned via `mm_map`. The returned regions are freed before
- * returning — the caller owns the MatchResultCollection outright.
+ * Takes pre-decoded ACGT strings (one per sequence) and calls the
+ * minimap2 in-memory entry points (`mm_idx_str` -> `mm_map`). Mirrors
+ * the shape of `minimap_port` for downstream evaluation, but the
+ * compact-to-ACGT conversion is the *caller's* responsibility — see
+ * `compact_sequence_to_acgt(...)` above. Hoisting the conversion
+ * out of `on_run` keeps the per-iteration timing window honest
+ * (issue 1b in STRANGE_TIMING_COMPREHESIVE_REPORT.md). The
+ * cross-alphabet sanity check that this function used to perform via
+ * `static_assert` is preserved at the conversion site (the templated
+ * `compact_sequence_to_acgt` above is the only entry that produces
+ * the strings consumed here).
  *
- * @tparam QueryRange  compact_sequence_range type for the query
- * @tparam TargetRange compact_sequence_range type for the target
- * @param query_seq    Query sequence as compact_sequence_range
- * @param target_seq   Target sequence as compact_sequence_range
+ * @param query_acgt   ASCII query sequence (NUL-terminated; we pass
+ *                     `c_str()` straight into `mm_map`).
+ * @param target_acgt  ASCII target sequence, same NUL-termination
+ *                     contract.
  * @param params       Algorithm parameters (defaults match minimap2)
  * @return             PAF-like results in the shared MatchResultCollection shape
  */
-template<
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange>
-[[nodiscard]] MatchResultCollection tool_minimap2(
-    compact_sequence_range<QueryRange>& query_seq,
-    compact_sequence_range<TargetRange>& target_seq,
+[[nodiscard]] inline MatchResultCollection tool_minimap2(
+    const std::string& query_acgt,
+    const std::string& target_acgt,
     const Minimap2Params& params = Minimap2Params{})
 {
-    static_assert(
-        std::is_same_v<
-            typename compact_sequence_range<QueryRange>::traits::alphabet_type,
-            typename compact_sequence_range<TargetRange>::traits::alphabet_type>,
-        "tool_minimap2: query and target must use the same alphabet type");
-
     // Top-level region for the reference-minimap2 wrapper. Inner regions
     // come from BENCH_INSTR_BLOCK call sites inside minimap2/*.c; this
     // outer region lets the report layer attribute the wrapper-side
-    // overhead (sequence-to-ACGT conversion, mm_idx_str index build,
-    // mm_tbuf_init, result copy) that minimap2's own markers don't see.
+    // overhead (mm_idx_str index build, mm_tbuf_init, result copy) that
+    // minimap2's own markers don't see. The compact-to-ACGT conversion
+    // used to live here and dominated the wrapper time on XXL inputs;
+    // it's now the caller's responsibility.
     static const auto* _tool_minimap2_run_desc =
         bioseq::instr::register_region_static("tool_minimap2.run");
     auto _tool_minimap2_run_scope = bioseq::instr::region(_tool_minimap2_run_desc);
 
-    const std::string target_acgt = detail::compact_sequence_to_acgt(target_seq);
-    const std::string query_acgt  = detail::compact_sequence_to_acgt(query_seq);
     const int32_t target_len = static_cast<int32_t>(target_acgt.size());
     const int32_t query_len  = static_cast<int32_t>(query_acgt.size());
 

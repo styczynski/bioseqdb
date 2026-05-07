@@ -252,6 +252,7 @@ struct BenchmarkSpec {
     bool                           fast = false;
     bool                           bench_lock = false;
     bool                           concurrency = true;
+    bool                           test_case_lock = true;
     bool                           by_regions = false;
     std::span<const ForEntry>     for_entries{};
     std::span<const OverEntry>    over_entries{};
@@ -381,6 +382,8 @@ inline void emit_benchmark(std::string& out, const BenchmarkSpec& bench) {
     emit_kv_bool(out, "bench_lock", bench.bench_lock);
     out += ',';
     emit_kv_bool(out, "concurrency", bench.concurrency);
+    out += ',';
+    emit_kv_bool(out, "test_case_lock", bench.test_case_lock);
     out += "},\"matrix\":{";
     emit_kv_bool(out, "by_regions", bench.by_regions);
     out += ",\"for\":";

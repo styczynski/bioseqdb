@@ -72,6 +72,13 @@ struct AlignerInput {
     /// `on_run` calls access them through their declared signatures
     /// without forcing a `const_cast` at every call site.
     mutable std::vector<GeneratedBenchSequencePair> pairs;
+    /// Pre-decoded ACGT strings in lock-step with `pairs`. Populated
+    /// once in `build_input` so the per-iteration timing window of
+    /// `run_aligner` does not include the O(bp_size) compact-to-ACGT
+    /// conversion that `tool_minimap2` used to do inline. See issue
+    /// 1b in STRANGE_TIMING_COMPREHESIVE_REPORT.md.
+    std::vector<std::string> queries_acgt;
+    std::vector<std::string> targets_acgt;
     /// Optional kmer-size override pulled from the test case `data`
     /// blob. 0 means "use the algorithm default (15)". Set on the
     /// REPR_STORAGE_* test cases to force a specific MinimizerRepr
@@ -150,6 +157,24 @@ struct AlignerOutput {
     input.pairs = generate_test_sequences(params);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
+
+    // Pre-decode each pair's compact representation into ACGT so the
+    // tool_minimap2 cell does not pay the O(bp_size) decompress
+    // inside its timing window. Cost lives in on_input (excluded from
+    // wall_clock_ns by `std::call_once`-guarded caching). Memory cost
+    // is one ASCII byte per base per pair; for XXL_HIFI's 500 Mbp
+    // target that's an extra ~500 MB beyond the existing packed
+    // representation. Acceptable: the cached input is held only for
+    // the duration of the benchmark.
+    input.queries_acgt.reserve(input.pairs.size());
+    input.targets_acgt.reserve(input.pairs.size());
+    for (auto& pair : input.pairs) {
+        input.queries_acgt.push_back(
+            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.query));
+        input.targets_acgt.push_back(
+            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.target));
+    }
+
     JustLog("[bench_v10] build_input '{}' produced {} pairs (k_override={})",
              test_case_name, input.pairs.size(), input.kmer_size_override);
     return input;
@@ -220,11 +245,14 @@ struct AlgorithmDispatch {
 
     AlignerOutput output;
     output.total_pairs = input.pairs.size();
-    for (auto& pair : input.pairs) {  // pairs are `mutable` in AlignerInput; see field comment
+    for (std::size_t pair_index = 0; pair_index < input.pairs.size(); ++pair_index) {
+        auto& pair = input.pairs[pair_index];     // pairs are `mutable` in AlignerInput; see field comment
         MatchResultCollection results;
         if (dispatch.is_minimap2_reference) {
             results = bioseq::bench::HWY_NAMESPACE::tool_minimap2(
-                pair.query, pair.target, dispatch.params);
+                input.queries_acgt[pair_index],
+                input.targets_acgt[pair_index],
+                dispatch.params);
         } else {
             results = bioseq::simd::HWY_NAMESPACE::minimap_port(
                 pair.query, pair.target, dispatch.params);

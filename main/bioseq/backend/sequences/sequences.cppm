@@ -26,6 +26,8 @@ export module bioseq_sequences:sequences;
 import mlogging;
 import sequan_compat;
 
+using namespace seq::literals; // todo: this must be remvoed
+
 export {
 
 template<typename T, template<typename...> typename U>
@@ -56,10 +58,33 @@ public:
     using storage_unit = storage_unit_t;
     static constexpr size_t letter_bit_width = p_letter_bit_width;
     static constexpr bool is_valid_sequence_custom_alphabet = true;
+
+    static constexpr size_t leftover_bits = (sizeof(alphabet_type) * 8) % letter_bit_width;
 };
 
 template <typename T>
 concept is_sequence_custom_alphabet = T::is_valid_sequence_custom_alphabet == true;
+
+// This concept checks if we can do clever trick
+// Can we interpret sequence over A as sequence over B?
+// This requires:
+//   - alphabet to be the same
+//   - letter width to be the same
+//   - storage unit of A needs to be of size B or larger
+//   - there cannot be any leftover bits in either A or B
+//   - size of A in bits must be divisible by size of B in bits
+// Last two conditions means that each storage unit in A can be split into N units in B
+// where N is integer, so this means we can interpret sequence A as sequence over B
+// (this needs some tweaking as size and padding adjustment, but this concept just check if we can do it)
+template <typename A, typename B>
+concept is_sequence_custom_alphabet_bit_castable_to = (
+    is_sequence_custom_alphabet<A> && \
+    is_sequence_custom_alphabet<B> && \
+    std::same_as<typename A::alphabet_type, typename B::alphabet_type> && \
+    A::letter_bit_width == B::letter_bit_width && \
+    sizeof(typename A::storage_unit) >= sizeof(typename B::storage_unit) && \
+    A::leftover_bits == 0 && B::leftover_bits == 0
+);
 
 template<typename R>
 concept sequence_proper_container = \
@@ -241,6 +266,74 @@ template<
     return bit_pack_detail::extract_letters_from_unit_impl<Value, bits_per_letter, letter_count>(
         std::make_index_sequence<letter_count>{}, val);
 }
+
+/*
+This struct represents different view of the sequence.
+*/
+template <
+    typename base_t,
+    typename output_t
+>
+struct bit_casted_view {
+private:
+    const base_t& base;
+public:
+
+    bit_casted_view(const base_t& base_container): base(base_container) {}
+
+    using base_traits = base_t::traits;
+    using traits = output_t::traits;
+
+    // If this is downcast or upcast. Downcast is when we translate for example 32 uint into 8 uint. Upcast viceversa
+    static constexpr bool is_down_cast = sizeof(output_t) <= sizeof(base_t);
+    // What is the ratio between sizes in bits between input and output type
+    static constexpr size_t cast_ratio = is_down_cast ? (base_traits::unit_width / traits::unit_width) : (traits::unit_width / base_traits::unit_width);
+    // Log base 2 for cast_ratio (useful for shifts)
+    static constexpr size_t cast_ratio_log = seqan3::detail::ceil_log2(cast_ratio);
+
+    // Assert verifies that cast_ratio is power of two, otherwise we cannot do anything
+    static_assert(1 << cast_ratio_log == cast_ratio);
+
+    [[always_inline]] constexpr size_t bp_size() const {
+        // Number of letters stays the same, we only change interpretation not the value itself
+        return base.bp_size();
+    };
+
+    [[always_inline]] constexpr size_t size() const {
+        // This calculates number of new units of new type from the number of letters
+        return int_div_ceil(base.bp_size(), traits::letters_per_unit).first;
+    };
+
+    [[always_inline]] constexpr size_t byte_size() const {
+        // We don't change underlying values so it stays the same
+        return base.byte_size();
+    };
+
+    [[always_inline]] constexpr size_t padding() {
+        return int_div_ceil(base.bp_size(), traits::letters_per_unit).second;
+    };
+
+    template<typename I>
+    requires(base_t::template is_valid_derived_iter<I>::value)
+    [[always_inline]] constexpr const typename traits::storage_unit* read_cptr(const I& it) {
+        return reinterpret_cast<const typename traits::storage_unit*>(base.read_cptr(it));
+    };
+
+    template<typename I>
+    requires(base_t::template is_valid_derived_iter<I>::value)
+    [[always_inline]] constexpr static void advance_iter(I& it, const size_t value) {
+        // This is interesting part:
+        // - if we downcast then for one real unit we have view 'cast_ratio' units, so each cast_ratio increments of iterator means 1 real increment
+        // - if we upcast then for 'cast_ratio' real units we have one view unit, so each 1 increment of iterator means 'cast_ratio' real increments
+        if constexpr (is_down_cast) {
+            DEBUG_ASSERT(value % down_cast_ratio == 0, fmt::format("bit_casted_view for downcasted value (ratio={}) can only advance iterator by the ratio of downcasting otherwise it wouldn't be zero cost. value ({}) must be divisible by down_cast_ratio ({})", down_cast_ratio, value, down_cast_ratio));
+            // This is just optimised division
+            it += (value >> cast_ratio_log);
+        } else {
+            it += (value << cast_ratio_log);
+        }
+    };
+};
 
 template<
     typename derived_t,
@@ -981,6 +1074,35 @@ struct compact_sequence_range_base {
         }
         return reverse_complement_ranks;
     }
+
+    // // Downcasting support
+    // template<
+    //     typename other_derived_t
+    // >
+    // requires(
+    //     is_sequence_custom_alphabet_downcastable_to<
+    //         sequence_custom_alphabet<typename traits::alphabet_type, typename traits::storage_unit, traits::bits_per_char>,
+    //         sequence_custom_alphabet<typename other_derived_t::traits::alphabet_type, typename other_derived_t::traits::storage_unit, other_derived_t::traits::bits_per_char>
+    //     >
+    // )
+    // [[always_inline]] constexpr bit_casted_view<derived_t, other_derived_t> bit_cast_to() const {
+    //     return bit_casted_view<derived_t, other_derived_t>(*super());
+    // }
+
+    template<
+        typename other_storage_unit,
+        typename other_derived_t = compact_sequence_range<sequence_custom_alphabet<typename traits::alphabet_type, other_storage_unit, traits::bits_per_char>>
+    >
+    requires(
+        is_sequence_custom_alphabet_bit_castable_to<
+            sequence_custom_alphabet<typename traits::alphabet_type, typename traits::storage_unit, traits::bits_per_char>,
+            sequence_custom_alphabet<typename traits::alphabet_type, other_storage_unit, traits::bits_per_char>
+        >
+    )
+    [[always_inline]] constexpr bit_casted_view<derived_t, other_derived_t> bit_cast_to_storage_unit() const {
+        return bit_casted_view<derived_t, other_derived_t>(*super());
+    }
+
 };
 
 template<typename R>
@@ -1061,6 +1183,8 @@ public:
             //return std::distance(this->base(), other.base());
         };
     };
+
+    using iterator = iterator_impl;
 
     iterator_impl begin() {
         return iterator_impl(_data.cbegin());
@@ -1263,6 +1387,28 @@ enum sequence_strand_mode : uint8_t {
     SEQUENCE_STRAND_REVERSE_COMPLEMENT = 1,
     SEQUENCE_STRAND_EQUAL = 2
 };
+
+void hehe_hyhy() {
+    std::vector<seq::dna4> MINIMIZER_TEST_DNA4_SEQ{
+        "GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4
+    };
+    auto seq = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint64_t>>(MINIMIZER_TEST_DNA4_SEQ);
+    auto iter = seq.begin();
+
+    //auto down_cast = seq.bit_cast_to<compact_sequence_range<seq::dna4>>();
+    auto down_cast = seq.bit_cast_to_storage_unit<uint32_t>();
+    JustLog("test val = {}", *iter);
+    down_cast.advance_iter(iter, 2);
+    JustLog("test val = {}", *iter);
+
+    iter = seq.begin();
+    auto noop_cast = seq.bit_cast_to_storage_unit<uint64_t>();
+    JustLog("test val = {}", *iter);
+    noop_cast.advance_iter(iter, 1);
+    JustLog("test val = {}", *iter);
+
+    uint8_t chunk = *down_cast.read_cptr(iter);
+}
 
 };
 

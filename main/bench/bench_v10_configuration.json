@@ -39,6 +39,9 @@
     "XL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "5 Mbp fragments, ~0.2% HiFi error" },
     "XL_CCS":          { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.005, "insertion_rate": 0.005, "deletion_rate": 0.005, "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 4321987 }, "description": "5 Mbp fragments, ~1.5% CCS error" },
 
+    "XXL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 500000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error" },
+
+
     "REPR_STORAGE_K7_MEDIUM":  { "data": { "kmer_size": 7,  "fragment_count": 3, "fragment_length_mean": 5000, "fragment_length_stddev": 500, "reference_length": 30000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 24681012 }, "description": "K=7 / MEDIUM HiFi — exercises 32-bit MinimizerRepr<15,7>" },
     "REPR_STORAGE_K27_XL":     { "data": { "kmer_size": 27, "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 13579246 }, "description": "K=27 / XL HiFi — exercises 128-bit MinimizerRepr<28,27>" },
 
@@ -58,7 +61,7 @@
         "MEDIUM_HIFI": 35, "MEDIUM_CCS": 35, "MEDIUM_ONT_MODERN": 35, "MEDIUM_ONT_LEGACY": 35, "MEDIUM_HIGH_INDEL_LOW_SUB": 35, "MEDIUM_HIGH_SUB_LOW_INDEL": 35,
         "LONG_HIFI": 12, "LONG_CCS": 12, "LONG_ONT_MODERN": 12, "LONG_HIGH_SUB_LOW_INDEL": 12,
         "VERY_LONG_HIFI": 3, "VERY_LONG_CCS": 3, "VERY_LONG_ONT_MODERN": 3, "VERY_LONG_HIGH_SUB_LOW_INDEL": 3,
-        "XL_HIFI": 2, "XL_CCS": 2
+        "XL_HIFI": 2, "XL_CCS": 2, "XXL_HIFI": 1
       },
       "over": {
         "minimap2_dp": {},
@@ -195,11 +198,11 @@
   },
 
   "bench_aligners_curated": {
-    "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Asserts both unique-fragment primary correctness and SEAL-style batch behaviour.",
+    "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Asserts both unique-fragment primary correctness and SEAL-style batch behaviour. On purpose evaluates one sample for very long sequence (XXL_HIFI)",
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": true },
     "matrix": {
-      "for": { "CURATED_UNIQUE_FRAGMENT": 30, "CURATED_SEAL_BATCH": 30 },
+      "for": { "CURATED_UNIQUE_FRAGMENT": 30, "CURATED_SEAL_BATCH": 30, "XXL_HIFI": 1 },
       "over": {
         "minimap2_dp": {},
         "bioseq_ksw2_scalar_dp_scalar_mm": {},

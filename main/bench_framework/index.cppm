@@ -576,8 +576,15 @@ struct MetricSpec {
 };
 
 struct ConcurrencyOpts {
-    bool bench_lock  = false;
-    bool concurrency = true;
+    bool bench_lock     = false;
+    bool concurrency    = true;
+    /// If true (default), within one benchmark only one execution
+    /// tuple may run against a given test_case at a time. The
+    /// framework holds a per-test-case mutex around the iteration's
+    /// timing window so cells that share a cached `Input` do not
+    /// fight for memory bandwidth. Acquisition order is
+    /// `bench_lock → test_case_lock`, so deadlock is impossible.
+    bool test_case_lock = true;
 };
 
 struct ParamSchema {
@@ -671,6 +678,15 @@ struct BenchmarkExecutionState {
     std::vector<TestCaseSpec>           test_cases{};
     std::vector<ExecutionTuple>         execution_tuples{};
     std::vector<std::unique_ptr<Cell>>  cells{};
+
+    /// One mutex per test_case (indexed by `Cell::test_case_index`).
+    /// When `concurrency.test_case_lock == true`, the iteration loop
+    /// holds the matching mutex for the duration of its timing
+    /// window so two tuples that share the same cached `Input` do
+    /// not race on memory bandwidth. `std::unique_ptr<std::mutex>`
+    /// because `std::mutex` is non-movable and we want stable
+    /// addresses for the duration of the benchmark.
+    std::vector<std::unique_ptr<std::mutex>> per_test_case_mutexes{};
 
     BenchmarkExecutionState() = default;
     BenchmarkExecutionState(BenchmarkExecutionState&&) = delete;
@@ -1141,7 +1157,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "concurrency": {
       "title": "ConcurrencyOptions",
-      "description": "Per-benchmark concurrency knobs. Both fields default to false / true respectively.",
+      "description": "Per-benchmark concurrency knobs. Defaults: bench_lock=false, concurrency=true, test_case_lock=true.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -1154,6 +1170,11 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "type": "boolean",
           "default": true,
           "description": "If true (default), this benchmark's iterations are distributed across TBB workers. If false, iterations run serially. NOTE: any benchmark that declares a counter-typed metric is forced serial regardless of this flag."
+        },
+        "test_case_lock": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true (default), within one benchmark only one execution tuple may run against a given test_case at a time. The framework holds a per-test-case mutex around the iteration's timing window (acquired immediately before clock::now_ns(), released immediately after). Prevents cached-input memory-bandwidth contention between cells that share a test_case input. Acquisition order is bench_lock -> test_case_lock so this is deadlock-free. Set to false on benchmarks that genuinely benefit from intra-test-case parallel fan-out."
         }
       }
     },
@@ -2385,6 +2406,10 @@ parse_compare_and_tolerance(
         bool concurrency_flag = true;
         if (concurrency_obj["concurrency"].get(concurrency_flag) == simdjson::SUCCESS) {
             benchmark.concurrency.concurrency = concurrency_flag;
+        }
+        bool test_case_lock_flag = true;
+        if (concurrency_obj["test_case_lock"].get(test_case_lock_flag) == simdjson::SUCCESS) {
+            benchmark.concurrency.test_case_lock = test_case_lock_flag;
         }
     }
 
@@ -3653,6 +3678,8 @@ inline void run_typed_benchmark(
     const auto counter_handles = resolve_counter_handles(state.config.metrics);
     const bool by_regions = state.config.by_regions;
 
+    const bool test_case_lock_enabled = state.config.concurrency.test_case_lock;
+
     /// Run exactly one iteration of one cell. Hot path; called once per
     /// (cell × iter_index) work unit.
     auto run_one_iteration = [&](Cell& cell) {
@@ -3667,10 +3694,26 @@ inline void run_typed_benchmark(
 
         const auto counters_before = snapshot_counters(counter_handles);
 
+        // Acquire the per-test-case mutex (if the flag is on) so this
+        // iteration runs alone against its cached input. Held only
+        // around `clock::now_ns` -> `on_run` -> `clock::now_ns` so the
+        // wall_clock_ns sample never includes lock-wait time.
+        // `on_evaluate` and `append_iteration_samples` then run with
+        // the mutex released — they don't touch the cached input
+        // beyond what's already legal under read-only sharing.
+        std::unique_lock<std::mutex> test_case_guard;
+        if (test_case_lock_enabled
+            && cell.test_case_index < state.per_test_case_mutexes.size()) {
+            test_case_guard = std::unique_lock<std::mutex>(
+                *state.per_test_case_mutexes[cell.test_case_index]);
+        }
+
         const auto t_begin_ns = bioseq::instr::clock::now_ns();
         const Output output = on_run(tuple.algorithm_name, tuple.params, input);
         const auto t_end_ns = bioseq::instr::clock::now_ns();
         const auto iteration_wall_clock_ns = static_cast<double>(t_end_ns - t_begin_ns);
+
+        if (test_case_guard.owns_lock()) test_case_guard.unlock();
 
         const auto counters_after = snapshot_counters(counter_handles);
 
@@ -6858,6 +6901,20 @@ template<typename Input, typename Output>
             return;
         }
         state.cells = detail::build_cells(state);
+
+        // Allocate one std::mutex per declared test_case so the
+        // hot-path lambda can grab the matching one when
+        // `concurrency.test_case_lock` is set. Indexed by
+        // `Cell::test_case_index`, so the size must match
+        // `state.test_cases.size()` exactly. Always allocated (even
+        // when the flag is false) — the cost is one heap pointer per
+        // test case, and it lets the hot path assume the vector is
+        // populated.
+        state.per_test_case_mutexes.clear();
+        state.per_test_case_mutexes.reserve(state.test_cases.size());
+        for (std::size_t i = 0; i < state.test_cases.size(); ++i) {
+            state.per_test_case_mutexes.emplace_back(std::make_unique<std::mutex>());
+        }
 
         std::uint64_t total_iterations = 0;
         for (const auto& cell_ptr : state.cells) total_iterations += cell_ptr->iterations;
