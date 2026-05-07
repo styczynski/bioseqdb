@@ -2,15 +2,7 @@
  * @file sequence_generator.cppm
  * @brief Synthetic benchmark sequence generator, modelled after SEAL.
  *
- * Re-housed under `bench_scheduler/data_utils/` so any DNA-bench
- * harness (the aligner today, the IO bench tomorrow) can reuse it
- * without copying the SEAL-style error-model code. Lives in the
- * `data_utils` sub-namespace, an opt-in extension of the scheduler:
- * the core scheduler API (parallel_runner, regression, charting) is
- * deliberately sequence-free; data_utils is for "useful but
- * domain-typed" building blocks.
- *
- * Produces `(query, target)` pairs with ground-truth position metadata so
+ * Produces (query, target) pairs with ground-truth position metadata so
  * downstream evaluation can classify each aligner hit as correct or
  * incorrect. The error model matches SEAL's core generators — uniform
  * substitutions, normally-distributed indel lengths, optional
@@ -18,9 +10,9 @@
  * because our evaluator consumes ground truth directly from this struct.
  *
  * Interface:
- *   GeneratorParams   — simulation knobs (reference length, error rates, ...)
- *   GeneratedBenchSequencePair — single (query, target) with ground truth
- *   generate_test_sequences()  — fresh batch, seeded by params.seed
+ *   GeneratorParams              — simulation knobs (reference length, error rates, ...)
+ *   GeneratedBenchSequencePair   — single (query, target) with ground truth
+ *   generate_test_sequences()    — fresh batch, seeded by params.seed
  */
 module;
 
@@ -37,7 +29,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.scheduler.data_utils.sequence_generator;
+export module bench.sequence_generator;
 
 import mlogging;
 import sequan_compat;
@@ -47,92 +39,46 @@ export {
 
 HWY_BEFORE_NAMESPACE();
 
-namespace bioseq::bench_scheduler::data_utils::HWY_NAMESPACE {
+namespace bioseq::bench::HWY_NAMESPACE {
 
-/// Alphabet config used by the benchmark pipeline.
-///
-/// Originally `sequence_custom_alphabet<seq::dna4, uint64_t>` (32 letters
-/// per uint64_t). Switched to `uint32_t` storage (16 letters per uint32_t):
-///
-/// 1. `unit_leftover_bits == 0` for both — bit-packed encoding stays the
-///    same, V3 unit-aligned `to_encoded_into` fast path stays in scope.
-/// 2. `hn::ScalableTag<uint32_t>` gives 4 lanes per 128-bit vector instead
-///    of 2 for uint64_t. The `mm_sketch_simd` rolling-window kernel runs
-///    4× independent streams instead of 2×, halving the iteration count.
-/// 3. `uint32_t` is wide enough to hold the 30-bit k-mer hash for k ≤ 15
-///    (default minimap2 `map-ont` preset), so the templated hash inside
-///    `simd_hash<storage_unit, dd_t>` stays correct without overrides.
-///    For larger k a uint64_t hash override would be needed; not in scope
-///    for the long-sequence bench.
-///
-/// Memory footprint per 1 Mbp sequence is unchanged (250 kB in either
-/// layout — 8 bits per pair stored, just at different word granularity).
+/// Alphabet config used by the benchmark pipeline. uint32_t storage gives
+/// 16 letters per word and 4 SIMD lanes per 128-bit vector — preferred for
+/// the long-sequence benches where the rolling-window kernel runs 4
+/// independent streams. Bit packing matches the canonical bioseq layout.
 using bench_alphabet_config = sequence_custom_alphabet<seq::dna4, uint32_t>;
 using bench_sequence_range  = compact_sequence_range<bench_alphabet_config>;
 
- /*
- * @brief Simulation knobs passed to `generate_test_sequences()`.
- *
- * Substitution + indel models mirror SEAL's UniformErrorGenerator and
- * IndelGenerator (generator/errors/*.java). Lengths are sampled from
- * Gaussians just like SEAL does; rates are per-base probabilities.
- *
- * Two intentional divergences from SEAL we have already accepted:
- *   * Error-generator ordering is hardcoded (substitutions first, then
- *     indels). SEAL applies a caller-supplied list of generators in
- *     order (Fragmentizer.java:168-171); since its default suite runs
- *     substitutions before indels we chose this fixed order rather
- *     than shipping a generator-plugin API.
- *   * Deletion lengths are clamped to >= 0. SEAL's IndelGenerator
- *     (IndelGenerator.java:102-121) uses `i += deleteLength` without a
- *     floor, so a negative Gaussian sample rewinds `i` and can emit a
- *     duplicated character. We consider the SEAL behaviour a bug and
- *     clamp, matching SEAL's own insertion-length clamp.
- */
+/// Simulation knobs passed to `generate_test_sequences()`.
+///
+/// Substitution + indel models mirror SEAL's UniformErrorGenerator and
+/// IndelGenerator. Lengths are sampled from Gaussians; rates are per-base
+/// probabilities. Deletion lengths are clamped to >= 0 (SEAL has a bug
+/// where negative samples rewind position; we don't reproduce it).
 struct GeneratorParams {
-    /// Length (bp) of the synthetic reference shared by all fragments.
-    size_t reference_length = 10'000;
-
-    /// Number of fragments (queries) to produce.
-    size_t fragment_count = 100;
-
-    /// Gaussian mean / stddev for fragment length (bp).
-    size_t fragment_length_mean = 150;
+    size_t reference_length      = 10'000;
+    size_t fragment_count        = 100;
+    size_t fragment_length_mean  = 150;
     double fragment_length_stddev = 10.0;
 
-    /// Per-base probability of a substitution error. Mirrors SEAL's
-    /// UniformErrorGenerator with a constant rate (no positional bias).
-    double substitution_rate = 0.01;
+    double substitution_rate     = 0.01;
+    double insertion_rate        = 0.0005;
+    double deletion_rate         = 0.0005;
 
-    /// Per-base probability of starting an insertion / deletion event.
-    double insertion_rate = 0.0005;
-    double deletion_rate  = 0.0005;
-
-    /// Gaussian mean / stddev for indel event lengths (bp).
     double insertion_length_mean   = 2.0;
     double insertion_length_stddev = 1.0;
     double deletion_length_mean    = 2.0;
     double deletion_length_stddev  = 1.0;
 
-    /// Probability that a generated fragment is taken from the reverse
-    /// strand of the reference (reverse-complemented before errors are
-    /// applied).
-    double reverse_complement_rate = 0.5;
-
-    /// Deterministic RNG seed. Same seed -> identical batch output.
-    uint64_t seed = 42;
+    double   reverse_complement_rate = 0.5;
+    uint64_t seed                    = 42;
 };
 
- /*
- * @brief One generated (query, target) pair with ground-truth metadata.
- *
- * `query` is the fragment extracted from `target` at
- * [truth_target_start, truth_target_end), optionally reverse-
- * complemented, with errors injected. `target` is the same synthetic
- * reference shared by all pairs in a batch — duplicated per pair so the
- * struct can be handed to single-pair evaluation harnesses without
- * tracking shared storage separately.
- */
+/// One generated (query, target) pair with ground-truth metadata. `query`
+/// is the fragment extracted from `target` at [truth_target_start,
+/// truth_target_end), optionally reverse-complemented and with errors
+/// injected. `target` is the same synthetic reference shared by all pairs
+/// in a batch — duplicated per pair so the struct can be handed to a
+/// single-pair evaluator without tracking shared storage separately.
 struct GeneratedBenchSequencePair {
     bench_sequence_range query;
     bench_sequence_range target;
@@ -141,26 +87,16 @@ struct GeneratedBenchSequencePair {
     size_t truth_target_end   = 0;
     bool   is_reverse         = false;
 
-    /// Effective per-base error rate (substitutions + insertions + deletions).
-    double effective_error_rate = 0.0;
-
-    /// Pre-error query length, used by the evaluator to rescale
-    /// position_offset into a fractional error.
+    double effective_error_rate  = 0.0;
     size_t original_query_length = 0;
 };
 
 namespace detail {
 
-/// Round a (possibly negative) Gaussian sample down to a non-negative
-/// bp count. SEAL's IndelGenerator clamps insertion lengths this way
-/// but not deletions — we apply it uniformly so a bad RNG draw never
-/// produces backward progress in the indel loop. Kept as a named
-/// helper so the divergence from SEAL is easy to find later.
 [[nodiscard]] constexpr size_t clamp_gaussian_to_nonneg_bp(double raw_length) {
     return raw_length > 0.0 ? static_cast<size_t>(raw_length) : size_t{0};
 }
 
-/// Generate a uniform-random dna4 sequence of the requested length.
 [[nodiscard]] inline std::vector<seq::dna4> build_random_reference(
     size_t length, std::mt19937_64& rng)
 {
@@ -173,7 +109,6 @@ namespace detail {
     return reference;
 }
 
-/// Reverse-complement a dna4 sequence in place.
 inline void reverse_complement_in_place(std::vector<seq::dna4>& sequence) {
     std::reverse(sequence.begin(), sequence.end());
     for (auto& letter : sequence) {
@@ -181,10 +116,6 @@ inline void reverse_complement_in_place(std::vector<seq::dna4>& sequence) {
     }
 }
 
-/// Apply SEAL-style uniform substitution errors to a sequence. Each base
-/// is independently replaced with probability `rate`; the replacement is
-/// chosen uniformly from the other three bases so a substitution is
-/// always visible (matches SEAL's SubstitutionErrorGenerator).
 inline size_t apply_uniform_substitutions(
     std::vector<seq::dna4>& sequence, double rate, std::mt19937_64& rng)
 {
@@ -207,8 +138,6 @@ inline size_t apply_uniform_substitutions(
     return substitution_count;
 }
 
-/// Apply SEAL-style independent insertion / deletion events to a sequence.
-/// Returns the resulting sequence (possibly with different length).
 [[nodiscard]] inline std::vector<seq::dna4> apply_indels(
     const std::vector<seq::dna4>& sequence,
     double insertion_rate, double insertion_mean, double insertion_stddev,
@@ -249,8 +178,6 @@ inline size_t apply_uniform_substitutions(
     return mutated_sequence;
 }
 
-/// Clamp a normally-distributed fragment length into [1, upper_bound-1]
-/// so uniform start-position sampling is always well-defined.
 [[nodiscard]] inline size_t sample_fragment_length(
     size_t mean, double stddev, size_t upper_bound, std::mt19937_64& rng)
 {
@@ -265,17 +192,10 @@ inline size_t apply_uniform_substitutions(
 
 }  // namespace detail
 
- /*
- * @brief Generate a fresh batch of (query, target) pairs.
- *
- * Builds one synthetic reference, then repeatedly samples fragments from
- * it, optionally reverse-complements, injects SEAL-style substitution
- * and indel errors, and records the ground-truth origin so an evaluator
- * can classify each downstream aligner hit.
- *
- * The RNG is seeded once from params.seed so a given seed always yields
- * the same batch.
- */
+/// Generate a fresh batch of (query, target) pairs. Builds one synthetic
+/// reference, then samples fragments from it, optionally reverse-
+/// complements, injects SEAL-style substitution + indel errors, and
+/// records the ground-truth origin. Deterministic for a given params.seed.
 [[nodiscard]] inline std::vector<GeneratedBenchSequencePair>
 generate_test_sequences(const GeneratorParams& params) {
     std::mt19937_64 rng(params.seed);
@@ -327,14 +247,14 @@ generate_test_sequences(const GeneratorParams& params) {
         pairs.push_back(std::move(pair));
     }
 
-    JustLog("[bench.generator] Generated {} fragment pairs over a {} bp reference "
+    JustLog("[bench.sequence_generator] Generated {} fragment pairs over a {} bp reference "
             "(sub_rate={}, ins_rate={}, del_rate={})",
             pairs.size(), params.reference_length,
             params.substitution_rate, params.insertion_rate, params.deletion_rate);
     return pairs;
 }
 
-}  // namespace bioseq::bench_scheduler::data_utils::HWY_NAMESPACE
+}  // namespace bioseq::bench::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
 

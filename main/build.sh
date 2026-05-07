@@ -100,22 +100,22 @@ if has_token integration; then
 fi
 
 if has_token bench; then
-    # Forward any extra args after the test list (so `./build.sh bench --fast`
-    # reaches the bench). The `${...:+...}` form keeps `set -u` happy when no
-    # extras were passed.
+    # bench_framework binary is NOT a Catch2 binary — pass extra args
+    # through verbatim so `--fast`, `--threads`, `--report` reach the
+    # framework's CLI parser.
     if [ "$#" -gt 1 ]; then
-        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi "${@:2}"
+        ./bioseq/bioseq_bench "${@:2}"
     else
-        ./bioseq/bioseq_bench --reporter console::out=-::colour-mode=ansi
+        ./bioseq/bioseq_bench
     fi
 fi
 
 if has_token io; then
-    # Forward any extra args after the test list
+    # bench_framework binary, same shape as `bench` above.
     if [ "$#" -gt 1 ]; then
-        ./bioseq/bioseq_io_bench --reporter console::out=-::colour-mode=ansi "${@:2}"
+        ./bioseq/bioseq_io_bench "${@:2}"
     else
-        ./bioseq/bioseq_io_bench --reporter console::out=-::colour-mode=ansi
+        ./bioseq/bioseq_io_bench
     fi
 fi
 

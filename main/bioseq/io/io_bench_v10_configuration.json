@@ -1,0 +1,279 @@
+{
+  "params": {
+    "bioseq_io_sync_fasta":   {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_mmap_fasta":   {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_async4_fasta": {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_sync_fastq":   {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_mmap_fastq":   {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_async4_fastq": {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_pgzip_fastq":  {"_": {"type": "integer", "default": 0}},
+    "bioseq_io_zlib_fastq":   {"_": {"type": "integer", "default": 0}},
+    "kseqpp_fasta":           {"_": {"type": "integer", "default": 0}},
+    "kseqpp_fastq":           {"_": {"type": "integer", "default": 0}},
+    "naive_ifstream_fasta":   {"_": {"type": "integer", "default": 0}},
+    "naive_ifstream_fastq":   {"_": {"type": "integer", "default": 0}},
+
+    "bioseq_writer_sync_fasta":      {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_sync_fastq":      {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_parallel4_fasta": {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_parallel4_fastq": {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_parallel8_fasta": {"_": {"type": "integer", "default": 0}},
+    "bioseq_writer_parallel8_fastq": {"_": {"type": "integer", "default": 0}},
+    "naive_ofstream_fasta":          {"_": {"type": "integer", "default": 0}},
+    "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}}
+  },
+
+  "test_cases": {
+    "FASTA_SHORT":     { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200,    "seed": 1 }, "description": "~9 MiB FASTA of ~200 bp records" },
+    "FASTA_MEDIUM":    { "data": { "format": "fasta", "kind": "synthetic", "record_count": 5000,  "mean_record_length_bp": 2000,   "seed": 2 }, "description": "~11 MiB FASTA of ~2 kbp records" },
+    "FASTA_LONG":      { "data": { "format": "fasta", "kind": "synthetic", "record_count": 200,   "mean_record_length_bp": 50000,  "seed": 3 }, "description": "~11 MiB FASTA of ~50 kbp records" },
+    "FASTA_VERY_LONG": { "data": { "format": "fasta", "kind": "synthetic", "record_count": 15,    "mean_record_length_bp": 1000000,"seed": 4 }, "description": "~16 MiB FASTA of ~1 Mbp records" },
+
+    "FASTQ_SHORT":     { "data": { "format": "fastq", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200,    "seed": 5 }, "description": "~9 MiB FASTQ of ~200 bp records" },
+    "FASTQ_MEDIUM":    { "data": { "format": "fastq", "kind": "synthetic", "record_count": 5000,  "mean_record_length_bp": 2000,   "seed": 6 }, "description": "~11 MiB FASTQ of ~2 kbp records" },
+    "FASTQ_LONG":      { "data": { "format": "fastq", "kind": "synthetic", "record_count": 200,   "mean_record_length_bp": 50000,  "seed": 7 }, "description": "~11 MiB FASTQ of ~50 kbp records" },
+    "FASTQ_VERY_LONG": { "data": { "format": "fastq", "kind": "synthetic", "record_count": 15,    "mean_record_length_bp": 1000000,"seed": 8 }, "description": "~16 MiB FASTQ of ~1 Mbp records" },
+
+    "FASTA_REAL_HUMAN_GENOME":    { "data": { "format": "fasta", "kind": "real", "real_data_path": "homo_sapiens_GRCh38_dna4.fasta" },                  "description": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)" },
+    "FASTQ_REAL_HUMAN_FASTQ_6GB": { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq" }, "description": "Real-data FASTQ: ~6 GiB" },
+    "FASTQ_REAL_HUMAN_FASTQ_GZ":  { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true }, "description": "Real-data FASTQ.gz: ~1.96 GiB compressed" }
+  },
+
+  "bench_io_readers_fasta": {
+    "description": "FASTA reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTA corpora.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": {
+        "FASTA_SHORT": 8, "FASTA_MEDIUM": 5, "FASTA_LONG": 3, "FASTA_VERY_LONG": 2, "FASTA_REAL_HUMAN_GENOME": 3
+      },
+      "over": {
+        "bioseq_io_sync_fasta":   {},
+        "bioseq_io_mmap_fasta":   {},
+        "bioseq_io_async4_fasta": {},
+        "kseqpp_fasta":           {},
+        "naive_ifstream_fasta":   {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "bioseq_io_sync_fasta_within_2x_of_naive",
+              { "key": "bioseq_io_sync_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ifstream_fasta" } ],
+            [ "bioseq_io_mmap_fasta_within_2x_of_naive",
+              { "key": "bioseq_io_mmap_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ifstream_fasta" } ],
+            [ "bioseq_io_async4_fasta_within_2x_of_naive",
+              { "key": "bioseq_io_async4_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ifstream_fasta" } ],
+
+            [ "mmap_fasta_within_2x_of_sync",
+              { "key": "bioseq_io_mmap_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_io_sync_fasta" } ],
+
+            [ "async4_fasta_within_2x_of_sync",
+              { "key": "bioseq_io_async4_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_io_sync_fasta" } ]
+          ]
+        },
+        "bytes_on_disk":      { "type": "evaluation" },
+        "decompressed_bytes": { "type": "evaluation" },
+        "record_count":       { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_io_readers_fastq": {
+    "description": "FASTQ reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTQ corpora.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": {
+        "FASTQ_SHORT": 8, "FASTQ_MEDIUM": 5, "FASTQ_LONG": 3, "FASTQ_VERY_LONG": 2, "FASTQ_REAL_HUMAN_FASTQ_6GB": 2
+      },
+      "over": {
+        "bioseq_io_sync_fastq":   {},
+        "bioseq_io_mmap_fastq":   {},
+        "bioseq_io_async4_fastq": {},
+        "kseqpp_fastq":           {},
+        "naive_ifstream_fastq":   {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "bioseq_io_sync_fastq_within_2x_of_naive",
+              { "key": "bioseq_io_sync_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ifstream_fastq" } ],
+            [ "bioseq_io_mmap_fastq_within_2x_of_naive",
+              { "key": "bioseq_io_mmap_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ifstream_fastq" } ],
+            [ "bioseq_io_async4_fastq_within_2x_of_naive",
+              { "key": "bioseq_io_async4_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ifstream_fastq" } ],
+
+            [ "mmap_fastq_within_2x_of_sync",
+              { "key": "bioseq_io_mmap_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_io_sync_fastq" } ],
+
+            [ "async4_fastq_within_2x_of_sync",
+              { "key": "bioseq_io_async4_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_io_sync_fastq" } ]
+          ]
+        },
+        "bytes_on_disk":      { "type": "evaluation" },
+        "decompressed_bytes": { "type": "evaluation" },
+        "record_count":       { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_io_readers_gz": {
+    "description": "Gzip-aware reader paths (parallel-gzip + zlib fallback) on the .fastq.gz real-data cell. Asserts pgzip beats single-thread zlib by >= 25%.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "FASTQ_REAL_HUMAN_FASTQ_GZ": 2 },
+      "over": {
+        "bioseq_io_pgzip_fastq": {},
+        "bioseq_io_zlib_fastq":  {},
+        "kseqpp_fastq":          {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "pgzip_faster_than_zlib_fastq",
+              { "key": "bioseq_io_pgzip_fastq" },
+              { "compare": "<", "threshold%": 30, "tolerance%": 5, "aggregate": "p50" },
+              { "key": "bioseq_io_zlib_fastq" } ]
+          ]
+        },
+        "bytes_on_disk":      { "type": "evaluation" },
+        "decompressed_bytes": { "type": "evaluation" },
+        "record_count":       { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_io_writers_fasta": {
+    "description": "FASTA writer paths. sync vs parallel4 vs parallel8 bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates roundtrip.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": {
+        "FASTA_SHORT": 6, "FASTA_MEDIUM": 4, "FASTA_LONG": 3, "FASTA_VERY_LONG": 2, "FASTA_REAL_HUMAN_GENOME": 3
+      },
+      "over": {
+        "bioseq_writer_sync_fasta":      {},
+        "bioseq_writer_parallel4_fasta": {},
+        "bioseq_writer_parallel8_fasta": {},
+        "naive_ofstream_fasta":          {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "writer_sync_fasta_within_2x_of_naive",
+              { "key": "bioseq_writer_sync_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ofstream_fasta" } ],
+
+            [ "writer_parallel4_fasta_within_2x_of_sync",
+              { "key": "bioseq_writer_parallel4_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_writer_sync_fasta" } ],
+
+            [ "writer_parallel8_within_2x_of_parallel4_fasta",
+              { "key": "bioseq_writer_parallel8_fasta" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_writer_parallel4_fasta" } ]
+          ]
+        },
+        "bytes_on_disk":          { "type": "evaluation" },
+        "record_count":           { "type": "evaluation" },
+        "roundtrip_record_match": { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_io_writers_fastq": {
+    "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates roundtrip.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": {
+        "FASTQ_SHORT": 6, "FASTQ_MEDIUM": 4, "FASTQ_LONG": 3, "FASTQ_VERY_LONG": 2, "FASTQ_REAL_HUMAN_FASTQ_6GB": 2
+      },
+      "over": {
+        "bioseq_writer_sync_fastq":      {},
+        "bioseq_writer_parallel4_fastq": {},
+        "bioseq_writer_parallel8_fastq": {},
+        "naive_ofstream_fastq":          {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "writer_sync_fastq_within_2x_of_naive",
+              { "key": "bioseq_writer_sync_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "naive_ofstream_fastq" } ],
+
+            [ "writer_parallel4_fastq_within_2x_of_sync",
+              { "key": "bioseq_writer_parallel4_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_writer_sync_fastq" } ],
+
+            [ "writer_parallel8_within_2x_of_parallel4_fastq",
+              { "key": "bioseq_writer_parallel8_fastq" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 100, "aggregate": "p50" },
+              { "key": "bioseq_writer_parallel4_fastq" } ]
+          ]
+        },
+        "bytes_on_disk":          { "type": "evaluation" },
+        "record_count":           { "type": "evaluation" },
+        "roundtrip_record_match": { "type": "evaluation" }
+      }
+    }
+  },
+
+  "regression_rules": [
+    {
+      "name": "wall_clock_p50_no_blowup",
+      "metric": "wall_clock_ns",
+      "aggregate": "p50",
+      "operator": { "compare": "<", "tolerance%": 25 }
+    },
+    {
+      "name": "wall_clock_p99_no_runaway_outlier",
+      "metric": "wall_clock_ns",
+      "aggregate": "p99",
+      "operator": { "compare": "<", "tolerance%": 50 }
+    },
+    {
+      "name": "record_count_deterministic",
+      "metric": "record_count",
+      "aggregate": "p50",
+      "operator": { "compare": "=", "tolerance%": 0 }
+    },
+    {
+      "name": "roundtrip_record_match_deterministic",
+      "benchmarks": ["bench_io_writers_fasta", "bench_io_writers_fastq"],
+      "metric": "roundtrip_record_match",
+      "aggregate": "p50",
+      "operator": { "compare": "=", "tolerance%": 0 }
+    }
+  ]
+}

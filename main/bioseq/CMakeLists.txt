@@ -59,26 +59,9 @@ find_package(TBB REQUIRED tbb)
 #     sql/bioseq--1.0.sql
 # )
 
-# === bench target (unit-test binary for minimap_port + tool_minimap2) ===
-# Sources for the minimap2 reference implementation live under
-# ../bench/tool_minimap2/** — they are treated as a black box and only
-# linked into the test binary, never into the Postgres extension.
-file(GLOB_RECURSE BENCH_SRC_FILES
-  ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/minimap2/*.c
-  ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/minimap2/*.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/../bench/bench_main.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/../bench/*_test.cpp)
-
-file(GLOB_RECURSE BENCH_SRC_MOD_FILES
-  ${CMAKE_CURRENT_LIST_DIR}/../bench/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
+# === bench target wiring lives in main/bench/bench_v10.cmake ===
+# (Old AddCommonTargetX block deleted as part of the V10 migration.
+# `bioseq_bench` is now built on top of `bench_framework`.)
 
 file(GLOB_RECURSE A_SRC_FILES
   ${CMAKE_CURRENT_LIST_DIR}/cli/cli_main.cpp)
@@ -114,63 +97,6 @@ list (APPEND A_SRC_TESTS ${A_SRC_FILES})
 
 list(REMOVE_ITEM SRC_FILES ${A_SRC_TESTS})
 list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
-
-AddCommonTargetX(
-  bioseq_bench
-  TYPE TEST_EXEC
-  CXX 26
-  RELOCATABLE
-  NAME bioseq_bench
-  COMMENT "BioSeq Aligner benchmark harness"
-  VERSION ${INSTALL_VERSION}
-  COMPONENT ${PROJECT_NAME}
-  INCLUDE_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/../config"
-    "${CMAKE_CURRENT_LIST_DIR}/include2"
-    "${CMAKE_CURRENT_LIST_DIR}/include"
-    "${CMAKE_CURRENT_LIST_DIR}/backend"
-    "${CMAKE_CURRENT_LIST_DIR}/../bench/tool_minimap2"
-    "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
-    "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
-    "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
-    "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
-  LINKS
-    safestring_static
-    fmt
-    ZLIB::ZLIB
-    reflectcpp::reflectcpp
-    libassert::assert
-    foonathan_memory
-    ftxui::component
-    ftxui::dom
-    ftxui::screen
-    simdjson::simdjson
-    nlohmann_json_schema_validator
-    TBB::tbb
-  SOURCES
-    ${BENCH_SRC_FILES}
-  SUPPORT_CXX_MODULES
-  CXX_MOD_BASE_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}"
-    "${CMAKE_CURRENT_LIST_DIR}/../bench"
-  CXX_MOD_FILES
-    ${BENCH_SRC_MOD_FILES}
-  BOOST
-    program_options regex serialization iterator integer
-  HWY 1.3.0
-)
-
-# Bake repo paths into the bench binary so it does not need any env
-# vars at runtime to find its companion files. Reports always land in
-# `main/reporting/`; the regression-thresholds JSON sits next to the
-# bench source; the git commit is resolved by spawning `git -C ${SOURCE}`
-# from inside `bench_main`.
-target_compile_definitions(bioseq_bench
-  PRIVATE
-    "BIOSEQ_BENCH_REPORT_DIR=\"${CMAKE_CURRENT_LIST_DIR}/../reporting/bioseq_bench\""
-    "BIOSEQ_BENCH_SOURCE_DIR=\"${CMAKE_CURRENT_LIST_DIR}/..\""
-    "BIOSEQ_BENCH_THRESHOLDS_PATH=\"${CMAKE_CURRENT_LIST_DIR}/../bench/regression_thresholds.json\""
-)
 
 AddCommonTargetX(
   bioseq_aligner
@@ -261,3 +187,6 @@ include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")
 
 # bench_framework — generic, algorithm-agnostic benchmark orchestration.
 include("${CMAKE_CURRENT_LIST_DIR}/../bench_framework/build.cmake")
+
+# V10 aligner bench target (bioseq_bench), built on top of bench_framework.
+include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_v10.cmake")
