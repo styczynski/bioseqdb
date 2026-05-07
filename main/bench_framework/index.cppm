@@ -33,7 +33,9 @@ module;
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -473,6 +475,21 @@ inline constexpr std::array<BuiltinMetricEntry, 22> kBuiltinMetricRegistry{ {
     return std::nullopt;
 }
 
+/// Inverse of `parse_metric_type`. Renders a `MetricSource` as its
+/// JSON-side spelling (`"region"`, `"loop"`, `"builtin"`, `"counter"`,
+/// `"evaluation"`). Used by diagnostic messages — the strings round-trip
+/// with `parse_metric_type`.
+[[nodiscard]] inline constexpr std::string_view metric_source_name(MetricSource source) noexcept {
+    switch (source) {
+        case MetricSource::OuterClock: return "builtin";
+        case MetricSource::Region:     return "region";
+        case MetricSource::Loop:       return "loop";
+        case MetricSource::Counter:    return "counter";
+        case MetricSource::Evaluation: return "evaluation";
+    }
+    return "?";
+}
+
 [[nodiscard]] inline std::optional<CompareOp> parse_compare_op(std::string_view op_text) noexcept {
     if (op_text == "<") return CompareOp::LessThan;
     if (op_text == ">") return CompareOp::GreaterThan;
@@ -741,6 +758,38 @@ struct RegressionEntry {
 /// `regression_rules_mu`; consumed by the global validator and the
 /// regression evaluator after the parallel benchmark loop has joined.
 using RegressionRulesByConfig = std::map<std::string, std::vector<RegressionRule>>;
+
+/// One sanity-warning finding emitted at end-of-run. Sanity checks
+/// catch suspicious uniformity that no other validation pass could
+/// have flagged (e.g. an `add_counter(0)` pattern, an evaluator that
+/// always returns the same hardcoded value, or a frozen clock). They
+/// are hardcoded, cannot be disabled, and never affect the exit code,
+/// but are surfaced both in `report.json` (under `sanity_warnings`)
+/// and on stderr at the very end of the run.
+///
+/// Currently the only emitted `type` is `"metric_looks_constant"`;
+/// the field is a free-form string so additional checks can land
+/// without touching consumers' parsers.
+struct SanityWarning {
+    /// Stable identifier for the check kind. `"metric_looks_constant"`
+    /// is the only value emitted in V6.
+    std::string type;
+    /// Metric name whose data tripped the check.
+    std::string metric;
+    /// Human-readable explanation including, where applicable, the
+    /// stringified offending value (e.g. "always produces '0'").
+    std::string message;
+    /// Basename of the oldest report on disk that already exhibited
+    /// this warning when joined with the current run's data, e.g.
+    /// `"report_3.json"`. Empty string ⇒ JSON `null` (history walk
+    /// hit a missing report).
+    std::string warning_since;
+    /// `meta.commit` of the historical report identified by
+    /// `warning_since`. Empty string ⇒ JSON `null` (warning_since
+    /// itself null, or the older report had no `meta` block, or its
+    /// `meta.commit` was empty).
+    std::string warning_since_commit;
+};
 
 // Forward declarations used by BenchmarkContext.
 struct ProgressState;
@@ -1466,9 +1515,9 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
 inline constexpr std::string_view kBenchReportSchema = R"json({
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "BenchFrameworkReport",
-  "description": "Output report.json produced by bioseq::bench_framework. Two top-level fields: 'rule_violations' (every rule that didn't pass) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
+  "description": "Output report.json produced by bioseq::bench_framework. Top-level fields: 'meta' (run identity), 'rule_violations' (every rule that didn't pass), 'regressions' (cross-run regression entries), 'sanity_warnings' (hardcoded end-of-run anomaly checks; non-blocking) and 'benchmarks' (per-benchmark sample arrays). The framework re-validates its own report against this schema after writing as a sanity check.",
   "type": "object",
-  "required": ["meta", "rule_violations", "regressions", "benchmarks"],
+  "required": ["meta", "rule_violations", "regressions", "sanity_warnings", "benchmarks"],
   "additionalProperties": false,
   "properties": {
     "meta": { "$ref": "#/definitions/meta" },
@@ -1481,6 +1530,11 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       "type": "array",
       "description": "Every regression rule violation detected against the previous report (report_<N-1>.json). Empty on the first run after a clean report_dir, when no regression rules are configured, or when nothing regressed.",
       "items": { "$ref": "#/definitions/regression_entry" }
+    },
+    "sanity_warnings": {
+      "type": "array",
+      "description": "Hardcoded sanity-check findings emitted at the very end of the run. Catches anomalies that no other validation pass could have flagged (a metric whose values are bit-identical across every benchmark/algorithm/test_case/region looks suspicious — broken instrumentation like add_counter(0), an evaluator stuck on a constant, a frozen clock). Cannot be disabled and never affects the exit code; surfaced here and on stderr so the operator notices.",
+      "items": { "$ref": "#/definitions/sanity_warning" }
     },
     "benchmarks": {
       "type": "object",
@@ -1633,6 +1687,38 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
           "description": "Commit SHA captured by the historical report identified by 'regression_since' (its meta.commit field). Null when 'regression_since' is null, when the historical report was written by a pre-V5 framework (no meta block), or when meta.commit was empty in that report."
         }
       }
+    },
+    "sanity_warning": {
+      "title": "SanityWarning",
+      "description": "One sanity-check finding. The framework runs a small set of hardcoded checks looking for suspicious uniformity in the metric data. Findings cannot be disabled and never affect the exit code, but are surfaced both here and on stderr at end-of-run so the operator notices.",
+      "type": "object",
+      "required": ["type", "metric", "message", "warning_since", "warning_since_commit"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Sanity-check identifier. Currently the only emitted value is 'metric_looks_constant'; the schema admits any non-empty string so future check kinds can land without a schema change."
+        },
+        "metric": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Metric whose data tripped the check."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable explanation including, where applicable, the stringified offending value (e.g. 'always produces 0')."
+        },
+        "warning_since": {
+          "type": ["string", "null"],
+          "description": "Basename of the oldest report on disk that already exhibited this warning when joined with the current run's data (e.g. 'report_3.json'). Null when the history walk hit a missing report."
+        },
+        "warning_since_commit": {
+          "type": ["string", "null"],
+          "description": "meta.commit field of the historical report identified by 'warning_since'. Null when warning_since is null, when the older report was written by a pre-V5 framework (no meta block), or when meta.commit was empty in that report."
+        }
+      }
     }
   }
 })json";
@@ -1741,24 +1827,9 @@ inline void drain_diagnostics_to_context(
     return diagnostics;
 }
 
-/// Validate the user's benchmark configuration against the built-in
-/// `kBenchConfigSchema`.
-[[nodiscard]] inline std::vector<ValidationDiag> validate_config_against_schema(
-    const std::string& json_text,
-    std::string_view source_path) noexcept
-{
-    return validate_against_schema(json_text, kBenchConfigSchema, source_path);
-}
-
-/// Validate the framework's freshly-written report against the built-in
-/// `kBenchReportSchema`. Used as an internal sanity check — if this ever
-/// reports errors we have a bug in the report writer.
-[[nodiscard]] inline std::vector<ValidationDiag> validate_report_against_schema(
-    const std::string& json_text,
-    std::string_view source_path) noexcept
-{
-    return validate_against_schema(json_text, kBenchReportSchema, source_path);
-}
+// `validate_against_schema` is the single entry point: callers pass
+// either `kBenchConfigSchema` or `kBenchReportSchema` directly. The
+// previous one-line wrappers were pure forwarders.
 
 // ----------------- Config parsing helpers -----------------
 
@@ -2407,7 +2478,8 @@ struct ConfigParseOutcome {
     //    the walk: we still try to populate as much of the state as
     //    possible so semantic_validate_config can layer further checks
     //    on top.
-    auto schema_diagnostics = validate_config_against_schema(state.config_body, config_path);
+    auto schema_diagnostics = validate_against_schema(
+        state.config_body, kBenchConfigSchema, config_path);
     for (auto& diag : schema_diagnostics) {
         if (diag.severity == ValidationDiag::Severity::Error) outcome.ok = false;
         outcome.diagnostics.push_back(std::move(diag));
@@ -2736,20 +2808,12 @@ struct ConfigParseOutcome {
             //     before run-time so the user sees a precise message
             //     instead of getting silently-empty samples.
             if (entry->source != metric.declared_source) {
-                const auto declared_text =
-                    metric.declared_source == MetricSource::Region ? "region"
-                  : metric.declared_source == MetricSource::Loop   ? "loop"
-                  : metric.declared_source == MetricSource::OuterClock ? "builtin"
-                  : "?";
-                const auto entry_text =
-                    entry->source == MetricSource::Region ? "region"
-                  : entry->source == MetricSource::Loop   ? "loop"
-                  : entry->source == MetricSource::OuterClock ? "builtin"
-                  : "?";
                 error("metric_source_mismatch",
                       fmt::format("matrix.metrics.{}", metric.name),
                       fmt::format("metric '{}' is declared as 'type: {}' but the registry knows it as a '{}'-source metric; either change 'type' or rename the metric",
-                                  metric.name, declared_text, entry_text));
+                                  metric.name,
+                                  metric_source_name(metric.declared_source),
+                                  metric_source_name(entry->source)));
                 continue;
             }
             // 4c. Min / Max metrics require an explicit `region` filter —
@@ -4166,26 +4230,31 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return std::nullopt;
 }
 
-/// Evaluate every regression rule against the current run's collected
-/// samples and the on-disk historical reports. Single-threaded —
-/// invoked once from `run_impl` after the parallel benchmark loop has
-/// joined. Pushes diagnostics (warnings + matched-nothing errors) into
-/// `diagnostics_out`; returns the list of detected regressions.
-[[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
-    const RegressionRulesByConfig& regression_rules_by_config,
-    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
-    const std::filesystem::path&   report_dir,
-    std::size_t                    current_index,
-    std::vector<ValidationDiag>&   diagnostics_out) noexcept
-{
-    std::vector<RegressionEntry> entries;
+/// Lazy parser-cache for historical reports. Each `report_<N>.json`
+/// is parsed at most once per cache instance even if multiple
+/// consumers (regressions, sanity warnings) ask for the same index.
+/// `ParsedHistoricalReport` is held via `unique_ptr` because it pins
+/// (the inner simdjson parser is non-movable). Stack-allocated;
+/// freed at the end of `run_impl`'s evaluation phase.
+struct HistoricalReportCache {
+    std::filesystem::path                                                report_dir;
+    std::map<std::size_t, std::unique_ptr<ParsedHistoricalReport>>      cached{};
+    std::set<std::size_t>                                                known_missing{};
 
-    // Per-invocation cache: each report file is parsed at most once.
-    std::map<std::size_t, std::unique_ptr<ParsedHistoricalReport>> history_cache;
-    std::set<std::size_t> known_missing;
-    auto fetch_report = [&](std::size_t index) -> ParsedHistoricalReport* {
+    explicit HistoricalReportCache(std::filesystem::path dir) noexcept
+        : report_dir(std::move(dir)) {}
+
+    HistoricalReportCache(const HistoricalReportCache&) = delete;
+    HistoricalReportCache& operator=(const HistoricalReportCache&) = delete;
+    HistoricalReportCache(HistoricalReportCache&&) = delete;
+    HistoricalReportCache& operator=(HistoricalReportCache&&) = delete;
+
+    /// Fetch (loading on demand) the report at `index`. Returns nullptr
+    /// once for a missing report and remembers that miss so subsequent
+    /// fetches don't re-touch the filesystem.
+    [[nodiscard]] ParsedHistoricalReport* fetch(std::size_t index) noexcept {
         if (known_missing.count(index) > 0) return nullptr;
-        if (auto it = history_cache.find(index); it != history_cache.end()) {
+        if (auto it = cached.find(index); it != cached.end()) {
             return it->second.get();
         }
         auto loaded = load_report_at_index(report_dir, index);
@@ -4194,8 +4263,256 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
             return nullptr;
         }
         auto* raw = loaded.get();
-        history_cache.emplace(index, std::move(loaded));
+        cached.emplace(index, std::move(loaded));
         return raw;
+    }
+};
+
+/// Bit-exact identity for a `double`. Uses `std::bit_cast<uint64_t>`
+/// so that NaN, ±0, and ±infinity hash consistently in the
+/// distinct-value sets used by the sanity-warning detector. Plain
+/// `double ==` would treat every NaN as never-equal-to-itself,
+/// silencing a "metric always returns NaN" warning — which is the
+/// opposite of what the user wants.
+[[nodiscard]] inline std::uint64_t double_bits(double sample) noexcept {
+    return std::bit_cast<std::uint64_t>(sample);
+}
+
+/// Walk an entire historical report's
+/// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric_name>`
+/// tree and collect every distinct sample value seen for `metric_name`.
+/// Returns an empty set when the metric was absent in that report (or
+/// when the report's structure is unparseable). Linear in the report
+/// size; called at most once per `(metric, hist_report)` pair via the
+/// per-rule cache in `evaluate_sanity_warnings`.
+[[nodiscard]] inline std::set<std::uint64_t> distinct_sample_bits_for_metric(
+    simdjson::dom::element report_root,
+    std::string_view       metric_name) noexcept
+{
+    std::set<std::uint64_t> result;
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return result;
+    const auto benchmarks_obj = try_get_object(*root_obj, "benchmarks");
+    if (!benchmarks_obj.has_value()) return result;
+
+    for (auto bench_field : *benchmarks_obj) {
+        const auto bench_obj = try_as_object(bench_field.value);
+        if (!bench_obj.has_value()) continue;
+        simdjson::dom::array execution_tuples;
+        if ((*bench_obj)["execution_tuples"].get(execution_tuples) != simdjson::SUCCESS) {
+            continue;
+        }
+        for (auto tuple_record : execution_tuples) {
+            const auto record_obj = try_as_object(tuple_record);
+            if (!record_obj.has_value()) continue;
+            const auto test_cases_obj = try_get_object(*record_obj, "test_cases");
+            if (!test_cases_obj.has_value()) continue;
+            for (auto tc_field : *test_cases_obj) {
+                const auto tc_obj = try_as_object(tc_field.value);
+                if (!tc_obj.has_value()) continue;
+                for (auto region_field : *tc_obj) {
+                    const auto region_obj = try_as_object(region_field.value);
+                    if (!region_obj.has_value()) continue;
+                    simdjson::dom::array values_array;
+                    if ((*region_obj).at_key(metric_name).get(values_array)
+                        != simdjson::SUCCESS) continue;
+                    for (auto value_elem : values_array) {
+                        double sample_value = 0.0;
+                        if (value_elem.get(sample_value) == simdjson::SUCCESS) {
+                            result.insert(double_bits(sample_value));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return result;
+}
+
+/// Format the constant value seen for a `metric_looks_constant`
+/// warning. Integer-valued doubles in the safe IEEE range render
+/// as `"490"`; everything else uses default `fmt` double formatting.
+/// NaN / infinity surface explicitly so the diagnostic reads sensibly.
+[[nodiscard]] inline std::string stringify_constant_value(double sample) noexcept {
+    if (std::isnan(sample)) return "NaN";
+    if (std::isinf(sample)) return sample < 0.0 ? "-infinity" : "infinity";
+    if (std::isfinite(sample)
+        && sample == std::floor(sample)
+        && std::abs(sample) < static_cast<double>(1ULL << 53))
+    {
+        return fmt::format("{}", static_cast<std::int64_t>(sample));
+    }
+    return fmt::format("{}", sample);
+}
+
+/// Run hardcoded sanity checks against the just-finished run's
+/// collected samples and walk history backwards to attribute
+/// `warning_since` / `warning_since_commit`. Currently emits
+/// `metric_looks_constant` only — the only suspicious-uniformity
+/// case the user spec calls out.
+///
+/// **Detection.** A metric is "constant" when every sample seen
+/// across every (benchmark, tuple, test_case, region) cell of the
+/// current run hashes to one bit-pattern. Empty samples (metric
+/// declared but never emitted) do NOT trip the check — earlier
+/// validation already surfaces those (`region_filter_never_matched`,
+/// `missing_evaluation_metric`).
+///
+/// **History walk.** For each constant metric we fetch
+/// `report_<N-1>.json`, `report_<N-2>.json`, … and compare the
+/// historical report's distinct-sample set with `{V}`. If the
+/// historical set is a subset of `{V}`, that older report shares
+/// the warning. We stop at the first historical index where the
+/// sets diverge, or at index 1 (the warning has been present in
+/// every report on disk). Missing reports lock `warning_since` to
+/// JSON `null`.
+///
+/// **First run** (`current_index == 1`): no history is reachable.
+/// We emit `warning_since: "report_1.json"` and the current run's
+/// own commit; the warning is observable from a single run, unlike
+/// regression rules whose entire premise needs a baseline.
+///
+/// **Non-blocking.** Sanity warnings are surfaced but never affect
+/// the framework's exit code. The list is sorted alphabetically by
+/// metric name for diff-friendly output.
+[[nodiscard]] inline std::vector<SanityWarning> evaluate_sanity_warnings(
+    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const ReportMeta&            current_meta,
+    std::size_t                  current_index,
+    HistoricalReportCache&       history_cache) noexcept
+{
+    // 1. Collect distinct bit-patterns per metric name across every
+    //    cell of the current run.
+    std::map<std::string, std::set<std::uint64_t>> distinct_bits_by_metric;
+    for (const auto& [_bench_key, state_ptr] : reports) {
+        for (const auto& cell_ptr : state_ptr->cells) {
+            for (const auto& [_region_name, region_metrics] : cell_ptr->samples) {
+                for (const auto& [metric_name, sample_values] : region_metrics) {
+                    auto& bucket = distinct_bits_by_metric[metric_name];
+                    for (double sample : sample_values) {
+                        bucket.insert(double_bits(sample));
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<SanityWarning> warnings;
+    warnings.reserve(distinct_bits_by_metric.size());
+
+    for (const auto& [metric_name, distinct_bits] : distinct_bits_by_metric) {
+        // Step 5 of the detector: skip metrics that produced no samples.
+        if (distinct_bits.empty()) continue;
+        // Constancy test: exactly one distinct bit-pattern.
+        if (distinct_bits.size() != 1) continue;
+
+        const std::uint64_t constant_bits = *distinct_bits.begin();
+        const double constant_value = std::bit_cast<double>(constant_bits);
+        const auto value_text = stringify_constant_value(constant_value);
+
+        // 2. Walk history backwards. The walk stops as soon as a
+        //    historical report's distinct samples for this metric are
+        //    not a subset of `{constant_bits}`. `oldest_with_warning`
+        //    tracks the deepest report still consistent with the
+        //    current constant.
+        std::string warning_since_label;
+        std::string warning_since_commit;
+        bool history_gap = false;
+
+        if (current_index <= 1) {
+            // First run: warning is trivially present since report_1.
+            warning_since_label  = "report_1.json";
+            warning_since_commit = current_meta.commit;
+        } else {
+            // `oldest_with_warning == current_index` is the sentinel
+            // "no historical evidence yet — warning is brand new". As
+            // we walk back and find consistent reports, the value
+            // descends; we stop on the first divergence or absence.
+            std::size_t oldest_with_warning = current_index;
+            for (std::size_t historical_index = current_index - 1;
+                 historical_index >= 1; --historical_index)
+            {
+                auto* hist_report = history_cache.fetch(historical_index);
+                if (hist_report == nullptr) {
+                    history_gap = true; break;
+                }
+                const auto historical_bits =
+                    distinct_sample_bits_for_metric(hist_report->root, metric_name);
+                // Empty historical set: metric absent (or empty samples)
+                // in that report. Treat as a stop condition — the
+                // warning needs the metric to have actually emitted a
+                // value before we can say it was "the same constant"
+                // back then. Pointing `warning_since` at a report that
+                // didn't contain the metric would be misleading.
+                if (historical_bits.empty()) break;
+                bool subset_of_constant = true;
+                for (std::uint64_t bits : historical_bits) {
+                    if (bits != constant_bits) {
+                        subset_of_constant = false; break;
+                    }
+                }
+                if (!subset_of_constant) break;
+                oldest_with_warning = historical_index;
+                if (historical_index == 1) break;     // avoid size_t underflow
+            }
+
+            if (history_gap) {
+                // warning_since stays empty → emit JSON null.
+            } else if (oldest_with_warning != current_index) {
+                warning_since_label =
+                    fmt::format("report_{}.json", oldest_with_warning);
+                if (auto* origin_report = history_cache.fetch(oldest_with_warning);
+                    origin_report != nullptr) {
+                    warning_since_commit = commit_from_report(origin_report->root);
+                }
+            } else {
+                // No historical report confirmed the warning. It is
+                // brand new in this run — point to the run we are
+                // about to write and reuse the current commit.
+                warning_since_label  = fmt::format("report_{}.json", current_index);
+                warning_since_commit = current_meta.commit;
+            }
+        }
+
+        SanityWarning warning;
+        warning.type   = "metric_looks_constant";
+        warning.metric = metric_name;
+        warning.message = fmt::format(
+            "Metric '{}' always produced the same value '{}' across every "
+            "benchmark, algorithm, test case, and region in this report. "
+            "This might be a false positive, but more likely the instrumentation "
+            "is broken (e.g. add_counter(0) everywhere, an evaluator stuck on a "
+            "hardcoded constant, a frozen clock). If the constant value is "
+            "genuinely correct, add at least one benchmark or test case where "
+            "this metric takes a different value to silence this warning. "
+            "This warning cannot be disabled.",
+            metric_name, value_text);
+        warning.warning_since        = std::move(warning_since_label);
+        warning.warning_since_commit = std::move(warning_since_commit);
+        warnings.push_back(std::move(warning));
+    }
+
+    return warnings;
+}
+
+/// Evaluate every regression rule against the current run's collected
+/// samples and the on-disk historical reports. Single-threaded —
+/// invoked once from `run_impl` after the parallel benchmark loop has
+/// joined. Pushes diagnostics (warnings + matched-nothing errors) into
+/// `diagnostics_out`; returns the list of detected regressions. The
+/// shared `HistoricalReportCache` is owned by the caller so the
+/// sanity-warning pass can reuse the parsed report bodies.
+[[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
+    const RegressionRulesByConfig& regression_rules_by_config,
+    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    std::size_t                    current_index,
+    HistoricalReportCache&         history_cache,
+    std::vector<ValidationDiag>&   diagnostics_out) noexcept
+{
+    std::vector<RegressionEntry> entries;
+
+    auto fetch_report = [&](std::size_t index) -> ParsedHistoricalReport* {
+        return history_cache.fetch(index);
     };
 
     for (const auto& [config_path, rules] : regression_rules_by_config) {
@@ -4220,9 +4537,8 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
             const std::set<std::string> excluded_test_cases(
                 rule.exclude_cases.begin(), rule.exclude_cases.end());
 
-            const auto rule_location = [&]() noexcept {
-                return fmt::format("{}/regression_rules/{}", config_path, rule.name);
-            };
+            const std::string rule_location =
+                fmt::format("{}/regression_rules/{}", config_path, rule.name);
 
             // Build a per-state (tuple_ptr, test_case_name) → cell map
             // once per rule so the inner walk is O(1) per combo instead
@@ -4267,7 +4583,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_baseline_missing",
-                                    rule_location(),
+                                    rule_location,
                                     fmt::format("no historical baseline available for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' (current run is index {}); rule treated as satisfied",
                                                 state->config.benchmark_key,
                                                 tuple.algorithm_name,
@@ -4291,7 +4607,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_baseline_missing",
-                                    rule_location(),
+                                    rule_location,
                                     fmt::format("no matching samples in report_{}.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
                                                 current_index - 1,
                                                 state->config.benchmark_key,
@@ -4353,7 +4669,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_history_incomplete",
-                                    rule_location(),
+                                    rule_location,
                                     fmt::format("could not walk full history while attributing regression for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}': a historical report was missing or did not contain matching samples",
                                                 state->config.benchmark_key,
                                                 tuple.algorithm_name,
@@ -4371,7 +4687,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                                     diagnostics_out.push_back({
                                         ValidationDiag::Severity::Warning,
                                         "regression_pre_existing",
-                                        rule_location(),
+                                        rule_location,
                                         fmt::format("regression has been present in every report on disk back to report_1.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' — almost certainly not introduced by recent changes",
                                                     state->config.benchmark_key,
                                                     tuple.algorithm_name,
@@ -4405,7 +4721,7 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
                 diagnostics_out.push_back({
                     ValidationDiag::Severity::Error,
                     "regression_rule_matched_nothing",
-                    rule_location(),
+                    rule_location,
                     fmt::format("regression rule '{}' did not match any (benchmark, tuple, test_case, region) combination with current samples; check 'benchmarks', 'regions', 'metric', and 'exclude_cases'",
                                 rule.name)
                 });
@@ -4523,18 +4839,37 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
     builder.end_array();
 }
 
+/// Emit `"<key>": "<value>"` when `value` is non-empty, or `"<key>": null`
+/// when it is empty. The framework uses empty strings as the in-memory
+/// sentinel for "JSON null" on optional metadata fields like
+/// `regression_since`, `regression_since_commit`, `warning_since`, and
+/// `warning_since_commit` — every such field follows this exact shape.
+inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
+                                    std::string_view key,
+                                    std::string_view value)
+{
+    emit_key(builder, key);
+    if (value.empty()) {
+        builder.append_null();
+    } else {
+        builder.escape_and_append_with_quotes(value);
+    }
+}
+
 /// Serialise the per-benchmark execution state map plus the global
-/// violations and regressions lists into the supplied `output_path`.
-/// Returns the resolved path on success, empty string on I/O /
-/// serialisation failure. The framework writes one report per run as
-/// `report_<N>.json`; index allocation lives in `run_impl` so the
-/// regression evaluator and the writer agree on `current_index`.
+/// violations / regressions / sanity-warnings lists into the supplied
+/// `output_path`. Returns the resolved path on success, empty string
+/// on I/O / serialisation failure. The framework writes one report
+/// per run as `report_<N>.json`; index allocation lives in `run_impl`
+/// so the regression evaluator and the writer agree on
+/// `current_index`.
 [[nodiscard]] inline std::string write_report(
     const std::filesystem::path& output_path,
     const ReportMeta& meta,
     const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
     const std::vector<Violation>& violations,
-    const std::vector<RegressionEntry>& regressions)
+    const std::vector<RegressionEntry>& regressions,
+    const std::vector<SanityWarning>& sanity_warnings)
 {
     constexpr std::size_t kInitialCapacity = 1u << 18;  // 256 KiB up front
     simdjson::builder::string_builder builder{kInitialCapacity};
@@ -4641,21 +4976,11 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
             emit_key(inner, "now");
             inner.append(entry.now);
             inner.append_comma();
-            emit_key(inner, "regression_since");
-            if (entry.regression_since.empty()) {
-                inner.append_null();
-            } else {
-                inner.escape_and_append_with_quotes(
-                    std::string_view{entry.regression_since});
-            }
+            emit_kv_string_or_null(inner, "regression_since",
+                std::string_view{entry.regression_since});
             inner.append_comma();
-            emit_key(inner, "regression_since_commit");
-            if (entry.regression_since_commit.empty()) {
-                inner.append_null();
-            } else {
-                inner.escape_and_append_with_quotes(
-                    std::string_view{entry.regression_since_commit});
-            }
+            emit_kv_string_or_null(inner, "regression_since_commit",
+                std::string_view{entry.regression_since_commit});
         });
     };
 
@@ -4769,6 +5094,26 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
         });
     };
 
+    /// Emit one sanity-warning entry. Field order:
+    /// type, metric, message, warning_since, warning_since_commit.
+    /// `warning_since` and `warning_since_commit` use the same
+    /// empty-string ⇒ JSON-null convention as regression entries.
+    auto emit_one_sanity_warning = [&](auto& b, const SanityWarning& warning) {
+        emit_object_with_body(b, [&](auto& inner) {
+            emit_kv_string(inner, "type",    warning.type);
+            inner.append_comma();
+            emit_kv_string(inner, "metric",  warning.metric);
+            inner.append_comma();
+            emit_kv_string(inner, "message", warning.message);
+            inner.append_comma();
+            emit_kv_string_or_null(inner, "warning_since",
+                std::string_view{warning.warning_since});
+            inner.append_comma();
+            emit_kv_string_or_null(inner, "warning_since_commit",
+                std::string_view{warning.warning_since_commit});
+        });
+    };
+
     emit_object_with_body(builder, [&](auto& root_b) {
         // `meta` first — operators reading the report scan the top
         // for commit / timestamp before drilling deeper.
@@ -4790,6 +5135,15 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
             emit_range_with_commas(arr_b, regressions,
                 [&](auto& vb, const RegressionEntry& entry) {
                     emit_one_regression(vb, entry);
+                });
+            arr_b.end_array();
+        });
+        root_b.append_comma();
+        emit_kv_with_body(root_b, "sanity_warnings", [&](auto& arr_b) {
+            arr_b.start_array();
+            emit_range_with_commas(arr_b, sanity_warnings,
+                [&](auto& vb, const SanityWarning& warning) {
+                    emit_one_sanity_warning(vb, warning);
                 });
             arr_b.end_array();
         });
@@ -4847,17 +5201,6 @@ inline void emit_double_array(simdjson::builder::string_builder& builder,
         }
     }
     return result;
-}
-
-/// Spelling of a `CompareOp` that the user typed in JSON. Used only by the
-/// stderr summary printer.
-[[nodiscard]] inline std::string format_op(CompareOp op) noexcept {
-    switch (op) {
-        case CompareOp::LessThan:    return "<";
-        case CompareOp::GreaterThan: return ">";
-        case CompareOp::Equal:       return "=";
-    }
-    return "?";
 }
 
 /// Pretty-print every violation to stderr at end-of-run. Uses raw stdio
@@ -4923,6 +5266,25 @@ inline void print_violations(const std::vector<Violation>& violations) noexcept 
     std::fflush(stderr);
 }
 
+/// Render the trailing `<label> = report_<N>.json (commit=<sha>)` line
+/// shared by `print_regressions` / `print_sanity_warnings`. Empty
+/// `since` becomes `"<label> = null (history incomplete)"`; an empty
+/// commit on a known report becomes `"<unknown>"`. Both printers carry
+/// the same "where did this anomaly originate" semantics so the
+/// formatting belongs in one place.
+inline void print_since_line(const char* label,
+                              const std::string& since,
+                              const std::string& commit) noexcept
+{
+    if (since.empty()) {
+        std::fprintf(stderr, "    %s = null (history incomplete)\n", label);
+        return;
+    }
+    std::fprintf(stderr, "    %s = %s (commit=%s)\n",
+        label, since.c_str(),
+        commit.empty() ? "<unknown>" : commit.c_str());
+}
+
 /// Pretty-print every detected regression to stderr. Mirrors
 /// `print_violations` for visual consistency. Uses raw stdio for the
 /// same reason — this is final-pass operator output.
@@ -4959,17 +5321,46 @@ inline void print_regressions(const std::vector<RegressionEntry>& regressions) n
         std::fprintf(stderr,
             "    previously = %.6g, now = %.6g\n",
             entry.previously, entry.now);
-        if (entry.regression_since.empty()) {
-            std::fprintf(stderr,
-                "    regression_since = null (history incomplete)\n");
-        } else {
-            std::fprintf(stderr,
-                "    regression_since = %s (commit=%s)\n",
-                entry.regression_since.c_str(),
-                entry.regression_since_commit.empty()
-                    ? "<unknown>"
-                    : entry.regression_since_commit.c_str());
-        }
+        print_since_line("regression_since",
+            entry.regression_since, entry.regression_since_commit);
+        std::fprintf(stderr, "\n");
+    }
+
+    std::fprintf(stderr,
+        "============================================================\n");
+    std::fflush(stderr);
+}
+
+/// Pretty-print every sanity warning to stderr. Mirrors
+/// `print_regressions` / `print_violations` for visual consistency.
+/// Uses raw stdio for the same reason — final-pass operator output
+/// must remain visible after fmtlog has drained.
+inline void print_sanity_warnings(const std::vector<SanityWarning>& warnings) noexcept {
+    if (warnings.empty()) {
+        std::fprintf(stderr,
+            "============================================================\n"
+            "BENCH FRAMEWORK — all sanity checks passed (0 warnings)\n"
+            "============================================================\n");
+        std::fflush(stderr);
+        return;
+    }
+
+    std::fprintf(stderr,
+        "============================================================\n"
+        "BENCH FRAMEWORK — %zu sanity warning%s (non-blocking)\n"
+        "============================================================\n",
+        warnings.size(), warnings.size() == 1 ? "" : "s");
+
+    for (const auto& warning : warnings) {
+        std::fprintf(stderr,
+            "[%s] %s\n",
+            warning.type.c_str(),
+            warning.metric.c_str());
+        std::fprintf(stderr,
+            "    %s\n",
+            warning.message.c_str());
+        print_since_line("warning_since",
+            warning.warning_since, warning.warning_since_commit);
         std::fprintf(stderr, "\n");
     }
 
@@ -5113,17 +5504,11 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                                  : std::string_view{run_meta.commit},
          run_meta.dirty, run_meta.created, run_meta.fast);
 
-    // Filter benchmarks by --fast.
-    std::vector<ErasedBenchmark> selected;
-    selected.reserve(benchmarks.size());
-    for (auto& erased : benchmarks) {
-        // The filter is applied on the per-benchmark `fast` field, but we
-        // can't know that until parse. To keep run_impl simple, we ALWAYS
-        // parse, then the closure applies the filter inside before doing
-        // expensive work. For cleaner semantics we move the filtering into
-        // the closure (see typed dispatch).
-        selected.push_back(std::move(erased));
-    }
+    // Filter benchmarks by --fast. The `--fast` field lives on the per-
+    // benchmark config, not on `ErasedBenchmark`, so the filter actually
+    // runs inside each closure after parse. `selected` therefore mirrors
+    // `benchmarks` 1:1 — we just take ownership.
+    std::vector<ErasedBenchmark> selected = std::move(benchmarks);
 
     // Uniqueness check on benchmark_key.
     std::set<std::string> seen_keys;
@@ -5217,21 +5602,34 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         max_existing_report_index(report_dir_path).value_or(0) + 1;
     logi("[bench_framework] writing run as report_{}.json", current_index);
 
+    // Single shared parser-cache for every consumer that wants to walk
+    // historical reports (regressions + sanity warnings). Each
+    // `report_<N>.json` is parsed at most once per run.
+    HistoricalReportCache history_cache{report_dir_path};
+
     // Evaluate regression rules against report_<current_index - 1>.json
     // (and walk further back as needed for `regression_since`). The
     // evaluator never writes anything; we collect entries and flush
     // them to the report below alongside any diagnostics it produced.
     std::vector<ValidationDiag> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
-        regression_rules_by_config, reports, report_dir_path,
-        current_index, regression_eval_diagnostics);
+        regression_rules_by_config, reports,
+        current_index, history_cache, regression_eval_diagnostics);
     const bool regression_eval_had_errors = report_diagnostics(
         std::span<const ValidationDiag>{regression_eval_diagnostics},
         "regression");
 
+    // Sanity warnings: hardcoded checks against the just-finished run's
+    // sample arrays plus history. Non-blocking (do not affect the exit
+    // code), but always surface to stderr + the report so a human
+    // notices broken instrumentation.
+    auto sanity_warnings = evaluate_sanity_warnings(
+        reports, run_meta, current_index, history_cache);
+
     logi("[bench_framework] all benchmarks finished, writing report...");
     const auto output_path = report_path_for_index(report_dir_path, current_index);
-    const auto report_path = write_report(output_path, run_meta, reports, violations, regressions);
+    const auto report_path = write_report(output_path, run_meta, reports,
+                                           violations, regressions, sanity_warnings);
     if (!report_path.empty()) {
         logi("[bench_framework] wrote {}", report_path);
     }
@@ -5243,7 +5641,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         const auto report_text = slurp_file(std::filesystem::path{report_path});
         if (!report_text.empty()) {
             const auto report_check_diagnostics =
-                validate_report_against_schema(report_text, report_path);
+                validate_against_schema(report_text, kBenchReportSchema, report_path);
             report_schema_failed = report_diagnostics(
                 std::span<const ValidationDiag>{report_check_diagnostics}, "report");
         }
@@ -5251,7 +5649,12 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
     print_violations(violations);
     print_regressions(regressions);
+    print_sanity_warnings(sanity_warnings);
 
+    // Sanity warnings are non-blocking: their presence does NOT
+    // contribute to the exit code (the user spec calls them out as
+    // "not blocking, however they should be printed to stderr at the
+    // end"). The summary above is the operator-visible surface.
     return (violations.empty()
             && regressions.empty()
             && !diagnostics_had_errors
