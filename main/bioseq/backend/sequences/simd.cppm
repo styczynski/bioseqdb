@@ -836,6 +836,283 @@ inline void iterate_sequence_bp_simd_offsets(
 	return;
 }
 
+/**
+ * Multi-stream sibling of `iterate_sequence_bp_simd_offsets`.
+ *
+ * Same algorithmic shape (calculate_iteration_offsets → square_lane_matrix
+ * fill+transpose → per-row per-bp handler call → partial-chunk tail with
+ * full_mask → left_mask → none_mask transitions → finish_fn), generalised
+ * along one axis: `NumStreams` SIMD streams are interleaved per call to the
+ * handler. The original (single-stream) caller pattern is recovered exactly
+ * with `NumStreams == 1`.
+ *
+ * Why this exists: the two-stack minimizer collector wants 2× ILP on M1's
+ * NEON pipes by running two independent SIMD streams over disjoint slices
+ * of the same sequence. Today it inlines the matrix-load / transpose /
+ * per-bp loop twice (once for the single-stream fallback, once for the
+ * dual-stream production path). v2 lets the algorithm body live in ONE
+ * `[&]` lambda whose only `NumStreams`-aware bit is a fixed-size BP-vector
+ * array per call.
+ *
+ * Handler call shape (when `delays_count == 0` — the only case currently
+ * supported here; see static_assert below):
+ *
+ *     handler_fn(
+ *         std::bool_constant<is_full>,
+ *         offsets,                  // std::array<size_t, MaxLanes(d) * NumStreams>
+ *         d,                        // ScalableTag<storage_unit>
+ *         live_mask,                // hn::Mask<D>, full_mask in full-chunk pass,
+ *                                   // transitions full → left → none in tail
+ *         bp_streams                // std::array<hn::Vec<D>, NumStreams>
+ *     );
+ *
+ * Lane-count discipline (CODE_STYLE.md §2):
+ *   - `lanes_per_stream`     = hn::Lanes(d)              [runtime]
+ *   - `total_lanes`          = lanes_per_stream * NumStreams [runtime]
+ *   - `max_lanes_per_stream` = hn::MaxLanes(D{})         [constexpr]
+ *   - `total_max_lanes`      = max_lanes_per_stream * NumStreams [constexpr]
+ *   - Offsets array: sized at `total_max_lanes`, used at runtime up to
+ *     `total_lanes` slots.
+ *   - Per-stream matrix storage: sized at `max_lanes_per_stream`, used up
+ *     to `lanes_per_stream` rows.
+ *
+ * Delay support: `delays_count == 0` is the only path implemented here.
+ * The variadic `delays_ts...` is preserved for API-shape parity with v1
+ * but a non-empty pack triggers a `static_assert`. Adding delay support
+ * requires per-stream `circular_append_buffer` instances; that is a
+ * mechanical extension once a caller actually needs it (none today).
+ *
+ * The `bps_last_chunk == 0` fix-up (steal one full chunk into the partial
+ * path so the partial-mask transitions actually fire and finish_fn always
+ * gets called) is the same one v1 carries; the bug-fix comment in v1 also
+ * applies verbatim here.
+ */
+template<
+	size_t NumStreams,
+	typename... delays_ts,
+	supports_compact_sequence_range R,
+	typename handler_fn_t,
+	typename finish_fn_t,
+	typename I = decltype(compact_sequence_range<R>().begin())
+>
+[[gnu::always_inline]] [[gnu::flatten]] inline void
+iterate_sequence_bp_simd_v2(
+	const compact_sequence_range<R>& seq,
+	const I& begin,
+	const I& end,
+	const size_t context_bps,
+	handler_fn_t&& handler_fn,
+	finish_fn_t&& finish_fn,
+	delays_ts... delays
+) {
+	using seq_traits = compact_sequence_range<R>::traits;
+	constexpr size_t delays_count = sizeof...(delays);
+
+	static_assert(delays_count == 0,
+		"iterate_sequence_bp_simd_v2 currently supports only delays_count == 0. "
+		"For delayed (multi-stream lock-step) iteration, extend this function "
+		"with per-stream circular_append_buffer instances; for delayed "
+		"single-stream iteration use the original iterate_sequence_bp_simd_offsets.");
+	static_assert(NumStreams >= 1, "NumStreams must be >= 1");
+
+	// Suppress unused-parameter warnings for the parameter-pack args we are
+	// preserving for API shape parity with v1.
+	((void)delays, ...);
+
+	const auto& [context_units, _ctx_pad] =
+		int_div_ceil(context_bps, seq_traits::letters_per_unit);
+
+	const size_t seq_len = seq.size();
+	if (seq.bp_size() < context_bps) {
+		// Sequence shorter than required context.
+		return;
+	}
+
+	const hn::ScalableTag<typename seq_traits::storage_unit> d;
+	using vec_t      = hn::Vec<decltype(d)>;
+	using vec_mask_t = hn::Mask<decltype(d)>;
+	using matrix     = square_lane_matrix<decltype(d)>;
+
+	const vec_t bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
+	auto iter = begin;
+
+	const size_t lanes_per_stream             = hn::Lanes(d);
+	constexpr size_t max_lanes_per_stream     = hn::MaxLanes(decltype(d){});
+	const size_t total_lanes                  = lanes_per_stream * NumStreams;
+	constexpr size_t total_max_lanes          = max_lanes_per_stream * NumStreams;
+
+	// Compute global offsets across ALL streams (NumStreams * Lanes(d) lanes
+	// total). Identical recipe to v1's `calculate_iteration_offsets` call,
+	// just with a larger `lanes_n` argument.
+	const auto& [units_per_lane, offsets] =
+		calculate_iteration_offsets<total_max_lanes>(
+			seq_len,
+			total_lanes,
+			context_units);
+
+	// Per-stream offsets slice (computed once before the chunk loop). Indexed
+	// at runtime by `lane`, but `s` is constexpr inside the chunk loop so the
+	// array indirection is a free address-arithmetic load.
+	HWY_ALIGN std::array<std::array<size_t, max_lanes_per_stream>, NumStreams>
+		offsets_per_stream{};
+	for (size_t s = 0; s < NumStreams; ++s) {
+		for (size_t lane = 0; lane < lanes_per_stream; ++lane) {
+			offsets_per_stream[s][lane] = offsets[s * lanes_per_stream + lane];
+		}
+	}
+
+	const size_t bps_per_lane =
+		(context_units + units_per_lane) * seq_traits::letters_per_unit;
+	auto [full_chunks_count_raw, bps_last_chunk_raw] =
+		int_div_floor(bps_per_lane,
+			lanes_per_stream * seq_traits::letters_per_unit);
+
+	// Same `bps_last_chunk == 0` fix-up as v1 — keeps the partial-mask
+	// transitions firing and `finish_fn` reachable on exact-fit lengths.
+	size_t full_chunks_count = full_chunks_count_raw;
+	size_t bps_last_chunk    = bps_last_chunk_raw;
+	if (bps_last_chunk == 0 && full_chunks_count > 0) {
+		--full_chunks_count;
+		bps_last_chunk = lanes_per_stream * seq_traits::letters_per_unit;
+	}
+
+	const vec_mask_t full_mask = hn::FirstN(d, lanes_per_stream);
+	// `left_mask` drops only the LAST lane of the LAST stream — the tail of
+	// the sequence (max_offset reaches seq_end → padded). Earlier streams /
+	// earlier lanes have plenty of margin and never sit on padding bytes,
+	// but we apply the same mask uniformly across streams to match the
+	// existing dual-stream production path's behaviour.
+	const vec_mask_t left_mask =
+		(offsets[0] == offsets[total_lanes - 1])
+			? hn::MaskFalse(d)
+			: hn::FirstN(d, lanes_per_stream - 1);
+
+	vec_mask_t main_mask = full_mask;
+	int32_t main_counter = 0;
+
+	DEBUG_ASSERT(bps_last_chunk >= seq.padding() || bps_last_chunk == 0,
+		"Sanity check. bps_last_chunk should always cover at least seq.padding().");
+	const int32_t main_counter_only_left =
+		static_cast<int32_t>(bps_last_chunk) - static_cast<int32_t>(seq.padding());
+	const int32_t main_counter_none =
+		static_cast<int32_t>(bps_last_chunk);
+
+	// (4) Per-stream raw matrix storage. With `delays_count == 0` we don't
+	// need the circular buffer indirection from v1 — one chunk of rows is
+	// loaded, consumed in order, then overwritten by the next chunk.
+	HWY_ALIGN std::array<std::array<vec_t, max_lanes_per_stream>, NumStreams>
+		raw_matrix_storage;
+
+	// (5) Full-chunk fast path.
+	//
+	// The per-row / per-bp body is INLINED here (rather than wrapped in a
+	// `handle_row_bp` lambda) so the compiler sees a single straight-line
+	// body inside the chunk loop. handler_fn is called with the BP vectors
+	// expanded as POSITIONAL ARGUMENTS via `index_sequence` (NOT as a
+	// `std::array<vec_t, NumStreams>`) so that on M1 NEON ABI each BP lands
+	// in a SIMD register (V0/V1) instead of a stack slot. This is the same
+	// shape today's dual-stream production path uses (`step_one_bp_pair(d,
+	// bp_lo, bp_hi, …)` with `bp_lo`, `bp_hi` as separate `vec_t` args).
+	for (size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
+		// Per-stream matrix construction + fill (compile-time unrolled).
+		[&]<size_t... S>(std::index_sequence<S...>) {
+			((matrix(raw_matrix_storage[S].data())
+				.fill_with_offsets(d, offsets_per_stream[S],
+					seq.read_cptr(iter))), ...);
+		}(std::make_index_sequence<NumStreams>{});
+		// Advance iter ONCE per chunk — every stream shares the starting
+		// position; the offsets-per-stream slices encode per-stream stride.
+		iter += lanes_per_stream;
+		// Per-stream transpose.
+		[&]<size_t... S>(std::index_sequence<S...>) {
+			((matrix(raw_matrix_storage[S].data()).transpose(d)), ...);
+		}(std::make_index_sequence<NumStreams>{});
+
+		for (size_t row_index = 0; row_index < lanes_per_stream;
+		     ++row_index) {
+			// Hold each stream's row-of-BPs in a NAMED scalar pack — see
+			// comment block above for the register-vs-stack rationale.
+			vec_t row_0 = raw_matrix_storage[0][row_index];
+			[[maybe_unused]] vec_t row_1;
+			if constexpr (NumStreams > 1) {
+				row_1 = raw_matrix_storage[1][row_index];
+			}
+			constexpr size_t lpu = seq_traits::letters_per_unit;
+			for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
+				const vec_t bp_v_0 = hn::And(row_0, bp_bitmask_vec);
+				row_0 = hn::ShiftRightSame(row_0, seq_traits::bits_per_char);
+				if constexpr (NumStreams == 1) {
+					handler_fn(std::bool_constant<true>{},
+						offsets, d, full_mask, bp_v_0);
+				} else {
+					const vec_t bp_v_1 = hn::And(row_1, bp_bitmask_vec);
+					row_1 = hn::ShiftRightSame(row_1, seq_traits::bits_per_char);
+					handler_fn(std::bool_constant<true>{},
+						offsets, d, full_mask, bp_v_0, bp_v_1);
+				}
+			}
+		}
+	}
+
+	// (6) Partial-chunk tail.
+	[&]<size_t... S>(std::index_sequence<S...>) {
+		((matrix(raw_matrix_storage[S].data())
+			.partial_fill_with_offsets(d, end - iter,
+				offsets_per_stream[S], seq.read_cptr(iter))), ...);
+		((matrix(raw_matrix_storage[S].data()).transpose(d)), ...);
+	}(std::make_index_sequence<NumStreams>{});
+
+	if (main_counter_none == 0) {
+		// Sequence length was an exact full-chunk multiple — fix-up didn't
+		// apply (full_chunks_count was 0 going in). No tail iterations.
+		return;
+	}
+
+	DEBUG_ASSERT(main_counter_none >= 1, "None counter cannot be less than 1.");
+	DEBUG_ASSERT(main_counter_only_left >= 1,
+		"Only-left counter cannot be less than 1.");
+	DEBUG_ASSERT(main_counter_none >= main_counter_only_left,
+		"Counters should have proper order (first should be only_left, then none)");
+	DEBUG_ASSERT(static_cast<size_t>(main_counter_none) <= bps_per_lane,
+		"Sanity check. If this fails, there's probably size_t overflow.");
+
+	// Tail loop. Same body shape as the full-chunk fast path but with
+	// `main_counter` bookkeeping for the full → left → none mask transitions.
+	for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
+		vec_t row_0 = raw_matrix_storage[0][row_index];
+		[[maybe_unused]] vec_t row_1;
+		if constexpr (NumStreams > 1) {
+			row_1 = raw_matrix_storage[1][row_index];
+		}
+		constexpr size_t lpu = seq_traits::letters_per_unit;
+		for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
+			const vec_t bp_v_0 = hn::And(row_0, bp_bitmask_vec);
+			row_0 = hn::ShiftRightSame(row_0, seq_traits::bits_per_char);
+			if constexpr (NumStreams == 1) {
+				handler_fn(std::bool_constant<false>{},
+					offsets, d, main_mask, bp_v_0);
+			} else {
+				const vec_t bp_v_1 = hn::And(row_1, bp_bitmask_vec);
+				row_1 = hn::ShiftRightSame(row_1, seq_traits::bits_per_char);
+				handler_fn(std::bool_constant<false>{},
+					offsets, d, main_mask, bp_v_0, bp_v_1);
+			}
+
+			++main_counter;
+			if (main_counter == main_counter_none) {
+				finish_fn(offsets, d, left_mask);
+				return;
+			} else if (main_counter == main_counter_only_left) {
+				main_mask = left_mask;
+			}
+		}
+	}
+	// Unreachable in practice: the tail iteration count is bounded by
+	// `lanes_per_stream * lpu = bps_last_chunk = main_counter_none` by
+	// construction, so the early return inside the loop always fires.
+	finish_fn(offsets, d, left_mask);
+}
+
 // ============================================================================
 // SIMD primitives — char→rank lookup, dna4 pack, dna5 pack, decode spreads.
 // ============================================================================

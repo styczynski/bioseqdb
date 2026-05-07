@@ -122,6 +122,41 @@ public:
 
 	};
 
+	// Static "post-lex" scramble — the seven-step integer mix from the
+	// minimap_int scalar_hash::next() body, applied to a precomputed lex
+	// kmer at emit time.
+	//
+	// Used by collectors that compute lex inline (cheap golden-ratio mix
+	// for window ordering) and apply the canonical minimap_int scramble
+	// only when a window minimum is emitted. The bit-pattern is identical
+	// to scalar_hash<input_t>::next's emit value because the body below is
+	// the literal copy of that body's scramble half (the lex-rolling half
+	// stays in the caller).
+	//
+	// Shifts are clamped via `clamp` so that on narrow `input_t` (e.g.
+	// uint8_t) we don't shift past `sizeof(input_t)*8 - 1` and invoke UB.
+	// The same clamp pattern is used in the simd_hash::next body and in
+	// the inline scramble lambdas this method replaces.
+	template<typename input_t>
+	[[nodiscard]] static constexpr input_t scramble(
+		const input_t& lex_kmer,
+		const input_t& kmer_mask
+	) {
+		constexpr size_t storage_max_shift = sizeof(input_t) * 8 - 1;
+		constexpr auto clamp = [](size_t s) constexpr -> size_t {
+			return s > storage_max_shift ? storage_max_shift : s;
+		};
+		input_t key = lex_kmer;
+		key = (~key + (key << clamp(21))) & kmer_mask;
+		key = key ^ (key >> clamp(24));
+		key = ((key + (key << clamp(3))) + (key << clamp(8))) & kmer_mask;
+		key = key ^ (key >> clamp(14));
+		key = ((key + (key << clamp(2))) + (key << clamp(4))) & kmer_mask;
+		key = key ^ (key >> clamp(28));
+		key = (key + (key << clamp(31))) & kmer_mask;
+		return key;
+	}
+
 	// kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
 	// kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
 

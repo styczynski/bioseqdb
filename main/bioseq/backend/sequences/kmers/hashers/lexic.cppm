@@ -172,6 +172,24 @@ public:
 
 	};
 
+	// Static "post-lex" scramble. Identity for the lexic hasher — its
+	// `next()` already returns the canonical lex hash (Min(forward, RC)),
+	// and downstream consumers that compute lex inline + apply a hasher's
+	// scramble at emit time can call this uniformly across hasher variants
+	// without conditional compilation.
+	//
+	// The two-stack minimizer collector uses this entry point (via
+	// `simd_hash_t<alphabet>::template scramble<input_t>`) so that passing
+	// `lexic_hasher` as the `simd_hash_t` template argument actually
+	// produces a lex-only emit, mirroring the parameter's intent.
+	template<typename input_t>
+	[[nodiscard]] static constexpr input_t scramble(
+		const input_t& lex_kmer,
+		[[maybe_unused]] const input_t& kmer_mask
+	) {
+		return lex_kmer;
+	}
+
 	// kmer[0] = (kmer[0] << 2 | nucl) & mask;           // forward k-mer
 	// kmer[1] = (kmer[1] >> 2) | (3ULL^nucl) << shift1; // reverse k-mer
 
