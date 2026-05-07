@@ -660,6 +660,10 @@ struct BenchmarkExecutionState {
 
 struct ParsedCli {
     bool                       fast_filter = false;
+    /// `--summary`: skip benchmark execution entirely and render an
+    /// aggregated dashboard derived from the existing
+    /// `report_<N>.json` files in `report_dir`.
+    bool                       summary_mode = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
 };
@@ -5139,6 +5143,34 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
 
 // ----------------- Stderr violations summary -----------------
 
+/// Render a single `ConfigValue` scalar to its plain-text form. Shared
+/// by the stderr pretty-printer and the V8 summary's stable identity
+/// builder — both want the value as a string but with different field
+/// separators around it. Doubles use `{:.17g}` so an int → double
+/// round-trip in a historical report (`5` parsed back as `5.0`)
+/// canonicalises onto the integer form via the `floor(value) == value
+/// && |value| < 2^53` guard, preventing identity-key drift between
+/// reports written by different framework versions.
+inline void append_config_value_text(std::string& out, const ConfigValue& value) noexcept {
+    switch (value.kind) {
+        case ConfigValue::Kind::String:    out += value.string_value; return;
+        case ConfigValue::Kind::Integer:   out += std::to_string(value.integer_value); return;
+        case ConfigValue::Kind::Double: {
+            const double dbl = value.double_value;
+            if (std::isfinite(dbl)
+                && dbl == std::floor(dbl)
+                && std::abs(dbl) < static_cast<double>(1ULL << 53)) {
+                out += std::to_string(static_cast<std::int64_t>(dbl));
+            } else {
+                out += fmt::format("{:.17g}", dbl);
+            }
+            return;
+        }
+        case ConfigValue::Kind::Boolean:   out += value.boolean_value ? "true" : "false"; return;
+        case ConfigValue::Kind::NonScalar: out += "<non-scalar>"; return;
+    }
+}
+
 /// Render a ParamMap as a human-readable single-line `k=v, k=v, ...` blob
 /// for the stderr violations summary. Not meant for re-parsing — use
 /// `emit_param_object` for the JSON report.
@@ -5150,13 +5182,7 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
         first = false;
         result += name;
         result += "=";
-        switch (value.kind) {
-            case ConfigValue::Kind::String:    result += value.string_value; break;
-            case ConfigValue::Kind::Integer:   result += std::to_string(value.integer_value); break;
-            case ConfigValue::Kind::Double:    result += std::to_string(value.double_value); break;
-            case ConfigValue::Kind::Boolean:   result += value.boolean_value ? "true" : "false"; break;
-            case ConfigValue::Kind::NonScalar: result += "<non-scalar>"; break;
-        }
+        append_config_value_text(result, value);
     }
     return result;
 }
@@ -5327,6 +5353,1073 @@ inline void print_sanity_warnings(const std::vector<SanityWarning>& warnings) no
     std::fflush(stderr);
 }
 
+// ----------------- V8: Cross-report summary dashboard -----------------
+//
+// The `--summary` mode walks every `report_<N>.json` already on disk
+// in `report_dir`, deduplicates rule violations / regressions / sanity
+// warnings across reports by a stable identity tuple (§ identity),
+// scores each unique issue by base-severity × recurrence × value-pct ×
+// amplitude, and renders an ftxui dashboard grouped by metric →
+// scope → test_case. No benchmarks are executed; the framework is a
+// pure consumer of prior reports.
+
+/// One unique issue tracked across every historical report on disk.
+/// All scoring inputs (presence pattern, latest values, latest
+/// samples) live on the struct so `score_summary_issue` is a
+/// pure-arithmetic constexpr-friendly helper.
+struct SummaryIssue {
+    enum class Kind : std::uint8_t { Regression, RuleViolation, SanityWarning };
+
+    Kind                          kind = Kind::SanityWarning;
+    /// Stable identity string (see `make_*_identity` helpers).
+    std::string                   identity{};
+    /// Layout groupers — drive the dashboard's two-level aggregation.
+    std::string                   metric{};
+    std::string                   scope_label{};
+    std::string                   test_case{};   // "" for sanity warnings
+    std::string                   benchmark{};   // "" for sanity warnings
+    std::string                   rule_name{};   // "" for sanity warnings
+    /// Latest-report values used by the value-pct factor and shown
+    /// in the dashboard's stat blurb.
+    /// Rule:        [lhs_aggregate, rhs_aggregate]
+    /// Regression:  [previously, now]
+    /// Sanity:      ignored
+    std::array<double, 2>         latest_args{0.0, 0.0};
+    /// Latest-report sample array used by `amplitude_factor`. Empty
+    /// for sanity warnings or when the matching cell wasn't found.
+    std::vector<double>           latest_samples{};
+    /// One byte per report slot (0 = absent, 1 = present). Length =
+    /// max_report_index after the walk finishes. We use uint8_t
+    /// instead of `vector<bool>` to avoid the bit-packed
+    /// specialisation's missing `data()` and friction with
+    /// `std::span`.
+    std::vector<std::uint8_t>     presence_per_report{};
+    /// Distinguishes "report missing" from "report present, issue
+    /// absent" for the renderer (🟦 vs 🟩 / 🟥 / 🟨).
+    std::vector<std::uint8_t>     report_data_present{};
+    /// Highest report index where this issue was observed; tells the
+    /// walk loop when to overwrite `latest_args` / `latest_samples`.
+    std::size_t                   latest_seen_index = 0;
+    /// Last sanity warning's free-form message (the renderer prints
+    /// the first line as the stat blurb). Empty for non-sanity.
+    std::string                   sanity_message{};
+    /// Cached score; populated once after the walk by
+    /// `score_summary_issue`.
+    double                        score = 0.0;
+};
+
+/// Severity bucket — the score → emoji + colour mapping. The table is
+/// scanned in declaration order; the first entry whose `min_score`
+/// the issue meets wins. List order is high → low, matching the user
+/// spec.
+struct SeverityBucket {
+    double            min_score;
+    std::string_view  emoji;
+    ftxui::Color      color;
+    std::string_view  label;
+};
+
+inline const std::array<SeverityBucket, 5> kSeverityBuckets{ {
+    { 1500.0, "\xe2\x9b\x94",      ftxui::Color::Red,         "critical"  }, // ⛔
+    { 1000.0, "\xf0\x9f\x94\xb4",  ftxui::Color::RedLight,    "high"      }, // 🔴
+    {  600.0, "\xe2\xad\x95",      ftxui::Color::Magenta,     "medium-hi" }, // ⭕
+    {  300.0, "\xf0\x9f\x9f\xa0",  ftxui::Color::Yellow,      "medium"    }, // 🟠
+    {    0.0, "\xf0\x9f\x9f\xa1",  ftxui::Color::YellowLight, "low"       }, // 🟡
+} };
+
+/// Look up the bucket whose `min_score` is the highest one ≤ `score`.
+/// Sentinel: the last entry has `min_score == 0`, so the loop always
+/// finds a hit for any non-negative score.
+[[nodiscard]] inline const SeverityBucket& bucket_for(double score) noexcept {
+    for (const auto& bucket : kSeverityBuckets) {
+        if (score >= bucket.min_score) return bucket;
+    }
+    return kSeverityBuckets.back();
+}
+
+/// Per-slot block glyph for an issue's presence row.
+/// Order of preconditions: missing report (🟦) wins over presence
+/// state because we cannot say anything about an unparseable file.
+[[nodiscard]] inline std::string_view summary_block_for(
+    SummaryIssue::Kind kind,
+    bool present,
+    bool report_data_present) noexcept
+{
+    if (!report_data_present) return "\xf0\x9f\x9f\xa6";   // 🟦
+    if (!present)             return "\xf0\x9f\x9f\xa9";   // 🟩
+    if (kind == SummaryIssue::Kind::SanityWarning) return "\xf0\x9f\x9f\xa8"; // 🟨
+    return "\xf0\x9f\x9f\xa5";                              // 🟥
+}
+
+/// 64-bit FNV-1a hash. Used to fingerprint the sanity-warning
+/// `message` field so two genuinely different constant values on the
+/// same metric (e.g. "490" vs "0") don't collide in the deduplicated
+/// view.
+[[nodiscard]] constexpr std::uint64_t fnv1a64(std::string_view text) noexcept {
+    constexpr std::uint64_t kFnvOffsetBasis = 0xcbf29ce484222325ULL;
+    constexpr std::uint64_t kFnvPrime       = 0x00000100000001B3ULL;
+    std::uint64_t hash = kFnvOffsetBasis;
+    for (const char ch : text) {
+        hash ^= static_cast<std::uint64_t>(static_cast<unsigned char>(ch));
+        hash *= kFnvPrime;
+    }
+    return hash;
+}
+
+// Field separators for identity strings. ASCII 0x1e (record
+// separator) and 0x1f (unit separator) are reserved control
+// characters in JSON-clean input, so config-supplied identifiers
+// cannot inject ambiguity here.
+inline constexpr char kSummaryIdentityRs = '\x1e';
+inline constexpr char kSummaryIdentityUs = '\x1f';
+
+/// Stable serialisation of a ParamMap into the V8 identity grammar:
+/// `k1=v1\x1fk2=v2\x1f...`. Iteration is alphabetical (`ParamMap` is
+/// `std::map`).
+[[nodiscard]] inline std::string format_param_map_stable(const ParamMap& params) noexcept {
+    std::string result;
+    bool first = true;
+    for (const auto& [name, value] : params) {
+        if (!first) result += kSummaryIdentityUs;
+        first = false;
+        result += name;
+        result += '=';
+        append_config_value_text(result, value);
+    }
+    return result;
+}
+
+/// Variadic identity-string builder. Joins `kind` to the trailing
+/// `fields` with `\x1e` after the kind and `\x1f` between subsequent
+/// fields. Each `field` is implicitly convertible to `std::string_view`.
+/// Used by the three `make_*_identity` callers below; the fold
+/// expression collapses what was previously a per-kind 20-line
+/// `string += sep` ritual.
+template<typename... Fields>
+[[nodiscard]] inline std::string join_identity(
+    std::string_view kind, const Fields&... fields) noexcept
+{
+    std::string identity{kind};
+    identity += kSummaryIdentityRs;
+    bool first = true;
+    auto append_one = [&](std::string_view field) noexcept {
+        if (!first) identity += kSummaryIdentityUs;
+        first = false;
+        identity += field;
+    };
+    (append_one(std::string_view{fields}), ...);
+    return identity;
+}
+
+/// Identity helpers — one tiny call to `join_identity` each. See
+/// BENCH_V8_IMPL_PLAN.md §2. The `region` and `aggregate` parameters
+/// on `make_violation_identity` reserve slots in the identity tuple
+/// for the eventual per-region / per-aggregate rule extensions; V8
+/// callers pass the constant defaults `"all_regions"` / `"p50"` (no
+/// per-region rules exist yet, but the slots ensure forward
+/// compatibility).
+[[nodiscard]] inline std::string make_violation_identity(
+    std::string_view config_path,
+    std::string_view benchmark,
+    std::string_view rule_name,
+    std::string_view lhs_algorithm,
+    const ParamMap&  lhs_params,
+    std::string_view rhs_algorithm,
+    const ParamMap&  rhs_params,
+    std::string_view test_case,
+    std::string_view metric,
+    std::string_view region    = "all_regions",
+    std::string_view aggregate = "p50") noexcept
+{
+    return join_identity("rule",
+        config_path, benchmark, rule_name,
+        lhs_algorithm, format_param_map_stable(lhs_params),
+        rhs_algorithm, format_param_map_stable(rhs_params),
+        test_case, metric, region, aggregate);
+}
+
+[[nodiscard]] inline std::string make_regression_identity(
+    std::string_view config_path,
+    std::string_view benchmark,
+    std::string_view rule_name,
+    std::string_view algorithm,
+    const ParamMap&  params,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric,
+    std::string_view aggregate) noexcept
+{
+    return join_identity("regression",
+        config_path, benchmark, rule_name,
+        algorithm, format_param_map_stable(params),
+        test_case, region, metric, aggregate);
+}
+
+[[nodiscard]] inline std::string make_sanity_identity(
+    std::string_view type,
+    std::string_view metric,
+    std::string_view message) noexcept
+{
+    // 16-hex FNV-1a fingerprint plus the message length cheaply
+    // discriminates same-prefix messages without storing the full
+    // verbose body in the identity key.
+    auto hash_text = fmt::format("{:016x}-{}", fnv1a64(message), message.size());
+    return join_identity("sanity", type, metric, std::string_view{hash_text});
+}
+
+// ----------------- Per-report sample-array index -----------------
+
+/// Walk an object whose fields are `(param_name, scalar_value)` pairs
+/// and produce a `ParamMap`. The same shape appears in three V8 walk
+/// sites (rule-violation sides, regression `violating_tuples[0]`,
+/// and `build_sample_index`'s `tuple` block); extracting the loop
+/// keeps the framework's three callers from drifting out of sync.
+[[nodiscard]] inline ParamMap parse_param_map(simdjson::dom::object obj) noexcept {
+    ParamMap params;
+    for (auto field : obj) {
+        params.emplace(std::string{field.key},
+                       ConfigValue::from_simdjson(field.value));
+    }
+    return params;
+}
+
+/// Path → samples map used by the V8 summary's amplitude lookup. The
+/// path is `benchmark\x1falgorithm\x1fparams\x1ftest_case\x1fregion\x1fmetric`
+/// (a subset of the issue identity, minus the kind/rule_name fields)
+/// and matches what the issue walk produces when it asks for the
+/// sample array of "the cell that triggered this rule violation /
+/// regression in this report".
+using SampleIndex = std::map<std::string, std::vector<double>>;
+
+/// Build the per-cell sample-array path key.
+[[nodiscard]] inline std::string make_sample_path(
+    std::string_view benchmark,
+    std::string_view algorithm,
+    const ParamMap&  params,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric) noexcept
+{
+    std::string path;
+    path += benchmark;   path += kSummaryIdentityUs;
+    path += algorithm;   path += kSummaryIdentityUs;
+    path += format_param_map_stable(params);
+    path += kSummaryIdentityUs;
+    path += test_case;   path += kSummaryIdentityUs;
+    path += region;      path += kSummaryIdentityUs;
+    path += metric;
+    return path;
+}
+
+/// Walk a parsed report's full `benchmarks.<>.execution_tuples[*].
+/// test_cases.<>.<region>.<metric>` tree once, building a flat
+/// `SampleIndex` keyed by the same path the summary's identity uses.
+/// O(report size); called at most once per report regardless of how
+/// many issues need amplitude data.
+[[nodiscard]] inline SampleIndex build_sample_index(
+    simdjson::dom::element report_root) noexcept
+{
+    SampleIndex index;
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return index;
+    const auto benchmarks_obj = try_get_object(*root_obj, "benchmarks");
+    if (!benchmarks_obj.has_value()) return index;
+
+    for (auto bench_field : *benchmarks_obj) {
+        const auto bench_obj = try_as_object(bench_field.value);
+        if (!bench_obj.has_value()) continue;
+        simdjson::dom::array execution_tuples;
+        if ((*bench_obj)["execution_tuples"].get(execution_tuples) != simdjson::SUCCESS) {
+            continue;
+        }
+        for (auto tuple_record : execution_tuples) {
+            const auto record_obj = try_as_object(tuple_record);
+            if (!record_obj.has_value()) continue;
+            const auto tuple_inner = try_get_object(*record_obj, "tuple");
+            if (!tuple_inner.has_value()) continue;
+            // The tuple sub-object has exactly one key — the algorithm
+            // name — mapping to the param map.
+            for (auto algo_field : *tuple_inner) {
+                std::string algorithm{algo_field.key};
+                const auto params_obj = try_as_object(algo_field.value);
+                if (!params_obj.has_value()) continue;
+                ParamMap params = parse_param_map(*params_obj);
+                const auto test_cases_obj = try_get_object(*record_obj, "test_cases");
+                if (!test_cases_obj.has_value()) continue;
+                for (auto tc_field : *test_cases_obj) {
+                    const auto tc_obj = try_as_object(tc_field.value);
+                    if (!tc_obj.has_value()) continue;
+                    for (auto region_field : *tc_obj) {
+                        const auto region_obj = try_as_object(region_field.value);
+                        if (!region_obj.has_value()) continue;
+                        for (auto metric_field : *region_obj) {
+                            simdjson::dom::array values_array;
+                            if (metric_field.value.get(values_array) != simdjson::SUCCESS) continue;
+                            std::vector<double> samples;
+                            for (auto value_elem : values_array) {
+                                double sample_value = 0.0;
+                                if (value_elem.get(sample_value) == simdjson::SUCCESS) {
+                                    samples.push_back(sample_value);
+                                }
+                            }
+                            auto path = make_sample_path(
+                                std::string_view{bench_field.key},
+                                algorithm, params,
+                                std::string_view{tc_field.key},
+                                std::string_view{region_field.key},
+                                std::string_view{metric_field.key});
+                            index.emplace(std::move(path), std::move(samples));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return index;
+}
+
+/// Look up sample data in a per-report `SampleIndex`. Returns an
+/// empty span when the cell is absent (the per-report layout differs
+/// from the issue's identity; we tolerate it by returning empty so
+/// `amplitude_factor` falls back to its default 1.0).
+[[nodiscard]] inline std::vector<double> samples_from_index(
+    const SampleIndex& index,
+    std::string_view benchmark,
+    std::string_view algorithm,
+    const ParamMap&  params,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric) noexcept
+{
+    auto path = make_sample_path(benchmark, algorithm, params, test_case, region, metric);
+    if (auto it = index.find(path); it != index.end()) return it->second;
+    return {};
+}
+
+// ----------------- Per-report walks -----------------
+
+/// Helper: pull a string-typed field from an object. Returns "" when
+/// the field is missing or non-string (matches the rest of the file's
+/// graceful-degradation pattern for JSON walks).
+[[nodiscard]] inline std::string get_string_field(
+    simdjson::dom::object obj, std::string_view key) noexcept
+{
+    std::string_view text;
+    if (obj.at_key(key).get(text) == simdjson::SUCCESS) return std::string{text};
+    return {};
+}
+
+/// Helper: pull a double-typed field from an object. Returns 0.0 on
+/// miss or wrong type.
+[[nodiscard]] inline double get_double_field(
+    simdjson::dom::object obj, std::string_view key) noexcept
+{
+    double value = 0.0;
+    if (obj.at_key(key).get(value) == simdjson::SUCCESS) return value;
+    std::int64_t ivalue = 0;
+    if (obj.at_key(key).get(ivalue) == simdjson::SUCCESS) {
+        return static_cast<double>(ivalue);
+    }
+    return 0.0;
+}
+
+/// One entry extracted from a per-report JSON array. The `Extract`
+/// callable returns `std::nullopt` for malformed entries; otherwise
+/// the framework merges the data into `aggregation` under
+/// `update_first` (run once when the issue is brand new) and
+/// `update_latest` (run whenever this report wins the latest-seen
+/// race).
+struct ExtractedIssue {
+    std::string                          identity;
+    SummaryIssue::Kind                   kind = SummaryIssue::Kind::SanityWarning;
+    /// Initialiser for fields that are intrinsic to the issue's
+    /// identity (metric / rule_name / scope_label / etc.). Run
+    /// once on first insertion.
+    std::function<void(SummaryIssue&)>   update_first;
+    /// Updater for fields that may move between reports
+    /// (latest_args, latest_samples, sanity_message). Run only when
+    /// `report_index > issue.latest_seen_index`.
+    std::function<void(SummaryIssue&)>   update_latest;
+};
+
+/// Generic per-report-array walker. The three issue kinds (rule
+/// violations, regressions, sanity warnings) all follow the same
+/// shape: pull `report_root[array_key]`, iterate entries, build an
+/// identity, and merge into `aggregation`. Only the per-entry
+/// extraction differs — encoded in the `Extract` callable. This
+/// templated walker collapses ~120 lines of triplicated boilerplate
+/// from the previous three `walk_report_*` functions into one.
+template<typename Extract>
+inline void walk_report_array(
+    simdjson::dom::element                report_root,
+    std::string_view                       array_key,
+    std::size_t                            report_index,
+    std::size_t                            max_index,
+    std::map<std::string, SummaryIssue>&   aggregation,
+    Extract                                extract) noexcept
+{
+    DEBUG_ASSERT(report_index >= 1, "report_index must be 1-based; 0 underflows the presence-array index");
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return;
+    simdjson::dom::array entries_array;
+    if ((*root_obj)[array_key].get(entries_array) != simdjson::SUCCESS) return;
+
+    for (auto entry : entries_array) {
+        const auto obj = try_as_object(entry);
+        if (!obj.has_value()) continue;
+        auto extracted = extract(*obj);
+        if (!extracted.has_value()) continue;
+        ExtractedIssue ex = std::move(*extracted);
+
+        // `try_emplace` distinguishes "first encounter" from "merge
+        // into existing" cleanly. We move the identity string into
+        // the map key on insert; on the merge path the identity
+        // already lives both as the map key and on the existing
+        // SummaryIssue (set the first time), so the moved-from
+        // `ex.identity` is not consulted again.
+        auto [it, inserted] = aggregation.try_emplace(std::move(ex.identity));
+        SummaryIssue& issue = it->second;
+        if (inserted) {
+            issue.kind     = ex.kind;
+            issue.identity = it->first;     // copy back from the stored key
+            issue.presence_per_report.assign(max_index, 0);
+            ex.update_first(issue);
+        }
+        issue.presence_per_report[report_index - 1] = 1;
+        if (report_index > issue.latest_seen_index) {
+            issue.latest_seen_index = report_index;
+            ex.update_latest(issue);
+        }
+    }
+}
+
+/// Pull `violating_tuples[0]` (a single-element param-map array).
+/// Returns an empty `ParamMap` when the array is missing or empty.
+[[nodiscard]] inline ParamMap parse_violating_tuple_first(simdjson::dom::object obj) noexcept {
+    simdjson::dom::array tuples_array;
+    if (obj["violating_tuples"].get(tuples_array) != simdjson::SUCCESS) return {};
+    for (auto tuple_elem : tuples_array) {
+        const auto params_obj = try_as_object(tuple_elem);
+        if (!params_obj.has_value()) continue;
+        return parse_param_map(*params_obj);     // schema mandates exactly one
+    }
+    return {};
+}
+
+/// Pull `test_cases[0]` (a single-element string array).
+[[nodiscard]] inline std::string parse_test_case_first(simdjson::dom::object obj) noexcept {
+    simdjson::dom::array tc_array;
+    if (obj["test_cases"].get(tc_array) != simdjson::SUCCESS) return {};
+    for (auto tc_elem : tc_array) {
+        std::string_view tc_text;
+        if (tc_elem.get(tc_text) == simdjson::SUCCESS) return std::string{tc_text};
+    }
+    return {};
+}
+
+/// Pull both args from a `rule_violations[*].args` 2-element array.
+/// Defaults to `{0, 0}` when the array is missing or wrong-shaped.
+[[nodiscard]] inline std::array<double, 2> parse_violation_args(
+    simdjson::dom::object obj) noexcept
+{
+    std::array<double, 2> args{0.0, 0.0};
+    simdjson::dom::array args_array;
+    if (obj["args"].get(args_array) != simdjson::SUCCESS) return args;
+    std::size_t arg_index = 0;
+    for (auto arg_elem : args_array) {
+        if (arg_index >= args.size()) break;
+        double sample_value = 0.0;
+        if (arg_elem.get(sample_value) == simdjson::SUCCESS) {
+            args[arg_index] = sample_value;
+        }
+        ++arg_index;
+    }
+    return args;
+}
+
+/// Pull every `(<algo_name>, <ParamMap>)` side from a
+/// `rule_violations[*].execution_tuple`. May return one (self-compare)
+/// or two entries.
+[[nodiscard]] inline std::vector<std::pair<std::string, ParamMap>>
+parse_violation_sides(simdjson::dom::object obj) noexcept
+{
+    std::vector<std::pair<std::string, ParamMap>> sides;
+    const auto exec_obj = try_get_object(obj, "execution_tuple");
+    if (!exec_obj.has_value()) return sides;
+    for (auto algo_field : *exec_obj) {
+        const auto params_inner = try_as_object(algo_field.value);
+        if (!params_inner.has_value()) continue;
+        sides.emplace_back(std::string{algo_field.key},
+                            parse_param_map(*params_inner));
+    }
+    return sides;
+}
+
+// ----------------- Scoring -----------------
+
+inline constexpr double kSummaryBaseRegression    = 1000.0;
+inline constexpr double kSummaryBaseRuleViolation =  700.0;
+inline constexpr double kSummaryBaseSanityWarning =  300.0;
+
+[[nodiscard]] constexpr double base_severity(SummaryIssue::Kind kind) noexcept {
+    switch (kind) {
+        case SummaryIssue::Kind::Regression:     return kSummaryBaseRegression;
+        case SummaryIssue::Kind::RuleViolation:  return kSummaryBaseRuleViolation;
+        case SummaryIssue::Kind::SanityWarning:  return kSummaryBaseSanityWarning;
+    }
+    return kSummaryBaseSanityWarning;
+}
+
+/// Multiplicative time-pattern factor. Inputs are pre-extracted from
+/// the presence array so this stays a pure function of small integers
+/// + booleans.
+[[nodiscard]] constexpr double recurrence_factor(
+    bool        present_in_latest,
+    std::size_t recent_streak,
+    bool        any_old_gap,
+    std::size_t total_reports) noexcept
+{
+    if (!present_in_latest)                                      return 0.20;
+    if (total_reports > 0 && recent_streak == total_reports)     return 0.40;
+    if (recent_streak == 1) {
+        return any_old_gap ? 2.40 : 1.60;
+    }
+    const double base        = any_old_gap ? 1.80 : 1.30;
+    const double floor_value = any_old_gap ? 0.70 : 0.40;
+    const double slope       = any_old_gap ? 0.15 : 0.20;
+    const double faded       = base - slope * static_cast<double>(recent_streak - 1);
+    return faded < floor_value ? floor_value : faded;
+}
+
+/// Relative percentage difference `|a - b| / |b| * 100`. Used by both
+/// `value_pct_factor` (for scoring) and `format_stat_blurb` (for
+/// dashboard display). Returns 0 when both sides are tiny (avoids
+/// the kEps-clamp gimmick affecting the displayed Δ%).
+[[nodiscard]] inline double relative_diff_pct(double a, double b) noexcept {
+    constexpr double kEps = 1e-12;
+    return std::abs(a - b) / std::max(std::abs(b), kEps) * 100.0;
+}
+
+/// Relative amplitude percentage `100 * (max - min) / |min|` of a
+/// sample set. Used by both `amplitude_factor` and the dashboard's
+/// stat blurb. Returns 0 for fewer than two samples (no amplitude
+/// to speak of).
+[[nodiscard]] inline double relative_amplitude_pct(std::span<const double> samples) noexcept {
+    if (samples.size() < 2) return 0.0;
+    double min_value = samples.front();
+    double max_value = samples.front();
+    for (double sample : samples) {
+        if (sample < min_value) min_value = sample;
+        if (sample > max_value) max_value = sample;
+    }
+    constexpr double kEps = 1e-12;
+    return 100.0 * (max_value - min_value) / std::max(std::abs(min_value), kEps);
+}
+
+/// Multiplicative value-percentage factor. log-shaped so a 555%
+/// overshoot and a 5550% overshoot don't collapse onto the same
+/// number. A near-zero denominator (`previously == 0` for a
+/// regression rising to anything) saturates at `kFactorCeil`
+/// directly — the log path would clamp there anyway, but the
+/// explicit branch makes intent obvious.
+[[nodiscard]] inline double value_pct_factor(double a, double b) noexcept {
+    constexpr double kEps         = 1e-12;
+    constexpr double kSlope       = 0.5;
+    constexpr double kFactorCeil  = 3.0;
+    if (std::abs(b) < kEps) return kFactorCeil;
+    const double pct = relative_diff_pct(a, b);
+    const double bonus = kSlope * std::log10(1.0 + pct / 100.0);
+    const double factor = 1.0 + bonus;
+    return factor < kFactorCeil ? factor : kFactorCeil;
+}
+
+/// Multiplicative amplitude factor. High-noise samples reduce the
+/// score because the regression / rule violation may be within
+/// natural variability. Curve mirrors the user spec: factor = 1.0
+/// at amp = 0%, factor = 1/6 at amp = 10000%.
+[[nodiscard]] inline double amplitude_factor(std::span<const double> samples) noexcept {
+    if (samples.size() < 2) return 1.0;
+    constexpr double kCapPct = 10000.0;
+    const double rel_amp_pct = relative_amplitude_pct(samples);
+    const double clipped     = rel_amp_pct < kCapPct ? rel_amp_pct : kCapPct;
+    const double normalised  = clipped / 1000.0;
+    return (12.0 - normalised) / 12.0;
+}
+
+/// Compute (recent_streak, any_old_gap) from a presence array.
+struct PresencePattern {
+    bool        present_in_latest = false;
+    std::size_t recent_streak     = 0;
+    bool        any_old_gap       = false;
+};
+
+[[nodiscard]] inline PresencePattern presence_pattern(
+    std::span<const std::uint8_t> presence) noexcept
+{
+    PresencePattern result;
+    if (presence.empty()) return result;
+    result.present_in_latest = presence.back() != 0;
+    if (!result.present_in_latest) return result;
+    std::size_t streak = 0;
+    for (auto rit = presence.rbegin(); rit != presence.rend(); ++rit) {
+        if (*rit == 0) break;
+        ++streak;
+    }
+    result.recent_streak = streak;
+    if (streak < presence.size()) {
+        const std::size_t older_end = presence.size() - streak;
+        for (std::size_t i = 0; i < older_end; ++i) {
+            if (presence[i] != 0) { result.any_old_gap = true; break; }
+        }
+    }
+    return result;
+}
+
+/// Composite scoring pipeline. Sanity warnings skip value-pct and
+/// amplitude (no underlying numeric comparison); rules and
+/// regressions use both.
+[[nodiscard]] inline double score_summary_issue(const SummaryIssue& issue) noexcept {
+    const auto pattern = presence_pattern(issue.presence_per_report);
+    const double recurrence = recurrence_factor(
+        pattern.present_in_latest,
+        pattern.recent_streak,
+        pattern.any_old_gap,
+        issue.presence_per_report.size());
+    const double base = base_severity(issue.kind);
+    if (issue.kind == SummaryIssue::Kind::SanityWarning) {
+        return base * recurrence;
+    }
+    const double value_pct = value_pct_factor(issue.latest_args[0], issue.latest_args[1]);
+    const double amplitude = amplitude_factor(
+        std::span<const double>{issue.latest_samples});
+    return base * recurrence * value_pct * amplitude;
+}
+
+// ----------------- Render -----------------
+
+/// Issues sorted by `(metric ↑, scope_label ↑, score ↓, identity ↑)`.
+/// The score-descending pass is what drives the user's "most concerning
+/// first" expectation.
+[[nodiscard]] inline std::vector<const SummaryIssue*> sort_summary_issues(
+    const std::map<std::string, SummaryIssue>& aggregation) noexcept
+{
+    std::vector<const SummaryIssue*> sorted;
+    sorted.reserve(aggregation.size());
+    for (const auto& [_identity, issue] : aggregation) sorted.push_back(&issue);
+    std::sort(sorted.begin(), sorted.end(),
+        [](const SummaryIssue* lhs, const SummaryIssue* rhs) noexcept {
+            if (lhs->metric != rhs->metric)         return lhs->metric < rhs->metric;
+            if (lhs->scope_label != rhs->scope_label) return lhs->scope_label < rhs->scope_label;
+            if (lhs->score != rhs->score)           return lhs->score > rhs->score;
+            return lhs->identity < rhs->identity;
+        });
+    return sorted;
+}
+
+/// Truncate `text` to at most `max_chars` *bytes* (a byte budget,
+/// not a column count) and append the UTF-8 ellipsis when shortened.
+/// When the cut would land inside a UTF-8 multi-byte sequence we
+/// retract to the nearest leading byte (continuation bytes have the
+/// `10xxxxxx` bit pattern) so we never emit a half-encoded character.
+/// The dashboard mostly prints ASCII; the retract-loop adds at most
+/// 3 bytes of overhead per call.
+[[nodiscard]] inline std::string clip_to_width(std::string text, std::size_t max_chars) noexcept {
+    if (text.size() <= max_chars) return text;
+    constexpr std::string_view kEllipsis = "\xe2\x80\xa6";   // "…" (3 bytes)
+    if (max_chars <= kEllipsis.size()) return std::string(max_chars, '.');
+    std::size_t cut = max_chars - kEllipsis.size();
+    while (cut > 0
+        && (static_cast<unsigned char>(text[cut]) & 0xC0u) == 0x80u) {
+        --cut;
+    }
+    if (cut == 0) {
+        // Single multi-byte codepoint takes the entire budget — give
+        // up and pad with dots so the row's column total stays within
+        // `max_chars`.
+        return std::string(max_chars, '.');
+    }
+    text.resize(cut);
+    text += kEllipsis;
+    return text;
+}
+
+/// Build the per-issue stat blurb shown on each row. Reuses the
+/// `relative_diff_pct` / `relative_amplitude_pct` helpers so the
+/// numbers in the dashboard align with the numbers in the score.
+[[nodiscard]] inline std::string format_stat_blurb(const SummaryIssue& issue) noexcept {
+    const std::span<const double> samples{issue.latest_samples};
+    const double amp = relative_amplitude_pct(samples);
+    switch (issue.kind) {
+        case SummaryIssue::Kind::RuleViolation: {
+            const double signed_diff = issue.latest_args[1] == 0.0
+                ? relative_diff_pct(issue.latest_args[0], issue.latest_args[1])
+                : (issue.latest_args[0] - issue.latest_args[1])
+                  / std::abs(issue.latest_args[1]) * 100.0;
+            return fmt::format("rule  lhs={:.6g} vs rhs={:.6g}  (Δ {:+.1f}%, amp ±{:.0f}%)",
+                issue.latest_args[0], issue.latest_args[1], signed_diff, amp);
+        }
+        case SummaryIssue::Kind::Regression: {
+            const double signed_diff = issue.latest_args[0] == 0.0
+                ? relative_diff_pct(issue.latest_args[1], issue.latest_args[0])
+                : (issue.latest_args[1] - issue.latest_args[0])
+                  / std::abs(issue.latest_args[0]) * 100.0;
+            return fmt::format("regr  now={:.6g} vs prev={:.6g}  (Δ {:+.1f}%, amp ±{:.0f}%)",
+                issue.latest_args[1], issue.latest_args[0], signed_diff, amp);
+        }
+        case SummaryIssue::Kind::SanityWarning: {
+            std::string_view message{issue.sanity_message};
+            if (auto dot = message.find('.'); dot != std::string_view::npos) {
+                message = message.substr(0, dot);
+            }
+            constexpr std::size_t kSanityBlurbMaxChars = 40;
+            return clip_to_width(fmt::format("sanity  {}", message), kSanityBlurbMaxChars);
+        }
+    }
+    return {};
+}
+
+/// Build the per-issue presence-block ftxui Element row. Shows the
+/// last `kBlockWindow` slots, oldest on the left → newest on the
+/// right. Glyphs are emitted as one element-per-cell so ftxui sizes
+/// them uniformly.
+inline constexpr std::size_t kSummaryBlockWindow = 8;
+
+[[nodiscard]] inline ftxui::Elements presence_blocks(const SummaryIssue& issue) noexcept {
+    using namespace ftxui;
+    const std::size_t total = issue.presence_per_report.size();
+    const std::size_t take  = total < kSummaryBlockWindow ? total : kSummaryBlockWindow;
+    const std::size_t start = total - take;
+    Elements blocks;
+    blocks.reserve(take);
+    for (std::size_t i = start; i < total; ++i) {
+        const bool present = issue.presence_per_report[i] != 0;
+        // Default to "no data" (🟦) when the parallel array isn't sized
+        // — only happens if `summary_mode_main` skipped the
+        // `report_data_present` stamp, which would itself be a bug we
+        // want to surface visually rather than hide as 🟩.
+        const bool data_ok = i < issue.report_data_present.size()
+            && issue.report_data_present[i] != 0;
+        const auto glyph = summary_block_for(issue.kind, present, data_ok);
+        blocks.push_back(text(std::string{glyph}));
+    }
+    return blocks;
+}
+
+/// Group ordering helper: a tuple key for the "metric → scope" header
+/// pass. `std::pair<string, string>` would suffice; we keep a tiny
+/// alias for readability.
+using SummaryGroupKey = std::pair<std::string, std::string>;
+
+/// Convert one fully-scored issue into its dashboard row. Severity
+/// emoji + colour, kind label (bold), stat blurb, presence row, dim
+/// rule name on the right.
+[[nodiscard]] inline ftxui::Element render_issue_row(const SummaryIssue& issue) noexcept {
+    using namespace ftxui;
+    const auto& bucket = bucket_for(issue.score);
+    Elements row;
+    row.push_back(text(fmt::format(" {} ", bucket.emoji)) | color(bucket.color));
+    row.push_back(text(format_stat_blurb(issue)));
+    row.push_back(filler());
+    auto blocks = presence_blocks(issue);
+    Elements blocks_box;
+    blocks_box.reserve(blocks.size() + 2);
+    blocks_box.push_back(text("  "));
+    for (auto& blk : blocks) blocks_box.push_back(std::move(blk));
+    blocks_box.push_back(text("  "));
+    row.push_back(hbox(std::move(blocks_box)));
+    if (!issue.rule_name.empty()) {
+        // Cap the rule_name so a long identifier doesn't push the
+        // presence blocks past the screen edge in ftxui's auto-fit.
+        constexpr std::size_t kRuleNameMaxChars = 24;
+        row.push_back(text(clip_to_width(issue.rule_name, kRuleNameMaxChars)) | dim);
+    }
+    return hbox(std::move(row));
+}
+
+/// Render the whole dashboard. Two-pass aggregation: outer
+/// metric-section header, inner scope-section sub-header, leaf
+/// issue rows. Trailing legend doubles as the colour key.
+///
+/// We write the rendered ftxui screen via `std::fputs(stderr)` rather
+/// than `JustLog` — this matches `print_violations` /
+/// `print_regressions` / `print_sanity_warnings` (the V5–V7 stderr
+/// printers) which already bypass fmtlog so end-of-run operator output
+/// stays visible after the asynchronous log queue drains.
+inline void render_summary(
+    std::span<const SummaryIssue* const> sorted_issues,
+    std::size_t   max_report_index,
+    std::size_t   reports_present_count) noexcept
+{
+    using namespace ftxui;
+
+    const auto banner = fmt::format(
+        "BENCH FRAMEWORK — summary across {} report{} (report_1.json … report_{}.json)",
+        reports_present_count, reports_present_count == 1 ? "" : "s",
+        max_report_index);
+
+    Elements rows;
+    rows.push_back(text(banner) | bold);
+    rows.push_back(separator());
+
+    if (sorted_issues.empty()) {
+        rows.push_back(text("No rule violations, regressions, or sanity warnings on disk.")
+                       | color(Color::Green) | bold);
+    } else {
+        std::string current_metric;
+        std::string current_scope;
+        for (const auto* issue : sorted_issues) {
+            if (issue->metric != current_metric) {
+                if (!current_metric.empty()) rows.push_back(text(""));
+                rows.push_back(text(fmt::format("\xe2\x96\xb6 {}",  // ▶
+                                                issue->metric)) | bold);
+                current_metric = issue->metric;
+                current_scope.clear();
+            }
+            if (issue->scope_label != current_scope) {
+                rows.push_back(text(fmt::format("  \xe2\x94\x94 {}",     // └
+                                                issue->scope_label))
+                               | color(Color::Cyan));
+                current_scope = issue->scope_label;
+            }
+            rows.push_back(hbox({text("      "), render_issue_row(*issue)}));
+        }
+    }
+
+    rows.push_back(separator());
+    rows.push_back(text(fmt::format("{} issue{} displayed (sorted by score, highest first).",
+                                     sorted_issues.size(),
+                                     sorted_issues.size() == 1 ? "" : "s")));
+    Elements legend_severity;
+    legend_severity.push_back(text("Legend:  "));
+    for (const auto& bucket : kSeverityBuckets) {
+        legend_severity.push_back(text(fmt::format(" {} {}  ",
+                                                    bucket.emoji, bucket.label))
+                                   | color(bucket.color));
+    }
+    rows.push_back(hbox(std::move(legend_severity)));
+    rows.push_back(text(
+        "         "
+        "\xf0\x9f\x9f\xa9 ok   "         // 🟩
+        "\xf0\x9f\x9f\xa5 violation/regression   "  // 🟥
+        "\xf0\x9f\x9f\xa8 sanity warning   "        // 🟨
+        "\xf0\x9f\x9f\xa6 missing report data"      // 🟦
+    ));
+
+    auto document = vbox(std::move(rows));
+    auto screen = Screen::Create(Dimension::Fit(document));
+    Render(screen, document);
+    std::fputs("\n", stderr);
+    std::fputs(screen.ToString().c_str(), stderr);
+    std::fputs("\n", stderr);
+    std::fflush(stderr);
+}
+
+// ----------------- summary_mode_main -----------------
+
+/// Build the rule-violation extractor lambda. Returns a lambda
+/// suitable for `walk_report_array<...>`, capturing `sample_index`
+/// by reference (caller-owned, lives for the whole report walk).
+[[nodiscard]] inline auto rule_violation_extractor(const SampleIndex& sample_index) noexcept {
+    return [&sample_index](simdjson::dom::object obj)
+        -> std::optional<ExtractedIssue>
+    {
+        const auto location  = get_string_field(obj, "location");
+        const auto benchmark = get_string_field(obj, "benchmark");
+        const auto rule_name = get_string_field(obj, "rule_name");
+        const auto test_case = get_string_field(obj, "test_case");
+        const auto metric    = get_string_field(obj, "metric");
+
+        auto sides = parse_violation_sides(obj);
+        if (sides.empty()) return std::nullopt;
+        // Single-key execution_tuple = self-compare (LHS == RHS); the
+        // writer emits one entry to avoid a duplicate JSON key. We
+        // copy the single side into the RHS slot so identity + score
+        // see both halves of the rule.
+        std::pair<std::string, ParamMap> lhs = std::move(sides.front());
+        std::pair<std::string, ParamMap> rhs = sides.size() > 1
+            ? std::move(sides[1])
+            : lhs;
+        const auto args = parse_violation_args(obj);
+
+        ExtractedIssue ex;
+        ex.kind     = SummaryIssue::Kind::RuleViolation;
+        ex.identity = make_violation_identity(
+            location, benchmark, rule_name,
+            lhs.first, lhs.second, rhs.first, rhs.second,
+            test_case, metric);
+
+        ex.update_first = [metric, test_case, benchmark, rule_name,
+                           lhs_algo = lhs.first, rhs_algo = rhs.first]
+                          (SummaryIssue& issue) noexcept {
+            issue.metric    = metric;
+            issue.test_case = test_case;
+            issue.benchmark = benchmark;
+            issue.rule_name = rule_name;
+            issue.scope_label = (lhs_algo == rhs_algo)
+                ? fmt::format("{} @ {}", lhs_algo, test_case)
+                : fmt::format("{} vs {} @ {}", lhs_algo, rhs_algo, test_case);
+        };
+        // `update_latest` only needs the LHS cell's coordinates for
+        // the sample-index lookup. RHS is dropped here.
+        ex.update_latest = [args, benchmark,
+                            lhs_algo = std::move(lhs.first),
+                            lhs_params = std::move(lhs.second),
+                            test_case, metric, &sample_index]
+                           (SummaryIssue& issue) noexcept {
+            issue.latest_args = args;
+            // Amplitude reads the LHS cell's samples (the side that
+            // exceeded the rule). V8 always evaluates rule violations
+            // against `all_regions`; per-region rules would need this
+            // hard-coded "all_regions" replaced with the rule's region.
+            issue.latest_samples = samples_from_index(
+                sample_index, benchmark, lhs_algo, lhs_params,
+                test_case, "all_regions", metric);
+        };
+        return ex;
+    };
+}
+
+/// Build the regression extractor lambda. Same shape as the rule
+/// extractor; the regression's stored `region` flows into both the
+/// identity and the sample lookup.
+[[nodiscard]] inline auto regression_extractor(const SampleIndex& sample_index) noexcept {
+    return [&sample_index](simdjson::dom::object obj)
+        -> std::optional<ExtractedIssue>
+    {
+        const auto location       = get_string_field(obj, "location");
+        const auto benchmark      = get_string_field(obj, "benchmark");
+        const auto rule_name      = get_string_field(obj, "rule_name");
+        const auto algorithm_name = get_string_field(obj, "algorithm_name");
+        const auto region         = get_string_field(obj, "region");
+        const auto metric         = get_string_field(obj, "metric");
+        const auto aggregate      = get_string_field(obj, "aggregate");
+        const double previously   = get_double_field(obj, "previously");
+        const double now_value    = get_double_field(obj, "now");
+        auto params = parse_violating_tuple_first(obj);
+        auto test_case = parse_test_case_first(obj);
+
+        ExtractedIssue ex;
+        ex.kind     = SummaryIssue::Kind::Regression;
+        ex.identity = make_regression_identity(
+            location, benchmark, rule_name, algorithm_name, params,
+            test_case, region, metric, aggregate);
+
+        ex.update_first = [metric, test_case, benchmark, rule_name,
+                           algorithm_name, region, aggregate]
+                          (SummaryIssue& issue) noexcept {
+            issue.metric    = metric;
+            issue.test_case = test_case;
+            issue.benchmark = benchmark;
+            issue.rule_name = rule_name;
+            // Two regressions on the same (algorithm, test_case,
+            // region) but different aggregates (p50 vs p99) live as
+            // separate issues; surface the aggregate suffix so the
+            // dashboard rows are visually distinct. The default p50
+            // is the regression-rule baseline so we omit it to keep
+            // the common case terse.
+            std::string region_suffix = (region == "all_regions")
+                ? std::string{}
+                : fmt::format(" ({})", region);
+            std::string aggregate_suffix = (aggregate.empty() || aggregate == "p50")
+                ? std::string{}
+                : fmt::format(" [{}]", aggregate);
+            issue.scope_label = fmt::format("{} @ {}{}{}",
+                algorithm_name, test_case, region_suffix, aggregate_suffix);
+        };
+        ex.update_latest = [previously, now_value, benchmark, algorithm_name,
+                            params = std::move(params), test_case, region,
+                            metric, &sample_index]
+                           (SummaryIssue& issue) noexcept {
+            issue.latest_args = {previously, now_value};
+            issue.latest_samples = samples_from_index(
+                sample_index, benchmark, algorithm_name, params,
+                test_case, region, metric);
+        };
+        return ex;
+    };
+}
+
+/// Build the sanity-warning extractor lambda. Captures nothing —
+/// sanity warnings carry no per-report sample lookup. Returned by
+/// value so the call site can plug it directly into
+/// `walk_report_array`.
+[[nodiscard]] inline auto sanity_warning_extractor() noexcept {
+    return [](simdjson::dom::object obj) -> std::optional<ExtractedIssue> {
+        const auto type    = get_string_field(obj, "type");
+        const auto metric  = get_string_field(obj, "metric");
+        const auto message = get_string_field(obj, "message");
+
+        ExtractedIssue ex;
+        ex.kind     = SummaryIssue::Kind::SanityWarning;
+        ex.identity = make_sanity_identity(type, metric, message);
+        ex.update_first = [type, metric, message](SummaryIssue& issue) noexcept {
+            issue.metric         = metric;
+            issue.scope_label    = "(global)";
+            issue.rule_name      = type;
+            issue.sanity_message = message;
+        };
+        ex.update_latest = [message](SummaryIssue& issue) noexcept {
+            issue.sanity_message = message;
+        };
+        return ex;
+    };
+}
+
+/// Top-level entry point for `--summary`. Orchestrates the per-report
+/// walk, scoring, and render. Returns `0` on success — even when no
+/// reports are present.
+[[nodiscard]] inline int summary_mode_main(const std::string& report_dir) noexcept {
+    const std::filesystem::path report_dir_path{report_dir};
+    const auto max_index = max_existing_report_index(report_dir_path).value_or(0);
+    if (max_index == 0) {
+        logi("[bench_framework] --summary: no reports under '{}'", report_dir);
+        return 0;
+    }
+
+    HistoricalReportCache cache{report_dir_path};
+    std::map<std::string, SummaryIssue> aggregation;
+    std::vector<std::uint8_t> report_data_present(max_index, 0);
+    std::size_t reports_present_count = 0;
+
+    for (std::size_t report_index = 1; report_index <= max_index; ++report_index) {
+        auto* report = cache.fetch(report_index);
+        if (report == nullptr) continue;     // gap → presence stays 0
+        report_data_present[report_index - 1] = 1;
+        ++reports_present_count;
+        const auto sample_index = build_sample_index(report->root);
+        walk_report_array(report->root, "rule_violations",
+            report_index, max_index, aggregation,
+            rule_violation_extractor(sample_index));
+        walk_report_array(report->root, "regressions",
+            report_index, max_index, aggregation,
+            regression_extractor(sample_index));
+        walk_report_array(report->root, "sanity_warnings",
+            report_index, max_index, aggregation,
+            sanity_warning_extractor());
+    }
+
+    if (reports_present_count == 0) {
+        logi("[bench_framework] --summary: every report under '{}' failed to parse",
+             report_dir);
+        return 0;
+    }
+
+    // Stamp the data-presence array onto every issue (the writer
+    // walks issues, not reports).
+    for (auto& [_identity, issue] : aggregation) {
+        issue.report_data_present = report_data_present;
+        DEBUG_ASSERT(issue.report_data_present.size() == issue.presence_per_report.size(),
+            "presence and report_data_present must be the same length");
+        issue.score = score_summary_issue(issue);
+    }
+
+    auto sorted_issues = sort_summary_issues(aggregation);
+    render_summary(std::span<const SummaryIssue* const>{
+                       sorted_issues.data(), sorted_issues.size()},
+                   max_index, reports_present_count);
+    return 0;
+}
+
 // ----------------- CLI parsing -----------------
 
 /// Parse the framework's three CLI flags out of `argv`. Unknown flags are
@@ -5339,6 +6432,8 @@ inline void print_sanity_warnings(const std::vector<SanityWarning>& warnings) no
         const std::string_view arg{argv[i]};
         if (arg == "--fast") {
             parsed.fast_filter = true;
+        } else if (arg == "--summary") {
+            parsed.summary_mode = true;
         } else if (arg == "--threads" && (i + 1) < argc) {
             const std::string thread_text{argv[i + 1]};
             try {
@@ -5441,6 +6536,16 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     const auto cli = parse_cli(argc, argv);
     if (cli.report_override.has_value()) {
         report_dir = *cli.report_override;
+    }
+
+    if (cli.summary_mode) {
+        if (cli.fast_filter) {
+            logw("[bench_framework] --summary ignores --fast (no benchmarks run)");
+        }
+        if (cli.threads_override.has_value()) {
+            logw("[bench_framework] --summary ignores --threads (no benchmarks run)");
+        }
+        return summary_mode_main(report_dir);
     }
 
     logi("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
