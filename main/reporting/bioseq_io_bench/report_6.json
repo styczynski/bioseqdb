@@ -1,0 +1,3912 @@
+{
+    "meta": {
+        "commit": "00dda45bbf8bcc1e44ad42db1e007cada53f004c",
+        "dirty": true,
+        "timestamp": 1778157721,
+        "created": "2026-05-07T12:42:01Z",
+        "fast": false
+    },
+    "rule_violations": [],
+    "regressions": [],
+    "sanity_warnings": [
+        {
+            "type": "metric_looks_constant",
+            "metric": "output_bytes_nonzero",
+            "message": "Metric 'output_bytes_nonzero' always produced the same value '1' across every benchmark, algorithm, test case, and region in this report. This might be a false positive, but more likely the instrumentation is broken (e.g. add_counter(0) everywhere, an evaluator stuck on a hardcoded constant, a frozen clock). If the constant value is genuinely correct, add at least one benchmark or test case where this metric takes a different value to silence this warning. This warning cannot be disabled.",
+            "warning_since": "report_6.json",
+            "warning_since_commit": "00dda45bbf8bcc1e44ad42db1e007cada53f004c"
+        },
+        {
+            "type": "metric_looks_constant",
+            "metric": "records_nonzero",
+            "message": "Metric 'records_nonzero' always produced the same value '1' across every benchmark, algorithm, test case, and region in this report. This might be a false positive, but more likely the instrumentation is broken (e.g. add_counter(0) everywhere, an evaluator stuck on a hardcoded constant, a frozen clock). If the constant value is genuinely correct, add at least one benchmark or test case where this metric takes a different value to silence this warning. This warning cannot be disabled.",
+            "warning_since": "report_6.json",
+            "warning_since_commit": "00dda45bbf8bcc1e44ad42db1e007cada53f004c"
+        },
+        {
+            "type": "metric_looks_constant",
+            "metric": "roundtrip_record_match",
+            "message": "Metric 'roundtrip_record_match' always produced the same value '1' across every benchmark, algorithm, test case, and region in this report. This might be a false positive, but more likely the instrumentation is broken (e.g. add_counter(0) everywhere, an evaluator stuck on a hardcoded constant, a frozen clock). If the constant value is genuinely correct, add at least one benchmark or test case where this metric takes a different value to silence this warning. This warning cannot be disabled.",
+            "warning_since": "report_6.json",
+            "warning_since_commit": "00dda45bbf8bcc1e44ad42db1e007cada53f004c"
+        }
+    ],
+    "benchmarks": {
+        "bench_io_readers_fasta": {
+            "title": "IO readers — FASTA (plain / async / mmap)",
+            "description": "FASTA reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTA corpora.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bioseq/io/io_bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "FASTA_SHORT": "~9 MiB FASTA of ~200 bp records",
+                "FASTA_MEDIUM": "~11 MiB FASTA of ~2 kbp records",
+                "FASTA_LONG": "~11 MiB FASTA of ~50 kbp records",
+                "FASTA_VERY_LONG": "~16 MiB FASTA of ~1 Mbp records",
+                "FASTQ_SHORT": "~9 MiB FASTQ of ~200 bp records",
+                "FASTQ_MEDIUM": "~11 MiB FASTQ of ~2 kbp records",
+                "FASTQ_LONG": "~11 MiB FASTQ of ~50 kbp records",
+                "FASTQ_VERY_LONG": "~16 MiB FASTQ of ~1 Mbp records",
+                "FASTA_REAL_HUMAN_GENOME": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)",
+                "FASTQ_REAL_HUMAN_FASTQ_6GB": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful.",
+                "FASTQ_REAL_HUMAN_FASTQ_GZ": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note."
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_io_async4_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "decompressed_bytes": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "observed_body_bytes": [
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3110750.0,
+                                    3128125.0,
+                                    3105291.0,
+                                    2890583.0,
+                                    2958708.0,
+                                    3012625.0,
+                                    2907416.0,
+                                    2904584.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "decompressed_bytes": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "observed_body_bytes": [
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2593833.0,
+                                    2307708.0,
+                                    2456084.0,
+                                    2380209.0,
+                                    2258250.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "decompressed_bytes": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "observed_body_bytes": [
+                                    10098505.0,
+                                    10098505.0,
+                                    10098505.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2654875.0,
+                                    2245333.0,
+                                    2460458.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "decompressed_bytes": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "observed_body_bytes": [
+                                    15125632.0,
+                                    15125632.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3728292.0,
+                                    3539750.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "decompressed_bytes": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "observed_body_bytes": [
+                                    230481012.0,
+                                    230481012.0,
+                                    230481012.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    71444917.0,
+                                    51459125.0,
+                                    51780834.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_io_mmap_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "decompressed_bytes": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "observed_body_bytes": [
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2911167.0,
+                                    2784875.0,
+                                    2774625.0,
+                                    3056792.0,
+                                    3292083.0,
+                                    3096458.0,
+                                    3208208.0,
+                                    3059458.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "decompressed_bytes": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "observed_body_bytes": [
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2492833.0,
+                                    2207458.0,
+                                    2227667.0,
+                                    2351584.0,
+                                    2430542.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "decompressed_bytes": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "observed_body_bytes": [
+                                    10098505.0,
+                                    10098505.0,
+                                    10098505.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2565250.0,
+                                    2132875.0,
+                                    2108542.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "decompressed_bytes": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "observed_body_bytes": [
+                                    15125632.0,
+                                    15125632.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3805417.0,
+                                    3172750.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "decompressed_bytes": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "observed_body_bytes": [
+                                    230481012.0,
+                                    230481012.0,
+                                    230481012.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    59223667.0,
+                                    52857875.0,
+                                    52710292.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_io_sync_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "decompressed_bytes": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "observed_body_bytes": [
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2963375.0,
+                                    2869250.0,
+                                    2916417.0,
+                                    3113333.0,
+                                    3080375.0,
+                                    3054041.0,
+                                    3044833.0,
+                                    2988375.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "decompressed_bytes": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "observed_body_bytes": [
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2395417.0,
+                                    2161750.0,
+                                    2155833.0,
+                                    2251292.0,
+                                    2352333.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "decompressed_bytes": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "observed_body_bytes": [
+                                    10098505.0,
+                                    10098505.0,
+                                    10098505.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2277542.0,
+                                    2086833.0,
+                                    2167917.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "decompressed_bytes": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "observed_body_bytes": [
+                                    15125632.0,
+                                    15125632.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3339666.0,
+                                    3289375.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "decompressed_bytes": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "observed_body_bytes": [
+                                    230481012.0,
+                                    230481012.0,
+                                    230481012.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    52271334.0,
+                                    52178042.0,
+                                    52906125.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "kseqpp_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "decompressed_bytes": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "observed_body_bytes": [
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4467625.0,
+                                    4343125.0,
+                                    4405959.0,
+                                    4747875.0,
+                                    4499250.0,
+                                    4417500.0,
+                                    4094042.0,
+                                    4459791.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "decompressed_bytes": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "observed_body_bytes": [
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3376125.0,
+                                    3562208.0,
+                                    3290000.0,
+                                    3067334.0,
+                                    3138792.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "decompressed_bytes": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "observed_body_bytes": [
+                                    10098505.0,
+                                    10098505.0,
+                                    10098505.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3362750.0,
+                                    3113750.0,
+                                    2850083.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "decompressed_bytes": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "observed_body_bytes": [
+                                    15125632.0,
+                                    15125632.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5406250.0,
+                                    4722541.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "decompressed_bytes": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "observed_body_bytes": [
+                                    230481012.0,
+                                    230481012.0,
+                                    230481012.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    228927750.0,
+                                    145184417.0,
+                                    108809459.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "naive_ifstream_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "decompressed_bytes": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "observed_body_bytes": [
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0,
+                                    7982009.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    7602542.0,
+                                    7688292.0,
+                                    7921875.0,
+                                    7647500.0,
+                                    7574291.0,
+                                    7985333.0,
+                                    7946584.0,
+                                    7611416.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "decompressed_bytes": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "observed_body_bytes": [
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0,
+                                    10024108.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    6280125.0,
+                                    6139750.0,
+                                    6116875.0,
+                                    6303958.0,
+                                    6111458.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "decompressed_bytes": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "observed_body_bytes": [
+                                    10098505.0,
+                                    10098505.0,
+                                    10098505.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    6558625.0,
+                                    6145167.0,
+                                    6094292.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "decompressed_bytes": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "observed_body_bytes": [
+                                    15125632.0,
+                                    15125632.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    8684708.0,
+                                    8775750.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "decompressed_bytes": [
+                                    234322497.0,
+                                    234322497.0,
+                                    234322497.0
+                                ],
+                                "observed_body_bytes": [
+                                    230481012.0,
+                                    230481012.0,
+                                    230481012.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    191315125.0,
+                                    187365125.0,
+                                    186245292.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "bench_io_readers_fastq": {
+            "title": "IO readers — FASTQ (plain / async / mmap)",
+            "description": "FASTQ reader paths. POSIX read / mmap / async-pipeline + kseqpp + naive_ifstream baselines, on synthetic plus real-data FASTQ corpora.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bioseq/io/io_bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "FASTA_SHORT": "~9 MiB FASTA of ~200 bp records",
+                "FASTA_MEDIUM": "~11 MiB FASTA of ~2 kbp records",
+                "FASTA_LONG": "~11 MiB FASTA of ~50 kbp records",
+                "FASTA_VERY_LONG": "~16 MiB FASTA of ~1 Mbp records",
+                "FASTQ_SHORT": "~9 MiB FASTQ of ~200 bp records",
+                "FASTQ_MEDIUM": "~11 MiB FASTQ of ~2 kbp records",
+                "FASTQ_LONG": "~11 MiB FASTQ of ~50 kbp records",
+                "FASTQ_VERY_LONG": "~16 MiB FASTQ of ~1 Mbp records",
+                "FASTA_REAL_HUMAN_GENOME": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)",
+                "FASTQ_REAL_HUMAN_FASTQ_6GB": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful.",
+                "FASTQ_REAL_HUMAN_FASTQ_GZ": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note."
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_io_async4_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "decompressed_bytes": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "observed_body_bytes": [
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5317541.0,
+                                    4843500.0,
+                                    4571542.0,
+                                    4556417.0,
+                                    4440542.0,
+                                    4576166.0,
+                                    4515500.0,
+                                    4572458.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "decompressed_bytes": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "observed_body_bytes": [
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4520542.0,
+                                    3574167.0,
+                                    3637084.0,
+                                    3440083.0,
+                                    3492125.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "decompressed_bytes": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "observed_body_bytes": [
+                                    10033972.0,
+                                    10033972.0,
+                                    10033972.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4364541.0,
+                                    3603709.0,
+                                    3445875.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "decompressed_bytes": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "observed_body_bytes": [
+                                    15023882.0,
+                                    15023882.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5645959.0,
+                                    5349833.0
+                                ]
+                            }
+                        },
+                        "FASTQ_REAL_HUMAN_FASTQ_6GB": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "decompressed_bytes": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "observed_body_bytes": [
+                                    2446884828.0,
+                                    2446884828.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3153717333.0,
+                                    2880584291.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_io_mmap_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "decompressed_bytes": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "observed_body_bytes": [
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4800250.0,
+                                    4163333.0,
+                                    5071708.0,
+                                    4564375.0,
+                                    4517041.0,
+                                    4224708.0,
+                                    4325375.0,
+                                    4380458.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "decompressed_bytes": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "observed_body_bytes": [
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3847625.0,
+                                    3285042.0,
+                                    3343250.0,
+                                    3250625.0,
+                                    3186375.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "decompressed_bytes": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "observed_body_bytes": [
+                                    10033972.0,
+                                    10033972.0,
+                                    10033972.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4272583.0,
+                                    3342042.0,
+                                    3760792.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "decompressed_bytes": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "observed_body_bytes": [
+                                    15023882.0,
+                                    15023882.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5667333.0,
+                                    5029042.0
+                                ]
+                            }
+                        },
+                        "FASTQ_REAL_HUMAN_FASTQ_6GB": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "decompressed_bytes": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "observed_body_bytes": [
+                                    2446884828.0,
+                                    2446884828.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2061029250.0,
+                                    603094583.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_io_sync_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "decompressed_bytes": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "observed_body_bytes": [
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4670500.0,
+                                    4416417.0,
+                                    4268083.0,
+                                    4525459.0,
+                                    4587292.0,
+                                    4448792.0,
+                                    4409042.0,
+                                    4509250.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "decompressed_bytes": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "observed_body_bytes": [
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3375625.0,
+                                    3360417.0,
+                                    3559166.0,
+                                    3614375.0,
+                                    3504417.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "decompressed_bytes": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "observed_body_bytes": [
+                                    10033972.0,
+                                    10033972.0,
+                                    10033972.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3434541.0,
+                                    3268750.0,
+                                    3295750.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "decompressed_bytes": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "observed_body_bytes": [
+                                    15023882.0,
+                                    15023882.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5006125.0,
+                                    5018500.0
+                                ]
+                            }
+                        },
+                        "FASTQ_REAL_HUMAN_FASTQ_6GB": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "decompressed_bytes": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "observed_body_bytes": [
+                                    2446884828.0,
+                                    2446884828.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2475681541.0,
+                                    2455455334.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "kseqpp_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "decompressed_bytes": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "observed_body_bytes": [
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4663875.0,
+                                    4632250.0,
+                                    4760208.0,
+                                    4436458.0,
+                                    4358875.0,
+                                    4376666.0,
+                                    4564167.0,
+                                    4617541.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "decompressed_bytes": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "observed_body_bytes": [
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3104708.0,
+                                    2887292.0,
+                                    3359792.0,
+                                    3106875.0,
+                                    2883792.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "decompressed_bytes": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "observed_body_bytes": [
+                                    10033972.0,
+                                    10033972.0,
+                                    10033972.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2882667.0,
+                                    2866709.0,
+                                    3129709.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "decompressed_bytes": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "observed_body_bytes": [
+                                    15023882.0,
+                                    15023882.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5306292.0,
+                                    5071958.0
+                                ]
+                            }
+                        },
+                        "FASTQ_REAL_HUMAN_FASTQ_6GB": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "decompressed_bytes": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "observed_body_bytes": [
+                                    2447610900.0,
+                                    2447610900.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2762424292.0,
+                                    2813335625.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "naive_ifstream_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "decompressed_bytes": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "observed_body_bytes": [
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0,
+                                    7978715.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    9323042.0,
+                                    9164750.0,
+                                    9163250.0,
+                                    9538167.0,
+                                    9479583.0,
+                                    9194500.0,
+                                    9385958.0,
+                                    9357959.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "decompressed_bytes": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "observed_body_bytes": [
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0,
+                                    9979778.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5254583.0,
+                                    5479584.0,
+                                    5181417.0,
+                                    5045041.0,
+                                    5335834.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "decompressed_bytes": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "observed_body_bytes": [
+                                    10033972.0,
+                                    10033972.0,
+                                    10033972.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4790875.0,
+                                    4509708.0,
+                                    4542042.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "decompressed_bytes": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "observed_body_bytes": [
+                                    15023882.0,
+                                    15023882.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    7411292.0,
+                                    7526417.0
+                                ]
+                            }
+                        },
+                        "FASTQ_REAL_HUMAN_FASTQ_6GB": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "decompressed_bytes": [
+                                    6430986673.0,
+                                    6430986673.0
+                                ],
+                                "observed_body_bytes": [
+                                    2447610900.0,
+                                    2447610900.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4610012625.0,
+                                    4678742417.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "bench_io_readers_gz": {
+            "title": "IO readers — gzipped paths",
+            "description": "Gzip-aware reader paths (parallel-gzip + zlib fallback) on the .fastq.gz real-data cell. Asserts pgzip beats single-thread zlib by >= 25%, and that both report the same record count and body bytes.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bioseq/io/io_bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "FASTA_SHORT": "~9 MiB FASTA of ~200 bp records",
+                "FASTA_MEDIUM": "~11 MiB FASTA of ~2 kbp records",
+                "FASTA_LONG": "~11 MiB FASTA of ~50 kbp records",
+                "FASTA_VERY_LONG": "~16 MiB FASTA of ~1 Mbp records",
+                "FASTQ_SHORT": "~9 MiB FASTQ of ~200 bp records",
+                "FASTQ_MEDIUM": "~11 MiB FASTQ of ~2 kbp records",
+                "FASTQ_LONG": "~11 MiB FASTQ of ~50 kbp records",
+                "FASTQ_VERY_LONG": "~16 MiB FASTQ of ~1 Mbp records",
+                "FASTA_REAL_HUMAN_GENOME": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)",
+                "FASTQ_REAL_HUMAN_FASTQ_6GB": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful.",
+                "FASTQ_REAL_HUMAN_FASTQ_GZ": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note."
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_io_pgzip_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_REAL_HUMAN_FASTQ_GZ": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    1967929675.0,
+                                    1967929675.0
+                                ],
+                                "decompressed_bytes": [
+                                    6297374960.0,
+                                    6297374960.0
+                                ],
+                                "observed_body_bytes": [
+                                    2446884828.0,
+                                    2446884828.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    11972633708.0,
+                                    7577432875.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_io_zlib_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_REAL_HUMAN_FASTQ_GZ": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    1967929675.0,
+                                    1967929675.0
+                                ],
+                                "decompressed_bytes": [
+                                    6297374960.0,
+                                    6297374960.0
+                                ],
+                                "observed_body_bytes": [
+                                    2446884828.0,
+                                    2446884828.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    32374906458.0,
+                                    32221885125.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "kseqpp_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_REAL_HUMAN_FASTQ_GZ": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    1967929675.0,
+                                    1967929675.0
+                                ],
+                                "decompressed_bytes": [
+                                    6297374960.0,
+                                    6297374960.0
+                                ],
+                                "observed_body_bytes": [
+                                    2447610900.0,
+                                    2447610900.0
+                                ],
+                                "record_count": [
+                                    24476109.0,
+                                    24476109.0
+                                ],
+                                "records_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    32869579291.0,
+                                    32819987625.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "bench_io_writers_fasta": {
+            "title": "IO writers — FASTA (sync / parallel)",
+            "description": "FASTA writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bioseq/io/io_bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "FASTA_SHORT": "~9 MiB FASTA of ~200 bp records",
+                "FASTA_MEDIUM": "~11 MiB FASTA of ~2 kbp records",
+                "FASTA_LONG": "~11 MiB FASTA of ~50 kbp records",
+                "FASTA_VERY_LONG": "~16 MiB FASTA of ~1 Mbp records",
+                "FASTQ_SHORT": "~9 MiB FASTQ of ~200 bp records",
+                "FASTQ_MEDIUM": "~11 MiB FASTQ of ~2 kbp records",
+                "FASTQ_LONG": "~11 MiB FASTQ of ~50 kbp records",
+                "FASTQ_VERY_LONG": "~16 MiB FASTQ of ~1 Mbp records",
+                "FASTA_REAL_HUMAN_GENOME": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)",
+                "FASTQ_REAL_HUMAN_FASTQ_6GB": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful.",
+                "FASTQ_REAL_HUMAN_FASTQ_GZ": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note."
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_writer_mmap_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3529208.0,
+                                    2757333.0,
+                                    2537500.0,
+                                    2962834.0,
+                                    2808875.0,
+                                    2579792.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3040375.0,
+                                    2534750.0,
+                                    3460791.0,
+                                    11865292.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10100395.0,
+                                    10100395.0,
+                                    10100395.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2624250.0,
+                                    2434375.0,
+                                    2645917.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15125757.0,
+                                    15125757.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5647000.0,
+                                    4011209.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    230481069.0,
+                                    230481069.0,
+                                    230481069.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    134371875.0,
+                                    82521834.0,
+                                    131970250.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_writer_parallel4_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2214916.0,
+                                    2069417.0,
+                                    2088375.0,
+                                    2132292.0,
+                                    2034291.0,
+                                    1929292.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2409708.0,
+                                    2326583.0,
+                                    2019625.0,
+                                    2003916.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10100395.0,
+                                    10100395.0,
+                                    10100395.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    1919708.0,
+                                    1913917.0,
+                                    2143667.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15125757.0,
+                                    15125757.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2772291.0,
+                                    2800000.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    230481069.0,
+                                    230481069.0,
+                                    230481069.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    52654917.0,
+                                    50419917.0,
+                                    48323000.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_writer_parallel8_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    1988166.0,
+                                    2003417.0,
+                                    1939500.0,
+                                    2256625.0,
+                                    1872416.0,
+                                    1998333.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    1981833.0,
+                                    2157583.0,
+                                    1988542.0,
+                                    2381375.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10100395.0,
+                                    10100395.0,
+                                    10100395.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    1920417.0,
+                                    1910041.0,
+                                    1942125.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15125757.0,
+                                    15125757.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2785667.0,
+                                    2948041.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    230481069.0,
+                                    230481069.0,
+                                    230481069.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    48704375.0,
+                                    62029750.0,
+                                    76693458.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_writer_sync_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0,
+                                    8450899.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2622875.0,
+                                    2774000.0,
+                                    2640500.0,
+                                    2758292.0,
+                                    2737417.0,
+                                    2784625.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0,
+                                    10077998.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2317166.0,
+                                    2032667.0,
+                                    2167000.0,
+                                    2039291.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10100395.0,
+                                    10100395.0,
+                                    10100395.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    1853791.0,
+                                    1874167.0,
+                                    1938542.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15125757.0,
+                                    15125757.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    2696666.0,
+                                    4993917.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    230481069.0,
+                                    230481069.0,
+                                    230481069.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    60912250.0,
+                                    50557333.0,
+                                    48541459.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "naive_ofstream_fasta": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTA_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0,
+                                    8530675.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    29437083.0,
+                                    29400625.0,
+                                    33178708.0,
+                                    30074833.0,
+                                    30221291.0,
+                                    30628542.0
+                                ]
+                            }
+                        },
+                        "FASTA_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0,
+                                    10200755.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    36413417.0,
+                                    35940917.0,
+                                    36544833.0,
+                                    36284542.0
+                                ]
+                            }
+                        },
+                        "FASTA_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    10226528.0,
+                                    10226528.0,
+                                    10226528.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    35190208.0,
+                                    36929500.0,
+                                    35489875.0
+                                ]
+                            }
+                        },
+                        "FASTA_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    15314819.0,
+                                    15314819.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    52702791.0,
+                                    53041333.0
+                                ]
+                            }
+                        },
+                        "FASTA_REAL_HUMAN_GENOME": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    233362081.0,
+                                    233362081.0,
+                                    233362081.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    678979209.0,
+                                    671914792.0,
+                                    678911750.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        "bench_io_writers_fastq": {
+            "title": "IO writers — FASTQ (sync / parallel)",
+            "description": "FASTQ writer paths. sync vs parallel4 vs parallel8 vs mmap-sink bioseq writers + naive_ofstream baseline. Each iteration writes the corpus, measures, and validates byte-faithful roundtrip via XOR-aggregated content hash. The dna5 SRR file is intentionally NOT included here: the bench's dna4 reader drops 'N's during slurp, so any roundtrip through dna4 is destructive on dna5 input. The reader matrix above keeps the 6 GiB dna5 cell to exercise mmap-parallel + parallel-gzip throughput; the writer matrix sticks to dna4-only corpora for byte-faithful roundtrip.",
+            "location": "/Users/piotr.styczynski/Code/bioseqdb/main/bioseq/io/io_bench_v10_configuration.json",
+            "test_case_descriptions": {
+                "FASTA_SHORT": "~9 MiB FASTA of ~200 bp records",
+                "FASTA_MEDIUM": "~11 MiB FASTA of ~2 kbp records",
+                "FASTA_LONG": "~11 MiB FASTA of ~50 kbp records",
+                "FASTA_VERY_LONG": "~16 MiB FASTA of ~1 Mbp records",
+                "FASTQ_SHORT": "~9 MiB FASTQ of ~200 bp records",
+                "FASTQ_MEDIUM": "~11 MiB FASTQ of ~2 kbp records",
+                "FASTQ_LONG": "~11 MiB FASTQ of ~50 kbp records",
+                "FASTQ_VERY_LONG": "~16 MiB FASTQ of ~1 Mbp records",
+                "FASTA_REAL_HUMAN_GENOME": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)",
+                "FASTQ_REAL_HUMAN_FASTQ_6GB": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful.",
+                "FASTQ_REAL_HUMAN_FASTQ_GZ": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note."
+            },
+            "execution_tuples": [
+                {
+                    "tuple": {
+                        "bioseq_writer_mmap_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5299333.0,
+                                    5446584.0,
+                                    5825459.0,
+                                    6077166.0,
+                                    6085375.0,
+                                    5632166.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    15006917.0,
+                                    10559375.0,
+                                    7632041.0,
+                                    9227292.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    14153375.0,
+                                    11479958.0,
+                                    31644542.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    12898958.0,
+                                    10303042.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_writer_parallel4_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5955042.0,
+                                    6231708.0,
+                                    5544167.0,
+                                    5735666.0,
+                                    5295542.0,
+                                    5716333.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5099917.0,
+                                    5790875.0,
+                                    5397375.0,
+                                    6345916.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    3944666.0,
+                                    3917542.0,
+                                    4066709.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5671584.0,
+                                    6018458.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_writer_parallel8_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5690875.0,
+                                    4860625.0,
+                                    5452042.0,
+                                    5300417.0,
+                                    5623000.0,
+                                    6314875.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4986834.0,
+                                    6069708.0,
+                                    6726541.0,
+                                    6464875.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4064958.0,
+                                    4159209.0,
+                                    4143042.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5729500.0,
+                                    5690000.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "bioseq_writer_sync_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    6749625.0,
+                                    5602042.0,
+                                    5713875.0,
+                                    5918459.0,
+                                    6003542.0,
+                                    5817541.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    5939083.0,
+                                    6500750.0,
+                                    5707375.0,
+                                    5462666.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    4151666.0,
+                                    5343459.0,
+                                    3964417.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    6260666.0,
+                                    7321541.0
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "tuple": {
+                        "naive_ofstream_fastq": {
+                            "_": 0
+                        }
+                    },
+                    "test_cases": {
+                        "FASTQ_SHORT": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0,
+                                    16546320.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0,
+                                    40000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    40540416.0,
+                                    42598166.0,
+                                    40948875.0,
+                                    36790833.0,
+                                    30089708.0,
+                                    30038833.0
+                                ]
+                            }
+                        },
+                        "FASTQ_MEDIUM": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0,
+                                    20028446.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    5000.0,
+                                    5000.0,
+                                    5000.0,
+                                    5000.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    50993292.0,
+                                    50073375.0,
+                                    48873625.0,
+                                    56332917.0
+                                ]
+                            }
+                        },
+                        "FASTQ_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    20070434.0,
+                                    20070434.0,
+                                    20070434.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    200.0,
+                                    200.0,
+                                    200.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    50092708.0,
+                                    48574542.0,
+                                    49468667.0
+                                ]
+                            }
+                        },
+                        "FASTQ_VERY_LONG": {
+                            "all_regions": {
+                                "bytes_on_disk": [
+                                    30047934.0,
+                                    30047934.0
+                                ],
+                                "output_bytes_nonzero": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "record_count": [
+                                    15.0,
+                                    15.0
+                                ],
+                                "roundtrip_record_match": [
+                                    1.0,
+                                    1.0
+                                ],
+                                "wall_clock_ns": [
+                                    71878875.0,
+                                    71531750.0
+                                ]
+                            }
+                        }
+                    }
+                }
+            ]
+        }
+    }
+}

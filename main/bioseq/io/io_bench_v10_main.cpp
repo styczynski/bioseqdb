@@ -101,6 +101,16 @@ struct WriterInput {
 
     /// In-memory corpus for the writer loop. Populated in `on_input`.
     std::vector<BenchBatch> batches;
+
+    /// XOR-aggregated content hash of `batches`, computed once in
+    /// `on_input` for the FASTQ shape (= header || seq ASCII || qual
+    /// truncated to encoded length). The `on_evaluate` lambda
+    /// recomputes this from the writer's on-disk output and compares
+    /// — any mismatch surfaces as `roundtrip_record_match = 0`.
+    /// `_fastq` and `_fasta` variants because the FASTQ form folds in
+    /// quality bytes; FASTA only header + seq.
+    std::uint64_t expected_content_hash_fastq = 0;
+    std::uint64_t expected_content_hash_fasta = 0;
 };
 
 struct IoOutput {
@@ -537,6 +547,18 @@ template <bool IsFasta>
     metrics.emplace("bytes_on_disk", static_cast<double>(input.bytes_on_disk));
     metrics.emplace("decompressed_bytes", static_cast<double>(input.decompressed_bytes));
     metrics.emplace("record_count", static_cast<double>(output.observed_record_count));
+    // Body bytes observed by the reader. For dna4-on-dna5 corpora this
+    // is < raw seq bytes (N's get dropped); for dna4-on-dna4 it equals
+    // the raw seq bytes. Surface as a metric so equality rules between
+    // bioseq paths can detect a path silently dropping or duplicating
+    // bytes that the others see.
+    metrics.emplace("observed_body_bytes",
+                    static_cast<double>(output.observed_body_bytes));
+    // Sanity: the reader must observe at least one record on a
+    // non-empty corpus. Surface as a 0/1 metric so the regression
+    // layer can pin it to 1 across iterations and test cases.
+    metrics.emplace("records_nonzero",
+                    output.observed_record_count > 0 ? 1.0 : 0.0);
     return metrics;
 }
 
@@ -553,6 +575,81 @@ void cleanup_reader(std::string_view /*data_dir*/,
 // =====================================================================
 //  Writer benchmark lambdas
 // =====================================================================
+
+/// XOR-hash a single record's content (header || '\1' || decoded
+/// sequence ASCII || '\1' || quality bytes truncated to encoded length).
+/// Returns a 64-bit hash. XOR is order-invariant — the parallel writer
+/// reorders records across producer threads, so a hash based on a sorted
+/// list would be hostile to that path; XOR of per-record hashes does not
+/// care about order.
+///
+/// The truncation `qsize = min(quality.size(), total_letters)` mirrors
+/// `sequence_writer::write_batch`: when the input alphabet drops bytes
+/// (e.g. dna4 reading dna5 inputs silently drops 'N's), the encoded
+/// sequence is shorter than the raw quality span, and the writer
+/// truncates qual to total_letters. We hash the same truncated form
+/// here so input and output hashes agree under that contract.
+///
+/// Hash collisions on a single record are statistically unlikely
+/// (1/2^64); after XORing N records, the chance of a false-positive
+/// match remains far below 1 in 10^9 for realistic N.
+template <bool IsFastq>
+[[nodiscard]] std::uint64_t hash_record_xor(
+    std::string_view header,
+    const auto& sequence_view,
+    std::span<const std::uint8_t> quality)
+{
+    using seq_traits = typename std::remove_cvref_t<decltype(sequence_view)>::traits;
+    constexpr std::size_t letters_per_word = seq_traits::letters_per_unit;
+    const std::size_t total_letters =
+        sequence_view.size() * letters_per_word - sequence_view.padding();
+    std::string serialized;
+    serialized.reserve(header.size() + total_letters
+                       + (IsFastq ? quality.size() : 0) + 2);
+    serialized.append(header);
+    serialized.push_back('\1');
+    for (std::size_t letter_index = 0; letter_index < total_letters; ++letter_index) {
+        const auto word = sequence_view.data()[letter_index / letters_per_word];
+        const std::size_t letter_in_word = letter_index % letters_per_word;
+        const std::uint8_t rank = static_cast<std::uint8_t>(
+            (word >> (seq_traits::bits_per_char * letter_in_word))
+            & seq_traits::char_mask);
+        serialized.push_back(seq_traits::letter_to_char(rank));
+    }
+    if constexpr (IsFastq) {
+        serialized.push_back('\1');
+        const std::size_t qsize = std::min(quality.size(), total_letters);
+        serialized.append(reinterpret_cast<const char*>(quality.data()), qsize);
+    }
+    return std::hash<std::string>{}(serialized);
+}
+
+/// Compute the XOR-aggregated content hash of every record across all
+/// batches. Order-invariant — safe to use as the canonical content
+/// fingerprint for the writer's input AND for the re-read output (the
+/// parallel writer may reorder records but cannot change the SET of
+/// records). Returns 0 for an empty batch list.
+template <bool IsFastq>
+[[nodiscard]] std::uint64_t hash_batches_xor(
+    const std::vector<BenchBatch>& batches)
+{
+    std::uint64_t accumulator = 0;
+    for (const auto& batch : batches) {
+        const std::size_t record_count_in_batch = batch.size();
+        for (std::size_t record_index = 0;
+             record_index < record_count_in_batch; ++record_index) {
+            const auto seq_view = batch.sequence(record_index);
+            const auto header_view = batch.header(record_index);
+            std::span<const std::uint8_t> qual_view{};
+            if constexpr (IsFastq) {
+                qual_view = batch.quality(record_index);
+            }
+            accumulator ^= hash_record_xor<IsFastq>(
+                header_view, seq_view, qual_view);
+        }
+    }
+    return accumulator;
+}
 
 /// Slurp `path` into an in-memory list of batches via the bioseq reader.
 template <bool IsFasta>
@@ -622,6 +719,15 @@ template <bool IsFasta>
         input.batches.clear();
         return input;
     }
+    // Compute the expected content hash once. `on_evaluate` will
+    // re-read the writer's output and compute the same hash; mismatches
+    // signal silent corruption (truncated qualities, header-without-body
+    // chunks, dropped records, etc.).
+    if (input.is_fastq) {
+        input.expected_content_hash_fastq = hash_batches_xor<true>(input.batches);
+    } else {
+        input.expected_content_hash_fasta = hash_batches_xor<false>(input.batches);
+    }
     input.output_scratch_path = allocate_temp_path(
         std::string{"writer_out_"} + std::string{test_case_name});
     JustLog("[io_bench_v10] writer corpus ready: '{}' (records={}, scratch={})",
@@ -631,11 +737,25 @@ template <bool IsFasta>
 
 template <bool IsFasta>
 [[nodiscard]] IoOutput run_bioseq_writer(const WriterInput& input,
-                                           std::size_t thread_count) {
+                                           std::size_t thread_count,
+                                           bool use_mmap_sink = false) {
     constexpr auto file_type = IsFasta
         ? sequence_io_file_type::FASTA
         : sequence_io_file_type::FASTQ;
     writer_options options{};
+    if (use_mmap_sink) {
+        // Pick a generous upper bound for the output size — has to be
+        // large enough that no record write overflows the mmap'd
+        // region, but sparse-file metadata makes overestimation cheap.
+        // 1.5× the slurped raw bytes leaves headroom for FASTA wrap
+        // newlines / FASTQ separator bytes the writer adds back, even
+        // after accounting for multi-line bodies in the source corpus
+        // collapsing to single-line bodies in the writer's output.
+        const std::size_t estimated_output_bytes =
+            input.source_bytes_on_disk + input.source_bytes_on_disk / 2;
+        options.output_capacity_hint =
+            estimated_output_bytes > 4096 ? estimated_output_bytes : 4096;
+    }
     auto writer_or_err = sequence_writer<seq::dna4, file_type>::open(
         input.output_scratch_path, options);
     if (!writer_or_err) {
@@ -699,7 +819,6 @@ template <bool IsFasta>
               input.output_scratch_path);
         return {};
     }
-    constexpr std::array<char, 4> rank_to_ascii{'A', 'C', 'G', 'T'};
     std::string scratch;
     scratch.reserve(64 * 1024);
     constexpr std::size_t fasta_wrap = 80;
@@ -724,7 +843,10 @@ template <bool IsFasta>
                 const std::uint8_t rank = static_cast<std::uint8_t>(
                     (word >> (seq_traits::bits_per_char * letter_in_word))
                     & seq_traits::char_mask);
-                scratch.push_back(rank_to_ascii[rank]);
+                // Use the alphabet's canonical letter_to_char mapping
+                // so we don't bake in the dna4 LUT shape — works for
+                // any alphabet supported by `BenchAlphabet`.
+                scratch.push_back(seq_traits::letter_to_char(rank));
                 if constexpr (IsFasta) {
                     ++in_line_count;
                     if (in_line_count == fasta_wrap &&
@@ -739,8 +861,21 @@ template <bool IsFasta>
                 scratch.push_back('+');
                 scratch.push_back('\n');
                 const auto quality_view = batch.quality(record_index);
+                // Truncate quality to match the encoded sequence length.
+                // Mirrors `sequence_writer::write_batch`: when the input
+                // alphabet drops bytes (e.g. dna4 reading dna5 inputs
+                // silently drops 'N's), the encoded sequence is shorter
+                // than the raw quality span. Writing the full
+                // quality_view here would emit qual_len > seq_len,
+                // causing the FASTQ FSM to abort on re-read with
+                // "FASTQ qual length mismatch (qual=X, seq=Y)".
+                const std::size_t qsize = std::min(quality_view.size(),
+                                                    total_letters);
                 scratch.append(reinterpret_cast<const char*>(quality_view.data()),
-                                quality_view.size());
+                                qsize);
+                if (qsize < total_letters) {
+                    scratch.append(total_letters - qsize, '!');
+                }
             }
             scratch.push_back('\n');
             out.write(scratch.data(), static_cast<std::streamsize>(scratch.size()));
@@ -760,9 +895,16 @@ template <bool IsFasta>
     if (algo == "bioseq_writer_sync_fasta")      return run_bioseq_writer<true>(input, 1);
     if (algo == "bioseq_writer_parallel4_fasta") return run_bioseq_writer<true>(input, 4);
     if (algo == "bioseq_writer_parallel8_fasta") return run_bioseq_writer<true>(input, 8);
+    // mmap_pwrite_sink path: writer.cppm `output_capacity_hint > 0` —
+    // bypasses the kernel pwrite memcpy by writing into a mmap'd region
+    // that the OS flushes asynchronously. Validates the second sink
+    // implementation in sinks.cppm. Uses 4 producer threads to also
+    // exercise the per-thread chunk path against the mmap sink.
+    if (algo == "bioseq_writer_mmap_fasta")      return run_bioseq_writer<true>(input, 4, /*use_mmap_sink=*/true);
     if (algo == "bioseq_writer_sync_fastq")      return run_bioseq_writer<false>(input, 1);
     if (algo == "bioseq_writer_parallel4_fastq") return run_bioseq_writer<false>(input, 4);
     if (algo == "bioseq_writer_parallel8_fastq") return run_bioseq_writer<false>(input, 8);
+    if (algo == "bioseq_writer_mmap_fastq")      return run_bioseq_writer<false>(input, 4, /*use_mmap_sink=*/true);
     if (algo == "naive_ofstream_fasta")          return run_naive_ofstream<true>(input);
     if (algo == "naive_ofstream_fastq")          return run_naive_ofstream<false>(input);
     loge("[io_bench_v10] unknown writer algorithm '{}'", algo);
@@ -776,11 +918,18 @@ template <bool IsFasta>
     return dispatch_writer(algo, input);
 }
 
-/// Re-read the writer's output to count records. Returns 1.0 if the
-/// roundtrip count matches `expected`, 0.0 otherwise.
+/// Re-read the writer's output to count records AND verify byte-faithful
+/// content. Returns 1.0 only if both:
+///   1. record count matches the input slurp;
+///   2. the XOR-aggregated content hash matches the input slurp's hash.
+/// Either failure returns 0.0 — the bench then surfaces it as a
+/// roundtrip violation. This catches silent corruption that the v10
+/// "count-only" check missed (e.g. truncated quality in the naive
+/// writer, headers split from bodies by mid-record flushes).
 template <bool IsFasta>
 [[nodiscard]] double roundtrip_match(const std::string& output_path,
-                                       std::size_t expected_record_count) {
+                                       std::size_t expected_record_count,
+                                       std::uint64_t expected_content_hash) {
     if (output_path.empty()) return 0.0;
     std::error_code ec;
     if (!fs::exists(output_path, ec) || fs::file_size(output_path, ec) == 0) {
@@ -790,8 +939,15 @@ template <bool IsFasta>
         ? sequence_io_file_type::FASTA
         : sequence_io_file_type::FASTQ;
     std::atomic<std::size_t> record_count{0};
-    auto handler_fn = [&record_count](BenchBatch&& batch) {
+    std::atomic<std::uint64_t> content_hash{0};
+    auto handler_fn = [&record_count, &content_hash](BenchBatch&& batch) {
         record_count.fetch_add(batch.size(), std::memory_order_relaxed);
+        // Hash this batch's contribution and XOR into the global
+        // accumulator. XOR is associative + commutative, so concurrent
+        // batch handlers contribute correctly via fetch_xor.
+        const std::uint64_t batch_hash = hash_batches_xor<!IsFasta>(
+            std::vector<BenchBatch>{std::move(batch)});
+        content_hash.fetch_xor(batch_hash, std::memory_order_relaxed);
     };
     auto failure_fn = [&output_path](std::string&& msg) {
         loge("[io_bench_v10] roundtrip read failed on '{}': {}",
@@ -804,8 +960,23 @@ template <bool IsFasta>
     auto outcome = read_sequences_file<seq::dna4, file_type>(
         output_path, handler_fn, failure_fn, options);
     if (!outcome.has_value()) return 0.0;
-    return record_count.load(std::memory_order_relaxed) == expected_record_count
-        ? 1.0 : 0.0;
+    const std::size_t observed_records =
+        record_count.load(std::memory_order_relaxed);
+    const std::uint64_t observed_hash =
+        content_hash.load(std::memory_order_relaxed);
+    if (observed_records != expected_record_count) {
+        loge("[io_bench_v10] roundtrip record count mismatch on '{}': "
+             "expected={}, observed={}",
+             output_path, expected_record_count, observed_records);
+        return 0.0;
+    }
+    if (observed_hash != expected_content_hash) {
+        loge("[io_bench_v10] roundtrip content hash mismatch on '{}': "
+             "expected=0x{:016x}, observed=0x{:016x}",
+             output_path, expected_content_hash, observed_hash);
+        return 0.0;
+    }
+    return 1.0;
 }
 
 [[nodiscard]] std::map<std::string, double> evaluate_writer(
@@ -817,9 +988,20 @@ template <bool IsFasta>
     std::map<std::string, double> metrics;
     metrics.emplace("bytes_on_disk", static_cast<double>(output.bytes_written));
     metrics.emplace("record_count", static_cast<double>(output.observed_record_count));
+    // bytes_written must be > 0 — a zero-byte output is a writer failure
+    // even when no FSM error fires on re-read (empty file = 0 records,
+    // record-count "matches" if expected_record_count is also 0). We
+    // surface this as a separate metric so the regression layer can
+    // pin it to a non-zero floor.
+    metrics.emplace("output_bytes_nonzero",
+                    output.bytes_written > 0 ? 1.0 : 0.0);
     const double match = input.is_fastq
-        ? roundtrip_match<false>(input.output_scratch_path, input.source_record_count)
-        : roundtrip_match<true>(input.output_scratch_path, input.source_record_count);
+        ? roundtrip_match<false>(input.output_scratch_path,
+                                  input.source_record_count,
+                                  input.expected_content_hash_fastq)
+        : roundtrip_match<true>(input.output_scratch_path,
+                                 input.source_record_count,
+                                 input.expected_content_hash_fasta);
     metrics.emplace("roundtrip_record_match", match);
     return metrics;
 }

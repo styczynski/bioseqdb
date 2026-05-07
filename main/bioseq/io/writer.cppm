@@ -239,6 +239,18 @@ public:
             }
         }
 
+        // Flush BEFORE starting a new record. This ensures every flushed
+        // chunk ends at a record boundary — never mid-header, mid-body,
+        // or between header and body. With multi-thread writers, chunks
+        // from different producers interleave on disk via pwrite at
+        // disjoint offsets; any non-record-aligned chunk would leave a
+        // record split across threads' chunks, producing malformed
+        // FASTQ on disk. Pre-record flushing keeps every produced byte
+        // sequence valid.
+        if (producer.chunk.size >= _options.flush_threshold_bytes) {
+            if (!flush_producer(producer)) return false;
+        }
+
         emit_header(producer.chunk, header);
         emit_body(producer, seq, total_letters);
         if constexpr (file_type == sequence_io_file_type::FASTQ) {
@@ -261,10 +273,6 @@ public:
         } else {
             producer.chunk.push_back(static_cast<std::uint8_t>('\n'));
         }
-
-        if (producer.chunk.size >= _options.flush_threshold_bytes) {
-            return flush_producer(producer);
-        }
         return true;
     }
 
@@ -282,6 +290,20 @@ public:
             const auto header_view = batch.header(record_index);
             const std::size_t total_letters =
                 seq_view.size() * letters_per_unit - seq_view.padding();
+
+            // Pre-record flush: drains the chunk if it crossed the
+            // flush threshold during the previous record. Doing it
+            // BEFORE writing this record's header means every flushed
+            // chunk ends at a record boundary. The previous design
+            // checked AFTER writing the record, then again INSIDE
+            // emit_body; with multi-thread writers, the latter could
+            // flush a chunk that ended just after the new record's
+            // header (with its body still pending), leaving on-disk
+            // chunks where one thread's @hdr line is followed by a
+            // different thread's records — producing malformed FASTQ.
+            if (producer.chunk.size >= _options.flush_threshold_bytes) {
+                if (!flush_producer(producer)) return false;
+            }
 
             if constexpr (file_type == sequence_io_file_type::FASTQ) {
                 const auto quality_view = batch.quality(record_index);
@@ -314,10 +336,6 @@ public:
                 emit_header(producer.chunk, header_view);
                 emit_body(producer, seq_view, total_letters);
                 producer.chunk.push_back(static_cast<std::uint8_t>('\n'));
-            }
-
-            if (producer.chunk.size >= _options.flush_threshold_bytes) {
-                if (!flush_producer(producer)) return false;
             }
         }
         return true;
@@ -406,13 +424,19 @@ private:
     }
 
     /// Decode `total_letters` of `seq` into `producer.chunk` with
-    /// optional FASTA line-wrapping. Stream-decodes large records to
-    /// keep the chunk bounded at `chunk_capacity_bytes` (no
-    /// re-allocation cost from chunk growth). When the chunk crosses
-    /// the flush threshold mid-record, the producer's bytes are
-    /// pwritten and the chunk reset; the rest of the record continues
-    /// in the next chunk at a fresh sink offset. pwrite with disjoint
-    /// offsets is well-defined so the on-disk output is correct.
+    /// optional FASTA line-wrapping. Single-shot decode — the whole
+    /// record's body lands in the chunk in one call. The chunk's
+    /// `extend` doubles capacity if needed, so very large records
+    /// transiently grow the per-thread chunk to record_size + previous
+    /// chunk content. Mid-record flushing was removed: with
+    /// multi-thread writers, a flush issued mid-record would commit a
+    /// chunk that ended without the record's trailing bytes (e.g.
+    /// `\n+\n<qual>\n` for FASTQ), and another thread's chunk
+    /// reserved at a later offset would land between the two halves on
+    /// disk, splitting one record across non-contiguous file regions.
+    /// The pre-record flush in `write_record`/`write_batch` ensures
+    /// the chunk is empty (or contains only complete records) before
+    /// each new record begins.
     inline void emit_body(writer_producer_state& producer,
                            const sequence_view_t& seq,
                            std::size_t total_letters) {
@@ -422,40 +446,10 @@ private:
                 ? _options.fasta_line_width
                 : 0;
         if (wrap_width == 0) {
-            // Stream-decode in batches sized so the chunk never grows
-            // past `chunk_capacity_bytes`. Each batch is rounded to a
-            // word boundary (32 letters) except for the last, so the
-            // SIMD decoder's word-major access pattern stays aligned.
-            const std::size_t cap = _options.chunk_capacity_bytes;
-            const std::size_t flush_threshold = _options.flush_threshold_bytes;
-            std::size_t remaining = total_letters;
-            std::size_t word_offset = 0;
-            while (remaining > 0) {
-                if (producer.chunk.size >= flush_threshold) {
-                    if (!flush_producer(producer)) return;
-                }
-                const std::size_t free_space = (producer.chunk.size < cap)
-                    ? (cap - producer.chunk.size) : 0;
-                std::size_t this_round = (free_space < remaining)
-                    ? free_space : remaining;
-                // For all but the last batch, align to a 32-letter
-                // word boundary so the next batch starts on a word.
-                if (remaining > this_round) {
-                    this_round = (this_round / letters_per_unit)
-                                  * letters_per_unit;
-                    if (this_round == 0) {
-                        // Free space is < one word; flush and retry.
-                        if (!flush_producer(producer)) return;
-                        continue;
-                    }
-                }
-                std::uint8_t* dst = producer.chunk.extend(this_round);
-                bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
-                    alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
-                        seq.data() + word_offset, dst, this_round);
-                remaining -= this_round;
-                word_offset += this_round / letters_per_unit;
-            }
+            std::uint8_t* dst = producer.chunk.extend(total_letters);
+            bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
+                alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                    seq.data(), dst, total_letters);
             return;
         }
         // Wrapped FASTA: decode into a scratch first, then memcpy
