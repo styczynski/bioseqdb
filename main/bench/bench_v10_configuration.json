@@ -37,6 +37,12 @@
     "VERY_LONG_HIGH_SUB_LOW_INDEL": { "data": { "fragment_count": 1, "fragment_length_mean": 1000000, "fragment_length_stddev": 50000, "reference_length": 1500000, "substitution_rate": 0.05, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 2198765 }, "description": "1 Mbp fragments, ~5% sub-only" },
 
     "XL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "5 Mbp fragments, ~0.2% HiFi error" },
+
+    "FAST_LONG_GROUP_1":         { "data": { "fragment_count": 1, "fragment_length_mean": 500000, "fragment_length_stddev": 100, "reference_length": 10000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "500 kbp fragments, ~0.2% HiFi error / group 1" },
+    "FAST_LONG_GROUP_2":         { "data": { "fragment_count": 1, "fragment_length_mean": 500000, "fragment_length_stddev": 100, "reference_length": 10000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "500 kbp fragments, ~0.2% HiFi error / group 2" },
+    "FAST_LONG_GROUP_3":         { "data": { "fragment_count": 1, "fragment_length_mean": 500000, "fragment_length_stddev": 100, "reference_length": 10000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "500 kbp fragments, ~0.2% HiFi error / group 3" },
+    "FAST_LONG_GROUP_4":         { "data": { "fragment_count": 1, "fragment_length_mean": 500000, "fragment_length_stddev": 100, "reference_length": 10000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "500 kbp fragments, ~0.2% HiFi error / group 4" },
+
     "XL_CCS":          { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.005, "insertion_rate": 0.005, "deletion_rate": 0.005, "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 4321987 }, "description": "5 Mbp fragments, ~1.5% CCS error" },
 
     "XXL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 500000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error" },
@@ -202,7 +208,7 @@
     "fast": true,
     "concurrency": { "bench_lock": true, "concurrency": true },
     "matrix": {
-      "for": { "CURATED_UNIQUE_FRAGMENT": 30, "CURATED_SEAL_BATCH": 30, "XXL_HIFI": 4 },
+      "for": { "CURATED_UNIQUE_FRAGMENT": 5000, "CURATED_SEAL_BATCH": 2000, "XXL_HIFI": 4, "FAST_LONG_GROUP_1": 50, "FAST_LONG_GROUP_2": 50, "FAST_LONG_GROUP_3": 50, "FAST_LONG_GROUP_4": 50 },
       "over": {
         "minimap2_dp": {},
         "bioseq_ksw2_scalar_dp_scalar_mm": {},
