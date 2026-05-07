@@ -114,6 +114,7 @@ struct SortOutput {
 [[nodiscard]] std::map<std::string, double> evaluate_sort_output(
     std::string_view /*algorithm_name*/,
     const ParamMap& /*params*/,
+    const SortInput& /*input*/,
     const SortOutput& output)
 {
     std::map<std::string, double> metrics;
@@ -176,13 +177,39 @@ struct CountOutput {
     return output;
 }
 
+/// Optional V9 teardown hook. Runs once per `(bench_count, test_case)`
+/// after every iteration on that input has finished, single-threaded.
+/// In a real benchmark this is where one would delete a scratch
+/// directory, close a database handle, or unlink temp files generated
+/// by `build_count_input`. We just log so the V9 lifecycle is
+/// observable in the example's stderr.
+void cleanup_count_input(std::string_view /*data_dir*/,
+                          std::string_view test_case_name,
+                          simdjson::dom::element /*data_element*/,
+                          const CountInput& input)
+{
+    logi("[example] cleanup_count_input released test_case='{}' (n={})",
+         test_case_name, input.values.size());
+}
+
 [[nodiscard]] std::map<std::string, double> evaluate_count_output(
     std::string_view /*algorithm_name*/,
     const ParamMap& /*params*/,
+    const CountInput& input,
     const CountOutput& output)
 {
+    // Demonstrate the V9 evaluator-with-input shape: independently
+    // count even values from `input` and compare to `output.even_count`.
+    // The result lands as `even_count` (matching the algorithm output)
+    // plus a derived `even_count_match` metric (0 / 1).
+    std::int64_t reference = 0;
+    for (const auto value : input.values) {
+        if ((value & 1) == 0) ++reference;
+    }
     std::map<std::string, double> metrics;
     metrics.emplace("even_count", static_cast<double>(output.even_count));
+    metrics.emplace("even_count_match",
+                    static_cast<double>(output.even_count == reference ? 1 : 0));
     return metrics;
 }
 
@@ -208,7 +235,7 @@ int main(int argc, char** argv) {
                 build_sort_input},
             std::function<SortOutput(std::string_view, const ParamMap&, const SortInput&)>{
                 run_sort_algorithm},
-            std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const SortOutput&)>{
+            std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const SortInput&, const SortOutput&)>{
                 evaluate_sort_output}),
         bioseq::bench_framework::create_benchmark<CountInput, CountOutput>(
             "Even-count parity check",
@@ -218,6 +245,8 @@ int main(int argc, char** argv) {
                 build_count_input},
             std::function<CountOutput(std::string_view, const ParamMap&, const CountInput&)>{
                 run_count_algorithm},
-            std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const CountOutput&)>{
-                evaluate_count_output}));
+            std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const CountInput&, const CountOutput&)>{
+                evaluate_count_output},
+            std::function<void(std::string_view, std::string_view, simdjson::dom::element, const CountInput&)>{
+                cleanup_count_input}));
 }

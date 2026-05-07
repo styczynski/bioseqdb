@@ -226,17 +226,33 @@ namespace detail {
  *                          when the benchmark allows parallel iteration; treat
  *                          captured state accordingly.
  * @param on_evaluate       Returns evaluation metrics computed from the algorithm
- *                          output. Each map entry is a `(metric_name,
- *                          metric_value)` pair appended to the `all_regions`
- *                          bucket. Names that don't match any `metrics` key
- *                          declared with `type: "evaluation"` are silently
- *                          dropped — `on_evaluate` lambdas are typically
- *                          generic across benchmarks, so emitting more keys
- *                          than this benchmark consumes is normal. Conversely,
- *                          if a declared evaluation metric is never returned,
- *                          the framework emits `missing_evaluation_metric` and
+ *                          output. Receives the same `Input` that was fed to
+ *                          `on_run` so the evaluator can run an independent
+ *                          reference pass (e.g. recompute the expected answer
+ *                          from the input and compare it against `output`)
+ *                          without polluting the timing window. Each map
+ *                          entry is a `(metric_name, metric_value)` pair
+ *                          appended to the `all_regions` bucket. Names that
+ *                          don't match any `metrics` key declared with
+ *                          `type: "evaluation"` are silently dropped —
+ *                          `on_evaluate` lambdas are typically generic across
+ *                          benchmarks, so emitting more keys than this
+ *                          benchmark consumes is normal. Conversely, if a
+ *                          declared evaluation metric is never returned, the
+ *                          framework emits `missing_evaluation_metric` and
  *                          fails the run (typo guard). Called concurrently
  *                          like `on_run`; no shared mutable state.
+ * @param on_cleanup        Optional teardown callback. Defaults to an empty
+ *                          `std::function` (no-op). When non-empty, runs
+ *                          exactly once per `(benchmark, test_case)` after
+ *                          every iteration on that input has finished, with
+ *                          the same first three parameters as `on_input`
+ *                          plus the cached `Input&`. Use it to release any
+ *                          side effects produced by `on_input` (temp files,
+ *                          allocated DBs, scratch buffers). Runs
+ *                          single-threaded after TBB joins; cleanup callable
+ *                          does NOT need to be thread-safe. **Must not
+ *                          throw**, same contract as `on_input`.
  */
 template<typename Input, typename Output>
 [[nodiscard]] ErasedBenchmark create_benchmark(
@@ -251,7 +267,12 @@ template<typename Input, typename Output>
                          const Input& input)> on_run,
     std::function<std::map<std::string, double>(std::string_view algorithm_name,
                                                 const ParamMap& params,
-                                                const Output& output)> on_evaluate);
+                                                const Input&  input,
+                                                const Output& output)> on_evaluate,
+    std::function<void(std::string_view data_dir,
+                       std::string_view test_case_name,
+                       simdjson::dom::element test_case_data,
+                       const Input& input)> on_cleanup = {});
 
 /**
  * @brief Run all benchmarks. Returns 0 on success, 1 if any rule violated
@@ -3610,7 +3631,8 @@ inline void run_typed_benchmark(
     BenchmarkContext& context,
     const std::function<Input(std::string_view, std::string_view, simdjson::dom::element)>& on_input,
     const std::function<Output(std::string_view, const ParamMap&, const Input&)>& on_run,
-    const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Output&)>& on_evaluate)
+    const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)>& on_evaluate,
+    const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup)
 {
     using bioseq::instr::installed_profiler_scope;
     using bioseq::instr::ProfilerBlock;
@@ -3652,7 +3674,8 @@ inline void run_typed_benchmark(
 
         const auto counters_after = snapshot_counters(counter_handles);
 
-        const auto evaluation_metrics = on_evaluate(tuple.algorithm_name, tuple.params, output);
+        const auto evaluation_metrics =
+            on_evaluate(tuple.algorithm_name, tuple.params, input, output);
 
         append_iteration_samples(cell, by_regions, profiler_block,
                                   iteration_wall_clock_ns, state.config.metrics,
@@ -3687,6 +3710,28 @@ inline void run_typed_benchmark(
     } else {
         for (auto* cell_ptr : work_items) {
             run_one_iteration(*cell_ptr);
+        }
+    }
+
+    // Tear down each cached input. Runs single-threaded — TBB's
+    // `parallel_for_each` returns only after every worker has finished
+    // `run_one_iteration`, so the cleanup callable does not need to be
+    // thread-safe. Skipped when the user supplied no callback (the
+    // cached `Input` destructor still fires when the vector goes out of
+    // scope below). Iteration order matches `state.test_cases` so any
+    // log lines from the user's body appear in a deterministic
+    // sequence. `spec.data` is a non-owning view into `state.parser`'s
+    // pool; the parser lives on `BenchmarkExecutionState`, which the
+    // closure (in `create_benchmark`'s template body) keeps alive
+    // until the benchmark's report is stashed under
+    // `context.reports` long after this function returns — so the
+    // view stays valid throughout the cleanup pass. **Must not
+    // throw**, same contract as `on_input`.
+    if (on_cleanup) {
+        for (std::size_t i = 0; i < cached_inputs.size(); ++i) {
+            if (!cached_inputs[i].has_value()) continue;
+            const auto& spec = state.test_cases[i];
+            on_cleanup(data_dir, spec.name, spec.data, *cached_inputs[i]);
         }
     }
 }
@@ -6736,7 +6781,8 @@ template<typename Input, typename Output>
     std::string config_path,
     std::function<Input(std::string_view, std::string_view, simdjson::dom::element)> on_input,
     std::function<Output(std::string_view, const ParamMap&, const Input&)> on_run,
-    std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Output&)> on_evaluate)
+    std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)> on_evaluate,
+    std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)> on_cleanup)
 {
     ErasedBenchmark erased;
     erased.title         = std::move(title);
@@ -6748,7 +6794,8 @@ template<typename Input, typename Output>
                        erased_config_path   = erased.config_path,
                        captured_on_input    = std::move(on_input),
                        captured_on_run      = std::move(on_run),
-                       captured_on_evaluate = std::move(on_evaluate)
+                       captured_on_evaluate = std::move(on_evaluate),
+                       captured_on_cleanup  = std::move(on_cleanup)
                       ](BenchmarkContext& context) {
         auto state_holder = std::make_unique<detail::BenchmarkExecutionState>();
         auto& state = *state_holder;
@@ -6831,7 +6878,8 @@ template<typename Input, typename Output>
         detail::run_typed_benchmark<Input, Output>(state, context,
                                                     captured_on_input,
                                                     captured_on_run,
-                                                    captured_on_evaluate);
+                                                    captured_on_evaluate,
+                                                    captured_on_cleanup);
 
         // 4. Post-run validation: missing-evaluation-metric check.
         auto post_run_diagnostics = detail::semantic_validate_post_run(state);

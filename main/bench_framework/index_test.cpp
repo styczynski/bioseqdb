@@ -497,7 +497,8 @@ struct ArgvBuilder {
 /// Wrapping into `std::function` happens only at the framework's API
 /// boundary (`create_benchmark` requires it); the helper itself stays
 /// fully templated.
-template<typename OnInput, typename OnRun, typename OnEvaluate>
+template<typename OnInput, typename OnRun, typename OnEvaluate,
+         typename OnCleanup = std::nullptr_t>
 [[nodiscard]] RunOutcome run_one_bench(
     std::string_view  bench_key,
     std::string_view  bench_title,
@@ -505,16 +506,17 @@ template<typename OnInput, typename OnRun, typename OnEvaluate>
     const TempReportDir& report_dir,
     OnInput  on_input,
     OnRun    on_run,
-    OnEvaluate on_evaluate)
+    OnEvaluate on_evaluate,
+    OnCleanup  on_cleanup = nullptr)
 {
     using Input = std::invoke_result_t<
         OnInput, std::string_view, std::string_view, simdjson::dom::element>;
     using Output = std::invoke_result_t<
         OnRun, std::string_view, const ParamMap&, const Input&>;
     static_assert(std::is_same_v<
-        std::invoke_result_t<OnEvaluate, std::string_view, const ParamMap&, const Output&>,
+        std::invoke_result_t<OnEvaluate, std::string_view, const ParamMap&, const Input&, const Output&>,
         std::map<std::string, double>>,
-        "on_evaluate must return std::map<std::string, double>");
+        "on_evaluate must return std::map<std::string, double> when invoked with (algo, params, input, output)");
 
     RunOutcome outcome;
     outcome.config_path = report_dir.path / "config.json";
@@ -523,11 +525,23 @@ template<typename OnInput, typename OnRun, typename OnEvaluate>
         cfg.write(config_text.data(), static_cast<std::streamsize>(config_text.size()));
     }
 
-    using InputFn  = std::function<Input(std::string_view, std::string_view, simdjson::dom::element)>;
-    using RunFn    = std::function<Output(std::string_view, const ParamMap&, const Input&)>;
-    using EvalFn   = std::function<std::map<std::string, double>(std::string_view,
+    using InputFn   = std::function<Input(std::string_view, std::string_view, simdjson::dom::element)>;
+    using RunFn     = std::function<Output(std::string_view, const ParamMap&, const Input&)>;
+    using EvalFn    = std::function<std::map<std::string, double>(std::string_view,
                                                                   const ParamMap&,
+                                                                  const Input&,
                                                                   const Output&)>;
+    using CleanupFn = std::function<void(std::string_view, std::string_view,
+                                          simdjson::dom::element, const Input&)>;
+
+    // The wrapper accepts `nullptr` (default) or a callable. When the
+    // sentinel is passed we hand the framework a default-empty
+    // `std::function`, exercising the "no cleanup" path; otherwise we
+    // bind the callable into the typed `CleanupFn`.
+    CleanupFn cleanup_fn{};
+    if constexpr (!std::is_same_v<OnCleanup, std::nullptr_t>) {
+        cleanup_fn = CleanupFn{std::move(on_cleanup)};
+    }
 
     auto bench = create_benchmark<Input, Output>(
         std::string{bench_title},
@@ -535,7 +549,8 @@ template<typename OnInput, typename OnRun, typename OnEvaluate>
         outcome.config_path.string(),
         InputFn{std::move(on_input)},
         RunFn{std::move(on_run)},
-        EvalFn{std::move(on_evaluate)});
+        EvalFn{std::move(on_evaluate)},
+        std::move(cleanup_fn));
 
     const std::array<std::string, 5> args = {
         "bench_framework_test",
@@ -762,6 +777,7 @@ TEST_CASE("bench_framework end-to-end happy path", "[bench_framework]") {
 
     auto on_evaluate = [](std::string_view /*algo*/,
                            const ParamMap& /*params*/,
+                           const ToyInput& /*input*/,
                            const ToyOutput& output)
         -> std::map<std::string, double>
     {
@@ -918,7 +934,8 @@ TEST_CASE("bench_framework rule violation fires on threshold", "[bench_framework
         return ToyOutput{};
     };
 
-    auto on_evaluate = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_evaluate = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return {}; };
 
     auto outcome = run_one_bench(
@@ -980,7 +997,8 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
     auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
         return ToyOutput{};
     };
-    auto on_evaluate_constant = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_evaluate_constant = [](std::string_view, const ParamMap&,
+                                     const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double>
     {
         return { {"frozen", 42.0} };
@@ -1021,7 +1039,8 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
     {
         std::atomic<std::int64_t> iteration_counter{0};
         auto on_evaluate_varying = [&iteration_counter](
-            std::string_view, const ParamMap&, const ToyOutput&)
+            std::string_view, const ParamMap&,
+            const ToyInput&, const ToyOutput&)
             -> std::map<std::string, double>
         {
             const auto value = iteration_counter.fetch_add(1, std::memory_order_relaxed);
@@ -1082,9 +1101,11 @@ TEST_CASE("regression rule fires after value drift", "[bench_framework][regressi
     auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
         return ToyOutput{};
     };
-    auto on_eval_one = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_eval_one = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return { {"value", 1.0} }; };
-    auto on_eval_two = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_eval_two = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return { {"value", 2.0} }; };
 
     // Run 1: baseline with value=1.0. No prior data → 0 regressions
@@ -1154,7 +1175,8 @@ TEST_CASE("evaluator returns extra unused key — silently dropped", "[bench_fra
     auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
         return ToyOutput{};
     };
-    auto on_evaluate = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_evaluate = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double>
     {
         return {
@@ -1223,7 +1245,8 @@ TEST_CASE("declared evaluator metric never returned still errors", "[bench_frame
     auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
         return ToyOutput{};
     };
-    auto on_evaluate_empty = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_evaluate_empty = [](std::string_view, const ParamMap&,
+                                  const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return {}; };
 
     auto outcome = run_one_bench(
@@ -1254,7 +1277,8 @@ TEST_CASE("schema validation rejects config missing 'params'", "[bench_framework
     auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
         return ToyOutput{};
     };
-    auto on_evaluate = [](std::string_view, const ParamMap&, const ToyOutput&)
+    auto on_evaluate = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return {}; };
 
     auto outcome = run_one_bench(
@@ -1266,4 +1290,104 @@ TEST_CASE("schema validation rejects config missing 'params'", "[bench_framework
     // "configuration validation". Either substring is fine to assert
     // on — the second is more specific.
     REQUIRE(stderr_contains(outcome.captured_stderr, "configuration validation"));
+}
+
+// ---------------------------------------------------------------------------
+//  Test 8 — V9 on_cleanup hook: invocation, ordering, zero-iteration skip
+// ---------------------------------------------------------------------------
+
+TEST_CASE("on_cleanup runs once per cached test_case after iterations finish",
+          "[bench_framework][cleanup][v9]") {
+    TestLogSilencer silence_mlogging;
+
+    // Schema requires per-algorithm params to be non-empty; carry a
+    // single defaulted scalar so this minimal benchmark validates.
+    static constexpr std::array<AlgoParamSpec, 1> kParams{{
+        {"size_hint", "integer", "0", ""}
+    }};
+    static constexpr std::array<AlgorithmSpec, 1> kAlgos{{
+        {"toy", std::span<const AlgoParamSpec>{kParams}}
+    }};
+    // Three test cases; one is given zero iterations so the cleanup
+    // path can prove it skips that slot.
+    static constexpr std::array<TestCaseDataSpec, 3> kTestCases{{
+        {"TINY",  "first",  R"({"length":4,"seed":1})"},
+        {"MID",   "second", R"({"length":8,"seed":2})"},
+        {"NEVER", "zero",   R"({"length":16,"seed":3})"}
+    }};
+    static constexpr std::array<ForEntry, 3> kForEntries{{
+        {"TINY",  3},
+        {"MID",   2},
+        {"NEVER", 0},
+    }};
+    static constexpr std::array<OverEntry, 1> kOverEntries{{
+        {"toy", "{}"}
+    }};
+    static constexpr std::array<MetricSpecLite, 1> kMetrics{{
+        {"wall_clock_ns", "builtin", "", "", "[]"}
+    }};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{
+            .key = "bench_cleanup",
+            .description = "cleanup hook",
+            .fast = false,
+            .bench_lock = false,
+            .concurrency = false,
+            .by_regions = false,
+            .for_entries  = std::span<const ForEntry>{kForEntries},
+            .over_entries = std::span<const OverEntry>{kOverEntries},
+            .metrics      = std::span<const MetricSpecLite>{kMetrics},
+        }
+    }};
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kTestCases},
+        std::span<const BenchmarkSpec>{benches});
+
+    TempReportDir report_dir;
+
+    auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
+        return ToyOutput{};
+    };
+    auto on_evaluate = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {}; };
+
+    SECTION("default-empty cleanup is a silent no-op") {
+        // Sanity check the no-cleanup path: the wrapper's
+        // `OnCleanup = std::nullptr_t` default leaves the framework's
+        // `std::function` empty, and the run still completes cleanly.
+        const auto outcome = run_one_bench(
+            "bench_cleanup", "no cleanup", config_text, report_dir,
+            build_toy_input, on_run, on_evaluate);
+        REQUIRE(outcome.exit_code == 0);
+    }
+
+    SECTION("user-supplied cleanup fires once per used test case") {
+        std::vector<std::string> seen_names;
+        std::vector<std::size_t> seen_lengths;
+        auto on_cleanup = [&](std::string_view /*data_dir*/,
+                              std::string_view test_case_name,
+                              simdjson::dom::element /*data*/,
+                              const ToyInput& input)
+        {
+            seen_names.emplace_back(test_case_name);
+            seen_lengths.push_back(input.values.size());
+        };
+
+        const auto outcome = run_one_bench(
+            "bench_cleanup", "with cleanup", config_text, report_dir,
+            build_toy_input, on_run, on_evaluate, on_cleanup);
+        REQUIRE(outcome.exit_code == 0);
+
+        // Both used test cases get exactly one cleanup call. The
+        // zero-iteration slot ("NEVER") is skipped because the
+        // input was never built.
+        REQUIRE(seen_names.size() == 2);
+        const std::vector<std::string> expected_names{"TINY", "MID"};
+        REQUIRE(seen_names == expected_names);
+        // Lengths reflect the JSON `length` field — ToyInput stores
+        // exactly that many randomised values.
+        REQUIRE(seen_lengths == std::vector<std::size_t>{4, 8});
+    }
 }
