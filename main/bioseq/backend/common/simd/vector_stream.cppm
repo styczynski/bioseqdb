@@ -74,7 +74,11 @@ concept any_arg_is_stream = (is_any_stream_v<Args> || ... || false);
 
 template <class D, typename ST, size_t W>
 requires (stream_width_ok<W>)
-struct vec_stream {
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+vec_stream {
     // Strip cv from D so the type is identical regardless of whether the
     // user wrote vec_stream<decltype(const_d), ...> or
     // vec_stream<hn::ScalableTag<T>, ...>. Highway's Vec<D> alias does
@@ -156,20 +160,22 @@ public:
     // Hidden friends are found only via ADL on vec_stream args, so they don't
     // pollute the surrounding namespace.
 
-    // Hidden-friend arithmetic operators. Direct array-initializer pattern:
-    // pack expansion fills all W slots in one expression — no mutable `out`
-    // variable for the optimizer to track. With static `pack_impl<S...>`
-    // the compiler sees a single std::array aggregate-init constructor call.
+    // Hidden-friend operators. Take vec_stream BY VALUE — for W ∈ {1, 2}
+    // the bundle is sizeof(vec_t) * W = 16 or 32 bytes, which the M1 NEON
+    // ABI passes as an HVA (homogeneous vector aggregate) in V0/V1
+    // registers. By-reference passing forces an address escape that
+    // can prevent SROA on the caller's side. The pack-expansion form
+    // gives the optimizer a single point of construction.
 
 #define BIOSEQ_VS_HIDDEN_FRIEND_OP(OPSYM, HNNAME)                                  \
     [[nodiscard]] friend HWY_INLINE auto operator OPSYM(                            \
-        vec_stream const& a, vec_stream const& b) noexcept {                        \
+        vec_stream a, vec_stream b) noexcept {                                      \
         return op_pack_impl_##HNNAME(a, b, std::make_index_sequence<W>{});          \
     }                                                                               \
     template <size_t... S>                                                          \
     [[nodiscard, gnu::always_inline]] static HWY_INLINE                             \
     vec_stream op_pack_impl_##HNNAME(                                               \
-        vec_stream const& a, vec_stream const& b, std::index_sequence<S...>) noexcept { \
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {           \
         return pack(hn::HNNAME(a[S], b[S])...);                                     \
     }
 
@@ -182,13 +188,13 @@ public:
     // Comparison operators return a mask_stream<tag_t, W>.
 #define BIOSEQ_VS_HIDDEN_FRIEND_CMP(OPSYM, HNNAME)                                 \
     [[nodiscard]] friend HWY_INLINE auto operator OPSYM(                            \
-        vec_stream const& a, vec_stream const& b) noexcept {                        \
+        vec_stream a, vec_stream b) noexcept {                                      \
         return cmp_pack_impl_##HNNAME(a, b, std::make_index_sequence<W>{});         \
     }                                                                               \
     template <size_t... S>                                                          \
     [[nodiscard, gnu::always_inline]] static HWY_INLINE                             \
     mask_stream<tag_t, W> cmp_pack_impl_##HNNAME(                                   \
-        vec_stream const& a, vec_stream const& b, std::index_sequence<S...>) noexcept { \
+        vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept {           \
         return mask_stream<tag_t, W>::pack(hn::HNNAME(a[S], b[S])...);              \
     }
 
@@ -209,7 +215,11 @@ public:
 
 template <class D, size_t W>
 requires (stream_width_ok<W>)
-struct mask_stream {
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+mask_stream {
     using tag_t = std::remove_cvref_t<D>;
     using mask_t = hn::Mask<tag_t>;
     static constexpr size_t stream_width = W;
@@ -379,43 +389,51 @@ inline constexpr bool tags_consistent_v =
 /// expansion expands all packs mentioned at the same depth simultaneously
 /// (zip-style); we want cartesian, so we hide one pack behind a template
 /// barrier.
+///
+/// Args are taken by FORWARDING reference and `project<S>` is invoked with
+/// the actual reference category preserved. The `project` overload returns
+/// `arg[S]` for stream args and `(arg)` (lvalue ref) for non-stream args
+/// — same semantics as before, just consistent with the forwarding-ref
+/// pattern of the outer `lift_op`.
 template <size_t S, typename Op, typename... Args>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
-auto lift_eval_at_slot(Op& op, Args&... args) {
+auto lift_eval_at_slot(Op& op, Args&&... args) {
     return op(project<S>(args)...);
 }
 
 template <size_t S, typename Op, typename... Args>
 [[gnu::always_inline]] HWY_INLINE
-void lift_apply_at_slot(Op& op, Args&... args) {
+void lift_apply_at_slot(Op& op, Args&&... args) {
     op(project<S>(args)...);
 }
 
 /// lift_op_pack_vec: helper that does the actual pack expansion for a
-/// vec_stream-returning lift. Static so the compiler sees a single direct
-/// `vec_stream::pack(...)` call (which is `vec_stream{ std::array{...} }`
-/// — a single aggregate-init point of construction, NRVO-friendly).
+/// vec_stream-returning lift. The result is constructed via `pack(...)`
+/// — a single std::array aggregate-init — so the compiler sees one point
+/// of construction (NRVO-friendly).
 template <class D, typename ST, size_t W,
           size_t... S, typename Op, typename... Args>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 vec_stream<D, ST, W> lift_op_pack_vec(
-    std::index_sequence<S...>, Op& op, Args&... args) {
-    return vec_stream<D, ST, W>::pack(lift_eval_at_slot<S>(op, args...)...);
+    std::index_sequence<S...>, Op& op, Args&&... args) {
+    return vec_stream<D, ST, W>::pack(
+        lift_eval_at_slot<S>(op, std::forward<Args>(args)...)...);
 }
 
 template <class D, size_t W,
           size_t... S, typename Op, typename... Args>
 [[nodiscard, gnu::always_inline]] HWY_INLINE
 mask_stream<D, W> lift_op_pack_mask(
-    std::index_sequence<S...>, Op& op, Args&... args) {
-    return mask_stream<D, W>::pack(lift_eval_at_slot<S>(op, args...)...);
+    std::index_sequence<S...>, Op& op, Args&&... args) {
+    return mask_stream<D, W>::pack(
+        lift_eval_at_slot<S>(op, std::forward<Args>(args)...)...);
 }
 
 template <size_t... S, typename Op, typename... Args>
 [[gnu::always_inline]] HWY_INLINE
 void lift_op_apply_void(
-    std::index_sequence<S...>, Op& op, Args&... args) {
-    (lift_apply_at_slot<S>(op, args...), ...);
+    std::index_sequence<S...>, Op& op, Args&&... args) {
+    (lift_apply_at_slot<S>(op, std::forward<Args>(args)...), ...);
 }
 
 /// lift_op: invoke `op(project<S>(args)...)` for S in [0, W) and bundle the
@@ -458,14 +476,15 @@ auto lift_op(Op&& op, Args&&... args) {
         using ST = std::conditional_t<std::is_void_v<ST_from_args>,
                                        hn::TFromD<D>, ST_from_args>;
         return lift_op_pack_vec<D, ST, W>(
-            std::make_index_sequence<W>{}, op, args...);
+            std::make_index_sequence<W>{}, op, std::forward<Args>(args)...);
     } else if constexpr (std::is_same_v<elem_result_t, hn::Mask<D>>) {
         return lift_op_pack_mask<D, W>(
-            std::make_index_sequence<W>{}, op, args...);
+            std::make_index_sequence<W>{}, op, std::forward<Args>(args)...);
     } else {
         static_assert(std::is_same_v<elem_result_t, void>,
                       "lift_op: element result must be Vec<D> or Mask<D> or void");
-        lift_op_apply_void(std::make_index_sequence<W>{}, op, args...);
+        lift_op_apply_void(std::make_index_sequence<W>{}, op,
+            std::forward<Args>(args)...);
     }
 }
 
