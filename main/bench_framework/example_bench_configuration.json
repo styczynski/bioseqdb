@@ -38,6 +38,15 @@
         "length": 16384,
         "seed": 21
       }
+    },
+    "BUGGY_INPUT": {
+      "description": "V12 demo: build_count_input throws the first 2 attempts. Drives the on_input retry UI.",
+      "concurrency": 1,
+      "data": {
+        "length": 256,
+        "seed": 99,
+        "buggy_input": 2
+      }
     }
   },
   "bench_sort": {
@@ -50,7 +59,7 @@
     "matrix": {
       "for": {
         "TINY": 50,
-        "SMALL": 20
+        "SMALL": 40
       },
       "over": {
         "std_sort": {},
@@ -98,7 +107,8 @@
     "matrix": {
       "for": {
         "TINY": 5,
-        "SMALL": 3
+        "SMALL": 3,
+        "BUGGY_INPUT": 2
       },
       "over": {
         "naive_count": {
@@ -128,6 +138,35 @@
         },
         "loop_mean_per_iter_ns": {
           "type": "loop",
+          "rules": []
+        }
+      }
+    }
+  },
+  "bench_buggy_cleanup": {
+    "description": "V12 demo: on_cleanup always throws. Drives the cleanup-retry UI and the cleanup_function_failing warning.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": false,
+      "concurrency": false
+    },
+    "matrix": {
+      "for": {
+        "TINY": 1
+      },
+      "over": {
+        "naive_count": {
+          "stride": [1]
+        }
+      },
+      "by_regions": false,
+      "metrics": {
+        "even_count": {
+          "type": "evaluation",
+          "rules": []
+        },
+        "even_count_match": {
+          "type": "evaluation",
           "rules": []
         }
       }

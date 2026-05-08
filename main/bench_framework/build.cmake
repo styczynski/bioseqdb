@@ -70,6 +70,7 @@ AddCommonTargetX(
     simdjson::simdjson
     nlohmann_json_schema_validator::validator
     TBB::tbb
+    lfreist-hwinfo::hwinfo
   SOURCES
     ${BENCH_FRAMEWORK_EXAMPLE_SOURCES}
   TESTS

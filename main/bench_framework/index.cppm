@@ -31,15 +31,23 @@ module;
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
 
+#include <hwinfo/platform.h>
+#include <hwinfo/ram.h>
+
+#include <cpptrace/cpptrace.hpp>
+#include <cpptrace/from_current.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -53,6 +61,7 @@ module;
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <unistd.h>
@@ -783,6 +792,10 @@ struct ParsedCli {
     bool                       summary_mode = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
+    /// V12: `--memory-buffer N` (0..50, default 10). Determines how
+    /// much headroom to leave above peak system usage when computing
+    /// the dynamic memory cap. See `MemoryBudget::cap_for`.
+    double                     memory_buffer_pct = 10.0;
 };
 
 /// Identity card for one report. Captured once in `run_impl` and
@@ -1018,81 +1031,185 @@ struct BenchmarkContext {
 
 namespace detail {
 
+// ----------------- V12 framework constants -----------------
+
+/// Hardcoded ceiling on the number of consecutive failed attempts at
+/// `on_input` (G2) and `on_cleanup` (G3) before the framework declares
+/// the batch unrecoverable. Set to 5 per spec; not exposed via CLI.
+inline constexpr std::size_t kMaxTaskInputHandlerErrorCount = 5;
+
+/// Maximum number of stack-trace frames to render in the dashboard
+/// per failure. Anything past this is dropped with an "elided" marker.
+inline constexpr std::size_t kMaxStackTraceLines = 30;
+
+// ----------------- hwinfo bridge -----------------
+
+/// Best-effort `(total, free)` bytes reading the host's physical RAM.
+/// Computed via the cross-platform `hwinfo::Memory` class. The exact
+/// semantics of `Memory::size()` / `Memory::free()` / `Memory::available()`
+/// vary by platform (see hwinfo-main/src/{apple,linux,windows}/ram.cpp);
+/// this helper picks the most-useful values per platform via
+/// compile-time `#ifdef HWINFO_*` from `<hwinfo/platform.h>`. On
+/// totally-broken hwinfo we fall back to "infinite memory" so the
+/// framework over-trusts the host instead of refusing to run.
+struct SystemMemorySnapshot {
+    std::uint64_t total_bytes = 0;
+    std::uint64_t free_bytes  = 0;
+};
+
+[[nodiscard]] inline SystemMemorySnapshot snapshot_system_memory() noexcept {
+    hwinfo::Memory mem{};
+    SystemMemorySnapshot snap{};
+
+    // The vcpkg-installed hwinfo (lfreist-hwinfo, vcpkg edition) exposes
+    // total_Bytes() / free_Bytes() / available_Bytes() as `int64_t`.
+    // Negative values are sentinel "I don't know"; treat as zero.
+    auto clamp_positive = [] (std::int64_t v) noexcept -> std::uint64_t {
+        return v <= 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(v);
+    };
+
+    // T: prefer total_Bytes() (Windows: sum of DIMMs; Linux: round-up
+    // MemTotal). Linux's pow-of-2 rounding is documented in
+    // BENCH_V12_IMPL_PLAN.md §6.5; we accept the overestimate and
+    // rely on the 30 s idle-clock timeout to catch genuinely-infeasible
+    // batches.
+    snap.total_bytes = clamp_positive(mem.total_Bytes());
+    if (snap.total_bytes == 0) snap.total_bytes = clamp_positive(mem.available_Bytes());
+
+    // F: pick the most-useful "currently-free" measurement per platform.
+    //   - Linux: available_Bytes() = MemAvailable, the metric `free(1)`
+    //     reports. Strictly better than free_Bytes() = MemFree because
+    //     MemAvailable includes reclaimable cache.
+    //   - macOS: free_Bytes() goes through `host_statistics64`, which
+    //     returns -1 (i.e. failure) on the vcpkg 2025-07-10 build for
+    //     ARM macOS in our test environment. We fall back to
+    //     available_Bytes() (= sysctl `hw.memsize_usable`) which is
+    //     close to T — i.e. dynamic-pressure detection is degraded on
+    //     macOS but the framework still runs. The operator sees this
+    //     in the startup log.
+    //   - Windows: free_Bytes() == available_Bytes() — either works.
+#if defined(HWINFO_UNIX) && !defined(HWINFO_APPLE)
+    snap.free_bytes = clamp_positive(mem.available_Bytes());
+#elif defined(HWINFO_APPLE)
+    snap.free_bytes = clamp_positive(mem.free_Bytes());
+    if (snap.free_bytes == 0) {
+        // macOS fall-back when host_statistics64 fails. Treat
+        // memsize_usable as a generous "approximately free" proxy
+        // (no external-pressure detection, but the framework runs).
+        snap.free_bytes = clamp_positive(mem.available_Bytes());
+    }
+#else
+    snap.free_bytes = clamp_positive(mem.free_Bytes());
+#endif
+
+    // Defensive clamps: never let `free` exceed `total`. If both are
+    // zero (broken hwinfo), pretend infinite total so the framework
+    // can still run; the operator gets a startup log line so the
+    // anomaly is visible.
+    if (snap.total_bytes == 0) {
+        snap.total_bytes = std::numeric_limits<std::uint64_t>::max();
+    }
+    if (snap.free_bytes > snap.total_bytes) {
+        snap.free_bytes = snap.total_bytes;
+    }
+    return snap;
+}
+
 // ----------------- MemoryBudget -----------------
 
-/// Process-wide memory budget enforcing a hardcoded 5 GiB ceiling.
-/// Acquired before `on_input` (`base_memory`) and around the iteration
-/// loop (`extra_memory`) by `BudgetReservation` RAII guards. Acquisition
-/// blocks on a `std::condition_variable` until enough budget is
-/// available; `release` does `notify_all` so any waiter whose remaining
-/// request now fits wakes up.
+// Forward declaration so `MemoryBudget::AcquireState` can hold a pointer
+// to a progress-side struct.
+struct ProgressGroup;
+
+/// Process-wide memory budget recomputed dynamically from hwinfo on
+/// every constraint check. There is no fixed ceiling: the budget
+/// shrinks/grows as the host's RAM pressure changes. The two hard-error
+/// conditions (`memory_budget_not_satisfiable`, fired when the batch
+/// requires more memory than the host owns; and
+/// `memory_budget_oversized` warning when the requirement exceeds the
+/// buffered cap) are evaluated **per batch** at the driver level. The
+/// third hard error (`memory_budget_constraint_timeout`) is reported by
+/// `acquire()` itself when the per-batch idle clock exceeds 30 s.
 class MemoryBudget {
 public:
-    /// Hardcoded ceiling. 5 GiB. The spec says "hardcode it in
-    /// variable", so this is `static constexpr` rather than a CLI knob.
-    /// Computed via `<< 30` so the literal value can't overflow 32-bit
-    /// `size_t` (defensive — bench_framework is 64-bit-only today).
-    static constexpr std::size_t kHardcodedTotalBytes =
-        std::size_t{5} * (std::size_t{1} << 30);
+    /// Hardcoded — not exposed via CLI per spec. The brief calls this
+    /// MAX_TASK_IDLE_WAITING_TIME and pins it at 30 s.
+    static constexpr std::chrono::seconds kMaxIdleWaitingTime{30};
 
-    explicit MemoryBudget(std::size_t total_bytes) noexcept
-        : total_bytes_(total_bytes),
-          available_bytes(static_cast<std::int64_t>(total_bytes))
+    /// Wake-up cadence inside `acquire` when blocked, so we re-poll
+    /// hwinfo even if no one calls `release()`. Aligned with the
+    /// dashboard's repaint period so a single hwinfo read can serve
+    /// both `acquire` re-checks and the renderer.
+    static constexpr std::chrono::milliseconds kPollInterval{200};
+
+    /// hwinfo TTL — every snapshot reads /proc/meminfo / sysctl / WMI.
+    /// Cache the last one so repeated reads inside a 200 ms window
+    /// collapse to one syscall regardless of how many batches block
+    /// concurrently.
+    static constexpr std::chrono::milliseconds kBudgetSnapshotTtl{200};
+
+    enum class AcquireOutcome : std::uint8_t {
+        Acquired,        // bytes deducted; caller may proceed
+        IdleTimeout,     // memory_budget_constraint_timeout fired
+    };
+
+    /// Per-batch state for the idle-clock logic. Stack-allocated inside
+    /// `run_one_batch`, reused across base/extra acquisitions, mutated
+    /// only by the owning TBB worker — no atomic on the local field.
+    /// `group_for_ui` (when non-null) lets `acquire` mirror the idle
+    /// timestamp into the dashboard's atomic field so the renderer can
+    /// show the "🕑 waiting Ns / 30s" row.
+    struct AcquireState {
+        std::int64_t   last_idle_start_ns = 0;     // 0 = "not idle"
+        ProgressGroup* group_for_ui = nullptr;     // optional UI mirror
+    };
+
+    /// Constructed once in `run_impl`. `memory_buffer_pct` is already
+    /// validated to `[0, 50]` by `parse_cli`.
+    explicit MemoryBudget(double memory_buffer_pct) noexcept
+        : memory_buffer_pct_(memory_buffer_pct)
     {
-        DEBUG_ASSERT(total_bytes > 0,
-            "MemoryBudget total must be positive — a 0-byte budget would "
-            "treat every non-zero request as oversized and silently bypass "
-            "the wait predicate, which is never the intent.");
+        DEBUG_ASSERT(memory_buffer_pct >= 0.0 && memory_buffer_pct <= 50.0,
+            "MemoryBudget memory_buffer_pct must be in [0, 50]");
     }
 
-    /// Block until at least `bytes` are available, then deduct them.
-    /// Returns immediately when `bytes == 0`. Oversized requests
-    /// (`bytes > kHardcodedTotalBytes`) bypass the wait predicate, log
-    /// a `memory_budget_oversized` warning, and forge through; the
-    /// resulting negative balance just blocks subsequent acquirers
-    /// until release.
-    void acquire(std::size_t bytes) {
-        if (bytes == 0) return;
-        std::unique_lock<std::mutex> guard(budget_mu);
-        if (oversized(bytes)) {
-            logw("[bench_framework] memory_budget_oversized: request {} bytes "
-                 "exceeds hardcoded budget {} bytes — running over-budget",
-                 bytes, kHardcodedTotalBytes);
-        } else {
-            budget_cv.wait(guard, [this, bytes] {
-                return available_bytes >= static_cast<std::int64_t>(bytes);
-            });
-        }
-        available_bytes -= static_cast<std::int64_t>(bytes);
+    /// Block until `bytes` fits the dynamic budget, or the idle clock
+    /// fires. The two batch-level hard-error conditions are checked at
+    /// the driver before any `acquire` call, so the only failure mode
+    /// surfaced here is `IdleTimeout`.
+    [[nodiscard]] AcquireOutcome
+    acquire(std::size_t bytes, AcquireState& state) noexcept;
+
+    /// Decrement active reservations and notify_all so blocked acquires
+    /// re-check.
+    void release(std::size_t bytes) noexcept;
+
+    /// Snapshot for the dashboard / batch-level upfront checks.
+    struct Snapshot {
+        std::uint64_t total_bytes;       // T (system physical, hwinfo)
+        std::uint64_t used_bytes;        // U = T − free
+        std::uint64_t cap_bytes;         // C = T·(1 − buffer/100)
+        std::uint64_t available_bytes;   // B = max(0, C − U − reserved)
+        std::uint64_t reserved_bytes;    // bytes currently held by us
+    };
+    [[nodiscard]] Snapshot snapshot() const noexcept;
+
+    /// Compute the cap (`C = T·(1 − buffer/100)`) for an arbitrary `T`.
+    /// Public so the per-batch driver can compare `base + extra` against
+    /// the cap without re-deriving the formula.
+    [[nodiscard]] static constexpr std::uint64_t
+    cap_for(std::uint64_t total, double buffer_pct) noexcept {
+        return static_cast<std::uint64_t>(
+            static_cast<double>(total) * (100.0 - buffer_pct) / 100.0);
     }
 
-    /// Release `bytes` previously acquired and wake every waiter.
-    void release(std::size_t bytes) noexcept {
-        if (bytes == 0) return;
-        {
-            std::lock_guard<std::mutex> guard(budget_mu);
-            available_bytes += static_cast<std::int64_t>(bytes);
-        }
-        budget_cv.notify_all();
-    }
+    [[nodiscard]] double memory_buffer_pct() const noexcept { return memory_buffer_pct_; }
 
-    /// Snapshot the available-bytes counter for the dashboard. Takes
-    /// the mutex briefly because `available_bytes` is a plain
-    /// `std::int64_t` mutated only under `budget_mu`. The renderer
-    /// calls this every paint (200 ms cadence) so the contention is
-    /// negligible.
-    [[nodiscard]] std::int64_t snapshot_available() const noexcept {
-        std::lock_guard<std::mutex> guard(budget_mu);
-        return available_bytes;
-    }
-
-    [[nodiscard]] std::size_t total_bytes() const noexcept { return total_bytes_; }
-
-    [[nodiscard]] bool oversized(std::size_t bytes) const noexcept {
-        // Compare against this instance's total, not the hardcoded
-        // constant — a future smaller-budget construction would
-        // otherwise allow a request to wait forever.
-        return bytes > total_bytes_;
+    /// Snapshot count of currently-held reservations. Used by the
+    /// renderer to colour-code idle waits and by upfront checks.
+    [[nodiscard]] std::int64_t active_reservations() const noexcept {
+        std::lock_guard<std::mutex> guard(budget_mu_);
+        return active_reservations_;
     }
 
     MemoryBudget(const MemoryBudget&) = delete;
@@ -1101,59 +1218,111 @@ public:
     MemoryBudget& operator=(MemoryBudget&&) = delete;
 
 private:
-    /// Mutable so `snapshot_available` can take the lock from a const
-    /// member function; the underlying state mutation lives behind
-    /// `acquire` / `release` which are non-const.
-    mutable std::mutex      budget_mu{};
-    std::condition_variable budget_cv{};
-    std::int64_t            available_bytes;
-    std::size_t             total_bytes_;
+    /// Read the cached SystemMemorySnapshot if it's still fresh, else
+    /// re-poll hwinfo and refresh the cache. Caller holds `budget_mu_`.
+    [[nodiscard]] SystemMemorySnapshot fresh_or_cached_locked() noexcept;
+
+    /// If `state.group_for_ui` is non-null, mirror `idle_start_ns` into
+    /// its atomic so the renderer can read it without the budget mutex.
+    static void mirror_idle_to_ui(const AcquireState& state,
+                                   std::int64_t idle_start_ns) noexcept;
+
+    mutable std::mutex      budget_mu_{};
+    std::condition_variable budget_cv_{};
+    double                  memory_buffer_pct_;
+    std::int64_t            reserved_bytes_ = 0;
+    std::int64_t            active_reservations_ = 0;
+    SystemMemorySnapshot    cached_snapshot_{};
+    std::int64_t            cached_snapshot_ns_ = 0;
 };
 
-/// Move-only RAII guard. Acquires `bytes` from the budget at construction
-/// and releases on destruction or explicit `release_now`. Lets the
-/// batch driver bind reservation lifetime to a scope and survive any
-/// user-callback abort path without a bookkeeping leak.
-class BudgetReservation {
+/// Move-only RAII guard. Calls `MemoryBudget::acquire`. On the
+/// `IdleTimeout` path the guard enters the moved-from state
+/// (`budget_ptr_ == nullptr`, `reserved_bytes_ == 0`) so the destructor
+/// is a no-op; this is what prevents a double-decrement if the caller
+/// forgets to check `ok()` and lets the destructor run anyway.
+///
+/// `[[nodiscard]]` on the class so a discarded
+/// `BudgetReservation(*budget, n, state);` temporary — which would
+/// release the reservation immediately — is flagged at compile time.
+class [[nodiscard("hold the BudgetReservation; immediately discarding "
+                   "the temporary releases the reservation")]] BudgetReservation {
 public:
     BudgetReservation() noexcept = default;
-    BudgetReservation(MemoryBudget& budget, std::size_t bytes)
-        : budget_ptr(&budget), reserved_bytes(bytes) {
-        budget.acquire(bytes);
+    BudgetReservation(MemoryBudget& budget, std::size_t bytes,
+                       MemoryBudget::AcquireState& state) noexcept
+        : budget_ptr_(&budget), reserved_bytes_(bytes)
+    {
+        outcome_ = budget.acquire(bytes, state);
+        if (outcome_ != MemoryBudget::AcquireOutcome::Acquired) {
+            // Failed acquire: enter moved-from state so the destructor
+            // does not call release(bytes) and double-decrement.
+            budget_ptr_     = nullptr;
+            reserved_bytes_ = 0;
+        }
     }
     BudgetReservation(BudgetReservation&& other) noexcept
-        : budget_ptr(std::exchange(other.budget_ptr, nullptr)),
-          reserved_bytes(std::exchange(other.reserved_bytes, 0)) {}
+        : budget_ptr_(std::exchange(other.budget_ptr_, nullptr)),
+          reserved_bytes_(std::exchange(other.reserved_bytes_, 0)),
+          outcome_(other.outcome_) {}
     BudgetReservation& operator=(BudgetReservation&& other) noexcept {
         release_now();
-        budget_ptr     = std::exchange(other.budget_ptr,     nullptr);
-        reserved_bytes = std::exchange(other.reserved_bytes, 0);
+        budget_ptr_     = std::exchange(other.budget_ptr_,     nullptr);
+        reserved_bytes_ = std::exchange(other.reserved_bytes_, 0);
+        outcome_        = other.outcome_;
         return *this;
     }
     BudgetReservation(const BudgetReservation&) = delete;
     BudgetReservation& operator=(const BudgetReservation&) = delete;
     ~BudgetReservation() { release_now(); }
 
-    /// Release immediately and zero the guard. Idempotent. We pass any
-    /// reservation (including zero) through to `release` because it
+    [[nodiscard]] bool ok() const noexcept {
+        return outcome_ == MemoryBudget::AcquireOutcome::Acquired;
+    }
+    [[nodiscard]] MemoryBudget::AcquireOutcome outcome() const noexcept {
+        return outcome_;
+    }
+
+    /// Release immediately and zero the guard. Idempotent. We pass
+    /// any reservation (including zero) through to `release` which
     /// short-circuits on zero internally.
     void release_now() noexcept {
-        if (budget_ptr != nullptr) {
-            budget_ptr->release(reserved_bytes);
+        if (budget_ptr_ != nullptr) {
+            budget_ptr_->release(reserved_bytes_);
         }
-        budget_ptr     = nullptr;
-        reserved_bytes = 0;
+        budget_ptr_     = nullptr;
+        reserved_bytes_ = 0;
     }
 
 private:
-    MemoryBudget* budget_ptr     = nullptr;
-    std::size_t   reserved_bytes = 0;
+    MemoryBudget*                budget_ptr_     = nullptr;
+    std::size_t                  reserved_bytes_ = 0;
+    MemoryBudget::AcquireOutcome outcome_ =
+        MemoryBudget::AcquireOutcome::IdleTimeout;
 };
 
 // ----------------- ProgressState -----------------
 
 /// One group of one test_case. Hot-path counter is `done`; the
 /// scheduler updates `label` only at item boundaries (cold path).
+///
+/// Failure / wait state observed by the renderer:
+///   - `input_retry_attempt`  — current `on_input` retry index (0 = clear).
+///   - `cleanup_retry_attempt`— current `on_cleanup` retry index (0 = clear).
+///   - `idle_start_ns`        — mirror of MemoryBudget::AcquireState's
+///                               idle clock so the renderer can show a
+///                               "🕑 waiting Ns / 30s" row when the
+///                               batch is blocked on memory with no
+///                               peers running.
+///   - `aborted`              — true after a hard error has aborted the
+///                               batch; renderer renders an `❌` row
+///                               with the diagnostic message.
+/// All four are atomic so the renderer thread can read them while the
+/// batch worker thread mutates them. The four failure-string fields
+/// (`input_failure_message` / `_trace`, `cleanup_failure_message` /
+/// `_trace`) are guarded by a separate `failure_mu` rather than the
+/// hot-path `label_mu` — the latter sits inside the iteration loop and
+/// must not be widened.
 struct ProgressGroup {
     std::size_t                group_index = 0;
     std::atomic<std::uint64_t> done{0};
@@ -1167,6 +1336,33 @@ struct ProgressGroup {
     /// the iteration loop.
     std::string                label{};
     std::mutex                 label_mu{};
+
+    /// Input retry status. 0 = clear; 1..kMaxTaskInputHandlerErrorCount
+    /// = current attempt (1-based).
+    std::atomic<std::uint8_t>  input_retry_attempt{0};
+    /// Cleanup retry status. Same shape as input_retry_attempt.
+    std::atomic<std::uint8_t>  cleanup_retry_attempt{0};
+    /// Nanoseconds since `bioseq::instr::clock::now_ns()` epoch at
+    /// which the batch entered the idle-wait state, mirrored from
+    /// MemoryBudget::AcquireState. 0 = not waiting on memory.
+    std::atomic<std::int64_t>  idle_start_ns{0};
+    /// Set true when a hard error aborts the batch.
+    std::atomic<bool>          aborted{false};
+
+    /// Failure-message + clipped stack trace surfaces. The renderer
+    /// only consults these when the corresponding atomic counter
+    /// (`input_retry_attempt` / `cleanup_retry_attempt`) is non-zero,
+    /// so the lock is taken at most once per failed attempt + once
+    /// per render at most. Keeping it separate from `label_mu`
+    /// prevents blocking the iteration hot path on a slow reader.
+    std::mutex                 failure_mu{};
+    std::string                input_failure_message{};
+    std::string                input_failure_trace{};
+    std::string                cleanup_failure_message{};
+    std::string                cleanup_failure_trace{};
+    /// Diagnostic blurb when `aborted == true` (e.g. "memory budget
+    /// constraint timeout"). Read under `failure_mu`.
+    std::string                aborted_reason{};
 };
 
 /// One test_case row in the dashboard. Aggregates progress across all
@@ -1210,6 +1406,137 @@ struct ProgressState {
     /// Lifetime is the same as ProgressState (both owned by run_impl).
     MemoryBudget* memory_budget = nullptr;
 };
+
+// ----------------- MemoryBudget out-of-line bodies -----------------
+
+inline void MemoryBudget::mirror_idle_to_ui(
+    const AcquireState& state, std::int64_t idle_start_ns) noexcept
+{
+    if (state.group_for_ui != nullptr) {
+        state.group_for_ui->idle_start_ns.store(idle_start_ns,
+                                                  std::memory_order_release);
+    }
+}
+
+inline SystemMemorySnapshot MemoryBudget::fresh_or_cached_locked() noexcept {
+    const auto now_ns = static_cast<std::int64_t>(bioseq::instr::clock::now_ns());
+    const auto ttl_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            kBudgetSnapshotTtl).count();
+    if (cached_snapshot_ns_ == 0 || (now_ns - cached_snapshot_ns_) >= ttl_ns) {
+        cached_snapshot_    = snapshot_system_memory();
+        cached_snapshot_ns_ = now_ns;
+    }
+    return cached_snapshot_;
+}
+
+inline MemoryBudget::AcquireOutcome
+MemoryBudget::acquire(std::size_t bytes, AcquireState& state) noexcept {
+    if (bytes == 0) return AcquireOutcome::Acquired;        // free fast path
+
+    std::unique_lock<std::mutex> guard(budget_mu_);
+    while (true) {
+        // 1. Refresh hwinfo on every check (G1.a) — through the cache so
+        //    N concurrently blocked batches collapse to one syscall.
+        const auto sys = fresh_or_cached_locked();
+        const auto cap = cap_for(sys.total_bytes, memory_buffer_pct_);
+        const auto used = (sys.total_bytes > sys.free_bytes)
+                             ? (sys.total_bytes - sys.free_bytes)
+                             : std::uint64_t{0};
+        // available B = max(0, C - U - reserved-by-us). Reserved bytes
+        // already account for our peers' acquisitions.
+        const auto framework_overhead = static_cast<std::uint64_t>(
+                                            std::max<std::int64_t>(reserved_bytes_, 0));
+        const auto avail_now = (cap > used + framework_overhead)
+                                  ? (cap - used - framework_overhead)
+                                  : std::uint64_t{0};
+
+        // 2. Budget fits → reserve and wake.
+        if (bytes <= avail_now) {
+            reserved_bytes_       += static_cast<std::int64_t>(bytes);
+            ++active_reservations_;
+            state.last_idle_start_ns = 0;
+            mirror_idle_to_ui(state, /*idle_start=*/0);
+            budget_cv_.notify_all();
+            return AcquireOutcome::Acquired;
+        }
+
+        // 3. Budget does NOT fit → idle-clock logic (G1.e).
+        // Spec literal reading:
+        //   - "If the work item has no requirements met AND there is no
+        //     other work item running we **start** the special timer."
+        //     ⇒ set timestamp = now() the first time we observe this
+        //     state.
+        //   - "If we check requirements ... not satisfied, but there is
+        //     at least one work item currently running, then we **set
+        //     this timestamp to now()**." ⇒ unconditionally reset to
+        //     now() while peers are alive.
+        // Combined: the 30 s clock only ticks when this batch is the
+        // sole holdout; any peer running keeps the clock at zero.
+        const auto now_ns = static_cast<std::int64_t>(
+                                bioseq::instr::clock::now_ns());
+        if (active_reservations_ > 0) {
+            state.last_idle_start_ns = now_ns;
+        } else {
+            if (state.last_idle_start_ns == 0) {
+                state.last_idle_start_ns = now_ns;
+            } else {
+                const auto elapsed_ns = now_ns - state.last_idle_start_ns;
+                const auto budget_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                            kMaxIdleWaitingTime).count();
+                if (elapsed_ns > budget_ns) {
+                    mirror_idle_to_ui(state, /*idle_start=*/0);
+                    return AcquireOutcome::IdleTimeout;
+                }
+            }
+        }
+        mirror_idle_to_ui(state, state.last_idle_start_ns);
+
+        // 4. Wake every kPollInterval to re-snapshot hwinfo (free memory
+        //    may shrink/grow without anyone calling release(), e.g.
+        //    another OS process eating RAM), and to re-check the idle
+        //    clock. wait_for also returns immediately on notify_all
+        //    from a peer's release().
+        budget_cv_.wait_for(guard, kPollInterval);
+    }
+}
+
+inline void MemoryBudget::release(std::size_t bytes) noexcept {
+    if (bytes == 0) return;
+    {
+        std::lock_guard<std::mutex> guard(budget_mu_);
+        reserved_bytes_      -= static_cast<std::int64_t>(bytes);
+        --active_reservations_;
+    }
+    budget_cv_.notify_all();
+}
+
+inline MemoryBudget::Snapshot MemoryBudget::snapshot() const noexcept {
+    std::lock_guard<std::mutex> guard(budget_mu_);
+    // Read the cache without bumping `cached_snapshot_ns_` — `snapshot()`
+    // is logically const. If the cache is empty (first dashboard paint
+    // before any acquire), fall back to a direct read; otherwise reuse
+    // whatever a recent acquire put there.
+    SystemMemorySnapshot sys = cached_snapshot_;
+    if (sys.total_bytes == 0) {
+        sys = snapshot_system_memory();
+    }
+    const auto cap  = cap_for(sys.total_bytes, memory_buffer_pct_);
+    const auto used = (sys.total_bytes > sys.free_bytes)
+                         ? (sys.total_bytes - sys.free_bytes)
+                         : std::uint64_t{0};
+    const auto framework_overhead = static_cast<std::uint64_t>(
+                                        std::max<std::int64_t>(reserved_bytes_, 0));
+    const auto avail = (cap > used + framework_overhead)
+                          ? (cap - used - framework_overhead)
+                          : std::uint64_t{0};
+    return Snapshot{
+        .total_bytes     = sys.total_bytes,
+        .used_bytes      = used,
+        .cap_bytes       = cap,
+        .available_bytes = avail,
+        .reserved_bytes  = framework_overhead,
+    };
+}
 
 // ----------------- Diagnostics -----------------
 //
@@ -4137,6 +4464,276 @@ inline void progress_mark_group_done(
     }
 }
 
+// ----------------- V12 progress helpers (retry / abort) -----------------
+//
+// All of these follow the same nullptr-safe lookup pattern through
+// `progress_group_for`. Failure-string fields are guarded by
+// `ProgressGroup::failure_mu`; the renderer only consults them when the
+// matching atomic counter is non-zero.
+
+/// Retry-failure category; templated over the "kind" so input and
+/// cleanup paths share one body. Members map onto matching ProgressGroup
+/// fields.
+enum class RetryKind : std::uint8_t { Input, Cleanup };
+
+inline void progress_record_retry_failure(
+    BenchmarkContext& context, const WorkBatch& batch,
+    RetryKind kind, std::uint8_t attempt,
+    std::string_view error_message,
+    std::string_view stack_trace) noexcept
+{
+    auto* group = progress_group_for(context,
+                                      batch.test_case_index, batch.group_index);
+    if (group == nullptr) return;
+    {
+        std::lock_guard<std::mutex> guard(group->failure_mu);
+        if (kind == RetryKind::Input) {
+            group->input_failure_message = std::string{error_message};
+            group->input_failure_trace   = std::string{stack_trace};
+        } else {
+            group->cleanup_failure_message = std::string{error_message};
+            group->cleanup_failure_trace   = std::string{stack_trace};
+        }
+    }
+    auto& counter = (kind == RetryKind::Input)
+                       ? group->input_retry_attempt
+                       : group->cleanup_retry_attempt;
+    counter.store(attempt, std::memory_order_release);
+}
+
+inline void progress_clear_retry_failure(
+    BenchmarkContext& context, const WorkBatch& batch,
+    RetryKind kind) noexcept
+{
+    auto* group = progress_group_for(context,
+                                      batch.test_case_index, batch.group_index);
+    if (group == nullptr) return;
+    // Counter is invalidated FIRST so a racing renderer's fast-path
+    // load may see 0 immediately. The renderer additionally re-reads
+    // the counter under `failure_mu` after locking; that is what
+    // closes the "fast read N>0, then strings cleared, then locked,
+    // then render with empty strings" race window. See `build_detail_rows`
+    // for the read side; both writers (record and clear) and the reader
+    // must agree on this protocol.
+    auto& counter = (kind == RetryKind::Input)
+                       ? group->input_retry_attempt
+                       : group->cleanup_retry_attempt;
+    counter.store(0, std::memory_order_release);
+    std::lock_guard<std::mutex> guard(group->failure_mu);
+    if (kind == RetryKind::Input) {
+        group->input_failure_message.clear();
+        group->input_failure_trace.clear();
+    } else {
+        group->cleanup_failure_message.clear();
+        group->cleanup_failure_trace.clear();
+    }
+}
+
+inline void progress_mark_batch_aborted(
+    BenchmarkContext& context, const WorkBatch& batch,
+    std::string_view reason) noexcept
+{
+    auto* tc = progress_test_case_for(context, batch.test_case_index);
+    if (tc == nullptr) return;
+    if (batch.group_index < tc->groups.size()) {
+        auto& group = *tc->groups[batch.group_index];
+        // Drop any in-flight retry rows so the renderer's `Aborted`
+        // detail doesn't sit alongside a stale "▶ ⛔ [retry 5/5]" row
+        // on the same group. Counters are zeroed first to invalidate
+        // the renderer's fast path; strings (including the new
+        // `aborted_reason`) are written under `failure_mu`.
+        group.input_retry_attempt.store(0, std::memory_order_release);
+        group.cleanup_retry_attempt.store(0, std::memory_order_release);
+        group.idle_start_ns.store(0, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> guard(group.failure_mu);
+            group.input_failure_message.clear();
+            group.input_failure_trace.clear();
+            group.cleanup_failure_message.clear();
+            group.cleanup_failure_trace.clear();
+            group.aborted_reason = std::string{reason};
+        }
+        group.aborted.store(true, std::memory_order_release);
+        group.active.store(false, std::memory_order_relaxed);
+    }
+    // Stamp finish so the renderer doesn't keep counting elapsed time
+    // for an aborted batch.
+    std::int64_t expected = 0;
+    tc->finish_ns.compare_exchange_strong(
+        expected, bioseq::instr::clock::now_ns(),
+        std::memory_order_relaxed, std::memory_order_relaxed);
+}
+
+// ----------------- Diagnostic emit helper (V12) -----------------
+
+/// Push one ValidationDiag into `*context.diagnostics` under
+/// `*context.diagnostics_mu`. nullptr-safe so the helper composes with
+/// places where diagnostics aren't wired (none today, but future test
+/// fixtures might construct a bare context).
+inline void push_runtime_diagnostic(
+    BenchmarkContext& context,
+    ValidationDiag::Severity severity,
+    std::string_view code,
+    std::string_view location,
+    std::string message) noexcept
+{
+    if (context.diagnostics == nullptr || context.diagnostics_mu == nullptr) return;
+    ValidationDiag diag;
+    diag.severity = severity;
+    diag.code     = std::string{code};
+    diag.location = std::string{location};
+    diag.message  = std::move(message);
+    std::lock_guard<std::mutex> guard(*context.diagnostics_mu);
+    context.diagnostics->push_back(std::move(diag));
+}
+
+/// Variadic facade — accepts `fmt::format_string<Args...>` so format
+/// specifiers are checked at compile time. `noexcept`-style signature
+/// matches the rest of the framework's progress helpers; a bad_alloc
+/// from `fmt::format` would terminate, which is the same contract as
+/// any other framework path.
+template<typename... Args>
+inline void emit_runtime_diagnostic(
+    BenchmarkContext& context,
+    ValidationDiag::Severity severity,
+    std::string_view code,
+    std::string_view location,
+    fmt::format_string<Args...> fmt_str,
+    Args&&... args) noexcept
+{
+    push_runtime_diagnostic(context, severity, code, location,
+        fmt::format(fmt_str, std::forward<Args>(args)...));
+}
+
+/// Build a "<config>:<benchmark>/<test_case>(group N)" location string
+/// for runtime diagnostics. Mirrors `semantic_location` for a similar
+/// shape, reusable by every per-batch error path.
+[[nodiscard]] inline std::string runtime_location(
+    std::string_view config_path,
+    std::string_view benchmark_key,
+    std::string_view test_case_name,
+    std::size_t group_index) noexcept
+{
+    return fmt::format("{}:{}/{}(group {})",
+                       config_path, benchmark_key, test_case_name, group_index);
+}
+
+// ----------------- V12 retry helpers (G2 / G3) -----------------
+
+/// Render `trace` clipped to the first `kMaxStackTraceLines` frames
+/// using cpptrace's built-in `to_string(color)`. We use cpptrace's
+/// formatter rather than libassert's because we never need the
+/// assertion-style header — just frames.
+[[nodiscard]] inline std::string
+clip_trace(const cpptrace::stacktrace& trace, bool color) noexcept {
+    cpptrace::stacktrace clipped = trace;            // implicit copy
+    const bool was_truncated = clipped.frames.size() > kMaxStackTraceLines;
+    if (was_truncated) {
+        clipped.frames.resize(kMaxStackTraceLines);
+    }
+    auto rendered = clipped.to_string(color);
+    if (was_truncated) rendered += "\n  … (more frames elided)";
+    return rendered;
+}
+
+/// Look up whether stderr is a TTY via the progress state. The renderer
+/// pre-computes this at startup; we mirror its decision so the trace
+/// formatter only emits ANSI codes when they will be rendered correctly.
+[[nodiscard]] inline bool color_for_traces(
+    const BenchmarkContext& context) noexcept {
+    if (context.progress == nullptr) return false;
+    return context.progress->tty_render.load(std::memory_order_relaxed);
+}
+
+/// Generic retry helper used by both `on_input` and `on_cleanup` paths.
+///
+/// Runs `attempt()` up to `kMaxTaskInputHandlerErrorCount` times. Each
+/// failure is recorded into the dashboard's per-batch failure slot
+/// (keyed by `kind`). On success, the failure record is cleared and
+/// the function returns `true`; on every-attempt-failure it returns
+/// `false` and the caller decides whether to emit a hard error
+/// (`Input` path) or a warning (`Cleanup` path).
+///
+/// `cpptrace::try_catch` is the multi-catch entry point — stacking
+/// CPPTRACE_CATCH clauses on a single CPPTRACE_TRY does not compile
+/// (each CPPTRACE_TRY closes its inner `try` with one `CATCH`). The
+/// `try_catch` helper recursively wraps each catcher in its own
+/// TRY/CATCH expansion so all of them install the unwind interceptor
+/// `from_current_exception()` needs.
+template<RetryKind kind, typename Attempt>
+[[nodiscard]] inline bool retry_user_callback(
+    BenchmarkContext& context, const WorkBatch& batch,
+    Attempt&& attempt) noexcept
+{
+    const bool color = color_for_traces(context);
+    for (std::size_t i = 0; i < kMaxTaskInputHandlerErrorCount; ++i) {
+        bool failed = false;
+        cpptrace::try_catch(
+            [&] { attempt(); },
+            [&] (const std::exception& e) {
+                progress_record_retry_failure(
+                    context, batch, kind,
+                    static_cast<std::uint8_t>(i + 1),
+                    e.what(),
+                    clip_trace(cpptrace::from_current_exception(), color));
+                failed = true;
+            },
+            [&] {     // void(): cpptrace's idiom for "catch (...)"
+                progress_record_retry_failure(
+                    context, batch, kind,
+                    static_cast<std::uint8_t>(i + 1),
+                    "<non-std exception>", "<no trace>");
+                failed = true;
+            }
+        );
+        if (!failed) {
+            progress_clear_retry_failure(context, batch, kind);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Try `on_input` up to `kMaxTaskInputHandlerErrorCount` times. Returns
+/// `nullopt` on every-attempt-failure; the caller is expected to emit
+/// `input_handler_failed_permanently` and abort the batch.
+template<typename Input, typename Builder>
+[[nodiscard]] inline std::optional<Input>
+build_input_with_retry(BenchmarkContext& context,
+                        const WorkBatch& batch,
+                        Builder&& builder) noexcept
+{
+    std::optional<Input> result;
+    const bool ok = retry_user_callback<RetryKind::Input>(
+        context, batch, [&] { result.emplace(builder()); });
+    if (!ok) result.reset();
+    return result;
+}
+
+/// Try `on_cleanup` up to `kMaxTaskInputHandlerErrorCount` times. On
+/// every-attempt-failure emits the `cleanup_function_failing` warning
+/// and resumes — cleanup leaks are accepted because the OS / developer
+/// will reclaim resources externally (per spec).
+template<typename Cleaner>
+inline void cleanup_with_retry(BenchmarkContext& context,
+                                const WorkBatch& batch,
+                                std::string_view test_case_name,
+                                std::string_view location,
+                                Cleaner&& cleaner) noexcept
+{
+    if (retry_user_callback<RetryKind::Cleanup>(context, batch,
+                                                  std::forward<Cleaner>(cleaner)))
+    {
+        return;
+    }
+    emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
+        "cleanup_function_failing", location,
+        "batch '{}' (group {}) cleanup gave up after {} attempts — "
+        "assuming OS / developer reclaim",
+        test_case_name, batch.group_index, kMaxTaskInputHandlerErrorCount);
+    progress_clear_retry_failure(context, batch, RetryKind::Cleanup);
+}
+
 // ----------------- run_unit driver -----------------
 
 template<typename Input, typename Output>
@@ -4223,32 +4820,137 @@ inline void run_typed_benchmark(
     };
 
     /// Process one batch end-to-end. Called by TBB once per batch.
+    /// V12 flow:
+    ///   1. on_estimate_resources()
+    ///   2. Snapshot hwinfo and check the two batch-level memory rules
+    ///      (G1.c warning + G1.d hard error).
+    ///   3. Reserve base_memory through MemoryBudget::acquire (G1.e
+    ///      idle clock surfaces inside the acquire).
+    ///   4. on_input with up to 5 retries (G2). Permanent failure
+    ///      ⇒ hard error + abort.
+    ///   5. Reserve extra_memory; run iterations.
+    ///   6. on_cleanup with up to 5 retries (G3). Permanent failure
+    ///      ⇒ warning + resume.
     auto run_one_batch = [&](WorkBatch& batch) {
         const auto& spec = state.test_cases[batch.test_case_index];
         auto& slot = group_slots[batch.batch_index];
 
-        // 1. Estimate resources for this batch.
+        // 1. Estimate resources.
         slot.constraints = on_estimate_resources(data_dir, spec.name, spec.data);
+        const std::size_t total_required =
+            slot.constraints.base_memory + slot.constraints.extra_memory;
 
-        // 2. Reserve base memory and build the input.
-        BudgetReservation base_reservation(*memory_budget, slot.constraints.base_memory);
-        slot.input.emplace(on_input(data_dir, spec.name, spec.data, slot.constraints));
+        const auto sys = snapshot_system_memory();
+        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
+                                                memory_budget->memory_buffer_pct());
+        const auto location_str = runtime_location(
+            state.config.config_path, state.config.benchmark_key,
+            spec.name, batch.group_index);
 
-        // 3. Reserve extra memory only for the iteration loop. Released
-        //    by RAII at the closing brace of this scope.
+        // 2. G1.d  Hard error: combined requirements exceed total system RAM.
+        if (total_required >= sys.total_bytes) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) requires {} B (base+extra) but the host "
+                "has only {} B total RAM",
+                spec.name, batch.group_index, total_required, sys.total_bytes);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "memory_budget_not_satisfiable", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            return;
+        }
+        // 2b. G1.c  Warning: combined requirements exceed buffered cap.
+        if (total_required >= cap) {
+            emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
+                "memory_budget_oversized", location_str,
+                "batch '{}' (group {}) requires {} B but buffered cap is {} B "
+                "(host total {} B, buffer {:.0f}%)",
+                spec.name, batch.group_index, total_required, cap,
+                sys.total_bytes, memory_budget->memory_buffer_pct());
+            // Continue: the acquire path will block until peers release
+            // budget, or the idle clock fires.
+        }
+
+        // 3. Reserve base memory. The AcquireState is shared between
+        //    the base + extra acquisitions so the idle-clock state
+        //    carries through; group_for_ui mirrors the timestamp for
+        //    the dashboard's 🕑 row.
+        MemoryBudget::AcquireState wait_state{};
+        wait_state.group_for_ui = progress_group_for(
+            context, batch.test_case_index, batch.group_index);
+
+        BudgetReservation base_reservation(*memory_budget,
+                                            slot.constraints.base_memory,
+                                            wait_state);
+        if (!base_reservation.ok()) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) waited {}s for {} B base memory with "
+                "no peer batches running — giving up",
+                spec.name, batch.group_index,
+                MemoryBudget::kMaxIdleWaitingTime.count(),
+                slot.constraints.base_memory);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "memory_budget_constraint_timeout", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            return;       // base_reservation was never acquired ⇒ no leak
+        }
+
+        // 4. on_input with retries (G2). On permanent failure, abort
+        //    the batch — base_reservation's destructor releases the
+        //    bytes on return; no Input was built so no cleanup.
+        auto built_input = build_input_with_retry<Input>(
+            context, batch,
+            [&] { return on_input(data_dir, spec.name, spec.data,
+                                   slot.constraints); });
+        if (!built_input.has_value()) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) gave up after {} attempts at on_input — "
+                "see UI for last error / trace",
+                spec.name, batch.group_index, kMaxTaskInputHandlerErrorCount);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "input_handler_failed_permanently", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            return;
+        }
+        slot.input = std::move(built_input);
+
+        // 5. Reserve extra memory and run the iteration loop. Extra
+        //    memory is released at the closing brace of this scope.
         {
-            BudgetReservation extra_reservation(*memory_budget, slot.constraints.extra_memory);
+            BudgetReservation extra_reservation(*memory_budget,
+                                                 slot.constraints.extra_memory,
+                                                 wait_state);
+            if (!extra_reservation.ok()) {
+                auto reason = fmt::format(
+                    "batch '{}' (group {}) waited {}s for {} B extra memory "
+                    "after Input was built — giving up",
+                    spec.name, batch.group_index,
+                    MemoryBudget::kMaxIdleWaitingTime.count(),
+                    slot.constraints.extra_memory);
+                push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                    "memory_budget_constraint_timeout", location_str, reason);
+                // The Input was built; run the user's cleanup (with
+                // retries) so resources don't leak.
+                if (on_cleanup) {
+                    cleanup_with_retry(context, batch, spec.name, location_str,
+                        [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
+                }
+                slot.input.reset();
+                progress_mark_batch_aborted(context, batch, reason);
+                return;
+            }
             progress_mark_test_case_start(context, batch);
             for (auto& item : batch.items) {
                 progress_update_label(context, batch, item, state.config.benchmark_key);
                 run_item_iterations(item, *slot.input);
                 progress_tick_item_done(context, batch);
             }
-        }
+        }   // extra_reservation released here
 
-        // 4. Cleanup, then release base_memory at scope exit.
+        // 6. Cleanup with retries (G3). On permanent failure we emit a
+        //    warning and resume — the framework keeps running.
         if (on_cleanup) {
-            on_cleanup(data_dir, spec.name, spec.data, *slot.input);
+            cleanup_with_retry(context, batch, spec.name, location_str,
+                [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
         }
         slot.input.reset();
         progress_mark_group_done(context, batch);
@@ -7065,7 +7767,7 @@ inline void render_summary(
 
 // ----------------- CLI parsing -----------------
 
-/// Parse the framework's three CLI flags out of `argv`. Unknown flags are
+/// Parse the framework CLI flags out of `argv`. Unknown flags are
 /// silently ignored (the user may layer their own flag parsing on top by
 /// inspecting argv before calling `run`). Runs first inside `run_impl` so a
 /// `--report` override is applied before any directory creation.
@@ -7078,16 +7780,41 @@ inline void render_summary(
         } else if (arg == "--summary") {
             parsed.summary_mode = true;
         } else if (arg == "--threads" && (i + 1) < argc) {
-            const std::string thread_text{argv[i + 1]};
-            try {
-                const int threads = std::stoi(thread_text);
-                if (threads > 0) parsed.threads_override = static_cast<unsigned>(threads);
-            } catch (...) {
-                loge("[bench_framework] --threads requires an integer (got '{}')", thread_text);
+            const std::string_view text{argv[i + 1]};
+            int threads = 0;
+            const auto* const begin = text.data();
+            const auto* const end   = text.data() + text.size();
+            const auto result = std::from_chars(begin, end, threads);
+            if (result.ec != std::errc{} || result.ptr != end || threads <= 0) {
+                loge("[bench_framework] --threads requires a positive integer (got '{}')",
+                     text);
+            } else {
+                parsed.threads_override = static_cast<unsigned>(threads);
             }
             ++i;
         } else if (arg == "--report" && (i + 1) < argc) {
             parsed.report_override = std::string{argv[i + 1]};
+            ++i;
+        } else if (arg == "--memory-buffer" && (i + 1) < argc) {
+            // V12: `--memory-buffer N` (0..50, default 10). Use
+            // std::from_chars to honour CODE_STYLE.md's "no exceptions
+            // in framework code" — the existing --threads parser used
+            // try/catch around std::stoi, but we don't extend that
+            // pattern.
+            const std::string_view text{argv[i + 1]};
+            int pct = 0;
+            const auto* const begin = text.data();
+            const auto* const end   = text.data() + text.size();
+            const auto result = std::from_chars(begin, end, pct);
+            if (result.ec != std::errc{} || result.ptr != end) {
+                loge("[bench_framework] --memory-buffer requires an integer (got '{}')",
+                     text);
+            } else if (pct < 0 || pct > 50) {
+                loge("[bench_framework] --memory-buffer must be in [0, 50] "
+                     "(got {}); falling back to default 10", pct);
+            } else {
+                parsed.memory_buffer_pct = static_cast<double>(pct);
+            }
             ++i;
         }
     }
@@ -7151,10 +7878,11 @@ gauge_palette(float fraction) noexcept {
     return ftxui::text(bar) | ftxui::color(gauge_color(clamped));
 }
 
-/// Format a memory value (bytes) as `%.2f GiB` for the dashboard header.
-[[nodiscard]] inline std::string format_bytes_gib(double bytes) noexcept {
+/// Convert raw bytes to a `double` in GiB. Inlined as a `constexpr`
+/// helper so callers don't repeat the `1024^3` divisor.
+[[nodiscard]] inline constexpr double bytes_to_gib(std::uint64_t bytes) noexcept {
     constexpr double kGib = 1024.0 * 1024.0 * 1024.0;
-    return fmt::format("{:.2f} GiB", bytes / kGib);
+    return static_cast<double>(bytes) / kGib;
 }
 
 /// Background thread body for the progress dashboard. Two paths:
@@ -7163,6 +7891,195 @@ gauge_palette(float fraction) noexcept {
 ///    shifting gauge per row, and a `[memory X / Y GiB]` header.
 /// 2. **Non-TTY (CI / pipes)**: emit a JustLog info line every 5 s
 ///    with one line per test_case still in flight.
+// ----------------- V12 row classification + glyph table -----------------
+
+/// Possible states of a test_case row in the dashboard. Renderer picks
+/// the most-urgent state across the test case's groups.
+enum class TestCaseRowState : std::uint8_t {
+    Done,           // tc->finish_ns set, no failure flags ⇒ ✅
+    Aborted,        // some group has aborted == true        ⇒ ❌
+    InputRetry,     // some group has input_retry > 0        ⇒ ▶ ⛔
+    CleanupRetry,   // some group has cleanup_retry > 0      ⇒ ▶ 🧹
+    IdleWait,       // some group has been idle > kMaxIdle/2 ⇒ ▶ 🕑
+    Running,        // default running                       ⇒ ▶ 🔄
+};
+
+/// Walk every group of `tc` and pick the most-urgent state. The order
+/// (Aborted > InputRetry > CleanupRetry > Done > IdleWait > Running)
+/// mirrors the user spec — failures and aborts surface first; an
+/// already-finished test case stays "Done" even if its idle clock
+/// briefly armed before it completed.
+[[nodiscard]] inline TestCaseRowState classify_test_case(
+    const ProgressTestCase& tc) noexcept
+{
+    bool any_aborted = false, any_input_retry = false;
+    bool any_cleanup_retry = false, any_idle_long = false;
+    for (const auto& group_ptr : tc.groups) {
+        if (group_ptr->aborted.load(std::memory_order_acquire))
+            any_aborted = true;
+        if (group_ptr->input_retry_attempt.load(std::memory_order_acquire) > 0)
+            any_input_retry = true;
+        if (group_ptr->cleanup_retry_attempt.load(std::memory_order_acquire) > 0)
+            any_cleanup_retry = true;
+        const auto idle_start = group_ptr->idle_start_ns.load(std::memory_order_acquire);
+        if (idle_start != 0) {
+            const auto elapsed_ns = static_cast<std::int64_t>(
+                                        bioseq::instr::clock::now_ns()) - idle_start;
+            const auto half_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    MemoryBudget::kMaxIdleWaitingTime).count() / 2;
+            if (elapsed_ns > half_ns) any_idle_long = true;
+        }
+    }
+    if (any_aborted)         return TestCaseRowState::Aborted;
+    if (any_input_retry)     return TestCaseRowState::InputRetry;
+    if (any_cleanup_retry)   return TestCaseRowState::CleanupRetry;
+    if (tc.finish_ns.load(std::memory_order_acquire) != 0)
+                             return TestCaseRowState::Done;
+    if (any_idle_long)       return TestCaseRowState::IdleWait;
+    return TestCaseRowState::Running;
+}
+
+/// Header glyph + colour per row state. Table-driven so adding a new
+/// state means adding a row, not editing branch ladders.
+struct RowGlyph {
+    TestCaseRowState  state;
+    std::string_view  glyph;        // UTF-8 (may include emoji)
+    ftxui::Color      tint;
+};
+
+inline const std::array<RowGlyph, 6> kRowGlyphs{ {
+    { TestCaseRowState::Aborted,
+      "\xe2\x9d\x8c",                      ftxui::Color::RedLight   },  // ❌
+    { TestCaseRowState::InputRetry,
+      "\xe2\x96\xb6 \xe2\x9b\x94",         ftxui::Color::Red        },  // ▶ ⛔
+    { TestCaseRowState::CleanupRetry,
+      "\xe2\x96\xb6 \xf0\x9f\xa7\xb9",     ftxui::Color::Magenta    },  // ▶ 🧹
+    { TestCaseRowState::IdleWait,
+      "\xe2\x96\xb6 \xf0\x9f\x95\x91",     ftxui::Color::Yellow     },  // ▶ 🕑
+    { TestCaseRowState::Running,
+      "\xe2\x96\xb6 \xf0\x9f\x94\x84",     ftxui::Color::Yellow     },  // ▶ 🔄
+    { TestCaseRowState::Done,
+      "\xe2\x9c\x85",                      ftxui::Color::Green      },  // ✅
+} };
+
+[[nodiscard]] inline const RowGlyph& glyph_for(TestCaseRowState state) noexcept {
+    for (const auto& entry : kRowGlyphs) {
+        if (entry.state == state) return entry;
+    }
+    return kRowGlyphs.front();
+}
+
+/// Build the detail-rows that hang off a failing/idle row. Returned as
+/// a list of ftxui Elements ready to be flattened into the renderer's
+/// `rows` vector.
+[[nodiscard]] inline ftxui::Elements build_detail_rows(
+    const ProgressTestCase& tc, TestCaseRowState state) noexcept
+{
+    using namespace ftxui;
+    Elements detail;
+    if (state == TestCaseRowState::Running || state == TestCaseRowState::Done) {
+        return detail;
+    }
+    for (const auto& group_ptr : tc.groups) {
+        const auto input_n   = group_ptr->input_retry_attempt.load(std::memory_order_acquire);
+        const auto cleanup_n = group_ptr->cleanup_retry_attempt.load(std::memory_order_acquire);
+        const auto aborted   = group_ptr->aborted.load(std::memory_order_acquire);
+        const auto idle_start = group_ptr->idle_start_ns.load(std::memory_order_acquire);
+
+        // Pick the matching detail content per state.
+        std::string header_line, message, trace;
+        Color tint = Color::GrayLight;
+
+        // Re-read counters under `failure_mu` after locking so a race
+        // between the fast-path acquire-load above and the writer's
+        // store-zero (in `progress_clear_retry_failure`) doesn't
+        // produce a "retry N/5 with empty strings" frame. The writer
+        // protocol is "store(0, release) BEFORE clearing strings under
+        // the lock"; revalidating under the lock means we never paint
+        // a stale N when the strings are already empty.
+        if (state == TestCaseRowState::Aborted && aborted) {
+            std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
+            message = group_ptr->aborted_reason;
+            header_line = fmt::format(
+                "group {} aborted",
+                group_ptr->group_index + 1);
+            tint = Color::RedLight;
+        } else if (state == TestCaseRowState::InputRetry && input_n > 0) {
+            std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
+            const auto fresh_n = group_ptr->input_retry_attempt
+                                    .load(std::memory_order_relaxed);
+            if (fresh_n == 0) continue;       // record was cleared while we waited
+            message = group_ptr->input_failure_message;
+            trace   = group_ptr->input_failure_trace;
+            header_line = fmt::format(
+                "group {} on_input failure [retry {}/{}]",
+                group_ptr->group_index + 1,
+                static_cast<int>(fresh_n),
+                kMaxTaskInputHandlerErrorCount);
+            tint = Color::Red;
+        } else if (state == TestCaseRowState::CleanupRetry && cleanup_n > 0) {
+            std::lock_guard<std::mutex> guard(group_ptr->failure_mu);
+            const auto fresh_n = group_ptr->cleanup_retry_attempt
+                                    .load(std::memory_order_relaxed);
+            if (fresh_n == 0) continue;       // record was cleared while we waited
+            message = group_ptr->cleanup_failure_message;
+            trace   = group_ptr->cleanup_failure_trace;
+            header_line = fmt::format(
+                "group {} on_cleanup failure [retry {}/{}]",
+                group_ptr->group_index + 1,
+                static_cast<int>(fresh_n),
+                kMaxTaskInputHandlerErrorCount);
+            tint = Color::Magenta;
+        } else if (state == TestCaseRowState::IdleWait && idle_start != 0) {
+            const auto elapsed_ns = static_cast<std::int64_t>(
+                                        bioseq::instr::clock::now_ns()) - idle_start;
+            const auto half_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    MemoryBudget::kMaxIdleWaitingTime).count() / 2;
+            if (elapsed_ns <= half_ns) continue;
+            const auto elapsed_s = elapsed_ns / 1'000'000'000;
+            const auto budget_s  = std::chrono::duration_cast<std::chrono::seconds>(
+                                       MemoryBudget::kMaxIdleWaitingTime).count();
+            header_line = fmt::format(
+                "group {} waiting {}s / {}s — no peers running, system memory unavailable",
+                group_ptr->group_index + 1, elapsed_s, budget_s);
+            tint = Color::Yellow;
+        } else {
+            continue;     // not the matching state for this group
+        }
+
+        detail.push_back(hbox({
+            text("    \xe2\x94\x94 "),                  // └
+            text(header_line) | color(tint),
+        }));
+        if (!message.empty()) {
+            detail.push_back(hbox({
+                text("       "),
+                paragraph(message) | color(Color::GrayLight),
+            }));
+        }
+        if (!trace.empty()) {
+            // Split trace on '\n' so each line is its own ftxui text
+            // element; ANSI colour codes from cpptrace's to_string(true)
+            // pass through ftxui correctly only when they live on one
+            // line.
+            std::size_t cursor = 0;
+            while (cursor < trace.size()) {
+                const auto newline = trace.find('\n', cursor);
+                std::string_view line = (newline == std::string::npos)
+                    ? std::string_view{trace}.substr(cursor)
+                    : std::string_view{trace}.substr(cursor, newline - cursor);
+                detail.push_back(hbox({
+                    text("       "),
+                    text(std::string{line}) | color(Color::GrayDark),
+                }));
+                if (newline == std::string::npos) break;
+                cursor = newline + 1;
+            }
+        }
+    }
+    return detail;
+}
+
 inline void render_progress_loop(ProgressState& progress) noexcept {
     using namespace std::chrono_literals;
     using namespace ftxui;
@@ -7197,16 +8114,28 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     auto render_once = [&] {
         Elements rows;
 
-        // Header with optional budget gauge.
-        std::string header_label = "bench_framework — live progress";
+        // Header line + budget readout.
+        rows.push_back(text("bench_framework — live progress") | bold);
         if (progress.memory_budget != nullptr) {
-            const auto available = progress.memory_budget->snapshot_available();
-            const auto total     = static_cast<double>(progress.memory_budget->total_bytes());
-            const auto used      = total - static_cast<double>(available);
-            header_label += fmt::format("  [memory {} / {}]",
-                format_bytes_gib(used), format_bytes_gib(total));
+            const auto snap = progress.memory_budget->snapshot();
+            const auto over_cap = snap.used_bytes >= snap.cap_bytes;
+            rows.push_back(hbox({
+                text("[budget free ") | color(Color::GrayLight),
+                text(fmt::format("{:.2f}", bytes_to_gib(snap.available_bytes)))
+                    | color(snap.available_bytes > 0 ? Color::Green : Color::Red),
+                text(fmt::format(" / cap {:.2f} GiB · sys used ",
+                                 bytes_to_gib(snap.cap_bytes))),
+                text(fmt::format("{:.2f}", bytes_to_gib(snap.used_bytes)))
+                    | color(over_cap ? Color::RedLight : Color::Yellow),
+                text(fmt::format(" / {:.2f} GiB · reserved ",
+                                 bytes_to_gib(snap.total_bytes))),
+                text(fmt::format("{:.2f}", bytes_to_gib(snap.reserved_bytes)))
+                    | color(Color::Cyan),
+                text(fmt::format(" GiB · buffer {:.0f}%]",
+                                 progress.memory_budget->memory_buffer_pct())),
+            }) | color(Color::GrayLight));
         }
-        rows.push_back(text(header_label) | bold);
+        rows.push_back(separator() | color(Color::GrayDark));
 
         for (const auto& per : progress.per_benchmark) {
             // One header row per benchmark.
@@ -7224,54 +8153,72 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 const float fraction    = tuple_total == 0
                     ? 1.0f
                     : static_cast<float>(tuple_done) / static_cast<float>(tuple_total);
-                const auto now_ns_value = bioseq::instr::clock::now_ns();
+                const auto now_ns_value = static_cast<std::int64_t>(
+                                              bioseq::instr::clock::now_ns());
                 const auto elapsed_ns   = start_ns == 0
                     ? std::int64_t{0}
-                    : ((finish_ns == 0 ? static_cast<std::int64_t>(now_ns_value)
-                                       : finish_ns) - start_ns);
+                    : ((finish_ns == 0 ? now_ns_value : finish_ns) - start_ns);
                 const auto elapsed_s    = elapsed_ns / 1'000'000'000;
 
-                if (finish_ns != 0) {
-                    rows.push_back(hbox({
-                        text("  \xe2\x9c\x93 ") | color(Color::Green),  // ✓
-                        text(tc->test_case_name) | size(WIDTH, EQUAL, 24),
-                        text(fmt::format("tuples {}/{}",
-                            tuple_done, tuple_total)),
-                        text(fmt::format("  Executed in {}s", elapsed_s))
-                            | color(Color::GrayLight),
-                    }));
-                    continue;
-                }
-                rows.push_back(hbox({
-                    text("  \xe2\x96\xb6 ") | color(Color::Yellow),     // ▶
-                    text(tc->test_case_name) | size(WIDTH, EQUAL, 24),
-                    text(fmt::format("tuples {}/{}  ",
-                        tuple_done, tuple_total)),
-                    coloured_gauge(fraction, kBarCells),
-                    text(fmt::format("  {:>3.0f}%  Running... {}s",
+                const auto state = classify_test_case(*tc);
+                const auto& glyph = glyph_for(state);
+
+                // Headline row, by state.
+                Elements headline;
+                headline.push_back(text(fmt::format("  {} ", glyph.glyph))
+                                    | color(glyph.tint));
+                headline.push_back(text(tc->test_case_name) | size(WIDTH, EQUAL, 24));
+
+                if (state == TestCaseRowState::Done) {
+                    headline.push_back(text(fmt::format("tuples {}/{}",
+                        tuple_done, tuple_total)));
+                    headline.push_back(text(fmt::format("  done in {} s", elapsed_s))
+                                       | color(Color::GrayLight));
+                } else if (state == TestCaseRowState::Aborted) {
+                    headline.push_back(text(fmt::format("aborted at {}/{}",
+                        tuple_done, tuple_total)) | color(Color::RedLight));
+                } else if (state == TestCaseRowState::InputRetry
+                        || state == TestCaseRowState::CleanupRetry
+                        || state == TestCaseRowState::IdleWait) {
+                    headline.push_back(text(fmt::format("tuples {}/{}",
+                        tuple_done, tuple_total)));
+                } else {
+                    headline.push_back(text(fmt::format("tuples {}/{}  ",
+                        tuple_done, tuple_total)));
+                    headline.push_back(coloured_gauge(fraction, kBarCells));
+                    headline.push_back(text(fmt::format("  {:>3.0f}%  Running... {}s",
                         static_cast<double>(fraction) * 100.0, elapsed_s))
-                        | color(Color::GrayLight),
-                }));
-                for (const auto& group_ptr : tc->groups) {
-                    if (!group_ptr->active.load(std::memory_order_relaxed)) continue;
-                    const auto done = group_ptr->done.load(std::memory_order_relaxed);
-                    const float gfrac = group_ptr->total == 0 ? 1.0f
-                        : static_cast<float>(done) / static_cast<float>(group_ptr->total);
-                    std::string copied_label;
-                    {
-                        std::lock_guard<std::mutex> guard(group_ptr->label_mu);
-                        copied_label = group_ptr->label;
+                        | color(Color::GrayLight));
+                }
+                rows.push_back(hbox(std::move(headline)));
+
+                // Detail rows for non-running states (failures / idle).
+                auto details = build_detail_rows(*tc, state);
+                for (auto& row : details) rows.push_back(std::move(row));
+
+                // Per-group gauge rows still appear for normal Running.
+                if (state == TestCaseRowState::Running) {
+                    for (const auto& group_ptr : tc->groups) {
+                        if (!group_ptr->active.load(std::memory_order_relaxed)) continue;
+                        const auto done  = group_ptr->done.load(std::memory_order_relaxed);
+                        const float gfrac = group_ptr->total == 0 ? 1.0f
+                            : static_cast<float>(done) / static_cast<float>(group_ptr->total);
+                        std::string copied_label;
+                        {
+                            std::lock_guard<std::mutex> guard(group_ptr->label_mu);
+                            copied_label = group_ptr->label;
+                        }
+                        rows.push_back(hbox({
+                            text("    \xe2\x94\x94 "),                       // └
+                            text(fmt::format("group {}", group_ptr->group_index + 1))
+                                | size(WIDTH, EQUAL, 10),
+                            coloured_gauge(gfrac, kBarCells),
+                            text(fmt::format("  {:>3.0f}%  ",
+                                static_cast<double>(gfrac) * 100.0))
+                                | color(Color::GrayLight),
+                            text(copied_label) | color(Color::GrayLight),
+                        }));
                     }
-                    rows.push_back(hbox({
-                        text("    \xe2\x94\x94 "),                       // └
-                        text(fmt::format("group {}", group_ptr->group_index + 1))
-                            | size(WIDTH, EQUAL, 10),
-                        coloured_gauge(gfrac, kBarCells),
-                        text(fmt::format("  {:>3.0f}%  ",
-                            static_cast<double>(gfrac) * 100.0))
-                            | color(Color::GrayLight),
-                        text(copied_label) | color(Color::GrayLight),
-                    }));
                 }
             }
         }
@@ -7376,10 +8323,24 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     RegressionRulesByConfig regression_rules_by_config;
 
     // Process-wide memory budget shared by every benchmark closure.
-    // Hardcoded ceiling lives on `MemoryBudget::kHardcodedTotalBytes`.
-    MemoryBudget memory_budget(MemoryBudget::kHardcodedTotalBytes);
-    logi("[bench_framework] memory budget total={} GiB",
-         MemoryBudget::kHardcodedTotalBytes / (1024.0 * 1024.0 * 1024.0));
+    // V12: budget recomputed dynamically from hwinfo on every check;
+    // the only knob is the safety buffer percentage.
+    MemoryBudget memory_budget(cli.memory_buffer_pct);
+    {
+        const auto sys = snapshot_system_memory();
+        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
+                                                cli.memory_buffer_pct);
+        logi("[bench_framework] memory budget: hwinfo total={:.2f} GiB free={:.2f} GiB "
+             "buffer={:.0f}% cap={:.2f} GiB",
+             bytes_to_gib(sys.total_bytes),
+             bytes_to_gib(sys.free_bytes),
+             cli.memory_buffer_pct,
+             bytes_to_gib(cap));
+        if (sys.total_bytes == std::numeric_limits<std::uint64_t>::max()) {
+            logw("[bench_framework] hwinfo returned 0 for total RAM — budget "
+                 "checks are effectively disabled (treated as infinite memory)");
+        }
+    }
 
     ProgressState progress;
     progress.tty_render.store(::isatty(STDERR_FILENO) != 0, std::memory_order_relaxed);

@@ -19,7 +19,8 @@
         "postgres"
       ]
     },
+    "tbb",
     "zlib",
-    "tbb"
+    "lfreist-hwinfo"
   ]
 }

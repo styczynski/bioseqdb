@@ -1,35 +1,40 @@
 /**
  * @file bench_framework/example_main.cpp
- * @brief Minimal demonstration of the benchmark framework (V11).
+ * @brief Demonstration of the benchmark framework (V12).
  *
- * Two toy benchmarks driven by `example_bench_configuration.json`:
+ * Three toy benchmarks driven by `example_bench_configuration.json`:
  *
  *   1. **bench_sort** — measures sorting performance for two algorithms
  *      (`std_sort`, `std_stable_sort`). One built-in `wall_clock_ns`
- *      metric, one rule comparing the two.
+ *      metric, one rule comparing the two. Each iteration sleeps a few
+ *      milliseconds so the demo runs ≥ 15 s of wall-clock time and a
+ *      human can watch the dashboard.
  *
  *   2. **bench_count** — counts even integers in a vector. One
  *      `evaluation` metric (the count) and one rule asserting the
- *      computed count is within tolerance of the known ground truth.
+ *      computed count matches the known ground truth. Includes a
+ *      "BUGGY_INPUT" test case that throws from `on_input` on the
+ *      first 2 attempts so the operator can see the V12 retry UI.
  *
- * V11 wiring: each `create_benchmark` call now also takes an
- * `on_estimate_resources` lambda before `on_input`. `on_input` itself
- * receives the framework's chosen `RunConstraints` so that future
- * implementations can size their input buffers accordingly. Both
- * estimators here return the input vector's bytes so the framework
- * accounts memory correctly.
+ *   3. **bench_buggy_cleanup** — every `on_cleanup` call throws.
+ *      Demonstrates the V12 cleanup-retry UI and the
+ *      `cleanup_function_failing` warning.
  */
 #include "common.h"
 
 #include <simdjson.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 import mlogging;
@@ -123,6 +128,13 @@ struct SortOutput {
         }
     }
 
+    // V12 demo: sleep ~250 ms per iteration so the dashboard is visible
+    // for ≥ 15 s end-to-end. The sleep lives inside the timing window
+    // intentionally so the rule `sort_within_2x_of_stable_sort`
+    // (tolerance 99%) keeps passing — both algorithms incur the same
+    // delay so their p50s converge.
+    std::this_thread::sleep_for(std::chrono::milliseconds{250});
+
     SortOutput output;
     output.size = working_copy.size();
     if (!working_copy.empty()) {
@@ -169,11 +181,55 @@ struct CountOutput {
     return { .base_memory = values_bytes, .extra_memory = 0 };
 }
 
+/// V12 demo: consume one failure budget for `test_case_name` and
+/// return the remaining count. When the test_case JSON object carries
+/// `"buggy_input": N`, the first `N` calls to `build_count_input` for
+/// that specific `test_case_name` throw a `std::runtime_error`. The
+/// framework's retry loop catches the exception, surfaces the retry
+/// row in the dashboard, and tries again — eventually succeeding.
+///
+/// The counter is keyed by `test_case_name` so adding more buggy-input
+/// test cases doesn't deplete a global shared budget. The whole
+/// fetch-and-decrement happens under `std::mutex` so concurrent
+/// builders for the same test_case_name don't race.
+///
+/// Returns the remaining count BEFORE the decrement — i.e. > 0 means
+/// "throw"; <= 0 means "succeed". Caller never decrements outside the
+/// helper.
+inline int consume_buggy_input_failure(std::string_view test_case_name,
+                                         int initial_failures) noexcept {
+    static std::mutex mu;
+    static std::map<std::string, int> per_test_case;
+    std::lock_guard<std::mutex> guard(mu);
+    auto [it, inserted] = per_test_case.emplace(std::string{test_case_name},
+                                                  initial_failures);
+    const int before = it->second;
+    if (before > 0) --it->second;
+    return before;
+}
+
 [[nodiscard]] CountInput build_count_input(std::string_view /*data_dir*/,
                                             std::string_view test_case_name,
                                             simdjson::dom::element data_element,
                                             const RunConstraints& /*constraints*/)
 {
+    // V12 demo: simulate a flaky on_input. The data element may carry a
+    // `"buggy_input": <int>` field giving the number of failures to
+    // inject for this specific test_case. We consume one slot from the
+    // per-test-case counter; when it falls to 0, on_input succeeds.
+    std::int64_t initial_failures = 0;
+    (void)data_element["buggy_input"].get(initial_failures);
+    if (initial_failures > 0) {
+        const int before = consume_buggy_input_failure(
+            test_case_name, static_cast<int>(initial_failures));
+        if (before > 0) {
+            throw std::runtime_error(fmt::format(
+                "simulated on_input failure for test_case '{}' "
+                "(remaining injected failures: {})",
+                test_case_name, before - 1));
+        }
+    }
+
     CountInput input;
     std::int64_t length = 0;
     if (data_element["length"].get(length) != simdjson::SUCCESS || length <= 0) {
@@ -225,6 +281,20 @@ void cleanup_count_input(std::string_view /*data_dir*/,
 {
     logi("[example] cleanup_count_input released test_case='{}' (n={})",
          test_case_name, input.values.size());
+}
+
+/// V12 demo: an `on_cleanup` that always throws. Drives the
+/// `▶ 🧹 ... [retry N/5]` UI row and the terminal
+/// `cleanup_function_failing` warning at end-of-run.
+void cleanup_always_throws(std::string_view /*data_dir*/,
+                            std::string_view test_case_name,
+                            simdjson::dom::element /*data_element*/,
+                            const CountInput& /*input*/)
+{
+    throw std::runtime_error(fmt::format(
+        "simulated cleanup failure for test_case '{}' — "
+        "demonstrates V12 cleanup retry path",
+        test_case_name));
 }
 
 [[nodiscard]] std::map<std::string, double> evaluate_count_output(
@@ -286,5 +356,20 @@ int main(int argc, char** argv) {
             std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const CountInput&, const CountOutput&)>{
                 evaluate_count_output},
             std::function<void(std::string_view, std::string_view, simdjson::dom::element, const CountInput&)>{
-                cleanup_count_input}));
+                cleanup_count_input}),
+        // V12 demo: cleanup always throws → 5 retries → warning.
+        bioseq::bench_framework::create_benchmark<CountInput, CountOutput>(
+            "Buggy cleanup demo (V12)",
+            "bench_buggy_cleanup",
+            config_path,
+            std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>{
+                estimate_count_resources},
+            std::function<CountInput(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>{
+                build_count_input},
+            std::function<CountOutput(std::string_view, const ParamMap&, const CountInput&)>{
+                run_count_algorithm},
+            std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const CountInput&, const CountOutput&)>{
+                evaluate_count_output},
+            std::function<void(std::string_view, std::string_view, simdjson::dom::element, const CountInput&)>{
+                cleanup_always_throws}));
 }

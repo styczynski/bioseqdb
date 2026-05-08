@@ -27,6 +27,7 @@ find_package(ftxui REQUIRED)
 find_package(simdjson REQUIRED)
 find_package(nlohmann_json_schema_validator REQUIRED)
 find_package(TBB REQUIRED tbb)
+find_package(lfreist-hwinfo REQUIRED)
 
 # AddCommonTarget(
 #   postgresql_bioseq
