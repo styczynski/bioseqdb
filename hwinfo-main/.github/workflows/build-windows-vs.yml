@@ -1,0 +1,22 @@
+name: Windows (Visual Studio)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup Visual Studio
+        uses: egor-tensin/vs-shell@v2
+
+      - name: Build and Test
+        run: ./scripts/feature-tests.shell
+        shell: bash

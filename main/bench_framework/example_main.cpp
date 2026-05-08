@@ -1,6 +1,6 @@
 /**
  * @file bench_framework/example_main.cpp
- * @brief Minimal demonstration of the benchmark framework.
+ * @brief Minimal demonstration of the benchmark framework (V11).
  *
  * Two toy benchmarks driven by `example_bench_configuration.json`:
  *
@@ -12,8 +12,12 @@
  *      `evaluation` metric (the count) and one rule asserting the
  *      computed count is within tolerance of the known ground truth.
  *
- * The point is to show the user-side wiring: three lambdas + one
- * `bioseq::bench_framework::run(...)` call. No bioseq-specific imports.
+ * V11 wiring: each `create_benchmark` call now also takes an
+ * `on_estimate_resources` lambda before `on_input`. `on_input` itself
+ * receives the framework's chosen `RunConstraints` so that future
+ * implementations can size their input buffers accordingly. Both
+ * estimators here return the input vector's bytes so the framework
+ * accounts memory correctly.
  */
 #include "common.h"
 
@@ -23,7 +27,6 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <numeric>
 #include <random>
 #include <string>
 #include <string_view>
@@ -44,6 +47,7 @@ namespace {
 
 using bioseq::bench_framework::ConfigValue;
 using bioseq::bench_framework::ParamMap;
+using bioseq::bench_framework::RunConstraints;
 
 // -------- bench_sort I/O types --------
 
@@ -57,9 +61,26 @@ struct SortOutput {
     std::size_t  size        = 0;
 };
 
+[[nodiscard]] RunConstraints estimate_sort_resources(
+    std::string_view /*data_dir*/,
+    std::string_view /*test_case_name*/,
+    simdjson::dom::element data_element)
+{
+    std::int64_t length = 0;
+    (void)data_element["length"].get(length);
+    const auto values_bytes = (length <= 0)
+        ? std::size_t{0}
+        : static_cast<std::size_t>(length) * sizeof(std::int64_t);
+    // base: SortInput.values lives until cleanup.
+    // extra: the working_copy in run_sort_algorithm doubles allocation
+    // for the duration of the iteration loop only.
+    return { .base_memory = values_bytes, .extra_memory = values_bytes };
+}
+
 [[nodiscard]] SortInput build_sort_input(std::string_view /*data_dir*/,
                                           std::string_view test_case_name,
-                                          simdjson::dom::element data_element)
+                                          simdjson::dom::element data_element,
+                                          const RunConstraints& /*constraints*/)
 {
     SortInput input;
     std::int64_t length = 0;
@@ -133,9 +154,25 @@ struct CountOutput {
     std::int64_t even_count = 0;
 };
 
+[[nodiscard]] RunConstraints estimate_count_resources(
+    std::string_view /*data_dir*/,
+    std::string_view /*test_case_name*/,
+    simdjson::dom::element data_element)
+{
+    std::int64_t length = 0;
+    (void)data_element["length"].get(length);
+    const auto values_bytes = (length <= 0)
+        ? std::size_t{0}
+        : static_cast<std::size_t>(length) * sizeof(std::int64_t);
+    // CountInput keeps `values`; run_count_algorithm only iterates,
+    // no extra allocation in the iteration loop.
+    return { .base_memory = values_bytes, .extra_memory = 0 };
+}
+
 [[nodiscard]] CountInput build_count_input(std::string_view /*data_dir*/,
                                             std::string_view test_case_name,
-                                            simdjson::dom::element data_element)
+                                            simdjson::dom::element data_element,
+                                            const RunConstraints& /*constraints*/)
 {
     CountInput input;
     std::int64_t length = 0;
@@ -177,12 +214,10 @@ struct CountOutput {
     return output;
 }
 
-/// Optional V9 teardown hook. Runs once per `(bench_count, test_case)`
-/// after every iteration on that input has finished, single-threaded.
-/// In a real benchmark this is where one would delete a scratch
-/// directory, close a database handle, or unlink temp files generated
-/// by `build_count_input`. We just log so the V9 lifecycle is
-/// observable in the example's stderr.
+/// Optional teardown hook. Runs once per `(bench_count, test_case,
+/// group)` after every iteration on that batch's cached `Input` has
+/// finished. Logs are useful here because V11 may call cleanup multiple
+/// times for the same test_case (one call per parallel group).
 void cleanup_count_input(std::string_view /*data_dir*/,
                           std::string_view test_case_name,
                           simdjson::dom::element /*data_element*/,
@@ -198,10 +233,9 @@ void cleanup_count_input(std::string_view /*data_dir*/,
     const CountInput& input,
     const CountOutput& output)
 {
-    // Demonstrate the V9 evaluator-with-input shape: independently
-    // count even values from `input` and compare to `output.even_count`.
-    // The result lands as `even_count` (matching the algorithm output)
-    // plus a derived `even_count_match` metric (0 / 1).
+    // Run an independent reference count from the input and compare to
+    // the algorithm's output. The metric `even_count` mirrors the
+    // algorithm output; `even_count_match` is a 0/1 sentinel.
     std::int64_t reference = 0;
     for (const auto value : input.values) {
         if ((value & 1) == 0) ++reference;
@@ -231,7 +265,9 @@ int main(int argc, char** argv) {
             "Sorting algorithm comparison",
             "bench_sort",
             config_path,
-            std::function<SortInput(std::string_view, std::string_view, simdjson::dom::element)>{
+            std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>{
+                estimate_sort_resources},
+            std::function<SortInput(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>{
                 build_sort_input},
             std::function<SortOutput(std::string_view, const ParamMap&, const SortInput&)>{
                 run_sort_algorithm},
@@ -241,7 +277,9 @@ int main(int argc, char** argv) {
             "Even-count parity check",
             "bench_count",
             config_path,
-            std::function<CountInput(std::string_view, std::string_view, simdjson::dom::element)>{
+            std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>{
+                estimate_count_resources},
+            std::function<CountInput(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>{
                 build_count_input},
             std::function<CountOutput(std::string_view, const ParamMap&, const CountInput&)>{
                 run_count_algorithm},

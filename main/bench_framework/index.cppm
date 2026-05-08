@@ -174,6 +174,36 @@ struct ConfigValue {
 using ParamMap = std::map<std::string, ConfigValue>;
 
 /**
+ * @brief Resource budget hints returned by the user's resource estimator.
+ *
+ * The framework uses this to schedule batches inside a hardcoded 5 GiB
+ * memory budget. `base_memory` covers the lifetime of the cached `Input`
+ * (allocated by `on_input`, released after `on_cleanup`); `extra_memory`
+ * covers only the iteration loop (acquired before the first iteration of
+ * a batch, released as soon as the last iteration of that batch returns
+ * from `on_run`). Both default to zero, which means "this batch has no
+ * memory constraints" — the framework will schedule it whenever a TBB
+ * worker is free.
+ *
+ * The estimator is called exactly once per batch (per `(test_case,
+ * group)` pair); the framework records that one answer on the batch
+ * and uses it for both the budget reservation and the `on_input` /
+ * `on_cleanup` lifecycle. RNG inside the estimator is therefore
+ * harmless — the second call that would yield a different value never
+ * happens.
+ */
+struct RunConstraints {
+    /// Bytes that must remain reserved between `on_input` and
+    /// `on_cleanup` (i.e. for the lifetime of the cached `Input`).
+    /// Default 0 = no reservation.
+    std::size_t base_memory  = 0;
+    /// Bytes additionally reserved while the iteration loop is in
+    /// flight on this batch. Released as soon as the loop exits.
+    /// Default 0 = no reservation.
+    std::size_t extra_memory = 0;
+};
+
+/**
  * @brief Type-erased benchmark handle returned by `create_benchmark`.
  *
  * Public so the variadic `run(...)` parameter pack can be deduced. Users
@@ -203,11 +233,13 @@ namespace detail {
  * **Thread-safety contract (important).** When a benchmark's
  * `concurrency.concurrency == true` (the default), the framework runs many
  * iterations of `on_run` and `on_evaluate` concurrently on TBB worker
- * threads. The captured callable objects must therefore be safe to invoke
- * concurrently — typically pure functions of their arguments, or callables
- * that only read shared state. `on_input` is single-shot per test case
- * (guarded by `std::call_once`) so it has no concurrency requirement, but
- * it MUST NOT throw — the framework does not catch user exceptions.
+ * threads — but only across different `(test_case, group)` batches. Within
+ * one batch, items run sequentially against one cached `Input`. The
+ * captured callable objects must be safe to invoke concurrently across
+ * batches (typically pure functions of their arguments).
+ *
+ * `on_estimate_resources`, `on_input`, `on_cleanup`, and `on_evaluate`
+ * MUST NOT throw — the framework does not catch user exceptions.
  *
  * @param title             Human-readable label echoed in the report's `title` field.
  * @param benchmark_key     Unique key used (a) to look up the matching block in
@@ -217,51 +249,59 @@ namespace detail {
  *                          which block this `create_benchmark` call describes.
  * @param config_path       Path to the bench configuration JSON (validated against
  *                          a built-in JSON schema before use).
- * @param on_input          Builds the test-case `Input` from the parsed JSON data.
- *                          Called at most once per (benchmark, test_case) — the
- *                          framework caches the result and reuses it across all
- *                          iterations of that test case. Must not throw.
+ * @param on_estimate_resources  Returns a `RunConstraints` describing the memory
+ *                          this batch will need. Called at most once per
+ *                          `(test_case, group)` batch, before `on_input`. The
+ *                          framework reserves `base_memory` from a shared 5 GiB
+ *                          pool before calling `on_input` and `extra_memory` for
+ *                          the iteration loop only. Called exactly once per
+ *                          batch; RNG inside is harmless because the
+ *                          framework only invokes the lambda once per
+ *                          `(test_case, group)` pair. Must not throw.
+ * @param on_input          Builds the test-case `Input` from the parsed JSON data
+ *                          and the framework-determined `RunConstraints`. Called
+ *                          exactly once per `(test_case, group)` batch — when a
+ *                          test_case is split into N parallel groups, the framework
+ *                          calls `on_input` once per group, each with its own
+ *                          `Input` instance. Must not throw.
  * @param on_run            Runs the algorithm. Wraps the timing window for the
- *                          built-in `wall_clock_ns` metric. Called concurrently
- *                          when the benchmark allows parallel iteration; treat
- *                          captured state accordingly.
+ *                          built-in `wall_clock_ns` metric. Called sequentially
+ *                          inside one batch, concurrently across batches.
  * @param on_evaluate       Returns evaluation metrics computed from the algorithm
  *                          output. Receives the same `Input` that was fed to
  *                          `on_run` so the evaluator can run an independent
- *                          reference pass (e.g. recompute the expected answer
- *                          from the input and compare it against `output`)
- *                          without polluting the timing window. Each map
- *                          entry is a `(metric_name, metric_value)` pair
+ *                          reference pass without polluting the timing window.
+ *                          Each map entry is a `(metric_name, metric_value)` pair
  *                          appended to the `all_regions` bucket. Names that
  *                          don't match any `metrics` key declared with
- *                          `type: "evaluation"` are silently dropped —
- *                          `on_evaluate` lambdas are typically generic across
- *                          benchmarks, so emitting more keys than this
- *                          benchmark consumes is normal. Conversely, if a
- *                          declared evaluation metric is never returned, the
- *                          framework emits `missing_evaluation_metric` and
- *                          fails the run (typo guard). Called concurrently
- *                          like `on_run`; no shared mutable state.
+ *                          `type: "evaluation"` are silently dropped.
+ *                          Declared-but-not-returned metrics fail the run via
+ *                          `missing_evaluation_metric`. Called like `on_run`.
  * @param on_cleanup        Optional teardown callback. Defaults to an empty
  *                          `std::function` (no-op). When non-empty, runs
- *                          exactly once per `(benchmark, test_case)` after
- *                          every iteration on that input has finished, with
- *                          the same first three parameters as `on_input`
- *                          plus the cached `Input&`. Use it to release any
- *                          side effects produced by `on_input` (temp files,
- *                          allocated DBs, scratch buffers). Runs
- *                          single-threaded after TBB joins; cleanup callable
- *                          does NOT need to be thread-safe. **Must not
- *                          throw**, same contract as `on_input`.
+ *                          once per `(test_case, group)` batch after every
+ *                          iteration on that batch's cached `Input` has
+ *                          finished. Same first three parameters as
+ *                          `on_input` plus the cached `Input&`. Note: when a
+ *                          test case is split into N groups, `on_cleanup` is
+ *                          called N times (once per group). Runs on the
+ *                          batch's TBB worker, so cleanup must not assume
+ *                          single-thread serialisation across cleanups —
+ *                          but it is single-threaded *within* one batch.
+ *                          **Must not throw**, same contract as `on_input`.
  */
 template<typename Input, typename Output>
 [[nodiscard]] ErasedBenchmark create_benchmark(
     std::string title,
     std::string benchmark_key,
     std::string config_path,
+    std::function<RunConstraints(std::string_view data_dir,
+                                  std::string_view test_case_name,
+                                  simdjson::dom::element test_case_data)> on_estimate_resources,
     std::function<Input(std::string_view data_dir,
                         std::string_view test_case_name,
-                        simdjson::dom::element test_case_data)> on_input,
+                        simdjson::dom::element test_case_data,
+                        const RunConstraints& constraints)> on_input,
     std::function<Output(std::string_view algorithm_name,
                          const ParamMap& params,
                          const Input& input)> on_run,
@@ -576,15 +616,19 @@ struct MetricSpec {
 };
 
 struct ConcurrencyOpts {
-    bool bench_lock     = false;
-    bool concurrency    = true;
-    /// If true (default), within one benchmark only one execution
-    /// tuple may run against a given test_case at a time. The
-    /// framework holds a per-test-case mutex around the iteration's
-    /// timing window so cells that share a cached `Input` do not
-    /// fight for memory bandwidth. Acquisition order is
-    /// `bench_lock → test_case_lock`, so deadlock is impossible.
-    bool test_case_lock = true;
+    /// If true, this benchmark runs alone (every item-iteration loop
+    /// acquires the cross-bench unique lock; siblings queue behind it).
+    bool bench_lock  = false;
+    /// If true (default), batches of this benchmark fan out across TBB
+    /// workers. False forces every item to take the per-benchmark
+    /// serial mutex, so all iterations of all items run on whichever
+    /// worker happens to pick them up next, but never two at once.
+    bool concurrency = true;
+
+    // V11 NOTE: `test_case_lock` (V10 default true) is deleted. The new
+    // batched scheduler runs at most one tuple at a time per
+    // (test_case, group), so the contention this flag was guarding
+    // against is impossible by construction.
 };
 
 struct ParamSchema {
@@ -601,9 +645,27 @@ struct AlgorithmSchema {
     std::vector<ParamSchema> params{};
 };
 
+/// Default per-test-case concurrency: max(1, hw_concurrency-1). Cached
+/// once per process so `parse_test_cases` does not re-query the OS for
+/// every entry.
+[[nodiscard]] inline std::size_t default_test_case_concurrency() noexcept {
+    static const std::size_t cached = [] {
+        const auto hw = std::thread::hardware_concurrency();
+        return std::max<std::size_t>(1u, hw <= 1u ? 1u : hw - 1u);
+    }();
+    return cached;
+}
+
 struct TestCaseSpec {
     std::string name;
     std::string description;
+    /// Maximum number of parallel groups this test case may be split
+    /// across. The framework caps the actual group count at the total
+    /// iteration count across all tuples sharing this test_case (a
+    /// group with zero iterations is meaningless, so we never create
+    /// one). Read from `test_cases.<name>.concurrency`; defaults to
+    /// `default_test_case_concurrency()` when the key is omitted.
+    std::size_t concurrency = 0;
     /// View into the parser pool of the owning `BenchmarkExecutionState`.
     simdjson::dom::element data{};
 };
@@ -631,30 +693,50 @@ struct ExecutionTuple {
     ParamMap    params{};      // every parameter resolved (declared or defaulted)
 };
 
-/// One (test_case × execution_tuple) cell holding the iteration metric
-/// arrays plus the bookkeeping needed to fan out parallel iterations.
+/// One (test_case × group × execution_tuple) cell holding iteration
+/// metrics for a single group's slice of iterations.
 ///
 /// `Cell` is owned via `std::unique_ptr<Cell>` (see `BenchmarkExecutionState`)
-/// because it embeds a `std::mutex` (non-movable) and stable pointers are
-/// handed out as `Cell*` to TBB workers. Per CODE_STYLE.md §5, smart
-/// pointers exist here because there is a clear ownership transfer (the
-/// per-benchmark state owns every cell for the lifetime of the run); the
-/// alternative would be a stable-iterator container like `std::list` plus
-/// manual lookup, which is strictly worse.
+/// because the framework hands out stable `Cell*` to TBB workers and the
+/// pointer must outlive any vector reallocation. Per CODE_STYLE.md §5,
+/// smart pointers exist here because the per-benchmark state owns every
+/// cell for the lifetime of the run; the alternative would be a
+/// stable-iterator container like `std::list` plus manual lookup, which
+/// is strictly worse.
+///
+/// Groups are an implementation detail driven by
+/// `test_cases.<name>.concurrency` and the per-group iteration split
+/// (see `split_iterations`). The user-visible report contains one
+/// entry per `(test_case, tuple)` with samples concatenated across
+/// every group of the same `(test_case, tuple)` pair — see
+/// `merge_group_samples` in the writer / rule evaluator.
+///
+/// Thread-safety: V11 schedules at most one batch per `(tc, group)`, and
+/// items inside a batch run sequentially. A `Cell` is therefore never
+/// touched by two threads at once, so `samples` does not need any
+/// mutex around its writes. (Pre-V11 needed `samples_mu` because the
+/// flat work-unit list let two threads race the same cell across
+/// concurrent iterations of a single tuple — V11 deletes that path.)
 struct Cell {
     const TestCaseSpec*  test_case = nullptr;
     const ExecutionTuple* tuple = nullptr;
+    /// Iterations *for this group* (= `split_iterations(total, group_count)[group_index]`).
     std::size_t          iterations = 0;
-    /// Stable index into the test_cases vector. Lets the input cache key
-    /// inputs by index without pointer arithmetic on hot path.
+    /// Stable index into the test_cases vector. Lets the per-batch
+    /// input cache key inputs by index without pointer arithmetic.
     std::size_t          test_case_index = 0;
+    /// Index of this group within its test_case's split. Always < group_count.
+    std::size_t          group_index = 0;
+    /// Total number of groups for this test_case (the group_index
+    /// upper-bound + 1). Cached on every cell so the writer does not
+    /// have to re-derive it from the global state.
+    std::size_t          group_count = 1;
 
     /// region_name -> metric_name -> sample values. "all_regions" is a
     /// synthetic bucket holding the iteration-level wall_clock_ns and every
     /// counter / evaluation metric. Per-region buckets only appear when
     /// `BenchmarkConfig::by_regions == true`.
     std::map<std::string, std::map<std::string, std::vector<double>>> samples{};
-    std::mutex samples_mu{};
 
     Cell() = default;
     Cell(const Cell&) = delete;
@@ -679,14 +761,12 @@ struct BenchmarkExecutionState {
     std::vector<ExecutionTuple>         execution_tuples{};
     std::vector<std::unique_ptr<Cell>>  cells{};
 
-    /// One mutex per test_case (indexed by `Cell::test_case_index`).
-    /// When `concurrency.test_case_lock == true`, the iteration loop
-    /// holds the matching mutex for the duration of its timing
-    /// window so two tuples that share the same cached `Input` do
-    /// not race on memory bandwidth. `std::unique_ptr<std::mutex>`
-    /// because `std::mutex` is non-movable and we want stable
-    /// addresses for the duration of the benchmark.
-    std::vector<std::unique_ptr<std::mutex>> per_test_case_mutexes{};
+    /// Held around an item's iteration loop when
+    /// `concurrency.concurrency == false`. Forces serial item execution
+    /// across all batches of this benchmark while still letting other
+    /// (parallel) benchmarks run concurrently. Non-movable, hence
+    /// inline as a value member of the pinned execution state.
+    std::mutex serial_mu{};
 
     BenchmarkExecutionState() = default;
     BenchmarkExecutionState(BenchmarkExecutionState&&) = delete;
@@ -832,6 +912,7 @@ struct SanityWarning {
 // Forward declarations used by BenchmarkContext.
 struct ProgressState;
 struct ValidationDiag;
+class  MemoryBudget;
 
 }  // namespace detail
 
@@ -870,6 +951,10 @@ struct BenchmarkContext {
     /// skip parsing.
     std::mutex*                                     regression_rules_mu = nullptr;
     detail::RegressionRulesByConfig*                regression_rules_by_config = nullptr;
+    /// Process-wide memory budget owned by `run_impl`. Shared across
+    /// every benchmark closure so a single 5 GiB pool gates batches
+    /// of unrelated benchmarks too.
+    detail::MemoryBudget*                           memory_budget = nullptr;
 };
 
 // ----------------- ConfigValue::from_simdjson -----------------
@@ -933,27 +1018,197 @@ struct BenchmarkContext {
 
 namespace detail {
 
+// ----------------- MemoryBudget -----------------
+
+/// Process-wide memory budget enforcing a hardcoded 5 GiB ceiling.
+/// Acquired before `on_input` (`base_memory`) and around the iteration
+/// loop (`extra_memory`) by `BudgetReservation` RAII guards. Acquisition
+/// blocks on a `std::condition_variable` until enough budget is
+/// available; `release` does `notify_all` so any waiter whose remaining
+/// request now fits wakes up.
+class MemoryBudget {
+public:
+    /// Hardcoded ceiling. 5 GiB. The spec says "hardcode it in
+    /// variable", so this is `static constexpr` rather than a CLI knob.
+    /// Computed via `<< 30` so the literal value can't overflow 32-bit
+    /// `size_t` (defensive — bench_framework is 64-bit-only today).
+    static constexpr std::size_t kHardcodedTotalBytes =
+        std::size_t{5} * (std::size_t{1} << 30);
+
+    explicit MemoryBudget(std::size_t total_bytes) noexcept
+        : total_bytes_(total_bytes),
+          available_bytes(static_cast<std::int64_t>(total_bytes))
+    {
+        DEBUG_ASSERT(total_bytes > 0,
+            "MemoryBudget total must be positive — a 0-byte budget would "
+            "treat every non-zero request as oversized and silently bypass "
+            "the wait predicate, which is never the intent.");
+    }
+
+    /// Block until at least `bytes` are available, then deduct them.
+    /// Returns immediately when `bytes == 0`. Oversized requests
+    /// (`bytes > kHardcodedTotalBytes`) bypass the wait predicate, log
+    /// a `memory_budget_oversized` warning, and forge through; the
+    /// resulting negative balance just blocks subsequent acquirers
+    /// until release.
+    void acquire(std::size_t bytes) {
+        if (bytes == 0) return;
+        std::unique_lock<std::mutex> guard(budget_mu);
+        if (oversized(bytes)) {
+            logw("[bench_framework] memory_budget_oversized: request {} bytes "
+                 "exceeds hardcoded budget {} bytes — running over-budget",
+                 bytes, kHardcodedTotalBytes);
+        } else {
+            budget_cv.wait(guard, [this, bytes] {
+                return available_bytes >= static_cast<std::int64_t>(bytes);
+            });
+        }
+        available_bytes -= static_cast<std::int64_t>(bytes);
+    }
+
+    /// Release `bytes` previously acquired and wake every waiter.
+    void release(std::size_t bytes) noexcept {
+        if (bytes == 0) return;
+        {
+            std::lock_guard<std::mutex> guard(budget_mu);
+            available_bytes += static_cast<std::int64_t>(bytes);
+        }
+        budget_cv.notify_all();
+    }
+
+    /// Snapshot the available-bytes counter for the dashboard. Takes
+    /// the mutex briefly because `available_bytes` is a plain
+    /// `std::int64_t` mutated only under `budget_mu`. The renderer
+    /// calls this every paint (200 ms cadence) so the contention is
+    /// negligible.
+    [[nodiscard]] std::int64_t snapshot_available() const noexcept {
+        std::lock_guard<std::mutex> guard(budget_mu);
+        return available_bytes;
+    }
+
+    [[nodiscard]] std::size_t total_bytes() const noexcept { return total_bytes_; }
+
+    [[nodiscard]] bool oversized(std::size_t bytes) const noexcept {
+        // Compare against this instance's total, not the hardcoded
+        // constant — a future smaller-budget construction would
+        // otherwise allow a request to wait forever.
+        return bytes > total_bytes_;
+    }
+
+    MemoryBudget(const MemoryBudget&) = delete;
+    MemoryBudget(MemoryBudget&&) = delete;
+    MemoryBudget& operator=(const MemoryBudget&) = delete;
+    MemoryBudget& operator=(MemoryBudget&&) = delete;
+
+private:
+    /// Mutable so `snapshot_available` can take the lock from a const
+    /// member function; the underlying state mutation lives behind
+    /// `acquire` / `release` which are non-const.
+    mutable std::mutex      budget_mu{};
+    std::condition_variable budget_cv{};
+    std::int64_t            available_bytes;
+    std::size_t             total_bytes_;
+};
+
+/// Move-only RAII guard. Acquires `bytes` from the budget at construction
+/// and releases on destruction or explicit `release_now`. Lets the
+/// batch driver bind reservation lifetime to a scope and survive any
+/// user-callback abort path without a bookkeeping leak.
+class BudgetReservation {
+public:
+    BudgetReservation() noexcept = default;
+    BudgetReservation(MemoryBudget& budget, std::size_t bytes)
+        : budget_ptr(&budget), reserved_bytes(bytes) {
+        budget.acquire(bytes);
+    }
+    BudgetReservation(BudgetReservation&& other) noexcept
+        : budget_ptr(std::exchange(other.budget_ptr, nullptr)),
+          reserved_bytes(std::exchange(other.reserved_bytes, 0)) {}
+    BudgetReservation& operator=(BudgetReservation&& other) noexcept {
+        release_now();
+        budget_ptr     = std::exchange(other.budget_ptr,     nullptr);
+        reserved_bytes = std::exchange(other.reserved_bytes, 0);
+        return *this;
+    }
+    BudgetReservation(const BudgetReservation&) = delete;
+    BudgetReservation& operator=(const BudgetReservation&) = delete;
+    ~BudgetReservation() { release_now(); }
+
+    /// Release immediately and zero the guard. Idempotent. We pass any
+    /// reservation (including zero) through to `release` because it
+    /// short-circuits on zero internally.
+    void release_now() noexcept {
+        if (budget_ptr != nullptr) {
+            budget_ptr->release(reserved_bytes);
+        }
+        budget_ptr     = nullptr;
+        reserved_bytes = 0;
+    }
+
+private:
+    MemoryBudget* budget_ptr     = nullptr;
+    std::size_t   reserved_bytes = 0;
+};
+
 // ----------------- ProgressState -----------------
 
-/// Per-benchmark progress counter snapshot used by the ftxui dashboard.
+/// One group of one test_case. Hot-path counter is `done`; the
+/// scheduler updates `label` only at item boundaries (cold path).
+struct ProgressGroup {
+    std::size_t                group_index = 0;
+    std::atomic<std::uint64_t> done{0};
+    std::uint64_t              total = 0;
+    /// Scheduler sets this true when the batch starts, false when the
+    /// batch's iteration loop exits. Renderer uses it to decide whether
+    /// to draw the row (collapsed test cases hide all groups).
+    std::atomic<bool>          active{false};
+    /// Brief label `algo=<>, bench=<>` updated at item boundaries.
+    /// Held under `label_mu` (one short string copy) — never blocks
+    /// the iteration loop.
+    std::string                label{};
+    std::mutex                 label_mu{};
+};
+
+/// One test_case row in the dashboard. Aggregates progress across all
+/// of its groups. `start_ns` / `finish_ns` measure wall-clock duration
+/// from "first group started" to "last group done". `tuple_total` is
+/// atomic so the renderer thread (started in `run_impl` before the
+/// per-benchmark closures populate this struct) sees a consistent
+/// value on weakly-ordered hardware.
+struct ProgressTestCase {
+    std::string                                test_case_name{};
+    std::atomic<std::uint64_t>                 tuple_done{0};       // cumulative items finished
+    std::atomic<std::uint64_t>                 tuple_total{0};
+    std::vector<std::unique_ptr<ProgressGroup>> groups{};
+    std::atomic<std::int64_t>                  start_ns{0};
+    std::atomic<std::int64_t>                  finish_ns{0};
+};
+
+/// Full progress model. The renderer reads everything; the scheduler
+/// writes via three helpers below.
+///
+/// Per-benchmark `test_cases` is populated by the closure that drives a
+/// single `ErasedBenchmark` (running on some TBB worker) AFTER the
+/// renderer thread has already started polling. To avoid a data race
+/// on the vector's structural state, the writer signals completion via
+/// `setup_done.store(true, release)` and readers gate every traversal
+/// on `setup_done.load(acquire)`. After the writer signals, the
+/// vector and every `unique_ptr` it holds are stable for the rest of
+/// the run.
 struct ProgressState {
     struct Per {
-        std::string title;
-        std::string benchmark_key;
-        std::atomic<std::uint64_t> done{0};
-        std::uint64_t total = 0;
+        std::string                                       title{};
+        std::string                                       benchmark_key{};
+        std::vector<std::unique_ptr<ProgressTestCase>>    test_cases{};
+        std::atomic<bool>                                 setup_done{false};
     };
     std::vector<std::unique_ptr<Per>> per_benchmark;
     std::atomic<bool> running{true};
     std::atomic<bool> tty_render{false};   // set true if stderr is a TTY at startup
-
-    /// Increment the done counter for benchmark at `benchmark_index`. Hot
-    /// path; relaxed atomic.
-    void tick(std::size_t benchmark_index) noexcept {
-        if (benchmark_index < per_benchmark.size()) {
-            per_benchmark[benchmark_index]->done.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
+    /// Optional pointer to the framework-owned memory budget; the
+    /// renderer prints `[memory X / Y GiB]` in the header when set.
+    /// Lifetime is the same as ProgressState (both owned by run_impl).
+    MemoryBudget* memory_budget = nullptr;
 };
 
 // ----------------- Diagnostics -----------------
@@ -1061,7 +1316,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "test_cases": {
       "title": "TestCases",
-      "description": "Abstract test cases. Each entry's 'data' field is an opaque JSON object handed verbatim to the user's on_input lambda; the framework itself does not interpret it.",
+      "description": "Abstract test cases. Each entry's 'data' field is an opaque JSON object handed verbatim to the user's on_input lambda; the framework itself does not interpret it. The optional 'concurrency' integer caps how many parallel groups the framework may split this test case into; the actual group count is min(concurrency, total_iterations_for_test_case).",
       "type": "object",
       "minProperties": 1,
       "propertyNames": { "minLength": 1 },
@@ -1074,6 +1329,11 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
             "type": "string",
             "description": "Human-readable label shown in the report. May be empty."
           },
+          "concurrency": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of parallel groups this test case may be split across. Defaults to max(1, hardware_concurrency() - 1) when omitted. Each group gets its own cached Input, so heavy inputs are duplicated across groups — set this to 1 for inputs that are too big to clone."
+          },
           "data": {
             "type": "object",
             "description": "Application-defined object passed to on_input. Schema is up to the user."
@@ -1081,7 +1341,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         }
       },
       "examples": [
-        { "SMALL": { "description": "100bp random sequence", "data": { "length": 100 } } }
+        { "SMALL": { "description": "100bp random sequence", "concurrency": 4, "data": { "length": 100 } } }
       ]
     },
     "regression_rules": {
@@ -1157,24 +1417,19 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "concurrency": {
       "title": "ConcurrencyOptions",
-      "description": "Per-benchmark concurrency knobs. Defaults: bench_lock=false, concurrency=true, test_case_lock=true.",
+      "description": "Per-benchmark concurrency knobs. Defaults: bench_lock=false, concurrency=true. (V11 dropped 'test_case_lock' — the new batched scheduler runs at most one tuple at a time against a given (test_case, group) cached Input, so the lock had no purpose.)",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "bench_lock": {
           "type": "boolean",
           "default": false,
-          "description": "If true, no other benchmark may run concurrently with this one. The framework arbitrates via a process-wide shared_mutex (this benchmark takes the unique lock; others take shared)."
+          "description": "If true, no other benchmark may run concurrently with this one. The framework arbitrates via a process-wide shared_mutex held around each item's iteration loop (this benchmark takes the unique lock; others take shared)."
         },
         "concurrency": {
           "type": "boolean",
           "default": true,
-          "description": "If true (default), this benchmark's iterations are distributed across TBB workers. If false, iterations run serially. NOTE: any benchmark that declares a counter-typed metric is forced serial regardless of this flag."
-        },
-        "test_case_lock": {
-          "type": "boolean",
-          "default": true,
-          "description": "If true (default), within one benchmark only one execution tuple may run against a given test_case at a time. The framework holds a per-test-case mutex around the iteration's timing window (acquired immediately before clock::now_ns(), released immediately after). Prevents cached-input memory-bandwidth contention between cells that share a test_case input. Acquisition order is bench_lock -> test_case_lock so this is deadlock-free. Set to false on benchmarks that genuinely benefit from intra-test-case parallel fan-out."
+          "description": "If true (default), this benchmark's batches are distributed across TBB workers. If false, all items inside this benchmark run serially behind a per-benchmark mutex (one batch's iteration loop at a time, even across different test_cases)."
         }
       }
     },
@@ -1981,6 +2236,16 @@ inline void drain_diagnostics_to_context(
             spec.description = std::string{description_text};
         }
 
+        // V11: optional `concurrency` integer (schema enforces minimum: 1).
+        // Default is the cached `default_test_case_concurrency()`.
+        std::int64_t concurrency_raw = 0;
+        if (inner_obj["concurrency"].get(concurrency_raw) == simdjson::SUCCESS
+            && concurrency_raw > 0) {
+            spec.concurrency = static_cast<std::size_t>(concurrency_raw);
+        } else {
+            spec.concurrency = default_test_case_concurrency();
+        }
+
         simdjson::dom::element data_element;
         if (inner_obj["data"].get(data_element) != simdjson::SUCCESS) {
             loge("[bench_framework] test_cases.{}.data missing", field.key);
@@ -2407,10 +2672,9 @@ parse_compare_and_tolerance(
         if (concurrency_obj["concurrency"].get(concurrency_flag) == simdjson::SUCCESS) {
             benchmark.concurrency.concurrency = concurrency_flag;
         }
-        bool test_case_lock_flag = true;
-        if (concurrency_obj["test_case_lock"].get(test_case_lock_flag) == simdjson::SUCCESS) {
-            benchmark.concurrency.test_case_lock = test_case_lock_flag;
-        }
+        // V11: `test_case_lock` is gone. Schema's
+        // `additionalProperties: false` rejects the key, so older
+        // configs surface as validation errors.
     }
 
     simdjson::dom::object matrix_obj;
@@ -2911,6 +3175,24 @@ struct ConfigParseOutcome {
 {
     std::vector<ValidationDiag> diagnostics;
 
+    // Single-pass walk: invoke `body(samples)` for every cell that has
+    // collected `metric_name` in `all_regions`, and stop early when
+    // `body` returns true. Replaces three near-identical
+    // for-loops-over-cells with a single shared traversal.
+    const auto for_each_all_regions_metric = [&](
+        const std::string& metric_name,
+        auto&& body) noexcept -> bool
+    {
+        for (const auto& cell_ptr : state.cells) {
+            const auto region_it = cell_ptr->samples.find("all_regions");
+            if (region_it == cell_ptr->samples.end()) continue;
+            const auto values_it = region_it->second.find(metric_name);
+            if (values_it == region_it->second.end()) continue;
+            if (body(values_it->second)) return true;
+        }
+        return false;
+    };
+
     // If no cell ran (every test_case had 0 iterations, or no test_cases were
     // declared at all), the missing-metric check would false-positive on
     // every evaluation metric. Skip the check entirely and emit a single
@@ -2929,30 +3211,23 @@ struct ConfigParseOutcome {
         return diagnostics;
     }
 
-    // Helper: scan every cell's all_regions bucket for a metric name.
+    // Helper: did any cell emit a sample for this metric?
     const auto metric_was_emitted = [&](const std::string& metric_name) noexcept {
-        for (const auto& cell_ptr : state.cells) {
-            const auto region_it = cell_ptr->samples.find("all_regions");
-            if (region_it == cell_ptr->samples.end()) continue;
-            if (region_it->second.find(metric_name) != region_it->second.end()) return true;
-        }
-        return false;
+        return for_each_all_regions_metric(metric_name,
+            [](const auto& /*values*/) noexcept { return true; });
     };
     // Helper: are any of a metric's collected samples non-zero? Used by
     // the PMU-availability check below — on platforms without PMU access,
     // the OS feeds back zeros for cycles/instructions/branches/branch_misses
     // and we want to surface that exactly once.
     const auto metric_has_non_zero_sample = [&](const std::string& metric_name) noexcept {
-        for (const auto& cell_ptr : state.cells) {
-            const auto region_it = cell_ptr->samples.find("all_regions");
-            if (region_it == cell_ptr->samples.end()) continue;
-            const auto values_it = region_it->second.find(metric_name);
-            if (values_it == region_it->second.end()) continue;
-            for (double sample : values_it->second) {
-                if (sample != 0.0) return true;
-            }
-        }
-        return false;
+        return for_each_all_regions_metric(metric_name,
+            [](const auto& values) noexcept {
+                for (double sample : values) {
+                    if (sample != 0.0) return true;
+                }
+                return false;
+            });
     };
 
     // PMU availability: if any declared region metric needs PMU, but every
@@ -3250,36 +3525,98 @@ struct ConfigParseOutcome {
 
 // ----------------- Cell construction -----------------
 
-/// Construct the (test_case × execution_tuple) cell table. Each cell carries
-/// the iteration count, samples map, and a stable test_case_index used by
-/// the typed input cache.
+/// Distribute `iterations` across `groups` groups, minimising max-min.
+/// Returns a vector of size `min(groups, iterations)` summing to
+/// `iterations`. Empty when either input is zero. Examples:
+///   split_iterations(32, 5) == {6, 6, 6, 7, 7}      // remainder 2 → last 2 entries +1
+///   split_iterations( 8, 1) == {8}                  // single group keeps everything
+///   split_iterations(19, 20) == 19 ones             // capped at iterations
+///   split_iterations( 0, 5) == {}                   // empty
+[[nodiscard]] inline std::vector<std::size_t>
+split_iterations(std::size_t iterations, std::size_t groups) {
+    if (iterations == 0 || groups == 0) return {};
+    const std::size_t effective_groups = std::min(groups, iterations);
+    std::vector<std::size_t> out(effective_groups, iterations / effective_groups);
+    const std::size_t remainder = iterations % effective_groups;
+    for (std::size_t bonus_index = effective_groups - remainder;
+         bonus_index < effective_groups; ++bonus_index) {
+        out[bonus_index] += 1;
+    }
+    return out;
+}
+
+/// Compute the actual number of groups for one test_case in this
+/// benchmark. Caps `test_case.concurrency` at the maximum iteration
+/// count across all tuples for this test_case (a group that would have
+/// 0 iterations is meaningless, so we never create one).
+[[nodiscard]] inline std::size_t group_count_for_test_case(
+    const BenchmarkConfig& config,
+    const TestCaseSpec&    test_case_spec,
+    std::size_t            iterations_per_tuple) noexcept
+{
+    if (iterations_per_tuple == 0) return 0;
+    const std::size_t requested = test_case_spec.concurrency == 0
+        ? default_test_case_concurrency()
+        : test_case_spec.concurrency;
+    const std::size_t cap_by_iterations = iterations_per_tuple;
+    return std::min(requested, cap_by_iterations);
+}
+
+/// Construct the (test_case × group × execution_tuple) cell table. Each
+/// cell holds one group's slice of iterations for one tuple. Groups
+/// are merged by the report writer / rule evaluator so the
+/// user-visible report still has one entry per (test_case, tuple).
 [[nodiscard]] inline std::vector<std::unique_ptr<Cell>> build_cells(
-    const BenchmarkExecutionState& state) noexcept
+    const BenchmarkExecutionState& state)
 {
     std::vector<std::unique_ptr<Cell>> cells;
-    cells.reserve(state.config.for_each.size() * state.execution_tuples.size());
+    // Rough upper bound: assume default concurrency for every (tc × tuple).
+    cells.reserve(state.config.for_each.size() * state.execution_tuples.size()
+                  * default_test_case_concurrency());
+
+    // Build a name → index lookup once so the per-`for_each` resolution
+    // is O(log N) instead of O(N) per entry.
+    std::map<std::string_view, std::size_t> test_case_by_name;
+    for (std::size_t test_case_index = 0;
+         test_case_index < state.test_cases.size(); ++test_case_index)
+    {
+        test_case_by_name.emplace(
+            std::string_view{state.test_cases[test_case_index].name},
+            test_case_index);
+    }
+
     for (const auto& [test_case_name, iterations] : state.config.for_each) {
-        std::size_t test_case_index = 0;
-        bool found = false;
-        for (std::size_t i = 0; i < state.test_cases.size(); ++i) {
-            if (state.test_cases[i].name == test_case_name) {
-                test_case_index = i;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
+        const auto found_it = test_case_by_name.find(
+            std::string_view{test_case_name});
+        if (found_it == test_case_by_name.end()) {
             loge("[bench_framework] test_case '{}' referenced by matrix.for but not declared",
                          test_case_name);
             continue;
         }
+        const std::size_t test_case_index = found_it->second;
+        const auto& test_case_spec = state.test_cases[test_case_index];
+        const std::size_t group_count = group_count_for_test_case(
+            state.config, test_case_spec, iterations);
+
+        if (group_count == 0) {
+            // Zero-iteration test case — emit no cells so the writer's
+            // "skip empty samples" path treats it as absent (matches V10
+            // behaviour, which also produced no samples for these).
+            continue;
+        }
+
+        const auto split = split_iterations(iterations, group_count);
         for (const auto& tuple : state.execution_tuples) {
-            auto cell = std::make_unique<Cell>();
-            cell->test_case        = &state.test_cases[test_case_index];
-            cell->test_case_index  = test_case_index;
-            cell->tuple            = &tuple;
-            cell->iterations       = iterations;
-            cells.push_back(std::move(cell));
+            for (std::size_t group_index = 0; group_index < split.size(); ++group_index) {
+                auto cell = std::make_unique<Cell>();
+                cell->test_case        = &state.test_cases[test_case_index];
+                cell->test_case_index  = test_case_index;
+                cell->tuple            = &tuple;
+                cell->iterations       = split[group_index];
+                cell->group_index      = group_index;
+                cell->group_count      = split.size();
+                cells.push_back(std::move(cell));
+            }
         }
     }
     return cells;
@@ -3498,7 +3835,8 @@ inline void combine_loop(
 ///   `<descriptor_name>[<metric_name>]`.
 /// - counters use the snapshotted before/after deltas.
 /// - evaluation metrics read the user's returned map.
-/// Held under `cell.samples_mu` for the duration of the append.
+/// V11: no per-cell mutex needed — items in a batch run sequentially
+/// against a unique `Cell*`, so `samples` has a single writer.
 inline void append_iteration_samples(
     Cell& cell,
     bool by_regions,
@@ -3509,7 +3847,6 @@ inline void append_iteration_samples(
     const std::vector<std::int64_t>& counters_after,
     const std::map<std::string, double>& evaluation_metrics) noexcept
 {
-    std::lock_guard<std::mutex> guard(cell.samples_mu);
     auto& all_regions = cell.samples["all_regions"];
     all_regions["wall_clock_ns"].push_back(iteration_wall_clock_ns);
 
@@ -3648,13 +3985,166 @@ inline void append_iteration_samples(
     return values;
 }
 
+// ----------------- WorkBatch + scheduler -----------------
+
+/// One entry inside a batch — one tuple's iteration loop bound to the
+/// batch's cached `Input`.
+struct WorkBatchItem {
+    Cell* cell = nullptr;        // points back into state.cells
+    /// Cached strong reference to the underlying tuple. Saves a hop in
+    /// the UI label updater on the cold path.
+    const ExecutionTuple* tuple = nullptr;
+};
+
+/// One scheduling unit: every item in the batch shares one cached
+/// `Input` instance built from the same `(test_case, group)`. Items
+/// run sequentially within the batch; batches run in parallel.
+struct WorkBatch {
+    std::size_t test_case_index = 0;
+    std::size_t group_index     = 0;
+    std::size_t group_count     = 1;
+    /// Sequence number of this batch in `state.cells`-order. Used as a
+    /// stable index into the per-batch slot vector by the scheduler.
+    std::size_t batch_index     = 0;
+    std::vector<WorkBatchItem> items{};
+};
+
+/// Walk `state.cells` once and group entries by `(test_case_index,
+/// group_index)`. The result is one batch per group; items inside each
+/// batch are tuples in `state.execution_tuples`-declared order.
+[[nodiscard]] inline std::vector<WorkBatch> build_work_batches(
+    BenchmarkExecutionState& state)
+{
+    // Use an ordered map keyed by the (tc_index, group_index) pair so
+    // batches come out in a deterministic order. The driver later treats
+    // `batches[i].batch_index` as i (assigned below in a final pass).
+    std::map<std::pair<std::size_t, std::size_t>, WorkBatch> by_key;
+    for (auto& cell_ptr : state.cells) {
+        const auto key = std::pair{cell_ptr->test_case_index, cell_ptr->group_index};
+        auto& batch = by_key[key];
+        if (batch.items.empty()) {
+            batch.test_case_index = cell_ptr->test_case_index;
+            batch.group_index     = cell_ptr->group_index;
+            batch.group_count     = cell_ptr->group_count;
+        }
+        batch.items.push_back(WorkBatchItem{ cell_ptr.get(), cell_ptr->tuple });
+    }
+
+    std::vector<WorkBatch> batches;
+    batches.reserve(by_key.size());
+    for (auto& [key, batch] : by_key) {
+        (void)key;
+        batch.batch_index = batches.size();
+        batches.push_back(std::move(batch));
+    }
+    return batches;
+}
+
+// ----------------- Progress helpers (single source of writes) -----------------
+
+/// Lazily resolve the `ProgressTestCase` for the current benchmark
+/// closure. Returns nullptr when the progress dashboard wasn't
+/// installed, the per-benchmark slot hasn't completed setup yet, or
+/// any index is out of bounds. Centralised so the five `progress_*`
+/// helpers don't repeat the same five-line guard chain.
+[[nodiscard]] inline ProgressTestCase* progress_test_case_for(
+    const BenchmarkContext& context, std::size_t test_case_index) noexcept
+{
+    if (context.progress == nullptr) return nullptr;
+    if (context.benchmark_index >= context.progress->per_benchmark.size())
+        return nullptr;
+    auto& per = *context.progress->per_benchmark[context.benchmark_index];
+    if (!per.setup_done.load(std::memory_order_acquire)) return nullptr;
+    if (test_case_index >= per.test_cases.size()) return nullptr;
+    return per.test_cases[test_case_index].get();
+}
+
+/// Lazily resolve the `ProgressGroup` for the current benchmark
+/// closure. Returns nullptr when no test case or group exists at the
+/// supplied indices.
+[[nodiscard]] inline ProgressGroup* progress_group_for(
+    const BenchmarkContext& context,
+    std::size_t test_case_index, std::size_t group_index) noexcept
+{
+    auto* tc = progress_test_case_for(context, test_case_index);
+    if (tc == nullptr) return nullptr;
+    if (group_index >= tc->groups.size()) return nullptr;
+    return tc->groups[group_index].get();
+}
+
+inline void progress_mark_test_case_start(
+    BenchmarkContext& context, const WorkBatch& batch) noexcept
+{
+    auto* tc = progress_test_case_for(context, batch.test_case_index);
+    if (tc == nullptr) return;
+    std::int64_t expected = 0;
+    tc->start_ns.compare_exchange_strong(
+        expected, bioseq::instr::clock::now_ns(),
+        std::memory_order_relaxed, std::memory_order_relaxed);
+    if (batch.group_index < tc->groups.size()) {
+        tc->groups[batch.group_index]->active.store(true, std::memory_order_relaxed);
+    }
+}
+
+inline void progress_update_label(
+    BenchmarkContext& context, const WorkBatch& batch,
+    const WorkBatchItem& item, std::string_view benchmark_key) noexcept
+{
+    auto* group = progress_group_for(context, batch.test_case_index, batch.group_index);
+    if (group == nullptr) return;
+    auto label = fmt::format("algo={}, bench={}",
+                             item.tuple->algorithm_name, benchmark_key);
+    std::lock_guard<std::mutex> guard(group->label_mu);
+    group->label = std::move(label);
+}
+
+inline void progress_tick_iteration(
+    BenchmarkContext& context, const Cell& cell) noexcept
+{
+    auto* group = progress_group_for(context, cell.test_case_index, cell.group_index);
+    if (group == nullptr) return;
+    group->done.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline void progress_tick_item_done(
+    BenchmarkContext& context, const WorkBatch& batch) noexcept
+{
+    auto* tc = progress_test_case_for(context, batch.test_case_index);
+    if (tc == nullptr) return;
+    tc->tuple_done.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline void progress_mark_group_done(
+    BenchmarkContext& context, const WorkBatch& batch) noexcept
+{
+    auto* tc = progress_test_case_for(context, batch.test_case_index);
+    if (tc == nullptr) return;
+    if (batch.group_index < tc->groups.size()) {
+        tc->groups[batch.group_index]->active.store(false, std::memory_order_relaxed);
+    }
+    // The test case is "done" once every batch's item-level tick has
+    // fired. The first thread to observe `tuple_done >= tuple_total`
+    // stamps `finish_ns` via CAS-from-zero; later observers see a
+    // non-zero `expected` and skip. (`tuple_done` and `tuple_total`
+    // are loaded separately, but post-completion no other thread is
+    // mutating them, so the loads always converge to consistent values.)
+    const auto total = tc->tuple_total.load(std::memory_order_relaxed);
+    if (tc->tuple_done.load(std::memory_order_relaxed) >= total) {
+        std::int64_t expected = 0;
+        tc->finish_ns.compare_exchange_strong(
+            expected, bioseq::instr::clock::now_ns(),
+            std::memory_order_relaxed, std::memory_order_relaxed);
+    }
+}
+
 // ----------------- run_unit driver -----------------
 
 template<typename Input, typename Output>
 inline void run_typed_benchmark(
     BenchmarkExecutionState& state,
     BenchmarkContext& context,
-    const std::function<Input(std::string_view, std::string_view, simdjson::dom::element)>& on_input,
+    const std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>& on_estimate_resources,
+    const std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>& on_input,
     const std::function<Output(std::string_view, const ParamMap&, const Input&)>& on_run,
     const std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)>& on_evaluate,
     const std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)>& on_cleanup)
@@ -3662,58 +4152,41 @@ inline void run_typed_benchmark(
     using bioseq::instr::installed_profiler_scope;
     using bioseq::instr::ProfilerBlock;
 
-    const auto test_case_count = state.test_cases.size();
-    std::vector<std::optional<Input>> cached_inputs(test_case_count);
-    std::vector<std::once_flag>       input_once_flags(test_case_count);
     const std::string                 data_dir = context.data_dir;
-
-    auto ensure_input = [&](const Cell& cell) -> const Input& {
-        std::call_once(input_once_flags[cell.test_case_index], [&] {
-            cached_inputs[cell.test_case_index].emplace(
-                on_input(data_dir, cell.test_case->name, cell.test_case->data));
-        });
-        return *cached_inputs[cell.test_case_index];
-    };
-
     const auto counter_handles = resolve_counter_handles(state.config.metrics);
     const bool by_regions = state.config.by_regions;
 
-    const bool test_case_lock_enabled = state.config.concurrency.test_case_lock;
+    // Pre-built batch list: one batch per (test_case, group). Items
+    // inside a batch run sequentially against one cached Input.
+    auto batches = build_work_batches(state);
+    if (batches.empty()) return;
 
-    /// Run exactly one iteration of one cell. Hot path; called once per
-    /// (cell × iter_index) work unit.
-    auto run_one_iteration = [&](Cell& cell) {
+    // One cached Input slot per batch. Pre-sized as a vector so each
+    // TBB worker writes to a distinct, owned slot without racing
+    // through std::map's internal tree.
+    struct GroupSlot {
+        std::optional<Input> input{};
+        RunConstraints       constraints{};
+    };
+    std::vector<GroupSlot> group_slots(batches.size());
+
+    auto* memory_budget = context.memory_budget;
+    DEBUG_ASSERT(memory_budget != nullptr,
+        "BenchmarkContext::memory_budget must be set by run_impl");
+
+    /// Run exactly one iteration of one cell against `input`. Hot path.
+    auto run_one_iteration = [&](Cell& cell, const Input& input) {
         const auto& tuple = *cell.tuple;
-        const Input& input = ensure_input(cell);
 
-        // Per-iteration profiler block. Construction zero-inits aggregate
-        // tables (see bioseq_instr.aggregate); no carry-over even if a
-        // worker thread is reused between iterations.
         ProfilerBlock<profiler_args_t> profiler_block{};
         installed_profiler_scope<profiler_args_t> profiler_scope{profiler_block};
 
         const auto counters_before = snapshot_counters(counter_handles);
 
-        // Acquire the per-test-case mutex (if the flag is on) so this
-        // iteration runs alone against its cached input. Held only
-        // around `clock::now_ns` -> `on_run` -> `clock::now_ns` so the
-        // wall_clock_ns sample never includes lock-wait time.
-        // `on_evaluate` and `append_iteration_samples` then run with
-        // the mutex released — they don't touch the cached input
-        // beyond what's already legal under read-only sharing.
-        std::unique_lock<std::mutex> test_case_guard;
-        if (test_case_lock_enabled
-            && cell.test_case_index < state.per_test_case_mutexes.size()) {
-            test_case_guard = std::unique_lock<std::mutex>(
-                *state.per_test_case_mutexes[cell.test_case_index]);
-        }
-
         const auto t_begin_ns = bioseq::instr::clock::now_ns();
         const Output output = on_run(tuple.algorithm_name, tuple.params, input);
         const auto t_end_ns = bioseq::instr::clock::now_ns();
         const auto iteration_wall_clock_ns = static_cast<double>(t_end_ns - t_begin_ns);
-
-        if (test_case_guard.owns_lock()) test_case_guard.unlock();
 
         const auto counters_after = snapshot_counters(counter_handles);
 
@@ -3724,59 +4197,72 @@ inline void run_typed_benchmark(
                                   iteration_wall_clock_ns, state.config.metrics,
                                   counters_before, counters_after, evaluation_metrics);
 
-        if (context.progress != nullptr) {
-            context.progress->tick(context.benchmark_index);
+        progress_tick_iteration(context, cell);
+    };
+
+    /// Run every iteration of one item, taking the bench-level locks
+    /// once per item (acquired around the whole iteration loop, not per
+    /// iteration). The cross-bench shared/unique lock is acquired here
+    /// — the closure that calls `run_typed_benchmark` no longer holds
+    /// it for us.
+    auto run_item_iterations = [&](const WorkBatchItem& item, const Input& input) {
+        std::shared_lock<std::shared_mutex> bench_shared;
+        std::unique_lock<std::shared_mutex> bench_unique;
+        if (state.config.concurrency.bench_lock) {
+            bench_unique = std::unique_lock<std::shared_mutex>(*context.cross_bench_mu);
+        } else {
+            bench_shared = std::shared_lock<std::shared_mutex>(*context.cross_bench_mu);
+        }
+        std::unique_lock<std::mutex> serial_guard;
+        if (!state.config.concurrency.concurrency) {
+            serial_guard = std::unique_lock<std::mutex>(state.serial_mu);
+        }
+        for (std::size_t iter = 0; iter < item.cell->iterations; ++iter) {
+            run_one_iteration(*item.cell, input);
         }
     };
 
-    // Build a flat work-unit list (Cell*, iteration_index) so TBB can
-    // distribute *iterations* across workers, not just whole cells. Without
-    // this, a single-cell benchmark with 1000 iterations would pin to one
-    // thread regardless of `--threads`.
-    std::vector<Cell*> work_items;
-    std::size_t total_units = 0;
-    for (const auto& cell_ptr : state.cells) total_units += cell_ptr->iterations;
-    work_items.reserve(total_units);
-    for (auto& cell_ptr : state.cells) {
-        for (std::size_t i = 0; i < cell_ptr->iterations; ++i) {
-            work_items.push_back(cell_ptr.get());
-        }
-    }
+    /// Process one batch end-to-end. Called by TBB once per batch.
+    auto run_one_batch = [&](WorkBatch& batch) {
+        const auto& spec = state.test_cases[batch.test_case_index];
+        auto& slot = group_slots[batch.batch_index];
 
-    if (state.config.concurrency.concurrency) {
-        // Counter-bearing benchmarks no longer force serial as of V5;
-        // see counter.cppm — per-thread storage means each TBB worker's
-        // before/after snapshot only reflects its own contribution.
-        oneapi::tbb::parallel_for_each(
-            work_items.begin(), work_items.end(),
-            [&](Cell* cell_ptr) { run_one_iteration(*cell_ptr); });
-    } else {
-        for (auto* cell_ptr : work_items) {
-            run_one_iteration(*cell_ptr);
-        }
-    }
+        // 1. Estimate resources for this batch.
+        slot.constraints = on_estimate_resources(data_dir, spec.name, spec.data);
 
-    // Tear down each cached input. Runs single-threaded — TBB's
-    // `parallel_for_each` returns only after every worker has finished
-    // `run_one_iteration`, so the cleanup callable does not need to be
-    // thread-safe. Skipped when the user supplied no callback (the
-    // cached `Input` destructor still fires when the vector goes out of
-    // scope below). Iteration order matches `state.test_cases` so any
-    // log lines from the user's body appear in a deterministic
-    // sequence. `spec.data` is a non-owning view into `state.parser`'s
-    // pool; the parser lives on `BenchmarkExecutionState`, which the
-    // closure (in `create_benchmark`'s template body) keeps alive
-    // until the benchmark's report is stashed under
-    // `context.reports` long after this function returns — so the
-    // view stays valid throughout the cleanup pass. **Must not
-    // throw**, same contract as `on_input`.
-    if (on_cleanup) {
-        for (std::size_t i = 0; i < cached_inputs.size(); ++i) {
-            if (!cached_inputs[i].has_value()) continue;
-            const auto& spec = state.test_cases[i];
-            on_cleanup(data_dir, spec.name, spec.data, *cached_inputs[i]);
+        // 2. Reserve base memory and build the input.
+        BudgetReservation base_reservation(*memory_budget, slot.constraints.base_memory);
+        slot.input.emplace(on_input(data_dir, spec.name, spec.data, slot.constraints));
+
+        // 3. Reserve extra memory only for the iteration loop. Released
+        //    by RAII at the closing brace of this scope.
+        {
+            BudgetReservation extra_reservation(*memory_budget, slot.constraints.extra_memory);
+            progress_mark_test_case_start(context, batch);
+            for (auto& item : batch.items) {
+                progress_update_label(context, batch, item, state.config.benchmark_key);
+                run_item_iterations(item, *slot.input);
+                progress_tick_item_done(context, batch);
+            }
         }
-    }
+
+        // 4. Cleanup, then release base_memory at scope exit.
+        if (on_cleanup) {
+            on_cleanup(data_dir, spec.name, spec.data, *slot.input);
+        }
+        slot.input.reset();
+        progress_mark_group_done(context, batch);
+    };
+
+    // 5. Drive batches in parallel. Even when the benchmark's
+    //    `concurrency` flag is false we still hand them to TBB —
+    //    `run_item_iterations` takes the per-benchmark serial mutex
+    //    inside, so iterations are still serialised. We let TBB
+    //    parallelise across benchmarks and across (test_case, group)
+    //    pairs that don't both want the serial mutex at the same
+    //    instant.
+    oneapi::tbb::parallel_for_each(batches.begin(), batches.end(),
+        [&](WorkBatch& batch) { run_one_batch(batch); });
 }
 
 // ----------------- Sample reduction -----------------
@@ -3906,39 +4392,109 @@ inline void run_typed_benchmark(
                               /*threshold_pct=*/0.0, op.tolerance_pct);
 }
 
-/// Apply every rule against every test case and collect failures.
-/// For each (rule, test_case) pair we look up matching cells on the LHS
-/// and RHS, take the median of each side's `all_regions[<metric>]` array,
-/// run the comparator, and synthesise a `Violation` if it fails.
+/// Per-cell map shape: `region -> metric -> samples`. Reused by the
+/// writer and rule evaluator to expose group-merged samples.
+using SampleMap = std::map<std::string, std::map<std::string, std::vector<double>>>;
+
+/// Concatenate every group cell's `samples` map into one `SampleMap`.
+/// Sample arrays append in cell-declaration order (= group_index order),
+/// so the result is deterministic. Empty input yields an empty map.
+[[nodiscard]] inline SampleMap merge_group_samples(
+    std::span<const Cell* const> group_cells)
+{
+    SampleMap merged;
+    for (const auto* cell_ptr : group_cells) {
+        if (cell_ptr == nullptr) continue;
+        for (const auto& [region_name, metric_map] : cell_ptr->samples) {
+            auto& target_region = merged[region_name];
+            for (const auto& [metric_name, samples] : metric_map) {
+                auto& target_metric = target_region[metric_name];
+                target_metric.insert(target_metric.end(),
+                                      samples.begin(), samples.end());
+            }
+        }
+    }
+    return merged;
+}
+
+/// `(tuple, test_case_name)` -> merged samples view of one benchmark
+/// state. Built once per consumer; shared by `evaluate_rules`,
+/// `evaluate_regressions`, and the report writer so all three see the
+/// same group-merged numbers (reading multiple group cells separately
+/// would skew aggregates and Cartesian-product rule evaluations).
+using MergedSamplesByPair =
+    std::map<std::pair<const ExecutionTuple*, std::string>, SampleMap>;
+
+[[nodiscard]] inline MergedSamplesByPair merged_samples_for_state(
+    const BenchmarkExecutionState& state)
+{
+    std::map<std::pair<const ExecutionTuple*, std::string>,
+             std::vector<const Cell*>> by_pair;
+    for (const auto& cell_ptr : state.cells) {
+        by_pair[{cell_ptr->tuple, cell_ptr->test_case->name}]
+            .push_back(cell_ptr.get());
+    }
+    MergedSamplesByPair merged;
+    for (auto& [pair_key, cells_for_pair] : by_pair) {
+        merged[pair_key] = merge_group_samples(
+            std::span<const Cell* const>(
+                cells_for_pair.data(), cells_for_pair.size()));
+    }
+    return merged;
+}
+
+/// Look up `region_name -> metric_name -> samples` inside a merged
+/// view. Returns nullptr when any link in the chain is missing.
+[[nodiscard]] inline const std::vector<double>* fetch_merged_samples(
+    const MergedSamplesByPair& merged,
+    const ExecutionTuple* tuple,
+    const std::string& test_case_name,
+    const std::string& region_name,
+    const std::string& metric_name) noexcept
+{
+    const auto pair_it = merged.find({tuple, test_case_name});
+    if (pair_it == merged.end()) return nullptr;
+    const auto region_it = pair_it->second.find(region_name);
+    if (region_it == pair_it->second.end()) return nullptr;
+    const auto metric_it = region_it->second.find(metric_name);
+    if (metric_it == region_it->second.end()) return nullptr;
+    return &metric_it->second;
+}
+
+/// Apply every rule against every test case and collect failures. With
+/// V11's per-group cells, samples are merged once per `(tuple,
+/// test_case)` *before* the rule loop so LHS/RHS aggregates are computed
+/// from the same merged sample arrays the report writer will emit.
 inline void evaluate_rules(const BenchmarkExecutionState& state,
                             std::vector<Violation>& violations)
 {
-    // Index cells by (test_case_name, &tuple) for quick lookup.
+    const auto merged = merged_samples_for_state(state);
+
     for (const auto& metric : state.config.metrics) {
         for (const auto& rule : metric.rules) {
             for (const auto& [test_case_name, _iterations] : state.config.for_each) {
-                std::vector<const Cell*> lhs_cells;
-                std::vector<const Cell*> rhs_cells;
-                for (const auto& cell_ptr : state.cells) {
-                    if (cell_ptr->test_case->name != test_case_name) continue;
-                    if (selector_matches(rule.lhs, *cell_ptr->tuple)) lhs_cells.push_back(cell_ptr.get());
-                    if (selector_matches(rule.rhs, *cell_ptr->tuple)) rhs_cells.push_back(cell_ptr.get());
+                // Collect tuple* on each side so we evaluate the rule
+                // exactly once per (LHS_tuple, RHS_tuple) pair, never
+                // duplicated across groups.
+                std::vector<const ExecutionTuple*> lhs_tuples;
+                std::vector<const ExecutionTuple*> rhs_tuples;
+                for (const auto& tuple : state.execution_tuples) {
+                    if (selector_matches(rule.lhs, tuple)) lhs_tuples.push_back(&tuple);
+                    if (selector_matches(rule.rhs, tuple)) rhs_tuples.push_back(&tuple);
                 }
-                for (const auto* lhs_cell : lhs_cells) {
-                    for (const auto* rhs_cell : rhs_cells) {
-                        // Look up the metric values inside the all_regions bucket.
-                        auto lhs_region_it = lhs_cell->samples.find("all_regions");
-                        auto rhs_region_it = rhs_cell->samples.find("all_regions");
-                        if (lhs_region_it == lhs_cell->samples.end()
-                            || rhs_region_it == rhs_cell->samples.end()) continue;
-                        auto lhs_metric_it = lhs_region_it->second.find(rule.metric_name);
-                        auto rhs_metric_it = rhs_region_it->second.find(rule.metric_name);
-                        if (lhs_metric_it == lhs_region_it->second.end()
-                            || rhs_metric_it == rhs_region_it->second.end()) continue;
-                        const double lhs_aggregate =
-                            aggregate_samples(rule.cmp.aggregate, lhs_metric_it->second);
-                        const double rhs_aggregate =
-                            aggregate_samples(rule.cmp.aggregate, rhs_metric_it->second);
+                for (const auto* lhs_tuple : lhs_tuples) {
+                    for (const auto* rhs_tuple : rhs_tuples) {
+                        const auto* lhs_samples = fetch_merged_samples(
+                            merged, lhs_tuple, test_case_name,
+                            "all_regions", rule.metric_name);
+                        const auto* rhs_samples = fetch_merged_samples(
+                            merged, rhs_tuple, test_case_name,
+                            "all_regions", rule.metric_name);
+                        if (lhs_samples == nullptr || rhs_samples == nullptr) continue;
+                        const double lhs_aggregate = aggregate_samples(
+                            rule.cmp.aggregate, *lhs_samples);
+                        const double rhs_aggregate = aggregate_samples(
+                            rule.cmp.aggregate, *rhs_samples);
                         if (comparator_passes(rule.cmp, lhs_aggregate, rhs_aggregate)) continue;
 
                         Violation violation;
@@ -3947,10 +4503,10 @@ inline void evaluate_rules(const BenchmarkExecutionState& state,
                         violation.rule_name       = rule.name;
                         violation.test_case       = test_case_name;
                         violation.metric          = rule.metric_name;
-                        violation.lhs_algorithm   = lhs_cell->tuple->algorithm_name;
-                        violation.lhs_full_params = lhs_cell->tuple->params;
-                        violation.rhs_algorithm   = rhs_cell->tuple->algorithm_name;
-                        violation.rhs_full_params = rhs_cell->tuple->params;
+                        violation.lhs_algorithm   = lhs_tuple->algorithm_name;
+                        violation.lhs_full_params = lhs_tuple->params;
+                        violation.rhs_algorithm   = rhs_tuple->algorithm_name;
+                        violation.rhs_full_params = rhs_tuple->params;
                         violation.args            = {lhs_aggregate, rhs_aggregate};
                         violations.push_back(std::move(violation));
                     }
@@ -4565,6 +5121,21 @@ struct HistoricalReportCache {
         return history_cache.fetch(index);
     };
 
+    // Per-state merged-samples cache built once per `(config_path,
+    // benchmark)` and reused across every rule that touches the same
+    // state. Earlier versions rebuilt this map per-rule, which scaled
+    // O(N_rules × N_cells).
+    std::map<const BenchmarkExecutionState*, MergedSamplesByPair> merged_cache;
+    auto merged_for = [&](const BenchmarkExecutionState* state)
+        -> const MergedSamplesByPair&
+    {
+        auto found = merged_cache.find(state);
+        if (found != merged_cache.end()) return found->second;
+        auto inserted = merged_cache.emplace(
+            state, merged_samples_for_state(*state));
+        return inserted.first->second;
+    };
+
     for (const auto& [config_path, rules] : regression_rules_by_config) {
         for (const auto& rule : rules) {
             std::size_t matched_count = 0;
@@ -4590,35 +5161,19 @@ struct HistoricalReportCache {
             const std::string rule_location =
                 fmt::format("{}/regression_rules/{}", config_path, rule.name);
 
-            // Build a per-state (tuple_ptr, test_case_name) → cell map
-            // once per rule so the inner walk is O(1) per combo instead
-            // of O(cells). With many tuples × test_cases × regions the
-            // earlier linear scan dominated.
-            std::map<const BenchmarkExecutionState*,
-                     std::map<std::pair<const ExecutionTuple*, std::string>, const Cell*>>
-                cells_by_state_index;
             for (const auto* state : matching_states) {
-                auto& index = cells_by_state_index[state];
-                for (const auto& cell_ptr : state->cells) {
-                    index.emplace(
-                        std::pair{cell_ptr->tuple, cell_ptr->test_case->name},
-                        cell_ptr.get());
-                }
-            }
-
-            for (const auto* state : matching_states) {
-                const auto& cell_index = cells_by_state_index[state];
+                const auto& merged_index = merged_for(state);
                 for (const auto& tuple : state->execution_tuples) {
                     for (const auto& [test_case_name, _iter] : state->config.for_each) {
                         if (excluded_test_cases.count(test_case_name) > 0) continue;
                         for (const auto& region_name : rule.regions) {
-                            const auto cell_it = cell_index.find(
+                            const auto merged_it = merged_index.find(
                                 std::pair{&tuple, test_case_name});
-                            if (cell_it == cell_index.end()) continue;
-                            const Cell* current_cell = cell_it->second;
+                            if (merged_it == merged_index.end()) continue;
+                            const auto& merged_samples = merged_it->second;
 
-                            const auto region_it = current_cell->samples.find(region_name);
-                            if (region_it == current_cell->samples.end()) continue;
+                            const auto region_it = merged_samples.find(region_name);
+                            if (region_it == merged_samples.end()) continue;
                             const auto metric_it = region_it->second.find(rule.metric);
                             if (metric_it == region_it->second.end()
                                 || metric_it->second.empty()) continue;
@@ -5034,26 +5589,26 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
         });
     };
 
-    /// Pick the cell that pairs a given (tuple, test_case_name). Returns
-    /// nullptr if no cell exists (e.g. matrix expansion produced no entry
-    /// for that test case under this algorithm — should not happen, but
-    /// the writer is defensive).
-    auto find_cell = [&](const BenchmarkExecutionState& state,
-                          const ExecutionTuple* tuple,
-                          std::string_view test_case_name) -> const Cell* {
-        for (const auto& cell_ptr : state.cells) {
-            if (cell_ptr->tuple != tuple) continue;
-            if (cell_ptr->test_case->name != test_case_name) continue;
-            return cell_ptr.get();
-        }
-        return nullptr;
+    /// Per-state merged-samples cache. Built lazily so empty
+    /// benchmarks pay nothing. Two reports share-by-config and the
+    /// writer iterates per benchmark, so a one-shot cache is all we
+    /// need.
+    std::map<const BenchmarkExecutionState*, MergedSamplesByPair> merged_cache;
+    auto merged_for_writer = [&](const BenchmarkExecutionState& state)
+        -> const MergedSamplesByPair&
+    {
+        auto found = merged_cache.find(&state);
+        if (found != merged_cache.end()) return found->second;
+        return merged_cache.emplace(&state, merged_samples_for_state(state))
+            .first->second;
     };
 
-    /// Emit the per-test-case object for one cell: every region (or just
-    /// "all_regions" when by_regions=false) and the metric arrays inside it.
-    auto emit_test_case_block = [&](auto& b, const Cell& cell) {
+    /// Emit the per-test-case object from a group-merged sample map:
+    /// every region (or just "all_regions" when by_regions=false) and
+    /// the metric arrays inside it.
+    auto emit_test_case_block = [&](auto& b, const SampleMap& merged) {
         emit_object_with_body(b, [&](auto& region_outer) {
-            emit_range_with_commas(region_outer, cell.samples,
+            emit_range_with_commas(region_outer, merged,
                 [](auto& region_b, const auto& region_kv) {
                     emit_kv_with_body(region_b,
                         std::string_view{region_kv.first},
@@ -5087,21 +5642,21 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
             outer.append_comma();
             emit_kv_with_body(outer, "test_cases", [&](auto& cases_b) {
                 emit_object_with_body(cases_b, [&](auto& cases_inner) {
+                    const auto& merged_index = merged_for_writer(state);
                     bool first_tc_in_tuple = true;
                     for (const auto& [test_case_name, _iter] : state.config.for_each) {
-                        const Cell* cell_for_pair = find_cell(state, &tuple, test_case_name);
-                        if (cell_for_pair == nullptr) continue;
-                        // Skip cells that produced no samples (e.g.
-                        // matrix.for declared zero iterations). The schema
-                        // requires at least one region per emitted
-                        // test_case bucket; emitting an empty object would
-                        // fail report validation.
-                        if (cell_for_pair->samples.empty()) continue;
+                        const auto pair_it = merged_index.find({&tuple, test_case_name});
+                        if (pair_it == merged_index.end()) continue;
+                        // Skip if every group produced no samples (e.g.
+                        // matrix.for declared zero iterations).
+                        if (pair_it->second.empty()) continue;
                         if (!first_tc_in_tuple) cases_inner.append_comma();
                         first_tc_in_tuple = false;
                         emit_kv_with_body(cases_inner,
                             std::string_view{test_case_name},
-                            [&](auto& inner_b) { emit_test_case_block(inner_b, *cell_for_pair); });
+                            [&](auto& inner_b) {
+                                emit_test_case_block(inner_b, pair_it->second);
+                            });
                     }
                 });
             });
@@ -6541,24 +7096,80 @@ inline void render_summary(
 
 // ----------------- Progress dashboard -----------------
 
+/// Severity buckets for the colour-shifting progress gauge. Picked by
+/// percentage from the lowest matching threshold. Keep ordered low → high.
+/// `palette` is the enumerator (literal type) — converting to
+/// `ftxui::Color` happens at the call site since Color's constructor
+/// is not constexpr.
+struct GaugeBucket {
+    float                   min_fraction;
+    ftxui::Color::Palette256 palette;
+};
+inline constexpr std::array<GaugeBucket, 4> kGaugeBuckets{ {
+    { 0.00f, static_cast<ftxui::Color::Palette256>(ftxui::Color::Red)     },
+    { 0.25f, ftxui::Color::Orange1                                       },
+    { 0.50f, static_cast<ftxui::Color::Palette256>(ftxui::Color::Yellow) },
+    { 0.75f, static_cast<ftxui::Color::Palette256>(ftxui::Color::Green)  },
+} };
+
+[[nodiscard]] inline constexpr ftxui::Color::Palette256
+gauge_palette(float fraction) noexcept {
+    auto picked = kGaugeBuckets.front().palette;
+    for (const auto& bucket : kGaugeBuckets) {
+        if (fraction >= bucket.min_fraction) picked = bucket.palette;
+    }
+    return picked;
+}
+
+/// Wrap `gauge_palette` in an `ftxui::Color`. The Color constructor
+/// itself is not `constexpr`, so this layer stays at runtime.
+[[nodiscard]] inline ftxui::Color gauge_color(float fraction) noexcept {
+    return ftxui::Color(gauge_palette(fraction));
+}
+
+/// Render a coloured gauge of fixed width. Returns an ftxui Element so
+/// the caller can compose with hbox/text. Fill width is rounded to the
+/// nearest integer; an entirely-empty bar still displays as
+/// `[░░░░...]` so the layout doesn't shift. Values outside `[0, 1]`
+/// are clamped before the lookup.
+[[nodiscard]] inline ftxui::Element coloured_gauge(
+    float fraction, int total_cells) noexcept
+{
+    constexpr std::string_view kFull  = "\xe2\x96\x88";   // █
+    constexpr std::string_view kEmpty = "\xe2\x96\x91";   // ░
+    if (total_cells <= 0) return ftxui::text("[]");
+    const float clamped = std::clamp(fraction, 0.0f, 1.0f);
+    const int filled_cells = std::clamp(
+        static_cast<int>(std::lround(
+            static_cast<double>(clamped) * static_cast<double>(total_cells))),
+        0, total_cells);
+    std::string bar;
+    bar.reserve(static_cast<std::size_t>(total_cells) * kFull.size() + 2);
+    bar.push_back('[');
+    for (int i = 0; i < total_cells; ++i) bar += (i < filled_cells ? kFull : kEmpty);
+    bar.push_back(']');
+    return ftxui::text(bar) | ftxui::color(gauge_color(clamped));
+}
+
+/// Format a memory value (bytes) as `%.2f GiB` for the dashboard header.
+[[nodiscard]] inline std::string format_bytes_gib(double bytes) noexcept {
+    constexpr double kGib = 1024.0 * 1024.0 * 1024.0;
+    return fmt::format("{:.2f} GiB", bytes / kGib);
+}
+
 /// Background thread body for the progress dashboard. Two paths:
-/// 1. **TTY**: render an ftxui document to stderr every 150 ms with one
-///    gauge per benchmark. Cursor reset between frames keeps the screen
-///    in place so output looks like a live UI.
-/// 2. **Non-TTY (CI / pipes)**: emit a JustLog info line every 5 s with
-///    `<benchmark_title> <done>/<total>` per benchmark, so log scrapers
-///    still see progress.
-/// Polls `progress.running` every 200 ms in the non-TTY path so the
-/// shutdown signal kicks in within ~200 ms of the workers finishing.
+/// 1. **TTY**: render an ftxui document to stderr every 200 ms with
+///    one row per test_case (active groups underneath), a colour-
+///    shifting gauge per row, and a `[memory X / Y GiB]` header.
+/// 2. **Non-TTY (CI / pipes)**: emit a JustLog info line every 5 s
+///    with one line per test_case still in flight.
 inline void render_progress_loop(ProgressState& progress) noexcept {
     using namespace std::chrono_literals;
     using namespace ftxui;
+    constexpr int kBarCells = 16;
 
     const bool tty = progress.tty_render.load(std::memory_order_relaxed);
     if (!tty) {
-        // No TTY → periodic logi() lines every ~5 s. We poll `running` every
-        // 200 ms so shutdown is responsive (a 5 s blocking sleep would force
-        // every CI build to wait an extra five seconds at the end).
         constexpr auto kPollInterval = std::chrono::milliseconds{200};
         constexpr int  kTicksPerLog  = 25;     // 25 × 200 ms == 5 s
         int ticks_until_next_log = kTicksPerLog;
@@ -6567,8 +7178,16 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
             if (--ticks_until_next_log > 0) continue;
             ticks_until_next_log = kTicksPerLog;
             for (const auto& per : progress.per_benchmark) {
-                const auto done_now = per->done.load(std::memory_order_relaxed);
-                logi("[bench_framework] [{}] {}/{}", per->title, done_now, per->total);
+                if (!per->setup_done.load(std::memory_order_acquire)) continue;
+                for (const auto& tc : per->test_cases) {
+                    const auto done = tc->tuple_done.load(std::memory_order_relaxed);
+                    const auto total = tc->tuple_total.load(std::memory_order_relaxed);
+                    if (tc->finish_ns.load(std::memory_order_relaxed) != 0) continue;
+                    if (tc->start_ns.load(std::memory_order_relaxed) == 0) continue;
+                    logi("[bench_framework] [{}/{}] tuples {}/{}",
+                         per->benchmark_key, tc->test_case_name,
+                         done, total);
+                }
             }
         }
         return;
@@ -6577,22 +7196,92 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     std::string reset_position;
     auto render_once = [&] {
         Elements rows;
-        rows.push_back(text("bench_framework — live progress") | bold);
+
+        // Header with optional budget gauge.
+        std::string header_label = "bench_framework — live progress";
+        if (progress.memory_budget != nullptr) {
+            const auto available = progress.memory_budget->snapshot_available();
+            const auto total     = static_cast<double>(progress.memory_budget->total_bytes());
+            const auto used      = total - static_cast<double>(available);
+            header_label += fmt::format("  [memory {} / {}]",
+                format_bytes_gib(used), format_bytes_gib(total));
+        }
+        rows.push_back(text(header_label) | bold);
+
         for (const auto& per : progress.per_benchmark) {
-            const auto done_now = per->done.load(std::memory_order_relaxed);
-            const float fraction = per->total == 0
-                ? 1.0f
-                : static_cast<float>(done_now) / static_cast<float>(per->total);
-            const auto label = per->benchmark_key + " (" + per->title + ")";
-            rows.push_back(hbox({
-                text(label) | size(WIDTH, EQUAL, 48),
-                gauge(fraction) | flex,
-                text(" " + std::to_string(done_now) + "/" + std::to_string(per->total)),
-            }));
+            // One header row per benchmark.
+            rows.push_back(text(fmt::format("• {} ({})", per->benchmark_key, per->title))
+                            | color(Color::Cyan));
+            // Skip the inner walk until the benchmark closure has
+            // finished populating its test_cases vector. Acquire
+            // ordering pairs with the writer's release store.
+            if (!per->setup_done.load(std::memory_order_acquire)) continue;
+            for (const auto& tc : per->test_cases) {
+                const auto tuple_done   = tc->tuple_done.load(std::memory_order_relaxed);
+                const auto tuple_total  = tc->tuple_total.load(std::memory_order_relaxed);
+                const auto start_ns     = tc->start_ns.load(std::memory_order_relaxed);
+                const auto finish_ns    = tc->finish_ns.load(std::memory_order_relaxed);
+                const float fraction    = tuple_total == 0
+                    ? 1.0f
+                    : static_cast<float>(tuple_done) / static_cast<float>(tuple_total);
+                const auto now_ns_value = bioseq::instr::clock::now_ns();
+                const auto elapsed_ns   = start_ns == 0
+                    ? std::int64_t{0}
+                    : ((finish_ns == 0 ? static_cast<std::int64_t>(now_ns_value)
+                                       : finish_ns) - start_ns);
+                const auto elapsed_s    = elapsed_ns / 1'000'000'000;
+
+                if (finish_ns != 0) {
+                    rows.push_back(hbox({
+                        text("  \xe2\x9c\x93 ") | color(Color::Green),  // ✓
+                        text(tc->test_case_name) | size(WIDTH, EQUAL, 24),
+                        text(fmt::format("tuples {}/{}",
+                            tuple_done, tuple_total)),
+                        text(fmt::format("  Executed in {}s", elapsed_s))
+                            | color(Color::GrayLight),
+                    }));
+                    continue;
+                }
+                rows.push_back(hbox({
+                    text("  \xe2\x96\xb6 ") | color(Color::Yellow),     // ▶
+                    text(tc->test_case_name) | size(WIDTH, EQUAL, 24),
+                    text(fmt::format("tuples {}/{}  ",
+                        tuple_done, tuple_total)),
+                    coloured_gauge(fraction, kBarCells),
+                    text(fmt::format("  {:>3.0f}%  Running... {}s",
+                        static_cast<double>(fraction) * 100.0, elapsed_s))
+                        | color(Color::GrayLight),
+                }));
+                for (const auto& group_ptr : tc->groups) {
+                    if (!group_ptr->active.load(std::memory_order_relaxed)) continue;
+                    const auto done = group_ptr->done.load(std::memory_order_relaxed);
+                    const float gfrac = group_ptr->total == 0 ? 1.0f
+                        : static_cast<float>(done) / static_cast<float>(group_ptr->total);
+                    std::string copied_label;
+                    {
+                        std::lock_guard<std::mutex> guard(group_ptr->label_mu);
+                        copied_label = group_ptr->label;
+                    }
+                    rows.push_back(hbox({
+                        text("    \xe2\x94\x94 "),                       // └
+                        text(fmt::format("group {}", group_ptr->group_index + 1))
+                            | size(WIDTH, EQUAL, 10),
+                        coloured_gauge(gfrac, kBarCells),
+                        text(fmt::format("  {:>3.0f}%  ",
+                            static_cast<double>(gfrac) * 100.0))
+                            | color(Color::GrayLight),
+                        text(copied_label) | color(Color::GrayLight),
+                    }));
+                }
+            }
         }
         auto document = vbox(std::move(rows));
-        const int height = static_cast<int>(progress.per_benchmark.size()) + 1;
-        auto screen = Screen::Create(Dimension::Fit(document), Dimension::Fixed(height));
+        // Auto-grow the screen vertically based on row count. Add a
+        // safety margin (1 row) so the cursor reset doesn't strand
+        // trailing characters.
+        const int height = std::max(1, static_cast<int>(rows.size())) + 1;
+        auto screen = Screen::Create(Dimension::Fit(document),
+                                      Dimension::Fixed(height));
         Render(screen, document);
         std::fputs(reset_position.c_str(), stderr);
         std::fputs(screen.ToString().c_str(), stderr);
@@ -6602,7 +7291,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
     while (progress.running.load(std::memory_order_relaxed)) {
         render_once();
-        std::this_thread::sleep_for(150ms);
+        std::this_thread::sleep_for(200ms);
     }
     render_once();   // final repaint with all bars at 100 %
     std::fputs("\n", stderr);
@@ -6686,14 +7375,20 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     std::map<std::string, std::unique_ptr<BenchmarkExecutionState>> reports;
     RegressionRulesByConfig regression_rules_by_config;
 
+    // Process-wide memory budget shared by every benchmark closure.
+    // Hardcoded ceiling lives on `MemoryBudget::kHardcodedTotalBytes`.
+    MemoryBudget memory_budget(MemoryBudget::kHardcodedTotalBytes);
+    logi("[bench_framework] memory budget total={} GiB",
+         MemoryBudget::kHardcodedTotalBytes / (1024.0 * 1024.0 * 1024.0));
+
     ProgressState progress;
     progress.tty_render.store(::isatty(STDERR_FILENO) != 0, std::memory_order_relaxed);
+    progress.memory_budget = &memory_budget;
     progress.per_benchmark.reserve(selected.size());
     for (const auto& erased : selected) {
         auto entry = std::make_unique<ProgressState::Per>();
         entry->title = erased.title;
         entry->benchmark_key = erased.benchmark_key;
-        entry->total = 0;       // populated after parse + matrix expansion
         progress.per_benchmark.push_back(std::move(entry));
     }
 
@@ -6720,6 +7415,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 context.diagnostics               = &diagnostics;
                 context.regression_rules_mu       = &regression_rules_mu;
                 context.regression_rules_by_config = &regression_rules_by_config;
+                context.memory_budget              = &memory_budget;
 
                 erased.execute(context);
             });
@@ -6822,7 +7518,8 @@ template<typename Input, typename Output>
     std::string title,
     std::string benchmark_key,
     std::string config_path,
-    std::function<Input(std::string_view, std::string_view, simdjson::dom::element)> on_input,
+    std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)> on_estimate_resources,
+    std::function<Input(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)> on_input,
     std::function<Output(std::string_view, const ParamMap&, const Input&)> on_run,
     std::function<std::map<std::string, double>(std::string_view, const ParamMap&, const Input&, const Output&)> on_evaluate,
     std::function<void(std::string_view, std::string_view, simdjson::dom::element, const Input&)> on_cleanup)
@@ -6832,17 +7529,39 @@ template<typename Input, typename Output>
     erased.benchmark_key = std::move(benchmark_key);
     erased.config_path   = std::move(config_path);
 
-    erased.execute = [erased_title         = erased.title,
-                       erased_benchmark_key = erased.benchmark_key,
-                       erased_config_path   = erased.config_path,
-                       captured_on_input    = std::move(on_input),
-                       captured_on_run      = std::move(on_run),
-                       captured_on_evaluate = std::move(on_evaluate),
-                       captured_on_cleanup  = std::move(on_cleanup)
+    erased.execute = [erased_title              = erased.title,
+                       erased_benchmark_key      = erased.benchmark_key,
+                       erased_config_path        = erased.config_path,
+                       captured_on_estimate      = std::move(on_estimate_resources),
+                       captured_on_input         = std::move(on_input),
+                       captured_on_run           = std::move(on_run),
+                       captured_on_evaluate      = std::move(on_evaluate),
+                       captured_on_cleanup       = std::move(on_cleanup)
                       ](BenchmarkContext& context) {
         auto state_holder = std::make_unique<detail::BenchmarkExecutionState>();
         auto& state = *state_holder;
         state.title = erased_title;
+
+        // Always publish a `setup_done` signal to the renderer on the
+        // way out, even from early-return paths. Otherwise an aborted
+        // benchmark would leave the dashboard's per-benchmark slot
+        // stuck on "header only, no rows" until `progress.running`
+        // flips false. The renderer treats `setup_done == true` plus
+        // an empty `test_cases` as "this benchmark is silent" and
+        // simply omits the inner walk.
+        struct PublishOnExit {
+            detail::ProgressState::Per* slot = nullptr;
+            ~PublishOnExit() noexcept {
+                if (slot != nullptr) {
+                    slot->setup_done.store(true, std::memory_order_release);
+                }
+            }
+        };
+        PublishOnExit publish_on_exit{
+            (context.progress != nullptr
+             && context.benchmark_index < context.progress->per_benchmark.size())
+                ? context.progress->per_benchmark[context.benchmark_index].get()
+                : nullptr};
 
         // 1. Parse the config file. The outcome carries schema diagnostics
         //    plus structural problems found during the simdjson walk.
@@ -6902,37 +7621,66 @@ template<typename Input, typename Output>
         }
         state.cells = detail::build_cells(state);
 
-        // Allocate one std::mutex per declared test_case so the
-        // hot-path lambda can grab the matching one when
-        // `concurrency.test_case_lock` is set. Indexed by
-        // `Cell::test_case_index`, so the size must match
-        // `state.test_cases.size()` exactly. Always allocated (even
-        // when the flag is false) — the cost is one heap pointer per
-        // test case, and it lets the hot path assume the vector is
-        // populated.
-        state.per_test_case_mutexes.clear();
-        state.per_test_case_mutexes.reserve(state.test_cases.size());
-        for (std::size_t i = 0; i < state.test_cases.size(); ++i) {
-            state.per_test_case_mutexes.emplace_back(std::make_unique<std::mutex>());
-        }
+        // V11: per-test-case mutexes deleted — the new batched scheduler
+        // runs at most one tuple at a time per (test_case, group), so
+        // there is no Input contention left to protect against.
 
-        std::uint64_t total_iterations = 0;
-        for (const auto& cell_ptr : state.cells) total_iterations += cell_ptr->iterations;
+        // Populate the progress dashboard's structure for this benchmark.
+        // One ProgressTestCase per test_case in declared order, one
+        // ProgressGroup per group of that test_case.
         if (context.progress != nullptr
             && context.benchmark_index < context.progress->per_benchmark.size()) {
-            context.progress->per_benchmark[context.benchmark_index]->total = total_iterations;
+            auto& per = *context.progress->per_benchmark[context.benchmark_index];
+            per.test_cases.clear();
+            per.test_cases.reserve(state.test_cases.size());
+            for (std::size_t tc_index = 0; tc_index < state.test_cases.size(); ++tc_index) {
+                auto tc = std::make_unique<detail::ProgressTestCase>();
+                tc->test_case_name = state.test_cases[tc_index].name;
+                // Walk every cell that targets this test_case to gather
+                // group count + per-group iteration totals + total tuple
+                // count.
+                std::size_t max_group_count = 0;
+                std::map<std::size_t, std::uint64_t> per_group_iters;
+                std::uint64_t tuple_total = 0;
+                for (const auto& cell_ptr : state.cells) {
+                    if (cell_ptr->test_case_index != tc_index) continue;
+                    max_group_count = std::max(max_group_count, cell_ptr->group_count);
+                    per_group_iters[cell_ptr->group_index] +=
+                        static_cast<std::uint64_t>(cell_ptr->iterations);
+                    ++tuple_total;
+                }
+                tc->tuple_total.store(tuple_total, std::memory_order_relaxed);
+                if (tuple_total == 0) {
+                    // Test case has no batches at all (zero iterations,
+                    // or undeclared in matrix.for). Stamp finish_ns
+                    // immediately so the renderer treats the row as
+                    // collapsed instead of showing "Running... 0s".
+                    tc->finish_ns.store(bioseq::instr::clock::now_ns(),
+                                        std::memory_order_relaxed);
+                }
+                tc->groups.reserve(max_group_count);
+                for (std::size_t group_index = 0; group_index < max_group_count;
+                     ++group_index) {
+                    auto group_ptr = std::make_unique<detail::ProgressGroup>();
+                    group_ptr->group_index = group_index;
+                    group_ptr->total = per_group_iters[group_index];
+                    tc->groups.push_back(std::move(group_ptr));
+                }
+                per.test_cases.push_back(std::move(tc));
+            }
+            // No explicit `setup_done` store here — the
+            // `PublishOnExit` RAII at the top of the closure handles
+            // it on every exit path, both successful and aborted.
         }
 
-        // Acquire the cross-benchmark lock per concurrency.bench_lock.
-        std::shared_lock<std::shared_mutex> shared_guard;
-        std::unique_lock<std::shared_mutex> unique_guard;
-        if (state.config.concurrency.bench_lock) {
-            unique_guard = std::unique_lock{*context.cross_bench_mu};
-        } else {
-            shared_guard = std::shared_lock{*context.cross_bench_mu};
-        }
+        // Cross-benchmark lock is now acquired per-item inside
+        // `run_typed_benchmark` (around each iteration loop). The outer
+        // acquisition that used to sit here is gone; otherwise a
+        // `bench_lock=true` benchmark would re-acquire the unique lock
+        // and deadlock — `std::shared_mutex` is not recursive.
 
         detail::run_typed_benchmark<Input, Output>(state, context,
+                                                    captured_on_estimate,
                                                     captured_on_input,
                                                     captured_on_run,
                                                     captured_on_evaluate,

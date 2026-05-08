@@ -1,0 +1,22 @@
+name: Linux (clang)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup gitmodules
+        run: git submodule update --init --recursive
+
+      - name: Setup clang
+        uses: egor-tensin/setup-clang@v1
+
+      - name: Build and Test
+        run: ./scripts/feature-tests.shell

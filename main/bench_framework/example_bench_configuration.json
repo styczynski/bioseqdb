@@ -25,13 +25,15 @@
   "test_cases": {
     "TINY": {
       "description": "1k random integers",
+      "concurrency": 4,
       "data": {
         "length": 1024,
         "seed": 13
       }
     },
     "SMALL": {
-      "description": "16k random integers",
+      "description": "16k random integers (serial — exercises the concurrency=1 path)",
+      "concurrency": 1,
       "data": {
         "length": 16384,
         "seed": 21

@@ -1,0 +1,25 @@
+name: MacOS
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - "macos-13" # x86_64
+          - "macos-15" # arm64
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup gitmodules
+        run: git submodule update --init --recursive
+
+      - name: Build and Test
+        run: ./scripts/feature-tests.shell

@@ -1,0 +1,25 @@
+on:
+  push:
+    branches:
+      - main
+      - dev
+name: sonarlint
+jobs:
+  sonarcloud:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        cmake .. -GNinja -DCMAKE_BUILD_TYPE=Debug -DCPPTRACE_BUILD_TESTING=On -DCMAKE_EXPORT_COMPILE_COMMANDS=On -DCMAKE_CXX_STANDARD=11
+        ninja
+        cd ..
+    - name: Run sonar-scanner
+      uses: SonarSource/sonarqube-scan-action@v7
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

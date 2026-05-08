@@ -1,0 +1,23 @@
+name: Linux (gcc)
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup gcc
+      uses: egor-tensin/setup-gcc@v1
+
+    - name: Setup gitmodules
+      run: git submodule update --init --recursive
+
+    - name: Build and Test
+      run: ./scripts/feature-tests.shell
