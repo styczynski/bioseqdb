@@ -54,6 +54,7 @@ HWY_BEFORE_NAMESPACE();
 namespace {
 
 using bioseq::bench_framework::ParamMap;
+using bioseq::bench_framework::RunConstraints;
 using bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
@@ -121,11 +122,60 @@ struct AlignerOutput {
     return value;
 }
 
+/// Estimate the memory required by one `(benchmark, test_case, group)`
+/// batch so the framework can throttle parallel batches against the
+/// global memory budget (see `BENCH_V11_IMPL_PLAN.md` §3.5 / §4 and
+/// `BENCH_V12_IMPL_PLAN.md` §3.4).
+///
+/// We size off the data already in the JSON blob, before any sequence
+/// generation: each test case produces `fragment_count` pairs, with
+/// every pair holding a `~fragment_length_mean`-bp query AND a copy
+/// of the full `reference_length`-bp target.  The per-pair byte cost
+/// is therefore `(fragment_length_mean + reference_length)`.  The
+/// `AlignerInput` struct keeps both the compact 2-bits-per-base
+/// representation and the pre-decoded ACGT string in lock-step (see
+/// the `queries_acgt`/`targets_acgt` fields), so we use a `2 x` factor
+/// to cover both representations + container overhead.  Extra memory
+/// ear-marks the per-iteration scratch space the aligners need (DP
+/// tables, anchor heaps, transient buffers in minimap2/ksw2/RMQ paths).
+[[nodiscard]] RunConstraints estimate_aligner_resources(
+    std::string_view /*data_dir*/,
+    std::string_view /*test_case_name*/,
+    simdjson::dom::element data) noexcept
+{
+    const auto fragment_count = static_cast<std::size_t>(
+        read_int_field(data, "fragment_count", 100));
+    const auto fragment_length_mean = static_cast<std::size_t>(
+        read_int_field(data, "fragment_length_mean", 150));
+    const auto reference_length = static_cast<std::size_t>(
+        read_int_field(data, "reference_length", 10000));
+
+    // Total bp generated across the cached `Input`: every pair carries
+    // a freshly-decoded query and a private copy of the full reference.
+    const std::size_t total_bp =
+        fragment_count * (fragment_length_mean + reference_length);
+
+    // base_memory: bytes that must remain reserved for the lifetime of
+    // the cached `AlignerInput` — i.e. the compact + ACGT pair storage
+    // and ancillary metadata, held until `cleanup` runs.
+    // extra_memory: per-iteration scratch + transient SIMD/DP/RMQ
+    // working sets that live only while `on_run` is in flight.
+    return {
+        .base_memory  = total_bp * 2,
+        .extra_memory = total_bp * 2,
+    };
+}
+
 /// Materialise a `(query, target)` batch from the `data` JSON blob.
-/// Lives in `on_input`; runs at most once per (benchmark, test_case).
+/// Lives in `on_input`; runs once per `(benchmark, test_case, group)`
+/// batch.  The `constraints` argument carries the same numbers
+/// `estimate_aligner_resources` returned, but we don't need them — the
+/// generator dimensions come straight from the JSON blob — so the
+/// parameter is unused.
 [[nodiscard]] AlignerInput build_input(std::string_view /*data_dir*/,
                                         std::string_view test_case_name,
-                                        simdjson::dom::element data) {
+                                        simdjson::dom::element data,
+                                        const RunConstraints& /*constraints*/) {
     GeneratorParams params{};
     params.reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length",
@@ -248,14 +298,38 @@ struct AlgorithmDispatch {
     for (std::size_t pair_index = 0; pair_index < input.pairs.size(); ++pair_index) {
         auto& pair = input.pairs[pair_index];     // pairs are `mutable` in AlignerInput; see field comment
         MatchResultCollection results;
-        if (dispatch.is_minimap2_reference) {
-            results = bioseq::bench::HWY_NAMESPACE::tool_minimap2(
-                input.queries_acgt[pair_index],
-                input.targets_acgt[pair_index],
-                dispatch.params);
-        } else {
-            results = bioseq::simd::HWY_NAMESPACE::minimap_port(
-                pair.query, pair.target, dispatch.params);
+        // Defensive try-block: a few algorithm × test_case combinations
+        // (notably wide-substitution low-indel patterns on LONG / VERY_LONG
+        // / XL inputs in `bench_aligners_grid`) currently throw
+        // `std::length_error` from inside the chaining or alignment
+        // back-end. Without this catch, the unhandled exception unwinds
+        // through the framework's TBB worker, calls `std::terminate`, and
+        // aborts the whole bench mid-grid.  We log the offending tuple so
+        // a follow-up can drill in, and surface a zero-result iteration
+        // so the run can still complete.
+        try {
+            if (dispatch.is_minimap2_reference) {
+                results = bioseq::bench::HWY_NAMESPACE::tool_minimap2(
+                    input.queries_acgt[pair_index],
+                    input.targets_acgt[pair_index],
+                    dispatch.params);
+            } else {
+                results = bioseq::simd::HWY_NAMESPACE::minimap_port(
+                    pair.query, pair.target, dispatch.params);
+            }
+        } catch (const std::exception& exception) {
+            loge("[bench_v10] aligner threw exception (algo='{}', pair_index={}, "
+                 "query_len={}, target_len={}, k={}): {}",
+                 algo, pair_index,
+                 input.queries_acgt[pair_index].size(),
+                 input.targets_acgt[pair_index].size(),
+                 dispatch.params.kmer_size,
+                 exception.what());
+            continue;
+        } catch (...) {
+            loge("[bench_v10] aligner threw non-std exception (algo='{}', pair_index={})",
+                 algo, pair_index);
+            continue;
         }
         bool found_primary = false;
         for (const auto& match : results.view()) {
@@ -310,14 +384,19 @@ int main(int argc, char** argv) {
     const std::string data_dir{BIOSEQ_BENCH_DATA_DIR};
 
     using bioseq::bench_framework::ParamMap;
+    using bioseq::bench_framework::RunConstraints;
     using bioseq::bench_framework::create_benchmark;
 
     // Mandatory `std::function<...>` casts (README §3e) — `create_benchmark`'s
     // template-arg deduction won't bind a lambda or function pointer to a
     // `std::function` parameter without help. Reused across the four blocks
     // below since all four share the same I/O types and lambdas.
+    auto estimate = std::function<RunConstraints(
+        std::string_view, std::string_view, simdjson::dom::element)>{
+            estimate_aligner_resources};
     auto build = std::function<AlignerInput(
-        std::string_view, std::string_view, simdjson::dom::element)>{build_input};
+        std::string_view, std::string_view, simdjson::dom::element,
+        const RunConstraints&)>{build_input};
     auto run = std::function<AlignerOutput(
         std::string_view, const ParamMap&, const AlignerInput&)>{run_aligner};
     auto eval = std::function<std::map<std::string, double>(
@@ -328,14 +407,14 @@ int main(int argc, char** argv) {
         argc, argv, report_dir, data_dir,
         create_benchmark<AlignerInput, AlignerOutput>(
             "Aligner full grid (length × error × algorithm)",
-            "bench_aligners_grid", config_path, build, run, eval),
+            "bench_aligners_grid", config_path, estimate, build, run, eval),
         create_benchmark<AlignerInput, AlignerOutput>(
             "MinimizerRepr storage exercise (K=7 / K=27)",
-            "bench_aligners_repr_storage", config_path, build, run, eval),
+            "bench_aligners_repr_storage", config_path, estimate, build, run, eval),
         create_benchmark<AlignerInput, AlignerOutput>(
             "RMQ chaining LONG/CCS regression repro",
-            "bench_aligners_rmq_repro", config_path, build, run, eval),
+            "bench_aligners_rmq_repro", config_path, estimate, build, run, eval),
         create_benchmark<AlignerInput, AlignerOutput>(
             "Curated correctness probes",
-            "bench_aligners_curated", config_path, build, run, eval));
+            "bench_aligners_curated", config_path, estimate, build, run, eval));
 }

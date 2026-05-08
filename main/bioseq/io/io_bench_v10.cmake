@@ -46,6 +46,7 @@ AddCommonTargetX(
   LINKS
     safestring_static
     fmt
+    reflectcpp::reflectcpp
     ZLIB::ZLIB
     libassert::assert
     foonathan_memory
@@ -55,6 +56,7 @@ AddCommonTargetX(
     simdjson::simdjson
     nlohmann_json_schema_validator::validator
     TBB::tbb
+    lfreist-hwinfo::hwinfo
     kseq++::kseq++
   SOURCES
     "${IO_BENCH_V10_DIR}/io_bench_v10_main.cpp"

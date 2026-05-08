@@ -61,6 +61,7 @@ namespace fs = std::filesystem;
 namespace {
 
 using bioseq::bench_framework::ParamMap;
+using bioseq::bench_framework::RunConstraints;
 using bioseq::io::reader_options;
 using bioseq::io::writer_options;
 using bioseq::io::sequence_batch;
@@ -319,6 +320,88 @@ struct CorpusDescriptor {
     return descriptor;
 }
 
+/// Best-effort estimate of total bytes that one batch of this test case
+/// will need to keep in memory.  For synthetic corpora we multiply
+/// record_count by mean_record_length_bp; for real-data corpora we
+/// stat the on-disk file (and scale up by the canonical ~3.2x to
+/// approximate the decompressed size when `compressed: true`).
+///
+/// Used by both `estimate_reader_resources` and
+/// `estimate_writer_resources` so the two paths share the same sizing
+/// model.  Returns zero if neither shape is determinable, in which case
+/// the framework treats the batch as zero-cost — strictly worse than a
+/// non-zero estimate, but acceptable: the run continues, it just doesn't
+/// participate in budget throttling.
+[[nodiscard]] std::size_t estimate_corpus_bytes(
+    std::string_view data_dir,
+    simdjson::dom::element data) noexcept
+{
+    const std::string kind = read_string_field(data, "kind", "synthetic");
+    if (kind == "real") {
+        const std::string relative = read_string_field(data, "real_data_path", "");
+        if (relative.empty()) return 0;
+        fs::path joined = fs::path{std::string{data_dir}} / relative;
+        std::error_code ec;
+        const auto observed_size = fs::file_size(joined, ec);
+        if (ec) return 0;
+        std::size_t bytes = static_cast<std::size_t>(observed_size);
+        if (read_bool_field(data, "compressed", false)) {
+            // Same factor `build_reader_input` uses for `decompressed_bytes`.
+            bytes = static_cast<std::size_t>(static_cast<double>(bytes) * 3.2);
+        }
+        return bytes;
+    }
+    if (kind != "synthetic") return 0;
+    const auto record_count = static_cast<std::size_t>(
+        read_int_field(data, "record_count", 1000));
+    const auto mean_record_length_bp = static_cast<std::size_t>(
+        read_int_field(data, "mean_record_length_bp", 200));
+    return record_count * mean_record_length_bp;
+}
+
+/// Reader-side resource estimator (see `BENCH_V11_IMPL_PLAN.md` §3.5 /
+/// §4 and `BENCH_V12_IMPL_PLAN.md` §3.4).  The reader's `Input` only
+/// holds the corpus path plus a few size counters, so the persistent
+/// (`base_memory`) cost is small.  However, we still budget `2x` the
+/// total corpus bytes for both base + extra so the dynamic memory
+/// budget throttles concurrent batches: the actual reader paths
+/// (mmap'd regions, parallel-gzip ring buffers, decoded sequence
+/// batches handed to the per-batch handler) push real RAM pressure
+/// during `on_run`, even though the framework can't see those
+/// allocations from the outside.
+[[nodiscard]] RunConstraints estimate_reader_resources(
+    std::string_view data_dir,
+    std::string_view /*test_case_name*/,
+    simdjson::dom::element data) noexcept
+{
+    const std::size_t bytes = estimate_corpus_bytes(data_dir, data);
+    return {
+        .base_memory  = bytes * 2,
+        .extra_memory = bytes * 2,
+    };
+}
+
+/// Writer-side resource estimator.  Differs from the reader because
+/// `WriterInput` slurps every input batch into RAM (see
+/// `WriterInput::batches`), so the persistent footprint *is* really
+/// `~bytes` bytes.  Same `2x base + 2x extra` shape as the reader for
+/// uniformity and headroom; callers can rely on it as a known
+/// "this batch needs ~4x corpus bytes free" gate.  Compressed cells
+/// are reader-only (`build_writer_input` early-returns) but we still
+/// emit a sensible estimate so the framework doesn't think those
+/// batches are free.
+[[nodiscard]] RunConstraints estimate_writer_resources(
+    std::string_view data_dir,
+    std::string_view /*test_case_name*/,
+    simdjson::dom::element data) noexcept
+{
+    const std::size_t bytes = estimate_corpus_bytes(data_dir, data);
+    return {
+        .base_memory  = bytes * 2,
+        .extra_memory = bytes * 2,
+    };
+}
+
 // =====================================================================
 //  Reader runners
 // =====================================================================
@@ -509,7 +592,8 @@ template <bool IsFasta>
 
 [[nodiscard]] ReaderInput build_reader_input(std::string_view data_dir,
                                                 std::string_view test_case_name,
-                                                simdjson::dom::element data) {
+                                                simdjson::dom::element data,
+                                                const RunConstraints& /*constraints*/) {
     const CorpusDescriptor descriptor =
         prepare_corpus(data_dir, test_case_name, data);
     ReaderInput input;
@@ -686,7 +770,8 @@ template <bool IsFasta>
 
 [[nodiscard]] WriterInput build_writer_input(std::string_view data_dir,
                                                 std::string_view test_case_name,
-                                                simdjson::dom::element data) {
+                                                simdjson::dom::element data,
+                                                const RunConstraints& /*constraints*/) {
     WriterInput input;
 
     // The .fastq.gz cell is reader-only; writers don't have a compress
@@ -1032,9 +1117,13 @@ int main(int argc, char** argv) {
 
     using bioseq::bench_framework::create_benchmark;
 
-    using ReaderBuild = std::function<ReaderInput(std::string_view,
+    using Estimate = std::function<RunConstraints(std::string_view,
                                                     std::string_view,
                                                     simdjson::dom::element)>;
+    using ReaderBuild = std::function<ReaderInput(std::string_view,
+                                                    std::string_view,
+                                                    simdjson::dom::element,
+                                                    const RunConstraints&)>;
     using ReaderRun = std::function<IoOutput(std::string_view,
                                                 const ParamMap&,
                                                 const ReaderInput&)>;
@@ -1048,7 +1137,8 @@ int main(int argc, char** argv) {
 
     using WriterBuild = std::function<WriterInput(std::string_view,
                                                     std::string_view,
-                                                    simdjson::dom::element)>;
+                                                    simdjson::dom::element,
+                                                    const RunConstraints&)>;
     using WriterRun = std::function<IoOutput(std::string_view,
                                                 const ParamMap&,
                                                 const WriterInput&)>;
@@ -1065,6 +1155,7 @@ int main(int argc, char** argv) {
         create_benchmark<ReaderInput, IoOutput>(
             "IO readers — FASTA (plain / async / mmap)",
             "bench_io_readers_fasta", config_path,
+            Estimate{estimate_reader_resources},
             ReaderBuild{build_reader_input},
             ReaderRun{run_reader},
             ReaderEval{evaluate_reader},
@@ -1072,6 +1163,7 @@ int main(int argc, char** argv) {
         create_benchmark<ReaderInput, IoOutput>(
             "IO readers — FASTQ (plain / async / mmap)",
             "bench_io_readers_fastq", config_path,
+            Estimate{estimate_reader_resources},
             ReaderBuild{build_reader_input},
             ReaderRun{run_reader},
             ReaderEval{evaluate_reader},
@@ -1079,6 +1171,7 @@ int main(int argc, char** argv) {
         create_benchmark<ReaderInput, IoOutput>(
             "IO readers — gzipped paths",
             "bench_io_readers_gz", config_path,
+            Estimate{estimate_reader_resources},
             ReaderBuild{build_reader_input},
             ReaderRun{run_reader},
             ReaderEval{evaluate_reader},
@@ -1086,6 +1179,7 @@ int main(int argc, char** argv) {
         create_benchmark<WriterInput, IoOutput>(
             "IO writers — FASTA (sync / parallel)",
             "bench_io_writers_fasta", config_path,
+            Estimate{estimate_writer_resources},
             WriterBuild{build_writer_input},
             WriterRun{run_writer},
             WriterEval{evaluate_writer},
@@ -1093,6 +1187,7 @@ int main(int argc, char** argv) {
         create_benchmark<WriterInput, IoOutput>(
             "IO writers — FASTQ (sync / parallel)",
             "bench_io_writers_fastq", config_path,
+            Estimate{estimate_writer_resources},
             WriterBuild{build_writer_input},
             WriterRun{run_writer},
             WriterEval{evaluate_writer},

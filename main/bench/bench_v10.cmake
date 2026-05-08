@@ -60,6 +60,7 @@ AddCommonTargetX(
   LINKS
     safestring_static
     fmt
+    reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
     ftxui::component
@@ -68,6 +69,7 @@ AddCommonTargetX(
     simdjson::simdjson
     nlohmann_json_schema_validator::validator
     TBB::tbb
+    lfreist-hwinfo::hwinfo
   SOURCES
     "${BENCH_V10_DIR}/bench_v10_main.cpp"
     ${BENCH_V10_C_SRC}
