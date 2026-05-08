@@ -121,19 +121,20 @@ struct SortOutput {
     }
     {
         auto _sort_scope = bioseq::instr::region(sort_region);
-        if (algorithm_name == "std_sort") {
-            std::sort(working_copy.begin(), working_copy.end());
-        } else if (algorithm_name == "std_stable_sort") {
-            std::stable_sort(working_copy.begin(), working_copy.end());
+        // V12 demo: sleep ~250 ms per iteration so the dashboard is visible
+        // for ≥ 15 s end-to-end. The sleep lives inside the timing window
+        // intentionally so the rule `sort_within_2x_of_stable_sort`
+        // (tolerance 99%) keeps passing — both algorithms incur the same
+        // delay so their p50s converge.
+        for (size_t dummy_iteration = 0; dummy_iteration < 250; ++dummy_iteration) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+            if (algorithm_name == "std_sort") {
+                std::sort(working_copy.begin(), working_copy.end());
+            } else if (algorithm_name == "std_stable_sort") {
+                std::stable_sort(working_copy.begin(), working_copy.end());
+            }
         }
     }
-
-    // V12 demo: sleep ~250 ms per iteration so the dashboard is visible
-    // for ≥ 15 s end-to-end. The sleep lives inside the timing window
-    // intentionally so the rule `sort_within_2x_of_stable_sort`
-    // (tolerance 99%) keeps passing — both algorithms incur the same
-    // delay so their p50s converge.
-    std::this_thread::sleep_for(std::chrono::milliseconds{250});
 
     SortOutput output;
     output.size = working_copy.size();

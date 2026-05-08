@@ -1042,6 +1042,16 @@ inline constexpr std::size_t kMaxTaskInputHandlerErrorCount = 5;
 /// per failure. Anything past this is dropped with an "elided" marker.
 inline constexpr std::size_t kMaxStackTraceLines = 30;
 
+/// Minimum time the retry-failure row stays in the dashboard before
+/// the next attempt is taken. Without this, a fast-failing user
+/// lambda (e.g. a `throw` immediately after entry) burns through all
+/// 5 retries in microseconds — the dashboard repaints at ~5 Hz, so
+/// `retry_attempt > 0` is never observed and the operator sees no UI
+/// for the retry sequence at all. 300 ms is slightly longer than the
+/// 200 ms render cadence so every attempt's failure state is
+/// guaranteed to show up in at least one frame.
+inline constexpr std::chrono::milliseconds kRetryFailureMinDisplayTime{300};
+
 // ----------------- hwinfo bridge -----------------
 
 /// Best-effort `(total, free)` bytes reading the host's physical RAM.
@@ -4621,28 +4631,22 @@ inline void emit_runtime_diagnostic(
 // ----------------- V12 retry helpers (G2 / G3) -----------------
 
 /// Render `trace` clipped to the first `kMaxStackTraceLines` frames
-/// using cpptrace's built-in `to_string(color)`. We use cpptrace's
-/// formatter rather than libassert's because we never need the
-/// assertion-style header — just frames.
+/// using cpptrace's built-in `to_string(color=false)`. We always
+/// produce uncoloured output because the rendered string is later
+/// embedded inside ftxui `text()` elements, which do NOT interpret
+/// ANSI escape sequences — colour codes would render as literal
+/// `[34m…[0m` text. The dashboard's visual tint for trace lines comes
+/// from ftxui's `| color(Color::GrayDark)` decorator instead.
 [[nodiscard]] inline std::string
-clip_trace(const cpptrace::stacktrace& trace, bool color) noexcept {
+clip_trace(const cpptrace::stacktrace& trace) noexcept {
     cpptrace::stacktrace clipped = trace;            // implicit copy
     const bool was_truncated = clipped.frames.size() > kMaxStackTraceLines;
     if (was_truncated) {
         clipped.frames.resize(kMaxStackTraceLines);
     }
-    auto rendered = clipped.to_string(color);
+    auto rendered = clipped.to_string(/*color=*/false);
     if (was_truncated) rendered += "\n  … (more frames elided)";
     return rendered;
-}
-
-/// Look up whether stderr is a TTY via the progress state. The renderer
-/// pre-computes this at startup; we mirror its decision so the trace
-/// formatter only emits ANSI codes when they will be rendered correctly.
-[[nodiscard]] inline bool color_for_traces(
-    const BenchmarkContext& context) noexcept {
-    if (context.progress == nullptr) return false;
-    return context.progress->tty_render.load(std::memory_order_relaxed);
 }
 
 /// Generic retry helper used by both `on_input` and `on_cleanup` paths.
@@ -4665,7 +4669,6 @@ template<RetryKind kind, typename Attempt>
     BenchmarkContext& context, const WorkBatch& batch,
     Attempt&& attempt) noexcept
 {
-    const bool color = color_for_traces(context);
     for (std::size_t i = 0; i < kMaxTaskInputHandlerErrorCount; ++i) {
         bool failed = false;
         cpptrace::try_catch(
@@ -4675,7 +4678,7 @@ template<RetryKind kind, typename Attempt>
                     context, batch, kind,
                     static_cast<std::uint8_t>(i + 1),
                     e.what(),
-                    clip_trace(cpptrace::from_current_exception(), color));
+                    clip_trace(cpptrace::from_current_exception()));
                 failed = true;
             },
             [&] {     // void(): cpptrace's idiom for "catch (...)"
@@ -4690,6 +4693,13 @@ template<RetryKind kind, typename Attempt>
             progress_clear_retry_failure(context, batch, kind);
             return true;
         }
+        // Hold the retry-failure row visible for at least one render
+        // cycle — see `kRetryFailureMinDisplayTime`'s comment. Applied
+        // after every failed attempt (including the last) so the final
+        // [retry 5/5] frame survives long enough for the dashboard to
+        // paint it before the caller marks the batch aborted (which
+        // wipes the retry counter).
+        std::this_thread::sleep_for(kRetryFailureMinDisplayTime);
     }
     return false;
 }
@@ -8047,31 +8057,45 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
             continue;     // not the matching state for this group
         }
 
+        // The `└ group X …` header sits at column 4 with a 1-cell
+        // box-drawing glyph + a space, so its content starts at column 6.
+        // Message and trace lines hang under it at column 8 — visibly
+        // deeper than the header so the nesting reads correctly.
         detail.push_back(hbox({
-            text("    \xe2\x94\x94 "),                  // └
+            text("    \xe2\x94\x94 "),                  // └ at column 4
             text(header_line) | color(tint),
         }));
         if (!message.empty()) {
             detail.push_back(hbox({
-                text("       "),
+                text("        "),                       // 8 spaces
                 paragraph(message) | color(Color::GrayLight),
             }));
         }
         if (!trace.empty()) {
-            // Split trace on '\n' so each line is its own ftxui text
-            // element; ANSI colour codes from cpptrace's to_string(true)
-            // pass through ftxui correctly only when they live on one
-            // line.
+            // Split trace on '\n' and emit each line as a SINGLE text()
+            // element with the indent prepended into the string. We do
+            // NOT wrap it in `hbox({text(indent), text(line)})`: ftxui's
+            // hbox shrinks children proportionally when the total width
+            // exceeds the screen, and a long demangled C++ frame name
+            // would collapse the indent prefix to 1-2 spaces for that
+            // row. A single text() element renders left-to-right and
+            // simply clips at the screen edge, so the indent stays a
+            // stable 8 chars regardless of how long the line is.
+            //
+            // We always pass `color=false` to cpptrace's `to_string`
+            // (see `clip_trace`) because ftxui's `text()` does NOT
+            // interpret ANSI escape sequences — colour codes would
+            // render as literal `[34m…[0m` text. The visual tint
+            // comes from ftxui's `| color(Color::GrayDark)` decorator.
             std::size_t cursor = 0;
             while (cursor < trace.size()) {
                 const auto newline = trace.find('\n', cursor);
                 std::string_view line = (newline == std::string::npos)
                     ? std::string_view{trace}.substr(cursor)
                     : std::string_view{trace}.substr(cursor, newline - cursor);
-                detail.push_back(hbox({
-                    text("       "),
-                    text(std::string{line}) | color(Color::GrayDark),
-                }));
+                std::string indented{"        "};
+                indented.append(line);
+                detail.push_back(text(std::move(indented)) | color(Color::GrayDark));
                 if (newline == std::string::npos) break;
                 cursor = newline + 1;
             }
@@ -8223,12 +8247,17 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
             }
         }
         auto document = vbox(std::move(rows));
-        // Auto-grow the screen vertically based on row count. Add a
-        // safety margin (1 row) so the cursor reset doesn't strand
-        // trailing characters.
-        const int height = std::max(1, static_cast<int>(rows.size())) + 1;
-        auto screen = Screen::Create(Dimension::Fit(document),
-                                      Dimension::Fixed(height));
+        // Use ftxui's layout-aware height calc — `Dimension::Fit` walks the
+        // dom and returns the exact terminal-row count (paragraph wrapping
+        // included). `extend_beyond_screen=true` lets a long dashboard
+        // (cpptrace stack trace, multiple retry rows) exceed the terminal
+        // height instead of being silently clipped. V12 used
+        // `Dimension::Fixed(rows.size() + 1)` after `std::move(rows)`,
+        // which read from a moved-from vector (libc++ leaves it empty),
+        // capped the screen at 2 rows, and clipped everything below the
+        // budget header.
+        auto screen = Screen::Create(
+            Dimension::Fit(document, /*extend_beyond_screen=*/true));
         Render(screen, document);
         std::fputs(reset_position.c_str(), stderr);
         std::fputs(screen.ToString().c_str(), stderr);
@@ -8629,9 +8658,16 @@ template<typename Input, typename Output>
                 }
                 per.test_cases.push_back(std::move(tc));
             }
-            // No explicit `setup_done` store here — the
-            // `PublishOnExit` RAII at the top of the closure handles
-            // it on every exit path, both successful and aborted.
+            // V13: publish setup_done IMMEDIATELY after the writes so the
+            // `progress_*` helpers (and the renderer) start observing
+            // tuple/group counters as `run_typed_benchmark` progresses.
+            // PublishOnExit still fires on every closure exit and is
+            // idempotent — its second store is a no-op. (V12 left
+            // setup_done false until the closure returned, so every
+            // progress_tick_* call returned early via the
+            // `progress_test_case_for` setup_done check, leaving every
+            // gauge frozen at 0/N for the entire run.)
+            per.setup_done.store(true, std::memory_order_release);
         }
 
         // Cross-benchmark lock is now acquired per-item inside
