@@ -786,10 +786,14 @@ struct BenchmarkExecutionState {
 
 struct ParsedCli {
     bool                       fast_filter = false;
-    /// `--summary`: skip benchmark execution entirely and render an
-    /// aggregated dashboard derived from the existing
-    /// `report_<N>.json` files in `report_dir`.
-    bool                       summary_mode = false;
+    /// V14: `--ui` opens a long-running interactive ftxui dashboard.
+    /// Replaces the V8 `--summary` one-shot. Mutually exclusive with
+    /// `--fast` / `--threads` (warn-and-ignore on collision).
+    bool                       ui_mode = false;
+    /// V14: `--ui-ascii` substitutes ASCII fallbacks for emoji glyphs.
+    /// Useful when the terminal locale is `C` or DejaVu / JetBrains
+    /// Mono is unavailable.
+    bool                       ui_ascii_fallback = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
     /// V12: `--memory-buffer N` (0..50, default 10). Determines how
@@ -7720,14 +7724,17 @@ inline void render_summary(
     };
 }
 
-/// Top-level entry point for `--summary`. Orchestrates the per-report
-/// walk, scoring, and render. Returns `0` on success — even when no
-/// reports are present.
-[[nodiscard]] inline int summary_mode_main(const std::string& report_dir) noexcept {
+/// One-shot V8-style summary printer. Walks every report on disk,
+/// scores issues, and renders the aggregated dashboard to stderr via
+/// `render_summary`. Used as the read-only fallback when `--ui` is
+/// requested but stdin / stderr is not a TTY (per V14 §11.1 / §8.1)
+/// and from `ui_mode_main`'s startup probe when the user explicitly
+/// requested ASCII-only output but no TTY is attached.
+[[nodiscard]] inline int render_summary_to_stderr_once(const std::string& report_dir) noexcept {
     const std::filesystem::path report_dir_path{report_dir};
     const auto max_index = max_existing_report_index(report_dir_path).value_or(0);
     if (max_index == 0) {
-        logi("[bench_framework] --summary: no reports under '{}'", report_dir);
+        logi("[bench_framework] summary: no reports under '{}'", report_dir);
         return 0;
     }
 
@@ -7754,7 +7761,7 @@ inline void render_summary(
     }
 
     if (reports_present_count == 0) {
-        logi("[bench_framework] --summary: every report under '{}' failed to parse",
+        logi("[bench_framework] summary: every report under '{}' failed to parse",
              report_dir);
         return 0;
     }
@@ -7775,6 +7782,16 @@ inline void render_summary(
     return 0;
 }
 
+// ----------------- V14: --ui interactive entry point -----------------
+
+/// Forward declaration for the interactive ftxui dashboard. Defined in
+/// the sibling implementation unit `interactive.cppm`. Invoked from
+/// `run_impl` when `--ui` is on the command line and stdin / stderr
+/// are interactive TTYs. When the TTY check fails the entry point
+/// itself dispatches `render_summary_to_stderr_once` so a CI-piped
+/// `--ui` invocation still produces V8-style output (per V14 §11.1).
+[[nodiscard]] int ui_mode_main(const std::string& report_dir, const ParsedCli& cli) noexcept;
+
 // ----------------- CLI parsing -----------------
 
 /// Parse the framework CLI flags out of `argv`. Unknown flags are
@@ -7787,8 +7804,10 @@ inline void render_summary(
         const std::string_view arg{argv[i]};
         if (arg == "--fast") {
             parsed.fast_filter = true;
-        } else if (arg == "--summary") {
-            parsed.summary_mode = true;
+        } else if (arg == "--ui") {
+            parsed.ui_mode = true;
+        } else if (arg == "--ui-ascii") {
+            parsed.ui_ascii_fallback = true;
         } else if (arg == "--threads" && (i + 1) < argc) {
             const std::string_view text{argv[i + 1]};
             int threads = 0;
@@ -8291,14 +8310,14 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         report_dir = *cli.report_override;
     }
 
-    if (cli.summary_mode) {
+    if (cli.ui_mode) {
         if (cli.fast_filter) {
-            logw("[bench_framework] --summary ignores --fast (no benchmarks run)");
+            logw("[bench_framework] --ui ignores --fast (no benchmarks run)");
         }
         if (cli.threads_override.has_value()) {
-            logw("[bench_framework] --summary ignores --threads (no benchmarks run)");
+            logw("[bench_framework] --ui ignores --threads (no benchmarks run)");
         }
-        return summary_mode_main(report_dir);
+        return ui_mode_main(report_dir, cli);
     }
 
     logi("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",

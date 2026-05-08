@@ -27,8 +27,15 @@ set(BENCH_FRAMEWORK_MODULE_FILES
   "${BIOSEQ_DIR}/backend/common/mlogging.cppm"
   "${BENCH_FRAMEWORK_DIR}/index.cppm")
 
+# `interactive.cppm` is a *module implementation unit* of `bench_framework`
+# (declared `module bench_framework;`, no `export`). CMake's
+# `target_sources(... FILE_SET TYPE CXX_MODULES ...)` only accepts module
+# interface units / partitions in CXX_MOD_FILES; implementation units go in
+# the regular SOURCES list, where they're compiled as part of the same
+# module without claiming to provide a new interface unit.
 set(BENCH_FRAMEWORK_EXAMPLE_SOURCES
-  "${BENCH_FRAMEWORK_DIR}/example_main.cpp")
+  "${BENCH_FRAMEWORK_DIR}/example_main.cpp"
+  "${BENCH_FRAMEWORK_DIR}/interactive.cppm")
 
 # Catch2 unit tests — see index_test.cpp for the test cases.
 # The TESTS argument auto-spawns a sibling target called
