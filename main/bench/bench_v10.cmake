@@ -72,6 +72,7 @@ AddCommonTargetX(
     lfreist-hwinfo::hwinfo
   SOURCES
     "${BENCH_V10_DIR}/bench_v10_main.cpp"
+    "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
     ${BENCH_V10_C_SRC}
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS

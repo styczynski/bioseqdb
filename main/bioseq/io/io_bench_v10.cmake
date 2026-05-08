@@ -60,6 +60,7 @@ AddCommonTargetX(
     kseq++::kseq++
   SOURCES
     "${IO_BENCH_V10_DIR}/io_bench_v10_main.cpp"
+    "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${BIOSEQ_DIR}"

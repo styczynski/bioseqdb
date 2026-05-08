@@ -166,6 +166,55 @@ inline constexpr GlyphTable kGlyphsUnicode = {
     return ascii ? pair.ascii : pair.utf8;
 }
 
+/// V8's `kSeverityBuckets` and `summary_block_for` emit emoji glyphs
+/// directly in their string_view fields, so they cannot consult the
+/// V14 GlyphView. This translator maps each known emoji to the §3.6
+/// ASCII fallback (each two columns wide so column alignment in the
+/// summary's severity-strip / presence-strip survives the swap).
+[[nodiscard]] inline std::string_view ascii_for_emoji(std::string_view utf8) noexcept {
+    // Severity (§3.6 row "⛔🔴⭕🟠🟡 → !!, ! , *, o, . " — 2 cells each).
+    if (utf8 == "\xe2\x9b\x94")     return "!!";   // ⛔
+    if (utf8 == "\xf0\x9f\x94\xb4") return "! ";   // 🔴
+    if (utf8 == "\xe2\xad\x95")     return "* ";   // ⭕
+    if (utf8 == "\xf0\x9f\x9f\xa0") return "o ";   // 🟠
+    if (utf8 == "\xf0\x9f\x9f\xa1") return ". ";   // 🟡
+    // Presence (§3.6 row "🟩🟥🟨🟦 → #, XX, !!, ??").
+    if (utf8 == "\xf0\x9f\x9f\xa9") return "# ";   // 🟩
+    if (utf8 == "\xf0\x9f\x9f\xa5") return "XX";   // 🟥
+    if (utf8 == "\xf0\x9f\x9f\xa8") return "!!";   // 🟨
+    if (utf8 == "\xf0\x9f\x9f\xa6") return "??";   // 🟦
+    // 🟢 also appears in V8 contexts via header line 3 (live banner).
+    if (utf8 == "\xf0\x9f\x9f\xa2") return "[L]";  // 🟢
+    return utf8;     // unknown — pass through
+}
+
+/// Translate every recognised emoji codepoint in `utf8` to its ASCII
+/// fallback when `ascii_mode` is true. Walks codepoints (not bytes) so
+/// the substitution does not split UTF-8 sequences.
+[[nodiscard]] inline std::string maybe_ascii_emoji(std::string_view utf8, bool ascii_mode) noexcept {
+    if (!ascii_mode) return std::string{utf8};
+    std::string out;
+    out.reserve(utf8.size());
+    std::size_t i = 0;
+    while (i < utf8.size()) {
+        const unsigned char b = static_cast<unsigned char>(utf8[i]);
+        std::size_t len = 1;
+        if      ((b & 0x80u) == 0)    len = 1;
+        else if ((b & 0xE0u) == 0xC0) len = 2;
+        else if ((b & 0xF0u) == 0xE0) len = 3;
+        else if ((b & 0xF8u) == 0xF0) len = 4;
+        if (i + len > utf8.size()) {
+            out.append(utf8.substr(i));
+            break;
+        }
+        const auto sub = utf8.substr(i, len);
+        const auto mapped = ascii_for_emoji(sub);
+        out.append(mapped);
+        i += len;
+    }
+    return out;
+}
+
 /// Adapter binding a `GlyphTable` to the active ascii-fallback flag.
 /// Built once per render frame; renderer code reads `gv.full_block()`
 /// instead of repeating the `gv.full_block()`
@@ -700,7 +749,11 @@ enum class FooterState : std::uint8_t {
 };
 
 [[nodiscard]] constexpr int footer_rows_for(FooterState s) noexcept {
-    return s == FooterState::Help ? 8 : 1;
+    // Help spans 12 rows (1 title + 11 keymap rows). Bumped from §2.7's
+    // original 8 because the keymap now covers the , / . visible-only
+    // navigation, [ / ], { / }, PageUp / PageDn, m / M, = / Tab peek,
+    // b / B, etc. — they no longer fit in 7 keymap rows.
+    return s == FooterState::Help ? 12 : 1;
 }
 
 [[nodiscard]] constexpr std::string_view mode_label(ValueDisplayMode mode) noexcept {
@@ -786,7 +839,128 @@ struct UiState {
     std::size_t                                     selected_report_id = 0;     // 0 = Summary
     std::map<std::string, std::string>              active_metric_per_bench{};
     bool                                            ascii_fallback = false;
+    /// Per-section explicit expand/collapse override. Default state is
+    /// computed from the section id (legend / historic default to
+    /// collapsed; everything else to expanded). An entry in this map
+    /// overrides that default. View-keyed across reports so navigating
+    /// `→` keeps the same expansion state on the next report.
+    std::map<std::string, bool>                     section_expanded{};
+    /// Set by `o` (toggle expand-all). When `expand_all_active` is set,
+    /// every section in the active view is treated as expanded
+    /// regardless of its `section_expanded` entry. A second `o` press
+    /// flips to `collapse_all_active`. The two are mutually exclusive.
+    bool                                            expand_all_active = false;
+    bool                                            collapse_all_active = false;
+    /// Index into the dynamically-generated section list of the active
+    /// view. SPACE / Backspace step this; Enter toggles the focused
+    /// section's expanded state.
+    int                                             focused_section_index = 0;
+    /// Cached snapshot of the section list emitted by the most recent
+    /// frame's `compute_section_list(...)`. Refreshed every render so
+    /// the event handler can address sections by index without rebuilding.
+    /// `mutable` so the const-render path can refresh it.
+    mutable std::vector<std::string>                last_frame_section_ids{};
+    /// Parallel array of human-readable labels for each section ID —
+    /// the same string the section header text contains. Used by the
+    /// `/` search bar to compute substring match counts (§5.2).
+    mutable std::vector<std::string>                last_frame_section_labels{};
+    /// Parallel array of "searchables" — non-section rows whose
+    /// display text the search bar should match against. Each item
+    /// carries a back-pointer to the section it lives under so a
+    /// match can scroll the focus pointer to that section. Refreshed
+    /// per frame.
+    struct Searchable {
+        std::string  text;             // display text (lowercased on init)
+        int          section_anchor;   // index into last_frame_section_ids
+    };
+    mutable std::vector<Searchable>                 last_frame_searchables{};
+    /// Current 0-based index of the search-match cursor. Reset to 0
+    /// on every query change. `n` / `N` advance / retreat.
+    int                                             search_match_cursor = 0;
 };
+
+/// Default expanded state for a section id. Legend and Historic
+/// regression sections start collapsed (per BENCH_V14_IMPL_DESIGN.md
+/// §3.3 and §6.4); every other section is expanded by default.
+[[nodiscard]] inline bool default_section_expanded(std::string_view section_id) noexcept {
+    if (section_id.find(":legend") != std::string_view::npos) return false;
+    if (section_id.find(":historic") != std::string_view::npos) return false;
+    return true;
+}
+
+/// Resolve the effective expanded state for `section_id`. Priority
+/// order (highest first):
+///
+///   1. explicit per-section override in `UiState::section_expanded` —
+///      lets the user collapse one section after pressing `o`
+///      expand-all without flipping every other section back to its
+///      default;
+///   2. global `expand_all_active` / `collapse_all_active` (set by `o`);
+///   3. type-driven default (legend / historic default to collapsed).
+[[nodiscard]] inline bool section_is_expanded(const UiState& ui, std::string_view section_id) noexcept {
+    const auto it = ui.section_expanded.find(std::string{section_id});
+    if (it != ui.section_expanded.end()) return it->second;
+    if (ui.expand_all_active)   return true;
+    if (ui.collapse_all_active) return false;
+    return default_section_expanded(section_id);
+}
+
+/// Toggle the explicit override for `section_id` while leaving the
+/// global expand/collapse flags untouched, so a `o`-then-Enter sequence
+/// only collapses the one section the user pointed at.
+inline void toggle_section_expanded(UiState& ui, std::string_view section_id) noexcept {
+    const bool current = section_is_expanded(ui, section_id);
+    ui.section_expanded[std::string{section_id}] = !current;
+}
+
+[[nodiscard]] inline std::string ascii_lower(std::string_view sv) noexcept {
+    std::string out;
+    out.reserve(sv.size());
+    for (char ch : sv) {
+        out.push_back(static_cast<char>(
+            (ch >= 'A' && ch <= 'Z') ? (ch - 'A' + 'a') : ch));
+    }
+    return out;
+}
+
+[[nodiscard]] inline bool contains_ci(std::string_view haystack_lower, std::string_view needle_lower) noexcept {
+    if (needle_lower.empty()) return false;
+    return haystack_lower.find(needle_lower) != std::string_view::npos;
+}
+
+/// Render a text string with every case-insensitive occurrence of
+/// `query` highlighted with a red background — the §5.2 "WYSIWYG"
+/// match indicator the user asked for. When `query` is empty or no
+/// match exists the original text is returned without decoration so
+/// callers can use the same helper unconditionally.
+[[nodiscard]] inline ftxui::Element render_with_search_highlight(
+    std::string_view text_to_render, std::string_view query) noexcept
+{
+    using namespace ftxui;
+    if (query.empty()) return text(std::string{text_to_render});
+    const std::string lower_text = ascii_lower(text_to_render);
+    const std::string lower_query = ascii_lower(query);
+    if (lower_text.find(lower_query) == std::string::npos) {
+        return text(std::string{text_to_render});
+    }
+    Elements parts;
+    std::size_t pos = 0;
+    while (pos < text_to_render.size()) {
+        const std::size_t hit = lower_text.find(lower_query, pos);
+        if (hit == std::string::npos) {
+            parts.push_back(text(std::string{text_to_render.substr(pos)}));
+            break;
+        }
+        if (hit > pos) {
+            parts.push_back(text(std::string{text_to_render.substr(pos, hit - pos)}));
+        }
+        parts.push_back(text(std::string{
+                text_to_render.substr(hit, lower_query.size())})
+            | bgcolor(Color::Red) | color(Color::White) | bold);
+        pos = hit + lower_query.size();
+    }
+    return hbox(std::move(parts));
+}
 
 // =============================================================================
 //  Section 5 — Reload thread, parse pool, and cache
@@ -1533,6 +1707,17 @@ struct CellRender {
     return sorted_samples[sorted_samples.size() / 2];
 }
 
+[[nodiscard]] inline double row_p99(std::span<const double> samples) {
+    if (samples.empty()) return std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> sorted_samples(samples.begin(), samples.end());
+    std::sort(sorted_samples.begin(), sorted_samples.end());
+    // Nearest-rank p99 — for n < 100 the top sample wins; matches the
+    // common engineering convention used elsewhere in V8.
+    const std::size_t idx = static_cast<std::size_t>(
+        std::ceil(0.99 * static_cast<double>(sorted_samples.size()))) - 1;
+    return sorted_samples[std::min(idx, sorted_samples.size() - 1)];
+}
+
 [[nodiscard]] inline std::string format_signed_pct(double pct) noexcept {
     if (!std::isfinite(pct)) return std::isnan(pct) ? "NaN" : (pct > 0 ? ">+1e6%" : "<-1e6%");
     if (pct >  999999.0) return ">+1e6%";
@@ -1693,7 +1878,9 @@ fingerprints_in_index_order(ReloadState& reload)
 }
 
 [[nodiscard]] inline ftxui::Element render_header_line1(
-    ReloadState& reload, const UiState& ui, const GlyphView& gv) noexcept
+    ReloadState& reload, const UiState& ui,
+    const std::map<std::string, GitLogEntry>& git_log,
+    const GlyphView& gv) noexcept
 {
     using namespace ftxui;
     const auto last_ok = reload.last_ok_ns.load(std::memory_order_acquire);
@@ -1714,8 +1901,20 @@ fingerprints_in_index_order(ReloadState& reload)
     } else {
         const auto sha = with_cached_report(reload, ui.selected_report_id,
             [](const ParsedReport& parsed) noexcept { return parsed.fp.commit; });
-        selected_text = sha.has_value()
-            ? fmt::format("Selected: report_{} \xc2\xb7 {}", ui.selected_report_id, short_sha(*sha))
+        std::string head_suffix;
+        if (sha.has_value() && !sha->empty()) {
+            const auto it = git_log.find(*sha);
+            if (it != git_log.end() && it->second.head_distance.has_value()) {
+                head_suffix = fmt::format(" (HEAD~{})", *it->second.head_distance);
+            } else if (it == git_log.end()) {
+                head_suffix = " (no git)";
+            } else {
+                head_suffix = " (detached)";
+            }
+        }
+        selected_text = sha.has_value() && !sha->empty()
+            ? fmt::format("Selected: report_{} \xc2\xb7 {}{}",
+                          ui.selected_report_id, short_sha(*sha), head_suffix)
             : fmt::format("Selected: report_{}", ui.selected_report_id);
     }
     Color updated_color = (last_ok > 0
@@ -1948,10 +2147,58 @@ struct StripRows {
     }) | size(WIDTH, EQUAL, ui.sidebar_width_cols);
 }
 
+/// Helper for the "section header" element used in both Summary and
+/// Report views. Renders the focus pointer + collapse glyph + label.
+/// `focused` lights the leading `↱` cursor (yellow) so SPACE / Backspace
+/// movements are visible.
+[[nodiscard]] inline ftxui::Element render_section_header(
+    const GlyphView& gv, std::string_view label, bool expanded,
+    bool focused, ftxui::Color label_color = ftxui::Color::Default,
+    int indent = 0, bool bold_label = true,
+    std::string_view search_query = {}) noexcept
+{
+    using namespace ftxui;
+    Elements parts;
+    parts.push_back(text(std::string(static_cast<std::size_t>(indent), ' ')));
+    if (focused) {
+        parts.push_back(text(std::string{gv.sel_pointer()} + " ")
+            | color(Color::Yellow) | bold);
+    } else {
+        parts.push_back(text("  "));
+    }
+    parts.push_back(text(std::string{
+        expanded ? gv.section_expanded() : gv.section_collapsed()} + " "));
+    Element label_el;
+    if (search_query.empty()) {
+        label_el = text(std::string{label}) | color(label_color);
+    } else {
+        // Highlighted text overrides label_color so the bgcolor stays
+        // visible against the dim grey of e.g. the historic section.
+        label_el = render_with_search_highlight(label, search_query)
+            | color(label_color);
+    }
+    if (bold_label) label_el = label_el | bold;
+    parts.push_back(label_el);
+    auto row = hbox(std::move(parts));
+    // ftxui's `yframe` only scrolls a child into view when the child
+    // (or one of its descendants) is decorated with `focus`. Without
+    // this, navigating the focus pointer with `[`/`]`/SPACE/etc. moves
+    // the cursor but the dom keeps showing the top of the body — the
+    // user reported as "active collapse section is outside visible
+    // window". Decorating the focused header with `focus` makes the
+    // outer `body | yframe` (see ui_mode_main) re-anchor the visible
+    // window on the cursor automatically.
+    if (focused) row = row | focus;
+    return row;
+}
+
 [[nodiscard]] inline ftxui::Element render_summary_view(
     ReloadState& reload, const UiState& ui, const GlyphView& gv) noexcept
 {
     using namespace ftxui;
+    ui.last_frame_section_ids.clear();
+    ui.last_frame_section_labels.clear();
+    ui.last_frame_searchables.clear();
     const auto snap_ptr = aggregate_from_cache(reload);
     const auto& snap = *snap_ptr;
     if (snap.issues.empty()) {
@@ -1961,63 +2208,129 @@ struct StripRows {
         });
     }
     const auto sorted = sort_summary_issues(snap.issues);
-    Elements rows;
-    std::string current_metric;
-    std::string current_scope;
-    Elements historic_rows;
-    std::size_t active_count = 0, historic_count = 0;
     auto historic_for = [](const SummaryIssue& issue) noexcept {
         return !issue.presence_per_report.empty() && issue.presence_per_report.back() == 0;
     };
+    std::size_t active_count = 0, historic_count = 0;
     for (const auto* issue_ptr : sorted) {
-        const auto& issue = *issue_ptr;
-        const bool historic = historic_for(issue);
-        if (historic) ++historic_count; else ++active_count;
+        if (historic_for(*issue_ptr)) ++historic_count; else ++active_count;
     }
+    // Group active issues by metric → ordered list of issues.
+    std::map<std::string, std::vector<const SummaryIssue*>> active_by_metric;
+    std::vector<std::string> metric_order;
+    std::vector<const SummaryIssue*> historic_issues;
     for (const auto* issue_ptr : sorted) {
-        const auto& issue = *issue_ptr;
-        const bool historic = historic_for(issue);
+        if (historic_for(*issue_ptr)) {
+            historic_issues.push_back(issue_ptr);
+        } else {
+            if (active_by_metric.find(issue_ptr->metric) == active_by_metric.end()) {
+                metric_order.push_back(issue_ptr->metric);
+            }
+            active_by_metric[issue_ptr->metric].push_back(issue_ptr);
+        }
+    }
+    auto presence_blocks_for = [&](const SummaryIssue& issue) noexcept -> Elements {
+        if (!ui.ascii_fallback) return presence_blocks(issue);
+        // ASCII variant — same window logic as presence_blocks() but
+        // funnels each glyph through `maybe_ascii_emoji` so column
+        // alignment of the strip is preserved.
+        const std::size_t total = issue.presence_per_report.size();
+        const std::size_t take  = total < kSummaryBlockWindow ? total : kSummaryBlockWindow;
+        const std::size_t start = total - take;
+        Elements blocks;
+        blocks.reserve(take);
+        for (std::size_t i = start; i < total; ++i) {
+            const bool present = issue.presence_per_report[i] != 0;
+            const bool data_ok = i < issue.report_data_present.size()
+                && issue.report_data_present[i] != 0;
+            const auto glyph = summary_block_for(issue.kind, present, data_ok);
+            blocks.push_back(text(maybe_ascii_emoji(glyph, true)));
+        }
+        return blocks;
+    };
+    auto render_issue_row = [&](const SummaryIssue& issue) noexcept {
         Elements row;
         const auto& bucket = bucket_for(issue.score);
-        row.push_back(text(fmt::format(" {} ", std::string{bucket.emoji}))
+        row.push_back(text(fmt::format(" {} ",
+                maybe_ascii_emoji(bucket.emoji, ui.ascii_fallback)))
             | color(bucket.color));
         row.push_back(text(format_stat_blurb(issue)));
         row.push_back(filler());
-        const auto blocks = presence_blocks(issue);
+        auto blocks = presence_blocks_for(issue);
         Elements blocks_box;
         blocks_box.reserve(blocks.size() + 2);
         blocks_box.push_back(text("  "));
-        for (const auto& blk : blocks) blocks_box.push_back(blk);
+        for (auto& blk : blocks) blocks_box.push_back(std::move(blk));
         blocks_box.push_back(text("  "));
         row.push_back(hbox(std::move(blocks_box)));
         if (!issue.rule_name.empty()) {
             row.push_back(text(clip_to_cells(issue.rule_name, kRuleNamePreviewCols)) | dim);
         }
-        if (historic) {
-            historic_rows.push_back(hbox({text("      "), hbox(std::move(row))}));
-            continue;
+        return hbox({text("      "), hbox(std::move(row))});
+    };
+    Elements rows;
+    // Per-metric expandable sections.
+    for (const auto& metric : metric_order) {
+        const std::string section_id = fmt::format("summary:metric:{}", metric);
+        const std::size_t section_idx = ui.last_frame_section_ids.size();
+        ui.last_frame_section_ids.push_back(section_id);
+        ui.last_frame_section_labels.push_back(metric);
+        ui.last_frame_searchables.push_back(
+            UiState::Searchable{ascii_lower(metric), static_cast<int>(section_idx)});
+        const bool expanded = section_is_expanded(ui, section_id);
+        const bool focused = static_cast<int>(section_idx)
+                             == ui.focused_section_index;
+        rows.push_back(render_section_header(gv, metric, expanded, focused,
+            ftxui::Color::Default, /*indent=*/0, /*bold_label=*/true,
+            ui.search_query));
+        if (!expanded) continue;
+        std::string current_scope;
+        for (const auto* issue_ptr : active_by_metric[metric]) {
+            const auto& issue = *issue_ptr;
+            if (issue.scope_label != current_scope) {
+                rows.push_back(hbox({
+                    text(fmt::format("    {} ", gv.sub_section_bullet())),
+                    text(issue.scope_label) | color(Color::Cyan),
+                }));
+                current_scope = issue.scope_label;
+                ui.last_frame_searchables.push_back(
+                    UiState::Searchable{ascii_lower(issue.scope_label),
+                                        static_cast<int>(section_idx)});
+            }
+            rows.push_back(render_issue_row(issue));
+            ui.last_frame_searchables.push_back(UiState::Searchable{
+                ascii_lower(format_stat_blurb(issue) + " " + issue.rule_name),
+                static_cast<int>(section_idx)});
         }
-        if (issue.metric != current_metric) {
-            if (!current_metric.empty()) rows.push_back(text(""));
-            rows.push_back(text(fmt::format("{} {}",
-                gv.section_expanded(),
-                issue.metric)) | bold);
-            current_metric = issue.metric;
-            current_scope.clear();
-        }
-        if (issue.scope_label != current_scope) {
-            rows.push_back(hbox({
-                text(fmt::format("  {} ", gv.sub_section_bullet())),
-                text(issue.scope_label) | color(Color::Cyan)
-            }));
-            current_scope = issue.scope_label;
-        }
-        rows.push_back(hbox({text("      "), hbox(std::move(row))}));
+        rows.push_back(text(""));
     }
-    rows.push_back(text(""));
-    rows.push_back(text(fmt::format("{} Historic regressions / violations  ({} issues hidden, press SPACE to expand)",
-        gv.section_collapsed(), historic_count))
-        | color(Color::GrayLight));
+    // Historic regressions / violations — collapsed by default per §3.3.
+    {
+        const std::string section_id = "summary:historic";
+        const std::size_t section_idx = ui.last_frame_section_ids.size();
+        ui.last_frame_section_ids.push_back(section_id);
+        const std::string short_label = "Historic regressions / violations";
+        ui.last_frame_section_labels.push_back(short_label);
+        ui.last_frame_searchables.push_back(
+            UiState::Searchable{ascii_lower(short_label), static_cast<int>(section_idx)});
+        const bool expanded = section_is_expanded(ui, section_id);
+        const bool focused = static_cast<int>(section_idx)
+                             == ui.focused_section_index;
+        const std::string label = expanded
+            ? fmt::format("Historic regressions / violations  ({} issues)", historic_count)
+            : fmt::format("Historic regressions / violations  ({} issues hidden, press SPACE to expand)", historic_count);
+        rows.push_back(render_section_header(gv, label, expanded, focused,
+            Color::GrayLight, /*indent=*/0, /*bold_label=*/true,
+            ui.search_query));
+        if (expanded) {
+            for (const auto* issue_ptr : historic_issues) {
+                rows.push_back(render_issue_row(*issue_ptr));
+                ui.last_frame_searchables.push_back(UiState::Searchable{
+                    ascii_lower(format_stat_blurb(*issue_ptr) + " " + issue_ptr->rule_name),
+                    static_cast<int>(section_idx)});
+            }
+        }
+    }
     rows.push_back(separator());
     rows.push_back(text(fmt::format("{} issues displayed \xe2\x80\x94 {} active, {} historic \xe2\x80\x94 sorted by score, highest first",
         active_count + historic_count, active_count, historic_count)));
@@ -2025,16 +2338,22 @@ struct StripRows {
     legend.push_back(text("Legend:  "));
     for (const auto& bucket : kSeverityBuckets) {
         legend.push_back(text(fmt::format(" {} {}  ",
-            std::string{bucket.emoji}, std::string{bucket.label}))
+            maybe_ascii_emoji(bucket.emoji, ui.ascii_fallback),
+            std::string{bucket.label}))
             | color(bucket.color));
     }
     rows.push_back(hbox(std::move(legend)));
-    rows.push_back(text(
-        "         "
-        "\xf0\x9f\x9f\xa9 ok   "
-        "\xf0\x9f\x9f\xa5 violation/regression   "
-        "\xf0\x9f\x9f\xa8 sanity warning   "
-        "\xf0\x9f\x9f\xa6 missing report data"));
+    if (ui.ascii_fallback) {
+        rows.push_back(text(
+            "         #  ok   XX violation/regression   !! sanity warning   ?? missing report data"));
+    } else {
+        rows.push_back(text(
+            "         "
+            "\xf0\x9f\x9f\xa9 ok   "
+            "\xf0\x9f\x9f\xa5 violation/regression   "
+            "\xf0\x9f\x9f\xa8 sanity warning   "
+            "\xf0\x9f\x9f\xa6 missing report data"));
+    }
     return vbox(std::move(rows));
 }
 
@@ -2169,13 +2488,36 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     const std::size_t left = focus_id >= kReportTableWindow
         ? focus_id - kReportTableWindow + 1 : 1;
     const std::size_t window_size = focus_id - left + 1;
+    // Pad the visible table to a stable `kReportTableWindow` columns so
+    // a dataset with fewer than 10 reports doesn't shrink the table
+    // (§7.4 step 2). The padding slots render with `—` (em-dash)
+    // headers and `—` cell bodies.
+    const std::size_t pad_left = kReportTableWindow - window_size;
     Elements rows;
     Elements header;
     header.push_back(text(fmt::format("{:<{}} ", "", kReportTableLabelCols)));
+    for (std::size_t p = 0; p < pad_left; ++p) {
+        header.push_back(text(fmt::format("{:>{}} ",
+            "\xe2\x80\x94", kReportTableValueCols))
+            | dim);
+    }
+    // Look up the focus report's strip cell colour so the `→R<N>`
+    // header reads in the same colour as the rightmost strip cell
+    // (§7.4 step 3). Cached fingerprint avoids re-parsing.
+    Color rightmost_color = Color::Default;
+    {
+        std::shared_lock<std::shared_mutex> guard(reload.mu);
+        const auto it = reload.cache.find(focus_id);
+        if (it != reload.cache.end()) {
+            rightmost_color = strip_cell_color(it->second.fp);
+        }
+    }
     for (std::size_t i = left; i <= focus_id; ++i) {
         const std::string label = i == focus_id ? fmt::format("\xe2\x86\x92R{}", i)
                                                 : fmt::format("R{}", i);
-        header.push_back(text(fmt::format("{:>{}} ", label, kReportTableValueCols)) | bold);
+        auto el = text(fmt::format("{:>{}} ", label, kReportTableValueCols)) | bold;
+        if (i == focus_id) el = el | color(rightmost_color);
+        header.push_back(el);
     }
     rows.push_back(hbox(std::move(header)));
     const bool smaller = metric_smaller_is_better(metric);
@@ -2190,6 +2532,13 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     };
     std::vector<std::vector<CellEntry>> per_tuple_cells(
         current_snap.tuples.size(), std::vector<CellEntry>(window_size));
+    // Per-tuple baseline p50, looked up from `ui.baseline_report_id` if
+    // pinned. Sampled in the same shared-lock pass as the table window
+    // so the snapshot is consistent (otherwise a reload-thread arena
+    // swap mid-render could swap one but not the other).
+    std::vector<double> per_tuple_baseline(current_snap.tuples.size(),
+        std::numeric_limits<double>::quiet_NaN());
+    const std::optional<std::size_t> baseline_id = ui.baseline_report_id;
     {
         std::shared_lock<std::shared_mutex> guard(reload.mu);
         for (std::size_t pos = 0; pos < window_size; ++pos) {
@@ -2202,6 +2551,20 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
                     benchmark_key, t.algorithm, t.params, test_case, kAllRegionsKey, metric);
                 if (samples.has_value()) {
                     per_tuple_cells[ti][pos].p50 = row_p50(*samples);
+                }
+            }
+        }
+        if (baseline_id.has_value()) {
+            const auto bl_it = reload.cache.find(*baseline_id);
+            if (bl_it != reload.cache.end() && bl_it->second.doc != nullptr) {
+                const auto bl_root = bl_it->second.doc->root;
+                for (std::size_t ti = 0; ti < current_snap.tuples.size(); ++ti) {
+                    const auto& t = current_snap.tuples[ti];
+                    auto samples = samples_from_report(bl_root,
+                        benchmark_key, t.algorithm, t.params, test_case, kAllRegionsKey, metric);
+                    if (samples.has_value()) {
+                        per_tuple_baseline[ti] = row_p50(*samples);
+                    }
                 }
             }
         }
@@ -2239,14 +2602,27 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
         Elements row;
         row.push_back(text(fmt::format("{:<{}} ",
             clip_to_cells(t.short_label, kReportTableLabelCols), kReportTableLabelCols)) | dim);
+        // Em-dash padding cells for the missing left edge. Width matches
+        // the data cells (`{:>kReportTableValueCols} ` plus 1-cell marker
+        // slot) so column alignment is preserved.
+        for (std::size_t p = 0; p < pad_left; ++p) {
+            row.push_back(hbox({
+                text(fmt::format(" {:>{}} ", "\xe2\x80\x94", kReportTableValueCols - 2)),
+                text(" "),
+            }) | color(Color::GrayDark));
+        }
         const double current_p50 = cells.back().p50;
         const double first_p50 = cells.front().p50;
         for (std::size_t i = 0; i < cells.size(); ++i) {
             const double v = cells[i].p50;
             const bool is_rightmost = (i == cells.size() - 1);
             const bool is_leftmost = (i == 0);
+            const std::optional<double> baseline_value
+                = (baseline_id.has_value() && std::isfinite(per_tuple_baseline[ti]))
+                    ? std::optional<double>{per_tuple_baseline[ti]}
+                    : std::nullopt;
             auto cell = render_cell(v, current_p50, first_p50,
-                /*baseline=*/std::nullopt, ui.value_mode, smaller,
+                baseline_value, ui.value_mode, smaller,
                 is_rightmost, is_leftmost, metric);
             char marker = ' ';
             if (show_markers) {
@@ -2285,53 +2661,194 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     return vbox(std::move(rows));
 }
 
+/// Render the Summary blurb sub-section for a `(test_case)` (§7.5).
+/// Iterates **every** declared metric on the snapshot, emitting one
+/// block per metric with `best (lowest p50)`, `worst (highest p50)`,
+/// and (when sample arrays are length ≥ 2) p99 sub-rows. Spread row
+/// follows; for fraction metrics it's reported in percentage points,
+/// otherwise in percent.
 [[nodiscard]] inline ftxui::Element render_report_summary_blurb(
     const BenchmarkSnapshot& snap,
-    std::string_view test_case,
-    std::string_view metric) noexcept
+    std::string_view test_case) noexcept
 {
     using namespace ftxui;
     Elements rows;
-    rows.push_back(text(fmt::format("\xe2\x96\xbc Summary  test_case={}  metric={}",
-        test_case, metric)));
     if (snap.tuples.empty()) return vbox(std::move(rows));
-    const bool smaller = metric_smaller_is_better(metric);
-    double best_p50 = smaller ? std::numeric_limits<double>::infinity()
-                              : -std::numeric_limits<double>::infinity();
-    double worst_p50 = -best_p50;
-    std::string best_label, worst_label;
     const std::string test_case_owned{test_case};
-    const std::string metric_owned{metric};
+    auto stat_for = [&](const std::string& metric_owned, bool want_p99)
+        -> std::pair<std::string /*best_label*/, std::pair<double /*best*/, double /*worst*/>>
+    {
+        const bool smaller = metric_smaller_is_better(metric_owned);
+        double best  = smaller ? std::numeric_limits<double>::infinity()
+                               : -std::numeric_limits<double>::infinity();
+        double worst = -best;
+        std::string best_label, worst_label;
+        bool any_finite = false;
+        std::size_t max_samples = 0;
+        for (const auto& t : snap.tuples) {
+            auto it_tc = snap.samples.find(t.canonical);
+            if (it_tc == snap.samples.end()) continue;
+            auto it_m = it_tc->second.find(test_case_owned);
+            if (it_m == it_tc->second.end()) continue;
+            auto it_v = it_m->second.find(metric_owned);
+            if (it_v == it_m->second.end()) continue;
+            max_samples = std::max(max_samples, it_v->second.size());
+            const double v = want_p99 ? row_p99(it_v->second) : row_p50(it_v->second);
+            if (!std::isfinite(v)) continue;
+            any_finite = true;
+            if ((smaller && v < best) || (!smaller && v > best)) {
+                best = v; best_label = t.short_label;
+            }
+            if ((smaller && v > worst) || (!smaller && v < worst)) {
+                worst = v; worst_label = t.short_label;
+            }
+        }
+        (void)max_samples;
+        if (!any_finite) return {std::string{},
+            {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}};
+        return {std::move(best_label), {best, worst}};
+    };
+    auto max_samples_for = [&](const std::string& metric_owned) noexcept -> std::size_t {
+        std::size_t max_samples = 0;
+        for (const auto& t : snap.tuples) {
+            auto it_tc = snap.samples.find(t.canonical);
+            if (it_tc == snap.samples.end()) continue;
+            auto it_m = it_tc->second.find(test_case_owned);
+            if (it_m == it_tc->second.end()) continue;
+            auto it_v = it_m->second.find(metric_owned);
+            if (it_v == it_m->second.end()) continue;
+            max_samples = std::max(max_samples, it_v->second.size());
+        }
+        return max_samples;
+    };
+    auto is_fraction_metric = [](std::string_view name) noexcept {
+        const auto ends = [&](std::string_view suffix) noexcept {
+            return name.size() >= suffix.size()
+                && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        return ends("_fraction") || ends("_rate")
+            || ends("_ratio") || ends("_pct");
+    };
+    for (const auto& metric : snap.metrics) {
+        rows.push_back(text(fmt::format("   {}", metric)) | bold);
+        const bool smaller = metric_smaller_is_better(metric);
+        const auto [best_lbl, p50_pair] = stat_for(metric, /*want_p99=*/false);
+        const auto [best_p50, worst_p50] = p50_pair;
+        const std::size_t max_samples = max_samples_for(metric);
+        const auto [best_lbl_p99, p99_pair] = stat_for(metric, /*want_p99=*/true);
+        const auto [best_p99, worst_p99] = p99_pair;
+        if (best_lbl.empty()) {
+            rows.push_back(text("     (no samples)") | dim);
+            continue;
+        }
+        // best / worst p50 lines.
+        const std::string best_kind = smaller ? "best (lowest p50)"
+                                              : "best (highest p50)";
+        const std::string worst_kind = smaller ? "worst (highest p50)"
+                                               : "worst (lowest p50)";
+        const double slowest = smaller ? worst_p50 : best_p50;
+        const double fastest = smaller ? best_p50  : worst_p50;
+        std::string best_extra;
+        if (std::isfinite(best_p50) && std::isfinite(worst_p50) && fastest != 0.0) {
+            const double ratio = slowest / fastest;
+            best_extra = fmt::format("       (vs slowest: {:.2f}× / {:+.0f}%)",
+                ratio, (ratio - 1.0) * 100.0);
+        }
+        rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}{}",
+            best_kind, best_lbl, kReportTableLabelCols,
+            format_metric_value(best_p50, metric), best_extra)));
+        // For "worst" we just print the value, no ratio decoration.
+        rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}",
+            worst_kind,
+            best_lbl == best_lbl ? best_lbl /* keep alignment */ : best_lbl,
+            kReportTableLabelCols,
+            format_metric_value(worst_p50, metric))));
+        // p99 sub-rows when ≥ 2 samples and finite (else collapse).
+        if (max_samples >= 2 && std::isfinite(best_p99) && std::isfinite(worst_p99)
+            && (best_p99 != best_p50 || worst_p99 != worst_p50)) {
+            const std::string best_kind99  = smaller ? "best (lowest p99)"
+                                                     : "best (highest p99)";
+            const std::string worst_kind99 = smaller ? "worst (highest p99)"
+                                                     : "worst (lowest p99)";
+            const double slowest99 = smaller ? worst_p99 : best_p99;
+            const double fastest99 = smaller ? best_p99  : worst_p99;
+            std::string best_extra99;
+            if (fastest99 != 0.0) {
+                best_extra99 = fmt::format("       (vs slowest: {:.2f}\xc3\x97)",
+                    slowest99 / fastest99);
+            }
+            rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}{}",
+                best_kind99, best_lbl_p99, kReportTableLabelCols,
+                format_metric_value(best_p99, metric), best_extra99)));
+            rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}",
+                worst_kind99, best_lbl_p99, kReportTableLabelCols,
+                format_metric_value(worst_p99, metric))));
+        } else if (max_samples == 1) {
+            rows.push_back(text("     \xe2\x80\xa2 (single sample)") | dim);
+        }
+        // Spread row.
+        if (std::isfinite(best_p50) && std::isfinite(worst_p50) && best_p50 != worst_p50) {
+            if (is_fraction_metric(metric)) {
+                const double pp = std::abs(worst_p50 - best_p50) * 100.0;
+                rows.push_back(text(fmt::format("     \xe2\x80\xa2 spread current report: {:.1f} pp (best\xe2\x86\x92worst)", pp)));
+            } else {
+                const double spread = smaller
+                    ? ((worst_p50 - best_p50) / std::max(1e-12, std::abs(best_p50)) * 100.0)
+                    : ((best_p50 - worst_p50) / std::max(1e-12, std::abs(worst_p50)) * 100.0);
+                rows.push_back(text(fmt::format("     \xe2\x80\xa2 spread current report: {:.0f}% (best\xe2\x86\x92worst, p50)",
+                    spread)));
+            }
+        }
+    }
+    return vbox(std::move(rows));
+}
+
+/// Render the Legend section (§6.4) for a benchmark snapshot. Lists
+/// every `(short_label, algorithm, params)` mapping plus an active-
+/// metric callout. Always built (even when collapsed); the caller
+/// decides whether to include it in the dom based on the section
+/// expand/collapse state.
+[[nodiscard]] inline ftxui::Element render_legend_body(
+    const BenchmarkSnapshot& snap,
+    std::string_view active_metric,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    Elements rows;
     for (const auto& t : snap.tuples) {
-        auto it_tc = snap.samples.find(t.canonical);
-        if (it_tc == snap.samples.end()) continue;
-        auto it_m = it_tc->second.find(test_case_owned);
-        if (it_m == it_tc->second.end()) continue;
-        auto it_v = it_m->second.find(metric_owned);
-        if (it_v == it_m->second.end()) continue;
-        double p50 = row_p50(it_v->second);
-        if (!std::isfinite(p50)) continue;
-        if ((smaller && p50 < best_p50) || (!smaller && p50 > best_p50)) {
-            best_p50 = p50; best_label = t.short_label;
+        std::string params_str = "{";
+        bool first = true;
+        for (const auto& [k, v] : t.params) {
+            if (!first) params_str += ", ";
+            params_str += k;
+            params_str += "=";
+            append_config_value_text(params_str, v);
+            first = false;
         }
-        if ((smaller && p50 > worst_p50) || (!smaller && p50 < worst_p50)) {
-            worst_p50 = p50; worst_label = t.short_label;
-        }
+        params_str += "}";
+        rows.push_back(hbox({
+            text(fmt::format("       {:<{}} ",
+                clip_to_cells(t.short_label, kShortLabelMaxWidth),
+                kShortLabelMaxWidth)) | color(Color::GrayLight),
+            text(fmt::format("{:<24} ", t.algorithm)),
+            text(params_str) | dim,
+        }));
     }
-    if (!best_label.empty()) {
-        rows.push_back(text(fmt::format("    \xe2\x80\xa2 best  {:<{}} {}",
-            best_label, kReportTableLabelCols, format_metric_value(best_p50, metric))));
+    rows.push_back(hbox({text("       "), separator()}));
+    for (const auto& metric_name : snap.metrics) {
+        const bool smaller = metric_smaller_is_better(metric_name);
+        const std::string suffix = smaller
+            ? "  (smaller is better) \xe2\x80\x94 coloured with smaller-is-greener gradient"
+            : "  (bigger is better) \xe2\x80\x94 coloured with bigger-is-greener gradient";
+        const bool is_active = (metric_name == active_metric);
+        const std::string line = fmt::format("       Metric: {}{}{}",
+            metric_name, suffix, is_active ? "  [active]" : "");
+        auto el = text(line);
+        if (is_active) el = el | bold | color(Color::Yellow);
+        else           el = el | dim;
+        rows.push_back(el);
     }
-    if (!worst_label.empty()) {
-        rows.push_back(text(fmt::format("    \xe2\x80\xa2 worst {:<{}} {}",
-            worst_label, kReportTableLabelCols, format_metric_value(worst_p50, metric))));
-    }
-    if (std::isfinite(best_p50) && std::isfinite(worst_p50) && best_p50 != worst_p50) {
-        const double spread = smaller
-            ? ((worst_p50 - best_p50) / std::max(1e-12, std::abs(best_p50)) * 100.0)
-            : ((best_p50 - worst_p50) / std::max(1e-12, std::abs(worst_p50)) * 100.0);
-        rows.push_back(text(fmt::format("    \xe2\x80\xa2 spread {:.1f}%", spread)));
-    }
+    (void)gv;
     return vbox(std::move(rows));
 }
 
@@ -2339,6 +2856,9 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     ReloadState& reload, const UiState& ui, const GlyphView& gv) noexcept
 {
     using namespace ftxui;
+    ui.last_frame_section_ids.clear();
+    ui.last_frame_section_labels.clear();
+    ui.last_frame_searchables.clear();
     if (ui.selected_report_id == 0) {
         return text("(no report selected)") | color(Color::GrayLight);
     }
@@ -2358,11 +2878,6 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
         std::size_t regression = 0;
         std::size_t sanity = 0;
     };
-    // Badge counts come from the report fingerprint and are
-    // benchmark-invariant — fetch them once per frame rather than once
-    // per benchmark. With even a handful of benchmarks the per-loop
-    // `with_cached_report` was costing N redundant shared-lock acquisitions
-    // every paint.
     const auto badges = with_cached_report(reload, ui.selected_report_id,
         [](const ParsedReport& parsed) noexcept {
             return BadgeCounts{parsed.fp.hard_violation_count,
@@ -2382,7 +2897,16 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
         if (auto it = ui.active_metric_per_bench.find(bench_key);
             it != ui.active_metric_per_bench.end()) active_metric = it->second;
         if (active_metric.empty()) active_metric = default_metric_for(snap);
-        Elements bench_rows;
+        // ---- Benchmark section header --------------------------------
+        const std::string bench_section_id = fmt::format("report:bench:{}", bench_key);
+        const std::size_t bench_section_idx = ui.last_frame_section_ids.size();
+        ui.last_frame_section_ids.push_back(bench_section_id);
+        ui.last_frame_section_labels.push_back(bench_key);
+        ui.last_frame_searchables.push_back(UiState::Searchable{
+            ascii_lower(bench_key), static_cast<int>(bench_section_idx)});
+        const bool bench_expanded = section_is_expanded(ui, bench_section_id);
+        const bool bench_focused = static_cast<int>(bench_section_idx)
+                                   == ui.focused_section_index;
         std::string badge_part;
         if (hard_count > 0)   badge_part += fmt::format("  {} {} hard",
             gv.hard_violation(), hard_count);
@@ -2390,19 +2914,87 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
             gv.regression(), regr_count);
         if (sanity_count > 0) badge_part += fmt::format("  {} {} sanity",
             gv.sanity(), sanity_count);
-        bench_rows.push_back(text(fmt::format("{} {}{}",
-            gv.section_expanded(), bench_key, badge_part))
-            | bold);
-        for (const auto& tc : snap.test_cases) {
-            bench_rows.push_back(text(fmt::format("  {} {}   metric={}   mode={}",
-                gv.section_expanded(),
-                tc, active_metric, std::string{mode_label(ui.value_mode)})));
-            bench_rows.push_back(render_report_table(reload, ui, bench_key, tc,
-                active_metric, snap, ui.selected_report_id));
-            bench_rows.push_back(render_report_summary_blurb(snap, tc, active_metric));
-            bench_rows.push_back(text(""));
+        rows.push_back(render_section_header(gv,
+            fmt::format("{}{}", bench_key, badge_part),
+            bench_expanded, bench_focused, Color::Default,
+            /*indent=*/0, /*bold_label=*/true, ui.search_query));
+        if (!bench_expanded) {
+            rows.push_back(separator());
+            continue;
         }
-        rows.push_back(vbox(std::move(bench_rows)));
+        for (const auto& tc : snap.test_cases) {
+            // ---- per (test_case, metric) section ---------------------
+            const std::string tc_section_id = fmt::format("report:bench:{}:tc:{}:metric:{}",
+                bench_key, tc, active_metric);
+            const std::size_t tc_section_idx = ui.last_frame_section_ids.size();
+            ui.last_frame_section_ids.push_back(tc_section_id);
+            ui.last_frame_section_labels.push_back(tc);
+            ui.last_frame_searchables.push_back(UiState::Searchable{
+                ascii_lower(tc + " " + active_metric),
+                static_cast<int>(tc_section_idx)});
+            const bool tc_expanded = section_is_expanded(ui, tc_section_id);
+            const bool tc_focused = static_cast<int>(tc_section_idx)
+                                    == ui.focused_section_index;
+            const std::string tc_label = fmt::format("{}   metric={}   mode={}",
+                tc, active_metric, std::string{mode_label(ui.value_mode)});
+            rows.push_back(render_section_header(gv, tc_label,
+                tc_expanded, tc_focused, Color::Default, /*indent=*/2,
+                /*bold_label=*/false, ui.search_query));
+            if (!tc_expanded) continue;
+            rows.push_back(render_report_table(reload, ui, bench_key, tc,
+                active_metric, snap, ui.selected_report_id));
+            // Tuple short labels become searchables anchored to the
+            // test_case section so a search match takes the user back
+            // to the table that contains the row.
+            for (const auto& tup : snap.tuples) {
+                ui.last_frame_searchables.push_back(UiState::Searchable{
+                    ascii_lower(tup.short_label + " " + tup.algorithm
+                                + " " + tup.canonical),
+                    static_cast<int>(tc_section_idx)});
+            }
+            // ---- Summary sub-section ----------------------------------
+            const std::string sum_id = fmt::format("report:bench:{}:tc:{}:metric:{}:summary",
+                bench_key, tc, active_metric);
+            const std::size_t sum_idx = ui.last_frame_section_ids.size();
+            ui.last_frame_section_ids.push_back(sum_id);
+            ui.last_frame_section_labels.push_back(fmt::format("Summary {}", tc));
+            ui.last_frame_searchables.push_back(UiState::Searchable{
+                ascii_lower(fmt::format("summary {} {}", tc, active_metric)),
+                static_cast<int>(sum_idx)});
+            const bool sum_expanded = section_is_expanded(ui, sum_id);
+            const bool sum_focused = static_cast<int>(sum_idx)
+                                     == ui.focused_section_index;
+            rows.push_back(render_section_header(gv,
+                fmt::format("Summary: best @ R{}", ui.selected_report_id),
+                sum_expanded, sum_focused, Color::Default, /*indent=*/4,
+                /*bold_label=*/false, ui.search_query));
+            if (sum_expanded) {
+                rows.push_back(render_report_summary_blurb(snap, tc));
+            }
+            // ---- Legend sub-section (§6.4) ----------------------------
+            const std::string legend_id = fmt::format("report:bench:{}:tc:{}:metric:{}:legend",
+                bench_key, tc, active_metric);
+            const std::size_t legend_idx = ui.last_frame_section_ids.size();
+            ui.last_frame_section_ids.push_back(legend_id);
+            ui.last_frame_section_labels.push_back(fmt::format("Legend {}", tc));
+            ui.last_frame_searchables.push_back(UiState::Searchable{
+                ascii_lower(fmt::format("legend {} {}", tc, active_metric)),
+                static_cast<int>(legend_idx)});
+            const bool legend_expanded = section_is_expanded(ui, legend_id);
+            const bool legend_focused = static_cast<int>(legend_idx)
+                                        == ui.focused_section_index;
+            const bool smaller = metric_smaller_is_better(active_metric);
+            const std::string legend_label = fmt::format(
+                "Legend  ({} tuples \xc2\xb7 {} metrics \xc2\xb7 is-smaller-better: {})",
+                snap.tuples.size(), snap.metrics.size(), smaller ? "\xe2\x9c\x93" : "\xe2\x9c\x97");
+            rows.push_back(render_section_header(gv, legend_label,
+                legend_expanded, legend_focused, Color::Default, /*indent=*/4,
+                /*bold_label=*/false, ui.search_query));
+            if (legend_expanded) {
+                rows.push_back(render_legend_body(snap, active_metric, gv));
+            }
+            rows.push_back(text(""));
+        }
         rows.push_back(separator());
     }
     return vbox(std::move(rows));
@@ -2455,26 +3047,36 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
 
 [[nodiscard]] inline ftxui::Element render_footer_help(const GlyphView&) noexcept {
     using namespace ftxui;
-    // 8-row compact layout (§2.7): two columns of grouped shortcuts.
+    // Two columns of grouped shortcuts, each pinned to a fixed width
+    // so the second column lines up regardless of the first's
+    // description length. Without `size(WIDTH, EQUAL, ...)` the
+    // `xflex` distribution made the second column shift around per
+    // row depending on text length — the user reported as "second
+    // column has different padding".
+    constexpr int kHelpColumnCells = 56;
     auto shortcut = [](std::string_view k, std::string_view desc) noexcept {
         return hbox({
             text(fmt::format(" {:<14}", std::string{k})) | color(Color::Yellow),
             text(std::string{desc}),
-        });
+        }) | size(WIDTH, EQUAL, kHelpColumnCells);
     };
     auto two_col = [&](std::string_view la, std::string_view da,
                        std::string_view lb, std::string_view db) noexcept {
-        return hbox({shortcut(la, da) | xflex, shortcut(lb, db) | xflex});
+        return hbox({shortcut(la, da), shortcut(lb, db)});
     };
     return vbox({
         text("Keymap (press ? again to dismiss)") | bold,
-        two_col("q / Ctrl-C",   "quit cleanly",            "Esc",          "dismiss / close / leave search"),
-        two_col("?",            "toggle full keymap",      "Ctrl-R",       "manual reload now"),
-        two_col("F2",           "toggle sidebar",          "Up/k Down/j",  "select up / down"),
-        two_col("Left/Right",   "prev/next report",        "[ / ] { / }",  "prev/next benchmark / tc"),
-        two_col("Space",        "next section",            "Backspace",    "previous section"),
-        two_col("Enter / o",    "toggle / expand-all",     "/  n / N",     "search; next / prev match"),
-        two_col("%  \\  = Tab", "cycle modes; peek",       "b / B  m / M", "pin baseline; switch metric"),
+        two_col("q / Ctrl-C",     "quit cleanly",            "Esc",            "dismiss / close / leave search"),
+        two_col("?",              "toggle full keymap",      "Ctrl-R",         "manual reload now"),
+        two_col("F2",             "toggle sidebar",          "Up/k Down/j",    "sidebar select up / down"),
+        two_col("Left/Right",     "prev/next report",        "[ / ]",          "prev/next benchmark"),
+        two_col("{ / }",          "prev/next test case",     "PageUp/PageDn",  "half-page jump"),
+        two_col(", / .",          "prev/next visible sec",   "Space",          "expand and descend; wraps"),
+        two_col("Backspace",      "prev section (reverse)",  "Enter",          "toggle focused collapse"),
+        two_col("o",              "expand-all / collapse-all","g / G",         "first / last sidebar entry"),
+        two_col("/  n / N",       "search; next / prev",     "Esc",            "exit search / clear filter"),
+        two_col("%  \\",          "cycle value modes",       "= / Tab",        "peek for 2s; tap twice = sticky"),
+        two_col("b / B",          "pin / clear baseline",    "m / M",          "switch metric forward / back"),
     }) | dim;
 }
 
@@ -2485,12 +3087,34 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
 
 [[nodiscard]] inline ftxui::Element render_footer_search(const UiState& ui) noexcept {
     using namespace ftxui;
-    return hbox({
-        text("/ search:  "),
-        text(ui.search_query) | bold,
-        filler(),
-        text(fmt::format("  matches: {}   \xe2\x8f\x8e jump   Esc dismiss", ui.search_match_count)),
-    });
+    Elements parts;
+    parts.push_back(text("/ search:  "));
+    if (ui.search_query.empty()) {
+        parts.push_back(text("(type to search...)") | dim);
+    } else {
+        parts.push_back(text(ui.search_query) | bold);
+    }
+    parts.push_back(filler());
+    Element status;
+    if (ui.search_query.empty()) {
+        status = text(" matches: -   \xe2\x8f\x8e jump   Esc cancel") | dim;
+    } else if (ui.search_match_count == 0) {
+        status = text(fmt::format(" no matches for '{}'   Esc cancel",
+                                  ui.search_query))
+            | bgcolor(Color::Red) | color(Color::White) | bold;
+    } else {
+        // Cursor +1 because cursor is 0-based internally; -1 sentinel
+        // means "before first navigation" — show 0/N until user
+        // presses Enter or n.
+        const int cursor_1based = ui.search_match_cursor < 0
+            ? 0 : ui.search_match_cursor + 1;
+        status = text(fmt::format(
+            " match {}/{}   \xe2\x8f\x8e jump   n / N next/prev   Esc cancel",
+            cursor_1based, ui.search_match_count))
+            | color(Color::Yellow);
+    }
+    parts.push_back(status);
+    return hbox(std::move(parts));
 }
 
 [[nodiscard]] inline ftxui::Element render_footer(
@@ -2554,6 +3178,12 @@ inline void close_sigterm_pipe() noexcept {
     if (wr >= 0) ::close(wr);
 }
 
+// Forward-declared because handle_global_event invokes it from the
+// `n` / `N` / Enter-in-search branches; the body lives in §X below
+// where the searchables index is naturally co-located with the
+// per-frame counter.
+inline void advance_search(UiState& ui, bool forward) noexcept;
+
 inline void notify_user(UiState& ui, std::string message) noexcept {
     ui.notification = std::move(message);
     ui.notification_expires = std::chrono::steady_clock::now() + kNotificationDuration;
@@ -2589,10 +3219,18 @@ report_ids_descending(ReloadState& reload, const UiState& ui)
 /// pipeline picks up the selection change via
 /// `debounce_selection_reparse` on the next frame.
 inline void apply_sidebar_selection(UiState& ui, ReloadState& reload) {
+    const auto previous_kind = ui.current_view.kind;
     auto commit = [&](std::size_t report_id, UiViewKey::Kind kind) noexcept {
         ui.selected_report_id = report_id;
         ui.current_view = UiViewKey{kind, "", "", ""};
         reload.selected_report_id_for_evict.store(report_id, std::memory_order_release);
+        // Reset section focus when switching view kinds so a stale index
+        // from the previous view doesn't survive into the new section
+        // layout. Switching between two reports of the same kind keeps
+        // the focused section, per §4.1's view-key scoping.
+        if (kind != previous_kind) {
+            ui.focused_section_index = 0;
+        }
     };
     if (ui.selected_sidebar_row == 0) {
         commit(0, UiViewKey::Kind::Summary);
@@ -2658,21 +3296,39 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
         ui.footer_state = FooterState::Search;
         ui.search_query.clear();
         ui.search_match_count = 0;
+        ui.search_match_cursor = -1;     // first `n` lands at index 0
         return true;
     }
     if (ui.footer_state == FooterState::Search) {
         if (event == Event::Backspace) {
-            if (!ui.search_query.empty()) ui.search_query.pop_back();
+            if (!ui.search_query.empty()) {
+                ui.search_query.pop_back();
+                ui.search_match_cursor = -1;
+            }
             return true;
         }
         if (event == Event::Return) {
+            // First `Enter` after typing a query jumps to the first
+            // match and exits the search bar (per §5.2 "Enter focuses
+            // the highlighted match and exits search").
+            advance_search(ui, /*forward=*/true);
             ui.footer_state = FooterState::Default;
             return true;
         }
         if (event.is_character()) {
             ui.search_query += event.character();
+            ui.search_match_cursor = -1;
             return true;
         }
+    }
+    // n / N — only meaningful while a search query is active.
+    if (event == Event::Character('n') && !ui.search_query.empty()) {
+        advance_search(ui, /*forward=*/true);
+        return true;
+    }
+    if (event == Event::Character('N') && !ui.search_query.empty()) {
+        advance_search(ui, /*forward=*/false);
+        return true;
     }
     if (event == Event::CtrlR) {
         reload.manual_reload.store(true, std::memory_order_release);
@@ -2713,22 +3369,128 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
         apply_sidebar_selection(ui, reload);
         return true;
     }
+    // ←/→ navigate previous/next report in the Report view (§5.1, §7.4.1).
+    // The strip is "oldest on the left, newest on the right" (§2.3), so
+    // ← steps to an OLDER report (higher row in the newest-first sidebar)
+    // and → steps to a NEWER report (lower row). This is the opposite
+    // direction from the previous (broken) implementation, in which
+    // ←/→ duplicated ↑/↓ exactly. Per-bench `active_metric`, value mode,
+    // expanded sections, and `focused_section_index` are preserved
+    // automatically because `apply_sidebar_selection` only mutates
+    // `selected_report_id` / `current_view.kind`. ←/→ are no-ops on the
+    // Summary view.
     if (event == Event::ArrowLeft) {
-        if (ui.current_view.kind == UiViewKey::Kind::Report
-            && ui.selected_sidebar_row > 1) {
-            --ui.selected_sidebar_row;
-            apply_sidebar_selection(ui, reload);
+        if (ui.current_view.kind != UiViewKey::Kind::Report) {
+            notify_user(ui, "\xe2\x86\x90 / \xe2\x86\x92 navigate reports \xe2\x80\x94 select a report first");
+            return true;
         }
+        const auto ids = report_ids_descending(reload, ui);
+        if (ui.selected_sidebar_row >= static_cast<int>(ids.size())) {
+            notify_user(ui, "already at oldest report");
+            return true;
+        }
+        ++ui.selected_sidebar_row;
+        apply_sidebar_selection(ui, reload);
         return true;
     }
     if (event == Event::ArrowRight) {
-        if (ui.current_view.kind == UiViewKey::Kind::Report) {
-            const auto ids = report_ids_descending(reload, ui);
-            if (ui.selected_sidebar_row < static_cast<int>(ids.size())) {
-                ++ui.selected_sidebar_row;
-                apply_sidebar_selection(ui, reload);
-            }
+        if (ui.current_view.kind != UiViewKey::Kind::Report) {
+            notify_user(ui, "\xe2\x86\x90 / \xe2\x86\x92 navigate reports \xe2\x80\x94 select a report first");
+            return true;
         }
+        if (ui.selected_sidebar_row <= 1) {
+            notify_user(ui, "already at newest report");
+            return true;
+        }
+        --ui.selected_sidebar_row;
+        apply_sidebar_selection(ui, reload);
+        return true;
+    }
+    // SPACE — pre-order forward through the active view's sections.
+    // When the focused section is collapsed, expand it first so the
+    // next render reveals its children at the (now incremented) focus
+    // index (§6.6).
+    if (event == Event::Character(' ')) {
+        if (ui.last_frame_section_ids.empty()) return true;
+        if (ui.focused_section_index < 0
+            || ui.focused_section_index
+                 >= static_cast<int>(ui.last_frame_section_ids.size())) {
+            ui.focused_section_index = 0;
+            return true;
+        }
+        const auto& current_id = ui.last_frame_section_ids[ui.focused_section_index];
+        if (!section_is_expanded(ui, current_id)) {
+            ui.section_expanded[current_id] = true;
+        }
+        const int size = static_cast<int>(ui.last_frame_section_ids.size());
+        ui.focused_section_index = (ui.focused_section_index + 1) % size;
+        return true;
+    }
+    // `.` (period) — move focus to the next *visible* section without
+    // modifying any collapse state. `last_frame_section_ids` already
+    // contains only sections whose ancestors are expanded (children of
+    // a collapsed parent are skipped during render), so a simple step
+    // through the vector is exactly "next visible section, no
+    // expansion". Wraps. ',' (comma) is the symmetric backward step.
+    if (event == Event::Character('.')) {
+        if (ui.last_frame_section_ids.empty()) return true;
+        const int size = static_cast<int>(ui.last_frame_section_ids.size());
+        if (ui.focused_section_index < 0 || ui.focused_section_index >= size) {
+            ui.focused_section_index = 0;
+            return true;
+        }
+        ui.focused_section_index = (ui.focused_section_index + 1) % size;
+        return true;
+    }
+    if (event == Event::Character(',')) {
+        if (ui.last_frame_section_ids.empty()) return true;
+        const int size = static_cast<int>(ui.last_frame_section_ids.size());
+        if (ui.focused_section_index < 0 || ui.focused_section_index >= size) {
+            ui.focused_section_index = size - 1;
+            return true;
+        }
+        ui.focused_section_index = (ui.focused_section_index - 1 + size) % size;
+        return true;
+    }
+    // Backspace — strict inverse of SPACE. Pre-order backward; tapping
+    // SPACE then Backspace returns focus to where it came from
+    // (§6.6 round-trip property). Only active when not in search.
+    if (event == Event::Backspace && ui.footer_state != FooterState::Search) {
+        if (ui.last_frame_section_ids.empty()) return true;
+        const int size = static_cast<int>(ui.last_frame_section_ids.size());
+        if (ui.focused_section_index < 0 || ui.focused_section_index >= size) {
+            ui.focused_section_index = size - 1;
+            return true;
+        }
+        ui.focused_section_index = (ui.focused_section_index - 1 + size) % size;
+        return true;
+    }
+    // Enter — toggle collapse on the focused section (§5.1, §6.6.1).
+    if (event == Event::Return && ui.footer_state != FooterState::Search) {
+        if (ui.last_frame_section_ids.empty()) return true;
+        if (ui.focused_section_index < 0
+            || ui.focused_section_index
+                 >= static_cast<int>(ui.last_frame_section_ids.size())) {
+            return true;
+        }
+        const auto& id = ui.last_frame_section_ids[ui.focused_section_index];
+        toggle_section_expanded(ui, id);
+        return true;
+    }
+    // o — latching toggle: expand-all on first press, collapse-all on
+    // the next, expand-all again on the third (§5.1).
+    if (event == Event::Character('o')) {
+        if (ui.expand_all_active) {
+            ui.expand_all_active = false;
+            ui.collapse_all_active = true;
+        } else {
+            ui.expand_all_active = true;
+            ui.collapse_all_active = false;
+        }
+        ui.section_expanded.clear();
+        notify_user(ui, ui.expand_all_active
+            ? "expand-all"
+            : "collapse-all");
         return true;
     }
     if (ui.current_view.kind == UiViewKey::Kind::Report) {
@@ -2769,6 +3531,115 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
             }
             return true;
         }
+        // m / M — cycle the active metric for the focused benchmark
+        // (§5.1 / §7.3). The benchmark is identified by the section ID
+        // closest to the focused row; we walk backward from the focus
+        // until we find a `report:bench:<key>` prefix.
+        if (event == Event::Character('m') || event == Event::Character('M')) {
+            const bool forward = (event == Event::Character('m'));
+            std::string focused_bench;
+            for (int i = std::min<int>(ui.focused_section_index,
+                    static_cast<int>(ui.last_frame_section_ids.size()) - 1);
+                 i >= 0; --i) {
+                const auto& id = ui.last_frame_section_ids[i];
+                static constexpr std::string_view kPrefix = "report:bench:";
+                if (id.compare(0, kPrefix.size(), kPrefix) != 0) continue;
+                const auto colon = id.find(':', kPrefix.size());
+                focused_bench = id.substr(kPrefix.size(),
+                    colon == std::string::npos ? std::string::npos : colon - kPrefix.size());
+                break;
+            }
+            if (focused_bench.empty()) {
+                notify_user(ui, "no benchmark in focus");
+                return true;
+            }
+            auto snap_opt = with_cached_report(reload, ui.selected_report_id,
+                [&](const ParsedReport& p) noexcept { return snapshot_benchmark(p, focused_bench); });
+            if (!snap_opt.has_value() || snap_opt->metrics.size() <= 1) {
+                notify_user(ui, fmt::format("only 1 metric in '{}'",
+                    focused_bench));
+                return true;
+            }
+            const auto& metrics = snap_opt->metrics;
+            std::string current_metric;
+            if (auto it = ui.active_metric_per_bench.find(focused_bench);
+                it != ui.active_metric_per_bench.end()) current_metric = it->second;
+            if (current_metric.empty()) current_metric = default_metric_for(*snap_opt);
+            auto it = std::find(metrics.begin(), metrics.end(), current_metric);
+            std::ptrdiff_t idx = (it == metrics.end()) ? 0 : (it - metrics.begin());
+            const std::ptrdiff_t step = forward ? 1 : -1;
+            const auto count = static_cast<std::ptrdiff_t>(metrics.size());
+            idx = (idx + step + count) % count;
+            ui.active_metric_per_bench[focused_bench] = metrics[idx];
+            notify_user(ui, fmt::format("metric: {}", metrics[idx]));
+            return true;
+        }
+        // [ / ] — jump section pointer to previous / next benchmark
+        // section header (§5.1).
+        if (event == Event::Character('[') || event == Event::Character(']')) {
+            const bool forward = (event == Event::Character(']'));
+            std::vector<int> bench_indices;
+            for (std::size_t i = 0; i < ui.last_frame_section_ids.size(); ++i) {
+                const auto& id = ui.last_frame_section_ids[i];
+                static constexpr std::string_view kPrefix = "report:bench:";
+                if (id.compare(0, kPrefix.size(), kPrefix) != 0) continue;
+                if (id.find(':', kPrefix.size()) != std::string::npos) continue;
+                bench_indices.push_back(static_cast<int>(i));
+            }
+            if (bench_indices.empty()) return true;
+            const int cur = ui.focused_section_index;
+            int target = bench_indices.front();
+            if (forward) {
+                target = bench_indices.front();
+                for (int idx : bench_indices) if (idx > cur) { target = idx; break; }
+                if (target == cur) target = bench_indices.front();
+            } else {
+                target = bench_indices.back();
+                for (auto it_b = bench_indices.rbegin(); it_b != bench_indices.rend(); ++it_b) {
+                    if (*it_b < cur) { target = *it_b; break; }
+                }
+            }
+            ui.focused_section_index = target;
+            return true;
+        }
+        // { / } — jump section pointer to previous / next test_case
+        // sub-section (`report:bench:*:tc:*:metric:*`) (§5.1).
+        if (event == Event::Character('{') || event == Event::Character('}')) {
+            const bool forward = (event == Event::Character('}'));
+            std::vector<int> tc_indices;
+            for (std::size_t i = 0; i < ui.last_frame_section_ids.size(); ++i) {
+                const auto& id = ui.last_frame_section_ids[i];
+                if (id.find(":tc:") == std::string::npos) continue;
+                if (id.find(":summary") != std::string::npos) continue;
+                if (id.find(":legend") != std::string::npos) continue;
+                tc_indices.push_back(static_cast<int>(i));
+            }
+            if (tc_indices.empty()) return true;
+            const int cur = ui.focused_section_index;
+            int target = tc_indices.front();
+            if (forward) {
+                target = tc_indices.front();
+                for (int idx : tc_indices) if (idx > cur) { target = idx; break; }
+                if (target == cur) target = tc_indices.front();
+            } else {
+                target = tc_indices.back();
+                for (auto it_t = tc_indices.rbegin(); it_t != tc_indices.rend(); ++it_t) {
+                    if (*it_t < cur) { target = *it_t; break; }
+                }
+            }
+            ui.focused_section_index = target;
+            return true;
+        }
+    }
+    // Page Up / Page Down — half-page section jumps (§5.1).
+    if (event == Event::PageUp || event == Event::PageDown) {
+        const int size = static_cast<int>(ui.last_frame_section_ids.size());
+        if (size == 0) return true;
+        const int half = std::max(1, size / 2);
+        const int delta = (event == Event::PageDown) ? half : -half;
+        ui.focused_section_index = std::clamp(
+            ui.focused_section_index + delta, 0, size - 1);
+        return true;
     }
     return false;
 }
@@ -2782,6 +3653,51 @@ inline void per_frame_tick(UiState& ui) noexcept {
     if (ui.footer_state == FooterState::Notification && now >= ui.notification_expires) {
         ui.footer_state = FooterState::Default;
         ui.notification.clear();
+    }
+    // Re-count search matches for the freshly-rendered frame's
+    // searchables. Cheap (O(items × |query|)) and keeps the footer's
+    // `matches: N` indicator in sync with the visible content.
+    if (!ui.search_query.empty()) {
+        const std::string needle = ascii_lower(ui.search_query);
+        int count = 0;
+        for (const auto& it : ui.last_frame_searchables) {
+            if (contains_ci(it.text, needle)) ++count;
+        }
+        ui.search_match_count = count;
+    } else {
+        ui.search_match_count = 0;
+    }
+}
+
+/// Walk searchables forward (or backward) from the current cursor and
+/// move the focus pointer to the matching section. Auto-expands the
+/// matching section if it's collapsed (so the matched row becomes
+/// visible). No-op when no matches exist or `query` is empty.
+inline void advance_search(UiState& ui, bool forward) noexcept {
+    if (ui.search_query.empty()) return;
+    const std::string needle = ascii_lower(ui.search_query);
+    std::vector<int> matches;
+    matches.reserve(ui.last_frame_searchables.size());
+    for (std::size_t i = 0; i < ui.last_frame_searchables.size(); ++i) {
+        if (contains_ci(ui.last_frame_searchables[i].text, needle)) {
+            matches.push_back(static_cast<int>(i));
+        }
+    }
+    if (matches.empty()) {
+        notify_user(ui, fmt::format("no matches for '{}'", ui.search_query));
+        return;
+    }
+    if (forward)  ui.search_match_cursor = (ui.search_match_cursor + 1) % static_cast<int>(matches.size());
+    else          ui.search_match_cursor = (ui.search_match_cursor - 1 + static_cast<int>(matches.size())) % static_cast<int>(matches.size());
+    const int target_in_searchables = matches[ui.search_match_cursor];
+    const int target_section = ui.last_frame_searchables[target_in_searchables].section_anchor;
+    ui.focused_section_index = target_section;
+    if (target_section >= 0
+        && target_section < static_cast<int>(ui.last_frame_section_ids.size())) {
+        const auto& id = ui.last_frame_section_ids[target_section];
+        if (!section_is_expanded(ui, id)) {
+            ui.section_expanded[id] = true;
+        }
     }
 }
 
@@ -2877,21 +3793,31 @@ namespace bioseq::bench_framework::detail {
         const int header_rows = live ? kHeaderRowsLive : kHeaderRowsBase;
         const auto strip = render_strip_rows(reload, ui, gv);
         ftxui::Elements header_lines;
-        header_lines.push_back(render_header_line1(reload, ui, gv));
+        header_lines.push_back(render_header_line1(reload, ui, git_log, gv));
         header_lines.push_back(strip.cells_row);
         header_lines.push_back(strip.arrow_row);
         if (live) header_lines.push_back(render_header_line3(reload, ui, gv));
         ftxui::Element header_block = ftxui::vbox(std::move(header_lines))
             | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, header_rows);
         ftxui::Element body;
+        // Apply `vscroll_indicator | yframe` to the *main pane only*,
+        // not the body. Wrapping the entire body would scroll the
+        // sidebar (Reports + Commits) along with the content, which
+        // makes the sidebar feel like it belongs to the report being
+        // viewed instead of being a fixed navigation rail. With the
+        // yframe scoped to the main pane the sidebar stays anchored
+        // at the top of the body region while the report content
+        // scrolls underneath the focused section.
+        ftxui::Element main_pane = render_main(reload, ui, gv)
+            | ftxui::vscroll_indicator | ftxui::yframe | ftxui::flex_grow;
         if (ui.sidebar_visible && screen.dimx() >= static_cast<int>(kMinScreenCols)) {
             body = ftxui::hbox({
                 render_sidebar(reload, ui, git_log, gv),
                 ftxui::separator(),
-                render_main(reload, ui, gv) | ftxui::flex_grow,
+                main_pane,
             });
         } else {
-            body = render_main(reload, ui, gv);
+            body = main_pane;
         }
         ftxui::Element footer = render_footer(ui, gv);
         const int footer_rows = footer_rows_for(ui.footer_state);
@@ -2902,8 +3828,7 @@ namespace bioseq::bench_framework::detail {
         return ftxui::vbox({
             header_block,
             ftxui::separator(),
-            body | ftxui::vscroll_indicator | ftxui::yframe
-                 | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, body_rows),
+            body | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, body_rows),
             ftxui::separator(),
             footer | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, footer_rows),
         });
