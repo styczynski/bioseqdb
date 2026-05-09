@@ -55,13 +55,13 @@
       {
         "name": "bench-opt",
         "displayName": "Benchmark-tuned optimisation config",
-         "description": "Like dev-opt-pg but -O3 and NDEBUG so the bench runs at production-grade optimisation while still allowing module-build incremental rebuilds.",
+         "description": "Like dev-opt-pg but -O3 and NDEBUG so the bench runs at production-grade optimisation while still allowing module-build incremental rebuilds. -save-temps=obj keeps per-TU .s/.ii/.bc artifacts beside each .o so the inspect MCP tool can extract assembly and IR for any function. -g preserves DWARF symbols for source-line cross-references.",
         "generator": "Ninja",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
           "CMAKE_BUILD_TYPE": "Debug",
-          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -save-temps=obj -g",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
