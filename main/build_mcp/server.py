@@ -52,6 +52,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# inspect tool — see inspect_tool.py docstring for design.
+# (Named `inspect_tool` rather than `inspect` to avoid shadowing the
+# stdlib `inspect` module when this script's directory ends up on
+# sys.path[0].)
+from inspect_tool import (
+    run_inspect as _run_inspect_impl,
+    MATCHES_WARN_THRESHOLD,
+)
+
 # --------------------------- configuration ---------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
@@ -638,6 +647,63 @@ def tool_start_build(mode: str, build_only: bool = False) -> str:
             f"Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
+def tool_inspect(arguments: dict) -> str:
+    """Implement the `inspect` tool. Returns a single string (a JSON
+    document) — the MCP tools/call envelope wraps it in a content item.
+
+    All errors come back as JSON `{"error": "...", ...}` rather than
+    raising, so the AI agent always gets a structured result.
+    """
+    function_name = arguments.get("function_name")
+    if not isinstance(function_name, str) or not function_name:
+        return json.dumps(
+            {"error": "function_name is required and must be a non-empty string"},
+            indent=2,
+        )
+    target = arguments.get("target", "bioseq_bench")
+    if not isinstance(target, str):
+        return json.dumps(
+            {"error": f"target must be a string, got {type(target).__name__}"},
+            indent=2,
+        )
+
+    def _int_arg(name: str, default: int) -> int:
+        v = arguments.get(name, default)
+        if isinstance(v, bool):  # bool is a subclass of int in Python
+            return default
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+            return int(v)
+        return default
+
+    max_matches = _int_arg("max_matches", 4)
+    snippet_lines = _int_arg("snippet_lines", 200)
+    max_llc_bc_files = _int_arg("max_llc_bc_files", 4)
+    source_basename = arguments.get("source_basename")
+    if source_basename is not None and not isinstance(source_basename, str):
+        source_basename = None
+    try:
+        llc_on_bc = parse_bool("llc_on_bc", arguments.get("llc_on_bc", True))
+    except RuntimeError as e:
+        # parse_bool raises on a malformed string — convert to the JSON
+        # error body shape the AI agent expects (per plan §6 error
+        # contract) instead of bubbling up as a JSON-RPC -32000.
+        return json.dumps({"error": str(e)}, indent=2)
+
+    out = _run_inspect_impl(
+        function_name=function_name,
+        target=target,
+        build_dir=BUILD_DIR,
+        max_matches=max_matches,
+        snippet_lines=snippet_lines,
+        source_basename=source_basename,
+        llc_on_bc=llc_on_bc,
+        max_llc_bc_files=max_llc_bc_files,
+    )
+    return json.dumps(out, indent=2)
+
+
 def tool_status(mode: str) -> str:
     if mode not in MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
@@ -750,6 +816,129 @@ TOOL_DEFINITIONS = [
             "required": ["mode"],
         },
     },
+    {
+        "name": "inspect",
+        "description": (
+            "Inspect a function in the latest bench-opt build. Returns a "
+            "JSON document with: demangled symbols matching the substring; "
+            "the linked-binary disassembly per match (post-LTO ground "
+            "truth); the per-TU compiler-emitted .s listing block (pre-LTO "
+            "compiler intent, with .loc source-line annotations); an "
+            "instruction histogram (total / SIMD / branches / loads / "
+            "stores / atomic_loads / atomic_stores / neon_struct_loadstore); "
+            "and a sweep of inline sites where the function appears as "
+            ".loc directives or DEBUG_VALUE annotations in other TUs' .s "
+            "files (useful for [[gnu::always_inline]] functions that have "
+            "no standalone symbol). All large outputs are written to "
+            "/tmp/bioseq_inspect/ and pointed at via paths so the AI can "
+            "Read them on demand.\n\n"
+            "Use this to compare two implementations of the same function "
+            "(e.g. before/after a refactor) at the instruction level to "
+            "spot vectorisation regressions, register spills, "
+            "instruction-count deltas, branch-pattern changes, etc.\n\n"
+            "Recommended: pass a fully-qualified namespace prefix as "
+            "`function_name` (e.g. "
+            "'void bioseq::simd::N_NEON::collect_minimizers_two_stack_nthash_simd@') "
+            "rather than the bare function name; bare names like 'hash' "
+            "match thousands of unrelated symbols (std::hash, "
+            "boost::hash, lambdas, etc.). The `summary.total_matches_before_cap` "
+            "field surfaces the un-capped count so you can decide whether "
+            "to retry with a tighter prefix; a top-level warning fires "
+            f"when the count exceeds {MATCHES_WARN_THRESHOLD}.\n\n"
+            "Latency: lazy disk-cached llc fallback. First call after a "
+            "fresh bench-opt build is ~25-100s (one llc per relevant .bc, "
+            "capped at 4). Subsequent calls reuse the cached .s and "
+            "complete in ~6-9s. Cache invalidates on .bc mtime; rebuilds "
+            "cleanly reset it.\n\n"
+            "Caveats:\n"
+            "  - llvm-objdump symbolises every branch target by finding "
+            "the closest *named* symbol with a smaller address — even when "
+            "the offset is huge (e.g. `bl 0x1004f5ec0 <_write+0x1004f5ec0>` "
+            "is NOT a call to _write, just the closest libsystem anchor). "
+            "Treat `<symbol+offset>` annotations with suspicion when the "
+            "offset is > 0x10000.\n"
+            "  - macOS+ThinLTO drops inline-frame source line info, so the "
+            "post-LTO disassembly's --line-numbers output is sparse. The "
+            "pre-LTO `.s` view (assembly_listing_*) preserves source "
+            "mapping via .loc directives.\n"
+            "  - At clang -O3 the default -discard-value-names strips "
+            "DEBUG_VALUE annotations for templated/inlined code, so "
+            "inline_sites[].debug_value_hits is often 0. The .loc "
+            "directive count is the primary signal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function_name": {
+                    "type": "string",
+                    "description":
+                        "Substring matched against demangled C++ names. "
+                        "Examples: "
+                        "'void bioseq::simd::N_NEON::collect_minimizers_two_stack_nthash_simd@' "
+                        "(prefix-anchored, recommended), or "
+                        "'collect_minimizers_two_stack_nthash_simd' "
+                        "(broader, may match many lambdas/closures).",
+                },
+                "target": {
+                    "type": "string",
+                    "enum": ["bioseq_bench", "bioseq_io_bench",
+                             "bioseq_aligner_tests_exec",
+                             "bioseq_aligner_int_tests_exec"],
+                    "default": "bioseq_bench",
+                    "description":
+                        "Which target binary to inspect under "
+                        "main/build/bench-opt/bioseq/.",
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "default": 4,
+                    "minimum": 1,
+                    "description":
+                        "Cap on the number of returned symbols. Largest "
+                        "first (by computed size).",
+                },
+                "snippet_lines": {
+                    "type": "integer",
+                    "default": 200,
+                    "minimum": 1,
+                    "description":
+                        "How many lines of asm/disasm to inline in the "
+                        "JSON. Full output is always written to /tmp and "
+                        "the path is included; use Read on the path for "
+                        "the rest.",
+                },
+                "source_basename": {
+                    "type": "string",
+                    "description":
+                        "Basename of the source file (e.g. "
+                        "'two_stacks_minimizers.cppm') used to filter "
+                        "the inline-site .loc sweep. Defaults to "
+                        "'<function_name>.cppm', which is usually wrong "
+                        "for namespaced functions — pass it explicitly "
+                        "for accurate inline_sites[].",
+                },
+                "max_llc_bc_files": {
+                    "type": "integer",
+                    "default": 4,
+                    "minimum": 0,
+                    "description":
+                        "Cap on the number of .bc files we llc-compile "
+                        "for the pre-LTO view when no .s is present. Each "
+                        "conversion costs ~25s on the bench-main TU. "
+                        "Raise to widen the search; set to 0 to disable.",
+                },
+                "llc_on_bc": {
+                    "type": "boolean",
+                    "default": True,
+                    "description":
+                        "Whether to run the llc-on-.bc fallback when no "
+                        ".s files are present (clang ThinLTO case). "
+                        "Disable for fast/incomplete inspect calls.",
+                },
+            },
+            "required": ["function_name"],
+        },
+    },
 ]
 
 
@@ -807,12 +996,15 @@ def parse_bool(parameter_description: str, value: Any) -> bool:
 def _handle_tools_call(params: dict) -> dict:
     name = params.get("name")
     args = params.get("arguments") or {}
-    mode = args.get("mode", "")
-    build_only: bool = parse_bool("build_only", args.get("build_only", False))
     if name == "start_build":
+        mode = args.get("mode", "")
+        build_only: bool = parse_bool("build_only", args.get("build_only", False))
         text = tool_start_build(mode, build_only=build_only)
     elif name == "status":
+        mode = args.get("mode", "")
         text = tool_status(mode)
+    elif name == "inspect":
+        text = tool_inspect(args)
     else:
         return {
             "content": [{"type": "text", "text": f"unknown tool: {name}"}],
