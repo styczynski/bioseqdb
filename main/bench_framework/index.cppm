@@ -794,10 +794,10 @@ struct ParsedCli {
     bool                       ui_ascii_fallback = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
-    /// V12: `--memory-buffer N` (0..50, default 10). Determines how
+    /// V12: `--memory-buffer N` (0..50, default 40). Determines how
     /// much headroom to leave above peak system usage when computing
     /// the dynamic memory cap. See `MemoryBudget::cap_for`.
-    double                     memory_buffer_pct = 10.0;
+    double                     memory_buffer_pct = 40.0;
 };
 
 /// Identity card for one report. Captured once in `run_impl` and
