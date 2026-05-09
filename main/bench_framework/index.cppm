@@ -27,6 +27,7 @@ module;
 #include <oneapi/tbb/global_control.h>
 #include <oneapi/tbb/parallel_for_each.h>
 #include <oneapi/tbb/task_arena.h>
+#include <oneapi/tbb/task_group.h>
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/screen.hpp>
@@ -51,12 +52,12 @@ module;
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
-#include <shared_mutex>
 #include <span>
 #include <sstream>
 #include <string>
@@ -770,12 +771,9 @@ struct BenchmarkExecutionState {
     std::vector<ExecutionTuple>         execution_tuples{};
     std::vector<std::unique_ptr<Cell>>  cells{};
 
-    /// Held around an item's iteration loop when
-    /// `concurrency.concurrency == false`. Forces serial item execution
-    /// across all batches of this benchmark while still letting other
-    /// (parallel) benchmarks run concurrently. Non-movable, hence
-    /// inline as a value member of the pinned execution state.
-    std::mutex serial_mu{};
+    // V16: `serial_mu` deleted — the scheduler enforces
+    // `concurrency.concurrency: false` by admitting at most one batch
+    // per benchmark at a time (see BatchScheduler::concurrency_admissible_locked).
 
     BenchmarkExecutionState() = default;
     BenchmarkExecutionState(BenchmarkExecutionState&&) = delete;
@@ -930,6 +928,7 @@ struct SanityWarning {
 struct ProgressState;
 struct ValidationDiag;
 class  MemoryBudget;
+class  BatchScheduler;
 
 }  // namespace detail
 
@@ -945,7 +944,9 @@ struct BenchmarkContext {
     std::string                                    data_dir;
     std::string                                    report_dir;
     bool                                            fast_filter = false;
-    std::shared_mutex*                              cross_bench_mu = nullptr;
+    // V16: `cross_bench_mu` deleted — bench-lock semantics enforced by
+    // the scheduler's admission predicates (see
+    // BatchScheduler::bench_lock_admissible_locked).
     detail::ProgressState*                          progress = nullptr;
     std::size_t                                     benchmark_index = 0;
     std::mutex*                                     violations_mu = nullptr;
@@ -968,10 +969,14 @@ struct BenchmarkContext {
     /// skip parsing.
     std::mutex*                                     regression_rules_mu = nullptr;
     detail::RegressionRulesByConfig*                regression_rules_by_config = nullptr;
-    /// Process-wide memory budget owned by `run_impl`. Shared across
-    /// every benchmark closure so a single 5 GiB pool gates batches
-    /// of unrelated benchmarks too.
-    detail::MemoryBudget*                           memory_budget = nullptr;
+    /// V16: process-wide batch scheduler. The per-benchmark closure
+    /// enqueues batches into this scheduler and waits for them to
+    /// drain before returning, so captured state (`Cell::samples`,
+    /// `BenchmarkExecutionState`, etc.) outlives the bodies. The
+    /// scheduler also owns a non-owning reference to the host's
+    /// `MemoryBudget` — callers that need budget metadata go through
+    /// the scheduler instead of duplicating the pointer here.
+    detail::BatchScheduler*                         scheduler = nullptr;
 };
 
 // ----------------- ConfigValue::from_simdjson -----------------
@@ -1131,52 +1136,20 @@ struct SystemMemorySnapshot {
 
 // ----------------- MemoryBudget -----------------
 
-// Forward declaration so `MemoryBudget::AcquireState` can hold a pointer
-// to a progress-side struct.
+// Forward declaration kept so the renderer can store a pointer.
 struct ProgressGroup;
 
-/// Process-wide memory budget recomputed dynamically from hwinfo on
-/// every constraint check. There is no fixed ceiling: the budget
-/// shrinks/grows as the host's RAM pressure changes. The two hard-error
-/// conditions (`memory_budget_not_satisfiable`, fired when the batch
-/// requires more memory than the host owns; and
-/// `memory_budget_oversized` warning when the requirement exceeds the
-/// buffered cap) are evaluated **per batch** at the driver level. The
-/// third hard error (`memory_budget_constraint_timeout`) is reported by
-/// `acquire()` itself when the per-batch idle clock exceeds 30 s.
+/// V16 slim form: hwinfo snapshotter plus the buffered-cap math. All
+/// reservation tracking moved to `BatchScheduler` (§3.7 of
+/// BENCH_V16_IMPL_PLAN.md). Removing the per-batch acquire/release
+/// path eliminates the worker-blocking cv-wait loop that was the
+/// secondary bottleneck under the V12 design.
 class MemoryBudget {
 public:
-    /// Hardcoded — not exposed via CLI per spec. The brief calls this
-    /// MAX_TASK_IDLE_WAITING_TIME and pins it at 30 s.
-    static constexpr std::chrono::seconds kMaxIdleWaitingTime{30};
-
-    /// Wake-up cadence inside `acquire` when blocked, so we re-poll
-    /// hwinfo even if no one calls `release()`. Aligned with the
-    /// dashboard's repaint period so a single hwinfo read can serve
-    /// both `acquire` re-checks and the renderer.
-    static constexpr std::chrono::milliseconds kPollInterval{200};
-
     /// hwinfo TTL — every snapshot reads /proc/meminfo / sysctl / WMI.
-    /// Cache the last one so repeated reads inside a 200 ms window
-    /// collapse to one syscall regardless of how many batches block
-    /// concurrently.
+    /// Cache the last one so concurrent renderer paints + scheduler
+    /// ticks collapse to one syscall per 200 ms window.
     static constexpr std::chrono::milliseconds kBudgetSnapshotTtl{200};
-
-    enum class AcquireOutcome : std::uint8_t {
-        Acquired,        // bytes deducted; caller may proceed
-        IdleTimeout,     // memory_budget_constraint_timeout fired
-    };
-
-    /// Per-batch state for the idle-clock logic. Stack-allocated inside
-    /// `run_one_batch`, reused across base/extra acquisitions, mutated
-    /// only by the owning TBB worker — no atomic on the local field.
-    /// `group_for_ui` (when non-null) lets `acquire` mirror the idle
-    /// timestamp into the dashboard's atomic field so the renderer can
-    /// show the "🕑 waiting Ns / 30s" row.
-    struct AcquireState {
-        std::int64_t   last_idle_start_ns = 0;     // 0 = "not idle"
-        ProgressGroup* group_for_ui = nullptr;     // optional UI mirror
-    };
 
     /// Constructed once in `run_impl`. `memory_buffer_pct` is already
     /// validated to `[0, 50]` by `parse_cli`.
@@ -1187,30 +1160,7 @@ public:
             "MemoryBudget memory_buffer_pct must be in [0, 50]");
     }
 
-    /// Block until `bytes` fits the dynamic budget, or the idle clock
-    /// fires. The two batch-level hard-error conditions are checked at
-    /// the driver before any `acquire` call, so the only failure mode
-    /// surfaced here is `IdleTimeout`.
-    [[nodiscard]] AcquireOutcome
-    acquire(std::size_t bytes, AcquireState& state) noexcept;
-
-    /// Decrement active reservations and notify_all so blocked acquires
-    /// re-check.
-    void release(std::size_t bytes) noexcept;
-
-    /// Snapshot for the dashboard / batch-level upfront checks.
-    struct Snapshot {
-        std::uint64_t total_bytes;       // T (system physical, hwinfo)
-        std::uint64_t used_bytes;        // U = T − free
-        std::uint64_t cap_bytes;         // C = T·(1 − buffer/100)
-        std::uint64_t available_bytes;   // B = max(0, C − U − reserved)
-        std::uint64_t reserved_bytes;    // bytes currently held by us
-    };
-    [[nodiscard]] Snapshot snapshot() const noexcept;
-
     /// Compute the cap (`C = T·(1 − buffer/100)`) for an arbitrary `T`.
-    /// Public so the per-batch driver can compare `base + extra` against
-    /// the cap without re-deriving the formula.
     [[nodiscard]] static constexpr std::uint64_t
     cap_for(std::uint64_t total, double buffer_pct) noexcept {
         return static_cast<std::uint64_t>(
@@ -1219,11 +1169,20 @@ public:
 
     [[nodiscard]] double memory_buffer_pct() const noexcept { return memory_buffer_pct_; }
 
-    /// Snapshot count of currently-held reservations. Used by the
-    /// renderer to colour-code idle waits and by upfront checks.
-    [[nodiscard]] std::int64_t active_reservations() const noexcept {
-        std::lock_guard<std::mutex> guard(budget_mu_);
-        return active_reservations_;
+    /// Live system-memory snapshot. Reads through a 200 ms cache so
+    /// many concurrent callers (scheduler + renderer) collapse to one
+    /// syscall per cache window. `const` because the cache fields are
+    /// `mutable`; observable state of the budget is unchanged.
+    [[nodiscard]] SystemMemorySnapshot current_system_snapshot() const noexcept {
+        std::lock_guard<std::mutex> guard(cache_mu_);
+        const auto now_ns = static_cast<std::int64_t>(bioseq::instr::clock::now_ns());
+        constexpr auto ttl_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    kBudgetSnapshotTtl).count();
+        if (cached_snapshot_ns_ == 0 || (now_ns - cached_snapshot_ns_) >= ttl_ns) {
+            cached_snapshot_    = snapshot_system_memory();
+            cached_snapshot_ns_ = now_ns;
+        }
+        return cached_snapshot_;
     }
 
     MemoryBudget(const MemoryBudget&) = delete;
@@ -1232,87 +1191,10 @@ public:
     MemoryBudget& operator=(MemoryBudget&&) = delete;
 
 private:
-    /// Read the cached SystemMemorySnapshot if it's still fresh, else
-    /// re-poll hwinfo and refresh the cache. Caller holds `budget_mu_`.
-    [[nodiscard]] SystemMemorySnapshot fresh_or_cached_locked() noexcept;
-
-    /// If `state.group_for_ui` is non-null, mirror `idle_start_ns` into
-    /// its atomic so the renderer can read it without the budget mutex.
-    static void mirror_idle_to_ui(const AcquireState& state,
-                                   std::int64_t idle_start_ns) noexcept;
-
-    mutable std::mutex      budget_mu_{};
-    std::condition_variable budget_cv_{};
-    double                  memory_buffer_pct_;
-    std::int64_t            reserved_bytes_ = 0;
-    std::int64_t            active_reservations_ = 0;
-    SystemMemorySnapshot    cached_snapshot_{};
-    std::int64_t            cached_snapshot_ns_ = 0;
-};
-
-/// Move-only RAII guard. Calls `MemoryBudget::acquire`. On the
-/// `IdleTimeout` path the guard enters the moved-from state
-/// (`budget_ptr_ == nullptr`, `reserved_bytes_ == 0`) so the destructor
-/// is a no-op; this is what prevents a double-decrement if the caller
-/// forgets to check `ok()` and lets the destructor run anyway.
-///
-/// `[[nodiscard]]` on the class so a discarded
-/// `BudgetReservation(*budget, n, state);` temporary — which would
-/// release the reservation immediately — is flagged at compile time.
-class [[nodiscard("hold the BudgetReservation; immediately discarding "
-                   "the temporary releases the reservation")]] BudgetReservation {
-public:
-    BudgetReservation() noexcept = default;
-    BudgetReservation(MemoryBudget& budget, std::size_t bytes,
-                       MemoryBudget::AcquireState& state) noexcept
-        : budget_ptr_(&budget), reserved_bytes_(bytes)
-    {
-        outcome_ = budget.acquire(bytes, state);
-        if (outcome_ != MemoryBudget::AcquireOutcome::Acquired) {
-            // Failed acquire: enter moved-from state so the destructor
-            // does not call release(bytes) and double-decrement.
-            budget_ptr_     = nullptr;
-            reserved_bytes_ = 0;
-        }
-    }
-    BudgetReservation(BudgetReservation&& other) noexcept
-        : budget_ptr_(std::exchange(other.budget_ptr_, nullptr)),
-          reserved_bytes_(std::exchange(other.reserved_bytes_, 0)),
-          outcome_(other.outcome_) {}
-    BudgetReservation& operator=(BudgetReservation&& other) noexcept {
-        release_now();
-        budget_ptr_     = std::exchange(other.budget_ptr_,     nullptr);
-        reserved_bytes_ = std::exchange(other.reserved_bytes_, 0);
-        outcome_        = other.outcome_;
-        return *this;
-    }
-    BudgetReservation(const BudgetReservation&) = delete;
-    BudgetReservation& operator=(const BudgetReservation&) = delete;
-    ~BudgetReservation() { release_now(); }
-
-    [[nodiscard]] bool ok() const noexcept {
-        return outcome_ == MemoryBudget::AcquireOutcome::Acquired;
-    }
-    [[nodiscard]] MemoryBudget::AcquireOutcome outcome() const noexcept {
-        return outcome_;
-    }
-
-    /// Release immediately and zero the guard. Idempotent. We pass
-    /// any reservation (including zero) through to `release` which
-    /// short-circuits on zero internally.
-    void release_now() noexcept {
-        if (budget_ptr_ != nullptr) {
-            budget_ptr_->release(reserved_bytes_);
-        }
-        budget_ptr_     = nullptr;
-        reserved_bytes_ = 0;
-    }
-
-private:
-    MemoryBudget*                budget_ptr_     = nullptr;
-    std::size_t                  reserved_bytes_ = 0;
-    MemoryBudget::AcquireOutcome outcome_ =
-        MemoryBudget::AcquireOutcome::IdleTimeout;
+    mutable std::mutex             cache_mu_{};
+    mutable SystemMemorySnapshot   cached_snapshot_{};
+    mutable std::int64_t           cached_snapshot_ns_ = 0;
+    double                         memory_buffer_pct_;
 };
 
 // ----------------- ProgressState -----------------
@@ -1323,11 +1205,11 @@ private:
 /// Failure / wait state observed by the renderer:
 ///   - `input_retry_attempt`  — current `on_input` retry index (0 = clear).
 ///   - `cleanup_retry_attempt`— current `on_cleanup` retry index (0 = clear).
-///   - `idle_start_ns`        — mirror of MemoryBudget::AcquireState's
-///                               idle clock so the renderer can show a
-///                               "🕑 waiting Ns / 30s" row when the
-///                               batch is blocked on memory with no
-///                               peers running.
+///   - `idle_start_ns`        — V16: written by the scheduler via
+///                               `mirror_idle_to_ui` while a batch is
+///                               pending and starves. The renderer
+///                               shows a "🕑 waiting Ns / 30s" row
+///                               when this batch is the sole holdout.
 ///   - `aborted`              — true after a hard error has aborted the
 ///                               batch; renderer renders an `❌` row
 ///                               with the diagnostic message.
@@ -1357,8 +1239,8 @@ struct ProgressGroup {
     /// Cleanup retry status. Same shape as input_retry_attempt.
     std::atomic<std::uint8_t>  cleanup_retry_attempt{0};
     /// Nanoseconds since `bioseq::instr::clock::now_ns()` epoch at
-    /// which the batch entered the idle-wait state, mirrored from
-    /// MemoryBudget::AcquireState. 0 = not waiting on memory.
+    /// which the batch entered the idle-wait state. Written by the
+    /// scheduler via `mirror_idle_to_ui`. 0 = not waiting on memory.
     std::atomic<std::int64_t>  idle_start_ns{0};
     /// Set true when a hard error aborts the batch.
     std::atomic<bool>          aborted{false};
@@ -1405,6 +1287,10 @@ struct ProgressTestCase {
 /// on `setup_done.load(acquire)`. After the writer signals, the
 /// vector and every `unique_ptr` it holds are stable for the rest of
 /// the run.
+// Forward-declared so ProgressState can carry a non-owning pointer to it
+// even though the class body lives further down in the module.
+class BatchScheduler;
+
 struct ProgressState {
     struct Per {
         std::string                                       title{};
@@ -1415,141 +1301,446 @@ struct ProgressState {
     std::vector<std::unique_ptr<Per>> per_benchmark;
     std::atomic<bool> running{true};
     std::atomic<bool> tty_render{false};   // set true if stderr is a TTY at startup
-    /// Optional pointer to the framework-owned memory budget; the
-    /// renderer prints `[memory X / Y GiB]` in the header when set.
-    /// Lifetime is the same as ProgressState (both owned by run_impl).
-    MemoryBudget* memory_budget = nullptr;
+    /// V16: scheduler exposes pending/running counters + reservation
+    /// totals consumed by the dashboard header. nullptr = no scheduler
+    /// installed (e.g. in `--ui` review mode). Memory-budget access is
+    /// routed through the scheduler too, so there's a single owner.
+    BatchScheduler*  scheduler     = nullptr;
 };
 
-// ----------------- MemoryBudget out-of-line bodies -----------------
+// ----------------- BatchScheduler -----------------
 
-inline void MemoryBudget::mirror_idle_to_ui(
-    const AcquireState& state, std::int64_t idle_start_ns) noexcept
-{
-    if (state.group_for_ui != nullptr) {
-        state.group_for_ui->idle_start_ns.store(idle_start_ns,
-                                                  std::memory_order_release);
+/// One pending or running batch, type-erased. Owned by the scheduler.
+/// The body is constructed by `run_typed_benchmark` and captures
+/// references back into the per-benchmark `BenchmarkExecutionState` —
+/// so the scheduler must guarantee the body has run to completion
+/// before the closure that built it returns. `wait_for_benchmark`
+/// enforces that contract.
+struct ScheduledBatch {
+    std::size_t      scheduler_id      = 0;
+    std::size_t      benchmark_index   = 0;
+    /// `concurrency.bench_lock` from the parsed config — true ⇒
+    /// scheduler treats the owning benchmark as exclusive across
+    /// benchmarks (other benchmarks' batches do not run until every
+    /// bench-locked batch from this benchmark has drained).
+    bool             bench_lock        = false;
+    /// `!concurrency.concurrency` — true ⇒ scheduler admits at most
+    /// one batch from this benchmark at a time (preserves V12's
+    /// "Strict latency-sensitive run" semantics).
+    bool             concurrency_serial = false;
+    /// Memory reservation requested by `on_estimate_resources`.
+    std::size_t      base_bytes        = 0;
+    std::size_t      extra_bytes       = 0;
+    /// Body executed by the TBB task pool. Wrapped at admission time
+    /// by an enclosing lambda that owns a `ScopedSchedulerFinish` so
+    /// the reservation always releases on every return path.
+    std::function<void()> body{};
+    /// UI mirror — the renderer reads `idle_start_ns` to colour the
+    /// "🕑 waiting Ns / 30s" row when this batch is the sole holdout.
+    /// May be nullptr (no progress dashboard installed).
+    ProgressGroup*   group_for_ui      = nullptr;
+    /// Per-batch idle clock (ns). 0 = "not idle yet". Mutated only by
+    /// the scheduler thread under `mu_`.
+    std::int64_t     last_idle_start_ns = 0;
+    /// Captured at enqueue so `emit_idle_timeout_locked` can mark the
+    /// progress UI without re-resolving every chain of indices.
+    std::string      location_str{};
+    std::string      test_case_name{};
+    std::size_t      test_case_index   = 0;
+    std::size_t      group_index       = 0;
+    /// Non-owning pointer to the BenchmarkContext used to push
+    /// diagnostics + UI updates. Lifetime is the same as `run_impl`.
+    BenchmarkContext* context           = nullptr;
+};
+
+/// Free helper used inside the scheduler when mirroring the idle clock
+/// to the per-group UI atomic. Replaces V12's
+/// `MemoryBudget::mirror_idle_to_ui`.
+inline void mirror_idle_to_ui(const ScheduledBatch& batch,
+                               std::int64_t idle_start_ns) noexcept {
+    if (batch.group_for_ui != nullptr) {
+        batch.group_for_ui->idle_start_ns.store(
+            idle_start_ns, std::memory_order_release);
     }
 }
 
-inline SystemMemorySnapshot MemoryBudget::fresh_or_cached_locked() noexcept {
-    const auto now_ns = static_cast<std::int64_t>(bioseq::instr::clock::now_ns());
-    const auto ttl_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                            kBudgetSnapshotTtl).count();
-    if (cached_snapshot_ns_ == 0 || (now_ns - cached_snapshot_ns_) >= ttl_ns) {
-        cached_snapshot_    = snapshot_system_memory();
-        cached_snapshot_ns_ = now_ns;
+/// Forward declaration so `ScopedSchedulerFinish` can refer to the
+/// scheduler before its body is defined.
+class BatchScheduler;
+
+/// RAII guard installed by the scheduler around every enqueued body.
+/// `~ScopedSchedulerFinish` calls `BatchScheduler::notify_batch_finished`
+/// so any return path (normal, diagnostic-emit, exception inside
+/// `cpptrace::try_catch` catchers) decrements reservations exactly once.
+struct ScopedSchedulerFinish {
+    BatchScheduler* scheduler;
+    std::size_t     scheduler_id;
+    ~ScopedSchedulerFinish() noexcept;
+};
+
+/// Single scheduler thread + TBB task pool. Replaces the V12
+/// `tbb::parallel_for_each(batches…)` model.
+///
+/// Memory reservations live exclusively here — bodies never block on
+/// `MemoryBudget` directly. Bench-lock + serial-concurrency rules are
+/// also enforced by admission predicates instead of process-global
+/// mutexes; see BENCH_V16_IMPL_PLAN.md §3.4.
+class BatchScheduler {
+public:
+    /// Scheduler tick cadence. Wakeups also fire on every batch
+    /// completion, so the wall-clock latency between "a slot opens"
+    /// and "the next batch is admitted" is dominated by
+    /// `notify_batch_finished` rather than the tick (the tick exists
+    /// only to re-poll hwinfo and re-check idle timeouts).
+    static constexpr std::chrono::seconds kSchedulerTickInterval{1};
+    /// `MAX_TASK_IDLE_WAITING_TIME` — preserved verbatim from V12.
+    /// A pending batch whose constraints don't fit AND whose peers
+    /// are all idle for this long aborts with
+    /// `memory_budget_constraint_timeout`.
+    static constexpr std::chrono::seconds kMaxIdleWaitingTime{30};
+
+    BatchScheduler(MemoryBudget& budget,
+                    oneapi::tbb::task_arena& arena) noexcept
+        : budget_(budget), arena_(arena)
+    {
+        thread_ = std::thread{[this] { scheduler_loop(); }};
     }
-    return cached_snapshot_;
-}
 
-inline MemoryBudget::AcquireOutcome
-MemoryBudget::acquire(std::size_t bytes, AcquireState& state) noexcept {
-    if (bytes == 0) return AcquireOutcome::Acquired;        // free fast path
+    ~BatchScheduler() noexcept {
+        // Dtor sequence (see BENCH_V16_IMPL_PLAN.md §4.5):
+        // 1. Stop the scheduler thread.
+        // 2. Drain any TBB tasks already enqueued.
+        // 3. Members destruct.
+        running_.store(false, std::memory_order_release);
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+        tg_.wait();      // tg_'s dtor would throw missing_wait otherwise
+    }
 
-    std::unique_lock<std::mutex> guard(budget_mu_);
-    while (true) {
-        // 1. Refresh hwinfo on every check (G1.a) — through the cache so
-        //    N concurrently blocked batches collapse to one syscall.
-        const auto sys = fresh_or_cached_locked();
-        const auto cap = cap_for(sys.total_bytes, memory_buffer_pct_);
-        const auto used = (sys.total_bytes > sys.free_bytes)
-                             ? (sys.total_bytes - sys.free_bytes)
-                             : std::uint64_t{0};
-        // available B = max(0, C - U - reserved-by-us). Reserved bytes
-        // already account for our peers' acquisitions.
-        const auto framework_overhead = static_cast<std::uint64_t>(
-                                            std::max<std::int64_t>(reserved_bytes_, 0));
-        const auto avail_now = (cap > used + framework_overhead)
-                                  ? (cap - used - framework_overhead)
-                                  : std::uint64_t{0};
+    BatchScheduler(const BatchScheduler&) = delete;
+    BatchScheduler(BatchScheduler&&) = delete;
+    BatchScheduler& operator=(const BatchScheduler&) = delete;
+    BatchScheduler& operator=(BatchScheduler&&) = delete;
 
-        // 2. Budget fits → reserve and wake.
-        if (bytes <= avail_now) {
-            reserved_bytes_       += static_cast<std::int64_t>(bytes);
-            ++active_reservations_;
-            state.last_idle_start_ns = 0;
-            mirror_idle_to_ui(state, /*idle_start=*/0);
-            budget_cv_.notify_all();
-            return AcquireOutcome::Acquired;
+    /// Add a batch to the pending queue. Thread-safe — called from
+    /// every per-benchmark closure during the enqueue phase.
+    void enqueue_batch(ScheduledBatch batch) noexcept {
+        {
+            std::lock_guard<std::mutex> guard(mu_);
+            batch.scheduler_id = next_id_++;
+            ++total_enqueued_;
+            ++outstanding_per_benchmark_[batch.benchmark_index];
+            pending_.push_back(std::move(batch));
         }
+        cv_.notify_all();
+    }
 
-        // 3. Budget does NOT fit → idle-clock logic (G1.e).
-        // Spec literal reading:
-        //   - "If the work item has no requirements met AND there is no
-        //     other work item running we **start** the special timer."
-        //     ⇒ set timestamp = now() the first time we observe this
-        //     state.
-        //   - "If we check requirements ... not satisfied, but there is
-        //     at least one work item currently running, then we **set
-        //     this timestamp to now()**." ⇒ unconditionally reset to
-        //     now() while peers are alive.
-        // Combined: the 30 s clock only ticks when this batch is the
-        // sole holdout; any peer running keeps the clock at zero.
-        const auto now_ns = static_cast<std::int64_t>(
-                                bioseq::instr::clock::now_ns());
-        if (active_reservations_ > 0) {
-            state.last_idle_start_ns = now_ns;
-        } else {
-            if (state.last_idle_start_ns == 0) {
-                state.last_idle_start_ns = now_ns;
-            } else {
-                const auto elapsed_ns = now_ns - state.last_idle_start_ns;
-                const auto budget_ns  = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                            kMaxIdleWaitingTime).count();
-                if (elapsed_ns > budget_ns) {
-                    mirror_idle_to_ui(state, /*idle_start=*/0);
-                    return AcquireOutcome::IdleTimeout;
+    /// Block until every batch belonging to `benchmark_index` has
+    /// either completed or been aborted. Called by the per-benchmark
+    /// closure before it returns, so the body's captured references
+    /// stay valid.
+    void wait_for_benchmark(std::size_t benchmark_index) noexcept {
+        std::unique_lock<std::mutex> guard(mu_);
+        cv_.wait(guard, [this, benchmark_index] {
+            const auto it = outstanding_per_benchmark_.find(benchmark_index);
+            return it == outstanding_per_benchmark_.end() || it->second == 0;
+        });
+    }
+
+    /// Block until every enqueued batch has either completed or been
+    /// aborted. Called once by `run_impl` after the outer benchmark
+    /// loop joins (which, given `wait_for_benchmark` is also called
+    /// per-closure, should already be a no-op — kept for defence in
+    /// depth).
+    void wait_for_completion() noexcept {
+        std::unique_lock<std::mutex> guard(mu_);
+        cv_.wait(guard, [this] {
+            return total_finished_ >= total_enqueued_;
+        });
+    }
+
+    /// Called from the body's `ScopedSchedulerFinish` destructor.
+    void notify_batch_finished(std::size_t scheduler_id) noexcept {
+        // Splice the finished node into a local list so its destructor
+        // (which destroys `body`'s captures — potentially a chain of
+        // std::function copies) runs OUTSIDE `mu_`. Keeps lock-hold
+        // duration bounded by counter updates only.
+        std::list<ScheduledBatch> to_drop;
+        {
+            std::lock_guard<std::mutex> guard(mu_);
+            const auto it = std::find_if(running_batches_.begin(),
+                                          running_batches_.end(),
+                [scheduler_id](const ScheduledBatch& candidate) noexcept {
+                    return candidate.scheduler_id == scheduler_id;
+                });
+            DEBUG_ASSERT(it != running_batches_.end(),
+                "BatchScheduler::notify_batch_finished: id not found");
+            const auto need = static_cast<std::int64_t>(
+                                   it->base_bytes + it->extra_bytes);
+            reserved_bytes_ -= need;
+            DEBUG_ASSERT(reserved_bytes_ >= 0,
+                "BatchScheduler reserved_bytes_ underflow");
+            decrement_or_erase_locked(active_bench_lock_holder_,
+                                       it->benchmark_index, it->bench_lock);
+            decrement_or_erase_locked(running_per_benchmark_,
+                                       it->benchmark_index, /*present=*/true);
+            decrement_or_erase_locked(outstanding_per_benchmark_,
+                                       it->benchmark_index, /*present=*/true);
+            to_drop.splice(to_drop.end(), running_batches_, it);
+            ++total_finished_;
+        }
+        cv_.notify_all();
+        // ~to_drop runs here; the body's captures (potentially heavy)
+        // are destroyed without holding the scheduler mutex.
+    }
+
+    /// Snapshot exposed to the renderer header. Recomputes from a
+    /// fresh hwinfo read (cached by `MemoryBudget`).
+    struct LiveSnapshot {
+        std::uint64_t total_bytes;
+        std::uint64_t cap_bytes;
+        std::uint64_t used_bytes;
+        std::uint64_t reserved_bytes;
+        std::uint64_t available_bytes;
+        std::size_t   pending_count;
+        std::size_t   running_count;
+    };
+    [[nodiscard]] LiveSnapshot live_snapshot() const noexcept {
+        const auto sys = budget_.current_system_snapshot();
+        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
+                                                budget_.memory_buffer_pct());
+        const auto used = (sys.total_bytes > sys.free_bytes)
+                              ? (sys.total_bytes - sys.free_bytes)
+                              : std::uint64_t{0};
+        std::lock_guard<std::mutex> guard(mu_);
+        const auto reserved = static_cast<std::uint64_t>(
+                                  std::max<std::int64_t>(reserved_bytes_, 0));
+        const auto available = (cap > used + reserved)
+                                  ? (cap - used - reserved)
+                                  : std::uint64_t{0};
+        return LiveSnapshot{
+            .total_bytes     = sys.total_bytes,
+            .cap_bytes       = cap,
+            .used_bytes      = used,
+            .reserved_bytes  = reserved,
+            .available_bytes = available,
+            .pending_count   = pending_.size(),
+            .running_count   = running_batches_.size(),
+        };
+    }
+
+    [[nodiscard]] double memory_buffer_pct() const noexcept {
+        return budget_.memory_buffer_pct();
+    }
+
+private:
+    /// Scheduler thread body — admits whatever fits, then sleeps until
+    /// either a notify or the next tick. The hwinfo snapshot is taken
+    /// OUTSIDE `mu_` so the only path that takes both `mu_` and
+    /// `cache_mu_` is `live_snapshot()`/`scheduler_loop`, both in the
+    /// `mu_`-released → `cache_mu_`-acquired order. Keeps the lock
+    /// hierarchy single-direction and deadlock-free.
+    void scheduler_loop() noexcept {
+        std::unique_lock<std::mutex> guard(mu_);
+        while (running_.load(std::memory_order_acquire)) {
+            guard.unlock();
+            const auto system_snapshot = budget_.current_system_snapshot();
+            guard.lock();
+            check_idle_timeouts_locked();
+            admit_locked(system_snapshot);
+            cv_.wait_for(guard, kSchedulerTickInterval);
+        }
+    }
+
+    /// Greedy admission. See BENCH_V16_IMPL_PLAN.md §3.3. The system
+    /// memory snapshot is provided by `scheduler_loop` so this body
+    /// never re-enters `current_system_snapshot()` while holding `mu_`.
+    void admit_locked(const SystemMemorySnapshot& sys) noexcept {
+        if (pending_.empty()) return;
+
+        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
+                                                budget_.memory_buffer_pct());
+        const auto used = (sys.total_bytes > sys.free_bytes)
+                              ? (sys.total_bytes - sys.free_bytes)
+                              : std::uint64_t{0};
+        std::uint64_t available =
+            (cap > used + static_cast<std::uint64_t>(reserved_bytes_))
+                ? (cap - used - static_cast<std::uint64_t>(reserved_bytes_))
+                : std::uint64_t{0};
+
+        // Smallest-first greedy: a small batch admits even if the next
+        // larger one would push us over `available`. With closed-set
+        // enqueue (no streaming), starvation is impossible (see plan
+        // §4.17).
+        std::stable_sort(pending_.begin(), pending_.end(),
+            [](const ScheduledBatch& lhs, const ScheduledBatch& rhs) noexcept {
+                return (lhs.base_bytes + lhs.extra_bytes)
+                     < (rhs.base_bytes + rhs.extra_bytes);
+            });
+
+        auto pending_iter = pending_.begin();
+        while (pending_iter != pending_.end()) {
+            const auto need = static_cast<std::uint64_t>(
+                                   pending_iter->base_bytes
+                                 + pending_iter->extra_bytes);
+            const bool fits = need <= available;
+            const bool bench_ok = bench_lock_admissible_locked(*pending_iter);
+            const bool concurrency_ok =
+                concurrency_admissible_locked(*pending_iter);
+
+            if (fits && bench_ok && concurrency_ok) {
+                available -= need;
+                reserved_bytes_ += static_cast<std::int64_t>(need);
+                if (pending_iter->bench_lock) {
+                    ++active_bench_lock_holder_[pending_iter->benchmark_index];
                 }
+                ++running_per_benchmark_[pending_iter->benchmark_index];
+
+                pending_iter->last_idle_start_ns = 0;
+                mirror_idle_to_ui(*pending_iter, /*idle_start=*/0);
+
+                running_batches_.push_back(std::move(*pending_iter));
+                pending_iter = pending_.erase(pending_iter);
+
+                // The enqueued lambda is an enclosing wrapper that
+                // owns the ScopedSchedulerFinish on its own stack. The
+                // wrapper lives in TBB's task_handle storage, the
+                // inner body lives in the std::list node. Erasing the
+                // node from notify_batch_finished only destroys the
+                // inner body (which has already returned by then).
+                auto& running_ref = running_batches_.back();
+                const auto running_id = running_ref.scheduler_id;
+                arena_.enqueue([this, &running_ref, running_id] {
+                    ScopedSchedulerFinish finish_guard{this, running_id};
+                    running_ref.body();
+                }, tg_);
+            } else {
+                // Update idle clock for the rejected batch. While
+                // peers are running we RESET the timer to "now" (it
+                // never crosses kMaxIdleWaitingTime). When this is
+                // the sole holdout we LATCH the timer at the first
+                // observation.
+                const auto now_ns = static_cast<std::int64_t>(
+                                         bioseq::instr::clock::now_ns());
+                if (!running_batches_.empty()) {
+                    pending_iter->last_idle_start_ns = now_ns;
+                } else if (pending_iter->last_idle_start_ns == 0) {
+                    pending_iter->last_idle_start_ns = now_ns;
+                }
+                mirror_idle_to_ui(*pending_iter,
+                                   pending_iter->last_idle_start_ns);
+                ++pending_iter;
             }
         }
-        mirror_idle_to_ui(state, state.last_idle_start_ns);
-
-        // 4. Wake every kPollInterval to re-snapshot hwinfo (free memory
-        //    may shrink/grow without anyone calling release(), e.g.
-        //    another OS process eating RAM), and to re-check the idle
-        //    clock. wait_for also returns immediately on notify_all
-        //    from a peer's release().
-        budget_cv_.wait_for(guard, kPollInterval);
     }
-}
 
-inline void MemoryBudget::release(std::size_t bytes) noexcept {
-    if (bytes == 0) return;
+    /// Walk pending and abort any batch that has been the sole
+    /// holdout for longer than `kMaxIdleWaitingTime`.
+    void check_idle_timeouts_locked() noexcept {
+        if (!running_batches_.empty()) return;
+        const auto now_ns = static_cast<std::int64_t>(
+                                bioseq::instr::clock::now_ns());
+        constexpr auto budget_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                kMaxIdleWaitingTime).count();
+        auto pending_iter = pending_.begin();
+        while (pending_iter != pending_.end()) {
+            if (pending_iter->last_idle_start_ns != 0
+                && (now_ns - pending_iter->last_idle_start_ns) > budget_ns) {
+                emit_idle_timeout_locked(*pending_iter);
+                const auto bench_idx = pending_iter->benchmark_index;
+                pending_iter = pending_.erase(pending_iter);
+                const auto outstanding_it =
+                    outstanding_per_benchmark_.find(bench_idx);
+                if (outstanding_it != outstanding_per_benchmark_.end()
+                    && --outstanding_it->second == 0)
+                {
+                    outstanding_per_benchmark_.erase(outstanding_it);
+                }
+                ++total_finished_;
+            } else {
+                ++pending_iter;
+            }
+        }
+    }
+
+    /// Forward declaration: defined out-of-line below the
+    /// `progress_mark_batch_aborted` / `push_runtime_diagnostic`
+    /// helpers (which the scheduler depends on but which appear
+    /// later in this module).
+    void emit_idle_timeout_locked(const ScheduledBatch& batch) noexcept;
+
+    [[nodiscard]] bool bench_lock_admissible_locked(
+        const ScheduledBatch& batch) const noexcept
     {
-        std::lock_guard<std::mutex> guard(budget_mu_);
-        reserved_bytes_      -= static_cast<std::int64_t>(bytes);
-        --active_reservations_;
+        if (active_bench_lock_holder_.empty()) return true;
+        // Some benchmark currently holds the bench-lock. Only
+        // batches from THE SAME benchmark may join it. (This
+        // preserves V12's "isolate from siblings" semantics while
+        // permitting intra-benchmark parallelism.)
+        const auto& holder_pair = *active_bench_lock_holder_.begin();
+        return batch.benchmark_index == holder_pair.first;
     }
-    budget_cv_.notify_all();
-}
 
-inline MemoryBudget::Snapshot MemoryBudget::snapshot() const noexcept {
-    std::lock_guard<std::mutex> guard(budget_mu_);
-    // Read the cache without bumping `cached_snapshot_ns_` — `snapshot()`
-    // is logically const. If the cache is empty (first dashboard paint
-    // before any acquire), fall back to a direct read; otherwise reuse
-    // whatever a recent acquire put there.
-    SystemMemorySnapshot sys = cached_snapshot_;
-    if (sys.total_bytes == 0) {
-        sys = snapshot_system_memory();
+    [[nodiscard]] bool concurrency_admissible_locked(
+        const ScheduledBatch& batch) const noexcept
+    {
+        if (!batch.concurrency_serial) return true;
+        const auto it = running_per_benchmark_.find(batch.benchmark_index);
+        return it == running_per_benchmark_.end() || it->second == 0;
     }
-    const auto cap  = cap_for(sys.total_bytes, memory_buffer_pct_);
-    const auto used = (sys.total_bytes > sys.free_bytes)
-                         ? (sys.total_bytes - sys.free_bytes)
-                         : std::uint64_t{0};
-    const auto framework_overhead = static_cast<std::uint64_t>(
-                                        std::max<std::int64_t>(reserved_bytes_, 0));
-    const auto avail = (cap > used + framework_overhead)
-                          ? (cap - used - framework_overhead)
-                          : std::uint64_t{0};
-    return Snapshot{
-        .total_bytes     = sys.total_bytes,
-        .used_bytes      = used,
-        .cap_bytes       = cap,
-        .available_bytes = avail,
-        .reserved_bytes  = framework_overhead,
-    };
+
+    /// Helper used by `notify_batch_finished` to decrement-or-erase a
+    /// `benchmark_index → count` map, with `[[present]]` guarding the
+    /// `active_bench_lock_holder_` case where only `bench_lock=true`
+    /// batches contribute. Caller holds `mu_`.
+    template <typename Map>
+    static void decrement_or_erase_locked(
+        Map& map, typename Map::key_type key, bool present) noexcept
+    {
+        if (!present) return;
+        const auto it = map.find(key);
+        DEBUG_ASSERT(it != map.end(),
+            "BatchScheduler counter map underflow");
+        if (it != map.end() && --it->second == 0) {
+            map.erase(it);
+        }
+    }
+
+    MemoryBudget&                budget_;
+    oneapi::tbb::task_arena&     arena_;
+    oneapi::tbb::task_group      tg_{};
+    std::thread                  thread_{};
+    mutable std::mutex           mu_{};
+    std::condition_variable      cv_{};
+    std::atomic<bool>            running_{true};
+
+    std::vector<ScheduledBatch>  pending_{};
+    /// `std::list` (not vector) so iterator/pointer stability holds
+    /// across subsequent pushes. The lambda enqueued into TBB
+    /// captures `&running_batches_.back()`; a vector reallocation
+    /// would invalidate the pointer.
+    std::list<ScheduledBatch>    running_batches_{};
+    std::size_t                  next_id_         = 0;
+    std::size_t                  total_enqueued_  = 0;
+    std::size_t                  total_finished_  = 0;
+    std::int64_t                 reserved_bytes_  = 0;
+
+    /// `benchmark_index → count of running bench_lock=true batches`.
+    /// Empty ⇒ no benchmark holds the bench-lock. Non-empty ⇒ exactly
+    /// one key (the holder) — `bench_lock_admissible_locked` rejects
+    /// anyone else.
+    std::map<std::size_t, std::size_t> active_bench_lock_holder_{};
+    /// `benchmark_index → count of running batches` — used to honour
+    /// `concurrency.concurrency: false`.
+    std::map<std::size_t, std::size_t> running_per_benchmark_{};
+    /// `benchmark_index → enqueued − finished` count. Drained by
+    /// `wait_for_benchmark`.
+    std::map<std::size_t, std::size_t> outstanding_per_benchmark_{};
+};
+
+inline ScopedSchedulerFinish::~ScopedSchedulerFinish() noexcept {
+    scheduler->notify_batch_finished(scheduler_id);
 }
 
 // ----------------- Diagnostics -----------------
@@ -1765,7 +1956,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
         "bench_lock": {
           "type": "boolean",
           "default": false,
-          "description": "If true, no other benchmark may run concurrently with this one. The framework arbitrates via a process-wide shared_mutex held around each item's iteration loop (this benchmark takes the unique lock; others take shared)."
+          "description": "If true, while any of this benchmark's batches is running the scheduler will not admit batches from other benchmarks. Multiple batches of THIS benchmark may still run concurrently when concurrency.concurrency is true (intra-benchmark parallelism is preserved). Set concurrency.concurrency to false in addition for strict latency-stable per-iteration measurement."
         },
         "concurrency": {
           "type": "boolean",
@@ -4543,14 +4734,18 @@ inline void progress_clear_retry_failure(
     }
 }
 
-inline void progress_mark_batch_aborted(
-    BenchmarkContext& context, const WorkBatch& batch,
+/// Mark a batch as aborted using bare indices. Shared between the
+/// V12 `WorkBatch`-driven path and the V16 scheduler-driven idle-
+/// timeout path (the latter has no live `WorkBatch`).
+inline void progress_mark_batch_aborted_at(
+    BenchmarkContext& context,
+    std::size_t test_case_index, std::size_t group_index,
     std::string_view reason) noexcept
 {
-    auto* tc = progress_test_case_for(context, batch.test_case_index);
+    auto* tc = progress_test_case_for(context, test_case_index);
     if (tc == nullptr) return;
-    if (batch.group_index < tc->groups.size()) {
-        auto& group = *tc->groups[batch.group_index];
+    if (group_index < tc->groups.size()) {
+        auto& group = *tc->groups[group_index];
         // Drop any in-flight retry rows so the renderer's `Aborted`
         // detail doesn't sit alongside a stale "▶ ⛔ [retry 5/5]" row
         // on the same group. Counters are zeroed first to invalidate
@@ -4576,6 +4771,14 @@ inline void progress_mark_batch_aborted(
     tc->finish_ns.compare_exchange_strong(
         expected, bioseq::instr::clock::now_ns(),
         std::memory_order_relaxed, std::memory_order_relaxed);
+}
+
+inline void progress_mark_batch_aborted(
+    BenchmarkContext& context, const WorkBatch& batch,
+    std::string_view reason) noexcept
+{
+    progress_mark_batch_aborted_at(context, batch.test_case_index,
+                                    batch.group_index, reason);
 }
 
 // ----------------- Diagnostic emit helper (V12) -----------------
@@ -4630,6 +4833,25 @@ inline void emit_runtime_diagnostic(
 {
     return fmt::format("{}:{}/{}(group {})",
                        config_path, benchmark_key, test_case_name, group_index);
+}
+
+// ----------------- BatchScheduler out-of-line bodies -----------------
+
+inline void BatchScheduler::emit_idle_timeout_locked(
+    const ScheduledBatch& batch) noexcept
+{
+    if (batch.context == nullptr) return;
+    auto reason = fmt::format(
+        "batch '{}' (group {}) waited {}s for {} B (base+extra) with no "
+        "peer batches running — giving up",
+        batch.test_case_name, batch.group_index,
+        kMaxIdleWaitingTime.count(),
+        batch.base_bytes + batch.extra_bytes);
+    push_runtime_diagnostic(*batch.context,
+        ValidationDiag::Severity::Error,
+        "memory_budget_constraint_timeout", batch.location_str, reason);
+    progress_mark_batch_aborted_at(*batch.context,
+        batch.test_case_index, batch.group_index, reason);
 }
 
 // ----------------- V12 retry helpers (G2 / G3) -----------------
@@ -4772,21 +4994,25 @@ inline void run_typed_benchmark(
     auto batches = build_work_batches(state);
     if (batches.empty()) return;
 
-    // One cached Input slot per batch. Pre-sized as a vector so each
-    // TBB worker writes to a distinct, owned slot without racing
-    // through std::map's internal tree.
+    auto* scheduler = context.scheduler;
+    DEBUG_ASSERT(scheduler != nullptr,
+        "BenchmarkContext::scheduler must be set by run_impl");
+
+    /// Heap-owned cache of per-batch input/constraint slots. The bodies
+    /// enqueued into the scheduler reference the slots by index;
+    /// lifetime extends through `wait_for_benchmark` (called below)
+    /// which blocks until every body has finished.
     struct GroupSlot {
         std::optional<Input> input{};
         RunConstraints       constraints{};
     };
-    std::vector<GroupSlot> group_slots(batches.size());
-
-    auto* memory_budget = context.memory_budget;
-    DEBUG_ASSERT(memory_budget != nullptr,
-        "BenchmarkContext::memory_budget must be set by run_impl");
+    auto group_slots = std::make_unique<std::vector<GroupSlot>>(batches.size());
+    auto batches_ptr = std::make_unique<std::vector<WorkBatch>>(std::move(batches));
 
     /// Run exactly one iteration of one cell against `input`. Hot path.
-    auto run_one_iteration = [&](Cell& cell, const Input& input) {
+    auto run_one_iteration = [&context, &state, by_regions, &counter_handles,
+                                &on_run, &on_evaluate](Cell& cell,
+                                                          const Input& input) {
         const auto& tuple = *cell.tuple;
 
         ProfilerBlock<profiler_args_t> profiler_block{};
@@ -4811,106 +5037,42 @@ inline void run_typed_benchmark(
         progress_tick_iteration(context, cell);
     };
 
-    /// Run every iteration of one item, taking the bench-level locks
-    /// once per item (acquired around the whole iteration loop, not per
-    /// iteration). The cross-bench shared/unique lock is acquired here
-    /// — the closure that calls `run_typed_benchmark` no longer holds
-    /// it for us.
-    auto run_item_iterations = [&](const WorkBatchItem& item, const Input& input) {
-        std::shared_lock<std::shared_mutex> bench_shared;
-        std::unique_lock<std::shared_mutex> bench_unique;
-        if (state.config.concurrency.bench_lock) {
-            bench_unique = std::unique_lock<std::shared_mutex>(*context.cross_bench_mu);
-        } else {
-            bench_shared = std::shared_lock<std::shared_mutex>(*context.cross_bench_mu);
-        }
-        std::unique_lock<std::mutex> serial_guard;
-        if (!state.config.concurrency.concurrency) {
-            serial_guard = std::unique_lock<std::mutex>(state.serial_mu);
-        }
+    /// Run every iteration of one item. V16: NO LOCKS — bench-lock and
+    /// serial-concurrency exclusion are enforced by the scheduler's
+    /// admission predicates, so the body never blocks on a process-
+    /// global mutex. This is what restores cross-batch parallelism
+    /// (the V12 cross_bench_mu writer-lock was the dominant
+    /// bottleneck on bench_v10 — see BENCH_V16_IMPL_PLAN.md §0.2).
+    auto run_item_iterations = [run_one_iteration](
+        const WorkBatchItem& item, const Input& input)
+    {
         for (std::size_t iter = 0; iter < item.cell->iterations; ++iter) {
             run_one_iteration(*item.cell, input);
         }
     };
 
-    /// Process one batch end-to-end. Called by TBB once per batch.
-    /// V12 flow:
-    ///   1. on_estimate_resources()
-    ///   2. Snapshot hwinfo and check the two batch-level memory rules
-    ///      (G1.c warning + G1.d hard error).
-    ///   3. Reserve base_memory through MemoryBudget::acquire (G1.e
-    ///      idle clock surfaces inside the acquire).
-    ///   4. on_input with up to 5 retries (G2). Permanent failure
-    ///      ⇒ hard error + abort.
-    ///   5. Reserve extra_memory; run iterations.
-    ///   6. on_cleanup with up to 5 retries (G3). Permanent failure
-    ///      ⇒ warning + resume.
-    auto run_one_batch = [&](WorkBatch& batch) {
+    /// V16 batch body — no memory acquire/release, no cross_bench_mu.
+    /// Called from TBB worker after the scheduler has admitted the
+    /// batch. The reservation lives entirely scheduler-side.
+    auto run_one_batch_unblocked = [&context, &state, &on_estimate_resources,
+                                       &on_input, &on_cleanup,
+                                       &data_dir, &group_slots,
+                                       run_item_iterations](WorkBatch& batch)
+    {
         const auto& spec = state.test_cases[batch.test_case_index];
-        auto& slot = group_slots[batch.batch_index];
-
-        // 1. Estimate resources.
-        slot.constraints = on_estimate_resources(data_dir, spec.name, spec.data);
-        const std::size_t total_required =
-            slot.constraints.base_memory + slot.constraints.extra_memory;
-
-        const auto sys = snapshot_system_memory();
-        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
-                                                memory_budget->memory_buffer_pct());
+        auto& slot = (*group_slots)[batch.batch_index];
         const auto location_str = runtime_location(
             state.config.config_path, state.config.benchmark_key,
             spec.name, batch.group_index);
 
-        // 2. G1.d  Hard error: combined requirements exceed total system RAM.
-        if (total_required >= sys.total_bytes) {
-            auto reason = fmt::format(
-                "batch '{}' (group {}) requires {} B (base+extra) but the host "
-                "has only {} B total RAM",
-                spec.name, batch.group_index, total_required, sys.total_bytes);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
-                "memory_budget_not_satisfiable", location_str, reason);
-            progress_mark_batch_aborted(context, batch, reason);
-            return;
-        }
-        // 2b. G1.c  Warning: combined requirements exceed buffered cap.
-        if (total_required >= cap) {
-            emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
-                "memory_budget_oversized", location_str,
-                "batch '{}' (group {}) requires {} B but buffered cap is {} B "
-                "(host total {} B, buffer {:.0f}%)",
-                spec.name, batch.group_index, total_required, cap,
-                sys.total_bytes, memory_budget->memory_buffer_pct());
-            // Continue: the acquire path will block until peers release
-            // budget, or the idle clock fires.
-        }
+        // 1. Estimate resources (still needed: on_input wants
+        //    `slot.constraints`). The scheduler already reserved the
+        //    same numbers — re-evaluating here is cheap.
+        slot.constraints = on_estimate_resources(
+            data_dir, spec.name, spec.data);
 
-        // 3. Reserve base memory. The AcquireState is shared between
-        //    the base + extra acquisitions so the idle-clock state
-        //    carries through; group_for_ui mirrors the timestamp for
-        //    the dashboard's 🕑 row.
-        MemoryBudget::AcquireState wait_state{};
-        wait_state.group_for_ui = progress_group_for(
-            context, batch.test_case_index, batch.group_index);
-
-        BudgetReservation base_reservation(*memory_budget,
-                                            slot.constraints.base_memory,
-                                            wait_state);
-        if (!base_reservation.ok()) {
-            auto reason = fmt::format(
-                "batch '{}' (group {}) waited {}s for {} B base memory with "
-                "no peer batches running — giving up",
-                spec.name, batch.group_index,
-                MemoryBudget::kMaxIdleWaitingTime.count(),
-                slot.constraints.base_memory);
-            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
-                "memory_budget_constraint_timeout", location_str, reason);
-            progress_mark_batch_aborted(context, batch, reason);
-            return;       // base_reservation was never acquired ⇒ no leak
-        }
-
-        // 4. on_input with retries (G2). On permanent failure, abort
-        //    the batch — base_reservation's destructor releases the
-        //    bytes on return; no Input was built so no cleanup.
+        // 2. on_input with retries. Permanent failure aborts the
+        //    batch (scheduler releases on body return).
         auto built_input = build_input_with_retry<Input>(
             context, batch,
             [&] { return on_input(data_dir, spec.name, spec.data,
@@ -4927,41 +5089,16 @@ inline void run_typed_benchmark(
         }
         slot.input = std::move(built_input);
 
-        // 5. Reserve extra memory and run the iteration loop. Extra
-        //    memory is released at the closing brace of this scope.
-        {
-            BudgetReservation extra_reservation(*memory_budget,
-                                                 slot.constraints.extra_memory,
-                                                 wait_state);
-            if (!extra_reservation.ok()) {
-                auto reason = fmt::format(
-                    "batch '{}' (group {}) waited {}s for {} B extra memory "
-                    "after Input was built — giving up",
-                    spec.name, batch.group_index,
-                    MemoryBudget::kMaxIdleWaitingTime.count(),
-                    slot.constraints.extra_memory);
-                push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
-                    "memory_budget_constraint_timeout", location_str, reason);
-                // The Input was built; run the user's cleanup (with
-                // retries) so resources don't leak.
-                if (on_cleanup) {
-                    cleanup_with_retry(context, batch, spec.name, location_str,
-                        [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
-                }
-                slot.input.reset();
-                progress_mark_batch_aborted(context, batch, reason);
-                return;
-            }
-            progress_mark_test_case_start(context, batch);
-            for (auto& item : batch.items) {
-                progress_update_label(context, batch, item, state.config.benchmark_key);
-                run_item_iterations(item, *slot.input);
-                progress_tick_item_done(context, batch);
-            }
-        }   // extra_reservation released here
+        // 3. Iterate items × iterations. Lock-free; scheduler enforced
+        //    exclusion.
+        progress_mark_test_case_start(context, batch);
+        for (auto& item : batch.items) {
+            progress_update_label(context, batch, item, state.config.benchmark_key);
+            run_item_iterations(item, *slot.input);
+            progress_tick_item_done(context, batch);
+        }
 
-        // 6. Cleanup with retries (G3). On permanent failure we emit a
-        //    warning and resume — the framework keeps running.
+        // 4. Cleanup with retries — warning on permanent failure.
         if (on_cleanup) {
             cleanup_with_retry(context, batch, spec.name, location_str,
                 [&] { on_cleanup(data_dir, spec.name, spec.data, *slot.input); });
@@ -4970,15 +5107,76 @@ inline void run_typed_benchmark(
         progress_mark_group_done(context, batch);
     };
 
-    // 5. Drive batches in parallel. Even when the benchmark's
-    //    `concurrency` flag is false we still hand them to TBB —
-    //    `run_item_iterations` takes the per-benchmark serial mutex
-    //    inside, so iterations are still serialised. We let TBB
-    //    parallelise across benchmarks and across (test_case, group)
-    //    pairs that don't both want the serial mutex at the same
-    //    instant.
-    oneapi::tbb::parallel_for_each(batches.begin(), batches.end(),
-        [&](WorkBatch& batch) { run_one_batch(batch); });
+    // V16 enqueue path — replaces the V12 `tbb::parallel_for_each`
+    // batch loop. Each batch is enqueued into the scheduler with its
+    // pre-computed memory + lock requirements; bodies are dispatched
+    // by the scheduler when admissible.
+    const auto sys_at_enqueue = snapshot_system_memory();
+    const auto cap_at_enqueue = MemoryBudget::cap_for(
+        sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
+
+    for (auto& batch : *batches_ptr) {
+        const auto& spec = state.test_cases[batch.test_case_index];
+        const auto constraints = on_estimate_resources(
+            data_dir, spec.name, spec.data);
+        const std::size_t total_required =
+            constraints.base_memory + constraints.extra_memory;
+        const auto location_str = runtime_location(
+            state.config.config_path, state.config.benchmark_key,
+            spec.name, batch.group_index);
+
+        // G1.d  Hard error: combined requirements exceed total system RAM.
+        if (total_required >= sys_at_enqueue.total_bytes) {
+            auto reason = fmt::format(
+                "batch '{}' (group {}) requires {} B (base+extra) but the host "
+                "has only {} B total RAM",
+                spec.name, batch.group_index,
+                total_required, sys_at_enqueue.total_bytes);
+            push_runtime_diagnostic(context, ValidationDiag::Severity::Error,
+                "memory_budget_not_satisfiable", location_str, reason);
+            progress_mark_batch_aborted(context, batch, reason);
+            continue;       // do not enqueue
+        }
+        // G1.c  Warning: combined requirements exceed buffered cap.
+        if (total_required >= cap_at_enqueue) {
+            emit_runtime_diagnostic(context, ValidationDiag::Severity::Warning,
+                "memory_budget_oversized", location_str,
+                "batch '{}' (group {}) requires {} B but buffered cap is {} B "
+                "(host total {} B, buffer {:.0f}%)",
+                spec.name, batch.group_index,
+                total_required, cap_at_enqueue,
+                sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
+            // Still enqueue — scheduler will admit once peers free up.
+        }
+
+        ScheduledBatch sb{};
+        sb.benchmark_index    = context.benchmark_index;
+        sb.bench_lock         = state.config.concurrency.bench_lock;
+        sb.concurrency_serial = !state.config.concurrency.concurrency;
+        sb.base_bytes         = constraints.base_memory;
+        sb.extra_bytes        = constraints.extra_memory;
+        sb.group_for_ui       = progress_group_for(
+            context, batch.test_case_index, batch.group_index);
+        sb.location_str       = location_str;
+        sb.test_case_name     = spec.name;
+        sb.test_case_index    = batch.test_case_index;
+        sb.group_index        = batch.group_index;
+        sb.context            = &context;
+        sb.body = [&run_one_batch_unblocked, &batch] {
+            run_one_batch_unblocked(batch);
+        };
+        scheduler->enqueue_batch(std::move(sb));
+    }
+
+    // Block until every batch under this benchmark_index has finished
+    // or aborted. Required to keep `state`, `*group_slots`, and the
+    // captured references alive through every enqueued body's
+    // execution. See BENCH_V16_IMPL_PLAN.md §3.6.
+    scheduler->wait_for_benchmark(context.benchmark_index);
+
+    // After wait_for_benchmark returns, all bodies have finished.
+    // batches_ptr / group_slots are still owned by `run_typed_benchmark`'s
+    // stack, so unique_ptr destructors run on the way out.
 }
 
 // ----------------- Sample reduction -----------------
@@ -7955,7 +8153,7 @@ enum class TestCaseRowState : std::uint8_t {
             const auto elapsed_ns = static_cast<std::int64_t>(
                                         bioseq::instr::clock::now_ns()) - idle_start;
             const auto half_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    MemoryBudget::kMaxIdleWaitingTime).count() / 2;
+                                    BatchScheduler::kMaxIdleWaitingTime).count() / 2;
             if (elapsed_ns > half_ns) any_idle_long = true;
         }
     }
@@ -8063,11 +8261,11 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
             const auto elapsed_ns = static_cast<std::int64_t>(
                                         bioseq::instr::clock::now_ns()) - idle_start;
             const auto half_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                    MemoryBudget::kMaxIdleWaitingTime).count() / 2;
+                                    BatchScheduler::kMaxIdleWaitingTime).count() / 2;
             if (elapsed_ns <= half_ns) continue;
             const auto elapsed_s = elapsed_ns / 1'000'000'000;
             const auto budget_s  = std::chrono::duration_cast<std::chrono::seconds>(
-                                       MemoryBudget::kMaxIdleWaitingTime).count();
+                                       BatchScheduler::kMaxIdleWaitingTime).count();
             header_line = fmt::format(
                 "group {} waiting {}s / {}s — no peers running, system memory unavailable",
                 group_ptr->group_index + 1, elapsed_s, budget_s);
@@ -8123,6 +8321,27 @@ inline const std::array<RowGlyph, 6> kRowGlyphs{ {
     return detail;
 }
 
+/// V16 grace period: a Done row stays visible for this long after
+/// `finish_ns` is stamped, then disappears. Failures (Aborted /
+/// InputRetry / CleanupRetry) are *never* hidden — the operator must
+/// see them.
+inline constexpr std::chrono::seconds kCompletedRowGracePeriod{5};
+
+/// Free helper — the auto-hide predicate. Used by both the per-row
+/// loop (skip rendering this row) and the all-hidden collapse loop
+/// (collapse the entire benchmark when every row is past the grace).
+[[nodiscard]] inline bool row_is_hideable(TestCaseRowState state,
+                                            std::int64_t finish_ns,
+                                            std::int64_t now_ns) noexcept
+{
+    if (state != TestCaseRowState::Done) return false;
+    if (finish_ns == 0) return false;
+    constexpr auto grace_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            kCompletedRowGracePeriod).count();
+    return (now_ns - finish_ns) > grace_ns;
+}
+
 inline void render_progress_loop(ProgressState& progress) noexcept {
     using namespace std::chrono_literals;
     using namespace ftxui;
@@ -8154,13 +8373,18 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     }
 
     std::string reset_position;
+    int previous_frame_height = 0;
     auto render_once = [&] {
         Elements rows;
+        const auto now_ns_value = static_cast<std::int64_t>(
+                                       bioseq::instr::clock::now_ns());
 
-        // Header line + budget readout.
+        // Header line + budget readout. V16: read pending/running +
+        // reservation totals from the scheduler when present, falling
+        // back to MemoryBudget for the system-wide numbers.
         rows.push_back(text("bench_framework — live progress") | bold);
-        if (progress.memory_budget != nullptr) {
-            const auto snap = progress.memory_budget->snapshot();
+        if (progress.scheduler != nullptr) {
+            const auto snap = progress.scheduler->live_snapshot();
             const auto over_cap = snap.used_bytes >= snap.cap_bytes;
             rows.push_back(hbox({
                 text("[budget free ") | color(Color::GrayLight),
@@ -8174,36 +8398,59 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                                  bytes_to_gib(snap.total_bytes))),
                 text(fmt::format("{:.2f}", bytes_to_gib(snap.reserved_bytes)))
                     | color(Color::Cyan),
-                text(fmt::format(" GiB · buffer {:.0f}%]",
-                                 progress.memory_budget->memory_buffer_pct())),
+                text(fmt::format(" GiB · pending {} running {} · buffer {:.0f}%]",
+                                 snap.pending_count, snap.running_count,
+                                 progress.scheduler->memory_buffer_pct())),
             }) | color(Color::GrayLight));
         }
         rows.push_back(separator() | color(Color::GrayDark));
 
         for (const auto& per : progress.per_benchmark) {
+            if (!per->setup_done.load(std::memory_order_acquire)) {
+                rows.push_back(text(fmt::format("• {} ({})",
+                                               per->benchmark_key, per->title))
+                                | color(Color::Cyan));
+                continue;
+            }
+            // V16 G2.b — collapse the benchmark when every test case is
+            // past the grace period. Empty test_cases vectors stay as
+            // "all done" too (degenerate but consistent).
+            bool all_hidden = !per->test_cases.empty();
+            for (const auto& tc : per->test_cases) {
+                const auto state = classify_test_case(*tc);
+                const auto finish_ns = tc->finish_ns.load(std::memory_order_relaxed);
+                if (!row_is_hideable(state, finish_ns, now_ns_value)) {
+                    all_hidden = false;
+                    break;
+                }
+            }
+            if (all_hidden) {
+                rows.push_back(text(fmt::format("• {} \xe2\x9c\x93 (all done)",
+                                               per->benchmark_key))
+                                | color(Color::GrayLight));
+                continue;
+            }
+
             // One header row per benchmark.
             rows.push_back(text(fmt::format("• {} ({})", per->benchmark_key, per->title))
                             | color(Color::Cyan));
-            // Skip the inner walk until the benchmark closure has
-            // finished populating its test_cases vector. Acquire
-            // ordering pairs with the writer's release store.
-            if (!per->setup_done.load(std::memory_order_acquire)) continue;
             for (const auto& tc : per->test_cases) {
                 const auto tuple_done   = tc->tuple_done.load(std::memory_order_relaxed);
                 const auto tuple_total  = tc->tuple_total.load(std::memory_order_relaxed);
                 const auto start_ns     = tc->start_ns.load(std::memory_order_relaxed);
                 const auto finish_ns    = tc->finish_ns.load(std::memory_order_relaxed);
+                const auto state = classify_test_case(*tc);
+
+                // V16 G2.a — auto-hide Done rows past the grace period.
+                if (row_is_hideable(state, finish_ns, now_ns_value)) continue;
+
                 const float fraction    = tuple_total == 0
                     ? 1.0f
                     : static_cast<float>(tuple_done) / static_cast<float>(tuple_total);
-                const auto now_ns_value = static_cast<std::int64_t>(
-                                              bioseq::instr::clock::now_ns());
                 const auto elapsed_ns   = start_ns == 0
                     ? std::int64_t{0}
                     : ((finish_ns == 0 ? now_ns_value : finish_ns) - start_ns);
                 const auto elapsed_s    = elapsed_ns / 1'000'000'000;
-
-                const auto state = classify_test_case(*tc);
                 const auto& glyph = glyph_for(state);
 
                 // Headline row, by state.
@@ -8266,22 +8513,25 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
             }
         }
         auto document = vbox(std::move(rows));
-        // Use ftxui's layout-aware height calc — `Dimension::Fit` walks the
-        // dom and returns the exact terminal-row count (paragraph wrapping
-        // included). `extend_beyond_screen=true` lets a long dashboard
-        // (cpptrace stack trace, multiple retry rows) exceed the terminal
-        // height instead of being silently clipped. V12 used
-        // `Dimension::Fixed(rows.size() + 1)` after `std::move(rows)`,
-        // which read from a moved-from vector (libc++ leaves it empty),
-        // capped the screen at 2 rows, and clipped everything below the
-        // budget header.
         auto screen = Screen::Create(
             Dimension::Fit(document, /*extend_beyond_screen=*/true));
         Render(screen, document);
-        std::fputs(reset_position.c_str(), stderr);
+        const int current_height = screen.dimy();
+
+        // V16 G2.b — when the dashboard shrinks (a row hid), explicit
+        // cursor-up + clear-to-end-of-screen prevents stale rows from
+        // lingering below the new top. ResetPosition(clear=true) on
+        // its own only clears the new screen's footprint.
+        if (previous_frame_height > current_height && previous_frame_height > 0) {
+            std::fputs(fmt::format("\x1b[{}A\x1b[J",
+                                    previous_frame_height).c_str(), stderr);
+        } else if (!reset_position.empty()) {
+            std::fputs(reset_position.c_str(), stderr);
+        }
         std::fputs(screen.ToString().c_str(), stderr);
         std::fflush(stderr);
         reset_position = screen.ResetPosition();
+        previous_frame_height = current_height;
     };
 
     while (progress.running.load(std::memory_order_relaxed)) {
@@ -8295,8 +8545,8 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
 // ----------------- run_impl -----------------
 
-/// Top-level orchestrator. Owns: CLI parsing, TBB arena setup, cross-bench
-/// shared_mutex, the ProgressState lifetime, the violations + reports maps,
+/// Top-level orchestrator. Owns: CLI parsing, TBB arena setup, scheduler,
+/// the ProgressState lifetime, the violations + reports maps,
 /// and the final report write + violations print. Returns 0 if every rule
 /// passed and every config parsed; returns 1 otherwise (duplicate
 /// benchmark_key, parse failure, or any rule violation).
@@ -8360,7 +8610,6 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         oneapi::tbb::global_control::max_allowed_parallelism, thread_count);
     oneapi::tbb::task_arena bench_arena(static_cast<int>(thread_count));
 
-    std::shared_mutex cross_bench_mu;
     std::mutex        violations_mu;
     std::mutex        reports_mu;
     std::mutex        diagnostics_mu;
@@ -8390,9 +8639,14 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         }
     }
 
+    // V16: process-wide scheduler. Owns batch admission + the TBB
+    // task pool that runs the bodies. Constructed BEFORE the progress
+    // thread so the renderer can read `scheduler.live_snapshot()`.
+    BatchScheduler scheduler(memory_budget, bench_arena);
+
     ProgressState progress;
     progress.tty_render.store(::isatty(STDERR_FILENO) != 0, std::memory_order_relaxed);
-    progress.memory_budget = &memory_budget;
+    progress.scheduler     = &scheduler;
     progress.per_benchmark.reserve(selected.size());
     for (const auto& erased : selected) {
         auto entry = std::make_unique<ProgressState::Per>();
@@ -8413,7 +8667,6 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 context.data_dir                  = data_dir;
                 context.report_dir                = report_dir;
                 context.fast_filter               = cli.fast_filter;
-                context.cross_bench_mu            = &cross_bench_mu;
                 context.progress                  = &progress;
                 context.benchmark_index           = benchmark_index;
                 context.violations_mu             = &violations_mu;
@@ -8424,11 +8677,16 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                 context.diagnostics               = &diagnostics;
                 context.regression_rules_mu       = &regression_rules_mu;
                 context.regression_rules_by_config = &regression_rules_by_config;
-                context.memory_budget              = &memory_budget;
+                context.scheduler                  = &scheduler;
 
                 erased.execute(context);
             });
     });
+
+    // Defence-in-depth: every closure already drains its own batches
+    // via `wait_for_benchmark` before returning. Should be a no-op,
+    // but guarantees correctness if a future closure forgets the wait.
+    scheduler.wait_for_completion();
 
     progress.running.store(false, std::memory_order_relaxed);
     progress_thread.join();
@@ -8689,11 +8947,11 @@ template<typename Input, typename Output>
             per.setup_done.store(true, std::memory_order_release);
         }
 
-        // Cross-benchmark lock is now acquired per-item inside
-        // `run_typed_benchmark` (around each iteration loop). The outer
-        // acquisition that used to sit here is gone; otherwise a
-        // `bench_lock=true` benchmark would re-acquire the unique lock
-        // and deadlock — `std::shared_mutex` is not recursive.
+        // V16: bench-lock + serial-concurrency exclusion are enforced
+        // by the BatchScheduler's admission predicates. The closure
+        // body just hands off to `run_typed_benchmark`, which enqueues
+        // batches into the scheduler and blocks via
+        // `wait_for_benchmark` before returning.
 
         detail::run_typed_benchmark<Input, Output>(state, context,
                                                     captured_on_estimate,
