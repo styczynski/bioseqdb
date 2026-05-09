@@ -1700,23 +1700,12 @@ struct CellRender {
     std::optional<ftxui::Color> tint{};
 };
 
-[[nodiscard]] inline double row_p50(std::span<const double> samples) {
-    if (samples.empty()) return std::numeric_limits<double>::quiet_NaN();
-    std::vector<double> sorted_samples(samples.begin(), samples.end());
-    std::sort(sorted_samples.begin(), sorted_samples.end());
-    return sorted_samples[sorted_samples.size() / 2];
-}
-
-[[nodiscard]] inline double row_p99(std::span<const double> samples) {
-    if (samples.empty()) return std::numeric_limits<double>::quiet_NaN();
-    std::vector<double> sorted_samples(samples.begin(), samples.end());
-    std::sort(sorted_samples.begin(), sorted_samples.end());
-    // Nearest-rank p99 — for n < 100 the top sample wins; matches the
-    // common engineering convention used elsewhere in V8.
-    const std::size_t idx = static_cast<std::size_t>(
-        std::ceil(0.99 * static_cast<double>(sorted_samples.size()))) - 1;
-    return sorted_samples[std::min(idx, sorted_samples.size() - 1)];
-}
+// V17: row_p50 / row_p99 deleted. Both percentiles now live in
+// the persisted AggregatedSamples (`percentiles.p50`, `percentiles.p99`)
+// — readers go straight to those slots. The UI's pre-V17 nearest-rank
+// `row_p99` (`ceil`-based) is replaced by the framework canonical
+// (`floor`-based) so rule eval, regression checks, and the dashboard
+// all agree on a single percentile interpretation.
 
 [[nodiscard]] inline std::string format_signed_pct(double pct) noexcept {
     if (!std::isfinite(pct)) return std::isnan(pct) ? "NaN" : (pct > 0 ? ">+1e6%" : "<-1e6%");
@@ -2383,8 +2372,13 @@ struct BenchmarkSnapshot {
     std::vector<std::string>                            test_cases;
     std::vector<std::string>                            metrics;
     std::vector<TupleRow>                               tuples;
-    std::map<std::string, std::map<std::string, std::map<std::string, std::vector<double>>>>
-        samples;     // canonical → tc → metric → samples
+    /// canonical → tc → metric → AggregatedSamples (V17 shape).
+    /// Default-constructed entries (`samples_count == 0`) signal
+    /// "cell absent" to the renderer; consumers gate on
+    /// `samples_count > 0` before reading the percentile slots.
+    std::map<std::string,
+        std::map<std::string,
+            std::map<std::string, AggregatedSamples>>>  samples;
 };
 
 [[nodiscard]] inline std::vector<std::string>
@@ -2438,16 +2432,12 @@ snapshot_benchmark(const ParsedReport& parsed, std::string_view bench_key)
                 if (!all_regions.has_value()) continue;
                 for (auto metric_field : *all_regions) {
                     metric_set.insert(std::string{metric_field.key});
-                    simdjson::dom::array values;
-                    if (metric_field.value.get(values) != simdjson::SUCCESS) continue;
-                    std::vector<double> samples;
-                    for (auto v : values) {
-                        double d = 0.0;
-                        if (v.get(d) == simdjson::SUCCESS) samples.push_back(d);
-                    }
+                    simdjson::dom::object metric_obj;
+                    if (metric_field.value.get(metric_obj) != simdjson::SUCCESS) continue;
                     snap.samples[snap.tuples.back().canonical]
                                 [std::string{tc_field.key}]
-                                [std::string{metric_field.key}] = std::move(samples);
+                                [std::string{metric_field.key}] =
+                                    parse_aggregated_samples(metric_obj);
                 }
             }
         }
@@ -2547,10 +2537,10 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
             const auto root = cache_it->second.doc->root;
             for (std::size_t ti = 0; ti < current_snap.tuples.size(); ++ti) {
                 const auto& t = current_snap.tuples[ti];
-                auto samples = samples_from_report(root,
+                auto aggregated = aggregated_from_report(root,
                     benchmark_key, t.algorithm, t.params, test_case, kAllRegionsKey, metric);
-                if (samples.has_value()) {
-                    per_tuple_cells[ti][pos].p50 = row_p50(*samples);
+                if (aggregated.has_value() && has_finite_samples(*aggregated)) {
+                    per_tuple_cells[ti][pos].p50 = aggregated->percentiles.p50;
                 }
             }
         }
@@ -2560,10 +2550,10 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
                 const auto bl_root = bl_it->second.doc->root;
                 for (std::size_t ti = 0; ti < current_snap.tuples.size(); ++ti) {
                     const auto& t = current_snap.tuples[ti];
-                    auto samples = samples_from_report(bl_root,
+                    auto aggregated = aggregated_from_report(bl_root,
                         benchmark_key, t.algorithm, t.params, test_case, kAllRegionsKey, metric);
-                    if (samples.has_value()) {
-                        per_tuple_baseline[ti] = row_p50(*samples);
+                    if (aggregated.has_value() && has_finite_samples(*aggregated)) {
+                        per_tuple_baseline[ti] = aggregated->percentiles.p50;
                     }
                 }
             }
@@ -2675,49 +2665,76 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     Elements rows;
     if (snap.tuples.empty()) return vbox(std::move(rows));
     const std::string test_case_owned{test_case};
-    auto stat_for = [&](const std::string& metric_owned, bool want_p99)
-        -> std::pair<std::string /*best_label*/, std::pair<double /*best*/, double /*worst*/>>
+    /// Lookup the per-tuple AggregatedSamples for `(metric, tc)`.
+    /// Returns nullptr when the cell wasn't emitted, has zero
+    /// samples, or emitted only non-finite values (where every
+    /// percentile slot is the default 0.0 — letting it into the
+    /// best/worst comparator would falsely place the cell at
+    /// "P50 = 0", polluting the gradient and the displayed
+    /// values). Single helper so both the percentile pickers and
+    /// the max-samples scan share one walk.
+    auto find_aggregate = [&](const TupleRow& t,
+                               const std::string& metric_owned) noexcept
+        -> const AggregatedSamples*
+    {
+        auto it_tc = snap.samples.find(t.canonical);
+        if (it_tc == snap.samples.end()) return nullptr;
+        auto it_m = it_tc->second.find(test_case_owned);
+        if (it_m == it_tc->second.end()) return nullptr;
+        auto it_v = it_m->second.find(metric_owned);
+        if (it_v == it_m->second.end()) return nullptr;
+        if (!has_finite_samples(it_v->second)) return nullptr;
+        return &it_v->second;
+    };
+    /// Per-metric scan result threaded through the blurb. Holds the
+    /// best / worst tuple labels alongside the corresponding values
+    /// so the row writers can render both sides without re-scanning
+    /// `snap.samples`. `valid == false` ⇒ no finite samples for the
+    /// metric (renderer prints `(no samples)` and skips).
+    struct PercentileScan {
+        std::string best_label{};
+        std::string worst_label{};
+        double      best_value  = std::numeric_limits<double>::quiet_NaN();
+        double      worst_value = std::numeric_limits<double>::quiet_NaN();
+        bool        valid       = false;
+    };
+    /// Pull the framework's canonical P50 / P99 directly. V17 made
+    /// the on-disk aggregate the source of truth, so the UI no
+    /// longer recomputes percentiles from a sample vector — it
+    /// reads the persisted slot.
+    auto stat_for = [&](const std::string& metric_owned,
+                         bool want_p99) -> PercentileScan
     {
         const bool smaller = metric_smaller_is_better(metric_owned);
+        PercentileScan scan;
         double best  = smaller ? std::numeric_limits<double>::infinity()
                                : -std::numeric_limits<double>::infinity();
         double worst = -best;
-        std::string best_label, worst_label;
-        bool any_finite = false;
-        std::size_t max_samples = 0;
         for (const auto& t : snap.tuples) {
-            auto it_tc = snap.samples.find(t.canonical);
-            if (it_tc == snap.samples.end()) continue;
-            auto it_m = it_tc->second.find(test_case_owned);
-            if (it_m == it_tc->second.end()) continue;
-            auto it_v = it_m->second.find(metric_owned);
-            if (it_v == it_m->second.end()) continue;
-            max_samples = std::max(max_samples, it_v->second.size());
-            const double v = want_p99 ? row_p99(it_v->second) : row_p50(it_v->second);
+            const auto* aggregated = find_aggregate(t, metric_owned);
+            if (aggregated == nullptr) continue;
+            const double v = want_p99 ? aggregated->percentiles.p99
+                                      : aggregated->percentiles.p50;
             if (!std::isfinite(v)) continue;
-            any_finite = true;
+            scan.valid = true;
             if ((smaller && v < best) || (!smaller && v > best)) {
-                best = v; best_label = t.short_label;
+                best = v; scan.best_label = t.short_label;
             }
             if ((smaller && v > worst) || (!smaller && v < worst)) {
-                worst = v; worst_label = t.short_label;
+                worst = v; scan.worst_label = t.short_label;
             }
         }
-        (void)max_samples;
-        if (!any_finite) return {std::string{},
-            {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()}};
-        return {std::move(best_label), {best, worst}};
+        if (!scan.valid) return PercentileScan{};
+        scan.best_value  = best;
+        scan.worst_value = worst;
+        return scan;
     };
     auto max_samples_for = [&](const std::string& metric_owned) noexcept -> std::size_t {
         std::size_t max_samples = 0;
         for (const auto& t : snap.tuples) {
-            auto it_tc = snap.samples.find(t.canonical);
-            if (it_tc == snap.samples.end()) continue;
-            auto it_m = it_tc->second.find(test_case_owned);
-            if (it_m == it_tc->second.end()) continue;
-            auto it_v = it_m->second.find(metric_owned);
-            if (it_v == it_m->second.end()) continue;
-            max_samples = std::max(max_samples, it_v->second.size());
+            const auto* aggregated = find_aggregate(t, metric_owned);
+            if (aggregated == nullptr) continue;
+            max_samples = std::max(max_samples, aggregated->samples_count);
         }
         return max_samples;
     };
@@ -2732,12 +2749,10 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     for (const auto& metric : snap.metrics) {
         rows.push_back(text(fmt::format("   {}", metric)) | bold);
         const bool smaller = metric_smaller_is_better(metric);
-        const auto [best_lbl, p50_pair] = stat_for(metric, /*want_p99=*/false);
-        const auto [best_p50, worst_p50] = p50_pair;
+        const auto p50 = stat_for(metric, /*want_p99=*/false);
         const std::size_t max_samples = max_samples_for(metric);
-        const auto [best_lbl_p99, p99_pair] = stat_for(metric, /*want_p99=*/true);
-        const auto [best_p99, worst_p99] = p99_pair;
-        if (best_lbl.empty()) {
+        const auto p99 = stat_for(metric, /*want_p99=*/true);
+        if (!p50.valid) {
             rows.push_back(text("     (no samples)") | dim);
             continue;
         }
@@ -2746,55 +2761,58 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
                                               : "best (highest p50)";
         const std::string worst_kind = smaller ? "worst (highest p50)"
                                                : "worst (lowest p50)";
-        const double slowest = smaller ? worst_p50 : best_p50;
-        const double fastest = smaller ? best_p50  : worst_p50;
+        const double slowest = smaller ? p50.worst_value : p50.best_value;
+        const double fastest = smaller ? p50.best_value  : p50.worst_value;
         std::string best_extra;
-        if (std::isfinite(best_p50) && std::isfinite(worst_p50) && fastest != 0.0) {
+        if (std::isfinite(p50.best_value) && std::isfinite(p50.worst_value)
+            && fastest != 0.0)
+        {
             const double ratio = slowest / fastest;
             best_extra = fmt::format("       (vs slowest: {:.2f}× / {:+.0f}%)",
                 ratio, (ratio - 1.0) * 100.0);
         }
         rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}{}",
-            best_kind, best_lbl, kReportTableLabelCols,
-            format_metric_value(best_p50, metric), best_extra)));
-        // For "worst" we just print the value, no ratio decoration.
+            best_kind, p50.best_label, kReportTableLabelCols,
+            format_metric_value(p50.best_value, metric), best_extra)));
+        // "worst" prints the worst tuple's label + worst value, no ratio decoration.
         rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}",
-            worst_kind,
-            best_lbl == best_lbl ? best_lbl /* keep alignment */ : best_lbl,
-            kReportTableLabelCols,
-            format_metric_value(worst_p50, metric))));
+            worst_kind, p50.worst_label, kReportTableLabelCols,
+            format_metric_value(p50.worst_value, metric))));
         // p99 sub-rows when ≥ 2 samples and finite (else collapse).
-        if (max_samples >= 2 && std::isfinite(best_p99) && std::isfinite(worst_p99)
-            && (best_p99 != best_p50 || worst_p99 != worst_p50)) {
+        if (max_samples >= 2 && p99.valid
+            && (p99.best_value != p50.best_value
+                || p99.worst_value != p50.worst_value)) {
             const std::string best_kind99  = smaller ? "best (lowest p99)"
                                                      : "best (highest p99)";
             const std::string worst_kind99 = smaller ? "worst (highest p99)"
                                                      : "worst (lowest p99)";
-            const double slowest99 = smaller ? worst_p99 : best_p99;
-            const double fastest99 = smaller ? best_p99  : worst_p99;
+            const double slowest99 = smaller ? p99.worst_value : p99.best_value;
+            const double fastest99 = smaller ? p99.best_value  : p99.worst_value;
             std::string best_extra99;
             if (fastest99 != 0.0) {
                 best_extra99 = fmt::format("       (vs slowest: {:.2f}\xc3\x97)",
                     slowest99 / fastest99);
             }
             rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}{}",
-                best_kind99, best_lbl_p99, kReportTableLabelCols,
-                format_metric_value(best_p99, metric), best_extra99)));
+                best_kind99, p99.best_label, kReportTableLabelCols,
+                format_metric_value(p99.best_value, metric), best_extra99)));
             rows.push_back(text(fmt::format("     \xe2\x80\xa2 {:<24} {:<{}} {}",
-                worst_kind99, best_lbl_p99, kReportTableLabelCols,
-                format_metric_value(worst_p99, metric))));
+                worst_kind99, p99.worst_label, kReportTableLabelCols,
+                format_metric_value(p99.worst_value, metric))));
         } else if (max_samples == 1) {
             rows.push_back(text("     \xe2\x80\xa2 (single sample)") | dim);
         }
         // Spread row.
-        if (std::isfinite(best_p50) && std::isfinite(worst_p50) && best_p50 != worst_p50) {
+        if (std::isfinite(p50.best_value) && std::isfinite(p50.worst_value)
+            && p50.best_value != p50.worst_value)
+        {
             if (is_fraction_metric(metric)) {
-                const double pp = std::abs(worst_p50 - best_p50) * 100.0;
+                const double pp = std::abs(p50.worst_value - p50.best_value) * 100.0;
                 rows.push_back(text(fmt::format("     \xe2\x80\xa2 spread current report: {:.1f} pp (best\xe2\x86\x92worst)", pp)));
             } else {
                 const double spread = smaller
-                    ? ((worst_p50 - best_p50) / std::max(1e-12, std::abs(best_p50)) * 100.0)
-                    : ((best_p50 - worst_p50) / std::max(1e-12, std::abs(worst_p50)) * 100.0);
+                    ? ((p50.worst_value - p50.best_value) / std::max(1e-12, std::abs(p50.best_value)) * 100.0)
+                    : ((p50.best_value - p50.worst_value) / std::max(1e-12, std::abs(p50.worst_value)) * 100.0);
                 rows.push_back(text(fmt::format("     \xe2\x80\xa2 spread current report: {:.0f}% (best\xe2\x86\x92worst, p50)",
                     spread)));
             }

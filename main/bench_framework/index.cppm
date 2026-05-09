@@ -2474,10 +2474,92 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
     },
     "region_block": {
       "type": "object",
-      "description": "Map from metric name to the per-iteration sample array.",
-      "additionalProperties": {
-        "type": "array",
-        "items": { "type": "number" }
+      "description": "Map from metric name to its aggregated samples. V17 replaced the per-iteration array with this fixed-shape summary so report.json stays compact even for benchmarks that emit thousands of samples per cell.",
+      "additionalProperties": { "$ref": "#/definitions/aggregated_samples" }
+    },
+    "aggregated_samples": {
+      "title": "AggregatedSamples",
+      "description": "Fixed-shape summary of one (benchmark, tuple, test_case, region, metric) cell's per-iteration samples. Always reflects the FINITE subset (NaN / +inf / -inf are filtered before any arithmetic). 'samples_count' is the original emission count; 'k-best.top10'/'bottom10' and the histogram bucket counts together let downstream consumers reason about the data without the raw vector.",
+      "type": "object",
+      "required": ["samples_count", "stats", "percentiles", "k-best", "histogram"],
+      "additionalProperties": false,
+      "properties": {
+        "samples_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of per-iteration samples emitted into this cell. Includes non-finite samples (NaN / +inf / -inf); the finite subset that backs the other fields is implicit in the histogram (Σ histogram[i].count == finite_count <= samples_count)."
+        },
+        "stats":       { "$ref": "#/definitions/aggregate_stats" },
+        "percentiles": { "$ref": "#/definitions/aggregate_percentiles" },
+        "k-best":      { "$ref": "#/definitions/aggregate_kbest" },
+        "histogram":   { "$ref": "#/definitions/aggregate_histogram" }
+      }
+    },
+    "aggregate_stats": {
+      "title": "AggregateStats",
+      "description": "Per-cell summary statistics over the finite subset. Default-constructed (every field 0.0) when no finite samples were observed. 'mean90' is the trimmed mean: drop floor(0.1 * finite_count) samples from each end of the sorted finite subset, average the rest. Equals 'mean' when finite_count < 10. 'stddev' uses the n-1 denominator and falls to 0 when finite_count < 2 OR when 'mean' is non-finite (sum overflowed).",
+      "type": "object",
+      "required": ["min", "max", "mean", "mean90", "sum", "stddev"],
+      "additionalProperties": false,
+      "properties": {
+        "min":    { "type": "number" },
+        "max":    { "type": "number" },
+        "mean":   { "type": "number" },
+        "mean90": { "type": "number" },
+        "sum":    { "type": "number" },
+        "stddev": { "type": "number" }
+      }
+    },
+    "aggregate_percentiles": {
+      "title": "AggregatePercentiles",
+      "description": "Discrete-index percentiles over the sorted finite subset: P{n} = sorted_finite[floor(n/100 * (finite_count - 1))]. P01 / P50 / P99 match the canonical aggregate semantics used by per-rule comparators and regression rules. P20 / P80 are reported for downstream UI consumers and are not currently rule-addressable.",
+      "type": "object",
+      "required": ["P01", "P20", "P50", "P80", "P99"],
+      "additionalProperties": false,
+      "properties": {
+        "P01": { "type": "number" },
+        "P20": { "type": "number" },
+        "P50": { "type": "number" },
+        "P80": { "type": "number" },
+        "P99": { "type": "number" }
+      }
+    },
+    "aggregate_kbest": {
+      "title": "AggregateKBest",
+      "description": "Top-N / bottom-N finite samples. 'top10' is sorted descending so top10[0] == stats.max; 'bottom10' is sorted ascending so bottom10[0] == stats.min. Both arrays carry min(10, finite_count) entries and have the same length. Empty arrays appear ONLY when the cell emitted no finite samples (every sample was NaN / inf); the JSON-schema 'minItems: 0' permits this case while 'maxItems: 10' enforces the cap.",
+      "type": "object",
+      "required": ["top10", "bottom10"],
+      "additionalProperties": false,
+      "properties": {
+        "top10": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 10,
+          "items": { "type": "number" }
+        },
+        "bottom10": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 10,
+          "items": { "type": "number" }
+        }
+      }
+    },
+    "aggregate_histogram": {
+      "title": "AggregateHistogram",
+      "description": "Linear-binned 10-bucket histogram of the finite subset. Bucket width is (stats.max - stats.min) / 10; bucket i covers [from, to) with from = min + i*width and to = min + (i+1)*width, except the last bucket which is closed on the right (from <= x <= to) so 'max' lands inside it. When width == 0 (all finite samples equal, OR finite_count <= 1) every count goes to bucket 0; remaining buckets render from == to with count == 0. When finite_count == 0 every bucket is from = to = 0 with count = 0. Σ count <= finite_count <= samples_count.",
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "count"],
+        "additionalProperties": false,
+        "properties": {
+          "from":  { "type": "number" },
+          "to":    { "type": "number" },
+          "count": { "type": "integer", "minimum": 0 }
+        }
       }
     },
     "regression_entry": {
@@ -5179,58 +5261,408 @@ inline void run_typed_benchmark(
     // stack, so unique_ptr destructors run on the way out.
 }
 
-// ----------------- Sample reduction -----------------
+// ----------------- Sample aggregation (V17) -----------------
 
-/// Reduce a sample vector into a single number per the supplied aggregate.
-/// Used by per-rule comparators (one call per LHS / RHS) and by the
-/// regression evaluator (one call per (rule, cell, region)). Empty input
-/// always returns 0.0 — the caller is expected to filter empty vectors
-/// upstream (the rule + regression evaluators both do); the fallback only
-/// fires on genuinely degenerate input.
+/// Number of histogram buckets in `AggregatedSamples::histogram`.
+/// Constant by spec — the schema enforces `minItems == maxItems == 10`,
+/// so changing this requires a coordinated schema bump.
+inline constexpr std::size_t kHistogramBucketCount = 10;
+
+/// Maximum length of `AggregatedSamples::top10` / `bottom10`.
+/// Shorter when fewer than 10 finite samples were observed.
+inline constexpr std::size_t kKBestSize = 10;
+
+/// Per-cell summary stats. Computed by `aggregate_samples_for_report`
+/// over the *finite subset* of the sample vector (NaN / ±inf are
+/// dropped before sorting). Default-constructed values (all-zero)
+/// are emitted when no finite samples were observed.
+struct AggregateStats {
+    double min     = 0.0;
+    double max     = 0.0;
+    double mean    = 0.0;
+    /// Trimmed mean: drop floor(0.1 * finite_count) samples from
+    /// each end of the sorted finite subset, average the rest.
+    /// Equals `mean` when finite_count < 10 (trim == 0).
+    double mean90  = 0.0;
+    double sum     = 0.0;
+    /// Sample standard deviation, n-1 denominator. 0 when
+    /// finite_count < 2 or when `mean` is non-finite (sum
+    /// overflowed): in the latter case (s - mean)² is NaN and
+    /// would poison the result; bail to 0.
+    double stddev  = 0.0;
+};
+
+/// Five canonical percentile slots reported per cell. Indexed via
+/// the registry below so adding a new percentile is a one-row
+/// edit.
+struct AggregatePercentiles {
+    double p01 = 0.0;
+    double p20 = 0.0;
+    double p50 = 0.0;
+    double p80 = 0.0;
+    double p99 = 0.0;
+};
+
+/// One bucket of the linear-binned histogram. `count` is `int64_t`
+/// (rather than `size_t`) because that is what the JSON schema's
+/// `integer` type maps to — and because non-finite values cannot
+/// poison it the way they could a `double`.
+struct AggregateBucket {
+    double      from  = 0.0;
+    double      to    = 0.0;
+    std::size_t count = 0;
+};
+
+/// Pre-aggregated view of a sample vector. Replaces raw
+/// `std::vector<double>` everywhere a consumer reads samples for
+/// reporting / UI purposes. The current run still collects raw
+/// samples in `Cell::samples` (so per-rule comparators keep using
+/// `aggregate_samples(Aggregate, vector<double>)` without an
+/// in-memory format change); the writer turns each cell's vector
+/// into one of these at write time, and historical-report
+/// readers parse this shape directly.
+///
+/// Invariants on a non-default-constructed value (set by
+/// `aggregate_samples_for_report` when at least one finite sample
+/// was present):
+///   * `top10[0] == stats.max` and the array is sorted descending.
+///   * `bottom10[0] == stats.min` and the array is sorted ascending.
+///   * `top10.size() == bottom10.size()` (both `min(10, finite_count)`).
+///   * `Σ histogram[i].count == finite_count` (= number of finite
+///     samples; non-finite samples never enter any bucket).
+///   * `histogram[i].to == histogram[i+1].from` for `i < 9`. Holds
+///     for ordinary inputs. For pathological inputs where
+///     `max - min` overflows to ±∞ the bucket bounds collapse to
+///     `±∞`; the on-disk round-trip still preserves bucket-edge
+///     equality because `sanitize_for_json` clamps `±∞` symmetrically
+///     before serialisation.
+///
+/// `parse_aggregated_samples` (the inverse) **does not** guarantee
+/// the bucket-edge or descending/ascending invariants on input it
+/// can't trust — it returns whatever the historical report
+/// contained, with default-constructed slots wherever the source
+/// was malformed. Consumers that need the full invariants should
+/// re-aggregate from raw samples instead of trusting parser output.
+struct AggregatedSamples {
+    std::size_t                                            samples_count = 0;
+    AggregateStats                                          stats{};
+    AggregatePercentiles                                    percentiles{};
+    std::vector<double>                                     top10{};
+    std::vector<double>                                     bottom10{};
+    std::array<AggregateBucket, kHistogramBucketCount>      histogram{};
+};
+
+/// True iff `aggregated` carries at least one *finite* sample.
+/// `samples_count == 0` ⇒ the cell wasn't emitted at all.
+/// `samples_count > 0 && top10.empty()` ⇒ every emitted sample
+/// was non-finite (NaN / ±inf), so every aggregate field is
+/// default-zero and consumers must NOT treat the percentile slots
+/// as data. Used by the renderer, the regression evaluator, and
+/// any other reader that needs "is there real data here?". Single
+/// definition next to the type so all consumers stay aligned.
+[[nodiscard]] inline bool has_finite_samples(const AggregatedSamples& aggregated) noexcept {
+    return aggregated.samples_count > 0 && !aggregated.top10.empty();
+}
+
+/// Compile-time table linking each percentile to its
+/// `AggregatePercentiles` field. Single source of truth used by
+/// the aggregator (writes the field), the writer (emits the JSON
+/// key), the historical-report reader (parses the same key), and
+/// `aggregate_samples(Aggregate, AggregatedSamples)` for the
+/// rule-eval percentile lookups (P01 / P50 / P99 only — the
+/// table also drives `aggregated_from_report`).
+struct AggregatedPercentileEntry {
+    std::string_view  name;          // "P01" / "P20" / "P50" / "P80" / "P99"
+    double            fraction;      // 0.01 / 0.20 / 0.50 / 0.80 / 0.99
+    double AggregatePercentiles::* slot;  // pointer-to-member into the struct
+};
+
+inline constexpr std::array<AggregatedPercentileEntry, 5>
+kAggregatedPercentileRegistry{ {
+    { "P01", 0.01, &AggregatePercentiles::p01 },
+    { "P20", 0.20, &AggregatePercentiles::p20 },
+    { "P50", 0.50, &AggregatePercentiles::p50 },
+    { "P80", 0.80, &AggregatePercentiles::p80 },
+    { "P99", 0.99, &AggregatePercentiles::p99 },
+} };
+
+/// Compile-time table linking each `stats` field to its JSON
+/// spelling. Drives both the writer (serialises in this order)
+/// and the reader (looks each field up by name). Adding a new
+/// per-cell statistic is a one-row edit (plus a slot in
+/// `AggregateStats`) that propagates to both sides automatically.
+struct AggregatedStatsEntry {
+    std::string_view  name;
+    double AggregateStats::* slot;
+};
+
+inline constexpr std::array<AggregatedStatsEntry, 6>
+kAggregatedStatsRegistry{ {
+    { "min",    &AggregateStats::min    },
+    { "max",    &AggregateStats::max    },
+    { "mean",   &AggregateStats::mean   },
+    { "mean90", &AggregateStats::mean90 },
+    { "sum",    &AggregateStats::sum    },
+    { "stddev", &AggregateStats::stddev },
+} };
+
+/// Compile-time reverse lookup `slot → JSON key`. Lets every
+/// reader path (sanity detector, future stats consumers) refer
+/// to a stat field by its `&AggregateStats::min` pointer-to-member
+/// and resolve the spelling through the same registry the writer
+/// uses, so a renamed field flows everywhere automatically.
+/// DEBUG_ASSERTs on registry miss so a future rename that drops a
+/// slot trips loudly during testing instead of silently turning a
+/// `json_double_or(*stats_obj, "?", 0.0)` lookup into a
+/// constant-zero false-positive.
+[[nodiscard]] inline std::string_view aggregated_stat_name(
+    double AggregateStats::* slot) noexcept
+{
+    for (const auto& entry : kAggregatedStatsRegistry) {
+        if (entry.slot == slot) return entry.name;
+    }
+    DEBUG_ASSERT(false,
+        "aggregated_stat_name: slot is not registered in kAggregatedStatsRegistry");
+    return std::string_view{};
+}
+
+/// Copy of `samples` containing only finite entries (NaN / ±inf
+/// dropped). Single source of truth for the V17 finite-only
+/// invariant: any path that reduces a raw sample vector — the
+/// per-rule comparator overload of `aggregate_samples`, the
+/// report-time aggregator `aggregate_samples_for_report` — funnels
+/// through this helper so the two interpretations stay aligned
+/// byte-for-byte on the finite subset.
+[[nodiscard]] inline std::vector<double> filter_finite(
+    const std::vector<double>& samples) noexcept
+{
+    std::vector<double> finite;
+    finite.reserve(samples.size());
+    for (const double value : samples) {
+        if (std::isfinite(value)) finite.push_back(value);
+    }
+    return finite;
+}
+
+/// Read the requested aggregate from a *raw sample vector*. Non-
+/// finite samples (NaN / ±inf) are filtered out before any
+/// arithmetic, matching `aggregate_samples_for_report` so a rule
+/// that runs against the raw vector and a rule that runs against
+/// the persisted aggregate produce the same number on the same
+/// in-memory data.
+///
+/// Used by:
+///   * per-rule comparators inside one run (LHS / RHS aggregates);
+///   * the regression evaluator's *current-run* side (the
+///     historical side reads via the AggregatedSamples overload).
+///
+/// Returns 0.0 when no finite samples remain. Sum/Min/Max take a
+/// fast path that skips the filter copy when every element is
+/// already finite (the common case); the percentile path always
+/// needs a mutable copy for `nth_element`.
 [[nodiscard]] inline double aggregate_samples(
     Aggregate aggregate, const std::vector<double>& samples) noexcept
 {
     if (samples.empty()) return 0.0;
+    const bool all_finite = std::all_of(samples.begin(), samples.end(),
+        [](double value) { return std::isfinite(value); });
+    if (all_finite && (aggregate == Aggregate::Sum
+                        || aggregate == Aggregate::Min
+                        || aggregate == Aggregate::Max))
+    {
+        switch (aggregate) {
+            case Aggregate::Sum: {
+                double total = 0.0;
+                for (const double value : samples) total += value;
+                return total;
+            }
+            case Aggregate::Min: return *std::min_element(samples.begin(), samples.end());
+            case Aggregate::Max: return *std::max_element(samples.begin(), samples.end());
+            default: break;     // unreachable (gated above)
+        }
+    }
+    std::vector<double> finite = all_finite ? samples : filter_finite(samples);
+    if (finite.empty()) return 0.0;
     switch (aggregate) {
         case Aggregate::Sum: {
             double total = 0.0;
-            for (const double value : samples) total += value;
+            for (const double value : finite) total += value;
             return total;
         }
         case Aggregate::Min:
-            return *std::min_element(samples.begin(), samples.end());
+            return *std::min_element(finite.begin(), finite.end());
         case Aggregate::Max:
-            return *std::max_element(samples.begin(), samples.end());
+            return *std::max_element(finite.begin(), finite.end());
         case Aggregate::P01:
         case Aggregate::P50:
         case Aggregate::P99: {
             // Discrete-index percentile: pick the sample at
             // `floor(p * (n - 1))` after a partial sort via
-            // std::nth_element. Matches NumPy's "lower" interpolation
-            // mode. The percentile fraction comes from the registry —
-            // adding a P95 entry there is enough to extend coverage;
-            // no new switch arm needed.
-            //
-            // For even n, P50 selects the lower-middle element (e.g.
-            // index 1 of 4-element vectors). The pre-V5 `median_of`
-            // helper used `n/2` (the upper-middle); existing rules
-            // that previously relied on that exact choice may see
-            // a one-element shift, but tolerance-bounded rules
-            // (the only kind where the choice matters) are robust
-            // to it.
+            // std::nth_element. Matches NumPy's "lower"
+            // interpolation mode and the offline aggregator in
+            // `aggregate_samples_for_report`.
             const double percentile_fraction =
                 aggregate_percentile(aggregate);
-            std::vector<double> copy = samples;
             const std::size_t target_index = static_cast<std::size_t>(
                 std::floor(percentile_fraction
-                           * static_cast<double>(copy.size() - 1)));
-            std::nth_element(copy.begin(),
-                             copy.begin() + static_cast<std::ptrdiff_t>(target_index),
-                             copy.end());
-            return copy[target_index];
+                           * static_cast<double>(finite.size() - 1)));
+            std::nth_element(finite.begin(),
+                             finite.begin() + static_cast<std::ptrdiff_t>(target_index),
+                             finite.end());
+            return finite[target_index];
         }
     }
     return 0.0;
+}
+
+/// Read the requested aggregate from a *pre-aggregated record*.
+/// Used by the regression evaluator + summary mode + interactive
+/// UI when consuming historical reports (which carry only the
+/// aggregate, never the raw samples). Returns 0.0 on
+/// default-constructed input (`samples_count == 0`) AND on
+/// all-non-finite cells (`samples_count > 0 && top10.empty()`),
+/// because the writer leaves every aggregate field at its
+/// default-zero in that case. Callers that need to distinguish
+/// "no real data" from "an aggregate that genuinely equals 0"
+/// should gate on `has_finite_samples` first.
+[[nodiscard]] inline double aggregate_samples(
+    Aggregate aggregate, const AggregatedSamples& aggregated) noexcept
+{
+    if (aggregated.samples_count == 0) return 0.0;
+    switch (aggregate) {
+        case Aggregate::Sum: return aggregated.stats.sum;
+        case Aggregate::Min: return aggregated.stats.min;
+        case Aggregate::Max: return aggregated.stats.max;
+        case Aggregate::P01: return aggregated.percentiles.p01;
+        case Aggregate::P50: return aggregated.percentiles.p50;
+        case Aggregate::P99: return aggregated.percentiles.p99;
+    }
+    return 0.0;
+}
+
+/// Build the `AggregatedSamples` view of a raw sample vector.
+/// Filters non-finite samples (NaN / ±inf) before any
+/// arithmetic. `samples_count` is the original (pre-filter) size
+/// — downstream consumers use it for the user-visible iteration
+/// tally; finite-only fields use the filtered subset.
+///
+/// Pathological inputs (e.g. a billion 1e300 samples that
+/// over/underflow `mean` to ±inf) are still possible. The writer
+/// pipes every emitted double through `sanitize_for_json`
+/// downstream so the on-disk form remains JSON-legal.
+[[nodiscard]] inline AggregatedSamples aggregate_samples_for_report(
+    const std::vector<double>& samples) noexcept
+{
+    AggregatedSamples out{};
+    out.samples_count = samples.size();
+    if (samples.empty()) return out;
+
+    std::vector<double> finite = filter_finite(samples);
+    if (finite.empty()) {
+        // All-non-finite: leave every aggregate field at its
+        // default (zero / empty). The schema's `top10` /
+        // `bottom10` use `minItems: 0` so empty arrays validate;
+        // the histogram array carries 10 default-constructed
+        // buckets (`count == 0`) which the schema accepts.
+        return out;
+    }
+
+    std::sort(finite.begin(), finite.end());
+    out.stats.min = finite.front();
+    out.stats.max = finite.back();
+    double sum = 0.0;
+    for (const double value : finite) sum += value;
+    out.stats.sum  = sum;
+    out.stats.mean = sum / static_cast<double>(finite.size());
+
+    // mean90 — drop floor(10%) on each side. For finite_count >= 1,
+    // `trim * 2 < finite_count` is always true, so the inner sum
+    // is well-defined. When trim == 0 the loop covers the whole
+    // vector and mean90 == mean by construction.
+    {
+        const auto trim = static_cast<std::size_t>(
+            std::floor(0.1 * static_cast<double>(finite.size())));
+        double trimmed = 0.0;
+        for (std::size_t i = trim; i < finite.size() - trim; ++i) {
+            trimmed += finite[i];
+        }
+        const auto kept = finite.size() - 2 * trim;
+        out.stats.mean90 = trimmed / static_cast<double>(kept);
+    }
+
+    // stddev — only meaningful for n >= 2 AND finite mean. A
+    // non-finite mean (sum overflowed) would make (s - mean)²
+    // produce NaN and silently wreck the result; bail to 0.
+    if (finite.size() >= 2 && std::isfinite(out.stats.mean)) {
+        double sq = 0.0;
+        for (const double value : finite) {
+            const double delta = value - out.stats.mean;
+            sq += delta * delta;
+        }
+        out.stats.stddev =
+            std::sqrt(sq / static_cast<double>(finite.size() - 1));
+    }
+
+    for (const auto& entry : kAggregatedPercentileRegistry) {
+        const auto idx = static_cast<std::size_t>(
+            std::floor(entry.fraction
+                       * static_cast<double>(finite.size() - 1)));
+        out.percentiles.*(entry.slot) = finite[idx];
+    }
+
+    const auto kbest = std::min(kKBestSize, finite.size());
+    out.top10.reserve(kbest);
+    out.bottom10.reserve(kbest);
+    for (std::size_t i = 0; i < kbest; ++i) {
+        out.top10.push_back(finite[finite.size() - 1 - i]);
+        out.bottom10.push_back(finite[i]);
+    }
+
+    // Histogram: linear binning, last bucket inclusive on the
+    // right so `max` lands inside it. When `width == 0` (all
+    // finite samples equal, or n == 1) every count goes to bucket 0.
+    // `std::isfinite(width)` guards the pathological max - min == ±inf
+    // case (e.g. samples include `numeric_limits<double>::max()`):
+    // a non-finite width would produce `(value - min) / inf == NaN`,
+    // and `static_cast<size_t>(NaN)` is UB.
+    const double width = (out.stats.max - out.stats.min)
+                         / static_cast<double>(kHistogramBucketCount);
+    for (std::size_t i = 0; i < kHistogramBucketCount; ++i) {
+        out.histogram[i].from = out.stats.min + width * static_cast<double>(i);
+        out.histogram[i].to   = (i + 1 == kHistogramBucketCount)
+            ? out.stats.max
+            : (out.stats.min + width * static_cast<double>(i + 1));
+    }
+    if (std::isfinite(width) && width > 0.0) {
+        for (const double value : finite) {
+            auto bucket = static_cast<std::size_t>(
+                std::floor((value - out.stats.min) / width));
+            if (bucket >= kHistogramBucketCount) bucket = kHistogramBucketCount - 1;
+            out.histogram[bucket].count += 1;
+        }
+    } else {
+        out.histogram[0].count = finite.size();
+    }
+    return out;
+}
+
+/// Map any double to a JSON-legal value. `NaN` becomes 0.0;
+/// `±infinity` clamp to `numeric_limits<double>::max() / lowest()`.
+/// JSON (RFC 8259) does not admit `NaN` or `Infinity` tokens, so
+/// emitting them would produce strings that
+/// `nlohmann::json::parse` (used by the framework's post-write
+/// self-validation) and any standard parser reject. This helper
+/// is applied at every numeric-emit site inside the writer so
+/// pathological-input runs still produce a valid report.
+[[nodiscard]] inline double sanitize_for_json(double value) noexcept {
+    if (std::isnan(value)) return 0.0;
+    if (value ==  std::numeric_limits<double>::infinity()) {
+        return  std::numeric_limits<double>::max();
+    }
+    if (value == -std::numeric_limits<double>::infinity()) {
+        return  std::numeric_limits<double>::lowest();
+    }
+    return value;
 }
 
 // ----------------- Rule evaluation -----------------
@@ -5681,12 +6113,146 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
     return std::string{commit_text};
 }
 
+/// Read a JSON `number` field as a double, falling back to
+/// `default_value` on any miss (key absent, wrong type, parse
+/// failure). Coerces through `int64_t` / `uint64_t` so an
+/// integer-spelled JSON value like `0` still resolves cleanly.
+/// Tiny helper so every aggregate-field reader below stays one
+/// line; consolidated in one place so its semantics (e.g. the
+/// integer-coercion order) are auditable.
+[[nodiscard]] inline double json_double_or(
+    simdjson::dom::object obj, std::string_view key, double default_value) noexcept
+{
+    simdjson::dom::element child;
+    if (obj.at_key(key).get(child) != simdjson::SUCCESS) return default_value;
+    double parsed_double = 0.0;
+    if (child.get(parsed_double) == simdjson::SUCCESS) return parsed_double;
+    std::int64_t parsed_int = 0;
+    if (child.get(parsed_int) == simdjson::SUCCESS) {
+        return static_cast<double>(parsed_int);
+    }
+    std::uint64_t parsed_uint = 0;
+    if (child.get(parsed_uint) == simdjson::SUCCESS) {
+        return static_cast<double>(parsed_uint);
+    }
+    return default_value;
+}
+
+/// Read a JSON `integer` field as `int64_t` with the same
+/// graceful-degradation contract as `json_double_or`.
+[[nodiscard]] inline std::int64_t json_int_or(
+    simdjson::dom::object obj, std::string_view key, std::int64_t default_value) noexcept
+{
+    simdjson::dom::element child;
+    if (obj.at_key(key).get(child) != simdjson::SUCCESS) return default_value;
+    std::int64_t parsed_int = 0;
+    if (child.get(parsed_int) == simdjson::SUCCESS) return parsed_int;
+    std::uint64_t parsed_uint = 0;
+    if (child.get(parsed_uint) == simdjson::SUCCESS) {
+        return static_cast<std::int64_t>(parsed_uint);
+    }
+    return default_value;
+}
+
+/// Parse one `region_block.<metric>` object into an
+/// `AggregatedSamples`. Missing optional sub-objects collapse to
+/// default-constructed values; consumers that need the full shape
+/// (sanity warnings, regression eval, --ui) check
+/// `samples_count > 0` and `top10.empty()` upfront.
+[[nodiscard]] inline AggregatedSamples parse_aggregated_samples(
+    simdjson::dom::object metric_obj) noexcept
+{
+    AggregatedSamples agg{};
+    agg.samples_count = static_cast<std::size_t>(std::max<std::int64_t>(
+        0, json_int_or(metric_obj, "samples_count", 0)));
+    if (const auto stats_obj = try_get_object(metric_obj, "stats");
+        stats_obj.has_value())
+    {
+        for (const auto& entry : kAggregatedStatsRegistry) {
+            agg.stats.*(entry.slot) = json_double_or(*stats_obj, entry.name, 0.0);
+        }
+    }
+    if (const auto pct_obj = try_get_object(metric_obj, "percentiles");
+        pct_obj.has_value())
+    {
+        for (const auto& entry : kAggregatedPercentileRegistry) {
+            agg.percentiles.*(entry.slot) =
+                json_double_or(*pct_obj, entry.name, 0.0);
+        }
+    }
+    /// Pull `parent[key]` as a `vector<double>`. Non-numeric items
+    /// (corrupt historical reports) are dropped silently — the
+    /// resulting array may shrink below the source length, breaking
+    /// the documented `top10[0] == stats.max` invariant of an
+    /// aggregator-built `AggregatedSamples`. Consumers that depend
+    /// on exact alignment with the source must check
+    /// `top10.size() == bottom10.size()` themselves; the regression
+    /// evaluator and the interactive UI only consult percentile
+    /// slots, so a truncated `top10` is harmless to them.
+    auto parse_double_array = [](simdjson::dom::object parent,
+                                  std::string_view key) noexcept
+        -> std::vector<double>
+    {
+        std::vector<double> out;
+        simdjson::dom::array arr;
+        if (parent.at_key(key).get(arr) != simdjson::SUCCESS) return out;
+        out.reserve(arr.size());
+        for (auto value_elem : arr) {
+            double parsed = 0.0;
+            if (value_elem.get(parsed) == simdjson::SUCCESS) {
+                out.push_back(parsed);
+            }
+        }
+        return out;
+    };
+    if (const auto kbest_obj = try_get_object(metric_obj, "k-best");
+        kbest_obj.has_value())
+    {
+        agg.top10    = parse_double_array(*kbest_obj, "top10");
+        agg.bottom10 = parse_double_array(*kbest_obj, "bottom10");
+        // The aggregator's invariant is `top10.size() == bottom10.size()`
+        // (both are `min(10, finite_count)`). If a corrupt historical
+        // report drops elements asymmetrically, truncate both sides
+        // back to the shorter length so consumers never see a
+        // size-mismatch (which would, e.g., let a future
+        // "spread = top10[i] - bottom10[i]" walk read past the end).
+        const auto kbest_paired = std::min(agg.top10.size(), agg.bottom10.size());
+        agg.top10.resize(kbest_paired);
+        agg.bottom10.resize(kbest_paired);
+    }
+    simdjson::dom::array hist_arr;
+    if (metric_obj["histogram"].get(hist_arr) == simdjson::SUCCESS) {
+        // Histogram positional alignment matters: bucket `i` in the
+        // source becomes bucket `i` in `agg.histogram`. We advance
+        // `bucket_index` unconditionally so a malformed bucket leaves
+        // its slot at default-construction (`from == to == 0`,
+        // `count == 0`) and later slots stay aligned with the source.
+        std::size_t bucket_index = 0;
+        for (auto bucket_elem : hist_arr) {
+            if (bucket_index >= kHistogramBucketCount) break;
+            if (const auto bucket_obj = try_as_object(bucket_elem);
+                bucket_obj.has_value())
+            {
+                agg.histogram[bucket_index].from  = json_double_or(*bucket_obj, "from", 0.0);
+                agg.histogram[bucket_index].to    = json_double_or(*bucket_obj, "to",   0.0);
+                agg.histogram[bucket_index].count = static_cast<std::size_t>(
+                    std::max<std::int64_t>(0, json_int_or(*bucket_obj, "count", 0)));
+            }
+            ++bucket_index;
+        }
+    }
+    return agg;
+}
+
 /// Walk a parsed report's
 /// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric>`
-/// path and pull out the sample array. Returns nullopt on any miss
-/// (benchmark absent, no matching tuple, region missing, etc.) — the
-/// evaluator treats this as "no historical baseline for this combo".
-[[nodiscard]] inline std::optional<std::vector<double>> samples_from_report(
+/// path and pull out the pre-aggregated record. Returns nullopt
+/// on any miss (benchmark absent, no matching tuple, region
+/// missing, etc.) — the regression evaluator and the interactive
+/// UI both treat this as "no historical baseline for this
+/// combo". V17: replaces the pre-V17 `samples_from_report` that
+/// returned a raw sample vector.
+[[nodiscard]] inline std::optional<AggregatedSamples> aggregated_from_report(
     simdjson::dom::element report_root,
     std::string_view benchmark,
     std::string_view algorithm_name,
@@ -5735,17 +6301,10 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
         const auto region_obj = try_get_object(*test_case_obj, region);
         if (!region_obj.has_value()) continue;
 
-        simdjson::dom::array metric_values;
-        if ((*region_obj).at_key(metric).get(metric_values) != simdjson::SUCCESS) continue;
+        simdjson::dom::object metric_obj;
+        if ((*region_obj).at_key(metric).get(metric_obj) != simdjson::SUCCESS) continue;
 
-        std::vector<double> values;
-        for (auto value_elem : metric_values) {
-            double sample_value = 0.0;
-            if (value_elem.get(sample_value) == simdjson::SUCCESS) {
-                values.push_back(sample_value);
-            }
-        }
-        return values;
+        return parse_aggregated_samples(metric_obj);
     }
     return std::nullopt;
 }
@@ -5800,11 +6359,29 @@ struct HistoricalReportCache {
 
 /// Walk an entire historical report's
 /// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric_name>`
-/// tree and collect every distinct sample value seen for `metric_name`.
-/// Returns an empty set when the metric was absent in that report (or
-/// when the report's structure is unparseable). Linear in the report
-/// size; called at most once per `(metric, hist_report)` pair via the
-/// per-rule cache in `evaluate_sanity_warnings`.
+/// tree and collect a distinct-value set capturing every sample
+/// seen for `metric_name`, *as observed through the V17 aggregate
+/// shape*. Returns an empty set when the metric was absent in that
+/// report (or when the report's structure is unparseable). Linear
+/// in the report size; called at most once per `(metric,
+/// hist_report)` pair via the per-rule cache in
+/// `evaluate_sanity_warnings`.
+///
+/// The aggregate per cell carries `min` and `max` (over the finite
+/// subset) plus an empty-vs-non-empty `top10`. From these we can
+/// drive the existing detector identically to the pre-V17 raw-
+/// vector walk:
+///
+///   * `samples_count == 0` → cell is empty, contributes nothing.
+///   * `top10` empty (`samples_count > 0`) → every emitted sample
+///     was non-finite. Insert a NaN sentinel so an all-NaN run
+///     reports as `metric_looks_constant` with a NaN-flavoured
+///     message — matching pre-V17 semantics where every NaN bit
+///     pattern collapsed into one set entry.
+///   * `min == max` → every finite sample in this cell shares one
+///     value `V`; insert `bit_cast<u64>(V)`.
+///   * `min != max` → cell is internally non-constant; insert
+///     both bits so the "size > 1 ⇒ not constant" check trips.
 [[nodiscard]] inline std::set<std::uint64_t> distinct_sample_bits_for_metric(
     simdjson::dom::element report_root,
     std::string_view       metric_name) noexcept
@@ -5833,14 +6410,33 @@ struct HistoricalReportCache {
                 for (auto region_field : *tc_obj) {
                     const auto region_obj = try_as_object(region_field.value);
                     if (!region_obj.has_value()) continue;
-                    simdjson::dom::array values_array;
-                    if ((*region_obj).at_key(metric_name).get(values_array)
+                    simdjson::dom::object metric_obj;
+                    if ((*region_obj).at_key(metric_name).get(metric_obj)
                         != simdjson::SUCCESS) continue;
-                    for (auto value_elem : values_array) {
-                        double sample_value = 0.0;
-                        if (value_elem.get(sample_value) == simdjson::SUCCESS) {
-                            result.insert(double_bits(sample_value));
+                    if (json_int_or(metric_obj, "samples_count", 0) <= 0) continue;
+                    bool top10_empty = true;
+                    if (const auto kbest_obj = try_get_object(metric_obj, "k-best");
+                        kbest_obj.has_value())
+                    {
+                        simdjson::dom::array top10_arr;
+                        if ((*kbest_obj)["top10"].get(top10_arr) == simdjson::SUCCESS) {
+                            top10_empty = (top10_arr.size() == 0);
                         }
+                    }
+                    if (top10_empty) {
+                        result.insert(double_bits(
+                            std::numeric_limits<double>::quiet_NaN()));
+                        continue;
+                    }
+                    const auto stats_obj = try_get_object(metric_obj, "stats");
+                    if (!stats_obj.has_value()) continue;
+                    const double min_value = json_double_or(*stats_obj,
+                        aggregated_stat_name(&AggregateStats::min), 0.0);
+                    const double max_value = json_double_or(*stats_obj,
+                        aggregated_stat_name(&AggregateStats::max), 0.0);
+                    result.insert(double_bits(min_value));
+                    if (max_value != min_value) {
+                        result.insert(double_bits(max_value));
                     }
                 }
             }
@@ -5902,15 +6498,30 @@ struct HistoricalReportCache {
     HistoricalReportCache&       history_cache) noexcept
 {
     // 1. Collect distinct bit-patterns per metric name across every
-    //    cell of the current run.
+    //    cell of the current run. We funnel through
+    //    `aggregate_samples_for_report` so the constancy lens
+    //    (min/max + NaN-stuck sentinel) matches the V17 historical-
+    //    side reader (`distinct_sample_bits_for_metric`) exactly.
     std::map<std::string, std::set<std::uint64_t>> distinct_bits_by_metric;
     for (const auto& [_bench_key, state_ptr] : reports) {
         for (const auto& cell_ptr : state_ptr->cells) {
             for (const auto& [_region_name, region_metrics] : cell_ptr->samples) {
                 for (const auto& [metric_name, sample_values] : region_metrics) {
+                    if (sample_values.empty()) continue;
                     auto& bucket = distinct_bits_by_metric[metric_name];
-                    for (double sample : sample_values) {
-                        bucket.insert(double_bits(sample));
+                    const auto agg = aggregate_samples_for_report(sample_values);
+                    if (agg.top10.empty()) {
+                        // All-non-finite cell: same sentinel the
+                        // historical reader inserts so an all-NaN
+                        // run still trips `metric_looks_constant`
+                        // with a NaN-flavoured message.
+                        bucket.insert(double_bits(
+                            std::numeric_limits<double>::quiet_NaN()));
+                        continue;
+                    }
+                    bucket.insert(double_bits(agg.stats.min));
+                    if (agg.stats.max != agg.stats.min) {
+                        bucket.insert(double_bits(agg.stats.max));
                     }
                 }
             }
@@ -6113,16 +6724,16 @@ struct HistoricalReportCache {
                             }
 
                             auto* baseline_report = fetch_report(current_index - 1);
-                            std::optional<std::vector<double>> baseline_samples;
+                            std::optional<AggregatedSamples> baseline_aggregate;
                             if (baseline_report != nullptr) {
-                                baseline_samples = samples_from_report(
+                                baseline_aggregate = aggregated_from_report(
                                     baseline_report->root,
                                     state->config.benchmark_key,
                                     tuple.algorithm_name, tuple.params,
                                     test_case_name, region_name, rule.metric);
                             }
-                            if (!baseline_samples.has_value()
-                                || baseline_samples->empty()) {
+                            if (!baseline_aggregate.has_value()
+                                || baseline_aggregate->samples_count == 0) {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_baseline_missing",
@@ -6138,7 +6749,7 @@ struct HistoricalReportCache {
                             }
 
                             const double previously_value =
-                                aggregate_samples(rule.aggregate, *baseline_samples);
+                                aggregate_samples(rule.aggregate, *baseline_aggregate);
 
                             if (comparator_passes(rule.op, now_value, previously_value)) {
                                 continue;     // no regression
@@ -6161,17 +6772,17 @@ struct HistoricalReportCache {
                                 if (hist_report == nullptr) {
                                     history_gap = true; break;
                                 }
-                                auto hist_samples = samples_from_report(
+                                auto hist_aggregate = aggregated_from_report(
                                     hist_report->root,
                                     state->config.benchmark_key,
                                     tuple.algorithm_name, tuple.params,
                                     test_case_name, region_name, rule.metric);
-                                if (!hist_samples.has_value()
-                                    || hist_samples->empty()) {
+                                if (!hist_aggregate.has_value()
+                                    || hist_aggregate->samples_count == 0) {
                                     history_gap = true; break;
                                 }
                                 const double hist_value =
-                                    aggregate_samples(rule.aggregate, *hist_samples);
+                                    aggregate_samples(rule.aggregate, *hist_aggregate);
                                 if (comparator_passes(rule.op, now_value, hist_value)) {
                                     break;     // found a passing report
                                 }
@@ -6347,15 +6958,117 @@ inline void emit_param_object(simdjson::builder::string_builder& builder,
     });
 }
 
-/// Emit `[v0, v1, ...]` from a numeric vector. Used for sample arrays.
+/// Emit a `double` JSON-safely. RFC 8259 forbids `NaN` /
+/// `Infinity` tokens; the simdjson builder would happily render
+/// them and the post-write `validate_against_schema` step would
+/// then refuse the report. `sanitize_for_json` collapses any
+/// non-finite value to a representable substitute (NaN → 0,
+/// ±∞ → numeric_limits clamp) so the writer always produces
+/// schema-legal output regardless of how degenerate the input
+/// data was.
+inline void emit_finite_double(simdjson::builder::string_builder& builder,
+                                double value)
+{
+    builder.append(sanitize_for_json(value));
+}
+
+/// Emit `[v0, v1, ...]` from a numeric vector. Routes every
+/// element through `emit_finite_double` so the array is always
+/// JSON-legal. Used for `top10` / `bottom10`.
 inline void emit_double_array(simdjson::builder::string_builder& builder,
                                const std::vector<double>& values)
 {
     builder.start_array();
-    emit_range_with_commas(builder, values, [](auto& b, double sample) {
-        b.append(sample);
+    emit_range_with_commas(builder, values, [](auto& array_builder, double sample) {
+        emit_finite_double(array_builder, sample);
     });
     builder.end_array();
+}
+
+/// Emit one `(metric -> AggregatedSamples)` leaf. Replaces the
+/// pre-V17 raw array emit; the in-memory representation is still
+/// `std::vector<double>` (so the rule evaluator and the rest of
+/// the framework keep working unchanged), but the on-disk shape
+/// is the fixed-size aggregate documented under
+/// `kBenchReportSchema#/definitions/aggregated_samples`.
+///
+/// **Precondition**: `samples` must be non-empty. The schema's
+/// `samples_count: minimum: 1` enforces "no empty cells in the
+/// report" — call sites filter empty vectors upstream
+/// (`emit_test_case_block` walks merged sample maps where empty
+/// metric vectors are pruned by `merge_group_samples`'s emit
+/// rule). DEBUG_ASSERTed so a future caller that drops the
+/// upstream filter trips loudly instead of producing a
+/// schema-invalid report.
+inline void emit_aggregated_samples(simdjson::builder::string_builder& builder,
+                                     const std::vector<double>& samples)
+{
+    DEBUG_ASSERT(!samples.empty(),
+        "emit_aggregated_samples: caller must filter empty sample vectors "
+        "(schema requires samples_count >= 1)");
+    const auto aggregated = aggregate_samples_for_report(samples);
+    emit_object_with_body(builder, [&](auto& root_inner) {
+        emit_key(root_inner, "samples_count");
+        root_inner.append(static_cast<std::int64_t>(aggregated.samples_count));
+        root_inner.append_comma();
+
+        emit_kv_with_body(root_inner, "stats", [&](auto& stats_builder) {
+            emit_object_with_body(stats_builder, [&](auto& stats_inner) {
+                bool first = true;
+                for (const auto& entry : kAggregatedStatsRegistry) {
+                    if (!first) stats_inner.append_comma();
+                    first = false;
+                    emit_key(stats_inner, entry.name);
+                    emit_finite_double(stats_inner, aggregated.stats.*(entry.slot));
+                }
+            });
+        });
+        root_inner.append_comma();
+
+        emit_kv_with_body(root_inner, "percentiles", [&](auto& pct_builder) {
+            emit_object_with_body(pct_builder, [&](auto& pct_inner) {
+                bool first = true;
+                for (const auto& entry : kAggregatedPercentileRegistry) {
+                    if (!first) pct_inner.append_comma();
+                    first = false;
+                    emit_key(pct_inner, entry.name);
+                    emit_finite_double(pct_inner, aggregated.percentiles.*(entry.slot));
+                }
+            });
+        });
+        root_inner.append_comma();
+
+        emit_kv_with_body(root_inner, "k-best", [&](auto& kbest_builder) {
+            emit_object_with_body(kbest_builder, [&](auto& kbest_inner) {
+                emit_kv_with_body(kbest_inner, "top10", [&](auto& array_builder) {
+                    emit_double_array(array_builder, aggregated.top10);
+                });
+                kbest_inner.append_comma();
+                emit_kv_with_body(kbest_inner, "bottom10", [&](auto& array_builder) {
+                    emit_double_array(array_builder, aggregated.bottom10);
+                });
+            });
+        });
+        root_inner.append_comma();
+
+        emit_kv_with_body(root_inner, "histogram", [&](auto& hist_builder) {
+            hist_builder.start_array();
+            emit_range_with_commas(hist_builder, aggregated.histogram,
+                [](auto& bucket_builder, const AggregateBucket& bucket) {
+                    emit_object_with_body(bucket_builder, [&](auto& bucket_inner) {
+                        emit_key(bucket_inner, "from");
+                        emit_finite_double(bucket_inner, bucket.from);
+                        bucket_inner.append_comma();
+                        emit_key(bucket_inner, "to");
+                        emit_finite_double(bucket_inner, bucket.to);
+                        bucket_inner.append_comma();
+                        emit_key(bucket_inner, "count");
+                        bucket_inner.append(static_cast<std::int64_t>(bucket.count));
+                    });
+                });
+            hist_builder.end_array();
+        });
+    });
 }
 
 /// Emit `"<key>": "<value>"` when `value` is non-empty, or `"<key>": null`
@@ -6519,23 +7232,34 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
 
     /// Emit the per-test-case object from a group-merged sample map:
     /// every region (or just "all_regions" when by_regions=false) and
-    /// the metric arrays inside it.
-    auto emit_test_case_block = [&](auto& b, const SampleMap& merged) {
-        emit_object_with_body(b, [&](auto& region_outer) {
+    /// the per-metric AggregatedSamples object inside it. V17 swapped
+    /// the per-iteration array out for the fixed-shape aggregate.
+    /// Empty sample vectors are pruned: the schema requires
+    /// `samples_count >= 1`, and a metric that observed zero values
+    /// is genuinely absent from the cell rather than present with a
+    /// zeroed aggregate. The pre-V17 writer also dropped empty
+    /// arrays, so this preserves the on-disk semantics.
+    auto emit_test_case_block = [&](auto& region_block_builder,
+                                      const SampleMap& merged) {
+        emit_object_with_body(region_block_builder, [&](auto& region_outer) {
             emit_range_with_commas(region_outer, merged,
-                [](auto& region_b, const auto& region_kv) {
-                    emit_kv_with_body(region_b,
+                [](auto& region_builder, const auto& region_kv) {
+                    emit_kv_with_body(region_builder,
                         std::string_view{region_kv.first},
-                        [&](auto& metrics_b) {
-                            emit_object_with_body(metrics_b, [&](auto& metric_outer) {
-                                emit_range_with_commas(metric_outer, region_kv.second,
-                                    [](auto& metric_b, const auto& metric_kv) {
-                                        emit_kv_with_body(metric_b,
-                                            std::string_view{metric_kv.first},
-                                            [&](auto& arr_b) {
-                                                emit_double_array(arr_b, metric_kv.second);
-                                            });
-                                    });
+                        [&](auto& metrics_builder) {
+                            emit_object_with_body(metrics_builder, [&](auto& metric_outer) {
+                                bool first_metric = true;
+                                for (const auto& metric_kv : region_kv.second) {
+                                    if (metric_kv.second.empty()) continue;
+                                    if (!first_metric) metric_outer.append_comma();
+                                    first_metric = false;
+                                    emit_kv_with_body(metric_outer,
+                                        std::string_view{metric_kv.first},
+                                        [&](auto& aggregate_builder) {
+                                            emit_aggregated_samples(
+                                                aggregate_builder, metric_kv.second);
+                                        });
+                                }
                             });
                         });
                 });
@@ -6942,9 +7666,10 @@ struct SummaryIssue {
     /// Regression:  [previously, now]
     /// Sanity:      ignored
     std::array<double, 2>         latest_args{0.0, 0.0};
-    /// Latest-report sample array used by `amplitude_factor`. Empty
-    /// for sanity warnings or when the matching cell wasn't found.
-    std::vector<double>           latest_samples{};
+    /// Latest-report aggregated samples used by `amplitude_factor`.
+    /// Default-constructed (`samples_count == 0`) for sanity
+    /// warnings or when the matching cell wasn't found.
+    AggregatedSamples             latest_samples{};
     /// One byte per report slot (0 = absent, 1 = present). Length =
     /// max_report_index after the walk finishes. We use uint8_t
     /// instead of `vector<bool>` to avoid the bit-packed
@@ -7140,13 +7865,15 @@ template<typename... Fields>
     return params;
 }
 
-/// Path → samples map used by the V8 summary's amplitude lookup. The
-/// path is `benchmark\x1falgorithm\x1fparams\x1ftest_case\x1fregion\x1fmetric`
-/// (a subset of the issue identity, minus the kind/rule_name fields)
-/// and matches what the issue walk produces when it asks for the
-/// sample array of "the cell that triggered this rule violation /
-/// regression in this report".
-using SampleIndex = std::map<std::string, std::vector<double>>;
+/// Path → aggregated-samples map used by the V8 summary's
+/// amplitude lookup. The path is
+/// `benchmark\x1falgorithm\x1fparams\x1ftest_case\x1fregion\x1fmetric`
+/// (a subset of the issue identity, minus the kind/rule_name
+/// fields) and matches what the issue walk produces when it asks
+/// for the AggregatedSamples of "the cell that triggered this
+/// rule violation / regression in this report". V17: stores
+/// pre-aggregated records instead of raw vectors.
+using SampleIndex = std::map<std::string, AggregatedSamples>;
 
 /// Build the per-cell sample-array path key.
 [[nodiscard]] inline std::string make_sample_path(
@@ -7170,9 +7897,11 @@ using SampleIndex = std::map<std::string, std::vector<double>>;
 
 /// Walk a parsed report's full `benchmarks.<>.execution_tuples[*].
 /// test_cases.<>.<region>.<metric>` tree once, building a flat
-/// `SampleIndex` keyed by the same path the summary's identity uses.
-/// O(report size); called at most once per report regardless of how
-/// many issues need amplitude data.
+/// `SampleIndex` keyed by the same path the summary's identity
+/// uses. Each leaf is parsed via `parse_aggregated_samples` so
+/// the index carries the V17 fixed-shape aggregate. O(report
+/// size); called at most once per report regardless of how many
+/// issues need amplitude data.
 [[nodiscard]] inline SampleIndex build_sample_index(
     simdjson::dom::element report_root) noexcept
 {
@@ -7210,22 +7939,16 @@ using SampleIndex = std::map<std::string, std::vector<double>>;
                         const auto region_obj = try_as_object(region_field.value);
                         if (!region_obj.has_value()) continue;
                         for (auto metric_field : *region_obj) {
-                            simdjson::dom::array values_array;
-                            if (metric_field.value.get(values_array) != simdjson::SUCCESS) continue;
-                            std::vector<double> samples;
-                            for (auto value_elem : values_array) {
-                                double sample_value = 0.0;
-                                if (value_elem.get(sample_value) == simdjson::SUCCESS) {
-                                    samples.push_back(sample_value);
-                                }
-                            }
+                            simdjson::dom::object metric_obj;
+                            if (metric_field.value.get(metric_obj) != simdjson::SUCCESS) continue;
                             auto path = make_sample_path(
                                 std::string_view{bench_field.key},
                                 algorithm, params,
                                 std::string_view{tc_field.key},
                                 std::string_view{region_field.key},
                                 std::string_view{metric_field.key});
-                            index.emplace(std::move(path), std::move(samples));
+                            index.emplace(std::move(path),
+                                           parse_aggregated_samples(metric_obj));
                         }
                     }
                 }
@@ -7235,11 +7958,11 @@ using SampleIndex = std::map<std::string, std::vector<double>>;
     return index;
 }
 
-/// Look up sample data in a per-report `SampleIndex`. Returns an
-/// empty span when the cell is absent (the per-report layout differs
-/// from the issue's identity; we tolerate it by returning empty so
-/// `amplitude_factor` falls back to its default 1.0).
-[[nodiscard]] inline std::vector<double> samples_from_index(
+/// Look up an `AggregatedSamples` in a per-report `SampleIndex`.
+/// Returns a default-constructed aggregate (`samples_count == 0`)
+/// when the cell is absent — `amplitude_factor` already treats
+/// `samples_count < 2` as "no amplitude info" and falls back to 1.0.
+[[nodiscard]] inline AggregatedSamples samples_from_index(
     const SampleIndex& index,
     std::string_view benchmark,
     std::string_view algorithm,
@@ -7448,56 +8171,61 @@ inline constexpr double kSummaryBaseSanityWarning =  300.0;
     return faded < floor_value ? floor_value : faded;
 }
 
-/// Relative percentage difference `|a - b| / |b| * 100`. Used by both
+/// Relative percentage difference
+/// `|current - baseline| / |baseline| * 100`. Used by both
 /// `value_pct_factor` (for scoring) and `format_stat_blurb` (for
-/// dashboard display). Returns 0 when both sides are tiny (avoids
-/// the kEps-clamp gimmick affecting the displayed Δ%).
-[[nodiscard]] inline double relative_diff_pct(double a, double b) noexcept {
+/// dashboard display). The `kEps` clamp on the denominator
+/// prevents the divide-by-zero when `baseline == 0` while keeping
+/// the displayed percentage stable across consumers.
+[[nodiscard]] inline double relative_diff_pct(double current, double baseline) noexcept {
     constexpr double kEps = 1e-12;
-    return std::abs(a - b) / std::max(std::abs(b), kEps) * 100.0;
+    return std::abs(current - baseline) / std::max(std::abs(baseline), kEps) * 100.0;
 }
 
-/// Relative amplitude percentage `100 * (max - min) / |min|` of a
-/// sample set. Used by both `amplitude_factor` and the dashboard's
-/// stat blurb. Returns 0 for fewer than two samples (no amplitude
-/// to speak of).
-[[nodiscard]] inline double relative_amplitude_pct(std::span<const double> samples) noexcept {
-    if (samples.size() < 2) return 0.0;
-    double min_value = samples.front();
-    double max_value = samples.front();
-    for (double sample : samples) {
-        if (sample < min_value) min_value = sample;
-        if (sample > max_value) max_value = sample;
-    }
+/// Relative amplitude percentage `100 * (max - min) / |min|` of
+/// a pre-aggregated sample set. Used by both `amplitude_factor`
+/// and the dashboard's stat blurb. Returns 0 for fewer than two
+/// finite samples (no amplitude to speak of). The `max(|min|, kEps)`
+/// clamp prevents divide-by-zero when min == 0 (e.g. all-zero
+/// samples). V17: takes `AggregatedSamples` so it works on both
+/// in-memory and historical data uniformly.
+[[nodiscard]] inline double relative_amplitude_pct(
+    const AggregatedSamples& aggregated) noexcept
+{
+    if (aggregated.samples_count < 2) return 0.0;
+    if (aggregated.top10.empty())     return 0.0;     // all-non-finite cell
     constexpr double kEps = 1e-12;
-    return 100.0 * (max_value - min_value) / std::max(std::abs(min_value), kEps);
+    return 100.0 * (aggregated.stats.max - aggregated.stats.min)
+                 / std::max(std::abs(aggregated.stats.min), kEps);
 }
 
 /// Multiplicative value-percentage factor. log-shaped so a 555%
 /// overshoot and a 5550% overshoot don't collapse onto the same
-/// number. A near-zero denominator (`previously == 0` for a
+/// number. A near-zero denominator (`baseline == 0` for a
 /// regression rising to anything) saturates at `kFactorCeil`
 /// directly — the log path would clamp there anyway, but the
 /// explicit branch makes intent obvious.
-[[nodiscard]] inline double value_pct_factor(double a, double b) noexcept {
+[[nodiscard]] inline double value_pct_factor(double current, double baseline) noexcept {
     constexpr double kEps         = 1e-12;
     constexpr double kSlope       = 0.5;
     constexpr double kFactorCeil  = 3.0;
-    if (std::abs(b) < kEps) return kFactorCeil;
-    const double pct = relative_diff_pct(a, b);
+    if (std::abs(baseline) < kEps) return kFactorCeil;
+    const double pct = relative_diff_pct(current, baseline);
     const double bonus = kSlope * std::log10(1.0 + pct / 100.0);
     const double factor = 1.0 + bonus;
     return factor < kFactorCeil ? factor : kFactorCeil;
 }
 
-/// Multiplicative amplitude factor. High-noise samples reduce the
-/// score because the regression / rule violation may be within
-/// natural variability. Curve mirrors the user spec: factor = 1.0
-/// at amp = 0%, factor = 1/6 at amp = 10000%.
-[[nodiscard]] inline double amplitude_factor(std::span<const double> samples) noexcept {
-    if (samples.size() < 2) return 1.0;
+/// Multiplicative amplitude factor. High-noise samples reduce
+/// the score because the regression / rule violation may be
+/// within natural variability. Curve mirrors the user spec:
+/// factor = 1.0 at amp = 0%, factor = 1/6 at amp = 10000%.
+[[nodiscard]] inline double amplitude_factor(
+    const AggregatedSamples& aggregated) noexcept
+{
+    if (aggregated.samples_count < 2) return 1.0;
     constexpr double kCapPct = 10000.0;
-    const double rel_amp_pct = relative_amplitude_pct(samples);
+    const double rel_amp_pct = relative_amplitude_pct(aggregated);
     const double clipped     = rel_amp_pct < kCapPct ? rel_amp_pct : kCapPct;
     const double normalised  = clipped / 1000.0;
     return (12.0 - normalised) / 12.0;
@@ -7547,8 +8275,7 @@ struct PresencePattern {
         return base * recurrence;
     }
     const double value_pct = value_pct_factor(issue.latest_args[0], issue.latest_args[1]);
-    const double amplitude = amplitude_factor(
-        std::span<const double>{issue.latest_samples});
+    const double amplitude = amplitude_factor(issue.latest_samples);
     return base * recurrence * value_pct * amplitude;
 }
 
@@ -7604,8 +8331,7 @@ struct PresencePattern {
 /// `relative_diff_pct` / `relative_amplitude_pct` helpers so the
 /// numbers in the dashboard align with the numbers in the score.
 [[nodiscard]] inline std::string format_stat_blurb(const SummaryIssue& issue) noexcept {
-    const std::span<const double> samples{issue.latest_samples};
-    const double amp = relative_amplitude_pct(samples);
+    const double amp = relative_amplitude_pct(issue.latest_samples);
     switch (issue.kind) {
         case SummaryIssue::Kind::RuleViolation: {
             const double signed_diff = issue.latest_args[1] == 0.0

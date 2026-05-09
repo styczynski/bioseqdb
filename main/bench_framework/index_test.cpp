@@ -226,6 +226,14 @@ struct TestCaseDataSpec {
     std::string_view name;
     std::string_view description{};
     std::string_view data_object_json{"{}"};   // raw JSON object body
+    /// Cap on the number of parallel groups the framework may
+    /// split this test case across (V11+). Default 0 ⇒ omit the
+    /// `concurrency` JSON field, which lets the framework apply
+    /// its own default (`max(1, hardware_concurrency() - 1)`).
+    /// Tests that need a deterministic single-group lifecycle
+    /// (e.g. on_cleanup invoked exactly once per used test case)
+    /// should set this to 1.
+    int              concurrency = 0;
 };
 
 struct MetricSpecLite {
@@ -252,7 +260,10 @@ struct BenchmarkSpec {
     bool                           fast = false;
     bool                           bench_lock = false;
     bool                           concurrency = true;
-    bool                           test_case_lock = true;
+    // V11 deleted `test_case_lock`; the schema rejects the field
+    // outright. The struct keeps no slot for it so existing call
+    // sites that pass `.test_case_lock = ...` would fail to
+    // compile and force a deliberate update.
     bool                           by_regions = false;
     std::span<const ForEntry>     for_entries{};
     std::span<const OverEntry>    over_entries{};
@@ -356,6 +367,12 @@ inline void emit_test_case(std::string& out, const TestCaseDataSpec& spec) {
     out += ":{";
     emit_kv_quoted(out, "description", spec.description);
     out += ',';
+    if (spec.concurrency > 0) {
+        emit_quoted(out, "concurrency");
+        out += ':';
+        out += std::to_string(spec.concurrency);
+        out += ',';
+    }
     emit_kv_raw(out, "data", spec.data_object_json);
     out += '}';
 }
@@ -382,8 +399,6 @@ inline void emit_benchmark(std::string& out, const BenchmarkSpec& bench) {
     emit_kv_bool(out, "bench_lock", bench.bench_lock);
     out += ',';
     emit_kv_bool(out, "concurrency", bench.concurrency);
-    out += ',';
-    emit_kv_bool(out, "test_case_lock", bench.test_case_lock);
     out += "},\"matrix\":{";
     emit_kv_bool(out, "by_regions", bench.by_regions);
     out += ",\"for\":";
@@ -494,12 +509,13 @@ struct ArgvBuilder {
 
 /// Heavily-templated end-to-end driver. The `Input` / `Output` types
 /// are deduced from the lambda signatures — call sites pass raw
-/// lambdas and never have to spell out `std::function<...>` casts or
-/// `<ToyInput, ToyOutput>` template arguments.
-///
-/// Wrapping into `std::function` happens only at the framework's API
-/// boundary (`create_benchmark` requires it); the helper itself stays
-/// fully templated.
+/// lambdas (the legacy 3-arg `on_input` shape) and never have to
+/// spell out `std::function<...>` casts. The wrapper bridges the
+/// legacy shape to the framework's V12+ API by injecting a no-op
+/// `on_estimate_resources` (returns `RunConstraints{}` ⇒ scheduler
+/// treats the batch as unconstrained) and adapting the 3-arg
+/// `on_input` to the 4-arg form by ignoring the
+/// `RunConstraints&` parameter.
 template<typename OnInput, typename OnRun, typename OnEvaluate,
          typename OnCleanup = std::nullptr_t>
 [[nodiscard]] RunOutcome run_one_bench(
@@ -512,6 +528,7 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
     OnEvaluate on_evaluate,
     OnCleanup  on_cleanup = nullptr)
 {
+    using bioseq::bench_framework::RunConstraints;
     using Input = std::invoke_result_t<
         OnInput, std::string_view, std::string_view, simdjson::dom::element>;
     using Output = std::invoke_result_t<
@@ -528,7 +545,12 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
         cfg.write(config_text.data(), static_cast<std::streamsize>(config_text.size()));
     }
 
-    using InputFn   = std::function<Input(std::string_view, std::string_view, simdjson::dom::element)>;
+    using EstimateFn = std::function<RunConstraints(std::string_view,
+                                                     std::string_view,
+                                                     simdjson::dom::element)>;
+    using InputFn   = std::function<Input(std::string_view, std::string_view,
+                                            simdjson::dom::element,
+                                            const RunConstraints&)>;
     using RunFn     = std::function<Output(std::string_view, const ParamMap&, const Input&)>;
     using EvalFn    = std::function<std::map<std::string, double>(std::string_view,
                                                                   const ParamMap&,
@@ -536,6 +558,17 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
                                                                   const Output&)>;
     using CleanupFn = std::function<void(std::string_view, std::string_view,
                                           simdjson::dom::element, const Input&)>;
+
+    EstimateFn estimate_fn = [](std::string_view, std::string_view,
+                                 simdjson::dom::element) noexcept {
+        return RunConstraints{};
+    };
+    InputFn adapted_input_fn = [legacy_input = std::move(on_input)](
+        std::string_view data_dir, std::string_view test_case_name,
+        simdjson::dom::element data_element,
+        const RunConstraints& /*constraints*/) mutable -> Input {
+        return legacy_input(data_dir, test_case_name, data_element);
+    };
 
     // The wrapper accepts `nullptr` (default) or a callable. When the
     // sentinel is passed we hand the framework a default-empty
@@ -550,7 +583,8 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
         std::string{bench_title},
         std::string{bench_key},
         outcome.config_path.string(),
-        InputFn{std::move(on_input)},
+        std::move(estimate_fn),
+        std::move(adapted_input_fn),
         RunFn{std::move(on_run)},
         EvalFn{std::move(on_evaluate)},
         std::move(cleanup_fn));
@@ -598,12 +632,14 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
 //  Report-walking helpers
 // ---------------------------------------------------------------------------
 
-/// Pull the per-iteration sample array for a single
-/// `(benchmark, algorithm, test_case, region, metric)` cell. Returns
-/// an empty vector when any path component is missing — letting tests
-/// distinguish "no data" from "wrong data" with a clean
-/// `REQUIRE(samples.size() == N)` style assertion.
-[[nodiscard]] inline std::vector<double> samples_at(
+/// Walk down to a single
+/// `(benchmark, algorithm, test_case, region, metric)` cell and
+/// return the V17 aggregated-samples object as a
+/// `nlohmann::json` value. Returns `nullopt` when any path
+/// component is missing — letting tests distinguish "no data"
+/// from "wrong data" with a clean
+/// `REQUIRE(aggregate_at(...).has_value())`-style assertion.
+[[nodiscard]] inline std::optional<nlohmann::json> aggregate_at(
     const nlohmann::json& report,
     std::string_view bench_key,
     std::string_view algorithm,
@@ -611,11 +647,11 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
     std::string_view region,
     std::string_view metric)
 {
-    if (!report.contains("benchmarks")) return {};
+    if (!report.contains("benchmarks")) return std::nullopt;
     const auto& benches = report["benchmarks"];
-    if (!benches.contains(bench_key)) return {};
+    if (!benches.contains(bench_key)) return std::nullopt;
     const auto& bench = benches[std::string{bench_key}];
-    if (!bench.contains("execution_tuples")) return {};
+    if (!bench.contains("execution_tuples")) return std::nullopt;
     for (const auto& tuple_record : bench["execution_tuples"]) {
         if (!tuple_record.contains("tuple")) continue;
         const auto& tuple_obj = tuple_record["tuple"];
@@ -627,13 +663,50 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
         if (!tc.contains(std::string{region})) continue;
         const auto& region_obj = tc[std::string{region}];
         if (!region_obj.contains(std::string{metric})) continue;
-        std::vector<double> result;
-        for (const auto& sample : region_obj[std::string{metric}]) {
-            result.push_back(sample.get<double>());
-        }
-        return result;
+        return std::optional<nlohmann::json>{region_obj[std::string{metric}]};
     }
-    return {};
+    return std::nullopt;
+}
+
+/// Convenience: `samples_count` for the cell, or 0 when the cell
+/// is absent. Replaces the pre-V17 `samples_at(...).size()`
+/// idiom that several tests used to validate iteration counts.
+[[nodiscard]] inline std::size_t samples_count_at(
+    const nlohmann::json& report,
+    std::string_view bench_key,
+    std::string_view algorithm,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric)
+{
+    const auto cell = aggregate_at(report, bench_key, algorithm,
+                                    test_case, region, metric);
+    if (!cell.has_value() || !cell->contains("samples_count")) return 0;
+    return cell->at("samples_count").get<std::size_t>();
+}
+
+/// Convenience: pull a numeric `stats` field (`min`, `max`, `mean`,
+/// `mean90`, `sum`, `stddev`) from the cell. Returns NaN when the
+/// cell or field is missing — tests assert against finite values.
+[[nodiscard]] inline double stat_at(
+    const nlohmann::json& report,
+    std::string_view bench_key,
+    std::string_view algorithm,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric,
+    std::string_view stat_name)
+{
+    const auto cell = aggregate_at(report, bench_key, algorithm,
+                                    test_case, region, metric);
+    if (!cell.has_value() || !cell->contains("stats")) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const auto& stats = cell->at("stats");
+    if (!stats.contains(std::string{stat_name})) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return stats.at(std::string{stat_name}).get<double>();
 }
 
 [[nodiscard]] inline std::size_t count_sanity_warnings_of_type(
@@ -824,43 +897,50 @@ TEST_CASE("bench_framework end-to-end happy path", "[bench_framework]") {
     REQUIRE(outcome.report["rule_violations"].empty());
     REQUIRE(outcome.report["regressions"].empty());
 
-    const auto wall_tiny = samples_at(outcome.report, "bench_happy",
-                                       "toy_sort", "TINY",
-                                       "all_regions", "wall_clock_ns");
-    REQUIRE(wall_tiny.size() == 4);
-    const auto wall_small = samples_at(outcome.report, "bench_happy",
-                                        "toy_sort", "SMALL",
-                                        "all_regions", "wall_clock_ns");
-    REQUIRE(wall_small.size() == 3);
-    for (const double sample : wall_tiny) REQUIRE(sample >= 0.0);
+    REQUIRE(samples_count_at(outcome.report, "bench_happy",
+                              "toy_sort", "TINY",
+                              "all_regions", "wall_clock_ns") == 4);
+    REQUIRE(samples_count_at(outcome.report, "bench_happy",
+                              "toy_sort", "SMALL",
+                              "all_regions", "wall_clock_ns") == 3);
+    REQUIRE(stat_at(outcome.report, "bench_happy",
+                     "toy_sort", "TINY",
+                     "all_regions", "wall_clock_ns", "min") >= 0.0);
 
-    const auto counter_tiny = samples_at(outcome.report, "bench_happy",
-                                          "toy_sort", "TINY",
-                                          "all_regions", "my_counter");
-    REQUIRE(counter_tiny.size() == 4);
-    // 16 values per TINY iteration -> counter delta == 16.
-    for (const double sample : counter_tiny) REQUIRE(sample == 16.0);
+    // Counter: 16 values per TINY iteration -> every sample is
+    // exactly 16.0, so min == max == 16.0 across 4 iterations.
+    REQUIRE(samples_count_at(outcome.report, "bench_happy",
+                              "toy_sort", "TINY",
+                              "all_regions", "my_counter") == 4);
+    REQUIRE(stat_at(outcome.report, "bench_happy",
+                     "toy_sort", "TINY",
+                     "all_regions", "my_counter", "min") == 16.0);
+    REQUIRE(stat_at(outcome.report, "bench_happy",
+                     "toy_sort", "TINY",
+                     "all_regions", "my_counter", "max") == 16.0);
 
-    const auto eval_tiny = samples_at(outcome.report, "bench_happy",
-                                       "toy_sort", "TINY",
-                                       "all_regions", "sum_value");
-    REQUIRE(eval_tiny.size() == 4);
-    // Every TINY iteration sees the same input (length 16, seed 11),
-    // so sum_value is constant within that test_case.
-    REQUIRE(std::all_of(eval_tiny.begin(), eval_tiny.end(),
-        [&](double sample) { return sample == eval_tiny.front(); }));
+    // sum_value is deterministic within TINY (length 16, seed 11):
+    // every iteration produces the same sum, so min == max.
+    REQUIRE(samples_count_at(outcome.report, "bench_happy",
+                              "toy_sort", "TINY",
+                              "all_regions", "sum_value") == 4);
+    REQUIRE(stat_at(outcome.report, "bench_happy",
+                     "toy_sort", "TINY",
+                     "all_regions", "sum_value", "min")
+            == stat_at(outcome.report, "bench_happy",
+                        "toy_sort", "TINY",
+                        "all_regions", "sum_value", "max"));
 
     // by_regions: true ⇒ per-descriptor bucket exists for region metrics.
-    const auto region_tiny = samples_at(outcome.report, "bench_happy",
-                                         "toy_sort", "TINY",
-                                         "toy_sort.sum", "region_total_ns");
-    REQUIRE(region_tiny.size() == 4);
+    REQUIRE(samples_count_at(outcome.report, "bench_happy",
+                              "toy_sort", "TINY",
+                              "toy_sort.sum", "region_total_ns") == 4);
 
     // The "unused_extra" key returned by on_evaluate is silently
     // dropped — the V7 relaxation. It must not appear anywhere.
-    REQUIRE(samples_at(outcome.report, "bench_happy",
-                        "toy_sort", "TINY",
-                        "all_regions", "unused_extra").empty());
+    REQUIRE_FALSE(aggregate_at(outcome.report, "bench_happy",
+                                "toy_sort", "TINY",
+                                "all_regions", "unused_extra").has_value());
     REQUIRE_FALSE(stderr_contains(outcome.captured_stderr,
                                     "evaluation_key_not_declared"));
 
@@ -1196,18 +1276,23 @@ TEST_CASE("evaluator returns extra unused key — silently dropped", "[bench_fra
     REQUIRE(outcome.exit_code == 0);
     REQUIRE_FALSE(stderr_contains(outcome.captured_stderr, "evaluation_key_not_declared"));
 
-    const auto accuracy = samples_at(outcome.report, "bench_extra",
-                                      "identity", "ONE",
-                                      "all_regions", "accuracy");
-    REQUIRE(accuracy.size() == 2);
-    for (const double sample : accuracy) REQUIRE(sample == 0.95);
+    REQUIRE(samples_count_at(outcome.report, "bench_extra",
+                              "identity", "ONE",
+                              "all_regions", "accuracy") == 2);
+    // Every iteration emits 0.95 → min == max == 0.95.
+    REQUIRE(stat_at(outcome.report, "bench_extra",
+                     "identity", "ONE",
+                     "all_regions", "accuracy", "min") == 0.95);
+    REQUIRE(stat_at(outcome.report, "bench_extra",
+                     "identity", "ONE",
+                     "all_regions", "accuracy", "max") == 0.95);
 
-    REQUIRE(samples_at(outcome.report, "bench_extra",
-                        "identity", "ONE",
-                        "all_regions", "latency").empty());
-    REQUIRE(samples_at(outcome.report, "bench_extra",
-                        "identity", "ONE",
-                        "all_regions", "throughput").empty());
+    REQUIRE_FALSE(aggregate_at(outcome.report, "bench_extra",
+                                "identity", "ONE",
+                                "all_regions", "latency").has_value());
+    REQUIRE_FALSE(aggregate_at(outcome.report, "bench_extra",
+                                "identity", "ONE",
+                                "all_regions", "throughput").has_value());
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,11 +1397,14 @@ TEST_CASE("on_cleanup runs once per cached test_case after iterations finish",
         {"toy", std::span<const AlgoParamSpec>{kParams}}
     }};
     // Three test cases; one is given zero iterations so the cleanup
-    // path can prove it skips that slot.
+    // path can prove it skips that slot. `.concurrency = 1` pins
+    // each test case to a single group so on_cleanup runs exactly
+    // once per used test case (V11 splits multi-group test cases
+    // across workers and calls cleanup once per group).
     static constexpr std::array<TestCaseDataSpec, 3> kTestCases{{
-        {"TINY",  "first",  R"({"length":4,"seed":1})"},
-        {"MID",   "second", R"({"length":8,"seed":2})"},
-        {"NEVER", "zero",   R"({"length":16,"seed":3})"}
+        {"TINY",  "first",  R"({"length":4,"seed":1})",  1},
+        {"MID",   "second", R"({"length":8,"seed":2})",  1},
+        {"NEVER", "zero",   R"({"length":16,"seed":3})", 1},
     }};
     static constexpr std::array<ForEntry, 3> kForEntries{{
         {"TINY",  3},
