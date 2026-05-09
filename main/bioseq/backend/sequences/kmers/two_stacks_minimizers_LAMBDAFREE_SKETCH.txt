@@ -1,0 +1,168 @@
+// =================================================================================
+// LAMBDAFREE — sketch / structural draft (not yet a compilable variant)
+//
+// Rationale: REPORT_PHASE_3_INDEPTH_ANALYSIS.md §7.1.
+// Replace `step_one_bp` lambda with a free template function
+// `step_one_bp_vec_stream` in `bioseq::simd::HWY_NAMESPACE::two_stack_internal`,
+// matching DIRECT's `step_one_bp_pair` pattern but keeping `vec_stream<D, ST, W>`
+// types in the parameter list.
+//
+// Expected outcome: clang inlines the free function into
+// `collect_minimizers_two_stack_nthash_simd_impl`'s frame (matching DIRECT),
+// eliminating the 705-instruction standalone lambda symbol and the per-BP
+// capture-struct pointer-chase pattern. State (state_fwd, state_rc, prefix_min,
+// prefix_kmer, pos_local, last_emit_pos) stays in NEON registers across the
+// `letters_per_unit`-unrolled per-BP loop.
+//
+// THIS IS A SKETCH ONLY. The lambda body must be moved verbatim into the
+// function body; the parameters below enumerate the captures the lambda used
+// in the STDARR variant.
+// =================================================================================
+
+namespace bioseq::simd::HWY_NAMESPACE::two_stack_internal {
+
+template<
+    bool   DetectPalindrome,
+    bool   IsFull,
+    bool   HasStaticW,
+    bool   HasStaticK,
+    size_t StaticW,
+    size_t StaticK,
+    size_t NumStreams,
+    size_t BufCapacity,
+    class  D,
+    typename ST,
+    typename SeqTraits,
+    typename OffsetsArray,
+    template<typename H_A> typename simd_hash_t,
+    class  AlphabetT,
+    class  MinimizerT,
+    typename HashValT
+>
+[[gnu::always_inline]] HWY_INLINE void
+step_one_bp_vec_stream(
+    // === per-call values ===
+    D                                      d,
+    vec_stream<D, ST, NumStreams>          bp_v,           // pass by VALUE (HVA on M1 NEON)
+    hn::Mask<D>                            live_mask,
+    OffsetsArray const&                    offsets,
+    // === cross-iteration state by REFERENCE ===
+    vec_stream<D, ST, NumStreams>&         state_fwd,
+    vec_stream<D, ST, NumStreams>&         state_rc,
+    vec_stream<D, ST, NumStreams>&         prefix_min,
+    vec_stream<D, ST, NumStreams>&         prefix_kmer,
+    vec_stream<D, ST, NumStreams>&         pos_local,
+    vec_stream<D, ST, NumStreams>&         last_emit_pos,
+    // === ring buffers by REFERENCE ===
+    std::array<vec_stream<D, ST, NumStreams>, BufCapacity>& ring_buf_elem,
+    std::array<vec_stream<D, ST, NumStreams>, BufCapacity>& ring_buf_hash_strand,
+    // === scalar bookkeeping by REFERENCE ===
+    ST&                                    pos_wrap_delta,
+    size_t&                                step,
+    size_t&                                ring_idx,
+    size_t&                                next_wrap_step,
+    // === loop-invariant SIMD constants by VALUE ===
+    hn::Vec<D>                             v_kmer_mask,
+    hn::Vec<D>                             v_alphabet_complement_xor,
+    hn::Vec<D>                             v_max,
+    hn::Vec<D>                             v_one,
+    hn::Vec<D>                             v_pos_mask,
+    hn::Vec<D>                             v_hash_kmer_mask,
+    hn::Vec<D>                             v_strand_clear,
+    hn::Vec<D>                             v_golden,
+    hn::Vec<D>                             v_wrap,
+    // === loop-invariant scalars by VALUE ===
+    size_t                                 w,
+    size_t                                 k_clamped,
+    size_t                                 emit_warmup,
+    size_t                                 wrap_period,
+    HashValT                               kmer_mask_scalar,
+    ST                                     wrap_delta_amount,
+    // === collector by REFERENCE ===
+    sketch_collector_t<MinimizerT>&        collector
+) {
+    using vec_t   = hn::Vec<D>;
+    using mask_t  = hn::Mask<D>;
+
+    static_assert(/* place sanity static_asserts here, e.g. NumStreams ∈ {1,2} */ true);
+
+    // ---- BODY: copy verbatim from the existing step_one_bp lambda in
+    //      two_stacks_minimizers.cppm (lines 285..481), substituting the
+    //      capture references with the named parameters above. The
+    //      semantic body does not change — only the syntactic capture
+    //      mechanism. ----
+
+    // Forward / RC update
+    const vec_stream<D, ST, NumStreams> complemented = Xor(bp_v, v_alphabet_complement_xor);
+    state_fwd = And(Or(ShiftLeft<SeqTraits::bits_per_char>(state_fwd), bp_v), v_kmer_mask);
+
+    vec_stream<D, ST, NumStreams> new_high;
+    if constexpr (HasStaticK) {
+        constexpr size_t static_rev_shift = SeqTraits::bits_per_char * (StaticK - 1);
+        constexpr size_t storage_bits_max = sizeof(ST) * 8;
+        constexpr size_t clamped_rev_shift =
+            (static_rev_shift >= storage_bits_max) ? (storage_bits_max - 1) : static_rev_shift;
+        new_high = ShiftLeft<clamped_rev_shift>(complemented);
+    } else {
+        const size_t dynamic_rev_shift = SeqTraits::bits_per_char * (k_clamped - 1);
+        new_high = ShiftLeftSame(complemented, static_cast<int>(dynamic_rev_shift));
+    }
+    state_rc = Or(ShiftRight<SeqTraits::bits_per_char>(state_rc), new_high);
+
+    // Lex + strand classification
+    const auto lex    = Min(state_fwd, state_rc);
+    const auto strand = Lt(state_rc, state_fwd);
+
+    // Mixed hash, packed element, ring-buf write, prefix-min update,
+    // suffix-min rebuild every w, position wrap, emit — all verbatim from
+    // existing lambda body.
+    //
+    // (~200 LOC continues; omitted here; see two_stacks_minimizers_STDARR.txt
+    //  lines 285..481 for the complete body and translate captures→params.)
+    //
+    // For the static suffix-min rebuild and wrap-slot, the inner lambdas
+    // can stay (they take size_t indices via integer_sequence and don't
+    // suffer from outer-lambda capture pressure).
+}
+
+}  // namespace bioseq::simd::HWY_NAMESPACE::two_stack_internal
+
+
+// In `collect_minimizers_two_stack_nthash_simd_impl`, replace the
+// `auto step_one_bp = [&]<bool is_full, typename... BpVecs>(...) { ... };`
+// declaration with a thin lambda that forwards to the free function:
+//
+//   auto step_one_bp = [&]<bool is_full, typename... BpVecs>(
+//         std::bool_constant<is_full>,
+//         auto const& offsets_in,
+//         auto& /*d unused*/,
+//         mask_t live_mask,
+//         BpVecs... bps) {
+//       const vec_stream_t bp_v = vec_stream_t::pack(bps...);
+//       two_stack_internal::step_one_bp_vec_stream<
+//           DetectPalindrome, is_full, has_static_w, has_static_k,
+//           StaticW, StaticK, NumStreams, buf_capacity,
+//           d_t, storage_unit, seq_traits,
+//           std::remove_cvref_t<decltype(offsets_in)>,
+//           simd_hash_t, alphabet_t, MinimizerT, hash_val_t>(
+//           d, bp_v, live_mask, offsets_in,
+//           state_fwd, state_rc, prefix_min, prefix_kmer, pos_local, last_emit_pos,
+//           ring_buf_elem, ring_buf_hash_strand,
+//           pos_wrap_delta, step, ring_idx, next_wrap_step,
+//           v_kmer_mask, v_alphabet_complement_xor, v_max, v_one, v_pos_mask,
+//           v_hash_kmer_mask, v_strand_clear, v_golden, v_wrap,
+//           w, k_clamped, emit_warmup, wrap_period,
+//           kmer_mask_scalar, wrap_delta_amount, collector);
+//   };
+//
+// The thin forwarding lambda has trivial capture (none, after this
+// transformation it captures no state directly — all state is in the
+// impl's frame and passed by reference to the free function). [[gnu::
+// always_inline]] should propagate cleanly through this empty-bodied
+// lambda since clang's inliner has no body-size concern.
+//
+// EXPECTED RESULT: per Phase-3-indepth report §5.3, the step_one_bp_pair-
+// shape in DIRECT empirically inlines with ALL 12+ refs preserved as
+// register-resident state (49 608 B fused public function). The same
+// should happen here. Bench expectation: full parity with DIRECT
+// (FAST_LONG block_simd p50 ≈ 160 ms ± noise).

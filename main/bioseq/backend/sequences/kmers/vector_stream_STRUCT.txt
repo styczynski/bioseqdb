@@ -1,0 +1,1031 @@
+module;
+
+#include <hwy/highway.h>
+#include <hwy/aligned_allocator.h>
+
+#include "common.h"
+
+#include <array>
+#include <type_traits>
+#include <utility>
+
+#if HWY_TARGET == HWY_RVV || HWY_TARGET == HWY_SVE || HWY_TARGET == HWY_SVE2
+#  error "bioseq_simd.vector_stream: vectors are sizeless on RVV/SVE; this module is only enabled for fixed-vector targets (NEON, SSE/AVX, AVX-512, SCALAR)."
+#endif
+
+export module bioseq_simd.vector_stream;
+
+import mlogging;
+import bioseq_simd.utils;     // for_each_index<W>
+
+export {
+
+HWY_BEFORE_NAMESPACE();
+
+namespace bioseq::simd::HWY_NAMESPACE {
+namespace hn = hwy::HWY_NAMESPACE;
+
+// ============================================================================
+// Bundle types — STRUCT variant.
+// ============================================================================
+//
+// vec_stream<D, ST, W> is a bundle of W hn::Vec<D> instances. STRUCT variant:
+// each `W ∈ {1, 2, 3, 4}` is a SEPARATE TEMPLATE SPECIALIZATION carrying
+// `W` directly named fields (`_v0`, `_v1`, …, `_vK-1`). There is no
+// std::array wrapper, no std::tuple wrapper, no internal nested struct.
+// The hypothesis under test: removing the wrapping aggregate gives the
+// optimizer a flat scalar layout that SROA can split independently of any
+// std::array<T,W> / std::tuple<T,...,T> implementation choice in libc++.
+//
+// mask_stream<D, W> follows the same shape with `W` named `mask_t` fields.
+
+template <size_t W> concept stream_width_ok = (W >= 1 && W <= 4);
+
+template <class D, typename ST, size_t W>
+requires (stream_width_ok<W>)
+struct vec_stream;  // primary, defined via specializations below
+
+template <class D, size_t W>
+requires (stream_width_ok<W>)
+struct mask_stream;  // primary, defined via specializations below
+
+template <typename T> struct is_vec_stream : std::false_type {};
+template <class D, typename ST, size_t W>
+struct is_vec_stream<vec_stream<D, ST, W>> : std::true_type {};
+template <typename T>
+inline constexpr bool is_vec_stream_v = is_vec_stream<std::remove_cvref_t<T>>::value;
+
+template <typename T> struct is_mask_stream : std::false_type {};
+template <class D, size_t W>
+struct is_mask_stream<mask_stream<D, W>> : std::true_type {};
+template <typename T>
+inline constexpr bool is_mask_stream_v = is_mask_stream<std::remove_cvref_t<T>>::value;
+
+template <typename T>
+inline constexpr bool is_any_stream_v =
+    is_vec_stream_v<T> || is_mask_stream_v<T>;
+
+template <typename... Args>
+concept any_arg_is_stream = (is_any_stream_v<Args> || ... || false);
+
+// ----------------------------------------------------------------------------
+// vec_stream specializations — direct named fields per W.
+// ----------------------------------------------------------------------------
+
+#define BIOSEQ_VS_HIDDEN_FRIEND_OPS_W(W_VAL)                                     \
+    /* Arithmetic ops (return vec_stream) */                                     \
+    [[nodiscard]] friend HWY_INLINE auto operator+(vec_stream a, vec_stream b) noexcept { \
+        return op_add_pack(a, b, std::make_index_sequence<W_VAL>{});             \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator-(vec_stream a, vec_stream b) noexcept { \
+        return op_sub_pack(a, b, std::make_index_sequence<W_VAL>{});             \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator*(vec_stream a, vec_stream b) noexcept { \
+        return op_mul_pack(a, b, std::make_index_sequence<W_VAL>{});             \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE vec_stream                \
+    op_add_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return pack(hn::Add(a[S], b[S])...);                                      \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE vec_stream                \
+    op_sub_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return pack(hn::Sub(a[S], b[S])...);                                      \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE vec_stream                \
+    op_mul_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return pack(hn::Mul(a[S], b[S])...);                                      \
+    }                                                                            \
+    /* Comparison ops (return mask_stream<tag_t, W_VAL>) */                       \
+    [[nodiscard]] friend HWY_INLINE auto operator==(vec_stream a, vec_stream b) noexcept { \
+        return cmp_eq_pack(a, b, std::make_index_sequence<W_VAL>{});              \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator!=(vec_stream a, vec_stream b) noexcept { \
+        return cmp_ne_pack(a, b, std::make_index_sequence<W_VAL>{});              \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator<(vec_stream a, vec_stream b) noexcept { \
+        return cmp_lt_pack(a, b, std::make_index_sequence<W_VAL>{});              \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator>(vec_stream a, vec_stream b) noexcept { \
+        return cmp_gt_pack(a, b, std::make_index_sequence<W_VAL>{});              \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator<=(vec_stream a, vec_stream b) noexcept { \
+        return cmp_le_pack(a, b, std::make_index_sequence<W_VAL>{});              \
+    }                                                                            \
+    [[nodiscard]] friend HWY_INLINE auto operator>=(vec_stream a, vec_stream b) noexcept { \
+        return cmp_ge_pack(a, b, std::make_index_sequence<W_VAL>{});              \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<tag_t, W_VAL> \
+    cmp_eq_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W_VAL>::pack(hn::Eq(a[S], b[S])...);            \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<tag_t, W_VAL> \
+    cmp_ne_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W_VAL>::pack(hn::Ne(a[S], b[S])...);            \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<tag_t, W_VAL> \
+    cmp_lt_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W_VAL>::pack(hn::Lt(a[S], b[S])...);            \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<tag_t, W_VAL> \
+    cmp_gt_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W_VAL>::pack(hn::Gt(a[S], b[S])...);            \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<tag_t, W_VAL> \
+    cmp_le_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W_VAL>::pack(hn::Le(a[S], b[S])...);            \
+    }                                                                            \
+    template <size_t... S>                                                       \
+    [[nodiscard, gnu::always_inline]] static HWY_INLINE mask_stream<tag_t, W_VAL> \
+    cmp_ge_pack(vec_stream a, vec_stream b, std::index_sequence<S...>) noexcept { \
+        return mask_stream<tag_t, W_VAL>::pack(hn::Ge(a[S], b[S])...);            \
+    }
+
+// ====== W = 1 specialization ===========================================
+template <class D, typename ST>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+vec_stream<D, ST, 1> {
+    using tag_t = std::remove_cvref_t<D>;
+    using stored_type = ST;
+    using vec_t = hn::Vec<tag_t>;
+    static constexpr size_t stream_width = 1;
+
+    // Direct named field — no std::array, no std::tuple, no nested struct.
+    vec_t _v0;
+
+    HWY_INLINE constexpr vec_stream() noexcept = default;
+    explicit HWY_INLINE constexpr vec_stream(vec_t a) noexcept : _v0(a) {}
+
+    [[nodiscard]] HWY_INLINE constexpr vec_t&       operator[](size_t /*s*/)       noexcept { return _v0; }
+    [[nodiscard]] HWY_INLINE constexpr const vec_t& operator[](size_t /*s*/) const noexcept { return _v0; }
+
+    // data() returns the bundle as a fixed-size std::array view for callers
+    // that explicitly want it (the test fixture and a couple of public ops).
+    // Building an array on the fly is a no-op after SROA.
+    [[nodiscard]] HWY_INLINE std::array<vec_t, 1> data() const noexcept {
+        return std::array<vec_t, 1>{ _v0 };
+    }
+
+    template <typename V0>
+    requires (std::is_convertible_v<V0, vec_t>)
+    [[nodiscard]] static HWY_INLINE constexpr vec_stream pack(V0 v) noexcept {
+        return vec_stream{ static_cast<vec_t>(v) };
+    }
+
+    [[nodiscard]] static HWY_INLINE vec_stream splat(tag_t d, ST value) noexcept {
+        const vec_t v = hn::Set(d, value);
+        return vec_stream{ v };
+    }
+    [[nodiscard]] static HWY_INLINE vec_stream splat_zero(tag_t d) noexcept {
+        return splat(d, ST{0});
+    }
+
+    /// Generic field-mapper. Applies callable `f` to each named field and
+    /// bundles the results back via `pack(...)`. The compiler unfolds the
+    /// pack expansion into one (W=1) … four (W=4) direct calls; SROA splits
+    /// the bundle by-field because the fields are direct members.
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 1>::pack(f(_v0));
+        } else {
+            return mask_stream<tag_t, 1>::pack(f(_v0));
+        }
+    }
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(vec_stream other, F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0, other._v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 1>::pack(f(_v0, other._v0));
+        } else {
+            return mask_stream<tag_t, 1>::pack(f(_v0, other._v0));
+        }
+    }
+
+    BIOSEQ_VS_HIDDEN_FRIEND_OPS_W(1)
+};
+
+// ====== W = 2 specialization ===========================================
+template <class D, typename ST>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+vec_stream<D, ST, 2> {
+    using tag_t = std::remove_cvref_t<D>;
+    using stored_type = ST;
+    using vec_t = hn::Vec<tag_t>;
+    static constexpr size_t stream_width = 2;
+
+    // Direct named fields. SROA ought to keep _v0 in V0 and _v1 in V1
+    // independently across the BP loop iterations.
+    vec_t _v0;
+    vec_t _v1;
+
+    HWY_INLINE constexpr vec_stream() noexcept = default;
+    HWY_INLINE constexpr vec_stream(vec_t a, vec_t b) noexcept : _v0(a), _v1(b) {}
+
+    [[nodiscard]] HWY_INLINE constexpr vec_t& operator[](size_t s) noexcept {
+        if (s == 0) return _v0;
+        return _v1;
+    }
+    [[nodiscard]] HWY_INLINE constexpr const vec_t& operator[](size_t s) const noexcept {
+        if (s == 0) return _v0;
+        return _v1;
+    }
+
+    [[nodiscard]] HWY_INLINE std::array<vec_t, 2> data() const noexcept {
+        return std::array<vec_t, 2>{ _v0, _v1 };
+    }
+
+    template <typename V0, typename V1>
+    requires (std::is_convertible_v<V0, vec_t> && std::is_convertible_v<V1, vec_t>)
+    [[nodiscard]] static HWY_INLINE constexpr vec_stream pack(V0 a, V1 b) noexcept {
+        return vec_stream{ static_cast<vec_t>(a), static_cast<vec_t>(b) };
+    }
+
+    [[nodiscard]] static HWY_INLINE vec_stream splat(tag_t d, ST value) noexcept {
+        const vec_t v = hn::Set(d, value);
+        return vec_stream{ v, v };
+    }
+    [[nodiscard]] static HWY_INLINE vec_stream splat_zero(tag_t d) noexcept {
+        return splat(d, ST{0});
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 2>::pack(f(_v0), f(_v1));
+        } else {
+            return mask_stream<tag_t, 2>::pack(f(_v0), f(_v1));
+        }
+    }
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(vec_stream other, F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0, other._v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 2>::pack(
+                f(_v0, other._v0), f(_v1, other._v1));
+        } else {
+            return mask_stream<tag_t, 2>::pack(
+                f(_v0, other._v0), f(_v1, other._v1));
+        }
+    }
+
+    BIOSEQ_VS_HIDDEN_FRIEND_OPS_W(2)
+};
+
+// ====== W = 3 specialization ===========================================
+template <class D, typename ST>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+vec_stream<D, ST, 3> {
+    using tag_t = std::remove_cvref_t<D>;
+    using stored_type = ST;
+    using vec_t = hn::Vec<tag_t>;
+    static constexpr size_t stream_width = 3;
+
+    vec_t _v0;
+    vec_t _v1;
+    vec_t _v2;
+
+    HWY_INLINE constexpr vec_stream() noexcept = default;
+    HWY_INLINE constexpr vec_stream(vec_t a, vec_t b, vec_t c) noexcept
+        : _v0(a), _v1(b), _v2(c) {}
+
+    [[nodiscard]] HWY_INLINE constexpr vec_t& operator[](size_t s) noexcept {
+        if (s == 0) return _v0;
+        if (s == 1) return _v1;
+        return _v2;
+    }
+    [[nodiscard]] HWY_INLINE constexpr const vec_t& operator[](size_t s) const noexcept {
+        if (s == 0) return _v0;
+        if (s == 1) return _v1;
+        return _v2;
+    }
+
+    [[nodiscard]] HWY_INLINE std::array<vec_t, 3> data() const noexcept {
+        return std::array<vec_t, 3>{ _v0, _v1, _v2 };
+    }
+
+    template <typename V0, typename V1, typename V2>
+    requires (std::is_convertible_v<V0, vec_t> &&
+              std::is_convertible_v<V1, vec_t> &&
+              std::is_convertible_v<V2, vec_t>)
+    [[nodiscard]] static HWY_INLINE constexpr vec_stream
+    pack(V0 a, V1 b, V2 c) noexcept {
+        return vec_stream{
+            static_cast<vec_t>(a), static_cast<vec_t>(b), static_cast<vec_t>(c) };
+    }
+
+    [[nodiscard]] static HWY_INLINE vec_stream splat(tag_t d, ST value) noexcept {
+        const vec_t v = hn::Set(d, value);
+        return vec_stream{ v, v, v };
+    }
+    [[nodiscard]] static HWY_INLINE vec_stream splat_zero(tag_t d) noexcept {
+        return splat(d, ST{0});
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 3>::pack(f(_v0), f(_v1), f(_v2));
+        } else {
+            return mask_stream<tag_t, 3>::pack(f(_v0), f(_v1), f(_v2));
+        }
+    }
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(vec_stream other, F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0, other._v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 3>::pack(
+                f(_v0, other._v0), f(_v1, other._v1), f(_v2, other._v2));
+        } else {
+            return mask_stream<tag_t, 3>::pack(
+                f(_v0, other._v0), f(_v1, other._v1), f(_v2, other._v2));
+        }
+    }
+
+    BIOSEQ_VS_HIDDEN_FRIEND_OPS_W(3)
+};
+
+// ====== W = 4 specialization ===========================================
+template <class D, typename ST>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+vec_stream<D, ST, 4> {
+    using tag_t = std::remove_cvref_t<D>;
+    using stored_type = ST;
+    using vec_t = hn::Vec<tag_t>;
+    static constexpr size_t stream_width = 4;
+
+    vec_t _v0;
+    vec_t _v1;
+    vec_t _v2;
+    vec_t _v3;
+
+    HWY_INLINE constexpr vec_stream() noexcept = default;
+    HWY_INLINE constexpr vec_stream(vec_t a, vec_t b, vec_t c, vec_t e) noexcept
+        : _v0(a), _v1(b), _v2(c), _v3(e) {}
+
+    [[nodiscard]] HWY_INLINE constexpr vec_t& operator[](size_t s) noexcept {
+        if (s == 0) return _v0;
+        if (s == 1) return _v1;
+        if (s == 2) return _v2;
+        return _v3;
+    }
+    [[nodiscard]] HWY_INLINE constexpr const vec_t& operator[](size_t s) const noexcept {
+        if (s == 0) return _v0;
+        if (s == 1) return _v1;
+        if (s == 2) return _v2;
+        return _v3;
+    }
+
+    [[nodiscard]] HWY_INLINE std::array<vec_t, 4> data() const noexcept {
+        return std::array<vec_t, 4>{ _v0, _v1, _v2, _v3 };
+    }
+
+    template <typename V0, typename V1, typename V2, typename V3>
+    requires (std::is_convertible_v<V0, vec_t> && std::is_convertible_v<V1, vec_t> &&
+              std::is_convertible_v<V2, vec_t> && std::is_convertible_v<V3, vec_t>)
+    [[nodiscard]] static HWY_INLINE constexpr vec_stream
+    pack(V0 a, V1 b, V2 c, V3 e) noexcept {
+        return vec_stream{
+            static_cast<vec_t>(a), static_cast<vec_t>(b),
+            static_cast<vec_t>(c), static_cast<vec_t>(e) };
+    }
+
+    [[nodiscard]] static HWY_INLINE vec_stream splat(tag_t d, ST value) noexcept {
+        const vec_t v = hn::Set(d, value);
+        return vec_stream{ v, v, v, v };
+    }
+    [[nodiscard]] static HWY_INLINE vec_stream splat_zero(tag_t d) noexcept {
+        return splat(d, ST{0});
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 4>::pack(f(_v0), f(_v1), f(_v2), f(_v3));
+        } else {
+            return mask_stream<tag_t, 4>::pack(f(_v0), f(_v1), f(_v2), f(_v3));
+        }
+    }
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(vec_stream other, F&& f) const noexcept {
+        using R = std::remove_cvref_t<decltype(f(_v0, other._v0))>;
+        if constexpr (std::is_same_v<R, vec_t>) {
+            return vec_stream<tag_t, ST, 4>::pack(
+                f(_v0, other._v0), f(_v1, other._v1),
+                f(_v2, other._v2), f(_v3, other._v3));
+        } else {
+            return mask_stream<tag_t, 4>::pack(
+                f(_v0, other._v0), f(_v1, other._v1),
+                f(_v2, other._v2), f(_v3, other._v3));
+        }
+    }
+
+    BIOSEQ_VS_HIDDEN_FRIEND_OPS_W(4)
+};
+
+#undef BIOSEQ_VS_HIDDEN_FRIEND_OPS_W
+
+// ----------------------------------------------------------------------------
+// mask_stream specializations — direct named mask fields per W.
+// ----------------------------------------------------------------------------
+
+// ====== W = 1 ==========================================================
+template <class D>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+mask_stream<D, 1> {
+    using tag_t = std::remove_cvref_t<D>;
+    using mask_t = hn::Mask<tag_t>;
+    static constexpr size_t stream_width = 1;
+
+    mask_t _m0;
+
+    HWY_INLINE constexpr mask_stream() noexcept = default;
+    explicit HWY_INLINE constexpr mask_stream(mask_t a) noexcept : _m0(a) {}
+
+    [[nodiscard]] HWY_INLINE constexpr mask_t&       operator[](size_t /*s*/)       noexcept { return _m0; }
+    [[nodiscard]] HWY_INLINE constexpr const mask_t& operator[](size_t /*s*/) const noexcept { return _m0; }
+
+    [[nodiscard]] HWY_INLINE std::array<mask_t, 1> data() const noexcept {
+        return std::array<mask_t, 1>{ _m0 };
+    }
+
+    template <typename M0>
+    requires (std::is_convertible_v<M0, mask_t>)
+    [[nodiscard]] static HWY_INLINE constexpr mask_stream pack(M0 a) noexcept {
+        return mask_stream{ static_cast<mask_t>(a) };
+    }
+
+    [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_t d) noexcept {
+        return mask_stream{ hn::MaskFalse(d) };
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        return mask_stream<tag_t, 1>::pack(f(_m0));
+    }
+};
+
+// ====== W = 2 ==========================================================
+template <class D>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+mask_stream<D, 2> {
+    using tag_t = std::remove_cvref_t<D>;
+    using mask_t = hn::Mask<tag_t>;
+    static constexpr size_t stream_width = 2;
+
+    mask_t _m0;
+    mask_t _m1;
+
+    HWY_INLINE constexpr mask_stream() noexcept = default;
+    HWY_INLINE constexpr mask_stream(mask_t a, mask_t b) noexcept : _m0(a), _m1(b) {}
+
+    [[nodiscard]] HWY_INLINE constexpr mask_t& operator[](size_t s) noexcept {
+        if (s == 0) return _m0;
+        return _m1;
+    }
+    [[nodiscard]] HWY_INLINE constexpr const mask_t& operator[](size_t s) const noexcept {
+        if (s == 0) return _m0;
+        return _m1;
+    }
+
+    [[nodiscard]] HWY_INLINE std::array<mask_t, 2> data() const noexcept {
+        return std::array<mask_t, 2>{ _m0, _m1 };
+    }
+
+    template <typename M0, typename M1>
+    requires (std::is_convertible_v<M0, mask_t> && std::is_convertible_v<M1, mask_t>)
+    [[nodiscard]] static HWY_INLINE constexpr mask_stream pack(M0 a, M1 b) noexcept {
+        return mask_stream{ static_cast<mask_t>(a), static_cast<mask_t>(b) };
+    }
+
+    [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_t d) noexcept {
+        const mask_t m = hn::MaskFalse(d);
+        return mask_stream{ m, m };
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        return mask_stream<tag_t, 2>::pack(f(_m0), f(_m1));
+    }
+};
+
+// ====== W = 3 ==========================================================
+template <class D>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+mask_stream<D, 3> {
+    using tag_t = std::remove_cvref_t<D>;
+    using mask_t = hn::Mask<tag_t>;
+    static constexpr size_t stream_width = 3;
+
+    mask_t _m0;
+    mask_t _m1;
+    mask_t _m2;
+
+    HWY_INLINE constexpr mask_stream() noexcept = default;
+    HWY_INLINE constexpr mask_stream(mask_t a, mask_t b, mask_t c) noexcept
+        : _m0(a), _m1(b), _m2(c) {}
+
+    [[nodiscard]] HWY_INLINE constexpr mask_t& operator[](size_t s) noexcept {
+        if (s == 0) return _m0;
+        if (s == 1) return _m1;
+        return _m2;
+    }
+    [[nodiscard]] HWY_INLINE constexpr const mask_t& operator[](size_t s) const noexcept {
+        if (s == 0) return _m0;
+        if (s == 1) return _m1;
+        return _m2;
+    }
+
+    [[nodiscard]] HWY_INLINE std::array<mask_t, 3> data() const noexcept {
+        return std::array<mask_t, 3>{ _m0, _m1, _m2 };
+    }
+
+    template <typename M0, typename M1, typename M2>
+    requires (std::is_convertible_v<M0, mask_t> && std::is_convertible_v<M1, mask_t> &&
+              std::is_convertible_v<M2, mask_t>)
+    [[nodiscard]] static HWY_INLINE constexpr mask_stream pack(M0 a, M1 b, M2 c) noexcept {
+        return mask_stream{ static_cast<mask_t>(a), static_cast<mask_t>(b), static_cast<mask_t>(c) };
+    }
+
+    [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_t d) noexcept {
+        const mask_t m = hn::MaskFalse(d);
+        return mask_stream{ m, m, m };
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        return mask_stream<tag_t, 3>::pack(f(_m0), f(_m1), f(_m2));
+    }
+};
+
+// ====== W = 4 ==========================================================
+template <class D>
+struct
+#if defined(__clang__)
+[[clang::trivial_abi]]
+#endif
+mask_stream<D, 4> {
+    using tag_t = std::remove_cvref_t<D>;
+    using mask_t = hn::Mask<tag_t>;
+    static constexpr size_t stream_width = 4;
+
+    mask_t _m0;
+    mask_t _m1;
+    mask_t _m2;
+    mask_t _m3;
+
+    HWY_INLINE constexpr mask_stream() noexcept = default;
+    HWY_INLINE constexpr mask_stream(mask_t a, mask_t b, mask_t c, mask_t e) noexcept
+        : _m0(a), _m1(b), _m2(c), _m3(e) {}
+
+    [[nodiscard]] HWY_INLINE constexpr mask_t& operator[](size_t s) noexcept {
+        if (s == 0) return _m0;
+        if (s == 1) return _m1;
+        if (s == 2) return _m2;
+        return _m3;
+    }
+    [[nodiscard]] HWY_INLINE constexpr const mask_t& operator[](size_t s) const noexcept {
+        if (s == 0) return _m0;
+        if (s == 1) return _m1;
+        if (s == 2) return _m2;
+        return _m3;
+    }
+
+    [[nodiscard]] HWY_INLINE std::array<mask_t, 4> data() const noexcept {
+        return std::array<mask_t, 4>{ _m0, _m1, _m2, _m3 };
+    }
+
+    template <typename M0, typename M1, typename M2, typename M3>
+    requires (std::is_convertible_v<M0, mask_t> && std::is_convertible_v<M1, mask_t> &&
+              std::is_convertible_v<M2, mask_t> && std::is_convertible_v<M3, mask_t>)
+    [[nodiscard]] static HWY_INLINE constexpr mask_stream
+    pack(M0 a, M1 b, M2 c, M3 e) noexcept {
+        return mask_stream{ static_cast<mask_t>(a), static_cast<mask_t>(b),
+                            static_cast<mask_t>(c), static_cast<mask_t>(e) };
+    }
+
+    [[nodiscard]] static HWY_INLINE mask_stream splat_false(tag_t d) noexcept {
+        const mask_t m = hn::MaskFalse(d);
+        return mask_stream{ m, m, m, m };
+    }
+
+    template <typename F>
+    [[nodiscard]] HWY_INLINE auto map(F&& f) const noexcept {
+        return mask_stream<tag_t, 4>::pack(f(_m0), f(_m1), f(_m2), f(_m3));
+    }
+};
+
+// ============================================================================
+// Lifting machinery — unchanged from the STDARR baseline. Operator[] on each
+// vec_stream / mask_stream specialization above provides the per-slot view
+// the lift_op pack expansion needs; the remaining code is identical to the
+// STDARR variant.
+// ============================================================================
+
+namespace vec_stream_internal {
+
+template <size_t S, typename Arg>
+[[gnu::always_inline]] HWY_INLINE
+constexpr decltype(auto) project(Arg& arg) {
+    if constexpr (is_any_stream_v<Arg>) {
+        return arg[S];
+    } else {
+        return (arg);
+    }
+}
+
+template <typename T>
+inline constexpr size_t stream_width_of_v = 0;
+
+template <typename T>
+requires (is_any_stream_v<T>)
+inline constexpr size_t stream_width_of_v<T> =
+    std::remove_cvref_t<T>::stream_width;
+
+template <typename...> struct deduce_width;
+template <> struct deduce_width<> { static constexpr size_t value = 0; };
+
+template <typename First, typename... Rest>
+struct deduce_width<First, Rest...> {
+    static constexpr size_t value = is_any_stream_v<First>
+        ? stream_width_of_v<First>
+        : deduce_width<Rest...>::value;
+};
+
+template <typename... Args>
+inline constexpr size_t deduce_width_v =
+    deduce_width<std::remove_cvref_t<Args>...>::value;
+
+template <typename T> struct tag_of_impl { using type = void; };
+template <typename T>
+requires (is_any_stream_v<T>)
+struct tag_of_impl<T> {
+    using type = typename std::remove_cvref_t<T>::tag_t;
+};
+template <typename T> using tag_of_t = typename tag_of_impl<T>::type;
+
+template <typename...> struct deduce_tag;
+template <> struct deduce_tag<> { using type = void; };
+
+template <typename First, typename... Rest>
+requires (is_any_stream_v<First>)
+struct deduce_tag<First, Rest...> {
+    using type = typename std::remove_cvref_t<First>::tag_t;
+};
+
+template <typename First, typename... Rest>
+requires (!is_any_stream_v<First>)
+struct deduce_tag<First, Rest...> : deduce_tag<Rest...> {};
+
+template <typename T> struct stored_of_impl { using type = void; };
+template <typename T>
+requires (is_vec_stream_v<T>)
+struct stored_of_impl<T> {
+    using type = typename std::remove_cvref_t<T>::stored_type;
+};
+template <typename T> using stored_of_t = typename stored_of_impl<T>::type;
+
+template <typename...> struct deduce_stored;
+template <> struct deduce_stored<> { using type = void; };
+
+template <typename First, typename... Rest>
+requires (is_vec_stream_v<First>)
+struct deduce_stored<First, Rest...> {
+    using type = typename std::remove_cvref_t<First>::stored_type;
+};
+
+template <typename First, typename... Rest>
+requires (!is_vec_stream_v<First>)
+struct deduce_stored<First, Rest...> : deduce_stored<Rest...> {};
+
+template <typename... Args>
+inline constexpr bool widths_consistent_v =
+    ((!is_any_stream_v<Args> ||
+      stream_width_of_v<Args> == deduce_width_v<Args...>)
+     && ... && true);
+
+template <typename... Args>
+inline constexpr bool tags_consistent_v =
+    ((!is_any_stream_v<Args> ||
+      std::is_same_v<tag_of_t<Args>,
+                     typename deduce_tag<std::remove_cvref_t<Args>...>::type>)
+     && ... && true);
+
+template <size_t S, typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto lift_eval_at_slot(Op& op, Args&&... args) {
+    return op(project<S>(args)...);
+}
+
+template <size_t S, typename Op, typename... Args>
+[[gnu::always_inline]] HWY_INLINE
+void lift_apply_at_slot(Op& op, Args&&... args) {
+    op(project<S>(args)...);
+}
+
+template <class D, typename ST, size_t W,
+          size_t... S, typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+vec_stream<D, ST, W> lift_op_pack_vec(
+    std::index_sequence<S...>, Op& op, Args&&... args) {
+    return vec_stream<D, ST, W>::pack(
+        lift_eval_at_slot<S>(op, std::forward<Args>(args)...)...);
+}
+
+template <class D, size_t W,
+          size_t... S, typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+mask_stream<D, W> lift_op_pack_mask(
+    std::index_sequence<S...>, Op& op, Args&&... args) {
+    return mask_stream<D, W>::pack(
+        lift_eval_at_slot<S>(op, std::forward<Args>(args)...)...);
+}
+
+template <size_t... S, typename Op, typename... Args>
+[[gnu::always_inline]] HWY_INLINE
+void lift_op_apply_void(
+    std::index_sequence<S...>, Op& op, Args&&... args) {
+    (lift_apply_at_slot<S>(op, std::forward<Args>(args)...), ...);
+}
+
+template <typename Op, typename... Args>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto lift_op(Op&& op, Args&&... args) {
+    static_assert(any_arg_is_stream<Args...>,
+                  "lift_op requires at least one stream argument");
+    static_assert(widths_consistent_v<Args...>,
+                  "lift_op: all stream arguments must share W");
+    static_assert(tags_consistent_v<Args...>,
+                  "lift_op: all stream arguments must share tag_t");
+
+    constexpr size_t W = deduce_width_v<Args...>;
+    using D = typename deduce_tag<std::remove_cvref_t<Args>...>::type;
+    static_assert(!std::is_void_v<D>, "lift_op: tag deduction failed");
+
+    using elem_result_t =
+        std::remove_cvref_t<decltype(op(project<0>(args)...))>;
+
+    if constexpr (std::is_same_v<elem_result_t, hn::Vec<D>>) {
+        using ST_from_args = typename deduce_stored<std::remove_cvref_t<Args>...>::type;
+        using ST = std::conditional_t<std::is_void_v<ST_from_args>,
+                                       hn::TFromD<D>, ST_from_args>;
+        return lift_op_pack_vec<D, ST, W>(
+            std::make_index_sequence<W>{}, op, std::forward<Args>(args)...);
+    } else if constexpr (std::is_same_v<elem_result_t, hn::Mask<D>>) {
+        return lift_op_pack_mask<D, W>(
+            std::make_index_sequence<W>{}, op, std::forward<Args>(args)...);
+    } else {
+        static_assert(std::is_same_v<elem_result_t, void>,
+                      "lift_op: element result must be Vec<D> or Mask<D> or void");
+        lift_op_apply_void(std::make_index_sequence<W>{}, op,
+            std::forward<Args>(args)...);
+    }
+}
+
+#define BIOSEQ_VS_DEFINE_TAG(NAME)                                                   \
+    struct op_##NAME {                                                               \
+        template <typename... Xs> [[gnu::always_inline]] HWY_INLINE                  \
+        static auto apply(Xs&&... xs) {                                              \
+            return hn::NAME(std::forward<Xs>(xs)...);                                \
+        }                                                                            \
+    }
+
+BIOSEQ_VS_DEFINE_TAG(Add);
+BIOSEQ_VS_DEFINE_TAG(Sub);
+BIOSEQ_VS_DEFINE_TAG(Mul);
+BIOSEQ_VS_DEFINE_TAG(Min);
+BIOSEQ_VS_DEFINE_TAG(Max);
+BIOSEQ_VS_DEFINE_TAG(And);
+BIOSEQ_VS_DEFINE_TAG(Or);
+BIOSEQ_VS_DEFINE_TAG(Xor);
+BIOSEQ_VS_DEFINE_TAG(AndNot);
+BIOSEQ_VS_DEFINE_TAG(Not);
+BIOSEQ_VS_DEFINE_TAG(Neg);
+BIOSEQ_VS_DEFINE_TAG(Abs);
+BIOSEQ_VS_DEFINE_TAG(Eq);
+BIOSEQ_VS_DEFINE_TAG(Ne);
+BIOSEQ_VS_DEFINE_TAG(Lt);
+BIOSEQ_VS_DEFINE_TAG(Gt);
+BIOSEQ_VS_DEFINE_TAG(Le);
+BIOSEQ_VS_DEFINE_TAG(Ge);
+BIOSEQ_VS_DEFINE_TAG(ShiftLeftSame);
+BIOSEQ_VS_DEFINE_TAG(ShiftRightSame);
+BIOSEQ_VS_DEFINE_TAG(IfThenElse);
+BIOSEQ_VS_DEFINE_TAG(IfThenElseZero);
+BIOSEQ_VS_DEFINE_TAG(IfThenZeroElse);
+BIOSEQ_VS_DEFINE_TAG(MaskFromVec);
+
+#undef BIOSEQ_VS_DEFINE_TAG
+
+}  // namespace vec_stream_internal
+
+template <typename OpTag, typename... Args>
+requires (any_arg_is_stream<Args...>)
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto lifted(Args&&... args) {
+    return vec_stream_internal::lift_op(
+        []<typename... Xs>(Xs&&... xs) [[gnu::always_inline]] {
+            return OpTag::apply(std::forward<Xs>(xs)...);
+        },
+        std::forward<Args>(args)...);
+}
+
+#define BIOSEQ_VS_BINARY_WRAPPER(NAME)                                              \
+    template <typename A, typename B>                                                \
+    requires (any_arg_is_stream<A, B>)                                               \
+    [[nodiscard]] HWY_INLINE auto NAME(A&& a, B&& b) {                               \
+        return lifted<vec_stream_internal::op_##NAME>(                               \
+            std::forward<A>(a), std::forward<B>(b));                                 \
+    }
+
+#define BIOSEQ_VS_UNARY_WRAPPER(NAME)                                               \
+    template <typename A>                                                            \
+    requires (is_any_stream_v<A>)                                                    \
+    [[nodiscard]] HWY_INLINE auto NAME(A&& a) {                                      \
+        return lifted<vec_stream_internal::op_##NAME>(std::forward<A>(a));           \
+    }
+
+#define BIOSEQ_VS_TERNARY_WRAPPER(NAME)                                             \
+    template <typename A, typename B, typename C>                                    \
+    requires (any_arg_is_stream<A, B, C>)                                            \
+    [[nodiscard]] HWY_INLINE auto NAME(A&& a, B&& b, C&& c) {                        \
+        return lifted<vec_stream_internal::op_##NAME>(                               \
+            std::forward<A>(a), std::forward<B>(b), std::forward<C>(c));             \
+    }
+
+BIOSEQ_VS_BINARY_WRAPPER(Add)
+BIOSEQ_VS_BINARY_WRAPPER(Sub)
+BIOSEQ_VS_BINARY_WRAPPER(Mul)
+BIOSEQ_VS_BINARY_WRAPPER(Min)
+BIOSEQ_VS_BINARY_WRAPPER(Max)
+BIOSEQ_VS_BINARY_WRAPPER(And)
+BIOSEQ_VS_BINARY_WRAPPER(Or)
+BIOSEQ_VS_BINARY_WRAPPER(Xor)
+BIOSEQ_VS_BINARY_WRAPPER(AndNot)
+BIOSEQ_VS_BINARY_WRAPPER(Eq)
+BIOSEQ_VS_BINARY_WRAPPER(Ne)
+BIOSEQ_VS_BINARY_WRAPPER(Lt)
+BIOSEQ_VS_BINARY_WRAPPER(Gt)
+BIOSEQ_VS_BINARY_WRAPPER(Le)
+BIOSEQ_VS_BINARY_WRAPPER(Ge)
+BIOSEQ_VS_BINARY_WRAPPER(ShiftLeftSame)
+BIOSEQ_VS_BINARY_WRAPPER(ShiftRightSame)
+
+BIOSEQ_VS_UNARY_WRAPPER(Not)
+BIOSEQ_VS_UNARY_WRAPPER(Neg)
+BIOSEQ_VS_UNARY_WRAPPER(Abs)
+BIOSEQ_VS_UNARY_WRAPPER(MaskFromVec)
+
+BIOSEQ_VS_TERNARY_WRAPPER(IfThenElse)
+BIOSEQ_VS_TERNARY_WRAPPER(IfThenElseZero)
+BIOSEQ_VS_TERNARY_WRAPPER(IfThenZeroElse)
+
+#undef BIOSEQ_VS_BINARY_WRAPPER
+#undef BIOSEQ_VS_UNARY_WRAPPER
+#undef BIOSEQ_VS_TERNARY_WRAPPER
+
+template <int N, typename A>
+requires (is_vec_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto ShiftLeft(A&& a) {
+    return vec_stream_internal::lift_op(
+        [](auto&& x) [[gnu::always_inline]] { return hn::ShiftLeft<N>(x); },
+        std::forward<A>(a));
+}
+
+template <int N, typename A>
+requires (is_vec_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto ShiftRight(A&& a) {
+    return vec_stream_internal::lift_op(
+        [](auto&& x) [[gnu::always_inline]] { return hn::ShiftRight<N>(x); },
+        std::forward<A>(a));
+}
+
+template <int N, typename A>
+requires (is_vec_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto RotateLeft(A&& a) {
+    return vec_stream_internal::lift_op(
+        [](auto&& x) [[gnu::always_inline]] { return hn::RotateLeft<N>(x); },
+        std::forward<A>(a));
+}
+
+template <int N, typename A>
+requires (is_vec_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto RotateRight(A&& a) {
+    return vec_stream_internal::lift_op(
+        [](auto&& x) [[gnu::always_inline]] { return hn::RotateRight<N>(x); },
+        std::forward<A>(a));
+}
+
+namespace vec_stream_internal_bc {
+template <class D_to, class A, size_t S>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto bitcast_at_slot(D_to d_to, A const& a) noexcept {
+    return hn::BitCast(d_to, a[S]);
+}
+
+template <class D_to, typename ST_to, size_t W,
+          class A, size_t... S>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+vec_stream<D_to, ST_to, W> bitcast_pack_impl(
+    D_to d_to, A const& a, std::index_sequence<S...>) noexcept {
+    return vec_stream<D_to, ST_to, W>::pack(
+        bitcast_at_slot<D_to, A, S>(d_to, a)...);
+}
+}  // namespace vec_stream_internal_bc
+
+template <class D_to, typename A>
+requires (is_vec_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto BitCast(D_to d_to, A&& a) {
+    using ATy = std::remove_cvref_t<A>;
+    constexpr size_t W = ATy::stream_width;
+    using ST_to = hn::TFromD<D_to>;
+    return vec_stream_internal_bc::bitcast_pack_impl<D_to, ST_to, W>(
+        d_to, a, std::make_index_sequence<W>{});
+}
+
+template <class D, typename A>
+requires (is_mask_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto VecFromMask(D d, A&& a) {
+    using ATy = std::remove_cvref_t<A>;
+    static_assert(std::is_same_v<typename ATy::tag_t, D>, "VecFromMask: tag mismatch");
+    return vec_stream_internal::lift_op(
+        [d](auto&& m) [[gnu::always_inline]] { return hn::VecFromMask(d, m); },
+        std::forward<A>(a));
+}
+
+template <class D, typename A, typename T>
+requires (is_vec_stream_v<A>)
+HWY_INLINE void StoreStream(A const& stream, D d,
+                            std::array<T*, std::remove_cvref_t<A>::stream_width> ptrs) {
+    using ATy = std::remove_cvref_t<A>;
+    static_assert(std::is_same_v<typename ATy::tag_t, D>, "StoreStream: tag mismatch");
+    for_each_index<ATy::stream_width>([&](auto s_const) [[gnu::always_inline]] {
+        constexpr size_t s = decltype(s_const)::value;
+        hn::Store(stream[s], d, ptrs[s]);
+    });
+}
+
+template <class D, typename A, typename T>
+requires (is_vec_stream_v<A>)
+HWY_INLINE void StoreUStream(A const& stream, D d,
+                             std::array<T*, std::remove_cvref_t<A>::stream_width> ptrs) {
+    using ATy = std::remove_cvref_t<A>;
+    static_assert(std::is_same_v<typename ATy::tag_t, D>, "StoreUStream: tag mismatch");
+    for_each_index<ATy::stream_width>([&](auto s_const) [[gnu::always_inline]] {
+        constexpr size_t s = decltype(s_const)::value;
+        hn::StoreU(stream[s], d, ptrs[s]);
+    });
+}
+
+template <class D, typename A>
+requires (is_mask_stream_v<A>)
+[[nodiscard]] HWY_INLINE auto AllFalsePerStream(D d, A const& a)
+    -> std::array<bool, std::remove_cvref_t<A>::stream_width>
+{
+    using ATy = std::remove_cvref_t<A>;
+    static_assert(std::is_same_v<typename ATy::tag_t, D>, "AllFalsePerStream: tag mismatch");
+    std::array<bool, ATy::stream_width> out{};
+    for_each_index<ATy::stream_width>([&](auto s_const) [[gnu::always_inline]] {
+        constexpr size_t s = decltype(s_const)::value;
+        out[s] = hn::AllFalse(d, a[s]);
+    });
+    return out;
+}
+
+}  // namespace bioseq::simd::HWY_NAMESPACE
+
+HWY_AFTER_NAMESPACE();
+
+}  // export

@@ -1388,6 +1388,18 @@ enum sequence_strand_mode : uint8_t {
     SEQUENCE_STRAND_EQUAL = 2
 };
 
+// Similar to is_sequence_custom_alphabet_bit_castable_to but accepts R parameter of compact_sequence_range and new storage_unit type
+// very convenient!
+// So we check if sequence templated by R can be bitcasted to use new_unit_type as storage_unit
+template <typename R, typename new_unit_type>
+concept is_sequence_bit_castable_to = (
+    supports_compact_sequence_range<R> && \
+    is_sequence_custom_alphabet_bit_castable_to<
+        sequence_custom_alphabet<typename compact_sequence_range<R>::traits::alphabet_type, typename compact_sequence_range<R>::traits::storage_unit, compact_sequence_range<R>::traits::bits_per_char>,
+        sequence_custom_alphabet<typename compact_sequence_range<R>::traits::alphabet_type, new_unit_type, compact_sequence_range<R>::traits::bits_per_char>
+    >
+);
+
 void hehe_hyhy() {
     std::vector<seq::dna4> MINIMIZER_TEST_DNA4_SEQ{
         "GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4
