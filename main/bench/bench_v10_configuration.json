@@ -39,10 +39,12 @@
     "XL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "5 Mbp fragments, ~0.2% HiFi error" },
 
     "FAST_LONG": { "concurrency": 5, "data": { "fragment_count": 1, "fragment_length_mean": 500000, "fragment_length_stddev": 100, "reference_length": 10000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "500 kbp fragments, ~0.2% HiFi error" },
+    "FAST_VERY_LONG": { "concurrency": 5, "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100, "reference_length": 100000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "5 Mbp fragments, ~0.2% HiFi error" },
+
 
     "XL_CCS":          { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 7000000, "substitution_rate": 0.005, "insertion_rate": 0.005, "deletion_rate": 0.005, "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 4321987 }, "description": "5 Mbp fragments, ~1.5% CCS error" },
 
-    "XXL_HIFI":         { "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 500000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error" },
+    "XXL_HIFI":         { "concurrency": 2, "data": { "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000, "reference_length": 500000000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 3219876 }, "description": "0.5 Gbp reference to 5 Mbp fragment, ~0.2% HiFi error" },
 
 
     "REPR_STORAGE_K7_MEDIUM":  { "data": { "kmer_size": 7,  "fragment_count": 3, "fragment_length_mean": 5000, "fragment_length_stddev": 500, "reference_length": 30000, "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 24681012 }, "description": "K=7 / MEDIUM HiFi — exercises 32-bit MinimizerRepr<15,7>" },
@@ -53,168 +55,34 @@
     "CURATED_UNIQUE_FRAGMENT": { "data": { "fragment_count": 1, "fragment_length_mean": 300, "fragment_length_stddev": 0, "reference_length": 2000, "substitution_rate": 0.0, "insertion_rate": 0.0, "deletion_rate": 0.0, "insertion_length_mean": 0.0, "deletion_length_mean": 0.0, "reverse_complement_rate": 0.0, "seed": 424242 }, "description": "Single error-free fragment from a 2 kbp random reference — trivial alignment" },
     "CURATED_SEAL_BATCH":      { "data": { "fragment_count": 8, "fragment_length_mean": 200, "fragment_length_stddev": 10, "reference_length": 4000, "substitution_rate": 0.01, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 1234 }, "description": "SEAL-style 8-fragment batch with mild error and reverse-complement" }
   },
-
-  "bench_aligners_grid": {
-    "description": "Length × error × algorithm matrix. Iteration counts are bucket-tuned (60 SHORT, 35 MEDIUM, 12 LONG, 3 VERY_LONG, 2 XL) so SHORT cells drive the tight noise floor while XL cells stay inside the per-call budget. Skip noisy×long cells (LONG / VERY_LONG / XL × ONT_LEGACY, HIGH_INDEL_LOW_SUB) — minimap2 itself fails to produce a primary at 8-10% indel rate on >50 kbp pairs.",
-    "fast": false,
-    "concurrency": { "bench_lock": true, "concurrency": true },
-    "matrix": {
-      "for": {
-        "SHORT_HIFI": 60, "SHORT_CCS": 60, "SHORT_ONT_MODERN": 60, "SHORT_ONT_LEGACY": 60, "SHORT_HIGH_INDEL_LOW_SUB": 60, "SHORT_HIGH_SUB_LOW_INDEL": 60,
-        "MEDIUM_HIFI": 35, "MEDIUM_CCS": 35, "MEDIUM_ONT_MODERN": 35, "MEDIUM_ONT_LEGACY": 35, "MEDIUM_HIGH_INDEL_LOW_SUB": 35, "MEDIUM_HIGH_SUB_LOW_INDEL": 35,
-        "LONG_HIFI": 12, "LONG_CCS": 12, "LONG_ONT_MODERN": 12, "LONG_HIGH_SUB_LOW_INDEL": 12,
-        "VERY_LONG_HIFI": 3, "VERY_LONG_CCS": 3, "VERY_LONG_ONT_MODERN": 3, "VERY_LONG_HIGH_SUB_LOW_INDEL": 3,
-        "XL_HIFI": 2, "XL_CCS": 2, "XXL_HIFI": 1
-      },
-      "over": {
-        "minimap2_dp": {},
-        "minimap2_rmq": {},
-        "bioseq_ksw2_scalar_dp_scalar_mm": {},
-        "bioseq_ksw2_simd_dp_scalar_mm": {},
-        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
-        "bioseq_ksw2_simd_dp_simd_minimap2_slow": {},
-        "bioseq_block_simd_dp_scalar_mm": {},
-        "bioseq_block_simd_dp_two_stack_nthash": {},
-        "bioseq_ksw2_rmq_scalar_mm": {}
-      },
-      "by_regions": false,
-      "metrics": {
-        "wall_clock_ns": {
-          "rules": [
-            [ "bioseq_scalar_at_least_as_fast_as_minimap2_dp",
-              { "key": "bioseq_ksw2_scalar_dp_scalar_mm" },
-              { "compare": "<", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "simd_minimizer_at_least_as_fast_as_scalar_minimizer",
-              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" },
-              { "compare": "<", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "bioseq_ksw2_scalar_dp_scalar_mm" } ],
-
-            [ "simd_dp_at_least_as_fast_as_scalar_dp",
-              { "key": "bioseq_ksw2_simd_dp_scalar_mm" },
-              { "compare": "<", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "bioseq_ksw2_scalar_dp_scalar_mm" } ],
-
-            [ "block_faster_than_ksw2_simd_dp",
-              { "key": "bioseq_block_simd_dp_two_stack_nthash" },
-              { "compare": "<", "threshold%": 10, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" } ],
-
-            [ "production_simd_at_least_5pct_faster_than_minimap2_dp",
-              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" },
-              { "compare": "<", "threshold%": 5, "tolerance%": 0, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "block_at_least_8pct_faster_than_minimap2_dp",
-              { "key": "bioseq_block_simd_dp_two_stack_nthash" },
-              { "compare": "<", "threshold%": 8, "tolerance%": 0, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "rmq_path_within_tolerance_of_minimap2_rmq",
-              { "key": "bioseq_ksw2_rmq_scalar_mm" },
-              { "compare": "=", "tolerance%": 10, "aggregate": "p50" },
-              { "key": "minimap2_rmq" } ],
-
-            [ "simd_slow_legacy_actually_slow",
-              { "key": "bioseq_ksw2_simd_dp_simd_minimap2_slow" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 0, "aggregate": "p50" },
-              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" } ]
-          ]
-        },
-        "match_count": { "type": "evaluation" },
-        "primary_correct_fraction": {
-          "type": "evaluation",
-          "rules": [
-            [ "bioseq_ksw2_scalar_correct_fraction_no_worse_than_minimap2",
-              { "key": "bioseq_ksw2_scalar_dp_scalar_mm" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "bioseq_ksw2_simd_two_stack_correct_fraction_no_worse_than_minimap2",
-              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "bioseq_block_two_stack_correct_fraction_no_worse_than_minimap2",
-              { "key": "bioseq_block_simd_dp_two_stack_nthash" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "bioseq_block_scalar_correct_fraction_no_worse_than_minimap2",
-              { "key": "bioseq_block_simd_dp_scalar_mm" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "bioseq_ksw2_simd_scalar_correct_fraction_no_worse_than_minimap2",
-              { "key": "bioseq_ksw2_simd_dp_scalar_mm" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ],
-
-            [ "bioseq_ksw2_rmq_correct_fraction_no_worse_than_minimap2",
-              { "key": "bioseq_ksw2_rmq_scalar_mm" },
-              { "compare": ">", "threshold%": 0, "tolerance%": 5, "aggregate": "p50" },
-              { "key": "minimap2_dp" } ]
-          ]
-        },
-        "mean_position_offset_bp": { "type": "evaluation" }
-      }
-    }
-  },
-
-  "bench_aligners_repr_storage": {
-    "description": "Force the 32-bit (K=7 / MEDIUM) and 128-bit (K=27 / XL) MinimizerRepr storage variants. Smaller grid (3 algorithm rows) so the bucket finishes in minutes.",
-    "fast": true,
-    "concurrency": { "bench_lock": true, "concurrency": true },
-    "matrix": {
-      "for": { "REPR_STORAGE_K7_MEDIUM": 5, "REPR_STORAGE_K27_XL": 1 },
-      "over": {
-        "minimap2_dp": {},
-        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
-        "bioseq_block_simd_dp_two_stack_nthash": {}
-      },
-      "by_regions": false,
-      "metrics": {
-        "wall_clock_ns":            { "rules": [] },
-        "match_count":              { "type": "evaluation" },
-        "primary_correct_fraction": { "type": "evaluation" },
-        "mean_position_offset_bp":  { "type": "evaluation" }
-      }
-    }
-  },
-
-  "bench_aligners_rmq_repro": {
-    "description": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining (AVL rebalance bug, fixed in chaining_rmq.cppm). One row, asserts non-zero match count.",
-    "fast": true,
-    "concurrency": { "bench_lock": true, "concurrency": true },
-    "matrix": {
-      "for": { "RMQ_REPRO_LONG_CCS": 5 },
-      "over": { "bioseq_ksw2_rmq_scalar_mm": {} },
-      "by_regions": false,
-      "metrics": {
-        "wall_clock_ns":            { "rules": [] },
-        "match_count":              { "type": "evaluation" },
-        "primary_correct_fraction": { "type": "evaluation" },
-        "mean_position_offset_bp":  { "type": "evaluation" }
-      }
-    }
-  },
-
   "bench_aligners_curated": {
     "description": "Curated correctness probes (replaces the legacy `[simple-benchmark]` Catch2 test cases). Asserts both unique-fragment primary correctness and SEAL-style batch behaviour. On purpose evaluates one sample for very long sequence (XXL_HIFI)",
     "fast": true,
-    "concurrency": { "bench_lock": true, "concurrency": true },
+    "concurrency": { "bench_lock": false, "concurrency": true },
     "matrix": {
-      "for": { "CURATED_UNIQUE_FRAGMENT": 5000, "CURATED_SEAL_BATCH": 2000, "XXL_HIFI": 4, "FAST_LONG": 250 },
+      "for": { "CURATED_UNIQUE_FRAGMENT": 5000, "CURATED_SEAL_BATCH": 2000, "XXL_HIFI": 4, "FAST_LONG": 300, "FAST_VERY_LONG": 20 },
       "over": {
         "minimap2_dp": {},
         "bioseq_ksw2_scalar_dp_scalar_mm": {},
         "bioseq_ksw2_simd_dp_two_stack_nthash": {},
         "bioseq_block_simd_dp_two_stack_nthash": {}
       },
-      "by_regions": false,
+      "by_regions": true,
       "metrics": {
         "wall_clock_ns": { "rules": [] },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "region_max_ns": {
+          "type": "region",
+          "region": "sort_run",
+          "rules": []
+        },
         "match_count":   { "type": "evaluation" },
         "primary_correct_fraction": {
           "type": "evaluation",

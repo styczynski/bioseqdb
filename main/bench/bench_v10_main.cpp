@@ -152,8 +152,8 @@ struct AlignerOutput {
 
     // // Total bp generated across the cached `Input`: every pair carries
     // // a freshly-decoded query and a private copy of the full reference.
-    // const std::size_t total_bp =
-    //     fragment_count * (fragment_length_mean + reference_length);
+    const std::size_t total_bp =
+        fragment_count * (fragment_length_mean + reference_length);
 
     // base_memory: bytes that must remain reserved for the lifetime of
     // the cached `AlignerInput` — i.e. the compact + ACGT pair storage
@@ -162,8 +162,8 @@ struct AlignerOutput {
     // working sets that live only while `on_run` is in flight.
     return {
         // Those are good estimates
-        .base_memory  = reference_length/2,
-        .extra_memory = reference_length/2,
+        .base_memory  = total_bp*3,
+        .extra_memory = total_bp*5,
     };
 }
 
