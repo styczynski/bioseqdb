@@ -82,7 +82,7 @@ concept is_sequence_custom_alphabet_bit_castable_to = (
     is_sequence_custom_alphabet<B> && \
     std::same_as<typename A::alphabet_type, typename B::alphabet_type> && \
     A::letter_bit_width == B::letter_bit_width && \
-    sizeof(typename A::storage_unit) >= sizeof(typename B::storage_unit) && \
+    ((sizeof(typename A::storage_unit) * 8) % (sizeof(typename B::storage_unit) * 8) == 0 || (sizeof(typename B::storage_unit) * 8) % (sizeof(typename A::storage_unit) * 8) == 0) && \
     A::leftover_bits == 0 && B::leftover_bits == 0
 );
 
@@ -268,30 +268,53 @@ template<
 }
 
 /*
-This struct represents different view of the sequence.
-*/
+ * `bit_casted_view` lets a `compact_sequence_range<base>` be iterated as if its
+ * underlying buffer were a contiguous array of a different `storage_unit` —
+ * e.g. a `compact_sequence_range<sequence_custom_alphabet<dna4, uint64_t>>`
+ * viewed as `uint32_t` units (downcast) or vice-versa (upcast). This is only
+ * sound when both source and target alphabets pack their letters with no
+ * leftover bits per unit, so the byte stream is identical and only the
+ * "how many letters do I unpack per stride" differs.
+ *
+ * Exposes the minimal sequence-iteration interface the SIMD loop in
+ * `iterate_sequence_bp_simd_v2` needs: `bp_size()`, `byte_size()`, `size()`,
+ * `padding()`, `read_cptr(it)`, `advance_iter(it, n)`. A plain
+ * `compact_sequence_range<R>` exposes the same shape — both satisfy
+ * `supports_compact_sequence_bitcast_view` (defined below `compact_sequence_range_base`).
+ */
 template <
     typename base_t,
     typename output_t
 >
 struct bit_casted_view {
+public:
+    using base_traits = base_t::traits;
+    using traits = output_t::traits;
+    using iterator = typename base_t::iterator;
+
 private:
     const base_t& base;
 public:
 
     bit_casted_view(const base_t& base_container): base(base_container) {}
 
-    using base_traits = base_t::traits;
-    using traits = output_t::traits;
-
-    // If this is downcast or upcast. Downcast is when we translate for example 32 uint into 8 uint. Upcast viceversa
-    static constexpr bool is_down_cast = sizeof(output_t) <= sizeof(base_t);
-    // What is the ratio between sizes in bits between input and output type
-    static constexpr size_t cast_ratio = is_down_cast ? (base_traits::unit_width / traits::unit_width) : (traits::unit_width / base_traits::unit_width);
-    // Log base 2 for cast_ratio (useful for shifts)
+    // If this is downcast or upcast. Downcast = we re-interpret a wide unit
+    // as a narrower unit (e.g. uint64 → uint32); upcast = the reverse. The
+    // sizeof comparison here is on the *storage_unit*, not on the wrapping
+    // sequence type — the wrapping types are the same size (both wrap a
+    // std::vector + size_t) regardless of the storage_unit.
+    static constexpr bool is_down_cast =
+        sizeof(typename traits::storage_unit) <=
+        sizeof(typename base_traits::storage_unit);
+    // Ratio between source and target unit widths in bits — always >= 1.
+    static constexpr size_t cast_ratio = is_down_cast
+        ? (base_traits::unit_width / traits::unit_width)
+        : (traits::unit_width / base_traits::unit_width);
+    // Log2 of cast_ratio (useful for shifts).
     static constexpr size_t cast_ratio_log = seqan3::detail::ceil_log2(cast_ratio);
 
-    // Assert verifies that cast_ratio is power of two, otherwise we cannot do anything
+    // Verifies that cast_ratio is power of two, otherwise advance_iter's
+    // shift-as-divide / shift-as-multiply lowering would be wrong.
     static_assert(1 << cast_ratio_log == cast_ratio);
 
     [[always_inline]] constexpr size_t bp_size() const {
@@ -299,23 +322,36 @@ public:
         return base.bp_size();
     };
 
-    [[always_inline]] constexpr size_t size() const {
-        // This calculates number of new units of new type from the number of letters
-        return int_div_ceil(base.bp_size(), traits::letters_per_unit).first;
-    };
-
     [[always_inline]] constexpr size_t byte_size() const {
         // We don't change underlying values so it stays the same
         return base.byte_size();
     };
 
-    [[always_inline]] constexpr size_t padding() {
-        return int_div_ceil(base.bp_size(), traits::letters_per_unit).second;
+    [[always_inline]] constexpr size_t size() const {
+        return view_units_for_letters();
     };
+
+    [[always_inline]] constexpr size_t padding() const {
+        // Empty letter slots in the trailing view-unit: units*lpu - bps.
+        return view_units_for_letters() * traits::letters_per_unit - base.bp_size();
+    };
+
+private:
+    /// Ceil-divide bp_size by view's letters_per_unit. Inlined here because
+    /// `int_div_ceil` lives in `bioseq_sequences.simd`, which imports this
+    /// module — pulling it in would create a cycle. Centralising the
+    /// computation also keeps `size()` and `padding()` consistent (both
+    /// depend on the same ceil result).
+    [[always_inline]] constexpr size_t view_units_for_letters() const {
+        constexpr size_t lpu = traits::letters_per_unit;
+        const size_t bps = base.bp_size();
+        return (bps + lpu - 1) / lpu;
+    }
+public:
 
     template<typename I>
     requires(base_t::template is_valid_derived_iter<I>::value)
-    [[always_inline]] constexpr const typename traits::storage_unit* read_cptr(const I& it) {
+    [[always_inline]] constexpr const typename traits::storage_unit* read_cptr(const I& it) const {
         return reinterpret_cast<const typename traits::storage_unit*>(base.read_cptr(it));
     };
 
@@ -323,16 +359,42 @@ public:
     requires(base_t::template is_valid_derived_iter<I>::value)
     [[always_inline]] constexpr static void advance_iter(I& it, const size_t value) {
         // This is interesting part:
-        // - if we downcast then for one real unit we have view 'cast_ratio' units, so each cast_ratio increments of iterator means 1 real increment
-        // - if we upcast then for 'cast_ratio' real units we have one view unit, so each 1 increment of iterator means 'cast_ratio' real increments
+        // - downcast: one real unit covers `cast_ratio` view units, so each
+        //   `cast_ratio` view-unit steps maps to 1 real iter increment. We
+        //   require `value` divisible by `cast_ratio` so the shift-as-divide
+        //   below is exact (otherwise we'd need pointer arithmetic). The
+        //   only call site today is the SIMD chunk loop which advances by
+        //   `Lanes(d)` — a power-of-two that scales the same way as
+        //   `cast_ratio`, so the divisibility holds by construction.
+        // - upcast: each view-unit step covers `cast_ratio` real units, so
+        //   we advance by `value * cast_ratio`. No divisibility constraint.
         if constexpr (is_down_cast) {
-            DEBUG_ASSERT(value % down_cast_ratio == 0, fmt::format("bit_casted_view for downcasted value (ratio={}) can only advance iterator by the ratio of downcasting otherwise it wouldn't be zero cost. value ({}) must be divisible by down_cast_ratio ({})", down_cast_ratio, value, down_cast_ratio));
-            // This is just optimised division
+            DEBUG_ASSERT(value % cast_ratio == 0,
+                fmt::format("bit_casted_view downcast (ratio={}) requires advance"
+                    " value ({}) divisible by cast_ratio for zero-cost shift-as-divide",
+                    cast_ratio, value));
             it += (value >> cast_ratio_log);
         } else {
             it += (value << cast_ratio_log);
         }
     };
+
+    /// Distance between two iterators in *view* storage_unit steps.
+    /// For a downcast (large→small) view, every base-iter step covers
+    /// `cast_ratio` view-units, so the raw `b - a` is multiplied by
+    /// `cast_ratio`. For an upcast (small→large), each view-unit takes
+    /// `cast_ratio` base-iter steps, so the raw `b - a` is divided by
+    /// `cast_ratio`. Mirrors the `compact_sequence_range_base::view_distance`
+    /// passthrough so v2 can use one expression regardless of the view
+    /// flavour.
+    template<typename I>
+    [[always_inline]] constexpr static size_t view_distance(const I& a, const I& b) {
+        if constexpr (is_down_cast) {
+            return static_cast<size_t>(b - a) << cast_ratio_log;
+        } else {
+            return static_cast<size_t>(b - a) >> cast_ratio_log;
+        }
+    }
 };
 
 template<
@@ -685,6 +747,29 @@ struct compact_sequence_range_base {
 
     constexpr size_t byte_size() const {
         return super()->size() * sizeof(typename traits::storage_unit); //+ sizeof(derived_range_t);
+    }
+
+    /// Advance an iterator by `value` storage_unit steps. Mirrors
+    /// `bit_casted_view::advance_iter` so callers can use the same
+    /// "view-aware" iterator-step API regardless of whether they hold a
+    /// raw `compact_sequence_range<R>` or a `bit_casted_view<…>`. For a
+    /// plain compact range there is no scale factor — one storage_unit
+    /// step is one base-iter increment — so this just forwards to
+    /// `it += value`.
+    template<typename I>
+    [[always_inline]] static inline void advance_iter(I& it, const size_t value) {
+        it += value;
+    }
+
+    /// Distance between two iterators in storage_unit steps, view-aware.
+    /// For a plain `compact_sequence_range<R>` the iterator's `operator-`
+    /// already yields units — this is just a pass-through. The
+    /// `bit_casted_view<…>` overload scales by `cast_ratio` so callers
+    /// see the result in *view* units regardless of the underlying base
+    /// iterator's native unit.
+    template<typename I>
+    [[always_inline]] static inline size_t view_distance(const I& a, const I& b) {
+        return static_cast<size_t>(b - a);
     }
 
     /**
@@ -1399,24 +1484,55 @@ concept is_sequence_bit_castable_to = (
         sequence_custom_alphabet<typename compact_sequence_range<R>::traits::alphabet_type, new_unit_type, compact_sequence_range<R>::traits::bits_per_char>
     >
 );
+// Sanity check we should be able to bitcast dna4 sequence to uint64/32/16/8
+static_assert(is_sequence_bit_castable_to<seq::dna4, uint64_t>);
+static_assert(is_sequence_bit_castable_to<seq::dna4, uint32_t>);
+static_assert(is_sequence_bit_castable_to<seq::dna4, uint16_t>);
+static_assert(is_sequence_bit_castable_to<seq::dna4, uint8_t>);
+
+// Common minimal interface that both `compact_sequence_range<R>` and
+// `bit_casted_view<base, output>` satisfy. Pegs the contract that
+// `iterate_sequence_bp_simd_v2` consumes — `bp_size()`, `byte_size()`,
+// `size()`, `padding()`, `read_cptr(it)`, `advance_iter(it, n)`,
+// `view_distance(a, b)`. Useful when v2 wants to drive iteration over
+// either a raw compact range or a view that re-interprets its underlying
+// buffer as a different storage_unit width (T4: bit-casted-view substrate).
+//
+// `read_cptr` is constrained with `convertible_to<…*>` (not `same_as`) to
+// admit forward-compatible refinements where the view's pointer might be
+// to a const-stricter or qualified-different but compatible type.
+template <typename V>
+concept supports_compact_sequence_bitcast_view =
+    requires (V v, typename V::iterator& it, const typename V::iterator& cit, size_t n) {
+        typename V::traits;
+        typename V::traits::storage_unit;
+        typename V::traits::alphabet_type;
+        { v.bp_size()                   } -> std::convertible_to<size_t>;
+        { v.byte_size()                 } -> std::convertible_to<size_t>;
+        { v.size()                      } -> std::convertible_to<size_t>;
+        { v.padding()                   } -> std::convertible_to<size_t>;
+        { v.read_cptr(cit)              } -> std::convertible_to<const typename V::traits::storage_unit*>;
+        { V::advance_iter(it, n)        };
+        { V::view_distance(cit, cit)    } -> std::convertible_to<size_t>;
+    };
 
 void hehe_hyhy() {
     std::vector<seq::dna4> MINIMIZER_TEST_DNA4_SEQ{
         "GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4
     };
-    auto seq = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint64_t>>(MINIMIZER_TEST_DNA4_SEQ);
+    auto seq = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint32_t>>(MINIMIZER_TEST_DNA4_SEQ);
     auto iter = seq.begin();
 
     //auto down_cast = seq.bit_cast_to<compact_sequence_range<seq::dna4>>();
-    auto down_cast = seq.bit_cast_to_storage_unit<uint32_t>();
+    auto down_cast = seq.bit_cast_to_storage_unit<uint16_t>();
     JustLog("test val = {}", *iter);
-    down_cast.advance_iter(iter, 2);
+    down_cast.advance_iter(iter, 4);
     JustLog("test val = {}", *iter);
 
     iter = seq.begin();
     auto noop_cast = seq.bit_cast_to_storage_unit<uint64_t>();
     JustLog("test val = {}", *iter);
-    noop_cast.advance_iter(iter, 1);
+    noop_cast.advance_iter(iter, 2);
     JustLog("test val = {}", *iter);
 
     uint8_t chunk = *down_cast.read_cptr(iter);

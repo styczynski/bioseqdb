@@ -102,6 +102,53 @@
     }
   },
 
+  "bench_aligners_repr_storage": {
+    "description": "Force the 32-bit (K=7 / MEDIUM) and 128-bit (K=27 / XL) MinimizerRepr storage variants. Smaller grid (3 algorithm rows) so the bucket finishes in minutes.",
+    "fast": true,
+    "concurrency": { "bench_lock": false, "concurrency": true },
+    "matrix": {
+      "for": { "REPR_STORAGE_K7_MEDIUM": 300, "REPR_STORAGE_K27_XL": 150 },
+      "over": {
+        "minimap2_dp": {},
+        "bioseq_ksw2_simd_dp_two_stack_nthash": {},
+        "bioseq_block_simd_dp_two_stack_nthash": {}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":            { "rules": [] },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "region_max_ns": {
+          "type": "region",
+          "region": "sort_run",
+          "rules": []
+        },
+        "match_count":              { "type": "evaluation" },
+        "primary_correct_fraction": {
+          "type": "evaluation",
+          "rules": [
+            [ "bioseq_ksw2_simd_dp_two_stack_nthash_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 1, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ],
+
+            [ "bioseq_block_simd_dp_two_stack_nthash_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_block_simd_dp_two_stack_nthash" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 1, "aggregate": "p50" },
+              { "key": "minimap2_dp" } ]
+          ]
+        },
+        "mean_position_offset_bp":  { "type": "evaluation" }
+      }
+    }
+  },
+
   "regression_rules": [
     {
       "name": "wall_clock_p50_no_blowup",

@@ -863,9 +863,19 @@ inline void iterate_sequence_bp_simd_offsets(
  *         offsets,                  // std::array<size_t, MaxLanes(d) * NumStreams>
  *         d,                        // ScalableTag<storage_unit>
  *         live_mask,                // hn::Mask<D>, full_mask in full-chunk pass,
- *                                   // transitions full → left → none in tail
- *         bp_streams                // std::array<hn::Vec<D>, NumStreams>
+ *                                   //   transitions full → left → none in tail
+ *         bp_v                      // vec_stream<D, ST, NumStreams>, by value
  *     );
+ *
+ * Phase-4 ABI change: BPs are bundled into a `vec_stream<D, ST, NumStreams>`
+ * and passed BY VALUE to `handler_fn`. With `[[clang::trivial_abi]]` on
+ * `vec_stream` (16-byte HVA on M1 NEON for W=2), the call still uses the
+ * V0/V1 NEON registers the parameter-pack form used in Phase-3, so the
+ * register-safety contract (Phase-1) is preserved. Pre-Phase-4 the call
+ * site expanded the bundle to a parameter pack via `index_sequence` —
+ * removed because v2's caller (`two_stacks_minimizers`) was repacking it
+ * into the same bundle on the receiving side, so the unpack→repack was
+ * pure boilerplate that obscured the data flow.
  *
  * Lane-count discipline (CODE_STYLE.md §2):
  *   - `lanes_per_stream`     = hn::Lanes(d)              [runtime]
@@ -891,14 +901,14 @@ inline void iterate_sequence_bp_simd_offsets(
 template<
 	size_t NumStreams,
 	typename... delays_ts,
-	supports_compact_sequence_range R,
+	supports_compact_sequence_bitcast_view View,
 	typename handler_fn_t,
 	typename finish_fn_t,
-	typename I = decltype(compact_sequence_range<R>().begin())
+	typename I = typename View::iterator
 >
 [[gnu::always_inline]] [[gnu::flatten]] inline void
 iterate_sequence_bp_simd_v2(
-	const compact_sequence_range<R>& seq,
+	const View& seq,
 	const I& begin,
 	const I& end,
 	const size_t context_bps,
@@ -906,7 +916,7 @@ iterate_sequence_bp_simd_v2(
 	finish_fn_t&& finish_fn,
 	delays_ts... delays
 ) {
-	using seq_traits = compact_sequence_range<R>::traits;
+	using seq_traits = typename View::traits;
 	constexpr size_t delays_count = sizeof...(delays);
 
 	static_assert(delays_count == 0,
@@ -929,16 +939,26 @@ iterate_sequence_bp_simd_v2(
 		return;
 	}
 
-	const hn::ScalableTag<typename seq_traits::storage_unit> d;
-	using vec_t      = hn::Vec<decltype(d)>;
-	using vec_mask_t = hn::Mask<decltype(d)>;
-	using matrix     = square_lane_matrix<decltype(d)>;
+	// Use the non-cv-qualified tag here; vec_stream's lifted ops deduce
+	// `D` via `deduce_tag` which strips cv (vector_stream.cppm line ~310),
+	// so a `vec_stream<const ScalableTag<…>, …>` declaration would not
+	// match the type returned by lift_op. `d` itself stays non-const so
+	// `square_lane_matrix<d_unq_t>::transpose(D& d)` (and friends) bind
+	// without const-dance — matching what `iterate_sequence_bp_simd_offsets`
+	// (v1) achieves via `decltype(d)` propagation.
+	using d_unq_t      = hn::ScalableTag<typename seq_traits::storage_unit>;
+	using vec_t        = hn::Vec<d_unq_t>;
+	using vec_mask_t   = hn::Mask<d_unq_t>;
+	using matrix       = square_lane_matrix<d_unq_t>;
+	using vec_stream_t = vec_stream<d_unq_t,
+		typename seq_traits::storage_unit, NumStreams>;
+	d_unq_t d;
 
 	const vec_t bp_bitmask_vec = hn::Set(d, seq_traits::char_mask);
 	auto iter = begin;
 
 	const size_t lanes_per_stream             = hn::Lanes(d);
-	constexpr size_t max_lanes_per_stream     = hn::MaxLanes(decltype(d){});
+	constexpr size_t max_lanes_per_stream     = hn::MaxLanes(d_unq_t{});
 	const size_t total_lanes                  = lanes_per_stream * NumStreams;
 	constexpr size_t total_max_lanes          = max_lanes_per_stream * NumStreams;
 
@@ -1006,24 +1026,22 @@ iterate_sequence_bp_simd_v2(
 
 	// (5) Full-chunk fast path.
 	//
-	// Phase-3 cleanup: per-row state lives in a `vec_stream<D, ST, NumStreams>`
-	// bundle; `handler_fn` is still called with BP vectors expanded as
-	// POSITIONAL parameter-pack arguments (Phase-1 lesson — passing a
-	// std::array reference forces stack spill on M1 NEON; the parameter-pack
-	// ABI puts each bp_v[s] in V0/V1 NEON registers). The bundle is
-	// scalar-replaced inside this helper because the [[gnu::always_inline]]
-	// + [[gnu::flatten]] annotations let SROA see through the std::array
-	// storage at compile time for W ∈ {1, 2}.
-	// Use the non-cv-qualified tag here; vec_stream's lifted ops deduce
-	// `D` via `deduce_tag` which strips cv (vector_stream.cppm line ~310),
-	// so a `vec_stream<const ScalableTag<…>, …>` declaration would not
-	// match the type returned by lift_op.
-	using d_unq_t = hn::ScalableTag<typename seq_traits::storage_unit>;
-	using vec_stream_t = vec_stream<d_unq_t,
-		typename seq_traits::storage_unit, NumStreams>;
+	// Phase-4 cleanup: per-row state lives in a `vec_stream<D, ST, NumStreams>`
+	// bundle, AND `handler_fn` receives the bundle directly (by value, HVA-
+	// passed in V0/V1 NEON registers). The Phase-3 unpack→repack at the
+	// handler boundary is gone because the only caller (`two_stacks_minimizers`)
+	// repacked the parameter pack into the same bundle on receipt — pure
+	// boilerplate that obscured the data flow. The bundle is scalar-replaced
+	// inside the impl because the [[gnu::always_inline]] + [[gnu::flatten]]
+	// annotations let SROA see through the std::array storage at compile
+	// time for W ∈ {1, 2}.
 	for (size_t chunk_no = 0; chunk_no < full_chunks_count; ++chunk_no) {
 		// Per-stream matrix construction + fill (compile-time unrolled).
-		for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+		// `for_each_stream<W>` is a `vec_stream`-namespaced alias for the
+		// `for_each_index<W>` pattern, signalling that the body iterates
+		// over stream slots (the matrix builder isn't a vec_stream lift —
+		// each stream gets its own raw `square_lane_matrix`).
+		for_each_stream<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
 			constexpr size_t s = decltype(stream_idx_const)::value;
 			matrix(raw_matrix_storage[s].data())
 				.fill_with_offsets(d, offsets_per_stream[s],
@@ -1031,41 +1049,47 @@ iterate_sequence_bp_simd_v2(
 		});
 		// Advance iter ONCE per chunk — every stream shares the starting
 		// position; the offsets-per-stream slices encode per-stream stride.
-		iter += lanes_per_stream;
+		// `View::advance_iter` is the view-aware iterator step: for plain
+		// `compact_sequence_range<R>` this is `iter += n`; for a
+		// `bit_casted_view<…>` it scales by `cast_ratio` so we step by the
+		// right number of base-iter increments per `n` view-units.
+		View::advance_iter(iter, lanes_per_stream);
 		// Per-stream transpose.
-		for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+		for_each_stream<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
 			constexpr size_t s = decltype(stream_idx_const)::value;
 			matrix(raw_matrix_storage[s].data()).transpose(d);
 		});
 
 		for (size_t row_index = 0; row_index < lanes_per_stream;
 		     ++row_index) {
-			// Build the row bundle via array-pack construction (per the
-			// prompt's "use array constructor + integer sequence" hint).
-			// Direct const-init avoids the construct-then-assign pattern.
-			vec_stream_t row = [&]<size_t... S>(std::index_sequence<S...>) {
-				return vec_stream_t::pack(raw_matrix_storage[S][row_index]...);
-			}(std::make_index_sequence<NumStreams>{});
+			// Pack the row vec_t from each per-stream matrix into a single
+			// vec_stream. `make_vec_stream_from_per_stream` is the
+			// vector_stream.cppm helper that wraps the index_sequence + pack
+			// IIFE so it stays one expression here.
+			vec_stream_t row = make_vec_stream_from_per_stream<
+				d_unq_t, typename seq_traits::storage_unit, NumStreams>(
+					raw_matrix_storage, row_index);
 
 			constexpr size_t lpu = seq_traits::letters_per_unit;
 			for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
 				const vec_stream_t bp_v = And(row, bp_bitmask_vec);
 				row = ShiftRight<seq_traits::bits_per_char>(row);
-				// Expand the bundle BACK into a parameter pack to keep the
-				// handler ABI register-safe (Phase-1 contract).
-				[&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
-					handler_fn(std::bool_constant<true>{},
-						offsets, d, full_mask, bp_v[S]...);
-				}(std::make_index_sequence<NumStreams>{});
+				handler_fn(std::bool_constant<true>{},
+					offsets, d, full_mask, bp_v);
 			}
 		}
 	}
 
-	// (6) Partial-chunk tail.
-	for_each_index<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
+	// (6) Partial-chunk tail. `View::view_distance(iter, end)` returns the
+	// remaining storage units in *view* terms — for plain compact ranges
+	// this is the raw `end - iter`, for a `bit_casted_view<…>` it scales
+	// by `cast_ratio` so partial_fill_with_offsets sees the correct
+	// per-row availability.
+	const size_t partial_units_remaining = View::view_distance(iter, end);
+	for_each_stream<NumStreams>([&](auto stream_idx_const) [[gnu::always_inline]] {
 		constexpr size_t s = decltype(stream_idx_const)::value;
 		matrix(raw_matrix_storage[s].data())
-			.partial_fill_with_offsets(d, end - iter,
+			.partial_fill_with_offsets(d, partial_units_remaining,
 				offsets_per_stream[s], seq.read_cptr(iter));
 		matrix(raw_matrix_storage[s].data()).transpose(d);
 	});
@@ -1087,18 +1111,16 @@ iterate_sequence_bp_simd_v2(
 	// Tail loop. Same body shape as the full-chunk fast path but with
 	// `main_counter` bookkeeping for the full → left → none mask transitions.
 	for (size_t row_index = 0; row_index < lanes_per_stream; ++row_index) {
-		vec_stream_t row = [&]<size_t... S>(std::index_sequence<S...>) {
-			return vec_stream_t::pack(raw_matrix_storage[S][row_index]...);
-		}(std::make_index_sequence<NumStreams>{});
+		vec_stream_t row = make_vec_stream_from_per_stream<
+			d_unq_t, typename seq_traits::storage_unit, NumStreams>(
+				raw_matrix_storage, row_index);
 
 		constexpr size_t lpu = seq_traits::letters_per_unit;
 		for (size_t bp_index = 0; bp_index < lpu; ++bp_index) {
 			const vec_stream_t bp_v = And(row, bp_bitmask_vec);
 			row = ShiftRight<seq_traits::bits_per_char>(row);
-			[&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
-				handler_fn(std::bool_constant<false>{},
-					offsets, d, main_mask, bp_v[S]...);
-			}(std::make_index_sequence<NumStreams>{});
+			handler_fn(std::bool_constant<false>{},
+				offsets, d, main_mask, bp_v);
 
 			++main_counter;
 			if (main_counter == main_counter_none) {

@@ -744,6 +744,46 @@ requires (is_mask_stream_v<A>)
     return out;
 }
 
+/// Per-stream compile-time loop over the W streams of a stream-shaped layout.
+/// Use this when you need to do something *per stream* that doesn't fit the
+/// `lifted` machinery (e.g. invoke a per-stream non-`vec_stream` matrix
+/// builder, run scalar bookkeeping per stream during emit). Just an alias for
+/// `for_each_index<W>` — the rename signals that the loop body is iterating
+/// over stream slots so callers don't have to reach for `bioseq_simd.utils`
+/// just for the index loop.
+template <size_t W, typename F>
+[[gnu::always_inline]] HWY_INLINE
+constexpr void for_each_stream(F&& fn) {
+    for_each_index<W>(std::forward<F>(fn));
+}
+
+/// Build a `vec_stream<D, ST, W>` whose slot S holds `factory(ic<S>{})`. The
+/// factory is invoked W times with `std::integral_constant<size_t, S>` so each
+/// slot can resolve at compile time. Centralises the index_sequence + pack
+/// construction pattern so callers don't repeat the IIFE — see also
+/// `make_vec_stream_from_per_stream` for the common matrix-row case.
+template <class D, typename ST, size_t W, typename Factory>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto make_vec_stream(Factory&& factory) noexcept {
+    return [&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
+        return vec_stream<D, ST, W>::pack(
+            factory(std::integral_constant<size_t, S>{})...);
+    }(std::make_index_sequence<W>{});
+}
+
+/// Pack one row out of a `std::array<std::array<vec_t, MaxLanes>, W>` matrix
+/// bundle into a `vec_stream`. The outer array indexes the stream, the inner
+/// array indexes the row within that stream's matrix. Inlined to a single
+/// `pack(...)` expression — no runtime loop.
+template <class D, typename ST, size_t W, typename PerStreamMatrix>
+[[nodiscard, gnu::always_inline]] HWY_INLINE
+auto make_vec_stream_from_per_stream(
+    PerStreamMatrix const& per_stream_matrix, size_t row_index) noexcept {
+    return make_vec_stream<D, ST, W>([&](auto s_const) [[gnu::always_inline]] {
+        return per_stream_matrix[decltype(s_const)::value][row_index];
+    });
+}
+
 }  // namespace bioseq::simd::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
