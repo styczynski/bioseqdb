@@ -149,6 +149,51 @@
     }
   },
 
+  "bench_aligners_rmq_repro": {
+    "description": "Pinned (LONG, CCS) seed that previously segfaulted on bioseq-RMQ chaining (AVL rebalance bug, fixed in chaining_rmq.cppm). One row, asserts non-zero match count.",
+    "fast": true,
+    "concurrency": { "bench_lock": false, "concurrency": true },
+    "matrix": {
+      "for": { "RMQ_REPRO_LONG_CCS": 100 },
+      "over": { "bioseq_ksw2_rmq_scalar_mm": {}, "minimap2_rmq": {} },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "rmq_bioseq_ksw2_rmq_scalar_mm_wall_clock_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_rmq_scalar_mm" },
+              { "compare": "<", "threshold%": 0, "tolerance%": 8, "aggregate": "p50" },
+              { "key": "minimap2_rmq" } ]
+          ]
+        },
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "rmq_bioseq_ksw2_rmq_scalar_mm_correct_fraction_no_worse_than_minimap2",
+              { "key": "bioseq_ksw2_rmq_scalar_mm" },
+              { "compare": ">", "threshold%": 0, "tolerance%": 1, "aggregate": "p50" },
+              { "key": "minimap2_rmq" } ]
+          ]
+        },
+        "primary_correct_fraction": { "type": "evaluation", "rules": [] },
+        "mean_position_offset_bp":  { "type": "evaluation", "rules": [] },
+        "region_total_ns": {
+          "type": "region",
+          "rules": []
+        },
+        "region_visits": {
+          "type": "region",
+          "rules": []
+        },
+        "region_max_ns": {
+          "type": "region",
+          "region": "sort_run",
+          "rules": []
+        }
+      }
+    }
+  },
+
   "regression_rules": [
     {
       "name": "wall_clock_p50_no_blowup",
