@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: chartscii
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            artifact: chartscii-linux-x64
+          - os: ubuntu-latest
+            target: linux-arm64
+            artifact: chartscii-linux-arm64
+          - os: macos-latest
+            target: darwin-x64
+            artifact: chartscii-darwin-x64
+          - os: macos-latest
+            target: darwin-arm64
+            artifact: chartscii-darwin-arm64
+          - os: windows-latest
+            target: windows-x64
+            artifact: chartscii-windows-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build TypeScript
+        run: bun run build
+
+      - name: Compile standalone binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          if [[ "${{ matrix.target }}" == *"arm64"* ]]; then
+            bun build ./dist/cli.js --compile --target=bun-${{ matrix.target }} --outfile=${{ matrix.artifact }}
+          else
+            bun build ./dist/cli.js --compile --target=bun-${{ matrix.target }} --outfile=${{ matrix.artifact }}
+          fi
+
+      - name: Compile standalone binary (Windows)
+        if: runner.os == 'Windows'
+        run: bun build ./dist/cli.js --compile --target=bun-${{ matrix.target }} --outfile=${{ matrix.artifact }}.exe
+
+      - name: Create tarball (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x ${{ matrix.artifact }}
+          tar -czvf ${{ matrix.artifact }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Create zip (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path "${{ matrix.artifact }}.exe" -DestinationPath "${{ matrix.artifact }}.zip"
+
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.tar.gz
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
+          ls -la release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+
+  publish-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Update Homebrew formula
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: tool3/homebrew-tap
+          event-type: update-formula
+          client-payload: |
+            {
+              "formula": "chartscii",
+              "version": "${{ steps.version.outputs.version }}",
+              "repo": "tool3/chartscii-cli"
+            }

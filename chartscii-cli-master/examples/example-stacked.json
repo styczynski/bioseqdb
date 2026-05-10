@@ -1,0 +1,37 @@
+[
+    {
+      "label": "JavaScript",
+      "value": [46, 11, 10],
+      "color": "red"
+    },
+    {
+      "label": "Markdown",
+      "value": [38, 11, 10],
+      "color": "green"
+    },
+    {
+      "label": "TypeScript",
+      "value": [56, 11, 10],
+      "color": ["blue", "green", "red"]
+    },
+    {
+      "label": "HTML",
+      "value": [22, 11, 10],
+      "color": "pink"
+    },
+    {
+      "label": "YAML",
+      "value": [43, 11, 10],
+      "color": "purple"
+    },
+    {
+      "label": "JSON",
+      "value": [87, 11, 10],
+      "color": "yellow"
+    },
+    {
+      "label": "Bash",
+      "value": [78, 11, 10],
+      "color": "marine"
+    }
+  ]

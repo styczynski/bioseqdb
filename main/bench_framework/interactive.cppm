@@ -115,10 +115,20 @@ inline constexpr int                      kBodySeparatorRows        = 2;
 
 // ---------- V18 (BENCH_V18_IMPL_DESIGN.md §2.1, §3.x, §4.3) ----------
 inline constexpr std::size_t              kPerRegionPanelMinCols    = 52;
-inline constexpr std::size_t              kPerRegionPanelTargetCols = 64;
-inline constexpr std::size_t              kPerRegionPanelMaxCols    = 100;
+// User-extension over V18 design baseline: the docked panel target
+// width was widened from 64 → 128 cells so dense per-region rows
+// (≥ 6 regions × ~10-cell values) display side-by-side without
+// crowding out the chart. The per-frame width clamp keeps it within
+// `[kPerRegionPanelMinCols, kPerRegionPanelMaxCols]`.
+inline constexpr std::size_t              kPerRegionPanelTargetCols = 128;
+inline constexpr std::size_t              kPerRegionPanelMaxCols    = 160;
 inline constexpr std::size_t              kChartMinRows             = 10;
 inline constexpr std::size_t              kChartTargetRows          = 14;
+/// V18 user-extension §6.5 — minimum chart rows reserved when the
+/// panel must show both the per-region table AND the chart. Anything
+/// below this in available chart rows triggers table pagination
+/// (the `p` key advances pages before transitioning to Step mode).
+inline constexpr std::size_t              kChartReservedRows        = 16;
 inline constexpr std::size_t              kPerRegionBracketCells    = 3;     // §3.6 rule 6
 inline constexpr std::size_t              kPivotMinPanelInnerCols   = 24;    // §3.1 rule 5
 inline constexpr std::size_t              kRegionBarMaxCellWidth    = 8;     // §4.3
@@ -1096,6 +1106,13 @@ struct ChartFocus {
     /// Canonical algorithm string when `mode == Step` (§6.1).
     /// Empty in Stacked mode.
     std::string  step_algo_canonical{};
+    /// V18 user-extension: when the per-region table can't fit every
+    /// algorithm while still leaving room for the chart, the table is
+    /// paginated. `table_page` is the 0-based page shown when
+    /// `mode == Stacked`. The `p` key advances `table_page` until the
+    /// last page, then transitions to `Mode::Step` and starts the
+    /// algorithm cycle from the beginning.
+    std::size_t  table_page = 0;
 };
 
 /// V18 §2.3 — pinned per-region focus.
@@ -3363,43 +3380,39 @@ struct TableLayout {
     }
     layout.per_algo_rows.assign(rows.size(), 1u);
     if (!layout.pivot) return layout;
-    constexpr std::size_t kInterChunkSpace = 3;
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        const auto& row = rows[i];
-        // Row min/max scan for marker presence.
-        double row_min = std::numeric_limits<double>::infinity();
-        double row_max = -std::numeric_limits<double>::infinity();
-        std::size_t min_pos = 0, max_pos = 0;
-        bool any_finite = false;
-        for (std::size_t r = 0; r < num_columns; ++r) {
-            const double v = row.values_focus[r];
-            if (!std::isfinite(v)) continue;
-            any_finite = true;
-            if (v < row_min) { row_min = v; min_pos = r; }
-            if (v > row_max) { row_max = v; max_pos = r; }
-        }
-        const bool show_markers = any_finite && row_min != row_max;
-        std::size_t chunks_lines = 1;
-        std::size_t current_width = 1;
-        for (std::size_t r = 0; r < num_columns; ++r) {
+    // Pivot mode renders every chunk at a UNIFORM width (max chunk
+    // width across all regions). Mirror the body's renderer exactly
+    // so the bracket gutter stays aligned with the wrapped chunks.
+    constexpr std::size_t kInterChunkSpace = 2;
+    constexpr std::size_t kMarkerSlot = 1;
+    constexpr std::size_t kColonSpaceCells = 2;
+    std::vector<std::size_t> col_value_width(num_columns, 0);
+    for (std::size_t r = 0; r < num_columns; ++r) {
+        for (const auto& row : rows) {
             const double v = row.values_focus[r];
             const auto value_text = std::isfinite(v)
                 ? format_metric_value(v, metric)
                 : std::string{gv.em_dash()};
-            const std::size_t marker = (show_markers
-                && std::isfinite(v)
-                && (r == min_pos || r == max_pos)) ? 1u : 0u;
-            const std::size_t cw = cell_width(region_universe[r]) + 2
-                + cell_width(value_text) + marker;
-            if (current_width > 1
-                && current_width + cw + kInterChunkSpace > panel_inner_cols)
-            {
-                ++chunks_lines;
-                current_width = 1;
-            }
-            current_width += cw + kInterChunkSpace;
+            col_value_width[r] = std::max(col_value_width[r], cell_width(value_text));
         }
-        layout.per_algo_rows[i] = 1u + chunks_lines;
+    }
+    std::size_t uniform_chunk_width = 0;
+    for (std::size_t r = 0; r < num_columns; ++r) {
+        const std::size_t per_chunk = cell_width(region_universe[r])
+            + kColonSpaceCells + col_value_width[r] + kMarkerSlot;
+        uniform_chunk_width = std::max(uniform_chunk_width, per_chunk);
+    }
+    const std::size_t cap_width = panel_inner_cols > 2
+        ? panel_inner_cols - 2 : panel_inner_cols;
+    if (uniform_chunk_width == 0 || uniform_chunk_width > cap_width) {
+        uniform_chunk_width = cap_width;
+    }
+    const std::size_t chunks_per_line = std::max<std::size_t>(1u,
+        (panel_inner_cols > 1 ? panel_inner_cols - 1 : panel_inner_cols)
+            / (uniform_chunk_width + kInterChunkSpace));
+    const std::size_t lines = (num_columns + chunks_per_line - 1) / chunks_per_line;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        layout.per_algo_rows[i] = 1u + std::max<std::size_t>(1u, lines);
     }
     return layout;
 }
@@ -3484,25 +3497,23 @@ extract_per_region_rows(const BenchmarkSnapshot& snap,
     return std::ceil(value_max / step) * step;
 }
 
-/// V18 §3.5 — per-region panel header text (bracket-and-pin badges
-/// applied by the renderer outside this helper).
+/// V18 §3.5 + user-extension — per-region panel header text. Includes
+/// the active metric name so the user always knows what the cells are
+/// measuring (bracket-and-pin badges applied by the renderer outside
+/// this helper).
 [[nodiscard]] inline std::string per_region_header_body(
     std::size_t focus_report_id, PerRegionAggregate aggregate,
-    ValueDisplayMode mode) noexcept
+    ValueDisplayMode mode, std::string_view metric) noexcept
 {
-    if (mode == ValueDisplayMode::Concrete) {
-        return fmt::format("R{} \xc2\xb7 aggr={}",
-                            focus_report_id, aggregate_label(aggregate));
-    }
+    const std::string base = fmt::format("R{} \xc2\xb7 metric={} \xc2\xb7 aggr={}",
+        focus_report_id, std::string{metric}, aggregate_label(aggregate));
+    if (mode == ValueDisplayMode::Concrete) return base;
     if (mode == ValueDisplayMode::DeltaCurrent) {
         // Note A: per-region cells stay concrete in DeltaCurrent.
-        return fmt::format("R{} \xc2\xb7 aggr={} \xc2\xb7 concrete; main: {}",
-                            focus_report_id, aggregate_label(aggregate),
-                            std::string{mode_label(mode)});
+        return fmt::format("{} \xc2\xb7 concrete; main: {}",
+                            base, std::string{mode_label(mode)});
     }
-    return fmt::format("R{} \xc2\xb7 aggr={} \xc2\xb7 {}",
-                        focus_report_id, aggregate_label(aggregate),
-                        std::string{mode_label(mode)});
+    return fmt::format("{} \xc2\xb7 {}", base, std::string{mode_label(mode)});
 }
 
 /// V18 §3.1 — render the per-region table contents (without the
@@ -3653,27 +3664,77 @@ extract_per_region_rows(const BenchmarkSnapshot& snap,
         }
         return vbox(std::move(rendered_rows));
     }
-    // Pivot mode (§3.1 rule 4): two rows per algorithm. When inline
-    // chunks would overflow `panel_inner_cols`, wrap onto a second
-    // line so the algorithm row spans up to 3 terminal rows.
+    // Pivot mode (§3.1 rule 4): per-algorithm label row + region/value
+    // chunks row(s). Every chunk renders at a UNIFORM width (max
+    // across all regions of label + ": " + max-value-width + marker)
+    // so each wrap position is column-aligned across rows AND across
+    // rows of different lines (true grid). Region labels and values
+    // are right-padded inside their chunk so the user reads
+    // `regname: value` columns vertically.
     Elements rendered_rows;
     const bool smaller = metric_smaller_is_better(metric);
+    auto value_text_for = [&](double v) noexcept -> std::string {
+        return std::isfinite(v) ? format_metric_value(v, metric)
+                                : std::string{gv.em_dash()};
+    };
+    // Per-region max value width (excluding label/colon/marker —
+    // those slots are added below and constant per region).
+    std::vector<std::size_t> col_value_width(num_columns, 0);
+    for (std::size_t r = 0; r < num_columns; ++r) {
+        for (const auto& row : rows) {
+            col_value_width[r] = std::max(col_value_width[r],
+                cell_width(value_text_for(row.values_focus[r])));
+        }
+    }
+    constexpr std::size_t kMarkerSlot = 1;
+    constexpr std::size_t kColonSpaceCells = 2;
+    // Single uniform chunk width across every region. Chunks of
+    // shorter regions get right-padded (a space pad after the value
+    // / marker) so the next line's leftmost chunk lines up column-
+    // for-column with this line's leftmost chunk.
+    std::size_t uniform_chunk_width = 0;
+    for (std::size_t r = 0; r < num_columns; ++r) {
+        const std::size_t per_chunk = cell_width(region_universe[r])
+            + kColonSpaceCells + col_value_width[r] + kMarkerSlot;
+        uniform_chunk_width = std::max(uniform_chunk_width, per_chunk);
+    }
+    // Cap uniform width so we never produce an unrenderable
+    // 200-cell chunk on a 64-cell panel. Anything that would have
+    // exceeded `panel_inner_cols - 2` shrinks to a 1-region-per-line
+    // layout but still aligns vertically within that single column.
+    const std::size_t cap_width = panel_inner_cols > 2
+        ? panel_inner_cols - 2 : panel_inner_cols;
+    if (uniform_chunk_width == 0 || uniform_chunk_width > cap_width) {
+        uniform_chunk_width = cap_width;
+    }
     auto build_chunk = [&](std::size_t r, double v, std::string marker,
                            Color marker_color) noexcept -> Elements {
+        const auto value_text = value_text_for(v);
+        const std::size_t value_pad = col_value_width[r] > cell_width(value_text)
+            ? col_value_width[r] - cell_width(value_text) : 0u;
+        const std::size_t inner_used = cell_width(region_universe[r])
+            + kColonSpaceCells + col_value_width[r] + kMarkerSlot;
+        const std::size_t outer_pad = uniform_chunk_width > inner_used
+            ? uniform_chunk_width - inner_used : 0u;
         Elements chunk;
         chunk.push_back(text(fmt::format("{}: ", region_universe[r]))
             | color(region_colour(palette_indices[r])));
-        chunk.push_back(text(std::isfinite(v) ? format_metric_value(v, metric)
-                                              : std::string{gv.em_dash()}));
-        if (!marker.empty()) chunk.push_back(text(marker) | color(marker_color) | bold);
+        chunk.push_back(text(std::string(value_pad, ' ')));
+        chunk.push_back(text(value_text));
+        if (marker.empty()) {
+            chunk.push_back(text(" "));
+        } else {
+            chunk.push_back(text(marker) | color(marker_color) | bold);
+        }
+        if (outer_pad > 0) {
+            chunk.push_back(text(std::string(outer_pad, ' ')));
+        }
         return chunk;
     };
-    auto chunk_width = [&](std::size_t r, double v, const std::string& marker) noexcept {
-        const auto value_text = std::isfinite(v) ? format_metric_value(v, metric)
-                                                  : std::string{gv.em_dash()};
-        return cell_width(region_universe[r]) + 2 + cell_width(value_text)
-             + (marker.empty() ? 0u : 1u);
-    };
+    constexpr std::size_t kInterChunkSpace = 2;
+    const std::size_t chunks_per_line = std::max<std::size_t>(1u,
+        (panel_inner_cols > 1 ? panel_inner_cols - 1 : panel_inner_cols)
+            / (uniform_chunk_width + kInterChunkSpace));
     for (const auto& row : rows) {
         rendered_rows.push_back(text(row.short_label) | dim);
         double row_min = std::numeric_limits<double>::infinity();
@@ -3688,17 +3749,16 @@ extract_per_region_rows(const BenchmarkSnapshot& snap,
             if (v > row_max) { row_max = v; max_pos = r; }
         }
         const bool show_markers = any_finite && row_min != row_max;
-        constexpr std::size_t kInterChunkSpace = 3;
         Elements current_line;
         current_line.push_back(text(" "));
-        std::size_t current_width = 1;
+        std::size_t chunks_in_line = 0;
         auto flush_line = [&]() noexcept {
             if (current_line.size() > 1) {
                 rendered_rows.push_back(hbox(std::move(current_line)));
             }
             current_line = Elements{};
             current_line.push_back(text(" "));
-            current_width = 1;
+            chunks_in_line = 0;
         };
         for (std::size_t r = 0; r < num_columns; ++r) {
             const double v = row.values_focus[r];
@@ -3713,13 +3773,11 @@ extract_per_region_rows(const BenchmarkSnapshot& snap,
                     marker_color = smaller ? Color::Red : Color::Green;
                 }
             }
-            const std::size_t cw = chunk_width(r, v, marker);
-            const std::size_t needed = current_width + cw + kInterChunkSpace;
-            if (current_width > 1 && needed > panel_inner_cols) flush_line();
+            if (chunks_in_line >= chunks_per_line) flush_line();
             auto chunk = build_chunk(r, v, marker, marker_color);
             for (auto& el : chunk) current_line.push_back(std::move(el));
             current_line.push_back(text(std::string(kInterChunkSpace, ' ')));
-            current_width += cw + kInterChunkSpace;
+            ++chunks_in_line;
         }
         flush_line();
     }
@@ -4277,22 +4335,63 @@ chart_focus_for_const(const UiState& ui, const UiViewKey& key) noexcept {
     return it == ui.chart_focus_per_view.end() ? nullptr : &it->second;
 }
 
-/// V18 §6.1 — advance the chart-mode state machine forward (`p`)
-/// or backward (`P`). Returns the notification string to surface.
+/// V18 user-extension — compute how many algorithm rows fit in the
+/// per-region table while still reserving `kChartReservedRows` for the
+/// chart below. Returns at least 1 so the panel can always show one
+/// algorithm. `pivot_estimate == true` halves the budget because pivot
+/// rows span ≥ 2 terminal rows each (§3.1 rule 4).
+[[nodiscard]] inline std::size_t compute_algos_per_page(
+    std::size_t panel_total_rows, bool pivot_estimate) noexcept
+{
+    constexpr std::size_t kPanelHeaderRows = 3;     // header + separator + spacer
+    constexpr std::size_t kBracketSlackRows = 1;    // legend / blank line
+    const std::size_t reserve = kPanelHeaderRows + kChartReservedRows + kBracketSlackRows;
+    const std::size_t available = panel_total_rows > reserve
+        ? panel_total_rows - reserve : 0;
+    const std::size_t per_algo = pivot_estimate ? 2u : 1u;
+    return std::max<std::size_t>(1u, available / per_algo);
+}
+
+/// V18 user-extension — total page count for `num_algos` rendered at
+/// `algos_per_page` per page. Always ≥ 1 so empty / single-algo cases
+/// don't divide-by-zero downstream.
+[[nodiscard]] inline std::size_t compute_total_pages(
+    std::size_t num_algos, std::size_t algos_per_page) noexcept
+{
+    if (algos_per_page == 0) return 1;
+    if (num_algos == 0)      return 1;
+    return (num_algos + algos_per_page - 1) / algos_per_page;
+}
+
+/// V18 §6.1 + user-extension — advance the chart-mode state machine
+/// forward (`p`) or backward (`P`). When `total_pages > 1` the cycle
+/// walks through Stacked-mode table pages BEFORE transitioning to
+/// Step mode (and reverses correctly for backward).
+///
+/// Returns the notification string to surface; format encodes the
+/// current state including `[page i/n]` when multi-page.
 [[nodiscard]] inline std::string
 cycle_chart_mode(ChartFocus& focus,
                   const std::vector<std::string>& alg_canonicals,
+                  std::size_t total_pages,
                   bool forward) noexcept
 {
     if (alg_canonicals.empty()) {
         focus.mode = ChartFocus::Mode::Stacked;
         focus.step_algo_canonical.clear();
+        focus.table_page = 0;
         return std::string{kNotifChartModeStacked};
     }
+    const std::size_t pages = std::max<std::size_t>(1u, total_pages);
     if (forward) {
         if (focus.mode == ChartFocus::Mode::Stacked) {
-            focus.mode = ChartFocus::Mode::Step;
-            focus.step_algo_canonical = alg_canonicals.front();
+            if (focus.table_page + 1 < pages) {
+                ++focus.table_page;
+            } else {
+                focus.mode = ChartFocus::Mode::Step;
+                focus.step_algo_canonical = alg_canonicals.front();
+                focus.table_page = 0;
+            }
         } else {
             const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(),
                                       focus.step_algo_canonical);
@@ -4301,14 +4400,20 @@ cycle_chart_mode(ChartFocus& focus,
             if (idx < 0 || idx + 1 == static_cast<std::ptrdiff_t>(alg_canonicals.size())) {
                 focus.mode = ChartFocus::Mode::Stacked;
                 focus.step_algo_canonical.clear();
+                focus.table_page = 0;
             } else {
                 focus.step_algo_canonical = alg_canonicals[static_cast<std::size_t>(idx + 1)];
             }
         }
     } else {
         if (focus.mode == ChartFocus::Mode::Stacked) {
-            focus.mode = ChartFocus::Mode::Step;
-            focus.step_algo_canonical = alg_canonicals.back();
+            if (focus.table_page > 0) {
+                --focus.table_page;
+            } else {
+                focus.mode = ChartFocus::Mode::Step;
+                focus.step_algo_canonical = alg_canonicals.back();
+                focus.table_page = 0;
+            }
         } else {
             const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(),
                                       focus.step_algo_canonical);
@@ -4317,12 +4422,17 @@ cycle_chart_mode(ChartFocus& focus,
             if (idx <= 0) {
                 focus.mode = ChartFocus::Mode::Stacked;
                 focus.step_algo_canonical.clear();
+                focus.table_page = pages > 0 ? pages - 1 : 0;
             } else {
                 focus.step_algo_canonical = alg_canonicals[static_cast<std::size_t>(idx - 1)];
             }
         }
     }
     if (focus.mode == ChartFocus::Mode::Stacked) {
+        if (pages > 1) {
+            return fmt::format("chart: stacked bars (page {}/{})",
+                focus.table_page + 1, pages);
+        }
         return std::string{kNotifChartModeStacked};
     }
     const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(),
@@ -4432,6 +4542,8 @@ resolve_perregion_focus(const UiState& ui, const BenchmarkSnapshot* /*unused*/,
     const BenchmarkSnapshot& focus_snap,
     std::size_t panel_inner_cols,
     std::size_t chart_rows,
+    std::size_t panel_total_rows,
+    bool omit_alg_column,
     const GlyphView& gv) noexcept
 {
     using namespace ftxui;
@@ -4441,24 +4553,49 @@ resolve_perregion_focus(const UiState& ui, const BenchmarkSnapshot* /*unused*/,
         });
     }
     const auto region_universe = region_universe_for(focus_snap, focus.test_case);
-    const auto rows = extract_per_region_rows(focus_snap, focus.test_case,
+    const auto all_rows = extract_per_region_rows(focus_snap, focus.test_case,
         focus.metric, region_universe, ui.per_region_aggregate);
+    UiViewKey view_key{UiViewKey::Kind::Report, focus.benchmark, focus.test_case, focus.metric};
+    const auto* focus_ptr = chart_focus_for_const(ui, view_key);
+    ChartFocus effective_focus = focus_ptr != nullptr ? *focus_ptr : ChartFocus{};
+    // V18 user-extension — table pagination. Slice `rows` for the
+    // current page (Stacked mode only); Step mode uses one algorithm
+    // anyway. Page size is derived from the actual panel height so the
+    // chart always has at least `kChartReservedRows` of vertical room.
+    const bool pivot_estimate = !region_universe.empty()
+        && panel_inner_cols < region_universe.size() * 6 + 2;
+    const std::size_t algos_per_page = compute_algos_per_page(panel_total_rows,
+        pivot_estimate);
+    const std::size_t total_pages = compute_total_pages(all_rows.size(),
+        algos_per_page);
+    const std::size_t safe_page = std::min(effective_focus.table_page,
+        total_pages > 0 ? total_pages - 1 : 0);
+    const std::size_t page_start = safe_page * algos_per_page;
+    const std::size_t page_end = std::min(all_rows.size(), page_start + algos_per_page);
+    std::vector<PerRegionRow> rows;
+    rows.reserve(page_end - page_start);
+    for (std::size_t i = page_start; i < page_end; ++i) rows.push_back(all_rows[i]);
     Elements parts;
+    if (total_pages > 1 && effective_focus.mode == ChartFocus::Mode::Stacked) {
+        parts.push_back(text(fmt::format(
+            "    Page {}/{} \xc2\xb7 algorithms {}-{} of {} \xc2\xb7 press 'p' for next",
+            safe_page + 1, total_pages, page_start + 1, page_end, all_rows.size()))
+            | color(Color::Yellow) | dim);
+    }
     parts.push_back(render_per_region_table_body(rows, region_universe,
         focus.metric, ui.per_region_aggregate,
-        /*omit_alg_column=*/false, panel_inner_cols, gv));
-    if (!any_finite_value(rows)) {
+        omit_alg_column, panel_inner_cols, gv));
+    if (!any_finite_value(all_rows)) {
         parts.push_back(text(""));
         parts.push_back(text("(no finite values in this report)") | dim);
         return vbox(std::move(parts));
     }
-    // Chart slot.
-    UiViewKey view_key{UiViewKey::Kind::Report, focus.benchmark, focus.test_case, focus.metric};
-    const auto* focus_ptr = chart_focus_for_const(ui, view_key);
-    ChartFocus effective_focus = focus_ptr != nullptr ? *focus_ptr : ChartFocus{};
     parts.push_back(text(""));
     if (effective_focus.mode == ChartFocus::Mode::Stacked) {
-        parts.push_back(render_stacked_bar_chart(rows, region_universe,
+        // Chart shows ALL algorithms (independent of paged table view)
+        // so the user can compare the page they're inspecting against
+        // the full picture.
+        parts.push_back(render_stacked_bar_chart(all_rows, region_universe,
             focus.metric, ui.per_region_aggregate, ui.selected_report_id,
             ui.value_mode, panel_inner_cols, chart_rows, gv));
     } else {
@@ -4722,7 +4859,8 @@ build_bracket_groups(const TableLayout& layout) noexcept
     const std::size_t chart_rows = panel_rows > 8 ? panel_rows - 8 : kChartMinRows;
     Elements parts;
     const std::string header_body = per_region_header_body(
-        ui.selected_report_id, ui.per_region_aggregate, ui.value_mode);
+        ui.selected_report_id, ui.per_region_aggregate, ui.value_mode,
+        focus_opt.has_value() ? focus_opt->metric : "");
     Elements header_parts;
     header_parts.push_back(text(std::string{gv.note_emoji()} + " ") | bold);
     header_parts.push_back(text(fmt::format("Per region \xe2\x80\x94 {}", header_body)) | bold);
@@ -4731,29 +4869,51 @@ build_bracket_groups(const TableLayout& layout) noexcept
     }
     parts.push_back(hbox(std::move(header_parts)));
     parts.push_back(separator());
-    // §3.6 — bracket gutter on the inboard edge + the inspector body.
+    // §3.6 + user-extension — bracket gutter on the inboard edge.
+    // Compute layout for the CURRENTLY-VISIBLE page only (the body
+    // renders only that page) so the gutter and table stay aligned.
     const std::size_t body_rows = panel_rows > 4 ? panel_rows - 4 : 4u;
-    // Build the bracket-group plan from the focused snapshot so each
-    // algorithm row in the per-region table is anchored by a `╭…╰`
-    // bracket in the gutter. Pivot-mode estimate: roughly when the
-    // panel is too narrow to show all regions at full width.
     const auto region_universe_pre = focus_opt.has_value()
         ? region_universe_for(*focus_snap, focus_opt->test_case)
         : std::vector<std::string>{};
-    const auto rows_pre = focus_opt.has_value()
+    const auto all_rows_pre = focus_opt.has_value()
         ? extract_per_region_rows(*focus_snap, focus_opt->test_case,
             focus_opt->metric, region_universe_pre, ui.per_region_aggregate)
         : std::vector<PerRegionRow>{};
+    const bool pivot_pre = !region_universe_pre.empty()
+        && panel_inner_cols < region_universe_pre.size() * 6 + 2;
+    const std::size_t algos_per_page_pre = compute_algos_per_page(panel_rows, pivot_pre);
+    const std::size_t total_pages_pre = compute_total_pages(all_rows_pre.size(),
+        algos_per_page_pre);
+    std::size_t page_pre = 0;
+    if (focus_opt.has_value()) {
+        UiViewKey vk{UiViewKey::Kind::Report, focus_opt->benchmark,
+            focus_opt->test_case, focus_opt->metric};
+        if (const auto* fp = chart_focus_for_const(ui, vk); fp != nullptr) {
+            page_pre = std::min(fp->table_page,
+                total_pages_pre > 0 ? total_pages_pre - 1 : 0);
+        }
+    }
+    const std::size_t page_start_pre = page_pre * algos_per_page_pre;
+    const std::size_t page_end_pre = std::min(all_rows_pre.size(),
+        page_start_pre + algos_per_page_pre);
+    std::vector<PerRegionRow> rows_pre;
+    rows_pre.reserve(page_end_pre - page_start_pre);
+    for (std::size_t i = page_start_pre; i < page_end_pre; ++i) {
+        rows_pre.push_back(all_rows_pre[i]);
+    }
     const auto layout = focus_opt.has_value()
         ? compute_table_layout(rows_pre, region_universe_pre, focus_opt->metric,
-            panel_inner_cols, /*omit_alg_column=*/true, gv)
+            panel_inner_cols, /*omit_alg_column=*/false, gv)
         : TableLayout{};
     const auto bracket_groups = build_bracket_groups(layout);
     parts.push_back(hbox({
         render_bracket_gutter(bracket_groups, body_rows, gv),
         text(" "),
         render_per_region_inspector_body(reload, ui, *focus_opt,
-            *focus_snap, panel_inner_cols, chart_rows, gv) | flex_grow,
+            *focus_snap, panel_inner_cols, chart_rows,
+            /*panel_total_rows=*/panel_rows,
+            /*omit_alg_column=*/false, gv) | flex_grow,
     }));
     return vbox(std::move(parts)) | borderRounded
         | size(WIDTH, EQUAL, static_cast<int>(panel_cols))
@@ -4877,7 +5037,8 @@ build_bracket_groups(const TableLayout& layout) noexcept
                                         == ui.focused_section_index;
                 const ResolvedFocus narrow_focus{bench_key, tc, active_metric};
                 const std::string header_body = per_region_header_body(
-                    ui.selected_report_id, ui.per_region_aggregate, ui.value_mode);
+                    ui.selected_report_id, ui.per_region_aggregate, ui.value_mode,
+                    active_metric);
                 const std::string base_label = fmt::format("{} Per region ({})",
                     gv.note_emoji(), header_body);
                 rows.push_back(render_section_header(gv, base_label,
@@ -4902,7 +5063,9 @@ build_bracket_groups(const TableLayout& layout) noexcept
                     rows.push_back(render_per_region_inspector_body(
                         reload, ui, narrow_focus, snap,
                         std::min(inner, kPerRegionPanelMaxCols),
-                        kChartTargetRows, gv));
+                        kChartTargetRows,
+                        /*panel_total_rows=*/kChartTargetRows + 12,
+                        /*omit_alg_column=*/false, gv));
                 }
             }
             // ---- Summary sub-section ----------------------------------
@@ -5611,7 +5774,8 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
                 std::string{aggregate_label(ui.per_region_aggregate)}));
             return true;
         }
-        // V18 §9.1 — p / P cycle chart mode.
+        // V18 §9.1 + user-extension — p / P cycle chart mode AND
+        // walk through Stacked-mode table pages before mode flip.
         if (event == Event::Character('p') || event == Event::Character('P')) {
             const bool forward = event == Event::Character('p');
             const auto resolved = resolve_perregion_focus(ui, nullptr, "");
@@ -5634,13 +5798,30 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
             UiViewKey view_key{UiViewKey::Kind::Report, resolved->benchmark,
                 resolved->test_case, resolved->metric};
             auto& focus = chart_focus_for(ui, view_key);
-            const auto note = cycle_chart_mode(focus, alg_canonicals, forward);
+            // Estimate the panel body height the renderer will see this
+            // frame so the page count matches what `render_*` will draw.
+            const int header_rows_est = reload.live_tmp_present.load(std::memory_order_acquire)
+                ? kHeaderRowsLive : kHeaderRowsBase;
+            const int footer_rows_est = footer_rows_for(ui.footer_state);
+            const std::size_t panel_total_rows = static_cast<std::size_t>(
+                std::max(1, screen.dimy() - header_rows_est - kBodySeparatorRows
+                          - footer_rows_est));
+            const auto region_uni = region_universe_for(*snap_opt, resolved->test_case);
+            const std::size_t panel_inner = kPerRegionPanelTargetCols
+                > 4 ? kPerRegionPanelTargetCols - 4 : 8;
+            const bool pivot_estimate = !region_uni.empty()
+                && panel_inner < region_uni.size() * 6 + 2;
+            const std::size_t algos_per_page = compute_algos_per_page(
+                panel_total_rows, pivot_estimate);
+            const std::size_t total_pages = compute_total_pages(
+                alg_canonicals.size(), algos_per_page);
+            const auto note = cycle_chart_mode(focus, alg_canonicals,
+                total_pages, forward);
             // Edge notifications for single-algo / single-region.
             if (alg_canonicals.size() == 1
                 && focus.mode == ChartFocus::Mode::Step) {
                 notify_user(ui, std::string{kNotifChartSingleAlgo});
             } else {
-                const auto region_uni = region_universe_for(*snap_opt, resolved->test_case);
                 std::size_t real_regions = 0;
                 for (const auto& reg : region_uni) {
                     if (reg != kAllRegionsKey) ++real_regions;
@@ -5927,7 +6108,14 @@ namespace bioseq::bench_framework::detail {
             main_pane_cols = main_pane_cols > panel_cols + 1
                 ? main_pane_cols - panel_cols - 1 : kPerRegionPanelMinCols;
         }
-        // Resolve focused per-region snapshot for wide-mode panel rendering.
+        // Render main pane FIRST so that `render_report_view`'s side
+        // effect of writing the new `last_frame_section_ids` lands
+        // before we resolve wide-mode focus from those ids. Otherwise
+        // a metric switch (`m`) shows the panel one frame stale —
+        // `resolve_perregion_focus` would consult yesterday's section
+        // IDs and pick the previous metric for one render.
+        ftxui::Element main_pane = render_main(reload, ui, gv, layout, main_pane_cols)
+            | ftxui::vscroll_indicator | ftxui::yframe | ftxui::flex_grow;
         std::optional<ResolvedFocus> wide_focus;
         BenchmarkSnapshot wide_snap;
         bool have_wide_snap = false;
@@ -5947,8 +6135,6 @@ namespace bioseq::bench_framework::detail {
                 }
             }
         }
-        ftxui::Element main_pane = render_main(reload, ui, gv, layout, main_pane_cols)
-            | ftxui::vscroll_indicator | ftxui::yframe | ftxui::flex_grow;
         if (ui.sidebar_visible && screen.dimx() >= static_cast<int>(kMinScreenCols)) {
             ftxui::Elements parts;
             parts.push_back(render_sidebar(reload, ui, git_log, gv));

@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 527.6 231.6" width="527.6" height="231.6">
+  <rect x="0" y="0" width="527.6" height="231.6" fill="#1e1e1e" rx="10" ry="10"/>
+  <g class="title-bar">
+    <circle cx="16" cy="20" r="6" fill="#ff5f56"/>
+    <circle cx="36" cy="20" r="6" fill="#ffbd2e"/>
+    <circle cx="56" cy="20" r="6" fill="#27c93f"/>
+  </g>
+  <g class="backgrounds">
+    <rect x="335.2" y="75.6" width="33.6" height="19.6" fill="#d70000"/>
+    <rect x="377.2" y="75.6" width="16.8" height="19.6" fill="#008000"/>
+    <rect x="402.4" y="75.6" width="58.8" height="19.6" fill="#ffff5f"/>
+    <rect x="469.6" y="75.6" width="42" height="19.6" fill="#000080"/>
+  </g>
+  <g class="glyphs">
+    <rect x="16" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="24.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="32.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="41.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="58" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="66.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="74.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="83.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="100" y="114.8" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="108.4" y="114.8" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="116.8" y="114.8" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="125.2" y="114.8" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="142" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="150.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="158.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="167.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="184" y="114.8" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="192.4" y="114.8" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="200.8" y="114.8" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="209.2" y="114.8" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="226" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="234.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="242.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="251.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="268" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="276.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="284.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="293.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="310" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="318.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="326.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="335.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="352" y="114.8" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="360.4" y="114.8" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="368.8" y="114.8" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="377.2" y="114.8" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="394" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="402.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="410.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="419.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="436" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="444.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="452.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="461.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="478" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="486.4" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="494.8" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="503.2" y="114.8" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="16" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="24.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="32.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="41.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="58" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="66.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="74.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="83.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="100" y="134.4" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="108.4" y="134.4" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="116.8" y="134.4" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="125.2" y="134.4" width="8.4" height="19.6" fill="#ffff5f" shape-rendering="crispEdges"/>
+    <rect x="142" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="150.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="158.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="167.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="184" y="134.4" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="192.4" y="134.4" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="200.8" y="134.4" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="209.2" y="134.4" width="8.4" height="19.6" fill="#d70000" shape-rendering="crispEdges"/>
+    <rect x="226" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="234.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="242.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="251.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="268" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="276.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="284.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="293.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="310" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="318.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="326.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="335.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="352" y="134.4" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="360.4" y="134.4" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="368.8" y="134.4" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="377.2" y="134.4" width="8.4" height="19.6" fill="#2472c8" shape-rendering="crispEdges"/>
+    <rect x="394" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="402.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="410.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="419.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="436" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="444.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="452.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="461.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="478" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="486.4" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="494.8" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+    <rect x="503.2" y="134.4" width="8.4" height="19.6" fill="#0dbc79" shape-rendering="crispEdges"/>
+  </g>
+  <g class="text">
+    <text y="70" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="14" xml:space="preserve"><tspan x="16" fill="#d4d4d4">Fleet Status</tspan></text>
+    <text y="89.6" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="14" xml:space="preserve"><tspan x="16" fill="#d4d4d4">                                      </tspan><tspan x="335.2" fill="#ffffff">down</tspan><tspan x="368.8" fill="#d4d4d4"> </tspan><tspan x="377.2" fill="#ffffff">ok</tspan><tspan x="394" fill="#d4d4d4"> </tspan><tspan x="402.4" fill="#000000">warning</tspan><tspan x="461.2" fill="#d4d4d4"> </tspan><tspan x="469.6" fill="#ffffff">maint</tspan></text>
+    <text y="109.2" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="14" xml:space="preserve"><tspan x="16" fill="#d4d4d4">                                                           </tspan></text>
+    <text y="128.8" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="14" xml:space="preserve"><tspan x="49.6" fill="#d4d4d4"> </tspan><tspan x="91.6" fill="#d4d4d4"> </tspan><tspan x="133.6" fill="#d4d4d4"> </tspan><tspan x="175.6" fill="#d4d4d4"> </tspan><tspan x="217.6" fill="#d4d4d4"> </tspan><tspan x="259.6" fill="#d4d4d4"> </tspan><tspan x="301.6" fill="#d4d4d4"> </tspan><tspan x="343.6" fill="#d4d4d4"> </tspan><tspan x="385.6" fill="#d4d4d4"> </tspan><tspan x="427.6" fill="#d4d4d4"> </tspan><tspan x="469.6" fill="#d4d4d4"> </tspan></text>
+    <text y="148.4" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="14" xml:space="preserve"><tspan x="49.6" fill="#d4d4d4"> </tspan><tspan x="91.6" fill="#d4d4d4"> </tspan><tspan x="133.6" fill="#d4d4d4"> </tspan><tspan x="175.6" fill="#d4d4d4"> </tspan><tspan x="217.6" fill="#d4d4d4"> </tspan><tspan x="259.6" fill="#d4d4d4"> </tspan><tspan x="301.6" fill="#d4d4d4"> </tspan><tspan x="343.6" fill="#d4d4d4"> </tspan><tspan x="385.6" fill="#d4d4d4"> </tspan><tspan x="427.6" fill="#d4d4d4"> </tspan><tspan x="469.6" fill="#d4d4d4"> </tspan></text>
+    <text y="168" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="14" xml:space="preserve"><tspan x="16" fill="#0dbc79">w</tspan><tspan x="24.4" fill="#0dbc79">e</tspan><tspan x="32.8" fill="#0dbc79">b</tspan><tspan x="41.2" fill="#0dbc79">1</tspan><tspan x="49.6" fill="#d4d4d4"> </tspan><tspan x="58" fill="#0dbc79">w</tspan><tspan x="66.4" fill="#0dbc79">e</tspan><tspan x="74.8" fill="#0dbc79">b</tspan><tspan x="83.2" fill="#0dbc79">2</tspan><tspan x="91.6" fill="#d4d4d4"> </tspan><tspan x="100" fill="#ffff5f">w</tspan><tspan x="108.4" fill="#ffff5f">e</tspan><tspan x="116.8" fill="#ffff5f">b</tspan><tspan x="125.2" fill="#ffff5f">3</tspan><tspan x="133.6" fill="#d4d4d4"> </tspan><tspan x="142" fill="#0dbc79">a</tspan><tspan x="150.4" fill="#0dbc79">p</tspan><tspan x="158.8" fill="#0dbc79">i</tspan><tspan x="167.2" fill="#0dbc79">1</tspan><tspan x="175.6" fill="#d4d4d4"> </tspan><tspan x="184" fill="#d70000">a</tspan><tspan x="192.4" fill="#d70000">p</tspan><tspan x="200.8" fill="#d70000">i</tspan><tspan x="209.2" fill="#d70000">2</tspan><tspan x="217.6" fill="#d4d4d4"> </tspan><tspan x="226" fill="#0dbc79">a</tspan><tspan x="234.4" fill="#0dbc79">p</tspan><tspan x="242.8" fill="#0dbc79">i</tspan><tspan x="251.2" fill="#0dbc79">3</tspan><tspan x="259.6" fill="#d4d4d4">  </tspan><tspan x="276.4" fill="#0dbc79">d</tspan><tspan x="284.8" fill="#0dbc79">b</tspan><tspan x="293.2" fill="#0dbc79">1</tspan><tspan x="301.6" fill="#d4d4d4">  </tspan><tspan x="318.4" fill="#0dbc79">d</tspan><tspan x="326.8" fill="#0dbc79">b</tspan><tspan x="335.2" fill="#0dbc79">2</tspan><tspan x="343.6" fill="#d4d4d4">  </tspan><tspan x="360.4" fill="#2472c8">d</tspan><tspan x="368.8" fill="#2472c8">b</tspan><tspan x="377.2" fill="#2472c8">3</tspan><tspan x="385.6" fill="#d4d4d4"> </tspan><tspan x="394" fill="#0dbc79">c</tspan><tspan x="402.4" fill="#0dbc79">d</tspan><tspan x="410.8" fill="#0dbc79">n</tspan><tspan x="419.2" fill="#0dbc79">1</tspan><tspan x="427.6" fill="#d4d4d4"> </tspan><tspan x="436" fill="#0dbc79">c</tspan><tspan x="444.4" fill="#0dbc79">d</tspan><tspan x="452.8" fill="#0dbc79">n</tspan><tspan x="461.2" fill="#0dbc79">2</tspan><tspan x="469.6" fill="#d4d4d4"> </tspan><tspan x="478" fill="#0dbc79">c</tspan><tspan x="486.4" fill="#0dbc79">d</tspan><tspan x="494.8" fill="#0dbc79">n</tspan><tspan x="503.2" fill="#0dbc79">3</tspan></text>
+  </g>
+  <text y="215.6" font-family="'SF Mono', 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace" font-size="10" xml:space="preserve"><tspan x="433.6" fill="#6a6a6a">chartscii-cli</tspan></text>
+</svg>

@@ -1,0 +1,5 @@
+ Oranges    12.99$
+ Apples     10.99$
+ Bananas    9.99$
+ Pineapples 13.99$
+ Pears      11.99$

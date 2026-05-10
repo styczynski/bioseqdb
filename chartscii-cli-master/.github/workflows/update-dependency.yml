@@ -1,0 +1,55 @@
+name: Update Dependency
+
+on:
+  repository_dispatch:
+    types: [dependency-update]
+
+permissions:
+  contents: write
+
+jobs:
+  update-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPO_DISPATCH_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Wait for npm availability
+        run: |
+          PACKAGE="${{ github.event.client_payload.package }}"
+          VERSION="${{ github.event.client_payload.version }}"
+          echo "Waiting for $PACKAGE@$VERSION to be available on npm..."
+          for i in {1..30}; do
+            if npm view "$PACKAGE@$VERSION" version 2>/dev/null; then
+              echo "Package is available!"
+              exit 0
+            fi
+            echo "Attempt $i: Package not yet available, waiting 10s..."
+            sleep 10
+          done
+          echo "Package not available after 5 minutes"
+          exit 1
+
+      - name: Update dependency and release
+        run: |
+          npm install ${{ github.event.client_payload.package }}@${{ github.event.client_payload.version }}
+          npm version v${{github.event.client_payload.version}} --no-git-tag-version
+          VERSION=$(node -p "require('./package.json').version")
+          git add package.json package-lock.json
+          git commit -m "chore: update ${{ github.event.client_payload.package }} to v${{ github.event.client_payload.version }}"
+          git tag "v$VERSION"
+          git push origin master
+          git push origin "v$VERSION"

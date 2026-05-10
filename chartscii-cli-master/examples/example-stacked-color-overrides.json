@@ -1,0 +1,34 @@
+[
+  {
+    "label": "Global colors only",
+    "value": [100, 50, 30],
+    "color": "cyan",
+    "comment": "Uses stackColors from CLI: -I red green blue"
+  },
+  {
+    "label": "Single value",
+    "value": 50,
+    "color": "green"
+  },
+  {
+    "label": "Per-bar array (full)",
+    "value": [120, 60, 40],
+    "color": ["yellow", "purple", "cyan"]
+  },
+  {
+    "label": "Per-bar array (partial)",
+    "value": [90, 70, 20],
+    "color": ["orange"],
+    "comment": "First segment orange, rest use global stackColors"
+  },
+  {
+    "label": "Per-segment objects",
+    "color": "purple",
+    "value": [
+      { "value": 80, "color": "pink" },
+      { "value": 60 },
+      { "value": 25, "color": "marine" }
+    ],
+    "comment": "Segments 1 and 3 have custom colors, segment 2 uses global"
+  }
+]

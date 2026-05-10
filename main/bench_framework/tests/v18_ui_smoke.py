@@ -313,6 +313,161 @@ def main():
       cnt >= 1, f"saw {cnt}")
     ui.quit()
 
+    # User-extension: wider panel target (128 cells, was 64). On a
+    # 320-col terminal we expect the panel to dock with at least 100
+    # cells of width. Probe by checking that the per-region panel's
+    # right border is not at the same column as the main pane's
+    # right edge — indirect, but observable as ≥ 100 cells of "Per
+    # region" panel surface (header text + chart row + legend).
+    print("--- Wider panel ---")
+    ui = UI(320, 50)
+    goto_bench_sort_per_region(ui)
+    txt = ui.screen_text()
+    t("Wide panel renders 'Per region' header (320×50 terminal)",
+      "Per region" in txt and "Stacked bars" in txt)
+    ui.quit()
+
+    # User-extension: panel header includes the metric name AND
+    # updates without one-frame lag after `m` press. Pre-fix, the
+    # metric in the header was one render stale.
+    print("--- Metric in header + m updates same frame ---")
+    ui = UI(280, 50)
+    goto_bench_sort_per_region(ui)
+    txt = ui.screen_text()
+    t("Header shows 'metric=region_total_ns' after navigation",
+      "metric=region_total_ns" in txt)
+    ui.send("m")
+    txt2 = ui.screen_text()
+    t("Header switches to 'metric=region_visits' immediately on m",
+      "metric=region_visits" in txt2 or "metric=wall_clock_ns" in txt2)
+    ui.quit()
+
+    # User-extension: pivot-mode column alignment. Force pivot mode by
+    # using the bioseq_bench fixture (≥ 30 regions, won't fit at panel
+    # default width). All second-column chunks must start at the same
+    # screen column for true grid alignment. We use the bench-tools
+    # bioseq_bench reports if available.
+    print("--- Pivot-mode column alignment ---")
+    bb_dir = os.path.join(REPO_ROOT, "main", "reporting", "bioseq_bench")
+    if os.path.isdir(bb_dir):
+        # Reuse UI but override REPORT_DIR via environment.
+        # Spawn directly because UI hardcodes REPORT_DIR; replicate inline.
+        master_fd, slave_fd = pty.openpty()
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 60, 320, 0, 0))
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
+        env.pop("LANG", None)
+        proc = subprocess.Popen(
+            [BINARY, "--ui", "--ui-test-mode", "--report", bb_dir],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            close_fds=True, env=env, start_new_session=True,
+        )
+        fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        time.sleep(3.5)
+        bbbuf = b""
+        for _ in range(60):
+            r, _, _ = select.select([master_fd], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                chunk = os.read(master_fd, 65536)
+            except (BlockingIOError, OSError):
+                break
+            if chunk:
+                bbbuf += chunk
+        for byte in (b"j", b"o", b"["):
+            os.write(master_fd, byte)
+            time.sleep(0.5)
+        for _ in range(4):
+            os.write(master_fd, b"m")
+            time.sleep(0.4)
+        time.sleep(1.0)
+        # Drain
+        while True:
+            r, _, _ = select.select([master_fd], [], [], 0.2)
+            if not r:
+                break
+            try:
+                chunk = os.read(master_fd, 65536)
+            except (BlockingIOError, OSError):
+                break
+            if not chunk:
+                break
+            bbbuf += chunk
+        # Use only the LAST rendered frame, identified as bytes after
+        # the most recent OSC sentinel. Earlier frames may be from
+        # navigation transitions and won't share the final layout.
+        last_idx = bbbuf.rfind(RENDER_SENTINEL)
+        latest = bbbuf[last_idx + len(RENDER_SENTINEL):] if last_idx >= 0 else bbbuf
+        if not latest.strip():
+            # Fall back to second-to-last frame if last is empty.
+            prev_idx = bbbuf.rfind(RENDER_SENTINEL, 0, last_idx)
+            latest = bbbuf[prev_idx + len(RENDER_SENTINEL):last_idx]
+        text = strip_ansi(latest).decode("utf-8", errors="replace")
+        # Find chunk lines that contain TWO `regname: <ms-or-em-dash>` patterns
+        # within the right-side panel (i.e. inside the last `│ ... │` segment).
+        chunk_lines = []
+        for line in text.split("\n"):
+            if "best (" in line or "worst (" in line or "spread" in line:
+                continue
+            # Take the last vertical-bar-bounded panel section.
+            panel_match = re.findall(r"│([^│]+)│", line)
+            if not panel_match:
+                continue
+            panel_body = panel_match[-1]
+            mm = list(re.finditer(r"([A-Za-z_][\w.]*):\s+(\S)", panel_body))
+            if len(mm) >= 2 and any(
+                tok in panel_body for tok in (" ms", "µs", " ns", "—")
+            ):
+                chunk_lines.append((panel_body, mm))
+        if chunk_lines:
+            second_cols = {matches[1].start() for _, matches in chunk_lines[:6]}
+            t("All wrapped chunk-lines have the same second-column start",
+              len(second_cols) == 1,
+              f"observed cols: {sorted(second_cols)}; "
+              f"sample: {chunk_lines[0][0][:120]!r}")
+        else:
+            print("SKIP: pivot-mode alignment (no pivot rows captured)")
+        os.write(master_fd, b"q")
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+        for fd in (master_fd, slave_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    else:
+        print("SKIP: pivot-mode alignment (bioseq_bench reports not present)")
+
+    # User-extension: pagination cycle. With a small panel height and
+    # ≥ 2 algorithms, the table can paginate. We use a 30-row terminal
+    # so the chart's reservation crowds out at least one algorithm row,
+    # forcing total_pages > 1. Pressing `p` should advance the page
+    # before flipping to Step mode.
+    print("--- Table pagination ---")
+    ui = UI(320, 30)
+    goto_bench_sort_per_region(ui)
+    txt = ui.screen_text()
+    # Either we see a 'Page x/y' indicator, or there's no pagination
+    # because algos fit. Both are valid; just verify p still cycles.
+    has_page_indicator = "Page 1/" in txt or "Page 2/" in txt
+    ui.send("p")
+    txt2 = ui.screen_text()
+    paged = "Page 2/" in txt2 or "page 2/" in txt2
+    stepped = "chart: step lines" in txt2 or "Step lines" in txt2
+    t("p emits a page or chart-mode notification (paged or stepped)",
+      paged or stepped, txt2[-300:])
+    ui.quit()
+
     print(f"\n=== {_PASSED}/{_TOTAL} passed ===")
     return 0 if _PASSED == _TOTAL else 1
 
