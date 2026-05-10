@@ -4335,20 +4335,41 @@ chart_focus_for_const(const UiState& ui, const UiViewKey& key) noexcept {
     return it == ui.chart_focus_per_view.end() ? nullptr : &it->second;
 }
 
+/// V18 user-extension — vertical row count the per-region table consumes
+/// per algorithm under the active layout. Mirrors `compute_table_layout`:
+/// non-pivot mode = 1 row each; pivot mode = 1 label row + ceil(num_regions
+/// / chunks_per_line) chunk rows. Always ≥ 1.
+[[nodiscard]] inline std::size_t rows_per_algo_in_layout(
+    const TableLayout& layout) noexcept
+{
+    if (layout.per_algo_rows.empty()) return 1u;
+    return std::max<std::size_t>(1u, layout.per_algo_rows.front());
+}
+
 /// V18 user-extension — compute how many algorithm rows fit in the
 /// per-region table while still reserving `kChartReservedRows` for the
 /// chart below. Returns at least 1 so the panel can always show one
-/// algorithm. `pivot_estimate == true` halves the budget because pivot
-/// rows span ≥ 2 terminal rows each (§3.1 rule 4).
+/// algorithm. `rows_per_algo` MUST come from `compute_table_layout`
+/// (not a hard-coded estimate) so the page count matches what the
+/// renderer actually draws — pivot mode with many regions can span
+/// 10+ rows per algorithm, which the prior 2-row estimate ignored and
+/// thereby crowded the chart out of the panel entirely. Pass
+/// `include_table_header = true` in non-pivot mode to reserve an extra
+/// row for the column-header strip (§3.1).
 [[nodiscard]] inline std::size_t compute_algos_per_page(
-    std::size_t panel_total_rows, bool pivot_estimate) noexcept
+    std::size_t panel_total_rows,
+    std::size_t rows_per_algo,
+    bool include_table_header) noexcept
 {
-    constexpr std::size_t kPanelHeaderRows = 3;     // header + separator + spacer
+    constexpr std::size_t kPanelHeaderRows  = 3;    // header + separator + spacer
     constexpr std::size_t kBracketSlackRows = 1;    // legend / blank line
-    const std::size_t reserve = kPanelHeaderRows + kChartReservedRows + kBracketSlackRows;
+    constexpr std::size_t kPageIndicatorRow = 1;    // §6.5 banner reservation
+    const std::size_t header_extra = include_table_header ? 1u : 0u;
+    const std::size_t reserve = kPanelHeaderRows + kChartReservedRows
+        + kBracketSlackRows + kPageIndicatorRow + header_extra;
     const std::size_t available = panel_total_rows > reserve
         ? panel_total_rows - reserve : 0;
-    const std::size_t per_algo = pivot_estimate ? 2u : 1u;
+    const std::size_t per_algo = std::max<std::size_t>(1u, rows_per_algo);
     return std::max<std::size_t>(1u, available / per_algo);
 }
 
@@ -4560,12 +4581,15 @@ resolve_perregion_focus(const UiState& ui, const BenchmarkSnapshot* /*unused*/,
     ChartFocus effective_focus = focus_ptr != nullptr ? *focus_ptr : ChartFocus{};
     // V18 user-extension — table pagination. Slice `rows` for the
     // current page (Stacked mode only); Step mode uses one algorithm
-    // anyway. Page size is derived from the actual panel height so the
-    // chart always has at least `kChartReservedRows` of vertical room.
-    const bool pivot_estimate = !region_universe.empty()
-        && panel_inner_cols < region_universe.size() * 6 + 2;
+    // anyway. Page size is derived from the actual panel height AND
+    // the per-algo row count from the active layout, so the chart
+    // always has at least `kChartReservedRows` of vertical room — even
+    // in pivot mode where each algo wraps over many lines.
+    const auto page_layout = compute_table_layout(all_rows, region_universe,
+        focus.metric, panel_inner_cols, omit_alg_column, gv);
+    const std::size_t rows_per_algo = rows_per_algo_in_layout(page_layout);
     const std::size_t algos_per_page = compute_algos_per_page(panel_total_rows,
-        pivot_estimate);
+        rows_per_algo, /*include_table_header=*/!page_layout.pivot);
     const std::size_t total_pages = compute_total_pages(all_rows.size(),
         algos_per_page);
     const std::size_t safe_page = std::min(effective_focus.table_page,
@@ -4880,9 +4904,18 @@ build_bracket_groups(const TableLayout& layout) noexcept
         ? extract_per_region_rows(*focus_snap, focus_opt->test_case,
             focus_opt->metric, region_universe_pre, ui.per_region_aggregate)
         : std::vector<PerRegionRow>{};
-    const bool pivot_pre = !region_universe_pre.empty()
-        && panel_inner_cols < region_universe_pre.size() * 6 + 2;
-    const std::size_t algos_per_page_pre = compute_algos_per_page(panel_rows, pivot_pre);
+    // Layout-aware pagination: compute the *actual* per-algo row count
+    // from a layout pass over ALL rows so the gutter/body see the same
+    // page slice the inspector-body renderer will draw. Pivot mode with
+    // many regions can span 10+ rows per algo — old `pivot_pre`
+    // estimate of 2 rows let the table eat the whole panel.
+    const auto layout_pre = focus_opt.has_value()
+        ? compute_table_layout(all_rows_pre, region_universe_pre,
+            focus_opt->metric, panel_inner_cols, /*omit_alg_column=*/false, gv)
+        : TableLayout{};
+    const std::size_t rows_per_algo_pre = rows_per_algo_in_layout(layout_pre);
+    const std::size_t algos_per_page_pre = compute_algos_per_page(panel_rows,
+        rows_per_algo_pre, /*include_table_header=*/!layout_pre.pivot);
     const std::size_t total_pages_pre = compute_total_pages(all_rows_pre.size(),
         algos_per_page_pre);
     std::size_t page_pre = 0;
@@ -5809,10 +5842,20 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
             const auto region_uni = region_universe_for(*snap_opt, resolved->test_case);
             const std::size_t panel_inner = kPerRegionPanelTargetCols
                 > 4 ? kPerRegionPanelTargetCols - 4 : 8;
-            const bool pivot_estimate = !region_uni.empty()
-                && panel_inner < region_uni.size() * 6 + 2;
+            // Layout-aware pagination: build the actual layout the
+            // renderer would use this frame, so `total_pages` matches
+            // what's drawn. Pivot mode with many regions can span 10+
+            // rows per algo — must NOT use the obsolete 2-row estimate.
+            const auto kp_rows = extract_per_region_rows(*snap_opt,
+                resolved->test_case, resolved->metric, region_uni,
+                ui.per_region_aggregate);
+            const GlyphView kp_gv{kGlyphsUnicode, ui.ascii_fallback};
+            const auto kp_layout = compute_table_layout(kp_rows, region_uni,
+                resolved->metric, panel_inner, /*omit_alg_column=*/false, kp_gv);
+            const std::size_t kp_rows_per_algo = rows_per_algo_in_layout(kp_layout);
             const std::size_t algos_per_page = compute_algos_per_page(
-                panel_total_rows, pivot_estimate);
+                panel_total_rows, kp_rows_per_algo,
+                /*include_table_header=*/!kp_layout.pivot);
             const std::size_t total_pages = compute_total_pages(
                 alg_canonicals.size(), algos_per_page);
             const auto note = cycle_chart_mode(focus, alg_canonicals,

@@ -468,6 +468,112 @@ def main():
       paged or stepped, txt2[-300:])
     ui.quit()
 
+    # User-extension: pagination must trigger on dense per-region data
+    # (bioseq_bench fixture: many regions × multi-algo, forces pivot
+    # mode where each algo wraps over 10+ rows). Pre-fix the
+    # `pivot_estimate=2 rows` heuristic let the table eat the chart.
+    # This test asserts: (a) page indicator visible, (b) chart still
+    # rendered alongside the paginated table, (c) `p` advances pages
+    # before transitioning to Step mode, (d) chart visible on later
+    # pages too.
+    print("--- Dense pagination keeps chart visible ---")
+    bb_dir = os.path.join(REPO_ROOT, "main", "reporting", "bioseq_bench")
+    if os.path.isdir(bb_dir):
+        # Custom UI launch with bioseq_bench report dir.
+        master_fd, slave_fd = pty.openpty()
+        # 240 cols × 50 rows ≈ user's terminal; many regions → pagination.
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", 50, 240, 0, 0))
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
+        env.pop("LANG", None)
+        bb_proc = subprocess.Popen(
+            [BINARY, "--ui", "--ui-test-mode", "--report", bb_dir],
+            stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            close_fds=True, env=env, start_new_session=True,
+        )
+        fl = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+        def _drain(buf, sec=0.4):
+            deadline = time.monotonic() + sec
+            while time.monotonic() < deadline:
+                r, _, _ = select.select([master_fd], [], [], 0.1)
+                if not r:
+                    continue
+                try:
+                    chunk = os.read(master_fd, 65536)
+                except (BlockingIOError, OSError):
+                    break
+                if chunk:
+                    buf += chunk
+            return buf
+
+        def _send(seq, buf, sec=0.6):
+            for ch in seq:
+                os.write(master_fd, ch.encode("utf-8"))
+                buf = _drain(buf, sec)
+            return buf
+
+        def _last_frame(buf):
+            li = buf.rfind(RENDER_SENTINEL)
+            tail = buf[li + len(RENDER_SENTINEL):] if li >= 0 else buf
+            if not tail.strip():
+                pi = buf.rfind(RENDER_SENTINEL, 0, li)
+                tail = buf[pi + len(RENDER_SENTINEL):li]
+            return strip_ansi(tail).decode("utf-8", errors="replace")
+
+        # Initial settle.
+        bbbuf = _drain(b"", 3.5)
+        # Navigate: open report 1 (j), expand-all (o), forward to next bench
+        # (`]`), then cycle metric until region_total_ns (4 m's from default
+        # wall_clock_ns through alphabetical metrics). bioseq_bench's first
+        # metric is match_count → mean_position_offset_bp →
+        # primary_correct_fraction → region_total_ns.
+        bbbuf = _send("jo]mmmm", bbbuf, sec=0.5)
+        bbbuf = _drain(bbbuf, 1.0)
+        page1 = _last_frame(bbbuf)
+        t("Dense fixture: 'Page 1/' indicator visible",
+          "Page 1/" in page1, page1[-400:])
+        t("Dense fixture: chart visible alongside paginated table (page 1)",
+          "Stacked bars" in page1, page1[-400:])
+        # Advance one page.
+        bbbuf = _send("p", bbbuf, sec=0.5)
+        page2 = _last_frame(bbbuf)
+        t("Dense fixture: 'p' advances to Page 2/",
+          "Page 2/" in page2, page2[-400:])
+        t("Dense fixture: chart still visible on page 2",
+          "Stacked bars" in page2, page2[-400:])
+        # Walk forward through remaining pages until we reach Step mode.
+        # bioseq_bench REPR_STORAGE_K27_XL has 3 algos with values; expect
+        # Page 3/3 then transition to Step lines.
+        bbbuf = _send("p", bbbuf, sec=0.5)
+        page3 = _last_frame(bbbuf)
+        t("Dense fixture: 'p' advances to Page 3/",
+          "Page 3/" in page3, page3[-400:])
+        bbbuf = _send("p", bbbuf, sec=0.5)
+        page4 = _last_frame(bbbuf)
+        t("Dense fixture: after last page 'p' enters Step mode",
+          "Step lines" in page4, page4[-400:])
+        # Cleanup.
+        os.write(master_fd, b"q")
+        try:
+            bb_proc.wait(timeout=2)
+        except Exception:
+            try:
+                bb_proc.terminate()
+                bb_proc.wait(timeout=1)
+            except Exception:
+                pass
+        for fd in (master_fd, slave_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    else:
+        print("SKIP: dense pagination (bioseq_bench reports not present)")
+
     print(f"\n=== {_PASSED}/{_TOTAL} passed ===")
     return 0 if _PASSED == _TOTAL else 1
 
