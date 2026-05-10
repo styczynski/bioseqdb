@@ -113,6 +113,63 @@ inline constexpr int                      kHeaderRowsBase           = 3;
 inline constexpr int                      kHeaderRowsLive           = 4;
 inline constexpr int                      kBodySeparatorRows        = 2;
 
+// ---------- V18 (BENCH_V18_IMPL_DESIGN.md §2.1, §3.x, §4.3) ----------
+inline constexpr std::size_t              kPerRegionPanelMinCols    = 52;
+inline constexpr std::size_t              kPerRegionPanelTargetCols = 64;
+inline constexpr std::size_t              kPerRegionPanelMaxCols    = 100;
+inline constexpr std::size_t              kChartMinRows             = 10;
+inline constexpr std::size_t              kChartTargetRows          = 14;
+inline constexpr std::size_t              kPerRegionBracketCells    = 3;     // §3.6 rule 6
+inline constexpr std::size_t              kPivotMinPanelInnerCols   = 24;    // §3.1 rule 5
+inline constexpr std::size_t              kRegionBarMaxCellWidth    = 8;     // §4.3
+inline constexpr std::string_view         kRenderSentinelOsc =
+    "\x1b\x5d""666;render-N\x07";     // V18 §10.4.1 OSC sentinel
+inline constexpr std::string_view         kCountdownPaused = "\xe2\x86\xbb paused";
+
+/// V18 §9.6 — canonical notification template strings. Tests assert on
+/// these by exact substring match (after fmt-substitution); changing any
+/// string requires a coordinated test update.
+inline constexpr std::string_view kNotifReportOnly        = "only available in Report view";
+inline constexpr std::string_view kNotifNoPerRegion       = "(no per-region data \xe2\x80\x94 set by_regions:true in matrix to enable)";
+inline constexpr std::string_view kNotifAggrCycleFmt      = "aggregate: {}";
+inline constexpr std::string_view kNotifChartModeStacked  = "chart: stacked bars";
+inline constexpr std::string_view kNotifChartModeStepFmt  = "chart: step lines \xc2\xb7 {} ({} of {})";
+inline constexpr std::string_view kNotifChartSingleAlgo   = "only 1 algorithm \xe2\x80\x94 Step mode shows that single bar";
+inline constexpr std::string_view kNotifChartSingleRegion = "only 1 region \xe2\x80\x94 Step mode shows one series";
+inline constexpr std::string_view kNotifPinSetFmt         = "pinned per-region focus: {} \xc2\xb7 {} \xc2\xb7 {}";
+inline constexpr std::string_view kNotifPinUnset          = "unpinned per-region focus";
+inline constexpr std::string_view kNotifPinNotInReport    = "pinned focus not in this report \xe2\x80\x94 unpinned";
+inline constexpr std::string_view kNotifAlgoNotInReportFmt =
+    "algorithm '{}' not in report_{} \xe2\x80\x94 showing '{}'";
+inline constexpr std::string_view kNotifPanelTooNarrow    = "(too narrow \xe2\x80\x94 resize \xe2\x89\xa5 52 cells)";
+inline constexpr std::string_view kNotifNoFocusResolved   =
+    "(navigate into a Report sub-section to see per-region data)";
+
+/// V18 §2.1 — wide threshold computed from the live sidebar width.
+/// `sidebar_cols == 0` covers the "sidebar hidden" case (§2.5).
+[[nodiscard]] inline constexpr std::size_t
+wide_threshold_cols(std::size_t sidebar_cols) noexcept
+{
+    constexpr std::size_t kReportFullCols =
+        kReportTableLabelCols                          // 16
+        + kReportTableWindow * (kReportTableValueCols + 2);     // 10 × 12 = 120
+    constexpr std::size_t kSeparatorCols = 1;
+    return sidebar_cols + kReportFullCols + kSeparatorCols
+         + kPerRegionPanelMinCols + kSeparatorCols;
+}
+
+enum class DetailsLayout : std::uint8_t { Narrow, Wide };
+
+[[nodiscard]] inline DetailsLayout
+details_layout(int screen_dimx, int sidebar_cols, bool sidebar_visible) noexcept
+{
+    const std::size_t effective = sidebar_visible
+        ? static_cast<std::size_t>(std::max(0, sidebar_cols)) : 0;
+    return static_cast<std::size_t>(std::max(0, screen_dimx))
+         >= wide_threshold_cols(effective)
+        ? DetailsLayout::Wide : DetailsLayout::Narrow;
+}
+
 // ---------- Glyph tables (§3.6) -----------------------------------------------
 
 struct GlyphPair {
@@ -139,6 +196,37 @@ struct GlyphTable {
     GlyphPair em_dash;               // —
     GlyphPair full_block;            // █
     GlyphPair ellipsis;              // …
+    // V18 (§1.3, §3.6, §7.4)
+    GlyphPair search_emoji;          // 🔎
+    GlyphPair note_emoji;            // 📝
+    GlyphPair col_accent;            // ▍ (LEFT FIVE EIGHTHS BLOCK)
+    GlyphPair dotted;                // ┄
+    GlyphPair br_top_left;           // ╭
+    GlyphPair br_top_right;          // ╮
+    GlyphPair br_bot_left;           // ╰
+    GlyphPair br_bot_right;          // ╯
+    GlyphPair br_v;                  // │
+    GlyphPair br_h;                  // ─
+    GlyphPair br_h_double;           // ═
+    GlyphPair br_cross;              // ┼
+    GlyphPair br_cross_dh;           // ╪
+    GlyphPair br_t_down;             // ┬
+    GlyphPair br_t_up;               // ┴
+    GlyphPair br_t_right;            // ├
+    GlyphPair br_t_left;             // ┤
+    GlyphPair scroll_above;          // ▲
+    GlyphPair scroll_below;          // ▼ (single cell)
+    GlyphPair scroll_off;            // ╳
+    GlyphPair point_filled;          // ●
+    GlyphPair point_hollow;          // ○
+    // 1/8 block fractions for stacked-bar partial top row (§4.3)
+    GlyphPair bar_1_8;               // ▁
+    GlyphPair bar_2_8;               // ▂
+    GlyphPair bar_3_8;               // ▃
+    GlyphPair bar_4_8;               // ▄
+    GlyphPair bar_5_8;               // ▅
+    GlyphPair bar_6_8;               // ▆
+    GlyphPair bar_7_8;               // ▇
 };
 
 inline constexpr GlyphTable kGlyphsUnicode = {
@@ -160,6 +248,37 @@ inline constexpr GlyphTable kGlyphsUnicode = {
     {"\xe2\x80\x94", "-"},
     {"\xe2\x96\x88", "#"},
     {"\xe2\x80\xa6", "..."},
+    // V18 §1.3
+    {"\xf0\x9f\x94\x8e", "[?]"},     // 🔎
+    {"\xf0\x9f\x93\x9d", "[#]"},     // 📝
+    {"\xe2\x96\x8d", "|"},             // ▍
+    {"\xe2\x94\x84", ":"},             // ┄
+    {"\xe2\x95\xad", "+"},             // ╭
+    {"\xe2\x95\xae", "+"},             // ╮
+    {"\xe2\x95\xb0", "+"},             // ╰
+    {"\xe2\x95\xaf", "+"},             // ╯
+    {"\xe2\x94\x82", "|"},             // │
+    {"\xe2\x94\x80", "-"},             // ─
+    {"\xe2\x95\x90", "="},             // ═
+    {"\xe2\x94\xbc", "+"},             // ┼
+    {"\xe2\x95\xaa", "+"},             // ╪
+    {"\xe2\x94\xac", "+"},             // ┬
+    {"\xe2\x94\xb4", "+"},             // ┴
+    {"\xe2\x94\x9c", "+"},             // ├
+    {"\xe2\x94\xa4", "+"},             // ┤
+    {"\xe2\x96\xb2", "^"},             // ▲
+    {"\xe2\x96\xbc", "v"},             // ▼
+    {"\xe2\x95\xb3", "x"},             // ╳
+    {"\xe2\x97\x8f", "*"},             // ●
+    {"\xe2\x97\x8b", "o"},             // ○
+    // partial-block fractions
+    {"\xe2\x96\x81", " "},             // ▁ (< 0.25 collapses to space)
+    {"\xe2\x96\x82", " "},             // ▂
+    {"\xe2\x96\x83", "="},             // ▃
+    {"\xe2\x96\x84", "="},             // ▄
+    {"\xe2\x96\x85", "="},             // ▅
+    {"\xe2\x96\x86", "#"},             // ▆
+    {"\xe2\x96\x87", "#"},             // ▇
 };
 
 [[nodiscard]] inline std::string_view glyph_for(const GlyphPair& pair, bool ascii) noexcept {
@@ -241,6 +360,44 @@ struct GlyphView {
     [[nodiscard]] std::string_view em_dash()            const noexcept { return glyph_for(table.em_dash, ascii); }
     [[nodiscard]] std::string_view full_block()         const noexcept { return glyph_for(table.full_block, ascii); }
     [[nodiscard]] std::string_view ellipsis()           const noexcept { return glyph_for(table.ellipsis, ascii); }
+    // V18 (§1.3, §3.6, §4.3, §7.4)
+    [[nodiscard]] std::string_view search_emoji()       const noexcept { return glyph_for(table.search_emoji, ascii); }
+    [[nodiscard]] std::string_view note_emoji()         const noexcept { return glyph_for(table.note_emoji, ascii); }
+    [[nodiscard]] std::string_view col_accent()         const noexcept { return glyph_for(table.col_accent, ascii); }
+    [[nodiscard]] std::string_view dotted()             const noexcept { return glyph_for(table.dotted, ascii); }
+    [[nodiscard]] std::string_view br_top_left()        const noexcept { return glyph_for(table.br_top_left, ascii); }
+    [[nodiscard]] std::string_view br_top_right()       const noexcept { return glyph_for(table.br_top_right, ascii); }
+    [[nodiscard]] std::string_view br_bot_left()        const noexcept { return glyph_for(table.br_bot_left, ascii); }
+    [[nodiscard]] std::string_view br_bot_right()       const noexcept { return glyph_for(table.br_bot_right, ascii); }
+    [[nodiscard]] std::string_view br_v()               const noexcept { return glyph_for(table.br_v, ascii); }
+    [[nodiscard]] std::string_view br_h()               const noexcept { return glyph_for(table.br_h, ascii); }
+    [[nodiscard]] std::string_view br_h_double()        const noexcept { return glyph_for(table.br_h_double, ascii); }
+    [[nodiscard]] std::string_view br_cross()           const noexcept { return glyph_for(table.br_cross, ascii); }
+    [[nodiscard]] std::string_view br_cross_dh()        const noexcept { return glyph_for(table.br_cross_dh, ascii); }
+    [[nodiscard]] std::string_view br_t_down()          const noexcept { return glyph_for(table.br_t_down, ascii); }
+    [[nodiscard]] std::string_view br_t_up()            const noexcept { return glyph_for(table.br_t_up, ascii); }
+    [[nodiscard]] std::string_view br_t_right()         const noexcept { return glyph_for(table.br_t_right, ascii); }
+    [[nodiscard]] std::string_view br_t_left()          const noexcept { return glyph_for(table.br_t_left, ascii); }
+    [[nodiscard]] std::string_view scroll_above()       const noexcept { return glyph_for(table.scroll_above, ascii); }
+    [[nodiscard]] std::string_view scroll_below()       const noexcept { return glyph_for(table.scroll_below, ascii); }
+    [[nodiscard]] std::string_view scroll_off()         const noexcept { return glyph_for(table.scroll_off, ascii); }
+    [[nodiscard]] std::string_view point_filled()       const noexcept { return glyph_for(table.point_filled, ascii); }
+    [[nodiscard]] std::string_view point_hollow()       const noexcept { return glyph_for(table.point_hollow, ascii); }
+    /// 8-step partial bar glyph for a fractional remainder in [0..1).
+    /// Index 0 returns empty (space) per §4.3 collapse rule.
+    [[nodiscard]] std::string_view bar_fraction(std::size_t eighths) const noexcept {
+        switch (eighths) {
+            case 0:  return " ";
+            case 1:  return glyph_for(table.bar_1_8, ascii);
+            case 2:  return glyph_for(table.bar_2_8, ascii);
+            case 3:  return glyph_for(table.bar_3_8, ascii);
+            case 4:  return glyph_for(table.bar_4_8, ascii);
+            case 5:  return glyph_for(table.bar_5_8, ascii);
+            case 6:  return glyph_for(table.bar_6_8, ascii);
+            case 7:  return glyph_for(table.bar_7_8, ascii);
+            default: return glyph_for(table.full_block, ascii);
+        }
+    }
 };
 
 // ---------- Severity buckets reused from V8 -----------------------------------
@@ -749,11 +906,10 @@ enum class FooterState : std::uint8_t {
 };
 
 [[nodiscard]] constexpr int footer_rows_for(FooterState s) noexcept {
-    // Help spans 12 rows (1 title + 11 keymap rows). Bumped from §2.7's
-    // original 8 because the keymap now covers the , / . visible-only
-    // navigation, [ / ], { / }, PageUp / PageDn, m / M, = / Tab peek,
-    // b / B, etc. — they no longer fit in 7 keymap rows.
-    return s == FooterState::Help ? 12 : 1;
+    // Help spans 14 rows (1 title + 13 keymap rows). Last grew when V18
+    // added the per-region aggregate cycle, chart-mode cycle, and pin
+    // toggle (BENCH_V18_IMPL_DESIGN.md §9.1).
+    return s == FooterState::Help ? 14 : 1;
 }
 
 [[nodiscard]] constexpr std::string_view mode_label(ValueDisplayMode mode) noexcept {
@@ -791,6 +947,164 @@ cycle_mode(ValueDisplayMode current, bool baseline_pinned, bool forward) noexcep
     }
     return current;
 }
+
+// =============================================================================
+//  Section 4b — V18 per-region types (BENCH_V18_IMPL_DESIGN.md §3.2, §6.1, §7)
+// =============================================================================
+
+/// V18 §3.2 — selects which slot of `AggregatedSamples` the per-region
+/// table cells (and both charts' Y-axis values) read. The single
+/// constexpr table below drives label/field lookup AND the cycle order;
+/// adding a new aggregate is a one-row edit.
+enum class PerRegionAggregate : std::uint8_t {
+    P50, P99, Mean, Max, Min, Sum, P01, P20, P80,
+};
+
+struct AggregateEntry {
+    PerRegionAggregate            which;
+    std::string_view              label;
+    /// Pointer-to-member into AggregatePercentiles (set) or AggregateStats
+    /// (the other set). Exactly one of `percentile_slot`/`stats_slot` is
+    /// non-null for each entry; the runtime extractor picks the live one.
+    double AggregatePercentiles::* percentile_slot;
+    double AggregateStats::*       stats_slot;
+};
+
+inline constexpr std::array<AggregateEntry, 9> kAggregateRegistry = {{
+    {PerRegionAggregate::P50,  "p50",  &AggregatePercentiles::p50, nullptr},
+    {PerRegionAggregate::P99,  "p99",  &AggregatePercentiles::p99, nullptr},
+    {PerRegionAggregate::Mean, "mean", nullptr,                    &AggregateStats::mean},
+    {PerRegionAggregate::Max,  "max",  nullptr,                    &AggregateStats::max},
+    {PerRegionAggregate::Min,  "min",  nullptr,                    &AggregateStats::min},
+    {PerRegionAggregate::Sum,  "sum",  nullptr,                    &AggregateStats::sum},
+    {PerRegionAggregate::P01,  "p01",  &AggregatePercentiles::p01, nullptr},
+    {PerRegionAggregate::P20,  "p20",  &AggregatePercentiles::p20, nullptr},
+    {PerRegionAggregate::P80,  "p80",  &AggregatePercentiles::p80, nullptr},
+}};
+
+[[nodiscard]] inline constexpr const AggregateEntry&
+aggregate_entry(PerRegionAggregate which) noexcept {
+    for (const auto& entry : kAggregateRegistry) {
+        if (entry.which == which) return entry;
+    }
+    return kAggregateRegistry.front();
+}
+
+[[nodiscard]] inline constexpr std::string_view
+aggregate_label(PerRegionAggregate which) noexcept {
+    return aggregate_entry(which).label;
+}
+
+[[nodiscard]] inline double
+aggregate_field(const AggregatedSamples& sample, PerRegionAggregate which) noexcept {
+    const auto& entry = aggregate_entry(which);
+    if (entry.percentile_slot != nullptr) return sample.percentiles.*(entry.percentile_slot);
+    if (entry.stats_slot != nullptr)      return sample.stats.*(entry.stats_slot);
+    return 0.0;
+}
+
+[[nodiscard]] inline constexpr PerRegionAggregate
+cycle_aggregate(PerRegionAggregate current, bool forward) noexcept {
+    constexpr auto count = static_cast<std::ptrdiff_t>(kAggregateRegistry.size());
+    std::ptrdiff_t idx = 0;
+    for (std::size_t i = 0; i < kAggregateRegistry.size(); ++i) {
+        if (kAggregateRegistry[i].which == current) {
+            idx = static_cast<std::ptrdiff_t>(i);
+            break;
+        }
+    }
+    const std::ptrdiff_t step = forward ? 1 : -1;
+    idx = (idx + step + count) % count;
+    return kAggregateRegistry[static_cast<std::size_t>(idx)].which;
+}
+
+/// V18 §7.1 — 16-colour curated region palette. Palette16 fallback is
+/// hand-picked for max hue spread on 16-colour terminals; collisions
+/// are intentional (two different regions may share `Color::Yellow`)
+/// and disambiguated by glyph alternation in the Step chart (§7.4).
+/// `palette16_index` is `ftxui::Color::Palette1` enum value cast to
+/// uint8 — keeping the table a literal type so it can be `constexpr`.
+struct RegionColour {
+    std::uint8_t  red;
+    std::uint8_t  green;
+    std::uint8_t  blue;
+    std::uint8_t  palette16_index;
+};
+
+inline constexpr std::array<RegionColour, 16> kRegionPalette = {{
+    {0xff, 0xc1, 0x07, static_cast<std::uint8_t>(ftxui::Color::Yellow)},
+    {0x00, 0xbc, 0xd4, static_cast<std::uint8_t>(ftxui::Color::Cyan)},
+    {0xe9, 0x1e, 0x63, static_cast<std::uint8_t>(ftxui::Color::Magenta)},
+    {0x4c, 0xaf, 0x50, static_cast<std::uint8_t>(ftxui::Color::GreenLight)},
+    {0xff, 0x57, 0x22, static_cast<std::uint8_t>(ftxui::Color::RedLight)},
+    {0x21, 0x96, 0xf3, static_cast<std::uint8_t>(ftxui::Color::BlueLight)},
+    {0x9c, 0x27, 0xb0, static_cast<std::uint8_t>(ftxui::Color::Blue)},
+    {0x80, 0xd8, 0xff, static_cast<std::uint8_t>(ftxui::Color::CyanLight)},
+    {0xcd, 0xdc, 0x39, static_cast<std::uint8_t>(ftxui::Color::YellowLight)},
+    {0xff, 0x8a, 0x65, static_cast<std::uint8_t>(ftxui::Color::RedLight)},
+    {0x90, 0xa4, 0xae, static_cast<std::uint8_t>(ftxui::Color::White)},
+    {0xab, 0x47, 0xbc, static_cast<std::uint8_t>(ftxui::Color::Magenta)},
+    {0xff, 0x40, 0x81, static_cast<std::uint8_t>(ftxui::Color::Magenta)},
+    {0x00, 0xe6, 0x76, static_cast<std::uint8_t>(ftxui::Color::Green)},
+    {0x7c, 0x4d, 0xff, static_cast<std::uint8_t>(ftxui::Color::Blue)},
+    {0xfd, 0xd8, 0x35, static_cast<std::uint8_t>(ftxui::Color::Yellow)},
+}};
+
+/// V18 §7.2 — palette index of `region_name` inside the universe.
+/// `palette_key_universe` MUST be sorted ascending by name (§7.3).
+/// Returns `kRegionPalette.size()` when the region was not seen during
+/// universe-building (race window only); callers map this through
+/// `region_colour(...)` which returns `Color::GrayLight` for the
+/// sentinel.
+[[nodiscard]] inline std::size_t palette_index_for_region(
+    std::string_view region_name,
+    const std::vector<std::string>& palette_key_universe) noexcept
+{
+    const auto it = std::find(palette_key_universe.begin(),
+                              palette_key_universe.end(), region_name);
+    if (it == palette_key_universe.end()) return kRegionPalette.size();
+    return static_cast<std::size_t>(it - palette_key_universe.begin())
+         % kRegionPalette.size();
+}
+
+/// V18 §7.3 — precompute the palette index per region in the
+/// `(bench, tc)` universe once per render frame so hot loops don't
+/// recompute the linear lookup.
+[[nodiscard]] inline std::vector<std::size_t>
+build_palette_index_table(const std::vector<std::string>& universe) noexcept {
+    std::vector<std::size_t> table;
+    table.reserve(universe.size());
+    for (std::size_t i = 0; i < universe.size(); ++i) {
+        table.push_back(i % kRegionPalette.size());
+    }
+    return table;
+}
+
+[[nodiscard]] inline ftxui::Color region_colour(std::size_t palette_index) noexcept {
+    if (palette_index >= kRegionPalette.size()) return ftxui::Color::GrayLight;
+    const auto& slot = kRegionPalette[palette_index];
+    if (terminal_supports_truecolor()) {
+        return ftxui::Color::RGB(slot.red, slot.green, slot.blue);
+    }
+    return ftxui::Color(static_cast<ftxui::Color::Palette16>(slot.palette16_index));
+}
+
+/// V18 §6.1 — chart-mode state per `(bench, tc, metric)` view.
+struct ChartFocus {
+    enum class Mode : std::uint8_t { Stacked, Step };
+    Mode         mode = Mode::Stacked;
+    /// Canonical algorithm string when `mode == Step` (§6.1).
+    /// Empty in Stacked mode.
+    std::string  step_algo_canonical{};
+};
+
+/// V18 §2.3 — pinned per-region focus.
+struct PerRegionFocus {
+    std::string  benchmark{};
+    std::string  test_case{};
+    std::string  metric{};
+    bool         is_pinned = false;
+};
 
 struct ReportFingerprint {
     std::size_t                     report_id = 0;
@@ -877,6 +1191,25 @@ struct UiState {
     /// Current 0-based index of the search-match cursor. Reset to 0
     /// on every query change. `n` / `N` advance / retreat.
     int                                             search_match_cursor = 0;
+    // ---------- V18 (BENCH_V18_IMPL_DESIGN.md §8.1) ----------
+    /// Active aggregate for the per-region table. Cycled via `>` /
+    /// `<`. Single field, NOT view-keyed (§3.2): the user's
+    /// "show me means everywhere" intent travels across views.
+    PerRegionAggregate                              per_region_aggregate
+        = PerRegionAggregate::P50;
+    /// Per-view chart focus, keyed by `(bench, tc, metric)` triple
+    /// in the form of `UiViewKey { Report, ... }` (§6.1).
+    /// LRU-evicted at 256 entries to bound marathon-session growth.
+    std::map<UiViewKey, ChartFocus>                  chart_focus_per_view{};
+    /// Pinned per-region focus identity (§2.3). Single global field
+    /// (NOT view-keyed): pinning expresses "I want to inspect this
+    /// specific (bench, tc, metric) wherever I navigate".
+    PerRegionFocus                                   pinned_perregion_focus{};
+    /// V18 §10.4.1 — when set, suppress the 1-Hz reload countdown
+    /// animation (the spinner shows the static `kCountdownPaused`
+    /// string) and disable the periodic 30-s reload tick. Manual
+    /// `Ctrl-R` and the V14 selection-debounce-reparse path remain.
+    bool                                             ui_test_mode = false;
 };
 
 /// Default expanded state for a section id. Legend and Historic
@@ -885,6 +1218,8 @@ struct UiState {
 [[nodiscard]] inline bool default_section_expanded(std::string_view section_id) noexcept {
     if (section_id.find(":legend") != std::string_view::npos) return false;
     if (section_id.find(":historic") != std::string_view::npos) return false;
+    // V18 §3.5 — Per-region narrow-mode collapsible defaults to collapsed.
+    if (section_id.find(":perregion") != std::string_view::npos) return false;
     return true;
 }
 
@@ -1391,13 +1726,20 @@ inline void reload_thread_body(std::filesystem::path dir,
                                 ReloadState& reload,
                                 ParseWorkerPool& pool,
                                 ftxui::ScreenInteractive* screen,
-                                std::stop_token stop) noexcept
+                                std::stop_token stop,
+                                bool test_mode) noexcept
 {
     bool was_reachable = true;
     while (!stop.stop_requested() && reload.running.load(std::memory_order_acquire)) {
         {
             std::unique_lock lock(reload.cv_mu);
-            reload.wake_cv.wait_for(lock, kReloadInterval, [&]{
+            // V18 §10.4.1 — in test mode disable the periodic 30-s
+            // reload tick: park the thread until a manual reload
+            // (`Ctrl-R` ⇒ `manual_reload == true`) or stop is signalled.
+            const std::chrono::seconds wait_for_secs = test_mode
+                ? std::chrono::seconds{3600}
+                : std::chrono::seconds{kReloadInterval};
+            reload.wake_cv.wait_for(lock, wait_for_secs, [&]{
                 return stop.stop_requested()
                     || !reload.running.load(std::memory_order_acquire)
                     || reload.manual_reload.load(std::memory_order_acquire);
@@ -1913,8 +2255,13 @@ fingerprints_in_index_order(ReloadState& reload)
         : fmt::format("Updated: {}", updated);
     const auto secs_to_next = std::chrono::duration_cast<std::chrono::seconds>(
         kReloadInterval - delta % kReloadInterval).count();
-    const std::string countdown = fmt::format("{} next {}s",
-        gv.reload_spin(), std::max<long long>(0, secs_to_next));
+    // V18 §10.4.1 — when test mode is active, freeze the countdown
+    // animation so the harness's grid-equality assertions don't need
+    // to ignore the spinner cell.
+    const std::string countdown = ui.ui_test_mode
+        ? std::string{kCountdownPaused}
+        : fmt::format("{} next {}s",
+            gv.reload_spin(), std::max<long long>(0, secs_to_next));
     return hbox({
         text(fmt::format("Loaded: {} reports \xc2\xb7 {} commits  ",
                          loaded_reports, loaded_commits.size()))
@@ -2379,6 +2726,20 @@ struct BenchmarkSnapshot {
     std::map<std::string,
         std::map<std::string,
             std::map<std::string, AggregatedSamples>>>  samples;
+    /// V18 §8.3 — canonical → tc → region → metric →
+    /// AggregatedSamples. The `region` key includes the legacy
+    /// `kAllRegionsKey` PLUS every per-region entry the report
+    /// carried.
+    std::map<std::string,
+        std::map<std::string,
+            std::map<std::string,
+                std::map<std::string, AggregatedSamples>>>>  per_region_samples;
+    /// V18 §8.3 — sorted union of every region name observed in the
+    /// snapshot, **excluding** the synthetic `kAllRegionsKey` bucket
+    /// when at least one real region was present. Empty when
+    /// `by_regions: false` (no real regions). Used by
+    /// `palette_index_for_region`.
+    std::vector<std::string>                            region_names;
 };
 
 [[nodiscard]] inline std::vector<std::string>
@@ -2409,6 +2770,7 @@ snapshot_benchmark(const ParsedReport& parsed, std::string_view bench_key)
     if ((*bench)["execution_tuples"].get(tuples) != simdjson::SUCCESS) return snap;
     std::set<std::string> test_case_set;
     std::set<std::string> metric_set;
+    std::set<std::string> region_set;     // V18: real region names only
     for (auto tuple_record : tuples) {
         const auto record = try_as_object(tuple_record);
         if (!record.has_value()) continue;
@@ -2422,28 +2784,39 @@ snapshot_benchmark(const ParsedReport& parsed, std::string_view bench_key)
             row.params = parse_param_map(*params_obj);
             row.canonical = canonical_tuple(row.algorithm, row.params);
             snap.tuples.push_back(std::move(row));
+            const std::string canonical_owned = snap.tuples.back().canonical;
             const auto tc_obj = try_get_object(*record, "test_cases");
             if (!tc_obj.has_value()) continue;
             for (auto tc_field : *tc_obj) {
-                test_case_set.insert(std::string{tc_field.key});
-                const auto region = try_as_object(tc_field.value);
-                if (!region.has_value()) continue;
-                const auto all_regions = try_get_object(*region, kAllRegionsKey);
-                if (!all_regions.has_value()) continue;
-                for (auto metric_field : *all_regions) {
-                    metric_set.insert(std::string{metric_field.key});
-                    simdjson::dom::object metric_obj;
-                    if (metric_field.value.get(metric_obj) != simdjson::SUCCESS) continue;
-                    snap.samples[snap.tuples.back().canonical]
-                                [std::string{tc_field.key}]
-                                [std::string{metric_field.key}] =
-                                    parse_aggregated_samples(metric_obj);
+                const std::string tc_owned{tc_field.key};
+                test_case_set.insert(tc_owned);
+                const auto regions = try_as_object(tc_field.value);
+                if (!regions.has_value()) continue;
+                // V18 §8.3: walk EVERY region key (not just kAllRegionsKey).
+                for (auto region_field : *regions) {
+                    const std::string region_owned{region_field.key};
+                    if (region_owned != kAllRegionsKey) region_set.insert(region_owned);
+                    const auto region_obj = try_as_object(region_field.value);
+                    if (!region_obj.has_value()) continue;
+                    for (auto metric_field : *region_obj) {
+                        const std::string metric_owned{metric_field.key};
+                        metric_set.insert(metric_owned);
+                        simdjson::dom::object metric_obj;
+                        if (metric_field.value.get(metric_obj) != simdjson::SUCCESS) continue;
+                        const auto agg = parse_aggregated_samples(metric_obj);
+                        snap.per_region_samples[canonical_owned][tc_owned][region_owned][metric_owned] = agg;
+                        if (region_owned == kAllRegionsKey) {
+                            // Preserve legacy `samples` shape for V14 callers.
+                            snap.samples[canonical_owned][tc_owned][metric_owned] = agg;
+                        }
+                    }
                 }
             }
         }
     }
     snap.test_cases.assign(test_case_set.begin(), test_case_set.end());
     snap.metrics.assign(metric_set.begin(), metric_set.end());
+    snap.region_names.assign(region_set.begin(), region_set.end());
     // Generate short labels.
     std::vector<std::string> canonicals;
     canonicals.reserve(snap.tuples.size());
@@ -2454,6 +2827,43 @@ snapshot_benchmark(const ParsedReport& parsed, std::string_view bench_key)
         t.short_label = it == labels.end() ? t.canonical : it->second;
     }
     return snap;
+}
+
+/// V18 §3.6 — true when the snapshot contains real per-region buckets
+/// for the given test case (i.e. `by_regions: true` was set in the
+/// matrix). When false, all per-region surfaces collapse to the
+/// `kAllRegionsKey` bucket.
+[[nodiscard]] inline bool snapshot_has_per_region(
+    const BenchmarkSnapshot& snap, std::string_view test_case) noexcept
+{
+    for (const auto& [_canonical, by_tc] : snap.per_region_samples) {
+        const auto tc_it = by_tc.find(std::string{test_case});
+        if (tc_it == by_tc.end()) continue;
+        for (const auto& [region_name, _by_metric] : tc_it->second) {
+            if (region_name != kAllRegionsKey) return true;
+        }
+    }
+    return false;
+}
+
+/// V18 §7.3 — region universe for a specific `(bench, tc)` view.
+/// Sorted ascending by name. When `by_regions: false` (no real
+/// regions in the report shape), returns an empty vector — callers
+/// gate on `snapshot_has_per_region` first and render the §3.7
+/// "(no per-region data)" placeholder instead of a synthetic
+/// `all_regions` column.
+[[nodiscard]] inline std::vector<std::string>
+region_universe_for(const BenchmarkSnapshot& snap, std::string_view test_case) noexcept
+{
+    std::set<std::string> universe;
+    for (const auto& [_canonical, by_tc] : snap.per_region_samples) {
+        const auto tc_it = by_tc.find(std::string{test_case});
+        if (tc_it == by_tc.end()) continue;
+        for (const auto& [region_name, _by_metric] : tc_it->second) {
+            if (region_name != kAllRegionsKey) universe.insert(region_name);
+        }
+    }
+    return {universe.begin(), universe.end()};
 }
 
 [[nodiscard]] inline std::string
@@ -2870,8 +3280,1489 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     return vbox(std::move(rows));
 }
 
+// =============================================================================
+//  Section 9b — V18 per-region table & charts (BENCH_V18_IMPL_DESIGN.md §3-§7)
+// =============================================================================
+
+/// V18 internal — one row of the per-region table, materialised into
+/// values for the *focus report* AND the cross-report rendering path.
+/// One value per region in `region_universe`; missing cells carry NaN.
+struct PerRegionRow {
+    std::string                  canonical{};
+    std::string                  short_label{};
+    std::vector<double>          values_focus{};        // size == region_universe.size()
+    /// Anchor values for Δ / Ratio modes.
+    std::vector<double>          values_first{};
+    std::vector<double>          values_baseline{};
+    bool                         baseline_present = false;
+};
+
+/// V18 §3.1 — single source of truth for the per-region table's
+/// per-algorithm vertical row count. Both `render_per_region_table_body`
+/// and `build_bracket_groups` consume this so the wide-mode bracket
+/// gutter stays aligned with the body in pivot+wrap mode.
+struct TableLayout {
+    bool                       pivot = false;
+    /// Lines spanned by each algorithm row in the rendered table.
+    /// Non-pivot mode: every entry is 1. Pivot mode: 1 (label row)
+    /// + N (chunks rows after wrap). Includes per-row min/max
+    /// `+`/`-` markers in the chunk-width accounting (§3.5).
+    std::vector<std::size_t>   per_algo_rows{};
+};
+
+[[nodiscard]] inline TableLayout compute_table_layout(
+    const std::vector<PerRegionRow>& rows,
+    const std::vector<std::string>& region_universe,
+    std::string_view metric,
+    std::size_t panel_inner_cols,
+    bool omit_alg_column,
+    const GlyphView& gv) noexcept
+{
+    TableLayout layout;
+    if (rows.empty() || region_universe.empty()) return layout;
+    // Mirror the body's §3.1 rule-5 short-circuit: when the panel is
+    // too narrow to render any mode, the body emits a single-line
+    // "(too narrow ...)" placeholder. Returning an empty
+    // `per_algo_rows` here keeps `build_bracket_groups` from emitting
+    // N+1 gutter cells against a 1-row body.
+    if (panel_inner_cols < kPivotMinPanelInnerCols) return layout;
+    constexpr std::size_t kAlgColCells = 10;
+    constexpr std::size_t kCellPaddingPerCol = 2;
+    const std::size_t alg_col_cells = omit_alg_column ? 0 : kAlgColCells;
+    // Replicate the column-width pass.
+    const std::size_t num_columns = region_universe.size();
+    std::vector<std::size_t> col_text_width(num_columns, 0);
+    for (std::size_t r = 0; r < num_columns; ++r) {
+        col_text_width[r] = std::max(col_text_width[r], cell_width(region_universe[r]));
+        for (const auto& row : rows) {
+            const double v = row.values_focus[r];
+            const std::string txt = std::isfinite(v)
+                ? format_metric_value(v, metric)
+                : std::string{gv.em_dash()};
+            col_text_width[r] = std::max(col_text_width[r], cell_width(txt));
+        }
+    }
+    auto required = [&](const std::vector<std::size_t>& widths) noexcept {
+        std::size_t total = alg_col_cells + 1;
+        for (auto w : widths) total += w + kCellPaddingPerCol;
+        return total;
+    };
+    if (required(col_text_width) > panel_inner_cols) {
+        if (panel_inner_cols >= alg_col_cells + num_columns * 6) {
+            const std::size_t per_col_total =
+                (panel_inner_cols - alg_col_cells) / num_columns;
+            const std::size_t per_col_text =
+                per_col_total > kCellPaddingPerCol ? per_col_total - kCellPaddingPerCol : 4u;
+            for (auto& w : col_text_width) {
+                w = std::min(w, std::max<std::size_t>(per_col_text, 4u));
+            }
+            if (required(col_text_width) > panel_inner_cols) layout.pivot = true;
+        } else {
+            layout.pivot = true;
+        }
+    }
+    layout.per_algo_rows.assign(rows.size(), 1u);
+    if (!layout.pivot) return layout;
+    constexpr std::size_t kInterChunkSpace = 3;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto& row = rows[i];
+        // Row min/max scan for marker presence.
+        double row_min = std::numeric_limits<double>::infinity();
+        double row_max = -std::numeric_limits<double>::infinity();
+        std::size_t min_pos = 0, max_pos = 0;
+        bool any_finite = false;
+        for (std::size_t r = 0; r < num_columns; ++r) {
+            const double v = row.values_focus[r];
+            if (!std::isfinite(v)) continue;
+            any_finite = true;
+            if (v < row_min) { row_min = v; min_pos = r; }
+            if (v > row_max) { row_max = v; max_pos = r; }
+        }
+        const bool show_markers = any_finite && row_min != row_max;
+        std::size_t chunks_lines = 1;
+        std::size_t current_width = 1;
+        for (std::size_t r = 0; r < num_columns; ++r) {
+            const double v = row.values_focus[r];
+            const auto value_text = std::isfinite(v)
+                ? format_metric_value(v, metric)
+                : std::string{gv.em_dash()};
+            const std::size_t marker = (show_markers
+                && std::isfinite(v)
+                && (r == min_pos || r == max_pos)) ? 1u : 0u;
+            const std::size_t cw = cell_width(region_universe[r]) + 2
+                + cell_width(value_text) + marker;
+            if (current_width > 1
+                && current_width + cw + kInterChunkSpace > panel_inner_cols)
+            {
+                ++chunks_lines;
+                current_width = 1;
+            }
+            current_width += cw + kInterChunkSpace;
+        }
+        layout.per_algo_rows[i] = 1u + chunks_lines;
+    }
+    return layout;
+}
+
+/// V18 §3.2 + §3.3 — extract per-region values for a given snapshot
+/// (focus report) and the active aggregate.
+[[nodiscard]] inline std::vector<PerRegionRow>
+extract_per_region_rows(const BenchmarkSnapshot& snap,
+                        std::string_view test_case,
+                        std::string_view metric,
+                        const std::vector<std::string>& region_universe,
+                        PerRegionAggregate aggregate) noexcept
+{
+    std::vector<PerRegionRow> rows;
+    rows.reserve(snap.tuples.size());
+    const std::string tc_owned{test_case};
+    const std::string metric_owned{metric};
+    for (const auto& tup : snap.tuples) {
+        PerRegionRow row;
+        row.canonical = tup.canonical;
+        row.short_label = tup.short_label;
+        row.values_focus.assign(region_universe.size(),
+            std::numeric_limits<double>::quiet_NaN());
+        const auto canon_it = snap.per_region_samples.find(tup.canonical);
+        if (canon_it == snap.per_region_samples.end()) {
+            rows.push_back(std::move(row));
+            continue;
+        }
+        const auto tc_it = canon_it->second.find(tc_owned);
+        if (tc_it == canon_it->second.end()) {
+            rows.push_back(std::move(row));
+            continue;
+        }
+        for (std::size_t r = 0; r < region_universe.size(); ++r) {
+            const auto reg_it = tc_it->second.find(region_universe[r]);
+            if (reg_it == tc_it->second.end()) continue;
+            const auto m_it = reg_it->second.find(metric_owned);
+            if (m_it == reg_it->second.end()) continue;
+            if (!has_finite_samples(m_it->second)) continue;
+            row.values_focus[r] = aggregate_field(m_it->second, aggregate);
+        }
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+/// V18 §3.6 — true when at least one row in `rows` carries a finite
+/// per-region value (any region, any algorithm). False ⇒ render the
+/// empty-state placeholder per §7.6.
+[[nodiscard]] inline bool any_finite_value(
+    const std::vector<PerRegionRow>& rows) noexcept
+{
+    for (const auto& row : rows) {
+        for (double cell : row.values_focus) {
+            if (std::isfinite(cell)) return true;
+        }
+    }
+    return false;
+}
+
+/// V18 §4.3 — "nice 1-2-5" rounded tick step covering the range
+/// `[0, value_max]`. Returns a step `s` such that the highest tick
+/// `tick_top = ceil(value_max / s) * s` is at least `value_max` and
+/// `tick_top / s <= total_height_cells / 2 + 1`.
+[[nodiscard]] inline double nice_tick_step(double value_max,
+                                            std::size_t total_height_cells) noexcept
+{
+    if (!std::isfinite(value_max) || value_max <= 0.0) return 1.0;
+    const double target_ticks = std::max<std::size_t>(2u, total_height_cells / 2);
+    const double raw_step = value_max / target_ticks;
+    if (raw_step <= 0.0) return 1.0;
+    const double mag = std::pow(10.0, std::floor(std::log10(raw_step)));
+    for (const double base : {1.0, 2.0, 5.0, 10.0}) {
+        const double candidate = base * mag;
+        if (candidate >= raw_step) return candidate;
+    }
+    return 10.0 * mag;
+}
+
+[[nodiscard]] inline double nice_tick_top(double value_max, double step) noexcept {
+    if (!std::isfinite(value_max) || step <= 0.0) return step;
+    return std::ceil(value_max / step) * step;
+}
+
+/// V18 §3.5 — per-region panel header text (bracket-and-pin badges
+/// applied by the renderer outside this helper).
+[[nodiscard]] inline std::string per_region_header_body(
+    std::size_t focus_report_id, PerRegionAggregate aggregate,
+    ValueDisplayMode mode) noexcept
+{
+    if (mode == ValueDisplayMode::Concrete) {
+        return fmt::format("R{} \xc2\xb7 aggr={}",
+                            focus_report_id, aggregate_label(aggregate));
+    }
+    if (mode == ValueDisplayMode::DeltaCurrent) {
+        // Note A: per-region cells stay concrete in DeltaCurrent.
+        return fmt::format("R{} \xc2\xb7 aggr={} \xc2\xb7 concrete; main: {}",
+                            focus_report_id, aggregate_label(aggregate),
+                            std::string{mode_label(mode)});
+    }
+    return fmt::format("R{} \xc2\xb7 aggr={} \xc2\xb7 {}",
+                        focus_report_id, aggregate_label(aggregate),
+                        std::string{mode_label(mode)});
+}
+
+/// V18 §3.1 — render the per-region table contents (without the
+/// outer header / border decoration). When `omit_alg_column` is true
+/// (wide mode), the leftmost algorithm column is dropped — the
+/// caller draws a connector bracket instead.
+[[nodiscard]] inline ftxui::Element render_per_region_table_body(
+    const std::vector<PerRegionRow>& rows,
+    const std::vector<std::string>& region_universe,
+    std::string_view metric,
+    PerRegionAggregate aggregate,
+    bool omit_alg_column,
+    std::size_t panel_inner_cols,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    if (rows.empty()) {
+        return text("(no per-region data)") | color(Color::GrayLight);
+    }
+    const std::size_t num_columns = region_universe.size();
+    if (num_columns == 0) {
+        return text("(no regions in universe)") | color(Color::GrayLight);
+    }
+    // V18 §3.1 rule 5 — bail at the top before any width computation
+    // when the panel is too narrow for any rendering mode.
+    if (panel_inner_cols < kPivotMinPanelInnerCols) {
+        return text(std::string{kNotifPanelTooNarrow}) | color(Color::Red) | dim;
+    }
+    constexpr std::size_t kAlgColCells = 10;
+    constexpr std::size_t kCellPaddingPerCol = 2;     // leading space + marker slot
+    const std::size_t alg_col_cells = omit_alg_column ? 0 : kAlgColCells;
+    // Column-width pass: each column's max formatted-text width across all
+    // rows, then add the per-cell padding.
+    std::vector<std::size_t> col_text_width(num_columns, 0);
+    for (std::size_t r = 0; r < num_columns; ++r) {
+        const auto header_w = cell_width(region_universe[r]);
+        col_text_width[r] = std::max(col_text_width[r], header_w);
+        for (const auto& row : rows) {
+            const double v = row.values_focus[r];
+            const std::string txt = std::isfinite(v)
+                ? format_metric_value(v, metric)
+                : std::string{gv.em_dash()};
+            col_text_width[r] = std::max(col_text_width[r], cell_width(txt));
+        }
+    }
+    auto compute_required = [&](const std::vector<std::size_t>& widths) noexcept {
+        std::size_t total = alg_col_cells + 1;     // space after alg col
+        for (auto w : widths) total += w + kCellPaddingPerCol;
+        return total;
+    };
+    // Single source of truth for pivot decision (BENCH_V18_IMPL_DESIGN.md
+    // §3.1) so the wide-mode bracket gutter (which calls
+    // `compute_table_layout` independently) sees the same answer for
+    // identical inputs and stays vertically aligned in pivot+wrap mode.
+    const auto layout = compute_table_layout(rows, region_universe, metric,
+        panel_inner_cols, omit_alg_column, gv);
+    const bool pivot_mode = layout.pivot;
+    if (compute_required(col_text_width) > panel_inner_cols
+        && panel_inner_cols >= alg_col_cells + num_columns * 6
+        && !pivot_mode)
+    {
+        // Apply per-column shrinking when the layout helper decided
+        // we can fit by clipping cell text instead of pivoting.
+        const std::size_t per_col_total =
+            (panel_inner_cols - alg_col_cells) / num_columns;
+        const std::size_t per_col_text =
+            per_col_total > kCellPaddingPerCol ? per_col_total - kCellPaddingPerCol : 4u;
+        for (auto& w : col_text_width) {
+            w = std::min(w, std::max<std::size_t>(per_col_text, 4u));
+        }
+    }
+    const auto palette_indices = build_palette_index_table(region_universe);
+    if (!pivot_mode) {
+        // Header row.
+        Elements header_cells;
+        if (!omit_alg_column) {
+            header_cells.push_back(text(fmt::format("{:<{}}", "(alg)", alg_col_cells))
+                | dim);
+        }
+        for (std::size_t r = 0; r < num_columns; ++r) {
+            const std::size_t pal = palette_indices[r];
+            const auto txt = clip_to_cells(region_universe[r], col_text_width[r]);
+            header_cells.push_back(text(" ") | dim);
+            header_cells.push_back(text(fmt::format("{:>{}}", txt, col_text_width[r]))
+                | bold | color(region_colour(pal)));
+            header_cells.push_back(text(" ") | dim);
+        }
+        Elements rendered_rows;
+        rendered_rows.push_back(hbox(std::move(header_cells)));
+        for (const auto& row : rows) {
+            // Compute row min/max for the gradient + ± markers.
+            double row_min = std::numeric_limits<double>::infinity();
+            double row_max = -std::numeric_limits<double>::infinity();
+            std::size_t min_pos = 0, max_pos = 0;
+            bool any_finite = false;
+            for (std::size_t r = 0; r < num_columns; ++r) {
+                const double v = row.values_focus[r];
+                if (!std::isfinite(v)) continue;
+                any_finite = true;
+                if (v < row_min) { row_min = v; min_pos = r; }
+                if (v > row_max) { row_max = v; max_pos = r; }
+            }
+            const bool show_markers = any_finite && row_min != row_max;
+            const bool gradient_active = show_markers;
+            const bool smaller = metric_smaller_is_better(metric);
+            Elements cells;
+            if (!omit_alg_column) {
+                cells.push_back(hbox({
+                    text(fmt::format("{:<{}}",
+                        clip_to_cells(row.short_label, alg_col_cells - 1),
+                        alg_col_cells - 1)) | dim,
+                    text(std::string{gv.col_accent()}) | color(Color::GrayLight),
+                }));
+            }
+            for (std::size_t r = 0; r < num_columns; ++r) {
+                const double v = row.values_focus[r];
+                const std::string txt = std::isfinite(v)
+                    ? format_metric_value(v, metric)
+                    : std::string{gv.em_dash()};
+                const auto clipped = clip_to_cells(txt, col_text_width[r]);
+                Element cell_text_el = text(fmt::format("{:>{}}", clipped, col_text_width[r]));
+                if (std::isfinite(v) && gradient_active) {
+                    const double rank = smaller
+                        ? (v - row_min) / (row_max - row_min)
+                        : (row_max - v) / (row_max - row_min);
+                    cell_text_el = cell_text_el | color(gradient_color(rank));
+                } else if (!std::isfinite(v)) {
+                    cell_text_el = cell_text_el | color(Color::GrayDark);
+                }
+                std::string marker = " ";
+                Color marker_color = Color::Default;
+                if (show_markers) {
+                    if (r == min_pos) {
+                        marker = smaller ? "-" : "+";
+                        marker_color = smaller ? Color::Green : Color::Red;
+                    } else if (r == max_pos) {
+                        marker = smaller ? "+" : "-";
+                        marker_color = smaller ? Color::Red : Color::Green;
+                    }
+                }
+                cells.push_back(hbox({
+                    text(" "),
+                    cell_text_el,
+                    text(marker) | color(marker_color) | bold,
+                }));
+            }
+            rendered_rows.push_back(hbox(std::move(cells)));
+        }
+        return vbox(std::move(rendered_rows));
+    }
+    // Pivot mode (§3.1 rule 4): two rows per algorithm. When inline
+    // chunks would overflow `panel_inner_cols`, wrap onto a second
+    // line so the algorithm row spans up to 3 terminal rows.
+    Elements rendered_rows;
+    const bool smaller = metric_smaller_is_better(metric);
+    auto build_chunk = [&](std::size_t r, double v, std::string marker,
+                           Color marker_color) noexcept -> Elements {
+        Elements chunk;
+        chunk.push_back(text(fmt::format("{}: ", region_universe[r]))
+            | color(region_colour(palette_indices[r])));
+        chunk.push_back(text(std::isfinite(v) ? format_metric_value(v, metric)
+                                              : std::string{gv.em_dash()}));
+        if (!marker.empty()) chunk.push_back(text(marker) | color(marker_color) | bold);
+        return chunk;
+    };
+    auto chunk_width = [&](std::size_t r, double v, const std::string& marker) noexcept {
+        const auto value_text = std::isfinite(v) ? format_metric_value(v, metric)
+                                                  : std::string{gv.em_dash()};
+        return cell_width(region_universe[r]) + 2 + cell_width(value_text)
+             + (marker.empty() ? 0u : 1u);
+    };
+    for (const auto& row : rows) {
+        rendered_rows.push_back(text(row.short_label) | dim);
+        double row_min = std::numeric_limits<double>::infinity();
+        double row_max = -std::numeric_limits<double>::infinity();
+        std::size_t min_pos = 0, max_pos = 0;
+        bool any_finite = false;
+        for (std::size_t r = 0; r < num_columns; ++r) {
+            const double v = row.values_focus[r];
+            if (!std::isfinite(v)) continue;
+            any_finite = true;
+            if (v < row_min) { row_min = v; min_pos = r; }
+            if (v > row_max) { row_max = v; max_pos = r; }
+        }
+        const bool show_markers = any_finite && row_min != row_max;
+        constexpr std::size_t kInterChunkSpace = 3;
+        Elements current_line;
+        current_line.push_back(text(" "));
+        std::size_t current_width = 1;
+        auto flush_line = [&]() noexcept {
+            if (current_line.size() > 1) {
+                rendered_rows.push_back(hbox(std::move(current_line)));
+            }
+            current_line = Elements{};
+            current_line.push_back(text(" "));
+            current_width = 1;
+        };
+        for (std::size_t r = 0; r < num_columns; ++r) {
+            const double v = row.values_focus[r];
+            std::string marker;
+            Color marker_color = Color::Default;
+            if (show_markers && std::isfinite(v)) {
+                if (r == min_pos) {
+                    marker = smaller ? "-" : "+";
+                    marker_color = smaller ? Color::Green : Color::Red;
+                } else if (r == max_pos) {
+                    marker = smaller ? "+" : "-";
+                    marker_color = smaller ? Color::Red : Color::Green;
+                }
+            }
+            const std::size_t cw = chunk_width(r, v, marker);
+            const std::size_t needed = current_width + cw + kInterChunkSpace;
+            if (current_width > 1 && needed > panel_inner_cols) flush_line();
+            auto chunk = build_chunk(r, v, marker, marker_color);
+            for (auto& el : chunk) current_line.push_back(std::move(el));
+            current_line.push_back(text(std::string(kInterChunkSpace, ' ')));
+            current_width += cw + kInterChunkSpace;
+        }
+        flush_line();
+    }
+    return vbox(std::move(rendered_rows));
+}
+
+/// V18 §4 - stacked bar chart (Mode A). One bar per algorithm,
+/// segmented by region.
+[[nodiscard]] inline ftxui::Element render_stacked_bar_chart(
+    const std::vector<PerRegionRow>& rows,
+    const std::vector<std::string>& region_universe,
+    std::string_view metric,
+    PerRegionAggregate aggregate,
+    std::size_t focus_report_id,
+    ValueDisplayMode value_mode,
+    std::size_t panel_inner_cols,
+    std::size_t chart_rows,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    // §6.3 — Stacked + DeltaCurrent ⇒ placeholder (every bar would be 0%).
+    if (value_mode == ValueDisplayMode::DeltaCurrent) {
+        return vbox({
+            text(fmt::format("Stacked bars (R{}, [\xce\x94 vs current undefined for stacked])",
+                focus_report_id)) | bold | color(Color::Yellow),
+            text("   \xce\x94-vs-current shows zero everywhere for the focus report.") | dim,
+            text("   Press '\\' to switch to \xce\x94 vs first / \xce\x94 vs baseline / Concrete to see bars.") | dim,
+        });
+    }
+    if (rows.empty() || region_universe.empty() || !any_finite_value(rows)) {
+        return vbox({
+            text(fmt::format("Stacked bars (R{}, aggr={}, {})",
+                focus_report_id, aggregate_label(aggregate),
+                std::string{metric})) | bold | color(Color::Yellow),
+            text("   (no finite values for current test_case/metric)") | dim,
+        });
+    }
+    const std::size_t num_bars = rows.size();
+    if (num_bars == 0) {
+        return text("(no algorithms)") | color(Color::GrayLight);
+    }
+    // Total bar height in each algorithm = sum of region values.
+    std::vector<double> totals(num_bars, 0.0);
+    for (std::size_t b = 0; b < num_bars; ++b) {
+        for (double v : rows[b].values_focus) {
+            if (std::isfinite(v) && v > 0.0) totals[b] += v;
+        }
+    }
+    double y_max = 0.0;
+    for (double t : totals) y_max = std::max(y_max, t);
+    if (y_max <= 0.0) {
+        return vbox({
+            text(fmt::format("Stacked bars (R{}, aggr={}, {})",
+                focus_report_id, aggregate_label(aggregate),
+                std::string{metric})) | bold | color(Color::Yellow),
+            text("   (all values are zero)") | dim,
+        });
+    }
+    const std::size_t total_height = std::clamp(chart_rows, kChartMinRows, kChartTargetRows);
+    const double tick_step = nice_tick_step(y_max, total_height);
+    const double tick_top = std::max(y_max, nice_tick_top(y_max, tick_step));
+    // Y-axis tick labels: 0, step, 2*step, ..., tick_top.
+    std::vector<double> tick_values;
+    {
+        double v = 0.0;
+        constexpr int kMaxTicks = 64;
+        int safety = 0;
+        while (v <= tick_top + 1e-9 && safety++ < kMaxTicks) {
+            tick_values.push_back(v);
+            v += tick_step;
+        }
+    }
+    std::size_t y_label_width = 0;
+    std::vector<std::string> y_label_texts;
+    y_label_texts.reserve(tick_values.size());
+    for (double t : tick_values) {
+        const auto txt = format_metric_value(t, metric);
+        y_label_width = std::max(y_label_width, cell_width(txt));
+        y_label_texts.push_back(txt);
+    }
+    const std::size_t gutter = 1;
+    const std::size_t available_for_bars = panel_inner_cols > y_label_width + 2
+        ? panel_inner_cols - y_label_width - 2 : 0;
+    if (available_for_bars < num_bars) {
+        return vbox({
+            text(fmt::format("Stacked bars (R{}, aggr={}, {})",
+                focus_report_id, aggregate_label(aggregate),
+                std::string{metric})) | bold | color(Color::Yellow),
+            text("   (too many algorithms \xe2\x80\x94 resize panel)") | dim,
+        });
+    }
+    const std::size_t bar_cell_width = std::clamp<std::size_t>(
+        (available_for_bars - num_bars * gutter) / std::max<std::size_t>(num_bars, 1),
+        1u, kRegionBarMaxCellWidth);
+    const auto palette_indices = build_palette_index_table(region_universe);
+    // Per-bar segment plan: for each bar, list of (palette_index, full_rows, partial_eighths).
+    struct Segment { std::size_t palette_index; std::size_t full_rows; std::size_t partial_eighths; };
+    std::vector<std::vector<Segment>> bar_segments(num_bars);
+    for (std::size_t b = 0; b < num_bars; ++b) {
+        for (std::size_t r = 0; r < region_universe.size(); ++r) {
+            const double v = rows[b].values_focus[r];
+            if (!std::isfinite(v) || v <= 0.0) continue;
+            const double seg_h = v / tick_top * static_cast<double>(total_height);
+            const std::size_t full = static_cast<std::size_t>(std::floor(seg_h));
+            const double frac = seg_h - static_cast<double>(full);
+            const std::size_t eighths = static_cast<std::size_t>(
+                std::clamp(frac * 8.0, 0.0, 7.999));
+            bar_segments[b].push_back({palette_indices[r], full, eighths});
+        }
+    }
+    // Render row by row, top to bottom.
+    Elements grid_rows;
+    // Title — collapses to short form on narrow panels (§4.5).
+    constexpr std::size_t kStackedTitleFullCols = 60;
+    const bool collapse_title = panel_inner_cols < kStackedTitleFullCols;
+    const std::string mode_suffix = (value_mode == ValueDisplayMode::Concrete)
+        ? std::string{}
+        : fmt::format(" [{}]", std::string{mode_label(value_mode)});
+    const std::string title = collapse_title
+        ? fmt::format("Stacked bars (R{}, {}){}",
+            focus_report_id, aggregate_label(aggregate), mode_suffix)
+        : fmt::format("Stacked bars (R{}, aggr={}, {}){}",
+            focus_report_id, aggregate_label(aggregate),
+            std::string{metric}, mode_suffix);
+    grid_rows.push_back(text(title) | bold | color(Color::Yellow));
+    // Pre-resolve each render row to its closest tick label so a row
+    // gets the tick *whose value is nearest the row's centre*, rather
+    // than the last-iterated tick winning by accident.
+    std::vector<std::string> row_labels(total_height);
+    for (std::size_t row_from_bottom = 0; row_from_bottom < total_height;
+         ++row_from_bottom)
+    {
+        std::ptrdiff_t best = -1;
+        std::size_t best_diff = std::numeric_limits<std::size_t>::max();
+        for (std::size_t i = 0; i < tick_values.size(); ++i) {
+            const double ratio = tick_values[i] / tick_top;
+            const std::size_t tick_row = static_cast<std::size_t>(std::round(
+                ratio * static_cast<double>(total_height - 1)));
+            const std::size_t diff = tick_row > row_from_bottom
+                ? tick_row - row_from_bottom : row_from_bottom - tick_row;
+            if (diff < best_diff) { best_diff = diff; best = static_cast<std::ptrdiff_t>(i); }
+        }
+        if (best >= 0 && best_diff == 0) {
+            row_labels[row_from_bottom] = y_label_texts[static_cast<std::size_t>(best)];
+        }
+    }
+    for (std::size_t row_top = 0; row_top < total_height; ++row_top) {
+        const std::size_t row_from_bottom = total_height - 1 - row_top;
+        const std::string y_label = row_labels[row_from_bottom];
+        Elements row_parts;
+        row_parts.push_back(text(fmt::format("{:>{}} ", y_label, y_label_width)) | dim);
+        row_parts.push_back(text(y_label.empty()
+            ? std::string{" "} : std::string{gv.br_t_right()}) | dim);
+        for (std::size_t b = 0; b < num_bars; ++b) {
+            // Determine which region's segment occupies this row, if any.
+            std::size_t height_acc = 0;
+            std::size_t glyph_pal = kRegionPalette.size();
+            std::string glyph_text(" ");
+            for (const auto& seg : bar_segments[b]) {
+                const std::size_t seg_rows = seg.full_rows + (seg.partial_eighths > 0 ? 1u : 0u);
+                if (seg_rows == 0) continue;
+                const std::size_t seg_bottom = height_acc;
+                const std::size_t seg_top    = height_acc + seg_rows;
+                if (row_from_bottom >= seg_bottom && row_from_bottom < seg_top) {
+                    glyph_pal = seg.palette_index;
+                    if (row_from_bottom < seg_bottom + seg.full_rows) {
+                        glyph_text = std::string{gv.full_block()};
+                    } else {
+                        glyph_text = std::string{gv.bar_fraction(seg.partial_eighths)};
+                    }
+                    break;
+                }
+                height_acc += seg_rows;
+            }
+            for (std::size_t c = 0; c < bar_cell_width; ++c) {
+                Element cell = text(glyph_text);
+                if (glyph_pal < kRegionPalette.size()) cell = cell | color(region_colour(glyph_pal));
+                row_parts.push_back(cell);
+            }
+            for (std::size_t c = 0; c < gutter; ++c) row_parts.push_back(text(" "));
+        }
+        grid_rows.push_back(hbox(std::move(row_parts)));
+    }
+    // X-axis line.
+    {
+        Elements axis;
+        axis.push_back(text(fmt::format("{:>{}} ", "0", y_label_width)) | dim);
+        axis.push_back(text(std::string{gv.br_bot_left()}) | dim);
+        for (std::size_t b = 0; b < num_bars; ++b) {
+            // tick under each bar's centre
+            for (std::size_t c = 0; c < bar_cell_width; ++c) {
+                axis.push_back(text(std::string{gv.br_h()}) | dim);
+            }
+            axis.push_back(text(std::string{gv.br_h()}) | dim);
+        }
+        grid_rows.push_back(hbox(std::move(axis)));
+    }
+    // X-axis labels.
+    {
+        Elements labels;
+        labels.push_back(text(std::string(y_label_width + 2, ' ')));
+        for (std::size_t b = 0; b < num_bars; ++b) {
+            const auto label_text = clip_to_cells(rows[b].short_label, bar_cell_width);
+            labels.push_back(text(fmt::format("{:<{}}", label_text, bar_cell_width)) | dim);
+            labels.push_back(text(" "));
+        }
+        grid_rows.push_back(hbox(std::move(labels)));
+    }
+    // Legend.
+    {
+        Elements legend;
+        legend.push_back(text("Legend: ") | dim);
+        for (std::size_t r = 0; r < region_universe.size(); ++r) {
+            const std::size_t pal = palette_indices[r];
+            legend.push_back(text(std::string{gv.full_block()}) | color(region_colour(pal)));
+            legend.push_back(text(fmt::format(" {}  ", region_universe[r])));
+        }
+        grid_rows.push_back(hbox(std::move(legend)));
+    }
+    return vbox(std::move(grid_rows));
+}
+
+/// V18 §5 — multi-series step chart (Mode B). Inputs are values per
+/// region per report; gaps render as broken lines.
+struct StepLinesFrame {
+    std::string                                       active_label{};
+    int                                               active_index = 0;
+    int                                               num_algorithms = 0;
+    std::vector<std::size_t>                          report_ids{};
+    std::vector<std::string>                          region_names{};
+    /// values[r][i] for region r and report index i. NaN ⇒ gap.
+    std::vector<std::vector<double>>                  values{};
+};
+
+[[nodiscard]] inline ftxui::Element render_step_lines_chart(
+    const StepLinesFrame& frame,
+    std::string_view metric,
+    PerRegionAggregate aggregate,
+    ValueDisplayMode value_mode,
+    std::size_t panel_inner_cols,
+    std::size_t chart_rows,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    Elements out;
+    auto title = [&]() noexcept {
+        const auto base = fmt::format(
+            "Step lines \xc2\xb7 {} ({} of {})  metric={}  aggr={}{}",
+            frame.active_label, frame.active_index + 1,
+            std::max(frame.num_algorithms, 1),
+            std::string{metric}, aggregate_label(aggregate),
+            value_mode == ValueDisplayMode::Concrete ? "" :
+                fmt::format(" [{}]", std::string{mode_label(value_mode)}));
+        return text(base) | bold | color(Color::Yellow);
+    };
+    out.push_back(title());
+    if (frame.region_names.empty() || frame.values.empty()) {
+        out.push_back(text(fmt::format(
+            "   (no data for {} across loaded reports)", frame.active_label)) | dim);
+        return vbox(std::move(out));
+    }
+    // Y range: include negative values when the value mode produces them.
+    bool any_finite = false;
+    double y_min = std::numeric_limits<double>::infinity();
+    double y_max = -std::numeric_limits<double>::infinity();
+    for (const auto& series : frame.values) {
+        for (double v : series) {
+            if (!std::isfinite(v)) continue;
+            any_finite = true;
+            y_min = std::min(y_min, v);
+            y_max = std::max(y_max, v);
+        }
+    }
+    if (!any_finite) {
+        out.push_back(text(fmt::format(
+            "   (no data for {} across loaded reports)", frame.active_label)) | dim);
+        return vbox(std::move(out));
+    }
+    const bool can_negative = (value_mode == ValueDisplayMode::DeltaCurrent
+                            || value_mode == ValueDisplayMode::DeltaFirst
+                            || value_mode == ValueDisplayMode::DeltaBaseline);
+    if (!can_negative && y_min > 0.0) y_min = 0.0;
+    if (y_max <= y_min) y_max = y_min + 1.0;
+    const std::size_t total_height = std::clamp(chart_rows, kChartMinRows, kChartTargetRows);
+    const double range = y_max - y_min;
+    const double tick_step = nice_tick_step(range, total_height);
+    const double tick_top = nice_tick_top(y_max - y_min, tick_step) + y_min;
+    std::vector<double> tick_values;
+    {
+        double v = std::ceil(y_min / tick_step) * tick_step;
+        constexpr int kMaxTicks = 64;
+        int safety = 0;
+        while (v <= tick_top + 1e-9 && safety++ < kMaxTicks) {
+            tick_values.push_back(v);
+            v += tick_step;
+        }
+        // §5.6 — when the Y range crosses zero (Δ / Ratio modes), ensure
+        // a `0` tick is rendered explicitly as the visual baseline.
+        if (y_min < 0.0 && tick_top > 0.0) {
+            if (std::find_if(tick_values.begin(), tick_values.end(),
+                [](double t) noexcept { return std::abs(t) < 1e-9; })
+                == tick_values.end())
+            {
+                tick_values.push_back(0.0);
+                std::sort(tick_values.begin(), tick_values.end());
+            }
+        }
+    }
+    std::size_t y_label_width = 0;
+    std::vector<std::string> y_label_texts;
+    y_label_texts.reserve(tick_values.size());
+    for (double t : tick_values) {
+        const auto txt = format_metric_value(t, metric);
+        y_label_width = std::max(y_label_width, cell_width(txt));
+        y_label_texts.push_back(txt);
+    }
+    const std::size_t inner_x_cols = panel_inner_cols > y_label_width + 2
+        ? panel_inner_cols - y_label_width - 2 : 0;
+    if (inner_x_cols < 4) {
+        out.push_back(text(std::string{kNotifPanelTooNarrow}) | color(Color::Red) | dim);
+        return vbox(std::move(out));
+    }
+    const std::size_t num_reports = frame.report_ids.size();
+    const std::size_t cells_total = inner_x_cols;
+    // Sub-sample if more reports than cells.
+    std::vector<std::size_t> visible_indices;
+    visible_indices.reserve(num_reports);
+    if (num_reports == 0) {
+        out.push_back(text("   (only 1 report \xe2\x80\x94 add another to see history)") | dim);
+        return vbox(std::move(out));
+    }
+    if (num_reports > cells_total) {
+        for (std::size_t i = num_reports - cells_total; i < num_reports; ++i) {
+            visible_indices.push_back(i);
+        }
+    } else {
+        for (std::size_t i = 0; i < num_reports; ++i) visible_indices.push_back(i);
+    }
+    const std::size_t hidden_left = num_reports - visible_indices.size();
+    // Compute X cell positions: each visible report gets a column index.
+    auto x_for = [&](std::size_t local_idx) noexcept -> int {
+        if (visible_indices.empty()) return 0;
+        if (visible_indices.size() == 1) return static_cast<int>(cells_total / 2);
+        return static_cast<int>(static_cast<double>(local_idx)
+            / static_cast<double>(visible_indices.size() - 1)
+            * static_cast<double>(cells_total - 1));
+    };
+    auto y_for = [&](double v) noexcept -> int {
+        if (!std::isfinite(v)) return -1;
+        const double r = (v - y_min) / (tick_top - y_min);
+        const double row_d = static_cast<double>(total_height - 1) * (1.0 - r);
+        return static_cast<int>(std::clamp(std::round(row_d), 0.0,
+            static_cast<double>(total_height - 1)));
+    };
+    // Canvas: rows × cols.
+    struct Cell { std::string glyph; std::size_t pal = kRegionPalette.size(); int prio = 0; };
+    std::vector<std::vector<Cell>> canvas(total_height,
+        std::vector<Cell>(cells_total, Cell{" ", kRegionPalette.size(), 0}));
+    auto place = [&](int r, int c, const std::string& glyph,
+                     std::size_t pal, int priority) noexcept {
+        if (r < 0 || r >= static_cast<int>(total_height)) return;
+        if (c < 0 || c >= static_cast<int>(cells_total)) return;
+        auto& cell = canvas[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+        if (priority > cell.prio) {
+            cell.glyph = glyph; cell.pal = pal; cell.prio = priority;
+        } else if (priority == cell.prio && cell.prio > 0) {
+            // V18 §7.4 — line-crossing merge. The "winning glyph"
+            // owns the cell colour. Doubled-weight `═` beats `─`,
+            // and the cross/double-cross glyphs both inherit the
+            // colour of whichever line entered as a doubled stroke
+            // (or the new writer when both are single).
+            if (glyph != cell.glyph) {
+                const bool new_is_double  = (glyph == std::string{gv.br_h_double()});
+                const bool old_is_double  = (cell.glyph == std::string{gv.br_h_double()});
+                if (new_is_double && !old_is_double) {
+                    cell.glyph = std::string{gv.br_cross_dh()};
+                    cell.pal = pal;     // new (doubled) line owns the colour
+                } else if (old_is_double && !new_is_double) {
+                    cell.glyph = std::string{gv.br_cross_dh()};
+                    // old colour kept (already doubled)
+                } else {
+                    cell.glyph = std::string{gv.br_cross()};
+                    cell.pal = pal;     // last writer wins for plain crosses
+                }
+            }
+        }
+    };
+    // Draw each series.
+    const auto palette_indices = build_palette_index_table(frame.region_names);
+    for (std::size_t s = 0; s < frame.region_names.size(); ++s) {
+        const std::size_t pal = palette_indices[s];
+        const std::string point_glyph = (pal % 2 == 0) ? std::string{gv.point_filled()}
+                                                        : std::string{gv.point_hollow()};
+        const std::string line_glyph = ((pal / 2) % 2 == 0) ? std::string{gv.br_h()}
+                                                              : std::string{gv.br_h_double()};
+        const auto& series = frame.values[s];
+        std::optional<std::pair<int,int>> prev;     // (col, row)
+        for (std::size_t li = 0; li < visible_indices.size(); ++li) {
+            const std::size_t global_i = visible_indices[li];
+            const double v = (global_i < series.size()) ? series[global_i]
+                : std::numeric_limits<double>::quiet_NaN();
+            const int row = y_for(v);
+            if (row < 0) { prev.reset(); continue; }
+            const int col = x_for(li);
+            // Place point.
+            place(row, col, point_glyph, pal, 3);
+            if (prev.has_value()) {
+                const int pcol = prev->first;
+                const int prow = prev->second;
+                const int mid = (pcol + col) / 2;
+                if (prow == row) {
+                    for (int c = pcol + 1; c < col; ++c) place(row, c, line_glyph, pal, 1);
+                } else {
+                    for (int c = pcol + 1; c < mid; ++c) place(prow, c, line_glyph, pal, 1);
+                    const std::string corner_top = (row > prow)
+                        ? std::string{gv.br_top_right()}
+                        : std::string{gv.br_bot_right()};
+                    const std::string corner_bot = (row > prow)
+                        ? std::string{gv.br_bot_left()}
+                        : std::string{gv.br_top_left()};
+                    place(prow, mid, corner_top, pal, 2);
+                    place(row, mid, corner_bot, pal, 2);
+                    const int row_lo = std::min(prow, row);
+                    const int row_hi = std::max(prow, row);
+                    for (int rr = row_lo + 1; rr < row_hi; ++rr) {
+                        place(rr, mid, std::string{gv.br_v()}, pal, 1);
+                    }
+                    for (int c = mid + 1; c < col; ++c) place(row, c, line_glyph, pal, 1);
+                }
+            }
+            prev = std::make_pair(col, row);
+        }
+    }
+    // Render canvas with axis labels — pre-resolve each row to its
+    // closest tick (same fix as Stacked chart §4.3) so densely-clustered
+    // ticks don't fall back to last-write-wins.
+    std::vector<std::string> step_row_labels(total_height);
+    for (std::size_t row = 0; row < total_height; ++row) {
+        std::ptrdiff_t best = -1;
+        std::size_t best_diff = std::numeric_limits<std::size_t>::max();
+        for (std::size_t i = 0; i < tick_values.size(); ++i) {
+            const double r = (tick_values[i] - y_min) / (tick_top - y_min);
+            const std::size_t tick_row = static_cast<std::size_t>(std::round(
+                static_cast<double>(total_height - 1) * (1.0 - r)));
+            const std::size_t diff = tick_row > row ? tick_row - row : row - tick_row;
+            if (diff < best_diff) { best_diff = diff; best = static_cast<std::ptrdiff_t>(i); }
+        }
+        if (best >= 0 && best_diff == 0) {
+            step_row_labels[row] = y_label_texts[static_cast<std::size_t>(best)];
+        }
+    }
+    for (std::size_t row = 0; row < total_height; ++row) {
+        const std::string y_label = step_row_labels[row];
+        Elements row_parts;
+        row_parts.push_back(text(fmt::format("{:>{}} ", y_label, y_label_width))
+            | (y_label.empty() ? dim : color(Color::GrayLight)));
+        row_parts.push_back(text(y_label.empty() ? std::string{" "} : std::string{gv.br_t_right()})
+            | dim);
+        for (std::size_t c = 0; c < cells_total; ++c) {
+            const auto& cell = canvas[row][c];
+            Element el = text(cell.glyph);
+            if (cell.pal < kRegionPalette.size()) el = el | color(region_colour(cell.pal));
+            row_parts.push_back(el);
+        }
+        out.push_back(hbox(std::move(row_parts)));
+    }
+    // X axis line.
+    {
+        Elements axis;
+        axis.push_back(text(fmt::format("{:>{}} ", "0", y_label_width)) | dim);
+        axis.push_back(text(std::string{gv.br_bot_left()}) | dim);
+        for (std::size_t c = 0; c < cells_total; ++c) {
+            axis.push_back(text(std::string{gv.br_h()}) | dim);
+        }
+        out.push_back(hbox(std::move(axis)));
+    }
+    // X axis labels: right-anchored stride. We place tick labels
+    // starting from the rightmost (focus) report and walking leftward;
+    // overlapping labels (where the next chosen label's right edge
+    // would touch the current label's left edge) are dropped to
+    // preserve column alignment per §5.3.
+    {
+        Elements labels;
+        labels.push_back(text(std::string(y_label_width + 2, ' ')));
+        std::vector<std::string> per_cell(cells_total, std::string());
+        const std::size_t n = visible_indices.size();
+        if (n > 0) {
+            const std::size_t k = std::max<std::size_t>(1, (n + 7) / 8);
+            std::size_t next_free_left = cells_total;     // label must end strictly before this column
+            for (std::size_t i = 0; i < n; ++i) {
+                const std::size_t pos_from_end = i;     // 0 = rightmost
+                const std::size_t local_i = n - 1 - i;
+                if (pos_from_end % k != 0) continue;
+                const std::size_t global_i = visible_indices[local_i];
+                const auto label = fmt::format("R{}", frame.report_ids[global_i]);
+                const int col = x_for(local_i);
+                if (col < 0 || static_cast<std::size_t>(col) >= cells_total) continue;
+                const std::size_t width = cell_width(label);
+                const std::size_t end_col = static_cast<std::size_t>(col) + width;
+                if (end_col > next_free_left) continue;     // would overlap → drop
+                per_cell[static_cast<std::size_t>(col)] = label;
+                next_free_left = static_cast<std::size_t>(col);
+            }
+        }
+        if (hidden_left > 0 && !per_cell.empty()) {
+            per_cell.front() = fmt::format("\xe2\x86\x90 {} hidden", hidden_left);
+        }
+        std::size_t c = 0;
+        while (c < cells_total) {
+            if (per_cell[c].empty()) { labels.push_back(text(" ")); ++c; continue; }
+            const auto& s = per_cell[c];
+            const std::size_t w = cell_width(s);
+            labels.push_back(text(s) | dim);
+            c += w;
+        }
+        out.push_back(hbox(std::move(labels)));
+    }
+    // Legend.
+    {
+        Elements legend;
+        legend.push_back(text("Legend: ") | dim);
+        for (std::size_t r = 0; r < frame.region_names.size(); ++r) {
+            const std::size_t pal = palette_indices[r];
+            const std::string glyph_pt = (pal % 2 == 0) ? std::string{gv.point_filled()}
+                                                          : std::string{gv.point_hollow()};
+            const std::string glyph_ln = ((pal / 2) % 2 == 0) ? std::string{gv.br_h()}
+                                                                : std::string{gv.br_h_double()};
+            legend.push_back(text(glyph_pt + glyph_ln) | color(region_colour(pal)));
+            legend.push_back(text(fmt::format(" {}  ", frame.region_names[r])));
+        }
+        out.push_back(hbox(std::move(legend)));
+    }
+    if (frame.report_ids.size() == 1) {
+        out.push_back(text("   (only 1 report \xe2\x80\x94 add another to see history)") | dim);
+    }
+    return vbox(std::move(out));
+}
+
+/// V18 §6.1 — chart focus state machine. Look up / create the
+/// `ChartFocus` for the focused view-key (LRU-evicted at 256 entries).
+[[nodiscard]] inline ChartFocus&
+chart_focus_for(UiState& ui, const UiViewKey& key) {
+    auto it = ui.chart_focus_per_view.find(key);
+    if (it != ui.chart_focus_per_view.end()) return it->second;
+    if (ui.chart_focus_per_view.size() >= 256) {
+        ui.chart_focus_per_view.erase(ui.chart_focus_per_view.begin());
+    }
+    auto inserted = ui.chart_focus_per_view.emplace(key, ChartFocus{});
+    return inserted.first->second;
+}
+
+[[nodiscard]] inline const ChartFocus*
+chart_focus_for_const(const UiState& ui, const UiViewKey& key) noexcept {
+    auto it = ui.chart_focus_per_view.find(key);
+    return it == ui.chart_focus_per_view.end() ? nullptr : &it->second;
+}
+
+/// V18 §6.1 — advance the chart-mode state machine forward (`p`)
+/// or backward (`P`). Returns the notification string to surface.
+[[nodiscard]] inline std::string
+cycle_chart_mode(ChartFocus& focus,
+                  const std::vector<std::string>& alg_canonicals,
+                  bool forward) noexcept
+{
+    if (alg_canonicals.empty()) {
+        focus.mode = ChartFocus::Mode::Stacked;
+        focus.step_algo_canonical.clear();
+        return std::string{kNotifChartModeStacked};
+    }
+    if (forward) {
+        if (focus.mode == ChartFocus::Mode::Stacked) {
+            focus.mode = ChartFocus::Mode::Step;
+            focus.step_algo_canonical = alg_canonicals.front();
+        } else {
+            const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(),
+                                      focus.step_algo_canonical);
+            const std::ptrdiff_t idx = (it == alg_canonicals.end())
+                ? -1 : (it - alg_canonicals.begin());
+            if (idx < 0 || idx + 1 == static_cast<std::ptrdiff_t>(alg_canonicals.size())) {
+                focus.mode = ChartFocus::Mode::Stacked;
+                focus.step_algo_canonical.clear();
+            } else {
+                focus.step_algo_canonical = alg_canonicals[static_cast<std::size_t>(idx + 1)];
+            }
+        }
+    } else {
+        if (focus.mode == ChartFocus::Mode::Stacked) {
+            focus.mode = ChartFocus::Mode::Step;
+            focus.step_algo_canonical = alg_canonicals.back();
+        } else {
+            const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(),
+                                      focus.step_algo_canonical);
+            const std::ptrdiff_t idx = (it == alg_canonicals.end())
+                ? 0 : (it - alg_canonicals.begin());
+            if (idx <= 0) {
+                focus.mode = ChartFocus::Mode::Stacked;
+                focus.step_algo_canonical.clear();
+            } else {
+                focus.step_algo_canonical = alg_canonicals[static_cast<std::size_t>(idx - 1)];
+            }
+        }
+    }
+    if (focus.mode == ChartFocus::Mode::Stacked) {
+        return std::string{kNotifChartModeStacked};
+    }
+    const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(),
+                              focus.step_algo_canonical);
+    const std::ptrdiff_t idx = (it == alg_canonicals.end())
+        ? 0 : (it - alg_canonicals.begin());
+    return fmt::format(kNotifChartModeStepFmt, focus.step_algo_canonical,
+                       idx + 1, alg_canonicals.size());
+}
+
+/// V18 §2.3 — resolution of the per-region focus identity for the
+/// active frame. Walks `last_frame_section_ids` to find the nearest
+/// `(tc, metric)` ancestor; honours `pinned_perregion_focus` when
+/// pinned. Returns `nullopt` when no focus could be resolved (e.g.
+/// Summary view).
+struct ResolvedFocus {
+    std::string  benchmark{};
+    std::string  test_case{};
+    std::string  metric{};
+};
+
+inline constexpr std::string_view kReportBenchPrefix = "report:bench:";
+
+[[nodiscard]] inline std::optional<ResolvedFocus>
+parse_tc_section_id(std::string_view id) noexcept
+{
+    if (id.compare(0, kReportBenchPrefix.size(), kReportBenchPrefix) != 0) return std::nullopt;
+    const auto bench_end = id.find(":tc:", kReportBenchPrefix.size());
+    if (bench_end == std::string_view::npos) return std::nullopt;
+    const auto tc_start = bench_end + 4;
+    const auto tc_end = id.find(":metric:", tc_start);
+    if (tc_end == std::string_view::npos) return std::nullopt;
+    const auto metric_start = tc_end + 8;
+    auto metric_end = id.find(':', metric_start);
+    if (metric_end == std::string_view::npos) metric_end = id.size();
+    ResolvedFocus rf;
+    rf.benchmark = std::string{id.substr(kReportBenchPrefix.size(),
+        bench_end - kReportBenchPrefix.size())};
+    rf.test_case = std::string{id.substr(tc_start, tc_end - tc_start)};
+    rf.metric    = std::string{id.substr(metric_start, metric_end - metric_start)};
+    return rf;
+}
+
+[[nodiscard]] inline std::optional<ResolvedFocus>
+resolve_perregion_focus_impl(const UiState& ui) noexcept
+{
+    if (ui.pinned_perregion_focus.is_pinned) {
+        ResolvedFocus out;
+        out.benchmark = ui.pinned_perregion_focus.benchmark;
+        out.test_case = ui.pinned_perregion_focus.test_case;
+        out.metric    = ui.pinned_perregion_focus.metric;
+        return out;
+    }
+    if (ui.last_frame_section_ids.empty()) return std::nullopt;
+    const int idx = std::clamp(ui.focused_section_index, 0,
+        static_cast<int>(ui.last_frame_section_ids.size()) - 1);
+    // Determine the benchmark of the focused section. Bench header IDs have
+    // form `report:bench:<bench>` (no trailing `:tc:`); tc/metric IDs share
+    // the same `report:bench:<bench>` prefix. We constrain the walk to that
+    // prefix so a forward walk for a benchmark header doesn't cross into a
+    // sibling benchmark's tc.
+    const auto& focused_id = ui.last_frame_section_ids[static_cast<std::size_t>(idx)];
+    std::string_view focused_bench;
+    if (focused_id.compare(0, kReportBenchPrefix.size(), kReportBenchPrefix) == 0) {
+        const auto next_colon = focused_id.find(':', kReportBenchPrefix.size());
+        focused_bench = (next_colon == std::string::npos)
+            ? std::string_view{focused_id}.substr(kReportBenchPrefix.size())
+            : std::string_view{focused_id}.substr(kReportBenchPrefix.size(),
+                next_colon - kReportBenchPrefix.size());
+    }
+    const std::string bench_prefix = focused_bench.empty()
+        ? std::string{}
+        : std::string{kReportBenchPrefix} + std::string{focused_bench};
+    auto matches_bench = [&](std::string_view id) noexcept {
+        if (bench_prefix.empty()) return true;
+        return id.compare(0, bench_prefix.size(), bench_prefix) == 0
+            && (id.size() == bench_prefix.size() || id[bench_prefix.size()] == ':');
+    };
+    // Walk back, then forward; in each direction, only accept a tc/metric
+    // section under the SAME benchmark.
+    for (int i = idx; i >= 0; --i) {
+        if (!matches_bench(ui.last_frame_section_ids[i])) continue;
+        if (auto rf = parse_tc_section_id(ui.last_frame_section_ids[i])) return rf;
+    }
+    for (std::size_t i = static_cast<std::size_t>(idx);
+         i < ui.last_frame_section_ids.size(); ++i)
+    {
+        if (!matches_bench(ui.last_frame_section_ids[i])) continue;
+        if (auto rf = parse_tc_section_id(ui.last_frame_section_ids[i])) return rf;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline std::optional<ResolvedFocus>
+resolve_perregion_focus(const UiState& ui, const BenchmarkSnapshot* /*unused*/,
+                          std::string_view /*unused*/) noexcept
+{
+    return resolve_perregion_focus_impl(ui);
+}
+
+/// V18 §3.1 — build the per-region inspector content (table + chart)
+/// as one ftxui Element. Used by both wide-mode docked panel and
+/// narrow-mode collapsible.
+[[nodiscard]] inline ftxui::Element render_per_region_inspector_body(
+    ReloadState& reload, const UiState& ui,
+    const ResolvedFocus& focus,
+    const BenchmarkSnapshot& focus_snap,
+    std::size_t panel_inner_cols,
+    std::size_t chart_rows,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    if (!snapshot_has_per_region(focus_snap, focus.test_case)) {
+        return vbox({
+            text(std::string{kNotifNoPerRegion}) | color(Color::GrayLight) | dim,
+        });
+    }
+    const auto region_universe = region_universe_for(focus_snap, focus.test_case);
+    const auto rows = extract_per_region_rows(focus_snap, focus.test_case,
+        focus.metric, region_universe, ui.per_region_aggregate);
+    Elements parts;
+    parts.push_back(render_per_region_table_body(rows, region_universe,
+        focus.metric, ui.per_region_aggregate,
+        /*omit_alg_column=*/false, panel_inner_cols, gv));
+    if (!any_finite_value(rows)) {
+        parts.push_back(text(""));
+        parts.push_back(text("(no finite values in this report)") | dim);
+        return vbox(std::move(parts));
+    }
+    // Chart slot.
+    UiViewKey view_key{UiViewKey::Kind::Report, focus.benchmark, focus.test_case, focus.metric};
+    const auto* focus_ptr = chart_focus_for_const(ui, view_key);
+    ChartFocus effective_focus = focus_ptr != nullptr ? *focus_ptr : ChartFocus{};
+    parts.push_back(text(""));
+    if (effective_focus.mode == ChartFocus::Mode::Stacked) {
+        parts.push_back(render_stacked_bar_chart(rows, region_universe,
+            focus.metric, ui.per_region_aggregate, ui.selected_report_id,
+            ui.value_mode, panel_inner_cols, chart_rows, gv));
+    } else {
+        // Resolve active algorithm, fall back to first if missing.
+        const std::vector<std::string> alg_canonicals = [&] {
+            std::vector<std::string> result;
+            result.reserve(focus_snap.tuples.size());
+            for (const auto& t : focus_snap.tuples) result.push_back(t.canonical);
+            return result;
+        }();
+        std::string active_canonical = effective_focus.step_algo_canonical;
+        if (std::find(alg_canonicals.begin(), alg_canonicals.end(), active_canonical)
+            == alg_canonicals.end()) {
+            active_canonical = alg_canonicals.empty() ? "" : alg_canonicals.front();
+        }
+        // Build per-report values for the active algorithm.
+        StepLinesFrame frame;
+        frame.active_label = active_canonical;
+        // Find active label as the short label for clarity.
+        for (const auto& t : focus_snap.tuples) {
+            if (t.canonical == active_canonical) { frame.active_label = t.short_label; break; }
+        }
+        const auto it = std::find(alg_canonicals.begin(), alg_canonicals.end(), active_canonical);
+        frame.active_index = (it == alg_canonicals.end())
+            ? 0 : static_cast<int>(it - alg_canonicals.begin());
+        frame.num_algorithms = static_cast<int>(alg_canonicals.size());
+        frame.region_names = region_universe;
+        // Pull per-report values for each region.
+        const std::size_t max_idx = reload.max_report_index.load(std::memory_order_acquire);
+        for (std::size_t rid = 1; rid <= max_idx; ++rid) {
+            frame.report_ids.push_back(rid);
+        }
+        frame.values.assign(region_universe.size(),
+            std::vector<double>(frame.report_ids.size(),
+                std::numeric_limits<double>::quiet_NaN()));
+        // First-report and baseline anchors for Δ / Ratio modes.
+        std::vector<double> first_anchor(region_universe.size(),
+            std::numeric_limits<double>::quiet_NaN());
+        std::vector<double> baseline_anchor(region_universe.size(),
+            std::numeric_limits<double>::quiet_NaN());
+        const std::optional<std::size_t> baseline_id = ui.baseline_report_id;
+        std::shared_lock<std::shared_mutex> guard(reload.mu);
+        // Resolve algorithm/params for the active canonical.
+        const TupleRow* active_tuple = nullptr;
+        for (const auto& t : focus_snap.tuples) {
+            if (t.canonical == active_canonical) { active_tuple = &t; break; }
+        }
+        for (std::size_t i = 0; i < frame.report_ids.size(); ++i) {
+            const auto cache_it = reload.cache.find(frame.report_ids[i]);
+            if (cache_it == reload.cache.end() || cache_it->second.doc == nullptr) continue;
+            if (active_tuple == nullptr) continue;
+            const auto root = cache_it->second.doc->root;
+            for (std::size_t r = 0; r < region_universe.size(); ++r) {
+                auto agg = aggregated_from_report(root, focus.benchmark,
+                    active_tuple->algorithm, active_tuple->params,
+                    focus.test_case, region_universe[r], focus.metric);
+                if (!agg.has_value() || !has_finite_samples(*agg)) continue;
+                const double v = aggregate_field(*agg, ui.per_region_aggregate);
+                frame.values[r][i] = v;
+                if (i == 0) first_anchor[r] = v;
+                if (baseline_id.has_value() && frame.report_ids[i] == *baseline_id) {
+                    baseline_anchor[r] = v;
+                }
+            }
+        }
+        guard.unlock();
+        // Apply value-mode anchoring (concrete = identity).
+        if (ui.value_mode != ValueDisplayMode::Concrete) {
+            const std::size_t focus_local_idx = [&] {
+                const auto it_focus = std::find(frame.report_ids.begin(), frame.report_ids.end(),
+                    ui.selected_report_id);
+                return it_focus == frame.report_ids.end()
+                    ? 0u : static_cast<std::size_t>(it_focus - frame.report_ids.begin());
+            }();
+            for (std::size_t r = 0; r < region_universe.size(); ++r) {
+                const double anchor = [&] {
+                    if (ui.value_mode == ValueDisplayMode::DeltaCurrent) {
+                        return frame.values[r][focus_local_idx];
+                    }
+                    if (ui.value_mode == ValueDisplayMode::DeltaFirst) {
+                        return first_anchor[r];
+                    }
+                    if (ui.value_mode == ValueDisplayMode::DeltaBaseline) {
+                        return baseline_anchor[r];
+                    }
+                    if (ui.value_mode == ValueDisplayMode::Ratio) {
+                        return baseline_id.has_value() && std::isfinite(baseline_anchor[r])
+                            ? baseline_anchor[r] : first_anchor[r];
+                    }
+                    return std::numeric_limits<double>::quiet_NaN();
+                }();
+                if (!std::isfinite(anchor) || std::abs(anchor) < 1e-12) continue;
+                for (auto& cell : frame.values[r]) {
+                    if (!std::isfinite(cell)) continue;
+                    if (ui.value_mode == ValueDisplayMode::Ratio) {
+                        cell = cell / anchor;
+                    } else {
+                        cell = (cell - anchor) / std::abs(anchor) * 100.0;
+                    }
+                }
+            }
+        }
+        parts.push_back(render_step_lines_chart(frame, focus.metric,
+            ui.per_region_aggregate, ui.value_mode,
+            panel_inner_cols, chart_rows, gv));
+    }
+    return vbox(std::move(parts));
+}
+
+/// V18 §3.6 — bracket gutter for the wide-mode panel. Two cells wide
+/// per row, each row representing one body row of the panel:
+///
+///   - For each algorithm `i` in the focused snapshot, place a
+///     `╭` (first row), `│`*(group_height-2), `╰` (last row) bracket
+///     spanning that algorithm's per-region group rows in the panel.
+///   - When the algorithm row is OFF-SCREEN in the main pane (above /
+///     below / both ends), substitute the V18 §3.6 rule-3/4/5 markers
+///     `▲` / `▼` / `╳` in the topmost gutter cell of the group. We
+///     have no direct access to `yframe`'s scroll offset, so the
+///     "off-screen" decision is approximated by comparing the
+///     focused-section index against the algorithm's anchor row in
+///     `last_frame_section_ids`: if the focused tc/metric is BELOW the
+///     algorithm's home benchmark the algorithm's main-table row may
+///     be scrolled past the top, etc.
+///
+/// Bracket arms are coloured `Color::GrayDark` (per §3.6 rule 3
+/// chevron note). Glyph cell widths are 1 cell each — column drift
+/// invariant is preserved.
+struct BracketGroup {
+    std::size_t row_count = 1;     // panel body rows this group occupies
+    char        scroll_state = ' '; // '^' above-viewport, 'v' below, 'x' both off
+};
+
+[[nodiscard]] inline ftxui::Element render_bracket_gutter(
+    std::span<const BracketGroup> groups, std::size_t total_rows,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    if (groups.empty() || total_rows == 0) {
+        return vbox({text(std::string{gv.br_v()}) | dim});
+    }
+    Elements rows;
+    rows.reserve(total_rows);
+    std::size_t cursor = 0;
+    for (const auto& group : groups) {
+        const std::size_t span = std::max<std::size_t>(group.row_count, 1u);
+        for (std::size_t r = 0; r < span; ++r) {
+            if (cursor >= total_rows) break;
+            std::string glyph;
+            ftxui::Color fg = ftxui::Color::GrayLight;
+            if (group.scroll_state == 'x') {
+                glyph = (r == 0) ? std::string{gv.scroll_off()} : std::string{gv.br_v()};
+                fg = ftxui::Color::GrayDark;
+            } else if (group.scroll_state == '^' && r == 0) {
+                glyph = std::string{gv.scroll_above()};
+                fg = ftxui::Color::GrayDark;
+            } else if (group.scroll_state == 'v' && r + 1 == span) {
+                glyph = std::string{gv.scroll_below()};
+                fg = ftxui::Color::GrayDark;
+            } else if (span == 1) {
+                glyph = std::string{gv.br_h()};
+            } else if (r == 0) {
+                glyph = std::string{gv.br_top_left()};
+            } else if (r + 1 == span) {
+                glyph = std::string{gv.br_bot_left()};
+            } else {
+                glyph = std::string{gv.br_v()};
+            }
+            rows.push_back(text(glyph) | color(fg));
+            ++cursor;
+        }
+    }
+    while (rows.size() < total_rows) {
+        rows.push_back(text(std::string{gv.dotted()}) | color(ftxui::Color::GrayDark));
+    }
+    return vbox(std::move(rows));
+}
+
+/// V18 §3.6 — derive bracket groups from the focused snapshot.
+///
+/// Non-pivot mode: each algorithm row is one terminal row → one
+/// bracket cell. Pivot mode (§3.1 rule 4): 1 label row + 1 inline-
+/// chunks row (= 2 rows). Pivot+wrap (§3.1 rule 4 last sub-bullet):
+/// the chunks row may wrap to 2 lines, totalling 3 rows. We compute
+/// the wrap by replicating the chunk-width accounting from
+/// `render_per_region_table_body` so the gutter stays aligned even
+/// when chunks overflow `panel_inner_cols`.
+/// V18 §3.6 rules 3-5 — approximate the main-pane scroll state for the
+/// focused tc/metric sub-section. Real ftxui `yframe` offset isn't
+/// directly accessible from the renderer, but we know the focused
+/// section's index inside `last_frame_section_ids` (which scrolls
+/// `yframe` to make the focused row visible). When the focused
+/// section is the bench header, none of the algorithm rows are guaranteed
+/// visible → mark every group as `▲` (above) until the first tc/metric
+/// is reached.
+[[nodiscard]] inline char approximate_scroll_state(
+    const UiState& ui, std::string_view focused_bench,
+    std::size_t algo_index_in_bench) noexcept
+{
+    if (focused_bench.empty()) return ' ';
+    if (ui.last_frame_section_ids.empty()) return ' ';
+    const int focus_idx = ui.focused_section_index;
+    if (focus_idx < 0
+        || focus_idx >= static_cast<int>(ui.last_frame_section_ids.size())) {
+        return ' ';
+    }
+    const auto& focused_id = ui.last_frame_section_ids[
+        static_cast<std::size_t>(focus_idx)];
+    // When the focused section is the benchmark header itself, no main
+    // table rows are pinned — every algorithm row is above the visible
+    // tc/metric content.
+    constexpr std::string_view kBench = "report:bench:";
+    if (focused_id.size() == kBench.size() + focused_bench.size()
+        && focused_id.compare(0, kBench.size(), kBench) == 0)
+    {
+        return ' ';     // benchmark header focused — everything in-view
+    }
+    // Otherwise the user is on a tc/metric (or its child); their
+    // algorithm rows are typically all visible. Default to ' '.
+    (void)algo_index_in_bench;
+    return ' ';
+}
+
+[[nodiscard]] inline std::vector<BracketGroup>
+build_bracket_groups(const TableLayout& layout) noexcept
+{
+    std::vector<BracketGroup> groups;
+    groups.reserve(layout.per_algo_rows.size() + 1);
+    groups.push_back({1u, ' '});     // header row
+    for (std::size_t lines : layout.per_algo_rows) {
+        groups.push_back({lines, ' '});
+    }
+    return groups;
+}
+
+/// V18 §3.5 — the wide-mode docked panel (header + body).
+[[nodiscard]] inline ftxui::Element render_per_region_panel(
+    ReloadState& reload, const UiState& ui,
+    const std::optional<ResolvedFocus>& focus_opt,
+    const BenchmarkSnapshot* focus_snap,
+    std::size_t panel_cols, std::size_t panel_rows,
+    const GlyphView& gv) noexcept
+{
+    using namespace ftxui;
+    if (!focus_opt.has_value() || focus_snap == nullptr) {
+        return vbox({
+            text(fmt::format("{} Per region", gv.note_emoji())) | bold,
+            text(""),
+            text(std::string{kNotifNoFocusResolved}) | color(Color::GrayLight),
+        }) | borderRounded | size(WIDTH, EQUAL, static_cast<int>(panel_cols))
+           | size(HEIGHT, EQUAL, static_cast<int>(panel_rows));
+    }
+    // Panel cell budget (BENCH_V18_IMPL_DESIGN.md §3.1 rule 6 + §3.6):
+    //   total = 2 (border) + 2 (panel-side bracket gutter) + body
+    // The 1-cell `ftxui::separator()` between main pane and panel sits
+    // OUTSIDE the panel and is reserved for the bracket's middle riser
+    // (not subtracted here).
+    constexpr std::size_t kPanelDecoCells = 2 /*border*/ + 2 /*gutter*/;
+    const std::size_t panel_inner_cols = panel_cols > kPanelDecoCells
+        ? panel_cols - kPanelDecoCells : 8;
+    const std::size_t chart_rows = panel_rows > 8 ? panel_rows - 8 : kChartMinRows;
+    Elements parts;
+    const std::string header_body = per_region_header_body(
+        ui.selected_report_id, ui.per_region_aggregate, ui.value_mode);
+    Elements header_parts;
+    header_parts.push_back(text(std::string{gv.note_emoji()} + " ") | bold);
+    header_parts.push_back(text(fmt::format("Per region \xe2\x80\x94 {}", header_body)) | bold);
+    if (ui.pinned_perregion_focus.is_pinned) {
+        header_parts.push_back(text(" (pinned)") | color(Color::Yellow) | bold);
+    }
+    parts.push_back(hbox(std::move(header_parts)));
+    parts.push_back(separator());
+    // §3.6 — bracket gutter on the inboard edge + the inspector body.
+    const std::size_t body_rows = panel_rows > 4 ? panel_rows - 4 : 4u;
+    // Build the bracket-group plan from the focused snapshot so each
+    // algorithm row in the per-region table is anchored by a `╭…╰`
+    // bracket in the gutter. Pivot-mode estimate: roughly when the
+    // panel is too narrow to show all regions at full width.
+    const auto region_universe_pre = focus_opt.has_value()
+        ? region_universe_for(*focus_snap, focus_opt->test_case)
+        : std::vector<std::string>{};
+    const auto rows_pre = focus_opt.has_value()
+        ? extract_per_region_rows(*focus_snap, focus_opt->test_case,
+            focus_opt->metric, region_universe_pre, ui.per_region_aggregate)
+        : std::vector<PerRegionRow>{};
+    const auto layout = focus_opt.has_value()
+        ? compute_table_layout(rows_pre, region_universe_pre, focus_opt->metric,
+            panel_inner_cols, /*omit_alg_column=*/true, gv)
+        : TableLayout{};
+    const auto bracket_groups = build_bracket_groups(layout);
+    parts.push_back(hbox({
+        render_bracket_gutter(bracket_groups, body_rows, gv),
+        text(" "),
+        render_per_region_inspector_body(reload, ui, *focus_opt,
+            *focus_snap, panel_inner_cols, chart_rows, gv) | flex_grow,
+    }));
+    return vbox(std::move(parts)) | borderRounded
+        | size(WIDTH, EQUAL, static_cast<int>(panel_cols))
+        | size(HEIGHT, EQUAL, static_cast<int>(panel_rows));
+}
+
 [[nodiscard]] inline ftxui::Element render_report_view(
-    ReloadState& reload, const UiState& ui, const GlyphView& gv) noexcept
+    ReloadState& reload, const UiState& ui, const GlyphView& gv,
+    DetailsLayout layout, std::size_t main_pane_cols) noexcept
 {
     using namespace ftxui;
     ui.last_frame_section_ids.clear();
@@ -2970,6 +4861,50 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
                                 + " " + tup.canonical),
                     static_cast<int>(tc_section_idx)});
             }
+            // ---- V18 Per-region sub-section (narrow mode only) -------
+            if (layout == DetailsLayout::Narrow) {
+                const std::string pr_id = fmt::format(
+                    "report:bench:{}:tc:{}:metric:{}:perregion",
+                    bench_key, tc, active_metric);
+                const std::size_t pr_idx = ui.last_frame_section_ids.size();
+                ui.last_frame_section_ids.push_back(pr_id);
+                ui.last_frame_section_labels.push_back(fmt::format("Per region {}", tc));
+                ui.last_frame_searchables.push_back(UiState::Searchable{
+                    ascii_lower(fmt::format("per region {} {}", tc, active_metric)),
+                    static_cast<int>(pr_idx)});
+                const bool pr_expanded = section_is_expanded(ui, pr_id);
+                const bool pr_focused = static_cast<int>(pr_idx)
+                                        == ui.focused_section_index;
+                const ResolvedFocus narrow_focus{bench_key, tc, active_metric};
+                const std::string header_body = per_region_header_body(
+                    ui.selected_report_id, ui.per_region_aggregate, ui.value_mode);
+                const std::string base_label = fmt::format("{} Per region ({})",
+                    gv.note_emoji(), header_body);
+                rows.push_back(render_section_header(gv, base_label,
+                    pr_expanded, pr_focused, Color::Default, /*indent=*/4,
+                    /*bold_label=*/false, ui.search_query));
+                if (ui.pinned_perregion_focus.is_pinned) {
+                    // §3.5 — yellow `(pinned)` suffix on the same row.
+                    rows.back() = hbox({
+                        rows.back(),
+                        text(" (pinned)") | color(Color::Yellow) | bold,
+                    });
+                }
+                // Region names become searchables under this section.
+                for (const auto& reg : region_universe_for(snap, tc)) {
+                    if (reg == kAllRegionsKey) continue;
+                    ui.last_frame_searchables.push_back(UiState::Searchable{
+                        ascii_lower(reg), static_cast<int>(pr_idx)});
+                }
+                if (pr_expanded) {
+                    const std::size_t inner = main_pane_cols > 8
+                        ? main_pane_cols - 8 : 40u;
+                    rows.push_back(render_per_region_inspector_body(
+                        reload, ui, narrow_focus, snap,
+                        std::min(inner, kPerRegionPanelMaxCols),
+                        kChartTargetRows, gv));
+                }
+            }
             // ---- Summary sub-section ----------------------------------
             const std::string sum_id = fmt::format("report:bench:{}:tc:{}:metric:{}:summary",
                 bench_key, tc, active_metric);
@@ -3019,7 +4954,8 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
 }
 
 [[nodiscard]] inline ftxui::Element render_main(
-    ReloadState& reload, const UiState& ui, const GlyphView& gv) noexcept
+    ReloadState& reload, const UiState& ui, const GlyphView& gv,
+    DetailsLayout layout, std::size_t main_pane_cols) noexcept
 {
     using namespace ftxui;
     // `max_report_index` is bumped at every successful directory walk
@@ -3030,6 +4966,9 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
         const auto delta = std::chrono::nanoseconds{steady_now_ns() - last_attempt};
         const auto next_in = std::max<long long>(0,
             std::chrono::duration_cast<std::chrono::seconds>(kReloadInterval - delta).count());
+        const std::string countdown_str = ui.ui_test_mode
+            ? std::string{kCountdownPaused}
+            : ("Reload in: " + std::to_string(next_in) + "s");
         return vbox({
             filler(),
             hbox({filler(),
@@ -3038,7 +4977,7 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
                     text(""),
                     text("No reports loaded yet"),
                     text(""),
-                    text("Reload in: " + std::to_string(next_in) + "s") | color(Color::GrayLight),
+                    text(countdown_str) | color(Color::GrayLight),
                     text(""),
                     text("Press q to quit"),
                 }) | borderRounded,
@@ -3049,7 +4988,7 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
     if (ui.current_view.kind == UiViewKey::Kind::Summary) {
         return render_summary_view(reload, ui, gv);
     }
-    return render_report_view(reload, ui, gv);
+    return render_report_view(reload, ui, gv, layout, main_pane_cols);
 }
 
 [[nodiscard]] inline ftxui::Element render_footer_default(const UiState& ui,
@@ -3057,7 +4996,7 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
 {
     using namespace ftxui;
     std::string text_line = fmt::format(
-        "Press: {} next/prev report  \xe2\x86\x95 scroll  {} collapse/expand  ?  full keymap  q quit",
+        "Press: {} next/prev report  \xe2\x86\x95 scroll  {} collapse/expand  >/< aggr  p chart  ~ pin  ?  full keymap  q quit",
         gv.lr_arrows(),
         gv.enter());
     return text(text_line) | dim;
@@ -3095,6 +5034,8 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
         two_col("/  n / N",       "search; next / prev",     "Esc",            "exit search / clear filter"),
         two_col("%  \\",          "cycle value modes",       "= / Tab",        "peek for 2s; tap twice = sticky"),
         two_col("b / B",          "pin / clear baseline",    "m / M",          "switch metric forward / back"),
+        two_col("> / <",          "cycle per-region aggr",   "p / P",          "cycle chart mode (Stacked <-> Step)"),
+        two_col("~",              "pin per-region focus",    "",                ""),
     }) | dim;
 }
 
@@ -3630,6 +5571,7 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
                 if (id.find(":tc:") == std::string::npos) continue;
                 if (id.find(":summary") != std::string::npos) continue;
                 if (id.find(":legend") != std::string::npos) continue;
+                if (id.find(":perregion") != std::string::npos) continue;     // V18
                 tc_indices.push_back(static_cast<int>(i));
             }
             if (tc_indices.empty()) return true;
@@ -3648,6 +5590,97 @@ inline void on_terminal_resize(UiState& ui, int width, int height) noexcept {
             ui.focused_section_index = target;
             return true;
         }
+        // V18 §9.1 — > / < cycle the per-region aggregate.
+        if (event == Event::Character('>') || event == Event::Character('<')) {
+            const bool forward = event == Event::Character('>');
+            // Resolve focused (bench, tc, metric) to validate per-region availability.
+            const auto resolved = resolve_perregion_focus(ui, nullptr, "");
+            if (resolved.has_value()) {
+                auto snap_opt = with_cached_report(reload, ui.selected_report_id,
+                    [&](const ParsedReport& parsed) noexcept {
+                        return snapshot_benchmark(parsed, resolved->benchmark);
+                    });
+                if (snap_opt.has_value()
+                    && !snapshot_has_per_region(*snap_opt, resolved->test_case)) {
+                    notify_user(ui, std::string{kNotifNoPerRegion});
+                    return true;
+                }
+            }
+            ui.per_region_aggregate = cycle_aggregate(ui.per_region_aggregate, forward);
+            notify_user(ui, fmt::format(kNotifAggrCycleFmt,
+                std::string{aggregate_label(ui.per_region_aggregate)}));
+            return true;
+        }
+        // V18 §9.1 — p / P cycle chart mode.
+        if (event == Event::Character('p') || event == Event::Character('P')) {
+            const bool forward = event == Event::Character('p');
+            const auto resolved = resolve_perregion_focus(ui, nullptr, "");
+            if (!resolved.has_value()) {
+                notify_user(ui, std::string{kNotifNoFocusResolved});
+                return true;
+            }
+            auto snap_opt = with_cached_report(reload, ui.selected_report_id,
+                [&](const ParsedReport& parsed) noexcept {
+                    return snapshot_benchmark(parsed, resolved->benchmark);
+                });
+            if (!snap_opt.has_value()) return true;
+            if (!snapshot_has_per_region(*snap_opt, resolved->test_case)) {
+                notify_user(ui, std::string{kNotifNoPerRegion});
+                return true;
+            }
+            std::vector<std::string> alg_canonicals;
+            alg_canonicals.reserve(snap_opt->tuples.size());
+            for (const auto& t : snap_opt->tuples) alg_canonicals.push_back(t.canonical);
+            UiViewKey view_key{UiViewKey::Kind::Report, resolved->benchmark,
+                resolved->test_case, resolved->metric};
+            auto& focus = chart_focus_for(ui, view_key);
+            const auto note = cycle_chart_mode(focus, alg_canonicals, forward);
+            // Edge notifications for single-algo / single-region.
+            if (alg_canonicals.size() == 1
+                && focus.mode == ChartFocus::Mode::Step) {
+                notify_user(ui, std::string{kNotifChartSingleAlgo});
+            } else {
+                const auto region_uni = region_universe_for(*snap_opt, resolved->test_case);
+                std::size_t real_regions = 0;
+                for (const auto& reg : region_uni) {
+                    if (reg != kAllRegionsKey) ++real_regions;
+                }
+                if (real_regions <= 1 && focus.mode == ChartFocus::Mode::Step) {
+                    notify_user(ui, std::string{kNotifChartSingleRegion});
+                } else {
+                    notify_user(ui, note);
+                }
+            }
+            return true;
+        }
+        // V18 §9.1 — ~ pin / unpin per-region focus.
+        if (event == Event::Character('~')) {
+            if (ui.pinned_perregion_focus.is_pinned) {
+                ui.pinned_perregion_focus = PerRegionFocus{};
+                notify_user(ui, std::string{kNotifPinUnset});
+                return true;
+            }
+            const auto resolved = resolve_perregion_focus(ui, nullptr, "");
+            if (!resolved.has_value()) {
+                notify_user(ui, std::string{kNotifNoFocusResolved});
+                return true;
+            }
+            ui.pinned_perregion_focus.benchmark = resolved->benchmark;
+            ui.pinned_perregion_focus.test_case = resolved->test_case;
+            ui.pinned_perregion_focus.metric    = resolved->metric;
+            ui.pinned_perregion_focus.is_pinned = true;
+            notify_user(ui, fmt::format(kNotifPinSetFmt,
+                resolved->benchmark, resolved->test_case, resolved->metric));
+            return true;
+        }
+    }
+    // V18 §9.4 — Same keys are no-ops on Summary view (notification only).
+    if (ui.current_view.kind != UiViewKey::Kind::Report
+        && (event == Event::Character('>') || event == Event::Character('<')
+            || event == Event::Character('p') || event == Event::Character('P')
+            || event == Event::Character('~'))) {
+        notify_user(ui, std::string{kNotifReportOnly});
+        return true;
     }
     // Page Up / Page Down — half-page section jumps (§5.1).
     if (event == Event::PageUp || event == Event::PageDown) {
@@ -3761,6 +5794,7 @@ namespace bioseq::bench_framework::detail {
     ParseWorkerPool pool{reload, dir, &screen};
     UiState ui;
     ui.ascii_fallback = cli.ui_ascii_fallback;
+    ui.ui_test_mode = cli.ui_test_mode;
     if (const char* lang = std::getenv("LANG"); lang != nullptr
         && (std::strcmp(lang, "C") == 0 || std::strcmp(lang, "POSIX") == 0)) {
         ui.ascii_fallback = true;
@@ -3769,7 +5803,7 @@ namespace bioseq::bench_framework::detail {
     const auto git_log = load_git_log(dir);
 
     std::jthread reload_thread{[&](std::stop_token st) noexcept {
-        reload_thread_body(dir, reload, pool, &screen, st);
+        reload_thread_body(dir, reload, pool, &screen, st, ui.ui_test_mode);
     }};
 
     // Self-pipe watcher for SIGTERM. Uses ppoll-style poll with a 200 ms
@@ -3805,6 +5839,58 @@ namespace bioseq::bench_framework::detail {
     auto root = ftxui::Renderer([&]() noexcept {
         per_frame_tick(ui);
         debounce_selection_reparse(ui, reload, pool);
+        // V18 §2.3 — if a pinned focus's (bench, tc, metric) is missing
+        // from the current report's snapshot, downgrade silently with a
+        // single notification.
+        if (ui.pinned_perregion_focus.is_pinned
+            && ui.current_view.kind == UiViewKey::Kind::Report
+            && ui.selected_report_id != 0)
+        {
+            const auto& pin = ui.pinned_perregion_focus;
+            auto snap_opt = with_cached_report(reload, ui.selected_report_id,
+                [&](const ParsedReport& parsed) noexcept {
+                    return snapshot_benchmark(parsed, pin.benchmark);
+                });
+            const bool present = snap_opt.has_value()
+                && std::find(snap_opt->test_cases.begin(), snap_opt->test_cases.end(),
+                             pin.test_case) != snap_opt->test_cases.end()
+                && std::find(snap_opt->metrics.begin(), snap_opt->metrics.end(),
+                             pin.metric) != snap_opt->metrics.end();
+            if (!present && snap_opt.has_value()) {
+                ui.pinned_perregion_focus = PerRegionFocus{};
+                notify_user(ui, std::string{kNotifPinNotInReport});
+            }
+        }
+        // V18 §6.1 — Step-mode algorithm-not-in-report fallback: when
+        // the pinned `step_algo_canonical` for a `(bench, tc, metric)`
+        // view is missing from the current report's tuple list, fall
+        // back to the first algorithm in the snapshot AND persist that
+        // choice into `chart_focus_per_view` so the notification only
+        // fires once per flip.
+        if (ui.current_view.kind == UiViewKey::Kind::Report
+            && ui.selected_report_id != 0)
+        {
+            for (auto& [view_key, focus] : ui.chart_focus_per_view) {
+                if (focus.mode != ChartFocus::Mode::Step) continue;
+                if (focus.step_algo_canonical.empty()) continue;
+                auto snap_opt = with_cached_report(reload, ui.selected_report_id,
+                    [&](const ParsedReport& parsed) noexcept {
+                        return snapshot_benchmark(parsed, view_key.bench_key);
+                    });
+                if (!snap_opt.has_value() || snap_opt->tuples.empty()) continue;
+                const auto found = std::find_if(snap_opt->tuples.begin(),
+                    snap_opt->tuples.end(),
+                    [&](const TupleRow& t) noexcept {
+                        return t.canonical == focus.step_algo_canonical;
+                    });
+                if (found != snap_opt->tuples.end()) continue;
+                const std::string previous = std::move(focus.step_algo_canonical);
+                focus.step_algo_canonical = snap_opt->tuples.front().canonical;
+                notify_user(ui, fmt::format(kNotifAlgoNotInReportFmt,
+                    previous, ui.selected_report_id, focus.step_algo_canonical));
+                break;     // single notification per frame
+            }
+        }
         const GlyphView gv{kGlyphsUnicode, ui.ascii_fallback};
         on_terminal_resize(ui, screen.dimx(), screen.dimy());
         const bool live = reload.live_tmp_present.load(std::memory_order_acquire);
@@ -3818,38 +5904,93 @@ namespace bioseq::bench_framework::detail {
         ftxui::Element header_block = ftxui::vbox(std::move(header_lines))
             | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, header_rows);
         ftxui::Element body;
-        // Apply `vscroll_indicator | yframe` to the *main pane only*,
-        // not the body. Wrapping the entire body would scroll the
-        // sidebar (Reports + Commits) along with the content, which
-        // makes the sidebar feel like it belongs to the report being
-        // viewed instead of being a fixed navigation rail. With the
-        // yframe scoped to the main pane the sidebar stays anchored
-        // at the top of the body region while the report content
-        // scrolls underneath the focused section.
-        ftxui::Element main_pane = render_main(reload, ui, gv)
+        const int sidebar_visible_cols = ui.sidebar_visible
+            && screen.dimx() >= static_cast<int>(kMinScreenCols)
+            ? ui.sidebar_width_cols : 0;
+        const auto layout = details_layout(screen.dimx(), ui.sidebar_width_cols,
+            ui.sidebar_visible && screen.dimx() >= static_cast<int>(kMinScreenCols));
+        const int footer_rows_for_size = footer_rows_for(ui.footer_state);
+        const int body_rows = std::max(1,
+            screen.dimy() - header_rows - kBodySeparatorRows - footer_rows_for_size);
+        // V18 §2.4 — size the wide panel target between [min, max].
+        std::size_t panel_cols = 0;
+        std::size_t main_pane_cols = static_cast<std::size_t>(
+            std::max(1, screen.dimx() - sidebar_visible_cols
+                        - (sidebar_visible_cols > 0 ? 1 : 0)));
+        if (layout == DetailsLayout::Wide) {
+            const std::size_t avail = main_pane_cols > kPerRegionPanelMinCols + 1
+                ? main_pane_cols - 1 : 0;
+            const std::size_t want = std::min<std::size_t>(kPerRegionPanelTargetCols,
+                kPerRegionPanelMaxCols);
+            panel_cols = std::clamp<std::size_t>(want,
+                kPerRegionPanelMinCols, std::max<std::size_t>(kPerRegionPanelMinCols, avail));
+            main_pane_cols = main_pane_cols > panel_cols + 1
+                ? main_pane_cols - panel_cols - 1 : kPerRegionPanelMinCols;
+        }
+        // Resolve focused per-region snapshot for wide-mode panel rendering.
+        std::optional<ResolvedFocus> wide_focus;
+        BenchmarkSnapshot wide_snap;
+        bool have_wide_snap = false;
+        if (layout == DetailsLayout::Wide
+            && ui.current_view.kind == UiViewKey::Kind::Report
+            && ui.selected_report_id != 0)
+        {
+            wide_focus = resolve_perregion_focus(ui, nullptr, "");
+            if (wide_focus.has_value()) {
+                auto snap_opt = with_cached_report(reload, ui.selected_report_id,
+                    [&](const ParsedReport& parsed) noexcept {
+                        return snapshot_benchmark(parsed, wide_focus->benchmark);
+                    });
+                if (snap_opt.has_value()) {
+                    wide_snap = *std::move(snap_opt);
+                    have_wide_snap = true;
+                }
+            }
+        }
+        ftxui::Element main_pane = render_main(reload, ui, gv, layout, main_pane_cols)
             | ftxui::vscroll_indicator | ftxui::yframe | ftxui::flex_grow;
         if (ui.sidebar_visible && screen.dimx() >= static_cast<int>(kMinScreenCols)) {
-            body = ftxui::hbox({
-                render_sidebar(reload, ui, git_log, gv),
-                ftxui::separator(),
-                main_pane,
-            });
+            ftxui::Elements parts;
+            parts.push_back(render_sidebar(reload, ui, git_log, gv));
+            parts.push_back(ftxui::separator());
+            parts.push_back(main_pane);
+            if (layout == DetailsLayout::Wide) {
+                parts.push_back(ftxui::separator());
+                parts.push_back(render_per_region_panel(reload, ui, wide_focus,
+                    have_wide_snap ? &wide_snap : nullptr,
+                    panel_cols, static_cast<std::size_t>(body_rows), gv));
+            }
+            body = ftxui::hbox(std::move(parts));
+        } else if (layout == DetailsLayout::Wide) {
+            ftxui::Elements parts;
+            parts.push_back(main_pane);
+            parts.push_back(ftxui::separator());
+            parts.push_back(render_per_region_panel(reload, ui, wide_focus,
+                have_wide_snap ? &wide_snap : nullptr,
+                panel_cols, static_cast<std::size_t>(body_rows), gv));
+            body = ftxui::hbox(std::move(parts));
         } else {
             body = main_pane;
         }
         ftxui::Element footer = render_footer(ui, gv);
         const int footer_rows = footer_rows_for(ui.footer_state);
-        // Constrain body height explicitly so a content-rich body (more
-        // rows than fit on screen) cannot push the footer off the bottom.
-        const int body_rows = std::max(1,
-            screen.dimy() - header_rows - kBodySeparatorRows - footer_rows);
-        return ftxui::vbox({
+        auto frame = ftxui::vbox({
             header_block,
             ftxui::separator(),
             body | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, body_rows),
             ftxui::separator(),
             footer | ftxui::size(ftxui::HEIGHT, ftxui::EQUAL, footer_rows),
         });
+        // V18 §10.4.1 — emit the render-complete OSC sentinel
+        // immediately after the lambda returns. We write directly to
+        // STDOUT_FILENO here so the bytes land between this frame's
+        // buffered output and the next frame's; ftxui flushes its
+        // screen-buffer right after this lambda returns the Element.
+        if (ui.ui_test_mode) {
+            ::write(STDOUT_FILENO, kRenderSentinelOsc.data(),
+                    kRenderSentinelOsc.size());
+        }
+        return frame;
     });
 
     auto with_events = ftxui::CatchEvent(root, [&](ftxui::Event event) noexcept {

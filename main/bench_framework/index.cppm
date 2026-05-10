@@ -792,6 +792,13 @@ struct ParsedCli {
     /// Useful when the terminal locale is `C` or DejaVu / JetBrains
     /// Mono is unavailable.
     bool                       ui_ascii_fallback = false;
+    /// V18: `--ui-test-mode` disables the 1-Hz reload-countdown
+    /// animation and the periodic 30-s reload tick, and emits a
+    /// `\x1b]666;render-N\x07` OSC sentinel after every render so a
+    /// PTY-driven Python harness can synchronise on completed frames
+    /// (BENCH_V18_IMPL_DESIGN.md §10.4.1). Manual `Ctrl-R` and the
+    /// V14 selection-debounce-reparse path remain functional.
+    bool                       ui_test_mode = false;
     std::optional<unsigned>    threads_override{};
     std::optional<std::string> report_override{};
     /// V12: `--memory-buffer N` (0..50, default 40). Determines how
@@ -8732,6 +8739,8 @@ inline void render_summary(
             parsed.ui_mode = true;
         } else if (arg == "--ui-ascii") {
             parsed.ui_ascii_fallback = true;
+        } else if (arg == "--ui-test-mode") {
+            parsed.ui_test_mode = true;
         } else if (arg == "--threads" && (i + 1) < argc) {
             const std::string_view text{argv[i + 1]};
             int threads = 0;
