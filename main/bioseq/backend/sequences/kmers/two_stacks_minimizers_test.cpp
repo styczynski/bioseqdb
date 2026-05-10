@@ -218,9 +218,7 @@ run_two_stack_pairs(std::vector<Alphabet>& data, size_t w, size_t k) {
     sketch_collector collector;
     collect_minimizers_two_stack_nthash_simd<minimap_int_hasher,
         /*MinimizerT=*/MinimapSketchData,
-        /*R=*/seq_type,
-        /*I=*/decltype(seq.begin()),
-        /*hash_val_t=*/UnitType>(
+        /*R=*/seq_type>(
             collector, seq, seq.begin(), seq.end(), w, k);
     return collector.extract_pairs();
 }

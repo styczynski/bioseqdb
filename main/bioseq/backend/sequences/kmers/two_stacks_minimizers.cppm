@@ -158,12 +158,17 @@ struct sequence_simd_iteration_state {
         if constexpr (HasStaticK) {
             constexpr size_t static_rev_shift =
                 SeqTraits::bits_per_char * (StaticK - 1);
-            constexpr size_t storage_bits_max = sizeof(ST) * 8;
-            constexpr size_t clamped_rev_shift =
-                (static_rev_shift >= storage_bits_max)
-                    ? (storage_bits_max - 1)
-                    : static_rev_shift;
-            new_high = ShiftLeft<clamped_rev_shift>(complemented);
+            // The public dispatcher widens `hash_val_t` so the lane fits
+            // K's reverse-complement shift. If that contract is ever
+            // broken at compile time, fail the build here instead of
+            // silently clamping the shift (which silently corrupts the
+            // canonical kmer — see Phase-5 §3.4).
+            static_assert(static_rev_shift < sizeof(ST) * 8,
+                "Static K reverse-complement shift exceeds SIMD lane "
+                "width. The public dispatcher must select a wider "
+                "hash_val_t (uint64_t) for K such that K*bits_per_char "
+                ">= sizeof(ST)*8.");
+            new_high = ShiftLeft<static_rev_shift>(complemented);
         } else {
             const size_t dynamic_rev_shift =
                 SeqTraits::bits_per_char * (k_clamped - 1);
@@ -472,29 +477,25 @@ collect_minimizers_two_stack_nthash_simd_impl(
     using storage_unit = typename seq_traits::storage_unit;
     using alphabet_t   = typename seq_traits::alphabet_type;
 
-    // ---- Phase-4 K-clamp scalar fallback (Layer A) ---------------------
-    // When the chosen view's storage_unit can't hold the requested K
-    // (i.e. the SIMD lane state would silently clamp K), fall back to
-    // scalar `collect_minimizers` — which defaults to a uint64 hash
-    // state, wide enough for any K up to 32 (dna4) / 21 (dna5). The
-    // guard fires only when K wouldn't fit in `storage_unit`; the K=15
-    // hot path always passes (kmer_max_length = 16 for uint32, 32 for
-    // uint64), and the K=27 case on the bench's uint32 storage now
-    // produces canonical minimizers instead of a silent K=16 clamp —
-    // see `REGRESSION_NTHASH_INVESTIGATE_CRITICAL_PROBLEM_REPORT.md`.
-    constexpr size_t kmer_max_length =
-        sizeof(storage_unit) * 8 / seq_traits::bits_per_char;
-    // FIXME: Normally this 'false &&'' shouldn't be here but we want to check if two-stack works without scalar fallback on REPR_STORAGE_K7_MEDIUM/REPR_STORAGE_K7_XL
-    if (false && k > kmer_max_length) [[unlikely]] {
-        JustLog("warn: collect_minimizers_two_stack_nthash_simd_impl: "
-                "K={} > kmer_max_length={} for the SIMD lane "
-                "storage_unit ({} bits); falling back to scalar "
-                "collect_minimizers (uint64 hash state).",
-                k, kmer_max_length, sizeof(storage_unit) * 8);
-        collect_minimizers<simd_hash_t, MinimizerT>(
-            collector, seq, seq_begin, seq_end, w, k);
-        return;
-    }
+    // K-fits-in-lane invariant. The public dispatcher
+    // (`collect_minimizers_two_stack_nthash_simd`) chooses `hash_val_t`
+    // such that `K * bits_per_char` fits in the resulting SIMD lane:
+    // state_fwd accumulates K letters' worth of bits, and state_rc's
+    // reverse-complement shift `(K-1)*bpc < K*bpc <= lane_width` is
+    // therefore in-range for `ushl`. If a future caller instantiates
+    // the impl directly with an under-sized hash unit, the
+    // DEBUG_ASSERT below trips before the per-BP body emits a `ushl`
+    // that would saturate to zero (see Phase-5 §3 for the failure
+    // mechanism).
+    DEBUG_ASSERT(k * seq_traits::bits_per_char <= sizeof(storage_unit) * 8,
+        fmt::format(
+            "two_stack SIMD lane storage_unit too narrow for K. "
+            "k={}, bits_per_char={}, lane_bits={}. The public dispatcher "
+            "should have widened hash_val_t (e.g. to uint64_t) so the "
+            "K-mer ({} bits) fits in the lane. See "
+            "NTHASH_NARROW_FIX/REPORT_PHASE_5_INDEPTH_ANALYSIS.md.",
+            k, seq_traits::bits_per_char, sizeof(storage_unit) * 8,
+            k * seq_traits::bits_per_char));
 
     using d_t    = hn::ScalableTag<storage_unit>;
     const d_t d;
@@ -677,13 +678,30 @@ collect_minimizers_two_stack_nthash_simd_impl(
 /**
  * Public API for the two-stack nthash collector.
  *
- * Picks NumStreams ∈ {1, 2} based on `seq.bp_size()` (dual-stream needs
- * room for two parallel slices of `Lanes(d) * letters_per_unit` BPs each
- * plus the `k + w - 1` context overlap), then dispatches to
- * `collect_minimizers_two_stack_nthash_simd_impl` with
- * `DetectPalindrome = (NumStreams == 1)` (Phase-1 byte-identity contract)
- * and the static-(w, k) specialization for the minimap2 default
- * `w == 10, k == 15` plus the two standard runtime-w/k fallbacks.
+ * Two-axis dispatch (Phase-5):
+ *
+ *   1. **Static (W, K) specialisation** — the minimap2 default
+ *      `(w=10, k=15)` short-circuits to a fully constexpr body; other
+ *      (w, k) shapes route through one of the dynamic-K fallbacks
+ *      (`(W=10, K=0)` or `(W=0, K=0)`).
+ *   2. **K-aware hash unit selection** — the SIMD lane storage_unit
+ *      must be wide enough to hold one K-mer's worth of bits (Phase-5
+ *      §3 root-cause: a `ushl` with shift `>= lane_width` saturates
+ *      to zero on ARMv8, silently zeroing `state_rc` and collapsing
+ *      every emitted minimizer's hash to zero). The smallest legal
+ *      lane is `R::storage_unit` when `K * bits_per_char` fits, or
+ *      `uint64_t` otherwise (the bit-cast view substrate from Phase-4
+ *      re-interprets the source buffer at the wider unit, so no copy
+ *      and no scalar fallback is needed).
+ *
+ * Generic principle: pick the smallest power-of-two unit that holds
+ * the K-mer. Applies to every (alphabet, base storage, K) the bitcast
+ * concept admits — no per-test special cases.
+ *
+ * Picks `NumStreams ∈ {1, 2}` based on `seq.bp_size()` against the
+ * *chosen lane's* `Lanes(d) * letters_per_unit` chunk size (so a uint64
+ * lane that holds 32 letters per chunk has a different dual-stream
+ * threshold than the uint32 lane that holds 16).
  *
  * `MinimizerT` is deduced from the collector argument so call sites stay
  * the same shape as before — only `sketch_collector` (which is
@@ -693,8 +711,7 @@ template<
     template<typename H_A> typename simd_hash_t,
     class MinimizerT,
     supports_compact_sequence_range R,
-    typename I = decltype(compact_sequence_range<R>().begin()),
-    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+    typename I = decltype(compact_sequence_range<R>().begin())
 >
 requires (
     supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
@@ -711,42 +728,101 @@ inline void collect_minimizers_two_stack_nthash_simd(
         bioseq::instr::register_region_static("mm_sketch_simd");
     auto _scope = bioseq::instr::region(_desc);
 
-    using seq_traits   = compact_sequence_range<R>::traits;
-    using storage_unit = typename seq_traits::storage_unit;
-    using d_t          = hn::ScalableTag<storage_unit>;
-    const d_t d;
-    constexpr size_t lpu        = seq_traits::letters_per_unit;
-    const size_t lanes_per_stream = hn::Lanes(d);
-    const size_t context_bps    = k + w - 1;
-    const size_t min_seq_for_dual =
-        2 * lanes_per_stream * lpu + context_bps;
-    const bool use_dual = (seq.bp_size() >= min_seq_for_dual);
+    using seq_traits           = compact_sequence_range<R>::traits;
+    using base_storage_unit    = typename seq_traits::storage_unit;
+    constexpr size_t base_bits = sizeof(base_storage_unit) * 8;
+    constexpr size_t bpc       = seq_traits::bits_per_char;
 
-    auto dispatch = [&]<size_t StaticW, size_t StaticK>() {
-        if (use_dual) {
-            collect_minimizers_two_stack_nthash_simd_impl<
-                StaticW, StaticK,
-                /*NumStreams=*/2, /*DetectPalindrome=*/false,
-                simd_hash_t, MinimizerT, R, I, hash_val_t>(
-                    collector, seq, seq_begin, seq_end, w, k);
-        } else {
-            collect_minimizers_two_stack_nthash_simd_impl<
-                StaticW, StaticK,
-                /*NumStreams=*/1, /*DetectPalindrome=*/true,
-                simd_hash_t, MinimizerT, R, I, hash_val_t>(
-                    collector, seq, seq_begin, seq_end, w, k);
-        }
-    };
+    // Stage 1 — given the lane unit and (StaticW, StaticK), pick
+    // NumStreams and forward to the impl. The dual-stream eligibility
+    // threshold is derived from the *lane's* `Lanes(d)` so a wider lane
+    // (uint64) sees a higher threshold (`Lanes` halves but
+    // `letters_per_unit` doubles, so the per-chunk BPs come out the same
+    // — but use the lane's own counts to avoid surprise on platforms
+    // where `Lanes` differs).
+    auto dispatch_with_unit =
+        [&]<typename hash_unit_t, size_t StaticW, size_t StaticK>() {
+            using unit_d_t = hn::ScalableTag<hash_unit_t>;
+            constexpr size_t lpu_unit =
+                sizeof(hash_unit_t) * 8 / bpc;
+            const size_t lanes_per_stream_unit = hn::Lanes(unit_d_t{});
+            const size_t context_bps           = k + w - 1;
+            const size_t min_seq_for_dual_unit =
+                2 * lanes_per_stream_unit * lpu_unit + context_bps;
+            const bool use_dual_unit =
+                (seq.bp_size() >= min_seq_for_dual_unit);
 
+            if (use_dual_unit) {
+                collect_minimizers_two_stack_nthash_simd_impl<
+                    StaticW, StaticK,
+                    /*NumStreams=*/2, /*DetectPalindrome=*/false,
+                    simd_hash_t, MinimizerT, R, I, hash_unit_t>(
+                        collector, seq, seq_begin, seq_end, w, k);
+            } else {
+                collect_minimizers_two_stack_nthash_simd_impl<
+                    StaticW, StaticK,
+                    /*NumStreams=*/1, /*DetectPalindrome=*/true,
+                    simd_hash_t, MinimizerT, R, I, hash_unit_t>(
+                        collector, seq, seq_begin, seq_end, w, k);
+            }
+        };
+
+    // Stage 2 — given (StaticW, StaticK), pick the lane unit. The
+    // K-fits-in-lane test is `K * bpc <= lane_width`: state_fwd
+    // accumulates K letters into the lane (so K*bpc bits must fit),
+    // and state_rc shifts the new high letter by `(K-1)*bpc` (which is
+    // strictly less than `K*bpc`, so the shift is in-range whenever
+    // state_fwd fits). For dynamic K (StaticK == 0) the runtime k
+    // value drives the choice; uint64 covers every K up to 32 for
+    // dna4 (the SIMD ceiling on AArch64; > 64-bit lanes are out of
+    // NEON's reach today).
+    auto dispatch_with_k_aware_unit =
+        [&]<size_t StaticW, size_t StaticK>() {
+            if constexpr (StaticK > 0) {
+                constexpr size_t kmer_bits_static = StaticK * bpc;
+                if constexpr (kmer_bits_static <= base_bits) {
+                    dispatch_with_unit.template operator()<
+                        base_storage_unit, StaticW, StaticK>();
+                } else if constexpr (kmer_bits_static <= 64) {
+                    dispatch_with_unit.template operator()<
+                        uint64_t, StaticW, StaticK>();
+                } else {
+                    static_assert(kmer_bits_static <= 64,
+                        "Static K-mer doesn't fit in any SIMD lane "
+                        "we support today (uint64_t = 64 bits is the "
+                        "ceiling on AArch64 NEON). Bench grid never "
+                        "exercises this; either widen K or extend the "
+                        "lane vocabulary.");
+                }
+            } else {
+                const size_t kmer_bits = k * bpc;
+                if (kmer_bits <= base_bits) {
+                    dispatch_with_unit.template operator()<
+                        base_storage_unit, StaticW, 0>();
+                } else if (kmer_bits <= 64) {
+                    dispatch_with_unit.template operator()<
+                        uint64_t, StaticW, 0>();
+                } else {
+                    DEBUG_ASSERT(false, fmt::format(
+                        "two_stack SIMD: kmer_bits={} exceeds uint64 "
+                        "lane (k={}, bits_per_char={}). Need a wider "
+                        "lane vocabulary or a scalar fallback.",
+                        kmer_bits, k, bpc));
+                }
+            }
+        };
+
+    // Stage 3 — top-level (W, K) static dispatch. The minimap2 default
+    // (w=10, k=15) short-circuits to the fully static specialisation.
     if (w == 10 && k == 15) [[likely]] {
-        dispatch.template operator()<10, 15>();
+        dispatch_with_k_aware_unit.template operator()<10, 15>();
         return;
     }
     if (w == 10) {
-        dispatch.template operator()<10, 0>();
+        dispatch_with_k_aware_unit.template operator()<10, 0>();
         return;
     }
-    dispatch.template operator()<0, 0>();
+    dispatch_with_k_aware_unit.template operator()<0, 0>();
 }
 
 

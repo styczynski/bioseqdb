@@ -411,13 +411,15 @@ static void check_two_stack_invariants(
     using seq_traits = compact_sequence_range<seq_type>::traits;
 
     // Determinism: two independent calls produce identical output.
+    // Phase-5 dispatcher picks `hash_val_t` automatically from K's
+    // bit-width — for the K=15 / dna4 cases here it resolves to the
+    // base storage_unit (uint32 or uint64 as the test parameterises),
+    // matching what the explicit hash_val_t argument used to pin.
     auto seq_a = compact_sequence_range<seq_type>(data);
     sketch_collector collector_a;
     collect_minimizers_two_stack_nthash_simd<minimap_int_hasher,
         /*MinimizerT=*/MinimapSketchData,
-        /*R=*/seq_type,
-        /*I=*/decltype(seq_a.begin()),
-        /*hash_val_t=*/typename seq_traits::storage_unit>(
+        /*R=*/seq_type>(
         collector_a, seq_a, seq_a.begin(), seq_a.end(), w, k);
     const auto pairs_a = collector_a.extract_pairs();
 
@@ -425,9 +427,7 @@ static void check_two_stack_invariants(
     sketch_collector collector_b;
     collect_minimizers_two_stack_nthash_simd<minimap_int_hasher,
         /*MinimizerT=*/MinimapSketchData,
-        /*R=*/seq_type,
-        /*I=*/decltype(seq_b.begin()),
-        /*hash_val_t=*/typename seq_traits::storage_unit>(
+        /*R=*/seq_type>(
         collector_b, seq_b, seq_b.begin(), seq_b.end(), w, k);
     const auto pairs_b = collector_b.extract_pairs();
 
