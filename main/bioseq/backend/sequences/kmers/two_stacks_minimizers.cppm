@@ -436,7 +436,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // default `hash_val_t = R::storage_unit`, the bitcast is identity
     // (target == source); the substrate exists so future callers can opt
     // into a wider lane width by passing an explicit `hash_val_t`. See
-    // `REGRESSION_NTHASH_INVESTIGATE_CRITICAL_PROBLEM_REPORT.md`'s
+    // `main/DOCS/BUGFIX/REGRESSION_NTHASH_INVESTIGATE_CRITICAL_PROBLEM_REPORT__DOC0213.md`'s
     // Layer A / Layer B discussion.
     using base_seq_traits   = typename compact_sequence_range<R>::traits;
     constexpr bool can_bitcast_to_hash =
@@ -493,7 +493,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
             "k={}, bits_per_char={}, lane_bits={}. The public dispatcher "
             "should have widened hash_val_t (e.g. to uint64_t) so the "
             "K-mer ({} bits) fits in the lane. See "
-            "NTHASH_NARROW_FIX/REPORT_PHASE_5_INDEPTH_ANALYSIS.md.",
+            "main/DOCS/BUGFIX/REPORT_PHASE_5_INDEPTH_ANALYSIS__DOC0244.md.",
             k, seq_traits::bits_per_char, sizeof(storage_unit) * 8,
             k * seq_traits::bits_per_char));
 
@@ -525,7 +525,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
 
     // ---- Alphabet complement (XOR for dna4; dna5 uses the same XOR
     // path here per ENGINEERING_REPORT_V2.md V11, with the known dna5
-    // limitation tracked in FIX_TESTS_FINDINGS_AND_SOLUTIONS.md §2.2).
+    // limitation tracked in main/DOCS/BUGFIX/FIX_TESTS_FINDINGS_AND_SOLUTIONS__DOC0190.md §2.2).
     const storage_unit alphabet_complement_mask =
         static_cast<storage_unit>(seq_traits::alphabet_size - 1);
     const vec_t v_alphabet_complement_xor = hn::Set(d, alphabet_complement_mask);
@@ -549,7 +549,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // V10b mask: `hash_mask_high` zeros the low `hash_bits` of the storage
     // word so we can OR in `pos_local`.
     //
-    // BUG FIX (FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT.md):
+    // BUG FIX (main/DOCS/BUGFIX/FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT__DOC0194.md):
     // the previous form folded `kmer_mask & hash_mask_high` into one mask
     // as a "save-1-SIMD-op" optimisation. That fold is broken for any
     // storage_unit where `kmer_mask` lives entirely in the *low* bits and

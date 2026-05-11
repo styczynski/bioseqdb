@@ -21,7 +21,7 @@
 //      assert determinism, in-bounds positions, and a density bound (4·N/W
 //      upper, N/(4·W) lower) — exactly the "passing requirement" the user
 //      asked for in the regression task. See
-//      FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT.md for the full
+//      main/DOCS/BUGFIX/FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT__DOC0194.md for the full
 //      analysis and why mm_sketch's own count on poly-A is also far above
 //      4·N/W (so requiring two-stack to bit-for-bit match mm_sketch on
 //      poly-A is physically impossible).
@@ -38,7 +38,7 @@
 //                                         position-shift bug
 //                                         (`iterate_sequence_bp_simd_offsets`
 //                                         under non-zero offsets), tracked in
-//                                         FIX_TESTS_FINDINGS_AND_SOLUTIONS.md
+//                                         main/DOCS/BUGFIX/FIX_TESTS_FINDINGS_AND_SOLUTIONS__DOC0190.md
 //                                         §2.2; that case is excluded from the
 //                                         parameterisation below.
 #include "common_simd.h"
@@ -80,7 +80,7 @@ std::vector<seq::dna4> MINIMIZER_TEST_DNA4_SEQ{
 // past the trivial single-offset partition (`offsets[0] == offsets[Lanes-1]`)
 // for `bits_per_char = 3` (dna5) over `uint64_t` storage. The dna5+uint64
 // `lexic_hasher` parity case still triggers a separate latent SIMD bug
-// described in FIX_TESTS_FINDINGS_AND_SOLUTIONS.md §2.2 — that
+// described in main/DOCS/BUGFIX/FIX_TESTS_FINDINGS_AND_SOLUTIONS__DOC0190.md §2.2 — that
 // parameterisation is excluded from the SIMD-vs-scalar parity test below.
 std::vector<seq::dna5> MINIMIZER_TEST_DNA5_SEQ{
     "GACGAGCCCAGCACGACGCAGCACGACGCAGCACGCAGCGCGAGCCCAGCACGACGCAGCACGA"
@@ -365,7 +365,7 @@ TEMPLATE_TEST_CASE(
 
 // dna5 + lexic_hasher: the uint64_t parameterisation hits the pre-existing
 // `iterate_sequence_bp_simd_offsets` position-shift bug for 3-bit
-// alphabets (see FIX_TESTS_FINDINGS_AND_SOLUTIONS.md §2.2). Excluded
+// alphabets (see main/DOCS/BUGFIX/FIX_TESTS_FINDINGS_AND_SOLUTIONS__DOC0190.md §2.2). Excluded
 // here pending an independent fix; the bug never reaches production
 // because dna5 isn't on the bench grid.
 TEMPLATE_TEST_CASE(

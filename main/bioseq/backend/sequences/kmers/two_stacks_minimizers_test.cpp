@@ -33,7 +33,7 @@
 // (commit 59887b0b — "wip: fixing issue with nthash narrow lanes") via the
 // JustLog dump in NTHASH_NARROW_FIX/BASELINE_HARDCODED_OUTPUT.txt. The
 // NEW impl is locked to produce a sorted-unique pair set bit-identical to
-// these literals — see NTHASH_NARROW_FIX/REPORT_PHASE_1.md for the
+// these literals — see main/DOCS/BUGFIX/REPORT_PHASE_1__DOC0221.md for the
 // before/after diff and the validation methodology.
 
 #include "common_simd.h"

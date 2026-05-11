@@ -77,7 +77,7 @@ struct AlignerInput {
     /// once in `build_input` so the per-iteration timing window of
     /// `run_aligner` does not include the O(bp_size) compact-to-ACGT
     /// conversion that `tool_minimap2` used to do inline. See issue
-    /// 1b in STRANGE_TIMING_COMPREHESIVE_REPORT.md.
+    /// 1b in main/DOCS/REPORTS/STRANGE_TIMING_COMPREHESIVE_REPORT__DOC0215.md.
     std::vector<std::string> queries_acgt;
     std::vector<std::string> targets_acgt;
     /// Optional kmer-size override pulled from the test case `data`
@@ -124,8 +124,8 @@ struct AlignerOutput {
 
 /// Estimate the memory required by one `(benchmark, test_case, group)`
 /// batch so the framework can throttle parallel batches against the
-/// global memory budget (see `BENCH_V11_IMPL_PLAN.md` §3.5 / §4 and
-/// `BENCH_V12_IMPL_PLAN.md` §3.4).
+/// global memory budget (see `main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V11_IMPL_PLAN__DOC0224.md` §3.5 / §4 and
+/// `main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V12_IMPL_PLAN__DOC0226.md` §3.4).
 ///
 /// We size off the data already in the JSON blob, before any sequence
 /// generation: each test case produces `fragment_count` pairs, with

@@ -245,7 +245,7 @@ HWY_INLINE void scan_for_each(
 // =====================================================================
 // Compression-pipeline kernels — used by parallel_gzip_decoder.
 // All inside the existing HWY_BEFORE_NAMESPACE() block; no new HWY-
-// wrapped module per CODE_STYLE.md.
+// wrapped module per main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md.
 // =====================================================================
 
 /// Marker resolution — for each `uint16_t` value `v` in `buffer`, if

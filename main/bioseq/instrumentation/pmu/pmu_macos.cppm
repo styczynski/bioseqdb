@@ -11,7 +11,7 @@
  * when init fails so the rest of the pipeline keeps running.
  *
  * Reverse-engineered framework symbols are documented in
- * main/bioseq/RESEARCH/KPERF_EXAMPLE.md (the public-domain xnu/kperf
+ * main/DOCS/EXTERNAL_DOCS/KPERF_EXAMPLE__DOC0077.md (the public-domain xnu/kperf
  * demo by ibireme that this implementation is modelled after).
  */
 module;

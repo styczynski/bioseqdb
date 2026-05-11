@@ -2,7 +2,7 @@
  * @file bench_framework/index_test.cpp
  * @brief End-to-end Catch2 unit tests for `bioseq::bench_framework`.
  *
- * Design choices (per BENCH_V7_IMPL_PLAN.md §2):
+ * Design choices (per main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V7_IMPL_PLAN__DOC0203.md §2):
  *   - One file, no helper subdir. Heavily-templated utilities at the
  *     top so each TEST_CASE stays focused on what it actually
  *     verifies.
@@ -18,7 +18,7 @@
  *   - Counter-metric tests use a per-test counter name (line-derived)
  *     because `bioseq::instr::counter()` registers in a process-wide
  *     map that persists across TEST_CASEs.
- *   - All test code follows CODE_STYLE.md §1: descriptive variable
+ *   - All test code follows main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §1: descriptive variable
  *     names, `[[nodiscard]]` on every value-returning helper, no raw
  *     `printf`/`cerr` outside `StderrCapture`'s redirect plumbing,
  *     and no helper that throws on cleanup.
@@ -613,7 +613,7 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
         if (input) {
             std::string body{std::istreambuf_iterator<char>{input},
                              std::istreambuf_iterator<char>{}};
-            // Per CODE_STYLE.md §1 the project is exception-free; nlohmann
+            // Per main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §1 the project is exception-free; nlohmann
             // throws by default, so we explicitly disable it and treat any
             // structural failure as "empty report" — tests then see an
             // empty `outcome.report` and the assertions naturally fail

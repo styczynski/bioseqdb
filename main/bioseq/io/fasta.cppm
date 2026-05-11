@@ -65,7 +65,7 @@ enum class parse_outcome : std::uint8_t {
 };
 
 /// Returned by `parse_one_fasta_record` / `parse_one_fastq_record` to
-/// avoid an out-pointer for the cursor (CODE_STYLE.md §1 / §5
+/// avoid an out-pointer for the cursor (main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §1 / §5
 /// forbids output pointer parameters). The caller does
 /// `auto step = parse_one_*_record(...); slab.parse_cursor =
 /// step.cursor;` after each call.

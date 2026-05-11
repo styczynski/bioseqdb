@@ -588,7 +588,7 @@ auto lift_op(Op&& op, Args&&... args) {
     }
 // NOTE — this macro is purely a NAMING shortcut: it expands to a struct with
 // a static apply() forwarding to hn::<Name>. There is no logic in the macro,
-// it is exactly the long-hand form repeated 25 times. CODE_STYLE.md forbids
+// it is exactly the long-hand form repeated 25 times. main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md forbids
 // macros for *code logic*; this is type-name boilerplate that has no other
 // expression. We #undef it immediately after the registrations to limit blast
 // radius. The §10.B fallback in the plan was the long-hand form (~280 LOC of

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """V18 UI smoke harness — drives the bench_framework_example binary
 through a PTY and asserts on rendered output. Stdlib only (no pexpect
-or pyte) per BENCH_V18_IMPL_DESIGN.md §10.4.1.
+or pyte) per main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §10.4.1.
 
 The harness uses ftxui's render-complete sentinel (`\\x1b]666;render-N\\x07`,
 emitted only under `--ui-test-mode`) for deterministic frame-by-frame

@@ -359,8 +359,8 @@ struct CorpusDescriptor {
     return record_count * mean_record_length_bp;
 }
 
-/// Reader-side resource estimator (see `BENCH_V11_IMPL_PLAN.md` §3.5 /
-/// §4 and `BENCH_V12_IMPL_PLAN.md` §3.4).  The reader's `Input` only
+/// Reader-side resource estimator (see `main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V11_IMPL_PLAN__DOC0224.md` §3.5 /
+/// §4 and `main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V12_IMPL_PLAN__DOC0226.md` §3.4).  The reader's `Input` only
 /// holds the corpus path plus a few size counters, so the persistent
 /// (`base_memory`) cost is small.  However, we still budget `2x` the
 /// total corpus bytes for both base + extra so the dynamic memory

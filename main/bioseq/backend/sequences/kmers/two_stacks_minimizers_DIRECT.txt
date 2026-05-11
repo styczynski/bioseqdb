@@ -150,7 +150,7 @@ requires (
     // V10b mask: `hash_mask_high` zeros the low `hash_bits` of the storage
     // word so we can OR in `pos_local`.
     //
-    // BUG FIX (FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT.md):
+    // BUG FIX (main/DOCS/BUGFIX/FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT__DOC0194.md):
     // the previous form folded `kmer_mask & hash_mask_high` into one mask
     // as a "save-1-SIMD-op" optimisation. That fold is broken for any
     // storage_unit where `kmer_mask` lives entirely in the *low* bits and
@@ -955,7 +955,7 @@ collect_minimizers_two_stack_nthash_simd_impl(
     // collapses to zero on every uint64 storage_unit configuration
     // (because kmer_mask lives in the low bits and hash_mask_high lives in
     // the high bits) — that's the regression captured in
-    // FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT.md. Use
+    // main/DOCS/BUGFIX/FIX_MINIMIZER_TERRIBLE_REGRESSION_PROBLEMS_REPORT__DOC0194.md. Use
     // `hash_mask_high` alone, which is the correct top-half mask for the
     // post-multiply hash bits.
     const storage_unit hash_kmer_mask = hash_mask_high;

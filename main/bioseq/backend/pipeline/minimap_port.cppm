@@ -820,7 +820,7 @@ template <class MinimizerT, MinimizerIndex IndexT>
     // each NEON BlendedStore lowers to a 3-step Load+Blend+Store —
     // measured as 5–22 percentage points slower than this 8-bit MSD
     // radix sort on the bench's LONG/VLONG/XL/XXL buckets. See
-    // OTHER_TOOLS_RESEARCH/new_speedup/REPORT_2.md for the full V1-vs-V2
+    // main/DOCS/REPORTS/NEW_SPEEDUP_REPORT_2__DOC0149.md for the full V1-vs-V2
     // numbers; the SIMD variant becomes attractive again on AVX-512
     // hosts and is left as a future-work option.
     {

@@ -7,7 +7,7 @@
  * text I/O, binary wire format, and 1-arg projection helpers
  * (bioseq.len, bioseq.unit_len).
  *
- * Design notes: see main/bioseq/RESEARCH/SPEC_HOW_TO_CONNECT_ALIGNER_3.md
+ * Design notes: see main/DOCS/PROMPTS/SPEC_HOW_TO_CONNECT_ALIGNER_3__DOC0057.md
  *
  *-------------------------------------------------------------------------
  */

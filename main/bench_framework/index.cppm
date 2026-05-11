@@ -12,7 +12,7 @@
  * counter snapshots, evaluation-handler outputs), evaluates rules from
  * the config, and writes a single `report.json`.
  *
- * Design choices documented in BENCH_V2_IMPL_PLAN.md. Keep that file in
+ * Design choices documented in main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V2_IMPL_PLAN__DOC0198.md. Keep that file in
  * sync with this implementation.
  */
 module;
@@ -708,7 +708,7 @@ struct ExecutionTuple {
 ///
 /// `Cell` is owned via `std::unique_ptr<Cell>` (see `BenchmarkExecutionState`)
 /// because the framework hands out stable `Cell*` to TBB workers and the
-/// pointer must outlive any vector reallocation. Per CODE_STYLE.md §5,
+/// pointer must outlive any vector reallocation. Per main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §5,
 /// smart pointers exist here because the per-benchmark state owns every
 /// cell for the lifetime of the run; the alternative would be a
 /// stable-iterator container like `std::list` plus manual lookup, which
@@ -796,7 +796,7 @@ struct ParsedCli {
     /// animation and the periodic 30-s reload tick, and emits a
     /// `\x1b]666;render-N\x07` OSC sentinel after every render so a
     /// PTY-driven Python harness can synchronise on completed frames
-    /// (BENCH_V18_IMPL_DESIGN.md §10.4.1). Manual `Ctrl-R` and the
+    /// (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §10.4.1). Manual `Ctrl-R` and the
     /// V14 selection-debounce-reparse path remain functional.
     bool                       ui_test_mode = false;
     std::optional<unsigned>    threads_override{};
@@ -1096,7 +1096,7 @@ struct SystemMemorySnapshot {
 
     // T: prefer total_Bytes() (Windows: sum of DIMMs; Linux: round-up
     // MemTotal). Linux's pow-of-2 rounding is documented in
-    // BENCH_V12_IMPL_PLAN.md §6.5; we accept the overestimate and
+    // main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V12_IMPL_PLAN__DOC0226.md §6.5; we accept the overestimate and
     // rely on the 30 s idle-clock timeout to catch genuinely-infeasible
     // batches.
     snap.total_bytes = clamp_positive(mem.total_Bytes());
@@ -1148,7 +1148,7 @@ struct ProgressGroup;
 
 /// V16 slim form: hwinfo snapshotter plus the buffered-cap math. All
 /// reservation tracking moved to `BatchScheduler` (§3.7 of
-/// BENCH_V16_IMPL_PLAN.md). Removing the per-batch acquire/release
+/// main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md). Removing the per-batch acquire/release
 /// path eliminates the worker-blocking cv-wait loop that was the
 /// secondary bottleneck under the V12 design.
 class MemoryBudget {
@@ -1391,7 +1391,7 @@ struct ScopedSchedulerFinish {
 /// Memory reservations live exclusively here — bodies never block on
 /// `MemoryBudget` directly. Bench-lock + serial-concurrency rules are
 /// also enforced by admission predicates instead of process-global
-/// mutexes; see BENCH_V16_IMPL_PLAN.md §3.4.
+/// mutexes; see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.4.
 class BatchScheduler {
 public:
     /// Scheduler tick cadence. Wakeups also fire on every batch
@@ -1414,7 +1414,7 @@ public:
     }
 
     ~BatchScheduler() noexcept {
-        // Dtor sequence (see BENCH_V16_IMPL_PLAN.md §4.5):
+        // Dtor sequence (see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §4.5):
         // 1. Stop the scheduler thread.
         // 2. Drain any TBB tasks already enqueued.
         // 3. Members destruct.
@@ -1559,7 +1559,7 @@ private:
         }
     }
 
-    /// Greedy admission. See BENCH_V16_IMPL_PLAN.md §3.3. The system
+    /// Greedy admission. See main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.3. The system
     /// memory snapshot is provided by `scheduler_loop` so this body
     /// never re-enters `current_system_snapshot()` while holding `mu_`.
     void admit_locked(const SystemMemorySnapshot& sys) noexcept {
@@ -5131,7 +5131,7 @@ inline void run_typed_benchmark(
     /// admission predicates, so the body never blocks on a process-
     /// global mutex. This is what restores cross-batch parallelism
     /// (the V12 cross_bench_mu writer-lock was the dominant
-    /// bottleneck on bench_v10 — see BENCH_V16_IMPL_PLAN.md §0.2).
+    /// bottleneck on bench_v10 — see main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §0.2).
     auto run_item_iterations = [run_one_iteration](
         const WorkBatchItem& item, const Input& input)
     {
@@ -5260,7 +5260,7 @@ inline void run_typed_benchmark(
     // Block until every batch under this benchmark_index has finished
     // or aborted. Required to keep `state`, `*group_slots`, and the
     // captured references alive through every enqueued body's
-    // execution. See BENCH_V16_IMPL_PLAN.md §3.6.
+    // execution. See main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.6.
     scheduler->wait_for_benchmark(context.benchmark_index);
 
     // After wait_for_benchmark returns, all bodies have finished.
@@ -7133,7 +7133,7 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
     };
 
     /// Emit one violation as a JSON object — exactly the shape the spec
-    /// shows in BENCH_V2_CODE.md (`location`, `benchmark`, `rule_name`,
+    /// shows in main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V2_CODE__DOC0195.md (`location`, `benchmark`, `rule_name`,
     /// `execution_tuple`, `test_case`, `metric`, `args`).
     auto emit_one_violation = [&](auto& b, const Violation& violation) {
         emit_object_with_body(b, [&](auto& inner) {
@@ -7801,7 +7801,7 @@ template<typename... Fields>
 }
 
 /// Identity helpers — one tiny call to `join_identity` each. See
-/// BENCH_V8_IMPL_PLAN.md §2. The `region` and `aggregate` parameters
+/// main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V8_IMPL_PLAN__DOC0204.md §2. The `region` and `aggregate` parameters
 /// on `make_violation_identity` reserve slots in the identity tuple
 /// for the eventual per-region / per-aggregate rule extensions; V8
 /// callers pass the constant defaults `"all_regions"` / `"p50"` (no
@@ -8759,7 +8759,7 @@ inline void render_summary(
             ++i;
         } else if (arg == "--memory-buffer" && (i + 1) < argc) {
             // V12: `--memory-buffer N` (0..50, default 10). Use
-            // std::from_chars to honour CODE_STYLE.md's "no exceptions
+            // std::from_chars to honour main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md's "no exceptions
             // in framework code" — the existing --threads parser used
             // try/catch around std::stoi, but we don't extend that
             // pattern.

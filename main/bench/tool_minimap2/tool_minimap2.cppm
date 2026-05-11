@@ -68,7 +68,7 @@ using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
  * Promoted out of `detail::` so bench harnesses can call it from
  * `on_input` and pass the resulting string into `tool_minimap2`. That
  * keeps the O(bp_size) decompression out of the per-iteration timing
- * window — see STRANGE_TIMING_COMPREHESIVE_REPORT.md §1b for context.
+ * window — see main/DOCS/REPORTS/STRANGE_TIMING_COMPREHESIVE_REPORT__DOC0215.md §1b for context.
  */
 template<supports_compact_sequence_range Range>
 [[nodiscard]] std::string compact_sequence_to_acgt(
@@ -224,7 +224,7 @@ struct NativeMinimap2Handles {
  * compact-to-ACGT conversion is the *caller's* responsibility — see
  * `compact_sequence_to_acgt(...)` above. Hoisting the conversion
  * out of `on_run` keeps the per-iteration timing window honest
- * (issue 1b in STRANGE_TIMING_COMPREHESIVE_REPORT.md). The
+ * (issue 1b in main/DOCS/REPORTS/STRANGE_TIMING_COMPREHESIVE_REPORT__DOC0215.md). The
  * cross-alphabet sanity check that this function used to perform via
  * `static_assert` is preserved at the conversion site (the templated
  * `compact_sequence_to_acgt` above is the only entry that produces

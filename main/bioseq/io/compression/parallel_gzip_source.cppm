@@ -2,7 +2,7 @@
  * @file parallel_gzip_source.cppm
  * @brief `io_source`-conforming adapter on top of `parallel_gzip_decoder`.
  *
- * PIMPL via `std::unique_ptr<impl>` (the one place CODE_STYLE.md §1
+ * PIMPL via `std::unique_ptr<impl>` (the one place main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §1
  * explicitly allows). The PIMPL holds the mmap source (which keeps the
  * fd alive for the duration of the parse), the decoder, and the
  * trailing error message. Constructed via

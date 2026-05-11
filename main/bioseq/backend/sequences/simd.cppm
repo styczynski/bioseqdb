@@ -877,7 +877,7 @@ inline void iterate_sequence_bp_simd_offsets(
  * into the same bundle on the receiving side, so the unpack→repack was
  * pure boilerplate that obscured the data flow.
  *
- * Lane-count discipline (CODE_STYLE.md §2):
+ * Lane-count discipline (main/DOCS/GUIDELINES/CODE_STYLE__DOC0145.md §2):
  *   - `lanes_per_stream`     = hn::Lanes(d)              [runtime]
  *   - `total_lanes`          = lanes_per_stream * NumStreams [runtime]
  *   - `max_lanes_per_stream` = hn::MaxLanes(D{})         [constexpr]

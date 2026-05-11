@@ -12,8 +12,8 @@
  * else lives in the new sub-namespace
  * `bioseq::bench_framework::detail::ui` to avoid polluting `detail`.
  *
- * Design source: BENCH_V14_IMPL_DESIGN.md §§ 0–11.
- * Implementation plan: BENCH_V15_IMPL_PLAN.md §§ 0–11.
+ * Design source: main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V14_IMPL_DESIGN__DOC0229.md §§ 0–11.
+ * Implementation plan: main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V15_IMPL_PLAN__DOC0232.md §§ 0–11.
  */
 module;
 
@@ -113,7 +113,7 @@ inline constexpr int                      kHeaderRowsBase           = 3;
 inline constexpr int                      kHeaderRowsLive           = 4;
 inline constexpr int                      kBodySeparatorRows        = 2;
 
-// ---------- V18 (BENCH_V18_IMPL_DESIGN.md §2.1, §3.x, §4.3) ----------
+// ---------- V18 (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §2.1, §3.x, §4.3) ----------
 inline constexpr std::size_t              kPerRegionPanelMinCols    = 52;
 // User-extension over V18 design baseline: the docked panel target
 // width was widened from 64 → 128 cells so dense per-region rows
@@ -918,7 +918,7 @@ enum class FooterState : std::uint8_t {
 [[nodiscard]] constexpr int footer_rows_for(FooterState s) noexcept {
     // Help spans 14 rows (1 title + 13 keymap rows). Last grew when V18
     // added the per-region aggregate cycle, chart-mode cycle, and pin
-    // toggle (BENCH_V18_IMPL_DESIGN.md §9.1).
+    // toggle (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §9.1).
     return s == FooterState::Help ? 14 : 1;
 }
 
@@ -959,7 +959,7 @@ cycle_mode(ValueDisplayMode current, bool baseline_pinned, bool forward) noexcep
 }
 
 // =============================================================================
-//  Section 4b — V18 per-region types (BENCH_V18_IMPL_DESIGN.md §3.2, §6.1, §7)
+//  Section 4b — V18 per-region types (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §3.2, §6.1, §7)
 // =============================================================================
 
 /// V18 §3.2 — selects which slot of `AggregatedSamples` the per-region
@@ -1208,7 +1208,7 @@ struct UiState {
     /// Current 0-based index of the search-match cursor. Reset to 0
     /// on every query change. `n` / `N` advance / retreat.
     int                                             search_match_cursor = 0;
-    // ---------- V18 (BENCH_V18_IMPL_DESIGN.md §8.1) ----------
+    // ---------- V18 (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §8.1) ----------
     /// Active aggregate for the per-region table. Cycled via `>` /
     /// `<`. Single field, NOT view-keyed (§3.2): the user's
     /// "show me means everywhere" intent travels across views.
@@ -1230,7 +1230,7 @@ struct UiState {
 };
 
 /// Default expanded state for a section id. Legend and Historic
-/// regression sections start collapsed (per BENCH_V14_IMPL_DESIGN.md
+/// regression sections start collapsed (per main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V14_IMPL_DESIGN__DOC0229.md
 /// §3.3 and §6.4); every other section is expanded by default.
 [[nodiscard]] inline bool default_section_expanded(std::string_view section_id) noexcept {
     if (section_id.find(":legend") != std::string_view::npos) return false;
@@ -3298,7 +3298,7 @@ default_metric_for(const BenchmarkSnapshot& snap) noexcept
 }
 
 // =============================================================================
-//  Section 9b — V18 per-region table & charts (BENCH_V18_IMPL_DESIGN.md §3-§7)
+//  Section 9b — V18 per-region table & charts (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §3-§7)
 // =============================================================================
 
 /// V18 internal — one row of the per-region table, materialised into
@@ -3564,7 +3564,7 @@ extract_per_region_rows(const BenchmarkSnapshot& snap,
         for (auto w : widths) total += w + kCellPaddingPerCol;
         return total;
     };
-    // Single source of truth for pivot decision (BENCH_V18_IMPL_DESIGN.md
+    // Single source of truth for pivot decision (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md
     // §3.1) so the wide-mode bracket gutter (which calls
     // `compute_table_layout` independently) sees the same answer for
     // identical inputs and stays vertically aligned in pivot+wrap mode.
@@ -4872,7 +4872,7 @@ build_bracket_groups(const TableLayout& layout) noexcept
         }) | borderRounded | size(WIDTH, EQUAL, static_cast<int>(panel_cols))
            | size(HEIGHT, EQUAL, static_cast<int>(panel_rows));
     }
-    // Panel cell budget (BENCH_V18_IMPL_DESIGN.md §3.1 rule 6 + §3.6):
+    // Panel cell budget (main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V18_IMPL_DESIGN__DOC0245.md §3.1 rule 6 + §3.6):
     //   total = 2 (border) + 2 (panel-side bracket gutter) + body
     // The 1-cell `ftxui::separator()` between main pane and panel sits
     // OUTSIDE the panel and is reserved for the bracket's middle riser
