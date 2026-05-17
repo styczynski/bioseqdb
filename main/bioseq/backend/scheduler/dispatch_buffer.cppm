@@ -60,6 +60,7 @@ import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
 import bioseq_sequences.minimap_port;
+import bioseq_sequences.pipe;            // for minimap_port / minimap2_port_with_index entry points
 import bioseq_cigar;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sidecar;

@@ -677,13 +677,15 @@ struct RmqTree {
 /// tree(s). Out-of-range anchors are pruned. Then an RMQ query finds
 /// the best predecessor in the valid query-position range.
 ///
-/// @param anchors         Sorted anchor array
+/// @param anchors         Sorted anchor array (read-only span; the kernel only
+///                         reads positions and emits a freshly-reordered
+///                         anchor vector alongside chains).
 /// @param params          Chaining parameters (must have prepare() called)
 /// @param max_dist_inner  Inner tree max distance (0 = disabled)
 /// @param cap_rmq_size    Maximum tree size before pruning (default 100000)
 /// @return Pair of (chains, reordered_anchors)
 [[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_rmq(
-    std::vector<Anchor>& anchors,
+    std::span<const Anchor> anchors,
     const ChainingParams& params,
     int32_t max_dist_inner = 0,
     int32_t cap_rmq_size = 100000)

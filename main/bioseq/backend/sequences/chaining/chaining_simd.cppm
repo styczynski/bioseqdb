@@ -107,7 +107,7 @@ struct SoaAnchors {
 /// @return SoA layout with padding
 template<class D>
 [[nodiscard]] SoaAnchors create_soa_anchors(
-    D d_int, const std::vector<Anchor>& anchors)
+    D d_int, std::span<const Anchor> anchors)
 {
     const size_t max_lanes = hn::MaxLanes(d_int);
     const size_t anchor_count = anchors.size();
@@ -275,7 +275,7 @@ HWY_INLINE hn::Vec<D> vectorized_chaining_score(
 template<class D>
 void simd_dp_forward_pass(
     D d_int,
-    const std::vector<Anchor>& anchors,
+    std::span<const Anchor> anchors,
     const SoaAnchors& soa,
     int32_t* HWY_RESTRICT best_scores,
     std::span<int64_t> predecessors,
@@ -525,11 +525,12 @@ void simd_dp_forward_pass(
 /// Requires skip_penalty == 0 (the vectorized scoring kernel omits it).
 /// If skip_penalty is non-zero, use chain_anchors_scalar instead.
 ///
-/// @param anchors  Sorted anchor array
+/// @param anchors  Sorted anchor array (read-only span; the kernel only reads
+///                  positions and emits a freshly-reordered anchor vector).
 /// @param params   Chaining parameters (must have prepare() called)
 /// @return Pair of (chains, reordered_anchors)
 [[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_simd(
-    std::vector<Anchor>& anchors,
+    std::span<const Anchor> anchors,
     const ChainingParams& params)
 {
     static const auto* _simd_desc =

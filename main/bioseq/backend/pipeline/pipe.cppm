@@ -464,6 +464,19 @@ struct StageDescription {
     std::string                              stage_name;
     std::optional<StageAlgorithmDescription> algorithm;
     std::optional<std::string>               extra_description;
+
+    /**
+     * @brief Pre-allocation upper bound the stage reserves before driving its
+     * kernel (DOC0249 §21 — "reserve correctness").
+     *
+     * Populated by every stage that opens an `ArenaSlab<E>` of bounded size
+     * (MinimizerStage, SeedHitStage, ChainStage, RegionStage).  Set to
+     * `std::nullopt` for stages that mutate in-place or whose output size
+     * is `0` (IndexStage, SinkStage, etc.).  The EXPLAIN renderer surfaces
+     * this as a per-stage `[reserved: N]` line so a reader can verify
+     * `actual ≤ reserved` against the runtime instrumentation log.
+     */
+    std::optional<std::size_t>               estimated_batch_size;
 };
 
 struct PipelineDescription {
@@ -662,6 +675,13 @@ struct MinimizerStage
         algo.name = std::string{
             ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(MA)};
         desc.algorithm = std::move(algo);
+        // Reserve target for the sketch arena slab (DOC0249 §21.4
+        // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
+        // the describe path the proto is empty so bp_size() is zero — which
+        // still yields the +64 safety margin from `estimated_sketch_count`.
+        desc.estimated_batch_size = detail::estimated_sketch_count(
+            query_seq_ != nullptr ? query_seq_->bp_size() : 0u,
+            runtime_w > 0 ? runtime_w : 10);
         return desc;
     }
 };
@@ -674,7 +694,7 @@ struct MinimizerStage
  * away at -O3 (zero runtime cost).
  */
 template <class IndexT>
-struct IndexStage : StageBase<IndexStage<IndexT>, ::bioseq::chaining::Anchor> {
+struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downstream sees the same sketch span */> {
     static constexpr std::string_view stage_name = "IndexStage";
 
     const IndexT* index_;
@@ -713,14 +733,17 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             ? params.kmer_size
             : static_cast<int32_t>(Cep::kmer_len);
 
-        // The kernel takes std::vector<MinimizerT>&; build a vector wrapper.
-        // The const_cast is safe because the kernel only reads.
-        using MinimizerT = typename std::remove_cvref_t<B>::value_type;
-        std::vector<std::remove_const_t<MinimizerT>> minimizers_vec(
-            sketches.data(), sketches.data() + sketches.size());
+        using MinimizerT = std::remove_const_t<
+            typename std::remove_cvref_t<B>::value_type>;
 
-        auto anchors_vec = collect_seed_hits(
-            minimizers_vec, target_index_ref,
+        // Kernel now accepts std::span directly (DOC0249 M5).  The radix-sort
+        // inside `collect_seed_hits` still emits its anchors into a
+        // `std::vector<Anchor>`; we materialise that into an arena slab so
+        // downstream stages can hold span references whose lifetime tracks
+        // the per-query Arena::Chain scope opened in pipeline_run_impl_batch.
+        auto anchors_vec = collect_seed_hits<MinimizerT>(
+            std::span<const MinimizerT>{sketches.data(), sketches.size()},
+            target_index_ref,
             query_len, params.max_occ, kmer_size);
 
         auto anchors_slab = make_arena_slab<Anchor>();
@@ -741,6 +764,18 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         algo.parameters.push_back({"max_occ", std::to_string(params.max_occ)});
         algo.parameters.push_back({"query_len", std::to_string(query_len)});
         desc.algorithm = std::move(algo);
+        // Anchor reserve target — used by SeedHitStage's slab (DOC0249 §21.4
+        // "estimated_anchor_count").  The actual sketch count is unknown at
+        // describe time so the reported figure uses query_len/window=10 as
+        // the canonical median; the runtime reserve picks a tighter value
+        // when the real sketches.size() is available.
+        const std::size_t approx_sketch_count =
+            static_cast<std::size_t>(query_len) / 10u + 64u;
+        desc.estimated_batch_size = detail::estimated_anchor_count(
+            approx_sketch_count,
+            static_cast<std::size_t>(query_len),
+            /*target_bp=*/static_cast<std::size_t>(query_len),
+            params.kmer_size);
         return desc;
     }
 };
@@ -763,26 +798,26 @@ struct ChainStage : StageBase<ChainStage<CA>, Chain> {
     [[gnu::always_inline]] void process(B&& anchors_in, Sink& sink) {
         using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 
-        // chain_anchors_* take const vector& today.  Build a vector view
-        // (one copy from the span); the wrapper is mechanical and matches
-        // the spec's "kernel signature unchanged at this layer" rule.
-        std::vector<Anchor> anchors_vec(
-            anchors_in.data(), anchors_in.data() + anchors_in.size());
+        // chain_anchors_* now accept std::span<const Anchor> directly
+        // (DOC0249 M6); no vector copy at the boundary.
+        const std::span<const Anchor> anchors_span{
+            anchors_in.data(), anchors_in.size()};
 
         std::vector<Chain>  chains_vec;
         std::vector<Anchor> reordered_vec;
         if constexpr (CA == ChainingAlgorithmType::SIMD_MM2) {
-            auto pair = ::bioseq::simd::HWY_NAMESPACE::chain_anchors_simd(anchors_vec, cp);
+            auto pair = ::bioseq::simd::HWY_NAMESPACE::chain_anchors_simd(
+                anchors_span, cp);
             chains_vec    = std::move(pair.first);
             reordered_vec = std::move(pair.second);
         } else if constexpr (CA == ChainingAlgorithmType::RMQ) {
-            auto pair = ::bioseq::chaining::chain_anchors_rmq(anchors_vec, cp);
+            auto pair = ::bioseq::chaining::chain_anchors_rmq(anchors_span, cp);
             chains_vec    = std::move(pair.first);
             reordered_vec = std::move(pair.second);
         } else {
             static_assert(CA == ChainingAlgorithmType::SCALAR_MM2,
                 "Unhandled ChainingAlgorithmType variant");
-            auto pair = ::bioseq::chaining::chain_anchors_scalar(anchors_vec, cp);
+            auto pair = ::bioseq::chaining::chain_anchors_scalar(anchors_span, cp);
             chains_vec    = std::move(pair.first);
             reordered_vec = std::move(pair.second);
         }
@@ -820,6 +855,12 @@ struct ChainStage : StageBase<ChainStage<CA>, Chain> {
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
         desc.algorithm = std::move(algo);
+        // Chain stage reserves both a chains slab and a reordered-anchors
+        // slab; we surface the chain reserve (the smaller of the two; the
+        // anchor reserve mirrors SeedHitStage's per-query estimate).
+        desc.estimated_batch_size = detail::estimated_chain_count(
+            /*anchor_count=*/0u, cp.min_seed_count) +
+            static_cast<std::size_t>(cp.min_seed_count);
         return desc;
     }
 };
@@ -839,15 +880,13 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
 
     template <is_constexpr_aligner_params Cep, class CB, class AB, class Sink>
     [[gnu::always_inline]] void process_pair(CB&& chains, AB&& anchors, Sink& sink) {
-        // generate_regions takes std::vector<Chain>& and std::vector<Anchor>&
-        // (it does not mutate, but the signature is by-reference).  Build a
-        // pair of vectors from the spans.
-        std::vector<Chain>  chains_vec(
-            chains.data(), chains.data() + chains.size());
-        std::vector<Anchor> anchors_vec(
-            anchors.data(), anchors.data() + anchors.size());
-
-        auto regions_vec = generate_regions(chains_vec, anchors_vec, query_len);
+        // generate_regions now accepts span inputs directly (DOC0249 M7).
+        // The kernel sorts `chains` in place by score, so we pass a mutable
+        // span; `anchors` is read-only.
+        auto regions_vec = generate_regions(
+            std::span<Chain>{chains.data(), chains.size()},
+            std::span<const Anchor>{anchors.data(), anchors.size()},
+            query_len);
 
         // `AlignRegion` owns a `std::vector<CigarOp>` so it is not
         // trivially-destructible.  Use the placement-new pattern so the
@@ -873,6 +912,9 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
         algo.name = "Region generation";
         algo.parameters.push_back({"query_len", std::to_string(query_len)});
         desc.algorithm = std::move(algo);
+        // One region per chain (exact); the actual chain count is only
+        // known at runtime so the describe-time figure is left empty.  The
+        // runtime reserve in process_pair sizes the slab from chains.size().
         return desc;
     }
 };
@@ -894,15 +936,11 @@ struct PrimarySecondaryStage : StageBase<PrimarySecondaryStage, AlignRegion> {
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
     [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
-        std::vector<AlignRegion> regions_vec;
-        regions_vec.reserve(regions.size());
-        for (std::size_t idx = 0; idx < regions.size(); ++idx) {
-            regions_vec.push_back(std::move(regions.data()[idx]));
-        }
-        classify_primary_secondary(regions_vec, mask_level, mask_len, sub_diff_value);
-        for (std::size_t idx = 0; idx < regions_vec.size(); ++idx) {
-            regions.data()[idx] = std::move(regions_vec[idx]);
-        }
+        // Kernel now mutates in place through a span — no vector round-trip
+        // (DOC0249 M8).
+        classify_primary_secondary(
+            std::span<AlignRegion>{regions.data(), regions.size()},
+            mask_level, mask_len, sub_diff_value);
         sink.on_batch_pair(std::forward<RB>(regions), std::forward<AB>(anchors));
     }
 
@@ -932,16 +970,12 @@ struct SecondaryFilterStage : StageBase<SecondaryFilterStage, AlignRegion> {
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
     [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
-        std::vector<AlignRegion> regions_vec;
-        regions_vec.reserve(regions.size());
-        for (std::size_t idx = 0; idx < regions.size(); ++idx) {
-            regions_vec.push_back(std::move(regions.data()[idx]));
-        }
-        filter_secondary_regions(regions_vec, pri_ratio, min_diff_value, best_n);
-        const std::size_t new_size = regions_vec.size();
-        for (std::size_t idx = 0; idx < new_size; ++idx) {
-            regions.data()[idx] = std::move(regions_vec[idx]);
-        }
+        // Kernel filters in place via a span; the new effective size is
+        // returned so the downstream stage observes a shorter prefix
+        // (DOC0249 M8 — `filter_secondary_regions_span`).
+        const std::size_t new_size = filter_secondary_regions(
+            std::span<AlignRegion>{regions.data(), regions.size()},
+            pri_ratio, min_diff_value, best_n);
         sink.on_batch_pair(
             std::span<AlignRegion>{regions.data(), new_size},
             std::forward<AB>(anchors));
@@ -980,19 +1014,12 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT>, AlignRegion> {
             const int32_t kmer_size = Cep::generic_fallback
                 ? runtime_kmer_size
                 : static_cast<int32_t>(Cep::kmer_len);
-            std::vector<AlignRegion> regions_vec;
-            regions_vec.reserve(regions.size());
-            for (std::size_t idx = 0; idx < regions.size(); ++idx) {
-                regions_vec.push_back(std::move(regions.data()[idx]));
-            }
-            std::vector<Anchor> anchors_vec(
-                anchors.data(), anchors.data() + anchors.size());
-            estimate_divergence_from_seeds(
-                regions_vec, *query_minimizers_, anchors_vec,
+            estimate_divergence_from_seeds<MinimizerT>(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const MinimizerT>{
+                    query_minimizers_->data(), query_minimizers_->size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()},
                 query_len, kmer_size, target_len);
-            for (std::size_t idx = 0; idx < regions_vec.size(); ++idx) {
-                regions.data()[idx] = std::move(regions_vec[idx]);
-            }
         }
         sink.on_batch_pair(std::forward<RB>(regions), std::forward<AB>(anchors));
     }
@@ -1027,19 +1054,10 @@ struct AlignStage : StageBase<AlignStage<BAA, QR, TR>, AlignRegion> {
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
     [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
         if (enabled) {
-            std::vector<AlignRegion> regions_vec;
-            regions_vec.reserve(regions.size());
-            for (std::size_t idx = 0; idx < regions.size(); ++idx) {
-                regions_vec.push_back(std::move(regions.data()[idx]));
-            }
-            std::vector<Anchor> anchors_vec(
-                anchors.data(), anchors.data() + anchors.size());
             align_regions<BAA>(
-                regions_vec, anchors_vec,
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()},
                 *query_seq_, *target_seq_, *sm, params);
-            for (std::size_t idx = 0; idx < regions_vec.size(); ++idx) {
-                regions.data()[idx] = std::move(regions_vec[idx]);
-            }
         }
         sink.on_batch_pair(std::forward<RB>(regions), std::forward<AB>(anchors));
     }
@@ -1088,15 +1106,9 @@ struct MapqStage : StageBase<MapqStage, AlignRegion> {
     template <is_constexpr_aligner_params Cep, class RB, class Sink>
     [[gnu::always_inline]] void process(RB&& regions, Sink& sink) {
         if (enabled) {
-            std::vector<AlignRegion> regions_vec;
-            regions_vec.reserve(regions.size());
-            for (std::size_t idx = 0; idx < regions.size(); ++idx) {
-                regions_vec.push_back(std::move(regions.data()[idx]));
-            }
-            compute_mapping_quality(regions_vec, params, 0);
-            for (std::size_t idx = 0; idx < regions_vec.size(); ++idx) {
-                regions.data()[idx] = std::move(regions_vec[idx]);
-            }
+            compute_mapping_quality(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                params, 0);
         }
         sink.on_batch(std::forward<RB>(regions));
     }
@@ -1705,6 +1717,249 @@ template <supports_compact_sequence_range QR,
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE::pipe
+
+// =============================================================================
+// 9.7 Public entry points (DOC0249 §9.7) — relocated from minimap_port.cppm so
+// they can delegate to `pipe::dispatch_pipeline` without forming a circular
+// import.  Live in `bioseq::simd::HWY_NAMESPACE` so callers' fully-qualified
+// names (`bioseq::simd::N_NEON::minimap_port(...)`,
+// `bioseq::simd::N_NEON::minimap2_port_with_index(...)`) are unchanged.
+// =============================================================================
+
+namespace bioseq::simd::HWY_NAMESPACE {
+
+/**
+ * @brief Run the minimap2 pipeline against a pre-built target index using a
+ * caller-supplied query minimiser vector (DOC0249 §9.7).
+ *
+ * Single-query convenience wrapper that hands off to
+ * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>(...)`.  All algorithm-
+ * choice and bucket dispatch happens inside the pipe cascade — no
+ * `(BAA, CA)` switch at this layer.
+ */
+template <class MinimizerT,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          ::bioseq::simd::HWY_NAMESPACE::MinimizerIndex IndexT>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    const std::vector<MinimizerT>& query_minimizers,
+    const IndexT& prebuilt_target_index,
+    const Minimap2Params& params = Minimap2Params{})
+{
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap2_port_with_index");
+    auto _scope = bioseq::instr::region(_desc);
+    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
+        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
+        QueryRange, TargetRange, MinimizerT, IndexT>(
+            query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
+}
+
+/**
+ * @brief Run the minimap2 pipeline against pre-built target minimizers
+ * (DOC0249 §9.7 / legacy minimap2_port shape).
+ *
+ * Builds a TargetIndex from `target_minimizers` and delegates to
+ * `minimap2_port_with_index`.
+ */
+template <class MinimizerT,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange>
+[[nodiscard]] MatchResultCollection minimap2_port(
+    const compact_sequence_range<QueryRange>& query_seq,
+    const compact_sequence_range<TargetRange>& target_seq,
+    const std::vector<MinimizerT>& query_minimizers,
+    const std::vector<MinimizerT>& target_minimizers,
+    const Minimap2Params& params = Minimap2Params{})
+{
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap2_port");
+    auto _scope = bioseq::instr::region(_desc);
+    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
+    TargetIndex target_index;
+    target_index.build(target_minimizers, target_len);
+    return minimap2_port_with_index<MinimizerT, QueryRange, TargetRange, TargetIndex>(
+        query_seq, target_seq, query_minimizers, target_index, params);
+}
+
+namespace pipe_entry_detail {
+
+/**
+ * @brief Per-bucket helper for the from-sequence `minimap_port` entry.
+ *
+ * Owns one `Arena::Chain` scope around the target minimiser sketching + index
+ * build.  Sketching uses the chosen `MinimizerAlgorithmType` selected by a
+ * runtime switch (mirrors the legacy `minimap_port_with_repr` body).  Once
+ * the target index is built, the function delegates to
+ * `minimap2_port_with_index` so the per-query MinimizerStage inside
+ * `pipe::dispatch_pipeline` handles query sketching.
+ */
+template <class MinimizerT,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange>
+[[nodiscard]] MatchResultCollection minimap_port_with_repr(
+    compact_sequence_range<QueryRange>& query_seq,
+    compact_sequence_range<TargetRange>& target_seq,
+    const Minimap2Params& params)
+{
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap_port");
+    auto _scope = bioseq::instr::region(_desc);
+
+    context::context pipeline_context;
+    context::installed_context_scope context_install(pipeline_context);
+
+    const std::size_t window_len = static_cast<std::size_t>(params.window_size);
+    const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
+
+    sketch_collector_t<MinimizerT> target_collector;
+    {
+        static const auto* _mm_sketch_target_desc =
+            bioseq::instr::register_region_static("mm_sketch");
+        auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
+        target_collector.reserve(
+            target_seq.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
+        switch (params.minimizer_algorithm) {
+            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
+                collect_minimizers_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    window_len, kmer_len);
+                break;
+            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH:
+                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    window_len, kmer_len);
+                break;
+            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR:
+            default:
+                collect_minimizers<minimap_int_hasher>(
+                    target_collector, target_seq,
+                    target_seq.begin(), target_seq.end(),
+                    window_len, kmer_len);
+                break;
+        }
+    }
+    const auto target_minimizers = std::move(target_collector).extract_sketches_data();
+
+    sketch_collector_t<MinimizerT> query_collector;
+    {
+        static const auto* _mm_sketch_query_desc =
+            bioseq::instr::register_region_static("mm_sketch");
+        auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
+        query_collector.reserve(
+            query_seq.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
+        switch (params.minimizer_algorithm) {
+            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
+                collect_minimizers_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    window_len, kmer_len);
+                break;
+            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH:
+                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    window_len, kmer_len);
+                break;
+            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR:
+            default:
+                collect_minimizers<minimap_int_hasher>(
+                    query_collector, query_seq,
+                    query_seq.begin(), query_seq.end(),
+                    window_len, kmer_len);
+                break;
+        }
+    }
+    const auto query_minimizers = std::move(query_collector).extract_sketches_data();
+
+    return minimap2_port<MinimizerT, QueryRange, TargetRange>(
+        query_seq, target_seq, query_minimizers, target_minimizers, params);
+}
+
+} // namespace pipe_entry_detail
+
+/**
+ * @brief Top-level minimap2 entry — raw query/target sequences only
+ * (DOC0249 §9.7 / legacy `minimap_port`).
+ *
+ * Picks a `MinimizerRepr<L, K>` bucket from `max(query_bp, target_bp)` and
+ * `params.kmer_size`, then forwards to the per-bucket
+ * `pipe_entry_detail::minimap_port_with_repr`.  Each per-bucket helper
+ * sketches both target and query minimisers, builds the target index, and
+ * delegates to `minimap2_port_with_index` — which in turn calls
+ * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>`.
+ *
+ * The L-bucket switch mirrors the legacy ladder at
+ * `minimap_port.cppm:2604-2699` exactly.
+ */
+template <supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange>
+[[nodiscard]] MatchResultCollection minimap_port(
+    compact_sequence_range<QueryRange>& query_seq,
+    compact_sequence_range<TargetRange>& target_seq,
+    const Minimap2Params& params = Minimap2Params{})
+{
+    const std::size_t max_len =
+        std::max(query_seq.bp_size(), target_seq.bp_size());
+    const int32_t kmer_len = params.kmer_size;
+
+    if (kmer_len == 15) {
+        if (max_len <= (std::size_t{1} << 16))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<16u, 15u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 20))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<20u, 15u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 24))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<24u, 15u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 28))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<28u, 15u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 32))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<32u, 15u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 48))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<48u, 15u>>(
+                query_seq, target_seq, params);
+        return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
+            query_seq, target_seq, params);
+    }
+    if (kmer_len == 7) {
+        if (max_len <= (std::size_t{1} << 15))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<15u, 7u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 28))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<28u, 7u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 48))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<48u, 7u>>(
+                query_seq, target_seq, params);
+        return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 7u>>(
+            query_seq, target_seq, params);
+    }
+    if (kmer_len == 27) {
+        if (max_len <= (std::size_t{1} << 28))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<28u, 27u>>(
+                query_seq, target_seq, params);
+        if (max_len <= (std::size_t{1} << 48))
+            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<48u, 27u>>(
+                query_seq, target_seq, params);
+        return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 27u>>(
+            query_seq, target_seq, params);
+    }
+    if (max_len <= (std::size_t{1} << 28))
+        return pipe_entry_detail::minimap_port_with_repr<MinimapSketchData>(
+            query_seq, target_seq, params);
+    return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
+        query_seq, target_seq, params);
+}
+
+} // namespace bioseq::simd::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
 

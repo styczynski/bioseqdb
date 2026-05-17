@@ -34,6 +34,7 @@ import mlogging;
 import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
+import bioseq_sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
 import bioseq_instr;
 import bench_framework;
 import bench.tool_minimap2;

@@ -316,7 +316,7 @@ struct ChainingParams {
 /// @param min_seed_count   Minimum number of anchors per chain
 /// @return Pair of (chains, reordered_anchors)
 [[nodiscard]] inline std::pair<std::vector<Chain>, std::vector<Anchor>> backtrack_chains(
-    const std::vector<Anchor>& anchors,
+    std::span<const Anchor> anchors,
     std::span<const int32_t> best_scores,
     std::span<const int64_t> predecessors,
     std::span<const int32_t> peak_scores,

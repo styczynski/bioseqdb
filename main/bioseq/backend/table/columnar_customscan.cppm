@@ -5245,6 +5245,21 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		const auto& params = aligner_snapshot->params;
 		const auto& features = aligner_snapshot->features;
 
+		/*
+		 * Renderer driven by the structured `PipelineDescription` populated at
+		 * `BeginCustomScan` (DOC0249 §12.3).  The renderer no longer hardcodes
+		 * which parameters belong to which stage — adding a new stage / new
+		 * algorithm trait surfaces automatically once it appears in
+		 * `PipelineDescription::stages`.
+		 *
+		 * When the describe path did not populate a description (e.g. a
+		 * cold-path branch that bypassed BeginCustomScan), `pipeline_desc` is
+		 * `std::nullopt`; in that case we emit a minimal placeholder line so
+		 * EXPLAIN still surfaces the algorithm choice the executor will run.
+		 */
+		const bool has_pipeline_desc =
+			aligner_snapshot->pipeline_desc.has_value();
+
 		if (es->format == EXPLAIN_FORMAT_TEXT) {
 			appendStringInfoSpaces(es->str, es->indent * 2);
 			appendStringInfoString(es->str,
@@ -5255,138 +5270,86 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				"Single thread [workers=1]:\n");
 			++es->indent;
 
-			auto print_step = [&](const char* label) {
-				appendStringInfoSpaces(es->str, es->indent * 2);
-				appendStringInfo(es->str, "| %s\n", label);
-			};
-			auto print_submit = [&](const char* label) {
-				appendStringInfoSpaces(es->str, es->indent * 2);
-				appendStringInfo(es->str, "* %s\n", label);
-			};
-			auto print_param_int = [&](const char* name, int32_t value) {
-				appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
-				appendStringInfo(es->str, "%s: %d\n", name, static_cast<int>(value));
-			};
-			auto print_param_float = [&](const char* name, double value) {
-				appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
-				appendStringInfo(es->str, "%s: %.4f\n", name, value);
-			};
-
 			/*
-			 * "Compute indices" lists kmer_size/window_size. When the
-			 * sidecar fast path is active for some fraction of the
-			 * batch, those rows pin k=15/w=10 regardless of the user's
-			 * GUC (see dispatch_buffer.cppm's prebuilt-index branch —
-			 * the sidecar blob was sketched at INSERT with those fixed
-			 * values). Surface this divergence directly rather than
-			 * silently misrepresenting the parameter.
+			 * Sidecar-divergence warning: when the prebuilt-index path is
+			 * active for some fraction of the batch, those rows pin
+			 * k=15/w=10 regardless of the user's GUC (see
+			 * dispatch_buffer.cppm).  Surfaced as a header line above the
+			 * pipeline tree so it is not visually attached to any one stage.
 			 */
 			const bool sidecar_path_active = bioseq_read_sequence_index;
 			const bool user_kw_differs =
 				sidecar_path_active &&
 				(params.kmer_size != 15 || params.window_size != 10);
 			if (user_kw_differs) {
-				print_step("Compute indices (sidecar rows pin kmer_size=15 window_size=10)");
-			} else {
-				print_step("Compute indices");
-			}
-			print_param_int("kmer_size",   params.kmer_size);
-			print_param_int("window_size", params.window_size);
-
-			print_step("Collect chain seeds");
-			print_param_int("max_occ", params.max_occ);
-
-			{
-				StringInfoData chain_label;
-				initStringInfo(&chain_label);
-				appendStringInfo(&chain_label, "Chain seeds: %s",
-								 chaining_algorithm_name(params.chaining_algorithm));
-				print_step(chain_label.data);
-				pfree(chain_label.data);
-			}
-			print_param_int  ("min_chain_score", params.min_chain_score);
-			print_param_int  ("min_seed_count",  params.min_seed_count);
-			print_param_int  ("max_chain_skip",  params.max_chain_skip);
-			print_param_int  ("max_chain_iter",  params.max_chain_iter);
-			print_param_int  ("bandwidth",       params.bandwidth);
-			print_param_int  ("max_gap",         params.max_gap);
-			print_param_float("chain_gap_scale",  static_cast<double>(params.chain_gap_scale));
-			print_param_float("chain_skip_scale", static_cast<double>(params.chain_skip_scale));
-			if (params.chaining_algorithm == ChainingAlgorithmType::RMQ) {
-				print_param_int("bandwidth_long", params.bandwidth_long);
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfoString(es->str,
+					"NOTE: sidecar rows pin kmer_size=15 window_size=10\n");
 			}
 
-			print_step("Generate alignment regions");
-
-			print_step("Classification/filter");
-			print_param_float("mask_level",   static_cast<double>(params.mask_level));
-			print_param_int  ("mask_len",     params.mask_len);
-			print_param_float("pri_ratio",    static_cast<double>(params.pri_ratio));
-			print_param_int  ("best_n",       params.best_n);
-
-			/*
-			 * Pipeline order matches minimap2_port_with_index_impl in
-			 * minimap_port.cppm: divergence estimation → base alignment →
-			 * MAPQ. Skipped stages are omitted entirely so the printed
-			 * tree is a faithful render of what the executor actually runs.
-			 */
-			if (params.compute_divergence) {
-				print_step("Compute divergence");
-			}
-
-			if (params.do_cigar) {
-				StringInfoData base_label;
-				initStringInfo(&base_label);
-				const bool ksw2_is_single_affine =
-					params.base_alignment_algorithm ==
-						BaseAlignmentAlgorithmType::KSW2
-					&& params.gap_open1 == params.gap_open2
-					&& params.gap_ext1  == params.gap_ext2;
-				appendStringInfo(&base_label, "Perform base alignment: %s%s",
-					base_alignment_algorithm_name(params.base_alignment_algorithm),
-					ksw2_is_single_affine ? " (single-affine)" : "");
-				print_step(base_label.data);
-				pfree(base_label.data);
-				print_param_int("match_score",  params.match_score);
-				print_param_int("mismatch_pen", params.mismatch_pen);
-				print_param_int("gap_open1",    params.gap_open1);
-				print_param_int("gap_ext1",     params.gap_ext1);
-				if (params.base_alignment_algorithm ==
-					BaseAlignmentAlgorithmType::KSW2) {
+			if (has_pipeline_desc) {
+				for (const auto& stage :
+					aligner_snapshot->pipeline_desc->stages)
+				{
 					/*
-					 * gap_open2/gap_ext2/zdrop/end_bonus are only
-					 * consulted by the dual-affine z2/d2 kernels. When
-					 * the single-affine collapse fires we still show
-					 * them for completeness — the label above tells the
-					 * user which path actually runs.
+					 * Skip stages whose `algorithm` is std::nullopt AND
+					 * carry no `extra_description` — those are stages
+					 * disabled by their `enabled` flag (e.g. DivergenceStage
+					 * when compute_divergence=false).  DOC0249 §11.4.
 					 */
-					print_param_int("gap_open2", params.gap_open2);
-					print_param_int("gap_ext2",  params.gap_ext2);
-					print_param_int("zdrop",     params.zdrop);
-					print_param_int("end_bonus", params.end_bonus);
-				} else {
-					/* block aligner — min/max block sizes are the relevant knobs. */
-					print_param_int("block_min_size",
-									static_cast<int32_t>(params.block_min_size));
-					print_param_int("block_max_size",
-									static_cast<int32_t>(params.block_max_size));
-				}
-			}
+					if (!stage.algorithm.has_value()
+						&& !stage.extra_description.has_value())
+					{
+						continue;
+					}
 
-			if (params.compute_mapq) {
-				print_step("Compute mapping quality");
+					appendStringInfoSpaces(es->str, es->indent * 2);
+					if (stage.algorithm.has_value()) {
+						appendStringInfo(es->str, "| %s: %s\n",
+							stage.stage_name.c_str(),
+							stage.algorithm->name.c_str());
+						for (const auto& p : stage.algorithm->parameters) {
+							appendStringInfoSpaces(es->str,
+								(es->indent + 1) * 2);
+							appendStringInfo(es->str, "%s: %s\n",
+								p.name.c_str(), p.value.c_str());
+						}
+						for (const auto& p : stage.algorithm->computed_properties) {
+							appendStringInfoSpaces(es->str,
+								(es->indent + 1) * 2);
+							appendStringInfo(es->str, "[%s: %s]\n",
+								p.name.c_str(), p.value.c_str());
+						}
+					} else {
+						appendStringInfo(es->str, "| %s — %s\n",
+							stage.stage_name.c_str(),
+							stage.extra_description->c_str());
+					}
+					if (stage.estimated_batch_size.has_value()) {
+						appendStringInfoSpaces(es->str,
+							(es->indent + 1) * 2);
+						appendStringInfo(es->str, "[reserved: %zu]\n",
+							*stage.estimated_batch_size);
+					}
+				}
+			} else {
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"| Pipeline (chaining=%s, base_alignment=%s)\n",
+					chaining_algorithm_name(params.chaining_algorithm),
+					base_alignment_algorithm_name(params.base_alignment_algorithm));
 			}
 
 			/*
 			 * Surface the per-batch execution counters from the
 			 * BatchProcessor stats. Only meaningful after ANALYZE has
 			 * actually run the scan (`last_stats.targets_considered`
-			 * is zero before the first batch). Format:
-			 *   `* Submit results [N batches, M results]`
-			 * The "batches" / "results" labels echo the §2 prompt
-			 * mockup; we keep them concise so a one-shot scan still
-			 * fits the existing tree shape.
+			 * is zero before the first batch).
 			 */
+			auto print_submit = [&](const char* label) {
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str, "* %s\n", label);
+			};
 			if (explain_runtime != nullptr) {
 				const auto& stats = explain_runtime->buffer.execution_stats();
 				if (stats.targets_considered > 0) {
@@ -5406,16 +5369,6 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				print_submit("Submit results");
 			}
 
-			/*
-			 * When bioseq.aligner.enable_profiling is on, append a
-			 * "Runtime:" block summarising the bioseq::instr::access
-			 * profiler counters. The actual high-resolution timings
-			 * still go to the JustLog summary at scan-end (see
-			 * EndCustomScan); EXPLAIN ANALYZE only shows the
-			 * coarse-grained per-stage call counts so users can see
-			 * which pipeline steps dominated without leaving the
-			 * query output.
-			 */
 			if (params.enable_profiling) {
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfoString(es->str, "Runtime:\n");
@@ -5438,25 +5391,55 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			es->indent -= 2;
 			(void) features;  // currently only has_mmsearch is load-bearing
 		} else {
-			/* Structured formats: emit the same info via ExplainPropertyText
-			 * so machine-readable EXPLAIN still exposes every decision. */
+			/*
+			 * Structured formats: emit the same per-stage information via
+			 * `ExplainOpenGroup` + `ExplainPropertyText` so EXPLAIN (FORMAT
+			 * JSON / YAML / XML) consumes the same metadata as the TEXT
+			 * renderer (DOC0249 §12.4).
+			 */
 			ExplainOpenGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
 			ExplainPropertyText("Chaining Algorithm",
 								chaining_algorithm_name(params.chaining_algorithm), es);
 			ExplainPropertyText("Base Alignment Algorithm",
 								base_alignment_algorithm_name(params.base_alignment_algorithm), es);
-			ExplainPropertyInteger("kmer_size",   NULL, params.kmer_size,   es);
-			ExplainPropertyInteger("window_size", NULL, params.window_size, es);
-			ExplainPropertyInteger("min_chain_score", NULL, params.min_chain_score, es);
-			ExplainPropertyInteger("min_seed_count",  NULL, params.min_seed_count,  es);
-			ExplainPropertyInteger("bandwidth",       NULL, params.bandwidth,       es);
-			ExplainPropertyInteger("max_gap",         NULL, params.max_gap,         es);
-			ExplainPropertyInteger("max_occ",         NULL, params.max_occ,         es);
-			ExplainPropertyInteger("match_score",     NULL, params.match_score,     es);
-			ExplainPropertyInteger("mismatch_pen",    NULL, params.mismatch_pen,    es);
-			ExplainPropertyText("do_cigar",           params.do_cigar ? "true" : "false", es);
-			ExplainPropertyText("compute_divergence", params.compute_divergence ? "true" : "false", es);
-			ExplainPropertyText("compute_mapq",       params.compute_mapq ? "true" : "false", es);
+			if (has_pipeline_desc) {
+				ExplainOpenGroup("Pipeline Stages", "Pipeline Stages", false, es);
+				for (const auto& stage :
+					aligner_snapshot->pipeline_desc->stages)
+				{
+					if (!stage.algorithm.has_value()
+						&& !stage.extra_description.has_value())
+					{
+						continue;
+					}
+					ExplainOpenGroup("Stage", stage.stage_name.c_str(), true, es);
+					ExplainPropertyText("Stage Name",
+						stage.stage_name.c_str(), es);
+					if (stage.algorithm.has_value()) {
+						ExplainPropertyText("Algorithm",
+							stage.algorithm->name.c_str(), es);
+						for (const auto& p : stage.algorithm->parameters) {
+							ExplainPropertyText(p.name.c_str(),
+								p.value.c_str(), es);
+						}
+						for (const auto& p : stage.algorithm->computed_properties) {
+							ExplainPropertyText(p.name.c_str(),
+								p.value.c_str(), es);
+						}
+					} else if (stage.extra_description.has_value()) {
+						ExplainPropertyText("Description",
+							stage.extra_description->c_str(), es);
+					}
+					if (stage.estimated_batch_size.has_value()) {
+						ExplainPropertyUInteger("Estimated Batch Size",
+							NULL,
+							static_cast<uint64_t>(*stage.estimated_batch_size),
+							es);
+					}
+					ExplainCloseGroup("Stage", stage.stage_name.c_str(), true, es);
+				}
+				ExplainCloseGroup("Pipeline Stages", "Pipeline Stages", false, es);
+			}
 			ExplainCloseGroup("Bioseq Pipeline", "Bioseq Pipeline", true, es);
 		}
 	}

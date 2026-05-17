@@ -723,7 +723,7 @@ static_assert(MinimizerIndex<TargetIndex>,
  */
 template <class MinimizerT, MinimizerIndex IndexT>
 [[nodiscard]] std::vector<Anchor> collect_seed_hits(
-    const std::vector<MinimizerT>& query_minimizers,
+    std::span<const MinimizerT> query_minimizers,
     const IndexT& target_index,
     int32_t query_len,
     int32_t max_occ,
@@ -858,7 +858,7 @@ template <class MinimizerT, MinimizerIndex IndexT>
  * match_length: approximate number of matching bases in seeded regions
  * block_length: approximate total aligned length in seeded regions
  */
-void compute_fuzzy_lengths(AlignRegion& region, const std::vector<Anchor>& anchors) {
+void compute_fuzzy_lengths(AlignRegion& region, std::span<const Anchor> anchors) {
     region.match_length = 0;
     region.block_length = 0;
     if (region.seed_count <= 0) {
@@ -895,7 +895,7 @@ void compute_fuzzy_lengths(AlignRegion& region, const std::vector<Anchor>& ancho
  */
 void set_region_coordinates(
     AlignRegion& region,
-    const std::vector<Anchor>& anchors,
+    std::span<const Anchor> anchors,
     int32_t query_len)
 {
     if (region.seed_count <= 0) {
@@ -944,8 +944,8 @@ void set_region_coordinates(
  * with coordinates derived from the anchor positions.
  */
 [[nodiscard]] std::vector<AlignRegion> generate_regions(
-    std::vector<Chain>& chains,
-    const std::vector<Anchor>& anchors,
+    std::span<Chain> chains,
+    std::span<const Anchor> anchors,
     int32_t query_len)
 {
     static const auto* _desc =
@@ -993,7 +993,7 @@ void set_region_coordinates(
  *            AND uncov <= mask_len
  */
 void classify_primary_secondary(
-    std::vector<AlignRegion>& regions,
+    std::span<AlignRegion> regions,
     float mask_level,
     int32_t mask_len,
     int32_t sub_diff)
@@ -1141,8 +1141,8 @@ void classify_primary_secondary(
  *   - score + min_diff >= parent.score
  *   - up to best_n secondaries total
  */
-void filter_secondary_regions(
-    std::vector<AlignRegion>& regions,
+[[nodiscard]] std::size_t filter_secondary_regions(
+    std::span<AlignRegion> regions,
     float pri_ratio,
     int32_t min_diff,
     int32_t best_n)
@@ -1151,7 +1151,7 @@ void filter_secondary_regions(
         bioseq::instr::register_region_static("mm_select_sub");
     auto _scope = bioseq::instr::region(_desc);
     if (regions.empty() || pri_ratio <= 0.0f) {
-        return;
+        return regions.size();
     }
 
     // Use index-based filtering to avoid reading from moved-from objects.
@@ -1187,7 +1187,10 @@ void filter_secondary_regions(
         }
     }
 
-    // Compact: move kept regions to front
+    // Compact: move kept regions to front.  Span has no resize(); the caller
+    // observes the new effective size via the returned value.  Regions past
+    // `write_pos` are moved-from (empty CIGAR vector) — their destructors run
+    // when the owning storage (arena slab or vector) unwinds.
     size_t write_pos = 0;
     for (size_t region_idx = 0; region_idx < region_count; ++region_idx) {
         if (keep[region_idx]) {
@@ -1197,14 +1200,14 @@ void filter_secondary_regions(
             ++write_pos;
         }
     }
-    regions.resize(write_pos);
 
-    // Re-index
-    for (size_t region_idx = 0; region_idx < regions.size(); ++region_idx) {
+    // Re-index the surviving prefix.
+    for (size_t region_idx = 0; region_idx < write_pos; ++region_idx) {
         regions[region_idx].region_id = static_cast<int32_t>(region_idx);
     }
 
-    JustLog("[minimap_port] After secondary filtering: {} regions remain", regions.size());
+    JustLog("[minimap_port] After secondary filtering: {} regions remain", write_pos);
+    return write_pos;
 }
 
 // ============================================================================
@@ -1341,8 +1344,8 @@ template<
     supports_compact_sequence_range QueryRange,
     supports_compact_sequence_range TargetRange>
 void align_regions(
-    std::vector<AlignRegion>& regions,
-    const std::vector<Anchor>& anchors,
+    std::span<AlignRegion> regions,
+    std::span<const Anchor> anchors,
     const compact_sequence_range<QueryRange>& query_seq,
     const compact_sequence_range<TargetRange>& target_seq,
     const ScoringMatrix<QueryRange>& scoring_matrix,
@@ -1660,9 +1663,9 @@ void align_regions(
  */
 template <class MinimizerT>
 void estimate_divergence_from_seeds(
-    std::vector<AlignRegion>& regions,
-    const std::vector<MinimizerT>& query_minimizers,
-    const std::vector<Anchor>& anchors,
+    std::span<AlignRegion> regions,
+    std::span<const MinimizerT> query_minimizers,
+    std::span<const Anchor> anchors,
     int32_t query_len,
     int32_t kmer_size,
     int32_t target_len)
@@ -1847,7 +1850,7 @@ void estimate_divergence_from_seeds(
  * Where ratio = secondary_dp_max * secondary_chain_score / (dp_max_score * original_score)
  */
 void compute_mapping_quality(
-    std::vector<AlignRegion>& regions,
+    std::span<AlignRegion> regions,
     const Minimap2Params& params,
     int32_t rep_len)
 {
@@ -2102,601 +2105,6 @@ void print_match_results(
     collection.print(query_name, target_name);
 }
 
-// ============================================================================
-// Main entry point
-// ============================================================================
-
-/**
- * @brief Run the complete minimap2 mapping pipeline.
- *
- * This is the main entry point that executes all phases of the minimap2
- * algorithm. It assumes minimizers have already been collected for both
- * query and target sequences.
- *
- * Pipeline steps:
- *   1. Build target index from target minimizers
- *   2. Collect seed hits (lookup query minimizers in target index)
- *   3. Chain seeds using DP (mg_lchain_dp)
- *   4. Generate alignment regions (mm_gen_regs)
- *   5. Classify primary/secondary (mm_set_parent)
- *   6. Filter secondaries (mm_select_sub)
- *   7. Base-level alignment via dual-affine DP (KSW2)
- *   8. Compute mapping quality (mm_set_mapq2)
- *   9. Convert to PAF-like MatchResult records
- *
- * @tparam QueryRange   compact_sequence_range type for query (e.g. sequence_custom_alphabet<seq::dna4, uint64_t>)
- * @tparam TargetRange  compact_sequence_range type for target
- * @param query_seq           Query sequence as compact_sequence_range
- * @param target_seq          Target sequence as compact_sequence_range
- * @param query_minimizers    Pre-computed minimizers for the query
- * @param target_minimizers   Pre-computed minimizers for the target
- * @param params              Algorithm parameters (defaults match minimap2)
- * @return MatchResultCollection containing PAF-like alignment results
- */
-/**
- * @brief Variant that accepts a prebuilt MinimizerIndex (skipping phase 1).
- *
- * Used by the sidecar path in dispatch_buffer.cppm — a serialized
- * TargetIndex is rehydrated from bytea and passed in verbatim. The template
- * constraint MinimizerIndex<IndexT> lets future custom index types slot in
- * without modifying the pipeline.
- */
-template<
-    class MinimizerT,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    MinimizerIndex IndexT>
-[[nodiscard]] MatchResultCollection minimap2_port_with_index(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    const IndexT& prebuilt_target_index,
-    const Minimap2Params& params = Minimap2Params{});
-
-template<
-    class MinimizerT,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange>
-[[nodiscard]] MatchResultCollection minimap2_port(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    const std::vector<MinimizerT>& target_minimizers,
-    const Minimap2Params& params = Minimap2Params{})
-{
-    static const auto* _desc =
-        bioseq::instr::register_region_static("minimap2_port");
-    auto _scope = bioseq::instr::region(_desc);
-
-    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
-    TargetIndex target_index;
-    target_index.build(target_minimizers, target_len);
-
-    return minimap2_port_with_index<MinimizerT>(
-        query_seq, target_seq, query_minimizers, target_index, params);
-}
-
-/*
- * Internal, template-dispatched body of minimap2_port_with_index. The
- * runtime entry point performs a single switch on
- * (base_alignment_algorithm, chaining_algorithm) to pick the matching
- * instantiation — so both algorithm selectors are resolved to a template
- * parameter and `constexpr if` is used everywhere they are consumed.
- *
- * Not marked static — doing so would give the declaration internal linkage
- * which conflicts with being inside a module's exported region. Template
- * instantiations get unique names at link time so there is no ODR risk.
- */
-template<
-    BaseAlignmentAlgorithmType base_alignment_algorithm,
-    ChainingAlgorithmType      chaining_algorithm,
-    class MinimizerT,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    MinimizerIndex IndexT>
-[[nodiscard]] MatchResultCollection minimap2_port_with_index_impl(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    const IndexT& prebuilt_target_index,
-    const Minimap2Params& params);
-
-template<
-    class MinimizerT,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    MinimizerIndex IndexT>
-[[nodiscard]] MatchResultCollection minimap2_port_with_index(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    const IndexT& prebuilt_target_index,
-    const Minimap2Params& params)
-{
-    /*
-     * Nested runtime switch — promotes BOTH selectors into template
-     * parameters so the per-region alignment loop and the chaining
-     * dispatch both compile in their branchless forms. 2×3 = 6 template
-     * instantiations; each is specialised for the fixed algorithm pair.
-     */
-    switch (params.base_alignment_algorithm) {
-        case BaseAlignmentAlgorithmType::KSW2:
-            switch (params.chaining_algorithm) {
-                case ChainingAlgorithmType::SIMD_MM2:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::SIMD_MM2,
-                        MinimizerT>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-                case ChainingAlgorithmType::RMQ:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::RMQ,
-                        MinimizerT>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-                case ChainingAlgorithmType::SCALAR_MM2:
-                default:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::SCALAR_MM2,
-                        MinimizerT>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-            }
-        case BaseAlignmentAlgorithmType::BLOCK_ALIGNER:
-        default:
-            switch (params.chaining_algorithm) {
-                case ChainingAlgorithmType::SIMD_MM2:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::SIMD_MM2,
-                        MinimizerT>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-                case ChainingAlgorithmType::RMQ:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::RMQ,
-                        MinimizerT>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-                case ChainingAlgorithmType::SCALAR_MM2:
-                default:
-                    return minimap2_port_with_index_impl<
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::SCALAR_MM2,
-                        MinimizerT>(
-                        query_seq, target_seq, query_minimizers, prebuilt_target_index, params);
-            }
-    }
-}
-
-template<
-    BaseAlignmentAlgorithmType base_alignment_algorithm,
-    ChainingAlgorithmType      chaining_algorithm,
-    class MinimizerT,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    MinimizerIndex IndexT>
-[[nodiscard]] MatchResultCollection minimap2_port_with_index_impl(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
-    const std::vector<MinimizerT>& query_minimizers,
-    const IndexT& prebuilt_target_index,
-    const Minimap2Params& params)
-{
-    static const auto* _desc =
-        bioseq::instr::register_region_static("minimap2_port_with_index");
-    auto _scope = bioseq::instr::region(_desc);
-
-    // Install a per-pipeline memory context if the caller hasn't already.
-    std::optional<context::context> owned_context;
-    std::optional<context::installed_context_scope> context_install;
-    if (context::current_or_null() == nullptr) {
-        owned_context.emplace();
-        context_install.emplace(*owned_context);
-    }
-
-    using query_traits = typename compact_sequence_range<QueryRange>::traits;
-    using target_traits = typename compact_sequence_range<TargetRange>::traits;
-    static_assert(
-        std::is_same_v<typename query_traits::alphabet_type, typename target_traits::alphabet_type>,
-        "Query and target sequences must use the same alphabet type");
-
-    constexpr size_t alphabet_size = seqan3::alphabet_size<typename query_traits::alphabet_type>;
-
-    const int32_t query_len  = static_cast<int32_t>(query_seq.bp_size());
-    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
-
-    JustLog("[minimap_port] Starting minimap2_port_with_index: query_len={}, target_len={}, "
-            "query_minimizers={}, prebuilt_target_len={}, alphabet_size={}",
-            query_len, target_len, query_minimizers.size(),
-            prebuilt_target_index.target_length(), alphabet_size);
-
-    if (query_len == 0 || target_len == 0) {
-        JustLog("[minimap_port] Empty input — returning no results");
-        return MatchResultCollection{};
-    }
-
-    // ---- Phase 1 is skipped — prebuilt_target_index is supplied ----
-
-    // ---- Phase 2: Collect seed hits ----
-    auto anchors = collect_seed_hits(
-        query_minimizers, prebuilt_target_index, query_len, params.max_occ,
-        params.kmer_size);
-
-    if (anchors.empty()) {
-        JustLog("[minimap_port] No seed hits found — returning no results");
-        return MatchResultCollection{};
-    }
-
-    // ---- Phase 3: Chain seeds ----
-    // Each chain_anchors_* function has its own bioseq::instr::region
-    // covering the full body (mg_lchain_dp / mg_lchain_rmq / mg_lchain_simd)
-    // plus sub-scopes for forward-pass and backtracking.
-    //
-    // Dispatched via `constexpr if` on the chaining_algorithm template
-    // parameter so the per-chain inner loops are compiled branchlessly —
-    // promoted from the Minimap2Params enum once in the outer switch of
-    // minimap2_port_with_index.
-    const auto chaining_params = params.to_chaining_params();
-    auto [chains, reordered_anchors] = [&]()
-        -> std::pair<std::vector<Chain>, std::vector<Anchor>>
-    {
-        if constexpr (chaining_algorithm == ChainingAlgorithmType::SIMD_MM2) {
-            return chain_anchors_simd(anchors, chaining_params);
-        } else if constexpr (chaining_algorithm == ChainingAlgorithmType::RMQ) {
-            return chain_anchors_rmq(anchors, chaining_params);
-        } else {
-            static_assert(chaining_algorithm == ChainingAlgorithmType::SCALAR_MM2,
-                          "Unhandled ChainingAlgorithmType variant");
-            return chain_anchors_scalar(anchors, chaining_params);
-        }
-    }();
-
-    if (chains.empty()) {
-        JustLog("[minimap_port] No chains formed — returning no results");
-        return MatchResultCollection{};
-    }
-
-    // ---- Phase 4: Generate alignment regions (region scope inside the fn) ----
-    auto regions = generate_regions(chains, reordered_anchors, query_len);
-
-    // ---- Phase 5 (chain_post): Primary/secondary classification + filter ----
-    // classify_primary_secondary and filter_secondary_regions have
-    // bioseq::instr::region scopes inside them.
-    const int32_t sub_diff = params.match_score * 2 + params.mismatch_pen;
-    classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
-    const int32_t min_diff = params.kmer_size * 2;
-    filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
-
-    // ---- Phase 6: Estimate divergence from seeds (mm_est_err equivalent) ----
-    // estimate_divergence_from_seeds has a "mm_est_err" region scope inside.
-    // Gated on compute_divergence — if the target list never projects
-    // bioseq.divergence() there is no reason to spend the binary-search
-    // walk per region. MatchResult::divergence stays at its -1.f sentinel
-    // in that case, which maps back to SQL NULL.
-    if (params.compute_divergence) {
-        estimate_divergence_from_seeds(regions, query_minimizers, reordered_anchors,
-                                       query_len, params.kmer_size, target_len);
-    } else {
-        JustLog("[minimap_port] Skipping mm_est_err (compute_divergence=false)");
-    }
-
-    // ---- Phase 7: Base-level alignment (only when CIGAR requested) ----
-    // align_regions has a "mm_align_skeleton" region scope inside.
-    if (params.do_cigar) {
-        // Build unified scoring matrix for KSW2 and block aligner.
-        // Cached per-thread so a steady-state batch loop doesn't redo
-        // ~245 byte stores per pair (proposal §C.2). The cache is keyed
-        // on (match_score, mismatch_pen, sc_ambi); on key mismatch the
-        // matrix is regenerated. The static-initialiser race is safe
-        // because the cache is thread_local.
-        thread_local int8_t s_cached_match    = std::numeric_limits<int8_t>::min();
-        thread_local int8_t s_cached_mismatch = std::numeric_limits<int8_t>::min();
-        thread_local int8_t s_cached_ambi     = std::numeric_limits<int8_t>::min();
-        thread_local ScoringMatrix<QueryRange> s_cached_matrix{};
-        const int8_t want_match    = static_cast<int8_t>(params.match_score);
-        const int8_t want_mismatch = static_cast<int8_t>(params.mismatch_pen);
-        const int8_t want_ambi     = static_cast<int8_t>(params.sc_ambi);
-        if (s_cached_match != want_match
-            || s_cached_mismatch != want_mismatch
-            || s_cached_ambi != want_ambi) {
-            s_cached_matrix   = ScoringMatrix<QueryRange>::generate(
-                want_match, want_mismatch, want_ambi);
-            s_cached_match    = want_match;
-            s_cached_mismatch = want_mismatch;
-            s_cached_ambi     = want_ambi;
-        }
-        const auto& scoring_matrix = s_cached_matrix;
-
-        // Sequences are passed directly — encoding of specific sub-regions
-        // happens lazily inside the KSW2 core kernel. Base-alignment algorithm
-        // is pinned to base_alignment_algorithm at compile time.
-        align_regions<base_alignment_algorithm>(
-            regions, reordered_anchors,
-            query_seq, target_seq,
-            scoring_matrix, params);
-
-        // Re-classify after DP (like align_regs does in map.c:572-574)
-        classify_primary_secondary(regions, params.mask_level, params.mask_len, sub_diff);
-        filter_secondary_regions(regions, params.pri_ratio, min_diff, params.best_n);
-    } else {
-        JustLog("[minimap_port] Skipping mm_align_skeleton (do_cigar=false)");
-    }
-
-    // ---- Phase 8: Compute MAPQ (region scope inside the fn) ----
-    if (params.compute_mapq) {
-        compute_mapping_quality(regions, params, 0);
-    } else {
-        JustLog("[minimap_port] Skipping mm_set_mapq (compute_mapq=false)");
-    }
-
-    // ---- Phase 9: Convert to MatchResult ----
-    std::vector<MatchResult> results;
-    results.reserve(regions.size());
-    for (auto& region : regions) {
-        results.push_back(region_to_match_result(std::move(region), query_len, target_len));
-    }
-
-    JustLog("[minimap_port] Pipeline complete: {} alignment results", results.size());
-    return MatchResultCollection(std::move(results));
-}
-
-/**
- * @brief Top-level entry point for our C++ minimap2 port.
- *
- * Unlike `minimap2_port`, this function is given the raw query/target sequences
- * (no pre-computed minimizers) and performs the full pipeline:
- *   1. Minimizer extraction for target  (mm_sketch equivalent)
- *   2. Minimizer extraction for query   (mm_sketch equivalent)
- *   3. Delegates to `minimap2_port` for the remainder of the pipeline.
- *
- * The function is annotated with bioseq::instr::region scopes so the profiler
- * can attribute time to each pipeline stage. The minimizer extraction stages
- * share the `mm_sketch` region name with the corresponding minimap2 C
- * function, which makes the profile comparable side-by-side between the two
- * implementations.
- *
- * @tparam QueryRange   compact_sequence_range type for query
- * @tparam TargetRange  compact_sequence_range type for target
- * @param query_seq     Query sequence as compact_sequence_range
- * @param target_seq    Target sequence as compact_sequence_range
- * @param params        Algorithm parameters (defaults match minimap2)
- * @return MatchResultCollection containing PAF-like alignment results
- */
-// Templated body of minimap_port — instantiated once per
-// `MinimizerRepr` shape selected by the size-bucket dispatch below.
-// Keeps the existing collect_minimizers / target index / pipeline flow
-// but parametrised on `MinimizerT` so each bucket gets its own packed
-// layout (35-bit hash for XXL, 47-bit hash for SHORT).  The bench grid
-// always picks 64-bit storage (K = 15 + max ≤ 256 Mbp) so the dispatch
-// is a free trade — no SIMD lane width change, just a few bits shifted
-// between the hash and pos fields.
-template<class MinimizerT,
-         supports_compact_sequence_range QueryRange,
-         supports_compact_sequence_range TargetRange>
-[[nodiscard]] MatchResultCollection minimap_port_with_repr(
-    compact_sequence_range<QueryRange>& query_seq,
-    compact_sequence_range<TargetRange>& target_seq,
-    const Minimap2Params& params)
-{
-    static const auto* _desc =
-        bioseq::instr::register_region_static("minimap_port");
-    auto _scope = bioseq::instr::region(_desc);
-
-    // Install a per-query memory context. Every downstream allocation
-    // site (KSW2 state, backtrack matrix, chaining DP arrays, anchors,
-    // regions) reaches it through context::current(). See
-    // RESEARCH/SPEC_MEMORY_ALLOCATORS.md §5.
-    context::context pipeline_context;
-    context::installed_context_scope context_install(pipeline_context);
-
-    const size_t w = static_cast<size_t>(params.window_size);
-    const size_t k = static_cast<size_t>(params.kmer_size);
-
-    // ---- Minimizer extraction: target (same block name as minimap2 mm_sketch) ----
-    // Dispatch on params.minimizer_algorithm. The two collectors have
-    // identical post-conditions (sketch_collector populated with the
-    // (last_pos, kmer) pairs in the same order) — the kmers test suite
-    // pins this contract. Branch is per-call (twice per minimap_port
-    // invocation) so the runtime cost is negligible vs the sketch work.
-    //
-    // Reserve the collector's vector to the expected minimizer count
-    // (`N/w` plus a safety margin) so the per-window push_back doesn't
-    // chain through ~17 geometric reallocations on a 1 Mbp pair. The
-    // underlying minimap2 invariant is that ~one minimizer per `w`-wide
-    // window survives, so `seq.bp_size() / w + 64` is a tight bound.
-    sketch_collector_t<MinimizerT> target_collector;
-    {
-        static const auto* _mm_sketch_target_desc =
-            bioseq::instr::register_region_static("mm_sketch");
-        auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
-        target_collector.reserve(target_seq.bp_size() / std::max<size_t>(w, 1) + 64);
-        switch (params.minimizer_algorithm) {
-            case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                collect_minimizers_simd<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::SCALAR:
-            default:
-                collect_minimizers<minimap_int_hasher>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    w, k);
-                break;
-        }
-    }
-    // Move the vector out of the collector — target_collector is dead after
-    // this point, so we drop a ~N*8B memcpy per pair (the legacy code
-    // returned by-value through extract_sketches_data, which built up as a
-    // ~150 kB copy on VERY_LONG inputs).
-    const auto target_minimizers = std::move(target_collector).extract_sketches_data();
-    JustLog("[minimap_port] target_minimizers: {}", target_minimizers.size());
-
-    // ---- Minimizer extraction: query ----
-    sketch_collector_t<MinimizerT> query_collector;
-    {
-        static const auto* _mm_sketch_query_desc =
-            bioseq::instr::register_region_static("mm_sketch");
-        auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
-        query_collector.reserve(query_seq.bp_size() / std::max<size_t>(w, 1) + 64);
-        switch (params.minimizer_algorithm) {
-            case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                collect_minimizers_simd<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-            case MinimizerAlgorithmType::SCALAR:
-            default:
-                collect_minimizers<minimap_int_hasher>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    w, k);
-                break;
-        }
-    }
-    // Move the vector out of the collector for the same reason as above.
-    const auto query_minimizers = std::move(query_collector).extract_sketches_data();
-    JustLog("[minimap_port] query_minimizers: {}", query_minimizers.size());
-
-    // ---- Remainder of the pipeline: target index, chaining, alignment, MAPQ ----
-    return minimap2_port<MinimizerT>(query_seq, target_seq,
-                         query_minimizers, target_minimizers, params);
-}
-
-// Tier-1 dispatch — picks the `MinimizerRepr<MaxSeqLog2, KmerLen>`
-// instantiation matching (max(query_len, target_len), params.kmer_size).
-//
-// Each bucket's `pos_field_mask = (1 << pos_bits) - 1` MUST cover
-// `max_len`; otherwise positions silently alias and the index returns
-// wrong hits. Wider position fields shift bits away from the hash,
-// but as long as `min_hash_bits = min(56, 2*K)` still fits the layout
-// is valid — see `kmers/index.cppm` for the picker.
-//
-// Bucket boundaries (K = 15, min_hash_bits = 30):
-//   max_len <=    64 kbp  →  MinimizerRepr<16, 15>   uint64 storage
-//   max_len <=     1 Mbp  →  MinimizerRepr<20, 15>   uint64 storage
-//   max_len <=    16 Mbp  →  MinimizerRepr<24, 15>   uint64 storage
-//   max_len <=   256 Mbp  →  MinimizerRepr<28, 15>   uint64 storage (canonical)
-//   max_len <=     4 Gbp  →  MinimizerRepr<32, 15>   uint64 storage
-//   max_len <=  256 Tbp   →  MinimizerRepr<48, 15>   128-bit fallback
-//   max_len <  ~9.2 Ebp   →  MinimizerRepr<63, 15>   128-bit fallback (widest)
-//
-// The 128-bit fallback's `static_assert(pos_bits + 1 <= 64)` caps the
-// widest position field at 63 bits, which is far beyond any
-// realistic genome. The K=7 / K=27 ladders mirror the same shape; the
-// non-canonical-K fallback also tracks a wide bucket so a request that
-// exceeds 256 Mbp is never silently truncated.
-template<supports_compact_sequence_range QueryRange,
-         supports_compact_sequence_range TargetRange>
-[[nodiscard]] MatchResultCollection minimap_port(
-    compact_sequence_range<QueryRange>& query_seq,
-    compact_sequence_range<TargetRange>& target_seq,
-    const Minimap2Params& params = Minimap2Params{})
-{
-    const size_t max_len =
-        std::max(query_seq.bp_size(), target_seq.bp_size());
-    const int32_t k = params.kmer_size;
-
-    if (k == 15) {
-        if (max_len <= (size_t{1} << 16)) {
-            return minimap_port_with_repr<MinimizerRepr<16u, 15u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 20)) {
-            return minimap_port_with_repr<MinimizerRepr<20u, 15u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 24)) {
-            return minimap_port_with_repr<MinimizerRepr<24u, 15u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 28)) {
-            return minimap_port_with_repr<MinimizerRepr<28u, 15u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 32)) {
-            return minimap_port_with_repr<MinimizerRepr<32u, 15u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 48)) {
-            return minimap_port_with_repr<MinimizerRepr<48u, 15u>>(
-                query_seq, target_seq, params);
-        }
-        return minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
-            query_seq, target_seq, params);
-    }
-
-    // K=7 + small genomes opt into 32-bit storage (Goal A — actually
-    // exercises a non-64-bit MinimizerRepr).  val32_hash = 31 - 15 = 16
-    // ≥ min_hash_bits = 14, so MinimizerRepr<15, 7> picks uint32_t
-    // storage with hash:16 / pos:15 / strand:1.  minimap_int's mask
-    // produces 2*K = 14-bit hashes which fit comfortably.  K must be
-    // odd to avoid the palindromic-kmer assertion failure in the
-    // minimap2 C reference's `mm_sketch` (see comment in
-    // `default_kw_sweep_grid`); K = 7 is the smallest odd value that
-    // still lets MEDIUM-sized sequences land on 32-bit storage.
-    if (k == 7) {
-        if (max_len <= (size_t{1} << 15)) {
-            return minimap_port_with_repr<MinimizerRepr<15u, 7u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 28)) {
-            return minimap_port_with_repr<MinimizerRepr<28u, 7u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 48)) {
-            return minimap_port_with_repr<MinimizerRepr<48u, 7u>>(
-                query_seq, target_seq, params);
-        }
-        return minimap_port_with_repr<MinimizerRepr<63u, 7u>>(
-            query_seq, target_seq, params);
-    }
-
-    // K=27 forces the 128-bit fallback (val64_hash = 63 - pos_bits = 35
-    // < min_hash_bits = 54), exercising the dual-uint64 specialisation
-    // with `data_low_64()` / `data_high_64()` accessors (Goal A + B).
-    // Used by the XXL_KMER_27 bench case.  K = 27 is odd (palindrome
-    // safety for the C reference) and matches typical assembly-grade
-    // long-K presets (`-x asm10` runs K = 19, the next odd up is K = 21).
-    if (k == 27) {
-        if (max_len <= (size_t{1} << 28)) {
-            return minimap_port_with_repr<MinimizerRepr<28u, 27u>>(
-                query_seq, target_seq, params);
-        }
-        if (max_len <= (size_t{1} << 48)) {
-            return minimap_port_with_repr<MinimizerRepr<48u, 27u>>(
-                query_seq, target_seq, params);
-        }
-        return minimap_port_with_repr<MinimizerRepr<63u, 27u>>(
-            query_seq, target_seq, params);
-    }
-
-    // Non-canonical K — fall back to the canonical MinimapSketchData
-    // (MinimizerRepr<28, 15>) when max_len fits, else the wide K=15
-    // 128-bit fallback. Truncates the hash if K > 17 but the bench
-    // grid never reaches that path; exotic-K callers can add their
-    // own bucket here if they need it.
-    if (max_len <= (size_t{1} << 28)) {
-        return minimap_port_with_repr<MinimapSketchData>(
-            query_seq, target_seq, params);
-    }
-    return minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
-        query_seq, target_seq, params);
-}
 
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

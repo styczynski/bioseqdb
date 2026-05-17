@@ -18,6 +18,7 @@ module;
 
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <vector>
 #include <algorithm>
 #include <limits>
@@ -47,11 +48,13 @@ namespace bioseq::chaining {
 ///
 ///   Backtrack from highest-scoring anchors to extract chains.
 ///
-/// @param anchors  Sorted anchor array
+/// @param anchors  Sorted anchor array (read-only span; the kernel does not
+///                  mutate the input — it only reads positions to score and
+///                  emit a freshly-reordered anchor vector alongside chains).
 /// @param params   Chaining parameters (must have prepare() called)
 /// @return Pair of (chains, reordered_anchors)
 [[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_scalar(
-    std::vector<Anchor>& anchors,
+    std::span<const Anchor> anchors,
     const ChainingParams& params)
 {
     static const auto* _dp_desc =
