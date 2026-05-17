@@ -39,6 +39,7 @@ import bioseq_scan_state;
 import pg_utils;
 import bioseq_scheduler.dispatch_buffer;
 import bioseq_sequences.minimap_port;  // for MatchResult
+import bioseq_sequences.pipe;            // for PipelineDescription / describe_pipeline_for
 import bioseq_cigar;                    // for format_cigar
 import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
 import bioseq_sidecar;                   // meta_sidecar reads for symbol_count fast path
@@ -104,6 +105,16 @@ struct PerScanAlignerState {
 	bioseq::simd::N_NEON::Minimap2Params params{};
 	BioseqScanFeatureFlags              features{};
 	bool                                params_captured = false;
+
+	/*
+	 * Structured pipeline description captured at BeginCustomScan via
+	 * `bioseq::simd::N_NEON::pipe::describe_pipeline_for(...)`.  Populated
+	 * once per scan (cold path) and consumed by
+	 * `ColumnarScan_ExplainCustomScan` to render the per-stage breakdown
+	 * without hardcoded knowledge of which parameters belong to which
+	 * stage (DOC0249 §11, §12.2).
+	 */
+	std::optional<bioseq::simd::N_NEON::pipe::PipelineDescription> pipeline_desc{};
 };
 
 /*
@@ -3739,6 +3750,24 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	runtime.aligner_state.params          = aligner_params;
 	runtime.aligner_state.features        = features;
 	runtime.aligner_state.params_captured = true;
+
+	/*
+	 * Capture the structured pipeline description for EXPLAIN.  Walks the
+	 * same dispatch ladder `dispatch_pipeline` would but invokes each stage's
+	 * `describe()` instead of `on_batch(...)`.  The proto query / target
+	 * sequence ranges are empty placeholders — every stage's `describe()`
+	 * consults only by-value config fields (DOC0249 §6.1 invariant) so the
+	 * empty input is safe.
+	 */
+	if (features.has_mmsearch) {
+		using QR_default = sequence_custom_alphabet<seq::dna4, uint64_t>;
+		using TR_default = sequence_custom_alphabet<seq::dna4, uint64_t>;
+		compact_sequence_range<QR_default> empty_query_proto{};
+		compact_sequence_range<TR_default> empty_target_proto{};
+		runtime.aligner_state.pipeline_desc =
+			bioseq::simd::N_NEON::pipe::describe_pipeline_for(
+				aligner_params, empty_query_proto, empty_target_proto);
+	}
 
 	/*
 	 * Only consult the sidecar when mmsearch is actually present. Without
