@@ -525,19 +525,27 @@ void simd_dp_forward_pass(
 /// Requires skip_penalty == 0 (the vectorized scoring kernel omits it).
 /// If skip_penalty is non-zero, use chain_anchors_scalar instead.
 ///
-/// @param anchors  Sorted anchor array (read-only span; the kernel only reads
-///                  positions and emits a freshly-reordered anchor vector).
-/// @param params   Chaining parameters (must have prepare() called)
-/// @return Pair of (chains, reordered_anchors)
-[[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_simd(
+/// @param anchors                  Sorted anchor array (read-only span; the
+///                                  kernel only reads positions and emits a
+///                                  freshly-reordered anchor span).
+/// @param params                   Chaining parameters (must have prepare()
+///                                  called).
+/// @param chains_out               Output slab — surviving chains are appended
+///                                  here in score-descending order.
+/// @param reordered_anchors_out    Output slab — anchors of surviving chains
+///                                  appended in chain order; `Chain::anchor_start`
+///                                  indexes into this slab.
+void chain_anchors_simd(
     std::span<const Anchor> anchors,
-    const ChainingParams& params)
+    const ChainingParams& params,
+    ::bioseq::chaining::ArenaSlab<Chain>& chains_out,
+    ::bioseq::chaining::ArenaSlab<Anchor>& reordered_anchors_out)
 {
     static const auto* _simd_desc =
         bioseq::instr::register_region_static("mg_lchain_simd");
     auto _simd_scope = bioseq::instr::region(_simd_desc);
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
-    if (anchor_count == 0) return {{}, {}};
+    if (anchor_count == 0) return;
 
     // The vectorized scoring kernel omits skip_penalty * gap_length.
     // Enforce that skip_penalty is zero; fall back to scalar if not.
@@ -595,11 +603,12 @@ void simd_dp_forward_pass(
     static const auto* _bt_desc =
         bioseq::instr::register_region_static("backtrack_chains");
     auto _bt_scope = bioseq::instr::region(_bt_desc);
-    return backtrack_chains(anchors,
+    backtrack_chains(anchors,
         std::span<const int32_t>(padded_best_scores, anchor_count),
         std::span<const int64_t>(predecessors),
         std::span<const int32_t>(peak_scores),
-        params.min_chain_score, params.min_seed_count);
+        params.min_chain_score, params.min_seed_count,
+        chains_out, reordered_anchors_out);
 }
 
 

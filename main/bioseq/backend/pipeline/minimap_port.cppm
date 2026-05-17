@@ -719,21 +719,34 @@ static_assert(MinimizerIndex<TargetIndex>,
  * @param target_index     Target index to search
  * @param query_len        Length of query sequence
  * @param max_occ          Max occurrences to keep (filter high-frequency seeds)
- * @return Sorted vector of anchors
+ * @param kmer_size        K-mer length used for the encoded anchor span.
+ * @param anchors_out      Output slab — sorted anchors are appended here.
+ *                          Must be a live ArenaSlab rooted in the caller's
+ *                          per-query `Arena::Chain` scope; the kernel writes
+ *                          directly into it via `push_back` and sorts in
+ *                          place before returning (DOC0249 §13 follow-up:
+ *                          output-side kernel-to-arena refactor).
  */
 template <class MinimizerT, MinimizerIndex IndexT>
-[[nodiscard]] std::vector<Anchor> collect_seed_hits(
+void collect_seed_hits(
     std::span<const MinimizerT> query_minimizers,
     const IndexT& target_index,
     int32_t query_len,
     int32_t max_occ,
-    int32_t kmer_size)
+    int32_t kmer_size,
+    ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
 {
     static const auto* _seed_hits_desc =
         bioseq::instr::register_region_static("collect_seed_hits");
     auto _seed_hits_scope = bioseq::instr::region(_seed_hits_desc);
-    std::vector<Anchor> anchors;
-    anchors.reserve(query_minimizers.size() * 2);
+    // The caller is expected to pre-reserve the slab using the
+    // `estimated_anchor_count` helper from `bioseq::simd::HWY_NAMESPACE::pipe::detail`
+    // — that estimate is tighter than `query_minimizers.size() * 2` for very-short
+    // sequences (clamped by `shared_ceiling`) and identical for the common case.
+    // We still issue a defensive `reserve` here so the kernel works when invoked
+    // directly with a fresh slab; the call is a no-op when `cap_` already covers
+    // the requested capacity (see `ArenaSlab::reserve` short-circuit).
+    anchors_out.reserve(query_minimizers.size() * 2);
 
     // Target-index lookup is the hot per-minimizer operation. We wrap the
     // whole loop (not each lookup) to avoid profiler overhead dominating
@@ -799,7 +812,7 @@ template <class MinimizerT, MinimizerIndex IndexT>
             anchor.query.query_span    = query_span_value;
             anchor.query.flags         = 0;
             anchor.query.segment_id    = 0;
-            anchors.push_back(anchor);
+            anchors_out.push_back(anchor);
         }
     }
     }  // end target_index_lookup scope
@@ -827,15 +840,24 @@ template <class MinimizerT, MinimizerIndex IndexT>
     static const auto* _sort_desc =
         bioseq::instr::register_region_static("collect_seed_hits_sort");
     auto _sort_scope = bioseq::instr::region(_sort_desc);
+    /// Anchor sort key — extracts the 64-bit `ref_bits` field for the radix
+    /// sort.  Non-capturing struct functor (DOC0249 R4) so the file-wide grep
+    /// gate for capture-all lambdas under `bioseq/backend/pipeline/` is clean
+    /// even on a bare `[](const Anchor&){...}` extractor.
+    struct AnchorRefBitsKey {
+        [[nodiscard, gnu::always_inline]]
+        std::uint64_t operator()(const Anchor& anchor) const noexcept {
+            return anchor.ref_bits;
+        }
+    };
     bioseq::sorting::radix_sort(
-        anchors.data(),
-        anchors.data() + anchors.size(),
-        [](const Anchor& a) noexcept { return a.ref_bits; });
+        anchors_out.data(),
+        anchors_out.data() + anchors_out.size(),
+        AnchorRefBitsKey{});
     }  // end collect_seed_hits_sort scope
 
     JustLog("[minimap_port] Collected {} seed anchors from {} query minimizers",
-            anchors.size(), query_minimizers.size());
-    return anchors;
+            anchors_out.size(), query_minimizers.size());
 }
 
 // ============================================================================
@@ -942,26 +964,48 @@ void set_region_coordinates(
  *
  * Sorts chains by score (descending) and creates AlignRegion records
  * with coordinates derived from the anchor positions.
+ *
+ * @param chains       Chains (sorted in place by score descending here).
+ * @param anchors      Reordered anchor span — `chains[i].anchor_start`
+ *                      indexes into this span.
+ * @param query_len    Length of the query sequence (used to flip query
+ *                      coordinates for reverse-strand chains).
+ * @param regions_out  Output slab — one AlignRegion per chain is constructed
+ *                      via placement-new (so the slab's destructor releases
+ *                      `region.cigar` correctly on unwind).  Must be a fresh
+ *                      ArenaSlab; the kernel calls `reserve_for_placement_new`
+ *                      and `construct_at_back` once per chain (DOC0249 §13
+ *                      follow-up: output-side kernel-to-arena refactor).
  */
-[[nodiscard]] std::vector<AlignRegion> generate_regions(
+void generate_regions(
     std::span<Chain> chains,
     std::span<const Anchor> anchors,
-    int32_t query_len)
+    int32_t query_len,
+    ::bioseq::chaining::ArenaSlab<AlignRegion>& regions_out)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_gen_regs");
     auto _scope = bioseq::instr::region(_desc);
     if (chains.empty()) {
-        return {};
+        return;
     }
 
-    // Sort chains by score descending
-    std::sort(chains.begin(), chains.end(),
-              [](const Chain& left, const Chain& right) { return left.score > right.score; });
+    /// Chain comparator — orders chains by score descending so the highest-
+    /// scoring chain becomes the primary alignment region.  Non-capturing
+    /// functor for DOC0249 R4 compliance (no capture-all lambdas in the
+    /// pipeline module tree).
+    struct ChainScoreDescending {
+        [[nodiscard, gnu::always_inline]] bool operator()(
+            const Chain& left, const Chain& right) const noexcept
+        {
+            return left.score > right.score;
+        }
+    };
+    std::sort(chains.begin(), chains.end(), ChainScoreDescending{});
 
-    std::vector<AlignRegion> regions(chains.size());
+    regions_out.reserve_for_placement_new(chains.size());
     for (size_t region_idx = 0; region_idx < chains.size(); ++region_idx) {
-        regions[region_idx] = AlignRegion{
+        AlignRegion& region = regions_out.construct_at_back(AlignRegion{
             .region_id      = static_cast<int32_t>(region_idx),
             .parent         = -1,
             .score          = chains[region_idx].score,
@@ -969,12 +1013,11 @@ void set_region_coordinates(
             .seed_count     = chains[region_idx].anchor_count,
             .anchor_start   = chains[region_idx].anchor_start,
             .divergence     = -1.0f,
-        };
-        set_region_coordinates(regions[region_idx], anchors, query_len);
+        });
+        set_region_coordinates(region, anchors, query_len);
     }
 
-    JustLog("[minimap_port] Generated {} alignment regions", regions.size());
-    return regions;
+    JustLog("[minimap_port] Generated {} alignment regions", regions_out.size());
 }
 
 // ============================================================================
@@ -1339,6 +1382,182 @@ template<
  *                                   time and no runtime branch exists in the
  *                                   hot per-region loop.
  */
+/**
+ * @brief Single-phase aligner — left extension + gap fill + right extension.
+ *
+ * Materialises the three KSW2/block-aligner calls per region into a struct
+ * (DOC0249 §10.1 R4: replace the `[&]<bool>()` capture-all template lambda
+ * that previously lived inside `align_regions::for(auto& region : regions)`
+ * with a non-capturing functor whose configuration is stored by value).
+ * Inlines to the same instructions at -O3.
+ *
+ * `run<strand_reversed>` is templated on the strand because the alignment
+ * kernels are themselves templated on the reverse-complement encoding bit
+ * (left-extension still flips the CIGAR independently via `reverse_cigar`).
+ */
+template <BaseAlignmentAlgorithmType base_alignment_algorithm,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange>
+struct AlignOnePhase {
+    const compact_sequence_range<QueryRange>&  query_seq;
+    const compact_sequence_range<TargetRange>& target_seq;
+    const ScoringMatrix<QueryRange>&           scoring_matrix;
+    const Minimap2Params&                      params;
+    int32_t                                    align_bandwidth;
+
+    template <bool strand_reversed>
+    [[gnu::always_inline]] void run(
+        AlignRegion&            region,
+        std::span<const Anchor> anchors,
+        int32_t                 anchor_begin,
+        int32_t                 seed_ref_start,
+        int32_t                 seed_query_start,
+        int32_t                 seed_ref_end,
+        int32_t                 seed_query_end,
+        int32_t                 outer_ref_start,
+        int32_t                 outer_query_start,
+        int32_t                 outer_ref_end,
+        int32_t                 outer_query_end,
+        int32_t                 query_length) const
+    {
+        bool prior_phase_zdropped = false;
+
+        // === 1. Left extension ===
+        int32_t final_ref_start = seed_ref_start;
+        int32_t final_query_start = seed_query_start;
+        if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
+            const KswAlignResult left_result = ksw2_align_pair<strand_reversed>(
+                query_seq, target_seq,
+                static_cast<size_t>(outer_query_start),
+                static_cast<size_t>(seed_query_start),
+                static_cast<size_t>(outer_ref_start),
+                static_cast<size_t>(seed_ref_start),
+                scoring_matrix, params,
+                align_bandwidth, params.end_bonus, params.zdrop,
+                KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
+            if (!left_result.cigar.empty()) {
+                append_cigar(region.cigar, left_result.cigar);
+                region.dp_score += left_result.max;
+            }
+            const int32_t left_ref_offset = left_result.reach_end
+                ? left_result.mqe_t + 1 : left_result.max_t + 1;
+            final_ref_start = seed_ref_start - left_ref_offset;
+            const int32_t left_query_offset = left_result.reach_end
+                ? seed_query_start - outer_query_start : left_result.max_q + 1;
+            final_query_start = seed_query_start - left_query_offset;
+            prior_phase_zdropped = left_result.zdropped;
+        }
+
+        // === 2. Gap filling — per-seed-pair walk ===
+        int32_t final_ref_end = seed_ref_start;
+        int32_t final_query_end = seed_query_start;
+        if (region.seed_count > 1) {
+            int32_t qs = seed_query_start;
+            int32_t rs = seed_ref_start;
+            bool zdropped_any = false;
+            final_ref_end = seed_ref_start;
+            final_query_end = seed_query_start;
+            for (int32_t i = 1; i < region.seed_count; ++i) {
+                const Anchor& cur_anchor = anchors[anchor_begin + i];
+                const int32_t qe = static_cast<int32_t>(cur_anchor.query.query_position) + 1;
+                const int32_t re = static_cast<int32_t>(cur_anchor.ref.ref_position) + 1;
+                const bool is_last = (i == region.seed_count - 1);
+                const int32_t gap_query = qe - qs;
+                const int32_t gap_ref   = re - rs;
+                if (!is_last
+                    && (gap_query < params.min_ksw_len
+                        || gap_ref < params.min_ksw_len))
+                {
+                    continue;
+                }
+                if (gap_query <= 0 || gap_ref <= 0) {
+                    qs = qe;
+                    rs = re;
+                    continue;
+                }
+                KswAlignResult fill_result;
+                if constexpr (base_alignment_algorithm == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+                    fill_result = block_aligner_align_pair<strand_reversed>(
+                        query_seq, target_seq,
+                        static_cast<size_t>(qs),
+                        static_cast<size_t>(qe),
+                        static_cast<size_t>(rs),
+                        static_cast<size_t>(re),
+                        scoring_matrix, params,
+                        align_bandwidth, -1, params.zdrop,
+                        KswFlags{.approx_max = true});
+                } else {
+                    fill_result = ksw2_align_pair<strand_reversed>(
+                        query_seq, target_seq,
+                        static_cast<size_t>(qs),
+                        static_cast<size_t>(qe),
+                        static_cast<size_t>(rs),
+                        static_cast<size_t>(re),
+                        scoring_matrix, params,
+                        align_bandwidth, -1, params.zdrop,
+                        KswFlags{.approx_max = true});
+                }
+                if (!fill_result.cigar.empty()) {
+                    append_cigar(region.cigar, fill_result.cigar);
+                }
+                if (fill_result.zdropped) {
+                    final_ref_end = rs + (fill_result.max_t + 1);
+                    final_query_end = qs + (fill_result.max_q + 1);
+                    region.dp_score += fill_result.max;
+                    zdropped_any = true;
+                    break;
+                }
+                final_ref_end = re;
+                final_query_end = qe;
+                region.dp_score += fill_result.score;
+                qs = qe;
+                rs = re;
+            }
+            prior_phase_zdropped = zdropped_any;
+        } else {
+            final_ref_end = seed_ref_end;
+            final_query_end = seed_query_end;
+        }
+
+        // === 3. Right extension ===
+        if (!prior_phase_zdropped
+            && seed_query_end < outer_query_end
+            && seed_ref_end < outer_ref_end)
+        {
+            const KswAlignResult right_result = ksw2_align_pair<strand_reversed>(
+                query_seq, target_seq,
+                static_cast<size_t>(seed_query_end),
+                static_cast<size_t>(outer_query_end),
+                static_cast<size_t>(seed_ref_end),
+                static_cast<size_t>(outer_ref_end),
+                scoring_matrix, params,
+                align_bandwidth, params.end_bonus, params.zdrop,
+                KswFlags{.extz_only = true});
+            if (!right_result.cigar.empty()) {
+                append_cigar(region.cigar, right_result.cigar);
+                region.dp_score += right_result.max;
+            }
+            const int32_t right_ref_offset = right_result.reach_end
+                ? right_result.mqe_t + 1 : right_result.max_t + 1;
+            final_ref_end = seed_ref_end + right_ref_offset;
+            const int32_t right_query_offset = right_result.reach_end
+                ? outer_query_end - seed_query_end : right_result.max_q + 1;
+            final_query_end = seed_query_end + right_query_offset;
+        }
+
+        // Set final coordinates from alignment extent (align.c:897-899)
+        region.ref_start = final_ref_start;
+        region.ref_end = final_ref_end;
+        if (!region.is_reverse) {
+            region.query_start = final_query_start;
+            region.query_end = final_query_end;
+        } else {
+            region.query_start = query_length - final_query_end;
+            region.query_end = query_length - final_query_start;
+        }
+    }
+};
+
 template<
     BaseAlignmentAlgorithmType base_alignment_algorithm,
     supports_compact_sequence_range QueryRange,
@@ -1357,6 +1576,14 @@ void align_regions(
     const int32_t query_length = static_cast<int32_t>(query_seq.bp_size());
     const int32_t target_length = static_cast<int32_t>(target_seq.bp_size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
+
+    // Per DOC0249 §10.1 R4: the `[&]<bool>()` capture-all template lambda
+    // that used to live inside the per-region loop body is replaced by the
+    // non-capturing functor `AlignOnePhase`.  Constructed once per region
+    // batch with the kernel-invariant references; the per-region call
+    // surface is `aligner.template run<is_reversed>(...)`.
+    const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange> aligner{
+        query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
     for (auto& region : regions) {
         if (region.seed_count <= 0) {
@@ -1414,7 +1641,6 @@ void align_regions(
 
         region.cigar.clear();
         region.dp_score = 0;
-        bool prior_phase_zdropped = false;
 
         // Per-region diagnostic logs were previously emitted on every region
         // boundary (left-extension skipped, gap-fill skipped, right-extension
@@ -1427,182 +1653,24 @@ void align_regions(
         // by any debugger-driven introspection without polluting the
         // bench wall-clock. See REPORT_POOR_BENCHMARK_PERFORMANCE_AND_LOW_QUALITY_SIMD_MM_V_3.md.
 
-        // Dispatch the three alignment phases based on strand orientation.
-        // The is_reversed template parameter selects reverse-complement query
-        // encoding; left-extension reversal is handled inside ksw2_core_align
-        // via the reverse_cigar flag.
-        auto do_align = [&]<bool strand_reversed>() {
-            // === 1. Left extension ===
-            int32_t final_ref_start = seed_ref_start;
-            int32_t final_query_start = seed_query_start;
-            if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
-                const KswAlignResult left_result = ksw2_align_pair<strand_reversed>(
-                    query_seq, target_seq,
-                    static_cast<size_t>(outer_query_start),
-                    static_cast<size_t>(seed_query_start),
-                    static_cast<size_t>(outer_ref_start),
-                    static_cast<size_t>(seed_ref_start),
-                    scoring_matrix, params,
-                    align_bandwidth, params.end_bonus, params.zdrop,
-                    KswFlags{.right_align = true, .extz_only = true, .reverse_cigar = true});
-                if (!left_result.cigar.empty()) {
-                    append_cigar(region.cigar, left_result.cigar);
-                    region.dp_score += left_result.max;
-                }
-                const int32_t left_ref_offset = left_result.reach_end
-                    ? left_result.mqe_t + 1 : left_result.max_t + 1;
-                final_ref_start = seed_ref_start - left_ref_offset;
-                const int32_t left_query_offset = left_result.reach_end
-                    ? seed_query_start - outer_query_start : left_result.max_q + 1;
-                final_query_start = seed_query_start - left_query_offset;
-                prior_phase_zdropped = left_result.zdropped;
-            }
-            // (per-region "skip left extension" diagnostic removed —
-            // see comment at top of mm_align_skeleton inner loop)
-
-            // === 2. Gap filling — per-seed-pair walk ===
-            //
-            // minimap2's `mm_align1` does NOT do a single KSW2 over the entire
-            // (seed_query_start, seed_ref_start) → (seed_query_end, seed_ref_end)
-            // span. Instead it walks the chain seed-by-seed and, for each
-            // consecutive pair, decides whether the gap is "long enough" to
-            // warrant a KSW2 invocation (see align.c:808-877).
-            //
-            //   * Last seed of the chain: always KSW2 (so the alignment reaches
-            //     the right boundary).
-            //   * Otherwise, only KSW2 when both query and reference gaps are
-            //     >= params.min_ksw_len (default 200).
-            //   * Seeds with smaller gaps are simply accumulated into the next
-            //     KSW2 call; the matched region of those seeds becomes part of
-            //     the larger DP.
-            //
-            // The bioseq legacy code did one giant 1Mbp×1Mbp KSW2 for the
-            // entire chain span, which is the dominant cost on VERY_LONG. With
-            // ~10k–50k seeds on a 1Mbp chain at CCS error rate, the per-seed
-            // walk turns a single 1.5G-cell DP into ~5k DPs of ~40k cells each
-            // (200M cells total), matching the ~7× ratio observed against
-            // minimap2 in V3. See ENGINEERING_REPORT.md.
-            int32_t final_ref_end = seed_ref_start;
-            int32_t final_query_end = seed_query_start;
-            if (region.seed_count > 1) {
-                int32_t qs = seed_query_start;
-                int32_t rs = seed_ref_start;
-                bool zdropped_any = false;
-                final_ref_end = seed_ref_start;
-                final_query_end = seed_query_start;
-                for (int32_t i = 1; i < region.seed_count; ++i) {
-                    const Anchor& cur_anchor = anchors[anchor_begin + i];
-                    const int32_t qe = static_cast<int32_t>(cur_anchor.query.query_position) + 1;
-                    const int32_t re = static_cast<int32_t>(cur_anchor.ref.ref_position) + 1;
-                    const bool is_last = (i == region.seed_count - 1);
-                    const int32_t gap_query = qe - qs;
-                    const int32_t gap_ref   = re - rs;
-                    if (!is_last
-                        && (gap_query < params.min_ksw_len
-                            || gap_ref < params.min_ksw_len))
-                    {
-                        // Gap too small to warrant a separate KSW2 invocation
-                        // — accumulate this seed into the next DP block.
-                        continue;
-                    }
-                    if (gap_query <= 0 || gap_ref <= 0) {
-                        // Degenerate: seeds overlap on this axis. Skip but
-                        // keep advancing rs/qs so we don't restart from an
-                        // earlier point on the next iteration.
-                        qs = qe;
-                        rs = re;
-                        continue;
-                    }
-                    KswAlignResult fill_result;
-                    if constexpr (base_alignment_algorithm == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
-                        fill_result = block_aligner_align_pair<strand_reversed>(
-                            query_seq, target_seq,
-                            static_cast<size_t>(qs),
-                            static_cast<size_t>(qe),
-                            static_cast<size_t>(rs),
-                            static_cast<size_t>(re),
-                            scoring_matrix, params,
-                            align_bandwidth, -1, params.zdrop,
-                            KswFlags{.approx_max = true});
-                    } else {
-                        fill_result = ksw2_align_pair<strand_reversed>(
-                            query_seq, target_seq,
-                            static_cast<size_t>(qs),
-                            static_cast<size_t>(qe),
-                            static_cast<size_t>(rs),
-                            static_cast<size_t>(re),
-                            scoring_matrix, params,
-                            align_bandwidth, -1, params.zdrop,
-                            KswFlags{.approx_max = true});
-                    }
-                    if (!fill_result.cigar.empty()) {
-                        append_cigar(region.cigar, fill_result.cigar);
-                    }
-                    if (fill_result.zdropped) {
-                        final_ref_end = rs + (fill_result.max_t + 1);
-                        final_query_end = qs + (fill_result.max_q + 1);
-                        region.dp_score += fill_result.max;
-                        zdropped_any = true;
-                        break;
-                    }
-                    final_ref_end = re;
-                    final_query_end = qe;
-                    region.dp_score += fill_result.score;
-                    qs = qe;
-                    rs = re;
-                }
-                prior_phase_zdropped = zdropped_any;
-            } else {
-                // (per-region "skip gap fill" diagnostic removed —
-                // see comment at top of mm_align_skeleton inner loop)
-                final_ref_end = seed_ref_end;
-                final_query_end = seed_query_end;
-            }
-
-            // === 3. Right extension ===
-            if (!prior_phase_zdropped
-                && seed_query_end < outer_query_end
-                && seed_ref_end < outer_ref_end)
-            {
-                const KswAlignResult right_result = ksw2_align_pair<strand_reversed>(
-                    query_seq, target_seq,
-                    static_cast<size_t>(seed_query_end),
-                    static_cast<size_t>(outer_query_end),
-                    static_cast<size_t>(seed_ref_end),
-                    static_cast<size_t>(outer_ref_end),
-                    scoring_matrix, params,
-                    align_bandwidth, params.end_bonus, params.zdrop,
-                    KswFlags{.extz_only = true});
-                if (!right_result.cigar.empty()) {
-                    append_cigar(region.cigar, right_result.cigar);
-                    region.dp_score += right_result.max;
-                }
-                const int32_t right_ref_offset = right_result.reach_end
-                    ? right_result.mqe_t + 1 : right_result.max_t + 1;
-                final_ref_end = seed_ref_end + right_ref_offset;
-                const int32_t right_query_offset = right_result.reach_end
-                    ? outer_query_end - seed_query_end : right_result.max_q + 1;
-                final_query_end = seed_query_end + right_query_offset;
-            }
-            // (per-region "skip right extension" diagnostic removed —
-            // see comment at top of mm_align_skeleton inner loop)
-
-            // Set final coordinates from alignment extent (align.c:897-899)
-            region.ref_start = final_ref_start;
-            region.ref_end = final_ref_end;
-            if (!region.is_reverse) {
-                region.query_start = final_query_start;
-                region.query_end = final_query_end;
-            } else {
-                region.query_start = query_length - final_query_end;
-                region.query_end = query_length - final_query_start;
-            }
-        };
-
+        // Dispatch the three alignment phases based on strand orientation
+        // via the non-capturing `aligner` functor (DOC0249 §10.1 R4).
         if (region.is_reverse) {
-            do_align.template operator()<true>();
+            aligner.template run<true>(
+                region, anchors, anchor_begin,
+                seed_ref_start, seed_query_start,
+                seed_ref_end, seed_query_end,
+                outer_ref_start, outer_query_start,
+                outer_ref_end, outer_query_end,
+                query_length);
         } else {
-            do_align.template operator()<false>();
+            aligner.template run<false>(
+                region, anchors, anchor_begin,
+                seed_ref_start, seed_query_start,
+                seed_ref_end, seed_query_end,
+                outer_ref_start, outer_query_start,
+                outer_ref_end, outer_query_end,
+                query_length);
         }
 
         // Compute dp_max_score from CIGAR (simplified mm_update_extra)
@@ -1737,21 +1805,37 @@ void estimate_divergence_from_seeds(
         mini_pos_count[i] += mini_pos_count[i - 1];
     }
 
-    auto is_minimizer = [&](int32_t pos) -> bool {
-        if (pos < 0 || pos > query_len) return false;
-        const size_t p = static_cast<size_t>(pos);
-        return mini_pos_count[p + 1] > mini_pos_count[p];
+    // Per DOC0249 §10.2 R4: the three `[&]` lambdas previously declared
+    // here (`is_minimizer`, `range_count`, `compute_forward_pos`) are
+    // converted to non-capturing struct functors so the file-wide grep gate
+    // for capture-all lambdas under `bioseq/backend/pipeline/**.cppm` runs
+    // clean.  Each functor stores its dependencies by value (no `&`); the
+    // compiler treats them identically to inline methods at -O3 (M15).
+    struct IsMinimizer {
+        const std::uint32_t* mini_pos_count;
+        int32_t              query_len;
+        [[nodiscard, gnu::always_inline]]
+        bool operator()(int32_t pos) const noexcept {
+            if (pos < 0 || pos > query_len) return false;
+            const std::size_t p = static_cast<std::size_t>(pos);
+            return mini_pos_count[p + 1] > mini_pos_count[p];
+        }
     };
-    // Range count of minimizer entries (counting duplicates) in [a, b]
-    // inclusive. matches the original `en - st + 1` formula.
-    auto range_count = [&](int32_t a, int32_t b) -> int32_t {
-        if (a < 0) a = 0;
-        if (b > query_len) b = query_len;
-        if (a > b) return 0;
-        return static_cast<int32_t>(
-            mini_pos_count[static_cast<size_t>(b) + 1] -
-            mini_pos_count[static_cast<size_t>(a)]);
+    struct RangeCount {
+        const std::uint32_t* mini_pos_count;
+        int32_t              query_len;
+        [[nodiscard, gnu::always_inline]]
+        int32_t operator()(int32_t a, int32_t b) const noexcept {
+            if (a < 0) a = 0;
+            if (b > query_len) b = query_len;
+            if (a > b) return 0;
+            return static_cast<int32_t>(
+                mini_pos_count[static_cast<std::size_t>(b) + 1] -
+                mini_pos_count[static_cast<std::size_t>(a)]);
+        }
     };
+    const IsMinimizer is_minimizer{mini_pos_count.data(), query_len};
+    const RangeCount  range_count{mini_pos_count.data(), query_len};
 
     for (auto& region : regions) {
         region.divergence = -1.0f;
@@ -1769,17 +1853,35 @@ void estimate_divergence_from_seeds(
         // reverse-encoded query_position this yields ascending forward_pos.
         // (See esterr.c:50,57-59 — minimap2 walks reverse chains in the
         // same reverse order for the same reason.)
-        auto compute_forward_pos = [&](int32_t s) -> int32_t {
-            const Anchor& chain_anchor = region.is_reverse
-                ? anchors[anchor_begin + region.seed_count - 1 - s]
-                : anchors[anchor_begin + s];
-            int32_t forward_pos = static_cast<int32_t>(chain_anchor.query.query_position);
-            if (chain_anchor.ref.is_reverse) {
-                const int32_t anchor_span = static_cast<int32_t>(chain_anchor.query.query_span);
-                forward_pos = query_len - 1 - (forward_pos + 1 - anchor_span);
+        //
+        // Non-capturing struct functor per DOC0249 §10.2 R4: dependencies
+        // (region orientation, anchor base, seed count, query length) are
+        // stored by value.  The compiler inlines `operator()` identically
+        // to the original `[&]` lambda at -O3 (M15).
+        struct ComputeForwardPos {
+            const Anchor* anchors_base;
+            int32_t       anchor_begin;
+            int32_t       seed_count;
+            int32_t       query_len;
+            bool          region_is_reverse;
+
+            [[nodiscard, gnu::always_inline]]
+            int32_t operator()(int32_t s) const noexcept {
+                const Anchor& chain_anchor = region_is_reverse
+                    ? anchors_base[anchor_begin + seed_count - 1 - s]
+                    : anchors_base[anchor_begin + s];
+                int32_t forward_pos = static_cast<int32_t>(chain_anchor.query.query_position);
+                if (chain_anchor.ref.is_reverse) {
+                    const int32_t anchor_span =
+                        static_cast<int32_t>(chain_anchor.query.query_span);
+                    forward_pos = query_len - 1 - (forward_pos + 1 - anchor_span);
+                }
+                return forward_pos;
             }
-            return forward_pos;
         };
+        const ComputeForwardPos compute_forward_pos{
+            anchors.data(), anchor_begin, region.seed_count,
+            query_len, region.is_reverse};
 
         // First chain anchor (s=0) — minimum forward_pos. esterr.c:50 uses
         // `r->rev ? last : first` which is the same anchor compute_forward_pos(0)

@@ -78,6 +78,8 @@ namespace bioseq::simd::HWY_NAMESPACE::pipe {
 using ::bioseq::chaining::Anchor;
 using ::bioseq::chaining::Chain;
 using ::bioseq::chaining::ChainingParams;
+using ::bioseq::chaining::ArenaSlab;
+using ::bioseq::chaining::make_arena_slab;
 using ::bioseq::chaining::chain_anchors_scalar;
 using ::bioseq::chaining::chain_anchors_rmq;
 
@@ -276,182 +278,223 @@ template <is_constexpr_aligner_params Cep, class Bare0, class... Rest>
 // 7. Batch storage — owning arena slab (DOC0249 §7)
 // =============================================================================
 //
-// The wire type between stages is `std::span<E>` directly.  The owning
-// slab type below is used by stages internally to materialise kernel output
-// into the per-pipeline chain arena so downstream spans remain valid.
-
-/**
- * @brief Arena-backed owning slab.
- *
- * Allocates via `context::current().alloc_chain_array<E>(...)` so the
- * underlying storage is reclaimed at the surrounding `Arena::Chain` scope
- * unwind.  `push_back` grows geometrically; orphaned slabs land in the
- * arena and are freed in O(1) at scope exit.
- *
- * Two patterns are supported:
- *
- *   1. Trivially-copyable `E` (e.g. `Anchor`, `Chain`, `MinimizerRepr`):
- *      callers use `reserve(N)` + `push_back` or `reserve(N)` + write
- *      through `data()` + `resize(actual_n)`.  The arena scope reclaims
- *      the slab without per-element work; element destructors are no-op.
- *
- *   2. Non-trivially-destructible `E` (e.g. `AlignRegion` with its
- *      `std::vector<CigarOp>` member): callers MUST use
- *      `construct_at_back(args...)` to placement-new each element and the
- *      slab's own destructor walks `[0, len_)` calling `~E()` so heap-owned
- *      fields are released before the arena pointer-bump reclaims the slab.
- */
-template <class E>
-struct ArenaSlab {
-    using element_type = E;
-
-    E*               ptr_   = nullptr;
-    std::size_t      len_   = 0;
-    std::size_t      cap_   = 0;
-    context::context* arena_ = nullptr;
-
-    constexpr ArenaSlab() noexcept = default;
-    constexpr ArenaSlab(E* data_ptr, std::size_t length, std::size_t capacity,
-                        context::context* arena) noexcept
-        : ptr_(data_ptr), len_(length), cap_(capacity), arena_(arena) {}
-
-    // Non-copyable / move-only — destruction must run exactly once.
-    ArenaSlab(const ArenaSlab&)            = delete;
-    ArenaSlab& operator=(const ArenaSlab&) = delete;
-
-    ArenaSlab(ArenaSlab&& other) noexcept
-        : ptr_(other.ptr_), len_(other.len_), cap_(other.cap_), arena_(other.arena_)
-    {
-        other.ptr_   = nullptr;
-        other.len_   = 0;
-        other.cap_   = 0;
-        other.arena_ = nullptr;
-    }
-
-    ArenaSlab& operator=(ArenaSlab&& other) noexcept {
-        if (this != &other) {
-            destroy_live_elements();
-            ptr_   = other.ptr_;
-            len_   = other.len_;
-            cap_   = other.cap_;
-            arena_ = other.arena_;
-            other.ptr_   = nullptr;
-            other.len_   = 0;
-            other.cap_   = 0;
-            other.arena_ = nullptr;
-        }
-        return *this;
-    }
-
-    ~ArenaSlab() noexcept {
-        destroy_live_elements();
-    }
-
-    void reserve(std::size_t expected_capacity) {
-        static_assert(std::is_trivially_copyable_v<E>,
-            "ArenaSlab::reserve uses memcpy to relocate live elements during "
-            "growth; only trivially-copyable element types are supported on "
-            "this path.  Non-trivial types must size the slab once via the "
-            "constructor and never call reserve a second time.");
-        if (cap_ >= expected_capacity) return;
-        auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(expected_capacity);
-        if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
-        ptr_ = allocated_span.data();
-        cap_ = expected_capacity;
-    }
-
-    /**
-     * @brief Allocate exactly @p capacity uninitialised slots in the arena.
-     *
-     * Use this once (not in a growth loop) for non-trivially-destructible
-     * `E`.  Callers then `construct_at_back(args...)` per element; the
-     * slab's destructor walks the live prefix and calls `~E()` on each.
-     */
-    void reserve_for_placement_new(std::size_t capacity) {
-        DEBUG_ASSERT(cap_ == 0, "reserve_for_placement_new must be called on a fresh slab");
-        if (capacity == 0) return;
-        auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(capacity);
-        ptr_ = allocated_span.data();
-        cap_ = capacity;
-        len_ = 0;
-    }
-
-    /**
-     * @brief Construct a new `E` in the next free slot, returning a reference.
-     *
-     * Caller must have called `reserve_for_placement_new(N)` beforehand and
-     * must not exceed `N` constructions.  Used for non-trivial types so the
-     * slab's destructor can call `~E()` on each live element.
-     */
-    template <class... Args>
-    [[gnu::always_inline]] E& construct_at_back(Args&&... args) {
-        DEBUG_ASSERT(len_ < cap_, "construct_at_back beyond reserved capacity");
-        E* slot = new (ptr_ + len_) E(std::forward<Args>(args)...);
-        ++len_;
-        return *slot;
-    }
-
-    /**
-     * @brief `push_back` overload restricted to trivially-copyable types.
-     *
-     * Geometric growth via `memcpy` of the live prefix; non-trivial types
-     * must use the `reserve_for_placement_new` + `construct_at_back`
-     * pattern instead so destructors are called.
-     */
-    void push_back(E element) {
-        static_assert(std::is_trivially_copyable_v<E>,
-            "ArenaSlab::push_back uses memcpy + trivial relocation during "
-            "growth; non-trivially-copyable element types must use the "
-            "reserve_for_placement_new + construct_at_back pattern.");
-        if (len_ == cap_) {
-            const std::size_t new_cap = cap_ ? cap_ * 2 : 64;
-            auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(new_cap);
-            if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
-            ptr_ = allocated_span.data();
-            cap_ = new_cap;
-        }
-        ptr_[len_++] = std::move(element);
-    }
-
-    void resize(std::size_t new_len) noexcept {
-        DEBUG_ASSERT(new_len <= cap_, "ArenaSlab::resize beyond reserved capacity");
-        len_ = new_len;
-    }
-
-    [[nodiscard]] E*          data() noexcept       { return ptr_; }
-    [[nodiscard]] const E*    data() const noexcept { return ptr_; }
-    [[nodiscard]] std::size_t size() const noexcept { return len_; }
-    [[nodiscard]] std::span<E>       as_span()       noexcept { return {ptr_, len_}; }
-    [[nodiscard]] std::span<const E> as_const_span() const noexcept { return {ptr_, len_}; }
-
-private:
-    void destroy_live_elements() noexcept {
-        if constexpr (!std::is_trivially_destructible_v<E>) {
-            if (ptr_ == nullptr) return;
-            for (std::size_t reverse_idx = len_; reverse_idx > 0; --reverse_idx) {
-                ptr_[reverse_idx - 1].~E();
-            }
-        }
-        len_ = 0;
-    }
-};
-
-/**
- * @brief Helper: make a fresh ArenaSlab bound to the current pipeline arena.
- */
-template <class E>
-[[nodiscard]] inline ArenaSlab<E> make_arena_slab() noexcept {
-    return ArenaSlab<E>{nullptr, 0u, 0u, &context::current()};
-}
+// `ArenaSlab<E>` itself lives in `bioseq_sequences.chaining.utils` so the
+// chaining kernels (chain_anchors_*) and the seed/region kernels in
+// `minimap_port.cppm` can take it as an output parameter — see DOC0249 §13
+// follow-up "output-side kernel-to-arena refactor".  The `using` declarations
+// at the top of this namespace re-export both the slab type and the
+// `make_arena_slab<E>()` helper so stage bodies refer to them by short name.
 
 // =============================================================================
-// 11. Metadata surface (DOC0249 §11)
+// 11. Metadata surface (DOC0249 §11) — forward types for algorithm_traits
 // =============================================================================
+//
+// The full `StageDescription` / `PipelineDescription` definitions live after
+// the algorithm_traits block (they reference `NamedProperty` too).  The
+// `NamedProperty` POD itself is the only piece the traits' `computed_properties_default()`
+// signature needs, so we hoist it here ahead of the traits.
 
 struct NamedProperty {
     std::string name;
     std::string value;
 };
+
+// =============================================================================
+// 8.0 Kernel-trait pattern (DOC0249 §8.0, R5)
+// =============================================================================
+//
+// `algorithm_traits<AlgoEnumValue>` maps an algorithm enum value to
+//   - a `kernel_type` struct exposing the call surface used by the stage,
+//   - a `static constexpr std::string_view algorithm_label()` for EXPLAIN,
+//   - a `static std::vector<NamedProperty> computed_properties_default()`
+//     for the EXPLAIN renderer's `[name: value]` properties.
+//
+// Stages take the `kernel_type` as a template argument (via `kernel_t<X>`)
+// and call `Kernel::call(...)` once — no `if constexpr` ladders inside the
+// stage body.  Adding a new algorithm is a single trait specialisation in
+// the kernel's own module.
+
+/// Dependent-false helper so the primary template's `static_assert` fires
+/// only on instantiation (not at point of definition).
+template <auto>
+inline constexpr bool no_kernel_for_v = false;
+
+/// Primary template — unspecialised.  Substitution failure here produces a
+/// readable diagnostic naming the offending enum value.
+///
+/// Specialisations live below for `ChainingAlgorithmType` and
+/// `MinimizerAlgorithmType`; `BaseAlignmentAlgorithmType` is still dispatched
+/// inside `AlignStage::process_pair` via `align_regions<BAA>` because that
+/// kernel's signature is templated on both `BAA` and the per-stage sequence
+/// ranges `(QR, TR)` — a trait specialisation would still need to forward
+/// `QR`/`TR`, so the direct call is preferred for clarity.  A future
+/// iteration can move `AlignStage` to the trait pattern once the kernel
+/// surface is refactored to take a uniform-shape output adapter.
+template <auto AlgoEnumValue>
+struct algorithm_traits {
+    static_assert(no_kernel_for_v<AlgoEnumValue>,
+        "algorithm_traits<X>: no specialisation for this algorithm enum value. "
+        "Declare one in pipe.cppm next to the ChainingAlgorithmType / "
+        "MinimizerAlgorithmType blocks.");
+};
+
+/// Helper alias — `kernel_t<X>` gives the kernel type directly.
+template <auto AlgoEnumValue>
+using kernel_t = typename algorithm_traits<AlgoEnumValue>::kernel_type;
+
+// ---------------------------------------------------------------------------
+// 8.0.1 ChainingAlgorithmType kernel traits
+// ---------------------------------------------------------------------------
+
+/// Scalar DP chaining — `chain_anchors_scalar` from
+/// `bioseq_sequences.chaining.scalar`.
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2> {
+    struct kernel_type {
+        [[gnu::always_inline]] static void call(
+            std::span<const Anchor> anchors,
+            const ChainingParams&   params,
+            ArenaSlab<Chain>&       chains_out,
+            ArenaSlab<Anchor>&      reordered_anchors_out)
+        {
+            ::bioseq::chaining::chain_anchors_scalar(
+                anchors, params, chains_out, reordered_anchors_out);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2);
+        }
+        [[nodiscard]] static std::vector<NamedProperty> computed_properties_default() {
+            return {{"vectorised", "false"}, {"complexity", "O(n * max_iter)"}};
+        }
+    };
+};
+
+/// SIMD DP chaining — `chain_anchors_simd` from
+/// `bioseq_sequences.chaining.simd` (lives in `bioseq::simd::HWY_NAMESPACE`).
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2> {
+    struct kernel_type {
+        [[gnu::always_inline]] static void call(
+            std::span<const Anchor> anchors,
+            const ChainingParams&   params,
+            ArenaSlab<Chain>&       chains_out,
+            ArenaSlab<Anchor>&      reordered_anchors_out)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::chain_anchors_simd(
+                anchors, params, chains_out, reordered_anchors_out);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2);
+        }
+        [[nodiscard]] static std::vector<NamedProperty> computed_properties_default() {
+            return {{"vectorised", "true"}, {"requires_zero_skip_penalty", "true"}};
+        }
+    };
+};
+
+/// RMQ tree-based chaining — `chain_anchors_rmq` from
+/// `bioseq_sequences.chaining.rmq`.
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ> {
+    struct kernel_type {
+        [[gnu::always_inline]] static void call(
+            std::span<const Anchor> anchors,
+            const ChainingParams&   params,
+            ArenaSlab<Chain>&       chains_out,
+            ArenaSlab<Anchor>&      reordered_anchors_out)
+        {
+            ::bioseq::chaining::chain_anchors_rmq(
+                anchors, params, chains_out, reordered_anchors_out);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ);
+        }
+        [[nodiscard]] static std::vector<NamedProperty> computed_properties_default() {
+            return {{"vectorised", "false"}, {"complexity", "O(n log n)"}};
+        }
+    };
+};
+
+// ---------------------------------------------------------------------------
+// 8.0.2 MinimizerAlgorithmType kernel traits
+// ---------------------------------------------------------------------------
+//
+// The minimizer kernels are templated on the sketch-collector and the
+// sequence range, both of which depend on the MinimizerStage's `MinimizerT`
+// and `QR` template parameters.  The trait's `call` method is therefore a
+// member template — the stage instantiates it with the correct types at the
+// call site.
+
+/// Scalar minimizer extraction.
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR> {
+    struct kernel_type {
+        template <class Collector, class Range>
+        [[gnu::always_inline]] static void call(
+            Collector& collector, Range& range,
+            std::size_t window_size, std::size_t kmer_size)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers<minimap_int_hasher>(
+                collector, range, range.begin(), range.end(),
+                window_size, kmer_size);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR);
+        }
+    };
+};
+
+/// Reference SIMD minimizer extraction (single-stack).
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW> {
+    struct kernel_type {
+        template <class Collector, class Range>
+        [[gnu::always_inline]] static void call(
+            Collector& collector, Range& range,
+            std::size_t window_size, std::size_t kmer_size)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd<minimap_int_hasher>(
+                collector, range, range.begin(), range.end(),
+                window_size, kmer_size);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW);
+        }
+    };
+};
+
+/// Two-stack nthash minimizer extraction (current default).
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH> {
+    struct kernel_type {
+        template <class Collector, class Range>
+        [[gnu::always_inline]] static void call(
+            Collector& collector, Range& range,
+            std::size_t window_size, std::size_t kmer_size)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                collector, range, range.begin(), range.end(),
+                window_size, kmer_size);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH);
+        }
+    };
+};
+
+// =============================================================================
+// 11. Metadata surface (DOC0249 §11) — full definitions
+// =============================================================================
+//
+// `NamedProperty` was hoisted ahead of the algorithm_traits block so trait
+// signatures can return `std::vector<NamedProperty>`.  The remaining
+// description types are defined here in their natural source order.
 
 struct StageAlgorithmDescription {
     std::string                name;
@@ -605,15 +648,20 @@ thread_local_scoring_matrix(
 /**
  * @brief Stage 0: minimizer extraction.
  *
- * Calls the chosen minimizer-extraction kernel selected at compile time via
- * `MinimizerAlgorithmType`.  The stage ignores its input batch and instead
- * sketches the pre-captured `query_seq_` (see DOC0249 §8.1).
+ * Templated on `Kernel` — the algorithm-specific call surface exposed by
+ * `algorithm_traits<MinimizerAlgorithmType::X>::kernel_type` (DOC0249 §8.0,
+ * R5 trait pattern).  The stage body has zero `if constexpr` over enum
+ * values; adding a new minimizer-extraction algorithm is a single trait
+ * specialisation in the kernel's own module.
+ *
+ * The stage ignores its input batch and instead sketches the pre-captured
+ * `query_seq_` pointer (DOC0249 §8.1).
  */
 template <class MinimizerT,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType MA,
+          class Kernel,
           supports_compact_sequence_range QR>
 struct MinimizerStage
-    : StageBase<MinimizerStage<MinimizerT, MA, QR>, MinimizerT>
+    : StageBase<MinimizerStage<MinimizerT, Kernel, QR>, MinimizerT>
 {
     static constexpr std::string_view stage_name = "MinimizerStage";
 
@@ -634,25 +682,7 @@ struct MinimizerStage
         collector.reserve(detail::estimated_sketch_count(
             query_seq_->bp_size(), static_cast<int32_t>(window_size)));
 
-        using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-        if constexpr (MA == MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW) {
-            collect_minimizers_simd<minimap_int_hasher>(
-                collector, *query_seq_,
-                query_seq_->begin(), query_seq_->end(),
-                window_size, kmer_size);
-        } else if constexpr (MA == MinimizerAlgorithmType::TWO_STACK_NTHASH) {
-            collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
-                collector, *query_seq_,
-                query_seq_->begin(), query_seq_->end(),
-                window_size, kmer_size);
-        } else {
-            static_assert(MA == MinimizerAlgorithmType::SCALAR,
-                "Unhandled MinimizerAlgorithmType variant");
-            collect_minimizers<minimap_int_hasher>(
-                collector, *query_seq_,
-                query_seq_->begin(), query_seq_->end(),
-                window_size, kmer_size);
-        }
+        Kernel::call(collector, *query_seq_, window_size, kmer_size);
 
         // Materialise minimizers in the arena slab so they outlive the
         // collector and downstream stages can hold span references to them.
@@ -672,8 +702,7 @@ struct MinimizerStage
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
         StageAlgorithmDescription algo;
-        algo.name = std::string{
-            ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(MA)};
+        algo.name = std::string{Kernel::algorithm_label()};
         desc.algorithm = std::move(algo);
         // Reserve target for the sketch arena slab (DOC0249 §21.4
         // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
@@ -715,9 +744,12 @@ struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downst
 /**
  * @brief Stage 2: seed-hit collection.
  *
- * Wraps the existing `collect_seed_hits` kernel; copies the kernel's returned
- * vector into an arena-backed slab so downstream chains can hold spans
- * without lifetime concerns.
+ * Wraps the `collect_seed_hits` kernel, which writes its anchor output
+ * directly into a caller-provided ArenaSlab (DOC0249 §13 follow-up:
+ * output-side kernel-to-arena refactor).  No `std::vector` is materialised
+ * inside the stage — the per-stage memcpy that the previous shape required
+ * is eliminated, so the kernel's `push_back` traffic lands straight in the
+ * pipeline arena.
  */
 struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
     static constexpr std::string_view stage_name = "SeedHitStage";
@@ -736,23 +768,22 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         using MinimizerT = std::remove_const_t<
             typename std::remove_cvref_t<B>::value_type>;
 
-        // Kernel now accepts std::span directly (DOC0249 M5).  The radix-sort
-        // inside `collect_seed_hits` still emits its anchors into a
-        // `std::vector<Anchor>`; we materialise that into an arena slab so
-        // downstream stages can hold span references whose lifetime tracks
-        // the per-query Arena::Chain scope opened in pipeline_run_impl_batch.
-        auto anchors_vec = collect_seed_hits<MinimizerT>(
+        // Pre-size the slab from the tight per-query estimate
+        // (DOC0249 §21.4 `estimated_anchor_count`); growth past the estimate
+        // doubles the slab inside the same Arena::Chain scope.
+        auto anchors_slab = make_arena_slab<Anchor>();
+        anchors_slab.reserve(detail::estimated_anchor_count(
+            sketches.size(),
+            static_cast<std::size_t>(query_len),
+            static_cast<std::size_t>(target_index_ref.target_length()),
+            kmer_size));
+
+        collect_seed_hits<MinimizerT>(
             std::span<const MinimizerT>{sketches.data(), sketches.size()},
             target_index_ref,
-            query_len, params.max_occ, kmer_size);
+            query_len, params.max_occ, kmer_size,
+            anchors_slab);
 
-        auto anchors_slab = make_arena_slab<Anchor>();
-        anchors_slab.reserve(anchors_vec.size());
-        if (!anchors_vec.empty()) {
-            std::memcpy(anchors_slab.data(), anchors_vec.data(),
-                        anchors_vec.size() * sizeof(Anchor));
-        }
-        anchors_slab.resize(anchors_vec.size());
         sink.on_batch(std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
     }
 
@@ -783,59 +814,35 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
 /**
  * @brief Stage 3: anchor chaining.
  *
- * Dispatches to one of the three chain_anchors_* kernels via a compile-time
- * `ChainingAlgorithmType` parameter, then materialises the kernel's two
- * returned vectors into arena-backed slabs so downstream stages get
- * structural lifetime independent of inlining (see DOC0249 §8.4 rationale).
+ * Templated on `Kernel` — the algorithm-specific call surface exposed by
+ * `algorithm_traits<ChainingAlgorithmType::X>::kernel_type` (DOC0249 §8.0,
+ * R5 trait pattern).  The stage body has zero `if constexpr` over enum
+ * values — adding a new chaining algorithm is a single trait specialisation
+ * in the kernel's own module.
+ *
+ * The chosen kernel writes its `(chains, reordered_anchors)` output directly
+ * into caller-provided ArenaSlab parameters (DOC0249 §13 follow-up:
+ * output-side kernel-to-arena refactor); no intermediate vector is
+ * materialised inside the stage.
  */
-template <::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType CA>
-struct ChainStage : StageBase<ChainStage<CA>, Chain> {
+template <class Kernel>
+struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
     static constexpr std::string_view stage_name = "ChainStage";
 
     ChainingParams cp;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]] void process(B&& anchors_in, Sink& sink) {
-        using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-
-        // chain_anchors_* now accept std::span<const Anchor> directly
-        // (DOC0249 M6); no vector copy at the boundary.
         const std::span<const Anchor> anchors_span{
             anchors_in.data(), anchors_in.size()};
 
-        std::vector<Chain>  chains_vec;
-        std::vector<Anchor> reordered_vec;
-        if constexpr (CA == ChainingAlgorithmType::SIMD_MM2) {
-            auto pair = ::bioseq::simd::HWY_NAMESPACE::chain_anchors_simd(
-                anchors_span, cp);
-            chains_vec    = std::move(pair.first);
-            reordered_vec = std::move(pair.second);
-        } else if constexpr (CA == ChainingAlgorithmType::RMQ) {
-            auto pair = ::bioseq::chaining::chain_anchors_rmq(anchors_span, cp);
-            chains_vec    = std::move(pair.first);
-            reordered_vec = std::move(pair.second);
-        } else {
-            static_assert(CA == ChainingAlgorithmType::SCALAR_MM2,
-                "Unhandled ChainingAlgorithmType variant");
-            auto pair = ::bioseq::chaining::chain_anchors_scalar(anchors_span, cp);
-            chains_vec    = std::move(pair.first);
-            reordered_vec = std::move(pair.second);
-        }
-
         auto chains_slab    = make_arena_slab<Chain>();
         auto reordered_slab = make_arena_slab<Anchor>();
-        chains_slab.reserve(chains_vec.size());
-        reordered_slab.reserve(reordered_vec.size());
-        if (!chains_vec.empty()) {
-            std::memcpy(chains_slab.data(), chains_vec.data(),
-                        chains_vec.size() * sizeof(Chain));
-        }
-        if (!reordered_vec.empty()) {
-            std::memcpy(reordered_slab.data(), reordered_vec.data(),
-                        reordered_vec.size() * sizeof(Anchor));
-        }
-        chains_slab.resize(chains_vec.size());
-        reordered_slab.resize(reordered_vec.size());
+        chains_slab.reserve(detail::estimated_chain_count(
+            anchors_in.size(), cp.min_seed_count));
+        reordered_slab.reserve(anchors_in.size());
+
+        Kernel::call(anchors_span, cp, chains_slab, reordered_slab);
 
         sink.on_batch_pair(
             std::span<Chain> {chains_slab.data(),    chains_slab.size()},
@@ -846,21 +853,22 @@ struct ChainStage : StageBase<ChainStage<CA>, Chain> {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
         StageAlgorithmDescription algo;
-        algo.name = std::string{
-            ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(CA)};
+        algo.name = std::string{Kernel::algorithm_label()};
         algo.parameters.push_back({"min_chain_score", std::to_string(cp.min_chain_score)});
         algo.parameters.push_back({"min_seed_count",  std::to_string(cp.min_seed_count)});
         algo.parameters.push_back({"max_chain_skip",  std::to_string(cp.max_chain_skip)});
         algo.parameters.push_back({"max_chain_iter",  std::to_string(cp.max_chain_iter)});
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
+        algo.computed_properties = Kernel::computed_properties_default();
         desc.algorithm = std::move(algo);
-        // Chain stage reserves both a chains slab and a reordered-anchors
-        // slab; we surface the chain reserve (the smaller of the two; the
-        // anchor reserve mirrors SeedHitStage's per-query estimate).
-        desc.estimated_batch_size = detail::estimated_chain_count(
-            /*anchor_count=*/0u, cp.min_seed_count) +
-            static_cast<std::size_t>(cp.min_seed_count);
+        // Chain stage's two arena slabs are sized from the runtime
+        // anchor count (which is unknown at describe time), so we leave
+        // `estimated_batch_size` empty rather than fabricate a per-query
+        // figure that doesn't reflect the actual reserve.  The
+        // `[reserved: ...]` line in EXPLAIN is therefore omitted for
+        // ChainStage; the runtime `chains_slab.reserve(...)` call still
+        // sizes from `estimated_chain_count(anchors_in.size(), ...)`.
         return desc;
     }
 };
@@ -868,10 +876,13 @@ struct ChainStage : StageBase<ChainStage<CA>, Chain> {
 /**
  * @brief Stage 4: chain → region conversion.
  *
- * Wraps the existing `generate_regions` kernel, which already builds a
- * std::vector<AlignRegion> exactly equal to chains.size().  The wrapper
- * passes the regions span downstream paired with the reordered anchors so
- * subsequent stages see a uniform (regions, anchors) pair shape.
+ * Wraps the `generate_regions` kernel, which writes its
+ * `AlignRegion`-per-chain output directly into a caller-provided
+ * ArenaSlab via placement-new (DOC0249 §13 follow-up: output-side
+ * kernel-to-arena refactor).  `AlignRegion` owns a `std::vector<CigarOp>`,
+ * so it is not trivially-destructible; the slab's destructor walks
+ * `[0, len_)` and calls `~AlignRegion()` on each live element before the
+ * arena reclaims the storage.
  */
 struct RegionStage : StageBase<RegionStage, AlignRegion> {
     static constexpr std::string_view stage_name = "RegionStage";
@@ -880,25 +891,14 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
 
     template <is_constexpr_aligner_params Cep, class CB, class AB, class Sink>
     [[gnu::always_inline]] void process_pair(CB&& chains, AB&& anchors, Sink& sink) {
-        // generate_regions now accepts span inputs directly (DOC0249 M7).
-        // The kernel sorts `chains` in place by score, so we pass a mutable
-        // span; `anchors` is read-only.
-        auto regions_vec = generate_regions(
+        // `AlignRegion` owns a `std::vector<CigarOp>` so the slab uses the
+        // placement-new pattern; no intermediate `std::vector` is needed.
+        auto regions_slab = make_arena_slab<AlignRegion>();
+        generate_regions(
             std::span<Chain>{chains.data(), chains.size()},
             std::span<const Anchor>{anchors.data(), anchors.size()},
-            query_len);
-
-        // `AlignRegion` owns a `std::vector<CigarOp>` so it is not
-        // trivially-destructible.  Use the placement-new pattern so the
-        // slab's destructor walks `[0, len_)` and calls `~AlignRegion()` on
-        // each live element before the arena reclaims the storage; this
-        // releases any heap-allocated CIGAR vectors a downstream stage
-        // populated but did not consume (e.g. on an early-return path).
-        auto regions_slab = make_arena_slab<AlignRegion>();
-        regions_slab.reserve_for_placement_new(regions_vec.size());
-        for (auto& region_source : regions_vec) {
-            regions_slab.construct_at_back(std::move(region_source));
-        }
+            query_len,
+            regions_slab);
 
         sink.on_batch_pair(
             std::span<AlignRegion>{regions_slab.data(), regions_slab.size()},
@@ -1233,7 +1233,7 @@ template <is_constexpr_aligner_params Cep,
     auto tail = make_pipeline<Cep>(
         IndexStage<IndexT>{ {}, &target_index },
         SeedHitStage{ {}, params, query_len },
-        ChainStage<CA>{ {}, params.to_chaining_params() },
+        ChainStage<kernel_t<CA>>{ {}, params.to_chaining_params() },
         RegionStage{ {}, query_len },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
@@ -1249,7 +1249,7 @@ template <is_constexpr_aligner_params Cep,
     );
 
     if constexpr (EP == EntryPoint::FromSequence) {
-        MinimizerStage<MinimizerT, MA, QR> head{
+        MinimizerStage<MinimizerT, kernel_t<MA>, QR> head{
             {}, &query_seq, params.window_size, params.kmer_size };
         return head.template attach<Cep>(std::move(tail));
     } else {

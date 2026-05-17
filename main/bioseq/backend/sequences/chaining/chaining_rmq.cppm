@@ -677,16 +677,24 @@ struct RmqTree {
 /// tree(s). Out-of-range anchors are pruned. Then an RMQ query finds
 /// the best predecessor in the valid query-position range.
 ///
-/// @param anchors         Sorted anchor array (read-only span; the kernel only
-///                         reads positions and emits a freshly-reordered
-///                         anchor vector alongside chains).
-/// @param params          Chaining parameters (must have prepare() called)
-/// @param max_dist_inner  Inner tree max distance (0 = disabled)
-/// @param cap_rmq_size    Maximum tree size before pruning (default 100000)
-/// @return Pair of (chains, reordered_anchors)
-[[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_rmq(
+/// @param anchors                  Sorted anchor array (read-only span; the
+///                                  kernel only reads positions and emits a
+///                                  freshly-reordered anchor span).
+/// @param params                   Chaining parameters (must have prepare()
+///                                  called).
+/// @param chains_out               Output slab — surviving chains are appended
+///                                  here in score-descending order.
+/// @param reordered_anchors_out    Output slab — anchors of surviving chains
+///                                  appended in chain order; `Chain::anchor_start`
+///                                  indexes into this slab.
+/// @param max_dist_inner           Inner tree max distance (0 = disabled).
+/// @param cap_rmq_size             Maximum tree size before pruning (default
+///                                  100000).
+void chain_anchors_rmq(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
+    ArenaSlab<Chain>& chains_out,
+    ArenaSlab<Anchor>& reordered_anchors_out,
     int32_t max_dist_inner = 0,
     int32_t cap_rmq_size = 100000)
 {
@@ -694,7 +702,7 @@ struct RmqTree {
         bioseq::instr::register_region_static("mg_lchain_rmq");
     auto _rmq_scope = bioseq::instr::region(_rmq_desc);
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
-    if (anchor_count == 0) return {{}, {}};
+    if (anchor_count == 0) return;
 
     int32_t max_dist = params.max_gap;
     if (max_dist < params.bandwidth) max_dist = params.bandwidth;
@@ -905,11 +913,12 @@ struct RmqTree {
     static const auto* _bt_desc =
         bioseq::instr::register_region_static("backtrack_chains");
     auto _bt_scope = bioseq::instr::region(_bt_desc);
-    return backtrack_chains(anchors,
+    backtrack_chains(anchors,
         std::span<const int32_t>(best_scores_v),
         std::span<const int64_t>(predecessors_v),
         std::span<const int32_t>(peak_scores_v),
-        params.min_chain_score, params.min_seed_count);
+        params.min_chain_score, params.min_seed_count,
+        chains_out, reordered_anchors_out);
 }
 
 }  // namespace bioseq::chaining

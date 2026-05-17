@@ -48,21 +48,35 @@ namespace bioseq::chaining {
 ///
 ///   Backtrack from highest-scoring anchors to extract chains.
 ///
-/// @param anchors  Sorted anchor array (read-only span; the kernel does not
-///                  mutate the input — it only reads positions to score and
-///                  emit a freshly-reordered anchor vector alongside chains).
-/// @param params   Chaining parameters (must have prepare() called)
-/// @return Pair of (chains, reordered_anchors)
-[[nodiscard]] std::pair<std::vector<Chain>, std::vector<Anchor>> chain_anchors_scalar(
+/// @param anchors                  Sorted anchor array (read-only span; the
+///                                  kernel does not mutate the input — it only
+///                                  reads positions to score and emit a
+///                                  freshly-reordered anchor span alongside
+///                                  the chains).
+/// @param params                   Chaining parameters (must have prepare()
+///                                  called).
+/// @param chains_out               Output slab — surviving chains are appended
+///                                  here in score-descending order.
+/// @param reordered_anchors_out    Output slab — anchors of surviving chains
+///                                  appended in chain order; `Chain::anchor_start`
+///                                  indexes into this slab.
+///
+/// Both output slabs must be live ArenaSlab values rooted in the caller's
+/// per-query `Arena::Chain` scope.  The kernel writes directly into them via
+/// `backtrack_chains`, avoiding a per-stage memcpy that the legacy
+/// `std::pair<std::vector<...>>` return shape forced (DOC0249 §13 follow-up).
+void chain_anchors_scalar(
     std::span<const Anchor> anchors,
-    const ChainingParams& params)
+    const ChainingParams& params,
+    ArenaSlab<Chain>& chains_out,
+    ArenaSlab<Anchor>& reordered_anchors_out)
 {
     static const auto* _dp_desc =
         bioseq::instr::register_region_static("mg_lchain_dp");
     auto _dp_scope = bioseq::instr::region(_dp_desc);
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
     if (anchor_count == 0) {
-        return {{}, {}};
+        return;
     }
 
     int32_t max_dist_x = params.max_gap;
@@ -236,8 +250,9 @@ namespace bioseq::chaining {
     static const auto* _bt_desc =
         bioseq::instr::register_region_static("backtrack_chains");
     auto _bt_scope = bioseq::instr::region(_bt_desc);
-    return backtrack_chains(anchors, best_scores, predecessors, peak_scores,
-                           params.min_chain_score, params.min_seed_count);
+    backtrack_chains(anchors, best_scores, predecessors, peak_scores,
+                     params.min_chain_score, params.min_seed_count,
+                     chains_out, reordered_anchors_out);
 }
 
 }  // namespace bioseq::chaining

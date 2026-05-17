@@ -20,7 +20,10 @@ module;
 #include <cstring>
 #include <cmath>
 #include <bit>
+#include <new>
 #include <span>
+#include <type_traits>
+#include <utility>
 #include <vector>
 #include <algorithm>
 #include <limits>
@@ -109,6 +112,170 @@ struct Chain {
     int32_t anchor_count = 0;    ///< anchor count (lower 32 bits of u[])
     int32_t anchor_start = 0;    ///< start index in the reordered anchor array
 };
+
+// ============================================================================
+// Arena-backed owning slab — pipeline batch storage (DOC0249 §7)
+// ============================================================================
+
+/// Arena-backed owning batch storage shared by the pipeline stages and the
+/// kernels they drive (DOC0249 §7 + §13 follow-up: output-side kernel-to-arena
+/// refactor).
+///
+/// Allocates via `context::current().alloc_chain_array<E>(...)` so the
+/// underlying storage is reclaimed at the surrounding `Arena::Chain` scope
+/// unwind.  `push_back` grows geometrically; orphaned slabs land in the
+/// arena and are freed in O(1) at scope exit.
+///
+/// Two patterns are supported:
+///
+///   1. Trivially-copyable `E` (e.g. `Anchor`, `Chain`, `MinimizerRepr`):
+///      callers use `reserve(N)` + `push_back` or `reserve(N)` + write
+///      through `data()` + `resize(actual_n)`.  The arena scope reclaims
+///      the slab without per-element work; element destructors are no-op.
+///
+///   2. Non-trivially-destructible `E` (e.g. `AlignRegion` with its
+///      `std::vector<CigarOp>` member): callers MUST use
+///      `construct_at_back(args...)` to placement-new each element and the
+///      slab's own destructor walks `[0, len_)` calling `~E()` so heap-owned
+///      fields are released before the arena pointer-bump reclaims the slab.
+///
+/// Lives in `bioseq::chaining` because the chaining kernels are the primary
+/// producers (`backtrack_chains`, `chain_anchors_*`) and the pipeline stages
+/// (`bioseq::simd::HWY_NAMESPACE::pipe`) import this module already.
+template <class E>
+struct ArenaSlab {
+    using element_type = E;
+
+    E*                ptr_   = nullptr;
+    std::size_t       len_   = 0;
+    std::size_t       cap_   = 0;
+    context::context* arena_ = nullptr;
+
+    constexpr ArenaSlab() noexcept = default;
+    constexpr ArenaSlab(E* data_ptr, std::size_t length, std::size_t capacity,
+                        context::context* arena) noexcept
+        : ptr_(data_ptr), len_(length), cap_(capacity), arena_(arena) {}
+
+    ArenaSlab(const ArenaSlab&)            = delete;
+    ArenaSlab& operator=(const ArenaSlab&) = delete;
+
+    ArenaSlab(ArenaSlab&& other) noexcept
+        : ptr_(other.ptr_), len_(other.len_), cap_(other.cap_), arena_(other.arena_)
+    {
+        other.ptr_   = nullptr;
+        other.len_   = 0;
+        other.cap_   = 0;
+        other.arena_ = nullptr;
+    }
+
+    ArenaSlab& operator=(ArenaSlab&& other) noexcept {
+        if (this != &other) {
+            destroy_live_elements();
+            ptr_   = other.ptr_;
+            len_   = other.len_;
+            cap_   = other.cap_;
+            arena_ = other.arena_;
+            other.ptr_   = nullptr;
+            other.len_   = 0;
+            other.cap_   = 0;
+            other.arena_ = nullptr;
+        }
+        return *this;
+    }
+
+    ~ArenaSlab() noexcept {
+        destroy_live_elements();
+    }
+
+    void reserve(std::size_t expected_capacity) {
+        static_assert(std::is_trivially_copyable_v<E>,
+            "ArenaSlab::reserve uses memcpy to relocate live elements during "
+            "growth; only trivially-copyable element types are supported on "
+            "this path.  Non-trivial types must size the slab once via "
+            "reserve_for_placement_new() and never call reserve a second time.");
+        if (cap_ >= expected_capacity) return;
+        auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(expected_capacity);
+        if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
+        ptr_ = allocated_span.data();
+        cap_ = expected_capacity;
+    }
+
+    /// Allocate exactly @p capacity uninitialised slots in the arena.
+    ///
+    /// Use this once (not in a growth loop) for non-trivially-destructible
+    /// `E`.  Callers then `construct_at_back(args...)` per element; the
+    /// slab's destructor walks the live prefix and calls `~E()` on each.
+    void reserve_for_placement_new(std::size_t capacity) {
+        DEBUG_ASSERT(cap_ == 0, "reserve_for_placement_new must be called on a fresh slab");
+        if (capacity == 0) return;
+        auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(capacity);
+        ptr_ = allocated_span.data();
+        cap_ = capacity;
+        len_ = 0;
+    }
+
+    /// Construct a new `E` in the next free slot, returning a reference.
+    ///
+    /// Caller must have called `reserve_for_placement_new(N)` beforehand and
+    /// must not exceed `N` constructions.  Used for non-trivial types so the
+    /// slab's destructor can call `~E()` on each live element.
+    template <class... Args>
+    [[gnu::always_inline]] E& construct_at_back(Args&&... args) {
+        DEBUG_ASSERT(len_ < cap_, "construct_at_back beyond reserved capacity");
+        E* slot = new (ptr_ + len_) E(std::forward<Args>(args)...);
+        ++len_;
+        return *slot;
+    }
+
+    /// `push_back` overload restricted to trivially-copyable types.
+    ///
+    /// Geometric growth via `memcpy` of the live prefix; non-trivial types
+    /// must use the `reserve_for_placement_new` + `construct_at_back`
+    /// pattern instead so destructors are called.
+    void push_back(E element) {
+        static_assert(std::is_trivially_copyable_v<E>,
+            "ArenaSlab::push_back uses memcpy + trivial relocation during "
+            "growth; non-trivially-copyable element types must use the "
+            "reserve_for_placement_new + construct_at_back pattern.");
+        if (len_ == cap_) {
+            const std::size_t new_cap = cap_ ? cap_ * 2 : 64;
+            auto allocated_span = arena_->template alloc_chain_array<E, alignof(E)>(new_cap);
+            if (len_ > 0) std::memcpy(allocated_span.data(), ptr_, len_ * sizeof(E));
+            ptr_ = allocated_span.data();
+            cap_ = new_cap;
+        }
+        ptr_[len_++] = std::move(element);
+    }
+
+    void resize(std::size_t new_len) noexcept {
+        DEBUG_ASSERT(new_len <= cap_, "ArenaSlab::resize beyond reserved capacity");
+        len_ = new_len;
+    }
+
+    [[nodiscard]] E*          data() noexcept       { return ptr_; }
+    [[nodiscard]] const E*    data() const noexcept { return ptr_; }
+    [[nodiscard]] std::size_t size() const noexcept { return len_; }
+    [[nodiscard]] std::size_t capacity() const noexcept { return cap_; }
+    [[nodiscard]] std::span<E>       as_span()       noexcept { return {ptr_, len_}; }
+    [[nodiscard]] std::span<const E> as_const_span() const noexcept { return {ptr_, len_}; }
+
+private:
+    void destroy_live_elements() noexcept {
+        if constexpr (!std::is_trivially_destructible_v<E>) {
+            if (ptr_ == nullptr) return;
+            for (std::size_t reverse_idx = len_; reverse_idx > 0; --reverse_idx) {
+                ptr_[reverse_idx - 1].~E();
+            }
+        }
+        len_ = 0;
+    }
+};
+
+/// Helper: make a fresh ArenaSlab bound to the current pipeline arena context.
+template <class E>
+[[nodiscard]] inline ArenaSlab<E> make_arena_slab() noexcept {
+    return ArenaSlab<E>{nullptr, 0u, 0u, &context::current()};
+}
 
 // ============================================================================
 // Chaining parameters
@@ -308,20 +475,30 @@ struct ChainingParams {
 /// anchors. The previous minimap_port.cppm (lines 693-698) incorrectly unmarked
 /// rejected chains -- this function fixes that behavior.
 ///
-/// @param anchors          Original (AoS) anchor array
-/// @param best_scores      f[i] -- best chain score ending at anchor i
-/// @param predecessors     p[i] -- predecessor index (-1 if chain start)
-/// @param peak_scores      v[i] -- peak score along the chain through i
-/// @param min_score        Minimum chain score to keep
-/// @param min_seed_count   Minimum number of anchors per chain
-/// @return Pair of (chains, reordered_anchors)
-[[nodiscard]] inline std::pair<std::vector<Chain>, std::vector<Anchor>> backtrack_chains(
+/// @param anchors                  Original (AoS) anchor array
+/// @param best_scores              f[i] -- best chain score ending at anchor i
+/// @param predecessors             p[i] -- predecessor index (-1 if chain start)
+/// @param peak_scores              v[i] -- peak score along the chain through i
+/// @param min_score                Minimum chain score to keep
+/// @param min_seed_count           Minimum number of anchors per chain
+/// @param chains_out               Output slab — surviving chains are appended.
+/// @param reordered_anchors_out    Output slab — anchors of surviving chains
+///                                 appended in chain order; `Chain::anchor_start`
+///                                 indexes into this slab.
+///
+/// The two output slabs are written directly inside the per-query
+/// `Arena::Chain` scope (DOC0249 §13 output-side refactor); no intermediate
+/// `std::vector` is allocated, so the caller's pipeline stage avoids a
+/// per-stage memcpy on the chaining-output hot path.
+inline void backtrack_chains(
     std::span<const Anchor> anchors,
     std::span<const int32_t> best_scores,
     std::span<const int64_t> predecessors,
     std::span<const int32_t> peak_scores,
     int32_t min_score,
-    int32_t min_seed_count)
+    int32_t min_seed_count,
+    ArenaSlab<Chain>& chains_out,
+    ArenaSlab<Anchor>& reordered_anchors_out)
 {
     (void)peak_scores;  // upstream keeps it for parity with lchain.c; unused here
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
@@ -339,11 +516,22 @@ struct ChainingParams {
         }
     }
 
+    /// Score-ascending comparator for the backtracking pass — we walk the
+    /// scored-index array tail-first so the highest-scoring chain anchors
+    /// claim the predecessor trail before any lower-scoring chain reaches
+    /// them.  Non-capturing functor (R4 compliance, no capture-all lambdas
+    /// in any pipeline-module file).
+    struct ScoreAscending {
+        [[nodiscard, gnu::always_inline]] bool operator()(
+            const ScoredAnchorIndex& left,
+            const ScoredAnchorIndex& right) const noexcept
+        {
+            return left.score < right.score;
+        }
+    };
+
     // Sort by score ascending so we process highest-scoring chains last->first
-    std::sort(scored_indices.begin(), scored_indices.end(),
-              [](const ScoredAnchorIndex& left, const ScoredAnchorIndex& right) {
-                  return left.score < right.score;
-              });
+    std::sort(scored_indices.begin(), scored_indices.end(), ScoreAscending{});
 
     // `visited` was previously a `std::vector<int32_t>(anchor_count, 0)` —
     // a fresh malloc + zero-fill on every chaining call. Move into the
@@ -355,8 +543,6 @@ struct ChainingParams {
     auto visited = bt_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
     std::memset(visited.data(), 0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
-    std::vector<Chain> chains;
-    std::vector<Anchor> reordered_anchors;
     std::vector<int64_t> chain_anchor_indices;
 
     // Process from highest to lowest score
@@ -387,11 +573,11 @@ struct ChainingParams {
             Chain chain;
             chain.score = chain_score;
             chain.anchor_count = chain_length;
-            chain.anchor_start = static_cast<int32_t>(reordered_anchors.size());
-            chains.push_back(chain);
+            chain.anchor_start = static_cast<int32_t>(reordered_anchors_out.size());
+            chains_out.push_back(chain);
 
             for (const int64_t anchor_idx : chain_anchor_indices) {
-                reordered_anchors.push_back(anchors[anchor_idx]);
+                reordered_anchors_out.push_back(anchors[anchor_idx]);
             }
         }
         // CRITICAL: Do NOT unmark visited[] for rejected chains.
@@ -399,8 +585,8 @@ struct ChainingParams {
         // (lchain.c:43,55 deliberately leaves t[i]=1)
     }
 
-    JustLog("[chaining] Backtracking: {} chains from {} anchors", chains.size(), anchor_count);
-    return {std::move(chains), std::move(reordered_anchors)};
+    JustLog("[chaining] Backtracking: {} chains from {} anchors",
+            chains_out.size(), anchor_count);
 }
 
 }  // namespace bioseq::chaining
