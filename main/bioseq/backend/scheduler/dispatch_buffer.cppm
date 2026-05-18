@@ -347,7 +347,7 @@ public:
                                 static const auto* mm_sketch_desc =
                                     bioseq::instr::register_region_static("mm_sketch");
                                 auto _mm_sketch = bioseq::instr::region<Args>(mm_sketch_desc);
-                                collect_minimizers<minimap_int_hasher>(
+                                collect_minimizers<minimap_int_hasher, MinimapSketchData>(
                                     query_collector, query_seq,
                                     query_seq.begin(), query_seq.end(),
                                     static_cast<size_t>(params.window_size),

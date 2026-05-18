@@ -465,13 +465,21 @@ template<
     // unit is uint32.  The scalar hasher's state lives in scalar registers
     // and uint64_t arithmetic costs the same as uint32_t on AArch64, so
     // there's no penalty for the wider default.
-    typename hash_val_t = uint64_t
+    typename hash_val_t = uint64_t,
+    // DOC0254 §5.3 — the collector type is now a template parameter so the
+    // kernel can route its `collect(...)` traffic into a caller-provided
+    // arena slab via `sketch_collector_arena_adapter<MinimizerT>` (or any
+    // other shape implementing `collect/reserve`).  Defaulting to the
+    // legacy `sketch_collector_t<MinimizerT>` keeps every existing call
+    // site source-compatible.
+    class Collector = sketch_collector_t<MinimizerT>
 >
 requires (
 	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>
 )
+[[gnu::always_inline]]
 inline void collect_minimizers(
-    sketch_collector_t<MinimizerT>& collector,
+    Collector& collector,
 	compact_sequence_range<R>& seq,
 	const I& seq_begin,
 	const I& seq_end,
@@ -619,13 +627,17 @@ template<
 	class MinimizerT,
 	supports_compact_sequence_range R,
 	typename I = decltype(compact_sequence_range<R>().begin()),
-    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit,
+    // DOC0254 §5.3 — Collector defaults to the legacy
+    // sketch_collector_t<MinimizerT>; arena adapters substitute here.
+    class Collector = sketch_collector_t<MinimizerT>
 >
 requires (
 	supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
+[[gnu::always_inline]]
 inline void collect_minimizers_simd(
-    sketch_collector_t<MinimizerT>& collector,
+    Collector& collector,
 	compact_sequence_range<R>& seq,
 	const I& seq_begin,
 	const I& seq_end,
@@ -1011,6 +1023,55 @@ inline void collect_minimizers_simd(
     // for (auto& pos : temp_positions) {
     //     JustLog("{} -> {}", pos.first, pos.second);
     // }
+}
+
+// =============================================================================
+// DOC0254 §8.2 — Cep-templated minimizer-kernel bridges.
+//
+// The `collect_minimizers_constexpr<W, K, ...>` and
+// `collect_minimizers_simd_constexpr<W, K, ...>` forwarders feed the per-window
+// inner loop the canonical `(W, K)` pair as integer immediates so the
+// optimiser can fold the bounds and unroll loops.  The runtime kernels above
+// were upgraded to `[[gnu::always_inline]] inline` (§5.3) so the constant
+// propagation actually fires.
+// =============================================================================
+
+template <
+    std::size_t W, std::size_t K,
+    template<typename H_A> typename scalar_hash_t,
+    class MinimizerT,
+    supports_compact_sequence_range R,
+    typename I          = decltype(compact_sequence_range<R>().begin()),
+    typename hash_val_t = std::uint64_t,
+    class Collector     = sketch_collector_t<MinimizerT>>
+[[gnu::always_inline]]
+inline void collect_minimizers_constexpr(
+    Collector&                 collector,
+    compact_sequence_range<R>& seq,
+    const I&                   seq_begin,
+    const I&                   seq_end)
+{
+    collect_minimizers<scalar_hash_t, MinimizerT, R, I, hash_val_t, Collector>(
+        collector, seq, seq_begin, seq_end, W, K);
+}
+
+template <
+    std::size_t W, std::size_t K,
+    template<typename H_A> typename simd_hash_t,
+    class MinimizerT,
+    supports_compact_sequence_range R,
+    typename I          = decltype(compact_sequence_range<R>().begin()),
+    typename hash_val_t = typename compact_sequence_range<R>::traits::storage_unit,
+    class Collector     = sketch_collector_t<MinimizerT>>
+[[gnu::always_inline]]
+inline void collect_minimizers_simd_constexpr(
+    Collector&                 collector,
+    compact_sequence_range<R>& seq,
+    const I&                   seq_begin,
+    const I&                   seq_end)
+{
+    collect_minimizers_simd<simd_hash_t, MinimizerT, R, I, hash_val_t, Collector>(
+        collector, seq, seq_begin, seq_end, W, K);
 }
 
 } // bioseq::simd::HWY_NAMESPACE

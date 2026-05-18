@@ -265,6 +265,11 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    } else if (algo == "bioseq_ksw2_batched_simd_dp_two_stack_nthash") {
+        // DOC0254 §11.9: KSW2_BATCHED selected via runtime params.
+        dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
+        dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2_BATCHED;
+        dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
     } else if (algo == "bioseq_ksw2_simd_dp_simd_minimap2_slow") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;

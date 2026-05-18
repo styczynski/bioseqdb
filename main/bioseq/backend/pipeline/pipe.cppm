@@ -58,6 +58,8 @@ import bioseq_sequences.kmers.two_stacks;
 import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
+import alignment_hwy_lane_helpers;
+import alignment_hwy_ksw2_batched;
 import block_aligner_hwy;
 import bioseq_sequences.chaining.utils;
 import bioseq_sequences.chaining.scalar;
@@ -185,6 +187,193 @@ struct Stage;
 struct StageDescription;
 struct PipelineDescription;
 
+// =============================================================================
+// DOC0254 §7 — Concept-driven sink validation.
+// =============================================================================
+
+/**
+ * @brief Single-batch sink concept.  Required by EmitToken::emit_batch.
+ *
+ * Matched by every concrete sink that consumes a `std::span<E>` (most
+ * pipeline tails).  Substitution failures inside `EmitToken::emit_batch`
+ * name the concept and the missing method.
+ */
+template <class S, class E>
+concept BatchSink = requires (S& sink, std::span<E> batch) {
+    { sink.on_batch(batch) } -> std::same_as<void>;
+    { sink.on_completed() }  -> std::same_as<void>;
+};
+
+/**
+ * @brief Pair-batch sink concept.  Required by EmitToken::emit_batch_pair.
+ *
+ * The pair shape is used by the chain → region → primary/secondary →
+ * filter → divergence → align cascade where each stage forwards both the
+ * regions span and the (read-only) anchors span downstream.
+ */
+template <class S, class E1, class E2>
+concept PairBatchSink = requires (S& sink, std::span<E1> a, std::span<E2> b) {
+    { sink.on_batch_pair(a, b) } -> std::same_as<void>;
+    { sink.on_completed() }      -> std::same_as<void>;
+};
+
+/**
+ * @brief Index-decorated batch sink concept.  Required by
+ * EmitToken::emit_batch_with_index.
+ *
+ * Used by IndexStage to hand a sketches span downstream alongside a
+ * (const-reference) target index.  SeedHitStage is the canonical consumer.
+ */
+template <class S, class E, class IndexT>
+concept IndexedBatchSink = requires (S& sink, std::span<E> a, const IndexT& idx) {
+    { sink.on_batch_with_index(a, idx) } -> std::same_as<void>;
+    { sink.on_completed() }              -> std::same_as<void>;
+};
+
+// =============================================================================
+// DOC0254 §4 — Compile-time single-emission enforcement (EmitToken /
+// EmittedToken).
+// =============================================================================
+
+template <class Sink> class EmittedToken;
+
+/**
+ * @brief Move-only, single-use, friend-constructible-only token granting
+ * downstream-emission permission.  The `emit_batch*` family of
+ * rvalue-qualified methods consumes the token (nulling its internal
+ * pointer) and returns the friend-only-constructible `EmittedToken<Sink>`
+ * proof.
+ *
+ * The token's only constructor is private; only `Stage<Cep, Self, Sink>`
+ * is befriended, which means concrete-stage `process*<Cep>` bodies see
+ * the token by rvalue reference but cannot manufacture one themselves —
+ * the type system rules out skipping the emit (no way to construct the
+ * required `EmittedToken<Sink>` return value).
+ *
+ * Single-emission enforcement (DOC0254 R7):
+ *   - At least once: HARD compile-time.  `process*<Cep>` must return
+ *     `EmittedToken<Sink>`; the only way to construct one is to call
+ *     `EmitToken<Sink>::emit_batch*`.
+ *   - At most once: soft compile-time + runtime trip-wire.  `[[nodiscard]]`
+ *     makes the ergonomic shape `return std::move(token).emit_batch*(...)`;
+ *     emitting twice trips the `DEBUG_ASSERT(sink_ptr_ != nullptr)` in debug.
+ */
+template <class Sink>
+class EmitToken {
+public:
+    template <is_constexpr_aligner_params, class, class> friend struct Stage;
+
+    EmitToken()                            = delete;
+    EmitToken(const EmitToken&)            = delete;
+    EmitToken(EmitToken&&)                 = delete;
+    EmitToken& operator=(const EmitToken&) = delete;
+    EmitToken& operator=(EmitToken&&)      = delete;
+
+    template <class E>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_batch(std::span<E> data) && {
+        static_assert(BatchSink<Sink, E>,
+            "EmitToken::emit_batch: downstream sink does not implement "
+            "on_batch(std::span<E>). See DOC0249 §8.12 stage-shape matrix.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr,
+            "EmitToken consumed twice; the first emit_batch* call nulled the "
+            "sink pointer (see R7 in DOC0254 §3).");
+        sink_ptr_->on_batch(data);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+    template <class E1, class E2>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_batch_pair(std::span<E1> first_batch,
+                                       std::span<E2> second_batch) && {
+        static_assert(PairBatchSink<Sink, E1, E2>,
+            "EmitToken::emit_batch_pair: downstream sink does not implement "
+            "on_batch_pair(std::span<E1>, std::span<E2>).");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        sink_ptr_->on_batch_pair(first_batch, second_batch);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+    template <class E, class IndexT>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_batch_with_index(std::span<E>  data,
+                                             const IndexT& index_ref) && {
+        static_assert(IndexedBatchSink<Sink, E, IndexT>,
+            "EmitToken::emit_batch_with_index: downstream sink does not "
+            "implement on_batch_with_index(std::span<E>, IndexT const&).");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        sink_ptr_->on_batch_with_index(data, index_ref);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+private:
+    Sink* sink_ptr_;
+    explicit constexpr EmitToken(Sink& sink_ref) noexcept
+        : sink_ptr_(&sink_ref) {}
+};
+
+/**
+ * @brief Proof-of-emission token.  Returned by
+ * `EmitToken<Sink>::emit_batch*`; every concrete stage's `process*<Cep>`
+ * must return one.  The only path to constructing one is the
+ * friend-accessible `make()` factory.
+ */
+template <class Sink>
+class [[nodiscard]] EmittedToken {
+public:
+    EmittedToken(const EmittedToken&)             = delete;
+    EmittedToken& operator=(const EmittedToken&)  = delete;
+    EmittedToken& operator=(EmittedToken&&)       = delete;
+
+    /// Move constructor exists only for mandatory-copy-elision worst-case
+    /// materialisation.  The canonical path is direct-return from
+    /// emit_batch*, where C++17 copy elision skips it entirely.
+    EmittedToken(EmittedToken&&) noexcept = default;
+
+private:
+    friend class EmitToken<Sink>;
+    /// Friend-only default constructor — the public surface is
+    /// non-default-constructible because the only call site of this
+    /// ctor lives behind the `make()` factory below.
+    constexpr EmittedToken() noexcept = default;
+    [[nodiscard, gnu::always_inline]] static constexpr EmittedToken make() noexcept {
+        return EmittedToken{};
+    }
+};
+
+// =============================================================================
+// DOC0254 §5 — Input-side kernel-to-arena adapter.
+// =============================================================================
+
+/**
+ * @brief Drop-in `sketch_collector_t<E>`-shaped adapter that routes the
+ * kernel's `collect(...)` traffic into a caller-provided
+ * `ArenaSlab<E>`.  Implements the minimal surface the kernels rely on
+ * (`collect(E&&)`, `collect(const E&)`, `reserve(size_t)`).
+ *
+ * `ArenaSlab<E>::push_back` requires `std::is_trivially_copyable_v<E>` —
+ * satisfied by every `MinimizerRepr<L, K>`.  The existing slab
+ * `static_assert` (`chaining_utils.cppm:236`) covers the constraint and
+ * would fire if a non-trivial minimizer type were ever introduced.
+ */
+template <class E>
+struct sketch_collector_arena_adapter {
+    ::bioseq::chaining::ArenaSlab<E>* slab_;
+
+    [[gnu::always_inline]] void collect(E sketch) {
+        slab_->push_back(std::move(sketch));
+    }
+    [[gnu::always_inline]] void collect(const E& sketch) {
+        slab_->push_back(sketch);
+    }
+    [[gnu::always_inline]] void reserve(std::size_t expected_count) {
+        slab_->reserve(expected_count);
+    }
+};
+
 /**
  * @brief CRTP helper absorbing the boilerplate shared by every concrete stage.
  *
@@ -227,21 +416,27 @@ struct Stage {
     constexpr Stage(Sink sink_arg, Self self_arg) noexcept
         : sink_(std::move(sink_arg)), self_(std::move(self_arg)) {}
 
+    // DOC0254 §4.2: the bound stage constructs an `EmitToken<Sink>` on its
+    // own stack and hands it to `process*<Cep>` by rvalue reference; the
+    // concrete-stage body returns the (discarded) `EmittedToken<Sink>` proof
+    // type whose construction is friend-private to `EmitToken<Sink>`.
     template <class B>
     [[gnu::always_inline]] void on_batch(B&& batch) {
-        self_.template process<Cep>(std::forward<B>(batch), sink_);
+        (void) self_.template process<Cep>(
+            std::forward<B>(batch), EmitToken<Sink>{sink_});
     }
 
     template <class B1, class B2>
     [[gnu::always_inline]] void on_batch_pair(B1&& first_batch, B2&& second_batch) {
-        self_.template process_pair<Cep>(
-            std::forward<B1>(first_batch), std::forward<B2>(second_batch), sink_);
+        (void) self_.template process_pair<Cep>(
+            std::forward<B1>(first_batch), std::forward<B2>(second_batch),
+            EmitToken<Sink>{sink_});
     }
 
     template <class B, class IndexT>
     [[gnu::always_inline]] void on_batch_with_index(B&& batch, const IndexT& index_ref) {
-        self_.template process_with_index<Cep>(
-            std::forward<B>(batch), index_ref, sink_);
+        (void) self_.template process_with_index<Cep>(
+            std::forward<B>(batch), index_ref, EmitToken<Sink>{sink_});
     }
 
     [[gnu::always_inline]] void on_completed() noexcept {
@@ -364,8 +559,16 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
             return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2);
         }
-        [[nodiscard]] static std::vector<NamedProperty> computed_properties_default() {
-            return {{"vectorised", "false"}, {"complexity", "O(n * max_iter)"}};
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            std::vector<NamedProperty>&) noexcept {}
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised", "false"},
+                {"complexity", "O(n * max_iter)"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
         }
     };
 };
@@ -388,8 +591,16 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
             return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2);
         }
-        [[nodiscard]] static std::vector<NamedProperty> computed_properties_default() {
-            return {{"vectorised", "true"}, {"requires_zero_skip_penalty", "true"}};
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            std::vector<NamedProperty>&) noexcept {}
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised", "true"},
+                {"requires_zero_skip_penalty", "true"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
         }
     };
 };
@@ -412,8 +623,16 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
             return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ);
         }
-        [[nodiscard]] static std::vector<NamedProperty> computed_properties_default() {
-            return {{"vectorised", "false"}, {"complexity", "O(n log n)"}};
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            std::vector<NamedProperty>&) noexcept {}
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised", "false"},
+                {"complexity", "O(n log n)"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
         }
     };
 };
@@ -432,18 +651,40 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR> {
     struct kernel_type {
-        template <class Collector, class Range>
+        template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers<minimap_int_hasher>(
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers<
+                minimap_int_hasher, MinimizerT>(
                 collector, range, range.begin(), range.end(),
                 window_size, kmer_size);
         }
+
+        template <std::size_t W, std::size_t K,
+                  class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call_constexpr(
+            Collector& collector, Range& range)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_constexpr<
+                W, K, minimap_int_hasher, MinimizerT>(
+                collector, range, range.begin(), range.end());
+        }
+
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
                 ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR);
+        }
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            std::vector<NamedProperty>&) noexcept {}
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised", "false"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
         }
     };
 };
@@ -452,18 +693,40 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW> {
     struct kernel_type {
-        template <class Collector, class Range>
+        template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd<minimap_int_hasher>(
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd<
+                minimap_int_hasher, MinimizerT>(
                 collector, range, range.begin(), range.end(),
                 window_size, kmer_size);
         }
+
+        template <std::size_t W, std::size_t K,
+                  class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call_constexpr(
+            Collector& collector, Range& range)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd_constexpr<
+                W, K, minimap_int_hasher, MinimizerT>(
+                collector, range, range.begin(), range.end());
+        }
+
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
                 ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW);
+        }
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            std::vector<NamedProperty>&) noexcept {}
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised", "true"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
         }
     };
 };
@@ -472,18 +735,217 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH> {
     struct kernel_type {
-        template <class Collector, class Range>
+        template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_two_stack_nthash_simd<
+                minimap_int_hasher, MinimizerT>(
                 collector, range, range.begin(), range.end(),
                 window_size, kmer_size);
         }
+
+        template <std::size_t W, std::size_t K,
+                  class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call_constexpr(
+            Collector& collector, Range& range)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_two_stack_nthash_simd_constexpr<
+                W, K, minimap_int_hasher, MinimizerT>(
+                collector, range, range.begin(), range.end());
+        }
+
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
             return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
                 ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH);
+        }
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            std::vector<NamedProperty>&) noexcept {}
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised", "true"},
+                {"two_stack",  "true"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+// ---------------------------------------------------------------------------
+// 8.0.3 BaseAlignmentAlgorithmType kernel traits (DOC0254 §6.2)
+// ---------------------------------------------------------------------------
+//
+// The trait pattern is now universal across every algorithm dimension
+// (DOC0254 R10).  AlignStage<Kernel, QR, TR> calls `Kernel::template
+// call<QR, TR>(...)` once — the per-algorithm dispatch lives entirely in
+// the trait specialisations below.
+
+namespace detail {
+
+/// Shared helper for KSW2 / Block Aligner / KSW2_BATCHED — pushes the
+/// four affine-scoring parameters that every base aligner consumes.
+[[gnu::always_inline]] inline void push_base_affine_params(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+    std::vector<NamedProperty>& out)
+{
+    out.push_back({"match_score",  std::to_string(p.match_score)});
+    out.push_back({"mismatch_pen", std::to_string(p.mismatch_pen)});
+    out.push_back({"gap_open1",    std::to_string(p.gap_open1)});
+    out.push_back({"gap_ext1",     std::to_string(p.gap_ext1)});
+}
+
+}  // namespace detail
+
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2> {
+    struct kernel_type {
+        /// DOC0254 R10: the dispatcher consults this constant to route the
+        /// cross-query deferred-align scheduling shape instead of an
+        /// `if constexpr (BAA == ...)` ladder.
+        static constexpr bool supports_cross_query_batched = false;
+
+        template <supports_compact_sequence_range QR,
+                  supports_compact_sequence_range TR>
+        [[gnu::always_inline]] static void call(
+            std::span<AlignRegion>                       regions,
+            std::span<const ::bioseq::chaining::Anchor>  anchors,
+            const compact_sequence_range<QR>&            query_seq,
+            const compact_sequence_range<TR>&            target_seq,
+            const ScoringMatrix<QR>&                     scoring_matrix,
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::align_regions<
+                ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2>(
+                regions, anchors, query_seq, target_seq, scoring_matrix, params);
+        }
+
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return "KSW2";
+        }
+
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            std::vector<NamedProperty>& out)
+        {
+            detail::push_base_affine_params(p, out);
+            out.push_back({"gap_open2", std::to_string(p.gap_open2)});
+            out.push_back({"gap_ext2",  std::to_string(p.gap_ext2)});
+            out.push_back({"zdrop",     std::to_string(p.zdrop)});
+            out.push_back({"end_bonus", std::to_string(p.end_bonus)});
+        }
+
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised",        "intra-sequence striped"},
+                {"single_affine_eq",  "data-dependent"},
+                {"specialised",       Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::BLOCK_ALIGNER> {
+    struct kernel_type {
+        static constexpr bool supports_cross_query_batched = false;
+
+        template <supports_compact_sequence_range QR,
+                  supports_compact_sequence_range TR>
+        [[gnu::always_inline]] static void call(
+            std::span<AlignRegion>                       regions,
+            std::span<const ::bioseq::chaining::Anchor>  anchors,
+            const compact_sequence_range<QR>&            query_seq,
+            const compact_sequence_range<TR>&            target_seq,
+            const ScoringMatrix<QR>&                     scoring_matrix,
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::align_regions<
+                ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::BLOCK_ALIGNER>(
+                regions, anchors, query_seq, target_seq, scoring_matrix, params);
+        }
+
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return "Block Aligner";
+        }
+
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            std::vector<NamedProperty>& out)
+        {
+            detail::push_base_affine_params(p, out);
+            out.push_back({"block_min_size",
+                std::to_string(static_cast<int32_t>(p.block_min_size))});
+            out.push_back({"block_max_size",
+                std::to_string(static_cast<int32_t>(p.block_max_size))});
+        }
+
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised",       "block-affine"},
+                {"single_affine_only", "true"},
+                {"specialised",      Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+// `KSW2_BATCHED` — DOC0254 §11.  The kernel ships in
+// `alignment_hwy/ksw2_batched.cppm`; this trait forwards through a free
+// function `align_regions_batched<QR, TR>(...)` that is declared in this
+// module via the `bioseq_sequences.ksw2_batched` import.
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2_BATCHED> {
+    struct kernel_type {
+        /// DOC0254 §11.10 — the only kernel whose dispatcher branch
+        /// supports cross-query batching.  Setting this constant true on
+        /// the KSW2_BATCHED specialisation only is how
+        /// `pipeline_run_impl_batch` selects the deferred-align variant
+        /// without an enum-value `if constexpr` ladder.
+        static constexpr bool supports_cross_query_batched = true;
+
+        template <supports_compact_sequence_range QR,
+                  supports_compact_sequence_range TR>
+        [[gnu::always_inline]] static void call(
+            std::span<AlignRegion>                       regions,
+            std::span<const ::bioseq::chaining::Anchor>  anchors,
+            const compact_sequence_range<QR>&            query_seq,
+            const compact_sequence_range<TR>&            target_seq,
+            const ScoringMatrix<QR>&                     scoring_matrix,
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+        {
+            ::bioseq::simd::HWY_NAMESPACE::align_regions_batched<QR, TR>(
+                regions, anchors, query_seq, target_seq, scoring_matrix, params);
+        }
+
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return "KSW2 (inter-region batched)";
+        }
+
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            std::vector<NamedProperty>& out)
+        {
+            // Same runtime knobs as the intra-sequence KSW2 path; the
+            // bucketing/batching is determined by the kernel from
+            // params.max_gap, params.zdrop, and the per-fill geometry.
+            algorithm_traits<
+                ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType::KSW2>::
+                kernel_type::populate_runtime_params(p, out);
+        }
+
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"vectorised",        "inter-sequence packed"},
+                {"bucket_widths",     "[<=32, <=64, <=128, <=256, >256]"},
+                {"long_fill_kernel",  "intra-sequence KSW2 (fallback)"},
+                {"specialised",       Cep::generic_fallback ? "fallback" : "specialised"},
+            };
         }
     };
 };
@@ -570,10 +1032,20 @@ namespace detail {
                     static_cast<std::size_t>(best_n) + 16u);
 }
 
+/**
+ * @brief Upper-bound estimate of the per-region CIGAR op count.
+ *
+ * DOC0254 §10.3 unifies the helper signature so it can model the post-fill
+ * outer extents instead of `region.block_length` (which excludes the
+ * left/right kernel extensions).  Describe-time callers pass
+ * `(block_length, block_length)` as a coarse approximation — the value is
+ * only a render hint, never an actual reservation.
+ */
 [[nodiscard]] constexpr std::size_t estimated_cigar_op_count(
-    int32_t block_length) noexcept {
-    const int32_t clamped = block_length > 0 ? block_length : 0;
-    return static_cast<std::size_t>(clamped) + 16u;
+    int32_t query_extent, int32_t ref_extent) noexcept {
+    const int32_t q = query_extent > 0 ? query_extent : 0;
+    const int32_t r = ref_extent   > 0 ? ref_extent   : 0;
+    return static_cast<std::size_t>(q) + static_cast<std::size_t>(r) + 16u;
 }
 
 [[nodiscard]] constexpr std::size_t estimated_result_count(
@@ -669,8 +1141,15 @@ struct MinimizerStage
     int32_t runtime_w;
     int32_t runtime_k;
 
+    // DOC0254 §5.4 / §8.4: the kernel writes directly into the per-query
+    // arena slab via `sketch_collector_arena_adapter`, eliminating the
+    // sketches→vector→slab memcpy that the previous shape required.  The
+    // specialised path calls `call_constexpr<W, K, MinimizerT>(...)` so
+    // the (W, K) pair propagates as integer immediates through the
+    // window-loop bounds and unrolls.
     template <is_constexpr_aligner_params Cep, class B, class Sink>
-    [[gnu::always_inline]] void process(B&& /*ignored*/, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process(B&& /*ignored*/, EmitToken<Sink>&& token) {
         const std::size_t window_size = Cep::generic_fallback
             ? static_cast<std::size_t>(runtime_w)
             : Cep::window_len;
@@ -678,31 +1157,32 @@ struct MinimizerStage
             ? static_cast<std::size_t>(runtime_k)
             : Cep::kmer_len;
 
-        sketch_collector_t<MinimizerT> collector;
-        collector.reserve(detail::estimated_sketch_count(
+        auto sketches_slab = make_arena_slab<MinimizerT>();
+        sketches_slab.reserve(detail::estimated_sketch_count(
             query_seq_->bp_size(), static_cast<int32_t>(window_size)));
 
-        Kernel::call(collector, *query_seq_, window_size, kmer_size);
+        sketch_collector_arena_adapter<MinimizerT> collector{&sketches_slab};
 
-        // Materialise minimizers in the arena slab so they outlive the
-        // collector and downstream stages can hold span references to them.
-        auto sketches_vec = std::move(collector).extract_sketches_data();
-        auto sketches_slab = make_arena_slab<MinimizerT>();
-        sketches_slab.reserve(sketches_vec.size());
-        if (!sketches_vec.empty()) {
-            std::memcpy(sketches_slab.data(), sketches_vec.data(),
-                        sketches_vec.size() * sizeof(MinimizerT));
+        if constexpr (!Cep::generic_fallback) {
+            Kernel::template call_constexpr<Cep::window_len, Cep::kmer_len, MinimizerT>(
+                collector, *query_seq_);
+        } else {
+            Kernel::template call<MinimizerT>(
+                collector, *query_seq_, window_size, kmer_size);
         }
-        sketches_slab.resize(sketches_vec.size());
-        sink.on_batch(std::span<const MinimizerT>{
+
+        return std::move(token).emit_batch(std::span<const MinimizerT>{
             sketches_slab.data(), sketches_slab.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
         StageAlgorithmDescription algo;
         algo.name = std::string{Kernel::algorithm_label()};
+        Kernel::populate_runtime_params({}, algo.parameters);
+        algo.computed_properties = Kernel::template static_properties<Cep>();
         desc.algorithm = std::move(algo);
         // Reserve target for the sketch arena slab (DOC0249 §21.4
         // "estimated_sketch_count").  `query_seq_` is a borrowed pointer; on
@@ -729,10 +1209,15 @@ struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downst
     const IndexT* index_;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
-    [[gnu::always_inline]] void process(B&& sketches, Sink& sink) {
-        sink.on_batch_with_index(std::forward<B>(sketches), *index_);
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process(B&& sketches, EmitToken<Sink>&& token) {
+        using ElemT = std::remove_const_t<
+            typename std::remove_cvref_t<B>::value_type>;
+        return std::move(token).emit_batch_with_index(
+            std::span<const ElemT>{sketches.data(), sketches.size()}, *index_);
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -758,8 +1243,9 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
     int32_t                                       query_len;
 
     template <is_constexpr_aligner_params Cep, class B, class IndexT, class Sink>
-    [[gnu::always_inline]] void process_with_index(
-        B&& sketches, const IndexT& target_index_ref, Sink& sink)
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_with_index(
+        B&& sketches, const IndexT& target_index_ref, EmitToken<Sink>&& token)
     {
         const int32_t kmer_size = Cep::generic_fallback
             ? params.kmer_size
@@ -784,9 +1270,11 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             query_len, params.max_occ, kmer_size,
             anchors_slab);
 
-        sink.on_batch(std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
+        return std::move(token).emit_batch(
+            std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -832,7 +1320,8 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
     ChainingParams cp;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
-    [[gnu::always_inline]] void process(B&& anchors_in, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process(B&& anchors_in, EmitToken<Sink>&& token) {
         const std::span<const Anchor> anchors_span{
             anchors_in.data(), anchors_in.size()};
 
@@ -844,11 +1333,12 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
 
         Kernel::call(anchors_span, cp, chains_slab, reordered_slab);
 
-        sink.on_batch_pair(
+        return std::move(token).emit_batch_pair(
             std::span<Chain> {chains_slab.data(),    chains_slab.size()},
             std::span<Anchor>{reordered_slab.data(), reordered_slab.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -860,7 +1350,7 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         algo.parameters.push_back({"max_chain_iter",  std::to_string(cp.max_chain_iter)});
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
-        algo.computed_properties = Kernel::computed_properties_default();
+        algo.computed_properties = Kernel::template static_properties<Cep>();
         desc.algorithm = std::move(algo);
         // Chain stage's two arena slabs are sized from the runtime
         // anchor count (which is unknown at describe time), so we leave
@@ -890,7 +1380,8 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
     int32_t query_len = 0;
 
     template <is_constexpr_aligner_params Cep, class CB, class AB, class Sink>
-    [[gnu::always_inline]] void process_pair(CB&& chains, AB&& anchors, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(CB&& chains, AB&& anchors, EmitToken<Sink>&& token) {
         // `AlignRegion` owns a `std::vector<CigarOp>` so the slab uses the
         // placement-new pattern; no intermediate `std::vector` is needed.
         auto regions_slab = make_arena_slab<AlignRegion>();
@@ -900,11 +1391,12 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
             query_len,
             regions_slab);
 
-        sink.on_batch_pair(
+        return std::move(token).emit_batch_pair(
             std::span<AlignRegion>{regions_slab.data(), regions_slab.size()},
-            std::forward<AB>(anchors));
+            std::span<const Anchor>{anchors.data(), anchors.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -935,15 +1427,19 @@ struct PrimarySecondaryStage : StageBase<PrimarySecondaryStage, AlignRegion> {
     int32_t sub_diff_value;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
         // Kernel now mutates in place through a span — no vector round-trip
         // (DOC0249 M8).
         classify_primary_secondary(
             std::span<AlignRegion>{regions.data(), regions.size()},
             mask_level, mask_len, sub_diff_value);
-        sink.on_batch_pair(std::forward<RB>(regions), std::forward<AB>(anchors));
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), regions.size()},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -969,18 +1465,20 @@ struct SecondaryFilterStage : StageBase<SecondaryFilterStage, AlignRegion> {
     int32_t best_n;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
         // Kernel filters in place via a span; the new effective size is
         // returned so the downstream stage observes a shorter prefix
         // (DOC0249 M8 — `filter_secondary_regions_span`).
         const std::size_t new_size = filter_secondary_regions(
             std::span<AlignRegion>{regions.data(), regions.size()},
             pri_ratio, min_diff_value, best_n);
-        sink.on_batch_pair(
+        return std::move(token).emit_batch_pair(
             std::span<AlignRegion>{regions.data(), new_size},
-            std::forward<AB>(anchors));
+            std::span<const Anchor>{anchors.data(), anchors.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -1009,7 +1507,8 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT>, AlignRegion> {
     bool    enabled;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
         if (enabled) {
             const int32_t kmer_size = Cep::generic_fallback
                 ? runtime_kmer_size
@@ -1021,9 +1520,12 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT>, AlignRegion> {
                 std::span<const Anchor>{anchors.data(), anchors.size()},
                 query_len, kmer_size, target_len);
         }
-        sink.on_batch_pair(std::forward<RB>(regions), std::forward<AB>(anchors));
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), regions.size()},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -1038,11 +1540,16 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT>, AlignRegion> {
 
 /**
  * @brief Stage 8: base-level alignment via the chosen aligner (conditional).
+ *
+ * DOC0254 §6.3 — reparameterised on `Kernel = kernel_t<BAA>`.  Algorithm
+ * dispatch happens exclusively via the trait; the `if constexpr (BAA == ...)`
+ * ladder inside `describe()` is gone — its rows now live in
+ * `Kernel::populate_runtime_params(...)`.
  */
-template <::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
+template <class Kernel,
           supports_compact_sequence_range QR,
           supports_compact_sequence_range TR>
-struct AlignStage : StageBase<AlignStage<BAA, QR, TR>, AlignRegion> {
+struct AlignStage : StageBase<AlignStage<Kernel, QR, TR>, AlignRegion> {
     static constexpr std::string_view stage_name = "AlignStage";
 
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
@@ -1052,39 +1559,30 @@ struct AlignStage : StageBase<AlignStage<BAA, QR, TR>, AlignRegion> {
     bool                                          enabled;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    [[gnu::always_inline]] void process_pair(RB&& regions, AB&& anchors, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
         if (enabled) {
-            align_regions<BAA>(
+            Kernel::template call<QR, TR>(
                 std::span<AlignRegion>{regions.data(), regions.size()},
-                std::span<const Anchor>{anchors.data(), anchors.size()},
+                std::span<const ::bioseq::chaining::Anchor>{
+                    anchors.data(), anchors.size()},
                 *query_seq_, *target_seq_, *sm, params);
         }
-        sink.on_batch_pair(std::forward<RB>(regions), std::forward<AB>(anchors));
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), regions.size()},
+            std::span<const ::bioseq::chaining::Anchor>{
+                anchors.data(), anchors.size()});
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
         if (enabled) {
             StageAlgorithmDescription algo;
-            algo.name = std::string{
-                ::bioseq::simd::HWY_NAMESPACE::base_alignment_algorithm_name(BAA)};
-            algo.parameters.push_back({"match_score",  std::to_string(params.match_score)});
-            algo.parameters.push_back({"mismatch_pen", std::to_string(params.mismatch_pen)});
-            algo.parameters.push_back({"gap_open1",    std::to_string(params.gap_open1)});
-            algo.parameters.push_back({"gap_ext1",     std::to_string(params.gap_ext1)});
-            using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-            if constexpr (BAA == BaseAlignmentAlgorithmType::KSW2) {
-                algo.parameters.push_back({"gap_open2", std::to_string(params.gap_open2)});
-                algo.parameters.push_back({"gap_ext2",  std::to_string(params.gap_ext2)});
-                algo.parameters.push_back({"zdrop",     std::to_string(params.zdrop)});
-                algo.parameters.push_back({"end_bonus", std::to_string(params.end_bonus)});
-            } else {
-                algo.parameters.push_back({"block_min_size",
-                    std::to_string(static_cast<int32_t>(params.block_min_size))});
-                algo.parameters.push_back({"block_max_size",
-                    std::to_string(static_cast<int32_t>(params.block_max_size))});
-            }
+            algo.name = std::string{Kernel::algorithm_label()};
+            Kernel::populate_runtime_params(params, algo.parameters);
+            algo.computed_properties = Kernel::template static_properties<Cep>();
             desc.algorithm = std::move(algo);
         }
         return desc;
@@ -1104,20 +1602,27 @@ struct MapqStage : StageBase<MapqStage, AlignRegion> {
     bool                                          enabled;
 
     template <is_constexpr_aligner_params Cep, class RB, class Sink>
-    [[gnu::always_inline]] void process(RB&& regions, Sink& sink) {
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process(RB&& regions, EmitToken<Sink>&& token) {
         if (enabled) {
             compute_mapping_quality(
                 std::span<AlignRegion>{regions.data(), regions.size()},
                 params, 0);
         }
-        sink.on_batch(std::forward<RB>(regions));
+        return std::move(token).emit_batch(
+            std::span<AlignRegion>{regions.data(), regions.size()});
     }
 
+    // DOC0254 §4.3: pair → single delegation.  The outer body has no
+    // surviving `EmitToken<Sink>` after the inner call moves it, so a
+    // second emit is structurally blocked.
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    [[gnu::always_inline]] void process_pair(RB&& regions, AB&& /*unused*/, Sink& sink) {
-        process<Cep>(std::forward<RB>(regions), sink);
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(RB&& regions, AB&& /*unused*/, EmitToken<Sink>&& token) {
+        return process<Cep>(std::forward<RB>(regions), std::move(token));
     }
 
+    template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
@@ -1160,8 +1665,11 @@ struct SinkStage {
 
 template <is_constexpr_aligner_params Cep, class Self, class Sink>
 [[nodiscard]] PipelineDescription Stage<Cep, Self, Sink>::describe() const {
+    // DOC0254 §9.2 / R11: every concrete stage's `describe()` is templated on
+    // Cep so describe-time Cep-sensitive output always matches the runtime
+    // path's behaviour.  No `describe_representative_cep_t` alias.
     PipelineDescription d;
-    d.stages.push_back(self_.describe());
+    d.stages.push_back(self_.template describe<Cep>());
     if constexpr (requires { sink_.describe(); }) {
         PipelineDescription rest = sink_.describe();
         d.stages.insert(d.stages.end(),
@@ -1240,7 +1748,7 @@ template <is_constexpr_aligner_params Cep,
         DivergenceStage<MinimizerT>{
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
-        AlignStage<BAA, QR, TR>{
+        AlignStage<kernel_t<BAA>, QR, TR>{
             {}, params, &scoring_matrix, &query_seq, &target_seq, params.do_cigar },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
@@ -1269,6 +1777,24 @@ template <is_constexpr_aligner_params Cep,
  * iteration's pipeline is built.  Per-query results are appended to
  * `out_per_query` in input order.
  */
+// Forward declaration so `pipeline_run_impl_batch` can delegate to the
+// cross-query deferred-align path when the runtime flag is set.
+template <is_constexpr_aligner_params Cep,
+          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
+          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
+          EntryPoint                                                EP,
+          supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class MinimizerT, class IndexT>
+[[nodiscard]] std::vector<MatchResultCollection>
+pipeline_run_impl_batch_deferred_align(
+    std::span<const compact_sequence_range<QR>> query_seqs,
+    const compact_sequence_range<TR>&           target_seq,
+    std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
+    const IndexT&                               target_index,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params);
+
 template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
@@ -1284,6 +1810,20 @@ template <is_constexpr_aligner_params Cep,
     const IndexT&                               target_index,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
 {
+    // DOC0254 §11.10 — dispatcher routes `KSW2_BATCHED &&
+    // params.cross_query_batched` to the deferred-align scheduling shape.
+    // The branch is gated by a trait-level constant
+    // (`kernel_t<BAA>::supports_cross_query_batched`) so it never
+    // materialises an `if constexpr (BAA == X)` ladder (R10).
+    if constexpr (kernel_t<BAA>::supports_cross_query_batched) {
+        if (params.cross_query_batched) {
+            return pipeline_run_impl_batch_deferred_align<
+                Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT>(
+                    query_seqs, target_seq, query_minimizers_per_query,
+                    target_index, params);
+        }
+    }
+
     std::optional<context::context>                 owned_context;
     std::optional<context::installed_context_scope> install;
     if (context::current_or_null() == nullptr) {
@@ -1346,6 +1886,209 @@ template <is_constexpr_aligner_params Cep,
     }
 
     return out_per_query;
+}
+
+// =============================================================================
+// DOC0254 §11.10 — Cross-query deferred-align scheduling shape.
+//
+// Pipeline implementation parallel to `pipeline_run_impl_batch` selected when
+// `BAA == KSW2_BATCHED && params.cross_query_batched`.
+//
+// The deferred variant opens one outer Arena::Chain scope around the whole
+// batch and processes every query under it.  Per-query inner scopes still
+// open/close, but the outer scope holds whatever cross-query bucket state
+// `align_regions_batched_cross_query` chooses to accumulate (today: none —
+// the per-query bucketing already saturates the bucket fill on
+// VERY_LONG inputs per §11.10).  The pipeline layout is otherwise
+// identical to the in-spec `pipeline_run_impl_batch` shape; the
+// implementation is opt-in via `params.cross_query_batched`.
+// =============================================================================
+
+template <is_constexpr_aligner_params Cep,
+          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
+          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
+          EntryPoint                                                EP,
+          supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class MinimizerT, class IndexT>
+[[nodiscard]] std::vector<MatchResultCollection>
+pipeline_run_impl_batch_deferred_align(
+    std::span<const compact_sequence_range<QR>> query_seqs,
+    const compact_sequence_range<TR>&           target_seq,
+    std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
+    const IndexT&                               target_index,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    std::optional<context::context>                 owned_context;
+    std::optional<context::installed_context_scope> install;
+    if (context::current_or_null() == nullptr) {
+        owned_context.emplace();
+        install.emplace(*owned_context);
+    }
+    auto outer_chain_scope = context::current().push<context::Arena::Chain>();
+    auto batch_fill_scope  = context::current().push<context::Arena::Chain>();
+
+    JustLog("[bioseq] pipe: pipeline_run_impl_batch_deferred_align entry — "
+            "Cep(L={},K={},W={},fallback={}) BAA={} CA={} MA={} EP={} "
+            "queries={} target_bp={} cross_query_batched=1",
+            Cep::sequence_len_log2, Cep::kmer_len, Cep::window_len,
+            Cep::generic_fallback ? 1 : 0,
+            static_cast<int>(BAA), static_cast<int>(CA), static_cast<int>(MA),
+            static_cast<int>(EP), query_seqs.size(), target_seq.bp_size());
+
+    std::vector<MatchResultCollection> out_per_query;
+    out_per_query.reserve(query_seqs.size());
+
+    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
+    const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
+
+    static const std::vector<MinimizerT> empty_minimizers_proto{};
+
+    for (std::size_t qi = 0; qi < query_seqs.size(); ++qi) {
+        const auto&   query_seq = query_seqs[qi];
+        const int32_t query_len = static_cast<int32_t>(query_seq.bp_size());
+
+        auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
+
+        MatchResultCollection out;
+        out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
+
+        const auto& mins_for_this_query = (EP == EntryPoint::WithPrebuiltMinimizers)
+            ? query_minimizers_per_query[qi]
+            : empty_minimizers_proto;
+
+        if (query_len == 0 || target_len == 0) {
+            out_per_query.push_back(std::move(out));
+            continue;
+        }
+
+        auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
+            query_seq, target_seq, mins_for_this_query, target_index,
+            scoring_matrix, out, params, query_len, target_len);
+
+        if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
+            pipeline.on_batch(std::span<const MinimizerT>{
+                mins_for_this_query.data(), mins_for_this_query.size()});
+        } else {
+            pipeline.on_batch(std::span<const std::byte>{});
+        }
+        pipeline.on_completed();
+        out_per_query.push_back(std::move(out));
+    }
+
+    return out_per_query;
+}
+
+// =============================================================================
+// DOC0254 §11.10 — AlignCollectStage + align_regions_batched_cross_query.
+//
+// The deferred-align scheduling shape captures (regions, anchors,
+// query_seq*) per query into a `PerQueryAlignState<QR, MinimizerT>`
+// slot via `AlignCollectStage`, then `align_regions_batched_cross_query`
+// folds the per-query fill lists into one big slab, buckets across all
+// queries' fills, runs the per-bucket DP, and stitches per-region CIGAR
+// back into each query's regions before the Phase C stage chain
+// (primary/secondary/filter/mapq/sink) runs.
+//
+// Today's runtime delegates to the per-query `align_regions_batched`
+// inside the regular pipeline; the structural per-query slot remains
+// available for the inner-loop substitution (fused inter-sequence SIMD
+// DP) that a follow-up may introduce.  Building this two-phase shape
+// here keeps the deferred path independent of the per-query path.
+// =============================================================================
+
+template <supports_compact_sequence_range QR, class MinimizerT>
+struct PerQueryAlignState {
+    const compact_sequence_range<QR>* query_seq = nullptr;
+    int32_t                           query_len = 0;
+    ArenaSlab<AlignRegion>            regions{nullptr, 0u, 0u, nullptr};
+    ArenaSlab<::bioseq::chaining::Anchor> anchors{nullptr, 0u, 0u, nullptr};
+    MatchResultCollection             out{};
+};
+
+/**
+ * @brief Phase-A terminal stage for the deferred-align pipeline.
+ *
+ * Records the upstream `(regions, anchors)` pair plus the per-query
+ * query_seq pointer into a `PerQueryAlignState` slot and emits no
+ * further batches; the downstream sink (a no-op) absorbs an empty
+ * emission so the pipeline composition stays uniform.  Used only by
+ * `pipeline_run_impl_batch_deferred_align`.
+ */
+template <supports_compact_sequence_range QR, class MinimizerT>
+struct AlignCollectStage
+    : StageBase<AlignCollectStage<QR, MinimizerT>, AlignRegion>
+{
+    static constexpr std::string_view stage_name = "AlignCollectStage";
+
+    PerQueryAlignState<QR, MinimizerT>* slot;
+
+    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    [[gnu::always_inline]]
+    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors,
+                                    EmitToken<Sink>&& token)
+    {
+        // Move-in the regions / anchors slabs to the per-query slot via
+        // span-copy: the caller owns the arena scope so the spans are
+        // safe through the deferred-align Phase B/C steps.
+        const std::size_t n_r = regions.size();
+        const std::size_t n_a = anchors.size();
+        slot->regions.reserve_for_placement_new(n_r);
+        for (std::size_t i = 0; i < n_r; ++i) {
+            slot->regions.construct_at_back(std::move(regions.data()[i]));
+        }
+        slot->anchors.reserve(n_a);
+        for (std::size_t i = 0; i < n_a; ++i) {
+            slot->anchors.push_back(anchors.data()[i]);
+        }
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{slot->regions.data(), slot->regions.size()},
+            std::span<const ::bioseq::chaining::Anchor>{
+                slot->anchors.data(), slot->anchors.size()});
+    }
+
+    template <is_constexpr_aligner_params Cep>
+    [[nodiscard]] StageDescription describe() const {
+        StageDescription desc;
+        desc.stage_name = std::string{stage_name};
+        StageAlgorithmDescription algo;
+        algo.name = "Align-collect (deferred batching)";
+        desc.algorithm = std::move(algo);
+        return desc;
+    }
+};
+
+/**
+ * @brief Phase B of the deferred-align scheduling shape — folds every
+ *        per-query fill list into one big slab, buckets across queries,
+ *        runs the per-bucket DP, and stitches the per-fill CIGAR back
+ *        into each query's regions.
+ *
+ * The current implementation iterates per-query through
+ * `align_regions_batched` — which buckets that query's fills and runs
+ * the per-bucket DP — keeping the per-query slabs alive across the
+ * call.  Substituting an explicit cross-query bucket accumulator is a
+ * local change to this function and does not affect the surrounding
+ * dispatcher or `AlignCollectStage`.
+ */
+template <supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class MinimizerT>
+void align_regions_batched_cross_query(
+    std::span<PerQueryAlignState<QR, MinimizerT>> per_query,
+    const compact_sequence_range<TR>&             target_seq,
+    const ScoringMatrix<QR>&                      scoring_matrix,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    for (auto& q : per_query) {
+        if (q.query_seq == nullptr || q.regions.size() == 0) continue;
+        align_regions_batched<QR, TR>(
+            std::span<AlignRegion>{q.regions.data(), q.regions.size()},
+            std::span<const ::bioseq::chaining::Anchor>{
+                q.anchors.data(), q.anchors.size()},
+            *q.query_seq, target_seq, scoring_matrix, params);
+    }
 }
 
 /**
@@ -1469,6 +2212,9 @@ template <is_constexpr_aligner_params Cep,
     switch (params.base_alignment_algorithm) {
         case BaseAlignmentAlgorithmType::KSW2:
             return dispatch_on_chain<Cep, BaseAlignmentAlgorithmType::KSW2, EP, QR, TR>(
+                query_seq, target_seq, query_minimizers, target_index, params);
+        case BaseAlignmentAlgorithmType::KSW2_BATCHED:
+            return dispatch_on_chain<Cep, BaseAlignmentAlgorithmType::KSW2_BATCHED, EP, QR, TR>(
                 query_seq, target_seq, query_minimizers, target_index, params);
         case BaseAlignmentAlgorithmType::BLOCK_ALIGNER:
         default:
@@ -1641,6 +2387,31 @@ template <is_constexpr_aligner_params CepHere,
                 default:
                     return describe_pipeline_leaf<CepHere,
                         BaseAlignmentAlgorithmType::KSW2,
+                        ChainingAlgorithmType::SCALAR_MM2,
+                        MinimizerAlgorithmType::SCALAR,
+                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
+                            query_seq_proto, target_seq_proto, params, query_len, target_len);
+            }
+        case BaseAlignmentAlgorithmType::KSW2_BATCHED:
+            switch (params.chaining_algorithm) {
+                case ChainingAlgorithmType::SIMD_MM2:
+                    return describe_pipeline_leaf<CepHere,
+                        BaseAlignmentAlgorithmType::KSW2_BATCHED,
+                        ChainingAlgorithmType::SIMD_MM2,
+                        MinimizerAlgorithmType::SCALAR,
+                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
+                            query_seq_proto, target_seq_proto, params, query_len, target_len);
+                case ChainingAlgorithmType::RMQ:
+                    return describe_pipeline_leaf<CepHere,
+                        BaseAlignmentAlgorithmType::KSW2_BATCHED,
+                        ChainingAlgorithmType::RMQ,
+                        MinimizerAlgorithmType::SCALAR,
+                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
+                            query_seq_proto, target_seq_proto, params, query_len, target_len);
+                case ChainingAlgorithmType::SCALAR_MM2:
+                default:
+                    return describe_pipeline_leaf<CepHere,
+                        BaseAlignmentAlgorithmType::KSW2_BATCHED,
                         ChainingAlgorithmType::SCALAR_MM2,
                         MinimizerAlgorithmType::SCALAR,
                         EntryPoint::WithPrebuiltMinimizers, QR, TR>(
@@ -1823,20 +2594,20 @@ template <class MinimizerT,
             target_seq.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
         switch (params.minimizer_algorithm) {
             case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                collect_minimizers_simd<minimap_int_hasher>(
+                collect_minimizers_simd<minimap_int_hasher, MinimizerT>(
                     target_collector, target_seq,
                     target_seq.begin(), target_seq.end(),
                     window_len, kmer_len);
                 break;
             case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher, MinimizerT>(
                     target_collector, target_seq,
                     target_seq.begin(), target_seq.end(),
                     window_len, kmer_len);
                 break;
             case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR:
             default:
-                collect_minimizers<minimap_int_hasher>(
+                collect_minimizers<minimap_int_hasher, MinimizerT>(
                     target_collector, target_seq,
                     target_seq.begin(), target_seq.end(),
                     window_len, kmer_len);
@@ -1854,20 +2625,20 @@ template <class MinimizerT,
             query_seq.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
         switch (params.minimizer_algorithm) {
             case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                collect_minimizers_simd<minimap_int_hasher>(
+                collect_minimizers_simd<minimap_int_hasher, MinimizerT>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     window_len, kmer_len);
                 break;
             case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher>(
+                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher, MinimizerT>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     window_len, kmer_len);
                 break;
             case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR:
             default:
-                collect_minimizers<minimap_int_hasher>(
+                collect_minimizers<minimap_int_hasher, MinimizerT>(
                     query_collector, query_seq,
                     query_seq.begin(), query_seq.end(),
                     window_len, kmer_len);

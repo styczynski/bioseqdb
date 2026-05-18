@@ -107,6 +107,11 @@ enum class ChainingAlgorithmType : uint8_t {
 enum class BaseAlignmentAlgorithmType : uint8_t {
     KSW2          = 0,
     BLOCK_ALIGNER = 1,
+    /// Inter-region batched KSW2 (DOC0254 §11). Packs many small KSW2
+    /// gap-fills across regions into SIMD lanes and runs an inter-sequence
+    /// DP. Long fills (q_max > 256 || t_max > 256) fall through to the
+    /// intra-sequence striped KSW2 kernel via the same trait surface.
+    KSW2_BATCHED  = 2,
 };
 
 /// Minimizer-extraction algorithm. Selected at runtime; the
@@ -152,6 +157,7 @@ enum class MinimizerAlgorithmType : uint8_t {
     switch (mode) {
         case BaseAlignmentAlgorithmType::KSW2:          return "KSW2";
         case BaseAlignmentAlgorithmType::BLOCK_ALIGNER: return "Block Aligner";
+        case BaseAlignmentAlgorithmType::KSW2_BATCHED:  return "KSW2 (inter-region batched)";
     }
     return "unknown";
 }
@@ -274,6 +280,14 @@ struct Minimap2Params {
     /// pipeline with context_args_profiling_full; when false, the
     /// no-profiling instantiation runs (zero overhead).
     bool                          enable_profiling          = false;
+
+    /// When true and base_alignment_algorithm == KSW2_BATCHED, the
+    /// dispatcher routes through the cross-query deferred-align scheduling
+    /// shape (DOC0254 §11.10). All queries in the outer batch collect their
+    /// fills before any DP runs, producing larger buckets and better SIMD
+    /// occupancy on shorter queries. Off by default — per-query bucketing
+    /// already saturates the bucket fill for VERY_LONG inputs.
+    bool                          cross_query_batched       = false;
 
     /// Build ChainingParams from this Minimap2Params.
     ///
@@ -1637,6 +1651,30 @@ void align_regions(
         }
         if (outer_query_end > query_length) {
             outer_query_end = query_length;
+        }
+
+        // DOC0254 §10.3: pre-reserve CIGAR storage from outer extents so the
+        // three-phase fill collapses the geometric doubling chain to one
+        // allocation per region.  `outer_query_end - outer_query_start`
+        // bounds the column count of the left-extension + gap-fill +
+        // right-extension union; +16 absorbs the per-op rounding.  The
+        // reserve is clamped to `4 * params.max_gap + 64` ops to prevent
+        // pathological over-allocation on multi-Mbp seed spans (XXL_HIFI
+        // workloads where the seeded query extent itself is megabases —
+        // run-length-compressed CIGARs are typically 10–100× smaller than
+        // the column count, so this cap stays a strict upper bound while
+        // protecting the per-query allocator from gigabyte spikes).
+        {
+            const int32_t cigar_q_extent = outer_query_end - outer_query_start;
+            const int32_t cigar_r_extent = outer_ref_end   - outer_ref_start;
+            const int32_t cigar_q_clamped = cigar_q_extent > 0 ? cigar_q_extent : 0;
+            const int32_t cigar_r_clamped = cigar_r_extent > 0 ? cigar_r_extent : 0;
+            const std::size_t raw_estimate =
+                static_cast<std::size_t>(cigar_q_clamped) +
+                static_cast<std::size_t>(cigar_r_clamped) + 16u;
+            const std::size_t cigar_reserve_cap =
+                static_cast<std::size_t>(4 * params.max_gap) + 64u;
+            region.cigar.reserve(std::min(raw_estimate, cigar_reserve_cap));
         }
 
         region.cigar.clear();

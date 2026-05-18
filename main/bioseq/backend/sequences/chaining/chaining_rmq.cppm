@@ -26,6 +26,7 @@ module;
 #include <span>
 #include <limits>
 #include <algorithm>
+#include <bit>
 #include <cstring>
 
 export module bioseq_sequences.chaining.rmq;
@@ -710,18 +711,21 @@ void chain_anchors_rmq(
         max_dist_inner = 0;
     }
 
-    // DP arrays — chain arena (SPEC §5.2).
+    // DP arrays — chain arena (SPEC §5.2).  DOC0254 §10.2 replaces the
+    // five `make_chain_vector<T>` + `.assign(n, sentinel)` pairs with
+    // `alloc_chain_array<T>` + `std::memset(...)` to match the
+    // chaining_scalar/SIMD paths (chaining_scalar.cppm:109-119).
     auto dp_scope = context::current().push<context::Arena::Chain>();
     auto& dp_ctx = context::current();
-    auto best_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
-    auto predecessors_v = dp_ctx.make_chain_vector<int64_t>(anchor_count);
-    auto peak_scores_v  = dp_ctx.make_chain_vector<int32_t>(anchor_count);
-    best_scores_v.assign(anchor_count, 0);
-    predecessors_v.assign(anchor_count, -1);
-    peak_scores_v.assign(anchor_count, 0);
-    auto best_scores  = std::span<int32_t>(best_scores_v);
-    auto predecessors = std::span<int64_t>(predecessors_v);
-    auto peak_scores  = std::span<int32_t>(peak_scores_v);
+    auto best_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
+    auto predecessors = dp_ctx.alloc_chain_array<int64_t>(static_cast<std::size_t>(anchor_count));
+    auto peak_scores  = dp_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
+    std::memset(best_scores.data(),  0,
+                static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
+    std::memset(predecessors.data(), 0xff,
+                static_cast<std::size_t>(anchor_count) * sizeof(int64_t));
+    std::memset(peak_scores.data(),  0,
+                static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
 
     // Allocate trees
     RmqTree primary_tree;
@@ -736,13 +740,18 @@ void chain_anchors_rmq(
     int64_t prune_start = 0;
     int64_t prune_start_inner = 0;
 
-    // Per-anchor node pointers (chain arena).
-    auto primary_nodes_v = dp_ctx.make_chain_vector<RmqNode*>(anchor_count);
-    auto inner_nodes_v   = dp_ctx.make_chain_vector<RmqNode*>(anchor_count);
-    primary_nodes_v.assign(anchor_count, nullptr);
-    inner_nodes_v.assign(anchor_count, nullptr);
-    auto primary_nodes = std::span<RmqNode*>(primary_nodes_v);
-    auto inner_nodes   = std::span<RmqNode*>(inner_nodes_v);
+    // Per-anchor node pointers (chain arena).  Pointer-zero portability:
+    // aarch64-darwin and x86_64-linux/darwin all have all-zero-bits
+    // null-pointer representation — the memset(0) is equivalent to the
+    // previous .assign(anchor_count, nullptr).
+    auto primary_nodes = dp_ctx.alloc_chain_array<RmqNode*>(
+        static_cast<std::size_t>(anchor_count));
+    auto inner_nodes   = dp_ctx.alloc_chain_array<RmqNode*>(
+        static_cast<std::size_t>(anchor_count));
+    std::memset(primary_nodes.data(), 0,
+                static_cast<std::size_t>(anchor_count) * sizeof(RmqNode*));
+    std::memset(inner_nodes.data(),   0,
+                static_cast<std::size_t>(anchor_count) * sizeof(RmqNode*));
 
     {
     static const auto* _fwd_desc =
@@ -914,9 +923,9 @@ void chain_anchors_rmq(
         bioseq::instr::register_region_static("backtrack_chains");
     auto _bt_scope = bioseq::instr::region(_bt_desc);
     backtrack_chains(anchors,
-        std::span<const int32_t>(best_scores_v),
-        std::span<const int64_t>(predecessors_v),
-        std::span<const int32_t>(peak_scores_v),
+        std::span<const int32_t>(best_scores.data(),  best_scores.size()),
+        std::span<const int64_t>(predecessors.data(), predecessors.size()),
+        std::span<const int32_t>(peak_scores.data(),  peak_scores.size()),
         params.min_chain_score, params.min_seed_count,
         chains_out, reordered_anchors_out);
 }

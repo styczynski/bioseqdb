@@ -407,14 +407,18 @@ template<
     class MinimizerT,
     supports_compact_sequence_range R,
     typename I = decltype(compact_sequence_range<R>().begin()),
-    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit
+    typename hash_val_t = compact_sequence_range<R>::traits::storage_unit,
+    // DOC0254 §5.3 — collector is now a template parameter, defaulting to
+    // the legacy sketch_collector_t so existing call sites compile
+    // unchanged.  Arena adapters substitute here.
+    class Collector = sketch_collector_t<MinimizerT>
 >
 requires (
     supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
 [[gnu::always_inline]] [[gnu::flatten]] inline void
 collect_minimizers_two_stack_nthash_simd_impl(
-    sketch_collector_t<MinimizerT>& collector,
+    Collector& collector,
     compact_sequence_range<R>& seq,
     const I& seq_begin,
     const I& seq_end,
@@ -711,13 +715,16 @@ template<
     template<typename H_A> typename simd_hash_t,
     class MinimizerT,
     supports_compact_sequence_range R,
-    typename I = decltype(compact_sequence_range<R>().begin())
+    typename I = decltype(compact_sequence_range<R>().begin()),
+    // DOC0254 §5.3 — Collector defaults to the legacy
+    // sketch_collector_t<MinimizerT>.  Arena adapters substitute here.
+    class Collector = sketch_collector_t<MinimizerT>
 >
 requires (
     supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
 )
 inline void collect_minimizers_two_stack_nthash_simd(
-    sketch_collector_t<MinimizerT>& collector,
+    Collector& collector,
     compact_sequence_range<R>& seq,
     const I& seq_begin,
     const I& seq_end,
@@ -756,13 +763,13 @@ inline void collect_minimizers_two_stack_nthash_simd(
                 collect_minimizers_two_stack_nthash_simd_impl<
                     StaticW, StaticK,
                     /*NumStreams=*/2, /*DetectPalindrome=*/false,
-                    simd_hash_t, MinimizerT, R, I, hash_unit_t>(
+                    simd_hash_t, MinimizerT, R, I, hash_unit_t, Collector>(
                         collector, seq, seq_begin, seq_end, w, k);
             } else {
                 collect_minimizers_two_stack_nthash_simd_impl<
                     StaticW, StaticK,
                     /*NumStreams=*/1, /*DetectPalindrome=*/true,
-                    simd_hash_t, MinimizerT, R, I, hash_unit_t>(
+                    simd_hash_t, MinimizerT, R, I, hash_unit_t, Collector>(
                         collector, seq, seq_begin, seq_end, w, k);
             }
         };
@@ -823,6 +830,82 @@ inline void collect_minimizers_two_stack_nthash_simd(
         return;
     }
     dispatch_with_k_aware_unit.template operator()<0, 0>();
+}
+
+// =============================================================================
+// DOC0254 §8.2 — Cep-templated bridge for the two-stack nthash SIMD kernel.
+//
+// Short-circuits directly to the `_impl<StaticW, StaticK>` dispatcher whose
+// inner code is already template-specialised on (W, K).  The dual/single
+// stream eligibility threshold is recomputed inline using the static
+// (W, K) constants so the dispatch remains branchless once inlined.
+// =============================================================================
+
+template <
+    std::size_t W, std::size_t K,
+    template<typename H_A> typename simd_hash_t,
+    class MinimizerT,
+    supports_compact_sequence_range R,
+    typename I       = decltype(compact_sequence_range<R>().begin()),
+    class Collector  = sketch_collector_t<MinimizerT>>
+requires (
+    supports_simd_hash<simd_hash_t, typename compact_sequence_range<R>::traits::alphabet_type>
+)
+[[gnu::always_inline]] inline void
+collect_minimizers_two_stack_nthash_simd_constexpr(
+    Collector&                 collector,
+    compact_sequence_range<R>& seq,
+    const I&                   seq_begin,
+    const I&                   seq_end)
+{
+    using seq_traits        = typename compact_sequence_range<R>::traits;
+    using base_storage_unit = typename seq_traits::storage_unit;
+    constexpr std::size_t base_bits = sizeof(base_storage_unit) * 8;
+    constexpr std::size_t bpc       = seq_traits::bits_per_char;
+    constexpr std::size_t kmer_bits = K * bpc;
+
+    if constexpr (kmer_bits <= base_bits) {
+        using unit_d_t = hn::ScalableTag<base_storage_unit>;
+        constexpr std::size_t lpu_unit = sizeof(base_storage_unit) * 8 / bpc;
+        const std::size_t lanes_per_stream_unit = hn::Lanes(unit_d_t{});
+        constexpr std::size_t context_bps = K + W - 1;
+        const std::size_t min_seq_for_dual_unit =
+            2 * lanes_per_stream_unit * lpu_unit + context_bps;
+        const bool use_dual = (seq.bp_size() >= min_seq_for_dual_unit);
+        if (use_dual) {
+            collect_minimizers_two_stack_nthash_simd_impl<
+                W, K, /*NumStreams=*/2, /*DetectPalindrome=*/false,
+                simd_hash_t, MinimizerT, R, I, base_storage_unit, Collector>(
+                    collector, seq, seq_begin, seq_end, W, K);
+        } else {
+            collect_minimizers_two_stack_nthash_simd_impl<
+                W, K, /*NumStreams=*/1, /*DetectPalindrome=*/true,
+                simd_hash_t, MinimizerT, R, I, base_storage_unit, Collector>(
+                    collector, seq, seq_begin, seq_end, W, K);
+        }
+    } else {
+        static_assert(K * bpc <= 64u,
+            "Static K-mer does not fit in any supported SIMD lane "
+            "(uint64_t is the AArch64-NEON ceiling).");
+        using unit_d_t = hn::ScalableTag<std::uint64_t>;
+        constexpr std::size_t lpu_unit = 64u / bpc;
+        const std::size_t lanes_per_stream_unit = hn::Lanes(unit_d_t{});
+        constexpr std::size_t context_bps = K + W - 1;
+        const std::size_t min_seq_for_dual_unit =
+            2 * lanes_per_stream_unit * lpu_unit + context_bps;
+        const bool use_dual = (seq.bp_size() >= min_seq_for_dual_unit);
+        if (use_dual) {
+            collect_minimizers_two_stack_nthash_simd_impl<
+                W, K, /*NumStreams=*/2, /*DetectPalindrome=*/false,
+                simd_hash_t, MinimizerT, R, I, std::uint64_t, Collector>(
+                    collector, seq, seq_begin, seq_end, W, K);
+        } else {
+            collect_minimizers_two_stack_nthash_simd_impl<
+                W, K, /*NumStreams=*/1, /*DetectPalindrome=*/true,
+                simd_hash_t, MinimizerT, R, I, std::uint64_t, Collector>(
+                    collector, seq, seq_begin, seq_end, W, K);
+        }
+    }
 }
 
 

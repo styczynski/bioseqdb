@@ -503,24 +503,15 @@ inline void backtrack_chains(
     (void)peak_scores;  // upstream keeps it for parity with lchain.c; unused here
     const int64_t anchor_count = static_cast<int64_t>(anchors.size());
 
-    // Build scored index array, filter by min_score
+    // Build scored index array, filter by min_score.  DOC0254 §10.1: replaces
+    // the two heap-allocated `std::vector`s with arena slabs; the scored slab
+    // is sized exactly to `anchor_count` (filter produces at most that many
+    // rows) and the per-rank-iteration chain index slab is reused via an
+    // explicit length counter instead of `clear()`.
     struct ScoredAnchorIndex {
         int32_t score;
         int64_t anchor_index;
     };
-    std::vector<ScoredAnchorIndex> scored_indices;
-    scored_indices.reserve(anchor_count);
-    for (int64_t anchor_idx = 0; anchor_idx < anchor_count; ++anchor_idx) {
-        if (best_scores[anchor_idx] >= min_score) {
-            scored_indices.push_back({best_scores[anchor_idx], anchor_idx});
-        }
-    }
-
-    /// Score-ascending comparator for the backtracking pass — we walk the
-    /// scored-index array tail-first so the highest-scoring chain anchors
-    /// claim the predecessor trail before any lower-scoring chain reaches
-    /// them.  Non-capturing functor (R4 compliance, no capture-all lambdas
-    /// in any pipeline-module file).
     struct ScoreAscending {
         [[nodiscard, gnu::always_inline]] bool operator()(
             const ScoredAnchorIndex& left,
@@ -530,8 +521,19 @@ inline void backtrack_chains(
         }
     };
 
+    auto& bt_ctx = context::current();
+
+    auto scored = bt_ctx.alloc_chain_array<ScoredAnchorIndex>(
+        static_cast<std::size_t>(anchor_count));
+    std::size_t scored_count = 0;
+    for (int64_t anchor_idx = 0; anchor_idx < anchor_count; ++anchor_idx) {
+        if (best_scores[anchor_idx] >= min_score) {
+            scored[scored_count++] = ScoredAnchorIndex{best_scores[anchor_idx], anchor_idx};
+        }
+    }
+
     // Sort by score ascending so we process highest-scoring chains last->first
-    std::sort(scored_indices.begin(), scored_indices.end(), ScoreAscending{});
+    std::sort(scored.data(), scored.data() + scored_count, ScoreAscending{});
 
     // `visited` was previously a `std::vector<int32_t>(anchor_count, 0)` —
     // a fresh malloc + zero-fill on every chaining call. Move into the
@@ -539,36 +541,45 @@ inline void backtrack_chains(
     // chain arena's scope is owned by the calling chain_anchors_*; the
     // span lives until that scope drops, which is after this function
     // returns to the caller — safe.
-    auto& bt_ctx = context::current();
     auto visited = bt_ctx.alloc_chain_array<int32_t>(static_cast<std::size_t>(anchor_count));
     std::memset(visited.data(), 0,
                 static_cast<std::size_t>(anchor_count) * sizeof(int32_t));
-    std::vector<int64_t> chain_anchor_indices;
+
+    // Per-rank-iteration chain index scratch — sized to the maximum chain
+    // length (= anchor_count) and reused across rank iterations via the
+    // `chain_len` counter (DOC0254 §10.1).
+    auto chain_idx = bt_ctx.alloc_chain_array<int64_t>(
+        static_cast<std::size_t>(anchor_count));
 
     // Process from highest to lowest score
-    for (int64_t rank_idx = static_cast<int64_t>(scored_indices.size()) - 1;
+    for (int64_t rank_idx = static_cast<int64_t>(scored_count) - 1;
          rank_idx >= 0; --rank_idx)
     {
         // NOTE: Do NOT skip candidates where visited[candidate] != 0.
         // The trace naturally stops at visited nodes. (lchain.c:35-56)
-        chain_anchor_indices.clear();
+        std::size_t chain_len = 0;
         int64_t trace_idx;
-        for (trace_idx = scored_indices[rank_idx].anchor_index;
+        for (trace_idx = scored[rank_idx].anchor_index;
              trace_idx >= 0 && visited[trace_idx] == 0;
              trace_idx = predecessors[trace_idx])
         {
-            chain_anchor_indices.push_back(trace_idx);
+            chain_idx[chain_len++] = trace_idx;
             visited[trace_idx] = 1;
         }
 
         const int32_t chain_score = (trace_idx < 0)
-            ? scored_indices[rank_idx].score
-            : scored_indices[rank_idx].score - best_scores[trace_idx];
-        const int32_t chain_length = static_cast<int32_t>(chain_anchor_indices.size());
+            ? scored[rank_idx].score
+            : scored[rank_idx].score - best_scores[trace_idx];
+        const int32_t chain_length = static_cast<int32_t>(chain_len);
 
         if (chain_score >= min_score && chain_length >= min_seed_count) {
-            // Reverse to forward order
-            std::reverse(chain_anchor_indices.begin(), chain_anchor_indices.end());
+            // Reverse to forward order (in-place two-pointer swap; no
+            // intermediate container).
+            if (chain_len > 1) {
+                for (std::size_t lo = 0, hi = chain_len - 1; lo < hi; ++lo, --hi) {
+                    std::swap(chain_idx[lo], chain_idx[hi]);
+                }
+            }
 
             Chain chain;
             chain.score = chain_score;
@@ -576,8 +587,8 @@ inline void backtrack_chains(
             chain.anchor_start = static_cast<int32_t>(reordered_anchors_out.size());
             chains_out.push_back(chain);
 
-            for (const int64_t anchor_idx : chain_anchor_indices) {
-                reordered_anchors_out.push_back(anchors[anchor_idx]);
+            for (std::size_t i = 0; i < chain_len; ++i) {
+                reordered_anchors_out.push_back(anchors[chain_idx[i]]);
             }
         }
         // CRITICAL: Do NOT unmark visited[] for rejected chains.

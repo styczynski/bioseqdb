@@ -277,7 +277,7 @@ export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
 			compact_sequence_range<Dst> seq = make_seq_range_from_pg<Dst>(hdr);
 
 			sketch_collector collector;
-			collect_minimizers<minimap_int_hasher>(
+			collect_minimizers<minimap_int_hasher, MinimapSketchData>(
 				collector, seq, seq.begin(), seq.end(),
 				/*w=*/10, /*k=*/15);
 			// Move the vector — collector dies at lambda exit.
