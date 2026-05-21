@@ -31,10 +31,22 @@
  */
 module;
 
+// DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
+// on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
+// gcc and clang honour the attribute at -O1+, but downgrade silently at -O0.
+// Build configs that compile this module without optimisation produce
+// stack-spilled adaptor frames that defeat the point of the cascade; refuse
+// to compile in that mode.
+#if !defined(__OPTIMIZE__)
+# error "DOC0256 chain primitive requires -O1 or higher (see DOC0256 §R17). " \
+        "Use -Og or -O1 -g for debug builds of pipe.cppm."
+#endif
+
 #include <hwy/highway.h>
 
 #include "common.h"
 
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
@@ -74,6 +86,14 @@ export {
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE::pipe {
+
+// DOC0256 §2.1 — the chain primitive is load-bearing on relaxed
+// template-template parameter matching (P0522R0) and C++20 class-type
+// NTTPs (carrying `auto...` packs that interleave enum NTTPs with
+// `std::size_t`).  Guard the build mode so a misconfigured build fails
+// loudly rather than producing subtly-wrong codegen.
+static_assert(__cplusplus >= 202302L,
+    "DOC0256 requires C++23 — see DOC0256 §2.1.");
 
 // Import types from the surrounding modules so the stage bodies can refer
 // to them by short name.
@@ -2120,214 +2140,776 @@ template <is_constexpr_aligner_params Cep,
 }
 
 // =============================================================================
-// 9.3 Inner dispatch — algorithm cascade (DOC0249 §9.3)
+// DOC0256 — value_sequence (non-type parameter pack carrier)
 // =============================================================================
+//
+// `std::integer_sequence<T, Vs...>` requires `T` to be an integral type per
+// the C++ standard, so libc++ rejects enum NTTP packs.  The chain's registry
+// for `ChainingAlgorithmType`, `BaseAlignmentAlgorithmType`, and
+// `MinimizerAlgorithmType` carries enum-valued packs, so we use our own
+// `value_sequence<T, Vs...>` carrier that imposes no constraint on `T`.
+// Used uniformly by `enum_dispatch_pack`, `value_dispatch_smallest_ge`,
+// and every registry's `value_list`.  Declared ahead of §4 so the
+// bucket-derivation helpers can refer to it.
+
+template <class T, T... Vs>
+struct value_sequence {
+    using value_type = T;
+    static constexpr std::size_t size() noexcept { return sizeof...(Vs); }
+};
+
+// =============================================================================
+// DOC0256 §4 — MinimizerLayout-driven L bucket derivation
+// =============================================================================
+//
+// Replaces the hand-coded `(K, L)` ladders that used to live inside
+// `dispatch_pipeline` and `minimap_port`.  The bucket list is computed at
+// compile time from the per-K transitions in `MinimizerLayout::storage_bits`,
+// so adding a new K only requires editing `kmer_size_buckets` and the
+// per-K clause in `storage_bits_for`.
+
+/// Canonical k-mer values the bench/postgres paths instantiate.  The leading
+/// entry is the default for non-canonical kmer_size — see kmer_size_default.
+inline constexpr std::array<std::size_t, 3> kmer_size_buckets = {
+    15u, 7u, 27u,
+};
+
+/// `bit_width(max(max_bp - 1, 1))` clamped into `[K, 63]` — the smallest
+/// `L` such that `2^L > max_bp - 1`, lifted up to `K` so the resulting
+/// `MinimizerLayout<L, K>` keeps `pos_bits >= kmer_size`.  At L=63 every K
+/// resolves to a non-void storage_t (the 128-bit specialisation handles the
+/// upper band), so a clamp on the upper end is sufficient.
+[[nodiscard]] constexpr std::size_t round_up_seq_len_log2(
+    std::size_t max_bp, std::size_t kmer_size) noexcept
+{
+    const std::size_t need = max_bp > 1u ? max_bp - 1u : 1u;
+    const std::size_t lg   = static_cast<std::size_t>(std::bit_width(need));
+    return std::clamp<std::size_t>(lg, kmer_size, 63u);
+}
+
+static_assert(round_up_seq_len_log2(0u,            15u) == 15u);
+static_assert(round_up_seq_len_log2(1u,            15u) == 15u);
+static_assert(round_up_seq_len_log2(std::size_t{1} << 28, 15u) == 28u);
+static_assert(round_up_seq_len_log2((std::size_t{1} << 48) + 1u, 15u) == 49u);
+static_assert(round_up_seq_len_log2(std::size_t{1} << 62, 15u) == 62u);
 
 namespace detail {
 
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] MatchResultCollection dispatch_on_chain_and_mini(
-    const compact_sequence_range<QR>& query_seq,
-    const compact_sequence_range<TR>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+/// Pack-expansion builder for a per-K table of `storage_bits` values keyed
+/// by L ∈ [0, 64).  The layout type takes (L, K) as template parameters, so
+/// the only way to convert a runtime L into a template argument is to
+/// pre-compute every value of `MinimizerLayout<L, K>::storage_bits` for L
+/// in the legal range and index into the resulting `std::array`.  All work
+/// happens at constant-evaluation time; the dispatcher path never enters
+/// this helper.
+template <std::size_t K, std::size_t... Ls>
+[[nodiscard]] consteval auto make_storage_bits_table_impl(
+    std::index_sequence<Ls...>) noexcept
 {
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-    if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
-        // MinimizerAlgorithmType is irrelevant on the pre-built path — pick
-        // any value and let the unused MinimizerStage fall away.
-        return pipeline_run_impl<Cep, BAA, CA,
-            MinimizerAlgorithmType::SCALAR, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-    } else {
-        switch (params.minimizer_algorithm) {
-            case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                return pipeline_run_impl<Cep, BAA, CA,
-                    MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW, EP, QR, TR>(
-                        query_seq, target_seq, query_minimizers, target_index, params);
-            case MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                return pipeline_run_impl<Cep, BAA, CA,
-                    MinimizerAlgorithmType::TWO_STACK_NTHASH, EP, QR, TR>(
-                        query_seq, target_seq, query_minimizers, target_index, params);
-            case MinimizerAlgorithmType::SCALAR:
-            default:
-                return pipeline_run_impl<Cep, BAA, CA,
-                    MinimizerAlgorithmType::SCALAR, EP, QR, TR>(
-                        query_seq, target_seq, query_minimizers, target_index, params);
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerLayout;
+    return std::array<std::size_t, sizeof...(Ls)>{
+        MinimizerLayout<Ls, K>::storage_bits...
+    };
+}
+
+template <std::size_t K>
+[[nodiscard]] consteval auto make_storage_bits_table() noexcept {
+    return make_storage_bits_table_impl<K>(std::make_index_sequence<64u>{});
+}
+
+/// Look up `MinimizerLayout<L, K>::storage_bits` from the per-K table.  The
+/// per-K clauses are a *dispatch table*, not a hand-tuned ladder — they exist
+/// because the layout requires K as a *template* argument and the consteval
+/// helper above can only enumerate L for a fixed compile-time K.  Every K
+/// in `kmer_size_buckets` must have a matching clause here.
+[[nodiscard]] consteval std::size_t storage_bits_for(
+    std::size_t L, std::size_t K) noexcept
+{
+    if (K == 15u) return make_storage_bits_table<15u>()[L];
+    if (K == 7u)  return make_storage_bits_table<7u>()[L];
+    if (K == 27u) return make_storage_bits_table<27u>()[L];
+    return 0u;
+}
+
+/// Compute the breakpoint L values for a given K.  For each L in [K, 63]:
+///   - L is emitted if storage_bits_for(L, K) != storage_bits_for(L-1, K),
+///     recorded as the largest L of the previous band (i.e. L-1).
+///   - L = K is emitted as the lower anchor.
+///   - L = 63 is always emitted as the terminal anchor.
+/// Max 6 entries possible (initial + up to 3 storage transitions + terminal +
+/// headroom).
+template <std::size_t K>
+[[nodiscard]] consteval auto compute_breakpoints_for() noexcept {
+    std::array<std::size_t, 6u> out{};
+    std::size_t out_n = 0u;
+    std::size_t last_bits = 0u;
+    for (std::size_t L = K; L <= 63u; ++L) {
+        const std::size_t bits = storage_bits_for(L, K);
+        if (bits != last_bits) {
+            out[out_n++] = (last_bits == 0u) ? L : L - 1u;
+            last_bits = bits;
         }
     }
+    out[out_n++] = 63u;
+    return std::pair{out, out_n};
 }
 
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] MatchResultCollection dispatch_on_chain(
-    const compact_sequence_range<QR>& query_seq,
-    const compact_sequence_range<TR>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+static_assert(compute_breakpoints_for<15u>().second <= 6u);
+static_assert(compute_breakpoints_for<7u>().second  <= 6u);
+static_assert(compute_breakpoints_for<27u>().second <= 6u);
+
+/// Work-buffer type for `compute_global_l_buckets`.  Sized 32 (≤ 6
+/// breakpoints/K × ≤ 5 kmer sizes = 30; rounded up to a power of two for
+/// headroom).
+using raw_buf = std::array<std::size_t, 32u>;
+
+/// Free consteval helper — appends `value` to raw[0..raw_n) unless it
+/// already exists; bumps raw_n on insert.  Threaded by reference so the
+/// caller controls the accumulator state without a `[&]` capture.
+consteval void append_unique_value(
+    raw_buf& raw, std::size_t& raw_n,
+    std::size_t value) noexcept
 {
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    switch (params.chaining_algorithm) {
-        case ChainingAlgorithmType::SIMD_MM2:
-            return dispatch_on_chain_and_mini<Cep, BAA,
-                ChainingAlgorithmType::SIMD_MM2, EP, QR, TR>(
-                    query_seq, target_seq, query_minimizers, target_index, params);
-        case ChainingAlgorithmType::RMQ:
-            return dispatch_on_chain_and_mini<Cep, BAA,
-                ChainingAlgorithmType::RMQ, EP, QR, TR>(
-                    query_seq, target_seq, query_minimizers, target_index, params);
-        case ChainingAlgorithmType::SCALAR_MM2:
-        default:
-            return dispatch_on_chain_and_mini<Cep, BAA,
-                ChainingAlgorithmType::SCALAR_MM2, EP, QR, TR>(
-                    query_seq, target_seq, query_minimizers, target_index, params);
+    for (std::size_t i = 0u; i < raw_n; ++i) {
+        if (raw[i] == value) return;
+    }
+    if (raw_n < raw.size()) {
+        raw[raw_n++] = value;
     }
 }
 
-template <is_constexpr_aligner_params Cep,
-          EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] MatchResultCollection dispatch_on_algorithms(
-    const compact_sequence_range<QR>& query_seq,
-    const compact_sequence_range<TR>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+/// Free consteval helper — merges compute_breakpoints_for<K>()'s breakpoint
+/// list into (raw, raw_n).  No `[&]` capture; the dedup state is threaded by
+/// reference through this helper from the caller.
+template <std::size_t K>
+consteval void merge_breakpoints_into(
+    raw_buf& raw, std::size_t& raw_n) noexcept
 {
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-    switch (params.base_alignment_algorithm) {
-        case BaseAlignmentAlgorithmType::KSW2:
-            return dispatch_on_chain<Cep, BaseAlignmentAlgorithmType::KSW2, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        case BaseAlignmentAlgorithmType::KSW2_BATCHED:
-            return dispatch_on_chain<Cep, BaseAlignmentAlgorithmType::KSW2_BATCHED, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        case BaseAlignmentAlgorithmType::BLOCK_ALIGNER:
-        default:
-            return dispatch_on_chain<Cep, BaseAlignmentAlgorithmType::BLOCK_ALIGNER, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
+    constexpr auto bp = compute_breakpoints_for<K>();
+    for (std::size_t i = 0u; i < bp.second; ++i) {
+        append_unique_value(raw, raw_n, bp.first[i]);
     }
 }
 
-template <std::size_t L, std::size_t K,
-          EntryPoint EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] MatchResultCollection dispatch_on_specialisation(
-    const compact_sequence_range<QR>& query_seq,
-    const compact_sequence_range<TR>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+/// Pack-expanded union over `kmer_size_buckets` indices.  Threads the
+/// accumulator state through the helper above (no `[&]`).
+template <std::size_t... Is>
+[[nodiscard]] consteval auto compute_global_l_buckets_impl(
+    std::index_sequence<Is...>) noexcept
 {
-    using SpecialisedCep = ConstexprAlignerParams<10u, K, L>;
-    using FallbackCep    = ConstexprAlignerFallbackParams<L>;
-    if (params.window_size == 10
-        && params.kmer_size == static_cast<int32_t>(K))
-    {
-        return dispatch_on_algorithms<SpecialisedCep, EP, QR, TR>(
-            query_seq, target_seq, query_minimizers, target_index, params);
+    raw_buf raw{};
+    std::size_t raw_n = 0u;
+    (merge_breakpoints_into<kmer_size_buckets[Is]>(raw, raw_n), ...);
+    // Insertion sort ascending — the dispatcher's smallest-ge lookup needs
+    // sorted input.
+    for (std::size_t i = 1u; i < raw_n; ++i) {
+        for (std::size_t j = i; j > 0u && raw[j] < raw[j - 1u]; --j) {
+            const std::size_t tmp = raw[j];
+            raw[j]   = raw[j - 1u];
+            raw[j - 1u] = tmp;
+        }
     }
-    return dispatch_on_algorithms<FallbackCep, EP, QR, TR>(
-        query_seq, target_seq, query_minimizers, target_index, params);
+    return std::pair{raw, raw_n};
+}
+
+[[nodiscard]] consteval auto compute_global_l_buckets() noexcept {
+    return compute_global_l_buckets_impl(
+        std::make_index_sequence<kmer_size_buckets.size()>{});
 }
 
 } // namespace detail
 
-/**
- * @brief Top-level dispatch ladder — selects (L, K) bucket from runtime
- * sequence sizes and `params.kmer_size`, then fans out through the algorithm
- * cascade (DOC0249 §9.2).
- *
- * Mirrors the existing ladder at `minimap_port.cppm:2604-2699` exactly but
- * now produces `(Cep, BAA, CA, MA, EP)` template-resolved pipeline runs at
- * each leaf instead of recursing into the legacy `minimap_port_with_repr`
- * → `minimap2_port_with_index_impl` chain.
- */
-template <EntryPoint EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] MatchResultCollection dispatch_pipeline(
-    const compact_sequence_range<QR>& query_seq,
-    const compact_sequence_range<TR>& target_seq,
-    const std::vector<MinimizerT>&    query_minimizers,
-    const IndexT&                     target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
-{
-    const std::size_t max_bp = std::max(query_seq.bp_size(), target_seq.bp_size());
-
-    if (params.kmer_size == 15) {
-        if (max_bp <= (std::size_t{1} << 16))
-            return detail::dispatch_on_specialisation<16, 15, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 20))
-            return detail::dispatch_on_specialisation<20, 15, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 24))
-            return detail::dispatch_on_specialisation<24, 15, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 28))
-            return detail::dispatch_on_specialisation<28, 15, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 32))
-            return detail::dispatch_on_specialisation<32, 15, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 48))
-            return detail::dispatch_on_specialisation<48, 15, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        return detail::dispatch_on_specialisation<63, 15, EP, QR, TR>(
-            query_seq, target_seq, query_minimizers, target_index, params);
-    }
-    if (params.kmer_size == 7) {
-        if (max_bp <= (std::size_t{1} << 15))
-            return detail::dispatch_on_specialisation<15, 7, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 28))
-            return detail::dispatch_on_specialisation<28, 7, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 48))
-            return detail::dispatch_on_specialisation<48, 7, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        return detail::dispatch_on_specialisation<63, 7, EP, QR, TR>(
-            query_seq, target_seq, query_minimizers, target_index, params);
-    }
-    if (params.kmer_size == 27) {
-        if (max_bp <= (std::size_t{1} << 28))
-            return detail::dispatch_on_specialisation<28, 27, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        if (max_bp <= (std::size_t{1} << 48))
-            return detail::dispatch_on_specialisation<48, 27, EP, QR, TR>(
-                query_seq, target_seq, query_minimizers, target_index, params);
-        return detail::dispatch_on_specialisation<63, 27, EP, QR, TR>(
-            query_seq, target_seq, query_minimizers, target_index, params);
-    }
-    // Non-canonical K — pick the closest L and let the fallback Cep cover it.
-    return detail::dispatch_on_specialisation<28, 15, EP, QR, TR>(
-        query_seq, target_seq, query_minimizers, target_index, params);
-}
-
-// =============================================================================
-// 12.2 describe_pipeline_for — describe path used by EXPLAIN
-// =============================================================================
+/// Materialised dispatcher L bucket list — the union of per-K breakpoints
+/// computed at compile time.  The `_n` constant gives the live prefix size;
+/// the array itself is sized 32 for headroom.
+inline constexpr auto seq_len_log2_buckets_pair = detail::compute_global_l_buckets();
+inline constexpr auto seq_len_log2_buckets      = seq_len_log2_buckets_pair.first;
+inline constexpr std::size_t seq_len_log2_buckets_n =
+    seq_len_log2_buckets_pair.second;
+static_assert(seq_len_log2_buckets_n >= 1u,
+    "seq_len_log2_buckets must be non-empty");
 
 namespace detail {
 
+/// Materialise `seq_len_log2_buckets` as a `value_sequence` the chain can
+/// pack-expand.  Used as the value-list of `seq_len_log2_registry`.
+template <std::size_t... Is>
+[[nodiscard]] consteval auto make_seq_len_log2_buckets_seq(
+    std::index_sequence<Is...>) noexcept
+{
+    return value_sequence<std::size_t, seq_len_log2_buckets[Is]...>{};
+}
+
+using seq_len_log2_buckets_seq = decltype(
+    make_seq_len_log2_buckets_seq(
+        std::make_index_sequence<seq_len_log2_buckets_n>{}));
+
+/// Materialise `kmer_size_buckets` similarly.  Used as the value-list of
+/// `kmer_size_registry`.
+template <std::size_t... Is>
+[[nodiscard]] consteval auto make_kmer_size_buckets_seq(
+    std::index_sequence<Is...>) noexcept
+{
+    return value_sequence<std::size_t, kmer_size_buckets[Is]...>{};
+}
+
+using kmer_size_buckets_seq = decltype(
+    make_kmer_size_buckets_seq(
+        std::make_index_sequence<kmer_size_buckets.size()>{}));
+
+} // namespace detail
+
+/// Canonical k-mer default — the historical fallback for any non-canonical
+/// `params.kmer_size` value.  The chain's `kmer_size_step` pins this when
+/// the runtime field is outside `kmer_size_buckets`.
+inline constexpr std::size_t kmer_size_default = 15u;
+static_assert(kmer_size_default == kmer_size_buckets[0],
+    "kmer_size_default must match the leading entry of kmer_size_buckets — "
+    "the chain's default-value path expects them in sync.");
+
+// =============================================================================
+// DOC0256 §5.1–5.3 — Low-level enum/value dispatch primitives
+// =============================================================================
+//
+// `enum_dispatch_pack` walks an `std::integer_sequence<T, Vs...>` and on the
+// first match invokes a stateless callable with `IC<T, V>` pinned.  The
+// recursive helper produces one `cmp` + branch per pack element under
+// `-O1+` and folds to a `cmp/je` chain (or switch jump-table for large
+// packs) at `-O3`.  There are no `[&]` lambdas anywhere on this path — the
+// callable is forwarded by lvalue reference through the recursion.
+
+namespace detail {
+
+template <class R, class T, T DefaultValue, T V_head, T... V_rest,
+          class F, class... Args>
+[[gnu::always_inline]]
+R enum_dispatch_search(T rt, F& f, Args&&... args)
+{
+    if (rt == V_head) {
+        return f(std::integral_constant<T, V_head>{},
+                 std::forward<Args>(args)...);
+    }
+    if constexpr (sizeof...(V_rest) > 0u) {
+        return enum_dispatch_search<R, T, DefaultValue, V_rest...>(
+            rt, f, std::forward<Args>(args)...);
+    } else {
+        return f(std::integral_constant<T, DefaultValue>{},
+                 std::forward<Args>(args)...);
+    }
+}
+
+template <class T, T DefaultValue, T V_head, T... V_rest, class F, class... Args>
+[[gnu::always_inline]]
+void enum_dispatch_search_void(T rt, F& f, Args&&... args)
+{
+    if (rt == V_head) {
+        f(std::integral_constant<T, V_head>{}, std::forward<Args>(args)...);
+        return;
+    }
+    if constexpr (sizeof...(V_rest) > 0u) {
+        enum_dispatch_search_void<T, DefaultValue, V_rest...>(
+            rt, f, std::forward<Args>(args)...);
+    } else {
+        f(std::integral_constant<T, DefaultValue>{}, std::forward<Args>(args)...);
+    }
+}
+
+template <class R, class T, T V_head, T... V_rest, class F, class... Args>
+[[gnu::always_inline]]
+R value_dispatch_smallest_ge_search(T rt, F& f, Args&&... args)
+{
+    if (V_head >= rt) {
+        return f(std::integral_constant<T, V_head>{},
+                 std::forward<Args>(args)...);
+    }
+    if constexpr (sizeof...(V_rest) > 0u) {
+        return value_dispatch_smallest_ge_search<R, T, V_rest...>(
+            rt, f, std::forward<Args>(args)...);
+    } else {
+        return f(std::integral_constant<T, V_head>{},
+                 std::forward<Args>(args)...);
+    }
+}
+
+} // namespace detail
+
+/// Dispatch `rt` against a `value_sequence<T, Vs...>`.  On the first V that
+/// equals `rt`, invoke `f(IC<T, V>{}, args...)` and return its result.  If
+/// no V matches, invoke f with `IC<T, DefaultValue>`.  `DefaultValue` must
+/// appear in the pack — enforced by a `static_assert`.
+template <class R, class T, T DefaultValue, T... Vs, class F, class... Args>
+[[gnu::always_inline]]
+R enum_dispatch_pack(value_sequence<T, Vs...>,
+                     T rt, F&& f, Args&&... args)
+{
+    static_assert(sizeof...(Vs) > 0u,
+        "enum_dispatch_pack: empty value pack");
+    static_assert(((Vs == DefaultValue) || ...),
+        "enum_dispatch_pack: DefaultValue must appear in the value pack");
+    return detail::enum_dispatch_search<R, T, DefaultValue, Vs...>(
+        rt, f, std::forward<Args>(args)...);
+}
+
+/// `void`-returning variant of `enum_dispatch_pack`.  Used by the sketch
+/// chain whose leaf returns `void`.
+template <class T, T DefaultValue, T... Vs, class F, class... Args>
+[[gnu::always_inline]]
+void enum_dispatch_pack_void(value_sequence<T, Vs...>,
+                             T rt, F&& f, Args&&... args)
+{
+    static_assert(sizeof...(Vs) > 0u,
+        "enum_dispatch_pack_void: empty value pack");
+    static_assert(((Vs == DefaultValue) || ...),
+        "enum_dispatch_pack_void: DefaultValue must appear in the value pack");
+    detail::enum_dispatch_search_void<T, DefaultValue, Vs...>(
+        rt, f, std::forward<Args>(args)...);
+}
+
+/// Dispatch `rt` against an ascending-sorted `value_sequence<T, Vs...>` and
+/// invoke `f(IC<T, V>{}, args...)` with the smallest V such that V >= rt.
+/// If no V satisfies the predicate, the last V (the largest in the sorted
+/// pack) is used.  Caller is responsible for ensuring the pack is sorted;
+/// the spec's bucket-derivation code in §4 produces a sorted result.
+template <class R, class T, T... Vs, class F, class... Args>
+[[gnu::always_inline]]
+R value_dispatch_smallest_ge(value_sequence<T, Vs...>,
+                             T rt, F&& f, Args&&... args)
+{
+    static_assert(sizeof...(Vs) > 0u,
+        "value_dispatch_smallest_ge: empty value pack");
+    return detail::value_dispatch_smallest_ge_search<R, T, Vs...>(
+        rt, f, std::forward<Args>(args)...);
+}
+
+template <class R, class T, T DefaultValue, T... Vs, class F, class... Args>
+[[gnu::always_inline]]
+R value_dispatch_exact_with_default(value_sequence<T, Vs...>,
+                                    T rt, F&& f, Args&&... args)
+{
+    return enum_dispatch_pack<R, T, DefaultValue, Vs...>(
+        value_sequence<T, Vs...>{},
+        rt, std::forward<F>(f), std::forward<Args>(args)...);
+}
+
+// =============================================================================
+// DOC0256 §5.4 / §5.9 — algorithm_enum_values registry + per-dim selectors
+// =============================================================================
+//
+// Each registry exposes:
+//   - `target_t`        — the NTTP type the dispatcher pins.
+//   - `default_value`   — pinned when the runtime field is outside the pack.
+//   - `value_list`      — `std::integer_sequence<target_t, ...>` of enum/size_t
+//                         values the dispatcher iterates.
+//   - `read_field(p, args...)` — extracts the target_t value from the runtime
+//                         parameter pack (singular method name shared by every
+//                         step adapter; the implementation may literally read a
+//                         field or compute a derived value).
+//
+// Adding a new dispatched dimension is one new registry plus one `enum_step` /
+// `bucket_step` alias.
+
+template <class Enum>
+struct algorithm_enum_values;
+
+template <>
+struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType> {
+    using target_t = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using enum_t   = target_t;  // legacy alias.
+    static constexpr target_t default_value = target_t::SCALAR_MM2;
+    using value_list = value_sequence<target_t,
+        target_t::SCALAR_MM2,
+        target_t::SIMD_MM2,
+        target_t::RMQ>;
+
+    template <class... Args>
+    [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+        Args&&...) noexcept
+    {
+        return p.chaining_algorithm;
+    }
+};
+
+template <>
+struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType> {
+    using target_t = ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    using enum_t   = target_t;
+    static constexpr target_t default_value = target_t::BLOCK_ALIGNER;
+    using value_list = value_sequence<target_t,
+        target_t::KSW2,
+        target_t::BLOCK_ALIGNER,
+        target_t::KSW2_BATCHED>;
+
+    template <class... Args>
+    [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+        Args&&...) noexcept
+    {
+        return p.base_alignment_algorithm;
+    }
+};
+
+template <>
+struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType> {
+    using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using enum_t   = target_t;
+    static constexpr target_t default_value = target_t::SCALAR;
+    using value_list = value_sequence<target_t,
+        target_t::SCALAR,
+        target_t::SIMD_MINIMAP2_SLOW,
+        target_t::TWO_STACK_NTHASH>;
+
+    template <class... Args>
+    [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+        Args&&...) noexcept
+    {
+        return p.minimizer_algorithm;
+    }
+};
+
+namespace detail {
+
+template <class Enum, Enum V>
+[[nodiscard]] consteval bool trait_specialised_for() noexcept {
+    return requires { typename algorithm_traits<V>::kernel_type; };
+}
+
+template <class Enum, Enum... Vs>
+[[nodiscard]] consteval bool all_traits_specialised_for(
+    value_sequence<Enum, Vs...>) noexcept
+{
+    return (trait_specialised_for<Enum, Vs>() && ...);
+}
+
+} // namespace detail
+
+static_assert(detail::all_traits_specialised_for(
+    algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>::value_list{}),
+    "algorithm_enum_values<ChainingAlgorithmType>::value_list contains a value "
+    "without an algorithm_traits<>::kernel_type specialisation.  Add the trait "
+    "specialisation alongside the enum value.");
+static_assert(detail::all_traits_specialised_for(
+    algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>::value_list{}),
+    "algorithm_enum_values<BaseAlignmentAlgorithmType>::value_list contains a "
+    "value without an algorithm_traits<>::kernel_type specialisation.");
+static_assert(detail::all_traits_specialised_for(
+    algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>::value_list{}),
+    "algorithm_enum_values<MinimizerAlgorithmType>::value_list contains a "
+    "value without an algorithm_traits<>::kernel_type specialisation.");
+
+namespace detail {
+
+/// A type satisfies `has_bp_size` when it exposes a `bp_size()` member
+/// returning an unsigned integer.  Constrains `seq_len_log2_registry::read_field`'s
+/// first two args so a chain composing `seq_len_log2_step` into a call site
+/// lacking `(QR&, TR&)` in those slots produces a localised diagnostic
+/// at the chain instantiation point.
+template <class T>
+concept has_bp_size = requires (const T& x) {
+    { x.bp_size() } -> std::convertible_to<std::size_t>;
+};
+
+struct seq_len_log2_registry {
+    using target_t = std::size_t;
+    static constexpr std::size_t default_value = seq_len_log2_buckets[0];
+    using value_list = seq_len_log2_buckets_seq;
+
+    template <has_bp_size QR_arg, has_bp_size TR_arg, class... Rest>
+    [[nodiscard, gnu::always_inline]] static std::size_t read_field(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const QR_arg& q, const TR_arg& t,
+        Rest&&...) noexcept
+    {
+        const std::size_t max_bp = std::max(q.bp_size(), t.bp_size());
+        return round_up_seq_len_log2(
+            max_bp, static_cast<std::size_t>(params.kmer_size));
+    }
+};
+
+struct kmer_size_registry {
+    using target_t = std::size_t;
+    static constexpr std::size_t default_value = kmer_size_default;
+    using value_list = kmer_size_buckets_seq;
+
+    template <class... Args>
+    [[nodiscard, gnu::always_inline]] static constexpr std::size_t read_field(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        Args&&...) noexcept
+    {
+        return static_cast<std::size_t>(params.kmer_size);
+    }
+};
+
+} // namespace detail
+
+// =============================================================================
+// DOC0256 §5.7 / §5.8 — dispatch_chain primitive and step adapters
+// =============================================================================
+//
+// The chain walks a parameter pack of *step* types.  Each step has:
+//
+//   - `target_t`         — the NTTP type the step pins
+//   - `default_value`    — pinned when `active_v<Pinned...>` is false
+//   - `active_v<...>`    — compile-time predicate; when false the chain pins
+//                          `default_value` without consulting the runtime
+//   - `dispatch<R, Pinned..., K>(params, k, args...)` — runtime dispatch
+//
+// The chain's only continuation type is `dispatch_chain<R, Leaf, Head,
+// Tail...>::continuation<Pinned...>` — a stateless POD with one templated
+// member function.  No `[&]` lambdas anywhere; the chain and the steps are
+// all pure compile-time machinery.
+
+namespace detail {
+
+template <class... Args>
+concept chain_args_are_references = (std::is_reference_v<Args> && ...);
+
+template <class R, template <auto...> class Leaf, class... Steps>
+struct dispatch_chain;
+
+template <class R, template <auto...> class Leaf>
+struct dispatch_chain<R, Leaf> {
+    template <auto... Pinned, class... Args>
+        requires chain_args_are_references<Args...>
+    [[gnu::always_inline]] static R run(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        Args&&... args)
+    {
+        return Leaf<Pinned...>::call(params, std::forward<Args>(args)...);
+    }
+};
+
+template <class R, template <auto...> class Leaf, class Head, class... Tail>
+struct dispatch_chain<R, Leaf, Head, Tail...> {
+    /// The chain's *only* continuation type.  Stateless POD with one
+    /// templated member function.  Replaces the per-level adaptor structs
+    /// from the v1 draft of DOC0256.
+    template <auto... Pinned>
+    struct continuation {
+        template <auto V, class... Args>
+        [[gnu::always_inline]] R run(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Args&&... args) const
+        {
+            return dispatch_chain<R, Leaf, Tail...>::template run<Pinned..., V>(
+                params, std::forward<Args>(args)...);
+        }
+    };
+
+    template <auto... Pinned, class... Args>
+        requires chain_args_are_references<Args...>
+    [[gnu::always_inline]] static R run(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        Args&&... args)
+    {
+        if constexpr (Head::template active_v<Pinned...>) {
+            return Head::template dispatch<R, Pinned...>(
+                params, continuation<Pinned...>{}, std::forward<Args>(args)...);
+        } else {
+            return dispatch_chain<R, Leaf, Tail...>::template run<
+                Pinned..., Head::default_value>(
+                    params, std::forward<Args>(args)...);
+        }
+    }
+};
+
+/// Exact-match enum or size_t dispatch step.  Used for BAA / CA / MA and
+/// for `kmer_size` (a size_t bucket).
+template <class Registry>
+struct enum_step {
+    using target_t = typename Registry::target_t;
+    static constexpr target_t default_value = Registry::default_value;
+
+    template <auto... /*Pinned*/>
+    static constexpr bool active_v = true;
+
+    template <class R, class K>
+    struct adapter {
+        K kont;
+        template <target_t V, class... A>
+        [[gnu::always_inline]] R operator()(
+            std::integral_constant<target_t, V>,
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            A&&... a) const
+        {
+            return kont.template run<V>(params, std::forward<A>(a)...);
+        }
+    };
+
+    template <class R, auto... Pinned, class K, class... Args>
+    [[gnu::always_inline]] static R dispatch(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        K k, Args&&... args)
+    {
+        adapter<R, K> a{k};
+        if constexpr (std::is_same_v<R, void>) {
+            enum_dispatch_pack_void<target_t, default_value>(
+                typename Registry::value_list{},
+                Registry::read_field(params, args...),
+                a,
+                params, std::forward<Args>(args)...);
+            return;
+        } else {
+            return enum_dispatch_pack<R, target_t, default_value>(
+                typename Registry::value_list{},
+                Registry::read_field(params, args...),
+                a,
+                params, std::forward<Args>(args)...);
+        }
+    }
+};
+
+/// Smallest-≥ bucket dispatch step.  Used for the L bucket (smallest L ≥
+/// `round_up_seq_len_log2(max_bp, K)`).
+template <class Registry>
+struct bucket_step {
+    using target_t = std::size_t;
+    static constexpr std::size_t default_value = Registry::default_value;
+
+    template <auto... /*Pinned*/>
+    static constexpr bool active_v = true;
+
+    template <class R, class K>
+    struct adapter {
+        K kont;
+        template <std::size_t V, class... A>
+        [[gnu::always_inline]] R operator()(
+            std::integral_constant<std::size_t, V>,
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            A&&... a) const
+        {
+            return kont.template run<V>(params, std::forward<A>(a)...);
+        }
+    };
+
+    template <class R, auto... Pinned, class K, class... Args>
+    [[gnu::always_inline]] static R dispatch(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        K k, Args&&... args)
+    {
+        adapter<R, K> a{k};
+        return value_dispatch_smallest_ge<R, std::size_t>(
+            typename Registry::value_list{},
+            Registry::read_field(params, args...),
+            a,
+            params, std::forward<Args>(args)...);
+    }
+};
+
+/// Wraps `Inner` so that when `ActiveCondition` is false the chain pins
+/// `Inner::default_value` without consulting the runtime field.  Used by
+/// the WithPrebuiltMinimizers MA short-circuit (EP != WithPrebuiltMinimizers
+/// → MA dispatched; EP == WithPrebuiltMinimizers → MA pinned to SCALAR).
+template <class Inner, bool ActiveCondition>
+struct guarded_step {
+    using target_t = typename Inner::target_t;
+    static constexpr target_t default_value = Inner::default_value;
+
+    template <auto... /*Pinned*/>
+    static constexpr bool active_v = ActiveCondition;
+
+    template <class R, auto... Pinned, class K, class... Args>
+    [[gnu::always_inline]] static R dispatch(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        K k, Args&&... args)
+    {
+        return Inner::template dispatch<R, Pinned...>(
+            params, k, std::forward<Args>(args)...);
+    }
+};
+
+using baa_step = enum_step<algorithm_enum_values<
+    ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>>;
+using ca_step  = enum_step<algorithm_enum_values<
+    ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>>;
+using ma_step  = enum_step<algorithm_enum_values<
+    ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>>;
+using kmer_size_step    = enum_step<kmer_size_registry>;
+using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
+
+} // namespace detail
+
+// =============================================================================
+// DOC0256 §5.10 — Leaf types and traits aliases
+// =============================================================================
+//
+// `pipeline_run_leaf<EP, QR, TR, MT, IT, L, K, BAA, CA, MA>` is the
+// namespace-scope class template that bottoms out the runtime cascade.
+// The Cep (Specialised vs Fallback) branch lifted from the deleted
+// `dispatch_on_specialisation` lives inside the leaf body.
+//
+// `pipeline_run_traits<EP, QR, TR, MT, IT>::leaf<L, K, BAA, CA, MA>` is the
+// alias-template wrapper exposing the leaf as an NTTP-only `template
+// <auto...> class` view — the shape `dispatch_chain` requires for its
+// `template <auto...> class Leaf` template-template parameter.
+
+namespace detail {
+
+template <EntryPoint EP_v,
+          supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class MinimizerT, class IndexT,
+          std::size_t L, std::size_t K,
+          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
+          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA>
+struct pipeline_run_leaf {
+    static_assert(std::is_same_v<decltype(L), std::size_t>,
+        "pipeline_run_leaf: L must be std::size_t (comes from seq_len_log2_step).");
+    static_assert(std::is_same_v<decltype(K), std::size_t>,
+        "pipeline_run_leaf: K must be std::size_t (comes from kmer_size_step).");
+    static_assert(std::is_same_v<decltype(BAA),
+        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>,
+        "pipeline_run_leaf: BAA must be BaseAlignmentAlgorithmType (from baa_step).");
+    static_assert(std::is_same_v<decltype(CA),
+        ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
+        "pipeline_run_leaf: CA must be ChainingAlgorithmType (from ca_step).");
+    static_assert(std::is_same_v<decltype(MA),
+        ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
+        "pipeline_run_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
+
+    [[nodiscard, gnu::always_inline]] static MatchResultCollection call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const compact_sequence_range<QR>& query_seq,
+        const compact_sequence_range<TR>& target_seq,
+        const std::vector<MinimizerT>&    query_minimizers,
+        const IndexT&                     target_index)
+    {
+        using SpecCep     = ConstexprAlignerParams<10u, K, L>;
+        using FallbackCep = ConstexprAlignerFallbackParams<L>;
+
+        // Cep selection — lifted from the deleted `dispatch_on_specialisation`.
+        // Both Cep instantiations are present in the binary; the runtime
+        // `if` picks one.  Compile-time impact: identical to the v0 body.
+        if (params.window_size == 10
+            && params.kmer_size == static_cast<int32_t>(K))
+        {
+            return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, QR, TR>(
+                query_seq, target_seq, query_minimizers, target_index, params);
+        }
+        return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, QR, TR>(
+            query_seq, target_seq, query_minimizers, target_index, params);
+    }
+};
+
+template <EntryPoint EP_v,
+          supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class MinimizerT, class IndexT>
+struct pipeline_run_traits {
+    template <auto L, auto K, auto BAA, auto CA, auto MA>
+    using leaf = pipeline_run_leaf<
+        EP_v, QR, TR, MinimizerT, IndexT,
+        L, K, BAA, CA, MA>;
+};
+
+/// Common leaf body shared by both Spec and Fallback Cep branches inside
+/// `describe_leaf::call`.  Identical to the legacy `describe_pipeline_leaf`
+/// from the v0 design — kept under that name so the §7.1 chain instantiation
+/// can be expressed without renaming the legacy entry.  Declared before
+/// `describe_leaf` so its unqualified call inside `describe_leaf::call`
+/// resolves at the point of template definition.
 template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
@@ -2353,138 +2935,132 @@ template <is_constexpr_aligner_params Cep,
     return describe_with_params<Cep>(pipeline);
 }
 
-template <is_constexpr_aligner_params CepHere,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR>
-[[nodiscard]] PipelineDescription describe_pipeline_dispatch_inner(
-    const compact_sequence_range<QR>& query_seq_proto,
-    const compact_sequence_range<TR>& target_seq_proto,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-    int32_t query_len, int32_t target_len)
-{
-    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
-    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+// Describe-side leaf — see DOC0256 §5.10.3 for the rationale on why
+// EP/MA are pinned constants here instead of chain-dispatched dimensions.
+template <supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          std::size_t L, std::size_t K,
+          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
+          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA>
+struct describe_leaf {
+    static_assert(std::is_same_v<decltype(L), std::size_t>,
+        "describe_leaf: L must be std::size_t (from seq_len_log2_step).");
+    static_assert(std::is_same_v<decltype(K), std::size_t>,
+        "describe_leaf: K must be std::size_t (from kmer_size_step).");
+    static_assert(std::is_same_v<decltype(BAA),
+        ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>,
+        "describe_leaf: BAA must be BaseAlignmentAlgorithmType (from baa_step).");
+    static_assert(std::is_same_v<decltype(CA),
+        ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>,
+        "describe_leaf: CA must be ChainingAlgorithmType (from ca_step).");
 
-    switch (params.base_alignment_algorithm) {
-        case BaseAlignmentAlgorithmType::KSW2:
-            switch (params.chaining_algorithm) {
-                case ChainingAlgorithmType::SIMD_MM2:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::SIMD_MM2,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-                case ChainingAlgorithmType::RMQ:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::RMQ,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-                case ChainingAlgorithmType::SCALAR_MM2:
-                default:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::KSW2,
-                        ChainingAlgorithmType::SCALAR_MM2,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-            }
-        case BaseAlignmentAlgorithmType::KSW2_BATCHED:
-            switch (params.chaining_algorithm) {
-                case ChainingAlgorithmType::SIMD_MM2:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::KSW2_BATCHED,
-                        ChainingAlgorithmType::SIMD_MM2,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-                case ChainingAlgorithmType::RMQ:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::KSW2_BATCHED,
-                        ChainingAlgorithmType::RMQ,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-                case ChainingAlgorithmType::SCALAR_MM2:
-                default:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::KSW2_BATCHED,
-                        ChainingAlgorithmType::SCALAR_MM2,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-            }
-        case BaseAlignmentAlgorithmType::BLOCK_ALIGNER:
-        default:
-            switch (params.chaining_algorithm) {
-                case ChainingAlgorithmType::SIMD_MM2:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::SIMD_MM2,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-                case ChainingAlgorithmType::RMQ:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::RMQ,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-                case ChainingAlgorithmType::SCALAR_MM2:
-                default:
-                    return describe_pipeline_leaf<CepHere,
-                        BaseAlignmentAlgorithmType::BLOCK_ALIGNER,
-                        ChainingAlgorithmType::SCALAR_MM2,
-                        MinimizerAlgorithmType::SCALAR,
-                        EntryPoint::WithPrebuiltMinimizers, QR, TR>(
-                            query_seq_proto, target_seq_proto, params, query_len, target_len);
-            }
+    [[nodiscard, gnu::always_inline]] static PipelineDescription call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const compact_sequence_range<QR>& q,
+        const compact_sequence_range<TR>& t,
+        const int32_t& query_len,
+        const int32_t& target_len)
+    {
+        using SpecCep     = ConstexprAlignerParams<10u, K, L>;
+        using FallbackCep = ConstexprAlignerFallbackParams<L>;
+
+        constexpr auto EP_describe = EntryPoint::WithPrebuiltMinimizers;
+        constexpr auto MA_describe = algorithm_enum_values<
+            ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>::default_value;
+        static_assert(MA_describe ==
+            ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR,
+            "describe_leaf relies on MA default = SCALAR.  Update both call "
+            "sites if the MA default ever changes.");
+
+        if (params.window_size == 10
+            && params.kmer_size == static_cast<int32_t>(K))
+        {
+            return describe_pipeline_leaf<SpecCep, BAA, CA,
+                MA_describe, EP_describe, QR, TR>(
+                    q, t, params, query_len, target_len);
+        }
+        return describe_pipeline_leaf<FallbackCep, BAA, CA,
+            MA_describe, EP_describe, QR, TR>(
+                q, t, params, query_len, target_len);
     }
-}
+};
+
+template <supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR>
+struct describe_traits {
+    template <auto L, auto K, auto BAA, auto CA>
+    using leaf = describe_leaf<QR, TR, L, K, BAA, CA>;
+};
 
 } // namespace detail
 
-/**
- * @brief Build a `PipelineDescription` matching the pipeline that would run
- * for the given (params, sequence sizes).
- *
- * Called once per Postgres scan from `BeginCustomScan` (cold path).  Walks
- * the same dispatch ladder as `dispatch_pipeline` but invokes the
- * `describe()` chain instead of `on_batch(...)`.  Constructs dummy
- * (empty-minimizers, empty-index) per-stage configuration; safe because every
- * stage's `describe()` consults only its by-value config fields (DOC0249
- * §6.1 invariant).
- *
- * Cep bucket is fixed to L=28 here because EXPLAIN output is identical
- * regardless of the L bucket — Cep.window_len / Cep.kmer_len are what the
- * renderer surfaces and those depend on the specialised-vs-fallback choice,
- * not on L.
- */
+// =============================================================================
+// DOC0256 §4.4 / §6.1 — top-level runtime cascade entry
+// =============================================================================
+//
+// Replaces every per-level dispatcher function (`dispatch_on_chain`,
+// `dispatch_on_chain_and_mini`, `dispatch_on_algorithms`,
+// `dispatch_on_specialisation`) and the hand-coded `(K, L)` ladder.  The
+// body is a single `dispatch_chain<...>::run<>(...)` line over five steps
+// (L, K, BAA, CA, MA) — see DOC0256 §R16.
+
+template <EntryPoint EP,
+          supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class MinimizerT, class IndexT>
+[[nodiscard, gnu::always_inline, gnu::flatten]]
+MatchResultCollection dispatch_pipeline(
+    const compact_sequence_range<QR>& query_seq,
+    const compact_sequence_range<TR>& target_seq,
+    const std::vector<MinimizerT>&    query_minimizers,
+    const IndexT&                     target_index,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    using Traits = detail::pipeline_run_traits<EP, QR, TR, MinimizerT, IndexT>;
+    return detail::dispatch_chain<
+        MatchResultCollection,
+        Traits::template leaf,
+        detail::seq_len_log2_step,
+        detail::kmer_size_step,
+        detail::baa_step,
+        detail::ca_step,
+        detail::guarded_step<detail::ma_step,
+            /*active=*/(EP != EntryPoint::WithPrebuiltMinimizers)>
+    >::template run<>(
+        params, query_seq, target_seq, query_minimizers, target_index);
+}
+
+// =============================================================================
+// DOC0256 §7.1 — describe_pipeline_for (EXPLAIN path)
+// =============================================================================
+//
+// One chain instantiation over four steps (L, K, BAA, CA).  EP and MA are
+// pinned constants inside `describe_leaf` (§5.10.3) — describe output is
+// invariant in them.
+
 template <supports_compact_sequence_range QR,
           supports_compact_sequence_range TR>
-[[nodiscard]] PipelineDescription describe_pipeline_for(
+[[nodiscard, gnu::always_inline, gnu::flatten]]
+PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     const compact_sequence_range<QR>& query_seq_proto,
     const compact_sequence_range<TR>& target_seq_proto)
 {
-    using Cep         = ConstexprAlignerParams<10u, 15u, 28u>;
-    using FallbackCep = ConstexprAlignerFallbackParams<28u>;
+    const int32_t query_len  =
+        static_cast<int32_t>(query_seq_proto.bp_size());
+    const int32_t target_len =
+        static_cast<int32_t>(target_seq_proto.bp_size());
 
-    const int32_t query_len  = static_cast<int32_t>(query_seq_proto.bp_size());
-    const int32_t target_len = static_cast<int32_t>(target_seq_proto.bp_size());
-
-    const bool specialised =
-        params.window_size == 10 && params.kmer_size == 15;
-    if (specialised) {
-        return detail::describe_pipeline_dispatch_inner<Cep, QR, TR>(
-            query_seq_proto, target_seq_proto, params, query_len, target_len);
-    }
-    return detail::describe_pipeline_dispatch_inner<FallbackCep, QR, TR>(
-        query_seq_proto, target_seq_proto, params, query_len, target_len);
+    using Traits = detail::describe_traits<QR, TR>;
+    return detail::dispatch_chain<
+        PipelineDescription,
+        Traits::template leaf,
+        detail::seq_len_log2_step,
+        detail::kmer_size_step,
+        detail::baa_step,
+        detail::ca_step
+    >::template run<>(
+        params, query_seq_proto, target_seq_proto, query_len, target_len);
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE::pipe
@@ -2557,15 +3133,95 @@ template <class MinimizerT,
 
 namespace pipe_entry_detail {
 
+// =============================================================================
+// DOC0256 §5.10.4 / §6.3 — sketch leaf and helpers
+// =============================================================================
+//
+// The two minimizer sketching switches (target pass / query pass) in the
+// legacy `minimap_port_with_repr` body collapse into:
+//   - `sketch_leaf<MinimizerT, Collector, Range, MA>` — the chain's
+//     terminal leaf; pins MA at compile time and invokes the trait's
+//     kernel directly.
+//   - `sketch_traits<MinimizerT, Collector, Range>::leaf<MA>` — the
+//     alias-template wrapper exposing the leaf as a `template <auto>
+//     class`.
+//   - `sketch_one<MinimizerT>(...)` — one `dispatch_chain` instantiation
+//     over `ma_step`.
+//   - `sketch_into_collector<MinimizerT>(...)` — packages the per-pass
+//     register_region_static + reserve + sketch_one into one inline call.
+
+template <class MinimizerT,
+          class Collector, class Range,
+          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType MA>
+struct sketch_leaf {
+    static_assert(std::is_same_v<decltype(MA),
+        ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>,
+        "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
+
+    [[gnu::always_inline]] static void call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        Collector& collector, Range& range,
+        const std::size_t& window_len, const std::size_t& kmer_len)
+    {
+        using Kernel = typename ::bioseq::simd::HWY_NAMESPACE::pipe::
+            algorithm_traits<MA>::kernel_type;
+        Kernel::template call<MinimizerT>(
+            collector, range, window_len, kmer_len);
+    }
+};
+
+template <class MinimizerT, class Collector, class Range>
+struct sketch_traits {
+    template <auto MA>
+    using leaf = sketch_leaf<MinimizerT, Collector, Range, MA>;
+};
+
+/// One-step chain over the MA dimension — replaces the legacy switch on
+/// `params.minimizer_algorithm`.  The chain pins MA at compile time and the
+/// leaf dispatches via the trait's kernel.
+template <class MinimizerT, class Collector, class Range>
+[[gnu::always_inline, gnu::flatten]] void sketch_one(
+    Collector& collector, Range& range,
+    const std::size_t& window_len, const std::size_t& kmer_len,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    using Traits = sketch_traits<MinimizerT, Collector, Range>;
+    ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
+        void,
+        Traits::template leaf,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::ma_step
+    >::template run<>(params, collector, range, window_len, kmer_len);
+}
+
+/// Packages the per-pass instrumentation scope + collector reserve +
+/// sketch_one into one inline call.  Replaces the ~22-line block-scope
+/// boilerplate repeated for the target and query passes in the legacy
+/// `minimap_port_with_repr` body.
+template <class MinimizerT, class Range>
+[[gnu::always_inline]] void sketch_into_collector(
+    sketch_collector_t<MinimizerT>& collector,
+    Range& range,
+    const std::size_t& window_len, const std::size_t& kmer_len,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    static const auto* _desc =
+        bioseq::instr::register_region_static("mm_sketch");
+    auto _scope = bioseq::instr::region(_desc);
+    collector.reserve(
+        range.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
+    sketch_one<MinimizerT>(collector, range, window_len, kmer_len, params);
+}
+
 /**
  * @brief Per-bucket helper for the from-sequence `minimap_port` entry.
  *
  * Owns one `Arena::Chain` scope around the target minimiser sketching + index
- * build.  Sketching uses the chosen `MinimizerAlgorithmType` selected by a
- * runtime switch (mirrors the legacy `minimap_port_with_repr` body).  Once
- * the target index is built, the function delegates to
- * `minimap2_port_with_index` so the per-query MinimizerStage inside
- * `pipe::dispatch_pipeline` handles query sketching.
+ * build.  Sketching is dispatched via `sketch_into_collector<MinimizerT>` —
+ * the per-pass switch on `params.minimizer_algorithm` is now expressed as a
+ * single-step `dispatch_chain` instantiation inside `sketch_one`.  Once the
+ * target index is built, the function delegates to `minimap2_port_with_index`
+ * so the per-query MinimizerStage inside `pipe::dispatch_pipeline` handles
+ * query sketching.
  */
 template <class MinimizerT,
           supports_compact_sequence_range QueryRange,
@@ -2586,148 +3242,84 @@ template <class MinimizerT,
     const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
 
     sketch_collector_t<MinimizerT> target_collector;
-    {
-        static const auto* _mm_sketch_target_desc =
-            bioseq::instr::register_region_static("mm_sketch");
-        auto _mm_sketch_target = bioseq::instr::region(_mm_sketch_target_desc);
-        target_collector.reserve(
-            target_seq.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
-        switch (params.minimizer_algorithm) {
-            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                collect_minimizers_simd<minimap_int_hasher, MinimizerT>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    window_len, kmer_len);
-                break;
-            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher, MinimizerT>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    window_len, kmer_len);
-                break;
-            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR:
-            default:
-                collect_minimizers<minimap_int_hasher, MinimizerT>(
-                    target_collector, target_seq,
-                    target_seq.begin(), target_seq.end(),
-                    window_len, kmer_len);
-                break;
-        }
-    }
+    sketch_into_collector<MinimizerT>(
+        target_collector, target_seq, window_len, kmer_len, params);
     const auto target_minimizers = std::move(target_collector).extract_sketches_data();
 
     sketch_collector_t<MinimizerT> query_collector;
-    {
-        static const auto* _mm_sketch_query_desc =
-            bioseq::instr::register_region_static("mm_sketch");
-        auto _mm_sketch_query = bioseq::instr::region(_mm_sketch_query_desc);
-        query_collector.reserve(
-            query_seq.bp_size() / std::max<std::size_t>(window_len, 1) + 64);
-        switch (params.minimizer_algorithm) {
-            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW:
-                collect_minimizers_simd<minimap_int_hasher, MinimizerT>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    window_len, kmer_len);
-                break;
-            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::TWO_STACK_NTHASH:
-                collect_minimizers_two_stack_nthash_simd<minimap_int_hasher, MinimizerT>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    window_len, kmer_len);
-                break;
-            case ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::SCALAR:
-            default:
-                collect_minimizers<minimap_int_hasher, MinimizerT>(
-                    query_collector, query_seq,
-                    query_seq.begin(), query_seq.end(),
-                    window_len, kmer_len);
-                break;
-        }
-    }
+    sketch_into_collector<MinimizerT>(
+        query_collector, query_seq, window_len, kmer_len, params);
     const auto query_minimizers = std::move(query_collector).extract_sketches_data();
 
     return minimap2_port<MinimizerT, QueryRange, TargetRange>(
         query_seq, target_seq, query_minimizers, target_minimizers, params);
 }
 
+// =============================================================================
+// DOC0256 §4.6 — from-sequence cascade leaf and traits
+// =============================================================================
+//
+// `minimap_port` now collapses to one `dispatch_chain<...>::run<>(...)` over
+// two steps (L, K).  The leaf below pins `(L, K)` into the
+// `MinimizerRepr<L, K>` storage type and delegates to the existing
+// `minimap_port_with_repr<MinimizerT>` body unchanged.
+
+template <supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          std::size_t L, std::size_t K>
+struct minimap_port_repr_leaf {
+    static_assert(std::is_same_v<decltype(L), std::size_t>,
+        "minimap_port_repr_leaf: L must be std::size_t (from seq_len_log2_step).");
+    static_assert(std::is_same_v<decltype(K), std::size_t>,
+        "minimap_port_repr_leaf: K must be std::size_t (from kmer_size_step).");
+
+    [[gnu::always_inline]] static MatchResultCollection call(
+        const Minimap2Params& params,
+        compact_sequence_range<QueryRange>&  q,
+        compact_sequence_range<TargetRange>& t)
+    {
+        using MinimizerT = ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<L, K>;
+        return minimap_port_with_repr<MinimizerT, QueryRange, TargetRange>(
+            q, t, params);
+    }
+};
+
+template <supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange>
+struct minimap_port_traits {
+    template <auto L, auto K>
+    using leaf = minimap_port_repr_leaf<QueryRange, TargetRange, L, K>;
+};
+
 } // namespace pipe_entry_detail
 
 /**
  * @brief Top-level minimap2 entry — raw query/target sequences only
- * (DOC0249 §9.7 / legacy `minimap_port`).
+ * (DOC0249 §9.7 / legacy `minimap_port`; DOC0256 §4.6 chain rewrite).
  *
- * Picks a `MinimizerRepr<L, K>` bucket from `max(query_bp, target_bp)` and
- * `params.kmer_size`, then forwards to the per-bucket
- * `pipe_entry_detail::minimap_port_with_repr`.  Each per-bucket helper
- * sketches both target and query minimisers, builds the target index, and
- * delegates to `minimap2_port_with_index` — which in turn calls
- * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>`.
- *
- * The L-bucket switch mirrors the legacy ladder at
- * `minimap_port.cppm:2604-2699` exactly.
+ * One `dispatch_chain<...>::run<>(...)` line over `seq_len_log2_step` +
+ * `kmer_size_step` — replaces the hand-coded `(K, L)` ladder.  Each pinned
+ * `(L, K)` selects a `MinimizerRepr<L, K>` and forwards to
+ * `pipe_entry_detail::minimap_port_with_repr<MinimizerT>` which sketches
+ * both target and query minimisers, builds the target index, and delegates
+ * to `minimap2_port_with_index` (which in turn calls
+ * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>`).
  */
 template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange>
-[[nodiscard]] MatchResultCollection minimap_port(
+[[nodiscard, gnu::always_inline, gnu::flatten]]
+MatchResultCollection minimap_port(
     compact_sequence_range<QueryRange>& query_seq,
     compact_sequence_range<TargetRange>& target_seq,
     const Minimap2Params& params = Minimap2Params{})
 {
-    const std::size_t max_len =
-        std::max(query_seq.bp_size(), target_seq.bp_size());
-    const int32_t kmer_len = params.kmer_size;
-
-    if (kmer_len == 15) {
-        if (max_len <= (std::size_t{1} << 16))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<16u, 15u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 20))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<20u, 15u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 24))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<24u, 15u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 28))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<28u, 15u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 32))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<32u, 15u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 48))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<48u, 15u>>(
-                query_seq, target_seq, params);
-        return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
-            query_seq, target_seq, params);
-    }
-    if (kmer_len == 7) {
-        if (max_len <= (std::size_t{1} << 15))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<15u, 7u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 28))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<28u, 7u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 48))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<48u, 7u>>(
-                query_seq, target_seq, params);
-        return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 7u>>(
-            query_seq, target_seq, params);
-    }
-    if (kmer_len == 27) {
-        if (max_len <= (std::size_t{1} << 28))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<28u, 27u>>(
-                query_seq, target_seq, params);
-        if (max_len <= (std::size_t{1} << 48))
-            return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<48u, 27u>>(
-                query_seq, target_seq, params);
-        return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 27u>>(
-            query_seq, target_seq, params);
-    }
-    if (max_len <= (std::size_t{1} << 28))
-        return pipe_entry_detail::minimap_port_with_repr<MinimapSketchData>(
-            query_seq, target_seq, params);
-    return pipe_entry_detail::minimap_port_with_repr<MinimizerRepr<63u, 15u>>(
-        query_seq, target_seq, params);
+    using Traits = pipe_entry_detail::minimap_port_traits<QueryRange, TargetRange>;
+    return ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
+        MatchResultCollection,
+        Traits::template leaf,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::seq_len_log2_step,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::kmer_size_step
+    >::template run<>(params, query_seq, target_seq);
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

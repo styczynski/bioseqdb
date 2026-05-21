@@ -361,6 +361,18 @@ static_assert(std::is_standard_layout_v<MinimapSketchData>);
 static_assert(std::is_trivially_copyable_v<MinimapSketchData>);
 static_assert(std::is_trivially_destructible_v<MinimapSketchData>);
 
+// DOC0256 §4.7 — guard the canonical 64-bit storage invariant.  The postgres
+// sidecar / dispatch_buffer paths bake in `sizeof(MinimapSketchData) == 8` and
+// the (hash:35 | pos:28 | strand:1) wire layout; if a future change to the
+// MinimizerLayout formula promotes (28, 15) to a 128-bit storage band we want
+// the build to fail loudly here rather than silently corrupting the on-disk
+// blob.
+static_assert(MinimizerLayout<28u, 15u>::storage_bits == 64u,
+    "MinimapSketchData = MinimizerRepr<28, 15> must remain a 64-bit storage type. "
+    "Postgres sidecar / dispatch_buffer rely on sizeof(MinimapSketchData) == 8 "
+    "and the bit-layout (hash:35 | pos:28 | strand:1) is hardcoded in the wire "
+    "protocol.  Update the sidecar wire format before relaxing this constraint.");
+
 // Sanity check: the canonical layout matches the prior hand-rolled
 // constants exactly.  Future MSL/KL choices route through MinimizerRepr.
 static_assert(MinimapSketchData::layout_t::pos_bits == 28u);

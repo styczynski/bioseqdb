@@ -16,6 +16,7 @@
 import mlogging;
 import sequan_compat;
 import bioseq_sequences;
+import bioseq_sequences.kmers;
 import bioseq_sequences.pipe;
 import bioseq_sequences.chaining.utils;
 import bioseq_sequences.minimap_port;
@@ -176,6 +177,539 @@ TEST_CASE("KSW2BatchedParity — trait surface matches KSW2",
     // deferred cross-query scheduling shape (DOC0254 §11.10).
     static_assert(!KKsw2::supports_cross_query_batched);
     static_assert(KBatched::supports_cross_query_batched);
+}
+
+// =============================================================================
+// DOC0256 §8.3 — chain primitive / registry / leaf tests.
+// =============================================================================
+
+namespace doc0256_test_helpers {
+
+using BAA = ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+using CA  = ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+using MA  = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+
+/// Probe callable for `enum_dispatch_pack` tests.  Stateless POD with a
+/// templated `operator()` whose body forwards the matched IC<T, V> into a
+/// caller-provided reference slot.
+template <class T>
+struct value_capture_callable {
+    T* sink;
+    template <T V, class... Args>
+    [[gnu::always_inline]] T operator()(
+        std::integral_constant<T, V>, Args&&...) const
+    {
+        *sink = V;
+        return V;
+    }
+};
+
+}  // namespace doc0256_test_helpers
+
+TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch",
+          "[pipe][doc0256][enum-dispatch-pack]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::CA;
+    using doc0256_test_helpers::MA;
+
+    SECTION("ChainingAlgorithmType — every enum value routes correctly") {
+        using Reg = algorithm_enum_values<CA>;
+        for (CA v : {CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ}) {
+            CA captured = static_cast<CA>(0xFF);
+            doc0256_test_helpers::value_capture_callable<CA> cb{&captured};
+            const CA result = enum_dispatch_pack<CA, CA, Reg::default_value>(
+                Reg::value_list{}, v, cb);
+            REQUIRE(captured == v);
+            REQUIRE(result == v);
+        }
+    }
+    SECTION("BaseAlignmentAlgorithmType — every enum value routes correctly") {
+        using Reg = algorithm_enum_values<BAA>;
+        for (BAA v : {BAA::KSW2, BAA::BLOCK_ALIGNER, BAA::KSW2_BATCHED}) {
+            BAA captured = static_cast<BAA>(0xFF);
+            doc0256_test_helpers::value_capture_callable<BAA> cb{&captured};
+            const BAA result = enum_dispatch_pack<BAA, BAA, Reg::default_value>(
+                Reg::value_list{}, v, cb);
+            REQUIRE(captured == v);
+            REQUIRE(result == v);
+        }
+    }
+    SECTION("MinimizerAlgorithmType — every enum value routes correctly") {
+        using Reg = algorithm_enum_values<MA>;
+        for (MA v : {MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH}) {
+            MA captured = static_cast<MA>(0xFF);
+            doc0256_test_helpers::value_capture_callable<MA> cb{&captured};
+            const MA result = enum_dispatch_pack<MA, MA, Reg::default_value>(
+                Reg::value_list{}, v, cb);
+            REQUIRE(captured == v);
+            REQUIRE(result == v);
+        }
+    }
+}
+
+TEST_CASE("DOC0256 — enum_dispatch_pack falls back to DefaultValue",
+          "[pipe][doc0256][enum-dispatch-pack][default]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::CA;
+    using doc0256_test_helpers::MA;
+
+    SECTION("ChainingAlgorithmType — out-of-range routes to SCALAR_MM2") {
+        using Reg = algorithm_enum_values<CA>;
+        CA captured = static_cast<CA>(0x00);
+        doc0256_test_helpers::value_capture_callable<CA> cb{&captured};
+        enum_dispatch_pack<CA, CA, Reg::default_value>(
+            Reg::value_list{}, static_cast<CA>(0xFF), cb);
+        REQUIRE(captured == CA::SCALAR_MM2);
+    }
+    SECTION("BaseAlignmentAlgorithmType — out-of-range routes to BLOCK_ALIGNER") {
+        using Reg = algorithm_enum_values<BAA>;
+        BAA captured = static_cast<BAA>(0x00);
+        doc0256_test_helpers::value_capture_callable<BAA> cb{&captured};
+        enum_dispatch_pack<BAA, BAA, Reg::default_value>(
+            Reg::value_list{}, static_cast<BAA>(0xFF), cb);
+        REQUIRE(captured == BAA::BLOCK_ALIGNER);
+    }
+    SECTION("MinimizerAlgorithmType — out-of-range routes to SCALAR") {
+        using Reg = algorithm_enum_values<MA>;
+        MA captured = static_cast<MA>(0x00);
+        doc0256_test_helpers::value_capture_callable<MA> cb{&captured};
+        enum_dispatch_pack<MA, MA, Reg::default_value>(
+            Reg::value_list{}, static_cast<MA>(0xFF), cb);
+        REQUIRE(captured == MA::SCALAR);
+    }
+}
+
+TEST_CASE("DOC0256 — value_dispatch_smallest_ge picks the right bucket",
+          "[pipe][doc0256][value-dispatch-smallest-ge]")
+{
+    // The spec union for kmer_size_buckets = {15, 7, 27} resolves to
+    // L buckets {7, 15, 17, 27, 33, 49, 63}.
+    static constexpr std::array<std::pair<std::size_t, std::size_t>, 15u> cases{{
+        { 1u,   7u}, { 7u,   7u}, { 8u,  15u}, {15u, 15u}, {16u, 17u},
+        {17u,  17u}, {18u,  27u}, {27u,  27u}, {28u, 33u}, {33u, 33u},
+        {34u,  49u}, {49u,  49u}, {50u,  63u}, {63u, 63u}, {64u, 63u},
+    }};
+
+    for (const auto& [want, expected] : cases) {
+        std::size_t captured = 0u;
+        doc0256_test_helpers::value_capture_callable<std::size_t> cb{&captured};
+        value_dispatch_smallest_ge<std::size_t, std::size_t>(
+            detail::seq_len_log2_buckets_seq{}, want, cb);
+        REQUIRE(captured == expected);
+    }
+}
+
+TEST_CASE("DOC0256 — round_up_seq_len_log2 produces canonical L",
+          "[pipe][doc0256][round-up-seq-len]")
+{
+    SECTION("Compile-time properties") {
+        static_assert(round_up_seq_len_log2(0u,            15u) == 15u);
+        static_assert(round_up_seq_len_log2(1u,            15u) == 15u);
+        static_assert(round_up_seq_len_log2(std::size_t{1} << 28, 15u) == 28u);
+        static_assert(round_up_seq_len_log2((std::size_t{1} << 48) + 1u, 15u) == 49u);
+        static_assert(round_up_seq_len_log2(std::size_t{1} << 62, 15u) == 62u);
+        SUCCEED();
+    }
+    SECTION("Clamps below K") {
+        REQUIRE(round_up_seq_len_log2(1u, 27u) == 27u);
+        REQUIRE(round_up_seq_len_log2(1u, 7u)  == 7u);
+    }
+    SECTION("Clamps above 63") {
+        REQUIRE(round_up_seq_len_log2(~std::size_t{0}, 15u) == 63u);
+    }
+}
+
+TEST_CASE("DOC0256 — kmer_size_default matches buckets[0]",
+          "[pipe][doc0256][registry][kmer-size-default]")
+{
+    static_assert(kmer_size_default == 15u);
+    static_assert(kmer_size_default == kmer_size_buckets[0]);
+    SUCCEED();
+}
+
+TEST_CASE("DOC0256 — algorithm_enum_values registry round-trips through algorithm_traits",
+          "[pipe][doc0256][registry][trait-roundtrip]")
+{
+    static_assert(detail::all_traits_specialised_for(
+        algorithm_enum_values<
+            ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType>::value_list{}));
+    static_assert(detail::all_traits_specialised_for(
+        algorithm_enum_values<
+            ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>::value_list{}));
+    static_assert(detail::all_traits_specialised_for(
+        algorithm_enum_values<
+            ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>::value_list{}));
+    SUCCEED();
+}
+
+namespace doc0256_test_helpers {
+
+/// Probe leaf for the BAA × CA × MA chain order test.  Three NTTPs are
+/// pinned; the leaf's `call` writes the (BAA, CA, MA) triple into a
+/// caller-provided slot reachable through the trailing args.
+template <auto BaaPin, auto CaPin, auto MaPin>
+struct bca_probe_leaf {
+    [[gnu::always_inline]] static int call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        BAA& baa_out, CA& ca_out, MA& ma_out)
+    {
+        baa_out = BaaPin;
+        ca_out  = CaPin;
+        ma_out  = MaPin;
+        return 1;
+    }
+};
+
+struct bca_probe_traits {
+    template <auto BaaPin, auto CaPin, auto MaPin>
+    using leaf = bca_probe_leaf<BaaPin, CaPin, MaPin>;
+};
+
+/// Probe leaf for the heterogeneous (size_t L, size_t K, BAA) chain test.
+template <auto LPin, auto KPin, auto BaaPin>
+struct lkb_probe_leaf {
+    [[gnu::always_inline]] static int call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        const compact_sequence_range<std::vector<seq::dna4>>& /*q*/,
+        const compact_sequence_range<std::vector<seq::dna4>>& /*t*/,
+        std::size_t& l_out, std::size_t& k_out, BAA& baa_out)
+    {
+        l_out   = LPin;
+        k_out   = KPin;
+        baa_out = BaaPin;
+        return 1;
+    }
+};
+
+struct lkb_probe_traits {
+    template <auto LPin, auto KPin, auto BaaPin>
+    using leaf = lkb_probe_leaf<LPin, KPin, BaaPin>;
+};
+
+/// Void-returning probe leaf for the MA-only chain test.
+template <auto MaPin>
+struct void_probe_leaf {
+    [[gnu::always_inline]] static void call(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        MA& ma_out)
+    {
+        ma_out = MaPin;
+    }
+};
+
+struct void_probe_traits {
+    template <auto MaPin>
+    using leaf = void_probe_leaf<MaPin>;
+};
+
+}  // namespace doc0256_test_helpers
+
+TEST_CASE("DOC0256 — dispatch_chain pins NTTPs in chain order",
+          "[pipe][doc0256][dispatch-chain][nttp-order]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::CA;
+    using doc0256_test_helpers::MA;
+    using doc0256_test_helpers::bca_probe_traits;
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+
+    constexpr std::array<BAA, 3> baas = {
+        BAA::KSW2, BAA::BLOCK_ALIGNER, BAA::KSW2_BATCHED,
+    };
+    constexpr std::array<CA, 3> cas = {
+        CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ,
+    };
+    constexpr std::array<MA, 3> mas = {
+        MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH,
+    };
+
+    for (BAA baa_v : baas) for (CA ca_v : cas) for (MA ma_v : mas) {
+        params.base_alignment_algorithm = baa_v;
+        params.chaining_algorithm       = ca_v;
+        params.minimizer_algorithm      = ma_v;
+        BAA baa_out = static_cast<BAA>(0xFF);
+        CA  ca_out  = static_cast<CA>(0xFF);
+        MA  ma_out  = static_cast<MA>(0xFF);
+        const int r = detail::dispatch_chain<
+            int,
+            bca_probe_traits::template leaf,
+            detail::baa_step,
+            detail::ca_step,
+            detail::ma_step
+        >::template run<>(params, baa_out, ca_out, ma_out);
+        REQUIRE(r == 1);
+        REQUIRE(baa_out == baa_v);
+        REQUIRE(ca_out  == ca_v);
+        REQUIRE(ma_out  == ma_v);
+    }
+}
+
+TEST_CASE("DOC0256 — dispatch_chain heterogeneous NTTPs (L, K, BAA)",
+          "[pipe][doc0256][dispatch-chain][heterogeneous]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::lkb_probe_traits;
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    // Build two dummy sequences of differing sizes so seq_len_log2_step
+    // picks a non-trivial L.
+    std::vector<seq::dna4> q_data(1u << 10);
+    std::vector<seq::dna4> t_data(1u << 14);
+    compact_sequence_range<std::vector<seq::dna4>> q{q_data};
+    compact_sequence_range<std::vector<seq::dna4>> t{t_data};
+
+    SECTION("K=15, BAA=KSW2 — picks the L bucket from max_bp") {
+        params.kmer_size                = 15;
+        params.base_alignment_algorithm = BAA::KSW2;
+        std::size_t l_out = 0u, k_out = 0u;
+        BAA baa_out = static_cast<BAA>(0xFF);
+        const int r = detail::dispatch_chain<
+            int,
+            lkb_probe_traits::template leaf,
+            detail::seq_len_log2_step,
+            detail::kmer_size_step,
+            detail::baa_step
+        >::template run<>(params, q, t, l_out, k_out, baa_out);
+        REQUIRE(r == 1);
+        REQUIRE(k_out == 15u);
+        REQUIRE(l_out == 15u);  // round_up_seq_len_log2(max(1<<10, 1<<14), 15) = 15
+        REQUIRE(baa_out == BAA::KSW2);
+    }
+    SECTION("K=7 — picks the K=7 bucket and L=7 from short sequences") {
+        std::vector<seq::dna4> q_small(64);
+        std::vector<seq::dna4> t_small(64);
+        compact_sequence_range<std::vector<seq::dna4>> q_sm{q_small};
+        compact_sequence_range<std::vector<seq::dna4>> t_sm{t_small};
+        params.kmer_size                = 7;
+        params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
+        std::size_t l_out = 0u, k_out = 0u;
+        BAA baa_out = static_cast<BAA>(0xFF);
+        detail::dispatch_chain<
+            int,
+            lkb_probe_traits::template leaf,
+            detail::seq_len_log2_step,
+            detail::kmer_size_step,
+            detail::baa_step
+        >::template run<>(params, q_sm, t_sm, l_out, k_out, baa_out);
+        REQUIRE(k_out == 7u);
+        REQUIRE(l_out == 7u);
+        REQUIRE(baa_out == BAA::BLOCK_ALIGNER);
+    }
+}
+
+TEST_CASE("DOC0256 — dispatch_chain skips inactive steps via guarded_step",
+          "[pipe][doc0256][dispatch-chain][guarded-step]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::CA;
+    using doc0256_test_helpers::MA;
+    using doc0256_test_helpers::bca_probe_traits;
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    // Inject an out-of-range MA value to confirm the chain never reads
+    // params.minimizer_algorithm — guarded_step short-circuits to
+    // ma_step::default_value (SCALAR) when active=false.
+    params.minimizer_algorithm      = static_cast<MA>(0xFF);
+    params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
+    params.chaining_algorithm       = CA::SCALAR_MM2;
+
+    BAA baa_out = static_cast<BAA>(0xFF);
+    CA  ca_out  = static_cast<CA>(0xFF);
+    MA  ma_out  = static_cast<MA>(0xFF);
+    detail::dispatch_chain<
+        int,
+        bca_probe_traits::template leaf,
+        detail::baa_step,
+        detail::ca_step,
+        detail::guarded_step<detail::ma_step, /*active=*/false>
+    >::template run<>(params, baa_out, ca_out, ma_out);
+    REQUIRE(baa_out == BAA::BLOCK_ALIGNER);
+    REQUIRE(ca_out  == CA::SCALAR_MM2);
+    REQUIRE(ma_out  == MA::SCALAR);
+}
+
+TEST_CASE("DOC0256 — dispatch_chain handles void return",
+          "[pipe][doc0256][dispatch-chain][void-return]")
+{
+    using doc0256_test_helpers::MA;
+    using doc0256_test_helpers::void_probe_traits;
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    for (MA v : {MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH}) {
+        params.minimizer_algorithm = v;
+        MA captured = static_cast<MA>(0xFF);
+        detail::dispatch_chain<
+            void,
+            void_probe_traits::template leaf,
+            detail::ma_step
+        >::template run<>(params, captured);
+        REQUIRE(captured == v);
+    }
+}
+
+namespace doc0256_test_helpers {
+
+/// Records which Cep branch was selected inside `pipeline_run_leaf::call`.
+inline thread_local int g_last_recorded_w = 0;
+inline thread_local int g_last_recorded_k = 0;
+
+}  // namespace doc0256_test_helpers
+
+TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime match",
+          "[pipe][doc0256][leaf][cep-route]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::CA;
+    using doc0256_test_helpers::MA;
+
+    SECTION("(W=10, K=15) — selects the specialised Cep") {
+        // Both branches use the same fully-instantiated pipeline body —
+        // we cannot directly observe which Cep was picked without a probe
+        // hook inside pipeline_run_impl.  Instead, we exercise the leaf's
+        // (W, K) gate behaviour and confirm the call completes without
+        // an out-of-bounds access by passing zero-sized sequences and
+        // empty minimizers.
+        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        params.window_size = 10;
+        params.kmer_size   = 15;
+        params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
+        params.chaining_algorithm       = CA::SCALAR_MM2;
+        params.minimizer_algorithm      = MA::SCALAR;
+        std::vector<seq::dna4> q_data(64);
+        std::vector<seq::dna4> t_data(64);
+        compact_sequence_range<std::vector<seq::dna4>> q{q_data};
+        compact_sequence_range<std::vector<seq::dna4>> t{t_data};
+        using MinimizerT =
+            ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
+        const std::vector<MinimizerT> mins{};
+        ::bioseq::simd::HWY_NAMESPACE::TargetIndex idx;
+        idx.build(mins, static_cast<int32_t>(t.bp_size()));
+        // The leaf's W==10 && K==15 branch picks SpecCep.
+        auto result = detail::pipeline_run_leaf<
+            EntryPoint::WithPrebuiltMinimizers,
+            std::vector<seq::dna4>, std::vector<seq::dna4>,
+            MinimizerT, ::bioseq::simd::HWY_NAMESPACE::TargetIndex,
+            15u, 15u,
+            BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
+                params, q, t, mins, idx);
+        REQUIRE(result.size() == 0u);
+    }
+    SECTION("(W=5, K=15) — selects the fallback Cep") {
+        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        params.window_size = 5;
+        params.kmer_size   = 15;
+        params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
+        params.chaining_algorithm       = CA::SCALAR_MM2;
+        params.minimizer_algorithm      = MA::SCALAR;
+        std::vector<seq::dna4> q_data(64);
+        std::vector<seq::dna4> t_data(64);
+        compact_sequence_range<std::vector<seq::dna4>> q{q_data};
+        compact_sequence_range<std::vector<seq::dna4>> t{t_data};
+        using MinimizerT =
+            ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
+        const std::vector<MinimizerT> mins{};
+        ::bioseq::simd::HWY_NAMESPACE::TargetIndex idx;
+        idx.build(mins, static_cast<int32_t>(t.bp_size()));
+        auto result = detail::pipeline_run_leaf<
+            EntryPoint::WithPrebuiltMinimizers,
+            std::vector<seq::dna4>, std::vector<seq::dna4>,
+            MinimizerT, ::bioseq::simd::HWY_NAMESPACE::TargetIndex,
+            15u, 15u,
+            BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
+                params, q, t, mins, idx);
+        REQUIRE(result.size() == 0u);
+    }
+}
+
+TEST_CASE("DOC0256 — non-canonical kmer_size resolves to the right L bucket",
+          "[pipe][doc0256][kmer-size-default]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::lkb_probe_traits;
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
+
+    for (int32_t k : {int32_t{11}, int32_t{21}}) {
+        params.kmer_size = k;
+        SECTION("max_bp = 1<<10") {
+            std::vector<seq::dna4> qd(1u << 10);
+            std::vector<seq::dna4> td(1u << 10);
+            compact_sequence_range<std::vector<seq::dna4>> q{qd};
+            compact_sequence_range<std::vector<seq::dna4>> t{td};
+            std::size_t l_out = 0u, k_out = 0u;
+            BAA baa_out = static_cast<BAA>(0xFF);
+            detail::dispatch_chain<
+                int,
+                lkb_probe_traits::template leaf,
+                detail::seq_len_log2_step,
+                detail::kmer_size_step,
+                detail::baa_step
+            >::template run<>(params, q, t, l_out, k_out, baa_out);
+            REQUIRE(k_out == kmer_size_default);
+            // round_up_seq_len_log2(1<<10, k) = max(10, k) = k for k in {11, 21}.
+            // Then seq_len_log2_step picks the smallest L >= k from
+            // {7, 15, 17, 27, 33, 49, 63}:
+            //   k=11 → L=15;  k=21 → L=27.
+            if (k == 11) REQUIRE(l_out == 15u);
+            if (k == 21) REQUIRE(l_out == 27u);
+        }
+        SECTION("max_bp = 1<<20") {
+            std::vector<seq::dna4> qd(1u << 20);
+            std::vector<seq::dna4> td(1u << 20);
+            compact_sequence_range<std::vector<seq::dna4>> q{qd};
+            compact_sequence_range<std::vector<seq::dna4>> t{td};
+            std::size_t l_out = 0u, k_out = 0u;
+            BAA baa_out = static_cast<BAA>(0xFF);
+            detail::dispatch_chain<
+                int,
+                lkb_probe_traits::template leaf,
+                detail::seq_len_log2_step,
+                detail::kmer_size_step,
+                detail::baa_step
+            >::template run<>(params, q, t, l_out, k_out, baa_out);
+            REQUIRE(k_out == kmer_size_default);
+            // round_up_seq_len_log2(1<<20, k) = 20.  smallest L >= 20 from
+            // {7, 15, 17, 27, 33, 49, 63} is 27.
+            REQUIRE(l_out == 27u);
+        }
+    }
+}
+
+namespace doc0256_test_helpers {
+
+template <class... Args>
+constexpr bool chain_accepts_v = requires {
+    ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
+        int, bca_probe_traits::template leaf,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::baa_step,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::ca_step,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::ma_step
+    >::template run<>(
+        std::declval<const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&>(),
+        std::declval<Args>()...);
+};
+
+}  // namespace doc0256_test_helpers
+
+TEST_CASE("DOC0256 — dispatch_chain rejects rvalue args at compile time",
+          "[pipe][doc0256][dispatch-chain][concept-gate]")
+{
+    using doc0256_test_helpers::BAA;
+    using doc0256_test_helpers::CA;
+    using doc0256_test_helpers::MA;
+
+    // lvalue references are accepted.
+    static_assert(doc0256_test_helpers::chain_accepts_v<BAA&, CA&, MA&>);
+    static_assert(doc0256_test_helpers::chain_accepts_v<const BAA&, const CA&, const MA&>);
+    // By-value (deduced as non-reference type) is rejected.
+    static_assert(!doc0256_test_helpers::chain_accepts_v<BAA, CA, MA>);
+    // rvalue ref is rejected.
+    static_assert(!doc0256_test_helpers::chain_accepts_v<BAA&&, CA&&, MA&&>);
+    SUCCEED();
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE::pipe
