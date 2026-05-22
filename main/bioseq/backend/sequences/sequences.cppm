@@ -26,8 +26,6 @@ export module bioseq_sequences:sequences;
 import mlogging;
 import sequan_compat;
 
-using namespace seq::literals; // todo: this must be remvoed
-
 export {
 
 template<typename T, template<typename...> typename U>
@@ -1515,28 +1513,6 @@ concept supports_compact_sequence_bitcast_view =
         { V::advance_iter(it, n)        };
         { V::view_distance(cit, cit)    } -> std::convertible_to<size_t>;
     };
-
-void hehe_hyhy() {
-    std::vector<seq::dna4> MINIMIZER_TEST_DNA4_SEQ{
-        "GATCGTAGCCCTAGTCACTGTAGCTGATCGTAGCTAGTCACTGTAGCTGATCGTAGCTAGTC"_dna4
-    };
-    auto seq = compact_sequence_range<sequence_custom_alphabet<seq::dna4, uint32_t>>(MINIMIZER_TEST_DNA4_SEQ);
-    auto iter = seq.begin();
-
-    //auto down_cast = seq.bit_cast_to<compact_sequence_range<seq::dna4>>();
-    auto down_cast = seq.bit_cast_to_storage_unit<uint16_t>();
-    JustLog("test val = {}", *iter);
-    down_cast.advance_iter(iter, 4);
-    JustLog("test val = {}", *iter);
-
-    iter = seq.begin();
-    auto noop_cast = seq.bit_cast_to_storage_unit<uint64_t>();
-    JustLog("test val = {}", *iter);
-    noop_cast.advance_iter(iter, 2);
-    JustLog("test val = {}", *iter);
-
-    uint8_t chunk = *down_cast.read_cptr(iter);
-}
 
 };
 
