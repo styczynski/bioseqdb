@@ -133,7 +133,7 @@ struct PerScanAlignerState {
  * ReScan (PARAM_EXTERN would route through a different ParamListInfo
  * member and is not currently supported).
  *
- * `seq_attno` / `column_name` / `alphabet_code` / `width_code` /
+ * `seq_attno` / `column_name` / `alphabet_code` / `storage_unit_byte_width` /
  * `primary_key_attno` mirror the equivalent MmsearchContext fields so the
  * ReScan path can call configure_mmsearch with a fresh query without
  * re-walking the plan.
@@ -147,7 +147,7 @@ struct MmsearchParamRebind {
 	AttrNumber seq_attno          = InvalidAttrNumber;
 	AttrNumber primary_key_attno  = InvalidAttrNumber;
 	uint8_t    alphabet_code      = 0;
-	uint8_t    width_code         = 0;
+	uint8_t    storage_unit_byte_width         = 0;
 	std::string column_name;
 	/*
 	 * Stash a pointer to the SPECIFIC mmsearch FuncExpr that
@@ -3439,11 +3439,11 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
 			continue;
 		}
-		const auto unpacked_typmod      = unpack_pgseq_typmod(col_var->vartypmod);
-		const auto unpacked_arg1_typmod = unpack_pgseq_typmod(arg1_typmod);
+		const auto unpacked_typmod      = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
+		const auto unpacked_arg1_typmod = compact_sequence_stdc_type_params::decode(arg1_typmod);
 		const bool typmod_match =
 			(unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code)
-			&& (unpacked_typmod.width_code == unpacked_arg1_typmod.width_code);
+			&& (unpacked_typmod.storage_unit_byte_width == unpacked_arg1_typmod.storage_unit_byte_width);
 		const bool same_alphabet =
 			unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code;
 		/*
@@ -3458,9 +3458,9 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		{
 			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch (Param) col=({},{}) arg1=({},{}) — rejecting (Param coalesce not yet supported)",
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_typmod.width_code),
+					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width),
 					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_arg1_typmod.width_code));
+					static_cast<unsigned>(unpacked_arg1_typmod.storage_unit_byte_width));
 			continue;
 		}
 		/*
@@ -3473,9 +3473,9 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		{
 			JustLog("[bioseq] pg: BeginCustomScan() unexpected same-rel Var typmod mismatch col=({},{}) arg1=({},{}) — rejecting",
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_typmod.width_code),
+					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width),
 					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_arg1_typmod.width_code));
+					static_cast<unsigned>(unpacked_arg1_typmod.storage_unit_byte_width));
 			continue;
 		}
 
@@ -3562,7 +3562,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				continue;
 			}
 			Const* query_const = reinterpret_cast<Const*>(arg1);
-			PgCompactSequenceHdr* extra_query_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+			pgseq_t* extra_query_hdr = reinterpret_cast<pgseq_t*>(
 				PG_DETOAST_DATUM(query_const->constvalue));
 			const size_t extra_total_bytes = static_cast<size_t>(VARSIZE(extra_query_hdr));
 			std::vector<char> extra_varlena_bytes(extra_total_bytes);
@@ -3588,7 +3588,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			 * copy so the bytes outlive the planner's per-query memory context.
 			 */
 			Const* query_const = reinterpret_cast<Const*>(arg1);
-			PgCompactSequenceHdr* query_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+			pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
 				PG_DETOAST_DATUM(query_const->constvalue));
 			const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
 			std::vector<char> query_varlena_bytes(query_total_bytes);
@@ -3603,7 +3603,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 										  std::string(attname_cstr),
 										  std::move(query_varlena_bytes),
 										  unpacked_typmod.alphabet_code,
-										  unpacked_typmod.width_code,
+										  unpacked_typmod.storage_unit_byte_width,
 										  primary_key_attno);
 			/*
 			 * Typmod-coalesce path: when the column and literal
@@ -3630,14 +3630,14 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				 * copy. apply_typmod_coalesce stores the result
 				 * inside the buffer's mmsearch_context.
 				 */
-				PgCompactSequenceHdr* src_hdr2 =
-					reinterpret_cast<PgCompactSequenceHdr*>(
+				pgseq_t* src_hdr2 =
+					reinterpret_cast<pgseq_t*>(
 						PG_DETOAST_DATUM(query_const->constvalue));
-				PgCompactSequenceHdr* recoded =
-					pgseq_recode_to_typmod(
-						src_hdr2,
-						unpacked_typmod.alphabet_code,
-						unpacked_typmod.width_code);
+				pgseq_t* recoded =
+					(src_hdr2->get_type_params() == unpacked_typmod)
+						? nullptr
+						: ::bioseq::simd::N_NEON::stdc_recode_to_type_params(
+							*src_hdr2, unpacked_typmod, pg_alloc);
 				if (reinterpret_cast<void*>(src_hdr2)
 					!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
 					pfree(src_hdr2);
@@ -3676,14 +3676,14 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			runtime.param_rebind.seq_attno         = col_var->varattno;
 			runtime.param_rebind.column_name       = std::string(attname_cstr);
 			runtime.param_rebind.alphabet_code     = unpacked_typmod.alphabet_code;
-			runtime.param_rebind.width_code        = unpacked_typmod.width_code;
+			runtime.param_rebind.storage_unit_byte_width        = unpacked_typmod.storage_unit_byte_width;
 			runtime.param_rebind.primary_key_attno = primary_key_attno;
 			runtime.param_rebind.mmsearch_fe       = fe;
 			primary_is_const = false;
 			JustLog("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
 					query_param->paramid, static_cast<int>(query_param->paramkind),
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_typmod.width_code));
+					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width));
 		}
 		else /* arg1_is_var_same_rel */
 		{
@@ -3704,7 +3704,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				query_var->varattno,
 				self_alignment,
 				unpacked_typmod.alphabet_code,
-				unpacked_typmod.width_code,
+				unpacked_typmod.storage_unit_byte_width,
 				primary_key_attno);
 			primary_is_const = false;
 			JustLog("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
@@ -3997,7 +3997,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 		pfree(letter_detoasted);
 	}
 
-	const UnpackedPgSeqTypmod typmod = unpack_pgseq_typmod(col_var->vartypmod);
+	const compact_sequence_stdc_type_params typmod = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
 	const int rank = bioseq::sidecar::letter_to_rank(typmod.alphabet_code, letter_char);
 	if (rank < 0) {
 		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count letter '{}' not in alphabet_code={}; keeping scalar call",
@@ -4840,8 +4840,8 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 					if (!query_const->constisnull
 						&& query_const->consttype == scan_stub_oids.bioseq_seq_type_oid)
 					{
-						PgCompactSequenceHdr* query_hdr =
-							reinterpret_cast<PgCompactSequenceHdr*>(
+						pgseq_t* query_hdr =
+							reinterpret_cast<pgseq_t*>(
 								PG_DETOAST_DATUM(query_const->constvalue));
 						const std::size_t query_total_bytes =
 							static_cast<std::size_t>(VARSIZE(query_hdr));
@@ -4858,7 +4858,7 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 							runtime.param_rebind.column_name,
 							std::move(query_varlena_bytes),
 							runtime.param_rebind.alphabet_code,
-							runtime.param_rebind.width_code,
+							runtime.param_rebind.storage_unit_byte_width,
 							runtime.param_rebind.primary_key_attno);
 						reconfigured = true;
 						JustLog("[bioseq] pg: ReScanCustomScan() rebound mmsearch query bp_size={} extras_count={} from Param paramid={}",
@@ -4998,7 +4998,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				!= reinterpret_cast<void*>(DatumGetPointer(letter_const->constvalue))) {
 				pfree(letter_detoasted);
 			}
-			const UnpackedPgSeqTypmod typmod = unpack_pgseq_typmod(col_var->vartypmod);
+			const compact_sequence_stdc_type_params typmod = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
 			const int rank = bioseq::sidecar::letter_to_rank(typmod.alphabet_code, letter_char);
 			if (rank < 0) {
 				continue;
@@ -5153,9 +5153,9 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 
 					if (explain_runtime != nullptr) {
 						const auto raw_alpha = explain_runtime->buffer.raw_query_alphabet_code();
-						const auto raw_width = explain_runtime->buffer.raw_query_width_code();
+						const auto raw_width = explain_runtime->buffer.raw_query_storage_unit_byte_width();
 						const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
-						const auto col_width = explain_runtime->buffer.mmsearch_width_code();
+						const auto col_width = explain_runtime->buffer.mmsearch_storage_unit_byte_width();
 						const auto fmt_alphabet_name = [](uint8_t code) {
 							return code == 0 ? "dna4" : code == 1 ? "dna5" : "?";
 						};
@@ -5191,7 +5191,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							 * literal was silently re-encoded.
 							 */
 							const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
-							const auto col_width = explain_runtime->buffer.mmsearch_width_code();
+							const auto col_width = explain_runtime->buffer.mmsearch_storage_unit_byte_width();
 							const auto fmt_alphabet_name = [](uint8_t code) {
 								return code == 0 ? "dna4" : code == 1 ? "dna5" : "?";
 							};

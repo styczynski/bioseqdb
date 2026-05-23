@@ -211,10 +211,10 @@ Datum bioseq_cigar_stub(PG_FUNCTION_ARGS) {
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count);
 Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
-	/* Module macros like PG_GETARG_PGCOMPACTSEQUENCE_P are not visible across
-	 * a C++20 `import` boundary (modules don't export preprocessor macros).
-	 * The varlena detoast is done manually. */
-	PgCompactSequenceHdr* hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+	/* Detoast the bioseq.seq varlena and reinterpret as pgseq_t (the
+	 * compact_sequence_stdc<…> instantiation defined in
+	 * bioseq_types.pg_compact_sequence). */
+	pgseq_t* hdr = reinterpret_cast<pgseq_t*>(
 		PG_DETOAST_DATUM(PG_GETARG_DATUM(0)));
 	text* sym_text = PG_GETARG_TEXT_PP(1);
 	const int32 sym_size = VARSIZE_ANY_EXHDR(sym_text);
@@ -233,9 +233,9 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 	 * below. */
 	int rank = -1;
 	int64_t computed_result = 0;
-	dispatch_pgseq(hdr->alphabet_code, hdr->width_code,
-		[&]<class Dst>() {
-			using alphabet_t = typename compact_sequence_range<Dst>::traits::alphabet_type;
+	pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width,
+		[&]<class S>() {
+			using alphabet_t = typename S::alphabet_type;
 			if (!seqan3::char_is_valid_for<alphabet_t>(sym_char)) {
 				return;
 			}
@@ -243,7 +243,7 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 			letter.assign_char(sym_char);
 			rank = static_cast<int>(letter.to_rank());
 
-			compact_sequence_range<Dst> seq = make_seq_range_from_pg<Dst>(hdr);
+			compact_sequence_range<S> seq{*hdr};
 			auto tally = seq.count_symbols();
 			if (static_cast<size_t>(rank) < tally.size()) {
 				computed_result = static_cast<int64_t>(tally[rank].first);

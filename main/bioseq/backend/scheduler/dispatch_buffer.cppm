@@ -17,7 +17,7 @@
  *   signals EOF, the buffer feeds its target varlenas (plus the mmsearch
  *   query varlena captured at BeginCustomScan) into
  *   BatchProcessor::process_sequences. That function dispatches on the
- *   column's (alphabet_code, width_code) typmod to instantiate the right
+ *   column's (alphabet_code, storage_unit_byte_width) typmod to instantiate the right
  *   compact_sequence_range<Dst> specialisation, then invokes
  *   minimap_port(query, target) for every row and stores the returned
  *   MatchResults keyed by primary key. Rows whose PK is missing from the
@@ -77,12 +77,12 @@ constexpr size_t kDispatchBatchCapacity = 1000;
 
 /*
  * BatchProcessor drives minimap_port across a batch of (query, target)
- * pairs that all share the same (alphabet_code, width_code) typmod. The
+ * pairs that all share the same (alphabet_code, storage_unit_byte_width) typmod. The
  * caller hands us the already-detoasted query varlena (captured at
  * BeginCustomScan — see columnar_customscan.cppm) and an array of per-row
  * target varlenas (captured at submit_scan — see TupleDispatchBuffer).
  *
- * Dispatch: we branch on (alphabet_code, width_code) exactly once, then
+ * Dispatch: we branch on (alphabet_code, storage_unit_byte_width) exactly once, then
  * inside the matching arm all eight compact_sequence_range<Dst>
  * specialisations compile down to their own minimap_port instantiation.
  * No std::variant, no runtime type erasure on the hot path.
@@ -191,9 +191,9 @@ public:
     [[nodiscard]] std::map<K, std::vector<MatchResult>> process_sequences(
         const size_t batch_size,
         const uint8_t alphabet_code,
-        const uint8_t width_code,
-        const PgCompactSequenceHdr* query_hdr,
-        const std::array<const PgCompactSequenceHdr*, batch_capacity>& target_hdrs,
+        const uint8_t storage_unit_byte_width,
+        const pgseq_t* query_hdr,
+        const std::array<const pgseq_t*, batch_capacity>& target_hdrs,
         const std::array<K, batch_capacity>& query_ids,
         const Minimap2Params& base_params,
         const std::array<TargetIndexBlobRef, batch_capacity>* index_blobs,
@@ -205,12 +205,12 @@ public:
             JustLog("[bioseq] pg: BatchProcessor::process_sequences received null query_hdr; returning empty map");
             return results;
         }
-        if (query_hdr->alphabet_code != alphabet_code || query_hdr->width_code != width_code) {
+        if (query_hdr->alphabet_code != alphabet_code || query_hdr->storage_unit_byte_width != storage_unit_byte_width) {
             JustLog("[bioseq] pg: BatchProcessor::process_sequences query_hdr typmod ({},{}) disagrees with context ({},{}); refusing to dispatch",
                     static_cast<unsigned>(query_hdr->alphabet_code),
-                    static_cast<unsigned>(query_hdr->width_code),
+                    static_cast<unsigned>(query_hdr->storage_unit_byte_width),
                     static_cast<unsigned>(alphabet_code),
-                    static_cast<unsigned>(width_code));
+                    static_cast<unsigned>(storage_unit_byte_width));
             return results;
         }
 
@@ -232,19 +232,19 @@ public:
                 bioseq::instr::register_region_static("BatchProcessor.process_sequences");
             auto _batch_scope = bioseq::instr::region<Args>(batch_desc);
 
-            dispatch_pgseq(alphabet_code, width_code,
-                [&]<class Dst>() {
+            pgseq_t::dispatch_instance(alphabet_code, storage_unit_byte_width,
+                [&]<class S>() {
                 /*
                  * Build the per-batch query compact_sequence_range once
-                 * from the stashed PG varlena. make_seq_range_from_pg
-                 * validates the header and copies the payload into an
-                 * owned std::vector — the alloc is amortised across
-                 * every target in this batch.
+                 * from the stashed PG varlena. The DOC0258 view
+                 * specialisation is reference-only — no allocation
+                 * happens here. The bytes inside `query_hdr` outlive
+                 * the batch via the buffer's std::vector<char>.
                  */
-                compact_sequence_range<Dst> query_seq = make_seq_range_from_pg<Dst>(query_hdr);
+                compact_sequence_range<S> query_seq{*query_hdr};
                 JustLog("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={}",
                         static_cast<unsigned>(alphabet_code),
-                        static_cast<unsigned>(width_code),
+                        static_cast<unsigned>(storage_unit_byte_width),
                         query_seq.bp_size(), batch_size);
 
                 /*
@@ -257,12 +257,12 @@ public:
                 std::optional<std::vector<MinimapSketchData>> cached_query_minimizers;
 
                 for (size_t i = 0; i < batch_size; ++i) {
-                    const PgCompactSequenceHdr* target_hdr = target_hdrs[i];
+                    const pgseq_t* target_hdr = target_hdrs[i];
                     if (target_hdr == nullptr) {
                         continue;  // NULL seq column in this row → no match
                     }
                     if (target_hdr->alphabet_code != alphabet_code
-                        || target_hdr->width_code != width_code) {
+                        || target_hdr->storage_unit_byte_width != storage_unit_byte_width) {
                         /*
                          * PG's typmod coercion should have rejected the
                          * INSERT if the stored typmod didn't match the
@@ -275,12 +275,12 @@ public:
                         JustLog("[bioseq] pg: target row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
                                 static_cast<int>(query_ids[i]),
                                 static_cast<unsigned>(target_hdr->alphabet_code),
-                                static_cast<unsigned>(target_hdr->width_code),
+                                static_cast<unsigned>(target_hdr->storage_unit_byte_width),
                                 static_cast<unsigned>(alphabet_code),
-                                static_cast<unsigned>(width_code));
+                                static_cast<unsigned>(storage_unit_byte_width));
                         continue;
                     }
-                    compact_sequence_range<Dst> target_seq = make_seq_range_from_pg<Dst>(target_hdr);
+                    compact_sequence_range<S> target_seq{*target_hdr};
 
                     const size_t min_bp = std::min(query_seq.bp_size(),
                                                    target_seq.bp_size());
@@ -432,7 +432,7 @@ public:
      * passed as the first argument of mmsearch(); primary_key_attno is
      * the 1-based attribute number of the Var passed as the argument of
      * any bioseq.<field>(...) projection function. alphabet_code /
-     * width_code hold the (alphabet, width) typmod shared by the column
+     * storage_unit_byte_width hold the (alphabet, width) typmod shared by the column
      * and the query literal — they are validated to be equal at
      * BeginCustomScan time. query_varlena holds a full detoasted copy
      * of the mmsearch second-argument bioseq.seq Const, so submit_scan
@@ -444,7 +444,7 @@ public:
         std::string column_name;
         std::vector<char> query_varlena;  // full detoasted varlena bytes, 16-byte aligned by std::allocator
         uint8_t alphabet_code          = 0;
-        uint8_t width_code             = 0;
+        uint8_t storage_unit_byte_width             = 0;
         bool active                    = false;
 
         /*
@@ -478,8 +478,9 @@ public:
          * alphabet but different widths (e.g. column is dna4/32 and
          * query is dna4/64), the bytes in the query header carry the
          * larger width. The bioseq pipeline templates on
-         * (alphabet_code, width_code) and dispatches via
-         * dispatch_pgseq, so the query and target MUST agree on both.
+         * (alphabet_code, storage_unit_byte_width) and dispatches via
+         * pgseq_t::dispatch_instance, so the query and target MUST
+         * agree on both.
          * `coalesced_query_varlena` holds the query bytes re-encoded
          * at the COLUMN's (alphabet, width). The non-coalesced
          * `query_varlena` is preserved for the EXPLAIN line so users
@@ -490,7 +491,7 @@ public:
         std::vector<char> coalesced_query_varlena;
         bool       coalesce_active          = false;
         uint8_t    raw_query_alphabet_code  = 0;
-        uint8_t    raw_query_width_code     = 0;
+        uint8_t    raw_query_storage_unit_byte_width     = 0;
 
         /*
          * Cross-alphabet recompute: when the column and the query
@@ -509,13 +510,13 @@ public:
          */
         bool       recompute_due_to_alphabet_mismatch = false;
 
-        [[nodiscard]] const PgCompactSequenceHdr* query_hdr() const {
+        [[nodiscard]] const pgseq_t* query_hdr() const {
             const std::vector<char>& bytes =
                 coalesce_active ? coalesced_query_varlena : query_varlena;
             if (!active || bytes.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const PgCompactSequenceHdr*>(bytes.data());
+            return reinterpret_cast<const pgseq_t*>(bytes.data());
         }
     };
 
@@ -564,18 +565,18 @@ public:
         std::vector<char> per_row_query_varlena;
         bool            per_row_query_is_null = true;
 
-        [[nodiscard]] const PgCompactSequenceHdr* seq_hdr() const {
+        [[nodiscard]] const pgseq_t* seq_hdr() const {
             if (seq_is_null || seq_varlena.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const PgCompactSequenceHdr*>(seq_varlena.data());
+            return reinterpret_cast<const pgseq_t*>(seq_varlena.data());
         }
 
-        [[nodiscard]] const PgCompactSequenceHdr* per_row_query_hdr() const {
+        [[nodiscard]] const pgseq_t* per_row_query_hdr() const {
             if (per_row_query_is_null || per_row_query_varlena.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const PgCompactSequenceHdr*>(
+            return reinterpret_cast<const pgseq_t*>(
                 per_row_query_varlena.data());
         }
     };
@@ -683,7 +684,7 @@ public:
      * plan. Called once per scan from ColumnarScan_BeginCustomScan.
      * query_varlena_bytes owns the detoasted varlena — moved in.
      *
-     * (alphabet_code, width_code) is the COLUMN's typmod — the
+     * (alphabet_code, storage_unit_byte_width) is the COLUMN's typmod — the
      * dispatch typmod for the whole batch. The query bytes may be
      * carried at a different (alphabet, width); the caller is
      * responsible for re-encoding if a coalesce is needed. See
@@ -693,14 +694,14 @@ public:
                             std::string column_name,
                             std::vector<char> query_varlena_bytes,
                             uint8_t alphabet_code,
-                            uint8_t width_code,
+                            uint8_t storage_unit_byte_width,
                             AttrNumber primary_key_attno) {
         mmsearch_context.seq_attno          = seq_attno;
         mmsearch_context.primary_key_attno  = primary_key_attno;
         mmsearch_context.column_name        = std::move(column_name);
         mmsearch_context.query_varlena      = std::move(query_varlena_bytes);
         mmsearch_context.alphabet_code      = alphabet_code;
-        mmsearch_context.width_code         = width_code;
+        mmsearch_context.storage_unit_byte_width         = storage_unit_byte_width;
         mmsearch_context.coalesce_active    = false;
         mmsearch_context.coalesced_query_varlena.clear();
         mmsearch_context.recompute_due_to_alphabet_mismatch = false;
@@ -710,14 +711,14 @@ public:
          * header may be empty if the caller passed bogus bytes, in which
          * case the configure_mmsearch fast-path already logs and skips.) */
         if (!mmsearch_context.query_varlena.empty()) {
-            const PgCompactSequenceHdr* hdr =
-                reinterpret_cast<const PgCompactSequenceHdr*>(
+            const pgseq_t* hdr =
+                reinterpret_cast<const pgseq_t*>(
                     mmsearch_context.query_varlena.data());
             mmsearch_context.raw_query_alphabet_code = hdr->alphabet_code;
-            mmsearch_context.raw_query_width_code    = hdr->width_code;
+            mmsearch_context.raw_query_storage_unit_byte_width    = hdr->storage_unit_byte_width;
         } else {
             mmsearch_context.raw_query_alphabet_code = alphabet_code;
-            mmsearch_context.raw_query_width_code    = width_code;
+            mmsearch_context.raw_query_storage_unit_byte_width    = storage_unit_byte_width;
         }
         mmsearch_context.active             = true;
 
@@ -730,7 +731,7 @@ public:
                 static_cast<int>(primary_key_attno),
                 mmsearch_context.column_name,
                 static_cast<unsigned>(alphabet_code),
-                static_cast<unsigned>(width_code),
+                static_cast<unsigned>(storage_unit_byte_width),
                 query_bp_size);
     }
 
@@ -753,7 +754,7 @@ public:
                                     AttrNumber per_row_query_attno,
                                     bool per_row_self_alignment,
                                     uint8_t alphabet_code,
-                                    uint8_t width_code,
+                                    uint8_t storage_unit_byte_width,
                                     AttrNumber primary_key_attno) {
         mmsearch_context.seq_attno              = seq_attno;
         mmsearch_context.primary_key_attno      = primary_key_attno;
@@ -762,9 +763,9 @@ public:
         mmsearch_context.coalesced_query_varlena.clear();
         mmsearch_context.coalesce_active        = false;
         mmsearch_context.alphabet_code          = alphabet_code;
-        mmsearch_context.width_code             = width_code;
+        mmsearch_context.storage_unit_byte_width             = storage_unit_byte_width;
         mmsearch_context.raw_query_alphabet_code = alphabet_code;
-        mmsearch_context.raw_query_width_code    = width_code;
+        mmsearch_context.raw_query_storage_unit_byte_width    = storage_unit_byte_width;
         mmsearch_context.per_row_query_attno    = per_row_query_attno;
         mmsearch_context.per_row_self_alignment = per_row_self_alignment;
         mmsearch_context.recompute_due_to_alphabet_mismatch = false;
@@ -775,7 +776,7 @@ public:
                 static_cast<int>(per_row_query_attno),
                 per_row_self_alignment,
                 static_cast<unsigned>(alphabet_code),
-                static_cast<unsigned>(width_code));
+                static_cast<unsigned>(storage_unit_byte_width));
     }
 
     /*
@@ -783,8 +784,7 @@ public:
      * target_width) so the BatchProcessor's static dispatch agrees
      * with the column's typmod. Caller passes the detoasted bytes
      * of the re-encoded value (typically built via the same
-     * dispatch_pgseq + encode_sequence_simd path used by seq_in /
-     * seq_cast).
+     * convert_from(cstr, …, pg_alloc) path used by seq_in / seq_cast).
      *
      * The ORIGINAL query_varlena is preserved (so EXPLAIN can
      * surface the literal the user wrote) and `query_hdr()`
@@ -796,9 +796,9 @@ public:
         mmsearch_context.coalesce_active = true;
         JustLog("[bioseq] pg: TupleDispatchBuffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
                 static_cast<unsigned>(mmsearch_context.raw_query_alphabet_code),
-                static_cast<unsigned>(mmsearch_context.raw_query_width_code),
+                static_cast<unsigned>(mmsearch_context.raw_query_storage_unit_byte_width),
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
-                static_cast<unsigned>(mmsearch_context.width_code),
+                static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
                 mmsearch_context.query_varlena.size(),
                 mmsearch_context.coalesced_query_varlena.size());
     }
@@ -836,14 +836,14 @@ public:
     [[nodiscard]] uint8_t mmsearch_alphabet_code() const {
         return mmsearch_context.alphabet_code;
     }
-    [[nodiscard]] uint8_t mmsearch_width_code() const {
-        return mmsearch_context.width_code;
+    [[nodiscard]] uint8_t mmsearch_storage_unit_byte_width() const {
+        return mmsearch_context.storage_unit_byte_width;
     }
     [[nodiscard]] uint8_t raw_query_alphabet_code() const {
         return mmsearch_context.raw_query_alphabet_code;
     }
-    [[nodiscard]] uint8_t raw_query_width_code() const {
-        return mmsearch_context.raw_query_width_code;
+    [[nodiscard]] uint8_t raw_query_storage_unit_byte_width() const {
+        return mmsearch_context.raw_query_storage_unit_byte_width;
     }
 
     /*
@@ -887,8 +887,8 @@ public:
      * (seq, alphabet, width) and produce nonsense matches.
      */
     void add_extra_const_query(std::vector<char> query_varlena_bytes) {
-        const PgCompactSequenceHdr* hdr =
-            reinterpret_cast<const PgCompactSequenceHdr*>(
+        const pgseq_t* hdr =
+            reinterpret_cast<const pgseq_t*>(
                 query_varlena_bytes.data());
         const uint32_t bp_size = (query_varlena_bytes.empty() || hdr == nullptr)
             ? 0u : hdr->bp_size;
@@ -946,7 +946,7 @@ public:
                 /*
                  * PG_DETOAST_DATUM resolves short-header/TOASTed/compressed
                  * varlenas into a flat 4-byte-header copy we can reinterpret
-                 * as PgCompactSequenceHdr*. The copy lives in
+                 * as pgseq_t*. The copy lives in
                  * CurrentMemoryContext, which is the per-query context here
                  * — it will be reset long after we finish writing, so the
                  * read below is safe. We still memcpy the bytes into our
@@ -954,7 +954,7 @@ public:
                  * ResetExprContext / per-tuple context cleanup between
                  * calls to ExecScanFetch.
                  */
-                PgCompactSequenceHdr* src_hdr = reinterpret_cast<PgCompactSequenceHdr*>(
+                pgseq_t* src_hdr = reinterpret_cast<pgseq_t*>(
                     PG_DETOAST_DATUM(seq_datum));
                 const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
                 entry.seq_varlena.assign(
@@ -1004,8 +1004,8 @@ public:
             if (query_null) {
                 entry.per_row_query_is_null = true;
             } else {
-                PgCompactSequenceHdr* src_hdr =
-                    reinterpret_cast<PgCompactSequenceHdr*>(
+                pgseq_t* src_hdr =
+                    reinterpret_cast<pgseq_t*>(
                         PG_DETOAST_DATUM(query_datum));
                 const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
                 entry.per_row_query_varlena.assign(
@@ -1089,10 +1089,10 @@ public:
      * the returned MatchResult map; builds output_cursors in insertion
      * order (one per MatchResult per row, skipping rows whose PK is
      * absent from the map). The query/target type dispatch happens
-     * inside process_sequences via dispatch_pgseq.
+     * inside process_sequences via pgseq_t::dispatch_instance.
      */
     void run_batch_and_build_cursors() {
-        std::array<const PgCompactSequenceHdr*, kDispatchBatchCapacity> target_hdrs{};
+        std::array<const pgseq_t*, kDispatchBatchCapacity> target_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
         std::array<typename BatchProcessor::TargetIndexBlobRef,
                    kDispatchBatchCapacity> index_blobs{};
@@ -1138,12 +1138,12 @@ public:
             }
         }
 
-        const PgCompactSequenceHdr* query_hdr = mmsearch_context.query_hdr();
+        const pgseq_t* query_hdr = mmsearch_context.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
         JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={} alphabet_recompute={}",
                 batch_size,
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
-                static_cast<unsigned>(mmsearch_context.width_code),
+                static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
                 query_bp_size,
                 read_sequence_index_active,
                 per_row_mode(),
@@ -1183,11 +1183,11 @@ public:
              */
             for (size_t i = 0; i < batch_size; ++i) {
                 const BufferedScanEntry& entry = buffered_entries[i];
-                const PgCompactSequenceHdr* per_row_hdr = entry.per_row_query_hdr();
+                const pgseq_t* per_row_hdr = entry.per_row_query_hdr();
                 if (per_row_hdr == nullptr || target_hdrs[i] == nullptr) {
                     continue;
                 }
-                std::array<const PgCompactSequenceHdr*, kDispatchBatchCapacity>
+                std::array<const pgseq_t*, kDispatchBatchCapacity>
                     single_targets{};
                 std::array<int32_t, kDispatchBatchCapacity> single_ids{};
                 std::array<typename BatchProcessor::TargetIndexBlobRef,
@@ -1203,7 +1203,7 @@ public:
                     processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
                         1,
                         mmsearch_context.alphabet_code,
-                        mmsearch_context.width_code,
+                        mmsearch_context.storage_unit_byte_width,
                         per_row_hdr,
                         single_targets, single_ids,
                         base_params,
@@ -1221,7 +1221,7 @@ public:
             match_map = processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
                 batch_size,
                 mmsearch_context.alphabet_code,
-                mmsearch_context.width_code,
+                mmsearch_context.storage_unit_byte_width,
                 query_hdr,
                 target_hdrs, query_ids,
                 base_params,
@@ -1252,15 +1252,15 @@ public:
             if (extra_bytes.empty()) {
                 continue;
             }
-            const PgCompactSequenceHdr* extra_hdr =
-                reinterpret_cast<const PgCompactSequenceHdr*>(
+            const pgseq_t* extra_hdr =
+                reinterpret_cast<const pgseq_t*>(
                     extra_bytes.data());
             BatchExecutionStats discarded_stats{};
             auto extra_match_map =
                 processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
                     batch_size,
                     mmsearch_context.alphabet_code,
-                    mmsearch_context.width_code,
+                    mmsearch_context.storage_unit_byte_width,
                     extra_hdr,
                     target_hdrs, query_ids,
                     base_params,

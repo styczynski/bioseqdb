@@ -67,10 +67,10 @@ import sequan_compat;
 import bioseq_metadata_admin;
 
 /* Pull TargetIndex / sketch_collector / collect_minimizers / minimap_int_hasher
- * / dispatch_pgseq / make_seq_range_from_pg / compact_sequence_range /
- * PgCompactSequenceHdr out of their home namespaces so the compute path below
- * reads clean. The minimap module places all of these inside
- * bioseq::simd::HWY_NAMESPACE; on ARM64 HWY_NAMESPACE resolves to N_NEON. */
+ * / pgseq_t / compact_sequence_range out of their home namespaces so the
+ * compute path below reads clean. The minimap module places all of these
+ * inside bioseq::simd::HWY_NAMESPACE; on ARM64 HWY_NAMESPACE resolves to
+ * N_NEON. */
 using bioseq::simd::HWY_NAMESPACE::TargetIndex;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers;
@@ -92,9 +92,9 @@ extern "C++" bool     IsColumnarTableAmTable(Oid relationId);
  * INSERT time. Declared via extern "C++" for the same reason as the two
  * symbols above (avoids a circular import on bioseq_table). */
 extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
-/* dispatch_pgseq / make_seq_range_from_pg / compact_sequence_range /
- * PgCompactSequenceHdr live in the root namespace (the pg_compact_sequence
- * module doesn't wrap in HWY_BEFORE_NAMESPACE). They are reachable directly. */
+/* pgseq_t and compact_sequence_range live in the root namespace (the
+ * pg_compact_sequence and bioseq_sequences modules don't wrap in
+ * HWY_BEFORE_NAMESPACE). They are reachable directly. */
 
 namespace bioseq::sidecar {
 
@@ -254,7 +254,7 @@ export void sidecar_write_meta(Oid user_relid, int64_t rowno,
  * allocate a single varlena of exact size and serialize straight into
  * VARDATA(ptr), saving one malloc + one memcpy per INSERT. */
 export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
-											const PgCompactSequenceHdr* hdr)
+											const pgseq_t* hdr)
 {
 	if (hdr == nullptr) {
 		return;
@@ -272,9 +272,9 @@ export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
 	TargetIndex idx;
 	std::size_t blob_bytes = 0;
 
-	dispatch_pgseq(hdr->alphabet_code, hdr->width_code,
-		[&]<class Dst>() {
-			compact_sequence_range<Dst> seq = make_seq_range_from_pg<Dst>(hdr);
+	pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width,
+		[&]<class S>() {
+			compact_sequence_range<S> seq{*hdr};
 
 			sketch_collector collector;
 			collect_minimizers<minimap_int_hasher, MinimapSketchData>(
@@ -312,7 +312,7 @@ export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
  * stack buffer to hold the counts plus a couple of spares so the function
  * never needs to heap-allocate here. */
 export void sidecar_compute_and_write_meta(Oid user_relid, int64_t rowno,
-										   const PgCompactSequenceHdr* hdr)
+										   const pgseq_t* hdr)
 {
 	if (hdr == nullptr) {
 		return;
@@ -322,9 +322,9 @@ export void sidecar_compute_and_write_meta(Oid user_relid, int64_t rowno,
 	int64_t counts[kMaxAlphabetSize] = { 0 };
 	int num_counts = 0;
 
-	dispatch_pgseq(hdr->alphabet_code, hdr->width_code,
-		[&]<class Dst>() {
-			compact_sequence_range<Dst> seq = make_seq_range_from_pg<Dst>(hdr);
+	pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width,
+		[&]<class S>() {
+			compact_sequence_range<S> seq{*hdr};
 			auto tally = seq.count_symbols();
 			num_counts = static_cast<int>(tally.size());
 			for (int i = 0; i < num_counts && i < kMaxAlphabetSize; ++i) {
@@ -397,7 +397,7 @@ export void sidecar_after_insert(Relation user_rel,
 		return;          /* NULL seq column; skip */
 	}
 
-	const PgCompactSequenceHdr* hdr = reinterpret_cast<const PgCompactSequenceHdr*>(
+	const pgseq_t* hdr = reinterpret_cast<const pgseq_t*>(
 		DatumGetPointer(detoasted_values[seq_attno - 1]));
 
 	/* Meta first: computing a symbol tally is cheap and gives us a consistent
@@ -593,8 +593,9 @@ export [[nodiscard]] float estimate_index_presence(Oid user_relid,
 }
 
 /* Fixed-size result of a meta_sidecar lookup. The maximum alphabet size
- * supported by dispatch_pgseq is 5 (dna5); we round to 8 to keep the
- * struct cache-line friendly and leave headroom for future alphabets.
+ * supported by pgseq_t::dispatch_instance is 5 (dna5); we round to 8 to
+ * keep the struct cache-line friendly and leave headroom for future
+ * alphabets.
  * Using a stack-sized struct here avoids the std::vector<int64_t>
  * heap allocation that every per-row scalar lookup otherwise pays for. */
 export struct SymbolCounts {
@@ -681,20 +682,21 @@ export std::optional<SymbolCounts> sidecar_read_meta_counts(Oid user_relid, int6
 /* Resolve an alphabet letter to its seqan3 rank. Returns -1 for letters
  * outside the alphabet. The helper exists so the custom-scan planner can
  * pre-compute the rank once per symbol_count() call site without paying
- * for a dispatch_pgseq template instantiation + seqan3 assign_char on
- * every EXPLAIN re-render or VarInjector rewrite.
+ * for a pgseq_t::dispatch_instance template instantiation + seqan3
+ * assign_char on every EXPLAIN re-render or VarInjector rewrite.
  *
  * The table is built at static-init time by walking the seqan3 alphabets
  * for every supported alphabet_code; the per-lookup cost is a pair of
- * array indexes. Only alphabet_code is load-bearing; width_code is
- * irrelevant because the rank mapping is identical for every storage
- * width of the same alphabet. */
+ * array indexes. Only alphabet_code is load-bearing; the storage byte
+ * width is irrelevant because the rank mapping is identical for every
+ * storage width of the same alphabet. */
 namespace detail {
 
-/* kPgseqAlphabetCount is the single source of truth — it lives next to
- * dispatch_pgseq in pg_compact_sequence.cppm and must grow alongside that
- * switch statement. Any drift is caught here at build time. */
-constexpr std::size_t kNumAlphabets = static_cast<std::size_t>(kPgseqAlphabetCount);
+/* pgseq_supported_alphabets::alphabet_count is the single source of truth
+ * — it lives in `bioseq_sequences:sequences` and grows automatically when
+ * the pack is extended. The build-time table mirrors that count. */
+constexpr std::size_t kNumAlphabets =
+	static_cast<std::size_t>(pgseq_supported_alphabets::alphabet_count);
 constexpr std::size_t kCharDomain   = 256;
 
 inline auto build_letter_rank_table() {
@@ -703,9 +705,9 @@ inline auto build_letter_rank_table() {
 		row.fill(static_cast<int8_t>(-1));
 	}
 	for (uint8_t alphabet_code = 0; alphabet_code < kNumAlphabets; ++alphabet_code) {
-		dispatch_pgseq(alphabet_code, /*width_code=*/ 0,
-			[&]<class Dst>() {
-				using alphabet_t = typename compact_sequence_range<Dst>::traits::alphabet_type;
+		pgseq_t::dispatch_instance(alphabet_code, /*byte_width=*/ 1,
+			[&]<class S>() {
+				using alphabet_t = typename S::alphabet_type;
 				for (int c = 0; c < static_cast<int>(kCharDomain); ++c) {
 					const char letter = static_cast<char>(c);
 					if (!seqan3::char_is_valid_for<alphabet_t>(letter)) {
@@ -822,8 +824,8 @@ template <typename WriteOne>
 			continue;
 		}
 
-		const PgCompactSequenceHdr* hdr =
-			reinterpret_cast<const PgCompactSequenceHdr*>(
+		const pgseq_t* hdr =
+			reinterpret_cast<const pgseq_t*>(
 				PG_DETOAST_DATUM(dat));
 
 		const int64_t rowno = static_cast<int64_t>(
@@ -840,7 +842,7 @@ template <typename WriteOne>
 
 		if (reinterpret_cast<const void*>(hdr)
 			!= reinterpret_cast<const void*>(DatumGetPointer(dat))) {
-			pfree(const_cast<PgCompactSequenceHdr*>(hdr));
+			pfree(const_cast<pgseq_t*>(hdr));
 		}
 	}
 
@@ -864,7 +866,7 @@ export [[nodiscard]] int64_t recompute_per_row_index_for_relid(Oid user_relid) {
 		user_relid, oids.index_sidecar_relid,
 		"DELETE FROM bioseq_internal.index_sidecar WHERE user_relid = $1",
 		"minimizers",
-		[](Oid relid, int64_t rowno, const PgCompactSequenceHdr* hdr) {
+		[](Oid relid, int64_t rowno, const pgseq_t* hdr) {
 			sidecar_compute_and_write_index(relid, rowno, hdr);
 		});
 }
@@ -876,7 +878,7 @@ export [[nodiscard]] int64_t recompute_per_row_meta_for_relid(Oid user_relid) {
 		user_relid, oids.meta_sidecar_relid,
 		"DELETE FROM bioseq_internal.meta_sidecar WHERE user_relid = $1",
 		"symbol_counts",
-		[](Oid relid, int64_t rowno, const PgCompactSequenceHdr* hdr) {
+		[](Oid relid, int64_t rowno, const pgseq_t* hdr) {
 			sidecar_compute_and_write_meta(relid, rowno, hdr);
 		});
 }

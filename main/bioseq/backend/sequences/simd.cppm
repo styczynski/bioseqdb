@@ -15,6 +15,8 @@ module;
 #include <vector>
 #include <functional>
 
+#include <boost/integer.hpp>
+
 export module bioseq_sequences.simd;
 
 import mlogging;
@@ -2350,14 +2352,14 @@ requires supports_compact_sequence_range<Src>
     const std::size_t bp_count = seq.bp_size();
     if (bp_count == 0) return std::string{};
 
-    if constexpr (is_sequence_custom_alphabet<Src>) {
+    if constexpr (is_sequence_custom_alphabet<Src> || is_compact_sequence_stdc_instance<Src>) {
         using storage_unit_t = typename seq_traits::storage_unit;
         using alphabet_t     = typename seq_traits::alphabet_type;
         constexpr std::size_t bpc = seq_traits::bits_per_char;
         constexpr std::size_t lpu = seq_traits::letters_per_unit;
         std::string out(bp_count, '\0');
         decode_words_to_ascii_scalar<alphabet_t, storage_unit_t, bpc, lpu>(
-            seq._data.data(),
+            seq.read_cptr(seq.cbegin()),
             reinterpret_cast<std::uint8_t*>(out.data()),
             bp_count);
         return out;
@@ -2385,14 +2387,14 @@ requires supports_compact_sequence_range<Src>
     const std::size_t bp_count = seq.bp_size();
     if (bp_count == 0) return std::string{};
 
-    if constexpr (is_sequence_custom_alphabet<Src>) {
+    if constexpr (is_sequence_custom_alphabet<Src> || is_compact_sequence_stdc_instance<Src>) {
         using storage_unit_t = typename seq_traits::storage_unit;
         using alphabet_t     = typename seq_traits::alphabet_type;
         constexpr std::size_t bpc = seq_traits::bits_per_char;
         constexpr std::size_t lpu = seq_traits::letters_per_unit;
         std::string out(bp_count, '\0');
         decode_words_to_ascii<alphabet_t, storage_unit_t, bpc, lpu>(
-            seq._data.data(),
+            seq.read_cptr(seq.cbegin()),
             reinterpret_cast<std::uint8_t*>(out.data()),
             bp_count);
         return out;
@@ -2434,8 +2436,14 @@ requires supports_compact_sequence_range<R1>
 	const size_t bp_b = b.bp_size();
 	const size_t bp_common = std::min(bp_a, bp_b);
 
-	const storage_unit_t* a_data = a._data.data();
-	const storage_unit_t* b_data = b._data.data();
+	// Short-circuit on either-empty inputs so we never fetch read_cptr on
+	// a zero-sized container — the existing custom-alphabet specialisation
+	// dereferences cbegin() inside read_cptr, which is UB on an empty
+	// std::vector. Empty <=> X collapses to the size-compare below.
+	if (bp_common == 0) return bp_a <=> bp_b;
+
+	const storage_unit_t* a_data = a.read_cptr(a.cbegin());
+	const storage_unit_t* b_data = b.read_cptr(b.cbegin());
 
 	size_t bp_idx = 0;
 	while (bp_idx + letters_per_unit <= bp_common) {
@@ -2479,6 +2487,172 @@ struct hwy_vector_string_printer<T, InfoT, I> {
 		return decode_compressed_seq_el<T, I>(*((T*)ptr));
 	}
 };
+
+// =====================================================================
+// DOC0258: SIMD-using free functions over `compact_sequence_stdc<…>`.
+// These live in `bioseq_sequences.simd` (the module that owns the SIMD
+// encoder / decoder) so the templated bodies can call those primitives
+// directly. The functions are exposed via the `bioseq::simd::N_NEON`
+// namespace so the postgres binding (`pg_compact_sequence.cppm`) can
+// call them without naming a different namespace.
+//
+// The class declaration in `bioseq_sequences:sequences` deliberately
+// does NOT expose these as members because cross-module forward
+// declarations of templates do not link (each module attaches its own
+// mangled symbol).
+// =====================================================================
+
+template<
+    class StdcT,
+    sequence_alphabet alphabet_t,
+    class Alloc
+>
+requires (
+    is_compact_sequence_stdc<StdcT>
+    && is_in_supported_alphabets_v<typename StdcT::supported_alphabets_type, alphabet_t>
+    && stdc_allocator<Alloc, StdcT>
+)
+[[nodiscard]]
+inline StdcT* stdc_convert_from_cstr(
+    std::uint8_t target_storage_byte_width,
+    typename StdcT::bp_size_t length,
+    const char* input,
+    Alloc&& alloc)
+{
+    DEBUG_ASSERT(
+        target_storage_byte_width == 1 || target_storage_byte_width == 2
+        || target_storage_byte_width == 4 || target_storage_byte_width == 8,
+        fmt::format("stdc_convert_from_cstr: storage_unit_byte_width {} not in {{1,2,4,8}}",
+                    static_cast<unsigned>(target_storage_byte_width)));
+
+    StdcT* result = nullptr;
+    dispatch_storage_unit_byte_width(target_storage_byte_width,
+        [&]<std::size_t BW>() {
+            using storage_unit_t = typename boost::uint_t<BW * 8>::least;
+            using sca_t = sequence_custom_alphabet<
+                alphabet_t, storage_unit_t,
+                seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_t>)>;
+
+            const auto packed =
+                encode_sequence_simd<sca_t>(
+                    input, static_cast<std::size_t>(length));
+
+            const std::size_t unit_count_value  = packed.size();
+            const std::size_t payload_bytes_value = unit_count_value * BW;
+            const std::size_t total_bytes =
+                StdcT::header_bytes() + round_up_to_uint64(payload_bytes_value);
+
+            StdcT* hdr = std::forward<Alloc>(alloc)(total_bytes);
+            if (hdr == nullptr) {
+                result = nullptr;
+                return;
+            }
+            hdr->vl_len_                 =
+                static_cast<typename StdcT::varlena_header_t>(total_bytes);
+            hdr->alphabet_code           =
+                StdcT::supported_alphabets_type::template index_of<alphabet_t>();
+            hdr->storage_unit_byte_width = static_cast<std::uint8_t>(BW);
+            hdr->padding_letters         =
+                static_cast<std::uint16_t>(packed.padding());
+            hdr->bp_size                 =
+                static_cast<typename StdcT::bp_size_t>(packed.bp_size());
+
+            if (unit_count_value > 0) {
+                std::memmove(hdr->data, packed._data.data(), payload_bytes_value);
+            }
+            result = hdr;
+        });
+    return result;
+}
+
+template<
+    class StdcT,
+    sequence_alphabet target_alphabet_t,
+    class Alloc
+>
+requires (
+    is_compact_sequence_stdc<StdcT>
+    && is_in_supported_alphabets_v<typename StdcT::supported_alphabets_type, target_alphabet_t>
+    && stdc_allocator<Alloc, StdcT>
+)
+[[nodiscard]]
+inline StdcT* stdc_recode_to(
+    const StdcT& src,
+    std::uint8_t target_byte_width,
+    Alloc&& alloc)
+{
+    std::string ascii;
+    src.convert_to([&]<class S>(const compact_sequence_range<S>& view) {
+        ascii = decode_sequence_simd<S>(view);
+    });
+    return stdc_convert_from_cstr<StdcT, target_alphabet_t>(
+        target_byte_width,
+        static_cast<typename StdcT::bp_size_t>(ascii.size()),
+        ascii.data(),
+        std::forward<Alloc>(alloc));
+}
+
+template<class StdcT, class Alloc>
+requires (
+    is_compact_sequence_stdc<StdcT>
+    && stdc_allocator<Alloc, StdcT>
+)
+[[nodiscard]]
+inline StdcT* stdc_recode_to_type_params(
+    const StdcT& src,
+    compact_sequence_stdc_type_params target,
+    Alloc&& alloc)
+{
+    if (target.alphabet_code == src.alphabet_code) {
+        return src.recast_storage_width(target.storage_unit_byte_width,
+                                         std::forward<Alloc>(alloc));
+    }
+    StdcT* result = nullptr;
+    StdcT::supported_alphabets_type::dispatch_alphabet(target.alphabet_code,
+        [&]<class TargetA>() {
+            result = stdc_recode_to<StdcT, TargetA>(
+                src, target.storage_unit_byte_width,
+                std::forward<Alloc>(alloc));
+        });
+    return result;
+}
+
+/// Lexicographic compare across two compact_sequence_stdc values. Same
+/// alphabet required at runtime; same storage width is not required
+/// (cross-width compares cast via bit_cast_to_storage_unit).
+template<class StdcT>
+requires (is_compact_sequence_stdc<StdcT>)
+[[nodiscard]]
+inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
+{
+    DEBUG_ASSERT(a.alphabet_code == b.alphabet_code,
+                 fmt::format("stdc_compare across alphabets: {} vs {}",
+                             static_cast<unsigned>(a.alphabet_code),
+                             static_cast<unsigned>(b.alphabet_code)));
+    std::strong_ordering result = std::strong_ordering::equal;
+    a.convert_to([&]<class Sa>(const compact_sequence_range<Sa>& ra) {
+        b.convert_to([&]<class Sb>(const compact_sequence_range<Sb>& rb) {
+            if constexpr (
+                std::is_same_v<typename Sa::storage_unit,
+                               typename Sb::storage_unit>
+            ) {
+                result = compare_sequences_scalar(ra, rb);
+            } else if constexpr (
+                sizeof(typename Sa::storage_unit) >=
+                sizeof(typename Sb::storage_unit)
+            ) {
+                const auto va =
+                    ra.template bit_cast_to_storage_unit<typename Sb::storage_unit>();
+                result = compare_sequences_scalar(va, rb);
+            } else {
+                const auto vb =
+                    rb.template bit_cast_to_storage_unit<typename Sa::storage_unit>();
+                result = compare_sequences_scalar(ra, vb);
+            }
+        });
+    });
+    return result;
+}
 
 }
 HWY_AFTER_NAMESPACE();
