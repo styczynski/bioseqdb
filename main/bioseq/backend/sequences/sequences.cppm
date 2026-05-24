@@ -1737,7 +1737,7 @@ public:
 
     varlena_header_t      vl_len_;                  // varlena header
     alphabet_code_t       alphabet_code;
-    std::uint8_t          storage_unit_byte_width;
+    std::uint8_t          storage_unit_byte_width; // note: this is width of storage units in bytes, so normally it won't be larger than 8 (8 => uint64_t), because no sensible arch supports native 128-width ints
     std::uint16_t         padding_letters;
     bp_size_t             bp_size;
     [[no_unique_address]]
