@@ -9,6 +9,7 @@ module;
 
 export module bioseq_simd.utils;
 import mlogging;
+import bioseq_common.templating;
 
 export {
 
@@ -204,21 +205,12 @@ inline constexpr std::pair<T, T> int_div_floor(const T& val, const T& div) {
 	return std::make_pair(val / div, val % div);
 }
 
-/// Compile-time fold over [0, W). Calls fn(integral_constant<size_t, S>{})
-/// for S = 0..W-1, unrolled at compile time.
-///
-/// This pattern was previously open-coded in iterate_sequence_bp_simd_offsets
-/// (simd.cppm) and the per-stream rebuild loops in two_stacks_minimizers.cppm
-/// (lines 304, 689, 755). Extracting it lets bioseq_simd.vector_stream and
-/// future per-stream code share a single named primitive instead of pasting
-/// the index_sequence + lambda IIFE everywhere.
-template <size_t W, typename F>
-[[gnu::always_inline]] HWY_INLINE
-constexpr void for_each_index(F&& fn) {
-	[&]<size_t... S>(std::index_sequence<S...>) [[gnu::always_inline]] {
-		(fn(std::integral_constant<size_t, S>{}), ...);
-	}(std::make_index_sequence<W>{});
-}
+/// DOC0261 §4.5 / §12.6 — `for_each_index<W>` is the unified primitive
+/// living in `bioseq_common.templating.pack_for_each`. Re-exported under
+/// the SIMD namespace so existing callers (`vector_stream.cppm`) keep the
+/// unqualified name. The lifted helper carries both `HWY_INLINE` and
+/// `[[gnu::always_inline]]` so SIMD-target attributes flow through.
+using ::bioseq::common::templating::for_each_index;
 
 template<typename D_IN, typename D_OUT>
 concept d_simd_cmp_3x = sizeof(hwy::MakeWide<hwy::MakeWide<hwy::MakeWide<hn::TFromD<D_IN>>>>) == sizeof(hn::TFromD<D_OUT>);

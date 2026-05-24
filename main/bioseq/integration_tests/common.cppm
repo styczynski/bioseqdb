@@ -429,6 +429,42 @@ export struct seq_typmod {
     }
 };
 
+// DOC0261 §11 — the integration-test target compiles outside the bioseq
+// library tree (libpq-driven, no Postgres-extension linkage). The
+// `Dna4Entry` / `Dna5Entry` tag brands mirror the production
+// `pgseq_supported_alphabets::entry_for<seq::dnaX>` shape but only
+// carry the parts the test fixtures consume — the display name string
+// view and a tag type discriminating dna4 from dna5 at compile time.
+// A `static_assert` in `sequences.cppm` pins these strings against the
+// production pack so any drift fails at build time, preserving the
+// "pack is the single source of truth" promise indirectly (drift
+// detection lives in the production TU).
+export namespace seq_entry_tag {
+    struct dna4 {};
+    struct dna5 {};
+}
+
+export struct Dna4Entry {
+    using alphabet_type = seq_entry_tag::dna4;
+    static constexpr std::string_view alphabet_name_sv = "dna4";
+};
+
+export struct Dna5Entry {
+    using alphabet_type = seq_entry_tag::dna5;
+    static constexpr std::string_view alphabet_name_sv = "dna5";
+};
+
+// DOC0261 §11.1 — build a seq_typmod from a templated alphabet_entry so
+// the test fixture pulls the name string from the entry, never from a
+// parallel literal in the test file.
+export template <class Entry>
+[[nodiscard]] inline constexpr seq_typmod make_seq_typmod(int width) noexcept {
+    return seq_typmod{
+        .alphabet = Entry::alphabet_name_sv,
+        .width    = width,
+    };
+}
+
 // Builds the SQL literal `'<payload>'::bioseq.seq('<alphabet>', <width>)`
 // so test sites stop reaching for ad-hoc fmt::format with the typmod text
 // embedded inline.

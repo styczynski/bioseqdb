@@ -2608,7 +2608,7 @@ inline StdcT* stdc_recode_to_type_params(
                                          std::forward<Alloc>(alloc));
     }
     StdcT* result = nullptr;
-    StdcT::supported_alphabets_type::dispatch_alphabet(target.alphabet_code,
+    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(target.alphabet_code,
         [&]<class TargetA>() {
             result = stdc_recode_to<StdcT, TargetA>(
                 src, target.storage_unit_byte_width,

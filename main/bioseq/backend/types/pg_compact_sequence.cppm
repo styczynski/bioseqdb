@@ -61,9 +61,46 @@ export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
 // ----------------------------------------------------------------------------
 
 export using pgseq_supported_alphabets =
-    supported_alphabets<seq::dna4, seq::dna5>;
+    supported_alphabets<
+        alphabet_entry<seq::dna4, "dna4">,
+        alphabet_entry<seq::dna5, "dna5">>;
 export using pgseq_t =
     compact_sequence_stdc<pgseq_supported_alphabets>;
+
+// ============================================================================
+// DRIFT GUARDS — DOC0261 R6 / R6.1.
+//
+// The static_asserts below are intentional duplicates of the production
+// pack's display-name strings. They exist to make any future drift between
+// the test-side name fixtures (in `integration_tests/common.cppm`'s
+// `Dna4Entry`/`Dna5Entry` tag structs) and the production pack fail at
+// build time — not at integration-test runtime. The literal strings here
+// must NOT be edited independently; if the pack ever grows or changes
+// a display name, update the pack first, then update the matching guard
+// here AND the `Dna4Entry`/`Dna5Entry` tag structs in lockstep.
+// ============================================================================
+
+// DOC0261 R6.1 — the generated CSV must be byte-identical to the
+// historical hand-written errhint.
+static_assert(pgseq_supported_alphabets::valid_alphabet_names_csv()
+              == std::string_view{"'dna4', 'dna5'"},
+              "valid_alphabet_names_csv must match today's hand-written hint "
+              "byte-for-byte — DOC0261 R6.1");
+
+// DOC0261 §11 — integration-test target compiles outside this TU's
+// link domain (libpq-driven, no Postgres-extension symbols available),
+// so the integration_tests.common module exposes its own
+// `Dna4Entry`/`Dna5Entry` tag aliases.
+static_assert(
+    pgseq_supported_alphabets::entry_for<seq::dna4>::alphabet_name_sv ==
+        std::string_view{"dna4"},
+    "integration_tests::Dna4Entry::alphabet_name_sv drifted from the "
+    "production pack — DOC0261 R6 source-of-truth promise");
+static_assert(
+    pgseq_supported_alphabets::entry_for<seq::dna5>::alphabet_name_sv ==
+        std::string_view{"dna5"},
+    "integration_tests::Dna5Entry::alphabet_name_sv drifted from the "
+    "production pack — DOC0261 R6 source-of-truth promise");
 
 // ----------------------------------------------------------------------------
 // pg_alloc — the postgres-specific allocator lambda. Returns nullptr for
@@ -191,18 +228,23 @@ Datum pg_compact_sequence_typmod_in(PG_FUNCTION_ARGS)
 	const char* alphabet_name = DatumGetCString(elem_datums[0]);
 	const char* width_str     = DatumGetCString(elem_datums[1]);
 
-	// Derive the alphabet code from the pack so the SQL name → code
-	// mapping cannot drift away from `pgseq_supported_alphabets`.
-	uint8_t alphabet_code;
-	if (strcmp(alphabet_name, "dna4") == 0)
-		alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>();
-	else if (strcmp(alphabet_name, "dna5") == 0)
-		alphabet_code = pgseq_supported_alphabets::index_of<seq::dna5>();
-	else
+	// DOC0261 §8.1 — the strcmp ladder collapses to a single pack
+	// lookup. Adding a new alphabet to the pack adds zero lines here,
+	// and the `errhint` text is regenerated from the same pack so
+	// adding an alphabet also auto-updates the error message.
+	const auto code_opt =
+		pgseq_supported_alphabets::try_index_of_name(alphabet_name);
+	if (!code_opt.has_value()) {
+		constexpr auto valid_names_csv =
+			pgseq_supported_alphabets::valid_alphabet_names_csv();
 		ereport(ERROR,
 		        (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 		         errmsg("bioseq.seq alphabet \"%s\" is not supported", alphabet_name),
-		         errhint("Valid alphabets: 'dna4', 'dna5'")));
+		         errhint("Valid alphabets: %.*s",
+		             static_cast<int>(valid_names_csv.size()),
+		             valid_names_csv.data())));
+	}
+	const uint8_t alphabet_code = static_cast<uint8_t>(*code_opt);
 
 	char* endptr = nullptr;
 	errno = 0;
@@ -236,19 +278,15 @@ Datum pg_compact_sequence_typmod_out(PG_FUNCTION_ARGS)
 		PG_RETURN_CSTRING(pstrdup(""));
 
 	const auto tp = compact_sequence_stdc_type_params::decode(typmod);
-	// Map the alphabet code back to its display name by dispatching on the
-	// pack — avoids hardcoding 0→dna4 / 1→dna5 here.
-	const char* alphabet_name = "?";
-	pgseq_supported_alphabets::dispatch_alphabet(tp.alphabet_code,
-		[&]<class A>() {
-			if constexpr (std::is_same_v<A, seq::dna4>) alphabet_name = "dna4";
-			else if constexpr (std::is_same_v<A, seq::dna5>) alphabet_name = "dna5";
-		});
+	const std::string_view alphabet_name =
+		pgseq_supported_alphabets::name_of_alphabet_code(tp.alphabet_code);
 	const unsigned width_bits =
 		static_cast<unsigned>(tp.storage_unit_byte_width) * 8u;
 
 	char* result = static_cast<char*>(palloc(64));
-	snprintf(result, 64, "('%s',%u)", alphabet_name, width_bits);
+	snprintf(result, 64, "('%.*s',%u)",
+	         static_cast<int>(alphabet_name.size()), alphabet_name.data(),
+	         width_bits);
 	PG_RETURN_CSTRING(result);
 }
 
@@ -290,7 +328,7 @@ Datum pg_compact_sequence_in(PG_FUNCTION_ARGS)
 		                length)));
 
 	pgseq_t* hdr = nullptr;
-	pgseq_supported_alphabets::dispatch_alphabet(tp.alphabet_code,
+	pgseq_supported_alphabets::dispatch_alphabet_by_code(tp.alphabet_code,
 		[&]<class A>() {
 			hdr = ::bioseq::simd::N_NEON::stdc_convert_from_cstr<pgseq_t, A>(
 				tp.storage_unit_byte_width,
@@ -493,7 +531,7 @@ Datum pg_compact_sequence_recv(PG_FUNCTION_ARGS)
 		                unit_count_w, static_cast<unsigned>(padding_letters))));
 
 	pgseq_t* hdr = nullptr;
-	pgseq_supported_alphabets::dispatch_alphabet(alphabet_code,
+	pgseq_supported_alphabets::dispatch_alphabet_by_code(alphabet_code,
 		[&]<class A>() {
 			hdr = pgseq_t::convert_from<A>(
 				byte_width,

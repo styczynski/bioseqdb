@@ -63,6 +63,7 @@ module;
 export module bioseq_sequences.pipe;
 
 import mlogging;
+import bioseq_common.templating;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
@@ -2140,23 +2141,14 @@ template <is_constexpr_aligner_params Cep,
 }
 
 // =============================================================================
-// DOC0256 — value_sequence (non-type parameter pack carrier)
+// DOC0256 / DOC0261 — value_sequence (non-type parameter pack carrier)
 // =============================================================================
 //
-// `std::integer_sequence<T, Vs...>` requires `T` to be an integral type per
-// the C++ standard, so libc++ rejects enum NTTP packs.  The chain's registry
-// for `ChainingAlgorithmType`, `BaseAlignmentAlgorithmType`, and
-// `MinimizerAlgorithmType` carries enum-valued packs, so we use our own
-// `value_sequence<T, Vs...>` carrier that imposes no constraint on `T`.
-// Used uniformly by `enum_dispatch_pack`, `value_dispatch_smallest_ge`,
-// and every registry's `value_list`.  Declared ahead of §4 so the
-// bucket-derivation helpers can refer to it.
+// `value_sequence<T, Vs...>` lives in `bioseq_common.templating` (DOC0261
+// §4.3); re-exported here so the existing pipe.cppm body keeps the
+// unqualified name. See DOC0261 §12.4.
 
-template <class T, T... Vs>
-struct value_sequence {
-    using value_type = T;
-    static constexpr std::size_t size() noexcept { return sizeof...(Vs); }
-};
+using ::bioseq::common::templating::value_sequence;
 
 // =============================================================================
 // DOC0256 §4 — MinimizerLayout-driven L bucket derivation
@@ -2263,36 +2255,22 @@ static_assert(compute_breakpoints_for<27u>().second <= 6u);
 /// headroom).
 using raw_buf = std::array<std::size_t, 32u>;
 
-/// Free consteval helper — appends `value` to raw[0..raw_n) unless it
-/// already exists; bumps raw_n on insert.  Threaded by reference so the
-/// caller controls the accumulator state without a `[&]` capture.
-consteval void append_unique_value(
-    raw_buf& raw, std::size_t& raw_n,
-    std::size_t value) noexcept
-{
-    for (std::size_t i = 0u; i < raw_n; ++i) {
-        if (raw[i] == value) return;
-    }
-    if (raw_n < raw.size()) {
-        raw[raw_n++] = value;
-    }
-}
-
 /// Free consteval helper — merges compute_breakpoints_for<K>()'s breakpoint
-/// list into (raw, raw_n).  No `[&]` capture; the dedup state is threaded by
-/// reference through this helper from the caller.
+/// list into (raw, raw_n) using the lifted `append_unique_value` primitive.
 template <std::size_t K>
 consteval void merge_breakpoints_into(
     raw_buf& raw, std::size_t& raw_n) noexcept
 {
     constexpr auto bp = compute_breakpoints_for<K>();
     for (std::size_t i = 0u; i < bp.second; ++i) {
-        append_unique_value(raw, raw_n, bp.first[i]);
+        ::bioseq::common::templating::append_unique_value(raw, raw_n, bp.first[i]);
     }
 }
 
 /// Pack-expanded union over `kmer_size_buckets` indices.  Threads the
-/// accumulator state through the helper above (no `[&]`).
+/// accumulator state through `merge_breakpoints_into` (no `[&]` capture)
+/// and finishes with the lifted insertion-sort primitive — the
+/// dispatcher's smallest-ge lookup needs sorted input.
 template <std::size_t... Is>
 [[nodiscard]] consteval auto compute_global_l_buckets_impl(
     std::index_sequence<Is...>) noexcept
@@ -2300,15 +2278,7 @@ template <std::size_t... Is>
     raw_buf raw{};
     std::size_t raw_n = 0u;
     (merge_breakpoints_into<kmer_size_buckets[Is]>(raw, raw_n), ...);
-    // Insertion sort ascending — the dispatcher's smallest-ge lookup needs
-    // sorted input.
-    for (std::size_t i = 1u; i < raw_n; ++i) {
-        for (std::size_t j = i; j > 0u && raw[j] < raw[j - 1u]; --j) {
-            const std::size_t tmp = raw[j];
-            raw[j]   = raw[j - 1u];
-            raw[j - 1u] = tmp;
-        }
-    }
+    ::bioseq::common::templating::sort_in_place_ascending(raw, raw_n);
     return std::pair{raw, raw_n};
 }
 
@@ -2368,128 +2338,19 @@ static_assert(kmer_size_default == kmer_size_buckets[0],
     "the chain's default-value path expects them in sync.");
 
 // =============================================================================
-// DOC0256 §5.1–5.3 — Low-level enum/value dispatch primitives
+// DOC0256 §5.1–5.3 / DOC0261 §4.4 — Low-level enum/value dispatch primitives
 // =============================================================================
 //
-// `enum_dispatch_pack` walks an `std::integer_sequence<T, Vs...>` and on the
-// first match invokes a stateless callable with `IC<T, V>` pinned.  The
-// recursive helper produces one `cmp` + branch per pack element under
-// `-O1+` and folds to a `cmp/je` chain (or switch jump-table for large
-// packs) at `-O3`.  There are no `[&]` lambdas anywhere on this path — the
-// callable is forwarded by lvalue reference through the recursion.
+// The dispatch primitives now live in `bioseq_common.templating`
+// (DOC0261). They are re-exported under the existing names so this
+// module's call sites stay unchanged. Codegen is identical to the
+// previous in-place definition — every helper carries
+// `[[gnu::always_inline]]`.
 
-namespace detail {
-
-template <class R, class T, T DefaultValue, T V_head, T... V_rest,
-          class F, class... Args>
-[[gnu::always_inline]]
-R enum_dispatch_search(T rt, F& f, Args&&... args)
-{
-    if (rt == V_head) {
-        return f(std::integral_constant<T, V_head>{},
-                 std::forward<Args>(args)...);
-    }
-    if constexpr (sizeof...(V_rest) > 0u) {
-        return enum_dispatch_search<R, T, DefaultValue, V_rest...>(
-            rt, f, std::forward<Args>(args)...);
-    } else {
-        return f(std::integral_constant<T, DefaultValue>{},
-                 std::forward<Args>(args)...);
-    }
-}
-
-template <class T, T DefaultValue, T V_head, T... V_rest, class F, class... Args>
-[[gnu::always_inline]]
-void enum_dispatch_search_void(T rt, F& f, Args&&... args)
-{
-    if (rt == V_head) {
-        f(std::integral_constant<T, V_head>{}, std::forward<Args>(args)...);
-        return;
-    }
-    if constexpr (sizeof...(V_rest) > 0u) {
-        enum_dispatch_search_void<T, DefaultValue, V_rest...>(
-            rt, f, std::forward<Args>(args)...);
-    } else {
-        f(std::integral_constant<T, DefaultValue>{}, std::forward<Args>(args)...);
-    }
-}
-
-template <class R, class T, T V_head, T... V_rest, class F, class... Args>
-[[gnu::always_inline]]
-R value_dispatch_smallest_ge_search(T rt, F& f, Args&&... args)
-{
-    if (V_head >= rt) {
-        return f(std::integral_constant<T, V_head>{},
-                 std::forward<Args>(args)...);
-    }
-    if constexpr (sizeof...(V_rest) > 0u) {
-        return value_dispatch_smallest_ge_search<R, T, V_rest...>(
-            rt, f, std::forward<Args>(args)...);
-    } else {
-        return f(std::integral_constant<T, V_head>{},
-                 std::forward<Args>(args)...);
-    }
-}
-
-} // namespace detail
-
-/// Dispatch `rt` against a `value_sequence<T, Vs...>`.  On the first V that
-/// equals `rt`, invoke `f(IC<T, V>{}, args...)` and return its result.  If
-/// no V matches, invoke f with `IC<T, DefaultValue>`.  `DefaultValue` must
-/// appear in the pack — enforced by a `static_assert`.
-template <class R, class T, T DefaultValue, T... Vs, class F, class... Args>
-[[gnu::always_inline]]
-R enum_dispatch_pack(value_sequence<T, Vs...>,
-                     T rt, F&& f, Args&&... args)
-{
-    static_assert(sizeof...(Vs) > 0u,
-        "enum_dispatch_pack: empty value pack");
-    static_assert(((Vs == DefaultValue) || ...),
-        "enum_dispatch_pack: DefaultValue must appear in the value pack");
-    return detail::enum_dispatch_search<R, T, DefaultValue, Vs...>(
-        rt, f, std::forward<Args>(args)...);
-}
-
-/// `void`-returning variant of `enum_dispatch_pack`.  Used by the sketch
-/// chain whose leaf returns `void`.
-template <class T, T DefaultValue, T... Vs, class F, class... Args>
-[[gnu::always_inline]]
-void enum_dispatch_pack_void(value_sequence<T, Vs...>,
-                             T rt, F&& f, Args&&... args)
-{
-    static_assert(sizeof...(Vs) > 0u,
-        "enum_dispatch_pack_void: empty value pack");
-    static_assert(((Vs == DefaultValue) || ...),
-        "enum_dispatch_pack_void: DefaultValue must appear in the value pack");
-    detail::enum_dispatch_search_void<T, DefaultValue, Vs...>(
-        rt, f, std::forward<Args>(args)...);
-}
-
-/// Dispatch `rt` against an ascending-sorted `value_sequence<T, Vs...>` and
-/// invoke `f(IC<T, V>{}, args...)` with the smallest V such that V >= rt.
-/// If no V satisfies the predicate, the last V (the largest in the sorted
-/// pack) is used.  Caller is responsible for ensuring the pack is sorted;
-/// the spec's bucket-derivation code in §4 produces a sorted result.
-template <class R, class T, T... Vs, class F, class... Args>
-[[gnu::always_inline]]
-R value_dispatch_smallest_ge(value_sequence<T, Vs...>,
-                             T rt, F&& f, Args&&... args)
-{
-    static_assert(sizeof...(Vs) > 0u,
-        "value_dispatch_smallest_ge: empty value pack");
-    return detail::value_dispatch_smallest_ge_search<R, T, Vs...>(
-        rt, f, std::forward<Args>(args)...);
-}
-
-template <class R, class T, T DefaultValue, T... Vs, class F, class... Args>
-[[gnu::always_inline]]
-R value_dispatch_exact_with_default(value_sequence<T, Vs...>,
-                                    T rt, F&& f, Args&&... args)
-{
-    return enum_dispatch_pack<R, T, DefaultValue, Vs...>(
-        value_sequence<T, Vs...>{},
-        rt, std::forward<F>(f), std::forward<Args>(args)...);
-}
+using ::bioseq::common::templating::enum_dispatch_pack;
+using ::bioseq::common::templating::enum_dispatch_pack_void;
+using ::bioseq::common::templating::value_dispatch_smallest_ge;
+using ::bioseq::common::templating::value_dispatch_exact_with_default;
 
 // =============================================================================
 // DOC0256 §5.4 / §5.9 — algorithm_enum_values registry + per-dim selectors
@@ -2644,180 +2505,21 @@ struct kmer_size_registry {
 } // namespace detail
 
 // =============================================================================
-// DOC0256 §5.7 / §5.8 — dispatch_chain primitive and step adapters
+// DOC0256 §5.7 / §5.8 / DOC0261 §4.6 — dispatch_chain primitive and step adapters
 // =============================================================================
 //
-// The chain walks a parameter pack of *step* types.  Each step has:
-//
-//   - `target_t`         — the NTTP type the step pins
-//   - `default_value`    — pinned when `active_v<Pinned...>` is false
-//   - `active_v<...>`    — compile-time predicate; when false the chain pins
-//                          `default_value` without consulting the runtime
-//   - `dispatch<R, Pinned..., K>(params, k, args...)` — runtime dispatch
-//
-// The chain's only continuation type is `dispatch_chain<R, Leaf, Head,
-// Tail...>::continuation<Pinned...>` — a stateless POD with one templated
-// member function.  No `[&]` lambdas anywhere; the chain and the steps are
-// all pure compile-time machinery.
+// The chain primitive and the three step adapters now live in
+// `bioseq_common.templating::dispatch_chain.cppm` (DOC0261 §4.6).
+// They are re-exported here so the pipeline body keeps unqualified
+// names. The per-pipeline aliases below pin `Params = Minimap2Params`;
+// `pipeline_dispatch_chain` is the local alias that supplies the
+// `Minimap2Params` slot so chain call sites do not need to repeat it.
 
 namespace detail {
 
-template <class... Args>
-concept chain_args_are_references = (std::is_reference_v<Args> && ...);
-
-template <class R, template <auto...> class Leaf, class... Steps>
-struct dispatch_chain;
-
-template <class R, template <auto...> class Leaf>
-struct dispatch_chain<R, Leaf> {
-    template <auto... Pinned, class... Args>
-        requires chain_args_are_references<Args...>
-    [[gnu::always_inline]] static R run(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        Args&&... args)
-    {
-        return Leaf<Pinned...>::call(params, std::forward<Args>(args)...);
-    }
-};
-
-template <class R, template <auto...> class Leaf, class Head, class... Tail>
-struct dispatch_chain<R, Leaf, Head, Tail...> {
-    /// The chain's *only* continuation type.  Stateless POD with one
-    /// templated member function.  Replaces the per-level adaptor structs
-    /// from the v1 draft of DOC0256.
-    template <auto... Pinned>
-    struct continuation {
-        template <auto V, class... Args>
-        [[gnu::always_inline]] R run(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-            Args&&... args) const
-        {
-            return dispatch_chain<R, Leaf, Tail...>::template run<Pinned..., V>(
-                params, std::forward<Args>(args)...);
-        }
-    };
-
-    template <auto... Pinned, class... Args>
-        requires chain_args_are_references<Args...>
-    [[gnu::always_inline]] static R run(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        Args&&... args)
-    {
-        if constexpr (Head::template active_v<Pinned...>) {
-            return Head::template dispatch<R, Pinned...>(
-                params, continuation<Pinned...>{}, std::forward<Args>(args)...);
-        } else {
-            return dispatch_chain<R, Leaf, Tail...>::template run<
-                Pinned..., Head::default_value>(
-                    params, std::forward<Args>(args)...);
-        }
-    }
-};
-
-/// Exact-match enum or size_t dispatch step.  Used for BAA / CA / MA and
-/// for `kmer_size` (a size_t bucket).
-template <class Registry>
-struct enum_step {
-    using target_t = typename Registry::target_t;
-    static constexpr target_t default_value = Registry::default_value;
-
-    template <auto... /*Pinned*/>
-    static constexpr bool active_v = true;
-
-    template <class R, class K>
-    struct adapter {
-        K kont;
-        template <target_t V, class... A>
-        [[gnu::always_inline]] R operator()(
-            std::integral_constant<target_t, V>,
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-            A&&... a) const
-        {
-            return kont.template run<V>(params, std::forward<A>(a)...);
-        }
-    };
-
-    template <class R, auto... Pinned, class K, class... Args>
-    [[gnu::always_inline]] static R dispatch(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        K k, Args&&... args)
-    {
-        adapter<R, K> a{k};
-        if constexpr (std::is_same_v<R, void>) {
-            enum_dispatch_pack_void<target_t, default_value>(
-                typename Registry::value_list{},
-                Registry::read_field(params, args...),
-                a,
-                params, std::forward<Args>(args)...);
-            return;
-        } else {
-            return enum_dispatch_pack<R, target_t, default_value>(
-                typename Registry::value_list{},
-                Registry::read_field(params, args...),
-                a,
-                params, std::forward<Args>(args)...);
-        }
-    }
-};
-
-/// Smallest-≥ bucket dispatch step.  Used for the L bucket (smallest L ≥
-/// `round_up_seq_len_log2(max_bp, K)`).
-template <class Registry>
-struct bucket_step {
-    using target_t = std::size_t;
-    static constexpr std::size_t default_value = Registry::default_value;
-
-    template <auto... /*Pinned*/>
-    static constexpr bool active_v = true;
-
-    template <class R, class K>
-    struct adapter {
-        K kont;
-        template <std::size_t V, class... A>
-        [[gnu::always_inline]] R operator()(
-            std::integral_constant<std::size_t, V>,
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-            A&&... a) const
-        {
-            return kont.template run<V>(params, std::forward<A>(a)...);
-        }
-    };
-
-    template <class R, auto... Pinned, class K, class... Args>
-    [[gnu::always_inline]] static R dispatch(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        K k, Args&&... args)
-    {
-        adapter<R, K> a{k};
-        return value_dispatch_smallest_ge<R, std::size_t>(
-            typename Registry::value_list{},
-            Registry::read_field(params, args...),
-            a,
-            params, std::forward<Args>(args)...);
-    }
-};
-
-/// Wraps `Inner` so that when `ActiveCondition` is false the chain pins
-/// `Inner::default_value` without consulting the runtime field.  Used by
-/// the WithPrebuiltMinimizers MA short-circuit (EP != WithPrebuiltMinimizers
-/// → MA dispatched; EP == WithPrebuiltMinimizers → MA pinned to SCALAR).
-template <class Inner, bool ActiveCondition>
-struct guarded_step {
-    using target_t = typename Inner::target_t;
-    static constexpr target_t default_value = Inner::default_value;
-
-    template <auto... /*Pinned*/>
-    static constexpr bool active_v = ActiveCondition;
-
-    template <class R, auto... Pinned, class K, class... Args>
-    [[gnu::always_inline]] static R dispatch(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        K k, Args&&... args)
-    {
-        return Inner::template dispatch<R, Pinned...>(
-            params, k, std::forward<Args>(args)...);
-    }
-};
+using ::bioseq::common::templating::enum_step;
+using ::bioseq::common::templating::bucket_step;
+using ::bioseq::common::templating::guarded_step;
 
 using baa_step = enum_step<algorithm_enum_values<
     ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType>>;
@@ -2827,6 +2529,14 @@ using ma_step  = enum_step<algorithm_enum_values<
     ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>>;
 using kmer_size_step    = enum_step<kmer_size_registry>;
 using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
+
+/// Per-pipeline chain alias — pins `Params` to the only param type
+/// pipe.cppm ever uses. `R` and the leaf template stay as template
+/// parameters because real call sites instantiate with different
+/// return types (MatchResultCollection / PipelineDescription / void).
+template <class R, template <auto...> class Leaf, class... Steps>
+using dispatch_chain = ::bioseq::common::templating::dispatch_chain<
+    R, Leaf, ::bioseq::simd::HWY_NAMESPACE::Minimap2Params, Steps...>;
 
 } // namespace detail
 

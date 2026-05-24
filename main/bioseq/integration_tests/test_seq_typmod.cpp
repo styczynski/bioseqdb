@@ -6,9 +6,10 @@
 //     storage units.
 //   * Cross-typmod casting `'X'::bioseq.seq('dna4', W)` for every width.
 //
-// We use TEMPLATE_TEST_CASE_SIG over (alphabet, width) instead of repeating
-// eight near-identical cases; the alphabet is encoded as a non-type template
-// parameter via a small enum.
+// We use TEMPLATE_TEST_CASE_SIG over (alphabet_entry, width) instead of
+// repeating eight near-identical cases; DOC0261 reparameterises the matrix
+// to pin a `pgseq_supported_alphabets::entry_for<seq::dnaX>` brand directly
+// so the alphabet name string is sourced from the production pack.
 
 #include "common_tests_integration.h"
 import integration_tests.common;
@@ -17,14 +18,23 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-enum class alphabet_id : int { dna4 = 0, dna5 = 1 };
+// DOC0261 §11.2 — exhaustive sample picker. Adding a new alphabet to
+// the pack forces a build break here so the test fixture is updated in
+// lockstep with R1's "pack is the single source of truth".
+template <class> inline constexpr bool always_false_v = false;
 
-constexpr std::string_view alphabet_name(alphabet_id a) {
-    return a == alphabet_id::dna4 ? "dna4" : "dna5";
-}
-
-constexpr std::string_view sample_for(alphabet_id a) {
-    return a == alphabet_id::dna4 ? "ACGTACGTACGTACGT" : "ACGTNACGTNACGTNACGTNACGTN";
+template <class Entry>
+constexpr std::string_view sample_for() {
+    using A = typename Entry::alphabet_type;
+    if constexpr (std::is_same_v<A, seq_entry_tag::dna4>) {
+        return "ACGTACGTACGTACGT";
+    } else if constexpr (std::is_same_v<A, seq_entry_tag::dna5>) {
+        return "ACGTNACGTNACGTNACGTNACGTN";
+    } else {
+        static_assert(always_false_v<Entry>,
+            "sample_for: no sample defined for this alphabet — "
+            "add a clause when the pack grows");
+    }
 }
 
 }  // namespace
@@ -32,20 +42,19 @@ constexpr std::string_view sample_for(alphabet_id a) {
 TEMPLATE_TEST_CASE_SIG(
     "bioseq.seq encode/decode roundtrip across full typmod matrix",
     "[seq][typmod][matrix]",
-    ((alphabet_id Alpha, int Width), Alpha, Width),
-    (alphabet_id::dna4, 8),
-    (alphabet_id::dna4, 16),
-    (alphabet_id::dna4, 32),
-    (alphabet_id::dna4, 64),
-    (alphabet_id::dna5, 8),
-    (alphabet_id::dna5, 16),
-    (alphabet_id::dna5, 32),
-    (alphabet_id::dna5, 64)) {
+    ((class Entry, int Width), Entry, Width),
+    (Dna4Entry, 8),
+    (Dna4Entry, 16),
+    (Dna4Entry, 32),
+    (Dna4Entry, 64),
+    (Dna5Entry, 8),
+    (Dna5Entry, 16),
+    (Dna5Entry, 32),
+    (Dna5Entry, 64)) {
     auto ctx = fresh_context();
 
-    constexpr seq_typmod typmod{.alphabet = alphabet_name(Alpha),
-                                .width = Width};
-    const std::string sample(sample_for(Alpha));
+    constexpr seq_typmod typmod = make_seq_typmod<Entry>(Width);
+    const std::string sample(sample_for<Entry>());
     const auto literal = format_literal(sample, typmod);
 
     const auto row = query_one(
@@ -65,7 +74,7 @@ TEMPLATE_TEST_CASE_SIG(
     ((int Width), Width),
     8, 16, 32, 64) {
     auto ctx = fresh_context();
-    const seq_typmod typmod{.alphabet = "dna4", .width = Width};
+    const seq_typmod typmod = make_seq_typmod<Dna4Entry>(Width);
     const std::string typmod_sql = typmod.sql();
 
     const auto row = query_one(

@@ -194,29 +194,23 @@ TEST_CASE("Cross-alphabet recompute: dna5 query against dna4 column "
 // this in the prompt: "Can we have integration tests for all
 // combinations of sequences? Can we parameterize it via Catch2
 // TEMPLATE_TEST_CASE".
-namespace {
-
-enum class alpha_id : int { dna4 = 0, dna5 = 1 };
-
-[[nodiscard]] inline std::string alpha_name(alpha_id a) {
-    return a == alpha_id::dna4 ? "dna4" : "dna5";
-}
-
-}  // namespace
+// DOC0261 §11.2 — Dna4Entry / Dna5Entry are sourced from
+// integration_tests.common (re-exported there because integration
+// tests cannot transitively import bioseq_sequences).
 
 TEMPLATE_TEST_CASE_SIG(
     "Typmod matrix: column dna4/32 against literal at (alphabet, width) — "
     "result set is consistent across coalesce / recompute paths",
     "[mmsearch][typmod_coalesce][typmod_matrix][matrix]",
-    ((alpha_id Alpha, int Width), Alpha, Width),
-    (alpha_id::dna4, 8),
-    (alpha_id::dna4, 16),
-    (alpha_id::dna4, 32),
-    (alpha_id::dna4, 64),
-    (alpha_id::dna5, 8),
-    (alpha_id::dna5, 16),
-    (alpha_id::dna5, 32),
-    (alpha_id::dna5, 64)) {
+    ((class Entry, int Width), Entry, Width),
+    (Dna4Entry, 8),
+    (Dna4Entry, 16),
+    (Dna4Entry, 32),
+    (Dna4Entry, 64),
+    (Dna5Entry, 8),
+    (Dna5Entry, 16),
+    (Dna5Entry, 32),
+    (Dna5Entry, 64)) {
     auto ctx = fresh_context({kCoalesceTable});
     seed_hoe_fixture(ctx, kCoalesceTable);
 
@@ -241,7 +235,7 @@ TEMPLATE_TEST_CASE_SIG(
             " WHERE mmsearch(seq0, "
             "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('{}', {})) "
             " ORDER BY pk;",
-            kCoalesceTable, alpha_name(Alpha), Width));
+            kCoalesceTable, Entry::alphabet_name_sv, Width));
 
     // The coalesce path (same alphabet) MUST produce results
     // identical to the baseline — the literal is re-encoded at
@@ -250,7 +244,8 @@ TEMPLATE_TEST_CASE_SIG(
     // to be a superset — the seed thresholds get lowered by
     // apply_size_heuristic and additional short matches surface.
     REQUIRE_FALSE(rows_param.empty());
-    if (Alpha == alpha_id::dna4) {
+    if constexpr (std::is_same_v<typename Entry::alphabet_type,
+                                  seq_entry_tag::dna4>) {
         REQUIRE(rows_param == rows_baseline);
     } else {
         // Cross-alphabet recompute: every baseline pk must be

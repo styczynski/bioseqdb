@@ -72,6 +72,7 @@ file(GLOB_RECURSE A_SRC_FILES
 file(GLOB_RECURSE A_SRC_MOD_FILES
   ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/**/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm

@@ -8,11 +8,13 @@ module;
 #include <deque>
 #include <iterator>
 #include <list>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <valarray>
 #include <vector>
 #include <limits>
@@ -25,6 +27,7 @@ export module bioseq_sequences:sequences;
 
 import mlogging;
 import sequan_compat;
+import bioseq_common.templating;
 
 export {
 
@@ -165,42 +168,115 @@ enum IteratorMode {
 static_assert(__cplusplus >= 202302L,
               "DOC0258 requires C++23-or-later (project default: C++26)");
 
+// DOC0261 — the alphabet_entry brand carries both an alphabet type
+// and a CompTimeStr display name pinned at the type level. The pack
+// is a single parameter pack of these brands; every name-based
+// dispatch site routes through the pack helpers, never through a
+// hand-written strcmp ladder.
+
+template <sequence_alphabet A, ::bioseq::common::templating::CompTimeStr Name>
+struct alphabet_entry {
+    using alphabet_type = A;
+    static constexpr auto alphabet_name = Name;
+    static constexpr std::size_t name_size = Name.size();
+    static constexpr std::string_view alphabet_name_sv = Name.view();
+    static constexpr bool is_valid_alphabet_entry = true;
+};
+
+template <class T>
+concept is_alphabet_entry = requires {
+    requires T::is_valid_alphabet_entry == true;
+    typename T::alphabet_type;
+    requires sequence_alphabet<typename T::alphabet_type>;
+};
+
 namespace dispatch_detail {
 
-template<class CodeT, class HandlerFn, sequence_alphabet AHead, sequence_alphabet... ARest>
-[[gnu::always_inline]]
-inline constexpr void dispatch_alphabet_impl(
-    CodeT rt_code, HandlerFn& handler, CodeT cursor)
-{
-    if (rt_code == cursor) {
-        handler.template operator()<AHead>();
-        return;
-    }
-    if constexpr (sizeof...(ARest) > 0) {
-        dispatch_alphabet_impl<CodeT, HandlerFn, ARest...>(
-            rt_code, handler, static_cast<CodeT>(cursor + 1));
+template <class Lhs, class Rhs>
+[[nodiscard]] consteval bool entries_name_distinct() noexcept {
+    if constexpr (Lhs::alphabet_name.size() != Rhs::alphabet_name.size()) {
+        return true;
     } else {
-        ASSERT(false,
-               fmt::format("dispatch_alphabet: code {} > pack max {}",
-                           static_cast<size_t>(rt_code), static_cast<size_t>(cursor)));
+        return !(Lhs::alphabet_name == Rhs::alphabet_name);
     }
 }
 
-template<class A, class Tuple>
-struct alphabet_in_tuple : std::false_type {};
+template <std::size_t I, class... Entries, std::size_t... Js>
+[[nodiscard]] consteval bool ith_name_unique(std::index_sequence<Js...>) noexcept {
+    using Tup = std::tuple<Entries...>;
+    using Ei = std::tuple_element_t<I, Tup>;
+    return ((entries_name_distinct<Ei,
+              std::tuple_element_t<I + 1u + Js, Tup>>()) && ...);
+}
 
-template<class A, class... Ts>
-struct alphabet_in_tuple<A, std::tuple<Ts...>>
-    : std::bool_constant<(std::is_same_v<A, Ts> || ...)> {};
+template <class... Entries>
+[[nodiscard]] consteval bool unique_names_in_pack() noexcept {
+    constexpr std::size_t N = sizeof...(Entries);
+    if constexpr (N <= 1) {
+        return true;
+    } else {
+        return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (ith_name_unique<Is, Entries...>(
+                std::make_index_sequence<(N > Is + 1u ? N - Is - 1u : 0u)>{})
+                && ...);
+        }(std::make_index_sequence<N>{});
+    }
+}
 
 }  // namespace dispatch_detail
 
-template<sequence_alphabet... alphabets_pack>
-requires (sizeof...(alphabets_pack) > 0)
-struct supported_alphabets {
-    using alphabets_tuple = std::tuple<alphabets_pack...>;
+namespace detail_supported_alphabets {
 
-    static constexpr size_t alphabet_count = sizeof...(alphabets_pack);
+template <class... Entries>
+consteval std::size_t valid_names_live_length() noexcept {
+    constexpr std::size_t entry_count = sizeof...(Entries);
+    constexpr std::size_t names_bytes  = (Entries::alphabet_name.size() + ...);
+    constexpr std::size_t quote_bytes  = 2u * entry_count;
+    constexpr std::size_t separator_bytes =
+        (entry_count > 1u ? 2u * (entry_count - 1u) : 0u);
+    return names_bytes + quote_bytes + separator_bytes;
+}
+
+template <class... Entries>
+consteval auto build_valid_names_buffer() noexcept {
+    constexpr std::size_t live_size = valid_names_live_length<Entries...>();
+    std::array<char, live_size> name_buffer{};
+    std::size_t write_offset = 0;
+    bool first_entry = true;
+    auto append = [&]<class E>() {
+        if (!first_entry) {
+            name_buffer[write_offset++] = ',';
+            name_buffer[write_offset++] = ' ';
+        }
+        name_buffer[write_offset++] = '\'';
+        for (std::size_t name_byte_index = 0;
+             name_byte_index < E::alphabet_name.size();
+             ++name_byte_index) {
+            name_buffer[write_offset++] = E::alphabet_name[name_byte_index];
+        }
+        name_buffer[write_offset++] = '\'';
+        first_entry = false;
+    };
+    (append.template operator()<Entries>(), ...);
+    return name_buffer;
+}
+
+template <class... Entries>
+inline constexpr auto valid_names_buffer_v = build_valid_names_buffer<Entries...>();
+
+template <class... Entries>
+inline constexpr std::size_t valid_names_live_length_v =
+    valid_names_live_length<Entries...>();
+
+}  // namespace detail_supported_alphabets
+
+template <is_alphabet_entry... entries_pack>
+requires (sizeof...(entries_pack) > 0)
+struct supported_alphabets {
+    using alphabet_entries_tuple = std::tuple<entries_pack...>;
+    using alphabets_tuple        = std::tuple<typename entries_pack::alphabet_type...>;
+
+    static constexpr size_t alphabet_count = sizeof...(entries_pack);
 
     /// Smallest unsigned integer type that can represent every pack index.
     /// `boost::uint_t<N>::least` requires N >= 1; clamp via std::max so the
@@ -212,31 +288,202 @@ struct supported_alphabets {
 
     static constexpr bool is_valid_supported_alphabets = true;
 
-    /// Runtime → compile-time fanout: pick the alphabet that matches `code`
-    /// and call handler.template operator()<A>() once. Recursive expansion
-    /// across the pack — codegen is a cmov ladder per leaf.
-    template<class HandlerFn>
+    static_assert(
+        ::bioseq::common::templating::unique_types_in_tuple_v<alphabets_tuple>,
+        "supported_alphabets: alphabet types must be unique within the pack");
+    static_assert(
+        dispatch_detail::unique_names_in_pack<entries_pack...>(),
+        "supported_alphabets: alphabet display names must be unique within the pack");
+
+    /// Probe types for the runtime-dispatch primitives. Defined as
+    /// nested struct templates so their `matches` / `extract` member
+    /// templates are well-formed (local-class templates are forbidden
+    /// by C++ — DOC0261 implementer note: probes live alongside the
+    /// pack, not inside the dispatch function body).
+    struct code_match_probe {
+        alphabet_code_t rt;
+        template <class Entry>
+        [[gnu::always_inline]]
+        constexpr bool matches(alphabet_code_t cursor) const noexcept {
+            return cursor == rt;
+        }
+        [[noreturn]] void on_no_match(alphabet_code_t cursor) const {
+            ASSERT(false,
+                fmt::format("dispatch_alphabet_by_code: code {} > pack max {}",
+                            static_cast<std::size_t>(rt),
+                            static_cast<std::size_t>(cursor)));
+        }
+    };
+
+    struct name_match_probe {
+        const char* rt;
+        bool& matched_ref;
+        template <class Entry>
+        [[gnu::always_inline]]
+        constexpr bool matches(alphabet_code_t /*cursor*/) const noexcept {
+            if (Entry::alphabet_name.equals_cstr(rt)) {
+                matched_ref = true;
+                return true;
+            }
+            return false;
+        }
+        constexpr void on_no_match(alphabet_code_t /*cursor*/) const noexcept {
+            // matched_ref stays false; caller checks the return value.
+        }
+    };
+
+    struct code_to_name_probe {
+        alphabet_code_t rt;
+        template <class Entry>
+        [[gnu::always_inline]]
+        constexpr std::optional<std::string_view> extract(
+            alphabet_code_t cursor) const noexcept
+        {
+            if (cursor == rt) return Entry::alphabet_name_sv;
+            return std::nullopt;
+        }
+    };
+
+    struct name_to_code_probe {
+        const char* rt;
+        template <class Entry>
+        [[gnu::always_inline]]
+        constexpr std::optional<alphabet_code_t> extract(
+            alphabet_code_t cursor) const noexcept
+        {
+            if (Entry::alphabet_name.equals_cstr(rt)) {
+                return cursor;
+            }
+            return std::nullopt;
+        }
+    };
+
+    /// Stateless adapter forwarding `operator()<Entry>` to
+    /// `operator()<typename Entry::alphabet_type>` on the wrapped handler.
+    /// No `[&]` capture (the project has been burned by capture-by-reference
+    /// nested lambdas not inlining): the adapter holds the handler by
+    /// reference as a data member and the templated `operator()` is
+    /// `[[gnu::always_inline]]`.
+    template <class HandlerFn>
+    struct entry_to_alphabet_adapter {
+        HandlerFn& handler;
+
+        template <class Entry>
+        [[gnu::always_inline]]
+        constexpr void operator()() const {
+            handler.template operator()<typename Entry::alphabet_type>();
+        }
+    };
+
+    /// Runtime → compile-time fanout by code (DOC0261 §5.5). Same shape
+    /// as the old `dispatch_alphabet`; renamed for symmetry with the new
+    /// `_by_name` member below. Handler is invoked with the alphabet
+    /// type (NOT the entry) so existing callers that say
+    /// `[&]<class A>(){ ... }` keep working unchanged.
+    template <class HandlerFn>
     [[gnu::always_inline]]
-    static constexpr void dispatch_alphabet(
+    static constexpr void dispatch_alphabet_by_code(
         alphabet_code_t code, HandlerFn&& handler)
     {
-        dispatch_detail::dispatch_alphabet_impl<alphabet_code_t, HandlerFn, alphabets_pack...>(
-            code, handler, alphabet_code_t{0});
+        namespace tpl = ::bioseq::common::templating;
+
+        entry_to_alphabet_adapter<std::remove_reference_t<HandlerFn>>
+            adapter{handler};
+        code_match_probe probe{code};
+        tpl::dispatch_recursive_pack<
+            alphabet_code_t,
+            tpl::type_list<entries_pack...>>(adapter, probe);
     }
 
-    /// Compile-time look-up: pack index of a specific alphabet, asserting
-    /// the alphabet is present.
-    template<sequence_alphabet A>
+    /// Runtime → compile-time fanout by name (DOC0261 §5.6). Walks the
+    /// pack; on the first entry whose name equals `name` invokes
+    /// `handler.template operator()<Entry>()`. Returns true if a handler
+    /// was invoked. Handler is invoked with `Entry` (NOT alphabet) so
+    /// callers can recover both the type and the static name buffer.
+    template <class HandlerFn>
+    static constexpr bool dispatch_alphabet_by_name(
+        const char* name, HandlerFn&& handler) noexcept
+    {
+        namespace tpl = ::bioseq::common::templating;
+
+        bool matched = false;
+        name_match_probe probe{name, matched};
+        tpl::dispatch_recursive_pack<
+            alphabet_code_t,
+            tpl::type_list<entries_pack...>>(handler, probe);
+        return matched;
+    }
+
+    /// Compile-time look-up: pack index of a specific alphabet. Asserting
+    /// — absence is a build error.
+    template <sequence_alphabet A>
     [[nodiscard]] static constexpr alphabet_code_t index_of() {
-        static_assert(
-            dispatch_detail::alphabet_in_tuple<A, alphabets_tuple>::value,
-            "alphabet A is not present in the pack");
-        alphabet_code_t result = 0;
-        bool found = false;
-        ((std::is_same_v<A, alphabets_pack> && !found
-              ? (found = true, true)
-              : (++result, false)) || ...);
-        return result;
+        using namespace ::bioseq::common::templating;
+        return static_cast<alphabet_code_t>(
+            index_of_type_pack_checked<A, typename entries_pack::alphabet_type...>());
+    }
+
+    /// Compile-time look-up: display name of a specific alphabet, returned
+    /// as a `CompTimeStr<N>` value. The `requires` clause short-circuits
+    /// if `A` is not in the pack so diagnostics fire at the alias site.
+    template <sequence_alphabet A>
+    [[nodiscard]] static constexpr auto name_of() {
+        constexpr std::size_t idx = static_cast<std::size_t>(index_of<A>());
+        return std::tuple_element_t<idx, alphabet_entries_tuple>::alphabet_name;
+    }
+
+    /// Member alias template: the `alphabet_entry<...>` brand for a
+    /// specific alphabet. Useful so test files can pull the entry off
+    /// the pack rather than naming a literal.
+    template <sequence_alphabet A>
+        requires (::bioseq::common::templating::contains_type_pack<
+            A, typename entries_pack::alphabet_type...>())
+    using entry_for = std::tuple_element_t<
+        ::bioseq::common::templating::index_of_type_pack<
+            A, typename entries_pack::alphabet_type...>(),
+        alphabet_entries_tuple>;
+
+    /// Runtime: map a code to the corresponding pack entry's display
+    /// name. Returns "?" on out-of-band input with a JustLog telemetry
+    /// line so silent corruption is observable.
+    [[nodiscard]] static std::string_view name_of_alphabet_code(
+        alphabet_code_t code) noexcept
+    {
+        namespace tpl = ::bioseq::common::templating;
+
+        auto opt = tpl::find_first_match_in_pack<
+            alphabet_code_t, std::string_view,
+            tpl::type_list<entries_pack...>>(code_to_name_probe{code});
+
+        if (!opt.has_value()) [[unlikely]] {
+            JustLog("[bioseq] name_of_alphabet_code: out-of-band code={}",
+                    static_cast<std::size_t>(code));
+            return std::string_view{"?"};
+        }
+        return *opt;
+    }
+
+    /// Runtime: map a cstring to the corresponding pack index. Returns
+    /// `std::nullopt` if the name is not in the pack (DOC0261 §5.7).
+    [[nodiscard]] static std::optional<alphabet_code_t> try_index_of_name(
+        const char* name) noexcept
+    {
+        namespace tpl = ::bioseq::common::templating;
+        return tpl::find_first_match_in_pack<
+            alphabet_code_t, alphabet_code_t,
+            tpl::type_list<entries_pack...>>(name_to_code_probe{name});
+    }
+
+    /// Build-time CSV of single-quoted, comma-space-separated names —
+    /// `"'dna4', 'dna5'"`. Used to generate the `errhint` text in
+    /// pg_compact_sequence_typmod_in. Byte-identical to the historical
+    /// hand-written hint (DOC0261 R6.1).
+    [[nodiscard]] static constexpr std::string_view
+    valid_alphabet_names_csv() noexcept
+    {
+        return std::string_view{
+            detail_supported_alphabets::valid_names_buffer_v<entries_pack...>.data(),
+            detail_supported_alphabets::valid_names_live_length_v<entries_pack...>};
     }
 };
 
@@ -251,7 +498,8 @@ concept is_supported_alphabets_v = requires {
 template<class Pack, class A>
 concept is_in_supported_alphabets_v =
     is_supported_alphabets_v<Pack>
-    && dispatch_detail::alphabet_in_tuple<A, typename Pack::alphabets_tuple>::value;
+    && ::bioseq::common::templating::contains_type_v<
+           A, typename Pack::alphabets_tuple>;
 
 /// Pick the matching templated lambda body for a runtime storage_unit_byte_width
 /// in {1, 2, 4, 8}. The four cases pin a `size_t` NTTP to the templated
@@ -1760,7 +2008,7 @@ public:
         std::uint8_t byte_width,
         HandlerFn&& handler)
     {
-        supported_alphabets_t::dispatch_alphabet(alpha_code,
+        supported_alphabets_t::dispatch_alphabet_by_code(alpha_code,
             [&]<class A>() {
                 dispatch_storage_unit_byte_width(byte_width,
                     [&]<size_t BW>() {
@@ -1770,6 +2018,15 @@ public:
                         >();
                     });
             });
+    }
+
+    /// Convenience pass-through to the pack's name lookup so callers that
+    /// already have a `compact_sequence_stdc*` don't have to spell out
+    /// `supported_alphabets_t::name_of_alphabet_code(...)`.
+    [[nodiscard]] static std::string_view name_of_alphabet_code(
+        alphabet_code_t code) noexcept
+    {
+        return supported_alphabets_t::name_of_alphabet_code(code);
     }
 
     /// Streaming recv factory: reads `unit_count` units of `target_storage_byte_width`
@@ -1850,7 +2107,7 @@ public:
 
 static_assert(
     std::is_standard_layout_v<
-        compact_sequence_stdc<supported_alphabets<seq::dna4, seq::dna5>>>,
+        compact_sequence_stdc<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>>>,
     "compact_sequence_stdc must be standard-layout for C-compatible storage");
 
 namespace compact_sequence_stdc_detail {
@@ -1861,15 +2118,15 @@ struct data_offset_check {
         (offsetof(stdc_t, data) % sizeof(std::uint64_t) == 0);
 };
 
-static_assert(data_offset_check<supported_alphabets<seq::dna4, seq::dna5>,
+static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
                                 std::uint32_t, std::int32_t>::aligned);
-static_assert(data_offset_check<supported_alphabets<seq::dna4, seq::dna5>,
+static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
                                 std::uint64_t, std::int32_t>::aligned);
-static_assert(data_offset_check<supported_alphabets<seq::dna4, seq::dna5>,
+static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
                                 std::uint16_t, std::int32_t>::aligned);
-static_assert(data_offset_check<supported_alphabets<seq::dna4, seq::dna5>,
+static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
                                 std::uint8_t,  std::int32_t>::aligned);
-static_assert(data_offset_check<supported_alphabets<seq::dna4, seq::dna5>,
+static_assert(data_offset_check<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>,
                                 std::uint32_t, std::int64_t>::aligned);
 }  // namespace compact_sequence_stdc_detail
 
@@ -1899,6 +2156,13 @@ struct compact_sequence_stdc_instance {
     static constexpr size_t byte_width        = storage_unit_byte_width;
     static constexpr size_t letter_bit_width  =
         seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_t>);
+
+    // DOC0261 §7 — alphabet name pinned at the type level via the pack
+    // lookup. Templated code can emit log lines / error messages that
+    // name the alphabet without re-deriving from the runtime byte.
+    static constexpr auto alphabet_name =
+        S::supported_alphabets_type::template name_of<alphabet_t>();
+    static constexpr std::string_view alphabet_name_sv = alphabet_name.view();
 
     static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
@@ -2006,7 +2270,7 @@ public:
 // catch it here with a one-line message instead.
 namespace compact_sequence_stdc_detail {
 using _check_instance_t = compact_sequence_stdc_instance<
-    compact_sequence_stdc<supported_alphabets<seq::dna4, seq::dna5>>,
+    compact_sequence_stdc<supported_alphabets<alphabet_entry<seq::dna4, "dna4">, alphabet_entry<seq::dna5, "dna5">>>,
     seq::dna4,
     size_t{8}>;
 static_assert(!is_sequence_custom_alphabet<_check_instance_t>,

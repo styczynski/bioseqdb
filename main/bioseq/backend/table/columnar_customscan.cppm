@@ -5156,18 +5156,21 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						const auto raw_width = explain_runtime->buffer.raw_query_storage_unit_byte_width();
 						const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
 						const auto col_width = explain_runtime->buffer.mmsearch_storage_unit_byte_width();
-						const auto fmt_alphabet_name = [](uint8_t code) {
-							return code == 0 ? "dna4" : code == 1 ? "dna5" : "?";
-						};
 						const auto width_to_bits = [](uint8_t code) {
 							return static_cast<unsigned>(8u << code);
 						};
 						StringInfoData hint_buf;
 						initStringInfo(&hint_buf);
+						const auto col_name =
+							pgseq_supported_alphabets::name_of_alphabet_code(col_alpha);
+						const auto raw_name =
+							pgseq_supported_alphabets::name_of_alphabet_code(raw_alpha);
 						appendStringInfo(&hint_buf,
-							"column is seq('%s', %u), but query is seq('%s', %u), so index needs to be recomputed",
-							fmt_alphabet_name(col_alpha), width_to_bits(col_width),
-							fmt_alphabet_name(raw_alpha), width_to_bits(raw_width));
+							"column is seq('%.*s', %u), but query is seq('%.*s', %u), so index needs to be recomputed",
+							static_cast<int>(col_name.size()), col_name.data(),
+							width_to_bits(col_width),
+							static_cast<int>(raw_name.size()), raw_name.data(),
+							width_to_bits(raw_width));
 						ExplainPropertyText("Performance reduced", hint_buf.data, es);
 						pfree(hint_buf.data);
 					}
@@ -5192,15 +5195,15 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							 */
 							const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
 							const auto col_width = explain_runtime->buffer.mmsearch_storage_unit_byte_width();
-							const auto fmt_alphabet_name = [](uint8_t code) {
-								return code == 0 ? "dna4" : code == 1 ? "dna5" : "?";
-							};
 							const auto width_to_bits = [](uint8_t code) {
 								return static_cast<unsigned>(8u << code);
 							};
+							const auto col_name =
+								pgseq_supported_alphabets::name_of_alphabet_code(col_alpha);
 							appendStringInfo(&presence_buf,
-								", coalesce to seq('%s', %u)",
-								fmt_alphabet_name(col_alpha), width_to_bits(col_width));
+								", coalesce to seq('%.*s', %u)",
+								static_cast<int>(col_name.size()), col_name.data(),
+								width_to_bits(col_width));
 						}
 						appendStringInfoString(&presence_buf, ")");
 						ExplainPropertyText("Bioseq Fetched From Sequence Index",

@@ -10,6 +10,7 @@
 
 import mlogging;
 import sequan_compat;
+import bioseq_common.templating;
 import bioseq_sequences;
 import bioseq_sequences.simd;
 import bioseq_sequences.kmers;
@@ -35,7 +36,9 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace {
 
-using test_supported_alphabets = supported_alphabets<seq::dna4, seq::dna5>;
+using test_supported_alphabets = supported_alphabets<
+    alphabet_entry<seq::dna4, "dna4">,
+    alphabet_entry<seq::dna5, "dna5">>;
 using test_stdc_t              = compact_sequence_stdc<test_supported_alphabets>;
 
 // Simple owning buffer allocator: arena() returns a callable that
@@ -214,7 +217,9 @@ TEST_CASE("DOC0258: type_params encode/decode is reversible", "[doc0258]") {
 
 TEST_CASE("DOC0258: data[] offset is uint64-aligned across pack widths",
           "[doc0258]") {
-    using P0 = supported_alphabets<seq::dna4, seq::dna5>;
+    using P0 = supported_alphabets<
+        alphabet_entry<seq::dna4, "dna4">,
+        alphabet_entry<seq::dna5, "dna5">>;
     using stdc_default = compact_sequence_stdc<P0>;
     using stdc_bp16    = compact_sequence_stdc<P0, std::uint16_t>;
     using stdc_bp8     = compact_sequence_stdc<P0, std::uint8_t>;
@@ -223,6 +228,91 @@ TEST_CASE("DOC0258: data[] offset is uint64-aligned across pack widths",
     REQUIRE(offsetof(stdc_bp16,    data) % 8u == 0u);
     REQUIRE(offsetof(stdc_bp8,     data) % 8u == 0u);
     REQUIRE(offsetof(stdc_bp64,    data) % 8u == 0u);
+}
+
+// =====================================================================
+// DOC0261 unit tests — CompTimeStr + pack name dispatch.
+// =====================================================================
+
+TEST_CASE("DOC0261: CompTimeStr basic operations",
+          "[doc0261][templating][CompTimeStr]") {
+    using namespace ::bioseq::common::templating;
+    constexpr CompTimeStr a{"foo"};
+    constexpr CompTimeStr b{"bar"};
+    STATIC_REQUIRE(a.size() == 3);
+    STATIC_REQUIRE(a == "foo");
+    STATIC_REQUIRE((a + b) == "foobar");
+    STATIC_REQUIRE(a.equals_cstr("foo"));
+    STATIC_REQUIRE(!a.equals_cstr("food"));
+    STATIC_REQUIRE(!a.equals_cstr("fo"));
+}
+
+TEST_CASE("DOC0261: supported_alphabets name/code roundtrip",
+          "[doc0261][supported_alphabets][names]") {
+    using sa = test_supported_alphabets;
+    STATIC_REQUIRE(sa::name_of<seq::dna4>() == "dna4");
+    STATIC_REQUIRE(sa::name_of<seq::dna5>() == "dna5");
+    REQUIRE(sa::name_of_alphabet_code(
+        sa::index_of<seq::dna4>()) == std::string_view{"dna4"});
+    REQUIRE(sa::name_of_alphabet_code(
+        sa::index_of<seq::dna5>()) == std::string_view{"dna5"});
+
+    REQUIRE(sa::try_index_of_name("dna4")
+            == std::optional<sa::alphabet_code_t>{0});
+    REQUIRE(sa::try_index_of_name("dna5")
+            == std::optional<sa::alphabet_code_t>{1});
+    REQUIRE(sa::try_index_of_name("xyz") == std::nullopt);
+    REQUIRE(sa::try_index_of_name("dna") == std::nullopt);
+    REQUIRE(sa::try_index_of_name("dna44") == std::nullopt);
+    REQUIRE(sa::try_index_of_name("") == std::nullopt);
+}
+
+TEST_CASE("DOC0261: supported_alphabets valid_alphabet_names_csv",
+          "[doc0261][supported_alphabets][names]") {
+    REQUIRE(test_supported_alphabets::valid_alphabet_names_csv()
+            == std::string_view{"'dna4', 'dna5'"});
+}
+
+TEST_CASE("DOC0261: supported_alphabets pack uniqueness static_asserts "
+          "(positive form)",
+          "[doc0261][supported_alphabets][static_assert]") {
+    STATIC_REQUIRE(test_supported_alphabets::alphabet_count == 2u);
+    using sa = test_supported_alphabets;
+    STATIC_REQUIRE(std::is_same_v<
+        sa::entry_for<seq::dna4>::alphabet_type, seq::dna4>);
+    STATIC_REQUIRE(std::is_same_v<
+        sa::entry_for<seq::dna5>::alphabet_type, seq::dna5>);
+    STATIC_REQUIRE(sa::entry_for<seq::dna4>::alphabet_name_sv == "dna4");
+
+    // The compiling of `test_supported_alphabets` itself proves the
+    // pack-level uniqueness static_asserts fire as expected on this
+    // pack (they would be a build error otherwise). Pin the predicates
+    // explicitly so a regression in the predicates is caught even if
+    // an unrelated edit removes the pack-level static_assert lines.
+    STATIC_REQUIRE(::bioseq::common::templating::unique_types_in_tuple_v<
+        typename sa::alphabets_tuple>);
+    STATIC_REQUIRE(dispatch_detail::unique_names_in_pack<
+        alphabet_entry<seq::dna4, "dna4">,
+        alphabet_entry<seq::dna5, "dna5">>());
+}
+
+TEST_CASE("DOC0261: dispatch_alphabet_by_name pins entry at type level",
+          "[doc0261][supported_alphabets][dispatch]") {
+    bool saw_dna4 = false;
+    const bool matched_dna4 = test_supported_alphabets::dispatch_alphabet_by_name(
+        "dna4",
+        [&]<class Entry>() {
+            saw_dna4 = std::is_same_v<typename Entry::alphabet_type, seq::dna4>;
+        });
+    REQUIRE(matched_dna4);
+    REQUIRE(saw_dna4);
+
+    bool saw_unknown = true;
+    const bool matched_unknown = test_supported_alphabets::dispatch_alphabet_by_name(
+        "rna7",
+        [&]<class /*Entry*/>() { saw_unknown = false; });
+    REQUIRE_FALSE(matched_unknown);
+    REQUIRE(saw_unknown);  // handler was NEVER invoked on no-match.
 }
 
 };
