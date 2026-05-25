@@ -1,0 +1,3 @@
+[mcp_servers.bioseq-build]
+args = ["/Users/piotr.styczynski/Code/bioseqdb/main/build_mcp/server.py"]
+command = "python3"
