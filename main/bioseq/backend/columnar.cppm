@@ -66,6 +66,15 @@ bool bioseq_update_index_on_insert = true;
 bool bioseq_read_sequence_index = true;
 
 /*
+ * DOC0260 Phase A — per-shard cap for the length-bucketed sub-table
+ * sharding. A new shard is allocated when the active one would cross
+ * `bioseq_storage_max_seq_sub_table_gbs * 2^30` bytes of payload. Special
+ * value 0 forces a fresh shard on every insert (test-only). Default 1024
+ * GiB (= 1 TiB).
+ */
+int bioseq_storage_max_seq_sub_table_gbs = 1024;
+
+/*
  * Aligner parameter GUCs — one per field of Minimap2Params so the user can
  * tune the minimap2 pipeline per-session without recompiling. Global defaults
  * match mm_mapopt_init() in options.c; per-call overrides are delivered via
@@ -314,6 +323,23 @@ bioseq_guc_init()
 		&bioseq_read_sequence_index,
 		true,
 		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomIntVariable(
+		"bioseq.storage.max_seq_sub_table_gbs",
+		"Maximum size, in gibibytes, of one sequence storage sub-table shard. "
+		"A new shard is allocated when the active one would cross this size. "
+		"Special value 0 forces a fresh shard on every insert -- test-only; "
+		"do NOT use in production multi-writer workloads.",
+		NULL,
+		&bioseq_storage_max_seq_sub_table_gbs,
+		1024,
+		0,
+		INT_MAX,
+		PGC_SUSET,
 		0,
 		NULL,
 		NULL,

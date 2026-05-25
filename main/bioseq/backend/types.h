@@ -350,4 +350,13 @@ struct ColumnarWriteState
 	 * deallocated when memory context is reset.
 	 */
 	StringInfo compressionBuffer;
+
+	/*
+	 * DOC0260 Phase A — per-write-state seq_caches (sub-table cache used
+	 * by sequence_storage_manager). Opaque void* so types.h stays C-shape;
+	 * the actual `bioseq::storage::seq_caches*` is placement-new'd into
+	 * stripeWriteContext by bioseq_init_write_state and destroyed by
+	 * ColumnarEndWrite. Holds the per-write-state cap snapshot.
+	 */
+	void *seq_caches;
 };

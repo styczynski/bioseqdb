@@ -75,6 +75,7 @@ using bioseq::simd::HWY_NAMESPACE::TargetIndex;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
+using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 
 /* Forward declarations for the two bioseq_table symbols we need at plan-
  * time for estimate_index_presence's bioseq-AM row-count fallback.

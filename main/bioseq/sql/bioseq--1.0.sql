@@ -375,6 +375,43 @@ COMMENT ON TABLE bioseq.metadata_age_log IS
     'bioseq.list_metadata(); written by bioseq.update_index() and '
     '(throttled) by sidecar_after_insert.';
 
+-- ============================================================================
+-- DOC0260 Phase A — length-bucketed sub-table sharding catalog.
+--
+-- One row per (database, tablespace, main-relfilenode, column, bucket, shard)
+-- triple. Sub-tables are created lazily by the storage manager on first
+-- INSERT into a (parent, column, bucket); the partial UNIQUE index enforces
+-- "at most one active shard per (parent, column, bucket)" so a concurrent
+-- inserter cannot create a duplicate active shard.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS bioseq.seq_sub_table (
+    database_oid        oid    NOT NULL,
+    tablespace_oid      oid    NOT NULL,
+    main_relfilenode    oid    NOT NULL,
+    column_attno        int2   NOT NULL,
+    bucket_idx          int2   NOT NULL,
+    shard_idx           int4   NOT NULL,
+    sub_table_relid     oid    NOT NULL,
+    sidecar_relid       oid    NOT NULL,
+    bytes_written       bigint NOT NULL DEFAULT 0 CHECK (bytes_written >= 0),
+    is_full             bool   NOT NULL DEFAULT FALSE,
+    total_payload_bytes bigint NOT NULL DEFAULT 0 CHECK (total_payload_bytes >= 0),
+    PRIMARY KEY (database_oid, tablespace_oid, main_relfilenode,
+                 column_attno, bucket_idx, shard_idx)
+);
+COMMENT ON TABLE bioseq.seq_sub_table IS
+    'DOC0260 Phase A: one row per (db, spc, relfilenode, column, bucket, shard) '
+    'recording the sub-table relid, its sidecar relid, and bytes_written/is_full.';
+
+CREATE UNIQUE INDEX IF NOT EXISTS seq_sub_table_active_shard_idx
+    ON bioseq.seq_sub_table
+        (database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx)
+    WHERE is_full = FALSE;
+
+CREATE INDEX IF NOT EXISTS seq_sub_table_by_main_idx
+    ON bioseq.seq_sub_table
+        (database_oid, tablespace_oid, main_relfilenode);
+
 -- rename bioseq schema to bioseq_internal and tighten security
 
 REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA bioseq FROM PUBLIC;
@@ -385,6 +422,39 @@ REVOKE ALL PRIVILEGES ON SCHEMA bioseq_internal FROM PUBLIC;
 
 CREATE SCHEMA bioseq;
 GRANT USAGE ON SCHEMA bioseq TO PUBLIC;
+
+-- DOC0260 Phase A — SECURITY DEFINER helper used by the storage manager
+-- to register a freshly-CREATE'd sub-table / sidecar pair with the bioseq
+-- extension. Owned by the extension owner so non-owner backends can lazily
+-- allocate shards. See DOC0260 §7.3 for the race / fallback semantics.
+CREATE OR REPLACE FUNCTION bioseq_internal.add_to_extension_secdef(
+    sub_name text, sidecar_name text)
+    RETURNS void
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, public
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'bioseq') THEN
+        EXECUTE format('ALTER EXTENSION bioseq ADD TABLE bioseq_internal.%I',
+                       sub_name);
+        EXECUTE format('ALTER EXTENSION bioseq ADD TABLE bioseq_internal.%I',
+                       sidecar_name);
+        PERFORM pg_extension_config_dump(
+            format('bioseq_internal.%I', sub_name)::regclass, 'WHERE FALSE');
+        PERFORM pg_extension_config_dump(
+            format('bioseq_internal.%I', sidecar_name)::regclass, 'WHERE FALSE');
+    END IF;
+END $$;
+REVOKE EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)
+    FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)
+    TO PUBLIC;
+
+-- DOC0260 Phase A — the seq_sub_table is an extension-owned catalog; skip
+-- its rows in pg_dump so the extension's CREATE script re-creates a clean
+-- catalog (lazy sub-tables are created on-demand by the first INSERT).
+SELECT pg_extension_config_dump('bioseq_internal.seq_sub_table', 'WHERE FALSE');
 
 --#include "udfs/upgrade_bioseq_storage/10.2-1.sql"
 CREATE OR REPLACE FUNCTION bioseq_internal.upgrade_bioseq_storage(rel regclass)
@@ -1011,14 +1081,21 @@ CREATE OPERATOR CLASS bioseq.seq_ops
     OPERATOR 5 > ,
     FUNCTION 1 bioseq.seq_cmp(bioseq.seq, bioseq.seq);
 
--- 6. bp_size / unit_size projection helpers.
+-- 6. bp_size / unit_size projection helpers. DOC0260 §1.1 #10 widened
+--    these from INT4 to BIGINT so sequences with bp_size > INT32_MAX
+--    (Phase C and beyond) are not silently truncated. The C
+--    implementation reads loc.total_bp_size (uint64) for locator-stub
+--    values and hdr->bp_size for inline payloads.
+DROP FUNCTION IF EXISTS bioseq.len(bioseq.seq);
+DROP FUNCTION IF EXISTS bioseq.unit_len(bioseq.seq);
+
 CREATE OR REPLACE FUNCTION bioseq.len(bioseq.seq)
-    RETURNS integer
+    RETURNS bigint
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_len'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
-    RETURNS integer
+    RETURNS bigint
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_unit_len'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 

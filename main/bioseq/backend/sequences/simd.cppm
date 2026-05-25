@@ -2413,19 +2413,26 @@ requires supports_compact_sequence_range<Src>
 // Lexicographic sequence comparator. Renamed from compare_sequences_simd —
 // the body is purely scalar, the previous `_simd` suffix was misleading.
 // Both sequences must share the same (alphabet, storage_unit).
+//
+// Constrained against `supports_compact_sequence_bitcast_view<V>` so the
+// caller can pass either a raw `compact_sequence_range<R>` or a
+// `bit_casted_view<base, output>` — both satisfy the concept (DOC0260
+// pre-existing latent bug: the cross-storage-width branch in
+// stdc_compare passes a bit_casted_view here, which the previous
+// `compact_sequence_range<R1>&` signature failed to match).
 // ============================================================================
-template<class R1, class R2>
-requires supports_compact_sequence_range<R1>
-      && supports_compact_sequence_range<R2>
-      && std::is_same_v<typename compact_sequence_range<R1>::traits::alphabet_type,
-                        typename compact_sequence_range<R2>::traits::alphabet_type>
-      && std::is_same_v<typename compact_sequence_range<R1>::traits::storage_unit,
-                        typename compact_sequence_range<R2>::traits::storage_unit>
+template<class V1, class V2>
+requires supports_compact_sequence_bitcast_view<V1>
+      && supports_compact_sequence_bitcast_view<V2>
+      && std::is_same_v<typename V1::traits::alphabet_type,
+                        typename V2::traits::alphabet_type>
+      && std::is_same_v<typename V1::traits::storage_unit,
+                        typename V2::traits::storage_unit>
 [[nodiscard]] std::strong_ordering compare_sequences_scalar(
-	const compact_sequence_range<R1>& a,
-	const compact_sequence_range<R2>& b)
+	const V1& a,
+	const V2& b)
 {
-	using seq_traits = typename compact_sequence_range<R1>::traits;
+	using seq_traits = typename V1::traits;
 	using storage_unit_t = typename seq_traits::storage_unit;
 	constexpr size_t bits_per_char    = seq_traits::bits_per_char;
 	constexpr size_t letters_per_unit = seq_traits::letters_per_unit;
@@ -2625,29 +2632,90 @@ requires (is_compact_sequence_stdc<StdcT>)
 [[nodiscard]]
 inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
 {
+    // DOC0260 R8 — load-bearing caller-contract check. Cross-alphabet
+    // calls would silently return `std::strong_ordering::equal` from the
+    // cross-alphabet `if constexpr` branch below (in release builds the
+    // surrounding DEBUG_ASSERT compiles out), so raise loudly here. The
+    // NO_POSTGRES branch covers the standalone aligner build where the
+    // Postgres `ERROR` level constant is undefined; that path keeps the
+    // historical DEBUG_ASSERT behaviour, which is acceptable because the
+    // aligner exec never calls stdc_compare with cross-alphabet inputs
+    // (every test fixture pins a single alphabet).
+#ifndef NO_POSTGRES
+    if (a.alphabet_code != b.alphabet_code) {
+        pg_log(ERROR,
+            "stdc_compare: callers must pass same-alphabet sequences "
+            "(lhs={}, rhs={})",
+            static_cast<unsigned>(a.alphabet_code),
+            static_cast<unsigned>(b.alphabet_code));
+    }
+#else
     DEBUG_ASSERT(a.alphabet_code == b.alphabet_code,
                  fmt::format("stdc_compare across alphabets: {} vs {}",
                              static_cast<unsigned>(a.alphabet_code),
                              static_cast<unsigned>(b.alphabet_code)));
+#endif
     std::strong_ordering result = std::strong_ordering::equal;
-    a.convert_to([&]<class Sa>(const compact_sequence_range<Sa>& ra) {
-        b.convert_to([&]<class Sb>(const compact_sequence_range<Sb>& rb) {
+    a.convert_to([&result, &b]<class Sa>(const compact_sequence_range<Sa>& ra) {
+        b.convert_to([&result, &ra]<class Sb>(const compact_sequence_range<Sb>& rb) {
+            using TraitsA = typename compact_sequence_range<Sa>::traits;
+            using TraitsB = typename compact_sequence_range<Sb>::traits;
+            // The dispatch_instance fanout synthesises every (alphabet,
+            // storage_unit) pair at compile time, but at runtime the
+            // DEBUG_ASSERT above pins same alphabet and the typmod pins
+            // same storage_unit_byte_width. Compile-time guards filter
+            // out unreachable pairs so we never try to instantiate
+            // bit_cast_to_storage_unit / compare_sequences_scalar on
+            // mismatched types (e.g. dna5 has 3 bits/char which doesn't
+            // pack evenly into smaller storage units, so the
+            // bit_cast_to_storage_unit constraint fails on dna5).
             if constexpr (
-                std::is_same_v<typename Sa::storage_unit,
-                               typename Sb::storage_unit>
+                !std::is_same_v<typename TraitsA::alphabet_type,
+                                typename TraitsB::alphabet_type>
+            ) {
+                (void)ra;
+                (void)rb;
+            } else if constexpr (
+                std::is_same_v<typename TraitsA::storage_unit,
+                               typename TraitsB::storage_unit>
             ) {
                 result = compare_sequences_scalar(ra, rb);
             } else if constexpr (
-                sizeof(typename Sa::storage_unit) >=
-                sizeof(typename Sb::storage_unit)
+                is_sequence_bit_castable_to<Sa, typename TraitsB::storage_unit>
+                && sizeof(typename TraitsA::storage_unit) >=
+                   sizeof(typename TraitsB::storage_unit)
             ) {
                 const auto va =
-                    ra.template bit_cast_to_storage_unit<typename Sb::storage_unit>();
+                    ra.template bit_cast_to_storage_unit<typename TraitsB::storage_unit>();
                 result = compare_sequences_scalar(va, rb);
-            } else {
+            } else if constexpr (
+                is_sequence_bit_castable_to<Sb, typename TraitsA::storage_unit>
+            ) {
                 const auto vb =
-                    rb.template bit_cast_to_storage_unit<typename Sa::storage_unit>();
+                    rb.template bit_cast_to_storage_unit<typename TraitsA::storage_unit>();
                 result = compare_sequences_scalar(ra, vb);
+            } else {
+                // Unreachable at runtime: same alphabet + different
+                // storage widths that can't bit-cast (e.g. dna5 with
+                // 3-bit leftover). This is a caller-contract
+                // violation, so per DOC0260 R8 raise a load-bearing
+                // pg_log(ERROR, …) — DEBUG_ASSERT would be silent in
+                // release builds and return std::strong_ordering::equal
+                // on a value mismatch. NO_POSTGRES build path keeps the
+                // historical DEBUG_ASSERT (aligner exec never hits
+                // cross-storage-width compares with dna5).
+                (void)ra;
+                (void)rb;
+#ifndef NO_POSTGRES
+                pg_log(ERROR,
+                    "stdc_compare: cross-storage-width same-alphabet pair "
+                    "with non-bit-castable layout (alphabet does not satisfy "
+                    "is_sequence_custom_alphabet_bit_castable_to)");
+#else
+                DEBUG_ASSERT(false,
+                    "stdc_compare: cross-storage-width same-alphabet pair "
+                    "with non-bit-castable layout (dna5 + mismatched width?)");
+#endif
             }
         });
     });

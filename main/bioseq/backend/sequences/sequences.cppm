@@ -740,6 +740,18 @@ public:
         return reinterpret_cast<const typename traits::storage_unit*>(base.read_cptr(it));
     };
 
+    /// Forward base's `cbegin()` so callers that consume the
+    /// `supports_compact_sequence_bitcast_view` concept can fetch the
+    /// initial iterator uniformly across `compact_sequence_range` and
+    /// `bit_casted_view`. Returns a base-side iterator that this view's
+    /// `read_cptr` accepts (per the `is_valid_derived_iter` constraint).
+    [[always_inline]] constexpr iterator cbegin() const {
+        return base.cbegin();
+    }
+    [[always_inline]] constexpr iterator begin() const {
+        return base.cbegin();
+    }
+
     template<typename I>
     requires(base_t::template is_valid_derived_iter<I>::value)
     [[always_inline]] constexpr static void advance_iter(I& it, const size_t value) {

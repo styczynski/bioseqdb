@@ -30,6 +30,9 @@ module;
 
 #include <sys/stat.h>
 #include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <vector>
 
 export module storage_metadata;
 
@@ -92,6 +95,66 @@ export bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot
 								MemoryContext ctx,
 								uint64_t stripeFirstRowNumber, int rowCount);
 export EState * create_estate_for_relation(Relation rel);
+
+// ---------------------------------------------------------------------------
+// DOC0260 Phase A — bioseq_internal.seq_sub_table catalog access.
+// ---------------------------------------------------------------------------
+
+export constexpr int Natts_seq_sub_table                       = 11;
+export constexpr int Anum_seq_sub_table_database_oid           = 1;
+export constexpr int Anum_seq_sub_table_tablespace_oid         = 2;
+export constexpr int Anum_seq_sub_table_main_relfilenode       = 3;
+export constexpr int Anum_seq_sub_table_column_attno           = 4;
+export constexpr int Anum_seq_sub_table_bucket_idx             = 5;
+export constexpr int Anum_seq_sub_table_shard_idx              = 6;
+export constexpr int Anum_seq_sub_table_sub_table_relid        = 7;
+export constexpr int Anum_seq_sub_table_sidecar_relid          = 8;
+export constexpr int Anum_seq_sub_table_bytes_written          = 9;
+export constexpr int Anum_seq_sub_table_is_full                = 10;
+export constexpr int Anum_seq_sub_table_total_payload_bytes    = 11;
+
+export struct SubTableRow {
+	Oid             database_oid       = InvalidOid;
+	Oid             tablespace_oid     = InvalidOid;
+	Oid             main_relfilenode   = InvalidOid;
+	int16_t         column_attno       = 0;
+	int16_t         bucket_idx         = 0;
+	int32_t         shard_idx          = 0;
+	Oid             sub_table_relid    = InvalidOid;
+	Oid             sidecar_relid      = InvalidOid;
+	std::uint64_t   bytes_written      = 0;
+	bool            is_full            = false;
+	std::uint64_t   total_payload_bytes = 0;
+};
+
+export Oid SubTableMetadataRelationId(void);
+export Oid SubTableMetadataPKeyIndexRelationId(void);
+export Oid SubTableMetadataActiveShardIndexRelationId(void);
+
+export [[nodiscard]] std::optional<SubTableRow>
+LookupActiveSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                          int16_t column_attno, int16_t bucket_idx);
+
+export [[nodiscard]] std::optional<SubTableRow>
+LookupSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                    int16_t column_attno, int16_t bucket_idx, int32_t shard_idx);
+
+export [[nodiscard]] SubTableRow
+InsertSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                    int16_t column_attno, int16_t bucket_idx, int32_t shard_idx,
+                    Oid sub_table_relid, Oid sidecar_relid);
+
+export SubTableRow
+UpdateSubTableShardBytesWritten(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                                int16_t column_attno, int16_t bucket_idx, int32_t shard_idx,
+                                std::uint64_t delta_bytes,
+                                std::uint64_t cap_bytes);
+
+export [[nodiscard]] std::vector<SubTableRow>
+ListSubTableShardsForMain(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode);
+
+export void
+DeleteSubTableShardsForMain(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode);
 
 
 /*
@@ -2563,4 +2626,323 @@ RewriteStripeMetadataRowWithNewValues(Relation rel, uint64_t stripeId,
 	newValues[Anum_bioseq_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
 
 	return UpdateStripeMetadataRow(storageId, stripeId, update, newValues);
+}
+
+// ---------------------------------------------------------------------------
+// DOC0260 Phase A — bioseq_internal.seq_sub_table catalog access.
+// Catalog access happens via the systable API so MVCC + transactional
+// semantics work the same way as for bioseq.stripe.
+// ---------------------------------------------------------------------------
+
+Oid SubTableMetadataRelationId(void) {
+	return safe_get_relname_relid("seq_sub_table", ColumnarNamespaceId());
+}
+
+Oid SubTableMetadataPKeyIndexRelationId(void) {
+	return safe_get_relname_relid("seq_sub_table_pkey", ColumnarNamespaceId());
+}
+
+Oid SubTableMetadataActiveShardIndexRelationId(void) {
+	return safe_get_relname_relid("seq_sub_table_active_shard_idx", ColumnarNamespaceId());
+}
+
+static SubTableRow BuildSubTableRowFromTuple(HeapTuple heapTuple, TupleDesc td) {
+	Datum values[Natts_seq_sub_table];
+	bool  nulls[Natts_seq_sub_table];
+	heap_deform_tuple(heapTuple, td, values, nulls);
+	SubTableRow row;
+	row.database_oid        = DatumGetObjectId(values[Anum_seq_sub_table_database_oid - 1]);
+	row.tablespace_oid      = DatumGetObjectId(values[Anum_seq_sub_table_tablespace_oid - 1]);
+	row.main_relfilenode    = DatumGetObjectId(values[Anum_seq_sub_table_main_relfilenode - 1]);
+	row.column_attno        = DatumGetInt16(values[Anum_seq_sub_table_column_attno - 1]);
+	row.bucket_idx          = DatumGetInt16(values[Anum_seq_sub_table_bucket_idx - 1]);
+	row.shard_idx           = DatumGetInt32(values[Anum_seq_sub_table_shard_idx - 1]);
+	row.sub_table_relid     = DatumGetObjectId(values[Anum_seq_sub_table_sub_table_relid - 1]);
+	row.sidecar_relid       = DatumGetObjectId(values[Anum_seq_sub_table_sidecar_relid - 1]);
+	row.bytes_written       = static_cast<std::uint64_t>(
+		DatumGetInt64(values[Anum_seq_sub_table_bytes_written - 1]));
+	row.is_full             = DatumGetBool(values[Anum_seq_sub_table_is_full - 1]);
+	row.total_payload_bytes = static_cast<std::uint64_t>(
+		DatumGetInt64(values[Anum_seq_sub_table_total_payload_bytes - 1]));
+	return row;
+}
+
+std::optional<SubTableRow>
+LookupActiveSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                          int16_t column_attno, int16_t bucket_idx)
+{
+	const Oid relid = SubTableMetadataRelationId();
+	if (!OidIsValid(relid)) {
+		return std::nullopt;
+	}
+	Relation rel = safe_relation_open(relid, AccessShareLock);
+	TupleDesc td = RelationGetDescr(rel);
+
+	const Oid idx_oid = SubTableMetadataActiveShardIndexRelationId();
+	const bool idx_ok = OidIsValid(idx_oid);
+
+	ScanKeyData keys[5];
+	ScanKeyInit(&keys[0], Anum_seq_sub_table_database_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
+	ScanKeyInit(&keys[1], Anum_seq_sub_table_tablespace_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
+	ScanKeyInit(&keys[2], Anum_seq_sub_table_main_relfilenode,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
+	ScanKeyInit(&keys[3], Anum_seq_sub_table_column_attno,
+	            BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(column_attno));
+	ScanKeyInit(&keys[4], Anum_seq_sub_table_bucket_idx,
+	            BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(bucket_idx));
+
+	SysScanDesc scan = systable_beginscan(rel, idx_oid, idx_ok, nullptr, 5, keys);
+	std::optional<SubTableRow> result;
+	HeapTuple tup = nullptr;
+	while (HeapTupleIsValid(tup = systable_getnext(scan))) {
+		SubTableRow row = BuildSubTableRowFromTuple(tup, td);
+		if (!row.is_full) {
+			result = row;
+			break;
+		}
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return result;
+}
+
+std::optional<SubTableRow>
+LookupSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                    int16_t column_attno, int16_t bucket_idx, int32_t shard_idx)
+{
+	const Oid relid = SubTableMetadataRelationId();
+	if (!OidIsValid(relid)) {
+		return std::nullopt;
+	}
+	Relation rel = safe_relation_open(relid, AccessShareLock);
+	TupleDesc td = RelationGetDescr(rel);
+
+	const Oid idx_oid = SubTableMetadataPKeyIndexRelationId();
+	const bool idx_ok = OidIsValid(idx_oid);
+
+	ScanKeyData keys[6];
+	ScanKeyInit(&keys[0], Anum_seq_sub_table_database_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
+	ScanKeyInit(&keys[1], Anum_seq_sub_table_tablespace_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
+	ScanKeyInit(&keys[2], Anum_seq_sub_table_main_relfilenode,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
+	ScanKeyInit(&keys[3], Anum_seq_sub_table_column_attno,
+	            BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(column_attno));
+	ScanKeyInit(&keys[4], Anum_seq_sub_table_bucket_idx,
+	            BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(bucket_idx));
+	ScanKeyInit(&keys[5], Anum_seq_sub_table_shard_idx,
+	            BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(shard_idx));
+
+	SysScanDesc scan = systable_beginscan(rel, idx_oid, idx_ok, nullptr, 6, keys);
+	std::optional<SubTableRow> result;
+	HeapTuple tup = systable_getnext(scan);
+	if (HeapTupleIsValid(tup)) {
+		result = BuildSubTableRowFromTuple(tup, td);
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return result;
+}
+
+SubTableRow
+InsertSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                    int16_t column_attno, int16_t bucket_idx, int32_t shard_idx,
+                    Oid sub_table_relid, Oid sidecar_relid)
+{
+	const Oid relid = SubTableMetadataRelationId();
+	if (!OidIsValid(relid)) {
+		pg_log(ERROR, "bioseq storage: seq_sub_table catalog not present");
+	}
+
+	// Race-loss handling — if the unique partial index already accepted a
+	// row for the same (db, spc, relfilenode, attno, bucket) with
+	// is_full=FALSE, return the winner instead of trying to insert a duplicate.
+	{
+		auto existing = LookupActiveSubTableShard(
+			database_oid, tablespace_oid, main_relfilenode,
+			column_attno, bucket_idx);
+		if (existing.has_value() && existing->shard_idx == shard_idx) {
+			return *existing;
+		}
+		if (existing.has_value() && existing->shard_idx != shard_idx) {
+			return *existing;
+		}
+	}
+
+	Relation rel = safe_relation_open(relid, RowExclusiveLock);
+	TupleDesc td = RelationGetDescr(rel);
+
+	Datum values[Natts_seq_sub_table] = { 0 };
+	bool  nulls[Natts_seq_sub_table]  = { false };
+	values[Anum_seq_sub_table_database_oid - 1]        = ObjectIdGetDatum(database_oid);
+	values[Anum_seq_sub_table_tablespace_oid - 1]      = ObjectIdGetDatum(tablespace_oid);
+	values[Anum_seq_sub_table_main_relfilenode - 1]    = ObjectIdGetDatum(main_relfilenode);
+	values[Anum_seq_sub_table_column_attno - 1]        = Int16GetDatum(column_attno);
+	values[Anum_seq_sub_table_bucket_idx - 1]          = Int16GetDatum(bucket_idx);
+	values[Anum_seq_sub_table_shard_idx - 1]           = Int32GetDatum(shard_idx);
+	values[Anum_seq_sub_table_sub_table_relid - 1]     = ObjectIdGetDatum(sub_table_relid);
+	values[Anum_seq_sub_table_sidecar_relid - 1]       = ObjectIdGetDatum(sidecar_relid);
+	values[Anum_seq_sub_table_bytes_written - 1]       = Int64GetDatum(0);
+	values[Anum_seq_sub_table_is_full - 1]             = BoolGetDatum(false);
+	values[Anum_seq_sub_table_total_payload_bytes - 1] = Int64GetDatum(0);
+
+	HeapTuple tup = heap_form_tuple(td, values, nulls);
+	CatalogTupleInsert(rel, tup);
+	heap_freetuple(tup);
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
+
+	SubTableRow row;
+	row.database_oid       = database_oid;
+	row.tablespace_oid     = tablespace_oid;
+	row.main_relfilenode   = main_relfilenode;
+	row.column_attno       = column_attno;
+	row.bucket_idx         = bucket_idx;
+	row.shard_idx          = shard_idx;
+	row.sub_table_relid    = sub_table_relid;
+	row.sidecar_relid      = sidecar_relid;
+	row.bytes_written      = 0;
+	row.is_full            = false;
+	row.total_payload_bytes = 0;
+	return row;
+}
+
+SubTableRow
+UpdateSubTableShardBytesWritten(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
+                                int16_t column_attno, int16_t bucket_idx, int32_t shard_idx,
+                                std::uint64_t delta_bytes,
+                                std::uint64_t cap_bytes)
+{
+	const Oid relid = SubTableMetadataRelationId();
+	const Oid idx_oid = SubTableMetadataPKeyIndexRelationId();
+	if (!OidIsValid(relid)) {
+		pg_log(ERROR, "bioseq storage: seq_sub_table catalog not present");
+	}
+
+	Relation rel = safe_relation_open(relid, RowExclusiveLock);
+	TupleDesc td = RelationGetDescr(rel);
+
+	ScanKeyData keys[6];
+	ScanKeyInit(&keys[0], Anum_seq_sub_table_database_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
+	ScanKeyInit(&keys[1], Anum_seq_sub_table_tablespace_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
+	ScanKeyInit(&keys[2], Anum_seq_sub_table_main_relfilenode,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
+	ScanKeyInit(&keys[3], Anum_seq_sub_table_column_attno,
+	            BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(column_attno));
+	ScanKeyInit(&keys[4], Anum_seq_sub_table_bucket_idx,
+	            BTEqualStrategyNumber, F_INT2EQ, Int16GetDatum(bucket_idx));
+	ScanKeyInit(&keys[5], Anum_seq_sub_table_shard_idx,
+	            BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(shard_idx));
+
+	SysScanDesc scan = systable_beginscan(rel, idx_oid, OidIsValid(idx_oid),
+	                                      nullptr, 6, keys);
+	HeapTuple oldTuple = systable_getnext(scan);
+	if (!HeapTupleIsValid(oldTuple)) {
+		systable_endscan(scan);
+		table_close(rel, RowExclusiveLock);
+		pg_log(ERROR,
+		       "bioseq storage: cannot update missing sub-table shard "
+		       "(db={}, spc={}, relfilenode={}, attno={}, bucket={}, shard={})",
+		       static_cast<unsigned>(database_oid),
+		       static_cast<unsigned>(tablespace_oid),
+		       static_cast<unsigned>(main_relfilenode),
+		       static_cast<int>(column_attno),
+		       static_cast<int>(bucket_idx),
+		       static_cast<int>(shard_idx));
+	}
+
+	SubTableRow current = BuildSubTableRowFromTuple(oldTuple, td);
+	const std::uint64_t new_bytes_written =
+		current.bytes_written + delta_bytes;
+	const std::uint64_t new_total_payload =
+		current.total_payload_bytes + delta_bytes;
+	const bool now_full = current.is_full
+		|| (cap_bytes != 0 && new_bytes_written >= cap_bytes)
+		|| (cap_bytes == 0 && delta_bytes > 0);
+
+	Datum newValues[Natts_seq_sub_table] = { 0 };
+	bool  newNulls [Natts_seq_sub_table] = { false };
+	bool  doReplace[Natts_seq_sub_table] = { false };
+	newValues[Anum_seq_sub_table_bytes_written - 1]       = Int64GetDatum(
+		static_cast<std::int64_t>(new_bytes_written));
+	doReplace[Anum_seq_sub_table_bytes_written - 1]       = true;
+	newValues[Anum_seq_sub_table_total_payload_bytes - 1] = Int64GetDatum(
+		static_cast<std::int64_t>(new_total_payload));
+	doReplace[Anum_seq_sub_table_total_payload_bytes - 1] = true;
+	newValues[Anum_seq_sub_table_is_full - 1]             = BoolGetDatum(now_full);
+	doReplace[Anum_seq_sub_table_is_full - 1]             = true;
+
+	HeapTuple newTuple = heap_modify_tuple(oldTuple, td, newValues, newNulls, doReplace);
+	CatalogTupleUpdate(rel, &oldTuple->t_self, newTuple);
+
+	systable_endscan(scan);
+	heap_freetuple(newTuple);
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
+
+	current.bytes_written       = new_bytes_written;
+	current.total_payload_bytes = new_total_payload;
+	current.is_full             = now_full;
+	return current;
+}
+
+std::vector<SubTableRow>
+ListSubTableShardsForMain(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode)
+{
+	std::vector<SubTableRow> out;
+	const Oid relid = SubTableMetadataRelationId();
+	if (!OidIsValid(relid)) {
+		return out;
+	}
+	Relation rel = safe_relation_open(relid, AccessShareLock);
+	TupleDesc td = RelationGetDescr(rel);
+
+	ScanKeyData keys[3];
+	ScanKeyInit(&keys[0], Anum_seq_sub_table_database_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
+	ScanKeyInit(&keys[1], Anum_seq_sub_table_tablespace_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
+	ScanKeyInit(&keys[2], Anum_seq_sub_table_main_relfilenode,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
+
+	SysScanDesc scan = systable_beginscan(rel, InvalidOid, false, nullptr, 3, keys);
+	HeapTuple tup = nullptr;
+	while (HeapTupleIsValid(tup = systable_getnext(scan))) {
+		out.push_back(BuildSubTableRowFromTuple(tup, td));
+	}
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+	return out;
+}
+
+void
+DeleteSubTableShardsForMain(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode)
+{
+	const Oid relid = SubTableMetadataRelationId();
+	if (!OidIsValid(relid)) {
+		return;
+	}
+	Relation rel = safe_relation_open(relid, RowExclusiveLock);
+
+	ScanKeyData keys[3];
+	ScanKeyInit(&keys[0], Anum_seq_sub_table_database_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(database_oid));
+	ScanKeyInit(&keys[1], Anum_seq_sub_table_tablespace_oid,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(tablespace_oid));
+	ScanKeyInit(&keys[2], Anum_seq_sub_table_main_relfilenode,
+	            BTEqualStrategyNumber, F_OIDEQ, ObjectIdGetDatum(main_relfilenode));
+
+	SysScanDesc scan = systable_beginscan(rel, InvalidOid, false, nullptr, 3, keys);
+	HeapTuple tup = nullptr;
+	while (HeapTupleIsValid(tup = systable_getnext(scan))) {
+		CatalogTupleDelete(rel, &tup->t_self);
+	}
+	systable_endscan(scan);
+	table_close(rel, RowExclusiveLock);
+	CommandCounterIncrement();
 }

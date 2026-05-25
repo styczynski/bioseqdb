@@ -16,6 +16,9 @@ module;
 
 #include <cmath>
 #include <algorithm>
+#include <cstring>
+#include <optional>
+#include <vector>
 
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
@@ -43,6 +46,9 @@ import config;
 import bioseq_table_io;
 import pg_utils;
 import bioseq_sidecar;
+import bioseq_storage;
+import bioseq_am_cache;
+import bioseq_types.pg_compact_sequence;
 
 /*
  * This is a check whether we need to bail out of a vacuum, it is set by the
@@ -69,6 +75,18 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple);
+
+/* DOC0260 Phase A — same as bioseq_beginscan_extended, plus an explicit
+ * `defer_seq_hydration` switch. Used by the custom scan / dispatch
+ * buffer code paths that hydrate per-bucket later. */
+TableScanDesc
+bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple,
+							bool defer_seq_hydration);
 
 /* available to other extensions using find_rendezvous_variable() */
 static ColumnarTableSetOptions_hook_type ColumnarTableSetOptions_hook = NULL;
@@ -180,6 +198,20 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple)
 {
+	return bioseq_beginscan_with_options(relation, snapshot, nkeys, key,
+		parallel_scan, flags, attr_needed, scanQual, parallelColumnarScan,
+		returnVectorizedTuple, /*defer_seq_hydration=*/false);
+}
+
+TableScanDesc
+bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple,
+							bool defer_seq_hydration)
+{
 	previousCacheEnabledState = bioseq_enable_page_cache;
 	Oid relfilelocator = relation->rd_locator.relNumber;
 	/*
@@ -217,6 +249,17 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 
 		/* Vectorized result */
 		scan->returnVectorizedTuple = returnVectorizedTuple;
+
+		/* DOC0260 Phase A — per-scan storage cache and deferred-hydration flag. */
+		scan->defer_seq_hydration = defer_seq_hydration;
+		auto* caches = bioseq::storage::alloc_seq_caches(scanContext);
+		caches->side = bioseq::storage::seq_caches::Side::Read;
+		caches->lock_mode = AccessShareLock;
+		caches->read_state_mctx = scanContext;
+		caches->main_database_oid   = relation->rd_locator.dbOid;
+		caches->main_tablespace_oid = relation->rd_locator.spcOid;
+		caches->main_relfilenode    = relation->rd_locator.relNumber;
+		scan->seq_cache = caches;
 
 		if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 		{
@@ -360,6 +403,16 @@ static void
 bioseq_endscan(TableScanDesc sscan)
 {
 	ColumnarScanDesc scan = reinterpret_cast<ColumnarScanDesc>(sscan);
+
+	/* DOC0260 Phase A — close per-scan seq_cache (releases relation pins,
+	 * tears down any cached ColumnarReadStates on sub-tables). */
+	if (scan->seq_cache != NULL) {
+		auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
+		caches->close_all(/*commit=*/true);
+		bioseq::storage::destroy_seq_caches(caches);
+		scan->seq_cache = NULL;
+	}
+
 	if (scan->cs_readState != NULL)
 	{
 		ColumnarEndRead(scan->cs_readState);
@@ -398,6 +451,41 @@ bioseq_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	}
 }
 
+
+/*
+ * DOC0260 Phase A — walk every SEQ column on `slot`, decode the locator
+ * stub (if present), and replace tts_values[idx] with the hydrated
+ * pgseq_t* fetched from the matching sub-table shard. Skips non-stub
+ * values (already-inline payloads) and NULLs. The caller must run with a
+ * memory context where the hydrated allocations are legal — for
+ * bioseq_getnextslot this is the scan's scanContext; for
+ * bioseq_index_fetch_tuple the per-fetch scanContext.
+ */
+[[gnu::always_inline]]
+static inline void
+hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
+                            bioseq::storage::seq_caches* cache,
+                            const bioseq::storage::BioseqAmCache& amc,
+                            MemoryContext payload_mctx)
+{
+	if (cache == nullptr || amc.seq_attnos.empty()) {
+		return;
+	}
+	const RelFileLocator& loc = main_rel->rd_locator;
+	for (std::int16_t attno : amc.seq_attnos) {
+		const int idx = attno - 1;
+		if (idx < 0 || idx >= slot->tts_tupleDescriptor->natts) continue;
+		if (slot->tts_isnull[idx]) continue;
+		auto* hdr = reinterpret_cast<const pgseq_t*>(
+			DatumGetPointer(slot->tts_values[idx]));
+		if (!bioseq::storage::is_locator_stub(hdr)) continue;
+		const auto loc_decoded = bioseq::storage::decode_locator_from_stub(hdr);
+		pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
+			loc.dbOid, loc.spcOid, loc.relNumber,
+			attno, loc_decoded, payload_mctx, cache);
+		slot->tts_values[idx] = PointerGetDatum(real);
+	}
+}
 
 static bool
 bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
@@ -454,6 +542,19 @@ bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot 
 
 		ExecStoreVirtualTuple(slot);
 		slot->tts_tid = row_number_to_tid(rowNumber);
+
+		/*
+		 * DOC0260 Phase A — hydrate every SEQ column unless the caller
+		 * asked for deferred hydration (custom scan / dispatch buffer
+		 * path, which performs per-bucket bulk hydration later).
+		 */
+		if (!scan->defer_seq_hydration)
+		{
+			const auto& amc = bioseq::storage::bioseq_am_cache_for(scan->cs_base.rs_rd);
+			auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
+			hydrate_seq_columns_in_slot(scan->cs_base.rs_rd, slot, caches, amc,
+			                            scan->scanContext);
+		}
 	}
 
 	return true;
@@ -540,6 +641,22 @@ bioseq_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 }
 
 
+[[gnu::always_inline]]
+static inline void
+init_index_fetch_seq_cache(IndexFetchColumnarData *scan, Relation rel,
+                           MemoryContext scanContext)
+{
+	auto *caches = bioseq::storage::alloc_seq_caches(scanContext);
+	caches->side = bioseq::storage::seq_caches::Side::Read;
+	caches->lock_mode = AccessShareLock;
+	caches->read_state_mctx = scanContext;
+	caches->main_database_oid   = rel->rd_locator.dbOid;
+	caches->main_tablespace_oid = rel->rd_locator.spcOid;
+	caches->main_relfilenode    = rel->rd_locator.relNumber;
+	scan->seq_cache = caches;
+	scan->defer_seq_hydration = false;
+}
+
 static IndexFetchTableData *
 bioseq_index_fetch_begin(Relation rel)
 {
@@ -562,6 +679,7 @@ bioseq_index_fetch_begin(Relation rel)
 		scan->stripeMetadataList = NIL;
 		scan->scanContext = scanContext;
 		scan->is_select_query = false;
+		init_index_fetch_seq_cache(scan, rel, scanContext);
 	}
 
 	return &scan->cs_base;
@@ -591,6 +709,7 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 
 		scan->attr_needed = bms_copy(attr_needed);
 		scan->is_select_query = true;
+		init_index_fetch_seq_cache(scan, rel, scanContext);
 	}
 
 	return &scan->cs_base;
@@ -610,6 +729,15 @@ bioseq_index_fetch_end(IndexFetchTableData *sscan)
 	bioseq_index_fetch_reset(sscan);
 
 	IndexFetchColumnarData *scan = reinterpret_cast<IndexFetchColumnarData *>(sscan);
+
+	/* DOC0260 Phase A — close per-fetch seq_cache. */
+	if (scan->seq_cache != NULL) {
+		auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
+		caches->close_all(/*commit=*/true);
+		bioseq::storage::destroy_seq_caches(caches);
+		scan->seq_cache = NULL;
+	}
+
 	if (scan->cs_readState)
 	{
 		ColumnarEndRead(scan->cs_readState);
@@ -828,6 +956,20 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 	slot->tts_tid = *tid;
 	ExecStoreVirtualTuple(slot);
 
+	/*
+	 * DOC0260 Phase A — hydrate SEQ stub columns unless the caller asked
+	 * for deferred hydration. For the index-fetch path we always hydrate
+	 * because downstream operators (recheck quals, executor projection)
+	 * read SEQ values directly.
+	 */
+	if (!scan->defer_seq_hydration)
+	{
+		const auto& amc = bioseq::storage::bioseq_am_cache_for(columnarRelation);
+		auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
+		hydrate_seq_columns_in_slot(columnarRelation, slot, caches, amc,
+		                            scan->scanContext);
+	}
+
 	return true;
 }
 
@@ -872,6 +1014,26 @@ bioseq_fetch_row_version(Relation relation,
 
 	if (TTS_EMPTY(slot))
 		ExecStoreVirtualTuple(slot);
+
+	/* DOC0260 Phase A — hydrate any SEQ stubs in the slot. We do NOT
+	 * cache a per-fetch seq_caches here because the row-version fetch
+	 * is one-shot; allocate, use, destroy. */
+	{
+		const auto& amc = bioseq::storage::bioseq_am_cache_for(relation);
+		if (!amc.seq_attnos.empty()) {
+			auto* caches = bioseq::storage::alloc_seq_caches(GetColumnarReadStateCache());
+			caches->side = bioseq::storage::seq_caches::Side::Read;
+			caches->lock_mode = AccessShareLock;
+			caches->read_state_mctx = GetColumnarReadStateCache();
+			caches->main_database_oid   = relation->rd_locator.dbOid;
+			caches->main_tablespace_oid = relation->rd_locator.spcOid;
+			caches->main_relfilenode    = relation->rd_locator.relNumber;
+			hydrate_seq_columns_in_slot(relation, slot, caches, amc,
+			                            GetColumnarReadStateCache());
+			caches->close_all(/*commit=*/true);
+			bioseq::storage::destroy_seq_caches(caches);
+		}
+	}
 
 	return true;
 }
@@ -951,10 +1113,91 @@ bioseq_index_delete_tuples(Relation rel,
 }
 
 
+/*
+ * DOC0260 Phase A — rewrite every non-NULL SEQ column in `detoasted_values`
+ * to a 40-byte locator stub. The original payload bytes are written to the
+ * matching sub-table shard via sequence_storage_manager::insert_payload.
+ * Returns a freshly-palloc'd Datum* (in the per-tuple context); the caller
+ * MUST hand THIS to ColumnarWriteRow (NOT slot->tts_values) so that
+ * ExecInsertIndexTuples — which reads from `slot->tts_values[]` to build
+ * btree/hash/gin keys — never sees the storage-layout bytes.
+ *
+ * `out_per_col_locator[c]` is the locator for amc.seq_attnos[c]; left as
+ * std::nullopt for NULL/already-stub values.
+ */
+[[nodiscard]] static Datum *
+rewrite_seq_columns_to_stubs(Relation relation,
+                             TupleTableSlot *slot,
+                             ColumnarWriteState *writeState,
+                             const bioseq::storage::BioseqAmCache &amc,
+                             Datum *detoasted_values,
+                             std::vector<std::optional<bioseq::storage::seq_locator>>
+                                 &out_per_col_locator)
+{
+	TupleDesc td = slot->tts_tupleDescriptor;
+	Datum *values_for_write = static_cast<Datum *>(
+		palloc(sizeof(Datum) * td->natts));
+	std::memcpy(values_for_write, detoasted_values, sizeof(Datum) * td->natts);
+
+	out_per_col_locator.assign(amc.seq_attnos.size(), std::nullopt);
+	if (amc.seq_attnos.empty()) {
+		return values_for_write;
+	}
+	// DOC0260 Phase A — lazily allocate the seq_caches on first call,
+	// because write_state_management.cppm intentionally does not import
+	// bioseq_storage (would cycle with bioseq_table).
+	if (writeState->seq_caches == nullptr) {
+		auto *fresh = bioseq::storage::alloc_seq_caches(
+			ColumnarWritePerTupleContext(writeState));
+		fresh->side = bioseq::storage::seq_caches::Side::Write;
+		fresh->lock_mode = RowExclusiveLock;
+		fresh->main_database_oid   = relation->rd_locator.dbOid;
+		fresh->main_tablespace_oid = relation->rd_locator.spcOid;
+		fresh->main_relfilenode    = relation->rd_locator.relNumber;
+		fresh->cap_bytes_snapshot  =
+			bioseq::storage::read_max_sub_table_cap_bytes();
+		writeState->seq_caches = fresh;
+	}
+	auto *caches = static_cast<bioseq::storage::seq_caches *>(writeState->seq_caches);
+	const auto cap_bytes = caches->cap_bytes_snapshot;
+
+	for (std::size_t c = 0; c < amc.seq_attnos.size(); ++c) {
+		const std::int16_t attno = amc.seq_attnos[c];
+		const int idx = attno - 1;
+		if (idx < 0 || idx >= td->natts) continue;
+		if (slot->tts_isnull[idx]) continue;
+		auto *hdr = reinterpret_cast<pgseq_t *>(
+			DatumGetPointer(values_for_write[idx]));
+		if (bioseq::storage::is_locator_stub(hdr)) continue;
+		const auto loc =
+			bioseq::storage::bioseq_default_storage_manager::insert_payload(
+				relation->rd_locator.dbOid,
+				relation->rd_locator.spcOid,
+				relation->rd_locator.relNumber,
+				attno, td, hdr, cap_bytes, caches);
+		out_per_col_locator[c] = loc;
+		pgseq_t *stub = bioseq::storage::alloc_locator_stub_in(
+			ColumnarWritePerTupleContext(writeState),
+			static_cast<std::uint8_t>(hdr->alphabet_code),
+			static_cast<std::uint8_t>(hdr->storage_unit_byte_width),
+			hdr->padding_letters,
+			/*total_bp_size=*/loc.total_bp_size,
+			loc);
+		values_for_write[idx] = PointerGetDatum(stub);
+	}
+	return values_for_write;
+}
+
 static void
 bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 					  int options, BulkInsertState bistate)
 {
+	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	{
+		pg_log(ERROR,
+			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
+	}
+
 	previousCacheEnabledState = bioseq_enable_page_cache;
 	bioseq_enable_page_cache = false;
 
@@ -973,16 +1216,25 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		slot_getallattrs(slot);
 
-		Datum *values = detoast_values(slot->tts_tupleDescriptor,
+		Datum *detoasted_values = detoast_values(slot->tts_tupleDescriptor,
 									   slot->tts_values, slot->tts_isnull);
 
-		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
+		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
+		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
+		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
+		Datum *values_for_write = rewrite_seq_columns_to_stubs(
+			relation, slot, writeState, amc, detoasted_values, per_col_locator);
+
+		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values_for_write,
+		                                             slot->tts_isnull);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
 
 		/* Mirror the inserted row to bioseq_internal sidecars.
-		 * sidecar_after_insert internally skips sidecar self-inserts. */
+		 * sidecar_after_insert internally skips sidecar self-inserts.
+		 * NOTE: we hand it `detoasted_values` (the original payload) so the
+		 * minimizer index is computed over the real bytes, not the stub. */
 		bioseq::sidecar::sidecar_after_insert(
-			relation, slot, values, writtenRowNumber);
+			relation, slot, detoasted_values, writtenRowNumber);
 	}
 	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
 
@@ -995,6 +1247,12 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 								  CommandId cid, int options,
 								  BulkInsertState bistate, uint32_t specToken)
 {
+	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	{
+		pg_log(ERROR,
+			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
+	}
+
 	previousCacheEnabledState = bioseq_enable_page_cache;
 	bioseq_enable_page_cache = false;
 
@@ -1013,11 +1271,17 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 		slot_getallattrs(slot);
 
-		Datum *values = detoast_values(slot->tts_tupleDescriptor,
+		Datum *detoasted_values = detoast_values(slot->tts_tupleDescriptor,
 									   slot->tts_values, slot->tts_isnull);
 
+		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
+		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
+		Datum *values_for_write = rewrite_seq_columns_to_stubs(
+			relation, slot, writeState, amc, detoasted_values, per_col_locator);
+
 		uint64_t storageId = LookupStorageId(relation->rd_locator);
-		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values, slot->tts_isnull);
+		uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values_for_write,
+		                                             slot->tts_isnull);
 		UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
 	}
@@ -1043,12 +1307,20 @@ static void
 bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 					  CommandId cid, int options, BulkInsertState bistate)
 {
+	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+	{
+		pg_log(ERROR,
+			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
+	}
+
 	ColumnarWriteState *writeState = bioseq_init_write_state(relation,
 															   RelationGetDescr(relation),
 																 slots[0]->tts_tableOid,
 															   GetCurrentSubTransactionId());
 
 	ColumnarCheckLogicalReplication(relation);
+
+	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 
 	{
 		MemoryContextScope ctx_guard{ColumnarWritePerTupleContext(writeState)};
@@ -1059,14 +1331,19 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			slot_getallattrs(tupleSlot);
 
-			Datum *values = detoast_values(tupleSlot->tts_tupleDescriptor,
+			Datum *detoasted_values = detoast_values(tupleSlot->tts_tupleDescriptor,
 										   tupleSlot->tts_values, tupleSlot->tts_isnull);
 
-			uint64_t writtenRowNumber = ColumnarWriteRow(writeState, values,
-													   tupleSlot->tts_isnull);
+			std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
+			Datum *values_for_write = rewrite_seq_columns_to_stubs(
+				relation, tupleSlot, writeState, amc,
+				detoasted_values, per_col_locator);
+
+			uint64_t writtenRowNumber = ColumnarWriteRow(writeState,
+				values_for_write, tupleSlot->tts_isnull);
 
 			bioseq::sidecar::sidecar_after_insert(
-				relation, tupleSlot, values, writtenRowNumber);
+				relation, tupleSlot, detoasted_values, writtenRowNumber);
 
 			EState *estate = create_estate_for_relation(relation);
 
@@ -1198,10 +1475,10 @@ bioseq_relation_set_new_filenode(Relation rel,
 								   TransactionId *freezeXid,
 								   MultiXactId *minmulti)
 {
-	if (persistence == RELPERSISTENCE_UNLOGGED)
+	if (persistence == RELPERSISTENCE_TEMP)
 	{
-		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("unlogged columnar tables are not supported");
+		pg_log(ERROR,
+			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
 	/*
@@ -1215,6 +1492,13 @@ bioseq_relation_set_new_filenode(Relation rel,
 		MarkRelfilenodeDropped(rel->rd_locator.relNumber, GetCurrentSubTransactionId());
 
 		DeleteMetadataRows(rel->rd_locator);
+
+		/* DOC0260 Phase A — cascade-drop sub-tables under the OLD
+		 * relfilenode triple. */
+		bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
+			rel->rd_locator.dbOid,
+			rel->rd_locator.spcOid,
+			rel->rd_locator.relNumber);
 	}
 	*freezeXid = RecentXmin;
 	*minmulti = GetOldestMultiXactId();
@@ -1334,9 +1618,22 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	ColumnarOptions columnarOptions = { 0 };
 	ReadColumnarOptions(OldHeap->rd_id, &columnarOptions);
 
-	ColumnarWriteState *writeState = ColumnarBeginWrite(NewHeap->rd_locator,
-														columnarOptions,
-														targetDesc);
+	/*
+	 * DOC0260 Phase A — CLUSTER allocates a new relfilenode for NewHeap.
+	 * The catalog rows in bioseq_internal.seq_sub_table are keyed on the
+	 * (db, spc, relfilenode) triple, so OldHeap's sub-tables (under
+	 * OldHeap's relfilenode) are independent from NewHeap's sub-tables
+	 * (under NewHeap's relfilenode).
+	 *
+	 * We thread the source scan through with defer_seq_hydration=TRUE so
+	 * we see OldHeap's stubs verbatim. For each row, decode the stub,
+	 * fetch_payload against OldHeap's triple, then re-insert_payload into
+	 * NewHeap's triple via the regular rewrite path on the destination
+	 * write state.
+	 */
+	ColumnarWriteState *writeState = bioseq_init_write_state(NewHeap, targetDesc,
+		RelationGetRelid(NewHeap), GetCurrentSubTransactionId());
+
 	/* we need all columns */
 	int natts = OldHeap->rd_att->natts;
 	PBitmapset attr_needed = PBitmapset::full_range(natts);
@@ -1355,23 +1652,89 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 															randomAccess,
 															NULL);
 
+	/* Read-side seq cache: hydrates OldHeap's stubs to real payloads. */
+	auto* read_caches = bioseq::storage::alloc_seq_caches(scanContext);
+	read_caches->side = bioseq::storage::seq_caches::Side::Read;
+	read_caches->lock_mode = AccessShareLock;
+	read_caches->read_state_mctx = scanContext;
+	read_caches->main_database_oid   = OldHeap->rd_locator.dbOid;
+	read_caches->main_tablespace_oid = OldHeap->rd_locator.spcOid;
+	read_caches->main_relfilenode    = OldHeap->rd_locator.relNumber;
+
 	Datum *values = make_array<Datum>(sourceDesc->natts);
 	bool *nulls = make_array<bool>(sourceDesc->natts);
 
+	const auto &source_amc = bioseq::storage::bioseq_am_cache_for(OldHeap);
+
 	*num_tuples = 0;
 
-	/* we don't need to know rowNumber here */
 	while (ColumnarReadNextRow(readState, values, nulls, NULL))
 	{
+		/* Hydrate any SEQ stub columns from OldHeap's sub-tables. */
+		for (std::int16_t attno : source_amc.seq_attnos) {
+			const int idx = attno - 1;
+			if (idx < 0 || idx >= sourceDesc->natts) continue;
+			if (nulls[idx]) continue;
+			auto* hdr = reinterpret_cast<const pgseq_t*>(
+				DatumGetPointer(values[idx]));
+			if (!bioseq::storage::is_locator_stub(hdr)) continue;
+			const auto loc = bioseq::storage::decode_locator_from_stub(hdr);
+			pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
+				OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
+				OldHeap->rd_locator.relNumber, attno, loc, scanContext, read_caches);
+			values[idx] = PointerGetDatum(real);
+		}
+
+		/* Rewrite SEQ columns into stubs targeting NewHeap's sub-tables.
+		 * We mimic the per-tuple insert path by using the write-side cache. */
+		auto* write_caches = static_cast<bioseq::storage::seq_caches*>(
+			writeState->seq_caches);
+		for (std::int16_t attno : source_amc.seq_attnos) {
+			const int idx = attno - 1;
+			if (idx < 0 || idx >= sourceDesc->natts) continue;
+			if (nulls[idx]) continue;
+			auto* hdr = reinterpret_cast<const pgseq_t*>(
+				DatumGetPointer(values[idx]));
+			if (bioseq::storage::is_locator_stub(hdr)) continue;
+			const auto cap_bytes = write_caches != nullptr
+				? write_caches->cap_bytes_snapshot
+				: bioseq::storage::read_max_sub_table_cap_bytes();
+			const auto loc =
+				bioseq::storage::bioseq_default_storage_manager::insert_payload(
+					NewHeap->rd_locator.dbOid, NewHeap->rd_locator.spcOid,
+					NewHeap->rd_locator.relNumber,
+					attno, targetDesc, hdr, cap_bytes, write_caches);
+			pgseq_t* stub = bioseq::storage::alloc_locator_stub_in(
+				ColumnarWritePerTupleContext(writeState),
+				static_cast<std::uint8_t>(hdr->alphabet_code),
+				static_cast<std::uint8_t>(hdr->storage_unit_byte_width),
+				hdr->padding_letters,
+				loc.total_bp_size,
+				loc);
+			values[idx] = PointerGetDatum(stub);
+		}
+
 		ColumnarWriteRow(writeState, values, nulls);
 		(*num_tuples)++;
 	}
 
 	*tups_vacuumed = 0;
 
-	ColumnarEndWrite(writeState);
+	read_caches->close_all(/*commit=*/true);
+	bioseq::storage::destroy_seq_caches(read_caches);
+
 	ColumnarEndRead(readState);
 	MemoryContextDelete(scanContext);
+
+	/* DOC0260 §8.7 — cascade-drop OldHeap's sub-tables before the
+	 * finish_heap_swap. After the swap the relfilenodes are swapped and
+	 * OldHeap's sub-tables become orphans under the (now-defunct) old
+	 * triple. The reaper is the long-tail safety net; this call makes
+	 * the cleanup deterministic. */
+	bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
+		OldHeap->rd_locator.dbOid,
+		OldHeap->rd_locator.spcOid,
+		OldHeap->rd_locator.relNumber);
 }
 
 
@@ -2632,6 +2995,12 @@ ColumnarTableDropHook(Oid relid)
 		DeleteMetadataRows(relfilelocator);
 		DeleteColumnarTableOptions(rel->rd_id, true);
 		MarkRelfilenodeDropped(relfilelocator.relNumber, GetCurrentSubTransactionId());
+
+		/* DOC0260 Phase A — cascade-drop sub-tables and sidecars under
+		 * this relation's (db, spc, relfilenode) triple. */
+		bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
+			relfilelocator.dbOid, relfilelocator.spcOid,
+			relfilelocator.relNumber);
 
 		/* keep the lock since we did physical changes to the relation */
 		table_close(rel, NoLock);

@@ -35,6 +35,12 @@ extern int bioseq_page_cache_size;
 extern bool bioseq_index_scan;
 extern bool bioseq_update_index_on_insert;
 extern bool bioseq_read_sequence_index;
+/*
+ * DOC0260 Phase A — controls the per-shard payload cap for the
+ * length-bucketed sub-table sharding. Value is in GiB; 0 is a documented
+ * test-only sentinel that forces a new shard per insert.
+ */
+extern int bioseq_storage_max_seq_sub_table_gbs;
 
 /* Aligner parameter GUCs — see sequences/minimap_port.cppm Minimap2Params
  * for field-by-field documentation. Kept in plain extern form so any module

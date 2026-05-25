@@ -383,10 +383,13 @@ export inline void reset_extension(const connection_test_context& ctx,
     // table. Truncate so per-test row counts start at 0. metadata_age_log
     // is in the same boat: a row written by the previous test under a
     // since-recycled OID would skew bioseq.list_metadata() age values.
+    // DOC0260 Phase A: seq_sub_table also lives in the extension and may
+    // carry orphan rows from the previous test's relfilenodes.
     exec_sql(ctx,
              "TRUNCATE bioseq_internal.index_sidecar, "
              "        bioseq_internal.meta_sidecar, "
-             "        bioseq_internal.metadata_age_log;");
+             "        bioseq_internal.metadata_age_log, "
+             "        bioseq_internal.seq_sub_table;");
 }
 
 // Same as the span overload, but accepts an initializer list so callers can

@@ -28,6 +28,21 @@ import bioseq_table_io;
 import pg_utils;
 import mlogging;
 
+// DOC0260 Phase A — forward declarations of the small bioseq_storage
+// surface we need at write-state teardown. Avoids `import bioseq_storage`
+// here (which would otherwise create a cycle with bioseq_table because
+// bioseq_table:access_method also imports bioseq_storage). The functions
+// are defined inside `bioseq_storage:sequence_storage_manager` and have
+// external (C++) linkage so the linker resolves them at final link time.
+namespace bioseq::storage {
+    struct seq_caches;
+    void destroy_seq_caches(seq_caches* caches) noexcept;
+}
+extern "C++" {
+    void bioseq_storage_seq_caches_close_all(bioseq::storage::seq_caches* c,
+                                             bool commit) noexcept;
+}
+
 extern "C++" {
 
 /*
@@ -106,6 +121,12 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 		fresh_write_state = ColumnarBeginWrite(relation->rd_locator,
 											   columnar_options,
 											   tuple_descriptor);
+		// DOC0260 Phase A — seq_caches is initialised lazily by the
+		// TAM-side rewrite helper (rewrite_seq_columns_to_stubs in
+		// access_method.cppm). Leave it null here so we do not force
+		// `import bioseq_storage` in this TU (would create a cycle with
+		// bioseq_table).
+		fresh_write_state->seq_caches = nullptr;
 	}
 
 	ColumnarSubXidWriteFrame* stack_entry = WriteStateCache.alloc_in_context<ColumnarSubXidWriteFrame>();
@@ -177,6 +198,18 @@ ColumnarPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 		ColumnarSubXidWriteFrame* stack_head = entry->writeStateStack;
 		if (stack_head->subXid == current_sub_xid)
 		{
+			// DOC0260 Phase A — flush per-(parent, column, bucket, shard)
+			// bytes_written deltas via the lazily-allocated seq_caches.
+			// Forward-declared symbols are resolved at link time
+			// (definitions live in bioseq_storage:sequence_storage_manager).
+			if (stack_head->writeState->seq_caches != nullptr)
+			{
+				auto* caches = static_cast<bioseq::storage::seq_caches*>(
+					stack_head->writeState->seq_caches);
+				bioseq_storage_seq_caches_close_all(caches, commit);
+				bioseq::storage::destroy_seq_caches(caches);
+				stack_head->writeState->seq_caches = nullptr;
+			}
 			if (commit)
 			{
 				ColumnarEndWrite(stack_head->writeState);

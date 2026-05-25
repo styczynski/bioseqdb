@@ -652,35 +652,93 @@ Datum pg_compact_sequence_gt(PG_FUNCTION_ARGS)
 }
 
 /*
- * bioseq.len(bioseq.seq) → int4. Returns the bp_size recorded in the header.
+ * bioseq.len(bioseq.seq) -> int8 (BIGINT). DOC0260 §1.1 #10 — widened
+ * from int4 so sequences with bp_size > INT32_MAX (Phase C and beyond)
+ * are not truncated. For a locator stub we read total_bp_size from the
+ * embedded seq_locator payload; for an inline sequence we read
+ * hdr->bp_size as before.
+ *
+ * Layout (mirrored from DOC0260 §5.3 / seq_locator in
+ * sequence_storage_manager.cppm):
+ *   offset 0  version       (1 byte)
+ *   offset 1  bucket_idx    (1 byte)
+ *   offset 2  _pad_2        (2 bytes)
+ *   offset 4  shard_idx     (4 bytes)
+ *   offset 8  total_bp_size (8 bytes)   <-- this TU reads here
+ *   offset 16 sub_row_no    (8 bytes)
+ *
+ * The 8-byte offset is anchored by
+ *   static_assert(offsetof(seq_locator, total_bp_size) == 8, ...)
+ * in sequence_storage_manager.cppm; if the seq_locator layout ever
+ * changes, that static_assert fires and forces a matching update
+ * here. We cannot `import bioseq_storage` from this TU because it
+ * closes a module-graph cycle through bioseq_table:access_method.
  */
 CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
 Datum pg_compact_sequence_len(PG_FUNCTION_ARGS)
 {
 	pgseq_t* hdr = pg_seq_arg<pgseq_t>(fcinfo, 0);
-	const uint32_t bp_raw = static_cast<uint32_t>(hdr->bp_size);
+	std::int64_t bp_size = 0;
+	const std::uint8_t sub_w = static_cast<std::uint8_t>(hdr->storage_unit_byte_width);
+	if ((sub_w & 0x80u) != 0u) {
+		std::uint64_t total = 0;
+		std::memcpy(&total, hdr->data + sizeof(std::uint8_t) +
+		                    sizeof(std::uint8_t) + sizeof(std::uint16_t) +
+		                    sizeof(std::uint32_t),
+		            sizeof(total));
+		bp_size = static_cast<std::int64_t>(total);
+	} else {
+		bp_size = static_cast<std::int64_t>(hdr->bp_size);
+	}
 	PG_FREE_IF_COPY(hdr, 0);
-	if (bp_raw > static_cast<uint32_t>(PG_INT32_MAX))
-		ereport(ERROR,
-		        (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-		         errmsg("bioseq.len: bp_size %u exceeds int4 range", bp_raw)));
-	PG_RETURN_INT32(static_cast<int32>(bp_raw));
+	PG_RETURN_INT64(bp_size);
 }
 
 /*
- * bioseq.unit_len(bioseq.seq) → int4. Returns the storage unit count.
+ * bioseq.unit_len(bioseq.seq) -> int8 (BIGINT). For a locator stub we
+ * compute the unit count from total_bp_size and the alphabet's
+ * bits_per_char. The bits_per_char value is looked up at compile time
+ * from `pgseq_supported_alphabets` via `dispatch_alphabet_by_code`, so
+ * adding a new alphabet to the pack does NOT silently produce wrong
+ * unit counts (DOC0145 §4 — static_assert / compile-time mapping
+ * instead of hardcoded magic).
  */
 CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_unit_len);
 Datum pg_compact_sequence_unit_len(PG_FUNCTION_ARGS)
 {
 	pgseq_t* hdr = pg_seq_arg<pgseq_t>(fcinfo, 0);
-	const std::size_t units = hdr->unit_count();
+	std::int64_t units = 0;
+	const std::uint8_t sub_w = static_cast<std::uint8_t>(hdr->storage_unit_byte_width);
+	if ((sub_w & 0x80u) != 0u) {
+		std::uint64_t total = 0;
+		std::memcpy(&total, hdr->data + sizeof(std::uint8_t) +
+		                    sizeof(std::uint8_t) + sizeof(std::uint16_t) +
+		                    sizeof(std::uint32_t),
+		            sizeof(total));
+		const std::uint8_t logical_w =
+			static_cast<std::uint8_t>(sub_w & 0x0Fu);
+		const auto alphabet_code =
+			static_cast<typename pgseq_t::alphabet_code_t>(hdr->alphabet_code);
+		std::size_t bits_per_char = 0;
+		pgseq_supported_alphabets::dispatch_alphabet_by_code(
+			alphabet_code,
+			[&bits_per_char]<class A>() {
+				bits_per_char = static_cast<std::size_t>(
+					seqan3::detail::ceil_log2(
+						static_cast<std::size_t>(seqan3::alphabet_size<A>)));
+			});
+		const std::size_t letters_per_unit = bits_per_char > 0
+			? (static_cast<std::size_t>(logical_w) * 8u) / bits_per_char
+			: 0u;
+		const std::size_t computed_units = letters_per_unit > 0
+			? (static_cast<std::size_t>(total) + letters_per_unit - 1u) / letters_per_unit
+			: 0u;
+		units = static_cast<std::int64_t>(computed_units);
+	} else {
+		units = static_cast<std::int64_t>(hdr->unit_count());
+	}
 	PG_FREE_IF_COPY(hdr, 0);
-	if (units > static_cast<std::size_t>(PG_INT32_MAX))
-		ereport(ERROR,
-		        (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-		         errmsg("bioseq.unit_len: value %zu exceeds int4 range", units)));
-	PG_RETURN_INT32(static_cast<int32>(units));
+	PG_RETURN_INT64(units);
 }
 
 } // extern "C"

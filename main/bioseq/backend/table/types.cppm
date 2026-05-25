@@ -55,6 +55,16 @@ export struct ColumnarScanDescData
     ParallelColumnarScan parallelColumnarScan;
 
     bool returnVectorizedTuple;
+
+    /*
+     * DOC0260 Phase A — deferred-hydration switch and per-scan relation
+     * cache. seq_cache is a `bioseq::storage::seq_caches*` allocated
+     * separately in scanContext via placement-new; the void* erasure keeps
+     * this struct standard-layout (the seq_caches embeds a std::map that
+     * is not standard-layout).
+     */
+    bool defer_seq_hydration;
+    void* seq_cache;
 };
 
 static_assert(std::is_standard_layout_v<ColumnarScanDescData>,
@@ -81,6 +91,12 @@ export struct IndexFetchColumnarData
      * sub-context of the begin call rather than the per-tuple context.
      */
     MemoryContext scanContext;
+
+    /*
+     * DOC0260 Phase A — see ColumnarScanDescData above.
+     */
+    bool defer_seq_hydration;
+    void* seq_cache;
 };
 
 static_assert(std::is_standard_layout_v<IndexFetchColumnarData>,
