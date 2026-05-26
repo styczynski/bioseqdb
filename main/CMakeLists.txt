@@ -22,7 +22,7 @@
 cmake_minimum_required(VERSION 3.20..3.24)
 
 # Change this:
-set(CMAKE_NAMED_ENV_TYPE "W") # suppported: "W", "H"
+set(CMAKE_NAMED_ENV_TYPE "H") # suppported: "W", "H"
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
@@ -75,6 +75,20 @@ project(
   VERSION 4.2.3
   LANGUAGES CXX
 )
+
+# --- Build-speed: Reduced BMI for C++ modules -------------------------------
+# clang's reduced BMI (P2615) drops definitions that importers don't need from
+# each module's BMI, shrinking the BMI files and cutting the per-TU module
+# scan/load cost across the ~70-module graph (x3 targets). Injected via the
+# per-module-compile flag so it applies only to our module-interface units and
+# leaves -O3 codegen untouched. Probe-guarded so a toolchain lacking the flag
+# still configures cleanly.
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-fmodules-reduced-bmi" BIOSEQ_HAS_REDUCED_BMI)
+if(BIOSEQ_HAS_REDUCED_BMI)
+  string(APPEND CMAKE_CXX_MODULE_MAP_FLAG " -fmodules-reduced-bmi")
+  message(STATUS "bioseq: -fmodules-reduced-bmi enabled; CMAKE_CXX_MODULE_MAP_FLAG='${CMAKE_CXX_MODULE_MAP_FLAG}'")
+endif()
 
 # set this to "${PROJECT_VERSION}" on release
 #set(INSTALL_VERSION "${PROJECT_VERSION}")

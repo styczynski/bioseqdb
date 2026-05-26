@@ -20,6 +20,13 @@ module;
 export module bioseq_sequences.simd;
 
 import mlogging;
+#ifndef NO_POSTGRES
+// DOC0260 R8: stdc_compare raises pg_log(ERROR) on caller-contract violations
+// under Postgres builds. pg_utils.logging is only part of the extension's
+// module set; the NO_POSTGRES aligner / test execs compile the DEBUG_ASSERT
+// branch in stdc_compare instead and must not import it.
+import pg_utils.logging;
+#endif
 import sequan_compat;
 import bioseq_sequences;
 import algo.circular_append_buffer;

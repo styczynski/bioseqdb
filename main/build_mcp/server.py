@@ -74,8 +74,27 @@ STATE_FILE = Path("/tmp/bioseq_build_mcp_state.json")
 LOCK_FILE = Path("/tmp/bioseq_build_mcp.lock")
 LOG_DIR = Path("/tmp")
 
-CMAKE_PARALLEL_JOBS = 32
-HARD_TIMEOUT_MIN = 35.0
+def _safe_parallel_jobs() -> int:
+    """Cap build parallelism by BOTH core count and RAM.
+
+    The heavy C++26 template TUs (pipeline/pipe.cppm, scheduler/dispatch_buffer.cppm,
+    storage/sequence_storage_manager.cppm, minimap_port.cppm, ksw2_batched.cppm)
+    each peak around ~3-4 GB RSS at -O3 + thin-LTO. The previous hardcoded
+    -j 32 launched dozens of them at once; on a 16 GB box that swap-thrashed
+    to a near-total stall (a cold postgresql_bioseq build completed only 2
+    build edges in the full 35-min hard-timeout window). Budgeting ~3 GB per
+    concurrent heavy compile keeps cold builds making forward progress without
+    paging. On this 8-core / 16 GB machine this yields -j 5."""
+    cpus = os.cpu_count() or 4
+    try:
+        mem_gb = (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        mem_gb = 16.0
+    return max(2, min(cpus, int(mem_gb // 3)))
+
+
+CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
+HARD_TIMEOUT_MIN = 50.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 
 @dataclass
@@ -108,6 +127,13 @@ class ModeDefinition:
     reporting_subdir_name: Optional[str] = None
     """This applies only to benchmark. Is this benchmark target?"""
     is_bench_mode: bool = False
+    """If true, install the freshly-built postgresql_bioseq extension (dylib +
+    .control + .sql) into the running PostgreSQL before executing the run
+    commands. Integration tests connect to that server and DROP/CREATE EXTENSION
+    from the installed files, so without this they would silently exercise a
+    stale, previously-installed extension. Requires 'postgresql_bioseq' to be in
+    `targets` so the dylib exists at install time."""
+    install_extension: bool = False
 
     @property
     def verb_is(self) -> str:
@@ -126,12 +152,19 @@ class ModeDefinition:
 MODES: Dict[str, ModeDefinition] = {
     "unit+integration": ModeDefinition(
         lock_group="tests",
-        expected_duration_min=10.0,
-        build_only_expected_duration_min=1.5,
+        expected_duration_min=22.0,
+        build_only_expected_duration_min=10.0,
         label="Unit/integration tests",
         docs="Run all bioseq unit and integration tests",
         is_verb_plular=True,
-        targets=["bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"],
+        # postgresql_bioseq MUST be built first: the integration tests connect to
+        # the running PostgreSQL and CREATE EXTENSION from the *installed* files,
+        # so the extension dylib + SQL must be (re)built and installed before the
+        # int-test client runs. Without this the int tests exercise whatever
+        # stale extension happens to be installed in the server.
+        targets=["postgresql_bioseq",
+                 "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"],
+        install_extension=True,
         commands=[
             [str(BIN_DIR / "bioseq_aligner_tests_exec"),
              "--reporter", "console::out=-::colour-mode=ansi"],
@@ -447,12 +480,27 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
 
     try:
         _update_entry(mode, step="configuring", build_only=build_only)
-        rc = _stream_subprocess(
-            ["cmake", "--preset", BUILD_PRESET],
-            log_handle, deadline, cwd=PROJECT_ROOT, env=env,
-        )
-        if rc != 0:
-            raise RuntimeError(f"cmake configure exited with code {rc}")
+        # Only run the (expensive) configure when the tree isn't configured yet.
+        # Re-running `cmake --preset` on an already-configured C++-modules tree
+        # regenerates the Ninja dyndep/modmap graph and invalidates EVERY module
+        # TU across all targets (~219 edges here vs ~34 for a true incremental),
+        # turning every run into a full rebuild that cannot finish inside the
+        # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
+        # when CMakeLists / cache / vcpkg manifest actually change, so a later
+        # `cmake --build` still picks up genuine configuration changes.
+        if not (BUILD_DIR / "build.ninja").exists():
+            rc = _stream_subprocess(
+                ["cmake", "--preset", BUILD_PRESET],
+                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(f"cmake configure exited with code {rc}")
+        else:
+            log_handle.write(
+                f"# build tree already configured ({BUILD_DIR / 'build.ninja'}); "
+                "skipping redundant `cmake --preset` to avoid a full C++-module "
+                "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
+            log_handle.flush()
 
         _update_entry(mode, step="building", build_only=build_only)
         for tgt in mode_details.targets:
@@ -489,6 +537,22 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
                 build_only=True,
             )
         else:
+            # Install the freshly-built extension into the running PostgreSQL
+            # so integration tests' CREATE EXTENSION picks up current code, not
+            # a stale previously-installed copy. bioseq is not in
+            # shared_preload_libraries, so new backends load the new dylib
+            # without a postmaster restart.
+            if mode_details.install_extension:
+                _update_entry(mode, step="installing extension")
+                rc = _stream_subprocess(
+                    ["cmake", "--install", str(BUILD_DIR), "--component", "bioseq"],
+                    log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        "extension install (cmake --install --component bioseq) "
+                        f"exited with code {rc}")
+
             _update_entry(mode, step="running")
             for cmd in mode_details.commands:
                 rc = _stream_subprocess(
