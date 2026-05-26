@@ -9,28 +9,15 @@ get_filename_component(BIOSEQ_DIR "${CMAKE_CURRENT_LIST_DIR}/../bioseq" ABSOLUTE
 set(BENCH_FRAMEWORK_DIR "${BIOSEQ_DIR}/../bench_framework")
 set(BENCH_V10_DIR       "${CMAKE_CURRENT_LIST_DIR}")
 
-# Module set:
-#   * the framework module
-#   * bioseq pipeline modules (alignment_hwy, sequences, common, pipeline)
-#   * the instrumentation module tree
-#   * the moved sequence_generator module
-#   * tool_minimap2's three modules (wrapper + alignment helpers + instr-shim)
-file(GLOB_RECURSE BENCH_V10_MOD_FILES
-  "${BIOSEQ_DIR}/backend/alignment_hwy/*.cppm"
-  "${BIOSEQ_DIR}/backend/common/*.cppm"
-  "${BIOSEQ_DIR}/backend/sequences/*.cppm"
-  "${BIOSEQ_DIR}/backend/pipeline/*.cppm"
-  "${BIOSEQ_DIR}/instrumentation/*.cppm"
+# Module set: ONLY the bench-private modules. The whole Domain N core
+# (alignment_hwy, common-minus-testing, sequences, pipeline, instrumentation)
+# is delivered via `bioseq_modules_nopg` (DOC0269 Phase A).
+set(BENCH_V10_MOD_FILES
   "${BENCH_FRAMEWORK_DIR}/index.cppm"
   "${BENCH_V10_DIR}/sequence_generator.cppm"
   "${BENCH_V10_DIR}/tool_minimap2/tool_minimap2.cppm"
   "${BENCH_V10_DIR}/tool_minimap2/alignment.cppm"
   "${BENCH_V10_DIR}/tool_minimap2/instr_shim.cppm")
-
-# `testing.cppm` exports a Catch2-bound testRunListener and only makes sense
-# for Catch2 test/bench binaries. The framework binary is plain EXEC; pulling
-# the module in would force Catch2 into the link line. Drop it explicitly.
-list(FILTER BENCH_V10_MOD_FILES EXCLUDE REGEX ".*/backend/common/testing\\.cppm$")
 
 # minimap2 C reference sources are linked alongside the bench TU.
 file(GLOB_RECURSE BENCH_V10_C_SRC
@@ -70,6 +57,8 @@ AddCommonTargetX(
     nlohmann_json_schema_validator::validator
     TBB::tbb
     lfreist-hwinfo::hwinfo
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
   SOURCES
     "${BENCH_V10_DIR}/bench_v10_main.cpp"
     "${BENCH_FRAMEWORK_DIR}/interactive.cppm"

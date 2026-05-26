@@ -797,15 +797,24 @@ def run_inspect(
     matches = all_matches[:max_matches]
 
     target_dir = build_dir / "bioseq" / "CMakeFiles" / f"{target}.dir"
+    # DOC0269 — Domain N shared modules live in `bioseq_modules_nopg.dir`
+    # (an OBJECT library linked by every non-PG consumer). Code from those
+    # modules ends up in the consumer's binary but the per-TU `.s`/`.bc`
+    # artifacts only exist under the lib's build dir. Sweep both.
+    shared_lib_dir = (build_dir / "bioseq" / "CMakeFiles" /
+                      "bioseq_modules_nopg.dir")
+    search_dirs = [d for d in (target_dir, shared_lib_dir) if d.exists()]
     s_files: list[Path] = []
-    if target_dir.exists():
-        s_files = list(target_dir.rglob("*.s"))
+    for d in search_dirs:
+        s_files.extend(d.rglob("*.s"))
 
     # llc fallback: when there are .bc but no .s, lazily compile.
     # `--max-llc-bc-files` caps the cold-path time. See plan §5.
-    if llc_on_bc and tools["llc"] and target_dir.exists():
-        bc_files = [bc for bc in target_dir.rglob("*.bc")
-                    if bc.with_suffix(".s") not in s_files]
+    if llc_on_bc and tools["llc"] and search_dirs:
+        bc_files: list[Path] = []
+        for d in search_dirs:
+            bc_files.extend(bc for bc in d.rglob("*.bc")
+                            if bc.with_suffix(".s") not in s_files)
         if bc_files and not s_files:
             relevant_bcs: list[Path] = []
             now = time.time()

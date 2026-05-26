@@ -23,7 +23,11 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
   set(options RELOCATABLE SUPPORT_CXX_MODULES)
   set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN)
-  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES)
+  # SHARED_MODULE_LIBS: object/static libraries that export FILE_SET
+  # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
+  # produced visible without rebuilding the module sources for every target —
+  # see main/DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_..._DOC0269.md §5.
+  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}> <${EXTENSION_INTEGRATION_TESTS}>")
 
@@ -215,6 +219,15 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
     # Link libraries
     if(EXTENSION_LINKS)
       target_link_libraries(${LIBRARY_NAME} PRIVATE ${EXTENSION_LINKS})
+    endif()
+
+    # Cross-target BMI sharing (DOC0269 §5). The libraries listed here own a
+    # FILE_SET CXX_MODULES whose BMI files are reused across all consumers
+    # instead of being rebuilt once per target. The objects from OBJECT/STATIC
+    # libraries also flow into the link line, so we only link them on the
+    # consumer once.
+    if(EXTENSION_SHARED_MODULE_LIBS)
+      target_link_libraries(${LIBRARY_NAME} PRIVATE ${EXTENSION_SHARED_MODULE_LIBS})
     endif()
 
     if(EXTENSION_INTEGRATION_TESTS_LINKS)

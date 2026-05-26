@@ -28,55 +28,166 @@ find_package(simdjson REQUIRED)
 find_package(nlohmann_json_schema_validator REQUIRED)
 find_package(TBB REQUIRED tbb)
 find_package(lfreist-hwinfo REQUIRED)
-
-# AddCommonTarget(
-#   postgresql_bioseq
-#   TYPE POSTGRES_EXTENSION
-#   CXX 26
-#   RELOCATABLE
-#   NAME bioseq
-#   COMMENT "BioSeqDB PG Extension"
-#   VERSION ${INSTALL_VERSION}
-#   COMPONENT ${PROJECT_NAME}
-#   INCLUDE_DIRS
-#     "${CMAKE_CURRENT_LIST_DIR}/../config"
-#     "${CMAKE_CURRENT_LIST_DIR}/include"
-#     "${CMAKE_CURRENT_LIST_DIR}/include2"
-#     "${CMAKE_CURRENT_LIST_DIR}/backend"
-#     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
-#     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
-#     "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
-#   LINKS
-#     safestring_static
-#     fmt
-#   SOURCES
-#     ${SRC_FILES}
-#   SUPPORT_CXX_MODULES
-#   CXX_MOD_BASE_DIRS
-#     "${CMAKE_CURRENT_LIST_DIR}"
-#   CXX_MOD_FILES
-#     ${SRC_MOD_FILES}
-#   INSTALLS
-#     sql/bioseq--1.0.sql
-# )
+find_package(HWY 1.3.0 REQUIRED NO_MODULE)
+find_package(Boost 1.90.0 REQUIRED COMPONENTS program_options regex serialization iterator integer)
 
 # === bench target wiring lives in main/bench/bench_v10.cmake ===
 # (Old AddCommonTargetX block deleted as part of the V10 migration.
 # `bioseq_bench` is now built on top of `bench_framework`.)
 
+# ============================================================================
+# DOC0269 Phase A — cross-target BMI sharing via an OBJECT library that owns
+# the Domain N (NO_POSTGRES) module file set.
+#
+# Before this change every consumer (bioseq_aligner, bioseq_aligner_tests_exec,
+# bioseq_bench, bioseq_io_bench, bioseq_bench_framework_example, …) rebuilt
+# its own copy of every shared module (~68 BMIs at ~25 s each). With the
+# library owning the FILE_SET CXX_MODULES PUBLIC, consumers link in the BMIs
+# instead and only compile their target-private modules. See
+# main/DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_VIA_SHARED_MODULE_LIBRARY_IMPORT_STD_AND_PIPE_PARTITIONS__DOC0269.md.
+#
+# `testing.cppm` is excluded — it pulls in Catch2 reporter headers; non-test
+# binaries (bioseq_aligner CLI, bioseq_bench, bench_framework_example,
+# bioseq_io_bench) don't link Catch2. Test targets add it as their own
+# per-target module on top of the shared lib.
+# ============================================================================
+
+set(BIOSEQ_NOPG_MODULES
+  # backend/alignment_hwy/* (Highway-bound SIMD aligners)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils.cppm
+  # backend/common/*  (testing.cppm excluded — Catch2 dependency)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/algo_tracer.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/circular_append_buffer.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/sequan_compat.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/utils.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/vector_stream.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/sorting/radix_sort.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/dispatch_chain.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_for_each.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_search.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/runtime_dispatch.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/template_str.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/templating.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm
+  # backend/config/config.cppm is Domain P (imports pg_utils, uses PG macros);
+  # it stays in postgresql_bioseq's own module set.
+  # backend/sequences/*
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/cigar.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/sequences.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_rmq.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_scalar.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_utils.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/mm_sketch_baseline.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/base.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/lexic.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/minimap_int.cppm
+  # backend/pipeline/*
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
+  # instrumentation/*
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/access.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/aggregate.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/arena.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/config.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/counter.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/descriptor.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/arch.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/do_not_optimize.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/siglock.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/spinlock.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/sysinfo.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/gauge.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/global_state.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/histogram.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/loop.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/mod.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_linux.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_macos.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_stub.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pool.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/region.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sample.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler_posix.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler_stub.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/thread_state.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/trace.cppm
+)
+
+add_library(bioseq_modules_nopg OBJECT)
+set_target_properties(bioseq_modules_nopg PROPERTIES
+  CXX_STANDARD 26
+  CXX_STANDARD_REQUIRED ON
+  CXX_EXTENSIONS ON
+  CXX_MODULE_STD ON
+  POSITION_INDEPENDENT_CODE ON
+  # IPO disabled here for the same reason as the existing `*_tests_exec`
+  # variants (see AddPostgreSQLExtension.cmake, comment on
+  # `INTERPROCEDURAL_OPTIMIZATION FALSE` for `_tests_exec`): clang's
+  # ThinLTO drops module-attached TLS init wrappers (the `_ZTHW…` symbols
+  # for `mlogging::fmtlogDetailT<0>::sbc`) at link time. With the lib's
+  # objects feeding into every Domain N consumer — including
+  # `bioseq_aligner_tests_exec` which we know reproduces the bug — the
+  # lib has to stay non-LTO so the test execs link cleanly. The lib's
+  # codegen is still `-O3 -DNDEBUG` per bench-opt; the only thing we
+  # lose is cross-TU inlining BETWEEN the lib's objects and the
+  # consumer's main TUs. Worth revisiting once the clang TLS-init bug
+  # is fixed upstream (tracked in DOC0269 §12). `-O3` is preserved.
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
+
+target_compile_definitions(bioseq_modules_nopg PUBLIC
+  NO_POSTGRES=1
+  POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
+
+target_include_directories(bioseq_modules_nopg PUBLIC
+  "${CMAKE_CURRENT_LIST_DIR}/../config"
+  "${CMAKE_CURRENT_LIST_DIR}/include2"
+  "${CMAKE_CURRENT_LIST_DIR}/include"
+  "${CMAKE_CURRENT_LIST_DIR}/backend"
+  "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
+  "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
+  ${Boost_INCLUDE_DIRS}
+  ${HWY_INCLUDE_DIRS})
+
+target_link_libraries(bioseq_modules_nopg PUBLIC
+  safestring_static
+  fmt
+  ZLIB::ZLIB
+  reflectcpp::reflectcpp
+  libassert::assert
+  foonathan_memory
+  hwy::hwy
+  ${Boost_LIBRARIES})
+
+target_sources(bioseq_modules_nopg
+  PUBLIC FILE_SET CXX_MODULES
+    BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
+    FILES ${BIOSEQ_NOPG_MODULES})
+
+# ============================================================================
+# Tests/integration-tests module file lists. testing.cppm is per-target
+# because the shared lib excludes Catch2.
+# ============================================================================
+
 file(GLOB_RECURSE A_SRC_FILES
   ${CMAKE_CURRENT_LIST_DIR}/cli/cli_main.cpp)
-# CXX modules: bench-specific (tool_minimap2 wrapper, generator, evaluation,
-# plus the minimap2-internal `alignment` module) + the bioseq module tree
-# still needed by bioseq's minimap_port.
-file(GLOB_RECURSE A_SRC_MOD_FILES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/**/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
 file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
@@ -85,20 +196,27 @@ file(GLOB_RECURSE A_SRC_TESTS
 
 file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
   ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cpp)
 
+# Integration-tests module set: shared lib provides mlogging.cppm + the
+# whole Domain N core, so we only list testing.cppm + the integration-test-
+# specific modules here.
 file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
   ${CMAKE_CURRENT_LIST_DIR}/integration_tests/*.cppm)
 
 list (APPEND A_SRC_TESTS ${A_SRC_FILES})
-#list (APPEND A_INTEGRATION_SRC_TESTS ${A_SRC_FILES})
 
 list(REMOVE_ITEM SRC_FILES ${A_SRC_TESTS})
 list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
+
+# Per-target module set for the aligner (and its tests_exec sibling): just
+# testing.cppm; every other Domain N module is delivered via
+# bioseq_modules_nopg. tests_exec adds the _test.cpp files to SOURCES via
+# AddCommonTargetX's TESTS arg.
+set(A_ALIGNER_MOD_FILES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm)
 
 AddCommonTargetX(
   bioseq_aligner
@@ -134,13 +252,15 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
   SOURCES
     ${A_SRC_FILES}
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}"
   CXX_MOD_FILES
-    ${A_SRC_MOD_FILES}
+    ${A_ALIGNER_MOD_FILES}
   BOOST
     program_options regex serialization iterator integer
   HWY 1.3.0

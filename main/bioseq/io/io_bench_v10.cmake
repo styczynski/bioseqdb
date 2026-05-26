@@ -7,21 +7,17 @@ set(IO_BENCH_V10_DIR    "${CMAKE_CURRENT_LIST_DIR}")
 set(BIOSEQ_DIR          "${CMAKE_CURRENT_LIST_DIR}/..")
 set(BENCH_FRAMEWORK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../bench_framework")
 
-# Module set: framework module + the IO module tree + bioseq sequences
-# (BenchAlphabet uses sequence_custom_alphabet) + instrumentation +
-# mlogging. The IO bench TU is NOT HWY-bound itself — it imports HWY
+# Module set: ONLY the IO-bench-private modules (io/*.cppm under this dir)
+# + the bench_framework interface unit. Domain N core (common-minus-testing,
+# sequences, instrumentation) comes from `bioseq_modules_nopg` (DOC0269
+# Phase A). The IO bench TU is NOT HWY-bound itself — it imports HWY
 # modules transitively through bioseq_io.public_api but does not call
-# HWY-namespaced functions directly. Highway support is still required
-# at the target level so the IO module's internal SIMD encoders compile.
+# HWY-namespaced functions directly. Highway support is still required at
+# the target level so the IO module's internal SIMD encoders compile.
 file(GLOB_RECURSE IO_BENCH_V10_MOD_FILES
-  "${IO_BENCH_V10_DIR}/*.cppm"
-  "${BIOSEQ_DIR}/backend/common/*.cppm"
-  "${BIOSEQ_DIR}/backend/sequences/*.cppm"
-  "${BIOSEQ_DIR}/instrumentation/*.cppm"
+  "${IO_BENCH_V10_DIR}/*.cppm")
+list(APPEND IO_BENCH_V10_MOD_FILES
   "${BENCH_FRAMEWORK_DIR}/index.cppm")
-
-# Drop the Catch2-bound test listener — same reasoning as bench_v10.cmake.
-list(FILTER IO_BENCH_V10_MOD_FILES EXCLUDE REGEX ".*/backend/common/testing\\.cppm$")
 
 AddCommonTargetX(
   bioseq_io_bench
@@ -58,6 +54,8 @@ AddCommonTargetX(
     TBB::tbb
     lfreist-hwinfo::hwinfo
     kseq++::kseq++
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
   SOURCES
     "${IO_BENCH_V10_DIR}/io_bench_v10_main.cpp"
     "${BENCH_FRAMEWORK_DIR}/interactive.cppm"

@@ -16,15 +16,10 @@ get_filename_component(BIOSEQ_DIR
   "${CMAKE_CURRENT_LIST_DIR}/../bioseq"
   ABSOLUTE)
 
-# Module file set: framework module + the bioseq_instr module tree the
-# framework imports + mlogging.
-file(GLOB_RECURSE BENCH_FRAMEWORK_INSTR_MODULES
-  "${BIOSEQ_DIR}/instrumentation/*.cppm"
-  "${BIOSEQ_DIR}/instrumentation/**/*.cppm")
-
+# Module file set: ONLY the framework's own interface unit (index.cppm).
+# instrumentation/* and mlogging.cppm come from `bioseq_modules_nopg`
+# (DOC0269 Phase A) so we don't rebuild them for this target.
 set(BENCH_FRAMEWORK_MODULE_FILES
-  ${BENCH_FRAMEWORK_INSTR_MODULES}
-  "${BIOSEQ_DIR}/backend/common/mlogging.cppm"
   "${BENCH_FRAMEWORK_DIR}/index.cppm")
 
 # `interactive.cppm` is a *module implementation unit* of `bench_framework`
@@ -78,6 +73,8 @@ AddCommonTargetX(
     nlohmann_json_schema_validator::validator
     TBB::tbb
     lfreist-hwinfo::hwinfo
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
   SOURCES
     ${BENCH_FRAMEWORK_EXAMPLE_SOURCES}
   TESTS

@@ -298,7 +298,15 @@ extern "C++" void
 bioseq_storage_seq_caches_close_all(bioseq::storage::seq_caches* caches,
                                     bool commit) noexcept;
 
-namespace bioseq::storage {
+// DOC0269 — Phase A required exporting this block so importers (notably
+// access_method.cppm) can name `sequence_storage_manager`,
+// `bioseq_default_storage_manager`, the §7.10 sidecar I/O helpers, and
+// `read_max_sub_table_cap_bytes`. Without the `export` keyword on this
+// re-opening of `namespace bioseq::storage`, the declarations land in the
+// module purview but are not exported, so the names are present in the
+// translation unit yet refused at import (clang's "declaration must be
+// imported from module 'bioseq_storage' before it is required").
+export namespace bioseq::storage {
 
 // ---------------------------------------------------------------------------
 // §6 — Catalog access shims. These call into storage_metadata which owns the
