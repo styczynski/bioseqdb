@@ -55,7 +55,26 @@
       {
         "name": "bench-opt",
         "displayName": "Benchmark-tuned optimisation config",
-         "description": "Like dev-opt-pg but -O3 and NDEBUG so the bench runs at production-grade optimisation while still allowing module-build incremental rebuilds. -save-temps=obj keeps per-TU .s/.ii/.bc artifacts beside each .o so the inspect MCP tool can extract assembly and IR for any function. -g preserves DWARF symbols for source-line cross-references.",
+         "description": "Production-grade -O3 + NDEBUG used by every default build (postgresql_bioseq, the test execs, bioseq_bench). The previous form of this preset also carried `-save-temps=obj -g`; both were dropped because they more than doubled per-TU peak RSS on the heavy-template TUs (dispatch_buffer.cppm, two_stacks_minimizers.cppm) — the DWARF tables alone push the dispatch_buffer compile from ~5 GB to >11 GB and the .ii/.s/.bc dumps add a multi-GB write per TU on top of that. `CMAKE_CXX_FLAGS_DEBUG` is set to an empty string so `-g` is NOT silently re-added by the `Debug` build type (the Debug type is preserved only because other CMake logic in the tree branches on it). For the inspect MCP tool (which needs the per-TU .s/.bc and DWARF) use the `bench-opt-debug` preset, or pass `debug=true` to `start_build` so the MCP server selects that preset automatically.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "VCPKG_TARGET_TRIPLET": "arm64-osx",
+          "CMAKE_OSX_ARCHITECTURES": "arm64",
+          "VCPKG_TARGET_ARCHITECTURE": "arm64",
+          "VCPKG_CRT_LINKAGE": "static",
+          "VCPKG_LIBRARY_LINKAGE": "static"
+        }
+      },
+      {
+        "name": "bench-opt-debug",
+        "displayName": "Benchmark-tuned optimisation config (with debug symbols and per-TU temps)",
+         "description": "Same -O3 + NDEBUG as `bench-opt`, plus `-save-temps=obj` (keeps per-TU .s/.ii/.bc artifacts beside each .o so the inspect MCP tool can extract assembly and IR for any function) and `-g` (preserves DWARF symbols for source-line cross-references in objdump output). Lives under build/bench-opt-debug/ so it does not invalidate the default bench-opt ninja graph. ~2x slower to compile and ~2-3x peak RSS per TU than `bench-opt`; only use when the inspect tool is needed.",
         "generator": "Ninja",
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {

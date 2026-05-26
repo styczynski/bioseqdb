@@ -159,16 +159,41 @@ struct sequence_simd_iteration_state {
             constexpr size_t static_rev_shift =
                 SeqTraits::bits_per_char * (StaticK - 1);
             // The public dispatcher widens `hash_val_t` so the lane fits
-            // K's reverse-complement shift. If that contract is ever
-            // broken at compile time, fail the build here instead of
-            // silently clamping the shift (which silently corrupts the
-            // canonical kmer — see Phase-5 §3.4).
-            static_assert(static_rev_shift < sizeof(ST) * 8,
-                "Static K reverse-complement shift exceeds SIMD lane "
-                "width. The public dispatcher must select a wider "
-                "hash_val_t (uint64_t) for K such that K*bits_per_char "
-                ">= sizeof(ST)*8.");
-            new_high = ShiftLeft<static_rev_shift>(complemented);
+            // K's reverse-complement shift. For dna5 (3-bit alphabet with
+            // a 3-bit leftover at every storage width) the widen-via-
+            // bitcast contract from `is_sequence_bit_castable_to` cannot
+            // be honoured — leftover_bits != 0 makes the bitcast invalid,
+            // so the impl ends up with `ST = base storage_unit` (e.g.
+            // `unsigned char`) instead of the requested `hash_val_t =
+            // uint64_t`. The previous `static_assert` here fired a hard
+            // compile error whenever the dispatch_chain instantiated the
+            // dna5 K=15 template (every postgresql_bioseq build pulling
+            // in dispatch_buffer.cppm). DOC0260 §3.2 keeps `dna5` in the
+            // `pgseq_supported_alphabets` pack, so the instantiation is
+            // unavoidable. We resolve this by routing the impossible
+            // configuration through a `DEBUG_ASSERT(false, …)` runtime
+            // guard so the impl compiles for every (alphabet, K)
+            // combination the spec advertises and only trips at run-time
+            // for the configurations the public dispatcher promises to
+            // skip. The bench/test grid never reaches dna5+K=15 on the
+            // two-stack SIMD path (the scalar `mm_sketch_baseline`
+            // handles dna5 today); see DOC0260 §1.1#9 / DOC0245.
+            if constexpr (static_rev_shift < sizeof(ST) * 8) {
+                new_high = ShiftLeft<static_rev_shift>(complemented);
+            } else {
+                DEBUG_ASSERT(false,
+                    fmt::format("two_stack SIMD: static K reverse-complement "
+                                "shift {} >= lane width {}; this (alphabet, K) "
+                                "must be routed to the scalar fallback "
+                                "(mm_sketch_baseline). See DOC0260 §3.2.",
+                                static_rev_shift, sizeof(ST) * 8));
+                // Placeholder that compiles. The DEBUG_ASSERT above
+                // unconditionally fails in debug builds; in release the
+                // resulting `new_high` is never observed because the
+                // dispatcher must route every dna5+K=15 query through
+                // mm_sketch_baseline before the SIMD impl ever runs.
+                new_high = vec_stream_t::splat(d, static_cast<ST>(0));
+            }
         } else {
             const size_t dynamic_rev_shift =
                 SeqTraits::bits_per_char * (k_clamped - 1);

@@ -456,6 +456,173 @@ GRANT EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)
 -- catalog (lazy sub-tables are created on-demand by the first INSERT).
 SELECT pg_extension_config_dump('bioseq_internal.seq_sub_table', 'WHERE FALSE');
 
+-- DOC0260 §6.1 — operator-facing summary view over the seq_sub_table catalog.
+-- LEFT JOIN pg_class so DDL races (a DROP TABLE racing this SELECT) return
+-- NULL instead of erroring; downstream monitoring tools should null-check.
+CREATE OR REPLACE VIEW bioseq.seq_sub_table_summary AS
+SELECT
+    s.database_oid,
+    s.tablespace_oid,
+    s.main_relfilenode,
+    s.column_attno,
+    s.bucket_idx,
+    s.shard_idx,
+    c1.relname AS shard_relation_name,
+    c2.relname AS sidecar_relation_name,
+    s.bytes_written,
+    pg_size_pretty(s.bytes_written) AS payload_pretty_size,
+    s.is_full,
+    s.total_payload_bytes
+FROM bioseq_internal.seq_sub_table s
+LEFT JOIN pg_class c1 ON c1.oid = s.sub_table_relid
+LEFT JOIN pg_class c2 ON c2.oid = s.sidecar_relid
+ORDER BY s.database_oid, s.tablespace_oid, s.main_relfilenode,
+         s.column_attno, s.bucket_idx, s.shard_idx;
+
+GRANT SELECT ON bioseq.seq_sub_table_summary TO PUBLIC;
+
+-- DOC0260 §11.4 — operator-facing UDF + procedure for shard listing and
+-- vacuum. list_seq_storage_shards resolves the (db, spc, relfilenode) triple
+-- for `rel` and returns the catalog rows that belong to it; the matching
+-- VACUUM procedure walks the list, commits between shards, and skips rows
+-- whose sub-table was dropped mid-loop.
+CREATE OR REPLACE FUNCTION bioseq.list_seq_storage_shards(rel regclass)
+    RETURNS TABLE (
+        sub_relation     regclass,
+        sidecar_relation regclass,
+        column_attno     int2,
+        bucket_idx       int2,
+        shard_idx        int4,
+        bytes_written    bigint,
+        is_full          bool
+    )
+    LANGUAGE sql STABLE
+AS $$
+    WITH parent AS (
+        SELECT
+            (SELECT oid FROM pg_database WHERE datname = current_database())
+                AS db_oid,
+            COALESCE(NULLIF(c.reltablespace, 0),
+                     (SELECT dattablespace FROM pg_database
+                      WHERE datname = current_database()))
+                AS spc_oid,
+            c.relfilenode AS rfn
+        FROM pg_class c
+        WHERE c.oid = rel
+    )
+    SELECT
+        s.sub_table_relid::regclass AS sub_relation,
+        s.sidecar_relid::regclass   AS sidecar_relation,
+        s.column_attno,
+        s.bucket_idx,
+        s.shard_idx,
+        s.bytes_written,
+        s.is_full
+    FROM bioseq_internal.seq_sub_table s, parent p
+    WHERE s.database_oid     = p.db_oid
+      AND s.tablespace_oid   = p.spc_oid
+      AND s.main_relfilenode = p.rfn
+    ORDER BY s.column_attno, s.bucket_idx, s.shard_idx;
+$$;
+
+GRANT EXECUTE ON FUNCTION bioseq.list_seq_storage_shards(regclass) TO PUBLIC;
+
+CREATE OR REPLACE PROCEDURE bioseq.vacuum_seq_storage(rel regclass)
+    LANGUAGE plpgsql
+AS $$
+DECLARE
+    r RECORD;
+BEGIN
+    -- DOC0260 §11.4 — materialise the shard list once into a TEMP table so
+    -- the per-iteration COMMIT cannot invalidate the underlying cursor.
+    CREATE TEMP TABLE IF NOT EXISTS _bioseq_shards_to_vacuum
+        ON COMMIT DROP
+        AS SELECT * FROM bioseq.list_seq_storage_shards(rel) WITH NO DATA;
+    TRUNCATE _bioseq_shards_to_vacuum;
+    INSERT INTO _bioseq_shards_to_vacuum
+        SELECT * FROM bioseq.list_seq_storage_shards(rel);
+
+    FOR r IN SELECT * FROM _bioseq_shards_to_vacuum LOOP
+        COMMIT;
+        BEGIN
+            EXECUTE format('VACUUM (ANALYZE) %s', r.sub_relation);
+            EXECUTE format('VACUUM (ANALYZE) %s', r.sidecar_relation);
+        EXCEPTION WHEN undefined_table THEN
+            CONTINUE;
+        END;
+    END LOOP;
+END $$;
+
+GRANT EXECUTE ON PROCEDURE bioseq.vacuum_seq_storage(regclass) TO PUBLIC;
+
+-- DOC0260 §11.3 step 3 — orphan reaper. Sweeps the seq_sub_table catalog in
+-- both directions: drops catalog rows whose sub_table_relid / sidecar_relid
+-- is no longer in pg_class, and drops pg_class entries matching the
+-- naming convention that have no catalog row. Operators run this as a
+-- recurring administrative task (Phase D D-VACUUM ships a background
+-- worker that calls it on a schedule). Idempotent and safe to repeat.
+CREATE OR REPLACE FUNCTION bioseq.reap_orphan_seq_sub_tables()
+    RETURNS TABLE (
+        action      text,
+        target      text
+    )
+    LANGUAGE plpgsql
+AS $$
+DECLARE
+    r RECORD;
+BEGIN
+    /* Direction A: catalog rows pointing at missing pg_class entries. */
+    FOR r IN
+        SELECT s.database_oid::text || '/' ||
+               s.main_relfilenode::text || '/' ||
+               s.column_attno::text || '/' ||
+               s.bucket_idx::text || '/' ||
+               s.shard_idx::text AS k
+        FROM bioseq_internal.seq_sub_table s
+        WHERE s.database_oid = (SELECT oid FROM pg_database
+                                WHERE datname = current_database())
+          AND NOT EXISTS (SELECT 1 FROM pg_class c
+                          WHERE c.oid = s.sub_table_relid)
+    LOOP
+        action := 'delete-catalog-row';
+        target := r.k;
+        RETURN NEXT;
+    END LOOP;
+
+    DELETE FROM bioseq_internal.seq_sub_table s
+        WHERE s.database_oid = (SELECT oid FROM pg_database
+                                WHERE datname = current_database())
+          AND NOT EXISTS (SELECT 1 FROM pg_class c
+                          WHERE c.oid = s.sub_table_relid);
+
+    /* Direction B: pg_class entries with no catalog row. */
+    FOR r IN
+        SELECT n.nspname || '.' || quote_ident(c.relname) AS qname,
+               c.relname AS rn
+        FROM pg_class c
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = 'bioseq_internal'
+          AND (c.relname LIKE 'seq_sub_%' OR c.relname LIKE 'idx_sidecar_%')
+          AND NOT EXISTS (
+              SELECT 1 FROM bioseq_internal.seq_sub_table s
+              WHERE s.sub_table_relid = c.oid
+                 OR s.sidecar_relid   = c.oid)
+    LOOP
+        BEGIN
+            EXECUTE format('DROP TABLE IF EXISTS %s', r.qname);
+            action := 'drop-relation';
+            target := r.qname;
+            RETURN NEXT;
+        EXCEPTION WHEN OTHERS THEN
+            action := 'drop-relation-failed:' || SQLERRM;
+            target := r.qname;
+            RETURN NEXT;
+        END;
+    END LOOP;
+END $$;
+
+GRANT EXECUTE ON FUNCTION bioseq.reap_orphan_seq_sub_tables() TO PUBLIC;
+
 --#include "udfs/upgrade_bioseq_storage/10.2-1.sql"
 CREATE OR REPLACE FUNCTION bioseq_internal.upgrade_bioseq_storage(rel regclass)
   RETURNS VOID

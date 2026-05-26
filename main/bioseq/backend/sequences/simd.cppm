@@ -2542,7 +2542,17 @@ inline StdcT* stdc_convert_from_cstr(
     StdcT* result = nullptr;
     dispatch_storage_unit_byte_width(target_storage_byte_width,
         [&]<std::size_t BW>() {
-            using storage_unit_t = typename boost::uint_t<BW * 8>::least;
+            // DOC0268 (this run) — pin to std::uintN_t (NOT
+            // boost::uint_t<>::least). On macOS arm64 the boost variant
+            // resolves to `unsigned long` for BW==8, which is a different
+            // C++ type from std::uint64_t (= `unsigned long long`) and
+            // tripped Highway's `IsIntegerLaneType` static_assert when this
+            // storage_unit fed into encode_sequence_simd.
+            using storage_unit_t =
+                std::conditional_t<BW == 8, std::uint64_t,
+                std::conditional_t<BW == 4, std::uint32_t,
+                std::conditional_t<BW == 2, std::uint16_t,
+                                              std::uint8_t>>>;
             using sca_t = sequence_custom_alphabet<
                 alphabet_t, storage_unit_t,
                 seqan3::detail::ceil_log2(seqan3::alphabet_size<alphabet_t>)>;

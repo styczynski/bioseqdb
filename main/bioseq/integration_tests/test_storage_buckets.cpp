@@ -23,9 +23,11 @@ constexpr std::string_view kTable = "test_storage_buckets_t";
 
 TEST_CASE("DOC0260 — bioseq.len reports correct payload size after stub hydration",
           "[integration][storage-buckets][len]") {
-    // DOC0260 Phase A keeps bioseq.len/unit_len at INTEGER (see SQL DDL
-    // notes); the BIGINT widening will land alongside the Phase-C
-    // bit_casted_view/stdc_compare fix.
+    // DOC0260 §1.1#10 — bioseq.len/unit_len are now BIGINT and stub-aware:
+    // the stub-side path reads `loc.total_bp_size` (uint64) from the locator
+    // payload, the inline path reads `hdr->bp_size`. The widening means
+    // sequences with bp_size > INT32_MAX (Phase C and beyond) round-trip
+    // their length without silent truncation.
     auto ctx = fresh_context({kTable});
     create_seq_table(
         ctx,
@@ -41,6 +43,68 @@ TEST_CASE("DOC0260 — bioseq.len reports correct payload size after stub hydrat
                 ctx,
                 fmt::format("SELECT bioseq.len(seq0) FROM {} LIMIT 1;", kTable))
             == 4);
+    REQUIRE(query_scalar(
+                ctx,
+                fmt::format("SELECT pg_typeof(bioseq.len(seq0))::text "
+                            "FROM {} LIMIT 1;", kTable))
+            == "bigint");
+}
+
+TEST_CASE("DOC0260 — bioseq.storage.max_seq_sub_table_gbs=0 forces one shard "
+          "per insert",
+          "[integration][storage-buckets][rollover][zero-cap-sentinel]") {
+    auto ctx = fresh_context({kTable});
+    exec_sql(ctx, "SET bioseq.storage.max_seq_sub_table_gbs = 0;");
+    exec_sqlf(ctx,
+              "CREATE TABLE {} (id INT PRIMARY KEY, "
+              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              kTable);
+    for (int i = 0; i < 5; ++i) {
+        exec_sqlf(ctx,
+                  "INSERT INTO {} VALUES ({}, "
+                  "'ACGT'::bioseq.seq('dna4', 32));",
+                  kTable, i);
+    }
+    const long long rows = query_scalar_int(
+        ctx,
+        fmt::format(
+            "SELECT count(*) FROM bioseq_internal.seq_sub_table s "
+            "WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "
+            "WHERE relname = '{}');",
+            kTable));
+    REQUIRE(rows == 5);
+}
+
+TEST_CASE("DOC0260 — bioseq.seq_sub_table_summary view + list_seq_storage_shards "
+          "expose every shard for a parent",
+          "[integration][storage-buckets][operator-views]") {
+    auto ctx = fresh_context({kTable});
+    exec_sqlf(ctx,
+              "CREATE TABLE {} (id INT PRIMARY KEY, "
+              "seq bioseq.seq('dna4', 32)) USING bioseq;",
+              kTable);
+    exec_sqlf(ctx,
+              "INSERT INTO {} VALUES (1, "
+              "'ACGTACGTACGT'::bioseq.seq('dna4', 32));",
+              kTable);
+
+    // View must list at least one row for the parent.
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format(
+                    "SELECT COUNT(*) FROM bioseq.seq_sub_table_summary "
+                    "WHERE main_relfilenode = "
+                    "  (SELECT relfilenode FROM pg_class WHERE relname='{}');",
+                    kTable))
+            >= 1);
+
+    // The list_seq_storage_shards SRF must return the same number of rows.
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT COUNT(*) FROM "
+                            "bioseq.list_seq_storage_shards('{}'::regclass);",
+                            kTable))
+            >= 1);
 }
 
 TEST_CASE("DOC0260 — seq_sub_table catalog exists and is empty on fresh extension",

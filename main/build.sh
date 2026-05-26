@@ -70,7 +70,7 @@ has_token() {
 # also recompiled the Postgres dylib and the unit-test binary on every run.
 TARGETS=()
 if has_token unit;        then TARGETS+=(bioseq_aligner_tests_exec); fi
-if has_token integration; then TARGETS+=(bioseq_aligner_int_tests_exec); fi
+if has_token integration; then TARGETS+=(postgresql_bioseq); TARGETS+=(bioseq_aligner_int_tests_exec); fi
 if has_token bench;       then TARGETS+=(bioseq_bench); fi
 if has_token io;       then TARGETS+=(bioseq_io_bench); fi
 if has_token framework_example; then TARGETS+=(bioseq_bench_framework_example); fi
@@ -97,6 +97,7 @@ if has_token unit; then
 fi
 
 if has_token integration; then
+    cmake --install "${BUILD_DIR}" --component "bioseq"
     ./bioseq/bioseq_aligner_int_tests_exec --reporter console::out=-::colour-mode=ansi
 fi
 

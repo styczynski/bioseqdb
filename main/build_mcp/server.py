@@ -64,10 +64,49 @@ from inspect_tool import (
 # --------------------------- configuration ---------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
-BUILD_PRESET = "bench-opt"
-BUILD_DIR = PROJECT_ROOT / "build" / BUILD_PRESET
+
+# DOC0270 — two parallel build trees:
+#
+#   "bench-opt"        — default, fast. -O3 + NDEBUG, no -g, no -save-temps.
+#                        Used by every normal start_build call. Lives under
+#                        build/bench-opt/.
+#   "bench-opt-debug"  — heavier, slower. Same -O3 + NDEBUG, plus -g (DWARF)
+#                        and -save-temps=obj (per-TU .s/.ii/.bc artifacts).
+#                        Selected with debug=true on start_build. Required by
+#                        the `inspect` tool — it pulls disassembly from the
+#                        objdump --line-numbers output (needs DWARF) and the
+#                        pre-LTO assembly view (needs the per-TU .s files).
+#                        Lives under build/bench-opt-debug/ so it does not
+#                        invalidate the default tree's ninja graph.
+#
+# Both presets share the rest of the toolchain (vcpkg, arm64-osx target).
+# The build dir is selected per-call from `debug`; the state file records
+# which mode each run used so `status` and `inspect` can find the right
+# artifacts.
+DEFAULT_BUILD_PRESET = "bench-opt"
+DEBUG_BUILD_PRESET = "bench-opt-debug"
+DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
+DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
 
+
+def preset_for(debug: bool) -> str:
+    return DEBUG_BUILD_PRESET if debug else DEFAULT_BUILD_PRESET
+
+
+def build_dir_for(debug: bool) -> Path:
+    return DEBUG_BUILD_DIR if debug else DEFAULT_BUILD_DIR
+
+
+def bin_dir_for(debug: bool) -> Path:
+    return build_dir_for(debug) / "bioseq"
+
+
+# Backwards-compatible aliases — the old module-level constants are still
+# read by callers that haven't been updated to thread `debug` through. They
+# always point at the default (non-debug) build tree.
+BUILD_PRESET = DEFAULT_BUILD_PRESET
+BUILD_DIR = DEFAULT_BUILD_DIR
 BIN_DIR = BUILD_DIR / "bioseq"
 
 STATE_FILE = Path("/tmp/bioseq_build_mcp_state.json")
@@ -119,7 +158,13 @@ class ModeDefinition:
     is_verb_plular: bool
     """Targets we need to build via CMake"""
     targets: List[str]
-    """Commands we want to run"""
+    """
+    Commands we want to run. First element of each command is the binary
+    basename — resolved against the active build tree's `bioseq/` directory
+    at run time (see `bin_dir_for(debug)`). This lets the same MODE definition
+    drive both the fast (build/bench-opt/) and the debug (build/bench-opt-debug/)
+    binaries; the worker decides which by reading the run's `debug` flag.
+    """
     commands: List[List[str]]
     """Extra documentation"""
     docs: str
@@ -166,9 +211,9 @@ MODES: Dict[str, ModeDefinition] = {
                  "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec"],
         install_extension=True,
         commands=[
-            [str(BIN_DIR / "bioseq_aligner_tests_exec"),
+            ["bioseq_aligner_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
-            [str(BIN_DIR / "bioseq_aligner_int_tests_exec"),
+            ["bioseq_aligner_int_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
     ),
@@ -180,7 +225,7 @@ MODES: Dict[str, ModeDefinition] = {
         docs="Run primary bioseq benchmark",
         is_verb_plular=False,
         targets=["bioseq_bench"],
-        commands=[[str(BIN_DIR / "bioseq_bench")]],
+        commands=[["bioseq_bench"]],
         reporting_subdir_name="bioseq_bench",
         is_bench_mode=True,
     ),
@@ -192,7 +237,7 @@ MODES: Dict[str, ModeDefinition] = {
         docs="Run primary bioseq benchmark in fast mode for faster iteration",
         is_verb_plular=False,
         targets=["bioseq_bench"],
-        commands=[[str(BIN_DIR / "bioseq_bench"), "--fast"]],
+        commands=[["bioseq_bench", "--fast"]],
         reporting_subdir_name="bioseq_bench",
         is_bench_mode=True,
     ),
@@ -204,7 +249,7 @@ MODES: Dict[str, ModeDefinition] = {
         docs="Run benchmark for IO module residing in io/ directory. Note this is separate benchmark dedicated only to IO interfaces",
         is_verb_plular=False,
         targets=["bioseq_io_bench"],
-        commands=[[str(BIN_DIR / "bioseq_io_bench")]],
+        commands=[["bioseq_io_bench"]],
         reporting_subdir_name="bioseq_io_bench",
         is_bench_mode=True,
     ),
@@ -440,12 +485,18 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
     return max(new, key=lambda p: _report_index(p.name))
 
 
-def _run_build_worker(mode: str, build_only: bool = False) -> int:
+def _run_build_worker(mode: str, build_only: bool = False,
+                      debug: bool = False) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
     run, updating `step`/`status` as it goes. The hard timeout is enforced
     by `_stream_subprocess` against `started_at + HARD_TIMEOUT_SEC`.
+
+    `debug=True` routes the build into `build/bench-opt-debug/` using the
+    `bench-opt-debug` preset — the per-TU `.s`/`.bc` + DWARF artefacts the
+    `inspect` tool consumes. `debug=False` (default) uses the lean
+    `bench-opt` preset that DOC0270 split out for everyday builds.
     """
     state = _load_state()
     entry = state.get(mode)
@@ -457,14 +508,19 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
     log_path = Path(entry["log_file"])
     deadline = started_at + HARD_TIMEOUT_SEC
 
+    active_preset = preset_for(debug)
+    active_build_dir = build_dir_for(debug)
+    active_bin_dir = bin_dir_for(debug)
+
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("w", buffering=1)
     log_handle.write(
         f"# bioseq build worker — mode={mode} pid={os.getpid()} "
         f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
         f"# project_root={PROJECT_ROOT}\n"
-        f"# build_dir={BUILD_DIR}\n"
-        f"# preset={BUILD_PRESET}\n"
+        f"# build_dir={active_build_dir}\n"
+        f"# preset={active_preset}\n"
+        f"# debug={debug}\n"
         f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
     )
     log_handle.flush()
@@ -479,7 +535,9 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
 
     try:
-        _update_entry(mode, step="configuring", build_only=build_only)
+        _update_entry(mode, step="configuring", build_only=build_only,
+                      debug=debug, preset=active_preset,
+                      build_dir=str(active_build_dir))
         # Only run the (expensive) configure when the tree isn't configured yet.
         # Re-running `cmake --preset` on an already-configured C++-modules tree
         # regenerates the Ninja dyndep/modmap graph and invalidates EVERY module
@@ -488,24 +546,25 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
         # hard timeout. Ninja still auto-reconfigures via its RERUN_CMAKE rule
         # when CMakeLists / cache / vcpkg manifest actually change, so a later
         # `cmake --build` still picks up genuine configuration changes.
-        if not (BUILD_DIR / "build.ninja").exists():
+        if not (active_build_dir / "build.ninja").exists():
             rc = _stream_subprocess(
-                ["cmake", "--preset", BUILD_PRESET],
+                ["cmake", "--preset", active_preset],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
             )
             if rc != 0:
                 raise RuntimeError(f"cmake configure exited with code {rc}")
         else:
             log_handle.write(
-                f"# build tree already configured ({BUILD_DIR / 'build.ninja'}); "
+                f"# build tree already configured ({active_build_dir / 'build.ninja'}); "
                 "skipping redundant `cmake --preset` to avoid a full C++-module "
                 "rebuild (Ninja auto-reconfigures if CMake inputs changed).\n")
             log_handle.flush()
 
-        _update_entry(mode, step="building", build_only=build_only)
+        _update_entry(mode, step="building", build_only=build_only,
+                      debug=debug)
         for tgt in mode_details.targets:
             rc = _stream_subprocess(
-                ["cmake", "--build", str(BUILD_DIR), "--target", tgt,
+                ["cmake", "--build", str(active_build_dir), "--target", tgt,
                  "--parallel", str(CMAKE_PARALLEL_JOBS)],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
             )
@@ -514,14 +573,16 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
 
         # Maintain the build/compile_commands.json symlink — clangd / IDEs
         # probe build/ by default. Only matters for human operators, but
-        # cheap to keep working.
-        cc = BUILD_DIR / "compile_commands.json"
+        # cheap to keep working. Symlink follows the active preset so the
+        # debug build can also be the source of compile_commands when the
+        # operator is iterating against -g + -save-temps.
+        cc = active_build_dir / "compile_commands.json"
         if cc.exists():
-            link = BUILD_DIR.parent / "compile_commands.json"
+            link = active_build_dir.parent / "compile_commands.json"
             try:
                 if link.is_symlink() or link.exists():
                     link.unlink()
-                link.symlink_to(Path(BUILD_PRESET) / "compile_commands.json")
+                link.symlink_to(Path(active_preset) / "compile_commands.json")
             except OSError:
                 pass
 
@@ -535,6 +596,7 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
                 exit_code=0,
                 report_file=None,
                 build_only=True,
+                debug=debug,
             )
         else:
             # Install the freshly-built extension into the running PostgreSQL
@@ -545,7 +607,8 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
             if mode_details.install_extension:
                 _update_entry(mode, step="installing extension")
                 rc = _stream_subprocess(
-                    ["cmake", "--install", str(BUILD_DIR), "--component", "bioseq"],
+                    ["cmake", "--install", str(active_build_dir),
+                     "--component", "bioseq"],
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
                 if rc != 0:
@@ -555,8 +618,13 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
 
             _update_entry(mode, step="running")
             for cmd in mode_details.commands:
+                # MODES.commands store binary BASENAMES; resolve against the
+                # active build's bin dir (DOC0270). Args after the first slot
+                # are passed through verbatim.
+                full_cmd = [str(active_bin_dir / cmd[0]), *cmd[1:]]
                 rc = _stream_subprocess(
-                    cmd, log_handle, deadline, cwd=BUILD_DIR, env=env,
+                    full_cmd, log_handle, deadline,
+                    cwd=active_build_dir, env=env,
                 )
                 if rc != 0:
                     # Bench exits non-zero when regression rules are violated
@@ -579,6 +647,7 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
                 exit_code=0,
                 report_file=str(report_path) if report_path else None,
                 build_only=False,
+                debug=debug,
             )
         log_handle.write(
             f"\n# worker exiting cleanly at "
@@ -596,6 +665,7 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
             exit_code=None,
             notes=str(e),
             build_only=build_only,
+            debug=debug,
         )
         log_handle.write(f"\n# killed by {HARD_TIMEOUT_MIN}-min hard timeout: {e}\n")
         return 124
@@ -610,6 +680,7 @@ def _run_build_worker(mode: str, build_only: bool = False) -> int:
             exit_code=None,
             notes=str(e),
             build_only=build_only,
+            debug=debug,
         )
         log_handle.write(f"\n# worker failed: {e}\n")
         return 1
@@ -652,7 +723,8 @@ def _running_in_same_group(state: dict, mode: str) -> tuple[str | None, dict | N
     return None, None
 
 
-def tool_start_build(mode: str, build_only: bool = False) -> str:
+def tool_start_build(mode: str, build_only: bool = False,
+                     debug: bool = False) -> str:
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
@@ -679,12 +751,16 @@ def tool_start_build(mode: str, build_only: bool = False) -> str:
         started_at = time.time()
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
         log_path = LOG_DIR / (
-            f"bioseq_build_mcp_{mode.replace('+', '_')}_{timestamp}.log"
+            f"bioseq_build_mcp_{mode.replace('+', '_')}_"
+            f"{'debug_' if debug else ''}{timestamp}.log"
         )
 
         server_path = Path(__file__).resolve()
         proc = subprocess.Popen(
-            [sys.executable, str(server_path), "--run-build", mode, "--build-only", ("true" if build_only else "false")],
+            [sys.executable, str(server_path),
+             "--run-build", mode,
+             "--build-only", ("true" if build_only else "false"),
+             "--debug", ("true" if debug else "false")],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -703,11 +779,16 @@ def tool_start_build(mode: str, build_only: bool = False) -> str:
             "exit_code": None,
             "report_file": None,
             "notes": None,
+            "debug": debug,
+            "preset": preset_for(debug),
+            "build_dir": str(build_dir_for(debug)),
         }
         _save_state(state)
-        _log(f"started worker pid={proc.pid} mode={mode} log={log_path}")
+        _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
+             f"log={log_path}")
 
-    return (f"{mode_details.label} {mode_details.verb_is} scheduled. "
+    return (f"{mode_details.label} {mode_details.verb_is} scheduled "
+            f"(preset={preset_for(debug)}). "
             f"Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
@@ -717,6 +798,13 @@ def tool_inspect(arguments: dict) -> str:
 
     All errors come back as JSON `{"error": "...", ...}` rather than
     raising, so the AI agent always gets a structured result.
+
+    The DOC0270 split means the inspect tool needs DWARF and per-TU temps,
+    which only exist in the `build/bench-opt-debug/` tree. We auto-detect:
+    if the debug tree has a build.ninja we use it; otherwise we fall back
+    to `build/bench-opt/` (which may produce an "no per-TU `.s` files"
+    warning if the binary was built without -save-temps). The caller can
+    force one or the other via `debug=true|false`.
     """
     function_name = arguments.get("function_name")
     if not isinstance(function_name, str) or not function_name:
@@ -755,16 +843,36 @@ def tool_inspect(arguments: dict) -> str:
         # contract) instead of bubbling up as a JSON-RPC -32000.
         return json.dumps({"error": str(e)}, indent=2)
 
+    # Resolve which build tree to inspect. `debug` is an explicit override;
+    # without it, prefer the debug tree if it's been built, otherwise fall
+    # back to the fast tree. The fast tree does NOT carry per-TU .s/.bc
+    # artefacts (DOC0270 dropped -save-temps from bench-opt), so inspecting
+    # the fast tree omits the pre-LTO listing and may surface as a
+    # top-level warning in the inspect output.
+    debug_raw = arguments.get("debug")
+    if debug_raw is None:
+        debug_chosen = (DEBUG_BUILD_DIR / "build.ninja").exists()
+    else:
+        try:
+            debug_chosen = parse_bool("debug", debug_raw)
+        except RuntimeError as e:
+            return json.dumps({"error": str(e)}, indent=2)
+    inspect_build_dir = build_dir_for(debug_chosen)
+
     out = _run_inspect_impl(
         function_name=function_name,
         target=target,
-        build_dir=BUILD_DIR,
+        build_dir=inspect_build_dir,
         max_matches=max_matches,
         snippet_lines=snippet_lines,
         source_basename=source_basename,
         llc_on_bc=llc_on_bc,
         max_llc_bc_files=max_llc_bc_files,
     )
+    # Surface which tree was inspected so the AI agent can act on
+    # "no .s files" results by re-running with debug=true.
+    out.setdefault("build_metadata", {})["debug_tree_used"] = debug_chosen
+    out["build_metadata"]["preset_used"] = preset_for(debug_chosen)
     return json.dumps(out, indent=2)
 
 
@@ -784,12 +892,18 @@ def tool_status(mode: str) -> str:
     log_path = entry.get("log_file") or "(no log file)"
     status = entry.get("status")
     build_only: bool = entry.get("build_only", False)
+    debug_used: bool = bool(entry.get("debug", False))
+    preset_suffix = (
+        f" preset={entry.get('preset', preset_for(debug_used))}"
+        if debug_used else ""
+    )
 
     if status == "running":
         elapsed_min = (time.time() - entry["started_at"]) / 60.0
         eta_min = max(0.0, (mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min) - elapsed_min)
         step = entry.get("step", "running")
-        return (f"{mode_details.label} {mode_details.verb_is} already scheduled. "
+        return (f"{mode_details.label} {mode_details.verb_is} already scheduled"
+                f"{preset_suffix}. "
                 f"Current step: {step}. "
                 f"Predicted finish in {_format_minutes(eta_min)}. "
                 f"Log: {log_path}")
@@ -798,13 +912,19 @@ def tool_status(mode: str) -> str:
     duration_min = (completed_at - entry["started_at"]) / 60.0
 
     if status == "completed":
-        msg = (f"{mode_details.label} {mode_details.verb_was} already completed "
+        msg = (f"{mode_details.label} {mode_details.verb_was} already completed"
+               f"{preset_suffix} "
                f"(total time: {_format_minutes(duration_min, plural_int=True)}). "
                f"Log: {log_path}")
         if entry.get("report_file"):
             msg += f". Report: {entry['report_file']}"
         if entry.get("build_only", False):
             msg += f". This was build-only job so targets were built, but not run (for faster iteration)."
+        if debug_used:
+            msg += (". This was a debug build (preset=bench-opt-debug); "
+                    "DWARF + per-TU .s/.bc artefacts are available under "
+                    f"{entry.get('build_dir', str(DEBUG_BUILD_DIR))} for the "
+                    "`inspect` tool.")
         return msg
 
     if status == "killed_timeout":
@@ -840,6 +960,22 @@ TOOL_DEFINITIONS = [
             "returns the current status instead of starting a duplicate. "
             f"{get_modes_short_documentation()} "
             f"\nNote: If you want to iterate quickly then use build_only parameter."
+            f"\n\nBuild tree selection (`debug` parameter, DOC0270):"
+            f"\n  - debug=false (DEFAULT): uses the `bench-opt` CMake preset → "
+            f"`build/bench-opt/`. -O3 + NDEBUG only, no debug info, no "
+            f"per-TU temps. This is the fast everyday build — preferred for "
+            f"every normal iteration, including running tests and benches."
+            f"\n  - debug=true: uses the `bench-opt-debug` CMake preset → "
+            f"`build/bench-opt-debug/`. Same -O3 + NDEBUG, plus -g (DWARF "
+            f"symbols) and -save-temps=obj (writes per-TU .s/.ii/.bc beside "
+            f"each .o). REQUIRED by the `inspect` tool: it pulls disassembly "
+            f"from objdump --line-numbers (needs DWARF) and pre-LTO "
+            f"per-TU listings (needs .s files). ~2x slower to compile, "
+            f"~2-3x peak RSS per TU, ~3x disk usage versus debug=false. "
+            f"Only set this when you intend to call `inspect` afterwards. "
+            f"The two build trees are kept on separate disk paths so "
+            f"toggling `debug` does not invalidate the other tree's ninja "
+            f"graph — switching is cheap once both have been populated once."
             f"\nHard timeout: ~{int(HARD_TIMEOUT_MIN)} min."
         ),
         "inputSchema": {
@@ -853,6 +989,20 @@ TOOL_DEFINITIONS = [
                 "build_only": {
                    "type": "boolean",
                    "description": "Do you want only to build the target, but do not actually run any commands (like benchmarks, tests etc.). Useful for faster iteration to check if the code just compiles correctly.",
+                   "default": False,
+                },
+                "debug": {
+                   "type": "boolean",
+                   "description": (
+                       "Select the debug build tree (preset=bench-opt-debug, "
+                       "dir=build/bench-opt-debug/). Adds -g + -save-temps=obj "
+                       "so the `inspect` tool can extract per-function "
+                       "disassembly and pre-LTO assembly listings. ~2x slower "
+                       "and uses ~3x more memory per TU than the default "
+                       "fast build — only set this when you actually need "
+                       "the inspect artefacts. Default false (uses the "
+                       "everyday `bench-opt` preset)."
+                   ),
                    "default": False,
                 }
             },
@@ -883,7 +1033,7 @@ TOOL_DEFINITIONS = [
     {
         "name": "inspect",
         "description": (
-            "Inspect a function in the latest bench-opt build. Returns a "
+            "Inspect a function in the latest build. Returns a "
             "JSON document with: demangled symbols matching the substring; "
             "the linked-binary disassembly per match (post-LTO ground "
             "truth); the per-TU compiler-emitted .s listing block (pre-LTO "
@@ -896,6 +1046,18 @@ TOOL_DEFINITIONS = [
             "no standalone symbol). All large outputs are written to "
             "/tmp/bioseq_inspect/ and pointed at via paths so the AI can "
             "Read them on demand.\n\n"
+            "DOC0270 — build-tree selection: the default `bench-opt` build "
+            "tree does NOT carry per-TU .s/.bc files or DWARF (DOC0270 "
+            "dropped -g + -save-temps from that preset to halve per-TU "
+            "compile memory). Call `start_build` with debug=true first to "
+            "produce a `bench-opt-debug` tree that has both. If you pass "
+            "no `debug` argument here, the tool auto-detects: the debug "
+            "tree wins when its build.ninja exists, otherwise we fall "
+            "back to the fast tree (the response's "
+            "`build_metadata.debug_tree_used` field records which one was "
+            "used; if it is false and you see 'no per-TU `.s` files' "
+            "warnings, schedule a `start_build mode=… debug=true` and "
+            "re-run inspect).\n\n"
             "Use this to compare two implementations of the same function "
             "(e.g. before/after a refactor) at the instruction level to "
             "spot vectorisation regressions, register spills, "
@@ -999,6 +1161,18 @@ TOOL_DEFINITIONS = [
                         ".s files are present (clang ThinLTO case). "
                         "Disable for fast/incomplete inspect calls.",
                 },
+                "debug": {
+                    "type": "boolean",
+                    "description":
+                        "Force the inspect tool to read from a specific "
+                        "build tree (DOC0270). true → build/bench-opt-debug/ "
+                        "(needs `start_build debug=true` to have populated "
+                        "it). false → build/bench-opt/ (the everyday tree; "
+                        "no per-TU .s/.bc, no DWARF). Omit to auto-detect: "
+                        "prefer the debug tree when available, fall back "
+                        "to fast. Set this explicitly only when you need "
+                        "to pin the tree (e.g. compare debug vs fast).",
+                },
             },
             "required": ["function_name"],
         },
@@ -1063,7 +1237,8 @@ def _handle_tools_call(params: dict) -> dict:
     if name == "start_build":
         mode = args.get("mode", "")
         build_only: bool = parse_bool("build_only", args.get("build_only", False))
-        text = tool_start_build(mode, build_only=build_only)
+        debug: bool = parse_bool("debug", args.get("debug", False))
+        text = tool_start_build(mode, build_only=build_only, debug=debug)
     elif name == "status":
         mode = args.get("mode", "")
         text = tool_status(mode)
@@ -1134,10 +1309,23 @@ def main() -> int:
         default='false',
         help="(internal) if 'true' then build will only compile target and not run any actual executables like benchmarks or tests",
     )
+    parser.add_argument(
+        "--debug",
+        choices=['true', 'false'],
+        default='false',
+        help=(
+            "(internal) if 'true' then build under build/bench-opt-debug/ "
+            "with the `bench-opt-debug` CMake preset (adds -g + "
+            "-save-temps=obj). Required for the `inspect` tool. Default "
+            "'false' uses the lean `bench-opt` preset (DOC0270)."
+        ),
+    )
     args = parser.parse_args()
     if args.run_build is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
-        return _run_build_worker(args.run_build, build_only=build_only)
+        debug: bool = parse_bool("debug", args.debug)
+        return _run_build_worker(args.run_build, build_only=build_only,
+                                 debug=debug)
 
     _serve()
     return 0

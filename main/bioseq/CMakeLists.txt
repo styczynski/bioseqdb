@@ -150,8 +150,18 @@ set_target_properties(bioseq_modules_nopg PROPERTIES
   # is fixed upstream (tracked in DOC0269 §12). `-O3` is preserved.
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
+# NO_POSTGRES is PRIVATE so the flag governs *this lib's own TU compilation only*
+# — it does NOT propagate into linking consumers. Aligner and the test execs
+# (which also need NO_POSTGRES=1) set the flag on themselves via
+# AddPostgreSQLExtension.cmake's `target_compile_definitions(... PUBLIC -DNO_POSTGRES=1)`
+# call for non-POSTGRES_EXTENSION targets, so the private scope here is sufficient
+# to keep the existing aligner/test pipeline intact. postgresql_bioseq, which now
+# also consumes this library (DOC0270), MUST NOT receive NO_POSTGRES — its
+# Domain P modules include <postgres.h> and rely on pg_log, palloc, etc. The
+# POSTGRESQL_VERSION_MAJOR define stays PUBLIC because both Domain N and
+# Domain P consumers care about the major-version-conditional code paths.
+target_compile_definitions(bioseq_modules_nopg PRIVATE NO_POSTGRES=1)
 target_compile_definitions(bioseq_modules_nopg PUBLIC
-  NO_POSTGRES=1
   POSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
 target_include_directories(bioseq_modules_nopg PUBLIC
@@ -210,6 +220,36 @@ list (APPEND A_SRC_TESTS ${A_SRC_FILES})
 
 list(REMOVE_ITEM SRC_FILES ${A_SRC_TESTS})
 list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
+
+# DOC0270 — drop every module that the shared bioseq_modules_nopg OBJECT
+# library already owns from postgresql_bioseq's per-target module set. Without
+# this `list(REMOVE_ITEM)`, postgresql_bioseq's `SRC_MOD_FILES` GLOB collects
+# all backend/**/*.cppm files (including the ~50 Domain N modules already in
+# the shared lib) and ninja rebuilds them inside the extension's own target —
+# the same ~25 s × ~50 BMI compile that DOC0269 Phase A eliminated for the
+# aligner / tests but never reached the postgres extension. The
+# `SHARED_MODULE_LIBS bioseq_modules_nopg` argument in the
+# `AddCommonTargetX(postgresql_bioseq …)` call below links the lib's BMIs in
+# instead. Net effect: the Domain N module set is compiled exactly once
+# across the whole build, not twice (lib + postgresql_bioseq) as before.
+#
+# IMPORTANT — the lib's BMIs are baked with NO_POSTGRES=1 (lib-private), so
+# the two Domain N modules that branch on NO_POSTGRES end up with the
+# DEBUG_ASSERT variant in postgresql_bioseq:
+#
+#   - sequences/simd.cppm  ::stdc_compare contract-violation paths use
+#     DEBUG_ASSERT instead of pg_log(ERROR, …). With -DNDEBUG the
+#     DEBUG_ASSERT compiles out, so the violations become silent. These
+#     paths are unreachable in well-formed code (caller passes mixed-alphabet
+#     stdc values, or cross-storage-width non-bit-castable pair); the
+#     follow-up to keep the loud-pg_log behaviour is to extract those calls
+#     into a Domain P wrapper that postgresql_bioseq imports separately —
+#     not done here to keep the diff scoped to the build-time fix.
+#   - common/mlogging.cppm ::log_configure() skips the postgres-specific
+#     fmtlog::setLogFile branch; logs route to stderr (Postgres server log)
+#     instead of /tmp/bioseq_loglog.log. Observable but not a correctness
+#     regression — the operator can re-route via BIOSEQ_LOG_FILE if needed.
+list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 
 # Per-target module set for the aligner (and its tests_exec sibling): just
 # testing.cppm; every other Domain N module is delivered via
@@ -291,6 +331,8 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
+  SHARED_MODULE_LIBS
+    bioseq_modules_nopg
   SOURCES
     ${SRC_FILES}
   SUPPORT_CXX_MODULES
@@ -304,6 +346,21 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+
+# DOC0270 — disable LTO on the Postgres extension. The default IPO=TRUE set
+# by AddPostgreSQLExtension.cmake doubles the per-build wall-clock for the
+# heavy dispatch_buffer.cppm template fan-out: clang first instantiates the
+# full (alphabet × storage_unit_byte_width) Cartesian product at per-TU
+# compile time, then ThinLTO re-runs inlining/optimisation across all TUs at
+# link time. The pre-DOC0270 baseline (DOC0268 §2) timed out a fresh
+# postgresql_bioseq build at the 50 min hard ceiling; the link-phase
+# template-instantiation tail accounts for a sizeable share of that. The
+# bioseq_modules_nopg OBJECT library also runs with IPO=FALSE (see the
+# comment on its property block above) for the same TLS-init-wrapper bug
+# that drove the test execs to opt out; keeping the postgresql_bioseq
+# linkage non-LTO matches that posture.
+set_target_properties(postgresql_bioseq PROPERTIES
+  INTERPROCEDURAL_OPTIMIZATION FALSE)
 
 include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")
 

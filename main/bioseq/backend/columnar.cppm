@@ -16,6 +16,12 @@ module;
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
+extern "C" {
+#include "utils/inval.h"
+#include "utils/lsyscache.h"
+#include "catalog/namespace.h"
+}
+
 export module bioseq_columnar;
 
 import mlogging;
@@ -24,6 +30,7 @@ import config;
 import pg_utils;
 import bioseq_metadata_admin;
 import bioseq_sidecar;
+import bioseq_storage;
 
 extern "C++" {
 
@@ -146,6 +153,21 @@ bioseq_init()
 	 * calls right after sidecar's. */
 	bioseq::metadata_admin::init_registry();
 	bioseq::sidecar::register_default_metadata_kinds();
+
+	/* DOC0260 §11.3 step 2 — register relcache invalidation callback
+	 * for the per-Relation BioseqAmCache slot installed on rd_amcache.
+	 * Postgres clears rd_amcache on a full relcache flush, but per-relid
+	 * invalidations still need our callback so the small_vector heap
+	 * spill is freed before the slot is dropped. */
+	CacheRegisterRelcacheCallback(bioseq::storage::bioseq_am_cache_invalidate,
+								  PointerGetDatum(NULL));
+
+	/* DOC0260 §11.3 step 3 — orphan reaper. We deliberately do NOT call
+	 * `ReapOrphanSeqSubTables()` directly from `_PG_init` because there is
+	 * no active transaction at module-load time and the reaper uses SPI
+	 * (which requires `IsTransactionState() == true`). Operators run the
+	 * sweep via the `bioseq.reap_orphan_seq_sub_tables()` SQL function
+	 * declared in `bioseq--1.0.sql`. */
 }
 
 

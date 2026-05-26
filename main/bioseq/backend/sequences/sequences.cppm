@@ -5,6 +5,7 @@ module;
 //include "fmt/ranges.h"
 
 #include <array>
+#include <cstdint>
 #include <deque>
 #include <iterator>
 #include <list>
@@ -15,6 +16,7 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <valarray>
 #include <vector>
 #include <limits>
@@ -2162,8 +2164,23 @@ requires (
 struct compact_sequence_stdc_instance {
     using compact_sequence_stdc_type = S;
     using alphabet_type              = alphabet_t;
-    using storage_unit               =
-        typename boost::uint_t<storage_unit_byte_width * 8>::least;
+    // DOC0268 (this run) — pin storage_unit to the std::uintN_t fixed-width
+    // aliases instead of boost::uint_t<N>::least. On macOS arm64 (LP64) the
+    // boost variant resolves to `unsigned long` for the 64-bit case, which
+    // is a *different* C++ type from `unsigned long long` (which is what
+    // std::uint64_t maps to). Highway's `ScalableTag<T>` lane-type traits
+    // are specialised only for the fixed-width std::uintN_t types, so the
+    // boost-derived `unsigned long` instantiation tripped
+    // `IsIntegerLaneType<unsigned long>()` static_assert in
+    // `hwy/ops/shared-inl.h` (the long-tail dispatch_buffer.cppm template
+    // blocker the previous Phase-A report flagged as out-of-scope). Forcing
+    // the alias to the std::uintN_t variant fixes the chain without
+    // touching SIMD code.
+    using storage_unit =
+        std::conditional_t<storage_unit_byte_width == 8, std::uint64_t,
+        std::conditional_t<storage_unit_byte_width == 4, std::uint32_t,
+        std::conditional_t<storage_unit_byte_width == 2, std::uint16_t,
+                                                          std::uint8_t>>>;
 
     static constexpr size_t byte_width        = storage_unit_byte_width;
     static constexpr size_t letter_bit_width  =
@@ -2198,8 +2215,16 @@ public:
         typename compact_sequence_range<S>::compact_sequence_range_base::traits;
     using base_container =
         const typename S::compact_sequence_stdc_type*;
+    // DOC0268 (this run) — keep the iterator's element type in lockstep
+    // with `S::storage_unit`. The previous `boost::uint_t<...>::least`
+    // resolved to `unsigned long` on macOS-arm64 (LP64), which is a
+    // different C++ type from `unsigned long long` (= std::uint64_t)
+    // chosen by S::storage_unit. The mismatch left
+    // `read_cptr(const iterator&)` returning `const unsigned long *`
+    // while the declared return type was `const unsigned long long *`,
+    // tripping a hard compile error.
     using iterator =
-        typename boost::uint_t<S::byte_width * 8>::least const*;
+        const typename S::storage_unit*;
 
 private:
     const typename S::compact_sequence_stdc_type& _stdc;
