@@ -40,6 +40,7 @@ module;
 #include <array>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -65,6 +66,7 @@ import bioseq_cigar;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sidecar;
 import bioseq_instr;
+import bioseq_storage;                  // DOC0260 §9 — seq_locator, fetch_payload_bulk, seq_caches
 
 HWY_BEFORE_NAMESPACE();
 
@@ -565,7 +567,27 @@ public:
         std::vector<char> per_row_query_varlena;
         bool            per_row_query_is_null = true;
 
+        /*
+         * DOC0260 §9.1 — Phase A deferred-hydration path. Under
+         * defer_seq_hydration the custom scan returns 40-byte locator stubs
+         * instead of materialised payloads, so submit_scan records the
+         * decoded locator here (leaving seq_varlena empty) and
+         * run_batch_and_build_cursors bulk-fetches the real payload grouped
+         * per bucket into batch_payload_ctx, writing the result into
+         * hydrated_seq_hdr. seq_hdr() prefers the hydrated pointer, so every
+         * downstream consumer (target_hdrs, BatchProcessor, output
+         * projection) is unchanged. The seq_varlena path is still the
+         * fallback for a non-stub value (a small inline payload).
+         */
+        std::optional<bioseq::storage::seq_locator> seq_loc;
+        std::optional<bioseq::storage::seq_locator> per_row_query_loc;
+        const pgseq_t* hydrated_seq_hdr           = nullptr;
+        const pgseq_t* hydrated_per_row_query_hdr = nullptr;
+
         [[nodiscard]] const pgseq_t* seq_hdr() const {
+            if (hydrated_seq_hdr != nullptr) {
+                return hydrated_seq_hdr;
+            }
             if (seq_is_null || seq_varlena.empty()) {
                 return nullptr;
             }
@@ -573,6 +595,9 @@ public:
         }
 
         [[nodiscard]] const pgseq_t* per_row_query_hdr() const {
+            if (hydrated_per_row_query_hdr != nullptr) {
+                return hydrated_per_row_query_hdr;
+            }
             if (per_row_query_is_null || per_row_query_varlena.empty()) {
                 return nullptr;
             }
@@ -654,6 +679,31 @@ private:
      */
     std::vector<std::vector<char>> extra_query_varlenas;
 
+    /*
+     * DOC0260 §9 — per-bucket deferred-hydration machinery. The custom scan
+     * runs with defer_seq_hydration=true, so submit_scan captures only
+     * locators; run_batch_and_build_cursors groups the buffered locators by
+     * bucket_idx and issues one fetch_payload_bulk per non-empty bucket
+     * (each opens that bucket's shards once, scanning them row-number-sorted).
+     * Hydrated payloads live in batch_payload_ctx (reset per batch); the
+     * per-scan db/spc/relfilenode identity is captured by configure_params.
+     */
+    using SM = bioseq::storage::bioseq_default_storage_manager;
+    Oid user_main_database_oid   = InvalidOid;
+    Oid user_main_tablespace_oid = InvalidOid;
+    Oid user_main_relfilenode    = InvalidOid;
+    MemoryContext batch_payload_ctx = nullptr;
+    std::array<std::vector<SM::fetch_request>, SM::bucket_count>
+        per_bucket_target_requests{};
+    std::array<std::vector<SM::fetch_request>, SM::bucket_count>
+        per_bucket_query_requests{};
+    std::vector<SM::fetch_request> fetch_bulk_sort_scratch{};
+    std::vector<pgseq_t*>          hydrated_target_payloads{};
+    std::vector<pgseq_t*>          hydrated_query_payloads{};
+    /* §9.6 EXPLAIN counters. */
+    std::uint64_t explain_bucket_touched_mask      = 0;
+    std::uint64_t explain_storage_bulk_fetch_calls = 0;
+
 public:
     explicit TupleDispatchBuffer(const size_t estimated_tuple_count) {
         buffered_entries.reserve(estimated_tuple_count * 2);
@@ -668,16 +718,42 @@ public:
      */
     void configure_params(const Minimap2Params& params,
                           bool read_sequence_index,
-                          Oid scan_user_relid) {
+                          Oid scan_user_relid,
+                          Oid scan_user_database_oid,
+                          Oid scan_user_tablespace_oid,
+                          Oid scan_user_main_relfilenode) {
         base_params                  = params;
         read_sequence_index_active   = read_sequence_index;
         user_relid                   = scan_user_relid;
+        user_main_database_oid       = scan_user_database_oid;
+        user_main_tablespace_oid     = scan_user_tablespace_oid;
+        user_main_relfilenode        = scan_user_main_relfilenode;
         last_stats                   = BatchExecutionStats{};
+        /*
+         * DOC0260 §9.4 — the payload arena is parented on CurrentMemoryContext
+         * at BeginCustomScan time (the executor per-query context), so the
+         * bulk-fetched pgseq_t* survive the full scan, not just one tuple.
+         */
+        if (batch_payload_ctx == nullptr) {
+            batch_payload_ctx = AllocSetContextCreate(CurrentMemoryContext,
+                "TupleDispatchBuffer payload arena", ALLOCSET_DEFAULT_SIZES);
+        }
+        if (fetch_bulk_sort_scratch.size() < kDispatchBatchCapacity) {
+            fetch_bulk_sort_scratch.resize(kDispatchBatchCapacity);
+        }
     }
 
     [[nodiscard]] const Minimap2Params& base_aligner_params() const { return base_params; }
     [[nodiscard]] const BatchExecutionStats& execution_stats() const { return last_stats; }
     [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
+
+    /* DOC0260 §9.6 — per-scan storage-bucket EXPLAIN counters. */
+    [[nodiscard]] std::uint64_t explain_bucket_touched_bits() const {
+        return explain_bucket_touched_mask;
+    }
+    [[nodiscard]] std::uint64_t explain_bulk_fetch_calls() const {
+        return explain_storage_bulk_fetch_calls;
+    }
 
     /*
      * Record the mmsearch column / pk / query triple extracted from the
@@ -956,11 +1032,22 @@ public:
                  */
                 pgseq_t* src_hdr = reinterpret_cast<pgseq_t*>(
                     PG_DETOAST_DATUM(seq_datum));
-                const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
-                entry.seq_varlena.assign(
-                    reinterpret_cast<const char*>(src_hdr),
-                    reinterpret_cast<const char*>(src_hdr) + total_bytes);
-                entry.seq_is_null = false;
+                if (bioseq::storage::is_locator_stub(src_hdr)) {
+                    /*
+                     * DOC0260 §9.2 — defer_seq_hydration path: capture the
+                     * locator only; run_batch_and_build_cursors bulk-fetches
+                     * the payload per bucket. seq_varlena stays empty.
+                     */
+                    entry.seq_loc =
+                        bioseq::storage::decode_locator_from_stub(src_hdr);
+                    entry.seq_is_null = false;
+                } else {
+                    const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
+                    entry.seq_varlena.assign(
+                        reinterpret_cast<const char*>(src_hdr),
+                        reinterpret_cast<const char*>(src_hdr) + total_bytes);
+                    entry.seq_is_null = false;
+                }
                 /*
                  * Free the detoasted copy if it was distinct from the
                  * original Datum (only the TOAST path actually palloc's).
@@ -1007,11 +1094,18 @@ public:
                 pgseq_t* src_hdr =
                     reinterpret_cast<pgseq_t*>(
                         PG_DETOAST_DATUM(query_datum));
-                const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
-                entry.per_row_query_varlena.assign(
-                    reinterpret_cast<const char*>(src_hdr),
-                    reinterpret_cast<const char*>(src_hdr) + total_bytes);
-                entry.per_row_query_is_null = false;
+                if (bioseq::storage::is_locator_stub(src_hdr)) {
+                    /* DOC0260 §9.2 — per-row query locator (bulk-fetched). */
+                    entry.per_row_query_loc =
+                        bioseq::storage::decode_locator_from_stub(src_hdr);
+                    entry.per_row_query_is_null = false;
+                } else {
+                    const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
+                    entry.per_row_query_varlena.assign(
+                        reinterpret_cast<const char*>(src_hdr),
+                        reinterpret_cast<const char*>(src_hdr) + total_bytes);
+                    entry.per_row_query_is_null = false;
+                }
                 if (reinterpret_cast<void*>(src_hdr)
                     != reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
                     pfree(src_hdr);
@@ -1083,6 +1177,131 @@ public:
     }
 
     /*
+     * DOC0260 §9.3 — per-bucket bulk hydration of one seq column. Groups the
+     * buffered entries that captured a locator for `column_attno` by
+     * bucket_idx and issues one SM::fetch_payload_bulk per non-empty bucket
+     * (each opens that bucket's shards once and scans them row-number-sorted).
+     * The hydrated payloads (palloc'd in batch_payload_ctx) are recorded on
+     * the entry so seq_hdr()/per_row_query_hdr() return them, and written back
+     * into the buffered output slot so a target list projecting the raw seq
+     * column resolves the Var to the materialised payload, not the stub.
+     */
+    void hydrate_one_column(
+            size_t batch_size,
+            bioseq::storage::seq_caches* cache,
+            std::int16_t column_attno,
+            std::array<std::vector<SM::fetch_request>, SM::bucket_count>& per_bucket,
+            std::vector<pgseq_t*>& out_payloads,
+            bool is_query) {
+        for (auto& v : per_bucket) {
+            v.clear();
+        }
+        bool any = false;
+        for (size_t i = 0; i < batch_size; ++i) {
+            const auto& loc = is_query ? buffered_entries[i].per_row_query_loc
+                                       : buffered_entries[i].seq_loc;
+            if (!loc.has_value()) {
+                continue;
+            }
+            per_bucket[loc->bucket_idx].push_back(SM::fetch_request{i, *loc});
+            any = true;
+        }
+        if (!any) {
+            return;
+        }
+        out_payloads.assign(batch_size, nullptr);
+        for (std::uint8_t b = 0; b < SM::bucket_count; ++b) {
+            auto& reqs = per_bucket[b];
+            if (reqs.empty()) {
+                continue;
+            }
+            SM::fetch_payload_bulk(
+                user_main_database_oid, user_main_tablespace_oid,
+                user_main_relfilenode, column_attno, static_cast<std::int16_t>(b),
+                std::span<const SM::fetch_request>{reqs.data(), reqs.size()},
+                std::span<pgseq_t*>{out_payloads.data(), out_payloads.size()},
+                std::span<SM::fetch_request>{fetch_bulk_sort_scratch.data(),
+                                             fetch_bulk_sort_scratch.size()},
+                batch_payload_ctx, cache);
+            explain_bucket_touched_mask |= (std::uint64_t{1} << b);
+            ++explain_storage_bulk_fetch_calls;
+        }
+        for (size_t i = 0; i < batch_size; ++i) {
+            if (out_payloads[i] == nullptr) {
+                continue;
+            }
+            if (is_query) {
+                buffered_entries[i].hydrated_per_row_query_hdr = out_payloads[i];
+            } else {
+                buffered_entries[i].hydrated_seq_hdr = out_payloads[i];
+            }
+            TupleTableSlot* sslot = buffered_entries[i].scan_slot_copy;
+            if (sslot != nullptr) {
+                const int idx = column_attno - 1;
+                if (idx >= 0 && idx < sslot->tts_tupleDescriptor->natts) {
+                    sslot->tts_values[idx] = PointerGetDatum(out_payloads[i]);
+                    sslot->tts_isnull[idx] = false;
+                }
+            }
+        }
+    }
+
+    /*
+     * DOC0260 §9.3 — entry point for per-bucket bulk hydration. Allocates a
+     * short-lived read-side seq_caches (its open shard relations are released
+     * by close_all before destroy), runs the target column and, when present,
+     * the per-row query column. A no-op when no entry captured a locator
+     * (e.g. an inline non-stub value, or no mmsearch column).
+     */
+    void hydrate_locators_by_bucket() {
+        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
+            ? kDispatchBatchCapacity
+            : buffered_entries.size();
+        bool any_locator = false;
+        for (size_t i = 0; i < batch_size; ++i) {
+            if (buffered_entries[i].seq_loc.has_value()
+                || buffered_entries[i].per_row_query_loc.has_value()) {
+                any_locator = true;
+                break;
+            }
+        }
+        if (!any_locator) {
+            return;
+        }
+        if (batch_payload_ctx == nullptr) {
+            batch_payload_ctx = AllocSetContextCreate(CurrentMemoryContext,
+                "TupleDispatchBuffer payload arena", ALLOCSET_DEFAULT_SIZES);
+        }
+        if (fetch_bulk_sort_scratch.size() < batch_size) {
+            fetch_bulk_sort_scratch.resize(batch_size);
+        }
+
+        bioseq::storage::seq_caches* cache =
+            bioseq::storage::alloc_seq_caches(batch_payload_ctx);
+        cache->side                = bioseq::storage::seq_caches::Side::Read;
+        cache->lock_mode           = AccessShareLock;
+        cache->read_state_mctx     = batch_payload_ctx;
+        cache->main_database_oid   = user_main_database_oid;
+        cache->main_tablespace_oid = user_main_tablespace_oid;
+        cache->main_relfilenode    = user_main_relfilenode;
+
+        hydrate_one_column(batch_size, cache,
+            static_cast<std::int16_t>(mmsearch_context.seq_attno),
+            per_bucket_target_requests, hydrated_target_payloads,
+            /*is_query=*/false);
+
+        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+            hydrate_one_column(batch_size, cache,
+                static_cast<std::int16_t>(mmsearch_context.per_row_query_attno),
+                per_bucket_query_requests, hydrated_query_payloads,
+                /*is_query=*/true);
+        }
+
+        cache->close_all(/*commit=*/false);
+        bioseq::storage::destroy_seq_caches(cache);
+    }
+
+    /*
      * Batch-phase transition. Called when the access method returns
      * TupIsNull. Invokes BatchProcessor::process_sequences on the
      * buffered target varlenas plus the stashed query varlena; stashes
@@ -1092,6 +1311,12 @@ public:
      * inside process_sequences via pgseq_t::dispatch_instance.
      */
     void run_batch_and_build_cursors() {
+        /*
+         * DOC0260 §9.3 — hydrate buffered locators in per-bucket bulk before
+         * any downstream consumer reads seq_hdr() / per_row_query_hdr().
+         */
+        hydrate_locators_by_bucket();
+
         std::array<const pgseq_t*, kDispatchBatchCapacity> target_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
         std::array<typename BatchProcessor::TargetIndexBlobRef,
@@ -1416,6 +1641,17 @@ public:
         match_map.clear();
         output_cursors.clear();
         output_position = -1;
+        /*
+         * DOC0260 §9.5 — the bulk-fetched payloads (and the per-row query
+         * payloads) live in batch_payload_ctx and are valid until exactly
+         * here: clear_slots() runs after the batch's output has been drained
+         * and before the next buffering cycle (e.g. a Nested Loop rescan), so
+         * resetting now reclaims the previous batch's payload arena without
+         * dangling any hydrated_seq_hdr the just-cleared entries referenced.
+         */
+        if (batch_payload_ctx != nullptr) {
+            MemoryContextReset(batch_payload_ctx);
+        }
     }
 
     /*

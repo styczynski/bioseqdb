@@ -1961,13 +1961,21 @@ using ::bioseq::common::templating::value_sequence;
 
 /// Canonical k-mer values the bench/postgres paths instantiate.  The leading
 /// entry is the default for non-canonical kmer_size — see kmer_size_default.
-inline constexpr std::array<std::size_t, 3> kmer_size_buckets = {
+///
+/// DOC0271 Phase 1 / PIPELINE_TEMPLATE_BRANCHING_LEVEL — the array's SIZE must
+/// match its element count, not be hard-coded to 3. A `std::array<size_t, 3>`
+/// with only `{15u}` initialised silently zeroes the trailing two slots, and
+/// the consteval dispatch table then enumerates K=0, which instantiates
+/// `MinimizerRepr<63, 0>` whose `hash_shift` equals `sizeof(storage_t)*8` and
+/// trips an undefined-shift constexpr error in `index.cppm:151`. `std::to_array`
+/// deduces the array size from the initialiser so the two stay in lockstep.
+inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
     #if PIPELINE_TEMPLATE_BRANCHING_LEVEL <= 1
-    15u,
+    15u
     #else
-    15u, 7u, 27u,
+    15u, 7u, 27u
     #endif
-};
+});
 
 /// `bit_width(max(max_bp - 1, 1))` clamped into `[K, 63]` — the smallest
 /// `L` such that `2^L > max_bp - 1`, lifted up to `K` so the resulting

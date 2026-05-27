@@ -228,6 +228,7 @@ static void insert_heap_row(Oid relid, int num_attrs, Datum* values, const bool*
 
 export void sidecar_write_meta(Oid user_relid, int64_t rowno,
 							   int16_t alphabet_code,
+							   int16_t column_attno,
 							   const int64_t* counts, int num_counts)
 {
 	const SidecarOids& oids = get_sidecar_oids();
@@ -236,15 +237,19 @@ export void sidecar_write_meta(Oid user_relid, int64_t rowno,
 	}
 	ArrayType* arr = make_int8_array(counts, num_counts);
 
-	Datum values[4];
-	bool  nulls[4]  = { false, false, false, false };
+	/* DOC0260 §11.1 — column_attno is the 5th column / 3rd PK component so
+	 * multi-SEQ-column tables get one meta row per (relid, rowno, column). */
+	Datum values[5];
+	bool  nulls[5]  = { false, false, false, false, false };
 	values[0] = ObjectIdGetDatum(user_relid);
 	values[1] = Int64GetDatum(rowno);
 	values[2] = Int16GetDatum(alphabet_code);
 	values[3] = PointerGetDatum(arr);
-	insert_heap_row(oids.meta_sidecar_relid, 4, values, nulls);
-	JustLog("[bioseq] sidecar: wrote meta row (relid={}, rowno={}, alphabet={}, n_counts={})",
+	values[4] = Int16GetDatum(column_attno);
+	insert_heap_row(oids.meta_sidecar_relid, 5, values, nulls);
+	JustLog("[bioseq] sidecar: wrote meta row (relid={}, rowno={}, attno={}, alphabet={}, n_counts={})",
 			static_cast<unsigned>(user_relid), rowno,
+			static_cast<int>(column_attno),
 			static_cast<int>(alphabet_code), num_counts);
 
 	pfree(arr);
@@ -313,6 +318,7 @@ export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
  * stack buffer to hold the counts plus a couple of spares so the function
  * never needs to heap-allocate here. */
 export void sidecar_compute_and_write_meta(Oid user_relid, int64_t rowno,
+										   int16_t column_attno,
 										   const pgseq_t* hdr)
 {
 	if (hdr == nullptr) {
@@ -335,6 +341,7 @@ export void sidecar_compute_and_write_meta(Oid user_relid, int64_t rowno,
 
 	sidecar_write_meta(user_relid, rowno,
 					   static_cast<int16_t>(hdr->alphabet_code),
+					   column_attno,
 					   counts, num_counts);
 }
 
@@ -383,32 +390,38 @@ export void sidecar_after_insert(Relation user_rel,
 	}
 
 	TupleDesc td = slot->tts_tupleDescriptor;
-	AttrNumber seq_attno = InvalidAttrNumber;
+	const int64_t rowno = static_cast<int64_t>(written_row_number);
+	AttrNumber first_seq_attno = InvalidAttrNumber;
+
+	/*
+	 * DOC0260 §11.1 (consolidated-review I12) — write one meta_sidecar row
+	 * per bioseq.seq column, keyed by column_attno, so a table with several
+	 * SEQ columns no longer collides every column onto a single
+	 * (user_relid, rowno) row. The index_sidecar is keyed only by
+	 * (user_relid, rowno) in Phase A (its per-shard split is Item 11, not yet
+	 * wired into the dispatch-buffer read path), so it is written once for the
+	 * first SEQ column to avoid a duplicate-key violation.
+	 */
 	for (int i = 0; i < td->natts; ++i) {
 		Form_pg_attribute attr = TupleDescAttr(td, i);
-		if (attr->atttypid == oids.bioseq_seq_type_oid) {
-			seq_attno = static_cast<AttrNumber>(i + 1);
-			break;
+		if (attr->atttypid != oids.bioseq_seq_type_oid) {
+			continue;
+		}
+		const AttrNumber attno = static_cast<AttrNumber>(i + 1);
+		if (slot->tts_isnull[attno - 1]) {
+			continue;          /* NULL seq column; skip */
+		}
+		const pgseq_t* hdr = reinterpret_cast<const pgseq_t*>(
+			DatumGetPointer(detoasted_values[attno - 1]));
+
+		sidecar_compute_and_write_meta(rel_oid, rowno,
+									   static_cast<int16_t>(attno), hdr);
+
+		if (first_seq_attno == InvalidAttrNumber) {
+			first_seq_attno = attno;
+			sidecar_compute_and_write_index(rel_oid, rowno, hdr);
 		}
 	}
-	if (seq_attno == InvalidAttrNumber) {
-		return;          /* no bioseq.seq column; nothing to write */
-	}
-	if (slot->tts_isnull[seq_attno - 1]) {
-		return;          /* NULL seq column; skip */
-	}
-
-	const pgseq_t* hdr = reinterpret_cast<const pgseq_t*>(
-		DatumGetPointer(detoasted_values[seq_attno - 1]));
-
-	/* Meta first: computing a symbol tally is cheap and gives us a consistent
-	 * meta_sidecar row even if index-side computation fails later. */
-	sidecar_compute_and_write_meta(rel_oid,
-								   static_cast<int64_t>(written_row_number),
-								   hdr);
-	sidecar_compute_and_write_index(rel_oid,
-									static_cast<int64_t>(written_row_number),
-									hdr);
 }
 
 /* ---------------------------------------------------------------- */
@@ -608,7 +621,8 @@ export struct SymbolCounts {
  * stored symbol_counts[] array inside a stack-sized SymbolCounts struct,
  * or empty optional when the row is missing. Uses the same PK-btree
  * fast-path as sidecar_read_index. */
-export std::optional<SymbolCounts> sidecar_read_meta_counts(Oid user_relid, int64_t rowno) {
+export std::optional<SymbolCounts> sidecar_read_meta_counts(Oid user_relid, int64_t rowno,
+															int16_t column_attno) {
 	const SidecarOids& oids = get_sidecar_oids();
 	if (oids.meta_sidecar_relid == InvalidOid) {
 		return std::nullopt;
@@ -624,17 +638,23 @@ export std::optional<SymbolCounts> sidecar_read_meta_counts(Oid user_relid, int6
 		JustLog("[bioseq] sidecar: meta_sidecar has no primary-key btree; falling back to seqscan");
 	}
 
-	ScanKeyData keys[2];
+	/* DOC0260 §11.1 — three-part key (user_relid, sequence_rowno, column_attno).
+	 * systable_beginscan takes heap attribute numbers and remaps them to the
+	 * PK index's columns, so column_attno is heap attr 5. */
+	ScanKeyData keys[3];
 	ScanKeyInit(&keys[0], 1 /*user_relid*/,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(user_relid));
 	ScanKeyInit(&keys[1], 2 /*sequence_rowno*/,
 				BTEqualStrategyNumber, F_INT8EQ,
 				Int64GetDatum(rowno));
+	ScanKeyInit(&keys[2], 5 /*column_attno*/,
+				BTEqualStrategyNumber, F_INT2EQ,
+				Int16GetDatum(column_attno));
 
 	SysScanDesc scan = systable_beginscan(rel, pk_index_oid,
 										  /*indexOK=*/ pk_index_oid != InvalidOid,
-										  NULL /*snapshot*/, 2, keys);
+										  NULL /*snapshot*/, 3, keys);
 
 	std::optional<SymbolCounts> result;
 	HeapTuple tup = systable_getnext(scan);
@@ -832,7 +852,7 @@ template <typename WriteOne>
 		const int64_t rowno = static_cast<int64_t>(
 			tid_to_row_number(slot->tts_tid));
 
-		write_one(user_relid, rowno, hdr);
+		write_one(user_relid, rowno, static_cast<int16_t>(seq_attno), hdr);
 		++written;
 
 		if ((written & 0x3FFF) == 0) {
@@ -867,7 +887,7 @@ export [[nodiscard]] int64_t recompute_per_row_index_for_relid(Oid user_relid) {
 		user_relid, oids.index_sidecar_relid,
 		"DELETE FROM bioseq_internal.index_sidecar WHERE user_relid = $1",
 		"minimizers",
-		[](Oid relid, int64_t rowno, const pgseq_t* hdr) {
+		[](Oid relid, int64_t rowno, int16_t /*column_attno*/, const pgseq_t* hdr) {
 			sidecar_compute_and_write_index(relid, rowno, hdr);
 		});
 }
@@ -879,8 +899,8 @@ export [[nodiscard]] int64_t recompute_per_row_meta_for_relid(Oid user_relid) {
 		user_relid, oids.meta_sidecar_relid,
 		"DELETE FROM bioseq_internal.meta_sidecar WHERE user_relid = $1",
 		"symbol_counts",
-		[](Oid relid, int64_t rowno, const pgseq_t* hdr) {
-			sidecar_compute_and_write_meta(relid, rowno, hdr);
+		[](Oid relid, int64_t rowno, int16_t column_attno, const pgseq_t* hdr) {
+			sidecar_compute_and_write_meta(relid, rowno, column_attno, hdr);
 		});
 }
 

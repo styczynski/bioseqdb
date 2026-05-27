@@ -2012,6 +2012,29 @@ public:
         return offsetof(compact_sequence_stdc, data);
     }
 
+    /// Encode `total_bytes` as a PostgreSQL 4-byte (uncompressed) varlena
+    /// header value for `vl_len_`. On little-endian platforms (the project
+    /// target, macOS arm64) this is the exact bit pattern PG's
+    /// `SET_VARSIZE_4B` writes: `length << 2`, leaving the low two format
+    /// bits clear so PG's `VARATT_IS_4B_U` / `VARSIZE` read it as a plain
+    /// uncompressed varlena of `total_bytes` bytes.
+    ///
+    /// We must NOT store the raw byte count here: although the C++ side
+    /// never reads `vl_len_` (sizes are derived from `bp_size` /
+    /// `unit_count()` / `header_bytes()`), every PostgreSQL varlena
+    /// operation that touches the value — `datumCopy`, tuple storage,
+    /// `PG_DETOAST_DATUM` with a copy — reads `VARSIZE(vl_len_) =
+    /// vl_len_ >> 2`. A raw byte count makes VARSIZE return a quarter of the
+    /// real size, truncating the value and corrupting every read that goes
+    /// through PG's machinery (DOC0268 Appendix). We replicate the encoding
+    /// here rather than call `SET_VARSIZE` because this module is shared with
+    /// the NO_POSTGRES standalone build, which has no PostgreSQL headers.
+    [[nodiscard]] static constexpr varlena_header_t
+    encode_varlena_header(std::size_t total_bytes) noexcept {
+        return static_cast<varlena_header_t>(
+            static_cast<std::uint32_t>(total_bytes) << 2);
+    }
+
     /// Runtime → compile-time fanout: pin the alphabet from alphabet_code,
     /// pin the storage_unit byte width, invoke `handler.template operator()
     /// <compact_sequence_stdc_instance<this-type, A, BW>>()` exactly once.
@@ -2409,8 +2432,7 @@ compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::r
 
     auto* hdr = std::forward<Alloc>(alloc)(total_bytes);
     if (hdr == nullptr) return nullptr;
-    hdr->vl_len_                 =
-        static_cast<typename compact_sequence_stdc::varlena_header_t>(total_bytes);
+    hdr->vl_len_                 = encode_varlena_header(total_bytes);
     hdr->alphabet_code           =
         supported_alphabets_t::template index_of<alphabet_t>();
     hdr->storage_unit_byte_width = target_storage_byte_width;
@@ -2488,8 +2510,7 @@ compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::c
                 result = nullptr;
                 return;
             }
-            hdr->vl_len_                 =
-                static_cast<typename compact_sequence_stdc::varlena_header_t>(total_bytes);
+            hdr->vl_len_                 = encode_varlena_header(total_bytes);
             hdr->alphabet_code           =
                 supported_alphabets_t::template index_of<alphabet_t>();
             hdr->storage_unit_byte_width = static_cast<std::uint8_t>(BW);
@@ -2544,8 +2565,7 @@ compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::r
         header_bytes() + round_up_to_uint64(payload_bytes_value);
     compact_sequence_stdc* dst = std::forward<Alloc>(alloc)(total_bytes);
     if (dst == nullptr) return nullptr;
-    dst->vl_len_                 =
-        static_cast<typename compact_sequence_stdc::varlena_header_t>(total_bytes);
+    dst->vl_len_                 = encode_varlena_header(total_bytes);
     dst->alphabet_code           = alphabet_code;
     dst->storage_unit_byte_width = target_byte_width;
     dst->bp_size                 = bp_size;

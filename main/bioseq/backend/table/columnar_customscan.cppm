@@ -14,6 +14,17 @@
  *-------------------------------------------------------------------------
  */
 module;
+// DOC0192 — pull <hwy/highway.h> into THIS TU's global module fragment so that
+// when columnar_customscan imports multiple HWY-wrapped module BMIs
+// (bioseq_sequences, bioseq_sequences.simd, bioseq_sequences.minimap_port,
+// bioseq_sequences.pipe, bioseq_sidecar, bioseq_scheduler.dispatch_buffer,
+// bioseq_types.pg_compact_sequence), clang's loader has a TU-local "anchor"
+// copy of `hwy::N_NEON::*` to collapse the per-BMI copies against. Without
+// this anchor the loader can't merge them and emits
+// `definition with same mangled name '_ZN3hwy6N_NEONL7BitCast...' as another
+// definition`. Mirrors the fix applied to bioseq_io_bench/bench_test.cpp
+// (DOC0192 §6). common_simd.h forwards #include <hwy/highway.h>.
+#include "common_simd.h"
 #include "common.h"
 
 #include <algorithm>
@@ -38,12 +49,15 @@ import bioseq_table_types;
 import bioseq_scan_state;
 import pg_utils;
 import bioseq_scheduler.dispatch_buffer;
+import bioseq_sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
+import bioseq_sequences.simd;             // stdc_recode_to_type_params
 import bioseq_sequences.minimap_port;  // for MatchResult
 import bioseq_sequences.pipe;            // for PipelineDescription / describe_pipeline_for
 import bioseq_cigar;                    // for format_cigar
 import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
 import bioseq_sidecar;                   // meta_sidecar reads for symbol_count fast path
 import bioseq_instr;                      // runtime profiler — summary at scan end
+import sequan_compat;                     // seq:: alphabet alias used by sequence_custom_alphabet
 
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
@@ -60,6 +74,14 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple);
+extern "C++" TableScanDesc
+bioseq_beginscan_deferred(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple);
+extern "C++" void bioseq_hydrate_scan_slot(TableScanDesc sscan, TupleTableSlot* slot, bool force);
 
 
 /*
@@ -177,6 +199,7 @@ struct SymbolCountCallSite {
 	Const*      placeholder   = nullptr;
 	int         rank          = -1;
 	char        letter        = '\0';
+	int16_t     column_attno  = 0;   // DOC0260 §11.1 — which SEQ column this counts
 	std::string column_name;    // attname for EXPLAIN output
 };
 
@@ -3305,8 +3328,6 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		const bool is_v = IsA(a1, Var)
 			&& reinterpret_cast<Var*>(a1)->varno == v0->varno
 			&& reinterpret_cast<Var*>(a1)->varattno > 0;
-		JustLog("[bioseq] pg: BeginCustomScan() classifier sees mmsearch arg1 nodeTag={} is_const={} is_param={} is_var_same_rel={}",
-				static_cast<int>(nodeTag(a1)), is_c, is_p, is_v);
 		if (!is_c && !is_p && !is_v) {
 			JustLog("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 nodeTag={} is not Const/Param/same-rel-Var)",
 					static_cast<int>(nodeTag(a1)));
@@ -3779,9 +3800,23 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		cscanstate->ss.ss_currentRelation != nullptr
 			? RelationGetRelid(cscanstate->ss.ss_currentRelation)
 			: InvalidOid;
+	/*
+	 * DOC0260 §9.4 — pass the parent's three-part physical identity
+	 * (database, tablespace, relfilenode) so the dispatch buffer can route
+	 * its per-bucket SM::fetch_payload_bulk calls to the right sub-tables.
+	 */
+	Oid scan_db_oid  = InvalidOid;
+	Oid scan_spc_oid = InvalidOid;
+	Oid scan_relfile = InvalidOid;
+	if (cscanstate->ss.ss_currentRelation != nullptr) {
+		scan_db_oid  = cscanstate->ss.ss_currentRelation->rd_locator.dbOid;
+		scan_spc_oid = cscanstate->ss.ss_currentRelation->rd_locator.spcOid;
+		scan_relfile = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
+	}
 	runtime.buffer.configure_params(aligner_params,
 							features.has_mmsearch && bioseq_read_sequence_index,
-							resolved_user_relid);
+							resolved_user_relid,
+							scan_db_oid, scan_spc_oid, scan_relfile);
 
 	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
@@ -4023,6 +4058,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	site.placeholder = placeholder;
 	site.rank        = rank;
 	site.letter      = letter_char;
+	site.column_attno = static_cast<int16_t>(col_var->varattno);  // DOC0260 §11.1
 	if (ctx->current_relation != nullptr
 		&& col_var->varattno >= 1) {
 		char* attname_cstr = get_attname(
@@ -4183,11 +4219,17 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 		return;
 	}
 
-	auto counts = bioseq::sidecar::sidecar_read_meta_counts(user_relid, sequence_rowno);
+	/*
+	 * DOC0260 §11.1 — read meta per SEQ column (keyed by column_attno) so
+	 * symbol_count(seqN) on a multi-SEQ-column table resolves the right
+	 * column's counts instead of always reading the first column's row.
+	 */
 	for (auto& site : consts.symbol_count_sites) {
 		if (site.placeholder == nullptr) {
 			continue;
 		}
+		auto counts = bioseq::sidecar::sidecar_read_meta_counts(
+			user_relid, sequence_rowno, site.column_attno);
 		if (!counts.has_value()
 			|| site.rank < 0
 			|| static_cast<std::size_t>(site.rank) >= counts->size) {
@@ -4197,10 +4239,9 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 		site.placeholder->constvalue = Int64GetDatum(counts->values[site.rank]);
 		site.placeholder->constisnull = false;
 	}
-	JustLog("[bioseq] pg: populate_symbol_count_placeholders relid={} rowno={} sites={} hit={}",
+	JustLog("[bioseq] pg: populate_symbol_count_placeholders relid={} rowno={} sites={} (per-column reads)",
 			static_cast<unsigned>(user_relid), sequence_rowno,
-			consts.symbol_count_sites.size(),
-			counts.has_value());
+			consts.symbol_count_sites.size());
 }
 
 
@@ -4379,6 +4420,21 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 */
 			if (!rowFound)
 				continue;
+		}
+
+		/*
+		 * DOC0260 §9 — the scan runs with defer_seq_hydration=true, so `slot`
+		 * carries 40-byte locator stubs. When there is an mmsearch qual the
+		 * row is buffered (submit_scan captures the locator; the batch path
+		 * bulk-hydrates per bucket), so we leave the stub in place. Without an
+		 * mmsearch qual the row is projected immediately below, so hydrate the
+		 * SEQ columns now (force=true overrides the defer flag) — this covers
+		 * both the scalar and vectorized convergence and is the analogue of
+		 * the inline hydration bioseq_getnextslot performs on non-deferred
+		 * scan paths.
+		 */
+		if (!runtime.buffer.mmsearch_active()) {
+			bioseq_hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
 		}
 
 		/*
@@ -4607,7 +4663,14 @@ ColumnarScanNext(BioseqScanState *columnarScanState)
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
-		scandesc = bioseq_beginscan_extended(node->ss.ss_currentRelation,
+		/*
+		 * DOC0260 §8/§9 — the custom scan defers SEQ-column hydration: the
+		 * TAM returns 40-byte locator stubs and the dispatch buffer hydrates
+		 * them in per-bucket bulk (mmsearch path) or the non-batched branch
+		 * hydrates the projected slot inline. All other scan paths leave the
+		 * flag off and the TAM auto-hydrates each row.
+		 */
+		scandesc = bioseq_beginscan_deferred(node->ss.ss_currentRelation,
 											   columnarScanState->snapshot,
 											   0, NULL, NULL, flags,
 											   columnarScanState->attrNeeded,
@@ -5195,8 +5258,14 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							 */
 							const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
 							const auto col_width = explain_runtime->buffer.mmsearch_storage_unit_byte_width();
-							const auto width_to_bits = [](uint8_t code) {
-								return static_cast<unsigned>(8u << code);
+							// mmsearch_storage_unit_byte_width() returns the
+							// storage unit width in BYTES (1/2/4/8), so the
+							// typmod width in bits is byte_width * 8 (e.g. 4
+							// bytes -> seq('dna4', 32)). The previous
+							// `8u << byte_width` formula treated the byte count
+							// as a log2 code and rendered 4 bytes as 128.
+							const auto width_to_bits = [](uint8_t byte_width) {
+								return static_cast<unsigned>(byte_width) * 8u;
 							};
 							const auto col_name =
 								pgseq_supported_alphabets::name_of_alphabet_code(col_alpha);

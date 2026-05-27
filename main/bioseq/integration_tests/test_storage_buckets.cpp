@@ -170,9 +170,14 @@ TEST_CASE("DOC0260 — DROP TABLE cascades to every sub-table",
             == 0);
     REQUIRE(query_scalar_int(
                 ctx,
+                // Per-shard relations are named seq_sub_<db>_<spc>_... (a
+                // digit follows the prefix); the catalog table itself is
+                // bioseq_internal.seq_sub_table, which must NOT be counted
+                // here. Anchor on a digit so the catalog + its indexes are
+                // excluded.
                 "SELECT count(*) FROM pg_class WHERE "
                 "relnamespace = 'bioseq_internal'::regnamespace "
-                "AND (relname LIKE 'seq_sub_%' OR relname LIKE 'idx_sidecar_%');")
+                "AND (relname ~ '^seq_sub_[0-9]' OR relname LIKE 'idx_sidecar_%');")
             == 0);
 }
 
@@ -251,4 +256,44 @@ TEST_CASE("DOC0260 — round-trip via USING bioseq table preserves payload bytes
     REQUIRE(rows[0][1].value() == "12");
     REQUIRE(rows[1][0].value() == "TTTTAAAA");
     REQUIRE(rows[1][1].value() == "8");
+}
+
+// DOC0260 §13/§12.2 — end-to-end coverage. The whole point of Phase A is that
+// existing queries (mmsearch in particular) keep working transparently while
+// the payload lives in sub-tables. This test seeds the canonical hoe fixture
+// (sequences spanning multiple length buckets), checks the sub-table catalog
+// has rows under the parent's relfilenode, then runs mmsearch and asserts the
+// match set is non-empty. A non-empty match is the smoking gun that the
+// hydration path actually reaches into the sub-tables and returns real
+// payload bytes — the spec is explicit that "select with mmsearch that
+// returns empty result set is not a proof that anything works."
+TEST_CASE("DOC0260 — mmsearch end-to-end exercises hydration from sub-tables",
+          "[integration][storage-buckets][e2e][mmsearch]") {
+    constexpr std::string_view kHoe = "phase_a_e2e_hoe";
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+
+    // Sub-tables exist under the parent's relfilenode triple.
+    const long long shards = query_scalar_int(
+        ctx,
+        fmt::format(
+            "SELECT count(*) FROM bioseq_internal.seq_sub_table s "
+            "WHERE s.main_relfilenode = (SELECT relfilenode FROM pg_class "
+            "WHERE relname='{}');",
+            kHoe));
+    REQUIRE(shards >= 1);
+
+    // mmsearch returns matching rows. The hoe seed has 5 rows that all
+    // contain the canonical probe (or a near-match); the exact result set
+    // depends on the aligner, so we only assert non-empty + that all PKs
+    // are in the seeded range.
+    const auto matched_pks = query_int_column(
+        ctx,
+        fmt::format(
+            "SELECT pk FROM {} WHERE mmsearch(seq0, {}) ORDER BY pk;",
+            kHoe, hoe_probe_literal()));
+    REQUIRE(matched_pks.size() >= 1);
+    for (const auto pk : matched_pks) {
+        REQUIRE((pk >= 1 && pk <= 5));
+    }
 }

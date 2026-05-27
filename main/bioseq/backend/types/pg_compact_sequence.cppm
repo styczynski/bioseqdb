@@ -554,9 +554,65 @@ Datum pg_compact_sequence_recv(PG_FUNCTION_ARGS)
 } // extern "C"
 
 namespace {
+
+// DOC0260 §5.2 — locator stub marker (bit 7 of storage_unit_byte_width).
+// Replicated inline here so pg_compact_sequence does not need to import
+// bioseq_storage (which would close a module-graph cycle with
+// bioseq_table:access_method). The discriminator and the
+// `total_bp_size` field offset inside the stub's data[] match the
+// canonical definition in `sequence_storage_manager.cppm` (the
+// `static_assert(offsetof(seq_locator, total_bp_size) == 8)` there is
+// the source of truth — if it ever fires, update this offset in
+// lockstep).
+constexpr std::uint8_t kLocatorStubMarkerLocal = 0x80;
+constexpr std::size_t  kLocatorTotalBpSizeOffset = 8;
+
+[[nodiscard]] [[gnu::always_inline]]
+inline bool pgseq_is_locator_stub(const pgseq_t* hdr) noexcept {
+	return hdr != nullptr
+	    && (static_cast<std::uint8_t>(hdr->storage_unit_byte_width)
+	        & kLocatorStubMarkerLocal) != 0u;
+}
+
+[[nodiscard]] [[gnu::always_inline]]
+inline std::uint64_t pgseq_locator_total_bp_size(const pgseq_t* hdr) noexcept {
+	std::uint64_t out = 0;
+	std::memcpy(&out,
+	            reinterpret_cast<const char*>(hdr->data)
+	                + kLocatorTotalBpSizeOffset,
+	            sizeof(out));
+	return out;
+}
+
 [[nodiscard]] inline int pg_compact_sequence_cmp_internal(
 	const pgseq_t* a, const pgseq_t* b)
 {
+	// DOC0260 §5.5 / R12 — when either operand is a locator stub the real
+	// payload lives in a sub-table; comparing the stub bytes via
+	// `stdc_compare` would dereference the encoded pointer fields as if
+	// they were bit-packed letters and crash. The columnar writer's
+	// chunk-skip min/max computation (`UpdateChunkSkipNodeMinMax`) IS
+	// invoked on stubs because the main-relation rows hold stubs in place
+	// of the payload (R11 keeps the slot's tts_values pointing at the
+	// original sequence for `ExecInsertIndexTuples`, but
+	// `ColumnarWriteRow` itself receives the stub via `values_for_write`).
+	// Provide a stub-safe ordering keyed on the encoded `total_bp_size`
+	// (the only stub field with a meaningful, monotone value). Real-real
+	// comparisons still go through `stdc_compare`; stub-vs-real is a
+	// rare cross-shape case that we serialise by length so the chunk-skip
+	// stats stay self-consistent.
+	const bool a_stub = pgseq_is_locator_stub(a);
+	const bool b_stub = pgseq_is_locator_stub(b);
+	if (a_stub || b_stub) {
+		const std::uint64_t la = a_stub ? pgseq_locator_total_bp_size(a)
+		                                : static_cast<std::uint64_t>(a->bp_size);
+		const std::uint64_t lb = b_stub ? pgseq_locator_total_bp_size(b)
+		                                : static_cast<std::uint64_t>(b->bp_size);
+		if (la < lb) return -1;
+		if (la > lb) return  1;
+		return 0;
+	}
+
 	if (a->get_type_params() != b->get_type_params()
 	    && a->alphabet_code != b->alphabet_code)
 		ereport(ERROR,

@@ -2572,7 +2572,7 @@ inline StdcT* stdc_convert_from_cstr(
                 return;
             }
             hdr->vl_len_                 =
-                static_cast<typename StdcT::varlena_header_t>(total_bytes);
+                StdcT::encode_varlena_header(total_bytes);
             hdr->alphabet_code           =
                 StdcT::supported_alphabets_type::template index_of<alphabet_t>();
             hdr->storage_unit_byte_width = static_cast<std::uint8_t>(BW);
@@ -2628,8 +2628,30 @@ inline StdcT* stdc_recode_to_type_params(
     Alloc&& alloc)
 {
     if (target.alphabet_code == src.alphabet_code) {
-        return src.recast_storage_width(target.storage_unit_byte_width,
-                                         std::forward<Alloc>(alloc));
+        // Same alphabet, width change. recast_storage_width copies the
+        // packed payload with a raw memcpy, which preserves the sequence
+        // ONLY when the alphabet's letters pack identically across storage
+        // widths — i.e. each byte holds a whole number of letters
+        // (8 % letter_bit_width == 0). dna4 (2 bits/letter) qualifies; dna5
+        // (3 bits/letter) does NOT — its letters straddle byte boundaries
+        // differently at each width, so a memcpy garbles the value
+        // (DOC0268 Appendix: 'ACGTN'::seq('dna5',32) decoded as "ACACG").
+        // For non-byte-aligned alphabets fall through to the
+        // alphabet-preserving ASCII round-trip below, which re-packs the
+        // letters correctly for the target width.
+        bool byte_aligned = false;
+        StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
+            src.alphabet_code,
+            [&byte_aligned]<class A>() {
+                constexpr std::size_t lbw =
+                    seqan3::detail::ceil_log2(
+                        static_cast<std::size_t>(seqan3::alphabet_size<A>));
+                byte_aligned = (lbw != 0u) && (8u % lbw == 0u);
+            });
+        if (byte_aligned) {
+            return src.recast_storage_width(target.storage_unit_byte_width,
+                                            std::forward<Alloc>(alloc));
+        }
     }
     StdcT* result = nullptr;
     StdcT::supported_alphabets_type::dispatch_alphabet_by_code(target.alphabet_code,

@@ -2861,9 +2861,18 @@ UpdateSubTableShardBytesWritten(Oid database_oid, Oid tablespace_oid, Oid main_r
 		current.bytes_written + delta_bytes;
 	const std::uint64_t new_total_payload =
 		current.total_payload_bytes + delta_bytes;
+	// DOC0260 §10.2 — is_full is driven only by a real byte cap. The cap=0
+	// shard-per-insert sentinel is implemented entirely by the insert_payload
+	// rollover (which, when the active shard already holds a row, marks it full
+	// and allocates the next shard, passing cap_bytes=1 so this branch flips
+	// is_full). We deliberately do NOT mark a shard full here merely because
+	// cap_bytes==0: the per-commit byte flush from close_all must leave a
+	// single-row shard ACTIVE so the next insert's rollover is the one (and
+	// only) place that advances the shard index — keeping the full-marking and
+	// the new-shard creation in one transaction, exactly like the normal
+	// byte-cap rollover.
 	const bool now_full = current.is_full
-		|| (cap_bytes != 0 && new_bytes_written >= cap_bytes)
-		|| (cap_bytes == 0 && delta_bytes > 0);
+		|| (cap_bytes != 0 && new_bytes_written >= cap_bytes);
 
 	Datum newValues[Natts_seq_sub_table] = { 0 };
 	bool  newNulls [Natts_seq_sub_table] = { false };
@@ -2879,7 +2888,6 @@ UpdateSubTableShardBytesWritten(Oid database_oid, Oid tablespace_oid, Oid main_r
 
 	HeapTuple newTuple = heap_modify_tuple(oldTuple, td, newValues, newNulls, doReplace);
 	CatalogTupleUpdate(rel, &oldTuple->t_self, newTuple);
-
 	systable_endscan(scan);
 	heap_freetuple(newTuple);
 	table_close(rel, RowExclusiveLock);

@@ -203,6 +203,27 @@ bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 		returnVectorizedTuple, /*defer_seq_hydration=*/false);
 }
 
+/*
+ * DOC0260 §8/§9 — the custom scan's deferred-hydration entry point. Same
+ * signature as bioseq_beginscan_extended but turns the deferred-hydration
+ * flag on, so bioseq_getnextslot returns locator stubs verbatim and the
+ * dispatch buffer hydrates them in per-bucket bulk. extern "C++" (global
+ * module fragment) so columnar_customscan — not a partition of
+ * bioseq_table — can forward-declare and link against it.
+ */
+extern "C++" TableScanDesc
+bioseq_beginscan_deferred(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple)
+{
+	return bioseq_beginscan_with_options(relation, snapshot, nkeys, key,
+		parallel_scan, flags, attr_needed, scanQual, parallelColumnarScan,
+		returnVectorizedTuple, /*defer_seq_hydration=*/true);
+}
+
 TableScanDesc
 bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
@@ -485,6 +506,44 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 			attno, loc_decoded, payload_mctx, cache);
 		slot->tts_values[idx] = PointerGetDatum(real);
 	}
+}
+
+/*
+ * DOC0260 Phase A — hydrate SEQ-column stubs on a scalar slot produced by
+ * the *vectorized* scan path. The scalar getnextslot path hydrates inline
+ * (see bioseq_getnextslot below), but when returnVectorizedTuple is set the
+ * TAM fills a vector slot without hydration; the custom scan then extracts
+ * scalar tuples via ExtractTupleFromVectorSlot, which carry raw 40-byte
+ * locator stubs. This wrapper lets columnar_customscan hydrate that extracted
+ * slot using the scan's own per-scan seq_cache / scanContext, so a projected
+ * (or join-Param-bound) seq value is the real payload rather than a stub.
+ *
+ * Wrapped in `extern "C++"` (global module fragment) so the custom scan —
+ * which is not a partition of bioseq_table — can forward-declare and link
+ * against it without importing the full table-AM module, exactly like
+ * tid_to_row_number below.
+ */
+extern "C++" void
+bioseq_hydrate_scan_slot(TableScanDesc sscan, TupleTableSlot* slot, bool force)
+{
+	ColumnarScanDesc scan = reinterpret_cast<ColumnarScanDesc>(sscan);
+	if (scan == nullptr) {
+		return;
+	}
+	/*
+	 * `force` overrides the defer flag: the §9 custom scan runs with
+	 * defer_seq_hydration=true (so the mmsearch batch path can capture
+	 * locators), but its non-batched projecting branch still needs the
+	 * slot hydrated before ExecProject — it passes force=true. Callers on
+	 * the inline path pass force=false and become a no-op when deferring.
+	 */
+	if (!force && scan->defer_seq_hydration) {
+		return;
+	}
+	const auto& amc = bioseq::storage::bioseq_am_cache_for(scan->cs_base.rs_rd);
+	auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
+	hydrate_seq_columns_in_slot(scan->cs_base.rs_rd, slot, caches, amc,
+	                            scan->scanContext);
 }
 
 static bool
@@ -1145,10 +1204,14 @@ rewrite_seq_columns_to_stubs(Relation relation,
 	}
 	// DOC0260 Phase A — lazily allocate the seq_caches on first call,
 	// because write_state_management.cppm intentionally does not import
-	// bioseq_storage (would cycle with bioseq_table).
+	// bioseq_storage (would cycle with bioseq_table). Allocate in the
+	// write state's `stripeWriteContext` — the per-tuple context is reset
+	// at the end of every bioseq_tuple_insert, which would leave
+	// writeState->seq_caches as a dangling pointer that the NEXT
+	// INSERT-row's `caches->...` dereference crashes on.
 	if (writeState->seq_caches == nullptr) {
 		auto *fresh = bioseq::storage::alloc_seq_caches(
-			ColumnarWritePerTupleContext(writeState));
+			writeState->stripeWriteContext);
 		fresh->side = bioseq::storage::seq_caches::Side::Write;
 		fresh->lock_mode = RowExclusiveLock;
 		fresh->main_database_oid   = relation->rd_locator.dbOid;

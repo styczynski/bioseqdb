@@ -23,25 +23,11 @@ module;
 export module bioseq_write_state_management;
 
 import bioseq_table;
+import bioseq_storage;          // seq_caches + destroy_seq_caches + bioseq_storage_seq_caches_close_all
 import storage_metadata;
 import bioseq_table_io;
 import pg_utils;
 import mlogging;
-
-// DOC0260 Phase A — forward declarations of the small bioseq_storage
-// surface we need at write-state teardown. Avoids `import bioseq_storage`
-// here (which would otherwise create a cycle with bioseq_table because
-// bioseq_table:access_method also imports bioseq_storage). The functions
-// are defined inside `bioseq_storage:sequence_storage_manager` and have
-// external (C++) linkage so the linker resolves them at final link time.
-namespace bioseq::storage {
-    struct seq_caches;
-    void destroy_seq_caches(seq_caches* caches) noexcept;
-}
-extern "C++" {
-    void bioseq_storage_seq_caches_close_all(bioseq::storage::seq_caches* c,
-                                             bool commit) noexcept;
-}
 
 extern "C++" {
 

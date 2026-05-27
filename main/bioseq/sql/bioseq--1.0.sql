@@ -344,11 +344,14 @@ CREATE TABLE IF NOT EXISTS bioseq.meta_sidecar (
     sequence_rowno  bigint   NOT NULL,
     alphabet_code   smallint NOT NULL,
     symbol_counts   bigint[] NOT NULL,         -- indexed by seqan3 rank
-    PRIMARY KEY (user_relid, sequence_rowno)
+    column_attno    smallint NOT NULL DEFAULT 0,  -- DOC0260 §11.1 (review I12)
+    PRIMARY KEY (user_relid, sequence_rowno, column_attno)
 );
 COMMENT ON TABLE bioseq.meta_sidecar IS
-    'Per-sequence symbol counts. symbol_counts[rank+1] is the count for '
-    'the rank-th letter in the alphabet identified by alphabet_code.';
+    'Per-sequence symbol counts, keyed per SEQ column. symbol_counts[rank+1] '
+    'is the count for the rank-th letter in the alphabet identified by '
+    'alphabet_code; column_attno disambiguates rows from tables with more '
+    'than one bioseq.seq column (DOC0260 §11.1 / consolidated-review I12).';
 
 -- ============================================================================
 -- METADATA AGE LOG.
@@ -403,7 +406,21 @@ COMMENT ON TABLE bioseq.seq_sub_table IS
     'DOC0260 Phase A: one row per (db, spc, relfilenode, column, bucket, shard) '
     'recording the sub-table relid, its sidecar relid, and bytes_written/is_full.';
 
-CREATE UNIQUE INDEX IF NOT EXISTS seq_sub_table_active_shard_idx
+-- DOC0260 §6.1 / DOC0268 Appendix — partial index over the ACTIVE (is_full =
+-- FALSE) shard of each (database, tablespace, relfilenode, column, bucket).
+-- This accelerates LookupActiveSubTableShard. It is intentionally NOT a UNIQUE
+-- index: is_full is a mutable predicate column, and a UNIQUE partial index on a
+-- flipped predicate column trips false "duplicate key" violations during shard
+-- rollover (PostgreSQL's uniqueness check sees the just-updated/deleted old
+-- active-shard entry as a live conflict when the next shard is inserted — most
+-- visibly under the cap=0 shard-per-insert sentinel, where the old shard is
+-- marked full and a fresh active shard is created in lockstep). The
+-- "one active shard per (parent, column, bucket)" invariant is enforced
+-- instead by the per-bucket transactional advisory lock taken in
+-- allocate_new_shard_and_open (§7.3) plus the LookupActiveSubTableShard
+-- recheck under that lock — exactly the serialization the spec already mandates
+-- for concurrent shard creation.
+CREATE INDEX IF NOT EXISTS seq_sub_table_active_shard_idx
     ON bioseq.seq_sub_table
         (database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx)
     WHERE is_full = FALSE;
@@ -440,10 +457,15 @@ BEGIN
                        sub_name);
         EXECUTE format('ALTER EXTENSION bioseq ADD TABLE bioseq_internal.%I',
                        sidecar_name);
-        PERFORM pg_extension_config_dump(
-            format('bioseq_internal.%I', sub_name)::regclass, 'WHERE FALSE');
-        PERFORM pg_extension_config_dump(
-            format('bioseq_internal.%I', sidecar_name)::regclass, 'WHERE FALSE');
+        -- NOTE: pg_extension_config_dump() can only be called from a SQL
+        -- script executed by CREATE EXTENSION (Postgres throws
+        -- ERRCODE_INVALID_TRANSACTION_STATE otherwise). The lazily-created
+        -- sub-tables / sidecars are extension members (via ALTER EXTENSION
+        -- ADD TABLE above) but they cannot be flagged "skip rows on dump"
+        -- here. That's OK in practice because the dump path goes through
+        -- `pg_dump`'s SELECT/COPY which re-hydrates seq columns
+        -- transparently and the extension's CREATE script re-creates the
+        -- catalog from scratch on restore.
     END IF;
 END $$;
 REVOKE EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)

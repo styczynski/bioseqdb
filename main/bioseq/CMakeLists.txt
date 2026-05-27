@@ -77,6 +77,10 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm
   # backend/config/config.cppm is Domain P (imports pg_utils, uses PG macros);
   # it stays in postgresql_bioseq's own module set.
+  # backend/storage/* — only the PG-free bucket math + seq_locator POD
+  # (DOC0260 §12.1). sequence_storage_manager.cppm / sequence_size.cppm stay
+  # in postgresql_bioseq's own set (they use the PG catalog / pg_log).
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/bucket_math.cppm
   # backend/sequences/*
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/cigar.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/index.cppm
@@ -202,6 +206,7 @@ file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp)
 
 file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS

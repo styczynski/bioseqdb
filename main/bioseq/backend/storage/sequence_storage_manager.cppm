@@ -51,13 +51,14 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <map>
 #include <optional>
 #include <span>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#include <boost/container/flat_map.hpp>  // DOC0260 R14 — seq_caches::entries
 
 export module bioseq_storage:sequence_storage_manager;
 
@@ -68,6 +69,10 @@ import bioseq_table_io;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sequences;
 import :sequence_size;
+// DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
+// module so the unit-test TU can link them without the Postgres backend.
+// Re-exported here so existing `import bioseq_storage` consumers are unchanged.
+export import bioseq_bucket_math;
 
 static_assert(__cplusplus >= 202302L,
               "DOC0260 requires C++23-or-later (project default: C++26)");
@@ -80,34 +85,12 @@ export namespace bioseq::storage {
 // ---------------------------------------------------------------------------
 
 constexpr std::uint8_t kLocatorStubMarker = 0x80;
-constexpr std::uint8_t kLocatorVersion    = 1;
 
-struct seq_locator {
-    std::uint8_t    version = kLocatorVersion;
-    std::uint8_t    bucket_idx = 0;
-    std::uint16_t   _pad_2 = 0;
-    std::uint32_t   shard_idx = 0;
-    sequence_size_t total_bp_size = 0;
-    std::uint64_t   sub_row_no = 0;
-};
-static_assert(sizeof(seq_locator) == 24,
-              "seq_locator layout must stay 24 bytes (DOC0260 §5.3).");
-static_assert(std::is_standard_layout_v<seq_locator>,
-              "seq_locator must be standard-layout (memcpy'd in/out of pgseq_t).");
-
-// DOC0260 §5.3 — `pg_compact_sequence_len` and `pg_compact_sequence_unit_len`
-// in `bioseq_types.pg_compact_sequence` cannot import `bioseq_storage` (it
-// would close a module-graph cycle with `bioseq_table:access_method`), so
-// they extract `total_bp_size` via a hand-rolled `memcpy` at the byte
-// offset below. These static_asserts make the layout the source of
-// truth: if seq_locator ever grows a field before total_bp_size, these
-// will fire at compile time so the magic offset in pg_compact_sequence.cppm
-// can be updated in lockstep.
-static_assert(offsetof(seq_locator, total_bp_size) == 8,
-              "seq_locator::total_bp_size offset must stay 8 bytes "
-              "(pg_compact_sequence.cppm reads at this offset).");
-static_assert(offsetof(seq_locator, sub_row_no) == 16,
-              "seq_locator::sub_row_no offset must stay 16 bytes.");
+// DOC0260 §12.1 — `kLocatorVersion` and the `seq_locator` POD (with its
+// 24-byte / offset static_asserts) now live in the PG-free `bioseq_bucket_math`
+// module so the unit-test TU can link them; they are re-exported above via
+// `export import bioseq_bucket_math`, so every use of `seq_locator` /
+// `kLocatorVersion` below resolves unchanged.
 
 constexpr std::size_t kLocatorStubVarlenaBytes =
     pgseq_t::header_bytes() + sizeof(seq_locator);
@@ -186,43 +169,11 @@ inline pgseq_t* alloc_locator_stub_in(
 }
 
 // ---------------------------------------------------------------------------
-// §4 — Bucket math. Compile-time threshold table + branchless LUT.
+// §4 — Bucket math. The consteval threshold builder, len_log2_for_size, the
+// branchless L->bucket LUT and bucket_index_for_size now live in the PG-free
+// `bioseq_bucket_math` module (DOC0260 §12.1) and are re-exported above via
+// `export import bioseq_bucket_math`. The template below delegates to them.
 // ---------------------------------------------------------------------------
-
-template<class len_t,
-         std::size_t bucket_min_len_bits,
-         std::size_t bucket_max_len_bits>
-[[nodiscard]] consteval auto generate_seq_buckets_len_thresholds() {
-    static_assert(bucket_min_len_bits < bucket_max_len_bits,
-                  "min bits must be strictly less than max bits");
-    static_assert(bucket_max_len_bits <= sizeof(len_t) * 8u,
-                  "max bits must fit in len_t");
-
-    constexpr std::size_t total_len_bits = sizeof(len_t) * 8u;
-    constexpr std::size_t single_count   = bucket_max_len_bits - bucket_min_len_bits - 1u;
-    constexpr std::size_t bucket_count   = 1u + single_count + 1u;
-
-    std::array<std::size_t, bucket_count> out{};
-    out[0] = bucket_min_len_bits;
-    for (std::size_t i = 0; i < single_count; ++i) {
-        out[i + 1] = bucket_min_len_bits + 1u + i;
-    }
-    out[bucket_count - 1u] = total_len_bits;
-    return out;
-}
-
-static_assert(generate_seq_buckets_len_thresholds<std::uint64_t, 8, 42>().size() == 35);
-static_assert(generate_seq_buckets_len_thresholds<std::uint64_t, 8, 42>()[0]  == 8);
-static_assert(generate_seq_buckets_len_thresholds<std::uint64_t, 8, 42>()[33] == 41);
-static_assert(generate_seq_buckets_len_thresholds<std::uint64_t, 8, 42>()[34] == 64);
-
-[[nodiscard]] [[gnu::always_inline]]
-constexpr std::size_t len_log2_for_size(sequence_size_t seq_size) noexcept {
-    const sequence_size_t need = seq_size > 1u
-        ? seq_size - sequence_size_t{1}
-        : sequence_size_t{1};
-    return static_cast<std::size_t>(std::bit_width(need));
-}
 
 // ---------------------------------------------------------------------------
 // §7 — Per-scan / per-batch relation cache. Owned by ColumnarScanDescData,
@@ -241,7 +192,14 @@ struct seq_caches {
         sequence_size_t pending_total_payload_delta = 0;
     };
 
-    std::map<std::uint64_t, entry> entries{};
+    // DOC0260 R14 — boost::container::flat_map (a sorted vector) rather than
+    // std::map: no per-node allocation, deterministic sorted iteration order
+    // for close_all, cache-friendly for the typical <50-entry working set, and
+    // safe to default-construct in a palloc-backed POD. The hot paths only do
+    // find / operator[] / clear, and never hold an `entry&` across an insert
+    // into `entries`, so flat_map's reference-invalidation-on-insert is a
+    // non-issue here.
+    boost::container::flat_map<std::uint64_t, entry> entries{};
     LOCKMODE lock_mode = AccessShareLock;
 
     enum class Side { Read, Write };
@@ -290,11 +248,11 @@ void destroy_seq_caches(seq_caches* caches) noexcept;
 }  // namespace bioseq::storage
 
 // DOC0260 Phase A — `extern "C++"` shim called from write_state_management
-// at write-state teardown. Lives at file scope so the forward declaration
-// in write_state_management.cppm resolves at link time without forcing an
-// `import bioseq_storage` over there (which would create a module cycle
-// with bioseq_table:access_method).
-extern "C++" void
+// at write-state teardown. Lives at file scope and is `export`-ed so
+// importers (write_state_management.cppm) can name it directly without
+// forcing a forward declaration that would otherwise be module-attached
+// to the importer (and so wouldn't link against this definition).
+export extern "C++" void
 bioseq_storage_seq_caches_close_all(bioseq::storage::seq_caches* caches,
                                     bool commit) noexcept;
 
@@ -358,27 +316,13 @@ struct sequence_storage_manager {
                   "seq_locator::bucket_idx is uint8_t; raise the locator "
                   "format version before configuring more than 255 buckets");
 
-    [[nodiscard]] static consteval auto build_L_to_bucket_idx() {
-        std::array<std::uint8_t, total_len_bits + 1u> out{};
-        for (std::size_t L = 0; L <= total_len_bits; ++L) {
-            std::size_t b = bucket_count - 1u;
-            for (std::size_t i = 0; i < bucket_count; ++i) {
-                if (L <= table_seq_buckets_len_thresholds[i]) {
-                    b = i;
-                    break;
-                }
-            }
-            out[L] = static_cast<std::uint8_t>(b);
-        }
-        return out;
-    }
-    static constexpr auto L_to_bucket_idx = build_L_to_bucket_idx();
-
+    // DOC0260 §12.1 — delegate to the PG-free free template so production and
+    // the unit-test TU resolve to identical bucketing code (the LUT itself is
+    // bucket_lut_v in bioseq_bucket_math).
     [[nodiscard]] [[gnu::always_inline]] static constexpr std::size_t
     bucket_index_for_size(sequence_size_t seq_size) noexcept {
-        const std::size_t L = len_log2_for_size(seq_size);
-        const std::size_t L_clamped = L > total_len_bits ? total_len_bits : L;
-        return static_cast<std::size_t>(L_to_bucket_idx[L_clamped]);
+        return bioseq::storage::bucket_index_for_size<
+            len_t, bucket_min_len_bits, bucket_max_len_bits>(seq_size);
     }
 
     // Shard lifecycle / write path.
@@ -630,7 +574,35 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
         if (it != cache->entries.end() && it->second.rel != nullptr) {
             return it->second.rel;
         }
-        Relation rel = try_safe_relation_open(sub_table_relid, lock_mode);
+        // DOC0260 §7.9 / §A1.4 — the resource owner the shard Relation is
+        // pinned under MUST match the owner that is current when
+        // `seq_caches::close_all` runs `relation_close()`. That owner differs
+        // by side:
+        //
+        //   * Write side: the seq_caches lives on the transaction-scoped
+        //     ColumnarWriteState and is closed by
+        //     ColumnarPopWriteStateForAllRels at xact commit, under
+        //     TopTransactionResourceOwner. The cached Relation therefore has
+        //     to outlive the per-statement owner (which is torn down at the
+        //     end of the surrounding INSERT). We pin it under
+        //     TopTransactionResourceOwner so open/close balance. Pinning it
+        //     under the per-stmt owner instead leaks it (force-closed at
+        //     statement end) and then double-closes at xact commit.
+        //
+        //   * Read side: the seq_caches lives for the duration of one scan and
+        //     is closed in bioseq_endscan / bioseq_index_fetch_end under the
+        //     SAME portal/executor owner that is current here. We must NOT
+        //     swap — pinning under TopTransaction trips "relcache reference
+        //     0x... is not owned by resource owner Portal" at scan teardown.
+        Relation rel = nullptr;
+        if (cache->side == seq_caches::Side::Write) {
+            ResourceOwner saved_owner = CurrentResourceOwner;
+            CurrentResourceOwner       = TopTransactionResourceOwner;
+            rel = try_safe_relation_open(sub_table_relid, lock_mode);
+            CurrentResourceOwner       = saved_owner;
+        } else {
+            rel = try_safe_relation_open(sub_table_relid, lock_mode);
+        }
         if (rel == nullptr) {
             pg_log(ERROR, "bioseq storage: failed to open sub-table relid {}",
                    static_cast<unsigned>(sub_table_relid));
@@ -674,39 +646,95 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     const std::string sidecar_name = format_sidecar_name(
         db_oid, spc_oid, main_relfilenode, column_attno, bucket_idx, starting_shard_idx);
 
+    // DOC0260 §7.3 — lazy CREATE TABLE for the sub-table + matching sidecar.
+    // We deliberately do NOT register the freshly-created relations with the
+    // extension via ALTER EXTENSION ADD TABLE here: doing so requires a
+    // SECURITY DEFINER plpgsql helper that issues ALTER EXTENSION inside SPI
+    // inside the parent INSERT's access-method callback. That nests three
+    // ResourceOwner layers (executor → SPI → SECURITY DEFINER) and Postgres
+    // refuses to clean up the inner TupleDescs at xact end ("tupdesc
+    // reference is not owned by resource owner TopTransaction" → PANIC).
+    // The bioseq_internal.seq_sub_table catalog row is the canonical
+    // tracker for cleanup (ColumnarTableDropHook /
+    // bioseq_relation_set_new_filenode + drop_sub_tables_for_main); the
+    // ALTER EXTENSION ADD TABLE was a pg_dump convenience that we trade
+    // for correctness — pg_dump still round-trips data through SELECT/COPY.
     StringInfo ddl = makeStringInfo();
     appendStringInfo(ddl,
         "CREATE %s TABLE IF NOT EXISTS bioseq_internal.%s "
             "(seq bioseq.seq('%s', %d)) USING bioseq;\n"
         "CREATE %s TABLE IF NOT EXISTS bioseq_internal.%s "
-            "(sub_rowno BIGINT PRIMARY KEY, blob BYTEA NOT NULL);\n"
-        "SELECT bioseq_internal.add_to_extension_secdef(%s, %s);",
+            "(sub_rowno BIGINT PRIMARY KEY, blob BYTEA NOT NULL);",
         persistence_kw, quote_identifier(sub_name.c_str()),
         tm.alphabet_name.c_str(),
         tm.storage_unit_bit_width,
-        persistence_kw, quote_identifier(sidecar_name.c_str()),
-        quote_literal_cstr(sub_name.c_str()),
-        quote_literal_cstr(sidecar_name.c_str()));
+        persistence_kw, quote_identifier(sidecar_name.c_str()));
 
     Oid new_sub_relid = InvalidOid;
     Oid new_sidecar_relid = InvalidOid;
 
-    if (SPI_connect() != SPI_OK_CONNECT) {
-        pg_log(ERROR, "bioseq storage: SPI_connect failed while allocating shard");
-    }
-    if (SPI_execute(ddl->data, /*read_only=*/false, /*tcount=*/0) != SPI_OK_UTILITY) {
+    // DOC0260 §7.3 — wrap the lazy CREATE TABLE in an internal sub-transaction
+    // so the surrounding INSERT statement's ResourceOwner / xact state stays
+    // intact regardless of what the DDL touches. Without this wrap, errors
+    // raised by the SPI body abort the parent INSERT with a "ResourceOwnerEnlarge
+    // called after release started" because the SPI-allocated resources outlive
+    // their owner.
+    //
+    // DOC0260 §A1.4 ROOT-CAUSE FIX — BeginInternalSubTransaction switches
+    // CurrentResourceOwner and CurrentMemoryContext to the sub-transaction's,
+    // and CommitSubTransaction (reached via ReleaseCurrentSubTransaction)
+    // leaves CurrentResourceOwner pointing at the *parent transaction's*
+    // owner (TopTransactionResourceOwner) — NOT the executor/portal owner
+    // that was current when this TAM insert callback was entered. If we do
+    // not restore it, the surrounding INSERT's standard_ExecutorEnd runs
+    // ExecResetTupleTable under TopTransactionResourceOwner and trips
+    // "tupdesc reference 0x... is not owned by resource owner TopTransaction"
+    // when releasing slot descriptors that were pinned under the executor
+    // owner. We therefore save and restore BOTH the resource owner and the
+    // memory context, mirroring the canonical pl/pgsql exception-block
+    // pattern (pl_exec.c exec_stmt_block).
+    MemoryContext subxact_saved_context = CurrentMemoryContext;
+    ResourceOwner subxact_saved_owner   = CurrentResourceOwner;
+    BeginInternalSubTransaction("bioseq storage CREATE shard");
+    // Run the body in the caller's memory context, not the sub-xact's.
+    MemoryContextSwitchTo(subxact_saved_context);
+    PG_TRY();
+    {
+        if (SPI_connect() != SPI_OK_CONNECT) {
+            pg_log(ERROR, "bioseq storage: SPI_connect failed while allocating shard");
+        }
+        // SPI_execute returns the result code of the LAST command in a multi-
+        // statement string. Our DDL is two CREATE TABLEs, so the expected
+        // return is SPI_OK_UTILITY. Accept SPI_OK_SELECT too as defensive
+        // back-compat in case a SELECT clause is added later.
+        const int rc = SPI_execute(ddl->data, /*read_only=*/false, /*tcount=*/0);
+        if (rc != SPI_OK_UTILITY && rc != SPI_OK_SELECT) {
+            pg_log(ERROR,
+                   "bioseq storage: failed to create sub-table {} + sidecar {} "
+                   "(SPI rc={})",
+                   sub_name, sidecar_name, rc);
+        }
         SPI_finish();
-        pg_log(ERROR, "bioseq storage: failed to create sub-table {} + sidecar {}",
-               sub_name, sidecar_name);
-    }
-    SPI_finish();
 
-    const Oid bioseq_internal_ns = get_namespace_oid("bioseq_internal", false);
-    new_sub_relid     = get_relname_relid(sub_name.c_str(),     bioseq_internal_ns);
-    new_sidecar_relid = get_relname_relid(sidecar_name.c_str(), bioseq_internal_ns);
-    if (!OidIsValid(new_sub_relid) || !OidIsValid(new_sidecar_relid)) {
-        pg_log(ERROR, "bioseq storage: sub-table or sidecar not found after CREATE");
+        const Oid bioseq_internal_ns = get_namespace_oid("bioseq_internal", false);
+        new_sub_relid     = get_relname_relid(sub_name.c_str(),     bioseq_internal_ns);
+        new_sidecar_relid = get_relname_relid(sidecar_name.c_str(), bioseq_internal_ns);
+        if (!OidIsValid(new_sub_relid) || !OidIsValid(new_sidecar_relid)) {
+            pg_log(ERROR, "bioseq storage: sub-table or sidecar not found after CREATE");
+        }
+        ReleaseCurrentSubTransaction();
+        MemoryContextSwitchTo(subxact_saved_context);
+        CurrentResourceOwner = subxact_saved_owner;
     }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(subxact_saved_context);
+        RollbackAndReleaseCurrentSubTransaction();
+        MemoryContextSwitchTo(subxact_saved_context);
+        CurrentResourceOwner = subxact_saved_owner;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 
     SubTableRow row = InsertSubTableShard(db_oid, spc_oid, main_relfilenode,
                                           column_attno, bucket_idx, starting_shard_idx,
@@ -743,9 +771,24 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
         return open_relation_cached(active->sub_table_relid, lock_mode, cache,
                                     column_attno, bucket_idx, active->shard_idx);
     }
+    // No ACTIVE shard. This happens (a) on the very first insert into the
+    // (parent, column, bucket), or (b) when every existing shard has been
+    // marked full — e.g. under the cap=0 sentinel where close_all flags each
+    // shard full at commit (DOC0260 §10.2). In case (b) shard 0 (and others)
+    // already exist, so starting at shard_idx 0 would re-INSERT an existing
+    // catalog PK ("duplicate key violates seq_sub_table_pkey"). Allocate the
+    // next index after the highest existing shard for this (column, bucket).
+    std::int32_t next_shard_idx = 0;
+    for (const auto& r : ListSubTableShardsForMain(
+             db_oid, spc_oid, main_relfilenode)) {
+        if (r.column_attno == column_attno && r.bucket_idx == bucket_idx
+            && r.shard_idx >= next_shard_idx) {
+            next_shard_idx = r.shard_idx + 1;
+        }
+    }
     return allocate_new_shard_and_open(db_oid, spc_oid, main_relfilenode,
                                        column_attno, parent_tupdesc, bucket_idx,
-                                       /*starting_shard_idx=*/0,
+                                       next_shard_idx,
                                        lock_mode, cache);
 }
 

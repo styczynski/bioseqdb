@@ -284,20 +284,42 @@ TEST_CASE("DOC0256 — enum_dispatch_pack falls back to DefaultValue",
 TEST_CASE("DOC0256 — value_dispatch_smallest_ge picks the right bucket",
           "[pipe][doc0256][value-dispatch-smallest-ge]")
 {
-    // The spec union for kmer_size_buckets = {15, 7, 27} resolves to
-    // L buckets {7, 15, 17, 27, 33, 49, 63}.
-    static constexpr std::array<std::pair<std::size_t, std::size_t>, 15u> cases{{
-        { 1u,   7u}, { 7u,   7u}, { 8u,  15u}, {15u, 15u}, {16u, 17u},
-        {17u,  17u}, {18u,  27u}, {27u,  27u}, {28u, 33u}, {33u, 33u},
-        {34u,  49u}, {49u,  49u}, {50u,  63u}, {63u, 63u}, {64u, 63u},
-    }};
-
-    for (const auto& [want, expected] : cases) {
-        std::size_t captured = 0u;
-        doc0256_test_helpers::value_capture_callable<std::size_t> cb{&captured};
-        value_dispatch_smallest_ge<std::size_t, std::size_t>(
-            detail::seq_len_log2_buckets_seq{}, want, cb);
-        REQUIRE(captured == expected);
+    // The bucket list is the union of `compute_breakpoints_for<K>()` across
+    // every K in `kmer_size_buckets`. With the default
+    // PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 2, kmer_size_buckets = {15, 7, 27}
+    // and the union resolves to L = {7, 15, 17, 27, 33, 49, 63}. With
+    // PIPELINE_TEMPLATE_BRANCHING_LEVEL = 1, kmer_size_buckets = {15} and
+    // the union collapses to K=15's per-K breakpoints. Gate the table
+    // accordingly so the test stays meaningful at both branching levels.
+    if constexpr (kmer_size_buckets.size() >= 3u) {
+        static constexpr std::array<std::pair<std::size_t, std::size_t>, 15u> cases{{
+            { 1u,   7u}, { 7u,   7u}, { 8u,  15u}, {15u, 15u}, {16u, 17u},
+            {17u,  17u}, {18u,  27u}, {27u,  27u}, {28u, 33u}, {33u, 33u},
+            {34u,  49u}, {49u,  49u}, {50u,  63u}, {63u, 63u}, {64u, 63u},
+        }};
+        for (const auto& [want, expected] : cases) {
+            std::size_t captured = 0u;
+            doc0256_test_helpers::value_capture_callable<std::size_t> cb{&captured};
+            value_dispatch_smallest_ge<std::size_t, std::size_t>(
+                detail::seq_len_log2_buckets_seq{}, want, cb);
+            REQUIRE(captured == expected);
+        }
+    } else {
+        // Reduced-branching mode (K = {15}). Reuse the K=15 breakpoints:
+        // value_dispatch_smallest_ge picks the smallest L breakpoint >= want.
+        // Verify the contract holds for a few representative `want` values
+        // — the exact breakpoint set is materialised by
+        // `compute_breakpoints_for<15>()` so we walk the same sequence.
+        constexpr auto bp = detail::compute_breakpoints_for<15u>();
+        REQUIRE(bp.second > 0u);
+        for (std::size_t i = 0u; i < bp.second; ++i) {
+            const std::size_t want = bp.first[i];
+            std::size_t captured = 0u;
+            doc0256_test_helpers::value_capture_callable<std::size_t> cb{&captured};
+            value_dispatch_smallest_ge<std::size_t, std::size_t>(
+                detail::seq_len_log2_buckets_seq{}, want, cb);
+            REQUIRE(captured >= want);
+        }
     }
 }
 
@@ -478,25 +500,32 @@ TEST_CASE("DOC0256 — dispatch_chain heterogeneous NTTPs (L, K, BAA)",
         REQUIRE(l_out == 15u);  // round_up_seq_len_log2(max(1<<10, 1<<14), 15) = 15
         REQUIRE(baa_out == BAA::KSW2);
     }
-    SECTION("K=7 — picks the K=7 bucket and L=7 from short sequences") {
-        std::vector<seq::dna4> q_small(64);
-        std::vector<seq::dna4> t_small(64);
-        compact_sequence_range<std::vector<seq::dna4>> q_sm{q_small};
-        compact_sequence_range<std::vector<seq::dna4>> t_sm{t_small};
-        params.kmer_size                = 7;
-        params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
-        std::size_t l_out = 0u, k_out = 0u;
-        BAA baa_out = static_cast<BAA>(0xFF);
-        detail::dispatch_chain<
-            int,
-            lkb_probe_traits::template leaf,
-            detail::seq_len_log2_step,
-            detail::kmer_size_step,
-            detail::baa_step
-        >::template run<>(params, q_sm, t_sm, l_out, k_out, baa_out);
-        REQUIRE(k_out == 7u);
-        REQUIRE(l_out == 7u);
-        REQUIRE(baa_out == BAA::BLOCK_ALIGNER);
+    // Gated by `kmer_size_buckets.size()`: only run when the K=7 dispatch
+    // branch is actually compiled in. PIPELINE_TEMPLATE_BRANCHING_LEVEL=1
+    // collapses kmer_size_buckets to {15u} for faster builds, in which case
+    // the dispatch chain has no K=7 leaf — the test would assert against
+    // the smallest-ge fallback (which is K=15) and spuriously fail.
+    if constexpr (kmer_size_buckets.size() >= 3u) {
+        SECTION("K=7 — picks the K=7 bucket and L=7 from short sequences") {
+            std::vector<seq::dna4> q_small(64);
+            std::vector<seq::dna4> t_small(64);
+            compact_sequence_range<std::vector<seq::dna4>> q_sm{q_small};
+            compact_sequence_range<std::vector<seq::dna4>> t_sm{t_small};
+            params.kmer_size                = 7;
+            params.base_alignment_algorithm = BAA::BLOCK_ALIGNER;
+            std::size_t l_out = 0u, k_out = 0u;
+            BAA baa_out = static_cast<BAA>(0xFF);
+            detail::dispatch_chain<
+                int,
+                lkb_probe_traits::template leaf,
+                detail::seq_len_log2_step,
+                detail::kmer_size_step,
+                detail::baa_step
+            >::template run<>(params, q_sm, t_sm, l_out, k_out, baa_out);
+            REQUIRE(k_out == 7u);
+            REQUIRE(l_out == 7u);
+            REQUIRE(baa_out == BAA::BLOCK_ALIGNER);
+        }
     }
 }
 
@@ -651,11 +680,20 @@ TEST_CASE("DOC0256 — non-canonical kmer_size resolves to the right L bucket",
             >::template run<>(params, q, t, l_out, k_out, baa_out);
             REQUIRE(k_out == kmer_size_default);
             // round_up_seq_len_log2(1<<10, k) = max(10, k) = k for k in {11, 21}.
-            // Then seq_len_log2_step picks the smallest L >= k from
-            // {7, 15, 17, 27, 33, 49, 63}:
-            //   k=11 → L=15;  k=21 → L=27.
-            if (k == 11) REQUIRE(l_out == 15u);
-            if (k == 21) REQUIRE(l_out == 27u);
+            // Then seq_len_log2_step picks the smallest L >= k from the
+            // (union over kmer_size_buckets) breakpoint list. With the
+            // default PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 2 that list is
+            // {7, 15, 17, 27, 33, 49, 63}: k=11 → L=15;  k=21 → L=27.
+            // With PIPELINE_TEMPLATE_BRANCHING_LEVEL == 1, only K=15 is in
+            // the union so the list collapses to K=15's per-K breakpoints
+            // {15, 33, 63}: k=11 → L=15; k=21 → L=33.
+            if constexpr (kmer_size_buckets.size() >= 3u) {
+                if (k == 11) REQUIRE(l_out == 15u);
+                if (k == 21) REQUIRE(l_out == 27u);
+            } else {
+                if (k == 11) REQUIRE(l_out == 15u);
+                if (k == 21) REQUIRE(l_out == 33u);
+            }
         }
         SECTION("max_bp = 1<<20") {
             std::vector<seq::dna4> qd(1u << 20);
@@ -672,9 +710,14 @@ TEST_CASE("DOC0256 — non-canonical kmer_size resolves to the right L bucket",
                 detail::baa_step
             >::template run<>(params, q, t, l_out, k_out, baa_out);
             REQUIRE(k_out == kmer_size_default);
-            // round_up_seq_len_log2(1<<20, k) = 20.  smallest L >= 20 from
-            // {7, 15, 17, 27, 33, 49, 63} is 27.
-            REQUIRE(l_out == 27u);
+            // round_up_seq_len_log2(1<<20, k) = 20. The smallest L >= 20
+            // in {7, 15, 17, 27, 33, 49, 63} is 27 (default level >= 2);
+            // in {15, 33, 63} (level == 1) it is 33.
+            if constexpr (kmer_size_buckets.size() >= 3u) {
+                REQUIRE(l_out == 27u);
+            } else {
+                REQUIRE(l_out == 33u);
+            }
         }
     }
 }

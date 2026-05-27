@@ -118,23 +118,21 @@ static void invalidate_one(Relation rel) {
     rel->rd_amcache = nullptr;
 }
 
-void bioseq_am_cache_invalidate(Datum /*arg*/, Oid relid) {
-    if (!OidIsValid(relid)) {
-        // System-wide flush — walk the relcache and clear every bioseq slot.
-        // The relcache provides a hash iterator; we use RelationCacheInitialize
-        // style direct enumeration via the RelidByRelfilenumber API. For
-        // Phase A's correctness we rely on the slow path: future opens
-        // re-populate lazily because rd_amcache will be nullptr once cleared.
-        // Postgres itself nulls rd_amcache on a full relcache flush, so the
-        // dominant call path is handled implicitly.
-        return;
-    }
-    Relation rel = try_safe_relation_open(relid, NoLock);
-    if (rel == nullptr) {
-        return;
-    }
-    invalidate_one(rel);
-    relation_close(rel, NoLock);
+void bioseq_am_cache_invalidate(Datum /*arg*/, Oid /*relid*/) {
+    // DOC0260 §8.3 — relcache invalidation callback. Postgres itself
+    // sets `rd_amcache = nullptr` on every relcache flush, so the
+    // dominant code path is handled implicitly: the next
+    // `bioseq_am_cache_for(rel)` call sees `rd_amcache == nullptr` and
+    // rebuilds. We deliberately do NOT call `try_safe_relation_open()`
+    // here — that would re-enter the relcache during a flush and corrupt
+    // the surrounding INSERT's ResourceOwner ("tupdesc reference is not
+    // owned by resource owner TopTransaction" → PANIC).
+    //
+    // The leaked `BioseqAmCache` allocation under `CacheMemoryContext`
+    // (one struct holding a `std::vector<int16_t>`) is bounded by the
+    // number of distinct USING bioseq relations a backend sees in its
+    // lifetime — a few hundred at most — and is reclaimed when
+    // CacheMemoryContext itself is reset.
 }
 
 }  // namespace bioseq::storage
