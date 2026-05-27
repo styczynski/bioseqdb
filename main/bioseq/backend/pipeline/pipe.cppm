@@ -31,6 +31,8 @@
  */
 module;
 
+#undef USE_SPEC_CEP // Do not use specialised CEP as it blows template instantiation too much right now. We want to keep the infrastructure in code
+
 // DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
 // on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
 // gcc and clang honour the attribute at -O1+, but downgrade silently at -O0.
@@ -1798,24 +1800,15 @@ template <is_constexpr_aligner_params Cep,
  * iteration's pipeline is built.  Per-query results are appended to
  * `out_per_query` in input order.
  */
-// Forward declaration so `pipeline_run_impl_batch` can delegate to the
-// cross-query deferred-align path when the runtime flag is set.
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
-          EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] std::vector<MatchResultCollection>
-pipeline_run_impl_batch_deferred_align(
-    std::span<const compact_sequence_range<QR>> query_seqs,
-    const compact_sequence_range<TR>&           target_seq,
-    std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
-    const IndexT&                               target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params);
-
+// DOC0271 Phase 1 §5.3 — the deferred-align parallel pipeline template
+// (`pipeline_run_impl_batch_deferred_align`) and its supporting types
+// (`PerQueryAlignState`, `AlignCollectStage`, `align_regions_batched_cross_query`)
+// were removed. The two function bodies were 98% identical and LTO already
+// DCE'd the deferred body in every linked binary (no production caller sets
+// `params.cross_query_batched = true`), so the post-LTO `__TEXT` is unchanged.
+// The pre-LTO IR cost — paid in pipe.cppm's TU compile RSS — is what motivates
+// the deletion: every `BAA = KSW2_BATCHED` leaf no longer instantiates a
+// duplicate ~6 KB body. See DOC0271 §4.3 + §5.3 Option B for the rationale.
 template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
@@ -1831,20 +1824,6 @@ template <is_constexpr_aligner_params Cep,
     const IndexT&                               target_index,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
 {
-    // DOC0254 §11.10 — dispatcher routes `KSW2_BATCHED &&
-    // params.cross_query_batched` to the deferred-align scheduling shape.
-    // The branch is gated by a trait-level constant
-    // (`kernel_t<BAA>::supports_cross_query_batched`) so it never
-    // materialises an `if constexpr (BAA == X)` ladder (R10).
-    if constexpr (kernel_t<BAA>::supports_cross_query_batched) {
-        if (params.cross_query_batched) {
-            return pipeline_run_impl_batch_deferred_align<
-                Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT>(
-                    query_seqs, target_seq, query_minimizers_per_query,
-                    target_index, params);
-        }
-    }
-
     std::optional<context::context>                 owned_context;
     std::optional<context::installed_context_scope> install;
     if (context::current_or_null() == nullptr) {
@@ -1909,208 +1888,15 @@ template <is_constexpr_aligner_params Cep,
     return out_per_query;
 }
 
-// =============================================================================
-// DOC0254 §11.10 — Cross-query deferred-align scheduling shape.
-//
-// Pipeline implementation parallel to `pipeline_run_impl_batch` selected when
-// `BAA == KSW2_BATCHED && params.cross_query_batched`.
-//
-// The deferred variant opens one outer Arena::Chain scope around the whole
-// batch and processes every query under it.  Per-query inner scopes still
-// open/close, but the outer scope holds whatever cross-query bucket state
-// `align_regions_batched_cross_query` chooses to accumulate (today: none —
-// the per-query bucketing already saturates the bucket fill on
-// VERY_LONG inputs per §11.10).  The pipeline layout is otherwise
-// identical to the in-spec `pipeline_run_impl_batch` shape; the
-// implementation is opt-in via `params.cross_query_batched`.
-// =============================================================================
-
-template <is_constexpr_aligner_params Cep,
-          ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
-          ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
-          EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT>
-[[nodiscard]] std::vector<MatchResultCollection>
-pipeline_run_impl_batch_deferred_align(
-    std::span<const compact_sequence_range<QR>> query_seqs,
-    const compact_sequence_range<TR>&           target_seq,
-    std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
-    const IndexT&                               target_index,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
-{
-    std::optional<context::context>                 owned_context;
-    std::optional<context::installed_context_scope> install;
-    if (context::current_or_null() == nullptr) {
-        owned_context.emplace();
-        install.emplace(*owned_context);
-    }
-    auto outer_chain_scope = context::current().push<context::Arena::Chain>();
-    auto batch_fill_scope  = context::current().push<context::Arena::Chain>();
-
-    JustLog("[bioseq] pipe: pipeline_run_impl_batch_deferred_align entry — "
-            "Cep(L={},K={},W={},fallback={}) BAA={} CA={} MA={} EP={} "
-            "queries={} target_bp={} cross_query_batched=1",
-            Cep::sequence_len_log2, Cep::kmer_len, Cep::window_len,
-            Cep::generic_fallback ? 1 : 0,
-            static_cast<int>(BAA), static_cast<int>(CA), static_cast<int>(MA),
-            static_cast<int>(EP), query_seqs.size(), target_seq.bp_size());
-
-    std::vector<MatchResultCollection> out_per_query;
-    out_per_query.reserve(query_seqs.size());
-
-    const int32_t target_len = static_cast<int32_t>(target_seq.bp_size());
-    const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
-
-    static const std::vector<MinimizerT> empty_minimizers_proto{};
-
-    for (std::size_t qi = 0; qi < query_seqs.size(); ++qi) {
-        const auto&   query_seq = query_seqs[qi];
-        const int32_t query_len = static_cast<int32_t>(query_seq.bp_size());
-
-        auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
-
-        MatchResultCollection out;
-        out.results.reserve(detail::estimated_result_count(query_len, target_len, params));
-
-        const auto& mins_for_this_query = (EP == EntryPoint::WithPrebuiltMinimizers)
-            ? query_minimizers_per_query[qi]
-            : empty_minimizers_proto;
-
-        if (query_len == 0 || target_len == 0) {
-            out_per_query.push_back(std::move(out));
-            continue;
-        }
-
-        auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
-            query_seq, target_seq, mins_for_this_query, target_index,
-            scoring_matrix, out, params, query_len, target_len);
-
-        if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
-            pipeline.on_batch(std::span<const MinimizerT>{
-                mins_for_this_query.data(), mins_for_this_query.size()});
-        } else {
-            pipeline.on_batch(std::span<const std::byte>{});
-        }
-        pipeline.on_completed();
-        out_per_query.push_back(std::move(out));
-    }
-
-    return out_per_query;
-}
-
-// =============================================================================
-// DOC0254 §11.10 — AlignCollectStage + align_regions_batched_cross_query.
-//
-// The deferred-align scheduling shape captures (regions, anchors,
-// query_seq*) per query into a `PerQueryAlignState<QR, MinimizerT>`
-// slot via `AlignCollectStage`, then `align_regions_batched_cross_query`
-// folds the per-query fill lists into one big slab, buckets across all
-// queries' fills, runs the per-bucket DP, and stitches per-region CIGAR
-// back into each query's regions before the Phase C stage chain
-// (primary/secondary/filter/mapq/sink) runs.
-//
-// Today's runtime delegates to the per-query `align_regions_batched`
-// inside the regular pipeline; the structural per-query slot remains
-// available for the inner-loop substitution (fused inter-sequence SIMD
-// DP) that a follow-up may introduce.  Building this two-phase shape
-// here keeps the deferred path independent of the per-query path.
-// =============================================================================
-
-template <supports_compact_sequence_range QR, class MinimizerT>
-struct PerQueryAlignState {
-    const compact_sequence_range<QR>* query_seq = nullptr;
-    int32_t                           query_len = 0;
-    ArenaSlab<AlignRegion>            regions{nullptr, 0u, 0u, nullptr};
-    ArenaSlab<::bioseq::chaining::Anchor> anchors{nullptr, 0u, 0u, nullptr};
-    MatchResultCollection             out{};
-};
-
-/**
- * @brief Phase-A terminal stage for the deferred-align pipeline.
- *
- * Records the upstream `(regions, anchors)` pair plus the per-query
- * query_seq pointer into a `PerQueryAlignState` slot and emits no
- * further batches; the downstream sink (a no-op) absorbs an empty
- * emission so the pipeline composition stays uniform.  Used only by
- * `pipeline_run_impl_batch_deferred_align`.
- */
-template <supports_compact_sequence_range QR, class MinimizerT>
-struct AlignCollectStage
-    : StageBase<AlignCollectStage<QR, MinimizerT>, AlignRegion>
-{
-    static constexpr std::string_view stage_name = "AlignCollectStage";
-
-    PerQueryAlignState<QR, MinimizerT>* slot;
-
-    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
-    [[gnu::always_inline]]
-    EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors,
-                                    EmitToken<Sink>&& token)
-    {
-        // Move-in the regions / anchors slabs to the per-query slot via
-        // span-copy: the caller owns the arena scope so the spans are
-        // safe through the deferred-align Phase B/C steps.
-        const std::size_t n_r = regions.size();
-        const std::size_t n_a = anchors.size();
-        slot->regions.reserve_for_placement_new(n_r);
-        for (std::size_t i = 0; i < n_r; ++i) {
-            slot->regions.construct_at_back(std::move(regions.data()[i]));
-        }
-        slot->anchors.reserve(n_a);
-        for (std::size_t i = 0; i < n_a; ++i) {
-            slot->anchors.push_back(anchors.data()[i]);
-        }
-        return std::move(token).emit_batch_pair(
-            std::span<AlignRegion>{slot->regions.data(), slot->regions.size()},
-            std::span<const ::bioseq::chaining::Anchor>{
-                slot->anchors.data(), slot->anchors.size()});
-    }
-
-    template <is_constexpr_aligner_params Cep>
-    [[nodiscard]] StageDescription describe() const {
-        StageDescription desc;
-        desc.stage_name = std::string{stage_name};
-        StageAlgorithmDescription algo;
-        algo.name = "Align-collect (deferred batching)";
-        desc.algorithm = std::move(algo);
-        return desc;
-    }
-};
-
-/**
- * @brief Phase B of the deferred-align scheduling shape — folds every
- *        per-query fill list into one big slab, buckets across queries,
- *        runs the per-bucket DP, and stitches the per-fill CIGAR back
- *        into each query's regions.
- *
- * The current implementation iterates per-query through
- * `align_regions_batched` — which buckets that query's fills and runs
- * the per-bucket DP — keeping the per-query slabs alive across the
- * call.  Substituting an explicit cross-query bucket accumulator is a
- * local change to this function and does not affect the surrounding
- * dispatcher or `AlignCollectStage`.
- */
-template <supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT>
-void align_regions_batched_cross_query(
-    std::span<PerQueryAlignState<QR, MinimizerT>> per_query,
-    const compact_sequence_range<TR>&             target_seq,
-    const ScoringMatrix<QR>&                      scoring_matrix,
-    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
-{
-    for (auto& q : per_query) {
-        if (q.query_seq == nullptr || q.regions.size() == 0) continue;
-        align_regions_batched<QR, TR>(
-            std::span<AlignRegion>{q.regions.data(), q.regions.size()},
-            std::span<const ::bioseq::chaining::Anchor>{
-                q.anchors.data(), q.anchors.size()},
-            *q.query_seq, target_seq, scoring_matrix, params);
-    }
-}
+// DOC0271 Phase 1 §5.3 — the entire cross-query deferred-align scheduling shape
+// (including `pipeline_run_impl_batch_deferred_align`, `PerQueryAlignState`,
+// `AlignCollectStage`, and `align_regions_batched_cross_query`) was deleted.
+// Its only structural difference from `pipeline_run_impl_batch` was one extra
+// `Arena::Chain` push for a not-yet-implemented cross-query fill accumulator;
+// the cross-query helper itself was a pass-through over per-query
+// `align_regions_batched<…>` calls. Restoring the shape later means re-adding
+// the four declarations above; the runtime semantics are now `cross_query_batched`-
+// flag-independent.
 
 /**
  * @brief Single-query convenience wrapper around `pipeline_run_impl_batch`.
@@ -2327,6 +2113,34 @@ using kmer_size_buckets_seq = decltype(
     make_kmer_size_buckets_seq(
         std::make_index_sequence<kmer_size_buckets.size()>{}));
 
+// DOC0271 Phase 1 §5.1 — per-K seq_len_log2 breakpoint sequence.
+//
+// Materialise the K-specific breakpoint list (from `compute_breakpoints_for<K>()`)
+// as a `value_sequence<std::size_t, ...>`.  Used by `bucket_step_pinned`'s
+// K-aware `value_list_for<K>` to iterate only the L breakpoints relevant for
+// that K — rather than the global union shape `seq_len_log2_buckets_seq` (which
+// causes the §3 explosion).
+template <std::size_t K, std::size_t... Is>
+[[nodiscard]] consteval auto make_per_k_breakpoints_seq_impl(
+    std::index_sequence<Is...>) noexcept
+{
+    constexpr auto bp = compute_breakpoints_for<K>();
+    return value_sequence<std::size_t, bp.first[Is]...>{};
+}
+
+template <std::size_t K>
+[[nodiscard]] consteval auto make_per_k_breakpoints_seq() noexcept {
+    constexpr auto bp = compute_breakpoints_for<K>();
+    return make_per_k_breakpoints_seq_impl<K>(std::make_index_sequence<bp.second>{});
+}
+
+template <std::size_t K>
+using per_k_breakpoints_seq = decltype(make_per_k_breakpoints_seq<K>());
+
+static_assert(per_k_breakpoints_seq<15u>::size() == compute_breakpoints_for<15u>().second);
+static_assert(per_k_breakpoints_seq<7u>::size()  == compute_breakpoints_for<7u>().second);
+static_assert(per_k_breakpoints_seq<27u>::size() == compute_breakpoints_for<27u>().second);
+
 } // namespace detail
 
 /// Canonical k-mer default — the historical fallback for any non-canonical
@@ -2502,6 +2316,38 @@ struct kmer_size_registry {
     }
 };
 
+/// DOC0271 Phase 1 §5.1 — pinned-aware seq_len_log2 registry.
+///
+/// Exposes `value_list_for<K, …>` and `read_field_for<K, …>` so the chain's
+/// `bucket_step_pinned` can iterate only the L breakpoints for the previously-pinned K.
+/// This collapses the 21-cell (L, K) Cartesian product (the global L union × K) into
+/// the per-K breakpoint count: `3 + 4 + 2 = 9` cells (K=15: 3 buckets, K=7: 4, K=27: 2).
+///
+/// Place this step *after* `kmer_size_step` in the chain so `Pinned... = (K, …)`.
+struct seq_len_log2_registry_per_k {
+    using target_t = std::size_t;
+
+    /// Anchored to K=15's lower bucket boundary (`compute_breakpoints_for<15>()[0]`).
+    /// The chain only ever pins `default_value` when `active_v` is false; today every
+    /// `bucket_step_pinned` is unconditionally active so this is dead code, but the
+    /// chain primitive requires a value to thread through inactive steps.
+    static constexpr std::size_t default_value = 15u;
+
+    template <std::size_t K, auto... /*RestPinned*/>
+    using value_list_for = per_k_breakpoints_seq<K>;
+
+    template <std::size_t /*K_pinned*/, has_bp_size QR_arg, has_bp_size TR_arg, class... Rest>
+    [[nodiscard, gnu::always_inline]] static std::size_t read_field_for(
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+        const QR_arg& q, const TR_arg& t,
+        Rest&&...) noexcept
+    {
+        const std::size_t max_bp = std::max(q.bp_size(), t.bp_size());
+        return round_up_seq_len_log2(
+            max_bp, static_cast<std::size_t>(params.kmer_size));
+    }
+};
+
 } // namespace detail
 
 // =============================================================================
@@ -2519,6 +2365,7 @@ namespace detail {
 
 using ::bioseq::common::templating::enum_step;
 using ::bioseq::common::templating::bucket_step;
+using ::bioseq::common::templating::bucket_step_pinned;
 using ::bioseq::common::templating::guarded_step;
 
 using baa_step = enum_step<algorithm_enum_values<
@@ -2529,6 +2376,10 @@ using ma_step  = enum_step<algorithm_enum_values<
     ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType>>;
 using kmer_size_step    = enum_step<kmer_size_registry>;
 using seq_len_log2_step = bucket_step<seq_len_log2_registry>;
+
+/// DOC0271 Phase 1 §5.1 — per-K seq_len_log2 step. Must follow `kmer_size_step`
+/// in the chain so the pinned-K's per-K breakpoint list is iterated.
+using seq_len_log2_step_per_k = bucket_step_pinned<seq_len_log2_registry_per_k>;
 
 /// Per-pipeline chain alias — pins `Params` to the only param type
 /// pipe.cppm ever uses. `R` and the leaf template stay as template
@@ -2589,6 +2440,7 @@ struct pipeline_run_leaf {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
         using FallbackCep = ConstexprAlignerFallbackParams<L>;
 
+        #if USE_SPEC_CEP == 1
         // Cep selection — lifted from the deleted `dispatch_on_specialisation`.
         // Both Cep instantiations are present in the binary; the runtime
         // `if` picks one.  Compile-time impact: identical to the v0 body.
@@ -2598,6 +2450,7 @@ struct pipeline_run_leaf {
             return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, QR, TR>(
                 query_seq, target_seq, query_minimizers, target_index, params);
         }
+        #endif
         return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, QR, TR>(
             query_seq, target_seq, query_minimizers, target_index, params);
     }
@@ -2608,7 +2461,10 @@ template <EntryPoint EP_v,
           supports_compact_sequence_range TR,
           class MinimizerT, class IndexT>
 struct pipeline_run_traits {
-    template <auto L, auto K, auto BAA, auto CA, auto MA>
+    // DOC0271 Phase 1 §5.1: chain pins K *before* L so the per-K L step can
+    // read the pinned K. The internal `pipeline_run_leaf` parameter order
+    // (L, K, …) is preserved; only this alias swaps the slots.
+    template <auto K, auto L, auto BAA, auto CA, auto MA>
     using leaf = pipeline_run_leaf<
         EP_v, QR, TR, MinimizerT, IndexT,
         L, K, BAA, CA, MA>;
@@ -2682,6 +2538,7 @@ struct describe_leaf {
             "describe_leaf relies on MA default = SCALAR.  Update both call "
             "sites if the MA default ever changes.");
 
+        #if USE_SPEC_CEP == 1
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(K))
         {
@@ -2689,6 +2546,7 @@ struct describe_leaf {
                 MA_describe, EP_describe, QR, TR>(
                     q, t, params, query_len, target_len);
         }
+        #endif
         return describe_pipeline_leaf<FallbackCep, BAA, CA,
             MA_describe, EP_describe, QR, TR>(
                 q, t, params, query_len, target_len);
@@ -2698,7 +2556,8 @@ struct describe_leaf {
 template <supports_compact_sequence_range QR,
           supports_compact_sequence_range TR>
 struct describe_traits {
-    template <auto L, auto K, auto BAA, auto CA>
+    // DOC0271 Phase 1 §5.1: chain pins K before L (see pipeline_run_traits).
+    template <auto K, auto L, auto BAA, auto CA>
     using leaf = describe_leaf<QR, TR, L, K, BAA, CA>;
 };
 
@@ -2727,11 +2586,13 @@ MatchResultCollection dispatch_pipeline(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
 {
     using Traits = detail::pipeline_run_traits<EP, QR, TR, MinimizerT, IndexT>;
+    // DOC0271 Phase 1 §5.1 — K-then-L chain order so the L step (per-K) can
+    // iterate only the breakpoints relevant for the pinned K.
     return detail::dispatch_chain<
         MatchResultCollection,
         Traits::template leaf,
-        detail::seq_len_log2_step,
         detail::kmer_size_step,
+        detail::seq_len_log2_step_per_k,
         detail::baa_step,
         detail::ca_step,
         detail::guarded_step<detail::ma_step,
@@ -2762,11 +2623,12 @@ PipelineDescription describe_pipeline_for(
         static_cast<int32_t>(target_seq_proto.bp_size());
 
     using Traits = detail::describe_traits<QR, TR>;
+    // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
     return detail::dispatch_chain<
         PipelineDescription,
         Traits::template leaf,
-        detail::seq_len_log2_step,
         detail::kmer_size_step,
+        detail::seq_len_log2_step_per_k,
         detail::baa_step,
         detail::ca_step
     >::template run<>(
@@ -2997,7 +2859,9 @@ struct minimap_port_repr_leaf {
 template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange>
 struct minimap_port_traits {
-    template <auto L, auto K>
+    // DOC0271 Phase 1 §5.1 — chain pins K before L; internal leaf order
+    // (L, K) is preserved, the alias swaps slots.
+    template <auto K, auto L>
     using leaf = minimap_port_repr_leaf<QueryRange, TargetRange, L, K>;
 };
 
@@ -3024,11 +2888,12 @@ MatchResultCollection minimap_port(
     const Minimap2Params& params = Minimap2Params{})
 {
     using Traits = pipe_entry_detail::minimap_port_traits<QueryRange, TargetRange>;
+    // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
     return ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
         MatchResultCollection,
         Traits::template leaf,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::seq_len_log2_step,
-        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::kmer_size_step
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::kmer_size_step,
+        ::bioseq::simd::HWY_NAMESPACE::pipe::detail::seq_len_log2_step_per_k
     >::template run<>(params, query_seq, target_seq);
 }
 

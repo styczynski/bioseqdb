@@ -153,6 +153,53 @@ struct bucket_step {
     }
 };
 
+/// Pinned-aware bucket step (DOC0271 §5.1).
+///
+/// Unlike `bucket_step`, the value list iterated by this step depends on the
+/// previously-pinned chain values via `Registry::template value_list_for<Pinned...>`.
+/// The intended use is per-K seq_len_log2 bucketing: place this step *after*
+/// the K (kmer_size) step so `Pinned...` starts with the pinned K, and have
+/// `value_list_for<K, …>` resolve to the K-specific breakpoint sequence (e.g.
+/// `compute_breakpoints_for<K>()` materialised as a `value_sequence`).
+///
+/// The runtime-side `read_field` is also Pinned-aware
+/// (`Registry::template read_field_for<Pinned...>(params, args...)`) so a
+/// per-K bucket-selection function can clamp to the same K the step is
+/// iterating against.
+template <class Registry>
+struct bucket_step_pinned {
+    using target_t = std::size_t;
+    static constexpr std::size_t default_value = Registry::default_value;
+
+    template <auto... /*Pinned*/>
+    static constexpr bool active_v = true;
+
+    template <class R, class Params, class Continuation>
+    struct adapter {
+        Continuation continuation;
+        template <std::size_t V, class... A>
+        [[gnu::always_inline]] R operator()(
+            std::integral_constant<std::size_t, V>,
+            const Params& params, A&&... forwarded_args) const
+        {
+            return continuation.template run<V>(
+                params, std::forward<A>(forwarded_args)...);
+        }
+    };
+
+    template <class R, class Params, auto... Pinned,
+              class Continuation, class... Args>
+    [[gnu::always_inline]] static R dispatch(
+        const Params& params, Continuation continuation, Args&&... args)
+    {
+        adapter<R, Params, Continuation> step_adapter{continuation};
+        return value_dispatch_smallest_ge<R, std::size_t>(
+            typename Registry::template value_list_for<Pinned...>{},
+            Registry::template read_field_for<Pinned...>(params, args...),
+            step_adapter, params, std::forward<Args>(args)...);
+    }
+};
+
 template <class Inner, bool ActiveCondition>
 struct guarded_step {
     using target_t = typename Inner::target_t;
