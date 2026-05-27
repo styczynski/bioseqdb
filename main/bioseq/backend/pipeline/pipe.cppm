@@ -31,7 +31,20 @@
  */
 module;
 
-#undef USE_SPEC_CEP // Do not use specialised CEP as it blows template instantiation too much right now. We want to keep the infrastructure in code
+/**
+Special value that controls template instantiation explosion:
+level 0: one kmer bucket length, always assume int64 L of sequence
+level 1: one kmer bucket length
+level 2: default kmer bucket lengths
+level 3: allow SpecCep specialisations
+
+General rule:
+- Lower level means faster build, smaller BMI
+- Higher level means exponentially slower build, larger executable binary size, but more efficient runtime code execution
+
+For testing/benchmarking faster iteration you can use level 1, level 3 requires massive hour-long builds
+*/
+#define PIPELINE_TEMPLATE_BRANCHING_LEVEL 1
 
 // DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
 // on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
@@ -1949,7 +1962,11 @@ using ::bioseq::common::templating::value_sequence;
 /// Canonical k-mer values the bench/postgres paths instantiate.  The leading
 /// entry is the default for non-canonical kmer_size — see kmer_size_default.
 inline constexpr std::array<std::size_t, 3> kmer_size_buckets = {
+    #if PIPELINE_TEMPLATE_BRANCHING_LEVEL <= 1
+    15u,
+    #else
     15u, 7u, 27u,
+    #endif
 };
 
 /// `bit_width(max(max_bp - 1, 1))` clamped into `[K, 63]` — the smallest
@@ -2438,9 +2455,13 @@ struct pipeline_run_leaf {
         const IndexT&                     target_index)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
+        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL == 0
+        using FallbackCep = ConstexprAlignerFallbackParams<63>;
+        #else
         using FallbackCep = ConstexprAlignerFallbackParams<L>;
+        #endif
 
-        #if USE_SPEC_CEP == 1
+        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 3
         // Cep selection — lifted from the deleted `dispatch_on_specialisation`.
         // Both Cep instantiations are present in the binary; the runtime
         // `if` picks one.  Compile-time impact: identical to the v0 body.
@@ -2528,7 +2549,11 @@ struct describe_leaf {
         const int32_t& target_len)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
+        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL == 0
+        using FallbackCep = ConstexprAlignerFallbackParams<63>;
+        #else
         using FallbackCep = ConstexprAlignerFallbackParams<L>;
+        #endif
 
         constexpr auto EP_describe = EntryPoint::WithPrebuiltMinimizers;
         constexpr auto MA_describe = algorithm_enum_values<
@@ -2538,7 +2563,7 @@ struct describe_leaf {
             "describe_leaf relies on MA default = SCALAR.  Update both call "
             "sites if the MA default ever changes.");
 
-        #if USE_SPEC_CEP == 1
+        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 3
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(K))
         {
