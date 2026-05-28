@@ -73,13 +73,12 @@ bool bioseq_update_index_on_insert = true;
 bool bioseq_read_sequence_index = true;
 
 /*
- * DOC0263 §11.3.2 — test-only knob. When on, the DOC0263 parity build
- * (compiled with -DBIOSEQ_ENABLE_FRAGMENTED_DISPATCH=1) wraps row sequences
- * in a synthetic chunked scanner. Default off; PGC_SUSET. The synthetic
- * scanner has NO Postgres backing — the production fragmented scanner is a
- * Phase C feature (DOC0264). Gating the chunked dispatch behind a build flag
- * keeps the dispatch_buffer TU from instantiating a second pipeline tree
- * (DOC0271 template-explosion budget; cf. DOC0263 §11.5 nightly-only matrix).
+ * DOC0263 §11.3.2 / DOC0264 — test-only knob. When on, the dispatch buffer
+ * wraps row sequences in a synthetic chunked scanner (parity tests). Default
+ * off; PGC_SUSET. The synthetic scanner has NO Postgres backing — the
+ * production fragmented scanner is `sequence_scanner_pg` (DOC0264). With
+ * the macro-gating removed in DOC0274, the chunked path is always compiled
+ * into the dispatch_buffer TU.
  */
 bool bioseq_test_force_chunked_scanner = false;
 
@@ -213,13 +212,14 @@ bioseq_guc_init()
 		NULL, NULL, NULL    // No variable hooks necessary
 	);
 
-	// DOC0263 §11.3.2 — test-only chunked-scanner force knob (parity tests).
+	// DOC0263 §11.3.2 / DOC0264 — test-only chunked-scanner force knob.
 	DefineCustomBoolVariable(
 		"bioseq.test_force_chunked_scanner",
 		"Test-only: wrap dispatch-buffer row sequences in a synthetic chunked "
-		"scanner (DOC0263 parity tests). Requires a build with "
-		"BIOSEQ_ENABLE_FRAGMENTED_DISPATCH=1; otherwise inert. DO NOT USE IN "
-		"PRODUCTION — the synthetic scanner has no Postgres backing.",
+		"scanner (DOC0263 parity tests). The chunked path is always compiled "
+		"in (DOC0274 removed the BIOSEQ_ENABLE_FRAGMENTED_DISPATCH build flag). "
+		"DO NOT USE IN PRODUCTION — the synthetic scanner has no Postgres "
+		"backing.",
 		NULL,
 		&bioseq_test_force_chunked_scanner,
 		false,

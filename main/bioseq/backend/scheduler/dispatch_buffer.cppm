@@ -54,16 +54,13 @@ module;
  * access_method.cppm. */
 extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
 
-// DOC0263 §11.3.2 — the chunked-scanner dispatch path is gated behind a build
-// flag (default OFF) so the dispatch_buffer TU instantiates ONE pipeline tree
-// (sequence_scanner_none) in production — no template explosion (DOC0271). A
-// parity/CI build sets -DBIOSEQ_ENABLE_FRAGMENTED_DISPATCH=1 to also compile the
-// chunked tree; the bioseq.test_force_chunked_scanner GUC then routes row
-// sequences through a synthetic chunked scanner end-to-end.
-#ifndef BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
-#define BIOSEQ_ENABLE_FRAGMENTED_DISPATCH 0
-#endif
-
+// DOC0263 §11.3.2 / DOC0264 — the chunked-scanner dispatch path is always
+// compiled (Phase C made the fragmented pipeline tree a permanent fixture).
+// The `bioseq.test_force_chunked_scanner` GUC routes row sequences through a
+// synthetic chunked scanner end-to-end (DOC0263 parity tests). The
+// `bioseq.test_force_inmemory_scanner` GUC forces the materialise-then-
+// in_memory baseline. Without either GUC the production path runs through
+// `with_lazy_postgres<S>` (DOC0264 §9.1).
 export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
@@ -79,7 +76,8 @@ import bioseq_sidecar;
 import bioseq_instr;
 import bioseq_storage;                  // DOC0260 §9
 import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
-import bioseq_storage_scanner;          // DOC0263 §11.3.2 — chunked test scanner (gated) — seq_locator, fetch_payload_bulk, seq_caches
+import bioseq_storage_scanner;          // DOC0263 §11.3.2 — chunked test scanner — seq_locator, fetch_payload_bulk, seq_caches
+import bioseq_storage_scanner_pg;       // DOC0264 §7 / DOC0274 — Phase C production fragment scanner
 
 HWY_BEFORE_NAMESPACE();
 
@@ -187,6 +185,26 @@ public:
     };
 
     /*
+     * DOC0264 / DOC0274 — context required to wire scanner_pg into the
+     * per-row pipeline dispatch. When non-null, the dispatch loop uses
+     * `sequence_scanner_pg<S>` (PG-backed for stub-backed targets, in-memory
+     * for the query literal). When null, the dispatch loop falls back to
+     * the Phase B baseline `with_lazy_in_memory`.
+     */
+    struct ScannerPgContext {
+        Oid                                              db_oid               = InvalidOid;
+        Oid                                              tablespace_oid       = InvalidOid;
+        Oid                                              main_relfilenode     = InvalidOid;
+        std::int16_t                                     mmsearch_seq_attno   = 0;
+        bioseq::storage::seq_caches*                     caches               = nullptr;
+        MemoryContext                                    parent_mctx          = nullptr;
+        // Per-row optional locator. nullopt means "use the inline pgseq_t at
+        // target_hdrs[i]" — scanner_pg is then constructed in in-memory mode.
+        std::array<std::optional<bioseq::storage::seq_locator>,
+            kDispatchBatchCapacity>                       target_locators{};
+    };
+
+    /*
      * Run the minimap2 pipeline across a batch. index_blobs may be nullptr
      * when the caller has no sidecar path (legacy/read_sequence_index=off);
      * otherwise it points at a contiguous block of batch_capacity pairs,
@@ -194,32 +212,23 @@ public:
      * path so the caller can mix "index present" and "index absent" rows
      * in the same scan (the common case when update_index_on_insert was
      * toggled during loading).
-     */
-    /*
-     * DOC0264 §9 / DOC0271 — production dispatch posture.
+     *
+     * DOC0264 / DOC0274 — production dispatch posture.
      *
      * The Phase C `sequence_scanner_pg<S>` (in module
-     * `bioseq_storage_scanner_pg`) is compiled but NOT wired into the
-     * dispatch_buffer's pipeline. The pipeline (minimap_port,
-     * minimap2_port_with_index) is templated on ONE Scanner type and
-     * requires query + target to share it. Forcing both into scanner_pg
-     * would double the dispatch_buffer template instantiation count
-     * (Phase B's `dispatch_buffer.cppm` was already the project's
-     * compile-time long pole; DOC0271 / DOC0272 §11.3.1 documents this
-     * trade-off explicitly).
-     *
-     * For Phase C the production path therefore continues to:
-     *   1. Bulk-hydrate stub-backed entries via the updated
-     *      `SM::fetch_payload(...)` which now stitches per-fragment
-     *      sub-table rows into one contiguous varlena (bounded by
-     *      MaxAllocSize — DOC0264 §9.4).
-     *   2. Dispatch through `with_lazy_in_memory` over the hydrated
-     *      varlena (the Phase B baseline).
-     *
-     * The Phase C scanner_pg path is exercised directly by the unit
-     * test of `sequence_scanner_pg<S>` (concept conformance +
-     * fragment-by-fragment read), and is the foundation for Phase D
-     * D-VARLENA / D-PIPELINE which lift the MaxAllocSize hydration cap.
+     * `bioseq_storage_scanner_pg`) is now wired into the dispatch loop.
+     * `scanner_pg_ctx` carries the per-batch identity (db/spc/relfilenode/
+     * attno/seq_caches/parent_mctx) plus the per-row optional locator the
+     * caller decoded at submit_scan time. When `scanner_pg_ctx` is non-null
+     * AND the user has not forced the in-memory baseline via
+     * `bioseq.test_force_inmemory_scanner = on`, the loop dispatches:
+     *   - target through `sequence_scanner_pg<S>` (PG-backed when locator
+     *     present; in-memory wrap of the inline pgseq_t otherwise);
+     *   - query through `sequence_scanner_pg<S>` in-memory wrap of the
+     *     batch's query literal.
+     * Both share the same `Scanner = sequence_scanner_pg<S>` template, so
+     * the pipeline tree adds one instantiation (alongside the existing
+     * `sequence_scanner_none` and `sequence_scanner_test_chunked` trees).
      *
      * NOTE on parameter passing: `target_hdrs`, `query_ids`, and
      * `index_blobs` are full-size `kDispatchBatchCapacity`-element arrays
@@ -237,7 +246,8 @@ public:
         const std::array<K, batch_capacity>& query_ids,
         const Minimap2Params& base_params,
         const std::array<TargetIndexBlobRef, batch_capacity>* index_blobs,
-        BatchExecutionStats& stats)
+        BatchExecutionStats& stats,
+        ScannerPgContext* scanner_pg_ctx = nullptr)
     {
         std::map<K, std::vector<MatchResult>> results;
 
@@ -285,16 +295,28 @@ public:
                 // DOC0263 §9.7 — present the row sequence to the migrated
                 // pipeline through the zero-overhead no-fragment lazy wrapper.
                 auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
-#if BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
                 const char* _force_chunked_guc =
                     GetConfigOptionByName("bioseq.test_force_chunked_scanner", NULL, true);
                 const bool chunked_scanner_forced =
                     _force_chunked_guc && std::strcmp(_force_chunked_guc, "on") == 0;
-#endif
-                JustLog("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={}",
+                // DOC0264 §9.2 / DOC0274 — test parity knob. When on, the dispatch
+                // loop forces the Phase B baseline (with_lazy_in_memory). Otherwise
+                // (default) and given a non-null ScannerPgContext, the loop uses
+                // the Phase C `sequence_scanner_pg<S>` (PG-backed for stub targets,
+                // in-memory for the query literal / inline targets).
+                const char* _force_inmemory_guc =
+                    GetConfigOptionByName("bioseq.test_force_inmemory_scanner", NULL, true);
+                const bool inmemory_scanner_forced =
+                    _force_inmemory_guc && std::strcmp(_force_inmemory_guc, "on") == 0;
+                const bool use_scanner_pg =
+                    scanner_pg_ctx != nullptr
+                    && !inmemory_scanner_forced
+                    && !chunked_scanner_forced;
+                JustLog("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={} use_scanner_pg={} chunked={} inmemory_forced={}",
                         static_cast<unsigned>(alphabet_code),
                         static_cast<unsigned>(storage_unit_byte_width),
-                        query_seq.bp_size(), batch_size);
+                        query_seq.bp_size(), batch_size,
+                        use_scanner_pg, chunked_scanner_forced, inmemory_scanner_forced);
 
                 /*
                  * Query minimizers are computed once per batch for the
@@ -307,11 +329,20 @@ public:
 
                 for (size_t i = 0; i < batch_size; ++i) {
                     const pgseq_t* target_hdr = target_hdrs[i];
-                    if (target_hdr == nullptr) {
+                    // DOC0274 — when use_scanner_pg=true AND a locator was captured
+                    // for this row (e.g. a stub whose materialised varlena would
+                    // exceed MaxAllocSize, so hydration was skipped), we still have
+                    // enough info to dispatch via scanner_pg's PG-backed mode. Only
+                    // skip when NEITHER an inline target nor a locator is available.
+                    const bool has_locator_for_pg =
+                        use_scanner_pg
+                        && scanner_pg_ctx->target_locators[i].has_value();
+                    if (target_hdr == nullptr && !has_locator_for_pg) {
                         continue;  // NULL seq column in this row → no match
                     }
-                    if (target_hdr->alphabet_code != alphabet_code
-                        || target_hdr->storage_unit_byte_width != storage_unit_byte_width) {
+                    if (target_hdr != nullptr
+                        && (target_hdr->alphabet_code != alphabet_code
+                            || target_hdr->storage_unit_byte_width != storage_unit_byte_width)) {
                         /*
                          * PG's typmod coercion should have rejected the
                          * INSERT if the stored typmod didn't match the
@@ -329,11 +360,18 @@ public:
                                 static_cast<unsigned>(storage_unit_byte_width));
                         continue;
                     }
-                    compact_sequence_range<S> target_seq{*target_hdr};
-                    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+                    // Construct compact_sequence_range only when target_hdr is
+                    // present. With a PG-backed locator we don't materialise the
+                    // full payload — scanner_pg streams fragment-by-fragment. Use
+                    // the locator's total_bp_size for the heuristic-relevant
+                    // min_bp comparison.
+                    const sequence_size_t target_bp_size = target_hdr != nullptr
+                        ? static_cast<sequence_size_t>(target_hdr->bp_size)
+                        : scanner_pg_ctx->target_locators[i]->total_bp_size;
 
-                    const size_t min_bp = std::min(query_seq.bp_size(),
-                                                   target_seq.bp_size());
+                    const size_t min_bp = std::min<size_t>(
+                        static_cast<size_t>(query_seq.bp_size()),
+                        static_cast<size_t>(target_bp_size));
 
                     ++stats.targets_considered;
 
@@ -372,42 +410,133 @@ public:
                         }
                         TargetIndex prebuilt_idx = TargetIndex::deserialize_from_binary(
                             (*index_blobs)[i].data, (*index_blobs)[i].bytes);
-#if BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
-                        if (chunked_scanner_forced) {
-                            using chunked = bioseq::storage::sequence_scanner_test_chunked<
-                                typename compact_sequence_range<S>::traits::storage_unit,
-                                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-                            bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
-                            bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
-                            collection = minimap2_port_with_index(
-                                fq, ft, *cached_query_minimizers, prebuilt_idx, params);
-                        } else
-#endif
-                        collection = minimap2_port_with_index(
-                            lazy_query, lazy_target,
-                            *cached_query_minimizers,
-                            prebuilt_idx, params);
+                        if (use_scanner_pg) {
+                            // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
+                            using SP = bioseq::storage::sequence_scanner_pg<S>;
+                            bioseq::storage::lazy_compact_sequence<S, SP> fq_pg{
+                                bioseq::storage::make_scanner_pg_in_memory<S>(query_seq)};
+                            const auto& loc_opt = scanner_pg_ctx->target_locators[i];
+                            if (loc_opt.has_value()) {
+                                // DOC0274 — compute last-fragment padding from
+                                // total_bp_size and S's letters_per_unit. For
+                                // total_bp = N, padding = ceil(N/lpu)*lpu - N.
+                                constexpr std::size_t _lpu =
+                                    compact_sequence_range<S>::traits::letters_per_unit;
+                                const std::uint64_t _total_units =
+                                    (loc_opt->total_bp_size + _lpu - 1) / _lpu;
+                                const std::size_t _padding =
+                                    static_cast<std::size_t>(
+                                        _total_units * _lpu - loc_opt->total_bp_size);
+                                SP target_scanner(
+                                    scanner_pg_ctx->db_oid,
+                                    scanner_pg_ctx->tablespace_oid,
+                                    scanner_pg_ctx->main_relfilenode,
+                                    scanner_pg_ctx->mmsearch_seq_attno,
+                                    *loc_opt,
+                                    _padding,
+                                    scanner_pg_ctx->caches,
+                                    scanner_pg_ctx->parent_mctx);
+                                bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
+                                    std::move(target_scanner)};
+                                collection = minimap2_port_with_index(
+                                    fq_pg, ft_pg, *cached_query_minimizers,
+                                    prebuilt_idx, params);
+                            } else {
+                                // Inline target — wrap via in-memory mode of scanner_pg.
+                                compact_sequence_range<S> target_seq{*target_hdr};
+                                bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
+                                    bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
+                                collection = minimap2_port_with_index(
+                                    fq_pg, ft_pg, *cached_query_minimizers,
+                                    prebuilt_idx, params);
+                            }
+                        } else if (target_hdr != nullptr) {
+                            // Baseline / chunked paths require an inline target.
+                            compact_sequence_range<S> target_seq{*target_hdr};
+                            auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+                            if (chunked_scanner_forced) {
+                                using chunked = bioseq::storage::sequence_scanner_test_chunked<
+                                    typename compact_sequence_range<S>::traits::storage_unit,
+                                    bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+                                bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
+                                bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
+                                collection = minimap2_port_with_index(
+                                    fq, ft, *cached_query_minimizers, prebuilt_idx, params);
+                            } else {
+                                collection = minimap2_port_with_index(
+                                    lazy_query, lazy_target,
+                                    *cached_query_minimizers,
+                                    prebuilt_idx, params);
+                            }
+                        } else {
+                            // No inline target AND scanner_pg disabled — cannot dispatch.
+                            JustLog("[bioseq] pg: row {} has no inline target and scanner_pg is disabled; treating as WHERE FALSE",
+                                    static_cast<int>(query_ids[i]));
+                            continue;
+                        }
                         stats.last_effective_params = params;
                     } else {
                         ++stats.targets_recomputed_minimizers;
                         Minimap2Params params = apply_size_heuristic(base_params, min_bp);
-#if BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
-                        if (chunked_scanner_forced) {
-                            using chunked = bioseq::storage::sequence_scanner_test_chunked<
-                                typename compact_sequence_range<S>::traits::storage_unit,
-                                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-                            bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
-                            bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
-                            collection = minimap_port(fq, ft, params);
-                        } else
-#endif
-                        collection = minimap_port(lazy_query, lazy_target, params);
+                        if (use_scanner_pg) {
+                            // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
+                            using SP = bioseq::storage::sequence_scanner_pg<S>;
+                            bioseq::storage::lazy_compact_sequence<S, SP> fq_pg{
+                                bioseq::storage::make_scanner_pg_in_memory<S>(query_seq)};
+                            const auto& loc_opt = scanner_pg_ctx->target_locators[i];
+                            if (loc_opt.has_value()) {
+                                // DOC0274 — compute last-fragment padding from
+                                // total_bp_size and S's letters_per_unit. For
+                                // total_bp = N, padding = ceil(N/lpu)*lpu - N.
+                                constexpr std::size_t _lpu =
+                                    compact_sequence_range<S>::traits::letters_per_unit;
+                                const std::uint64_t _total_units =
+                                    (loc_opt->total_bp_size + _lpu - 1) / _lpu;
+                                const std::size_t _padding =
+                                    static_cast<std::size_t>(
+                                        _total_units * _lpu - loc_opt->total_bp_size);
+                                SP target_scanner(
+                                    scanner_pg_ctx->db_oid,
+                                    scanner_pg_ctx->tablespace_oid,
+                                    scanner_pg_ctx->main_relfilenode,
+                                    scanner_pg_ctx->mmsearch_seq_attno,
+                                    *loc_opt,
+                                    _padding,
+                                    scanner_pg_ctx->caches,
+                                    scanner_pg_ctx->parent_mctx);
+                                bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
+                                    std::move(target_scanner)};
+                                collection = minimap_port(fq_pg, ft_pg, params);
+                            } else {
+                                compact_sequence_range<S> target_seq{*target_hdr};
+                                bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
+                                    bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
+                                collection = minimap_port(fq_pg, ft_pg, params);
+                            }
+                        } else if (target_hdr != nullptr) {
+                            compact_sequence_range<S> target_seq{*target_hdr};
+                            auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+                            if (chunked_scanner_forced) {
+                                using chunked = bioseq::storage::sequence_scanner_test_chunked<
+                                    typename compact_sequence_range<S>::traits::storage_unit,
+                                    bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+                                bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
+                                bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
+                                collection = minimap_port(fq, ft, params);
+                            } else {
+                                collection = minimap_port(lazy_query, lazy_target, params);
+                            }
+                        } else {
+                            JustLog("[bioseq] pg: row {} has no inline target and scanner_pg is disabled; treating as WHERE FALSE",
+                                    static_cast<int>(query_ids[i]));
+                            continue;
+                        }
                         stats.last_effective_params = params;
                     }
 
                     JustLog("[bioseq] pg: BatchProcessor row query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} prebuilt_index={} produced {} match(es)",
                             static_cast<int>(query_ids[i]),
-                            target_seq.bp_size(),
+                            target_bp_size,
                             stats.last_effective_params.kmer_size,
                             stats.last_effective_params.window_size,
                             stats.last_effective_params.min_chain_score,
@@ -1225,11 +1354,65 @@ public:
         for (auto& v : per_bucket) {
             v.clear();
         }
+        // DOC0274 — compute letters_per_unit + storage_unit_byte_width from
+        // the batch's (alphabet, width) typmod so the MaxAllocSize gate below
+        // works for ANY alphabet / storage_unit_byte_width pair (dna4/uint8,
+        // dna5/uint64, aa20/uint32, …) — NOT just the 2-bits-per-letter dna4
+        // case. The dispatch happens once per column (not per row).
+        //
+        // Explicit captures (no `[&]` capture-all) per DOC0264 R6 — the user-
+        // visible rule on the hot path is no capture-all lambdas.
+        std::size_t lpu_for_column          = 0;
+        std::size_t bytes_per_unit_for_col  = 0;
+        pgseq_t::dispatch_instance(
+            mmsearch_context.alphabet_code,
+            mmsearch_context.storage_unit_byte_width,
+            [&lpu_for_column, &bytes_per_unit_for_col]<class S>() noexcept {
+                using traits = typename compact_sequence_range<S>::traits;
+                lpu_for_column         = traits::letters_per_unit;
+                bytes_per_unit_for_col = sizeof(typename traits::storage_unit);
+            });
+        if (lpu_for_column == 0 || bytes_per_unit_for_col == 0) {
+            pg_log(ERROR,
+                "hydrate_one_column: dispatch_instance returned zero lpu / "
+                "bytes_per_unit for (alphabet={}, width={})",
+                static_cast<unsigned>(mmsearch_context.alphabet_code),
+                static_cast<unsigned>(mmsearch_context.storage_unit_byte_width));
+        }
         bool any = false;
         for (size_t i = 0; i < batch_size; ++i) {
             const auto& loc = is_query ? buffered_entries[i].per_row_query_loc
                                        : buffered_entries[i].seq_loc;
             if (!loc.has_value()) {
+                continue;
+            }
+            // DOC0274 — Phase C / D-VARLENA bridge: skip hydration when the
+            // assembled varlena would exceed MaxAllocSize. The scanner_pg
+            // dispatch path reads such sequences fragment-by-fragment without
+            // materialising. Projection of `SELECT seq` on these rows raises
+            // pg_log(ERROR) from access_method.cppm — that's the documented
+            // Phase C limit until Phase D D-VARLENA lifts it.
+            //
+            // Size = ceil(total_bp / letters_per_unit) * bytes_per_unit + header,
+            // where lpu and bytes_per_unit come from the column's (alphabet,
+            // width) typmod — generic across all supported alphabets.
+            const std::uint64_t total_units = lpu_for_column == 0
+                ? std::uint64_t{0}
+                : (static_cast<std::uint64_t>(loc->total_bp_size)
+                       + lpu_for_column - 1)
+                  / lpu_for_column;
+            const std::uint64_t projected_payload_bytes =
+                total_units * static_cast<std::uint64_t>(bytes_per_unit_for_col);
+            const std::uint64_t projected_varlena =
+                static_cast<std::uint64_t>(pgseq_t::header_bytes())
+                + projected_payload_bytes;
+            if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
+                JustLog("[bioseq] pg: hydrate_one_column row={} attno={} too large "
+                        "({} bp, lpu={}, byte_width={} ⇒ {} bytes > MaxAllocSize); "
+                        "deferring to scanner_pg",
+                        i, static_cast<int>(column_attno),
+                        loc->total_bp_size, lpu_for_column,
+                        bytes_per_unit_for_col, projected_varlena);
                 continue;
             }
             per_bucket[loc->bucket_idx].push_back(SM::fetch_request{i, *loc});
@@ -1431,6 +1614,43 @@ public:
                          kDispatchBatchCapacity>* blob_arg =
             blobs_eligible ? &index_blobs : nullptr;
 
+        // DOC0264 §9.2 / DOC0274 — wire scanner_pg into the dispatch loop.
+        // Allocates a fresh seq_caches for scanner_pg's PG-backed reads.
+        // Lives in batch_payload_ctx so palloc'd state survives the call.
+        if (batch_payload_ctx == nullptr) {
+            batch_payload_ctx = AllocSetContextCreate(CurrentMemoryContext,
+                "TupleDispatchBuffer payload arena", ALLOCSET_DEFAULT_SIZES);
+        }
+        bioseq::storage::seq_caches* scanner_pg_cache =
+            bioseq::storage::alloc_seq_caches(batch_payload_ctx);
+        scanner_pg_cache->side                = bioseq::storage::seq_caches::Side::Read;
+        scanner_pg_cache->lock_mode           = AccessShareLock;
+        scanner_pg_cache->read_state_mctx     = batch_payload_ctx;
+        scanner_pg_cache->main_database_oid   = user_main_database_oid;
+        scanner_pg_cache->main_tablespace_oid = user_main_tablespace_oid;
+        scanner_pg_cache->main_relfilenode    = user_main_relfilenode;
+
+        typename BatchProcessor::ScannerPgContext scanner_pg_ctx{};
+        scanner_pg_ctx.db_oid             = user_main_database_oid;
+        scanner_pg_ctx.tablespace_oid     = user_main_tablespace_oid;
+        scanner_pg_ctx.main_relfilenode   = user_main_relfilenode;
+        scanner_pg_ctx.mmsearch_seq_attno =
+            static_cast<std::int16_t>(mmsearch_context.seq_attno);
+        scanner_pg_ctx.caches             = scanner_pg_cache;
+        scanner_pg_ctx.parent_mctx        = batch_payload_ctx;
+        // Populate per-row locators for the target column. The production
+        // scanner_pg path uses these. Last-fragment padding is recomputed
+        // inside process_sequences where the template parameter S (and thus
+        // its letters_per_unit) is available.
+        for (size_t i = 0; i < batch_size; ++i) {
+            const auto& seq_loc_opt = buffered_entries[i].seq_loc;
+            if (seq_loc_opt.has_value()) {
+                scanner_pg_ctx.target_locators[i] = *seq_loc_opt;
+            }
+        }
+        // Pointer to the context.
+        auto* scanner_pg_arg = &scanner_pg_ctx;
+
         if (per_row_mode()) {
             /*
              * Per-row dispatch: each entry aligns against its own
@@ -1448,7 +1668,11 @@ public:
             for (size_t i = 0; i < batch_size; ++i) {
                 const BufferedScanEntry& entry = buffered_entries[i];
                 const pgseq_t* per_row_hdr = entry.per_row_query_hdr();
-                if (per_row_hdr == nullptr || target_hdrs[i] == nullptr) {
+                const bool target_present_per_row =
+                    target_hdrs[i] != nullptr
+                    || (scanner_pg_arg != nullptr
+                        && scanner_pg_ctx.target_locators[i].has_value());
+                if (per_row_hdr == nullptr || !target_present_per_row) {
                     continue;
                 }
                 std::array<const pgseq_t*, kDispatchBatchCapacity>
@@ -1463,6 +1687,11 @@ public:
                 const std::array<typename BatchProcessor::TargetIndexBlobRef,
                                  kDispatchBatchCapacity>* single_blob_arg =
                     blobs_eligible ? &single_blobs : nullptr;
+                // DOC0274 — build a single-row scanner_pg context so the
+                // dispatch loop can pick scanner_pg for this row's target.
+                typename BatchProcessor::ScannerPgContext single_pg_ctx = scanner_pg_ctx;
+                for (auto& opt : single_pg_ctx.target_locators) opt.reset();
+                single_pg_ctx.target_locators[0] = scanner_pg_ctx.target_locators[i];
                 auto single_match =
                     processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
                         1,
@@ -1472,7 +1701,8 @@ public:
                         single_targets, single_ids,
                         base_params,
                         single_blob_arg,
-                        single_stats);
+                        single_stats,
+                        &single_pg_ctx);
                 last_stats.targets_considered           += single_stats.targets_considered;
                 last_stats.targets_with_prebuilt_index  += single_stats.targets_with_prebuilt_index;
                 last_stats.targets_recomputed_minimizers += single_stats.targets_recomputed_minimizers;
@@ -1490,7 +1720,8 @@ public:
                 target_hdrs, query_ids,
                 base_params,
                 blob_arg,
-                last_stats);
+                last_stats,
+                scanner_pg_arg);
         }
 
         /*
@@ -1529,7 +1760,8 @@ public:
                     target_hdrs, query_ids,
                     base_params,
                     blob_arg,
-                    discarded_stats);
+                    discarded_stats,
+                    scanner_pg_arg);
             JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} produced matches for {} entries",
                     extra_idx, extra_match_map.size());
             for (auto it = match_map.begin(); it != match_map.end(); ) {
@@ -1546,6 +1778,13 @@ public:
                 }
             }
         }
+
+        // DOC0274 — release scanner_pg's per-batch seq_caches now that all
+        // process_sequences calls have returned. close_all releases the
+        // sub-table relations and their ColumnarReadStates; destroy_seq_caches
+        // returns the cache slab to the parent MemoryContext for reuse.
+        scanner_pg_cache->close_all(/*commit=*/false);
+        bioseq::storage::destroy_seq_caches(scanner_pg_cache);
 
         output_cursors.clear();
         for (size_t i = 0; i < buffered_entries.size(); ++i) {

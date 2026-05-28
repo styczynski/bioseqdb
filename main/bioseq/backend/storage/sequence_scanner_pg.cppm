@@ -58,11 +58,20 @@ export namespace bioseq::storage {
 
 // DOC0264 §7 — `sequence_scanner_pg<S>`.
 //
-// Production fragment-streaming scanner. Reads one fragment per
-// sub-table row via Phase A's `seq_caches` + `ColumnarReadRowByRowNumber`,
-// memcpys the bytes into a slot in a per-scanner MemoryContext, and
-// exposes them through Phase B's `read_fragment(n)` API. `release_fragment`
-// pfrees the slot.
+// Production fragment-streaming scanner. Two construction modes:
+//
+//   1. PG-backed (production target path): constructed from a locator + seq_caches.
+//      Reads one fragment per sub-table row via Phase A's `seq_caches` +
+//      `ColumnarReadRowByRowNumber`, memcpys the bytes into a slot in a per-scanner
+//      MemoryContext, exposes them through Phase B's `read_fragment(n)` API.
+//      `release_fragment` pfrees the slot.
+//
+//   2. In-memory (query / inline target path): constructed from a span over an
+//      existing `compact_sequence_range<R>`'s packed storage units. `read_fragment(n)`
+//      returns a subspan with NO allocation, NO MemoryContext. `release_fragment`
+//      is a no-op (caller owns the bytes). This lets a query literal (always inline)
+//      share the same scanner type as a PG-backed target without doubling the
+//      dispatch_buffer template tree (DOC0274).
 template <class StdcInstance>
 struct sequence_scanner_pg final {
     using storage_unit   = typename StdcInstance::storage_unit;
@@ -101,6 +110,7 @@ struct sequence_scanner_pg final {
     [[gnu::always_inline]]
     void release_fragment(std::size_t fragment_no) const noexcept;
 
+    // PG-backed constructor (production target path).
     explicit sequence_scanner_pg(
         Oid db_oid, Oid tablespace_oid, Oid main_relfilenode,
         std::int16_t column_attno, const seq_locator& locator,
@@ -115,7 +125,8 @@ struct sequence_scanner_pg final {
           last_fragment_padding_(last_fragment_padding),
           num_fragments_(locator.num_fragments),
           caches_(caches),
-          mctx_(nullptr)
+          mctx_(nullptr),
+          in_memory_data_{}
     {
         if (caches_ == nullptr) {
             pg_log(ERROR, "sequence_scanner_pg: caches pointer must be non-null");
@@ -129,6 +140,34 @@ struct sequence_scanner_pg final {
         mctx_ = AllocSetContextCreate(parent_mctx,
                                       "bioseq sequence_scanner_pg",
                                       ALLOCSET_DEFAULT_SIZES);
+        for (auto& slot : slots_) {
+            slot.fragment_no = std::numeric_limits<std::size_t>::max();
+            slot.bytes       = nullptr;
+        }
+    }
+
+    // In-memory constructor (query / inline target path). The caller owns the
+    // bytes; the scanner just stores a span into them, no allocation. The total
+    // bp count + last-fragment padding letters mirror what the FRAGMENTED lazy
+    // wrapper would expect from a PG-backed scanner.
+    explicit sequence_scanner_pg(
+        base_container in_memory_data,
+        sequence_size_t total_bp_size,
+        std::size_t last_fragment_padding) noexcept
+        : db_oid_(InvalidOid),
+          tablespace_oid_(InvalidOid),
+          main_relfilenode_(InvalidOid),
+          column_attno_(0),
+          locator_{},
+          total_bp_size_(total_bp_size),
+          last_fragment_padding_(last_fragment_padding),
+          num_fragments_(
+              (in_memory_data.size() + fragment_storage_units - 1)
+                  / fragment_storage_units),
+          caches_(nullptr),
+          mctx_(nullptr),
+          in_memory_data_(in_memory_data)
+    {
         for (auto& slot : slots_) {
             slot.fragment_no = std::numeric_limits<std::size_t>::max();
             slot.bytes       = nullptr;
@@ -149,10 +188,12 @@ struct sequence_scanner_pg final {
           num_fragments_(other.num_fragments_),
           caches_(other.caches_),
           mctx_(other.mctx_),
+          in_memory_data_(other.in_memory_data_),
           slots_(other.slots_)
     {
-        other.mctx_   = nullptr;
-        other.caches_ = nullptr;
+        other.mctx_           = nullptr;
+        other.in_memory_data_ = base_container{};
+        other.caches_         = nullptr;
         for (auto& slot : other.slots_) {
             slot.fragment_no = std::numeric_limits<std::size_t>::max();
             slot.bytes       = nullptr;
@@ -187,6 +228,9 @@ struct sequence_scanner_pg final {
         }
     }
 
+    [[nodiscard]] [[gnu::always_inline]]
+    bool is_in_memory_mode() const noexcept { return mctx_ == nullptr; }
+
 private:
     struct slot_t {
         std::size_t   fragment_no = std::numeric_limits<std::size_t>::max();
@@ -203,10 +247,12 @@ private:
     std::size_t                                          num_fragments_;
     seq_caches*                                          caches_;
     MemoryContext                                        mctx_;
+    // DOC0274 — in-memory mode backing span. Empty in PG-backed mode.
+    base_container                                       in_memory_data_;
     // Fixed-size slot ring matching the wrapper's
     // fragments_buffer_capacity (16). LRU-ish eviction in
     // allocate_slot_for_; the Phase-B wrapper typically drives
-    // release_fragment so the ring is rarely full.
+    // release_fragment so the ring is rarely full. Used only in PG-backed mode.
     mutable std::array<slot_t, 16>                       slots_{};
 
     [[nodiscard]] slot_t* find_slot_(std::size_t fragment_no) const noexcept {
@@ -248,6 +294,20 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
         pg_log(ERROR,
                "sequence_scanner_pg: read_fragment({}) >= num_fragments_({})",
                fragment_no, num_fragments_);
+    }
+
+    // DOC0274 — in-memory mode: subspan the caller-owned span, no allocation.
+    if (is_in_memory_mode()) {
+        const std::size_t start = fragment_no * fragment_storage_units;
+        if (start >= in_memory_data_.size()) {
+            pg_log(ERROR,
+                "sequence_scanner_pg in-memory: fragment {} starts at unit {} but "
+                "backing span only has {} units", fragment_no, start,
+                in_memory_data_.size());
+        }
+        const std::size_t end =
+            std::min(start + fragment_storage_units, in_memory_data_.size());
+        return in_memory_data_.subspan(start, end - start);
     }
 
     if (auto* s = find_slot_(fragment_no); s != nullptr) {
@@ -338,6 +398,10 @@ template <class StdcInstance>
 inline void sequence_scanner_pg<StdcInstance>::release_fragment(
     std::size_t fragment_no) const noexcept
 {
+    // DOC0274 — in-memory mode: no slot ownership, no-op release.
+    if (is_in_memory_mode()) {
+        return;
+    }
     for (auto& slot : slots_) {
         if (slot.fragment_no == fragment_no && slot.bytes != nullptr) {
             pfree(slot.bytes);
@@ -373,6 +437,31 @@ inline void with_lazy_postgres(
               locator, last_fragment_padding, caches, parent_mctx);
     lazy_compact_sequence<R, S> lazy{std::move(scanner)};
     std::forward<Fn>(fn)(lazy);
+}
+
+// DOC0274 — construct a sequence_scanner_pg in IN-MEMORY mode from an existing
+// compact_sequence_range. Used to wrap query literals or already-hydrated
+// inline targets so they share the production `sequence_scanner_pg<R>` template
+// type with stub-backed (PG-backed) targets — eliminating the need for a
+// separate in-memory scanner template in the dispatch_buffer pipeline tree.
+//
+// `range` must outlive the returned scanner: its `read_cptr(cbegin())` pointer
+// is captured into the scanner's backing span, and the scanner just slices it
+// per fragment with no copy.
+template <class R>
+[[nodiscard]] [[gnu::always_inline]]
+inline sequence_scanner_pg<R> make_scanner_pg_in_memory(
+    const compact_sequence_range<R>& range) noexcept
+{
+    using storage_unit = typename compact_sequence_range<R>::traits::storage_unit;
+    const std::size_t units = static_cast<std::size_t>(range.size());
+    std::span<const storage_unit> backing =
+        units == 0
+            ? std::span<const storage_unit>{}
+            : std::span<const storage_unit>(range.read_cptr(range.cbegin()), units);
+    const sequence_size_t total_bp = static_cast<sequence_size_t>(range.bp_size());
+    const std::size_t padding = static_cast<std::size_t>(range.padding());
+    return sequence_scanner_pg<R>{backing, total_bp, padding};
 }
 
 }  // namespace bioseq::storage

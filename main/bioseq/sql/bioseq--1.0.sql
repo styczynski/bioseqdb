@@ -1531,6 +1531,40 @@ CREATE OR REPLACE FUNCTION bioseq.locator_inspect(seq bioseq.seq)
         total_padding    INT4)
     AS 'MODULE_PATHNAME', 'bioseq_locator_inspect'
     LANGUAGE C IMMUTABLE STRICT;
+
+-- DOC0274 — `bioseq.create_query_target_sample_table(...)`. Inlines the
+-- benchmark generator's pair-emission loop (substitutions + indels +
+-- optional reverse-complement) and writes one row per pair: (query, target,
+-- truth_target_start, truth_target_end, is_reverse, effective_error_rate,
+-- original_query_length). Both seq columns flow through
+-- insert_sequence_streamed so peak RSS is bounded by one fragment + the
+-- shared reference vector (no full-row materialisation regardless of
+-- reference_length).
+CREATE OR REPLACE FUNCTION bioseq.create_query_target_sample_table(
+    table_name              TEXT,
+    fragment_count          INTEGER,
+    fragment_length_mean    BIGINT,
+    fragment_length_stddev  DOUBLE PRECISION,
+    reference_length        BIGINT,
+    substitution_rate       DOUBLE PRECISION,
+    insertion_rate          DOUBLE PRECISION,
+    deletion_rate           DOUBLE PRECISION,
+    insertion_length_mean   DOUBLE PRECISION,
+    deletion_length_mean    DOUBLE PRECISION,
+    reverse_complement_rate DOUBLE PRECISION,
+    seed                    BIGINT)
+    RETURNS OID
+    AS 'MODULE_PATHNAME', 'bioseq_create_query_target_sample_table'
+    LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION bioseq.create_query_target_sample_table(
+    TEXT, INTEGER, BIGINT, DOUBLE PRECISION, BIGINT, DOUBLE PRECISION,
+    DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION, DOUBLE PRECISION,
+    DOUBLE PRECISION, BIGINT) IS
+    'DOC0274: creates a USING bioseq table mirroring the bench generator''s '
+    '(query, target) pairs with ground-truth metadata. Each row has the same '
+    'reference as `target` and a mutated fragment as `query`; aligners are '
+    'expected to find the query inside the target at exactly '
+    '[truth_target_start, truth_target_end).';
 COMMENT ON FUNCTION bioseq.locator_inspect(bioseq.seq) IS
     'DOC0264 Phase C: returns the v2 locator fields embedded in a bioseq.seq '
     'stub value: (version, bucket_idx, shard_idx, num_fragments, '
