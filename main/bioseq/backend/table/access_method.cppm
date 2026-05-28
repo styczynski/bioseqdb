@@ -501,6 +501,23 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 			DatumGetPointer(slot->tts_values[idx]));
 		if (!bioseq::storage::is_locator_stub(hdr)) continue;
 		const auto loc_decoded = bioseq::storage::decode_locator_from_stub(hdr);
+		// DOC0264 §9.4 — guard against materialising sequences whose
+		// stitched varlena would exceed MaxAllocSize. Phase D D-VARLENA
+		// will replace this with a streaming SELECT/seq_send path.
+		const std::uint64_t projected_payload_bytes =
+			(loc_decoded.total_bp_size * /*bits_per_letter min=*/2u + 7u) / 8u;
+		const std::uint64_t projected_varlena =
+			static_cast<std::uint64_t>(pgseq_t::header_bytes())
+			+ projected_payload_bytes;
+		if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
+			pg_log(ERROR,
+			       "bioseq storage Phase C: sequence too large ({} bp ⇒ ~{} bytes) "
+			       "to materialise as a single varlena. SELECT seq / pg_dump "
+			       "cannot return this row directly. Use bioseq.substring(seq, …) "
+			       "to project a sub-region, or wait for Phase D D-VARLENA. "
+			       "See DOC0267.",
+			       loc_decoded.total_bp_size, projected_varlena);
+		}
 		pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
 			loc.dbOid, loc.spcOid, loc.relNumber,
 			attno, loc_decoded, payload_mctx, cache);
@@ -1233,7 +1250,7 @@ rewrite_seq_columns_to_stubs(Relation relation,
 			DatumGetPointer(values_for_write[idx]));
 		if (bioseq::storage::is_locator_stub(hdr)) continue;
 		const auto loc =
-			bioseq::storage::bioseq_default_storage_manager::insert_payload(
+			bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
 				relation->rd_locator.dbOid,
 				relation->rd_locator.spcOid,
 				relation->rd_locator.relNumber,
@@ -1763,7 +1780,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				? write_caches->cap_bytes_snapshot
 				: bioseq::storage::read_max_sub_table_cap_bytes();
 			const auto loc =
-				bioseq::storage::bioseq_default_storage_manager::insert_payload(
+				bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
 					NewHeap->rd_locator.dbOid, NewHeap->rd_locator.spcOid,
 					NewHeap->rd_locator.relNumber,
 					attno, targetDesc, hdr, cap_bytes, write_caches);

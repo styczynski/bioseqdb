@@ -39,7 +39,7 @@ import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / laz
 import bioseq_instr;
 import bench_framework;
 import bench.tool_minimap2;
-import bench.sequence_generator;
+import bioseq_sequences.generation;
 
 #ifndef BIOSEQ_BENCH_REPORT_DIR
 #error "BIOSEQ_BENCH_REPORT_DIR must be defined by the build system"
@@ -62,9 +62,9 @@ using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-using bioseq::bench::HWY_NAMESPACE::GeneratedBenchSequencePair;
-using bioseq::bench::HWY_NAMESPACE::GeneratorParams;
-using bioseq::bench::HWY_NAMESPACE::generate_test_sequences;
+using bioseq::sequences::generation::HWY_NAMESPACE::GeneratedBenchSequencePair;
+using bioseq::sequences::generation::HWY_NAMESPACE::GeneratorParams;
+using bioseq::sequences::generation::HWY_NAMESPACE::generate_test_sequences;
 
 constexpr std::int32_t kPositionTolerance = 10;
 

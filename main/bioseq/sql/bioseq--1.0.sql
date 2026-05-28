@@ -1489,3 +1489,52 @@ COMMENT ON FUNCTION bioseq.update_index(regclass, text) IS
     'Returns the number of entries written. Used to backfill metadata '
     'after bulk INSERTs were run with bioseq.update_index_on_insert = off.';
 
+-- ============================================================================
+-- DOC0264 Phase C — sample-sequence generation and locator inspection.
+-- ============================================================================
+
+-- bioseq.create_sample_table(table_name, n_sequences, sequence_bp_size,
+--                            [alphabet='dna4'], [seed=42])
+-- Creates a USING bioseq table containing `n_sequences` synthetic dna4
+-- sequences of `sequence_bp_size` letters each. Streams fragments through
+-- Phase C's insert_sequence_streamed so peak RSS during insert is bounded
+-- by one fragment's worth of state (~8 KiB) regardless of sequence size.
+-- Only the dna4 alphabet is shipped in Phase C; other alphabets are
+-- rejected with a clear error pointing at DOC0267 D-EXTENSIBILITY.
+-- Runs ANALYZE on the table at the end so planner stats are populated.
+CREATE OR REPLACE FUNCTION bioseq.create_sample_table(
+    table_name       TEXT,
+    n_sequences      INTEGER,
+    sequence_bp_size BIGINT,
+    alphabet         TEXT    DEFAULT 'dna4',
+    seed             BIGINT  DEFAULT 42)
+    RETURNS OID
+    AS 'MODULE_PATHNAME', 'bioseq_create_sample_table'
+    LANGUAGE C VOLATILE;
+COMMENT ON FUNCTION bioseq.create_sample_table(TEXT, INTEGER, BIGINT, TEXT, BIGINT) IS
+    'DOC0264 Phase C: creates a USING bioseq table with n_sequences synthetic '
+    'sequences of sequence_bp_size letters each. Only dna4 is supported in '
+    'Phase C; other alphabets are rejected. Bounded RSS regardless of '
+    'sequence_bp_size — fragments stream through insert_sequence_streamed.';
+
+-- bioseq.locator_inspect(seq) — returns the v2 locator fields for stub
+-- values, or zeros/inline-padding for non-stub values. Used by the
+-- integration tests to verify per-fragment row counts, total_bp_size, etc.
+CREATE OR REPLACE FUNCTION bioseq.locator_inspect(seq bioseq.seq)
+    RETURNS TABLE (
+        version          INT2,
+        bucket_idx       INT2,
+        shard_idx        INT4,
+        num_fragments    BIGINT,
+        total_bp_size    BIGINT,
+        first_sub_row_no BIGINT,
+        total_padding    INT4)
+    AS 'MODULE_PATHNAME', 'bioseq_locator_inspect'
+    LANGUAGE C IMMUTABLE STRICT;
+COMMENT ON FUNCTION bioseq.locator_inspect(bioseq.seq) IS
+    'DOC0264 Phase C: returns the v2 locator fields embedded in a bioseq.seq '
+    'stub value: (version, bucket_idx, shard_idx, num_fragments, '
+    'total_bp_size, first_sub_row_no, total_padding). For inline (non-stub) '
+    'values returns zeros for the locator-only fields and the inline '
+    'bp_size + padding.';
+

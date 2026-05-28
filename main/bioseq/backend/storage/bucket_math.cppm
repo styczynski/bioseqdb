@@ -30,30 +30,51 @@ export module bioseq_bucket_math;
 export namespace bioseq::storage {
 
 // ---------------------------------------------------------------------------
-// §5.3 — the 24-byte locator POD. Standard-layout so it can be memcpy'd in and
-// out of the pgseq_t stub `data[]` region by the encode/decode helpers (which
-// live in sequence_storage_manager).
+// DOC0264 §5 — Phase C v2 locator POD. Replaces the Phase A v1 24-byte
+// (version, bucket_idx, _pad_2, shard_idx, total_bp_size, sub_row_no) layout.
+// Standard-layout so it can be memcpy'd in and out of the pgseq_t stub `data[]`
+// region by the encode/decode helpers (which live in sequence_storage_manager).
+//
+// Layout (32 bytes):
+//   offset 0  version          (1 byte)  = kLocatorVersion = 2
+//   offset 1  bucket_idx       (1 byte)
+//   offset 2  _pad_2           (2 bytes) — always 0
+//   offset 4  shard_idx        (4 bytes)
+//   offset 8  num_fragments    (4 bytes) — fragments in this sequence (uint32)
+//   offset 12 _pad_4           (4 bytes) — always 0
+//   offset 16 total_bp_size    (8 bytes) — full sequence bp count
+//   offset 24 first_sub_row_no (8 bytes) — row no of fragment[0] in the shard
 // ---------------------------------------------------------------------------
 
-constexpr std::uint8_t kLocatorVersion = 1;
+constexpr std::uint8_t kLocatorVersion = 2;
 
 struct seq_locator {
     std::uint8_t    version = kLocatorVersion;
     std::uint8_t    bucket_idx = 0;
     std::uint16_t   _pad_2 = 0;
     std::uint32_t   shard_idx = 0;
+    std::uint32_t   num_fragments = 0;
+    std::uint32_t   _pad_4 = 0;
     std::uint64_t   total_bp_size = 0;
-    std::uint64_t   sub_row_no = 0;
+    std::uint64_t   first_sub_row_no = 0;
 };
-static_assert(sizeof(seq_locator) == 24,
-              "seq_locator layout must stay 24 bytes (DOC0260 §5.3).");
+static_assert(sizeof(seq_locator) == 32,
+              "DOC0264 §5: seq_locator v2 layout must stay 32 bytes.");
 static_assert(std::is_standard_layout_v<seq_locator>,
               "seq_locator must be standard-layout (memcpy'd in/out of pgseq_t).");
-static_assert(offsetof(seq_locator, total_bp_size) == 8,
-              "seq_locator::total_bp_size offset must stay 8 bytes "
+static_assert(offsetof(seq_locator, num_fragments) == 8,
+              "seq_locator::num_fragments offset must stay 8 bytes.");
+static_assert(offsetof(seq_locator, total_bp_size) == 16,
+              "DOC0264 §5: seq_locator::total_bp_size offset must stay 16 bytes "
               "(pg_compact_sequence.cppm reads at this offset).");
-static_assert(offsetof(seq_locator, sub_row_no) == 16,
-              "seq_locator::sub_row_no offset must stay 16 bytes.");
+static_assert(offsetof(seq_locator, first_sub_row_no) == 24,
+              "DOC0264 §5: seq_locator::first_sub_row_no offset must stay 24 bytes.");
+// DOC0264 R13 — guarantee num_fragments (uint32) × max-fragment-bp covers the
+// 1 Tbp project pessimistic ceiling.
+static_assert((static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())
+               * std::uint64_t{32768})
+              >= std::uint64_t{1'000'000'000'000ULL},
+              "DOC0264 R13: v2 num_fragments capacity insufficient for 1 Tbp ceiling");
 
 // ---------------------------------------------------------------------------
 // §4 — bucket cut-points. One bucket for L in [0, min_bits], one bucket each

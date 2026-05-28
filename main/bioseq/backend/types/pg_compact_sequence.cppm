@@ -560,12 +560,22 @@ namespace {
 // bioseq_storage (which would close a module-graph cycle with
 // bioseq_table:access_method). The discriminator and the
 // `total_bp_size` field offset inside the stub's data[] match the
-// canonical definition in `sequence_storage_manager.cppm` (the
-// `static_assert(offsetof(seq_locator, total_bp_size) == 8)` there is
+// canonical definition in `bucket_math.cppm` (the
+// `static_assert(offsetof(seq_locator, total_bp_size) == 16)` there is
 // the source of truth — if it ever fires, update this offset in
 // lockstep).
+//
+// DOC0264 §5 — Phase C v2 locator layout (32 bytes):
+//   offset 0  version          (1 byte)
+//   offset 1  bucket_idx       (1 byte)
+//   offset 2  _pad_2           (2 bytes)
+//   offset 4  shard_idx        (4 bytes)
+//   offset 8  num_fragments    (4 bytes)
+//   offset 12 _pad_4           (4 bytes)
+//   offset 16 total_bp_size    (8 bytes)
+//   offset 24 first_sub_row_no (8 bytes)
 constexpr std::uint8_t kLocatorStubMarkerLocal = 0x80;
-constexpr std::size_t  kLocatorTotalBpSizeOffset = 8;
+constexpr std::size_t  kLocatorTotalBpSizeOffset = 16;
 
 [[nodiscard]] [[gnu::always_inline]]
 inline bool pgseq_is_locator_stub(const pgseq_t* hdr) noexcept {
@@ -714,21 +724,22 @@ Datum pg_compact_sequence_gt(PG_FUNCTION_ARGS)
  * embedded seq_locator payload; for an inline sequence we read
  * hdr->bp_size as before.
  *
- * Layout (mirrored from DOC0260 §5.3 / seq_locator in
- * sequence_storage_manager.cppm):
- *   offset 0  version       (1 byte)
- *   offset 1  bucket_idx    (1 byte)
- *   offset 2  _pad_2        (2 bytes)
- *   offset 4  shard_idx     (4 bytes)
- *   offset 8  total_bp_size (8 bytes)   <-- this TU reads here
- *   offset 16 sub_row_no    (8 bytes)
+ * Layout (mirrored from DOC0264 §5 / seq_locator in bucket_math.cppm):
+ *   offset 0  version          (1 byte)
+ *   offset 1  bucket_idx       (1 byte)
+ *   offset 2  _pad_2           (2 bytes)
+ *   offset 4  shard_idx        (4 bytes)
+ *   offset 8  num_fragments    (4 bytes)
+ *   offset 12 _pad_4           (4 bytes)
+ *   offset 16 total_bp_size    (8 bytes)   <-- this TU reads here
+ *   offset 24 first_sub_row_no (8 bytes)
  *
- * The 8-byte offset is anchored by
- *   static_assert(offsetof(seq_locator, total_bp_size) == 8, ...)
- * in sequence_storage_manager.cppm; if the seq_locator layout ever
- * changes, that static_assert fires and forces a matching update
- * here. We cannot `import bioseq_storage` from this TU because it
- * closes a module-graph cycle through bioseq_table:access_method.
+ * The 16-byte offset is anchored by
+ *   static_assert(offsetof(seq_locator, total_bp_size) == 16, ...)
+ * in bucket_math.cppm; if the seq_locator layout ever changes, that
+ * static_assert fires and forces a matching update here. We cannot
+ * `import bioseq_storage` from this TU because it closes a module-graph
+ * cycle through bioseq_table:access_method.
  */
 CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
 Datum pg_compact_sequence_len(PG_FUNCTION_ARGS)
@@ -738,9 +749,7 @@ Datum pg_compact_sequence_len(PG_FUNCTION_ARGS)
 	const std::uint8_t sub_w = static_cast<std::uint8_t>(hdr->storage_unit_byte_width);
 	if ((sub_w & 0x80u) != 0u) {
 		std::uint64_t total = 0;
-		std::memcpy(&total, hdr->data + sizeof(std::uint8_t) +
-		                    sizeof(std::uint8_t) + sizeof(std::uint16_t) +
-		                    sizeof(std::uint32_t),
+		std::memcpy(&total, hdr->data + kLocatorTotalBpSizeOffset,
 		            sizeof(total));
 		bp_size = static_cast<std::int64_t>(total);
 	} else {
@@ -767,9 +776,7 @@ Datum pg_compact_sequence_unit_len(PG_FUNCTION_ARGS)
 	const std::uint8_t sub_w = static_cast<std::uint8_t>(hdr->storage_unit_byte_width);
 	if ((sub_w & 0x80u) != 0u) {
 		std::uint64_t total = 0;
-		std::memcpy(&total, hdr->data + sizeof(std::uint8_t) +
-		                    sizeof(std::uint8_t) + sizeof(std::uint16_t) +
-		                    sizeof(std::uint32_t),
+		std::memcpy(&total, hdr->data + kLocatorTotalBpSizeOffset,
 		            sizeof(total));
 		const std::uint8_t logical_w =
 			static_cast<std::uint8_t>(sub_w & 0x0Fu);

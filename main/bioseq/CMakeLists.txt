@@ -104,6 +104,8 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/lexic.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/minimap_int.cppm
+  # DOC0264 §10.1 — sample-sequence generator moved from main/bench/
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/generation/sequence_generator.cppm
   # backend/pipeline/*
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm

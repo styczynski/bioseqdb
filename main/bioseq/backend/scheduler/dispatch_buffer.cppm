@@ -196,6 +196,31 @@ public:
      * toggled during loading).
      */
     /*
+     * DOC0264 §9 / DOC0271 — production dispatch posture.
+     *
+     * The Phase C `sequence_scanner_pg<S>` (in module
+     * `bioseq_storage_scanner_pg`) is compiled but NOT wired into the
+     * dispatch_buffer's pipeline. The pipeline (minimap_port,
+     * minimap2_port_with_index) is templated on ONE Scanner type and
+     * requires query + target to share it. Forcing both into scanner_pg
+     * would double the dispatch_buffer template instantiation count
+     * (Phase B's `dispatch_buffer.cppm` was already the project's
+     * compile-time long pole; DOC0271 / DOC0272 §11.3.1 documents this
+     * trade-off explicitly).
+     *
+     * For Phase C the production path therefore continues to:
+     *   1. Bulk-hydrate stub-backed entries via the updated
+     *      `SM::fetch_payload(...)` which now stitches per-fragment
+     *      sub-table rows into one contiguous varlena (bounded by
+     *      MaxAllocSize — DOC0264 §9.4).
+     *   2. Dispatch through `with_lazy_in_memory` over the hydrated
+     *      varlena (the Phase B baseline).
+     *
+     * The Phase C scanner_pg path is exercised directly by the unit
+     * test of `sequence_scanner_pg<S>` (concept conformance +
+     * fragment-by-fragment read), and is the foundation for Phase D
+     * D-VARLENA / D-PIPELINE which lift the MaxAllocSize hydration cap.
+     *
      * NOTE on parameter passing: `target_hdrs`, `query_ids`, and
      * `index_blobs` are full-size `kDispatchBatchCapacity`-element arrays
      * (8 KB, 4 KB, and 16 KB respectively on a typical batch). They are
@@ -312,26 +337,6 @@ public:
 
                     ++stats.targets_considered;
 
-                    /*
-                     * Prebuilt-index fast path — if the custom scan
-                     * captured a serialized TargetIndex blob for this
-                     * row, deserialize it in place and call
-                     * minimap2_port_with_index so we skip the target
-                     * sketch pass. The deserialized TargetIndex owns
-                     * its unordered_map buckets and dies at scope exit.
-                     *
-                     * CRITICAL: the sidecar index was built with the
-                     * w=10/k=15 defaults baked into
-                     * sidecar_compute_and_write_index (see sidecar.cppm).
-                     * Query minimizers extracted with different w/k
-                     * values would hash to incompatible minimizers and
-                     * miss every seed — so for the prebuilt-index
-                     * branch we suppress the batch-level size heuristic
-                     * (which otherwise lowers k/w for short targets).
-                     * The recompute branch keeps the heuristic because
-                     * both query and target are sketched under the same
-                     * k/w there.
-                     */
                     const bool has_blob =
                         index_blobs != nullptr
                         && (*index_blobs)[i].data != nullptr
@@ -340,18 +345,8 @@ public:
                     MatchResultCollection collection;
                     if (has_blob) {
                         Minimap2Params params = base_params;
-                        /* Pin the sketch parameters to the sidecar's k/w.
-                         * Keep every other knob from base_params (bandwidth,
-                         * scoring, algorithm selection, …) intact. */
                         params.kmer_size   = 15;
                         params.window_size = 10;
-                        /*
-                         * For very short inputs minimap2 defaults want
-                         * min_chain_score=40/min_seed_count=3 which would
-                         * reject every chain. Keep the rule-of-thumb
-                         * thresholds from the heuristic, just without the
-                         * k/w rewrite.
-                         */
                         if (min_bp < 50) {
                             params.min_chain_score = 10;
                             params.min_seed_count  = 1;
@@ -359,14 +354,8 @@ public:
                             params.min_chain_score = 20;
                             params.min_seed_count  = 2;
                         }
-
                         ++stats.targets_with_prebuilt_index;
                         if (!cached_query_minimizers.has_value()) {
-                            /*
-                             * Build query minimizers once per batch using
-                             * the sidecar's pinned k/w. Every row in the
-                             * prebuilt-index branch reuses this set.
-                             */
                             sketch_collector query_collector;
                             {
                                 static const auto* mm_sketch_desc =
@@ -378,10 +367,6 @@ public:
                                     static_cast<size_t>(params.window_size),
                                     static_cast<size_t>(params.kmer_size));
                             }
-                            // Move the vector out of the collector — the
-                            // collector goes out of scope at the end of the
-                            // surrounding `if`, so the move avoids a copy
-                            // proportional to the query minimizer count.
                             cached_query_minimizers.emplace(
                                 std::move(query_collector).extract_sketches_data());
                         }
@@ -1296,6 +1281,16 @@ public:
      * by close_all before destroy), runs the target column and, when present,
      * the per-row query column. A no-op when no entry captured a locator
      * (e.g. an inline non-stub value, or no mmsearch column).
+     *
+     * DOC0264 §9.4 — Phase C: fetch_payload now stitches per-fragment rows
+     * into one contiguous varlena, bounded by MaxAllocSize. The dispatch
+     * loop continues to use `with_lazy_in_memory` over the hydrated varlena
+     * (Phase B baseline) — see DOC0273 §3.2 for the design trade-off: the
+     * Phase C `sequence_scanner_pg<S>` + `with_lazy_postgres<R>` machinery
+     * is built but not wired into the single-Scanner pipeline tree, to keep
+     * dispatch_buffer.cppm under the DOC0271 template-explosion budget.
+     * Hydration here also serves output projection (write-back into the
+     * buffered slot's tts_values for `SELECT seq` resolution).
      */
     void hydrate_locators_by_bucket() {
         const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity

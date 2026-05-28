@@ -14,7 +14,9 @@ set(BENCH_V10_DIR       "${CMAKE_CURRENT_LIST_DIR}")
 # is delivered via `bioseq_modules_nopg` (DOC0269 Phase A).
 set(BENCH_V10_MOD_FILES
   "${BENCH_FRAMEWORK_DIR}/index.cppm"
-  "${BENCH_V10_DIR}/sequence_generator.cppm"
+  # DOC0264 §10.1 — sequence_generator moved to
+  # main/bioseq/backend/sequences/generation/sequence_generator.cppm and
+  # is delivered via bioseq_modules_nopg below.
   "${BENCH_V10_DIR}/tool_minimap2/tool_minimap2.cppm"
   "${BENCH_V10_DIR}/tool_minimap2/alignment.cppm"
   "${BENCH_V10_DIR}/tool_minimap2/instr_shim.cppm")

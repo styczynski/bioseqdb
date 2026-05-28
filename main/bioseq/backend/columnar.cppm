@@ -84,6 +84,17 @@ bool bioseq_read_sequence_index = true;
 bool bioseq_test_force_chunked_scanner = false;
 
 /*
+ * DOC0264 §9.2 — test parity knob. Default OFF. Production stub-backed
+ * entries flow through `with_lazy_postgres<S>` (the production scanner).
+ * When ON, the dispatch loop materialises the stub via fetch_payload and
+ * wraps the resulting full varlena in `with_lazy_in_memory` instead,
+ * matching the Phase B baseline path. Integration tests flip this on to
+ * verify the production scanner_pg pipeline returns the same MatchResult
+ * set as the materialised baseline.
+ */
+bool bioseq_test_force_inmemory_scanner = false;
+
+/*
  * DOC0260 Phase A — per-shard cap for the length-bucketed sub-table
  * sharding. A new shard is allocated when the active one would cross
  * `bioseq_storage_max_seq_sub_table_gbs * 2^30` bytes of payload. Special
@@ -211,6 +222,25 @@ bioseq_guc_init()
 		"PRODUCTION — the synthetic scanner has no Postgres backing.",
 		NULL,
 		&bioseq_test_force_chunked_scanner,
+		false,
+		PGC_SUSET,
+		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+		NULL, NULL, NULL
+	);
+
+	// DOC0264 §9.2 — test parity GUC. Default off. Production stub-backed
+	// entries flow through `with_lazy_postgres<S>`; when this GUC is on, the
+	// dispatch loop materialises the stub via fetch_payload and uses the
+	// `with_lazy_in_memory` baseline. Integration tests use this to verify
+	// scanner_pg produces the same MatchResult set as the materialised path.
+	DefineCustomBoolVariable(
+		"bioseq.test_force_inmemory_scanner",
+		"Test-only: force the dispatch buffer to materialise stub-backed "
+		"sequences via fetch_payload and dispatch through with_lazy_in_memory "
+		"(matches the Phase B baseline). Default off — production goes through "
+		"the Phase C with_lazy_postgres scanner_pg.",
+		NULL,
+		&bioseq_test_force_inmemory_scanner,
 		false,
 		PGC_SUSET,
 		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,

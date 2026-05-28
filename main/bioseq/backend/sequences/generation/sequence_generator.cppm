@@ -1,6 +1,14 @@
 /**
  * @file sequence_generator.cppm
- * @brief Synthetic benchmark sequence generator, modelled after SEAL.
+ * @brief Synthetic sequence generator, modelled after SEAL.
+ *
+ * DOC0264 §10.1 — moved from `main/bench/sequence_generator.cppm` to the
+ * bioseq backend so the `bioseq.create_sample_table` SQL UDF can call it
+ * directly. The namespace is renamed from `bioseq::bench::HWY_NAMESPACE`
+ * to `bioseq::sequences::generation::HWY_NAMESPACE`; a `bioseq::bench`
+ * alias re-exports the symbols so the bench framework's existing imports
+ * keep working unchanged. `generate_single_dna4_sequence(bp_size, seed)`
+ * is a new helper for the UDF's per-sequence emission.
  *
  * Produces (query, target) pairs with ground-truth position metadata so
  * downstream evaluation can classify each aligner hit as correct or
@@ -10,9 +18,10 @@
  * because our evaluator consumes ground truth directly from this struct.
  *
  * Interface:
- *   GeneratorParams              — simulation knobs (reference length, error rates, ...)
- *   GeneratedBenchSequencePair   — single (query, target) with ground truth
- *   generate_test_sequences()    — fresh batch, seeded by params.seed
+ *   GeneratorParams                — simulation knobs (reference length, error rates, ...)
+ *   GeneratedBenchSequencePair     — single (query, target) with ground truth
+ *   generate_test_sequences()      — fresh batch, seeded by params.seed
+ *   generate_single_dna4_sequence() — DOC0264 §10.1: per-sequence helper for the UDF
  */
 module;
 
@@ -29,7 +38,7 @@ module;
 #include <utility>
 #include <vector>
 
-export module bench.sequence_generator;
+export module bioseq_sequences.generation;
 
 import mlogging;
 import sequan_compat;
@@ -39,7 +48,7 @@ export {
 
 HWY_BEFORE_NAMESPACE();
 
-namespace bioseq::bench::HWY_NAMESPACE {
+namespace bioseq::sequences::generation::HWY_NAMESPACE {
 
 /// Alphabet config used by the benchmark pipeline. uint32_t storage gives
 /// 16 letters per word and 4 SIMD lanes per 128-bit vector — preferred for
@@ -247,15 +256,40 @@ generate_test_sequences(const GeneratorParams& params) {
         pairs.push_back(std::move(pair));
     }
 
-    JustLog("[bench.sequence_generator] Generated {} fragment pairs over a {} bp reference "
+    JustLog("[bioseq.sequences.generation] Generated {} fragment pairs over a {} bp reference "
             "(sub_rate={}, ins_rate={}, del_rate={})",
             pairs.size(), params.reference_length,
             params.substitution_rate, params.insertion_rate, params.deletion_rate);
     return pairs;
 }
 
-}  // namespace bioseq::bench::HWY_NAMESPACE
+/// DOC0264 §10.1 — generate a single uniform-random dna4 sequence of
+/// `bp_size` letters using a stream-stateful std::mt19937_64 (one RNG
+/// state advanced across the whole sequence — NOT reseeded per fragment;
+/// consolidated-review I39). Used by the `bioseq.create_sample_table`
+/// UDF's per-sequence producer.
+[[nodiscard]] inline std::vector<seq::dna4>
+generate_single_dna4_sequence(std::size_t bp_size, std::uint64_t seed)
+{
+    std::mt19937_64 rng{seed};
+    std::uniform_int_distribution<int> base_dist(0, 3);
+    std::vector<seq::dna4> out(bp_size);
+    for (std::size_t position = 0; position < bp_size; ++position) {
+        out[position].assign_rank(
+            static_cast<seqan3::alphabet_rank_t<seq::dna4>>(base_dist(rng)));
+    }
+    return out;
+}
+
+}  // namespace bioseq::sequences::generation::HWY_NAMESPACE
 
 HWY_AFTER_NAMESPACE();
+
+// DOC0264 §10.1 — namespace alias for source-compat with the legacy
+// bench import. After Highway dispatches into N_NEON (or whatever target),
+// the alias re-exports those symbols under the old `bioseq::bench` name.
+namespace bioseq::bench {
+    using namespace bioseq::sequences::generation;
+}
 
 }  // export

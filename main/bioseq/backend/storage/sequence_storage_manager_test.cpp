@@ -108,17 +108,18 @@ TEST_CASE("DOC0260 §4 — every bucket index is addressable and < bucket_count"
     }
 }
 
-TEST_CASE("DOC0260 §5.3 — seq_locator is a 24-byte standard-layout POD that round-trips through bytes",
+TEST_CASE("DOC0264 §5 — seq_locator v2 is a 32-byte standard-layout POD that round-trips through bytes",
           "[storage][locator][unit]") {
-    static_assert(sizeof(seq_locator) == 24u);
+    static_assert(sizeof(seq_locator) == 32u);
     static_assert(std::is_standard_layout_v<seq_locator>);
 
     seq_locator loc{};
-    loc.version       = bioseq::storage::kLocatorVersion;
-    loc.bucket_idx    = 17;
-    loc.shard_idx     = 0xDEADBEEFu;
-    loc.total_bp_size = 0x0123456789ABCDEFull;
-    loc.sub_row_no    = 0xFEDCBA9876543210ull;
+    loc.version          = bioseq::storage::kLocatorVersion;
+    loc.bucket_idx       = 17;
+    loc.shard_idx        = 0xDEADBEEFu;
+    loc.num_fragments    = 0x12345678u;
+    loc.total_bp_size    = 0x0123456789ABCDEFull;
+    loc.first_sub_row_no = 0xFEDCBA9876543210ull;
 
     // memcpy out and back — the encode/decode helpers in
     // sequence_storage_manager do exactly this into the pgseq_t stub data[].
@@ -128,13 +129,15 @@ TEST_CASE("DOC0260 §5.3 — seq_locator is a 24-byte standard-layout POD that r
     seq_locator decoded{};
     std::memcpy(&decoded, bytes.data(), sizeof(decoded));
 
-    REQUIRE(decoded.version       == loc.version);
-    REQUIRE(decoded.bucket_idx    == loc.bucket_idx);
-    REQUIRE(decoded.shard_idx     == loc.shard_idx);
-    REQUIRE(decoded.total_bp_size == loc.total_bp_size);
-    REQUIRE(decoded.sub_row_no    == loc.sub_row_no);
+    REQUIRE(decoded.version          == loc.version);
+    REQUIRE(decoded.bucket_idx       == loc.bucket_idx);
+    REQUIRE(decoded.shard_idx        == loc.shard_idx);
+    REQUIRE(decoded.num_fragments    == loc.num_fragments);
+    REQUIRE(decoded.total_bp_size    == loc.total_bp_size);
+    REQUIRE(decoded.first_sub_row_no == loc.first_sub_row_no);
 
     // The fixed offsets the pg_compact_sequence stub reader depends on.
-    REQUIRE(offsetof(seq_locator, total_bp_size) == 8u);
-    REQUIRE(offsetof(seq_locator, sub_row_no)    == 16u);
+    REQUIRE(offsetof(seq_locator, num_fragments)    == 8u);
+    REQUIRE(offsetof(seq_locator, total_bp_size)    == 16u);
+    REQUIRE(offsetof(seq_locator, first_sub_row_no) == 24u);
 }

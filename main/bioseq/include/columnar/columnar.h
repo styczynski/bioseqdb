@@ -41,6 +41,11 @@ extern bool bioseq_read_sequence_index;
  * test-only sentinel that forces a new shard per insert.
  */
 extern int bioseq_storage_max_seq_sub_table_gbs;
+/* DOC0264 §9.2 — test parity GUC. When on, the dispatch buffer materialises
+ * stub-backed sequences via fetch_payload and dispatches through
+ * `with_lazy_in_memory` instead of the production `with_lazy_postgres`
+ * scanner_pg path. Default off. */
+extern bool bioseq_test_force_inmemory_scanner;
 
 /* Aligner parameter GUCs — see sequences/minimap_port.cppm Minimap2Params
  * for field-by-field documentation. Kept in plain extern form so any module

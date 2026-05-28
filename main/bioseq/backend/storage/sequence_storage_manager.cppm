@@ -68,6 +68,7 @@ import storage_metadata;
 import bioseq_table_io;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sequences;
+import sequan_compat;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
 import bioseq_storage_size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
 // DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
 // module so the unit-test TU can link them without the Postgres backend.
@@ -80,22 +81,24 @@ static_assert(__cplusplus >= 202302L,
 export namespace bioseq::storage {
 
 // ---------------------------------------------------------------------------
-// §5 — Locator stub format. A 40-byte pgseq_t-shaped varlena that lives in
-// the main columnar relation in place of the full sequence payload.
+// DOC0264 §5 — Phase C locator stub format. A 48-byte pgseq_t-shaped varlena
+// that lives in the main columnar relation in place of the full sequence
+// payload. Replaces the Phase A 40-byte v1 stub (no on-disk back-compat —
+// DOC0264 R0 / §1.1#10).
 // ---------------------------------------------------------------------------
 
 constexpr std::uint8_t kLocatorStubMarker = 0x80;
 
-// DOC0260 §12.1 — `kLocatorVersion` and the `seq_locator` POD (with its
-// 24-byte / offset static_asserts) now live in the PG-free `bioseq_bucket_math`
-// module so the unit-test TU can link them; they are re-exported above via
-// `export import bioseq_bucket_math`, so every use of `seq_locator` /
-// `kLocatorVersion` below resolves unchanged.
+// DOC0260 §12.1 + DOC0264 §5 — `kLocatorVersion` and the `seq_locator` POD
+// (with its 32-byte / offset static_asserts) live in the PG-free
+// `bioseq_bucket_math` module so the unit-test TU can link them; they are
+// re-exported above via `export import bioseq_bucket_math`, so every use of
+// `seq_locator` / `kLocatorVersion` below resolves unchanged.
 
 constexpr std::size_t kLocatorStubVarlenaBytes =
     pgseq_t::header_bytes() + sizeof(seq_locator);
-static_assert(kLocatorStubVarlenaBytes == 40,
-              "Phase A locator stub must be exactly 40 bytes (DOC0260 §5.3).");
+static_assert(kLocatorStubVarlenaBytes == 48,
+              "DOC0264 §5: Phase C locator stub must be exactly 48 bytes.");
 
 [[nodiscard]] [[gnu::always_inline]]
 inline bool is_locator_stub(const pgseq_t* hdr) noexcept {
@@ -326,14 +329,45 @@ struct sequence_storage_manager {
     }
 
     // Shard lifecycle / write path.
+    //
+    // DOC0264 §8 — `insert_sequence_streamed` writes one fragment per
+    // sub-table row from a per-fragment producer callback. The producer
+    // receives a palloc'd `pgseq_t*` whose header is pre-filled with
+    // alphabet/width, and fills `data[]` + `bp_size` + `padding_letters`
+    // for fragment `n` (last fragment uses `is_last_fragment=true`). The
+    // per-fragment MemoryContext is reset between fragments to bound peak
+    // RSS. Returns a v2 locator pointing at the first fragment row.
+    //
+    // `insert_payload_as_fragments` is the convenience wrapper that the
+    // existing single-varlena code paths (TAM rewrite-to-stubs, CLUSTER)
+    // use: it slices an already-materialised `pgseq_t*` into fragments
+    // via `insert_sequence_streamed`.
+    template<class FragmentProducer>
     [[nodiscard]] static seq_locator
-    insert_payload(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
-                   std::int16_t column_attno, TupleDesc parent_tupdesc,
-                   const pgseq_t* original_hdr,
-                   sequence_size_t current_cap_bytes,
-                   seq_caches* cache);
+    insert_sequence_streamed(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+                             std::int16_t column_attno,
+                             TupleDesc parent_tupdesc,
+                             std::uint8_t logical_alphabet_code,
+                             std::uint8_t logical_storage_unit_byte_width,
+                             sequence_size_t total_bp_size,
+                             std::uint16_t last_fragment_padding_letters,
+                             sequence_size_t current_cap_bytes,
+                             seq_caches* cache,
+                             FragmentProducer&& producer);
 
-    // Read path: single payload.
+    [[nodiscard]] static seq_locator
+    insert_payload_as_fragments(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+                                std::int16_t column_attno,
+                                TupleDesc parent_tupdesc,
+                                const pgseq_t* original_hdr,
+                                sequence_size_t current_cap_bytes,
+                                seq_caches* cache);
+
+    // Read path: single sequence — stitches all fragments into a single
+    // contiguous palloc'd `pgseq_t*` in `out_mctx`. Used by the legacy
+    // hydration path; Phase C raises pg_log(ERROR) if the stitched varlena
+    // would exceed MaxAllocSize (DOC0264 §9.4). Streaming readers should
+    // use `sequence_scanner_pg<S>` directly.
     [[nodiscard]] static pgseq_t*
     fetch_payload(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                   std::int16_t column_attno, const seq_locator& loc,
@@ -361,6 +395,14 @@ struct sequence_storage_manager {
 
 using bioseq_default_storage_manager =
     sequence_storage_manager<sequence_size_t, /*min=*/8, /*max=*/42>;
+
+// DOC0264 §7.9 — exported entry point so the Phase C `sequence_scanner_pg<S>`
+// (in `bioseq_storage_scanner_pg`) can resolve a sub-table relation via the
+// per-scan `seq_caches`. Implementation lives below in the .cppm body.
+[[nodiscard]] Relation
+open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+                           std::int16_t column_attno, const seq_locator& loc,
+                           LOCKMODE lock_mode, seq_caches* cache);
 
 // ---------------------------------------------------------------------------
 // §7.10 — Sidecar I/O. Per-shard heap relations co-sharded with sub-tables.
@@ -792,7 +834,7 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                        lock_mode, cache);
 }
 
-[[nodiscard]] static Relation
+[[nodiscard]] Relation
 open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                            std::int16_t column_attno, const seq_locator& loc,
                            LOCKMODE lock_mode, seq_caches* cache)
@@ -828,27 +870,63 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
 }
 
 // ---------------------------------------------------------------------------
-// §7.5 — insert_payload (write hot path).
+// DOC0264 §8 — insert_sequence_streamed (write hot path).
+//
+// One sequence → ceil(total_bp / fragment_bp) sub-table rows. Producer is
+// invoked once per fragment in a per-fragment MemoryContext that is reset
+// between fragments so peak RSS is bounded by one fragment's worth of state
+// (consolidated-review C3). Per-sequence shard-rollover pre-allocation
+// (§8.3) keeps a sequence's fragments in a single shard so the locator's
+// shard_idx is a single value.
 // ---------------------------------------------------------------------------
 
+namespace detail {
+
+// DOC0264 §4 — per-fragment storage_unit count. Class member from
+// `sequence_scanner_none<T>::fragment_storage_units` (DOC0263 §3) = 1024.
+inline constexpr std::size_t kFragmentStorageUnits = std::size_t{1024};
+
+// Look-up bits_per_char via the supported-alphabet pack so a future alphabet
+// addition does not silently produce wrong fragment_bp values.
+[[nodiscard]] inline std::size_t bits_per_char_for_alphabet_code(
+    pgseq_t::alphabet_code_t alpha) noexcept {
+    std::size_t bits_per_char = 0;
+    pgseq_supported_alphabets::dispatch_alphabet_by_code(alpha,
+        [&bits_per_char]<class A>() {
+            bits_per_char = static_cast<std::size_t>(
+                seqan3::detail::ceil_log2(
+                    static_cast<std::size_t>(seqan3::alphabet_size<A>)));
+        });
+    return bits_per_char;
+}
+
+// letters_per_unit = (storage_unit_byte_width * 8) / bits_per_char.
+[[nodiscard]] inline std::size_t letters_per_unit_for(
+    pgseq_t::alphabet_code_t alpha, std::uint8_t logical_byte_width) noexcept {
+    const std::size_t bpc = bits_per_char_for_alphabet_code(alpha);
+    return bpc > 0
+        ? (static_cast<std::size_t>(logical_byte_width) * 8u) / bpc
+        : 0u;
+}
+
+}  // namespace detail
+
 template<class L, std::size_t M, std::size_t X>
+template<class FragmentProducer>
 seq_locator
-sequence_storage_manager<L, M, X>::insert_payload(
+sequence_storage_manager<L, M, X>::insert_sequence_streamed(
     Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     std::int16_t column_attno, TupleDesc parent_tupdesc,
-    const pgseq_t* original_hdr,
+    std::uint8_t logical_alphabet_code,
+    std::uint8_t logical_storage_unit_byte_width,
+    sequence_size_t total_bp_size,
+    std::uint16_t last_fragment_padding_letters,
     sequence_size_t current_cap_bytes,
-    seq_caches* cache)
+    seq_caches* cache,
+    FragmentProducer&& producer)
 {
-    if (original_hdr == nullptr) {
-        pg_log(ERROR, "bioseq storage: insert_payload received null original_hdr");
-    }
-    if (is_locator_stub(original_hdr)) {
-        pg_log(ERROR, "bioseq storage: insert_payload received a stub; the "
-               "caller must screen out stubs before re-inserting");
-    }
     if (cache == nullptr || cache->side != seq_caches::Side::Write) {
-        pg_log(ERROR, "bioseq storage: insert_payload requires a write-side seq_caches");
+        pg_log(ERROR, "bioseq storage: insert_sequence_streamed requires a write-side seq_caches");
     }
     if (cache->main_database_oid == InvalidOid) {
         cache->main_database_oid   = db_oid;
@@ -856,31 +934,49 @@ sequence_storage_manager<L, M, X>::insert_payload(
         cache->main_relfilenode    = main_relfilenode;
     }
 
-    const sequence_size_t total_bp_size =
-        static_cast<sequence_size_t>(original_hdr->bp_size);
-    const sequence_size_t total_varlena_bytes =
-        static_cast<sequence_size_t>(VARSIZE(original_hdr));
-
-    if (total_varlena_bytes > static_cast<sequence_size_t>(MaxAllocSize)) {
+    const auto alpha_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
+    const std::size_t lpu = detail::letters_per_unit_for(alpha_code,
+                                                         logical_storage_unit_byte_width);
+    if (lpu == 0) {
         pg_log(ERROR,
-               "bioseq storage Phase A: sequence varlena size {} bytes exceeds "
-               "MaxAllocSize ({}). Phase A stores each sequence as a single "
-               "sub-table row; the ~4.3 Gbp ceiling is documented in DOC0260 "
-               "§1.2. Phase C lifts the cap via per-fragment row layout. See "
-               "DOC0264 (Phase C) and DOC0267 D-VARLENA.",
-               total_varlena_bytes,
-               static_cast<sequence_size_t>(MaxAllocSize));
+               "bioseq storage Phase C: insert_sequence_streamed could not derive "
+               "letters_per_unit (alphabet_code={}, byte_width={})",
+               static_cast<unsigned>(alpha_code),
+               static_cast<unsigned>(logical_storage_unit_byte_width));
     }
+    const sequence_size_t frag_bp =
+        static_cast<sequence_size_t>(detail::kFragmentStorageUnits) * lpu;
+    const sequence_size_t num_fragments =
+        total_bp_size == 0 ? 0u : (total_bp_size + frag_bp - 1) / frag_bp;
+    if (num_fragments > static_cast<sequence_size_t>(
+            std::numeric_limits<std::uint32_t>::max())) {
+        pg_log(ERROR,
+               "bioseq storage Phase C: num_fragments {} exceeds UINT32_MAX",
+               num_fragments);
+    }
+
+    // Per-row varlena bytes for a full (= non-last) fragment.
+    const std::size_t frag_varlena_bytes =
+        pgseq_t::header_bytes()
+        + detail::kFragmentStorageUnits
+              * static_cast<std::size_t>(logical_storage_unit_byte_width);
+    // Total varlena bytes the sequence occupies in the shard (= sum of
+    // fragment-row sizes). Used for the per-shard cap accounting; each row
+    // is the same size in Phase C because the last fragment row is also
+    // allocated at `frag_varlena_bytes` (palloc0 leaves trailing units 0).
+    const sequence_size_t total_varlena_bytes =
+        static_cast<sequence_size_t>(num_fragments) *
+        static_cast<sequence_size_t>(frag_varlena_bytes);
 
     const std::int16_t bucket_idx =
         static_cast<std::int16_t>(bucket_index_for_size(total_bp_size));
 
-    std::int32_t shard_idx = 0;
+    // DOC0264 §8.3 — per-sequence shard pre-allocation. If the active shard
+    // cannot fit the WHOLE sequence's bytes, allocate a fresh shard up front.
     Relation shard = open_or_create_shard(db_oid, spc_oid, main_relfilenode,
                                           column_attno, parent_tupdesc, bucket_idx,
                                           RowExclusiveLock, cache);
 
-    // Recheck — we may need to roll over to a new shard.
     auto active = LookupActiveSubTableShard(db_oid, spc_oid, main_relfilenode,
                                             column_attno, bucket_idx);
     if (!active.has_value()) {
@@ -894,17 +990,15 @@ sequence_storage_manager<L, M, X>::insert_payload(
     }
     const sequence_size_t projected =
         active->bytes_written + pending + total_varlena_bytes;
-    // DOC0260 §10.2 — cap=0 sentinel forces a fresh shard per insert, but
-    // only AFTER we have at least one row in the active shard. Otherwise
-    // we would emit N+1 shards (one empty leading shard + N data shards)
-    // for N inserts, breaking the §12.2 ShardPerRow.WhenCapIsZero test.
+    // DOC0264 §8.3 — pre-allocate a fresh shard when the active one cannot
+    // fit the whole sequence. Same semantics as Phase A's per-row rollover,
+    // but the unit of accounting is the whole sequence now.
     const bool rollover_required =
         active->bytes_written + pending > 0
         && (current_cap_bytes == 0 || projected > current_cap_bytes);
 
+    std::int32_t shard_idx = 0;
     if (rollover_required) {
-        // Flush any pending delta on the current shard before marking it full
-        // (so the catalog's bytes_written reflects reality).
         if (auto it = cache->entries.find(active_key);
             it != cache->entries.end() && it->second.pending_bytes_delta != 0)
         {
@@ -916,7 +1010,6 @@ sequence_storage_manager<L, M, X>::insert_payload(
             it->second.pending_bytes_delta = 0;
             it->second.pending_total_payload_delta = 0;
         } else {
-            // Mark the current shard full so subsequent backends roll over too.
             UpdateSubTableShardBytesWritten(
                 db_oid, spc_oid, main_relfilenode,
                 column_attno, bucket_idx, active->shard_idx,
@@ -932,6 +1025,18 @@ sequence_storage_manager<L, M, X>::insert_payload(
         shard_idx = active->shard_idx;
     }
 
+    // DOC0264 §8.3 hard guard: refuse to write a sequence whose total bytes
+    // exceed the cap (would not fit any shard, including a freshly-allocated
+    // one). current_cap_bytes==0 is the sentinel "no cap, one shard per
+    // sequence" and the check is suppressed.
+    if (current_cap_bytes > 0 && total_varlena_bytes > current_cap_bytes) {
+        pg_log(ERROR,
+            "bioseq storage Phase C: sequence with {} bytes exceeds shard cap "
+            "{} bytes ({} GiB). Raise bioseq.storage.max_seq_sub_table_gbs.",
+            total_varlena_bytes, current_cap_bytes,
+            current_cap_bytes >> 30);
+    }
+
     const std::uint64_t cache_key =
         seq_caches::key_for(column_attno, bucket_idx, shard_idx);
     seq_caches::entry& entry = cache->entries[cache_key];
@@ -944,25 +1049,199 @@ sequence_storage_manager<L, M, X>::insert_payload(
             GetCurrentSubTransactionId());
     }
 
-    Datum values[1] = { PointerGetDatum(original_hdr) };
-    bool  nulls[1]  = { false };
-    const std::uint64_t row_no = ColumnarWriteRow(entry.write_state, values, nulls);
+    // DOC0264 §8.4 — serialise writers on this (parent, column, bucket,
+    // shard) so the row numbers ColumnarWriteRow assigns are CONTIGUOUS
+    // within one sequence's fragments.
+    const std::int64_t row_lock_key =
+          (static_cast<std::int64_t>(db_oid)                << 48)
+        ^ (static_cast<std::int64_t>(main_relfilenode)      << 16)
+        ^ (static_cast<std::int64_t>(
+               static_cast<std::uint16_t>(column_attno))    << 8)
+        ^ (static_cast<std::int64_t>(
+               static_cast<std::uint16_t>(bucket_idx))      << 4)
+        ^  static_cast<std::int64_t>(shard_idx);
+    DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(row_lock_key));
+
+    // DOC0264 §8 — separate scratch + per-fragment contexts. The producer
+    // may allocate long-lived state in `scratch_mctx`; per-fragment palloc
+    // happens in `per_fragment_mctx` which is RESET between fragments to
+    // keep peak RSS bounded.
+    MemoryContext scratch_mctx = AllocSetContextCreate(
+        CurrentMemoryContext, "bioseq insert_sequence scratch",
+        ALLOCSET_DEFAULT_SIZES);
+    MemoryContext per_fragment_mctx = AllocSetContextCreate(
+        CurrentMemoryContext, "bioseq insert_sequence per-fragment",
+        ALLOCSET_DEFAULT_SIZES);
+
+    std::uint64_t first_sub_row_no = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t last_sub_row_no  = std::numeric_limits<std::uint64_t>::max();
+
+    for (sequence_size_t fragment_no = 0; fragment_no < num_fragments; ++fragment_no) {
+        MemoryContextReset(per_fragment_mctx);
+        const bool is_last = (fragment_no + 1 == num_fragments);
+        MemoryContextScope frag_ctx{per_fragment_mctx};
+
+        pgseq_t* frag = static_cast<pgseq_t*>(palloc0(frag_varlena_bytes));
+        SET_VARSIZE(frag, frag_varlena_bytes);
+        frag->alphabet_code           = static_cast<pgseq_t::alphabet_code_t>(
+                                            logical_alphabet_code);
+        frag->storage_unit_byte_width = logical_storage_unit_byte_width;
+        // Producer fills bp_size + padding_letters + data[] for fragment `n`.
+        std::forward<FragmentProducer>(producer)(
+            static_cast<std::size_t>(fragment_no), frag, scratch_mctx, is_last);
+
+        // Cross-check the producer's bp_size / padding consistency.
+        const sequence_size_t expected_bp = is_last
+            ? (total_bp_size - fragment_no * frag_bp)
+            : frag_bp;
+        if (static_cast<sequence_size_t>(frag->bp_size) != expected_bp) {
+            pg_log(ERROR,
+                "bioseq storage Phase C: producer bp_size mismatch on fragment {} "
+                "(got {}, expected {})",
+                fragment_no, static_cast<sequence_size_t>(frag->bp_size), expected_bp);
+        }
+        if (is_last && frag->padding_letters != last_fragment_padding_letters) {
+            pg_log(ERROR,
+                "bioseq storage Phase C: producer last-fragment padding_letters "
+                "mismatch (got {}, expected {})",
+                static_cast<unsigned>(frag->padding_letters),
+                static_cast<unsigned>(last_fragment_padding_letters));
+        }
+        if (!is_last && frag->padding_letters != 0) {
+            pg_log(ERROR,
+                "bioseq storage Phase C: producer non-last padding_letters must be 0 "
+                "(fragment {}, got {})",
+                fragment_no, static_cast<unsigned>(frag->padding_letters));
+        }
+
+        Datum values[1] = { PointerGetDatum(frag) };
+        bool  nulls[1]  = { false };
+        const std::uint64_t row_no = ColumnarWriteRow(entry.write_state, values, nulls);
+        if (fragment_no == 0) {
+            first_sub_row_no = row_no;
+        } else {
+            if (row_no != last_sub_row_no + 1) {
+                pg_log(ERROR,
+                    "bioseq storage Phase C: non-contiguous row numbers during "
+                    "streamed insert (expected {}, got {})",
+                    last_sub_row_no + 1, row_no);
+            }
+        }
+        last_sub_row_no = row_no;
+    }
+
+    MemoryContextDelete(per_fragment_mctx);
+    MemoryContextDelete(scratch_mctx);
 
     entry.pending_bytes_delta         += total_varlena_bytes;
     entry.pending_total_payload_delta += total_varlena_bytes;
 
+    if (num_fragments == 0) {
+        // Empty sequence — no rows were written. Choose a deterministic row
+        // number (0) as the stub's first_sub_row_no; the scanner short-
+        // circuits when num_fragments == 0 and never reads this row.
+        first_sub_row_no = 0;
+    }
+
     seq_locator out{};
-    out.version       = kLocatorVersion;
-    out.bucket_idx    = static_cast<std::uint8_t>(bucket_idx);
-    out._pad_2        = 0;
-    out.shard_idx     = static_cast<std::uint32_t>(shard_idx);
-    out.total_bp_size = total_bp_size;
-    out.sub_row_no    = row_no;
+    out.version          = kLocatorVersion;
+    out.bucket_idx       = static_cast<std::uint8_t>(bucket_idx);
+    out._pad_2           = 0;
+    out.shard_idx        = static_cast<std::uint32_t>(shard_idx);
+    out.num_fragments    = static_cast<std::uint32_t>(num_fragments);
+    out._pad_4           = 0;
+    out.total_bp_size    = total_bp_size;
+    out.first_sub_row_no = first_sub_row_no;
     return out;
 }
 
+template<class L, std::size_t M, std::size_t X>
+seq_locator
+sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
+    Oid db_oid, Oid spc_oid, Oid main_relfilenode,
+    std::int16_t column_attno, TupleDesc parent_tupdesc,
+    const pgseq_t* original_hdr,
+    sequence_size_t current_cap_bytes,
+    seq_caches* cache)
+{
+    if (original_hdr == nullptr) {
+        pg_log(ERROR, "bioseq storage: insert_payload_as_fragments received null original_hdr");
+    }
+    if (is_locator_stub(original_hdr)) {
+        pg_log(ERROR, "bioseq storage: insert_payload_as_fragments received a stub; "
+               "the caller must screen out stubs before re-inserting");
+    }
+
+    const sequence_size_t total_bp_size =
+        static_cast<sequence_size_t>(original_hdr->bp_size);
+    const std::uint8_t logical_alphabet_code =
+        static_cast<std::uint8_t>(original_hdr->alphabet_code);
+    const std::uint8_t logical_byte_width =
+        static_cast<std::uint8_t>(original_hdr->storage_unit_byte_width);
+    const std::uint16_t last_fragment_padding =
+        static_cast<std::uint16_t>(original_hdr->padding_letters);
+
+    const auto alpha_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
+    const std::size_t lpu = detail::letters_per_unit_for(alpha_code, logical_byte_width);
+    if (lpu == 0) {
+        pg_log(ERROR,
+               "bioseq storage Phase C: insert_payload_as_fragments could not derive "
+               "letters_per_unit (alphabet_code={}, byte_width={})",
+               static_cast<unsigned>(alpha_code),
+               static_cast<unsigned>(logical_byte_width));
+    }
+    const sequence_size_t frag_bp =
+        static_cast<sequence_size_t>(detail::kFragmentStorageUnits) * lpu;
+    const sequence_size_t num_fragments =
+        total_bp_size == 0 ? 0u : (total_bp_size + frag_bp - 1) / frag_bp;
+    const std::size_t bytes_per_unit =
+        static_cast<std::size_t>(logical_byte_width);
+    const std::size_t fragment_bytes =
+        detail::kFragmentStorageUnits * bytes_per_unit;
+
+    // Slice the original payload into N fragment rows.
+    const std::uint8_t* const src_data =
+        reinterpret_cast<const std::uint8_t*>(original_hdr->data);
+    const std::size_t src_bytes =
+        static_cast<std::size_t>(VARSIZE(original_hdr)) - pgseq_t::header_bytes();
+
+    auto producer = [src_data, src_bytes, fragment_bytes, frag_bp, total_bp_size,
+                     last_fragment_padding](
+        std::size_t fragment_no, pgseq_t* dst, MemoryContext /*scratch*/,
+        bool is_last) noexcept
+    {
+        const std::size_t src_offset = fragment_no * fragment_bytes;
+        const std::size_t copy_bytes = std::min(fragment_bytes,
+            src_offset < src_bytes ? src_bytes - src_offset : std::size_t{0});
+        if (copy_bytes > 0) {
+            std::memcpy(dst->data, src_data + src_offset, copy_bytes);
+        }
+        // Trailing bytes already zero from palloc0.
+        const sequence_size_t this_fragment_bp = is_last
+            ? (total_bp_size - static_cast<sequence_size_t>(fragment_no) * frag_bp)
+            : frag_bp;
+        dst->bp_size = static_cast<pgseq_t::bp_size_t>(this_fragment_bp);
+        dst->padding_letters = is_last ? last_fragment_padding : std::uint16_t{0};
+    };
+
+    return insert_sequence_streamed(
+        db_oid, spc_oid, main_relfilenode, column_attno, parent_tupdesc,
+        logical_alphabet_code, logical_byte_width,
+        total_bp_size, last_fragment_padding, current_cap_bytes, cache,
+        producer);
+}
+
 // ---------------------------------------------------------------------------
-// §7.6 — fetch_payload (read hot path).
+// DOC0264 §9.4 — fetch_payload streams all fragments into a single
+// contiguous pgseq_t* in `out_mctx`. For Phase C sequences this opens the
+// shard once via Phase A's cache, opens a random-access ColumnarReadState,
+// walks all `num_fragments` rows and memcpys each fragment's `data[]` into
+// the right offset of the destination varlena's payload region.
+//
+// Raises pg_log(ERROR) if the assembled varlena would exceed MaxAllocSize —
+// streaming readers must use `sequence_scanner_pg<S>` instead. The legacy
+// callers (auto-hydration of stub-backed scan slots) are bounded by the
+// MaxAllocSize gate in `hydrate_seq_columns_in_slot` (§9.4 access_method).
 // ---------------------------------------------------------------------------
 
 template<class L, std::size_t M, std::size_t X>
@@ -974,6 +1253,19 @@ sequence_storage_manager<L, M, X>::fetch_payload(
 {
     if (cache == nullptr) {
         pg_log(ERROR, "bioseq storage: fetch_payload requires a seq_caches");
+    }
+
+    // DOC0264 §6.5 — empty sequence (num_fragments == 0). The locator is the
+    // only on-disk artefact; there are no sub-table rows to fetch. Return a
+    // minimal empty pgseq_t in `out_mctx`.
+    if (loc.num_fragments == 0) {
+        MemoryContextScope ctx{out_mctx};
+        pgseq_t* out = static_cast<pgseq_t*>(palloc0(pgseq_t::header_bytes()));
+        SET_VARSIZE(out, pgseq_t::header_bytes());
+        // alphabet/width/bp_size/padding are all zero — caller-side stub
+        // hydration sees an empty payload (compact_sequence_range handles
+        // size=0 correctly per DOC0258 §5.3).
+        return out;
     }
 
     Relation shard = open_sub_table_for_locator(db_oid, spc_oid, main_relfilenode,
@@ -1006,29 +1298,133 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         attr_needed.free();
     }
 
-    Datum vals[1]  = { 0 };
-    bool  nulls[1] = { true };
-    if (!ColumnarReadRowByRowNumber(entry.read_state, loc.sub_row_no, vals, nulls)) {
+    // DOC0264 §9.4 — derive fragment shape from logical alphabet/width on
+    // first sub-table row.
+    Datum first_vals[1]  = { 0 };
+    bool  first_nulls[1] = { true };
+    if (!ColumnarReadRowByRowNumber(entry.read_state, loc.first_sub_row_no,
+                                    first_vals, first_nulls)) {
         pg_log(ERROR,
-               "bioseq storage: missing sub-table row {} (locator bucket={} shard={})",
-               loc.sub_row_no,
+               "bioseq storage Phase C: missing first sub-table row {} "
+               "(locator bucket={} shard={} num_fragments={})",
+               loc.first_sub_row_no,
                static_cast<unsigned>(loc.bucket_idx),
-               loc.shard_idx);
+               loc.shard_idx, loc.num_fragments);
     }
-    if (nulls[0]) {
-        pg_log(ERROR, "bioseq storage: sub-table row {} is NULL", loc.sub_row_no);
+    if (first_nulls[0]) {
+        pg_log(ERROR, "bioseq storage Phase C: first sub-table row {} is NULL",
+               loc.first_sub_row_no);
     }
-    pgseq_t* raw = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[0]));
-    if (is_locator_stub(raw)) {
+    pgseq_t* first_raw = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(first_vals[0]));
+    if (is_locator_stub(first_raw)) {
         pg_log(ERROR,
-               "bioseq storage: sub-table row {} is itself a stub (corruption)",
-               loc.sub_row_no);
+               "bioseq storage Phase C: first sub-table row {} is itself a stub (corruption)",
+               loc.first_sub_row_no);
     }
+
+    const std::uint8_t logical_alphabet_code =
+        static_cast<std::uint8_t>(first_raw->alphabet_code);
+    const std::uint8_t logical_byte_width =
+        static_cast<std::uint8_t>(first_raw->storage_unit_byte_width);
+    if ((logical_byte_width & kLocatorStubMarker) != 0u) {
+        pg_log(ERROR,
+               "bioseq storage Phase C: fragment-row header carries the stub marker "
+               "(sub_w={}) — corruption", static_cast<unsigned>(logical_byte_width));
+    }
+
+    const auto alpha_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
+    const std::size_t lpu = detail::letters_per_unit_for(alpha_code, logical_byte_width);
+    if (lpu == 0) {
+        pg_log(ERROR,
+               "bioseq storage Phase C: fetch_payload could not derive letters_per_unit "
+               "(alphabet_code={}, byte_width={})",
+               static_cast<unsigned>(alpha_code),
+               static_cast<unsigned>(logical_byte_width));
+    }
+    const std::size_t bytes_per_unit = static_cast<std::size_t>(logical_byte_width);
+    const std::size_t fragment_storage_bytes =
+        detail::kFragmentStorageUnits * bytes_per_unit;
+
+    // Compute the assembled varlena size and guard against MaxAllocSize.
+    const sequence_size_t total_units =
+        loc.total_bp_size == 0
+            ? sequence_size_t{0}
+            : (loc.total_bp_size + lpu - 1) / lpu;
+    const sequence_size_t total_payload_bytes =
+        static_cast<sequence_size_t>(total_units)
+        * static_cast<sequence_size_t>(bytes_per_unit);
+    const sequence_size_t assembled_varlena_bytes =
+        static_cast<sequence_size_t>(pgseq_t::header_bytes())
+        + total_payload_bytes;
+    if (assembled_varlena_bytes > static_cast<sequence_size_t>(MaxAllocSize)) {
+        pg_log(ERROR,
+               "bioseq storage Phase C: sequence too large to materialise as a "
+               "single varlena ({} bp ⇒ ~{} bytes > MaxAllocSize). Stream via "
+               "sequence_scanner_pg<S> or wait for Phase D D-VARLENA.",
+               loc.total_bp_size,
+               assembled_varlena_bytes);
+    }
+
     MemoryContextScope ctx{out_mctx};
-    const std::size_t raw_bytes = static_cast<std::size_t>(VARSIZE(raw));
-    pgseq_t* copy = static_cast<pgseq_t*>(palloc(raw_bytes));
-    std::memcpy(copy, raw, raw_bytes);
-    return copy;
+    pgseq_t* out = static_cast<pgseq_t*>(palloc0(static_cast<std::size_t>(assembled_varlena_bytes)));
+    SET_VARSIZE(out, static_cast<std::size_t>(assembled_varlena_bytes));
+    out->alphabet_code           = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
+    out->storage_unit_byte_width = logical_byte_width;
+    out->bp_size                 = static_cast<pgseq_t::bp_size_t>(loc.total_bp_size);
+    // Last-fragment padding is also the padding of the assembled varlena.
+
+    std::uint8_t* const out_data = reinterpret_cast<std::uint8_t*>(out->data);
+
+    // Copy the already-fetched first fragment.
+    const std::size_t first_payload_bytes =
+        static_cast<std::size_t>(VARSIZE(first_raw)) - pgseq_t::header_bytes();
+    const std::size_t first_copy_bytes =
+        std::min(first_payload_bytes,
+                 static_cast<std::size_t>(total_payload_bytes));
+    if (first_copy_bytes > 0) {
+        std::memcpy(out_data, first_raw->data, first_copy_bytes);
+    }
+    if (loc.num_fragments > 0) {
+        out->padding_letters = static_cast<std::uint16_t>(first_raw->padding_letters);
+    }
+
+    for (std::uint32_t fragment_no = 1; fragment_no < loc.num_fragments; ++fragment_no) {
+        const std::uint64_t row_no = loc.first_sub_row_no + fragment_no;
+        Datum vals[1]  = { 0 };
+        bool  nulls[1] = { true };
+        if (!ColumnarReadRowByRowNumber(entry.read_state, row_no, vals, nulls)) {
+            pg_log(ERROR,
+                   "bioseq storage Phase C: missing sub-table fragment row {} "
+                   "(locator bucket={} shard={} fragment={}/{})",
+                   row_no,
+                   static_cast<unsigned>(loc.bucket_idx),
+                   loc.shard_idx, fragment_no, loc.num_fragments);
+        }
+        if (nulls[0]) {
+            pg_log(ERROR, "bioseq storage Phase C: sub-table row {} is NULL", row_no);
+        }
+        pgseq_t* raw = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[0]));
+        if (is_locator_stub(raw)) {
+            pg_log(ERROR,
+                   "bioseq storage Phase C: sub-table fragment row {} is itself a stub",
+                   row_no);
+        }
+        const std::size_t dst_offset =
+            static_cast<std::size_t>(fragment_no) * fragment_storage_bytes;
+        const std::size_t raw_payload =
+            static_cast<std::size_t>(VARSIZE(raw)) - pgseq_t::header_bytes();
+        const std::size_t copy_bytes =
+            std::min(raw_payload,
+                     static_cast<std::size_t>(total_payload_bytes) - dst_offset);
+        if (copy_bytes > 0) {
+            std::memcpy(out_data + dst_offset, raw->data, copy_bytes);
+        }
+        if (fragment_no + 1 == loc.num_fragments) {
+            out->padding_letters = static_cast<std::uint16_t>(raw->padding_letters);
+        }
+    }
+
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,8 +1455,8 @@ sequence_storage_manager<L, M, X>::fetch_payload_bulk(
 
     std::sort(sort_scratch.begin(), sort_scratch.begin() + requests.size(),
         [](const fetch_request& a, const fetch_request& b) noexcept {
-            return std::tie(a.locator.shard_idx, a.locator.sub_row_no)
-                 < std::tie(b.locator.shard_idx, b.locator.sub_row_no);
+            return std::tie(a.locator.shard_idx, a.locator.first_sub_row_no)
+                 < std::tie(b.locator.shard_idx, b.locator.first_sub_row_no);
         });
 
     for (std::size_t i = 0; i < requests.size(); ++i) {
@@ -1177,7 +1573,7 @@ void sidecar_write_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     }
     TupleDesc td = RelationGetDescr(rel);
     Datum values[2] = {
-        Int64GetDatum(static_cast<std::int64_t>(loc.sub_row_no)),
+        Int64GetDatum(static_cast<std::int64_t>(loc.first_sub_row_no)),
         PointerGetDatum(blob_varlena),
     };
     bool nulls[2] = { false, false };
@@ -1209,7 +1605,7 @@ sidecar_read_blob(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     ScanKeyData keys[1];
     ScanKeyInit(&keys[0], 1 /*sub_rowno*/,
                 BTEqualStrategyNumber, F_INT8EQ,
-                Int64GetDatum(static_cast<std::int64_t>(loc.sub_row_no)));
+                Int64GetDatum(static_cast<std::int64_t>(loc.first_sub_row_no)));
     SysScanDesc scan = systable_beginscan(rel, pk_index_oid,
                                           /*indexOK=*/ pk_index_oid != InvalidOid,
                                           /*snapshot=*/nullptr, 1, keys);
@@ -1258,8 +1654,8 @@ void sidecar_read_blob_bulk(
     using FR = sequence_storage_manager<sequence_size_t, 8, 42>::fetch_request;
     std::sort(sort_scratch.begin(), sort_scratch.begin() + requests.size(),
         [](const FR& a, const FR& b) noexcept {
-            return std::tie(a.locator.shard_idx, a.locator.sub_row_no)
-                 < std::tie(b.locator.shard_idx, b.locator.sub_row_no);
+            return std::tie(a.locator.shard_idx, a.locator.first_sub_row_no)
+                 < std::tie(b.locator.shard_idx, b.locator.first_sub_row_no);
         });
     for (std::size_t i = 0; i < requests.size(); ++i) {
         const FR& req = sort_scratch[i];
