@@ -65,6 +65,8 @@ import bioseq_sequences.minimap_port;
 import bioseq_types.pg_compact_sequence;
 import sequan_compat;
 import bioseq_metadata_admin;
+import bioseq_storage_lazy;   // DOC0263 §9.6 — make_lazy_in_memory / lazy wrapper
+import bioseq_storage_size;   // DOC0263 §10.3 — kMinimizerSketchMaxPosition gate
 
 /* Pull TargetIndex / sketch_collector / collect_minimizers / minimap_int_hasher
  * / pgseq_t / compact_sequence_range out of their home namespaces so the
@@ -74,6 +76,7 @@ import bioseq_metadata_admin;
 using bioseq::simd::HWY_NAMESPACE::TargetIndex;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers;
+using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;
 using bioseq::simd::HWY_NAMESPACE::minimap_int_hasher;
 using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 
@@ -277,21 +280,46 @@ export void sidecar_compute_and_write_index(Oid user_relid, int64_t rowno,
 	 * idx and its byte count in captured locals. */
 	TargetIndex idx;
 	std::size_t blob_bytes = 0;
+	bool skip_index_oversize = false;  // DOC0263 §10.3 — set when bp_size > 2^28
 
 	pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width,
 		[&]<class S>() {
 			compact_sequence_range<S> seq{*hdr};
+			// DOC0263 §9.6 — sidecar sketches through the (zero-overhead
+			// no-fragment) lazy wrapper. Production scanner is sequence_scanner_none.
+			auto lazy_seq = bioseq::storage::make_lazy_in_memory(seq);
+
+			// DOC0263 §10.3 / §9.6 — the canonical MinimapSketchData<28,15>
+			// minimizer position field caps at 2^28 letters. Refuse to build a
+			// sidecar index for longer sequences (the read path then falls back
+			// to recompute) rather than silently truncating positions. This
+			// keeps the index's int32 fields provably safe (<= 2^28 << int32max).
+			if (lazy_seq.bp_size() > bioseq::storage::kMinimizerSketchMaxPosition) {
+				skip_index_oversize = true;
+				return;
+			}
 
 			sketch_collector collector;
-			collect_minimizers<minimap_int_hasher, MinimapSketchData>(
-				collector, seq, seq.begin(), seq.end(),
+			collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+				collector, lazy_seq, lazy_seq.begin(), lazy_seq.end(),
 				/*w=*/10, /*k=*/15);
 			// Move the vector — collector dies at lambda exit.
 			auto minimizers = std::move(collector).extract_sketches_data();
 
-			idx.build(minimizers, static_cast<int32_t>(seq.bp_size()));
+			// DOC0263 §10.2 — TargetIndex::build now takes `sequence_size_t`
+			// (uint64); pass seq.bp_size() directly, no narrowing. The 2^28
+			// gate above keeps the value provably within all downstream
+			// position fields.
+			idx.build(minimizers, seq.bp_size());
 			blob_bytes = idx.serialize_binary_size();
 		});
+
+	if (skip_index_oversize) {
+		JustLog("[bioseq] sidecar: skipping index for oversize sequence "
+		        "(rowno={}) — > 2^28 letters exceeds MinimapSketchData<28,15> "
+		        "position range (DOC0263 §10.3); read path will recompute.", rowno);
+		return;
+	}
 
 	bytea* target_index_varlena = reinterpret_cast<bytea*>(palloc(VARHDRSZ + blob_bytes));
 	SET_VARSIZE(target_index_varlena, VARHDRSZ + blob_bytes);

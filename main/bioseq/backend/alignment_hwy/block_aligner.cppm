@@ -40,6 +40,8 @@ import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
 import context;
+import bioseq_storage_scanner;   // DOC0263 — sequence_scanner_none default
+import bioseq_storage_lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
 
 export {
 
@@ -47,6 +49,12 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+// DOC0263 §9.1 — the block-aligner encode path runs through the lazy
+// wrapper's `encoded_iter<…>().ptr_at(...)` slot ring (§7), not
+// `to_encoded_into`; the shared helper lives in bioseq_storage_lazy so
+// block_aligner and ksw2 use the same one definition.
+using bioseq::storage::encode_region_via_ptr_at;
 
 // =============================================================================
 // Constants
@@ -113,16 +121,16 @@ public:
 
     /// Build from compact_sequence_range sub-region.
     template<bool is_reversed, int AlphabetDim,
-             supports_compact_sequence_range R>
-    void fill(const compact_sequence_range<R>& seq,
+             supports_compact_sequence_range R, class Scanner>
+    void fill(const bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
               size_t bp_from, size_t bp_to, size_t block_size) {
         len_ = bp_to - bp_from;
         const size_t total = 1 + len_ + block_size;
         data_ = context::current().alloc_align_array<uint8_t, 64>(total + 64);
         const uint8_t null_byte = static_cast<uint8_t>(AlphabetDim);
         data_[0] = null_byte;
-        seq.template to_encoded_into<is_reversed>(
-            data_.subspan(1, len_), bp_from, bp_to);
+        encode_region_via_ptr_at<is_reversed>(
+            seq, data_.subspan(1, len_), bp_from, bp_to);
         std::memset(data_.data() + 1 + len_, null_byte, block_size);
     }
 
@@ -1257,10 +1265,12 @@ public:
         bool is_reversed,
         supports_compact_sequence_range QueryRange,
         supports_compact_sequence_range TargetRange,
-        size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n>
+        size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n,
+        class Scanner = bioseq::storage::sequence_scanner_none<
+            typename compact_sequence_range<QueryRange>::traits::storage_unit>>
     [[nodiscard]] static KswAlignResult align(
-        const compact_sequence_range<QueryRange>& query_seq,
-        const compact_sequence_range<TargetRange>& target_seq,
+        const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+        const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
         size_t query_start,
         size_t query_end,
         size_t target_start,
@@ -1309,10 +1319,10 @@ public:
             auto& enc_ctx = context::current();
             auto query_enc  = enc_ctx.alloc_align_array<uint8_t>(query_len);
             auto target_enc = enc_ctx.alloc_align_array<uint8_t>(target_len);
-            query_seq.template to_encoded_into<is_reversed>(
-                query_enc, query_start, query_end);
-            target_seq.template to_encoded_into<false>(
-                target_enc, target_start, target_end);
+            encode_region_via_ptr_at<is_reversed>(
+                query_seq, query_enc, query_start, query_end);
+            encode_region_via_ptr_at<false>(
+                target_seq, target_enc, target_start, target_end);
             query_padded.fill_from_encoded_reversed(
                 query_enc.data(), query_len, max_size, null_byte);
             ref_padded.fill_from_encoded_reversed(

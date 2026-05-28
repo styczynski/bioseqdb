@@ -18,6 +18,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.pipe;
+import bioseq_storage_lazy;
 import bioseq_sequences.chaining.utils;
 import bioseq_sequences.minimap_port;
 import bioseq_cigar;
@@ -615,7 +616,7 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
         ::bioseq::simd::HWY_NAMESPACE::TargetIndex idx;
-        idx.build(mins, static_cast<int32_t>(t.bp_size()));
+        idx.build(mins, t.bp_size());
         // The leaf's W==10 && K==15 branch picks SpecCep.
         auto result = detail::pipeline_run_leaf<
             EntryPoint::WithPrebuiltMinimizers,
@@ -623,7 +624,7 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             MinimizerT, ::bioseq::simd::HWY_NAMESPACE::TargetIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, q, t, mins, idx);
+                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
         REQUIRE(result.size() == 0u);
     }
     SECTION("(W=5, K=15) — selects the fallback Cep") {
@@ -641,14 +642,14 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
             ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
         ::bioseq::simd::HWY_NAMESPACE::TargetIndex idx;
-        idx.build(mins, static_cast<int32_t>(t.bp_size()));
+        idx.build(mins, t.bp_size());
         auto result = detail::pipeline_run_leaf<
             EntryPoint::WithPrebuiltMinimizers,
             std::vector<seq::dna4>, std::vector<seq::dna4>,
             MinimizerT, ::bioseq::simd::HWY_NAMESPACE::TargetIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, q, t, mins, idx);
+                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
         REQUIRE(result.size() == 0u);
     }
 }

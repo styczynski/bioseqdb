@@ -50,7 +50,7 @@ namespace bioseq::chaining {
 /// The priority field enables RMQ: each node tracks the minimum-priority
 /// node in its subtree via subtree_min.
 struct RmqNode {
-    int32_t query_position = 0;
+    std::int64_t query_position = 0;   ///< DOC0263 §10.2 — widened from int32 (no position truncation)
     int64_t anchor_index   = 0;
     double  priority       = 0.0;  ///< -(best_scores[j] + 0.5 * gap_penalty * (ref_pos + query_pos))
 
@@ -759,22 +759,22 @@ void chain_anchors_rmq(
     auto _fwd_scope = bioseq::instr::loop(_fwd_desc);
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
         _fwd_scope.tick();
-        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
+        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
         int64_t best_predecessor = -1;
 
         // === Step 1: Insert completed ref-position groups into trees ===
         // Only insert when we move to a new reference position
         if (group_start < current_idx &&
-            anchors[group_start].ref_bits != anchors[current_idx].ref_bits)
+            anchors[group_start].ref_bits() != anchors[current_idx].ref_bits())
         {
             for (int64_t j = group_start; j < current_idx; ++j) {
                 RmqNode* node = primary_tree.alloc_node();
-                node->query_position = static_cast<int32_t>(anchors[j].query.query_position);
+                node->query_position = static_cast<std::int64_t>(anchors[j].query_position);
                 node->anchor_index = j;
                 node->priority = -(static_cast<double>(best_scores[j])
                     + 0.5 * static_cast<double>(params.gap_penalty)
-                    * (static_cast<double>(static_cast<int32_t>(anchors[j].ref_bits))
-                     + static_cast<double>(static_cast<int32_t>(anchors[j].query_bits))));
+                    * (static_cast<double>(anchors[j].ref_position)
+                     + static_cast<double>(anchors[j].query_position)));
                 primary_tree.insert(node);
                 primary_nodes[j] = node;
 
@@ -792,8 +792,8 @@ void chain_anchors_rmq(
 
         // === Step 2: Prune out-of-range nodes from primary tree ===
         while (prune_start < current_idx) {
-            if (anchors[current_idx].ref_bits >> 32 != anchors[prune_start].ref_bits >> 32 ||
-                anchors[current_idx].ref_bits > anchors[prune_start].ref_bits
+            if (anchors[current_idx].ref_chromosome_key() != anchors[prune_start].ref_chromosome_key() ||
+                anchors[current_idx].ref_bits() > anchors[prune_start].ref_bits()
                     + static_cast<uint64_t>(max_dist))
             {
                 if (primary_nodes[prune_start] != nullptr) {
@@ -824,8 +824,8 @@ void chain_anchors_rmq(
         // Prune inner tree
         if (max_dist_inner > 0) {
             while (prune_start_inner < current_idx) {
-                if (anchors[current_idx].ref_bits >> 32 != anchors[prune_start_inner].ref_bits >> 32 ||
-                    anchors[current_idx].ref_bits > anchors[prune_start_inner].ref_bits
+                if (anchors[current_idx].ref_chromosome_key() != anchors[prune_start_inner].ref_chromosome_key() ||
+                    anchors[current_idx].ref_bits() > anchors[prune_start_inner].ref_bits()
                         + static_cast<uint64_t>(max_dist_inner))
                 {
                     if (inner_nodes[prune_start_inner] != nullptr) {
@@ -842,8 +842,8 @@ void chain_anchors_rmq(
 
         // === Step 3: Primary RMQ query ===
         if (primary_tree.size() > 0) {
-            const int32_t current_query_pos = static_cast<int32_t>(
-                anchors[current_idx].query.query_position);
+            const std::int64_t current_query_pos = static_cast<std::int64_t>(
+                anchors[current_idx].query_position);
             RmqNode lo_key;
             lo_key.query_position = current_query_pos - max_dist;
             lo_key.anchor_index = std::numeric_limits<int64_t>::min();
@@ -882,7 +882,7 @@ void chain_anchors_rmq(
                     while (iter.at() != nullptr) {
                         const RmqNode* candidate = iter.at();
                         const int64_t cj = candidate->anchor_index;
-                        if (static_cast<int32_t>(anchors[current_idx].query.query_position)
+                        if (static_cast<std::int64_t>(anchors[current_idx].query_position)
                             - candidate->query_position > max_dist_inner)
                         {
                             break;

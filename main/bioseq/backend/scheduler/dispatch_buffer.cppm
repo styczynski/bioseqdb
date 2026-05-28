@@ -38,6 +38,7 @@ module;
 #include "common.h"
 
 #include <array>
+#include <cstring>
 #include <map>
 #include <optional>
 #include <span>
@@ -53,6 +54,16 @@ module;
  * access_method.cppm. */
 extern "C++" uint64_t tid_to_row_number(ItemPointerData tid);
 
+// DOC0263 §11.3.2 — the chunked-scanner dispatch path is gated behind a build
+// flag (default OFF) so the dispatch_buffer TU instantiates ONE pipeline tree
+// (sequence_scanner_none) in production — no template explosion (DOC0271). A
+// parity/CI build sets -DBIOSEQ_ENABLE_FRAGMENTED_DISPATCH=1 to also compile the
+// chunked tree; the bioseq.test_force_chunked_scanner GUC then routes row
+// sequences through a synthetic chunked scanner end-to-end.
+#ifndef BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
+#define BIOSEQ_ENABLE_FRAGMENTED_DISPATCH 0
+#endif
+
 export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
@@ -66,7 +77,9 @@ import bioseq_cigar;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sidecar;
 import bioseq_instr;
-import bioseq_storage;                  // DOC0260 §9 — seq_locator, fetch_payload_bulk, seq_caches
+import bioseq_storage;                  // DOC0260 §9
+import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
+import bioseq_storage_scanner;          // DOC0263 §11.3.2 — chunked test scanner (gated) — seq_locator, fetch_payload_bulk, seq_caches
 
 HWY_BEFORE_NAMESPACE();
 
@@ -244,6 +257,15 @@ public:
                  * the batch via the buffer's std::vector<char>.
                  */
                 compact_sequence_range<S> query_seq{*query_hdr};
+                // DOC0263 §9.7 — present the row sequence to the migrated
+                // pipeline through the zero-overhead no-fragment lazy wrapper.
+                auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
+#if BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
+                const char* _force_chunked_guc =
+                    GetConfigOptionByName("bioseq.test_force_chunked_scanner", NULL, true);
+                const bool chunked_scanner_forced =
+                    _force_chunked_guc && std::strcmp(_force_chunked_guc, "on") == 0;
+#endif
                 JustLog("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={}",
                         static_cast<unsigned>(alphabet_code),
                         static_cast<unsigned>(storage_unit_byte_width),
@@ -283,6 +305,7 @@ public:
                         continue;
                     }
                     compact_sequence_range<S> target_seq{*target_hdr};
+                    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
 
                     const size_t min_bp = std::min(query_seq.bp_size(),
                                                    target_seq.bp_size());
@@ -364,15 +387,36 @@ public:
                         }
                         TargetIndex prebuilt_idx = TargetIndex::deserialize_from_binary(
                             (*index_blobs)[i].data, (*index_blobs)[i].bytes);
+#if BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
+                        if (chunked_scanner_forced) {
+                            using chunked = bioseq::storage::sequence_scanner_test_chunked<
+                                typename compact_sequence_range<S>::traits::storage_unit,
+                                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+                            bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
+                            bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
+                            collection = minimap2_port_with_index(
+                                fq, ft, *cached_query_minimizers, prebuilt_idx, params);
+                        } else
+#endif
                         collection = minimap2_port_with_index(
-                            query_seq, target_seq,
+                            lazy_query, lazy_target,
                             *cached_query_minimizers,
                             prebuilt_idx, params);
                         stats.last_effective_params = params;
                     } else {
                         ++stats.targets_recomputed_minimizers;
                         Minimap2Params params = apply_size_heuristic(base_params, min_bp);
-                        collection = minimap_port(query_seq, target_seq, params);
+#if BIOSEQ_ENABLE_FRAGMENTED_DISPATCH
+                        if (chunked_scanner_forced) {
+                            using chunked = bioseq::storage::sequence_scanner_test_chunked<
+                                typename compact_sequence_range<S>::traits::storage_unit,
+                                bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+                            bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
+                            bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
+                            collection = minimap_port(fq, ft, params);
+                        } else
+#endif
+                        collection = minimap_port(lazy_query, lazy_target, params);
                         stats.last_effective_params = params;
                     }
 

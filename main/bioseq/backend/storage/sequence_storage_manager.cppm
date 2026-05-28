@@ -68,7 +68,7 @@ import storage_metadata;
 import bioseq_table_io;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sequences;
-import :sequence_size;
+import bioseq_storage_size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
 // DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
 // module so the unit-test TU can link them without the Postgres backend.
 // Re-exported here so existing `import bioseq_storage` consumers are unchanged.

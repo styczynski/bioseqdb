@@ -66,6 +66,9 @@ import bioseq_sequences.chaining.simd;
 import bioseq_sequences.chaining.rmq;
 import bioseq_sequences.radix_sort;
 import context;
+import bioseq_storage_scanner;
+import bioseq_storage_lazy;
+import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
 import bioseq_instr;
 
 export {
@@ -75,10 +78,15 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
-// Import chaining types from the shared chaining module
+// DOC0263 §10.1 — the canonical "any sequence position or length" type. Every
+// length / absolute coordinate carried by the port uses this (uint64) so no
+// position is silently truncated for sequences longer than 2^31 (C1).
+using bioseq::storage::sequence_size_t;
+
+// Import chaining types from the shared chaining module.
+// AnchorRefFields / AnchorQueryFields removed per DOC0263 §2 (Anchor is now a
+// flat 24 B struct, no nested ref/query sub-objects).
 using bioseq::chaining::Anchor;
-using bioseq::chaining::AnchorRefFields;
-using bioseq::chaining::AnchorQueryFields;
 using bioseq::chaining::Chain;
 using bioseq::chaining::ChainingMode;
 using bioseq::chaining::ChainingParams;
@@ -324,16 +332,19 @@ struct Minimap2Params {
  * Maps to the 12 mandatory PAF columns plus alignment details.
  */
 struct MatchResult {
-    // PAF mandatory columns
-    int32_t query_len              = 0;    ///< col 2: query sequence length
-    int32_t query_start            = 0;    ///< col 3: query start (0-based, closed)
-    int32_t query_end              = 0;    ///< col 4: query end (0-based, open)
+    // PAF mandatory columns. DOC0263 §10.2: every length / absolute coordinate
+    // (cols 2,3,4,7,8,9,10,11) is `sequence_size_t` (uint64) so it is never
+    // truncated for sequences longer than 2^31. PAF emits them as decimal
+    // strings, so the wire width is unchanged.
+    sequence_size_t query_len      = 0;    ///< col 2: query sequence length
+    sequence_size_t query_start    = 0;    ///< col 3: query start (0-based, closed)
+    sequence_size_t query_end      = 0;    ///< col 4: query end (0-based, open)
     bool    is_reverse             = false;///< col 5: '+' or '-'
-    int32_t target_len             = 0;    ///< col 7: target sequence length
-    int32_t target_start           = 0;    ///< col 8: target start on original strand
-    int32_t target_end             = 0;    ///< col 9: target end on original strand
-    int32_t num_matches            = 0;    ///< col 10: number of residue matches (mlen)
-    int32_t block_length           = 0;    ///< col 11: alignment block length (blen)
+    sequence_size_t target_len     = 0;    ///< col 7: target sequence length
+    sequence_size_t target_start   = 0;    ///< col 8: target start on original strand
+    sequence_size_t target_end     = 0;    ///< col 9: target end on original strand
+    sequence_size_t num_matches    = 0;    ///< col 10: number of residue matches (mlen)
+    sequence_size_t block_length   = 0;    ///< col 11: alignment block length (blen)
     int32_t mapq                   = 0;    ///< col 12: mapping quality (0-255)
 
     // Additional alignment info
@@ -367,15 +378,19 @@ struct AlignRegion {
     int32_t seed_count      = 0;    ///< number of seeds
     int32_t anchor_start    = 0;    ///< offset in anchor array
 
-    int32_t query_start     = 0;    ///< query start position
-    int32_t query_end       = 0;    ///< query end position
-    int32_t ref_start       = 0;    ///< reference start position
-    int32_t ref_end         = 0;    ///< reference end position
+    // DOC0263 §10.2 — absolute coordinates / lengths are `sequence_size_t`
+    // (uint64) so they carry the untruncated 64-bit anchor positions through
+    // to the MatchResult. Intermediate coordinate math that can go negative
+    // (e.g. ref_position + 1 - span) is done in signed int64 then clamped.
+    sequence_size_t query_start = 0;    ///< query start position
+    sequence_size_t query_end   = 0;    ///< query end position
+    sequence_size_t ref_start   = 0;    ///< reference start position
+    sequence_size_t ref_end     = 0;    ///< reference end position
     int32_t reference_id    = 0;    ///< reference sequence id (0 in our case)
     bool    is_reverse      = false;///< reverse strand
 
-    int32_t match_length    = 0;    ///< seeded exact match length
-    int32_t block_length    = 0;    ///< seeded alignment block length
+    sequence_size_t match_length = 0;   ///< seeded exact match length
+    sequence_size_t block_length = 0;   ///< seeded alignment block length
     int32_t secondary_score = 0;    ///< best secondary score against this primary
     int32_t secondary_count = 0;    ///< number of suboptimal mappings
 
@@ -419,7 +434,7 @@ struct TargetIndex {
     // is open-addressing with SSE2/NEON-accelerated probing.
     boost::unordered_flat_map<uint64_t, uint64_t> table;
     std::vector<uint64_t>                          positions;
-    int32_t target_len = 0;
+    sequence_size_t target_len = 0;   ///< DOC0263 §10.2 — full 64-bit target length
 
     static constexpr uint32_t kSerializeMagic   = 0xB1000001u;
     static constexpr uint32_t kSerializeVersion = 2u;
@@ -432,8 +447,9 @@ struct TargetIndex {
     struct SerializedHeader {
         uint32_t magic;
         uint32_t version;
-        int32_t  target_len;
+        uint64_t target_len;       ///< DOC0263 §10.2 — version 2 widens this to 64-bit
         uint32_t bucket_count;
+        uint32_t reserved;         ///< pad so total_positions stays 8-byte aligned; written as 0
         uint64_t total_positions;
     };
     /* Bucket layout v2: hash(u64) + pos_offset(u32) + pos_count(u32) = 16 bytes.
@@ -447,8 +463,8 @@ struct TargetIndex {
     };
     static constexpr std::size_t kSerializeHeaderBytes = sizeof(SerializedHeader);
     static constexpr std::size_t kSerializeBucketBytes = sizeof(SerializedBucket);
-    static_assert(kSerializeHeaderBytes == 24,
-                  "SerializedHeader wire layout must remain 24 bytes");
+    static_assert(kSerializeHeaderBytes == 32,
+                  "SerializedHeader wire layout must remain 32 bytes (v2: 64-bit target_len)");
     static_assert(kSerializeBucketBytes == 16,
                   "SerializedBucket wire layout must remain 16 bytes");
 
@@ -462,7 +478,7 @@ struct TargetIndex {
 
     template <class MinimizerT>
     void build(const std::vector<MinimizerT>& target_minimizers,
-               int32_t target_length) {
+               sequence_size_t target_length) {
         static const auto* _desc =
             bioseq::instr::register_region_static("target_index_build");
         auto _scope = bioseq::instr::region(_desc);
@@ -538,7 +554,7 @@ struct TargetIndex {
         return std::span<const uint64_t>(positions.data() + off, count);
     }
 
-    [[nodiscard]] int32_t target_length() const { return target_len; }
+    [[nodiscard]] sequence_size_t target_length() const { return target_len; }
 
     // --------------------------------------------------------------------
     //  Fast binary serialization  — v2 layout (little-endian, LP64)
@@ -562,7 +578,7 @@ struct TargetIndex {
         const uint32_t bucket_count    = static_cast<uint32_t>(table.size());
         const uint64_t total_positions = static_cast<uint64_t>(positions.size());
 
-        /* One aligned memcpy for the whole 24-byte header beats five
+        /* One aligned memcpy for the whole 32-byte header beats six
          * field-by-field stores: the compiler emits a single pair of
          * SIMD stores on ARM64 / x86_64 once the struct is ABI-laid-out. */
         const SerializedHeader header{
@@ -570,6 +586,7 @@ struct TargetIndex {
             kSerializeVersion,
             target_len,
             bucket_count,
+            0u,               // reserved (alignment pad)
             total_positions,
         };
         std::memcpy(output, &header, sizeof(header));
@@ -692,7 +709,7 @@ concept MinimizerIndex = requires (
     T& mutable_index,
     const T& const_index,
     const std::vector<MinimapSketchData>& sketches,
-    int32_t target_length_arg,
+    sequence_size_t target_length_arg,
     uint64_t kmer_hash,
     char* output_buffer,
     const char* input_buffer,
@@ -700,7 +717,7 @@ concept MinimizerIndex = requires (
 {
     { mutable_index.build(sketches, target_length_arg) } -> std::same_as<void>;
     { const_index.lookup(kmer_hash) } -> std::convertible_to<std::span<const uint64_t>>;
-    { const_index.target_length() } -> std::convertible_to<int32_t>;
+    { const_index.target_length() } -> std::convertible_to<sequence_size_t>;
     { const_index.serialize_binary_size() } -> std::convertible_to<std::size_t>;
     { const_index.serialize_to_binary(output_buffer) } -> std::same_as<void>;
     { T::deserialize_from_binary(input_buffer, input_size) } -> std::same_as<T>;
@@ -745,7 +762,7 @@ template <class MinimizerT, MinimizerIndex IndexT>
 void collect_seed_hits(
     std::span<const MinimizerT> query_minimizers,
     const IndexT& target_index,
-    int32_t query_len,
+    sequence_size_t query_len,
     int32_t max_occ,
     int32_t kmer_size,
     ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
@@ -780,7 +797,7 @@ void collect_seed_hits(
     //                     = (query_len - 2 + span) - fwd
     // Hoisting this addition out of the inner loop lets the compiler keep
     // (sub fwd) as the only per-hit op for the reverse branch.
-    const int32_t reverse_pos_base = query_len - 2 + static_cast<int32_t>(query_span_value);
+    const sequence_size_t reverse_pos_base = query_len - 2 + query_span_value;
     for (const auto& query_minimizer : query_minimizers) {
         const auto target_hits = target_index.lookup(query_minimizer.kmer());
         if (target_hits.empty() || static_cast<int32_t>(target_hits.size()) > max_occ) {
@@ -795,15 +812,16 @@ void collect_seed_hits(
         // Hoist the strand bit out of the inner per-hit loop — constant
         // across `target_hits`.
         const uint32_t query_strand_bit = query_pos_encoded & 1u;
-        const int32_t  forward_query_pos = static_cast<int32_t>(query_pos_encoded >> 1);
+        const sequence_size_t forward_query_pos = static_cast<sequence_size_t>(query_pos_encoded >> 1);
         // Reverse-strand position formula reduces to a single subtraction
         // once `reverse_pos_base` is hoisted; pre-compute here so the
         // branchless `csel` below picks between two register-resident
-        // ints.
-        const int32_t  reverse_query_pos = reverse_pos_base - forward_query_pos;
+        // 64-bit positions. (forward_query_pos is a k-mer start <= query_len-k,
+        // so reverse_pos_base - forward_query_pos never underflows.)
+        const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
 
         for (const uint64_t target_hit : target_hits) {
-            const int32_t ref_position = static_cast<int32_t>(
+            const sequence_size_t ref_position = static_cast<sequence_size_t>(
                 static_cast<uint32_t>(target_hit) >> 1);
             const uint32_t target_reference_id = static_cast<uint32_t>(target_hit >> 32);
 
@@ -815,17 +833,20 @@ void collect_seed_hits(
             // mispredict on mixed-strand hot loops.
             const uint32_t target_strand_bit = static_cast<uint32_t>(target_hit & 1ULL);
             const uint32_t is_reverse_bit    = target_strand_bit ^ query_strand_bit;
-            const uint32_t selected_query_pos = static_cast<uint32_t>(
-                is_reverse_bit ? reverse_query_pos : forward_query_pos);
+            const sequence_size_t selected_query_pos =
+                is_reverse_bit ? reverse_query_pos : forward_query_pos;
 
+            // DOC0263 anchor flat layout: ref/query sub-objects removed.
+            // `reference_id` field removed (single-target codebase; the index
+            // packing always produced rid=0 — see TargetIndex doc).
+            (void)target_reference_id;  // structurally 0, retained as a debug-time invariant tracer
             Anchor anchor;
-            anchor.ref.ref_position    = static_cast<uint32_t>(ref_position);
-            anchor.ref.reference_id    = target_reference_id;
-            anchor.ref.is_reverse      = is_reverse_bit;
-            anchor.query.query_position = selected_query_pos;
-            anchor.query.query_span    = query_span_value;
-            anchor.query.flags         = 0;
-            anchor.query.segment_id    = 0;
+            anchor.ref_position    = ref_position;
+            anchor.is_reverse      = is_reverse_bit;
+            anchor.query_position  = selected_query_pos;
+            anchor.query_span      = static_cast<std::uint8_t>(query_span_value);
+            anchor.flags           = 0;
+            anchor.segment_id      = 0;
             anchors_out.push_back(anchor);
         }
     }
@@ -861,7 +882,7 @@ void collect_seed_hits(
     struct AnchorRefBitsKey {
         [[nodiscard, gnu::always_inline]]
         std::uint64_t operator()(const Anchor& anchor) const noexcept {
-            return anchor.ref_bits;
+            return anchor.ref_bits();
         }
     };
     bioseq::sorting::radix_sort(
@@ -902,25 +923,29 @@ void compute_fuzzy_lengths(AlignRegion& region, std::span<const Anchor> anchors)
     }
 
     const int32_t anchor_begin = region.anchor_start;
-    region.match_length = static_cast<int32_t>(anchors[anchor_begin].query.query_span);
-    region.block_length = region.match_length;
+    // Accumulate in signed int64 (gaps are bounded position *deltas*, never
+    // absolute positions) then store into the sequence_size_t fields.
+    std::int64_t match_length = static_cast<int32_t>(anchors[anchor_begin].query_span);
+    std::int64_t block_length = match_length;
 
     for (int32_t anchor_idx = anchor_begin + 1;
          anchor_idx < anchor_begin + region.seed_count;
          ++anchor_idx)
     {
-        const int32_t span = static_cast<int32_t>(anchors[anchor_idx].query.query_span);
-        const int32_t target_gap = static_cast<int32_t>(anchors[anchor_idx].ref.ref_position)
-                                 - static_cast<int32_t>(anchors[anchor_idx - 1].ref.ref_position);
-        const int32_t query_gap = static_cast<int32_t>(anchors[anchor_idx].query.query_position)
-                                - static_cast<int32_t>(anchors[anchor_idx - 1].query.query_position);
+        const int32_t span = static_cast<int32_t>(anchors[anchor_idx].query_span);
+        const int32_t target_gap = static_cast<int32_t>(
+            anchors[anchor_idx].ref_position - anchors[anchor_idx - 1].ref_position);
+        const int32_t query_gap = static_cast<int32_t>(
+            anchors[anchor_idx].query_position - anchors[anchor_idx - 1].query_position);
         const int32_t max_gap = (target_gap > query_gap) ? target_gap : query_gap;
-        region.block_length += max_gap;
+        block_length += max_gap;
         const bool both_gaps_exceed_span = (target_gap > span && query_gap > span);
         const int32_t min_gap = (target_gap < query_gap) ? target_gap : query_gap;
         const int32_t match_increment = both_gaps_exceed_span ? span : min_gap;
-        region.match_length += match_increment;
+        match_length += match_increment;
     }
+    region.match_length = static_cast<sequence_size_t>(match_length);
+    region.block_length = static_cast<sequence_size_t>(block_length);
 }
 
 /**
@@ -932,7 +957,7 @@ void compute_fuzzy_lengths(AlignRegion& region, std::span<const Anchor> anchors)
 void set_region_coordinates(
     AlignRegion& region,
     std::span<const Anchor> anchors,
-    int32_t query_len)
+    sequence_size_t query_len)
 {
     if (region.seed_count <= 0) {
         return;
@@ -941,31 +966,36 @@ void set_region_coordinates(
     const Anchor& first_anchor = anchors[anchor_begin];
     const Anchor& last_anchor = anchors[anchor_begin + region.seed_count - 1];
 
-    region.is_reverse = first_anchor.ref.is_reverse != 0;
-    region.reference_id = static_cast<int32_t>(first_anchor.ref.reference_id);
+    region.is_reverse = first_anchor.is_reverse != 0;
+    region.reference_id = 0;  // DOC0263: single-target codebase, reference_id always 0
 
-    // Reference coordinates
-    const int32_t first_span = static_cast<int32_t>(first_anchor.query.query_span);
-    region.ref_start = static_cast<int32_t>(first_anchor.ref.ref_position) + 1 - first_span;
-    region.ref_end = static_cast<int32_t>(last_anchor.ref.ref_position) + 1;
-    if (region.ref_start < 0) {
-        region.ref_start = 0;
+    // Reference coordinates. The absolute positions are full 64-bit; the
+    // intermediate `position + 1 - span` can be negative, so it is computed in
+    // signed int64 and clamped before being stored in the sequence_size_t field.
+    const std::int64_t first_span = static_cast<int32_t>(first_anchor.query_span);
+    std::int64_t ref_start = static_cast<std::int64_t>(first_anchor.ref_position) + 1 - first_span;
+    const std::int64_t ref_end = static_cast<std::int64_t>(last_anchor.ref_position) + 1;
+    if (ref_start < 0) {
+        ref_start = 0;
     }
+    region.ref_start = static_cast<sequence_size_t>(ref_start);
+    region.ref_end = static_cast<sequence_size_t>(ref_end);
 
     // Query coordinates
-    int32_t raw_query_start = static_cast<int32_t>(first_anchor.query.query_position)
-                            + 1 - first_span;
-    const int32_t raw_query_end = static_cast<int32_t>(last_anchor.query.query_position) + 1;
+    std::int64_t raw_query_start = static_cast<std::int64_t>(first_anchor.query_position)
+                                 + 1 - first_span;
+    const std::int64_t raw_query_end = static_cast<std::int64_t>(last_anchor.query_position) + 1;
     if (raw_query_start < 0) {
         raw_query_start = 0;
     }
 
     if (!region.is_reverse) {
-        region.query_start = raw_query_start;
-        region.query_end = raw_query_end;
+        region.query_start = static_cast<sequence_size_t>(raw_query_start);
+        region.query_end = static_cast<sequence_size_t>(raw_query_end);
     } else {
-        region.query_start = query_len - raw_query_end;
-        region.query_end = query_len - raw_query_start;
+        const std::int64_t qlen = static_cast<std::int64_t>(query_len);
+        region.query_start = static_cast<sequence_size_t>(qlen - raw_query_end);
+        region.query_end = static_cast<sequence_size_t>(qlen - raw_query_start);
     }
 
     compute_fuzzy_lengths(region, anchors);
@@ -994,7 +1024,7 @@ void set_region_coordinates(
 void generate_regions(
     std::span<Chain> chains,
     std::span<const Anchor> anchors,
-    int32_t query_len,
+    sequence_size_t query_len,
     ::bioseq::chaining::ArenaSlab<AlignRegion>& regions_out)
 {
     static const auto* _desc =
@@ -1294,10 +1324,12 @@ void classify_primary_secondary(
 template<
     bool is_reversed,
     supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange>
+    supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 [[nodiscard]] KswAlignResult ksw2_align_pair(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
@@ -1345,10 +1377,12 @@ template<
 template<
     bool is_reversed,
     supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange>
+    supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 [[nodiscard]] KswAlignResult block_aligner_align_pair(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
@@ -1411,10 +1445,12 @@ template<
  */
 template <BaseAlignmentAlgorithmType base_alignment_algorithm,
           supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange>
+          supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 struct AlignOnePhase {
-    const compact_sequence_range<QueryRange>&  query_seq;
-    const compact_sequence_range<TargetRange>& target_seq;
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  query_seq;
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq;
     const ScoringMatrix<QueryRange>&           scoring_matrix;
     const Minimap2Params&                      params;
     int32_t                                    align_bandwidth;
@@ -1424,21 +1460,21 @@ struct AlignOnePhase {
         AlignRegion&            region,
         std::span<const Anchor> anchors,
         int32_t                 anchor_begin,
-        int32_t                 seed_ref_start,
-        int32_t                 seed_query_start,
-        int32_t                 seed_ref_end,
-        int32_t                 seed_query_end,
-        int32_t                 outer_ref_start,
-        int32_t                 outer_query_start,
-        int32_t                 outer_ref_end,
-        int32_t                 outer_query_end,
-        int32_t                 query_length) const
+        std::int64_t            seed_ref_start,
+        std::int64_t            seed_query_start,
+        std::int64_t            seed_ref_end,
+        std::int64_t            seed_query_end,
+        std::int64_t            outer_ref_start,
+        std::int64_t            outer_query_start,
+        std::int64_t            outer_ref_end,
+        std::int64_t            outer_query_end,
+        std::int64_t            query_length) const
     {
         bool prior_phase_zdropped = false;
 
         // === 1. Left extension ===
-        int32_t final_ref_start = seed_ref_start;
-        int32_t final_query_start = seed_query_start;
+        std::int64_t final_ref_start = seed_ref_start;
+        std::int64_t final_query_start = seed_query_start;
         if (seed_query_start > outer_query_start && seed_ref_start > outer_ref_start) {
             const KswAlignResult left_result = ksw2_align_pair<strand_reversed>(
                 query_seq, target_seq,
@@ -1463,21 +1499,21 @@ struct AlignOnePhase {
         }
 
         // === 2. Gap filling — per-seed-pair walk ===
-        int32_t final_ref_end = seed_ref_start;
-        int32_t final_query_end = seed_query_start;
+        std::int64_t final_ref_end = seed_ref_start;
+        std::int64_t final_query_end = seed_query_start;
         if (region.seed_count > 1) {
-            int32_t qs = seed_query_start;
-            int32_t rs = seed_ref_start;
+            std::int64_t qs = seed_query_start;
+            std::int64_t rs = seed_ref_start;
             bool zdropped_any = false;
             final_ref_end = seed_ref_start;
             final_query_end = seed_query_start;
             for (int32_t i = 1; i < region.seed_count; ++i) {
                 const Anchor& cur_anchor = anchors[anchor_begin + i];
-                const int32_t qe = static_cast<int32_t>(cur_anchor.query.query_position) + 1;
-                const int32_t re = static_cast<int32_t>(cur_anchor.ref.ref_position) + 1;
+                const std::int64_t qe = static_cast<std::int64_t>(cur_anchor.query_position) + 1;
+                const std::int64_t re = static_cast<std::int64_t>(cur_anchor.ref_position) + 1;
                 const bool is_last = (i == region.seed_count - 1);
-                const int32_t gap_query = qe - qs;
-                const int32_t gap_ref   = re - rs;
+                const std::int64_t gap_query = qe - qs;
+                const std::int64_t gap_ref   = re - rs;
                 if (!is_last
                     && (gap_query < params.min_ksw_len
                         || gap_ref < params.min_ksw_len))
@@ -1559,15 +1595,17 @@ struct AlignOnePhase {
             final_query_end = seed_query_end + right_query_offset;
         }
 
-        // Set final coordinates from alignment extent (align.c:897-899)
-        region.ref_start = final_ref_start;
-        region.ref_end = final_ref_end;
+        // Set final coordinates from alignment extent (align.c:897-899).
+        // Internal extent math is signed int64; the stored region fields are
+        // sequence_size_t (non-negative absolute coordinates).
+        region.ref_start = static_cast<sequence_size_t>(final_ref_start);
+        region.ref_end = static_cast<sequence_size_t>(final_ref_end);
         if (!region.is_reverse) {
-            region.query_start = final_query_start;
-            region.query_end = final_query_end;
+            region.query_start = static_cast<sequence_size_t>(final_query_start);
+            region.query_end = static_cast<sequence_size_t>(final_query_end);
         } else {
-            region.query_start = query_length - final_query_end;
-            region.query_end = query_length - final_query_start;
+            region.query_start = static_cast<sequence_size_t>(query_length - final_query_end);
+            region.query_end = static_cast<sequence_size_t>(query_length - final_query_start);
         }
     }
 };
@@ -1575,20 +1613,25 @@ struct AlignOnePhase {
 template<
     BaseAlignmentAlgorithmType base_alignment_algorithm,
     supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange>
+    supports_compact_sequence_range TargetRange,
+    class Scanner = bioseq::storage::sequence_scanner_none<
+        typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 void align_regions(
     std::span<AlignRegion> regions,
     std::span<const Anchor> anchors,
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     const ScoringMatrix<QueryRange>& scoring_matrix,
     const Minimap2Params& params)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_align_skeleton");
     auto _scope = bioseq::instr::region(_desc);
-    const int32_t query_length = static_cast<int32_t>(query_seq.bp_size());
-    const int32_t target_length = static_cast<int32_t>(target_seq.bp_size());
+    // DOC0263 §10.2 — lengths are full 64-bit (no int32 truncation of bp_size).
+    // Region coordinate math below is signed int64 so the extension/clamp logic
+    // and the reverse-strand mirror keep working for sequences longer than 2^31.
+    const std::int64_t query_length = static_cast<std::int64_t>(query_seq.bp_size());
+    const std::int64_t target_length = static_cast<std::int64_t>(target_seq.bp_size());
     const int32_t align_bandwidth = static_cast<int32_t>(params.bandwidth * 1.5 + 1.0);
 
     // Per DOC0249 §10.1 R4: the `[&]<bool>()` capture-all template lambda
@@ -1596,7 +1639,7 @@ void align_regions(
     // non-capturing functor `AlignOnePhase`.  Constructed once per region
     // batch with the kernel-invariant references; the per-region call
     // surface is `aligner.template run<is_reversed>(...)`.
-    const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange> aligner{
+    const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange, Scanner> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
     for (auto& region : regions) {
@@ -1609,43 +1652,45 @@ void align_regions(
         const Anchor& last_anchor = anchors[anchor_begin + region.seed_count - 1];
 
         // Inner seed boundaries (where seeds are)
-        const int32_t first_span = static_cast<int32_t>(first_anchor.query.query_span);
-        int32_t seed_ref_start = static_cast<int32_t>(first_anchor.ref.ref_position)
+        const int32_t first_span = static_cast<int32_t>(first_anchor.query_span);
+        std::int64_t seed_ref_start = static_cast<std::int64_t>(first_anchor.ref_position)
                                + 1 - first_span;
-        int32_t seed_query_start = static_cast<int32_t>(first_anchor.query.query_position)
+        std::int64_t seed_query_start = static_cast<std::int64_t>(first_anchor.query_position)
                                  + 1 - first_span;
-        const int32_t seed_ref_end = static_cast<int32_t>(last_anchor.ref.ref_position) + 1;
-        const int32_t seed_query_end = static_cast<int32_t>(last_anchor.query.query_position) + 1;
+        const std::int64_t seed_ref_end = static_cast<std::int64_t>(last_anchor.ref_position) + 1;
+        const std::int64_t seed_query_end = static_cast<std::int64_t>(last_anchor.query_position) + 1;
         if (seed_ref_start < 0) { seed_ref_start = 0; }
         if (seed_query_start < 0) { seed_query_start = 0; }
 
-        // Outer boundaries: extend beyond seeds (align.c:708-762 simplified)
-        int32_t outer_ref_start = seed_ref_start;
-        int32_t outer_query_start = seed_query_start;
-        int32_t outer_ref_end = seed_ref_end;
-        int32_t outer_query_end = seed_query_end;
+        // Outer boundaries: extend beyond seeds (align.c:708-762 simplified).
+        // `extension_len` is a bounded gap (<= params.max_gap) computed in int64
+        // to match the int64 coordinates; the std::min args are matched in type.
+        std::int64_t outer_ref_start = seed_ref_start;
+        std::int64_t outer_query_start = seed_query_start;
+        std::int64_t outer_ref_end = seed_ref_end;
+        std::int64_t outer_query_end = seed_query_end;
 
         if (seed_query_start > 0 && seed_ref_start > 0) {
-            int32_t extension_len = std::min(seed_query_start, params.max_gap);
+            std::int64_t extension_len = std::min<std::int64_t>(seed_query_start, params.max_gap);
             outer_query_start = seed_query_start - extension_len;
-            const int32_t bonus_extension =
+            const std::int64_t bonus_extension =
                 (extension_len * params.match_score > params.gap_open1)
                     ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
                     : 0;
             extension_len += bonus_extension;
-            extension_len = std::min(extension_len, params.max_gap);
+            extension_len = std::min<std::int64_t>(extension_len, params.max_gap);
             extension_len = std::min(extension_len, seed_ref_start);
             outer_ref_start = seed_ref_start - extension_len;
         }
         if (seed_query_end < query_length && seed_ref_end < target_length) {
-            int32_t extension_len = std::min(query_length - seed_query_end, params.max_gap);
+            std::int64_t extension_len = std::min<std::int64_t>(query_length - seed_query_end, params.max_gap);
             outer_query_end = seed_query_end + extension_len;
-            const int32_t bonus_extension =
+            const std::int64_t bonus_extension =
                 (extension_len * params.match_score > params.gap_open1)
                     ? (extension_len * params.match_score - params.gap_open1) / params.gap_ext1
                     : 0;
             extension_len += bonus_extension;
-            extension_len = std::min(extension_len, params.max_gap);
+            extension_len = std::min<std::int64_t>(extension_len, params.max_gap);
             extension_len = std::min(extension_len, target_length - seed_ref_end);
             outer_ref_end = seed_ref_end + extension_len;
         }
@@ -1665,10 +1710,10 @@ void align_regions(
         // the column count, so this cap stays a strict upper bound while
         // protecting the per-query allocator from gigabyte spikes).
         {
-            const int32_t cigar_q_extent = outer_query_end - outer_query_start;
-            const int32_t cigar_r_extent = outer_ref_end   - outer_ref_start;
-            const int32_t cigar_q_clamped = cigar_q_extent > 0 ? cigar_q_extent : 0;
-            const int32_t cigar_r_clamped = cigar_r_extent > 0 ? cigar_r_extent : 0;
+            const std::int64_t cigar_q_extent = outer_query_end - outer_query_start;
+            const std::int64_t cigar_r_extent = outer_ref_end   - outer_ref_start;
+            const std::int64_t cigar_q_clamped = cigar_q_extent > 0 ? cigar_q_extent : 0;
+            const std::int64_t cigar_r_clamped = cigar_r_extent > 0 ? cigar_r_extent : 0;
             const std::size_t raw_estimate =
                 static_cast<std::size_t>(cigar_q_clamped) +
                 static_cast<std::size_t>(cigar_r_clamped) + 16u;
@@ -1772,9 +1817,9 @@ void estimate_divergence_from_seeds(
     std::span<AlignRegion> regions,
     std::span<const MinimizerT> query_minimizers,
     std::span<const Anchor> anchors,
-    int32_t query_len,
+    sequence_size_t query_len,
     int32_t kmer_size,
-    int32_t target_len)
+    sequence_size_t target_len)
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("mm_est_err");
@@ -1851,21 +1896,21 @@ void estimate_divergence_from_seeds(
     // compiler treats them identically to inline methods at -O3 (M15).
     struct IsMinimizer {
         const std::uint32_t* mini_pos_count;
-        int32_t              query_len;
+        sequence_size_t      query_len;
         [[nodiscard, gnu::always_inline]]
-        bool operator()(int32_t pos) const noexcept {
-            if (pos < 0 || pos > query_len) return false;
+        bool operator()(std::int64_t pos) const noexcept {
+            if (pos < 0 || static_cast<sequence_size_t>(pos) > query_len) return false;
             const std::size_t p = static_cast<std::size_t>(pos);
             return mini_pos_count[p + 1] > mini_pos_count[p];
         }
     };
     struct RangeCount {
         const std::uint32_t* mini_pos_count;
-        int32_t              query_len;
+        sequence_size_t      query_len;
         [[nodiscard, gnu::always_inline]]
-        int32_t operator()(int32_t a, int32_t b) const noexcept {
+        int32_t operator()(std::int64_t a, std::int64_t b) const noexcept {
             if (a < 0) a = 0;
-            if (b > query_len) b = query_len;
+            if (static_cast<sequence_size_t>(b) > query_len) b = static_cast<std::int64_t>(query_len);
             if (a > b) return 0;
             return static_cast<int32_t>(
                 mini_pos_count[static_cast<std::size_t>(b) + 1] -
@@ -1900,19 +1945,19 @@ void estimate_divergence_from_seeds(
             const Anchor* anchors_base;
             int32_t       anchor_begin;
             int32_t       seed_count;
-            int32_t       query_len;
+            sequence_size_t query_len;
             bool          region_is_reverse;
 
             [[nodiscard, gnu::always_inline]]
-            int32_t operator()(int32_t s) const noexcept {
+            std::int64_t operator()(int32_t s) const noexcept {
                 const Anchor& chain_anchor = region_is_reverse
                     ? anchors_base[anchor_begin + seed_count - 1 - s]
                     : anchors_base[anchor_begin + s];
-                int32_t forward_pos = static_cast<int32_t>(chain_anchor.query.query_position);
-                if (chain_anchor.ref.is_reverse) {
-                    const int32_t anchor_span =
-                        static_cast<int32_t>(chain_anchor.query.query_span);
-                    forward_pos = query_len - 1 - (forward_pos + 1 - anchor_span);
+                std::int64_t forward_pos = static_cast<std::int64_t>(chain_anchor.query_position);
+                if (chain_anchor.is_reverse) {
+                    const std::int64_t anchor_span =
+                        static_cast<int32_t>(chain_anchor.query_span);
+                    forward_pos = static_cast<std::int64_t>(query_len) - 1 - (forward_pos + 1 - anchor_span);
                 }
                 return forward_pos;
             }
@@ -1924,7 +1969,7 @@ void estimate_divergence_from_seeds(
         // First chain anchor (s=0) — minimum forward_pos. esterr.c:50 uses
         // `r->rev ? last : first` which is the same anchor compute_forward_pos(0)
         // returns.
-        const int32_t first_forward_pos = compute_forward_pos(0);
+        const std::int64_t first_forward_pos = compute_forward_pos(0);
         if (!is_minimizer(first_forward_pos)) {
             continue;
         }
@@ -1938,9 +1983,9 @@ void estimate_divergence_from_seeds(
         // up in the target index), so the loop normally walks all
         // seed_count entries.
         int32_t seed_match_count = 1;
-        int32_t last_match_pos = first_forward_pos;
+        std::int64_t last_match_pos = first_forward_pos;
         for (int32_t walk_idx = 1; walk_idx < region.seed_count; ++walk_idx) {
-            const int32_t fp = compute_forward_pos(walk_idx);
+            const std::int64_t fp = compute_forward_pos(walk_idx);
             if (!is_minimizer(fp)) {
                 break;
             }
@@ -2099,8 +2144,8 @@ void compute_mapping_quality(
  */
 [[nodiscard]] MatchResult region_to_match_result(
     AlignRegion&& region,
-    int32_t query_len,
-    int32_t target_len)
+    sequence_size_t query_len,
+    sequence_size_t target_len)
 {
     return MatchResult{
         .query_len             = query_len,
@@ -2193,8 +2238,11 @@ struct MatchResultCollection {
                 match.target_end, match.num_matches, match.block_length, match.mapq);
 
             if (match.has_cigar && !match.cigar.empty()) {
-                const int32_t edit_distance = std::max(0,
-                    match.block_length - match.num_matches);
+                // NM = blen - mlen; both are sequence_size_t (uint64) and
+                // blen >= mlen, but compute signed + clamp defensively.
+                const std::int64_t edit_distance = std::max<std::int64_t>(0,
+                    static_cast<std::int64_t>(match.block_length)
+                  - static_cast<std::int64_t>(match.num_matches));
                 line += fmt::format("\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:0",
                     edit_distance, match.dp_max_score, match.dp_score);
             }

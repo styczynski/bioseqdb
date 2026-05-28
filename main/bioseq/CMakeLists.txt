@@ -62,6 +62,7 @@ set(BIOSEQ_NOPG_MODULES
   # backend/common/*  (testing.cppm excluded — Catch2 dependency)
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/algo_tracer.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/circular_append_buffer.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/fragment_cache.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/sequan_compat.cppm
@@ -77,10 +78,16 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm
   # backend/config/config.cppm is Domain P (imports pg_utils, uses PG macros);
   # it stays in postgresql_bioseq's own module set.
-  # backend/storage/* — only the PG-free bucket math + seq_locator POD
-  # (DOC0260 §12.1). sequence_storage_manager.cppm / sequence_size.cppm stay
-  # in postgresql_bioseq's own set (they use the PG catalog / pg_log).
+  # backend/storage/* — the PG-free bucket math + seq_locator POD
+  # (DOC0260 §12.1) plus, since DOC0263 §2.2, the standalone sequence_size
+  # module and the new lazy-fragmented-sequence machinery (scanner concept +
+  # lazy_compact_sequence wrapper). All are NO_POSTGRES-safe.
+  # sequence_storage_manager.cppm stays in postgresql_bioseq's own set (it uses
+  # the PG catalog / palloc).
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/bucket_math.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_size.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_scanner.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence.cppm
   # backend/sequences/*
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/cigar.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/index.cppm

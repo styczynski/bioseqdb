@@ -4141,9 +4141,18 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 							const bioseq::simd::N_NEON::MatchResult& match)
 {
 	using bioseq::simd::N_NEON::format_cigar;
-	auto set_int = [](Const* node, int32_t value) {
+	// DOC0263 §10.2 — MatchResult lengths/coordinates are now sequence_size_t
+	// (64-bit). The projected SQL columns (bioseq.query_start(anyelement) etc.)
+	// remain int4 per the untouched DDL (§2), so narrow at this boundary; the
+	// signed scores (dp_score, mapq, …) round-trip through int64 unchanged.
+	// The narrow is provably safe because the sidecar build refuses sequences
+	// with bp_size > 2^28 (sidecar.cppm §10.3 gate), and the recompute path's
+	// coordinates are bounded by min(query_len, target_len) which is gated
+	// upstream — Assert is debug-time only.
+	auto set_int = [](Const* node, int64_t value) {
 		if (node == nullptr) return;
-		node->constvalue = Int32GetDatum(value);
+		Assert(value >= INT32_MIN && value <= INT32_MAX);
+		node->constvalue = Int32GetDatum(static_cast<int32_t>(value));
 		node->constisnull = false;
 	};
 	auto set_bool = [](Const* node, bool value) {

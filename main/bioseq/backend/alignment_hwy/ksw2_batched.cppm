@@ -42,6 +42,8 @@ import alignment_hwy_lane_helpers;
 import bioseq_sequences.chaining.utils;
 import bioseq_sequences.minimap_port;
 import context;
+import bioseq_storage_scanner;   // DOC0263 — sequence_scanner_none default
+import bioseq_storage_lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
 
 export {
 
@@ -231,11 +233,13 @@ bucket_fills_by_geometry(
 namespace detail_ksw2_batched {
 
 template <bool Reverse,
-          supports_compact_sequence_range QR, supports_compact_sequence_range TR>
+          supports_compact_sequence_range QR, supports_compact_sequence_range TR,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QR>::traits::storage_unit>>
 [[gnu::always_inline]] inline void run_single_fill(
     FillDescriptor&                    fill,
-    const compact_sequence_range<QR>&  query_seq,
-    const compact_sequence_range<TR>&  target_seq,
+    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
+    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
     const ScoringMatrix<QR>&           scoring_matrix,
     const Minimap2Params&              params,
     std::int32_t                       align_bandwidth)
@@ -327,12 +331,14 @@ template <bool Reverse,
  */
 template <std::size_t Lanes, bool Reverse,
           supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR>
+          supports_compact_sequence_range TR,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QR>::traits::storage_unit>>
 void ksw2_extz2_batched_inner(
     FillDescriptor*                    fills,
     std::size_t                        n_fills,
-    const compact_sequence_range<QR>&  query_seq,
-    const compact_sequence_range<TR>&  target_seq,
+    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
+    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
     const ScoringMatrix<QR>&           scoring_matrix,
     const Minimap2Params&              params,
     std::int32_t                       bucket_max_q,
@@ -355,11 +361,13 @@ void ksw2_extz2_batched_inner(
 // DOC0254 §11.5 — Per-bucket execute phase.
 // ============================================================================
 
-template <supports_compact_sequence_range QR, supports_compact_sequence_range TR>
+template <supports_compact_sequence_range QR, supports_compact_sequence_range TR,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QR>::traits::storage_unit>>
 void execute_buckets(
     std::span<std::pair<FillBucketKey, std::span<FillDescriptor>>> buckets,
-    const compact_sequence_range<QR>&  query_seq,
-    const compact_sequence_range<TR>&  target_seq,
+    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
+    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
     const ScoringMatrix<QR>&           scoring_matrix,
     const Minimap2Params&              params)
 {
@@ -487,12 +495,14 @@ namespace detail_ksw2_batched {
  * forwards to this; the per-region inner loop mirrors
  * `align_regions<KSW2>` exactly on every per-fill coordinate.
  */
-template <supports_compact_sequence_range QR, supports_compact_sequence_range TR>
+template <supports_compact_sequence_range QR, supports_compact_sequence_range TR,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QR>::traits::storage_unit>>
 void align_regions_batched(
     std::span<AlignRegion>                       regions,
     std::span<const ::bioseq::chaining::Anchor>  anchors,
-    const compact_sequence_range<QR>&            query_seq,
-    const compact_sequence_range<TR>&            target_seq,
+    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&            query_seq,
+    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&            target_seq,
     const ScoringMatrix<QR>&                     scoring_matrix,
     const Minimap2Params&                        params)
 {
@@ -526,15 +536,15 @@ void align_regions_batched(
         const ::bioseq::chaining::Anchor& last_anchor  = anchors[anchor_begin + region.seed_count - 1];
 
         const std::int32_t first_span =
-            static_cast<std::int32_t>(first_anchor.query.query_span);
+            static_cast<std::int32_t>(first_anchor.query_span);
         std::int32_t seed_ref_start =
-            static_cast<std::int32_t>(first_anchor.ref.ref_position) + 1 - first_span;
+            static_cast<std::int32_t>(first_anchor.ref_position) + 1 - first_span;
         std::int32_t seed_query_start =
-            static_cast<std::int32_t>(first_anchor.query.query_position) + 1 - first_span;
+            static_cast<std::int32_t>(first_anchor.query_position) + 1 - first_span;
         const std::int32_t seed_ref_end =
-            static_cast<std::int32_t>(last_anchor.ref.ref_position) + 1;
+            static_cast<std::int32_t>(last_anchor.ref_position) + 1;
         const std::int32_t seed_query_end =
-            static_cast<std::int32_t>(last_anchor.query.query_position) + 1;
+            static_cast<std::int32_t>(last_anchor.query_position) + 1;
         if (seed_ref_start   < 0) seed_ref_start   = 0;
         if (seed_query_start < 0) seed_query_start = 0;
 
@@ -605,9 +615,9 @@ void align_regions_batched(
             for (std::int32_t i = 1; i < region.seed_count; ++i) {
                 const ::bioseq::chaining::Anchor& cur_anchor = anchors[anchor_begin + i];
                 const std::int32_t qe =
-                    static_cast<std::int32_t>(cur_anchor.query.query_position) + 1;
+                    static_cast<std::int32_t>(cur_anchor.query_position) + 1;
                 const std::int32_t re =
-                    static_cast<std::int32_t>(cur_anchor.ref.ref_position) + 1;
+                    static_cast<std::int32_t>(cur_anchor.ref_position) + 1;
                 const bool is_last = (i == region.seed_count - 1);
                 const std::int32_t gap_query = qe - qs;
                 const std::int32_t gap_ref   = re - rs;

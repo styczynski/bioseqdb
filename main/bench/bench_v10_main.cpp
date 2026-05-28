@@ -35,6 +35,7 @@ import sequan_compat;
 import bioseq_sequences;
 import bioseq_sequences.minimap_port;
 import bioseq_sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
+import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
 import bioseq_instr;
 import bench_framework;
 import bench.tool_minimap2;
@@ -321,8 +322,12 @@ struct AlgorithmDispatch {
                     input.targets_acgt[pair_index],
                     dispatch.params);
             } else {
+                // DOC0263 — minimap_port now takes lazy_compact_sequence&; wrap the
+                // in-memory ranges in the zero-overhead no-fragment lazy wrapper.
+                auto bench_lazy_query  = bioseq::storage::make_lazy_in_memory(pair.query);
+                auto bench_lazy_target = bioseq::storage::make_lazy_in_memory(pair.target);
                 results = bioseq::simd::HWY_NAMESPACE::minimap_port(
-                    pair.query, pair.target, dispatch.params);
+                    bench_lazy_query, bench_lazy_target, dispatch.params);
             }
         } catch (const std::exception& exception) {
             loge("[bench_v10] aligner threw exception (algo='{}', pair_index={}, "

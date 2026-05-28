@@ -132,9 +132,9 @@ template<class D>
     uint32_t* HWY_RESTRICT query_out = soa.query_data();
     uint32_t* HWY_RESTRICT span_out  = soa.span_data();
     for (size_t idx = 0; idx < anchor_count; ++idx) {
-        ref_out[idx]   = static_cast<uint32_t>(anchors[idx].ref_bits);
-        query_out[idx] = static_cast<uint32_t>(anchors[idx].query_bits);
-        span_out[idx]  = static_cast<uint32_t>(anchors[idx].query.query_span);
+        ref_out[idx]   = static_cast<uint32_t>(anchors[idx].ref_bits());
+        query_out[idx] = static_cast<uint32_t>(anchors[idx].query_bits());
+        span_out[idx]  = static_cast<uint32_t>(anchors[idx].query_span);
     }
 
     return soa;
@@ -322,12 +322,12 @@ void simd_dp_forward_pass(
 
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
         int32_t best_predecessor = -1;
-        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
+        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
 
         // === Window advancement (scalar, full 64-bit ref_bits for chromosome check) ===
         while (window_start < current_idx &&
-               (anchors[current_idx].ref_bits >> 32 != anchors[window_start].ref_bits >> 32 ||
-                anchors[current_idx].ref_bits > anchors[window_start].ref_bits
+               (anchors[current_idx].ref_chromosome_key() != anchors[window_start].ref_chromosome_key() ||
+                anchors[current_idx].ref_bits() > anchors[window_start].ref_bits()
                     + static_cast<uint64_t>(max_ref_dist)))
         {
             ++window_start;
@@ -445,7 +445,7 @@ void simd_dp_forward_pass(
                     best_predecessor = best_predecessor_lanes[lane];
                 } else if (best_score_lanes[lane] == best_score) {
                     best_predecessor = std::max(best_predecessor, best_predecessor_lanes[lane]);
-                    if (best_score == static_cast<int32_t>(anchors[current_idx].query.query_span)) {
+                    if (best_score == static_cast<int32_t>(anchors[current_idx].query_span)) {
                         best_predecessor = -1;
                     }
                 }
@@ -471,7 +471,7 @@ void simd_dp_forward_pass(
 
         // === Global-best long-range optimization (scalar) ===
         if (global_best_idx < 0 ||
-            anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
+            anchors[current_idx].ref_bits() - anchors[global_best_idx].ref_bits()
                 > static_cast<uint64_t>(max_ref_dist))
         {
             int32_t global_best_score = std::numeric_limits<int32_t>::min();
@@ -504,7 +504,7 @@ void simd_dp_forward_pass(
             ? peak_scores[best_predecessor] : best_score;
 
         if (global_best_idx < 0 ||
-            (anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
+            (anchors[current_idx].ref_bits() - anchors[global_best_idx].ref_bits()
                 <= static_cast<uint64_t>(max_ref_dist)
              && best_scores[global_best_idx] < best_scores[current_idx]))
         {

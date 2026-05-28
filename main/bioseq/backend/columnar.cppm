@@ -73,6 +73,17 @@ bool bioseq_update_index_on_insert = true;
 bool bioseq_read_sequence_index = true;
 
 /*
+ * DOC0263 §11.3.2 — test-only knob. When on, the DOC0263 parity build
+ * (compiled with -DBIOSEQ_ENABLE_FRAGMENTED_DISPATCH=1) wraps row sequences
+ * in a synthetic chunked scanner. Default off; PGC_SUSET. The synthetic
+ * scanner has NO Postgres backing — the production fragmented scanner is a
+ * Phase C feature (DOC0264). Gating the chunked dispatch behind a build flag
+ * keeps the dispatch_buffer TU from instantiating a second pipeline tree
+ * (DOC0271 template-explosion budget; cf. DOC0263 §11.5 nightly-only matrix).
+ */
+bool bioseq_test_force_chunked_scanner = false;
+
+/*
  * DOC0260 Phase A — per-shard cap for the length-bucketed sub-table
  * sharding. A new shard is allocated when the active one would cross
  * `bioseq_storage_max_seq_sub_table_gbs * 2^30` bytes of payload. Special
@@ -189,6 +200,21 @@ bioseq_guc_init()
 		PGC_SUSET,          // Only allow superusers to modify
 		0,                  // No flags for this GUC
 		NULL, NULL, NULL    // No variable hooks necessary
+	);
+
+	// DOC0263 §11.3.2 — test-only chunked-scanner force knob (parity tests).
+	DefineCustomBoolVariable(
+		"bioseq.test_force_chunked_scanner",
+		"Test-only: wrap dispatch-buffer row sequences in a synthetic chunked "
+		"scanner (DOC0263 parity tests). Requires a build with "
+		"BIOSEQ_ENABLE_FRAGMENTED_DISPATCH=1; otherwise inert. DO NOT USE IN "
+		"PRODUCTION — the synthetic scanner has no Postgres backing.",
+		NULL,
+		&bioseq_test_force_chunked_scanner,
+		false,
+		PGC_SUSET,
+		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+		NULL, NULL, NULL
 	);
 	DefineCustomEnumVariable("bioseq.compression",
 							 "Compression type for bioseq.",

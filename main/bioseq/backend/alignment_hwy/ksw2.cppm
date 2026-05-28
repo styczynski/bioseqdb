@@ -45,6 +45,8 @@ import bioseq_sequences;
 import bioseq_cigar;
 import alignment_hwy_utils;
 import context;
+import bioseq_storage_scanner;   // DOC0263 — sequence_scanner_none default
+import bioseq_storage_lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
 
 export {
 
@@ -52,6 +54,11 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+// DOC0263 §9.2 — the KSW2 encode path runs through the lazy wrapper's
+// `encoded_iter<…>().ptr_at(...)` slot ring (§7), not `to_encoded_into`; the
+// shared helper lives in bioseq_storage_lazy.
+using bioseq::storage::encode_region_via_ptr_at;
 
 // =============================================================================
 // KswAlignerMode — selects single- or dual-affine-gap formulation.
@@ -632,10 +639,12 @@ template<
     supports_compact_sequence_range TargetRange,
     size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n,
     typename partial_score_t = int8_t,
-    typename full_score_t    = int32_t>
+    typename full_score_t    = int32_t,
+    class Scanner = bioseq::storage::sequence_scanner_none<
+        typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 [[nodiscard]] KswAlignResult ksw2_core_align(
-    const compact_sequence_range<QueryRange>& query_seq,
-    const compact_sequence_range<TargetRange>& target_seq,
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
@@ -820,21 +829,21 @@ template<
     std::span<uint8_t> target_dst(state.target_bytes, target_len);
     if (flags.reverse_cigar) {
         // qr stays in source order — no extra mirror.
-        query_seq.template to_encoded_into<is_reversed, false>(
-            query_dst, query_start, query_end);
+        encode_region_via_ptr_at<is_reversed, false>(
+            query_seq, query_dst, query_start, query_end);
         // Target reversed; no rc on target, so the second template arg is
         // the only orientation flip.
-        target_seq.template to_encoded_into<false, true>(
-            target_dst, target_start, target_end);
+        encode_region_via_ptr_at<false, true>(
+            target_seq, target_dst, target_start, target_end);
     } else {
         // qr = reverse(encoded query). For the strand-reversed case the
         // existing <true, false> path produced rc(query); we want rc then
         // reverse-again, which is just complement-only. Captured as
         // <true, true> (see overload comment).
-        query_seq.template to_encoded_into<is_reversed, true>(
-            query_dst, query_start, query_end);
-        target_seq.template to_encoded_into<false, false>(
-            target_dst, target_start, target_end);
+        encode_region_via_ptr_at<is_reversed, true>(
+            query_seq, query_dst, query_start, query_end);
+        encode_region_via_ptr_at<false, false>(
+            target_seq, target_dst, target_start, target_end);
     }
 
     // --- Approximate max tracking ------------------------------------------
@@ -1403,10 +1412,12 @@ public:
     template<
         bool is_reversed,
         supports_compact_sequence_range QueryRange,
-        supports_compact_sequence_range TargetRange>
+        supports_compact_sequence_range TargetRange,
+        class Scanner = bioseq::storage::sequence_scanner_none<
+            typename compact_sequence_range<QueryRange>::traits::storage_unit>>
     [[nodiscard]] static KswAlignResult z2_align(
-        const compact_sequence_range<QueryRange>& query,
-        const compact_sequence_range<TargetRange>& target,
+        const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query,
+        const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target,
         size_t query_start,
         size_t query_end,
         size_t target_start,
@@ -1429,10 +1440,12 @@ public:
     template<
         bool is_reversed,
         supports_compact_sequence_range QueryRange,
-        supports_compact_sequence_range TargetRange>
+        supports_compact_sequence_range TargetRange,
+        class Scanner = bioseq::storage::sequence_scanner_none<
+            typename compact_sequence_range<QueryRange>::traits::storage_unit>>
     [[nodiscard]] static KswAlignResult d2_align(
-        const compact_sequence_range<QueryRange>& query,
-        const compact_sequence_range<TargetRange>& target,
+        const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query,
+        const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target,
         size_t query_start,
         size_t query_end,
         size_t target_start,

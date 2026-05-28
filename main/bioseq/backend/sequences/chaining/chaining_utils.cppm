@@ -40,69 +40,67 @@ namespace bioseq::chaining {
 // Anchor and Chain types — moved from minimap_port.cppm
 // ============================================================================
 
-/// Bitfield data for anchor reference (x) component.
-///
-/// Layout mirrors minimap2 mm128_t.x conventions:
-///   x: is_reverse<<63 | reference_id<<32 | ref_position
-///
-/// For our single-target case, reference_id is always 0.
-struct AnchorRefFields {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-    uint64_t ref_position: 32;    ///< lower 32 bits: reference position
-    uint64_t reference_id: 31;    ///< bits 32-62: reference sequence ID
-    uint64_t is_reverse: 1;       ///< bit 63: reverse strand flag
-#elif __BYTE_ORDER == __BIG_ENDIAN
-    uint64_t is_reverse: 1;
-    uint64_t reference_id: 31;
-    uint64_t ref_position: 32;
-#endif
-    int : 0;
-};
-
-/// Bitfield data for anchor query (y) component.
-///
-/// Layout mirrors minimap2 mm128_t.y conventions:
-///   y: segment_id<<48 | flags<<40 | query_span<<32 | query_position
-struct AnchorQueryFields {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-    uint64_t query_position: 32;  ///< lower 32 bits: query position
-    uint64_t query_span: 8;       ///< bits 32-39: query k-mer span
-    uint64_t flags: 8;            ///< bits 40-47: flags
-    uint64_t segment_id: 16;      ///< bits 48-63: segment ID
-#elif __BYTE_ORDER == __BIG_ENDIAN
-    uint64_t segment_id: 16;
-    uint64_t flags: 8;
-    uint64_t query_span: 8;
-    uint64_t query_position: 32;
-#endif
-    int : 0;
-};
-
 /// Anchor for chaining. Equivalent to mm128_t in collect_seed_hits output.
 ///
-/// Uses unions to provide both clean bitfield access (ref/query structs) and
-/// raw uint64_t access (ref_bits/query_bits) for sorting and arithmetic.
+/// **FLAT 24-byte layout** — no nested `ref`/`query` sub-objects. Fields are
+/// accessed directly (`anchor.ref_position`, `anchor.query_position`,
+/// `anchor.is_reverse`, `anchor.query_span`, …). DOC0263 §10.2 / consolidated-
+/// review C1 required the 64-bit position widening (the *correctness* fix); the
+/// minimap2 mm128_t's `reference_id` field is removed entirely since this
+/// codebase only ever has a single target (every write was `target_hit >> 32`
+/// which is structurally 0 for our index packing — see
+/// `minimap_port.cppm` `TargetIndex` doc: "Each stored position encodes:
+/// (rid << 32) | (pos << 1) | strand. For single-target, rid = 0."). That
+/// reclaims 31 bits per anchor, which combined with the layout flattening
+/// brings the anchor from the pre-Phase-B 16 B → **24 B** (1.5×, not 2×) so
+/// XXL_HIFI cache pressure stays close to the pre-Phase-B baseline.
 ///
-/// The unions previously defaulted to `= 0`. This forced a full 16 B
-/// zero-store on every `Anchor anchor;` declaration — even though
-/// `collect_seed_hits` immediately overwrote all four nested fields in
-/// both code branches (see `minimap_port.cppm:619-643`). The zero-store
-/// is a dead write the compiler can't elide because the writes go
-/// through a *different* union member (`anchor.ref.ref_position` vs the
-/// `ref_bits = 0` raw u64). With ~500-1500 anchors per pair and 400
-/// pairs per bench section, the dead stores added up to ~2-4 ms per
-/// section. Removed per proposal-2 §N3 — callers must write every
-/// field they read, which is the existing behaviour.
+/// The packed mm128-style sort key the chaining DP consumes is recomputed on
+/// demand by `ref_bits()` / `query_bits()` accessors; with `reference_id`
+/// hard-zero, `ref_bits() == (is_reverse << 63) | (ref_position & 0xffffffff)`.
+/// Same-chromosome position deltas in the hottest scoring loop read
+/// `ref_position` / `query_position` directly (no key recompute) — DP is
+/// **algorithmically unchanged** for every position < 2^32, which is every
+/// position the index packing produces today.
+///
+/// `collect_seed_hits` writes every field it later reads (no default `= 0`),
+/// preserving the dead-store elision from proposal-2 §N3.
 struct Anchor {
-    union {
-        AnchorRefFields ref;
-        uint64_t ref_bits;    ///< Raw value for sorting/arithmetic on reference data
-    };
-    union {
-        AnchorQueryFields query;
-        uint64_t query_bits;  ///< Raw value for sorting/arithmetic on query data
-    };
+    std::uint64_t ref_position;        ///< full 64-bit reference position (C1)
+    std::uint64_t query_position;      ///< full 64-bit query position (C1)
+    std::uint32_t is_reverse;          ///< reverse strand flag (0/1)
+    std::uint8_t  query_span;          ///< query k-mer span
+    std::uint8_t  flags;               ///< flags
+    std::uint16_t segment_id;          ///< segment ID
+
+    /// Packed mm128 reference word: is_reverse<<63 | 0<<32 | (ref_position & 0xffffffff).
+    /// Used as the radix sort key and for chromosome grouping. `reference_id`
+    /// was always 0 in this codebase (single-target) and has been removed.
+    [[nodiscard, gnu::always_inline]] inline std::uint64_t ref_bits() const noexcept {
+        return (static_cast<std::uint64_t>(is_reverse) << 63)
+             | static_cast<std::uint32_t>(ref_position);
+    }
+    /// Packed mm128 query word: segment_id<<48 | flags<<40 | query_span<<32 | (query_position & 0xffffffff).
+    [[nodiscard, gnu::always_inline]] inline std::uint64_t query_bits() const noexcept {
+        return (static_cast<std::uint64_t>(segment_id) << 48)
+             | (static_cast<std::uint64_t>(flags) << 40)
+             | (static_cast<std::uint64_t>(query_span) << 32)
+             | static_cast<std::uint32_t>(query_position);
+    }
+    /// Chromosome grouping key (was `ref_bits() >> 32` = is_reverse<<31 since
+    /// reference_id ≡ 0). The window-advancement / pruning hot path uses this
+    /// instead of `ref_bits() >> 32` to halve the per-iteration work.
+    [[nodiscard, gnu::always_inline]] inline std::uint64_t ref_chromosome_key() const noexcept {
+        return static_cast<std::uint64_t>(is_reverse) << 31;
+    }
 };
+
+// Pin the packing. DOC0263 §2 accepted "anchor memory doubles" (16 → ≤32 B); the
+// flat layout + reference_id removal lands at 24 B, 1.5× — the tightest the
+// C1-widened anchor permits with naturally-aligned 64-bit positions. The
+// per-anchor 8 B saved vs round-1's 32 B compounds to ~24 MB L2/L3 pressure
+// delta on XXL_HIFI's ~3M anchors / pair.
+static_assert(sizeof(Anchor) == 24, "Anchor must be 24 B (2 × uint64 positions + 4 B is_reverse + 4 B (span+flags+segment_id))");
 
 /// One chain of anchors, with metadata.
 ///
@@ -348,8 +346,10 @@ struct ChainingParams {
 ///
 /// ASSUMPTION: Both anchors must be on the same chromosome. The window-start
 /// advancement loop in the DP outer loop filters cross-chromosome pairs before
-/// they reach this function. The ref_distance computation (int32 truncation of
-/// 64-bit ref_bits subtraction) would produce garbage for different-chromosome pairs.
+/// they reach this function. The distances are computed as 64-bit position
+/// subtractions narrowed to the bounded int32 gap (NOT a truncation of the
+/// absolute positions, which are full 64-bit per DOC0263 C1); a cross-chromosome
+/// pair would produce a garbage gap, hence the same-chromosome precondition.
 ///
 /// @param current_anchor      Anchor i (the one we are scoring)
 /// @param predecessor_anchor  Anchor j (candidate predecessor)
@@ -374,10 +374,10 @@ struct ChainingParams {
     // combine the validity checks into one OR'd predicate. A single
     // branch + a single cmov-friendly select-on-INT32_MIN path replaces
     // the three early-exits. Per proposal-2 §N4.
-    const int32_t query_distance = static_cast<int32_t>(current_anchor.query.query_position)
-                                 - static_cast<int32_t>(predecessor_anchor.query.query_position);
+    const int32_t query_distance = static_cast<int32_t>(
+        current_anchor.query_position - predecessor_anchor.query_position);
     const int32_t ref_distance = static_cast<int32_t>(
-        current_anchor.ref_bits - predecessor_anchor.ref_bits);
+        current_anchor.ref_position - predecessor_anchor.ref_position);
     const int32_t diagonal_deviation = (ref_distance > query_distance)
         ? ref_distance - query_distance
         : query_distance - ref_distance;
@@ -395,7 +395,7 @@ struct ChainingParams {
     const int32_t gap_length = (ref_distance < query_distance)
         ? ref_distance : query_distance;
     const int32_t predecessor_span = static_cast<int32_t>(
-        predecessor_anchor.query.query_span);
+        predecessor_anchor.query_span);
     int32_t score = (predecessor_span < gap_length) ? predecessor_span : gap_length;
 
     if (diagonal_deviation != 0 || gap_length > predecessor_span) {
@@ -438,15 +438,15 @@ struct ChainingParams {
     bool& is_exact_match,
     int32_t& diagonal_width)
 {
-    const int32_t query_distance = static_cast<int32_t>(current_anchor.query.query_position)
-                                 - static_cast<int32_t>(predecessor_anchor.query.query_position);
+    const int32_t query_distance = static_cast<int32_t>(
+        current_anchor.query_position - predecessor_anchor.query_position);
     const int32_t ref_distance = static_cast<int32_t>(
-        current_anchor.ref_bits - predecessor_anchor.ref_bits);
+        current_anchor.ref_position - predecessor_anchor.ref_position);
     const int32_t diagonal_deviation = (ref_distance > query_distance)
         ? (ref_distance - query_distance) : (query_distance - ref_distance);
     diagonal_width = diagonal_deviation;
     const int32_t gap_length = (ref_distance < query_distance) ? ref_distance : query_distance;
-    const int32_t predecessor_span = static_cast<int32_t>(predecessor_anchor.query.query_span);
+    const int32_t predecessor_span = static_cast<int32_t>(predecessor_anchor.query_span);
     int32_t score = (predecessor_span < gap_length) ? predecessor_span : gap_length;
     is_exact_match = (diagonal_deviation == 0 && gap_length <= predecessor_span);
     if (diagonal_deviation != 0 || query_distance > predecessor_span) {

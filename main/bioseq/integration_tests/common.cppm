@@ -19,11 +19,28 @@ export module integration_tests.common;
 
 export import testing;
 export import mlogging;
+export import bioseq_storage_scanner;  // DOC0263 §11.1 — scanner types for parametrise_scanner_combinations
 
 namespace bioseq_int_tests {
 
 export using row_t = std::vector<std::optional<std::string>>;
 export using rowset_t = std::vector<row_t>;
+
+// DOC0263 §11.1 — invoke  once per scanner type
+// (the no-fragment baseline + the three synthetic chunked fragment sizes). Used
+// to parametrise scanner-combination matrix tests; the algorithm-level parity is
+// also covered directly by the NO_POSTGRES unit suites (lazy_*_parity_test.cpp).
+export template <class TestBody>
+inline void parametrise_scanner_combinations(TestBody&& body) {
+    using none         = bioseq::storage::sequence_scanner_none<std::uint64_t>;
+    using chunked_1024 = bioseq::storage::sequence_scanner_test_chunked<std::uint64_t, 1024>;
+    using chunked_4096 = bioseq::storage::sequence_scanner_test_chunked<std::uint64_t, 4096>;
+    using chunked_1    = bioseq::storage::sequence_scanner_test_chunked<std::uint64_t, 1>;
+    body.template operator()<none>("scanner_none");
+    body.template operator()<chunked_1024>("scanner_chunked_1024");
+    body.template operator()<chunked_4096>("scanner_chunked_4096");
+    body.template operator()<chunked_1>("scanner_chunked_1");
+}
 
 // POC `count_symbols()` returns 49 for rank-0 letters (A on dna4, A on dna5)
 // and 0 for everything else. Exposed here so every test references the same

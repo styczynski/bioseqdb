@@ -18,12 +18,22 @@ module;
 #include "common.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 
-export module bioseq_storage:sequence_size;
+// DOC0263 §2.2 — converted from the `bioseq_storage:sequence_size` partition
+// to a STANDALONE module so the NO_POSTGRES algorithm modules (simd, pipe,
+// minimap_port, the new lazy_compact_sequence machinery, …) can import
+// `sequence_size_t` without pulling in the Postgres-only `bioseq_storage`
+// primary unit (which re-exports `:sequence_storage_manager`). `bioseq_storage`
+// keeps re-exporting this module so existing `import bioseq_storage` consumers
+// are unaffected. This module is now in BIOSEQ_NOPG_MODULES and compiled with
+// NO_POSTGRES=1; its lone hard-error guard therefore uses JustLog + abort
+// instead of `pg_log(ERROR, …)` (the guard is defensive / has no callers, so
+// the change is invisible to Phase A).
+export module bioseq_storage_size;
 
 import mlogging;
-import pg_utils;
 
 export namespace bioseq::storage {
 
@@ -64,13 +74,14 @@ constexpr sequence_size_t kMinimizerSketchMaxPosition =
 [[gnu::always_inline]]
 inline void check_fits_in_minimizer_sketch_position(sequence_size_t v) {
     if (v > kMinimizerSketchMaxPosition) {
-        pg_log(ERROR,
+        JustLog(
             "bioseq storage: sequence position {} exceeds the canonical "
             "minimizer sketch (MinimapSketchData<28,15>) range ({}). "
             "Callers must skip the sidecar build for sequences whose "
             "total bp_size exceeds 2^28 letters. See DOC0260 §13.3, "
             "DOC0267 D-INLINE-SIDECAR.",
             v, kMinimizerSketchMaxPosition);
+        std::abort();
     }
 }
 

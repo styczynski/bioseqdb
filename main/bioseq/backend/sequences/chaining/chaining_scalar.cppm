@@ -130,13 +130,13 @@ void chain_anchors_scalar(
     for (int64_t current_idx = 0; current_idx < anchor_count; ++current_idx) {
         _fwd_scope.tick();
         int64_t best_predecessor_idx = -1;
-        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query.query_span);
+        int32_t best_score = static_cast<int32_t>(anchors[current_idx].query_span);
         int32_t skip_count = 0;
 
         // Advance window start: skip anchors on different chromosomes or too far
         while (window_start < current_idx &&
-               (anchors[current_idx].ref_bits >> 32 != anchors[window_start].ref_bits >> 32 ||
-                anchors[current_idx].ref_bits > anchors[window_start].ref_bits
+               (anchors[current_idx].ref_chromosome_key() != anchors[window_start].ref_chromosome_key() ||
+                anchors[current_idx].ref_bits() > anchors[window_start].ref_bits()
                     + static_cast<uint64_t>(max_dist_x)))
         {
             ++window_start;
@@ -195,7 +195,7 @@ void chain_anchors_scalar(
 
         // Try the globally best anchor in the window (global_best_idx optimization)
         if (global_best_idx < 0 ||
-            anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
+            anchors[current_idx].ref_bits() - anchors[global_best_idx].ref_bits()
                 > static_cast<uint64_t>(max_dist_x))
         {
             int32_t best_global = std::numeric_limits<int32_t>::min();
@@ -236,7 +236,7 @@ void chain_anchors_scalar(
             : best_score;
 
         if (global_best_idx < 0 ||
-            (anchors[current_idx].ref_bits - anchors[global_best_idx].ref_bits
+            (anchors[current_idx].ref_bits() - anchors[global_best_idx].ref_bits()
                 <= static_cast<uint64_t>(max_dist_x)
              && best_scores[global_best_idx] < best_scores[current_idx]))
         {

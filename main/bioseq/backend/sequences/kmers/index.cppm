@@ -7,6 +7,7 @@ module;
 
 #include <chrono>
 #include <ranges>
+#include <utility>
 
 export module bioseq_sequences.kmers;
 
@@ -464,11 +465,19 @@ public:
 // MinimapSketchData layout (28-bit pos, 35-bit hash, 1-bit strand).
 using sketch_collector = sketch_collector_t<MinimapSketchData>;
 
+// DOC0263 §8 — `SeqView` (was `supports_compact_sequence_range R`) so this
+// scalar kernel runs over EITHER a compact_sequence_range OR a
+// lazy_compact_sequence<R, Scanner> (forwarding to the underlying range under
+// scanner_none — zero overhead; streaming one fragment at a time under a
+// fragmented scanner). The kernel only ever touches `seq` via `SeqView::traits`
+// and `seq.iter<BP>(...)`, both of which the lazy wrapper provides; this is how
+// the fragmented minimizer reuses the bit-identical scalar logic (DOC0263 §8.4)
+// without the SIMD lane-replay's boundary-emit-gate fragility (§11.2.2).
 template<
 	template<typename H_A> typename scalar_hash_t,
 	class MinimizerT,
-	supports_compact_sequence_range R,
-	typename I = decltype(compact_sequence_range<R>().begin()),
+	class SeqView,
+	typename I = decltype(std::declval<SeqView&>().begin()),
     // Default hash state width to uint64_t — wide enough for any K up to
     // 32 (dna4) or 21 (dna5).  The previous default tracked the seq's
     // storage_unit (uint32_t in the bench) which silently clamped K to
@@ -487,12 +496,12 @@ template<
     class Collector = sketch_collector_t<MinimizerT>
 >
 requires (
-	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>
+	supports_scalar_hash<scalar_hash_t, typename SeqView::traits::alphabet_type, hash_val_t>
 )
 [[gnu::always_inline]]
-inline void collect_minimizers(
+inline void collect_minimizers_view(
     Collector& collector,
-	compact_sequence_range<R>& seq,
+	const SeqView& seq,
 	const I& seq_begin,
 	const I& seq_end,
 	const size_t w,
@@ -502,7 +511,7 @@ inline void collect_minimizers(
         bioseq::instr::register_region_static("mm_sketch");
     auto _scope = bioseq::instr::region(_desc);
 
-	using seq_traits = compact_sequence_range<R>::traits;
+	using seq_traits = typename SeqView::traits;
 	using hasher_t = scalar_hash_t<typename seq_traits::alphabet_type>::template scalar_hash<hash_val_t>;
 
 	// Compile-time upper bound on the rolling-window radius. The legacy code
@@ -632,6 +641,35 @@ inline void collect_minimizers(
 	// captures wall-clock via `bioseq::instr::clock::now_ns()`
 	// (mach_absolute_time fast-path), so the chrono reads were a pure
 	// duplicate. Removed per proposal-2 §N1.)
+}
+
+// Backward-compatible scalar entry point: the original `collect_minimizers`
+// signature over a concrete compact_sequence_range. Forwards to the generalised
+// `collect_minimizers_view` so existing call sites (and explicit-template-arg
+// callers that pass the alphabet as `R`) are unchanged. The DOC0263 fragmented
+// path calls `collect_minimizers_view` directly with the lazy wrapper.
+template<
+	template<typename H_A> typename scalar_hash_t,
+	class MinimizerT,
+	supports_compact_sequence_range R,
+	typename I = decltype(compact_sequence_range<R>().begin()),
+	typename hash_val_t = uint64_t,
+	class Collector = sketch_collector_t<MinimizerT>
+>
+requires (
+	supports_scalar_hash<scalar_hash_t, typename compact_sequence_range<R>::traits::alphabet_type, hash_val_t>
+)
+[[gnu::always_inline]]
+inline void collect_minimizers(
+    Collector& collector,
+	compact_sequence_range<R>& seq,
+	const I& seq_begin,
+	const I& seq_end,
+	const size_t w,
+	const size_t k
+) {
+	collect_minimizers_view<scalar_hash_t, MinimizerT, compact_sequence_range<R>, I, hash_val_t, Collector>(
+		collector, seq, seq_begin, seq_end, w, k);
 }
 
 template<
