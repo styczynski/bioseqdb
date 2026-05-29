@@ -548,7 +548,7 @@ ReadStripeRowByRowNumber(ColumnarReadState *readState,
 			readState->currentStripeMetadata->id
 			);
 
-		uint64_t chunkFirstRowNumber = 
+		uint64_t chunkFirstRowNumber =
 			stripeMetadata->firstRowNumber +
 			stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
 
@@ -954,6 +954,12 @@ static ChunkGroupReadState *
 BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupleDesc,
 					List *projectedColumnList, MemoryContext cxt, StripeReadState *state, uint64_t stripeId)
 {
+	if (chunkIndex < 0 || static_cast<uint32_t>(chunkIndex) >= stripeBuffers->chunkCount)
+	{
+		pg_log(ERROR, "chunk group index {} is outside selected chunk count {}",
+			   chunkIndex, stripeBuffers->chunkCount);
+	}
+
 	uint32_t chunkGroupRowCount =
 		stripeBuffers->selectedChunkGroupRowCounts[chunkIndex];
 	uint32_t chunkGroupRowOffset =
@@ -1144,12 +1150,16 @@ LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
 														tupleDescriptor,
 														stripeMetadata->chunkCount,
 														snapshot);
-	bool *selectedChunkMask = SelectedChunkMask(stripeSkipList, whereClauseList,
-												whereClauseVars, chunkGroupsFiltered);
+	StripeSkipList *selectedChunkSkipList = stripeSkipList;
 
-	StripeSkipList *selectedChunkSkipList =
-		SelectedChunkSkipList(stripeSkipList, projectedColumnMask,
-							  selectedChunkMask);
+	if (list_length(whereClauseVars) > 0)
+	{
+		bool *selectedChunkMask = SelectedChunkMask(stripeSkipList, whereClauseList,
+													whereClauseVars, chunkGroupsFiltered);
+
+		selectedChunkSkipList = SelectedChunkSkipList(stripeSkipList, projectedColumnMask,
+													 selectedChunkMask);
+	}
 
 	/* load column data for projected columns */
 	ColumnBuffers **columnBuffersArray = make_array<ColumnBuffers*>(columnCount);
@@ -1174,6 +1184,7 @@ LoadFilteredStripeBuffers(Relation relation, StripeMetadata *stripeMetadata,
 
 	StripeBuffers *stripeBuffers = make0<StripeBuffers>();
 	stripeBuffers->columnCount = columnCount;
+	stripeBuffers->chunkCount = selectedChunkSkipList->chunkCount;
 	stripeBuffers->rowCount = StripeSkipListRowCount(selectedChunkSkipList);
 	stripeBuffers->columnBuffersArray = columnBuffersArray;
 	stripeBuffers->selectedChunkGroupRowCounts =
@@ -1268,6 +1279,13 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 
 	for (auto column : PList<Var>(whereClauseVars))
 	{
+		if (column->varattno <= 0 ||
+			static_cast<uint32_t>(column->varattno) > stripeSkipList->columnCount)
+		{
+			pg_log(ERROR, "restriction column {} is outside stripe column count {}",
+				   column->varattno, stripeSkipList->columnCount);
+		}
+
 		uint32_t columnIndex = column->varattno - 1;
 
 		/* if this column's data type doesn't have a comparator, skip it */
@@ -1501,6 +1519,11 @@ SelectedChunkSkipList(StripeSkipList *stripeSkipList, bool *projectedColumnMask,
 		}
 	}
 
+	if (selectedChunkCount == stripeSkipList->chunkCount)
+	{
+		return stripeSkipList;
+	}
+
 	ColumnChunkSkipNode **selectedChunkSkipNodeArray =
 		make_array<ColumnChunkSkipNode*>(columnCount);
 
@@ -1595,6 +1618,12 @@ ProjectedColumnMask(uint32_t columnCount, List *projectedColumnList)
 
 	for (auto attno : PIntList{projectedColumnList})
 	{
+		if (attno <= 0 || static_cast<uint32_t>(attno) > columnCount)
+		{
+			pg_log(ERROR, "projected column {} is outside column count {}",
+				   attno, columnCount);
+		}
+
 		/* attno is 1-indexed; projectedColumnMask is 0-indexed */
 		int columnIndex = attno - 1;
 		projectedColumnMask[columnIndex] = true;

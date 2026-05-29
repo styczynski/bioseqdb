@@ -4141,18 +4141,33 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 							const bioseq::simd::N_NEON::MatchResult& match)
 {
 	using bioseq::simd::N_NEON::format_cigar;
-	// DOC0263 §10.2 — MatchResult lengths/coordinates are now sequence_size_t
-	// (64-bit). The projected SQL columns (bioseq.query_start(anyelement) etc.)
-	// remain int4 per the untouched DDL (§2), so narrow at this boundary; the
-	// signed scores (dp_score, mapq, …) round-trip through int64 unchanged.
-	// The narrow is provably safe because the sidecar build refuses sequences
-	// with bp_size > 2^28 (sidecar.cppm §10.3 gate), and the recompute path's
-	// coordinates are bounded by min(query_len, target_len) which is gated
-	// upstream — Assert is debug-time only.
+	// DOC0274 §1.8 — MatchResult absolute coordinates / lengths are
+	// `sequence_size_t` (uint64; minimap_port.cppm:334). They are projected
+	// through BIGINT (int8) placeholders so positions / lengths in sequences
+	// longer than `INT32_MAX` (~2.15 Gbp) are NOT truncated. `set_bigint`
+	// fills those eight (query_len … block_length) via `Int64GetDatum`. The
+	// remaining MatchResult fields (dp_score, mapq, chain_score, seed_count,
+	// …) are genuinely `int32_t` in the struct, so they keep INT4 placeholders
+	// and `set_int` — widening them at this boundary cannot recover precision
+	// the source type never held.
+	//
+	// `set_bigint`'s Assert is a debug-time witness that no real coordinate
+	// reaches the int64 sign boundary: the project's pessimistic ceiling is
+	// 1 Tbp (~2^40), ~23 bits below INT64_MAX, so the uint64→int64 reinterpret
+	// is always value-preserving.
 	auto set_int = [](Const* node, int64_t value) {
 		if (node == nullptr) return;
 		Assert(value >= INT32_MIN && value <= INT32_MAX);
 		node->constvalue = Int32GetDatum(static_cast<int32_t>(value));
+		node->constisnull = false;
+	};
+	// Parameter is the underlying type of `sequence_size_t` (std::uint64_t)
+	// spelled directly — this TU does not import bioseq_storage_size, so the
+	// `sequence_size_t` alias is not in scope here.
+	auto set_bigint = [](Const* node, std::uint64_t value) {
+		if (node == nullptr) return;
+		Assert(value <= static_cast<std::uint64_t>(INT64_MAX));
+		node->constvalue = Int64GetDatum(static_cast<int64_t>(value));
 		node->constisnull = false;
 	};
 	auto set_bool = [](Const* node, bool value) {
@@ -4167,14 +4182,15 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 	};
 
 	set_int(consts.dp_score_node,              match.dp_score);
-	set_int(consts.query_len_node,             match.query_len);
-	set_int(consts.query_start_node,           match.query_start);
-	set_int(consts.query_end_node,             match.query_end);
-	set_int(consts.target_len_node,            match.target_len);
-	set_int(consts.target_start_node,          match.target_start);
-	set_int(consts.target_end_node,            match.target_end);
-	set_int(consts.num_matches_node,           match.num_matches);
-	set_int(consts.block_length_node,          match.block_length);
+	// The eight sequence_size_t (uint64) coordinates/lengths → BIGINT, no narrow.
+	set_bigint(consts.query_len_node,          match.query_len);
+	set_bigint(consts.query_start_node,        match.query_start);
+	set_bigint(consts.query_end_node,          match.query_end);
+	set_bigint(consts.target_len_node,         match.target_len);
+	set_bigint(consts.target_start_node,       match.target_start);
+	set_bigint(consts.target_end_node,         match.target_end);
+	set_bigint(consts.num_matches_node,        match.num_matches);
+	set_bigint(consts.block_length_node,       match.block_length);
 	set_int(consts.mapq_node,                  match.mapq);
 	set_int(consts.chain_score_node,           match.chain_score);
 	set_int(consts.dp_max_score_node,          match.dp_max_score);
@@ -4538,7 +4554,9 @@ CustomExecScan(BioseqScanState *columnarScanState,
 	if (runtime.placeholder_consts.dp_score_node == nullptr) {
 		JustLog("[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
 
-		/* INT4: byval, len=4, no collation. */
+		/* INT4: byval, len=4, no collation. Used for the int32_t MatchResult
+		 * fields (dp_score, mapq, chain_score, dp_max_score, seed_count,
+		 * secondary_chain_score). */
 		const auto int_placeholder = []() {
 			return makeConst(
 				INT4OID,
@@ -4546,6 +4564,22 @@ CustomExecScan(BioseqScanState *columnarScanState,
 				InvalidOid,
 				4,
 				static_cast<Datum>(static_cast<int32_t>(0)),
+				/*constisnull=*/ true,
+				/*constbyval=*/ true
+			);
+		};
+		/* INT8: byval on LP64 (pg_type.typbyval for bigint is 't'), len=8.
+		 * Used for the eight sequence_size_t (uint64) coordinate/length
+		 * fields (query_len … block_length) so positions in sequences longer
+		 * than INT32_MAX are not truncated — DOC0274 §1.8. Matches the SQL
+		 * DDL where those eight projections RETURN BIGINT. */
+		const auto bigint_placeholder = []() {
+			return makeConst(
+				INT8OID,
+				-1,
+				InvalidOid,
+				8,
+				Int64GetDatum(static_cast<int64_t>(0)),
 				/*constisnull=*/ true,
 				/*constbyval=*/ true
 			);
@@ -4589,14 +4623,14 @@ CustomExecScan(BioseqScanState *columnarScanState,
 
 		runtime.placeholder_consts.symbol_count_sites.clear();
 		runtime.placeholder_consts.dp_score_node              = int_placeholder();
-		runtime.placeholder_consts.query_len_node             = int_placeholder();
-		runtime.placeholder_consts.query_start_node           = int_placeholder();
-		runtime.placeholder_consts.query_end_node             = int_placeholder();
-		runtime.placeholder_consts.target_len_node            = int_placeholder();
-		runtime.placeholder_consts.target_start_node          = int_placeholder();
-		runtime.placeholder_consts.target_end_node            = int_placeholder();
-		runtime.placeholder_consts.num_matches_node           = int_placeholder();
-		runtime.placeholder_consts.block_length_node          = int_placeholder();
+		runtime.placeholder_consts.query_len_node             = bigint_placeholder();
+		runtime.placeholder_consts.query_start_node           = bigint_placeholder();
+		runtime.placeholder_consts.query_end_node             = bigint_placeholder();
+		runtime.placeholder_consts.target_len_node            = bigint_placeholder();
+		runtime.placeholder_consts.target_start_node          = bigint_placeholder();
+		runtime.placeholder_consts.target_end_node            = bigint_placeholder();
+		runtime.placeholder_consts.num_matches_node           = bigint_placeholder();
+		runtime.placeholder_consts.block_length_node          = bigint_placeholder();
 		runtime.placeholder_consts.mapq_node                  = int_placeholder();
 		runtime.placeholder_consts.chain_score_node           = int_placeholder();
 		runtime.placeholder_consts.dp_max_score_node          = int_placeholder();

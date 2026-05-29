@@ -137,6 +137,7 @@ typedef struct ColumnBuffers
 typedef struct StripeBuffers
 {
 	uint32 columnCount;
+	uint32 chunkCount;
 	uint32 rowCount;
 	ColumnBuffers **columnBuffersArray;
 

@@ -57,11 +57,13 @@ namespace bioseq::chaining {
 ///
 /// The packed mm128-style sort key the chaining DP consumes is recomputed on
 /// demand by `ref_bits()` / `query_bits()` accessors; with `reference_id`
-/// hard-zero, `ref_bits() == (is_reverse << 63) | (ref_position & 0xffffffff)`.
+/// hard-zero, `ref_bits() == (is_reverse << 63) | (ref_position & ((1<<63)-1))`
+/// (DOC0275: the full position, not just the low 32 bits — see `ref_bits()`).
 /// Same-chromosome position deltas in the hottest scoring loop read
-/// `ref_position` / `query_position` directly (no key recompute) — DP is
-/// **algorithmically unchanged** for every position < 2^32, which is every
-/// position the index packing produces today.
+/// `ref_position` / `query_position` directly (no key recompute), so the
+/// precise gap math has always been full-64-bit; `ref_bits()` is the sort key
+/// plus the coarse window/distance heuristics, now also full-position so a
+/// reference > 2^32 (the 6 Gbp smoke case) neither mis-sorts nor mis-prunes.
 ///
 /// `collect_seed_hits` writes every field it later reads (no default `= 0`),
 /// preserving the dead-store elision from proposal-2 §N3.
@@ -73,12 +75,25 @@ struct Anchor {
     std::uint8_t  flags;               ///< flags
     std::uint16_t segment_id;          ///< segment ID
 
-    /// Packed mm128 reference word: is_reverse<<63 | 0<<32 | (ref_position & 0xffffffff).
-    /// Used as the radix sort key and for chromosome grouping. `reference_id`
-    /// was always 0 in this codebase (single-target) and has been removed.
+    /// Packed mm128 reference word: is_reverse<<63 | (ref_position & ((1<<63)-1)).
+    /// Used as the radix sort key and for the coarse window/distance heuristics
+    /// in the chaining DP (the precise gap math reads `ref_position` directly).
+    /// `reference_id` was always 0 in this codebase (single-target) and has been
+    /// removed, so the old mm128 "rid" slot (bits 32..62) is free to carry
+    /// position bits 32..62.
+    ///
+    /// DOC0275: this keeps the FULL reference position (bits 0..62) instead of
+    /// truncating to the low 32 (`static_cast<std::uint32_t>`). The value is
+    /// IDENTICAL to the old expression for every position < 2^32 (so every
+    /// existing unit/bench result is unchanged — the index packing produced
+    /// only sub-2^32 positions before the multi-Gbp smoke tests), but it no
+    /// longer wraps the sort key / distance heuristics for references larger
+    /// than UINT32_MAX (~4.29 Gbp, the 6 Gbp smoke case): two anchors 5 Gbp
+    /// apart would otherwise compare as if ~0.7 Gbp apart. is_reverse stays the
+    /// MSB so forward anchors still sort before reverse ones.
     [[nodiscard, gnu::always_inline]] inline std::uint64_t ref_bits() const noexcept {
         return (static_cast<std::uint64_t>(is_reverse) << 63)
-             | static_cast<std::uint32_t>(ref_position);
+             | (ref_position & ((static_cast<std::uint64_t>(1) << 63) - 1));
     }
     /// Packed mm128 query word: segment_id<<48 | flags<<40 | query_span<<32 | (query_position & 0xffffffff).
     [[nodiscard, gnu::always_inline]] inline std::uint64_t query_bits() const noexcept {

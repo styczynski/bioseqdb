@@ -295,11 +295,13 @@ constexpr std::array<projection_probe, 13> kProjectionHelpers = {{
     {"bioseq.chain_score(pk)",            "int4"},
     {"bioseq.secondary_chain_score(pk)",  "int4"},
     {"bioseq.seed_count(pk)",             "int4"},
-    {"bioseq.num_matches(pk)",            "int4"},
-    {"bioseq.block_length(pk)",           "int4"},
+    // DOC0274 §1.8 — these four are sequence_size_t (uint64) in MatchResult,
+    // so the projections RETURN BIGINT (int8), not int4.
+    {"bioseq.num_matches(pk)",            "int8"},
+    {"bioseq.block_length(pk)",           "int8"},
     {"bioseq.mapq(pk)",                   "int4"},
-    {"bioseq.target_len(pk)",             "int4"},
-    {"bioseq.query_len(pk)",              "int4"},
+    {"bioseq.target_len(pk)",             "int8"},
+    {"bioseq.query_len(pk)",              "int8"},
     {"bioseq.divergence(pk)",             "float4"},
     {"bioseq.cigar(pk)",                  "text"},
 }};

@@ -807,11 +807,16 @@ void collect_seed_hits(
         // `pos_strand_encoded()` returns `(last_pos << 1) | strand` — the
         // exact form `lookup()` packed into the positions array, so the
         // per-hit `target_hit` lives in the same encoded space.
-        const uint32_t query_pos_encoded = static_cast<uint32_t>(
-            query_minimizer.pos_strand_encoded());
+        // DOC0274 §1.9 — keep the FULL 64-bit encoded value. `pos_bits` is
+        // `ceil(log2(seq_len))` (up to 32 for a multi-Gbp sequence), so
+        // `(last_pos << 1) | strand` spans up to 33 bits; the old
+        // `static_cast<uint32_t>(...)` truncated any position >= 2^31. The
+        // query is small here, but mirroring the target-side fix below keeps
+        // both sides 64-bit-correct.
+        const uint64_t query_pos_encoded = query_minimizer.pos_strand_encoded();
         // Hoist the strand bit out of the inner per-hit loop — constant
         // across `target_hits`.
-        const uint32_t query_strand_bit = query_pos_encoded & 1u;
+        const uint32_t query_strand_bit = static_cast<uint32_t>(query_pos_encoded & 1ULL);
         const sequence_size_t forward_query_pos = static_cast<sequence_size_t>(query_pos_encoded >> 1);
         // Reverse-strand position formula reduces to a single subtraction
         // once `reverse_pos_base` is hoisted; pre-compute here so the
@@ -821,9 +826,20 @@ void collect_seed_hits(
         const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
 
         for (const uint64_t target_hit : target_hits) {
-            const sequence_size_t ref_position = static_cast<sequence_size_t>(
-                static_cast<uint32_t>(target_hit) >> 1);
-            const uint32_t target_reference_id = static_cast<uint32_t>(target_hit >> 32);
+            // DOC0274 §1.9 — `target_hit` is the index-stored
+            // `pos_strand_encoded()` = `(ref_pos << 1) | strand`, a full
+            // (pos_bits + 1)-bit value (`pos_bits == ceil(log2(target_len))`,
+            // up to 32 for a 4 Gbp target ⇒ up to 33 bits). The previous
+            // `static_cast<uint32_t>(target_hit) >> 1` truncated to the low 32
+            // bits, dropping bit 32 of `ref_pos << 1` for any ref_pos >= 2^31
+            // (~2.15 Gbp). The corrupted anchor coordinate then indexed the
+            // target buffer out of bounds → SIGSEGV. Shift the full 64-bit
+            // word instead. There is no reference_id in the encoding
+            // (single-target; `pos_strand_encoded()` masks the hash out), so
+            // bits above the position are part of the position, not an rid —
+            // hence the former `target_hit >> 32` "rid" read is gone.
+            const sequence_size_t ref_position =
+                static_cast<sequence_size_t>(target_hit >> 1);
 
             // Goal C — branchless strand select.  The two arms of the old
             // if/else differed only in `is_reverse` (0 vs 1) and
@@ -837,9 +853,10 @@ void collect_seed_hits(
                 is_reverse_bit ? reverse_query_pos : forward_query_pos;
 
             // DOC0263 anchor flat layout: ref/query sub-objects removed.
-            // `reference_id` field removed (single-target codebase; the index
-            // packing always produced rid=0 — see TargetIndex doc).
-            (void)target_reference_id;  // structurally 0, retained as a debug-time invariant tracer
+            // `reference_id` field removed (single-target codebase). DOC0274
+            // §1.9 also removed the `target_hit >> 32` "rid" read: it was only
+            // ever 0 because positions stayed < 2^31; past that it aliases the
+            // high bit of `ref_pos << 1`, so it never was a reference id.
             Anchor anchor;
             anchor.ref_position    = ref_position;
             anchor.is_reverse      = is_reverse_bit;

@@ -334,7 +334,7 @@ POSTGRES_FN(create_table_row_mask)
 	StripeMetadata *stripeMetadata = NULL;
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
 	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
 	
@@ -4195,4 +4195,3 @@ POSTGRES_FN(bioseq_stats)
 		SRF_RETURN_DONE(funcctx);
 	}
 }
-

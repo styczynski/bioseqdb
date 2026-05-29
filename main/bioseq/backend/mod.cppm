@@ -83,49 +83,49 @@ Datum bioseq_dp_score_stub(PG_FUNCTION_ARGS) {
 CXX_PG_FUNCTION_INFO_V1(bioseq_query_len_stub);
 Datum bioseq_query_len_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_query_len_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_query_start_stub);
 Datum bioseq_query_start_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_query_start_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_query_end_stub);
 Datum bioseq_query_end_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_query_end_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_target_len_stub);
 Datum bioseq_target_len_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_target_len_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_target_start_stub);
 Datum bioseq_target_start_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_target_start_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_target_end_stub);
 Datum bioseq_target_end_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_target_end_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_num_matches_stub);
 Datum bioseq_num_matches_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_num_matches_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_block_length_stub);
 Datum bioseq_block_length_stub(PG_FUNCTION_ARGS) {
 	JustLog("[bioseq] pg: bioseq_block_length_stub() UNEXPECTED direct call");
-	PG_RETURN_INT32(-1);
+	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_mapq_stub);

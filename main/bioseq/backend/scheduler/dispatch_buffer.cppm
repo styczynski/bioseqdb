@@ -468,9 +468,29 @@ public:
                                     *cached_query_minimizers,
                                     prebuilt_idx, params);
                             }
+                        } else if (scanner_pg_ctx != nullptr
+                                   && scanner_pg_ctx->target_locators[i].has_value()) {
+                            // DOC0274 (round-2 revert) — inmemory_forced=ON but the stub's
+                            // materialised varlena would exceed MaxAllocSize, so
+                            // hydrate_one_column skipped it and target_hdr is null. With
+                            // chunked + baseline both ruled out, the only way to honour the
+                            // GUC's force-baseline semantic is to raise: a silent fall
+                            // through to scanner_pg would defeat the purpose of the toggle
+                            // (the test couldn't distinguish "Phase B baseline" from
+                            // "Phase C production" on these rows). The user-facing fix is
+                            // either to turn the GUC off (use scanner_pg) or wait for
+                            // Phase D D-VARLENA which lifts the MaxAllocSize hydration cap.
+                            pg_log(ERROR,
+                                "bioseq.test_force_inmemory_scanner=on: row {} target stub "
+                                "({} bp) exceeds MaxAllocSize and cannot be materialised "
+                                "for the Phase B baseline. Either set the GUC to off (use "
+                                "the Phase C scanner_pg path which streams fragments) or "
+                                "wait for Phase D D-VARLENA. See DOC0267.",
+                                static_cast<int>(query_ids[i]),
+                                static_cast<unsigned long long>(target_bp_size));
                         } else {
-                            // No inline target AND scanner_pg disabled — cannot dispatch.
-                            JustLog("[bioseq] pg: row {} has no inline target and scanner_pg is disabled; treating as WHERE FALSE",
+                            // No inline target AND no locator — truly no usable target.
+                            JustLog("[bioseq] pg: row {} has no inline target and no scanner_pg locator; treating as WHERE FALSE",
                                     static_cast<int>(query_ids[i]));
                             continue;
                         }
@@ -526,8 +546,21 @@ public:
                             } else {
                                 collection = minimap_port(lazy_query, lazy_target, params);
                             }
+                        } else if (scanner_pg_ctx != nullptr
+                                   && scanner_pg_ctx->target_locators[i].has_value()) {
+                            // DOC0274 (round-2 revert) — see has_blob branch above for
+                            // the rationale. inmemory_forced=ON cannot satisfy its
+                            // force-baseline semantic on > MaxAllocSize stubs; raise.
+                            pg_log(ERROR,
+                                "bioseq.test_force_inmemory_scanner=on: row {} target stub "
+                                "({} bp) exceeds MaxAllocSize and cannot be materialised "
+                                "for the Phase B baseline. Either set the GUC to off (use "
+                                "the Phase C scanner_pg path which streams fragments) or "
+                                "wait for Phase D D-VARLENA. See DOC0267.",
+                                static_cast<int>(query_ids[i]),
+                                static_cast<unsigned long long>(target_bp_size));
                         } else {
-                            JustLog("[bioseq] pg: row {} has no inline target and scanner_pg is disabled; treating as WHERE FALSE",
+                            JustLog("[bioseq] pg: row {} has no inline target and no scanner_pg locator; treating as WHERE FALSE",
                                     static_cast<int>(query_ids[i]));
                             continue;
                         }

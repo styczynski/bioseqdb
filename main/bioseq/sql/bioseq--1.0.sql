@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS chunk_group (
     stripe_num bigint NOT NULL,
     chunk_group_num int NOT NULL,
     row_count bigint NOT NULL,
+    -- DOC0275: the C metadata layer (config.h Natts_bioseq_chunkgroup = 5,
+    -- Anum_bioseq_chunkgroup_deleted_rows = 5) has always read, written and
+    -- updated a 5th `deleted_rows` column: SaveChunkGroups writes it (0 at
+    -- creation), UpdateChunkGroupDeletedRows (write_state_row_mask.cppm) bumps
+    -- it on DML deletes, and ReadChunkGroupRowCounts reads it to gate the
+    -- row-mask read in ReadStripeRowByRowNumber. The DDL was a 4-column
+    -- partial port, so heap_deform_tuple only filled attrs 0..3 and
+    -- ReadChunkGroupRowCounts read datumArray[4] = UNINITIALISED STACK as the
+    -- deleted-row count. For a stripe with >1 chunk group that garbage was
+    -- non-zero (observed 100000), so the read spuriously took the
+    -- `deletedRows > 0` branch into ReadChunkRowMask and SIGSEGV'd. Adding the
+    -- column makes the catalog match the code; deleted_rows is genuinely 0
+    -- for append-only fragment storage.
+    deleted_rows bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (storage_id, stripe_num, chunk_group_num)
 );
 
@@ -999,57 +1013,65 @@ CREATE OR REPLACE FUNCTION bioseq.dp_score(el ANYELEMENT)
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
+-- DOC0274 §1.8 — every absolute coordinate / length the aligner reports is
+-- `sequence_size_t` (uint64) inside `MatchResult` (minimap_port.cppm:334).
+-- The eight projections below (query_len … block_length) therefore RETURN
+-- BIGINT (PG int8, int64-compatible) so positions/lengths in sequences
+-- longer than `INT32_MAX` (~2.15 Gbp) are not silently truncated by the
+-- custom-scan placeholder filler. The remaining helpers (score, mapq,
+-- chain_score, …) are genuinely `int32_t` in `MatchResult`, so they stay
+-- INTEGER — widening them would not recover any precision the source lacks.
 CREATE OR REPLACE FUNCTION bioseq.query_len(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_query_len_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.query_start(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_query_start_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.query_end(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_query_end_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.target_len(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_target_len_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.target_start(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_target_start_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.target_end(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_target_end_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.num_matches(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_num_matches_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
 CREATE OR REPLACE FUNCTION bioseq.block_length(el ANYELEMENT)
-    RETURNS INTEGER
+    RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_block_length_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE

@@ -672,7 +672,7 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
 			Int64GetDatum(stripe),
 			Int32GetDatum(chunkId),
 			Int64GetDatum(rowCount),
-			Int32GetDatum(0)
+			Int64GetDatum(0)   /* deleted_rows: bigint, read back via DatumGetUInt64 */
 		};
 
 		bool nulls[Natts_bioseq_chunkgroup] = { false };
@@ -810,9 +810,9 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 	Relation index = index_open(ColumnarChunkIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripe));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripe));
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
 															snapshot, 2, scanKey);
@@ -1224,7 +1224,7 @@ FindNextStripeForParallelWorker(Relation relation,
 	ScanKeyData scanKey[2];
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
 
 	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
 				BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(nextStripeId));
@@ -1303,7 +1303,7 @@ StripeMetadataLookupRowNumber(Relation relation, uint64_t rowNumber, Snapshot sn
 	uint64_t storageId = ColumnarStorageGetStorageId(relation, false);
 	ScanKeyData scanKey[2];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
 	StrategyNumber strategyNumber = InvalidStrategy;
 	RegProcedure procedure = InvalidOid;
@@ -1427,7 +1427,7 @@ FindStripeWithHighestRowNumber(Relation relation, Snapshot snapshot)
 	uint64_t storageId = ColumnarStorageGetStorageId(relation, false);
 	ScanKeyData scanKey[1];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
 	Relation columnarStripes = table_open(ColumnarStripeRelationId(), AccessShareLock);
 	Relation index = index_open(ColumnarStripeFirstRowNumberIndexRelationId(),
@@ -1465,9 +1465,9 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 
 	ScanKeyData scanKey[2];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunkgroup_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunkgroup_stripe,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripe));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripe));
 
 	SysScanDesc scanDescriptor =
 		systable_beginscan_ordered(columnarChunkGroup, index, snapshot, 2, scanKey);
@@ -1499,10 +1499,10 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 		uint32_t tupleChunkGroupIndex =
 			DatumGetUInt32(datumArray[Anum_bioseq_chunkgroup_chunk - 1]);
 
-		if (tupleChunkGroupIndex > chunkGroupCount)
+		if (tupleChunkGroupIndex >= chunkGroupCount)
 		{
 			pg_log(WARNING, "Tuple chunk group higher than chunk group count: {}, {} (storage_id = {}, stripe_id = {})", tupleChunkGroupIndex, chunkGroupCount, storageId, stripe);
-			tupleChunkGroupIndex = chunkGroupCount;
+			continue;
 		}
 
 		(*chunkGroupRowCounts)[tupleChunkGroupIndex] =
@@ -1535,11 +1535,11 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 
 	ScanKeyData scanKey[3];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunkgroup_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunkgroup_stripe,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripe));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripe));
 	ScanKeyInit(&scanKey[2], Anum_bioseq_chunkgroup_chunk,
-				BTEqualStrategyNumber, F_OIDEQ, Int32GetDatum(chunkGroupId));
+				BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(chunkGroupId));
 
 	SysScanDesc scanDescriptor =
 		systable_beginscan_ordered(columnarChunkGroup, index, NULL, 3, scanKey);
@@ -1556,7 +1556,7 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 
 		// Update deleted row count
 		update[Anum_bioseq_chunkgroup_deleted_rows - 1] = true;
-		values[Anum_bioseq_chunkgroup_deleted_rows - 1] = (deletedRowNumber);
+		values[Anum_bioseq_chunkgroup_deleted_rows - 1] = Int64GetDatum(deletedRowNumber);
 
 		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
 												   values, nulls, update);
@@ -1678,9 +1678,9 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 	Relation index = index_open(ColumnarChunkIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripeId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripeId));
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
 															GetTransactionSnapshot(), 2, scanKey);
@@ -1835,9 +1835,9 @@ UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 {
 	ScanKeyData scanKey[2];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(stripeId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripeId));
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
 	Relation columnarStripes = table_open(columnarStripesOid, AccessShareLock);
@@ -1898,7 +1898,7 @@ ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot, ScanDirection scan
 	HeapTuple heapTuple;
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_OIDEQ, Int64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
 	Oid columnarStripesOid = ColumnarStripeRelationId();
 
