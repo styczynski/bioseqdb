@@ -328,6 +328,17 @@ public:
                 std::optional<std::vector<MinimapSketchData>> cached_query_minimizers;
 
                 for (size_t i = 0; i < batch_size; ++i) {
+                    // DOC0276 — cancellation point at the per-row boundary. The
+                    // native aligner itself is NO_POSTGRES and cannot call
+                    // CHECK_FOR_INTERRUPTS; this lets a multi-row mmsearch honour
+                    // pg_cancel_backend between rows, and (with the storage-layer
+                    // check in fetch_payload) bounds how long a cancel waits.
+                    CHECK_FOR_INTERRUPTS();
+                    JustLogProgress("[dispatch] mmsearch row {}/{} start"
+                            " | footprint={}MB avail={}MB",
+                            i + 1, batch_size,
+                            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
                     const pgseq_t* target_hdr = target_hdrs[i];
                     // DOC0274 — when use_scanner_pg=true AND a locator was captured
                     // for this row (e.g. a stub whose materialised varlena would
@@ -369,6 +380,14 @@ public:
                         ? static_cast<sequence_size_t>(target_hdr->bp_size)
                         : scanner_pg_ctx->target_locators[i]->total_bp_size;
 
+                    // DOC0276 — targets larger than this recompute via the
+                    // memory-bounded segmented index (`minimap_port_segmented`,
+                    // multiple ≤200 Mbp segments). At/below it the size-bucket
+                    // `minimap_port` fits RAM, so small-target results are
+                    // unchanged. 256 Mbp ≈ the 2^28 MinimapSketchData position
+                    // boundary where the size-bucket would otherwise widen.
+                    constexpr sequence_size_t kSegmentationThresholdBp = 256'000'000;
+
                     const size_t min_bp = std::min<size_t>(
                         static_cast<size_t>(query_seq.bp_size()),
                         static_cast<size_t>(target_bp_size));
@@ -408,8 +427,18 @@ public:
                             cached_query_minimizers.emplace(
                                 std::move(query_collector).extract_sketches_data());
                         }
+                        JustLogProgress("[dispatch] row {} deserializing prebuilt index"
+                                " ({} bytes) | footprint={}MB avail={}MB",
+                                i + 1, (*index_blobs)[i].bytes,
+                                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
                         TargetIndex prebuilt_idx = TargetIndex::deserialize_from_binary(
                             (*index_blobs)[i].data, (*index_blobs)[i].bytes);
+                        JustLogProgress("[dispatch] row {} prebuilt index ready"
+                                " | footprint={}MB avail={}MB",
+                                i + 1,
+                                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
                         if (use_scanner_pg) {
                             // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
                             using SP = bioseq::storage::sequence_scanner_pg<S>;
@@ -526,12 +555,21 @@ public:
                                     scanner_pg_ctx->parent_mctx);
                                 bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
                                     std::move(target_scanner)};
-                                collection = minimap_port(fq_pg, ft_pg, params);
+                                // DOC0276 — large targets recompute via the
+                                // memory-bounded segmented entry; small targets
+                                // keep the size-bucket path (unchanged results).
+                                collection =
+                                    (target_bp_size > kSegmentationThresholdBp)
+                                        ? minimap_port_segmented(fq_pg, ft_pg, params)
+                                        : minimap_port(fq_pg, ft_pg, params);
                             } else {
                                 compact_sequence_range<S> target_seq{*target_hdr};
                                 bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
                                     bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
-                                collection = minimap_port(fq_pg, ft_pg, params);
+                                collection =
+                                    (target_bp_size > kSegmentationThresholdBp)
+                                        ? minimap_port_segmented(fq_pg, ft_pg, params)
+                                        : minimap_port(fq_pg, ft_pg, params);
                             }
                         } else if (target_hdr != nullptr) {
                             compact_sequence_range<S> target_seq{*target_hdr};
@@ -542,9 +580,15 @@ public:
                                     bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
                                 bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
                                 bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
-                                collection = minimap_port(fq, ft, params);
+                                collection =
+                                    (target_bp_size > kSegmentationThresholdBp)
+                                        ? minimap_port_segmented(fq, ft, params)
+                                        : minimap_port(fq, ft, params);
                             } else {
-                                collection = minimap_port(lazy_query, lazy_target, params);
+                                collection =
+                                    (target_bp_size > kSegmentationThresholdBp)
+                                        ? minimap_port_segmented(lazy_query, lazy_target, params)
+                                        : minimap_port(lazy_query, lazy_target, params);
                             }
                         } else if (scanner_pg_ctx != nullptr
                                    && scanner_pg_ctx->target_locators[i].has_value()) {

@@ -1094,39 +1094,35 @@ struct SystemMemorySnapshot {
         return v <= 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(v);
     };
 
-    // T: prefer total_Bytes() (Windows: sum of DIMMs; Linux: round-up
-    // MemTotal). Linux's pow-of-2 rounding is documented in
-    // main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V12_IMPL_PLAN__DOC0226.md §6.5; we accept the overestimate and
-    // rely on the 30 s idle-clock timeout to catch genuinely-infeasible
-    // batches.
-    snap.total_bytes = clamp_positive(mem.total_Bytes());
-    if (snap.total_bytes == 0) snap.total_bytes = clamp_positive(mem.available_Bytes());
-
-    // F: pick the most-useful "currently-free" measurement per platform.
-    //   - Linux: available_Bytes() = MemAvailable, the metric `free(1)`
-    //     reports. Strictly better than free_Bytes() = MemFree because
-    //     MemAvailable includes reclaimable cache.
-    //   - macOS: free_Bytes() goes through `host_statistics64`, which
-    //     returns -1 (i.e. failure) on the vcpkg 2025-07-10 build for
-    //     ARM macOS in our test environment. We fall back to
-    //     available_Bytes() (= sysctl `hw.memsize_usable`) which is
-    //     close to T — i.e. dynamic-pressure detection is degraded on
-    //     macOS but the framework still runs. The operator sees this
-    //     in the startup log.
-    //   - Windows: free_Bytes() == available_Bytes() — either works.
-#if defined(HWINFO_UNIX) && !defined(HWINFO_APPLE)
-    snap.free_bytes = clamp_positive(mem.available_Bytes());
-#elif defined(HWINFO_APPLE)
-    snap.free_bytes = clamp_positive(mem.free_Bytes());
-    if (snap.free_bytes == 0) {
-        // macOS fall-back when host_statistics64 fails. Treat
-        // memsize_usable as a generous "approximately free" proxy
-        // (no external-pressure detection, but the framework runs).
-        snap.free_bytes = clamp_positive(mem.available_Bytes());
+    // DOC0276 — PRIMARY source is the direct mach/POSIX probe in
+    // `bioseq::instr::detail::sysinfo` (the same probe the production extension's
+    // MemoryBudget uses). It exists precisely because the vcpkg hwinfo
+    // `free_Bytes()` routes through `host_statistics64`, which returns -1
+    // (failure) on the vcpkg ARM-macOS build — so the old code's "free" read 0
+    // and fell back to ~total, i.e. the framework's memory estimates were always
+    // (effectively) zero-pressure. `system_available_bytes()` calls
+    // host_statistics64(HOST_VM_INFO64) directly (which DOES work) and reports
+    // (free + inactive + speculative + purgeable) pages. hwinfo stays only as a
+    // last-resort fallback when the direct probe is unavailable.
+    namespace sysinfo = bioseq::instr::detail::sysinfo;
+    snap.total_bytes = sysinfo::system_total_bytes();
+    if (snap.total_bytes == 0) {
+        snap.total_bytes = clamp_positive(mem.total_Bytes());
+        if (snap.total_bytes == 0) snap.total_bytes = clamp_positive(mem.available_Bytes());
     }
+
+    snap.free_bytes = sysinfo::system_available_bytes();
+    if (snap.free_bytes == 0) {
+        // Direct probe unavailable — fall back to hwinfo per platform.
+#if defined(HWINFO_UNIX) && !defined(HWINFO_APPLE)
+        snap.free_bytes = clamp_positive(mem.available_Bytes());
+#elif defined(HWINFO_APPLE)
+        snap.free_bytes = clamp_positive(mem.free_Bytes());
+        if (snap.free_bytes == 0) snap.free_bytes = clamp_positive(mem.available_Bytes());
 #else
-    snap.free_bytes = clamp_positive(mem.free_Bytes());
+        snap.free_bytes = clamp_positive(mem.free_Bytes());
 #endif
+    }
 
     // Defensive clamps: never let `free` exceed `total`. If both are
     // zero (broken hwinfo), pretend infinite total so the framework

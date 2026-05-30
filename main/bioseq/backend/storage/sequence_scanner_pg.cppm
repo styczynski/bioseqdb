@@ -314,6 +314,22 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
         return base_container(s->bytes, fragment_storage_units);
     }
 
+    // DOC0276 — COLD fragment read: a cache miss that hits the columnar storage.
+    // This is the per-fragment work that dominates a large scanner_pg target
+    // scan (the native aligner driving it is NO_POSTGRES and cannot itself poll
+    // for interrupts). Honour cancellation here so a long scan responds to
+    // pg_cancel_backend, and emit a throttled progress heartbeat (count-based;
+    // the fmtlog timestamp header gives the rate) so the scan is observably
+    // alive. Throttling keeps this off the hot per-fragment cost when logging.
+    CHECK_FOR_INTERRUPTS();
+    if (enable_logging) {
+        static thread_local std::uint64_t cold_read_count = 0;
+        if ((cold_read_count++ % 4000) == 0) {
+            JustLogProgress("[scanner_pg] cold fragment read #{} (fragment {}/{})",
+                cold_read_count, fragment_no, num_fragments_);
+        }
+    }
+
     // Resolve the sub-table relation + read state via Phase A's cache.
     Relation shard = open_sub_table_for_locator(
         db_oid_, tablespace_oid_, main_relfilenode_, column_attno_,

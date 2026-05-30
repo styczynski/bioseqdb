@@ -757,6 +757,91 @@ template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, cl
     }
 }
 
+// DOC0276 — SUB-RANGE minimizer collection over storage units `[lo_unit, hi_unit)`.
+// Used by `minimap_port_segmented` to sketch one target SEGMENT at a time,
+// forwarding explicit begin/end iterators (advanced to the unit-aligned segment
+// bounds) so positions come out LOCAL to `lo_unit*lpu`.
+//
+// IMPORTANT: this ALWAYS uses the bit-identical SCALAR `collect_minimizers_view`,
+// even for contiguous (no-fragment) sequences. The SIMD two-stack kernel derives
+// its iteration length from the WHOLE sequence (`calculate_iteration_offsets` over
+// `seq.bp_size()`), not from `(end - begin)`, so handing it a sub-range start/end
+// makes it read past the requested window — garbage minimizers + an out-of-bounds
+// crash (observed: a 206 Mbp segment of a 500 Mbp target reported 99.7M minimizers
+// — more than the WHOLE sequence — then SIGSEGV). The scalar view honours
+// `seq_begin/seq_end` exactly and emits `seq_pos` from 0 at `seq_begin`, which is
+// what the globalisation (`TargetIndex::add_position_offset`) and the scalar/SIMD
+// parity both rely on. Scalar collection over contiguous memory is cheap (no I/O;
+// alignment dominates the per-segment wall-clock), so this is correct AND fast.
+template <class MinimizerT, class Seq, class Collector>
+[[gnu::always_inline]] inline void minimizer_dispatch_range(
+    Collector& c, Seq& seq, sequence_size_t lo_unit, sequence_size_t hi_unit,
+    std::size_t w, std::size_t k)
+{
+    if constexpr (requires { typename Seq::scanner_type; }) {
+        if constexpr (!Seq::scanner_type::supports_fragments()) {
+            // Contiguous: collect over the underlying range's sub-iterators.
+            auto& m = const_cast<std::remove_cvref_t<decltype(seq.underlying())>&>(seq.underlying());
+            auto b = m.begin();
+            auto e = m.begin();
+            std::advance(b, static_cast<typename std::iterator_traits<decltype(b)>::difference_type>(lo_unit));
+            std::advance(e, static_cast<typename std::iterator_traits<decltype(e)>::difference_type>(hi_unit));
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+                c, m, b, e, w, k);
+        } else {
+            // Fragmented: stream the scalar view over the lazy sub-range.
+            auto b = seq.begin();
+            auto e = seq.begin();
+            b += lo_unit;
+            e += hi_unit;
+            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+                c, seq, b, e, w, k);
+        }
+    } else {
+        // Raw compact_sequence_range (no lazy wrapper).
+        auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
+        auto b = m.begin();
+        auto e = m.begin();
+        std::advance(b, static_cast<typename std::iterator_traits<decltype(b)>::difference_type>(lo_unit));
+        std::advance(e, static_cast<typename std::iterator_traits<decltype(e)>::difference_type>(hi_unit));
+        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
+            c, m, b, e, w, k);
+    }
+}
+
+// DOC0276 — segment GEOMETRY. The MinimapSketchData position field is 28 bits
+// (MinimizerRepr<28,15>), so a segment's COLLECTED span — core + an overlap on
+// each side — must stay within that field, or the global position handed back by
+// `add_position_offset` would be silently masked by the packing ctor
+// (`pos_v & pos_field_mask`, index.cppm) and corrupt the seed. We cap the core at
+// 200 Mbp and each overlap at 30 Mbp; the static_assert ties both to the REAL
+// field width so neither can be bumped past 2^28 without a compile error.
+inline constexpr sequence_size_t kSegmentCoreMaxBp    = 200'000'000ull;  // core ceiling
+inline constexpr sequence_size_t kSegmentOverlapMaxBp =  30'000'000ull;  // per-side overlap ceiling
+inline constexpr sequence_size_t kSegmentMinBp        =  32'000'000ull;  // floor (keep batches useful)
+static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
+                  static_cast<sequence_size_t>(MinimapSketchData::pos_field_mask),
+              "segment collected span (core + 2*overlap) must fit "
+              "MinimapSketchData's 28-bit position field");
+
+// Choose a target-index SEGMENT size (bp) from the live memory budget. A full
+// minimizer index over an N-bp target costs ~6 B/bp at PEAK (collector vector
+// 8 B + flat_map bucket ~16 B/distinct + positions 8 B, all × density ~0.19).
+// On a 16 GB box a 6 Gbp full index (~37 GB) swaps; capping a segment to the
+// budget keeps the live index ~one segment, clamped to [kSegmentMinBp,
+// kSegmentCoreMaxBp].
+[[nodiscard]] inline sequence_size_t segment_bp_from_budget() noexcept {
+    constexpr std::uint64_t kBytesPerBp = 6;
+    const std::uint64_t budget = bioseq::memory::default_budget().allocatable_bytes();
+    // allocatable_bytes() == UINT64_MAX when the mach/POSIX probe is unavailable;
+    // dividing keeps it huge so the clamp yields kSegmentCoreMaxBp (the default).
+    const std::uint64_t by_budget = budget / kBytesPerBp;
+    const sequence_size_t want =
+        (by_budget > kSegmentCoreMaxBp) ? kSegmentCoreMaxBp
+                                        : static_cast<sequence_size_t>(by_budget);
+    return want < kSegmentMinBp ? kSegmentMinBp : want;
+}
+
 // ---------------------------------------------------------------------------
 // 8.0.2 MinimizerAlgorithmType kernel traits
 // ---------------------------------------------------------------------------
@@ -3032,6 +3117,126 @@ MatchResultCollection minimap_port(
         ::bioseq::simd::HWY_NAMESPACE::pipe::detail::kmer_size_step,
         ::bioseq::simd::HWY_NAMESPACE::pipe::detail::seq_len_log2_step_per_k
     >::template run<>(params, query_seq, target_seq);
+}
+
+/**
+ * @brief DOC0276 — memory-bounded recompute entry. Drop-in replacement for
+ * `minimap_port` on the production paths, sized for arbitrarily large targets
+ * on a fixed-RAM host.
+ *
+ * The non-segmented `minimap_port` builds ONE minimizer index over the whole
+ * target (~6 B/bp at peak → ~37 GB for 6 Gbp), which swaps a 16 GB box to death.
+ * This entry instead indexes the target in budget-sized SEGMENTS (≤200 Mbp core
+ * + overlap, sized by `bioseq::memory::default_budget()`), pinning the 8-byte
+ * `MinimapSketchData` minimizer (segment-local positions fit its 28-bit field).
+ * Each segment index is globalized (`TargetIndex::add_position_offset`) and run
+ * through the UNCHANGED `minimap2_port_with_index` against the FULL target, so
+ * chaining + DP alignment see correct global coordinates and stream the real
+ * target bytes. A result is kept only when its `target_start` lands in the
+ * segment's CORE — with overlap ≥ the longest match span, every alignment is
+ * fully indexed by exactly one segment, so there are no duplicates and no
+ * boundary-split partials. Per-segment index memory is freed each iteration, so
+ * the live footprint is ~one segment (~1.5 GB) regardless of target size.
+ *
+ * Limitation (documented): `max_occ` high-frequency-seed filtering is applied
+ * per-segment, so a k-mer whose genome-wide occurrences are split across
+ * segments can pass the filter in each. For low-repeat targets (the sample
+ * generator's near-random sequences) occurrences are ~uniform and well under
+ * `max_occ`, so anchors match the non-segmented path; a global pre-count would
+ * restore exact semantics for highly repetitive references (future work).
+ */
+template <supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+[[nodiscard]] MatchResultCollection minimap_port_segmented(
+    bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    const Minimap2Params& params = Minimap2Params{})
+{
+    using MinimizerT = MinimapSketchData;
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap_port_segmented");
+    auto _scope = bioseq::instr::region(_desc);
+
+    const std::size_t w = static_cast<std::size_t>(params.window_size);
+    const std::size_t k = static_cast<std::size_t>(params.kmer_size);
+    const sequence_size_t query_len  = query_seq.bp_size();
+    const sequence_size_t target_len = target_seq.bp_size();
+    if (query_len == 0 || target_len == 0) {
+        return MatchResultCollection{};
+    }
+
+    // (1) Sketch the query ONCE as MinimapSketchData (query < 2^28 bp; its
+    //     positions fit the 28-bit field). Same kmer hashing as the target, so
+    //     `collect_seed_hits` matches identically.
+    constexpr std::size_t q_lpu =
+        compact_sequence_range<QueryRange>::traits::letters_per_unit;
+    const sequence_size_t q_units = (query_len + q_lpu - 1) / q_lpu;
+    sketch_collector_t<MinimizerT> query_collector;
+    query_collector.reserve(query_len / std::max<std::size_t>(w, 1) + 64);
+    pipe::minimizer_dispatch_range<MinimizerT>(query_collector, query_seq, 0, q_units, w, k);
+    const std::vector<MinimizerT> query_minimizers =
+        std::move(query_collector).extract_sketches_data();
+
+    // (2) Segment the target. Overlap ≥ longest target match span so a match
+    //     starting in a segment core is fully indexed within that segment.
+    constexpr std::size_t lpu =
+        compact_sequence_range<TargetRange>::traits::letters_per_unit;
+    const sequence_size_t total_units = (target_len + lpu - 1) / lpu;
+    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
+    if (overlap_bp > pipe::kSegmentOverlapMaxBp) overlap_bp = pipe::kSegmentOverlapMaxBp;  // keep span < 2^28 (static_assert)
+    const sequence_size_t ovl_units = (overlap_bp + lpu - 1) / lpu;
+    sequence_size_t seg_units = pipe::segment_bp_from_budget() / lpu;
+    if (seg_units == 0) seg_units = 1;
+
+    std::vector<MatchResult> merged;
+    JustLogProgress("[minimap_port_segmented] target_len={} query_len={} seg_bp={} overlap_bp={} "
+                    "segments≈{} | footprint={}MB avail={}MB",
+            target_len, query_len, seg_units * lpu, overlap_bp,
+            (total_units + seg_units - 1) / seg_units,
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+
+    for (sequence_size_t lo_u = 0; lo_u < total_units; lo_u += seg_units) {
+        const sequence_size_t hi_u = std::min(lo_u + seg_units, total_units);
+        const sequence_size_t cs_u = (lo_u > ovl_units) ? (lo_u - ovl_units) : 0;
+        const sequence_size_t ce_u = std::min(hi_u + ovl_units, total_units);
+        const sequence_size_t cs_bp      = cs_u * lpu;
+        const sequence_size_t core_lo_bp = lo_u * lpu;
+        const sequence_size_t core_hi_bp = std::min(hi_u * lpu, target_len);
+
+        // Sketch only [cs_u, ce_u) target units; positions come out LOCAL to cs_bp.
+        sketch_collector_t<MinimizerT> seg_collector;
+        seg_collector.reserve((ce_u - cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+        pipe::minimizer_dispatch_range<MinimizerT>(seg_collector, target_seq, cs_u, ce_u, w, k);
+        std::vector<MinimizerT> seg_minimizers =
+            std::move(seg_collector).extract_sketches_data();
+
+        TargetIndex seg_index;
+        seg_index.build(seg_minimizers, target_len);
+        seg_index.add_position_offset(cs_bp);   // segment-local -> global
+
+        MatchResultCollection seg_res = minimap2_port_with_index(
+            query_seq, target_seq, query_minimizers, seg_index, params);
+
+        // Claim each match by exactly ONE segment (the one whose core contains
+        // its target_start). Overlap guarantees the match was fully indexed here.
+        for (auto& r : seg_res.results) {
+            if (r.target_start >= core_lo_bp && r.target_start < core_hi_bp) {
+                merged.push_back(std::move(r));
+            }
+        }
+        JustLogProgress("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
+                        "(merged {}) | footprint={}MB avail={}MB",
+                core_lo_bp, core_hi_bp,
+                merged.size(), seg_res.results.size(), merged.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+        // seg_index + seg_minimizers freed here.
+    }
+
+    return MatchResultCollection{std::move(merged)};
 }
 
 } // namespace bioseq::simd::HWY_NAMESPACE

@@ -101,5 +101,18 @@
 // background poll thread runs as soon as the producer enqueues), so we
 // simply enqueue and let the consumer drain.
 #define JustLog(...) if(enable_logging) { logd(__VA_ARGS__); }
+// Progress log (DOC0276). Same gating as JustLog (`enable_logging` only — it is
+// NOT compiled out by FMTLOG_ACTIVE_LEVEL or NDEBUG), but additionally DRAINS
+// the fmtlog SPSC queue synchronously via `poll(true)`. The PostgreSQL
+// extension never starts fmtlog's background poll thread, so a plain `JustLog`
+// only reaches the log file when the backend exits (and is lost on crash) —
+// useless for watching a long-running mmsearch. `JustLogProgress` flushes the
+// message (and everything queued before it) to the log file immediately, so a
+// `tail -f /tmp/bioseq_loglog.log` shows live phase/heartbeat progress. Reserve
+// it for low-frequency milestones/heartbeats: each call costs one drain+fwrite,
+// which would dominate a hot loop. `poll(true)` is safe to call from the
+// producer (single-threaded backend) — it is the standard single-thread
+// fmtlog usage.
+#define JustLogProgress(...) if(enable_logging) { logd(__VA_ARGS__); fmtlog::poll(true); }
 #define NJustLog(...) if(enable_logging) { elog(NOTICE, fmt::format(__VA_ARGS__).c_str()); }
 #define nodeStr(X) ""

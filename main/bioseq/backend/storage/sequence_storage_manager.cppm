@@ -1389,6 +1389,13 @@ sequence_storage_manager<L, M, X>::fetch_payload(
     }
 
     for (std::uint32_t fragment_no = 1; fragment_no < loc.num_fragments; ++fragment_no) {
+        // DOC0276 — full-hydration of a multi-Gbp target into one varlena walks
+        // tens of thousands of fragment rows. Make it cancellable and observable.
+        CHECK_FOR_INTERRUPTS();
+        if (enable_logging && (fragment_no & 0x3FFF) == 0) {
+            JustLogProgress("[fetch_payload] hydrated {}/{} fragments",
+                            fragment_no, loc.num_fragments);
+        }
         const std::uint64_t row_no = loc.first_sub_row_no + fragment_no;
         Datum vals[1]  = { 0 };
         bool  nulls[1] = { true };

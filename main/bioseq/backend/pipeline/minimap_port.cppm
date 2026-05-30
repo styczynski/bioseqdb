@@ -539,8 +539,11 @@ struct TargetIndex {
             ++iter->second;
         }
 
-        JustLog("[minimap_port] Built target index: {} distinct minimizers from {} total",
-                table.size(), target_minimizers.size());
+        JustLogProgress("[minimap_port] Built target index: {} distinct minimizers from {} total"
+                " | positions={} footprint={}MB avail={}MB",
+                table.size(), target_minimizers.size(), positions.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
     }
 
     [[nodiscard]] std::span<const uint64_t> lookup(uint64_t kmer_hash) const {
@@ -552,6 +555,24 @@ struct TargetIndex {
         const uint32_t off    = static_cast<uint32_t>(packed >> 32);
         const uint32_t count  = static_cast<uint32_t>(packed);
         return std::span<const uint64_t>(positions.data() + off, count);
+    }
+
+    // DOC0276 — segmented indexing support. The positions array holds
+    // `pos_strand_encoded()` = `(last_pos << 1) | strand`. When this index was
+    // built over a target SEGMENT collected from a sub-range starting at global
+    // bp `offset`, every `last_pos` is LOCAL to the segment; add `offset` to
+    // each to make the index report GLOBAL target coordinates. The positions
+    // array is `uint64_t` (full width — independent of the 28-bit MinimapSketchData
+    // collection field), so a global position up to 2^63 round-trips here. The
+    // kmer table is untouched (lookups still hit). O(positions) one-shot pass,
+    // run once per segment build.
+    void add_position_offset(sequence_size_t offset) {
+        if (offset == 0) return;
+        for (uint64_t& encoded : positions) {
+            const uint64_t pos    = (encoded >> 1) + static_cast<uint64_t>(offset);
+            const uint64_t strand = encoded & 1ULL;
+            encoded = (pos << 1) | strand;
+        }
     }
 
     [[nodiscard]] sequence_size_t target_length() const { return target_len; }
@@ -908,8 +929,11 @@ void collect_seed_hits(
         AnchorRefBitsKey{});
     }  // end collect_seed_hits_sort scope
 
-    JustLog("[minimap_port] Collected {} seed anchors from {} query minimizers",
-            anchors_out.size(), query_minimizers.size());
+    JustLogProgress("[minimap_port] Collected {} seed anchors from {} query minimizers"
+            " | footprint={}MB avail={}MB",
+            anchors_out.size(), query_minimizers.size(),
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
 }
 
 // ============================================================================
@@ -1078,7 +1102,10 @@ void generate_regions(
         set_region_coordinates(region, anchors, query_len);
     }
 
-    JustLog("[minimap_port] Generated {} alignment regions", regions_out.size());
+    JustLogProgress("[minimap_port] Generated {} alignment regions | footprint={}MB avail={}MB",
+            regions_out.size(),
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
 }
 
 // ============================================================================
@@ -1659,7 +1686,27 @@ void align_regions(
     const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange, Scanner> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
+    // DOC0276 — liveness heartbeat. A single big region (many gap-fills over a
+    // multi-Mbp seed span) can dominate wall-clock; the per-phase milestones
+    // alone would show a long silence with no sign of progress. Emit (and flush)
+    // a heartbeat at most ~once/second so `tail -f` of the log shows which
+    // region index is in flight and the live footprint. Gated on enable_logging
+    // so production pays only the loop counter.
+    std::int64_t hb_last_ns = enable_logging ? bioseq::instr::clock::now_ns() : 0;
+    std::size_t  hb_region_idx = 0;
     for (auto& region : regions) {
+        ++hb_region_idx;
+        if (enable_logging) {
+            const std::int64_t hb_now_ns = bioseq::instr::clock::now_ns();
+            if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
+                hb_last_ns = hb_now_ns;
+                JustLogProgress("[minimap_port] aligning region {}/{} seed_count={}"
+                        " | footprint={}MB avail={}MB",
+                        hb_region_idx, regions.size(), region.seed_count,
+                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            }
+        }
         if (region.seed_count <= 0) {
             continue;
         }
@@ -1799,7 +1846,10 @@ void align_regions(
         }
     }
 
-    JustLog("[minimap_port] Aligned {} regions", regions.size());
+    JustLogProgress("[minimap_port] Aligned {} regions | footprint={}MB avail={}MB",
+            regions.size(),
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
 }
 
 // ============================================================================

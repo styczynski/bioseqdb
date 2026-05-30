@@ -28,13 +28,17 @@ export import bioseq_instr.pmu;
 export import bioseq_instr.sampler;
 export import bioseq_instr.detail.summary_writer;
 
+// DOC0276 — the system-memory probe (process footprint / available / total)
+// is part of the public surface: the production extension and the bench
+// MemoryBudget both consult it, so it is exported rather than detail-private.
+export import bioseq_instr.detail.sysinfo;
+
 // Detail modules — imported (not exported) so the symbols they declare
 // are reachable inside bioseq_instr translation units without leaking
 // into callers that just write `import bioseq_instr;`.
 import bioseq_instr.detail.siglock;
 import bioseq_instr.detail.spinlock;
 import bioseq_instr.detail.arch;
-import bioseq_instr.detail.sysinfo;
 import bioseq_instr.detail.do_not_optimize;
 import bioseq_instr.pmu.linux;
 import bioseq_instr.pmu.macos;

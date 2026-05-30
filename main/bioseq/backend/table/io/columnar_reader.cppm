@@ -1751,7 +1751,23 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64_t chunkIndex,
 
 			/* decompress and deserialize current chunk's data */
 			StringInfo valueBuffer = NULL;
-			
+			// DOC0276 — does THIS chunk read OWN `valueBuffer` (a fresh
+			// decompressed/cached copy the free path may pfree), or is it the
+			// SHARED raw stripe buffer (owned by LoadColumnBuffers, alive for the
+			// whole stripe read)? `DecompressBuffer` returns the raw buffer as-is
+			// for COMPRESSION_NONE; the legacy code then repalloc'd it and stored
+			// it for `FreeChunkBufferValueArray` to pfree after the chunk read —
+			// which moves and then frees the shared raw buffer, leaving
+			// `chunkBuffers->valueBuffer` dangling. Any later RE-READ of the same
+			// chunk group then dereferences freed memory → SIGSEGV. This is
+			// invisible to a single forward pass (each chunk read once) but fatal
+			// the moment a reader revisits a chunk group: the segmented recompute
+			// path (DOC0276) does so via its overlap (backward chunk-group
+			// transitions at segment boundaries), and any random-access reader can
+			// too. So for the NONE / non-cached case use the raw buffer in place
+			// and never hand it to the free path.
+			bool valueBufferOwned = true;
+
 			if (shouldCache)
 			{
 				valueBuffer = static_cast<StringInfo>(ColumnarRetrieveCache(state->relation->rd_id, stripeId, chunkIndex, columnIndex));
@@ -1759,26 +1775,35 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64_t chunkIndex,
 
 			if (valueBuffer == NULL)
 			{
-				MemoryContext oldMemoryContext;
-				if (shouldCache)
+				if (chunkBuffers->valueCompressionType == COMPRESSION_NONE && !shouldCache)
 				{
-					oldMemoryContext = MemoryContextSwitchTo(ColumnarCacheMemoryContext());
+					/* Shared raw stripe buffer — use in place; do NOT repalloc or free it. */
+					valueBuffer = chunkBuffers->valueBuffer;
+					valueBufferOwned = false;
 				}
-
-				valueBuffer = DecompressBuffer(chunkBuffers->valueBuffer,
-								 chunkBuffers->valueCompressionType,
-								 chunkBuffers->decompressedValueSize);
-
-				valueBuffer = static_cast<StringInfo>(repalloc(valueBuffer, sizeof(cached_StringInfo)));
-				reinterpret_cast<cached_StringInfo *>(valueBuffer)->cached = false;
-
-				if (shouldCache)
+				else
 				{
+					MemoryContext oldMemoryContext;
+					if (shouldCache)
+					{
+						oldMemoryContext = MemoryContextSwitchTo(ColumnarCacheMemoryContext());
+					}
 
-					reinterpret_cast<cached_StringInfo *>(valueBuffer)->cached = true;
+					valueBuffer = DecompressBuffer(chunkBuffers->valueBuffer,
+									 chunkBuffers->valueCompressionType,
+									 chunkBuffers->decompressedValueSize);
 
-					ColumnarAddCacheEntry(state->relation->rd_id, stripeId, chunkIndex, columnIndex, valueBuffer);
-					MemoryContextSwitchTo(oldMemoryContext);
+					valueBuffer = static_cast<StringInfo>(repalloc(valueBuffer, sizeof(cached_StringInfo)));
+					reinterpret_cast<cached_StringInfo *>(valueBuffer)->cached = false;
+
+					if (shouldCache)
+					{
+
+						reinterpret_cast<cached_StringInfo *>(valueBuffer)->cached = true;
+
+						ColumnarAddCacheEntry(state->relation->rd_id, stripeId, chunkIndex, columnIndex, valueBuffer);
+						MemoryContextSwitchTo(oldMemoryContext);
+					}
 				}
 			}
 
@@ -1790,8 +1815,9 @@ DeserializeChunkData(StripeBuffers *stripeBuffers, uint64_t chunkIndex,
 								  attributeForm->attlen, attributeForm->attalign,
 								  chunkData->valueArray[columnIndex]);
 
-			/* store current chunk's data buffer to be freed at next chunk read */
-			chunkData->valueBufferArray[columnIndex] = valueBuffer;
+			/* store current chunk's data buffer to be freed at next chunk read —
+			 * NEVER the shared raw stripe buffer (see valueBufferOwned above). */
+			chunkData->valueBufferArray[columnIndex] = valueBufferOwned ? valueBuffer : NULL;
 		}
 		else if (columnAdded)
 		{
