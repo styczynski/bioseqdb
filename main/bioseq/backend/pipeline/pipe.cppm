@@ -3191,6 +3191,13 @@ template <supports_compact_sequence_range QueryRange,
     if (seg_units == 0) seg_units = 1;
 
     std::vector<MatchResult> merged;
+    // DOC0277 — HOIST the per-segment collector + index out of the loop so the
+    // ~280 MB sketch buffer and the ~0.5–1 GB index (table + positions) are
+    // allocated once and REUSED across all segments (clear() retains capacity;
+    // TargetIndex::build clears, not frees). Previously each of the ~30 segments
+    // of a 6 Gbp target malloc'd/freed ~1 GB, a hidden per-segment allocator tax.
+    sketch_collector_t<MinimizerT> seg_collector;
+    TargetIndex seg_index;
     JustLogProgress("[minimap_port_segmented] target_len={} query_len={} seg_bp={} overlap_bp={} "
                     "segments≈{} | footprint={}MB avail={}MB",
             target_len, query_len, seg_units * lpu, overlap_bp,
@@ -3207,13 +3214,16 @@ template <supports_compact_sequence_range QueryRange,
         const sequence_size_t core_hi_bp = std::min(hi_u * lpu, target_len);
 
         // Sketch only [cs_u, ce_u) target units; positions come out LOCAL to cs_bp.
-        sketch_collector_t<MinimizerT> seg_collector;
+        // DOC0277 — reuse the hoisted collector/index: clear() keeps the sketch
+        // buffer's capacity; extract via the const& overload (NOT std::move) so the
+        // collector retains its storage; build() copies into its own thread_local
+        // sort scratch, so this const ref stays valid and the collector is reusable.
+        seg_collector.clear();
         seg_collector.reserve((ce_u - cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
         pipe::minimizer_dispatch_range<MinimizerT>(seg_collector, target_seq, cs_u, ce_u, w, k);
-        std::vector<MinimizerT> seg_minimizers =
-            std::move(seg_collector).extract_sketches_data();
+        const std::vector<MinimizerT>& seg_minimizers =
+            seg_collector.extract_sketches_data();
 
-        TargetIndex seg_index;
         seg_index.build(seg_minimizers, target_len);
         seg_index.add_position_offset(cs_bp);   // segment-local -> global
 

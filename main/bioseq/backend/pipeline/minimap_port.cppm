@@ -491,52 +491,57 @@ struct TargetIndex {
             return;
         }
 
-        // Pass 1: bump per-kmer count. The packed value temporarily holds
-        //         count in the low 32 bits and 0 in the high 32 bits; the
-        //         sentinel offset value is rewritten in pass 2.
-        table.reserve(total);
-        for (const auto& minimizer : target_minimizers) {
-            ++table[minimizer.kmer()];
-        }
+        // DOC0277 — radix-sort-then-bin build (replaces the legacy
+        // count-then-scatter, which did ~2*total RANDOM hash probes — one
+        // `++table[kmer]` insert pass + one `table.find(kmer)` scatter pass —
+        // into a `reserve(total)`-oversized open-addressing map; on a ~213 Mbp
+        // segment that is ~80M random probes into a ~0.5–1 GB table, almost all
+        // cache/TLB misses, and was the dominant non-collection cost of the
+        // per-segment build). Sorting the minimizers by kmer groups equal kmers
+        // contiguously, so the table takes ONE insert per DISTINCT kmer and the
+        // positions array is filled by a single SEQUENTIAL scan — minimap2's
+        // `worker_post` (radix_sort + bucketed khash) strategy. Within-kmer
+        // position order is irrelevant: `collect_seed_hits` re-radix-sorts the
+        // produced anchors by `ref_bits` (minimap_port.cppm collect_seed_hits_sort),
+        // so the claimed-match set is byte-identical to the old build (validated
+        // by the §C in_memory↔scanner_pg parity + truth checks).
+        //
+        // The sort needs mutable storage; `build` keeps its `const&` signature
+        // (the `TargetIndexLike` concept + `minimap2_port` pass const), so we
+        // copy into a `thread_local` scratch that is REUSED across segments
+        // (one backend = one thread; no per-segment scratch (re)allocation —
+        // pairs with the hoisted `TargetIndex`/collector in minimap_port_segmented).
+        struct KmerKey {
+            [[nodiscard, gnu::always_inline]]
+            std::uint64_t operator()(const MinimizerT& m) const noexcept { return m.kmer(); }
+        };
+        static thread_local std::vector<MinimizerT> sorted_scratch;
+        sorted_scratch.assign(target_minimizers.begin(), target_minimizers.end());
+        bioseq::sorting::radix_sort(
+            sorted_scratch.data(), sorted_scratch.data() + total, KmerKey{});
 
-        // Pass 2: convert per-kmer counts into a (offset, cursor) pair —
-        // the high 32 bits hold the bucket's base offset and the low 32 bits
-        // are pre-zeroed to act as a per-kmer write cursor for Pass 3. The
-        // legacy code wrote `(offset << 32) | count` here and then needed a
-        // separate sweep to clear the low 32 bits before Pass 3; since
-        // Pass 3 doesn't consult the count and only ever writes the cursor,
-        // we just emit `offset << 32` directly and drop the prep sweep.
-        // (After Pass 3 the cursor naturally lands at `count`, which is
-        // what `lookup()` reads back.)
         positions.resize(total);
-        uint32_t running_offset = 0;
-        for (auto& kv : table) {
-            const uint32_t count = static_cast<uint32_t>(kv.second);
-            kv.second = static_cast<uint64_t>(running_offset) << 32;
-            running_offset += count;
-        }
-
-        // Pass 3: write each minimizer into its bucket using a per-kmer
-        // "next-free" cursor stashed in the low 32 bits. Each iteration:
-        //   * derive the encoded position (last_pos << 1) | strand from
-        //     `pos_strand_encoded()` — for the canonical 64-bit layout
-        //     this is one masked load (`value & ~hash_mask`); for the
-        //     128-bit fallback it's the low half;
-        //   * fetch the bucket's (base_offset, cursor) pair via one hash
-        //     map probe;
-        //   * splat into positions[base_offset + cursor] and bump cursor.
-        // The bucket entry now stores `(base_offset << 32) | (cursor+1)`;
-        // a single `++iter->second` works because the cursor occupies the
-        // low 32 bits and a unsigned-32 count cannot overflow into the
-        // base_offset region for any realistic genome.
-        for (const auto& minimizer : target_minimizers) {
-            const uint64_t encoded_position = minimizer.pos_strand_encoded();
-            auto iter = table.find(minimizer.kmer());
-            const uint64_t packed = iter->second;
-            const uint32_t base_offset = static_cast<uint32_t>(packed >> 32);
-            const uint32_t cursor      = static_cast<uint32_t>(packed);
-            positions[base_offset + cursor] = encoded_position;
-            ++iter->second;
+        // Distinct-kmer count is unknown until the scan, but density is ~0.19
+        // (most kmers distinct within a segment): reserving `total` rounds the
+        // open-addressing table up to the next power of two (~2x slots) and
+        // wastes ~half as cache-cold capacity. `total/2` lands one power-of-two
+        // bucket lower while still holding the realised distinct count.
+        table.reserve(total / 2 + 16);
+        std::size_t i = 0;
+        while (i < total) {
+            const std::uint64_t kmer = sorted_scratch[i].kmer();
+            std::size_t j = i;
+            while (j < total && sorted_scratch[j].kmer() == kmer) {
+                positions[j] = sorted_scratch[j].pos_strand_encoded();
+                ++j;
+            }
+            // lookup() reads (packed>>32)=offset, (packed&0xFFFFFFFF)=count and
+            // returns positions[offset, offset+count). Sorted layout => the run
+            // [i,j) IS that contiguous slice.
+            table.emplace(kmer,
+                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(i)) << 32)
+                | static_cast<std::uint64_t>(static_cast<std::uint32_t>(j - i)));
+            i = j;
         }
 
         JustLogProgress("[minimap_port] Built target index: {} distinct minimizers from {} total"
