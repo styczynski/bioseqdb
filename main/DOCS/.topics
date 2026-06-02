@@ -1,6 +1,6 @@
+ai-collab
 aligner
 aligner-improve
-ai-collab
 bench-framework
 bench-papers
 benchmarking-speedup
@@ -35,8 +35,8 @@ minimizer
 minimizer-simd
 minimizer-speedup
 minimizer-storage
-mmseqs2
 mm-fast
+mmseqs2
 nthash
 paradedb
 perf-load-store
@@ -47,11 +47,12 @@ profiling
 seal
 setup
 sidecar
-simdjson
 simd-sort
+simdjson
 sneaky-snake
+storage
 template-pipeline
-tests
 testing
+tests
 todo
 viewer
