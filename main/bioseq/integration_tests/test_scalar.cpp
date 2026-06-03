@@ -1,9 +1,9 @@
 // Integration scenarios:
 //   * Calling bioseq SQL functions directly on literals (no table) hits the
 //     scalar path of every projection helper.
-//   * `bioseq.symbol_count` on a literal returns the POC-hardcoded value
-//     for rank-0 letters and the "other" value for everything else, with
-//     vectorisation toggled either way (parity check against the SIMD path).
+//   * DOC0279 §12.5: `bioseq.symbol_count` on a literal returns the REAL
+//     per-rank tally (tally_symbol_counts) — NOT the deleted 49-stub — with
+//     vectorisation toggled either way.
 //   * `bioseq.len` / `bioseq.unit_len` on the empty sequence return 0 and
 //     do not error out under any width.
 
@@ -12,7 +12,8 @@ import integration_tests.common;
 
 using namespace bioseq_int_tests;
 
-TEST_CASE("bioseq.symbol_count over a literal stays at the POC value across vectorization",
+// Real tally of 'CTAGTCACTGTAGCCTGATCGTAGCTAGT' (29 bp): A=6, C=7, G=7, T=9.
+TEST_CASE("bioseq.symbol_count over a literal returns the real tally across vectorization",
           "[scalar][symbol_count]") {
     auto ctx = fresh_context();
     const auto reference = expect_invariant_under_guc_toggle(
@@ -22,8 +23,7 @@ TEST_CASE("bioseq.symbol_count over a literal stays at the POC value across vect
         "bioseq.enable_vectorization");
     REQUIRE(reference.size() == 1);
     REQUIRE(reference.front().size() == 1);
-    REQUIRE(std::stoll(reference.front().front().value()) ==
-            kSymbolCountPocFor_A);
+    REQUIRE(std::stoll(reference.front().front().value()) == 6);  // real A count
 }
 
 TEMPLATE_TEST_CASE_SIG(
@@ -41,8 +41,8 @@ TEMPLATE_TEST_CASE_SIG(
     REQUIRE(row[1].value() == "0");
 }
 
-TEST_CASE("bioseq.symbol_count returns 0 for non-rank-0 letters in this POC",
-          "[scalar][symbol_count][poc]") {
+TEST_CASE("bioseq.symbol_count returns the real per-letter tally for C/G/T",
+          "[scalar][symbol_count]") {
     auto ctx = fresh_context();
     const auto row = query_one(
         ctx,
@@ -52,7 +52,7 @@ TEST_CASE("bioseq.symbol_count returns 0 for non-rank-0 letters in this POC",
         "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'G'), "
         "       bioseq.symbol_count("
         "    'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32), 'T');");
-    REQUIRE(std::stoll(row[0].value()) == kSymbolCountPocOther);
-    REQUIRE(std::stoll(row[1].value()) == kSymbolCountPocOther);
-    REQUIRE(std::stoll(row[2].value()) == kSymbolCountPocOther);
+    REQUIRE(std::stoll(row[0].value()) == 7);  // C
+    REQUIRE(std::stoll(row[1].value()) == 7);  // G
+    REQUIRE(std::stoll(row[2].value()) == 9);  // T
 }

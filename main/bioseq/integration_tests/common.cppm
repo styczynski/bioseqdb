@@ -42,11 +42,9 @@ inline void parametrise_scanner_combinations(TestBody&& body) {
     body.template operator()<chunked_1>("scanner_chunked_1");
 }
 
-// POC `count_symbols()` returns 49 for rank-0 letters (A on dna4, A on dna5)
-// and 0 for everything else. Exposed here so every test references the same
-// magic value; replace this constant when the real counter lands.
-export constexpr long long kSymbolCountPocFor_A = 49;
-export constexpr long long kSymbolCountPocOther = 0;
+// DOC0279 §17 — the POC `count_symbols()` 49-stub is deleted; symbol_count now
+// returns the real per-rank tally (tally_symbol_counts). Tests assert the real
+// goldens directly (e.g. 'ACGTACGTACGTACGT' -> A=C=G=T=4).
 
 // Wraps a single libpq PGconn (via sqlgen's PostgresV2Connection) for raw SQL
 // against the bioseq Postgres extension. Tests build their state from raw SQL
@@ -377,7 +375,13 @@ export inline void reset_extension(const connection_test_context& ctx,
     for (const auto& table : tables) {
         exec_sqlf(ctx, "DROP TABLE IF EXISTS {} CASCADE;", table);
     }
+    // DOC0279 §16.2 — pinned reset order. DROP EXTENSION, then DROP the two
+    // schemas CASCADE so every lazily-created seqidx_*/seqidxtab_* table and
+    // catalog row is gone, then CREATE EXTENSION re-creates the catalogs empty.
+    // No trailing TRUNCATE / drop_all_index_tables() reaper is needed.
     exec_sql(ctx, "DROP EXTENSION IF EXISTS bioseq CASCADE;");
+    exec_sql(ctx, "DROP SCHEMA IF EXISTS bioseq_internal CASCADE;");
+    exec_sql(ctx, "DROP SCHEMA IF EXISTS bioseq CASCADE;");
     exec_sql(ctx, "CREATE EXTENSION bioseq;");
     // GUC reset: a previous test may have left bioseq.enable_vectorization
     // off etc.; the explicit names cover everything reachable from the
@@ -397,18 +401,6 @@ export inline void reset_extension(const connection_test_context& ctx,
         (void)sqlgen::postgres::PostgresV2Result::make(
             fmt::format("RESET {};", guc), ctx.raw());
     }
-    // Stale sidecar rows from dropped relids leak — the index/meta tables
-    // live in the extension and survive DROP TABLE CASCADE on the user's
-    // table. Truncate so per-test row counts start at 0. metadata_age_log
-    // is in the same boat: a row written by the previous test under a
-    // since-recycled OID would skew bioseq.list_metadata() age values.
-    // DOC0260 Phase A: seq_sub_table also lives in the extension and may
-    // carry orphan rows from the previous test's relfilenodes.
-    exec_sql(ctx,
-             "TRUNCATE bioseq_internal.index_sidecar, "
-             "        bioseq_internal.meta_sidecar, "
-             "        bioseq_internal.metadata_age_log, "
-             "        bioseq_internal.seq_sub_table;");
 }
 
 // Same as the span overload, but accepts an initializer list so callers can
@@ -428,17 +420,42 @@ export [[nodiscard]] inline connection_test_context fresh_context(
     return ctx;
 }
 
-// Counts rows in the named bioseq_internal sidecar table for a given user
-// relation. Used by sidecar-population tests.
-export [[nodiscard]] inline long long count_sidecar(
-    const connection_test_context& ctx, std::string_view sidecar_name,
+// DOC0279 §16.2 — libpq wrappers over the new admin/test SQL surface. They
+// replace the deleted count_sidecar() (which keyed on the removed index_sidecar
+// / meta_sidecar tables).
+
+// Total chunk rows of one index across its derived seqidx_* shards.
+export [[nodiscard]] inline long long index_table_row_count(
+    const connection_test_context& ctx, std::string_view index_name,
     std::string_view user_table) {
-    return std::stoll(query_scalar(
-        ctx,
-        fmt::format("SELECT COUNT(*)::bigint "
-                    "  FROM bioseq_internal.{} "
-                    " WHERE user_relid = '{}'::regclass;",
-                    sidecar_name, user_table)));
+    return query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.index_table_row_count('{}'::regclass, '{}')",
+        user_table, index_name));
+}
+
+// Distinct sub_key count for ONE query_key across an index's shards (the
+// per-sequence "is this row fully indexed" check).
+export [[nodiscard]] inline long long index_distinct_sub_keys(
+    const connection_test_context& ctx, std::string_view index_name,
+    std::string_view user_table, long long query_key) {
+    return query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.index_distinct_sub_keys('{}'::regclass, '{}', {})",
+        user_table, index_name, query_key));
+}
+
+// Resolve a row's COLUMNAR rowno (== index query_key) from its ctid.
+export [[nodiscard]] inline long long columnar_row_number_for_ctid(
+    const connection_test_context& ctx, std::string_view user_table,
+    std::string_view ctid_literal) {
+    return query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.columnar_row_number('{}'::regclass, '{}'::tid)",
+        user_table, ctid_literal));
+}
+
+// Backend-local spilled-run count of the most recent minimizers_per_sequence build.
+export [[nodiscard]] inline long long last_index_merge_run_count(
+    const connection_test_context& ctx) {
+    return query_scalar_int(ctx, "SELECT bioseq.last_index_merge_run_count()");
 }
 
 // Encodes the supported (alphabet, width) typmod values.

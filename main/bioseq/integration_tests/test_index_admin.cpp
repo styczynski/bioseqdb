@@ -1,19 +1,27 @@
-// Integration scenarios for the metadata-admin SQL surface
-// (bioseq.list_metadata + bioseq.update_index):
-//   * list_metadata enumerates the two default kinds (minimizers,
-//     symbol_counts) for a freshly-seeded USING bioseq table, with the
-//     expected (mode, insert_support) shape.
-//   * size and age columns are populated for kinds that have rows.
-//   * update_index('minimizers') backfills index_sidecar after a bulk load
-//     done with bioseq.update_index_on_insert = off.
-//   * update_index returns the count of entries written.
-//   * update_index is idempotent: running it twice produces the same row
-//     count and the same blob bytes.
-//   * update_index('NOT_A_KIND') raises (caught via sql_fails — the
-//     server-side message is "unknown metadata kind").
-//   * update_index updates bioseq_internal.metadata_age_log.
-//   * list_metadata returns no rows for a relation whose sidecars have
-//     been emptied.
+// Integration scenarios for the DOC0279 metadata-admin SQL surface
+// (bioseq.list_metadata + bioseq.update_index + bioseq.set_index_policy):
+//   * list_metadata enumerates the three PRODUCTION index kinds
+//     (minimizers_per_fragment, symbol_counts, minimizers_per_sequence) for a
+//     freshly-created USING bioseq table, NOT gated on data: every index
+//     appears with size='0 bytes' and a NULL age, carrying its registered
+//     (index_type, update_policy).
+//   * update_index('minimizers_per_fragment') (re)builds the per-fragment
+//     chunk index for every bioseq.seq column of every row and returns the
+//     count of sequences (re)indexed.
+//   * update_index rejects an unknown index name, and rejects non-bioseq-AM
+//     (heap) tables.
+//   * update_index accepts the table argument as quoted text or as an
+//     explicit ::regclass cast.
+//   * set_index_policy toggles a kind's update_policy (visible through
+//     list_metadata) and refuses UPDATE_ON_INSERT on the ineligible
+//     minimizers_per_sequence kind.
+//   * update_index is idempotent at the content level (stable chunk row
+//     count across repeated calls) and returns 0 on an empty table while
+//     list_metadata still lists the kinds.
+//
+// The legacy index_sidecar / meta_sidecar tables and count_sidecar() helper
+// are DELETED; row-count assertions go through the new
+// bioseq.index_table_row_count() libpq wrapper (index_table_row_count()).
 
 #include "common_tests_integration.h"
 import integration_tests.common;
@@ -26,147 +34,75 @@ constexpr std::string_view kTable = "test_index_admin_t";
 
 }  // namespace
 
-TEST_CASE("list_metadata enumerates default kinds for a seeded table",
+TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq table",
           "[index_admin][list]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    // No inserts: list_metadata is NOT gated on data, so every registered
+    // index must already appear for the fresh table.
+    exec_sqlf(ctx,
+              "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) "
+              "USING bioseq;",
+              kTable);
 
+    // Filter out the test-only CHUNKED_PER_TABLE 'test_table_rowcount' index
+    // (only present under -DBIOSEQ_TEST_INDEXES) so the assertion pins exactly
+    // the three production kinds regardless of how the dylib was built.
     const auto rows = query_rows(
         ctx,
-        fmt::format("SELECT name, mode, insert_support "
+        fmt::format("SELECT name, index_type, update_policy, size, (age IS NULL) "
                     "  FROM bioseq.list_metadata() "
                     " WHERE table_name = '{}'::regclass "
+                    "   AND name <> 'test_table_rowcount' "
                     " ORDER BY name;",
                     kTable));
-    REQUIRE(rows.size() == 2);
-    REQUIRE(rows[0].size() == 3);
-    REQUIRE(rows[0][0].value() == "minimizers");
-    REQUIRE(rows[0][1].value() == "PER_ROW");
-    REQUIRE(rows[0][2].value() == "t");
-    REQUIRE(rows[1].size() == 3);
-    REQUIRE(rows[1][0].value() == "symbol_counts");
-    REQUIRE(rows[1][1].value() == "PER_ROW");
-    REQUIRE(rows[1][2].value() == "t");
+
+    REQUIRE(rows.size() == 3);
+
+    // Sorted by name: minimizers_per_fragment, minimizers_per_sequence,
+    // symbol_counts.
+    REQUIRE(rows[0].size() == 5);
+    REQUIRE(rows[0][0].value() == "minimizers_per_fragment");
+    REQUIRE(rows[0][1].value() == "CHUNKED_PER_FRAGMENT");
+    REQUIRE(rows[0][2].value() == "UPDATE_ON_INSERT");
+    REQUIRE(rows[0][3].value() == "0 bytes");
+    REQUIRE(rows[0][4].value() == "t");  // age IS NULL
+
+    REQUIRE(rows[1].size() == 5);
+    REQUIRE(rows[1][0].value() == "minimizers_per_sequence");
+    REQUIRE(rows[1][1].value() == "CHUNKED_PER_FRAGMENT");
+    REQUIRE(rows[1][2].value() == "UPDATE_MANUALLY");
+    REQUIRE(rows[1][3].value() == "0 bytes");
+    REQUIRE(rows[1][4].value() == "t");
+
+    REQUIRE(rows[2].size() == 5);
+    REQUIRE(rows[2][0].value() == "symbol_counts");
+    REQUIRE(rows[2][1].value() == "INLINE_PER_SEQUENCE");
+    REQUIRE(rows[2][2].value() == "UPDATE_ON_INSERT");
+    REQUIRE(rows[2][3].value() == "0 bytes");
+    REQUIRE(rows[2][4].value() == "t");
 }
 
-TEST_CASE("list_metadata size and age columns are populated for seeded kinds",
-          "[index_admin][list]") {
-    auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
-
-    // The age-log throttle in sidecar_after_insert means the first INSERT
-    // in a 60-second window writes the row eagerly. seed_small_columnar
-    // performs three INSERTs through that path, so by the time we read
-    // back, both kinds have an age-log row.
-    const auto rows = query_rows(
-        ctx,
-        fmt::format("SELECT name, "
-                    "       size IS NOT NULL AS has_size, "
-                    "       age IS NOT NULL AS has_age "
-                    "  FROM bioseq.list_metadata() "
-                    " WHERE table_name = '{}'::regclass "
-                    " ORDER BY name;",
-                    kTable));
-    REQUIRE(rows.size() == 2);
-    for (const auto& row : rows) {
-        REQUIRE(row.size() == 3);
-        REQUIRE(row[1].value() == "t");   // size populated
-        REQUIRE(row[2].value() == "t");   // age populated
-    }
-}
-
-TEST_CASE("update_index('minimizers') backfills after GUC=off bulk load",
+TEST_CASE("update_index('minimizers_per_fragment') builds the per-fragment index",
           "[index_admin][update][backfill]") {
     auto ctx = fresh_context({kTable});
-
-    // Bulk load with the GUC off — neither sidecar populates incrementally.
-    // We can't reuse seed_small_columnar here because that helper sets
-    // bioseq.update_index_on_insert = on internally, which would defeat
-    // the scope. Build the same shape (3 dna4/32 rows) by hand.
-    exec_sqlf(ctx, "SET bioseq.update_index_on_insert = off;");
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 32},
-            .seq_columns = 1,
-            .using_bioseq = true,
-        },
-        {
-            seq_row{.pk = 1, .sequences = {"ACGTACGTACGTACGT"}},
-            seq_row{.pk = 2, .sequences = {"TTTTAAAAGGGGCCCC"}},
-            seq_row{.pk = 3, .sequences = {"AAAAAAAAAAAAAAAA"}},
-        });
-    exec_sqlf(ctx, "RESET bioseq.update_index_on_insert;");
-
-    REQUIRE(count_sidecar(ctx, "index_sidecar", kTable) == 0);
-    REQUIRE(count_sidecar(ctx, "meta_sidecar",  kTable) == 0);
-
-    const auto written = query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
-                    kTable));
-    REQUIRE(written == 3);
-    REQUIRE(count_sidecar(ctx, "index_sidecar", kTable) == 3);
-    // Updating one kind must not touch the other kind's sidecar.
-    REQUIRE(count_sidecar(ctx, "meta_sidecar", kTable) == 0);
-
-    // Symmetric backfill for symbol_counts.
-    const auto written_meta = query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'symbol_counts');",
-                    kTable));
-    REQUIRE(written_meta == 3);
-    REQUIRE(count_sidecar(ctx, "meta_sidecar", kTable) == 3);
-}
-
-TEST_CASE("update_index is idempotent: row count and blob bytes stable",
-          "[index_admin][update][idempotent]") {
-    auto ctx = fresh_context({kTable});
+    // seed_small_columnar sets bioseq.update_index_on_insert = on, so the two
+    // default UPDATE_ON_INSERT indexes (minimizers_per_fragment, symbol_counts)
+    // are populated incrementally at INSERT time.
     seed_small_columnar(ctx, kTable);
 
-    const auto first = query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
-                    kTable));
-    const auto second = query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
-                    kTable));
-    REQUIRE(first == second);
-    REQUIRE(first == 3);
-    REQUIRE(count_sidecar(ctx, "index_sidecar", kTable) == first);
+    REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", kTable) > 0);
+    REQUIRE(index_table_row_count(ctx, "symbol_counts", kTable) > 0);
 
-    // Blob bytes are bit-identical across the two recomputes. The
-    // serialiser walks std::unordered_map<uint64_t, ...> in bucket
-    // order, which is implementation-defined but stable for two
-    // identical insertion sequences against the same libstdc++ build —
-    // exactly the situation here where collect_minimizers is replayed
-    // on the same input. If a future libstdc++ adds hash randomisation
-    // for uint64_t keys, this assertion will need to compare a sorted
-    // (key, positions) projection instead of the raw blob.
-    const auto blob_hashes_a = query_rows(
-        ctx,
-        fmt::format("SELECT md5(target_index) "
-                    "  FROM bioseq_internal.index_sidecar "
-                    " WHERE user_relid = '{}'::regclass "
-                    " ORDER BY sequence_rowno;",
-                    kTable));
-    (void)query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
-                    kTable));
-    const auto blob_hashes_b = query_rows(
-        ctx,
-        fmt::format("SELECT md5(target_index) "
-                    "  FROM bioseq_internal.index_sidecar "
-                    " WHERE user_relid = '{}'::regclass "
-                    " ORDER BY sequence_rowno;",
-                    kTable));
-    REQUIRE(blob_hashes_a == blob_hashes_b);
+    // Explicit rebuild of the per-fragment index returns the count of
+    // sequences (re)indexed — three seeded rows.
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                            "'minimizers_per_fragment');",
+                            kTable)) == 3);
 }
 
-TEST_CASE("update_index rejects an unknown metadata kind",
+TEST_CASE("update_index rejects an unknown index name",
           "[index_admin][update][error]") {
     auto ctx = fresh_context({kTable});
     seed_small_columnar(ctx, kTable);
@@ -175,55 +111,6 @@ TEST_CASE("update_index rejects an unknown metadata kind",
         ctx,
         fmt::format("SELECT bioseq.update_index('{}'::regclass, 'NOT_A_KIND');",
                     kTable)));
-    // No backfill side effect from the failed call.
-    REQUIRE(count_sidecar(ctx, "index_sidecar", kTable) == 3);
-}
-
-TEST_CASE("update_index updates the metadata_age_log row for the kind",
-          "[index_admin][update][age_log]") {
-    auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
-
-    // Wipe the age log so we can prove update_index writes a fresh row.
-    exec_sql(ctx, "DELETE FROM bioseq_internal.metadata_age_log;");
-    REQUIRE(query_scalar_int(
-                ctx,
-                "SELECT COUNT(*)::bigint "
-                "  FROM bioseq_internal.metadata_age_log;") == 0);
-
-    (void)query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
-                    kTable));
-
-    REQUIRE(query_scalar_int(
-                ctx,
-                fmt::format("SELECT COUNT(*)::bigint "
-                            "  FROM bioseq_internal.metadata_age_log "
-                            " WHERE user_relid = '{}'::regclass "
-                            "   AND kind = 'minimizers';",
-                            kTable)) == 1);
-}
-
-TEST_CASE("list_metadata returns no rows for a relation with no sidecar entries",
-          "[index_admin][list][empty]") {
-    auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
-    exec_sqlf(ctx,
-              "DELETE FROM bioseq_internal.index_sidecar "
-              " WHERE user_relid = '{}'::regclass;",
-              kTable);
-    exec_sqlf(ctx,
-              "DELETE FROM bioseq_internal.meta_sidecar "
-              " WHERE user_relid = '{}'::regclass;",
-              kTable);
-
-    const auto rows = query_rows(
-        ctx,
-        fmt::format("SELECT name FROM bioseq.list_metadata() "
-                    " WHERE table_name = '{}'::regclass;",
-                    kTable));
-    REQUIRE(rows.empty());
 }
 
 TEST_CASE("update_index accepts text and explicit regclass for the table arg",
@@ -231,19 +118,19 @@ TEST_CASE("update_index accepts text and explicit regclass for the table arg",
     auto ctx = fresh_context({kTable});
     seed_small_columnar(ctx, kTable);
 
-    // Quoted text form — PG implicitly casts text → regclass via
-    // regclassin. This is the form most callers will use.
-    const auto written_text = query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}', 'minimizers');", kTable));
-    REQUIRE(written_text == 3);
+    // Quoted text form — PG implicitly casts text -> regclass via regclassin.
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT bioseq.update_index('{}', "
+                            "'minimizers_per_fragment');",
+                            kTable)) == 3);
 
     // Explicit ::regclass cast form.
-    const auto written_cast = query_scalar_int(
-        ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
-                    kTable));
-    REQUIRE(written_cast == 3);
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                            "'minimizers_per_fragment');",
+                            kTable)) == 3);
 }
 
 TEST_CASE("update_index rejects non-bioseq-AM tables",
@@ -251,9 +138,9 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
     constexpr std::string_view kHeapTable = "test_index_admin_heap_t";
     auto ctx = fresh_context({kHeapTable});
 
-    // Plain heap-AM table with a bioseq.seq column. The recompute path
-    // would not be reachable from the bioseq columnar custom scan, so
-    // update_index must refuse to write a sidecar that nothing reads.
+    // Plain heap-AM table with a bioseq.seq column. The chunked-storage
+    // reindex path is only reachable from the bioseq columnar AM, so
+    // update_index must refuse a heap relation.
     create_seq_table(
         ctx,
         seq_table_spec{
@@ -266,6 +153,108 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
 
     REQUIRE(sql_fails(
         ctx,
-        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers');",
+        fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                    "'minimizers_per_fragment');",
                     kHeapTable)));
+}
+
+TEST_CASE("set_index_policy toggles update_policy and persists; UPDATE_ON_INSERT "
+          "on minimizers_per_sequence errors",
+          "[index_admin][policy]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_columnar(ctx, kTable);
+
+    // Helper: read the current update_policy of one index from list_metadata.
+    auto policy_of = [&](std::string_view index_name) {
+        return query_scalar(
+            ctx,
+            fmt::format("SELECT update_policy FROM bioseq.list_metadata() "
+                        " WHERE table_name = '{}'::regclass "
+                        "   AND name = '{}' LIMIT 1;",
+                        kTable, index_name));
+    };
+
+    // symbol_counts defaults to UPDATE_ON_INSERT; flip it to UPDATE_MANUALLY.
+    exec_sqlf(ctx,
+              "SELECT bioseq.set_index_policy('{}'::regclass, 'symbol_counts', "
+              "'UPDATE_MANUALLY');",
+              kTable);
+    REQUIRE(policy_of("symbol_counts") == "UPDATE_MANUALLY");
+
+    // Flip it back to UPDATE_ON_INSERT.
+    exec_sqlf(ctx,
+              "SELECT bioseq.set_index_policy('{}'::regclass, 'symbol_counts', "
+              "'UPDATE_ON_INSERT');",
+              kTable);
+    REQUIRE(policy_of("symbol_counts") == "UPDATE_ON_INSERT");
+
+    // minimizers_per_sequence is INELIGIBLE for UPDATE_ON_INSERT (whole-
+    // sequence external sort) — setting it must error.
+    REQUIRE(sql_fails(
+        ctx,
+        fmt::format("SELECT bioseq.set_index_policy('{}'::regclass, "
+                    "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
+                    kTable)));
+}
+
+TEST_CASE("update_index('minimizers_per_fragment') is idempotent at the content level",
+          "[index_admin][update][idempotent]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_columnar(ctx, kTable);
+
+    // Run the rebuild twice; the per-fragment chunk row count must be stable
+    // (the rebuild clears the index then repopulates from identical input).
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                            "'minimizers_per_fragment');",
+                            kTable)) == 3);
+    const auto after_first =
+        index_table_row_count(ctx, "minimizers_per_fragment", kTable);
+
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                            "'minimizers_per_fragment');",
+                            kTable)) == 3);
+    const auto after_second =
+        index_table_row_count(ctx, "minimizers_per_fragment", kTable);
+
+    REQUIRE(after_first > 0);
+    REQUIRE(after_first == after_second);
+}
+
+TEST_CASE("update_index on an empty bioseq table returns 0 and list_metadata "
+          "still lists kinds",
+          "[index_admin][update][empty]") {
+    auto ctx = fresh_context({kTable});
+    // Create an empty USING bioseq table (no rows).
+    exec_sqlf(ctx,
+              "CREATE TABLE {} (pk int, seq0 bioseq.seq('dna4', 32)) "
+              "USING bioseq;",
+              kTable);
+
+    // No rows -> no sequences (re)indexed -> 0.
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                            "'minimizers_per_fragment');",
+                            kTable)) == 0);
+
+    // list_metadata still lists the three production kinds with size '0 bytes'.
+    const auto rows = query_rows(
+        ctx,
+        fmt::format("SELECT name, size FROM bioseq.list_metadata() "
+                    " WHERE table_name = '{}'::regclass "
+                    "   AND name <> 'test_table_rowcount' "
+                    " ORDER BY name;",
+                    kTable));
+    REQUIRE(rows.size() == 3);
+    REQUIRE(rows[0][0].value() == "minimizers_per_fragment");
+    REQUIRE(rows[1][0].value() == "minimizers_per_sequence");
+    REQUIRE(rows[2][0].value() == "symbol_counts");
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 2);
+        REQUIRE(row[1].value() == "0 bytes");
+    }
 }

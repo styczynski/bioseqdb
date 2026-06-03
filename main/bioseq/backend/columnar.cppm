@@ -28,8 +28,6 @@ import mlogging;
 import bioseq_table;
 import config;
 import pg_utils;
-import bioseq_metadata_admin;
-import bioseq_sidecar;
 import bioseq_storage;
 
 extern "C++" {
@@ -61,14 +59,13 @@ int bioseq_page_cache_size = 200U;
 bool bioseq_index_scan = true;
 bool bioseq_update_index_on_insert = true;
 /*
- * read_sequence_index gates the sidecar read path. When OFF the batch
- * processor always recomputes per-row minimizers for mmsearch targets
- * (identical to the historical behaviour before the sidecar index read).
- * When ON the custom scan opens bioseq_internal.index_sidecar for each
- * buffered row and, if a blob exists, rehydrates the TargetIndex rather
- * than re-computing it from the compact sequence. Rows without a sidecar
- * entry (INSERT happened under bioseq.update_index_on_insert = off) still
- * recompute — the recomputed count is surfaced in EXPLAIN.
+ * DOC0279 §11.3/§13 — read_sequence_index gates the query-time
+ * assemble-vs-recompute choice. When OFF the batch processor always
+ * recomputes per-row minimizers for mmsearch targets (identical to the
+ * historical behaviour). When ON the dispatch loop assembles the active
+ * per-sequence minimizer index from its chunked storage (deserialise +
+ * globalise, no re-collection) for each buffered row that has one. Rows
+ * without a stored index still recompute — surfaced in EXPLAIN.
  */
 bool bioseq_read_sequence_index = true;
 
@@ -172,13 +169,9 @@ bioseq_init()
 	bioseq_guc_init();
 	bioseq_tableam_init();
 	bioseq_planner_init();
-	/* MetadataKindRegistry: idempotent init followed by per-module
-	 * registrations. The registry singleton is empty until populated
-	 * here; future modules (e.g., a sneaky_snake prefilter or BWA-FM
-	 * index module) can chain their own register_*_metadata_kinds()
-	 * calls right after sidecar's. */
-	bioseq::metadata_admin::init_registry();
-	bioseq::sidecar::register_default_metadata_kinds();
+	/* DOC0279 §12.1 — the legacy MetadataKindRegistry / sidecar kind
+	 * registration is gone; the set of indexes is the compile-time
+	 * pg_supported_indexes::list_types() registry (no runtime init). */
 
 	/* DOC0260 §11.3 step 2 — register relcache invalidation callback
 	 * for the per-Relation BioseqAmCache slot installed on rd_amcache.

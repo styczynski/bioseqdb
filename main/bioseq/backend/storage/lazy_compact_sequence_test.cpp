@@ -24,6 +24,7 @@ import bioseq_sequences;
 import bioseq_storage_scanner;
 import bioseq_storage_lazy;
 import bioseq_common.fragment_cache;
+import bioseq_indexing.symbol_counts;   // DOC0279 §12.5 — tally_symbol_counts (replaces count_symbols)
 
 using namespace seq::literals;
 
@@ -221,19 +222,25 @@ TEST_CASE("DOC0263 §11.2 — to_encoded_into parity (forward + reverse-compleme
     }
 }
 
-TEST_CASE("DOC0263 §11.2 — fragmented count_symbols matches baseline",
+TEST_CASE("DOC0279 §12.5 — fragmented tally_symbol_counts matches the in-memory baseline",
           "[lazy-fragmented][unit]") {
+    // The POC count_symbols() 49-stub is deleted; the real per-rank tally is
+    // tally_symbol_counts() (a flat int64[2^bits_per_char], not (count,letter)
+    // pairs). The chunked-lazy tally must equal the scanner_none baseline.
     auto data = make_dna4(128);
     range_t range(data);
-    lazy_compact_sequence<dna4_u64, chunked1> lazy{chunked1::from_range(range)};
+    auto baseline_lazy = make_lazy_in_memory(range);                          // scanner_none
+    lazy_compact_sequence<dna4_u64, chunked1> frag_lazy{chunked1::from_range(range)};
 
-    auto base = range.count_symbols();
-    auto got  = lazy.count_symbols();
+    auto base = bioseq::indexing::tally_symbol_counts(baseline_lazy);
+    auto got  = bioseq::indexing::tally_symbol_counts(frag_lazy);
     REQUIRE(got.size() == base.size());
+    std::int64_t total = 0;
     for (std::size_t i = 0; i < base.size(); ++i) {
-        REQUIRE(got[i].first == base[i].first);
-        REQUIRE(got[i].second == base[i].second);
+        REQUIRE(got[i] == base[i]);
+        total += got[i];
     }
+    REQUIRE(total == 128);   // every base counted exactly once
 }
 
 TEST_CASE("DOC0263 §5 — fragment_cache push/find/evict + generation counter",

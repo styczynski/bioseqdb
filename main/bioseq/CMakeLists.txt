@@ -385,6 +385,23 @@ AddCommonTargetX(
 set_target_properties(postgresql_bioseq PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
+# DOC0279 §11.5/§16.2 — compile the test-only indexing descriptors
+# (TestTableCountIndex, a CHUNKED_PER_TABLE index) into the server-loaded
+# extension dylib AND the integration/unit test execs. Default OFF (production);
+# the integration CI preset sets -DBIOSEQ_TEST_INDEXES=ON so the
+# [indexing][per-table] test and the corruption-hook tests run.
+option(BIOSEQ_TEST_INDEXES
+  "Compile the test-only indexing descriptors into the extension + test execs" OFF)
+if(BIOSEQ_TEST_INDEXES)
+  target_compile_definitions(postgresql_bioseq PRIVATE BIOSEQ_TEST_INDEXES=1)
+  if(TARGET bioseq_aligner_int_tests_exec)
+    target_compile_definitions(bioseq_aligner_int_tests_exec PRIVATE BIOSEQ_TEST_INDEXES=1)
+  endif()
+  if(TARGET bioseq_aligner_tests_exec)
+    target_compile_definitions(bioseq_aligner_tests_exec PRIVATE BIOSEQ_TEST_INDEXES=1)
+  endif()
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/io/build.cmake")
 
 # bench_framework — generic, algorithm-agnostic benchmark orchestration.

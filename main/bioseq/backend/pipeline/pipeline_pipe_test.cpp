@@ -21,6 +21,7 @@ import bioseq_sequences.pipe;
 import bioseq_storage_lazy;
 import bioseq_sequences.chaining.utils;
 import bioseq_sequences.minimap_port;
+import bioseq_indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq_cigar;
 import alignment_hwy;
 import alignment_hwy_utils;
@@ -615,13 +616,13 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         using MinimizerT =
             ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
-        ::bioseq::simd::HWY_NAMESPACE::TargetIndex idx;
+        ::bioseq::indexing::MinimizerHashmapFragmentIndex idx;
         idx.build(mins, t.bp_size());
         // The leaf's W==10 && K==15 branch picks SpecCep.
         auto result = detail::pipeline_run_leaf<
             EntryPoint::WithPrebuiltMinimizers,
             std::vector<seq::dna4>, std::vector<seq::dna4>,
-            MinimizerT, ::bioseq::simd::HWY_NAMESPACE::TargetIndex,
+            MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
                 params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);
@@ -641,12 +642,12 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         using MinimizerT =
             ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
-        ::bioseq::simd::HWY_NAMESPACE::TargetIndex idx;
+        ::bioseq::indexing::MinimizerHashmapFragmentIndex idx;
         idx.build(mins, t.bp_size());
         auto result = detail::pipeline_run_leaf<
             EntryPoint::WithPrebuiltMinimizers,
             std::vector<seq::dna4>, std::vector<seq::dna4>,
-            MinimizerT, ::bioseq::simd::HWY_NAMESPACE::TargetIndex,
+            MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
                 params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx);

@@ -52,15 +52,64 @@ using bioseq::indexing::SequenceIndexType;
 using bioseq::indexing::IndexUpdatePolicy;
 using bioseq::indexing::index_sub_key_t;
 using bioseq::indexing::DIRECTORY_SUB_KEY;
+using bioseq::indexing::TEMP_RUN_BASE;
 
-/// The single registry of every production index (§12.1).
+#ifdef BIOSEQ_TEST_INDEXES
+/// DOC0279 §11.4/§16.2 — a trivial CHUNKED_PER_TABLE index, compiled into the
+/// dylib ONLY under -DBIOSEQ_TEST_INDEXES, that gives IndexStorageTablePg's
+/// for_each_sequence / write_to / index_table_shard rollover live integration
+/// coverage. build() streams every row (columnar rowno) and persists the row
+/// count as one int64 chunk. allows_update_on_insert=false (table-wide-never).
+template <class S>
+struct TestTableCountIndex {
+    static_assert(bioseq::indexing::is_index_chunked_storage_for<S, SequenceIndexType::CHUNKED_PER_TABLE>);
+    static constexpr SequenceIndexType index_type = SequenceIndexType::CHUNKED_PER_TABLE;
+    static constexpr std::string_view  index_name = "test_table_rowcount";
+    using storage_type = S;
+    static void build(S& storage) {
+        std::int64_t count = 0;
+        storage.for_each_sequence([&count](auto& /*lazy*/, std::size_t /*rowno*/, std::size_t /*total*/) {
+            ++count;
+        });
+        storage.resize(sizeof(std::int64_t));   // one chunk
+        storage.template write_to<std::int64_t>(0,
+            [&count](std::size_t c, std::int64_t* buf, std::size_t cap) -> std::size_t {
+                DEBUG_ASSERT(c == 0 && cap == 1, "test_table_rowcount: single int64 chunk");
+                buf[0] = count;
+                return c;
+            });
+    }
+    static void rebuild(S& storage) { storage.clear(index_name); build(storage); }
+};
+#endif
+}  // namespace bioseq::storage::indexing
+
+#ifdef BIOSEQ_TEST_INDEXES
+export namespace bioseq::indexing {
+template <> struct index_descriptor<bioseq::storage::indexing::TestTableCountIndex> {
+    static constexpr SequenceIndexType index_type = SequenceIndexType::CHUNKED_PER_TABLE;
+    static constexpr std::string_view  index_name = "test_table_rowcount";
+    static constexpr bool allows_update_on_insert = false;
+};
+}  // namespace bioseq::indexing
+#endif
+
+export namespace bioseq::storage::indexing {
+
+/// The single registry of every production index (§12.1). Under
+/// -DBIOSEQ_TEST_INDEXES the test-only CHUNKED_PER_TABLE TestTableCountIndex is
+/// appended so its for_each_sequence/write_to/rollover path gets live coverage.
 using pg_supported_indexes = bioseq::indexing::supported_indexes<
     IndexStorageFragmentPg,
     IndexStorageSequencePg,
     IndexStorageTablePg,
     bioseq::indexing::MinimizersPerFragmentIndex,     // CHUNKED_PER_FRAGMENT, "minimizers_per_fragment"
     bioseq::indexing::MinimizerSequenceMergedIndex,   // CHUNKED_PER_FRAGMENT, "minimizers_per_sequence"
-    bioseq::indexing::SymbolCountsIndex>;             // INLINE_PER_SEQUENCE,  "symbol_counts"
+    bioseq::indexing::SymbolCountsIndex               // INLINE_PER_SEQUENCE,  "symbol_counts"
+#ifdef BIOSEQ_TEST_INDEXES
+    , TestTableCountIndex                             // CHUNKED_PER_TABLE,    "test_table_rowcount"
+#endif
+    >;
 
 // g_last_index_merge_run_count (§8.8) is defined in bioseq_storage_indexing_pg
 // (same namespace, imported) so merge_runs can set it; referenced unqualified below.
@@ -151,7 +200,7 @@ struct PolicyRow { std::string name; bool enabled; bool update_on_insert; };
 inline void note_successful_write(Oid user_relid, Oid relfn, std::int16_t attno, std::string_view name) {
     if (SPI_connect() != SPI_OK_CONNECT) return;
     std::string sql = fmt::format(
-        "INSERT INTO bioseq_internal.index_age_log (user_relid, main_relfilenode, column_attno, index_name, last_updated) "
+        "INSERT INTO bioseq_internal.metadata_age_log (user_relid, main_relfilenode, column_attno, index_name, last_updated) "
         "VALUES ({}::oid, {}::oid, {}, {}, now()) "
         "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) DO UPDATE SET last_updated = now()",
         (unsigned)user_relid, (unsigned)relfn, (int)attno, quote_literal_cstr(std::string(name).c_str()));

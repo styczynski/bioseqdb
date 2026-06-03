@@ -55,7 +55,14 @@ import bioseq_sequences.minimap_port;  // for MatchResult
 import bioseq_sequences.pipe;            // for PipelineDescription / describe_pipeline_for
 import bioseq_cigar;                    // for format_cigar
 import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
-import bioseq_sidecar;                   // meta_sidecar reads for symbol_count fast path
+import bioseq_storage;                   // DOC0279 §12.5 — seq_locator, is_locator_stub, decode_locator_from_stub, seq_caches
+import bioseq_bucket_math;               // bucket_index_for_size (inline-value placement)
+import bioseq_storage_lazy;              // make_lazy_in_memory (inline-value tally)
+import bioseq_storage_scanner_pg;        // with_lazy_postgres (stub-value tally recompute)
+import bioseq_indexing.type;             // DOC0279 §11.5 — SequenceIndexType
+import bioseq_indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
+import bioseq_storage_indexing_pg;       // IndexStorageSequencePg
+import bioseq_storage_indexing_admin;    // estimate_index_presence, open_sequence_storage, letter_to_rank
 import bioseq_instr;                      // runtime profiler — summary at scan end
 import sequan_compat;                     // seq:: alphabet alias used by sequence_custom_alphabet
 
@@ -2692,7 +2699,8 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		 * *margin*, not the *direction*, of the preference.
 		 */
 		const float index_presence =
-			bioseq::sidecar::estimate_index_presence(rte->relid, rel->tuples);
+			bioseq::storage::indexing::estimate_index_presence(
+				rte->relid, rel->tuples, "minimizers_per_fragment");
 		const double sidecar_bonus = 10000.0 * static_cast<double>(index_presence);
 
 		JustLog("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={} magic_cnt={} index_presence={:.4f}",
@@ -4033,7 +4041,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	}
 
 	const compact_sequence_stdc_type_params typmod = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
-	const int rank = bioseq::sidecar::letter_to_rank(typmod.alphabet_code, letter_char);
+	const int rank = bioseq::storage::indexing::letter_to_rank(typmod.alphabet_code, letter_char);
 	if (rank < 0) {
 		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count letter '{}' not in alphabet_code={}; keeping scalar call",
 				letter_char, static_cast<unsigned>(typmod.alphabet_code));
@@ -4210,63 +4218,119 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 }
 
 /*
- * Per-tuple populate for every `bioseq.symbol_count(Var, 'L')` placeholder
- * in the rewritten target list. Fetches the counts[] array from
- * bioseq_internal.meta_sidecar once per row, then hands each placeholder
- * its own counts[rank] value. No placeholder = no meta read = no SPI call.
- *
- * The sidecar row is the source of truth: it was populated from the same
- * count_symbols() method at INSERT time, so the values this function
- * writes are bit-for-bit identical to what the scalar entry point in
- * mod.cppm would compute on the same varlena.
- *
- * Missing meta row (GUC off at INSERT, hand-restored dump, …) is handled
- * by leaving every placeholder as NULL. The scalar fallback in
- * bioseq_symbol_count was responsible for that value historically;
- * pushing a NULL through the projection keeps the optimizer contract
- * ("STRICT" means NULL on any NULL input) honest for now. A later
- * follow-up could backfill on scan, but that would require promoting
- * the scan transaction to read-write and is out of scope for the POC.
+ * DOC0279 §12.5 — per-tuple populate for every `bioseq.symbol_count(Var, 'L')`
+ * placeholder. For the current output row (resolved by columnar rowno) it
+ * random-access reads the SEQ column header, then for each site:
+ *   (2) if bioseq.read_sequence_index = on, tries the stored INLINE
+ *       SymbolCountsIndex chunk (one heap PK lookup, the only thing the GUC
+ *       gates here);
+ *   (3) otherwise UNCONDITIONALLY recomputes tally_symbol_counts over the row
+ *       (scanner_pg-streamed for a stored stub, in-memory for an inline value).
+ * The recompute guarantees a non-NULL answer for every present row regardless
+ * of the GUC — the GUC only chooses whether the stored chunk is preferred.
+ * Replaces the deleted meta_sidecar / 49-stub path.
  */
 static void
 populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
-								   Oid user_relid, int64_t sequence_rowno)
+								   Relation main, int64_t rowno)
 {
 	if (consts.symbol_count_sites.empty()) {
 		return;
 	}
-	if (sequence_rowno < 0 || user_relid == InvalidOid) {
-		for (auto& site : consts.symbol_count_sites) {
-			if (site.placeholder != nullptr) {
-				site.placeholder->constisnull = true;
-			}
-		}
-		return;
-	}
+	auto set_all_null = [&]() {
+		for (auto& s : consts.symbol_count_sites)
+			if (s.placeholder != nullptr) s.placeholder->constisnull = true;
+	};
+	if (rowno < 0 || main == nullptr) { set_all_null(); return; }
 
-	/*
-	 * DOC0260 §11.1 — read meta per SEQ column (keyed by column_attno) so
-	 * symbol_count(seqN) on a multi-SEQ-column table resolves the right
-	 * column's counts instead of always reading the first column's row.
-	 */
+	namespace bsi = bioseq::storage::indexing;
+	const Oid relid = RelationGetRelid(main);
+	const auto rid = bsi::index_relation_identity(relid);
+	TupleDesc td   = RelationGetDescr(main);
+	Snapshot snap  = GetTransactionSnapshot();
+
+	MemoryContext scratch = AllocSetContextCreate(CurrentMemoryContext,
+		"bioseq_symcount", ALLOCSET_SMALL_SIZES);
+	bioseq::storage::seq_caches* caches = bioseq::storage::alloc_seq_caches(scratch);
+	caches->side                = bioseq::storage::seq_caches::Side::Read;
+	caches->lock_mode           = AccessShareLock;
+	caches->read_state_mctx     = scratch;
+	caches->main_database_oid   = rid.db_oid;
+	caches->main_tablespace_oid = rid.tablespace_oid;
+	caches->main_relfilenode    = rid.relfilenode;
+
+	/* Project every distinct site column and random-access read the row once. */
+	List* projected = NIL;
+	for (auto& s : consts.symbol_count_sites)
+		if (s.placeholder != nullptr && !list_member_int(projected, s.column_attno))
+			projected = lappend_int(projected, s.column_attno);
+
+	std::vector<Datum> vals(td->natts);
+	auto nulls_owner = std::make_unique<bool[]>(td->natts);
+	bool* nulls = nulls_owner.get();
+	ColumnarReadState* rs = ColumnarBeginRead(main, td, projected, NIL, scratch, snap,
+											  /*randomAccess=*/true, nullptr);
+	const bool row_ok = ColumnarReadRowByRowNumber(
+		rs, static_cast<uint64_t>(rowno), vals.data(), nulls);
+	ColumnarEndRead(rs);
+
 	for (auto& site : consts.symbol_count_sites) {
-		if (site.placeholder == nullptr) {
-			continue;
-		}
-		auto counts = bioseq::sidecar::sidecar_read_meta_counts(
-			user_relid, sequence_rowno, site.column_attno);
-		if (!counts.has_value()
-			|| site.rank < 0
-			|| static_cast<std::size_t>(site.rank) >= counts->size) {
+		if (site.placeholder == nullptr) continue;
+		if (!row_ok || site.rank < 0 || nulls[site.column_attno - 1]) {
 			site.placeholder->constisnull = true;
 			continue;
 		}
-		site.placeholder->constvalue = Int64GetDatum(counts->values[site.rank]);
+		MemoryContext old = MemoryContextSwitchTo(scratch);
+		pgseq_t* hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[site.column_attno - 1]));
+		MemoryContextSwitchTo(old);
+		const std::uint8_t alpha = hdr->alphabet_code;
+		const bool stub          = bioseq::storage::is_locator_stub(hdr);
+		const std::uint8_t bw    = stub ? bioseq::storage::logical_storage_unit_byte_width(hdr)
+										: hdr->storage_unit_byte_width;
+		bioseq::storage::seq_locator loc{};
+		if (stub) loc = bioseq::storage::decode_locator_from_stub(hdr);
+
+		/* (2) stored read — the ONLY thing read_sequence_index gates here. */
+		std::optional<std::int64_t> stored;
+		if (bioseq_read_sequence_index && stub) {
+			auto store = bsi::open_sequence_storage(relid, rid.db_oid, rid.tablespace_oid,
+				rid.relfilenode, site.column_attno, "symbol_counts", loc,
+				static_cast<uint64_t>(rowno), caches, scratch);
+			stored = bioseq::indexing::SymbolCountsIndex<bsi::IndexStorageSequencePg>::read_count(
+				store, static_cast<std::size_t>(site.rank));
+		}
+		if (stored.has_value()) {
+			site.placeholder->constvalue  = Int64GetDatum(*stored);
+			site.placeholder->constisnull = false;
+			continue;
+		}
+
+		/* (3) unconditional recompute fallback (never gated by the GUC). */
+		std::int64_t cnt = 0;
+		pgseq_t::dispatch_instance(alpha, bw, [&]<class S>() {
+			if (stub) {
+				constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
+				const std::size_t pad = (loc.total_bp_size % lpu) == 0 ? 0
+					: static_cast<std::size_t>(lpu - loc.total_bp_size % lpu);
+				bioseq::storage::with_lazy_postgres<S>(rid.db_oid, rid.tablespace_oid,
+					rid.relfilenode, site.column_attno, loc, pad, caches, scratch,
+					[&](auto& lazy) {
+						auto counts = bioseq::indexing::tally_symbol_counts(lazy);
+						if (static_cast<std::size_t>(site.rank) < counts.size())
+							cnt = counts[site.rank];
+					});
+			} else {
+				compact_sequence_range<S> range{*hdr};
+				auto lazy = bioseq::storage::make_lazy_in_memory(range);
+				auto counts = bioseq::indexing::tally_symbol_counts(lazy);
+				if (static_cast<std::size_t>(site.rank) < counts.size())
+					cnt = counts[site.rank];
+			}
+		});
+		site.placeholder->constvalue  = Int64GetDatum(cnt);
 		site.placeholder->constisnull = false;
 	}
-	JustLog("[bioseq] pg: populate_symbol_count_placeholders relid={} rowno={} sites={} (per-column reads)",
-			static_cast<unsigned>(user_relid), sequence_rowno,
-			consts.symbol_count_sites.size());
+	MemoryContextDelete(scratch);
 }
 
 
@@ -4331,11 +4395,9 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 * they are resolved from meta_sidecar by (relid, rowno) so
 			 * we populate them alongside the per-match fields.
 			 */
-			{
-				const Oid user_relid = RelationGetRelid(node->ss_currentRelation);
-				populate_symbol_count_placeholders(runtime.placeholder_consts,
-												   user_relid, next->entry->sequence_rowno);
-			}
+			populate_symbol_count_placeholders(runtime.placeholder_consts,
+											   node->ss_currentRelation,
+											   next->entry->sequence_rowno);
 
 			/*
 			 * Re-install the buffered scan slot as the current scan
@@ -4504,9 +4566,8 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 					if (ItemPointerIsValid(&slot->tts_tid)) {
 						row_number = static_cast<int64_t>(tid_to_row_number(slot->tts_tid));
 					}
-					const Oid user_relid = RelationGetRelid(node->ss_currentRelation);
 					populate_symbol_count_placeholders(runtime.placeholder_consts,
-													   user_relid, row_number);
+													   node->ss_currentRelation, row_number);
 				}
 
 				ProjectionInfo* proj = ExecBuildProjectionInfo(
@@ -5105,7 +5166,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				pfree(letter_detoasted);
 			}
 			const compact_sequence_stdc_type_params typmod = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
-			const int rank = bioseq::sidecar::letter_to_rank(typmod.alphabet_code, letter_char);
+			const int rank = bioseq::storage::indexing::letter_to_rank(typmod.alphabet_code, letter_char);
 			if (rank < 0) {
 				continue;
 			}
@@ -5233,7 +5294,8 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				 * sidecar-backed scan suddenly gets slower.
 				 */
 				const float index_presence =
-					bioseq::sidecar::estimate_index_presence(user_relid, rel_tuples);
+					bioseq::storage::indexing::estimate_index_presence(
+						user_relid, rel_tuples, "minimizers_per_fragment");
 				float fetched_pct    = 0.0f;
 				float recomputed_pct = 100.0f;
 				const bool runtime_alphabet_recompute =

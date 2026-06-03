@@ -16,6 +16,22 @@ module;
 #include "columnar/columnar.h"
 #include "columnar/columnar_tableam.h"
 
+extern "C" {
+#include "funcapi.h"
+#include "utils/tuplestore.h"
+#include "utils/timestamp.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "catalog/pg_type.h"
+#include "lib/stringinfo.h"
+}
+
+#include <array>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
 export module bioseq_mod;
 
 import mlogging;
@@ -23,10 +39,12 @@ import bioseq_columnar;
 import pg_utils;
 import bioseq_types.pg_compact_sequence;
 import bioseq_sequences;
-import bioseq_sidecar;
-import bioseq_metadata_admin;
-import bioseq_storage_indexing_admin;   // DOC0279 §11.4/§12 — update_index_impl
-import bioseq_storage_indexing_pg;      // DOC0279 §8.8 — g_last_index_merge_run_count
+import bioseq_storage;                   // is_locator_stub, decode_locator_from_stub
+import bioseq_storage_lazy;              // make_lazy_in_memory
+import bioseq_indexing.type;             // DIRECTORY_SUB_KEY, index_sub_key_t
+import bioseq_indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
+import bioseq_storage_indexing_admin;    // DOC0279 §11.4/§12 — update_index_impl, list helpers, letter_to_rank
+import bioseq_storage_indexing_pg;       // DOC0279 §8.8 — g_last_index_merge_run_count, format_seqidx helpers
 import sequan_compat;
 
 // DOC0279 §12.2 — reach the columnar AM helpers (the cycle edge) via extern "C++".
@@ -209,17 +227,18 @@ Datum bioseq_cigar_stub(PG_FUNCTION_ARGS) {
  * the sidecar; this function is never invoked inside the custom scan for a
  * column reference.
  *
- * Both the scalar entry point here and the custom-scan fast path route
- * through count_symbols() at some point (compute-at-call for literals vs.
- * compute-at-INSERT for columns), so they return bit-for-bit identical
- * values by construction. Test 13 exercises the parity with vectorization
- * both on and off.
+ * DOC0279 §12.5: this scalar entry computes the REAL per-rank tally
+ * (tally_symbol_counts, an int64[2^bits_per_char] histogram) over the
+ * literal's inline bases — NOT the deleted `49`-stub. The custom-scan
+ * fast path (columnar_customscan.cppm) routes the same tally through the
+ * stored INLINE SymbolCountsIndex + the recompute fallback, so both paths
+ * return identical values. A stored (locator-stub) value cannot be tallied
+ * here because the scalar entry has no owning-relation context to stream
+ * the sub-table fragments from; such values are handled by the custom scan.
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count);
 Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
-	/* Detoast the bioseq.seq varlena and reinterpret as pgseq_t (the
-	 * compact_sequence_stdc<…> instantiation defined in
-	 * bioseq_types.pg_compact_sequence). */
+	/* Detoast the bioseq.seq varlena and reinterpret as pgseq_t. */
 	pgseq_t* hdr = reinterpret_cast<pgseq_t*>(
 		PG_DETOAST_DATUM(PG_GETARG_DATUM(0)));
 	text* sym_text = PG_GETARG_TEXT_PP(1);
@@ -233,29 +252,16 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 	}
 	const char sym_char = *VARDATA_ANY(sym_text);
 
-	/* Resolve letter→rank through the seqan3 dispatch so the scalar path
-	 * and the INSERT-time meta_sidecar computation share one source of
-	 * truth. On an unknown letter the caller raises ERRCODE_INVALID_PARAMETER_VALUE
-	 * below. */
-	int rank = -1;
-	int64_t computed_result = 0;
-	pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width,
-		[&]<class S>() {
-			using alphabet_t = typename S::alphabet_type;
-			if (!seqan3::char_is_valid_for<alphabet_t>(sym_char)) {
-				return;
-			}
-			alphabet_t letter{};
-			letter.assign_char(sym_char);
-			rank = static_cast<int>(letter.to_rank());
+	if (bioseq::storage::is_locator_stub(hdr)) {
+		PG_FREE_IF_COPY(hdr, 0);
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("bioseq.symbol_count: cannot tally a stored (stub) bioseq.seq value outside a scan"),
+				 errhint("query the column through the bioseq columnar scan, or run "
+						 "bioseq.update_index(rel, 'symbol_counts') to materialise the counter.")));
+	}
 
-			compact_sequence_range<S> seq{*hdr};
-			auto tally = seq.count_symbols();
-			if (static_cast<size_t>(rank) < tally.size()) {
-				computed_result = static_cast<int64_t>(tally[rank].first);
-			}
-		});
-
+	int rank = bioseq::storage::indexing::letter_to_rank(hdr->alphabet_code, sym_char);
 	if (rank < 0) {
 		PG_FREE_IF_COPY(hdr, 0);
 		ereport(ERROR,
@@ -263,6 +269,17 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 				 errmsg("bioseq.symbol_count: letter '%c' is not part of the alphabet (code=%u)",
 						sym_char, static_cast<unsigned>(hdr->alphabet_code))));
 	}
+
+	int64_t computed_result = 0;
+	pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width,
+		[&]<class S>() {
+			compact_sequence_range<S> range{*hdr};
+			auto lazy = bioseq::storage::make_lazy_in_memory(range);
+			auto counts = bioseq::indexing::tally_symbol_counts(lazy);  // std::array<int64,N=2^bits_per_char>
+			if (static_cast<size_t>(rank) < counts.size()) {
+				computed_result = static_cast<int64_t>(counts[rank]);
+			}
+		});
 
 	PG_FREE_IF_COPY(hdr, 0);
 	PG_RETURN_INT64(computed_result);
@@ -435,14 +452,132 @@ Datum bioseq_placeholder_support(PG_FUNCTION_ARGS) {
 }
 
 /*
- * bioseq.list_metadata() — set-returning function listing every
- * (user_relid, metadata_kind) pair the extension manages, with
- * (mode, insert_support, size, age) columns. Forwards into the
- * bioseq::metadata_admin module which owns the registry walk.
+ * bioseq.list_metadata() — DOC0279 §12.1/§12.2. Set-returning function
+ * emitting one tuple per (user bioseq table, bioseq.seq column, registered
+ * index) — the FULL cartesian product of {user bioseq relations} x {seq
+ * columns} x pg_supported_indexes::list_types(), NOT gated on whether any
+ * chunk exists. Columns: (table_name, column_attno, column_name, name,
+ * index_type, update_policy, size, age). The index set is the compile-time
+ * registry (no runtime MetadataKindRegistry). The heavy lifting is done by
+ * one constructed SQL query that joins a VALUES source (built in C++ with
+ * the per-column physical shard prefix) against index_policy + the derived
+ * seqidx_* shards + metadata_age_log.
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_list_metadata);
 Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
-	return bioseq::metadata_admin::list_metadata_impl(fcinfo);
+	namespace bsi = bioseq::storage::indexing;
+	namespace bidx = bioseq::indexing;
+
+	ReturnSetInfo* rsinfo = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
+	if (rsinfo == nullptr || !IsA(rsinfo, ReturnSetInfo))
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("bioseq.list_metadata() must be called in a set-returning context")));
+	if ((rsinfo->allowedModes & SFRM_Materialize) == 0)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("materialize mode required for bioseq.list_metadata()")));
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("bioseq.list_metadata() return type is not composite")));
+
+	MemoryContext per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+	MemoryContext old_ctx = MemoryContextSwitchTo(per_query_ctx);
+	Tuplestorestate* tupstore = tuplestore_begin_heap(true, false, work_mem);
+	rsinfo->returnMode = SFRM_Materialize;
+	rsinfo->setResult  = tupstore;
+	rsinfo->setDesc    = tupdesc;
+	MemoryContextSwitchTo(old_ctx);
+
+	const auto kinds = bsi::pg_supported_indexes::list_types();
+	const auto allows = bsi::pg_supported_indexes::allows_on_insert_flags();
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		return static_cast<Datum>(0);
+
+	/* 1. every user bioseq-AM relation (exclude internal namespaces / names). */
+	std::vector<Oid> rels;
+	if (SPI_execute(
+			"SELECT c.oid FROM pg_class c JOIN pg_am am ON c.relam=am.oid "
+			"JOIN pg_namespace n ON c.relnamespace=n.oid "
+			"WHERE am.amname='bioseq' AND c.relkind='r' "
+			"AND n.nspname NOT IN ('bioseq_internal','pg_catalog','information_schema') "
+			"AND n.nspname NOT LIKE 'pg\\_temp%'", true, 0) == SPI_OK_SELECT) {
+		for (std::uint64_t r = 0; r < SPI_processed; ++r) {
+			bool isn = false;
+			Oid o = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[r], SPI_tuptable->tupdesc, 1, &isn));
+			if (!isn) rels.push_back(o);
+		}
+	}
+
+	/* 2. build the VALUES source: (rel, attno, attname, idx_name, idx_type, def_uoi, prefix). */
+	std::string values;
+	for (Oid rel : rels) {
+		const auto rid = bsi::index_relation_identity(rel);
+		std::string colsql = fmt::format(
+			"SELECT a.attnum, a.attname FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid "
+			"JOIN pg_namespace tn ON t.typnamespace=tn.oid WHERE a.attrelid={}::oid AND t.typname='seq' "
+			"AND tn.nspname IN ('bioseq','bioseq_internal') AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+			static_cast<unsigned>(rel));
+		if (SPI_execute(colsql.c_str(), true, 0) != SPI_OK_SELECT) continue;
+		std::vector<std::pair<std::int16_t, std::string>> cols;
+		for (std::uint64_t c = 0; c < SPI_processed; ++c) {
+			bool isn = false;
+			std::int16_t a = static_cast<std::int16_t>(DatumGetInt16(
+				SPI_getbinval(SPI_tuptable->vals[c], SPI_tuptable->tupdesc, 1, &isn)));
+			char* nm = SPI_getvalue(SPI_tuptable->vals[c], SPI_tuptable->tupdesc, 2);
+			cols.emplace_back(a, nm ? std::string(nm) : std::string());
+		}
+		for (auto& [attno, attname] : cols) {
+			for (std::size_t i = 0; i < kinds.size(); ++i) {
+				const std::string idx_name{kinds[i].first};
+				const std::string idx_type{bidx::sequence_index_type_name(kinds[i].second)};
+				const bool def_uoi = bidx::default_update_on_insert_contains(kinds[i].first) && allows[i];
+				const std::string prefix = fmt::format("seqidx_{}_{:016x}_",
+					bsi::short_index_for(kinds[i].first),
+					bsi::identity_hash64(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, kinds[i].first));
+				if (!values.empty()) values += ",";
+				values += fmt::format("({}::oid,{}::int2,{},{},{},{},{})",
+					static_cast<unsigned>(rel), static_cast<int>(attno),
+					quote_literal_cstr(attname.c_str()),
+					quote_literal_cstr(idx_name.c_str()),
+					quote_literal_cstr(idx_type.c_str()),
+					def_uoi ? "true" : "false",
+					quote_literal_cstr(prefix.c_str()));
+			}
+		}
+	}
+
+	if (!values.empty()) {
+		std::string query = fmt::format(
+			"WITH src(rel,attno,attname,idx_name,idx_type,def_uoi,prefix) AS (VALUES {}) "
+			"SELECT src.rel::regclass, src.attno::int2, src.attname, src.idx_name, src.idx_type, "
+			"  CASE WHEN p.update_on_insert IS NOT NULL "
+			"       THEN (CASE WHEN p.update_on_insert THEN 'UPDATE_ON_INSERT' ELSE 'UPDATE_MANUALLY' END) "
+			"       WHEN src.def_uoi THEN 'UPDATE_ON_INSERT' ELSE 'UPDATE_MANUALLY' END, "
+			"  pg_size_pretty(COALESCE((SELECT SUM(pg_total_relation_size(ic.oid)) FROM pg_class ic "
+			"     JOIN pg_namespace inx ON ic.relnamespace=inx.oid "
+			"     WHERE inx.nspname='bioseq_internal' AND ic.relname LIKE src.prefix||'%'),0)::bigint), "
+			"  (SELECT now()-m.last_updated FROM bioseq_internal.metadata_age_log m "
+			"     WHERE m.user_relid=src.rel AND m.column_attno=src.attno AND m.index_name=src.idx_name LIMIT 1) "
+			"FROM src LEFT JOIN bioseq_internal.index_policy p "
+			"  ON p.user_relid=src.rel AND p.column_attno=src.attno AND p.index_name=src.idx_name "
+			"ORDER BY src.rel, src.attno, src.idx_name", values);
+		if (SPI_execute(query.c_str(), true, 0) == SPI_OK_SELECT) {
+			Datum vals[8];
+			bool nulls[8];
+			for (std::uint64_t r = 0; r < SPI_processed; ++r) {
+				for (int c = 0; c < 8; ++c) {
+					bool isn = false;
+					vals[c] = SPI_getbinval(SPI_tuptable->vals[r], SPI_tuptable->tupdesc, c + 1, &isn);
+					nulls[c] = isn;
+				}
+				tuplestore_putvalues(tupstore, tupdesc, vals, nulls);
+			}
+		}
+	}
+
+	SPI_finish();
+	return static_cast<Datum>(0);
 }
 
 /*
@@ -452,30 +587,13 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_update_index);
 Datum bioseq_update_index(PG_FUNCTION_ARGS) {
-	// DOC0279 §11.4 — route to the new chunked-storage reindex driver.
+	// DOC0279 §11.4 — route to the chunked-storage reindex driver. The driver
+	// validates the name, clears + rebuilds the named index for every SEQ
+	// column of every row, and stamps metadata_age_log on success.
 	const Oid rel = PG_GETARG_OID(0);
 	text* nm = PG_GETARG_TEXT_PP(1);
 	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
-	// Back-compat: the legacy kind name 'minimizers' maps to the new per-fragment index.
-	const std::string eff = (name == "minimizers") ? std::string("minimizers_per_fragment") : name;
-	const std::int64_t n = bioseq::storage::indexing::update_index_impl(rel, eff);
-	// Coexistence: the legacy single-blob index_sidecar is still consumed by the
-	// query path for < 2^28 targets, so keep backfilling it for the per-fragment kind.
-	if (eff == "minimizers_per_fragment") {
-		(void)bioseq::sidecar::recompute_per_row_index_for_relid(rel);
-	} else if (eff == "symbol_counts") {
-		(void)bioseq::sidecar::recompute_per_row_meta_for_relid(rel);
-	}
-	// Coexistence: refresh the legacy metadata_age_log row under the requested kind name.
-	if (SPI_connect() == SPI_OK_CONNECT) {
-		Oid argtypes[2] = { OIDOID, TEXTOID };
-		Datum argvals[2] = { ObjectIdGetDatum(rel), PG_GETARG_DATUM(1) };
-		SPI_execute_with_args(
-			"INSERT INTO bioseq_internal.metadata_age_log (user_relid, kind, last_updated) "
-			"VALUES ($1, $2, now()) ON CONFLICT (user_relid, kind) DO UPDATE SET last_updated = now()",
-			2, argtypes, argvals, nullptr, false, 0);
-		SPI_finish();
-	}
+	const std::int64_t n = bioseq::storage::indexing::update_index_impl(rel, name);
 	PG_RETURN_INT64(n);
 }
 
@@ -533,9 +651,84 @@ Datum bioseq_set_active_read_index(PG_FUNCTION_ARGS) {
 CXX_PG_FUNCTION_INFO_V1(bioseq_columnar_row_number);
 Datum bioseq_columnar_row_number(PG_FUNCTION_ARGS) {
 	const Oid rel = PG_GETARG_OID(0);
-	ItemPointer ctid = (ItemPointer)PG_GETARG_POINTER(1);
 	if (!IsColumnarTableAmTable(rel))
 		ereport(ERROR, (errmsg("bioseq.columnar_row_number: relation is not a USING bioseq table")));
-	PG_RETURN_INT64((std::int64_t)tid_to_row_number(*ctid));
+	/* `ctid tid` is a by-reference type; PG_GETARG_DATUM holds a pointer to the
+	 * 6-byte ItemPointerData. Copy by value before handing it to the extern
+	 * tid_to_row_number (pure ctid arithmetic, access_method.cppm). */
+	ItemPointer ctid = reinterpret_cast<ItemPointer>(PG_GETARG_DATUM(1));
+	if (ctid == nullptr)
+		ereport(ERROR, (errmsg("bioseq.columnar_row_number: NULL ctid")));
+	ItemPointerData tid = *ctid;
+	PG_RETURN_INT64(static_cast<std::int64_t>(tid_to_row_number(tid)));
+}
+
+/* DOC0279 §12.2/§16.2 — TEST-ONLY controlled-corruption helpers. They resolve
+ * the dynamic seqidx_* shard for (rel, name) internally and write / delete a
+ * single chunk row, so the integration tests can pin reserved-sentinel
+ * filtering, missing-manifest -> recompute, and present-manifest/missing-
+ * fragment corruption detection. Harmless in production (explicit admin verbs;
+ * never called by the engine). The TestTableCountIndex registry entry IS gated
+ * by BIOSEQ_TEST_INDEXES (§14); these byte-level hooks are not, because they
+ * change no production behaviour. */
+CXX_PG_FUNCTION_INFO_V1(bioseq_test_write_index_chunk);
+Datum bioseq_test_write_index_chunk(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	const std::int64_t query_key = PG_GETARG_INT64(2);
+	const std::int64_t sub_key   = PG_GETARG_INT64(3);
+	const std::int32_t chunk_no  = PG_GETARG_INT32(4);
+	Datum payload = PointerGetDatum(PG_GETARG_BYTEA_PP(5));   // detoast before SPI
+	bool wrote = false;
+	for (const std::string& pfx : bioseq::storage::indexing::seqidx_prefixes_for(rel, name)) {
+		auto shards = bioseq::storage::indexing::shard_relnames_with_prefix(pfx);
+		if (shards.empty()) continue;
+		/* prefer the shard already holding query_key; else the first shard. */
+		std::string target = shards.front();
+		for (const std::string& sh : shards) {
+			if (bioseq::storage::indexing::count_in_shard(sh,
+					fmt::format("WHERE query_key={}", static_cast<long long>(query_key))) > 0) {
+				target = sh;
+				break;
+			}
+		}
+		if (SPI_connect() != SPI_OK_CONNECT) break;
+		std::string sql = fmt::format(
+			"INSERT INTO bioseq_internal.{} (query_key, sub_key, chunk_no, chunk_bytes, blob) "
+			"VALUES ($1,$2,$3,octet_length($4),$4) "
+			"ON CONFLICT (query_key, sub_key, chunk_no) DO UPDATE SET chunk_bytes=EXCLUDED.chunk_bytes, blob=EXCLUDED.blob",
+			quote_identifier(target.c_str()));
+		Oid argt[4] = { INT8OID, INT8OID, INT4OID, BYTEAOID };
+		Datum argv[4] = { Int64GetDatum(query_key), Int64GetDatum(sub_key), Int32GetDatum(chunk_no), payload };
+		SPI_execute_with_args(sql.c_str(), 4, argt, argv, nullptr, false, 0);
+		SPI_finish();
+		wrote = true;
+		break;
+	}
+	if (!wrote)
+		ereport(ERROR, (errmsg("bioseq.test_write_index_chunk: no seqidx shard for (%s, %s)",
+			get_rel_name(rel), name.c_str())));
+	PG_RETURN_VOID();
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_test_delete_index_manifest);
+Datum bioseq_test_delete_index_manifest(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	const std::int64_t query_key = PG_GETARG_INT64(2);
+	const std::int64_t dir = static_cast<std::int64_t>(bioseq::indexing::DIRECTORY_SUB_KEY);
+	for (const std::string& pfx : bioseq::storage::indexing::seqidx_prefixes_for(rel, name)) {
+		for (const std::string& sh : bioseq::storage::indexing::shard_relnames_with_prefix(pfx)) {
+			if (SPI_connect() != SPI_OK_CONNECT) continue;
+			std::string sql = fmt::format(
+				"DELETE FROM bioseq_internal.{} WHERE query_key={} AND sub_key={}",
+				quote_identifier(sh.c_str()), static_cast<long long>(query_key), static_cast<long long>(dir));
+			SPI_execute(sql.c_str(), false, 0);
+			SPI_finish();
+		}
+	}
+	PG_RETURN_VOID();
 }
 }

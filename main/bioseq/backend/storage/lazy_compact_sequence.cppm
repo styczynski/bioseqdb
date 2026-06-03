@@ -127,8 +127,6 @@ struct lazy_compact_sequence<R, Scanner> {
     [[nodiscard]] [[gnu::always_inline]] auto iterable() const noexcept
         { return _ref->template iterable<M>(); }
 
-    [[nodiscard]] [[gnu::always_inline]] auto count_symbols() const { return _ref->count_symbols(); }
-
     template <class I>
     [[nodiscard]] [[gnu::always_inline]] std::string to_string(I b, I e, bool split_units = false) const
         { return _ref->to_string(b, e, split_units); }
@@ -406,18 +404,8 @@ struct lazy_compact_sequence<R, Scanner> {
         return bp_range{bp_begin(), bp_end()};
     }
 
-    // ---- count_symbols (DOC0263 §9.9) ---------------------------------
-    // count_symbols on compact_sequence_range is a POC stub (49 for rank 0, 0
-    // for the rest); reproduce the same shape so parity tests match.
-    [[nodiscard]] auto count_symbols() const {
-        std::array<std::pair<std::size_t, typename traits::alphabet_type>, traits::alphabet_size> result{};
-        for (std::size_t rank = 0; rank < traits::alphabet_size; ++rank) {
-            typename traits::alphabet_type letter{};
-            letter.assign_rank(static_cast<decltype(letter.to_rank())>(rank));
-            result[rank] = { (rank == 0 ? std::size_t{49} : std::size_t{0}), letter };
-        }
-        return result;
-    }
+    // ---- (DOC0279 §17) the POC count_symbols() stub is deleted; the real
+    //      per-rank tally is tally_symbol_counts() in bioseq_indexing.symbol_counts.
 
     // ---- to_encoded_into (the aligner-facing encode) ------------------
     // DOC0263 §1.1#7 / §7: the fragmented encode goes through the

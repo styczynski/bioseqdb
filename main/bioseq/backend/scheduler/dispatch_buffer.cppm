@@ -77,7 +77,6 @@ import bioseq_sequences.minimap_port;
 import bioseq_sequences.pipe;            // for minimap_port / minimap2_port_with_index entry points
 import bioseq_cigar;
 import bioseq_types.pg_compact_sequence;
-import bioseq_sidecar;
 import bioseq_instr;
 import bioseq_storage;                  // DOC0260 §9
 import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
@@ -181,18 +180,6 @@ export struct BatchExecutionStats {
 export class BatchProcessor {
 public:
     /*
-     * Per-row sidecar blob pointer + length pair. The pointer references
-     * memory owned by the caller's BufferedScanEntry (its own
-     * sidecar_blob std::vector<char>) — we never copy the bytes into the
-     * BatchProcessor. A null pointer or zero length means "no prebuilt
-     * index, recompute minimizers for this row".
-     */
-    struct TargetIndexBlobRef {
-        const char* data  = nullptr;
-        std::size_t bytes = 0;
-    };
-
-    /*
      * DOC0264 / DOC0274 — context required to wire scanner_pg into the
      * per-row pipeline dispatch. When non-null, the dispatch loop uses
      * `sequence_scanner_pg<S>` (PG-backed for stub-backed targets, in-memory
@@ -215,16 +202,16 @@ public:
         std::array<std::int64_t, kDispatchBatchCapacity>  target_rownos{};
         Oid                                               user_relid           = InvalidOid;
         bool                                              read_index_active    = false;
+        // DOC0279 §11.3/§12.3 — the table's ACTIVE read index for the target
+        // column (resolve_active_read_index), default minimizers_per_fragment.
+        std::string                                       active_index;
     };
 
     /*
-     * Run the minimap2 pipeline across a batch. index_blobs may be nullptr
-     * when the caller has no sidecar path (legacy/read_sequence_index=off);
-     * otherwise it points at a contiguous block of batch_capacity pairs,
-     * one per target. Rows with an empty blob fall back to the recompute
-     * path so the caller can mix "index present" and "index absent" rows
-     * in the same scan (the common case when update_index_on_insert was
-     * toggled during loading).
+     * Run the minimap2 pipeline across a batch. DOC0279 §11.3 — per target
+     * row, the loop ASSEMBLES the table's active per-sequence minimizer index
+     * from its chunked storage (gated by read_index_active + per-row presence)
+     * or RECOMPUTES it; the two are mixed freely within one batch.
      *
      * DOC0264 / DOC0274 — production dispatch posture.
      *
@@ -243,11 +230,9 @@ public:
      * the pipeline tree adds one instantiation (alongside the existing
      * `sequence_scanner_none` and `sequence_scanner_test_chunked` trees).
      *
-     * NOTE on parameter passing: `target_hdrs`, `query_ids`, and
-     * `index_blobs` are full-size `kDispatchBatchCapacity`-element arrays
-     * (8 KB, 4 KB, and 16 KB respectively on a typical batch). They are
-     * all passed by const-ref / pointer so the call does not copy ~28 KB
-     * into the callee. The result map is RVO'd / moved on return.
+     * NOTE on parameter passing: `target_hdrs` and `query_ids` are full-size
+     * `kDispatchBatchCapacity`-element arrays passed by const-ref so the call
+     * does not copy them. The result map is RVO'd / moved on return.
      */
     template<typename K, size_t batch_capacity>
     [[nodiscard]] std::map<K, std::vector<MatchResult>> process_sequences(
@@ -258,7 +243,6 @@ public:
         const std::array<const pgseq_t*, batch_capacity>& target_hdrs,
         const std::array<K, batch_capacity>& query_ids,
         const Minimap2Params& base_params,
-        const std::array<TargetIndexBlobRef, batch_capacity>* index_blobs,
         BatchExecutionStats& stats,
         ScannerPgContext* scanner_pg_ctx = nullptr)
     {
@@ -407,137 +391,8 @@ public:
 
                     ++stats.targets_considered;
 
-                    const bool has_blob =
-                        index_blobs != nullptr
-                        && (*index_blobs)[i].data != nullptr
-                        && (*index_blobs)[i].bytes > 0;
-
                     MatchResultCollection collection;
-                    if (has_blob) {
-                        Minimap2Params params = base_params;
-                        params.kmer_size   = 15;
-                        params.window_size = 10;
-                        if (min_bp < 50) {
-                            params.min_chain_score = 10;
-                            params.min_seed_count  = 1;
-                        } else if (min_bp < 200) {
-                            params.min_chain_score = 20;
-                            params.min_seed_count  = 2;
-                        }
-                        ++stats.targets_with_prebuilt_index;
-                        if (!cached_query_minimizers.has_value()) {
-                            sketch_collector query_collector;
-                            {
-                                static const auto* mm_sketch_desc =
-                                    bioseq::instr::register_region_static("mm_sketch");
-                                auto _mm_sketch = bioseq::instr::region<Args>(mm_sketch_desc);
-                                collect_minimizers<minimap_int_hasher, MinimapSketchData>(
-                                    query_collector, query_seq,
-                                    query_seq.begin(), query_seq.end(),
-                                    static_cast<size_t>(params.window_size),
-                                    static_cast<size_t>(params.kmer_size));
-                            }
-                            cached_query_minimizers.emplace(
-                                std::move(query_collector).extract_sketches_data());
-                        }
-                        JustLogProgress("[dispatch] row {} deserializing prebuilt index"
-                                " ({} bytes) | footprint={}MB avail={}MB",
-                                i + 1, (*index_blobs)[i].bytes,
-                                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-                        MinimizerHashmapFragmentIndex prebuilt_idx = MinimizerHashmapFragmentIndex::deserialize_from_binary(
-                            (*index_blobs)[i].data, (*index_blobs)[i].bytes);
-                        JustLogProgress("[dispatch] row {} prebuilt index ready"
-                                " | footprint={}MB avail={}MB",
-                                i + 1,
-                                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-                        if (use_scanner_pg) {
-                            // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
-                            using SP = bioseq::storage::sequence_scanner_pg<S>;
-                            bioseq::storage::lazy_compact_sequence<S, SP> fq_pg{
-                                bioseq::storage::make_scanner_pg_in_memory<S>(query_seq)};
-                            const auto& loc_opt = scanner_pg_ctx->target_locators[i];
-                            if (loc_opt.has_value()) {
-                                // DOC0274 — compute last-fragment padding from
-                                // total_bp_size and S's letters_per_unit. For
-                                // total_bp = N, padding = ceil(N/lpu)*lpu - N.
-                                constexpr std::size_t _lpu =
-                                    compact_sequence_range<S>::traits::letters_per_unit;
-                                const std::uint64_t _total_units =
-                                    (loc_opt->total_bp_size + _lpu - 1) / _lpu;
-                                const std::size_t _padding =
-                                    static_cast<std::size_t>(
-                                        _total_units * _lpu - loc_opt->total_bp_size);
-                                SP target_scanner(
-                                    scanner_pg_ctx->db_oid,
-                                    scanner_pg_ctx->tablespace_oid,
-                                    scanner_pg_ctx->main_relfilenode,
-                                    scanner_pg_ctx->mmsearch_seq_attno,
-                                    *loc_opt,
-                                    _padding,
-                                    scanner_pg_ctx->caches,
-                                    scanner_pg_ctx->parent_mctx);
-                                bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
-                                    std::move(target_scanner)};
-                                collection = minimap2_port_with_index(
-                                    fq_pg, ft_pg, *cached_query_minimizers,
-                                    prebuilt_idx, params);
-                            } else {
-                                // Inline target — wrap via in-memory mode of scanner_pg.
-                                compact_sequence_range<S> target_seq{*target_hdr};
-                                bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
-                                    bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
-                                collection = minimap2_port_with_index(
-                                    fq_pg, ft_pg, *cached_query_minimizers,
-                                    prebuilt_idx, params);
-                            }
-                        } else if (target_hdr != nullptr) {
-                            // Baseline / chunked paths require an inline target.
-                            compact_sequence_range<S> target_seq{*target_hdr};
-                            auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-                            if (chunked_scanner_forced) {
-                                using chunked = bioseq::storage::sequence_scanner_test_chunked<
-                                    typename compact_sequence_range<S>::traits::storage_unit,
-                                    bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-                                bioseq::storage::lazy_compact_sequence<S, chunked> fq{chunked::from_range(query_seq)};
-                                bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
-                                collection = minimap2_port_with_index(
-                                    fq, ft, *cached_query_minimizers, prebuilt_idx, params);
-                            } else {
-                                collection = minimap2_port_with_index(
-                                    lazy_query, lazy_target,
-                                    *cached_query_minimizers,
-                                    prebuilt_idx, params);
-                            }
-                        } else if (scanner_pg_ctx != nullptr
-                                   && scanner_pg_ctx->target_locators[i].has_value()) {
-                            // DOC0274 (round-2 revert) — inmemory_forced=ON but the stub's
-                            // materialised varlena would exceed MaxAllocSize, so
-                            // hydrate_one_column skipped it and target_hdr is null. With
-                            // chunked + baseline both ruled out, the only way to honour the
-                            // GUC's force-baseline semantic is to raise: a silent fall
-                            // through to scanner_pg would defeat the purpose of the toggle
-                            // (the test couldn't distinguish "Phase B baseline" from
-                            // "Phase C production" on these rows). The user-facing fix is
-                            // either to turn the GUC off (use scanner_pg) or wait for
-                            // Phase D D-VARLENA which lifts the MaxAllocSize hydration cap.
-                            pg_log(ERROR,
-                                "bioseq.test_force_inmemory_scanner=on: row {} target stub "
-                                "({} bp) exceeds MaxAllocSize and cannot be materialised "
-                                "for the Phase B baseline. Either set the GUC to off (use "
-                                "the Phase C scanner_pg path which streams fragments) or "
-                                "wait for Phase D D-VARLENA. See DOC0267.",
-                                static_cast<int>(query_ids[i]),
-                                static_cast<unsigned long long>(target_bp_size));
-                        } else {
-                            // No inline target AND no locator — truly no usable target.
-                            JustLog("[bioseq] pg: row {} has no inline target and no scanner_pg locator; treating as WHERE FALSE",
-                                    static_cast<int>(query_ids[i]));
-                            continue;
-                        }
-                        stats.last_effective_params = params;
-                    } else {
+                    {
                         ++stats.targets_recomputed_minimizers;
                         Minimap2Params params = apply_size_heuristic(base_params, min_bp);
                         if (use_scanner_pg) {
@@ -576,6 +431,8 @@ public:
                                 if (scanner_pg_ctx->read_index_active
                                     && OidIsValid(scanner_pg_ctx->user_relid)) {
                                     using IStore = bioseq::storage::indexing::IndexStorageFragmentPg;
+                                    const bool want_seq =
+                                        scanner_pg_ctx->active_index == "minimizers_per_sequence";
                                     // The stored index is ALWAYS w=10,k=15 (pinned at build); the query
                                     // minimizers + the seed pipeline MUST use the same w,k (NOT the size
                                     // heuristic's reduced k), exactly as the legacy prebuilt branch does.
@@ -593,8 +450,13 @@ public:
                                             cached_query_minimizers.emplace(std::move(qc).extract_sketches_data());
                                         }
                                     };
-                                    // DOC0279 §11.3b — per-sequence merged index (if present) takes
-                                    // precedence: query-relevant buckets only + exact global max_occ.
+                                    // DOC0279 §11.3 — route by the table's ACTIVE read index
+                                    // (set_active_read_index / resolve_active_read_index, default
+                                    // minimizers_per_fragment). Per-row presence still gates: an
+                                    // active index not materialised for THIS row recomputes.
+                                    if (want_seq) {
+                                    // §11.3b — per-sequence merged index: query-relevant buckets
+                                    // only + exact global max_occ.
                                     auto seq_store = bioseq::storage::indexing::open_fragment_storage(
                                         scanner_pg_ctx->user_relid, scanner_pg_ctx->db_oid,
                                         scanner_pg_ctx->tablespace_oid, scanner_pg_ctx->main_relfilenode,
@@ -612,7 +474,7 @@ public:
                                         collection = minimap2_port_with_index(fq_pg, ft_pg, *cached_query_minimizers, idx, idx_params);
                                         assembled = true;
                                     }
-                                    if (!assembled) {
+                                    } else {
                                     auto frag_store = bioseq::storage::indexing::open_fragment_storage(
                                         scanner_pg_ctx->user_relid, scanner_pg_ctx->db_oid,
                                         scanner_pg_ctx->tablespace_oid, scanner_pg_ctx->main_relfilenode,
@@ -653,7 +515,7 @@ public:
                                         }
                                         assembled = true;
                                     }
-                                    }  // close if (!assembled) per-fragment guard
+                                    }  // close the per-fragment else branch
                                 }
                                 if (!assembled) {
                                     collection =
@@ -691,8 +553,7 @@ public:
                             }
                         } else if (scanner_pg_ctx != nullptr
                                    && scanner_pg_ctx->target_locators[i].has_value()) {
-                            // DOC0274 (round-2 revert) — see has_blob branch above for
-                            // the rationale. inmemory_forced=ON cannot satisfy its
+                            // DOC0274 (round-2 revert): inmemory_forced=ON cannot satisfy its
                             // force-baseline semantic on > MaxAllocSize stubs; raise.
                             pg_log(ERROR,
                                 "bioseq.test_force_inmemory_scanner=on: row {} target stub "
@@ -717,7 +578,7 @@ public:
                             stats.last_effective_params.window_size,
                             stats.last_effective_params.min_chain_score,
                             stats.last_effective_params.min_seed_count,
-                            has_blob, collection.size());
+                            stats.targets_with_prebuilt_index, collection.size());
                     if (!collection.empty()) {
                         results[query_ids[i]] = std::move(collection.results);
                     }
@@ -835,14 +696,13 @@ public:
          * dna5/32), the sidecar minimizers — sketched at INSERT time
          * under the COLUMN's alphabet — are hash-incompatible with the
          * query. We can still align (dispatch on the column's
-         * alphabet, after coalescing the query bytes), but the
-         * sidecar must be ignored so we recompute minimizers per row.
+         * alphabet, after coalescing the query bytes), but the stored
+         * index must be ignored so we recompute minimizers per row.
          * `recompute_due_to_alphabet_mismatch` is set at
-         * configure_mmsearch time and consumed by run_batch when
-         * deciding whether to pass the index_blobs array through.
-         * EXPLAIN reads the same flag to print the
-         * "Bioseq Recomputed" line with an explanatory "Performance
-         * reduced" note.
+         * configure_mmsearch time and consumed by run_batch to disable
+         * stored-index assembly (read_index_active). EXPLAIN reads the
+         * same flag to print the "Bioseq Recomputed" line with an
+         * explanatory "Performance reduced" note.
          */
         bool       recompute_due_to_alphabet_mismatch = false;
 
@@ -875,17 +735,6 @@ public:
         int64_t         sequence_rowno      = -1;   /* derived from scan_slot->tts_tid; -1 when the TID was invalid */
         std::vector<char> seq_varlena;
         bool            seq_is_null         = true;
-
-        /*
-         * Per-row serialized TargetIndex bytes read from
-         * bioseq_internal.index_sidecar. Populated by submit_scan only when
-         * bioseq.read_sequence_index = on AND the lookup returned a non-empty
-         * blob. When empty the batch processor falls back to recomputing
-         * minimizers for this row. The std::vector<char> owns its bytes so
-         * the BatchProcessor::TargetIndexBlobRef points directly into the
-         * entry's storage without copying.
-         */
-        std::vector<char> sidecar_index_blob;
 
         /*
          * Per-row mmsearch query, populated only when MmsearchContext's
@@ -1474,38 +1323,19 @@ public:
         slot_getallattrs(entry.scan_slot_copy);
 
         /*
-         * Sidecar index read — only when the GUC is on, the row has a
-         * stable rowno, and there is a seq varlena (nothing to do for
-         * NULL-seq rows). We intentionally keep this INSIDE submit_scan
-         * so it happens once per row at buffering time; doing it later
-         * would require re-opening relcache entries per batch row.
-         *
-         * sidecar_read_index returns an owned std::vector<char>; moving
-         * it into entry.sidecar_index_blob avoids a memcpy. When the row
-         * has no stored blob (update_index_on_insert was off) the
-         * vector stays empty and the batch processor falls back to
-         * recomputing minimizers — that fallback is counted toward the
-         * EXPLAIN "recomputed" percentage.
+         * DOC0279 §11.3c — no per-row blob read here any more. The stored
+         * index (if any) is ASSEMBLED at batch time from its chunked storage,
+         * keyed by entry.sequence_rowno (the columnar rowno == index
+         * query_key, already computed above), so submit_scan only needs the
+         * rowno (carried into scanner_pg_ctx.target_rownos[]).
          */
-        if (read_sequence_index_active
-            && !entry.seq_is_null
-            && entry.sequence_rowno >= 0
-            && OidIsValid(user_relid)) {
-            auto blob = bioseq::sidecar::sidecar_read_index(
-                user_relid, entry.sequence_rowno);
-            if (blob.has_value()) {
-                entry.sidecar_index_blob = std::move(*blob);
-            }
-        }
-
         const uint32_t entry_seq_bp_size = entry.seq_hdr() != nullptr
             ? entry.seq_hdr()->bp_size : 0;
-        JustLog("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={}) sidecar_blob_bytes={}",
+        JustLog("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
                 entry.primary_key_is_null ? -1 : entry.primary_key,
                 entry.sequence_rowno,
                 entry_seq_bp_size,
-                entry.seq_is_null,
-                entry.sidecar_index_blob.size());
+                entry.seq_is_null);
 
         buffered_entries.push_back(std::move(entry));
     }
@@ -1717,8 +1547,6 @@ public:
 
         std::array<const pgseq_t*, kDispatchBatchCapacity> target_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
-        std::array<typename BatchProcessor::TargetIndexBlobRef,
-                   kDispatchBatchCapacity> index_blobs{};
 
         const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
             ? kDispatchBatchCapacity
@@ -1729,13 +1557,6 @@ public:
         }
 
         /*
-         * Populate the per-row blob reference array. The BatchProcessor
-         * reads directly from these pointers into BufferedScanEntry's
-         * own vector<char> storage — the vector keeps the bytes alive
-         * for the full batch and no extra copy happens. Rows without a
-         * sidecar blob stay at the default-constructed {nullptr, 0}
-         * pair, which the batch processor interprets as "recompute".
-         *
          * We use the buffer entry index `i` as the BatchProcessor's
          * key rather than the row's primary_key column. The PK from
          * the user's table is only available when the targetlist
@@ -1755,10 +1576,6 @@ public:
             const BufferedScanEntry& entry = buffered_entries[i];
             target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
             query_ids[i]   = static_cast<int32_t>(i);
-            if (!entry.sidecar_index_blob.empty()) {
-                index_blobs[i].data  = entry.sidecar_index_blob.data();
-                index_blobs[i].bytes = entry.sidecar_index_blob.size();
-            }
         }
 
         const pgseq_t* query_hdr = mmsearch_context.query_hdr();
@@ -1773,22 +1590,6 @@ public:
                 mmsearch_context.recompute_due_to_alphabet_mismatch);
 
         last_stats = BatchExecutionStats{};
-        /*
-         * Index-blob fast path conditions:
-         *   - GUC bioseq.read_sequence_index is on (read_sequence_index_active)
-         *   - We are NOT recomputing due to alphabet mismatch — the
-         *     sidecar's minimizers were sketched in the column's
-         *     alphabet, but a cross-alphabet query (`'X'::seq('dna5',
-         *     32)` against a `seq('dna4', 32)` column) routes through
-         *     a different hashing alphabet so reusing the blob would
-         *     produce no seed hits.
-         */
-        const bool blobs_eligible =
-            read_sequence_index_active
-            && !mmsearch_context.recompute_due_to_alphabet_mismatch;
-        const std::array<typename BatchProcessor::TargetIndexBlobRef,
-                         kDispatchBatchCapacity>* blob_arg =
-            blobs_eligible ? &index_blobs : nullptr;
 
         // DOC0264 §9.2 / DOC0274 — wire scanner_pg into the dispatch loop.
         // Allocates a fresh seq_caches for scanner_pg's PG-backed reads.
@@ -1830,6 +1631,16 @@ public:
         scanner_pg_ctx.user_relid        = user_relid;
         scanner_pg_ctx.read_index_active = read_sequence_index_active
             && !mmsearch_context.recompute_due_to_alphabet_mismatch;
+        // DOC0279 §11.3/§12.3 — resolve the target column's ACTIVE read index
+        // ONCE per batch (catalog lookup; default minimizers_per_fragment). The
+        // assemble loop routes by this and still gates per-row on presence.
+        scanner_pg_ctx.active_index =
+            std::string{bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX};
+        if (scanner_pg_ctx.read_index_active && OidIsValid(user_relid)) {
+            scanner_pg_ctx.active_index = bioseq::storage::indexing::resolve_active_read_index(
+                user_relid, user_main_relfilenode,
+                static_cast<std::int16_t>(mmsearch_context.seq_attno));
+        }
         // Pointer to the context.
         auto* scanner_pg_arg = &scanner_pg_ctx;
 
@@ -1860,15 +1671,9 @@ public:
                 std::array<const pgseq_t*, kDispatchBatchCapacity>
                     single_targets{};
                 std::array<int32_t, kDispatchBatchCapacity> single_ids{};
-                std::array<typename BatchProcessor::TargetIndexBlobRef,
-                           kDispatchBatchCapacity> single_blobs{};
                 single_targets[0] = target_hdrs[i];
                 single_ids[0]     = static_cast<int32_t>(i);
-                single_blobs[0]   = index_blobs[i];
                 BatchExecutionStats single_stats{};
-                const std::array<typename BatchProcessor::TargetIndexBlobRef,
-                                 kDispatchBatchCapacity>* single_blob_arg =
-                    blobs_eligible ? &single_blobs : nullptr;
                 // DOC0274 — build a single-row scanner_pg context so the
                 // dispatch loop can pick scanner_pg for this row's target.
                 typename BatchProcessor::ScannerPgContext single_pg_ctx = scanner_pg_ctx;
@@ -1883,7 +1688,6 @@ public:
                         per_row_hdr,
                         single_targets, single_ids,
                         base_params,
-                        single_blob_arg,
                         single_stats,
                         &single_pg_ctx);
                 last_stats.targets_considered           += single_stats.targets_considered;
@@ -1902,7 +1706,6 @@ public:
                 query_hdr,
                 target_hdrs, query_ids,
                 base_params,
-                blob_arg,
                 last_stats,
                 scanner_pg_arg);
         }
@@ -1942,7 +1745,6 @@ public:
                     extra_hdr,
                     target_hdrs, query_ids,
                     base_params,
-                    blob_arg,
                     discarded_stats,
                     scanner_pg_arg);
             JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} produced matches for {} entries",

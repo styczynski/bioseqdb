@@ -45,7 +45,6 @@ import bioseq_table_types;
 import config;
 import bioseq_table_io;
 import pg_utils;
-import bioseq_sidecar;
 import bioseq_storage_indexing_admin;   // DOC0279 §11.2 — index_build_on_insert
 import bioseq_storage;
 import bioseq_am_cache;
@@ -1317,11 +1316,6 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			RelationGetRelid(relation), amc.seq_attnos, slot->tts_isnull,
 			detoasted_values, per_col_locator, writtenRowNumber,
 			ColumnarWritePerTupleContext(writeState));
-		/* Coexistence: keep the legacy meta_sidecar (symbol_count fast path)
-		 * populated until the §12.5 INLINE symbol_counts reader is wired into
-		 * the custom scan. */
-		bioseq::sidecar::sidecar_after_insert(
-			relation, slot, detoasted_values, writtenRowNumber);
 	}
 	MemoryContextReset(ColumnarWritePerTupleContext(writeState));
 
@@ -1433,8 +1427,6 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 				RelationGetRelid(relation), amc.seq_attnos, tupleSlot->tts_isnull,
 				detoasted_values, per_col_locator, writtenRowNumber,
 				ColumnarWritePerTupleContext(writeState));
-			bioseq::sidecar::sidecar_after_insert(
-				relation, tupleSlot, detoasted_values, writtenRowNumber);
 
 			EState *estate = create_estate_for_relation(relation);
 

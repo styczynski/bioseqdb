@@ -711,12 +711,37 @@ TEST_CASE("LEFT JOIN with bioseq.symbol_count projection does not crash",
         REQUIRE(row.size() == 3);
         REQUIRE(row[0].has_value());
         REQUIRE(row[1].has_value());
-        // Every seeded sequence has a deterministic A-count from the
-        // meta_sidecar (seeded by the columnar AM at INSERT time when
-        // update_index_on_insert = on, which seed_hoe_fixture sets).
+        // Every seeded sequence has a deterministic A-count from the stored
+        // INLINE symbol_counts index (DOC0279 §12.5), populated by the columnar
+        // AM at INSERT time when update_index_on_insert = on (which
+        // seed_hoe_fixture sets).
         REQUIRE(row[2].has_value());
         const auto count = std::stoll(row[2].value());
         REQUIRE(count >= 0);
+    }
+
+    // Guard: a row inserted WITHOUT the stored INLINE index, read back with
+    // bioseq.read_sequence_index = off, must still surface a NON-NULL real
+    // tally via the unconditional recompute fallback (never NULL). seq0 of the
+    // new pk=6 row is 'AAAACCCCGGGGTTTTAAAACCCCGGGGTTTT' (A appears 8 times).
+    {
+        guc_scope no_insert(ctx, "bioseq.update_index_on_insert", "off");
+        exec_sqlf(ctx,
+                  "INSERT INTO {} VALUES "
+                  "(6, 'AAAACCCCGGGGTTTTAAAACCCCGGGGTTTT'::bioseq.seq('dna4', 32), "
+                  "'AAAACCCC'::bioseq.seq('dna4', 32));",
+                  kHoeJoin);
+    }
+    {
+        guc_scope no_read(ctx, "bioseq.read_sequence_index", "off");
+        const auto guard_row = query_one(
+            ctx,
+            fmt::format(
+                "SELECT bioseq.symbol_count(seq0, 'A') FROM {} WHERE pk = 6;",
+                kHoeJoin));
+        REQUIRE(guard_row.size() == 1);
+        REQUIRE(guard_row[0].has_value());  // recompute fallback is never NULL
+        REQUIRE(std::stoll(guard_row[0].value()) == 8);
     }
 }
 

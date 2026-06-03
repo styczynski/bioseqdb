@@ -338,62 +338,11 @@ COMMENT ON FUNCTION pg_catalog.alter_bioseq_table_reset(
 IS 'reset on or more options on a bioseq table to the system defaults';
 
 -- ============================================================================
--- SIDECAR TABLES (heap). See RESEARCH/SPEC_MINIMIZER_STORAGE.md.
---
---   index_sidecar: serialized TargetIndex blob per (user_relid, rowno).
---   meta_sidecar:  per-sequence metadata (symbol counts). Count is
---                  hardcoded to 49 A's for this POC.
--- ============================================================================
-CREATE TABLE IF NOT EXISTS bioseq.index_sidecar (
-    user_relid      oid    NOT NULL,
-    sequence_rowno  bigint NOT NULL,
-    target_index    bytea  NOT NULL,
-    PRIMARY KEY (user_relid, sequence_rowno)
-);
-COMMENT ON TABLE bioseq.index_sidecar IS
-    'Serialized minimizer TargetIndex, keyed by (user_relid, rowno).';
-
-CREATE TABLE IF NOT EXISTS bioseq.meta_sidecar (
-    user_relid      oid      NOT NULL,
-    sequence_rowno  bigint   NOT NULL,
-    alphabet_code   smallint NOT NULL,
-    symbol_counts   bigint[] NOT NULL,         -- indexed by seqan3 rank
-    column_attno    smallint NOT NULL DEFAULT 0,  -- DOC0260 §11.1 (review I12)
-    PRIMARY KEY (user_relid, sequence_rowno, column_attno)
-);
-COMMENT ON TABLE bioseq.meta_sidecar IS
-    'Per-sequence symbol counts, keyed per SEQ column. symbol_counts[rank+1] '
-    'is the count for the rank-th letter in the alphabet identified by '
-    'alphabet_code; column_attno disambiguates rows from tables with more '
-    'than one bioseq.seq column (DOC0260 §11.1 / consolidated-review I12).';
-
--- ============================================================================
--- METADATA AGE LOG.
---
--- Tracks the most recent (recompute, INSERT-batch) timestamp per
--- (user_relid, kind). Read by bioseq.list_metadata(); written by
--- bioseq.update_index() and (throttled to once per minute via a
--- backend-local in-memory cache) by sidecar_after_insert. The throttle
--- keeps high-throughput INSERT workloads off this single row.
---
--- Plain heap-AM table on purpose: writes here must NOT trigger the
--- bioseq AM's sidecar_after_insert hook (which would recurse). When a
--- future bioseq-AM table needs an age log, the recursion guard in
--- sidecar_after_insert will need to cover it explicitly.
--- ============================================================================
-CREATE TABLE IF NOT EXISTS bioseq.metadata_age_log (
-    user_relid    oid          NOT NULL,
-    kind          text         NOT NULL,
-    last_updated  timestamptz  NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_relid, kind)
-);
-COMMENT ON TABLE bioseq.metadata_age_log IS
-    'Last update timestamp per (user_relid, metadata kind). Read by '
-    'bioseq.list_metadata(); written by bioseq.update_index() and '
-    '(throttled) by sidecar_after_insert.';
-
--- ============================================================================
--- DOC0279 — the new index policy + age + table-wide-shard catalogs. Heap-AM.
+-- DOC0279 §12.3/§17 — index policy + age + table-wide-shard catalogs. Heap-AM.
+-- The legacy single-blob index_sidecar / per-row meta_sidecar tables are GONE
+-- (the per-fragment / INLINE chunked-storage indexes replace them; §17). The
+-- minimizer index + symbol counts now live in the lazily-created seqidx_*
+-- tables co-located with the sequence sub-table shards.
 -- (Literal install DDL uses bioseq.*; runtime resolves bioseq_internal.* after
 --  the ALTER SCHEMA rename below.)
 -- ============================================================================
@@ -410,7 +359,11 @@ CREATE TABLE IF NOT EXISTS bioseq.index_policy (
 CREATE UNIQUE INDEX IF NOT EXISTS index_policy_one_active_read
     ON bioseq.index_policy (user_relid, main_relfilenode, column_attno) WHERE is_active_read;
 
-CREATE TABLE IF NOT EXISTS bioseq.index_age_log (
+-- DOC0279 §12.3 — re-keyed metadata_age_log: last successful index build/write
+-- per (user_relid, main_relfilenode, column_attno, index_name). Read by
+-- bioseq.list_metadata(); written by bioseq.update_index() and the INSERT-time
+-- build. Plain heap-AM so writes never re-fire the bioseq AM insert hook.
+CREATE TABLE IF NOT EXISTS bioseq.metadata_age_log (
     user_relid       oid         NOT NULL,
     main_relfilenode oid         NOT NULL,
     column_attno     int2        NOT NULL,
@@ -528,7 +481,7 @@ SELECT pg_extension_config_dump('bioseq_internal.seq_sub_table', 'WHERE FALSE');
 -- DOC0279 — the new index catalogs carry OIDs/relfilenodes that do not survive
 -- a dump/restore, so dump the table definition but no rows.
 SELECT pg_extension_config_dump('bioseq_internal.index_policy', 'WHERE FALSE');
-SELECT pg_extension_config_dump('bioseq_internal.index_age_log', 'WHERE FALSE');
+SELECT pg_extension_config_dump('bioseq_internal.metadata_age_log', 'WHERE FALSE');
 SELECT pg_extension_config_dump('bioseq_internal.index_table_shard', 'WHERE FALSE');
 
 -- DOC0260 §6.1 — operator-facing summary view over the seq_sub_table catalog.
@@ -1350,16 +1303,17 @@ CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
 -- ---------------------------------------------------------------------------
--- bioseq.symbol_count — O(n) scalar fallback + cheap custom-scan fast path.
+-- bioseq.symbol_count — DOC0279 §12.5. O(n) scalar fallback + cheap
+-- custom-scan fast path, returning the REAL per-rank tally (no 49-stub).
 --
--- The Postgres entry point recomputes count_symbols() on the passed-in
--- varlena, so it works correctly for literals and plain-heap tables. On a
--- columnar scan the VarInjector in the bioseq custom scan rewrites every
--- `symbol_count(Var, 'L')` call into a placeholder Const that is populated
--- per-row from bioseq_internal.meta_sidecar; this is the preferred path
--- and is several orders of magnitude cheaper than re-scanning every
--- sequence. The SUPPORT function inflates the planner cost so any query
--- that *can* go through the custom scan will prefer it.
+-- The scalar entry computes tally_symbol_counts() over a literal's inline
+-- bases. On a columnar scan the VarInjector rewrites every
+-- `symbol_count(Var, 'L')` into a placeholder Const populated per-row from
+-- the stored INLINE symbol_counts index (if present, gated by
+-- bioseq.read_sequence_index) with an UNCONDITIONAL tally_symbol_counts
+-- recompute fallback — so the value is never NULL for a present row. The
+-- SUPPORT function inflates the planner cost so any query that *can* go
+-- through the custom scan will prefer it.
 -- ---------------------------------------------------------------------------
 CREATE FUNCTION bioseq_symbol_count_support(internal)
     RETURNS internal
@@ -1494,19 +1448,21 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq,
     PARALLEL SAFE;
 
 -- ============================================================================
--- bioseq.list_metadata — set-returning function listing every
--- (user_relid, metadata_kind) pair the extension knows about. The kind
--- set is populated at _PG_init() by the C++ MetadataKindRegistry; today's
--- set is {minimizers, symbol_counts}. Future kinds (e.g. sneaky_snake
--- runtime, bwa_fm_index, hnsw_minimizer_index) appear automatically when
--- their owning module registers them.
+-- bioseq.list_metadata — DOC0279 §12.1/§12.2. One row per (user bioseq table,
+-- bioseq.seq column, registered index). The index set is the compile-time
+-- pg_supported_indexes::list_types() registry; new indexes appear when the
+-- registry grows (no runtime registration). Not gated on chunk existence, so
+-- a fresh table already lists all production indexes with size '0 bytes' and
+-- a NULL age.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bioseq.list_metadata()
     RETURNS TABLE (
         table_name      regclass,
+        column_attno    int2,
+        column_name     text,
         name            text,
-        mode            text,        -- 'PER_ROW' or 'PER_TABLE'
-        insert_support  boolean,
+        index_type      text,        -- 'CHUNKED_PER_FRAGMENT' | 'INLINE_PER_SEQUENCE' | 'CHUNKED_PER_TABLE'
+        update_policy   text,        -- 'UPDATE_ON_INSERT' | 'UPDATE_MANUALLY'
         size            text,        -- pg_size_pretty output, e.g. '5.1 GB'
         age             interval     -- now() - last_updated; NULL if never updated
     )
@@ -1514,9 +1470,9 @@ CREATE OR REPLACE FUNCTION bioseq.list_metadata()
     LANGUAGE C VOLATILE PARALLEL SAFE;
 
 COMMENT ON FUNCTION bioseq.list_metadata() IS
-    'Enumerate every (user table, metadata kind) pair the extension '
-    'manages, with mode (PER_ROW/PER_TABLE), insert-trigger support, '
-    'estimated on-disk size, and estimated age since last update.';
+    'Enumerate every (user bioseq table, bioseq.seq column, registered index) '
+    'triple, with index_type, update_policy (UPDATE_ON_INSERT/UPDATE_MANUALLY), '
+    'derived on-disk size, and age since last successful build.';
 
 -- ============================================================================
 -- bioseq.update_index — bulk recompute / create the named metadata kind
@@ -1528,17 +1484,16 @@ COMMENT ON FUNCTION bioseq.list_metadata() IS
 -- 'minimizers')`). PG implicitly converts text → regclass via the
 -- regclassin input function in the first form.
 --
--- The function:
---   * raises ERRCODE_INVALID_PARAMETER_VALUE if `kind` is not registered;
---   * raises ERRCODE_INSUFFICIENT_PRIVILEGE if the caller cannot SELECT
---     from the user relation or INSERT into the backing sidecar;
---   * deletes any pre-existing entries for this (rel, kind) pair;
---   * scans the user relation and writes new entries;
---   * updates bioseq_internal.metadata_age_log;
---   * returns the count of entries written (PER_ROW: row count,
---     PER_TABLE: 1).
+-- The function (DOC0279 §11.4):
+--   * raises ERRCODE_INVALID_PARAMETER_VALUE if `name` is not a registered
+--     index (pg_supported_indexes::list_types());
+--   * errors if the relation is not a USING bioseq table;
+--   * clears the named index across all shards, then rebuilds it for every
+--     bioseq.seq column of every row (scanner_pg-streamed, RSS-bounded);
+--   * stamps bioseq_internal.metadata_age_log on success;
+--   * returns the count of sequences (re)indexed.
 --
--- Not PARALLEL SAFE: writes to sidecars and the age-log.
+-- Not PARALLEL SAFE: writes the seqidx_* chunk tables and the age-log.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bioseq.update_index(rel regclass, kind text)
     RETURNS bigint
@@ -1565,6 +1520,17 @@ CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name tex
     AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION bioseq.columnar_row_number(rel regclass, ctid tid) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_columnar_row_number' LANGUAGE C VOLATILE STRICT;
+
+-- DOC0279 §12.2/§16.2 — TEST-ONLY controlled-corruption hooks. They resolve the
+-- dynamic seqidx_* shard for (rel, name) internally and write / delete a single
+-- chunk row, so the integration tests can pin reserved-sentinel filtering,
+-- missing-manifest -> recompute, and present-manifest/missing-fragment
+-- corruption detection.
+CREATE OR REPLACE FUNCTION bioseq.test_write_index_chunk(rel regclass, name text, query_key bigint,
+        sub_key bigint, chunk_no int, payload bytea) RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_test_write_index_chunk' LANGUAGE C VOLATILE STRICT;
+CREATE OR REPLACE FUNCTION bioseq.test_delete_index_manifest(rel regclass, name text, query_key bigint) RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_test_delete_index_manifest' LANGUAGE C VOLATILE STRICT;
 
 COMMENT ON FUNCTION bioseq.update_index(regclass, text) IS
     'Recompute (or create) the named metadata kind for the given table. '
