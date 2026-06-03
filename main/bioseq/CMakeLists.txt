@@ -106,6 +106,15 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/minimap_int.cppm
   # DOC0264 §10.1 — sample-sequence generator moved from main/bench/
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/generation/sequence_generator.cppm
+  # DOC0279 — the NO_POSTGRES indexing concept/algorithm modules (§4 table).
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/sequence_index_type.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/index_chunked_storage.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/index_traits.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/supported_indexes.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence_index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_index.cppm
   # backend/pipeline/*
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm

@@ -100,12 +100,18 @@ import bioseq_instr;
 import bioseq_storage_scanner;
 import bioseq_storage_lazy;
 import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
+import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
 
 export {
 
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE::pipe {
+// DOC0279 §9 — bring the relocated index into this namespace so the prior
+// `TargetIndex` spellings resolve to `MinimizerHashmapFragmentIndex`.
+using bioseq::indexing::MinimizerHashmapFragmentIndex;
+using bioseq::indexing::MinimizerIndex;
 
 // DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
@@ -840,6 +846,39 @@ static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
         (by_budget > kSegmentCoreMaxBp) ? kSegmentCoreMaxBp
                                         : static_cast<sequence_size_t>(by_budget);
     return want < kSegmentMinBp ? kSegmentMinBp : want;
+}
+
+// DOC0279 §11.3a — the segment geometry of `minimap_port_segmented`, extracted
+// so `dispatch_buffer`'s stored-index assemble loop reuses the EXACT recompute
+// geometry. NOT a pure function of its args: it reads the runtime budget via
+// `segment_bp_from_budget()` exactly as recompute does. Each entry covers a
+// segment's overlapped collection range `[cs_u, ce_u)` (in units) and its core
+// claim band `[core_lo_bp, core_hi_bp)`.
+struct SegmentUnitRange {
+    sequence_size_t cs_u;          ///< collection start (units, overlap-included)
+    sequence_size_t ce_u;          ///< collection end   (units, overlap-included)
+    sequence_size_t core_lo_bp;    ///< core claim lower bound (bp)
+    sequence_size_t core_hi_bp;    ///< core claim upper bound (bp, clamped to total_bp)
+};
+[[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
+        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu) {
+    std::vector<SegmentUnitRange> out;
+    if (total_bp == 0 || lpu == 0) return out;
+    const sequence_size_t total_units = (total_bp + lpu - 1) / lpu;
+    sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
+    if (overlap_bp > kSegmentOverlapMaxBp) overlap_bp = kSegmentOverlapMaxBp;
+    const sequence_size_t ovl_units = (overlap_bp + lpu - 1) / lpu;
+    sequence_size_t seg_units = segment_bp_from_budget() / lpu;
+    if (seg_units == 0) seg_units = 1;
+    for (sequence_size_t lo_u = 0; lo_u < total_units; lo_u += seg_units) {
+        const sequence_size_t hi_u = std::min(lo_u + seg_units, total_units);
+        const sequence_size_t cs_u = (lo_u > ovl_units) ? (lo_u - ovl_units) : 0;
+        const sequence_size_t ce_u = std::min(hi_u + ovl_units, total_units);
+        const sequence_size_t core_lo_bp = lo_u * lpu;
+        const sequence_size_t core_hi_bp = std::min(hi_u * lpu, total_bp);
+        out.push_back(SegmentUnitRange{cs_u, ce_u, core_lo_bp, core_hi_bp});
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -2697,7 +2736,7 @@ template <is_constexpr_aligner_params Cep,
 {
     using MinimizerT = typename Cep::minimizer_repr_t;
     const std::vector<MinimizerT> empty_minimizers{};
-    TargetIndex                   empty_index{};
+    MinimizerHashmapFragmentIndex empty_index{};
     MatchResultCollection         ignored_out{};
     const auto& sm = thread_local_scoring_matrix<QR>(params);
 
@@ -2859,6 +2898,10 @@ PipelineDescription describe_pipeline_for(
 
 namespace bioseq::simd::HWY_NAMESPACE {
 
+// DOC0279 §9 — relocated index name in scope for this namespace's entry points.
+using bioseq::indexing::MinimizerHashmapFragmentIndex;
+using bioseq::indexing::MinimizerIndex;
+
 /**
  * @brief Run the minimap2 pipeline against a pre-built target index using a
  * caller-supplied query minimiser vector (DOC0249 §9.7).
@@ -2871,7 +2914,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 template <class MinimizerT,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerIndex IndexT,
+          ::bioseq::indexing::MinimizerIndex IndexT,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(
@@ -2913,9 +2956,9 @@ template <class MinimizerT,
         bioseq::instr::register_region_static("minimap2_port");
     auto _scope = bioseq::instr::region(_desc);
     const sequence_size_t target_len = target_seq.bp_size();
-    TargetIndex target_index;
+    MinimizerHashmapFragmentIndex target_index;
     target_index.build(target_minimizers, target_len);
-    return minimap2_port_with_index<MinimizerT, QueryRange, TargetRange, TargetIndex, Scanner>(
+    return minimap2_port_with_index<MinimizerT, QueryRange, TargetRange, MinimizerHashmapFragmentIndex, Scanner>(
         query_seq, target_seq, query_minimizers, target_index, params);
 }
 
@@ -3197,7 +3240,7 @@ template <supports_compact_sequence_range QueryRange,
     // TargetIndex::build clears, not frees). Previously each of the ~30 segments
     // of a 6 Gbp target malloc'd/freed ~1 GB, a hidden per-segment allocator tax.
     sketch_collector_t<MinimizerT> seg_collector;
-    TargetIndex seg_index;
+    MinimizerHashmapFragmentIndex seg_index;
     JustLogProgress("[minimap_port_segmented] target_len={} query_len={} seg_bp={} overlap_bp={} "
                     "segments≈{} | footprint={}MB avail={}MB",
             target_len, query_len, seg_units * lpu, overlap_bp,

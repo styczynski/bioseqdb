@@ -35,6 +35,7 @@ extern int bioseq_page_cache_size;
 extern bool bioseq_index_scan;
 extern bool bioseq_update_index_on_insert;
 extern bool bioseq_read_sequence_index;
+extern int  bioseq_index_run_buffer_bytes;  /* DOC0279 §13 — test-only run buffer override */
 /*
  * DOC0260 Phase A — controls the per-shard payload cap for the
  * length-bucketed sub-table sharding. Value is in GiB; 0 is a documented

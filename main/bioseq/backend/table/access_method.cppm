@@ -46,6 +46,7 @@ import config;
 import bioseq_table_io;
 import pg_utils;
 import bioseq_sidecar;
+import bioseq_storage_indexing_admin;   // DOC0279 §11.2 — index_build_on_insert
 import bioseq_storage;
 import bioseq_am_cache;
 import bioseq_types.pg_compact_sequence;
@@ -1309,10 +1310,16 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		                                             slot->tts_isnull);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
 
-		/* Mirror the inserted row to bioseq_internal sidecars.
-		 * sidecar_after_insert internally skips sidecar self-inserts.
-		 * NOTE: we hand it `detoasted_values` (the original payload) so the
-		 * minimizer index is computed over the real bytes, not the stub. */
+		/* DOC0279 §11.2 — build every UPDATE_ON_INSERT index (per SEQ column)
+		 * via the new chunked-storage drivers. detoasted_values carries the
+		 * ORIGINAL payload (pre-stub) so the index sees the real bytes. */
+		bioseq::storage::indexing::index_build_on_insert_columns(
+			RelationGetRelid(relation), amc.seq_attnos, slot->tts_isnull,
+			detoasted_values, per_col_locator, writtenRowNumber,
+			ColumnarWritePerTupleContext(writeState));
+		/* Coexistence: keep the legacy meta_sidecar (symbol_count fast path)
+		 * populated until the §12.5 INLINE symbol_counts reader is wired into
+		 * the custom scan. */
 		bioseq::sidecar::sidecar_after_insert(
 			relation, slot, detoasted_values, writtenRowNumber);
 	}
@@ -1422,6 +1429,10 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 			uint64_t writtenRowNumber = ColumnarWriteRow(writeState,
 				values_for_write, tupleSlot->tts_isnull);
 
+			bioseq::storage::indexing::index_build_on_insert_columns(
+				RelationGetRelid(relation), amc.seq_attnos, tupleSlot->tts_isnull,
+				detoasted_values, per_col_locator, writtenRowNumber,
+				ColumnarWritePerTupleContext(writeState));
 			bioseq::sidecar::sidecar_after_insert(
 				relation, tupleSlot, detoasted_values, writtenRowNumber);
 

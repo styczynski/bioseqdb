@@ -62,6 +62,7 @@ import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
 import bioseq_sequences.minimap_port;
+import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — MinimizerHashmapFragmentIndex
 import bioseq_types.pg_compact_sequence;
 import sequan_compat;
 import bioseq_metadata_admin;
@@ -73,7 +74,9 @@ import bioseq_storage_size;   // DOC0263 §10.3 — kMinimizerSketchMaxPosition 
  * compute path below reads clean. The minimap module places all of these
  * inside bioseq::simd::HWY_NAMESPACE; on ARM64 HWY_NAMESPACE resolves to
  * N_NEON. */
-using bioseq::simd::HWY_NAMESPACE::TargetIndex;
+// DOC0279 §9 — TargetIndex relocated to bioseq::indexing::MinimizerHashmapFragmentIndex.
+// This legacy sidecar path is retained (coexistence) only until §17 deletion.
+using TargetIndex = bioseq::indexing::MinimizerHashmapFragmentIndex;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers;
 using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;

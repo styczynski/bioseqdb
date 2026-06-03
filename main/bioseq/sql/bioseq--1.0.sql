@@ -393,6 +393,40 @@ COMMENT ON TABLE bioseq.metadata_age_log IS
     '(throttled) by sidecar_after_insert.';
 
 -- ============================================================================
+-- DOC0279 — the new index policy + age + table-wide-shard catalogs. Heap-AM.
+-- (Literal install DDL uses bioseq.*; runtime resolves bioseq_internal.* after
+--  the ALTER SCHEMA rename below.)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS bioseq.index_policy (
+    user_relid       oid  NOT NULL,
+    main_relfilenode oid  NOT NULL,
+    column_attno     int2 NOT NULL,
+    index_name       text NOT NULL,
+    enabled          bool NOT NULL DEFAULT TRUE,
+    update_on_insert bool NOT NULL DEFAULT FALSE,
+    is_active_read   bool NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (user_relid, main_relfilenode, column_attno, index_name)
+) USING heap;
+CREATE UNIQUE INDEX IF NOT EXISTS index_policy_one_active_read
+    ON bioseq.index_policy (user_relid, main_relfilenode, column_attno) WHERE is_active_read;
+
+CREATE TABLE IF NOT EXISTS bioseq.index_age_log (
+    user_relid       oid         NOT NULL,
+    main_relfilenode oid         NOT NULL,
+    column_attno     int2        NOT NULL,
+    index_name       text        NOT NULL,
+    last_updated     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_relid, main_relfilenode, column_attno, index_name)
+) USING heap;
+
+CREATE TABLE IF NOT EXISTS bioseq.index_table_shard (
+    database_oid oid NOT NULL, tablespace_oid oid NOT NULL, main_relfilenode oid NOT NULL,
+    column_attno int2 NOT NULL, index_name text NOT NULL, shard_idx int4 NOT NULL,
+    index_relid oid NOT NULL, bytes_written bigint NOT NULL DEFAULT 0, is_full bool NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (database_oid, tablespace_oid, main_relfilenode, column_attno, index_name, shard_idx)
+) USING heap;
+
+-- ============================================================================
 -- DOC0260 Phase A — length-bucketed sub-table sharding catalog.
 --
 -- One row per (database, tablespace, main-relfilenode, column, bucket, shard)
@@ -491,6 +525,11 @@ GRANT EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)
 -- its rows in pg_dump so the extension's CREATE script re-creates a clean
 -- catalog (lazy sub-tables are created on-demand by the first INSERT).
 SELECT pg_extension_config_dump('bioseq_internal.seq_sub_table', 'WHERE FALSE');
+-- DOC0279 — the new index catalogs carry OIDs/relfilenodes that do not survive
+-- a dump/restore, so dump the table definition but no rows.
+SELECT pg_extension_config_dump('bioseq_internal.index_policy', 'WHERE FALSE');
+SELECT pg_extension_config_dump('bioseq_internal.index_age_log', 'WHERE FALSE');
+SELECT pg_extension_config_dump('bioseq_internal.index_table_shard', 'WHERE FALSE');
 
 -- DOC0260 §6.1 — operator-facing summary view over the seq_sub_table catalog.
 -- LEFT JOIN pg_class so DDL races (a DROP TABLE racing this SELECT) return
@@ -1505,6 +1544,27 @@ CREATE OR REPLACE FUNCTION bioseq.update_index(rel regclass, kind text)
     RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_update_index'
     LANGUAGE C VOLATILE STRICT;
+
+-- DOC0279 §12.2 — read the backend-local minimizers_per_sequence merge run
+-- counter (test observability for the multi-cursor k-way merge).
+CREATE OR REPLACE FUNCTION bioseq.last_index_merge_run_count()
+    RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_last_index_merge_run_count'
+    LANGUAGE C VOLATILE;
+
+-- DOC0279 §12.2 — admin/test SQL surface for the new chunked index storage.
+CREATE OR REPLACE FUNCTION bioseq.set_index_policy(rel regclass, name text, policy text) RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_set_index_policy' LANGUAGE C VOLATILE STRICT;
+CREATE OR REPLACE FUNCTION bioseq.set_active_read_index(rel regclass, name text) RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_set_active_read_index' LANGUAGE C VOLATILE STRICT;
+CREATE OR REPLACE FUNCTION bioseq.drop_all_index_tables() RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_drop_all_index_tables' LANGUAGE C VOLATILE;
+CREATE OR REPLACE FUNCTION bioseq.index_table_row_count(rel regclass, name text) RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_index_table_row_count' LANGUAGE C VOLATILE STRICT;
+CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name text, query_key bigint) RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
+CREATE OR REPLACE FUNCTION bioseq.columnar_row_number(rel regclass, ctid tid) RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_columnar_row_number' LANGUAGE C VOLATILE STRICT;
 
 COMMENT ON FUNCTION bioseq.update_index(regclass, text) IS
     'Recompute (or create) the named metadata kind for the given table. '

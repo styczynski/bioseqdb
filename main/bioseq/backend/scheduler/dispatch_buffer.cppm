@@ -65,6 +65,11 @@ export module bioseq_scheduler.dispatch_buffer;
 
 import mlogging;
 import pg_utils;
+import bioseq_indexing.type;                 // DOC0279 — DIRECTORY_SUB_KEY
+import bioseq_indexing.minimizer_hashmap;    // DOC0279 §9 — MinimizerHashmapFragmentIndex, MinimizersPerFragmentIndex
+import bioseq_indexing.minimizer_sequence;    // DOC0279 §10 — MinimizerSequenceMergedIndex::assemble_for_query
+import bioseq_storage_indexing_pg;           // DOC0279 §8 — IndexStorageFragmentPg
+import bioseq_storage_indexing_admin;        // DOC0279 §8.7 — open_fragment_storage
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
@@ -83,6 +88,9 @@ HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+
+// DOC0279 §9 — relocated index type in scope (was bioseq::simd::...::TargetIndex).
+using bioseq::indexing::MinimizerHashmapFragmentIndex;
 
 // Fixed upper bound on a single batch. Matches the TupleDispatchBuffer
 // constructor hint; entries beyond this get truncated with a log line.
@@ -202,6 +210,11 @@ public:
         // target_hdrs[i]" — scanner_pg is then constructed in in-memory mode.
         std::array<std::optional<bioseq::storage::seq_locator>,
             kDispatchBatchCapacity>                       target_locators{};
+        // DOC0279 §11.3c — per-row columnar rowno (== index query_key) and the
+        // user relation oid, so the stored per-fragment index can be assembled.
+        std::array<std::int64_t, kDispatchBatchCapacity>  target_rownos{};
+        Oid                                               user_relid           = InvalidOid;
+        bool                                              read_index_active    = false;
     };
 
     /*
@@ -432,7 +445,7 @@ public:
                                 i + 1, (*index_blobs)[i].bytes,
                                 bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                                 bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-                        TargetIndex prebuilt_idx = TargetIndex::deserialize_from_binary(
+                        MinimizerHashmapFragmentIndex prebuilt_idx = MinimizerHashmapFragmentIndex::deserialize_from_binary(
                             (*index_blobs)[i].data, (*index_blobs)[i].bytes);
                         JustLogProgress("[dispatch] row {} prebuilt index ready"
                                 " | footprint={}MB avail={}MB",
@@ -555,13 +568,99 @@ public:
                                     scanner_pg_ctx->parent_mctx);
                                 bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
                                     std::move(target_scanner)};
-                                // DOC0276 — large targets recompute via the
-                                // memory-bounded segmented entry; small targets
-                                // keep the size-bucket path (unchanged results).
-                                collection =
-                                    (target_bp_size > kSegmentationThresholdBp)
-                                        ? minimap_port_segmented(fq_pg, ft_pg, params)
-                                        : minimap_port(fq_pg, ft_pg, params);
+                                // DOC0279 §11.3a — ASSEMBLE from the stored
+                                // per-fragment minimizer index if present
+                                // (deserialise + globalise, no re-collection);
+                                // else fall back to recompute (DOC0276).
+                                bool assembled = false;
+                                if (scanner_pg_ctx->read_index_active
+                                    && OidIsValid(scanner_pg_ctx->user_relid)) {
+                                    using IStore = bioseq::storage::indexing::IndexStorageFragmentPg;
+                                    // The stored index is ALWAYS w=10,k=15 (pinned at build); the query
+                                    // minimizers + the seed pipeline MUST use the same w,k (NOT the size
+                                    // heuristic's reduced k), exactly as the legacy prebuilt branch does.
+                                    Minimap2Params idx_params = base_params;
+                                    idx_params.kmer_size = 15; idx_params.window_size = 10;
+                                    if (min_bp < 50) { idx_params.min_chain_score = 10; idx_params.min_seed_count = 1; }
+                                    else if (min_bp < 200) { idx_params.min_chain_score = 20; idx_params.min_seed_count = 2; }
+                                    auto ensure_q = [&]{
+                                        if (!cached_query_minimizers.has_value()) {
+                                            sketch_collector qc;
+                                            collect_minimizers<minimap_int_hasher, MinimapSketchData>(
+                                                qc, query_seq, query_seq.begin(), query_seq.end(),
+                                                static_cast<size_t>(idx_params.window_size),
+                                                static_cast<size_t>(idx_params.kmer_size));
+                                            cached_query_minimizers.emplace(std::move(qc).extract_sketches_data());
+                                        }
+                                    };
+                                    // DOC0279 §11.3b — per-sequence merged index (if present) takes
+                                    // precedence: query-relevant buckets only + exact global max_occ.
+                                    auto seq_store = bioseq::storage::indexing::open_fragment_storage(
+                                        scanner_pg_ctx->user_relid, scanner_pg_ctx->db_oid,
+                                        scanner_pg_ctx->tablespace_oid, scanner_pg_ctx->main_relfilenode,
+                                        scanner_pg_ctx->mmsearch_seq_attno, "minimizers_per_sequence",
+                                        *loc_opt, (uint64_t)scanner_pg_ctx->target_rownos[i],
+                                        scanner_pg_ctx->caches, scanner_pg_ctx->parent_mctx);
+                                    if (seq_store.number_of_chunks(bioseq::indexing::DIRECTORY_SUB_KEY) >= 1) {
+                                        ensure_q();
+                                        bioseq::indexing::MinimizerAssemblyScratch sq_scratch;
+                                        auto idx = bioseq::indexing::MinimizerSequenceMergedIndex<IStore>::assemble_for_query(
+                                            seq_store,
+                                            std::span<const MinimapSketchData>(cached_query_minimizers->data(),
+                                                                               cached_query_minimizers->size()),
+                                            loc_opt->total_bp_size, idx_params.max_occ, sq_scratch);
+                                        collection = minimap2_port_with_index(fq_pg, ft_pg, *cached_query_minimizers, idx, idx_params);
+                                        assembled = true;
+                                    }
+                                    if (!assembled) {
+                                    auto frag_store = bioseq::storage::indexing::open_fragment_storage(
+                                        scanner_pg_ctx->user_relid, scanner_pg_ctx->db_oid,
+                                        scanner_pg_ctx->tablespace_oid, scanner_pg_ctx->main_relfilenode,
+                                        scanner_pg_ctx->mmsearch_seq_attno, "minimizers_per_fragment",
+                                        *loc_opt, (uint64_t)scanner_pg_ctx->target_rownos[i],
+                                        scanner_pg_ctx->caches, scanner_pg_ctx->parent_mctx);
+                                    if (frag_store.number_of_chunks(bioseq::indexing::DIRECTORY_SUB_KEY) >= 1) {
+                                        ensure_q();
+                                        const sequence_size_t total_bp = loc_opt->total_bp_size;
+                                        const std::size_t frag_units = SP::fragment_storage_units;
+                                        const std::size_t a_lpu = compact_sequence_range<S>::traits::letters_per_unit;
+                                        const sequence_size_t frag_bp = (sequence_size_t)frag_units * a_lpu;
+                                        const std::size_t size_u = (std::size_t)((total_bp + a_lpu - 1) / a_lpu);
+                                        bioseq::indexing::MinimizerAssemblyScratch scratch;
+                                        auto assemble_one = [&](std::size_t cs_u, std::size_t ce_u) {
+                                            const std::size_t frag_lo = cs_u / frag_units;
+                                            const std::size_t frag_hi = (ce_u + frag_units - 1) / frag_units;
+                                            const sequence_size_t cs_bp = (sequence_size_t)cs_u * a_lpu;
+                                            const sequence_size_t ce_bp = std::min((sequence_size_t)ce_u * a_lpu, total_bp);
+                                            return bioseq::indexing::MinimizersPerFragmentIndex<IStore>::assemble_segment(
+                                                frag_store, frag_lo, frag_hi, frag_bp, total_bp, cs_bp, ce_bp, scratch);
+                                        };
+                                        if (total_bp <= kSegmentationThresholdBp) {
+                                            auto seg = assemble_one(0, size_u);
+                                            collection = minimap2_port_with_index(fq_pg, ft_pg, *cached_query_minimizers, seg, idx_params);
+                                        } else {
+                                            std::vector<MatchResult> merged;
+                                            const sequence_size_t query_len = query_seq.bp_size();
+                                            for (auto sr : pipe::segment_unit_ranges(total_bp, query_len, a_lpu)) {
+                                                auto seg = assemble_one(sr.cs_u, sr.ce_u);
+                                                MatchResultCollection seg_res =
+                                                    minimap2_port_with_index(fq_pg, ft_pg, *cached_query_minimizers, seg, idx_params);
+                                                for (auto& r : seg_res.results)
+                                                    if (r.target_start >= sr.core_lo_bp && r.target_start < sr.core_hi_bp)
+                                                        merged.push_back(std::move(r));
+                                            }
+                                            collection = MatchResultCollection{std::move(merged)};
+                                        }
+                                        assembled = true;
+                                    }
+                                    }  // close if (!assembled) per-fragment guard
+                                }
+                                if (!assembled) {
+                                    collection =
+                                        (target_bp_size > kSegmentationThresholdBp)
+                                            ? minimap_port_segmented(fq_pg, ft_pg, params)
+                                            : minimap_port(fq_pg, ft_pg, params);
+                                }
                             } else {
                                 compact_sequence_range<S> target_seq{*target_hdr};
                                 bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
@@ -1724,7 +1823,13 @@ public:
             if (seq_loc_opt.has_value()) {
                 scanner_pg_ctx.target_locators[i] = *seq_loc_opt;
             }
+            // DOC0279 §11.3c — surface the per-row columnar rowno (the index
+            // query_key) so the stored per-fragment index can be assembled.
+            scanner_pg_ctx.target_rownos[i] = buffered_entries[i].sequence_rowno;
         }
+        scanner_pg_ctx.user_relid        = user_relid;
+        scanner_pg_ctx.read_index_active = read_sequence_index_active
+            && !mmsearch_context.recompute_due_to_alphabet_mismatch;
         // Pointer to the context.
         auto* scanner_pg_arg = &scanner_pg_ctx;
 
@@ -1769,6 +1874,7 @@ public:
                 typename BatchProcessor::ScannerPgContext single_pg_ctx = scanner_pg_ctx;
                 for (auto& opt : single_pg_ctx.target_locators) opt.reset();
                 single_pg_ctx.target_locators[0] = scanner_pg_ctx.target_locators[i];
+                single_pg_ctx.target_rownos[0]   = scanner_pg_ctx.target_rownos[i];  // DOC0279 §11.3c
                 auto single_match =
                     processor.template process_sequences<int32_t, kDispatchBatchCapacity>(
                         1,

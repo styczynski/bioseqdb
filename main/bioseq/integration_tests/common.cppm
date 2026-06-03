@@ -383,13 +383,15 @@ export inline void reset_extension(const connection_test_context& ctx,
     // off etc.; the explicit names cover everything reachable from the
     // option matrix tests. RESET ALL would be cheaper but resets system GUCs
     // we may not own (e.g. work_mem) — be specific to our own.
-    static constexpr std::array<std::string_view, 5> kGucsToReset{
+    static constexpr auto kGucsToReset = std::to_array<std::string_view>({
         "bioseq.enable_vectorization",
         "bioseq.enable_column_cache",
         "bioseq.enable_bioseq_index_scan",
         "bioseq.aligner.enable_profiling",
         "bioseq.update_index_on_insert",
-    };
+        "bioseq.read_sequence_index",         // DOC0279 §13 — assemble-vs-recompute routing
+        "bioseq.index_run_buffer_bytes",      // DOC0279 §13 — test-only spill run buffer
+    });
     for (const auto guc : kGucsToReset) {
         // Best-effort: GUCs not yet set by anyone are silently fine.
         (void)sqlgen::postgres::PostgresV2Result::make(

@@ -25,7 +25,13 @@ import bioseq_types.pg_compact_sequence;
 import bioseq_sequences;
 import bioseq_sidecar;
 import bioseq_metadata_admin;
+import bioseq_storage_indexing_admin;   // DOC0279 §11.4/§12 — update_index_impl
+import bioseq_storage_indexing_pg;      // DOC0279 §8.8 — g_last_index_merge_run_count
 import sequan_compat;
+
+// DOC0279 §12.2 — reach the columnar AM helpers (the cycle edge) via extern "C++".
+extern "C++" std::uint64_t tid_to_row_number(ItemPointerData tid);
+extern "C++" bool IsColumnarTableAmTable(Oid relationId);
 
 extern "C" {
 PG_MODULE_MAGIC;
@@ -446,6 +452,90 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_update_index);
 Datum bioseq_update_index(PG_FUNCTION_ARGS) {
-	return bioseq::metadata_admin::update_index_impl(fcinfo);
+	// DOC0279 §11.4 — route to the new chunked-storage reindex driver.
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	// Back-compat: the legacy kind name 'minimizers' maps to the new per-fragment index.
+	const std::string eff = (name == "minimizers") ? std::string("minimizers_per_fragment") : name;
+	const std::int64_t n = bioseq::storage::indexing::update_index_impl(rel, eff);
+	// Coexistence: the legacy single-blob index_sidecar is still consumed by the
+	// query path for < 2^28 targets, so keep backfilling it for the per-fragment kind.
+	if (eff == "minimizers_per_fragment") {
+		(void)bioseq::sidecar::recompute_per_row_index_for_relid(rel);
+	} else if (eff == "symbol_counts") {
+		(void)bioseq::sidecar::recompute_per_row_meta_for_relid(rel);
+	}
+	// Coexistence: refresh the legacy metadata_age_log row under the requested kind name.
+	if (SPI_connect() == SPI_OK_CONNECT) {
+		Oid argtypes[2] = { OIDOID, TEXTOID };
+		Datum argvals[2] = { ObjectIdGetDatum(rel), PG_GETARG_DATUM(1) };
+		SPI_execute_with_args(
+			"INSERT INTO bioseq_internal.metadata_age_log (user_relid, kind, last_updated) "
+			"VALUES ($1, $2, now()) ON CONFLICT (user_relid, kind) DO UPDATE SET last_updated = now()",
+			2, argtypes, argvals, nullptr, false, 0);
+		SPI_finish();
+	}
+	PG_RETURN_INT64(n);
+}
+
+/* DOC0279 §12.2 — read the backend-local minimizers_per_sequence merge run
+ * counter (test observability). */
+CXX_PG_FUNCTION_INFO_V1(bioseq_last_index_merge_run_count);
+Datum bioseq_last_index_merge_run_count(PG_FUNCTION_ARGS) {
+	PG_RETURN_INT64((std::int64_t)bioseq::storage::indexing::g_last_index_merge_run_count);
+}
+
+/* DOC0279 §12.2 — the remaining admin/test SQL helpers. */
+CXX_PG_FUNCTION_INFO_V1(bioseq_index_table_row_count);
+Datum bioseq_index_table_row_count(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	PG_RETURN_INT64(bioseq::storage::indexing::index_table_row_count_impl(rel, name));
+}
+CXX_PG_FUNCTION_INFO_V1(bioseq_index_distinct_sub_keys);
+Datum bioseq_index_distinct_sub_keys(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::int64_t qk = PG_GETARG_INT64(2);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	PG_RETURN_INT64(bioseq::storage::indexing::index_distinct_sub_keys_impl(rel, name, qk));
+}
+CXX_PG_FUNCTION_INFO_V1(bioseq_drop_all_index_tables);
+Datum bioseq_drop_all_index_tables(PG_FUNCTION_ARGS) {
+	bioseq::storage::indexing::drop_all_index_tables_impl();
+	PG_RETURN_VOID();
+}
+CXX_PG_FUNCTION_INFO_V1(bioseq_set_index_policy);
+Datum bioseq_set_index_policy(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	text* pol = PG_GETARG_TEXT_PP(2);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	const std::string policy(VARDATA_ANY(pol), VARSIZE_ANY_EXHDR(pol));
+	const bool uoi = (policy == "UPDATE_ON_INSERT");
+	const int st = bioseq::storage::indexing::set_index_policy_impl(rel, name, uoi);
+	if (st == 1) ereport(ERROR, (errmsg("bioseq.set_index_policy: unknown index '%s'", name.c_str())));
+	if (st == 2) ereport(ERROR, (errmsg("bioseq.set_index_policy: index '%s' cannot be UPDATE_ON_INSERT", name.c_str())));
+	PG_RETURN_VOID();
+}
+CXX_PG_FUNCTION_INFO_V1(bioseq_set_active_read_index);
+Datum bioseq_set_active_read_index(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::string name(VARDATA_ANY(nm), VARSIZE_ANY_EXHDR(nm));
+	const int st = bioseq::storage::indexing::set_active_read_index_impl(rel, name);
+	if (st == 1) ereport(ERROR, (errmsg("bioseq.set_active_read_index: unknown index '%s'", name.c_str())));
+	if (st == 2) ereport(ERROR, (errmsg("bioseq.set_active_read_index: a CHUNKED_PER_TABLE index cannot be the active read index")));
+	PG_RETURN_VOID();
+}
+CXX_PG_FUNCTION_INFO_V1(bioseq_columnar_row_number);
+Datum bioseq_columnar_row_number(PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	ItemPointer ctid = (ItemPointer)PG_GETARG_POINTER(1);
+	if (!IsColumnarTableAmTable(rel))
+		ereport(ERROR, (errmsg("bioseq.columnar_row_number: relation is not a USING bioseq table")));
+	PG_RETURN_INT64((std::int64_t)tid_to_row_number(*ctid));
 }
 }

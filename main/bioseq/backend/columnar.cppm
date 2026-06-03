@@ -72,6 +72,11 @@ bool bioseq_update_index_on_insert = true;
  */
 bool bioseq_read_sequence_index = true;
 
+/* DOC0279 §13 — test-only knob: forces the minimizers_per_sequence external
+ * sort's run buffer to a raw byte size (bypassing the 64 MiB floor) so a small
+ * fixture can be made to spill >=2 runs. 0 => use the computed RUN_BUFFER_BYTES. */
+int bioseq_index_run_buffer_bytes = 0;
+
 /*
  * DOC0263 §11.3.2 / DOC0264 — test-only knob. When on, the dispatch buffer
  * wraps row sequences in a synthetic chunked scanner (parity tests). Default
@@ -380,8 +385,9 @@ bioseq_guc_init()
 
 	DefineCustomBoolVariable(
 		"bioseq.update_index_on_insert",
-		"When true, compute and persist a minimizer TargetIndex for every "
-		"bioseq.seq value written into a USING bioseq table.",
+		"When true, (re)build every index whose per-table policy is "
+		"UPDATE_ON_INSERT for each bioseq.seq value written into a USING bioseq "
+		"table (fresh-table defaults: minimizers_per_fragment and symbol_counts).",
 		NULL,
 		&bioseq_update_index_on_insert,
 		true,
@@ -393,15 +399,27 @@ bioseq_guc_init()
 
 	DefineCustomBoolVariable(
 		"bioseq.read_sequence_index",
-		"When true, the batch processor rehydrates a persisted minimizer "
-		"TargetIndex from bioseq_internal.index_sidecar for each buffered "
-		"row instead of recomputing it. Rows without a sidecar entry "
-		"(inserted with update_index_on_insert = off) still recompute.",
+		"When true, the batch processor assembles the active per-sequence "
+		"minimizer index from its chunked storage for each buffered row instead "
+		"of recomputing it. Rows without a stored index still recompute.",
 		NULL,
 		&bioseq_read_sequence_index,
 		true,
 		PGC_USERSET,
 		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomIntVariable(
+		"bioseq.index_run_buffer_bytes",
+		"Test-only: raw byte size of the minimizers_per_sequence external-sort "
+		"run buffer (bypasses the 64 MiB floor); 0 uses the computed value.",
+		NULL,
+		&bioseq_index_run_buffer_bytes,
+		0, 0, INT_MAX,
+		PGC_SUSET,
+		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 		NULL,
 		NULL,
 		NULL);
