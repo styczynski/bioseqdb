@@ -137,9 +137,18 @@ struct truth_row {
 
 inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
                                          std::string_view table) {
+    // `ctid` is selected as an explicit target-list column (column 6) BEFORE it is
+    // also passed to bioseq.columnar_row_number(...). This is required for the
+    // bioseq custom scan: a `ctid` system column referenced ONLY inside an upper
+    // expression above a Sort (ORDER BY id) is not carried through the sort, so the
+    // function would receive an unprojected/garbage ctid. Selecting ctid as a bare
+    // Var materialises it as a real data column that survives the sort. (The
+    // production query_key path resolves rowno from the live scan slot's tts_tid in
+    // dispatch_buffer/access_method, never through a SQL function above a Sort, so it
+    // is unaffected — this is purely a test-harness query-shape requirement.)
     auto rows = query_rows(ctx,
         fmt::format("SELECT id, truth_target_start, truth_target_end, "
-                    "is_reverse, original_query_length, "
+                    "is_reverse, original_query_length, ctid, "
                     "bioseq.columnar_row_number('{}'::regclass, ctid) "
                     "FROM {} ORDER BY id;",
                     table,
@@ -153,7 +162,7 @@ inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
         tr.truth_end    = std::stoll(*r[2]);
         tr.is_reverse   = (*r[3] == "t");
         tr.query_length = std::stoll(*r[4]);
-        tr.rowno        = std::stoll(*r[5]);
+        tr.rowno        = std::stoll(*r[6]);   // r[5] is the explicit ctid column
         out.push_back(tr);
     }
     return out;

@@ -40,6 +40,7 @@ import bioseq_indexing.minimizer_hashmap;
 import bioseq_indexing.minimizer_sequence;
 import bioseq_indexing.symbol_counts;
 import bioseq_storage_indexing_pg;
+import bioseq_table_io;                     // ColumnarBeginRead/ColumnarReadNextRow/ColumnarEndRead (raw-stub row walk, §8.6)
 export import bioseq_storage_indexing_handles;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
@@ -329,6 +330,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             idx.rebuild_one_table(name, tb);
         }
         for (std::int16_t a : seq_attnos) note_successful_write(rel_oid, rid.relfilenode, a, name);
+        caches->close_all(/*commit=*/false);   // close cached seq_sub read-state relations (else "resource was not closed" at commit)
         bioseq::storage::destroy_seq_caches(caches);
         MemoryContextDelete(work);
         return written;
@@ -337,19 +339,33 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     // per-sequence walk: build the index for every SEQ column of every row.
     Relation ur = try_safe_relation_open(rel_oid, AccessShareLock);
     TupleDesc utd = RelationGetDescr(ur);
-    Snapshot snap = GetActiveSnapshot();
-    TableScanDesc scan = table_beginscan_strat(ur, snap, 0, nullptr, true, true);
-    TupleTableSlot* slot = MakeSingleTupleTableSlot(utd, table_slot_callbacks(ur));
+    // CRITICAL (DOC0279 §8.6/§11.4): read each row's stored value via the COLUMNAR
+    // reader, NOT table_scan_getnextslot. The bioseq table-AM scan ASSEMBLES the full
+    // sequence into one varlena, which exceeds MaxAllocSize (~1 GiB) for a multi-Gbp
+    // target (6 Gbp => ~1.5 GB) and ERRORs "sequence too large to materialise as a
+    // single varlena". ColumnarReadNextRow returns the RAW stored value (the 48-byte
+    // locator stub for a large sequence); we decode the locator and STREAM fragments
+    // via scanner_pg (RSS bounded by one fragment) — the only path that can index a
+    // >MaxAllocSize target. `&rowno` is the columnar row number == query_key (no
+    // tid_to_row_number needed; that path also fixed the rowno source).
+    Snapshot snap = GetTransactionSnapshot();
+    List* projected = nullptr;
+    for (std::int16_t a : seq_attnos) projected = lappend_int(projected, (int)a);
+    ColumnarReadState* rs = ColumnarBeginRead(ur, utd, projected, NIL, work, snap, /*randomAccess=*/false, nullptr);
+    MemoryContext inner = AllocSetContextCreate(work, "bioseq_update_index_inner_seq", ALLOCSET_DEFAULT_SIZES);
+    std::vector<Datum> vals(static_cast<std::size_t>(utd->natts));
+    std::vector<char>  nullbuf(static_cast<std::size_t>(utd->natts));
+    Datum* valp = vals.data();
+    bool*  nulls = reinterpret_cast<bool*>(nullbuf.data());
     std::int64_t written = 0;
-    while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
-        slot_getallattrs(slot);
-        const std::uint64_t rowno = tid_to_row_number(slot->tts_tid);
+    std::uint64_t rowno = 0;
+    while (ColumnarReadNextRow(rs, valp, nulls, &rowno)) {
+        MemoryContextReset(inner);     // bound RSS to one row's decode + one fragment
         bool any_col = false;
         for (std::int16_t seq_attno : seq_attnos) {
-            bool isnull=false; Datum dat = slot_getattr(slot, seq_attno, &isnull);
-            if (isnull) continue;
-            MemoryContext old = MemoryContextSwitchTo(work);
-            pgseq_t* hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(dat));
+            if (nulls[seq_attno - 1]) continue;
+            MemoryContext old = MemoryContextSwitchTo(inner);
+            pgseq_t* hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(valp[seq_attno - 1]));
             MemoryContextSwitchTo(old);
             const std::uint8_t alpha = hdr->alphabet_code;
             const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
@@ -358,7 +374,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                 pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
                     constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
                     const std::size_t pad = (loc.total_bp_size % lpu) == 0 ? 0 : (std::size_t)(lpu - loc.total_bp_size % lpu);
-                    bioseq::storage::with_lazy_postgres<S>(rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, loc, pad, caches, work,
+                    bioseq::storage::with_lazy_postgres<S>(rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, loc, pad, caches, inner,
                         [&](auto& lazy){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
@@ -385,15 +401,15 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     }
                 });
             }
-            if (reinterpret_cast<void*>(hdr) != reinterpret_cast<void*>(DatumGetPointer(dat))) pfree(hdr);
-            any_col = true;
+            any_col = true;   // detoast copies live in `inner`, reclaimed by the per-row reset / final delete
         }
         if (any_col) ++written;
     }
-    ExecDropSingleTupleTableSlot(slot);
-    table_endscan(scan);
+    ColumnarEndRead(rs);
+    MemoryContextDelete(inner);
     relation_close(ur, AccessShareLock);
     for (std::int16_t a : seq_attnos) note_successful_write(rel_oid, rid.relfilenode, a, name);
+    caches->close_all(/*commit=*/false);   // close cached seq_sub read-state relations (else "resource was not closed" at commit)
     bioseq::storage::destroy_seq_caches(caches);
     MemoryContextDelete(work);
     return written;

@@ -595,6 +595,73 @@ detect_feature_flags(List* targetlist, List* qual, const BioseqStubOids& oids)
 }
 
 /*
+ * DOC0279 — plan-time detection of an mmsearch typmod-coalesce (same alphabet,
+ * different storage width between the bioseq.seq column and the query literal).
+ *
+ * ColumnarScan_ExplainCustomScan needs this because the "coalesce to
+ * seq('<alpha>', <bits>)" hint used to be surfaced from the runtime buffer
+ * (`coalesce_active()`), which is ONLY populated when BeginCustomScan ran —
+ * i.e. NOT for `EXPLAIN` without `ANALYZE`. The coalesce decision is, however,
+ * fully determined at plan time by the column Var's typmod vs the literal's
+ * typmod, so we re-derive it from the plan qual here. Mirrors the BeginCustomScan
+ * typmod logic (same `compact_sequence_stdc_type_params::decode`), reading no
+ * runtime state. A mismatch we cannot classify simply yields `active=false`
+ * (no hint, never a crash).
+ */
+struct ExplainTypmodCoalesce { bool active = false; uint8_t col_alpha = 0; uint8_t col_byte_width = 0; };
+struct ExplainCoalesceWalkCtx { const BioseqStubOids* oids; ExplainTypmodCoalesce result; };
+
+[[nodiscard]] static bool
+explain_typmod_coalesce_walker(Node* node, void* context)
+{
+	if (node == nullptr) {
+		return false;
+	}
+	auto* ctx = static_cast<ExplainCoalesceWalkCtx*>(context);
+	if (!ctx->result.active && IsA(node, FuncExpr)) {
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+		if (is_mmsearch_funcid(fe->funcid, *ctx->oids) && list_length(fe->args) >= 2) {
+			Node* arg0 = reinterpret_cast<Node*>(linitial(fe->args));   // bioseq.seq column
+			Node* arg1 = reinterpret_cast<Node*>(lsecond(fe->args));    // query literal / param / var
+			if (arg0 != nullptr && arg1 != nullptr && IsA(arg0, Var)) {
+				const int32 col_typmod = reinterpret_cast<Var*>(arg0)->vartypmod;
+				int32 arg1_typmod = -1;
+				if (IsA(arg1, Const)) {
+					arg1_typmod = reinterpret_cast<Const*>(arg1)->consttypmod;
+				} else if (IsA(arg1, Param)) {
+					arg1_typmod = reinterpret_cast<Param*>(arg1)->paramtypmod;
+				} else if (IsA(arg1, Var)) {
+					arg1_typmod = reinterpret_cast<Var*>(arg1)->vartypmod;
+				}
+				if (col_typmod >= 0 && arg1_typmod >= 0) {
+					const auto col = compact_sequence_stdc_type_params::decode(col_typmod);
+					const auto qry = compact_sequence_stdc_type_params::decode(arg1_typmod);
+					if (col.alphabet_code == qry.alphabet_code
+						&& col.storage_unit_byte_width != qry.storage_unit_byte_width) {
+						ctx->result.active = true;
+						ctx->result.col_alpha = col.alphabet_code;
+						ctx->result.col_byte_width = col.storage_unit_byte_width;
+					}
+				}
+			}
+		}
+	}
+	return expression_tree_walker(node, explain_typmod_coalesce_walker, context);
+}
+
+[[nodiscard]] static ExplainTypmodCoalesce
+explain_detect_typmod_coalesce(List* qual, const BioseqStubOids& oids)
+{
+	ExplainCoalesceWalkCtx ctx{ &oids, ExplainTypmodCoalesce{} };
+	for (auto q : PList<Node>(qual)) {
+		if (q != nullptr) {
+			explain_typmod_coalesce_walker(q, &ctx);
+		}
+	}
+	return ctx.result;
+}
+
+/*
  * Snapshot the bioseq.aligner.* GUCs into a Minimap2Params struct.
  * A subsequent pass (parse_aligner_options_override) may overlay per-call
  * fields that the user supplied via aligner_options() in the mmsearch
@@ -5247,6 +5314,29 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 */
 		if (features.has_mmsearch)
 		{
+			/*
+			 * DOC0279 — plan-time typmod-coalesce hint. `EXPLAIN` without
+			 * `ANALYZE` never populates the runtime coalesce buffer, so the
+			 * runtime-gated "...coalesce to..." sub-clause further below cannot
+			 * fire for a plain `EXPLAIN`. Re-derive the decision from the plan
+			 * qual here so the coalesce is always visible in the plan (restores
+			 * the pre-DOC0279 plain-EXPLAIN behaviour the §11.5 rewrite dropped).
+			 */
+			{
+				const ExplainTypmodCoalesce coalesce_hint =
+					explain_detect_typmod_coalesce(node->ss.ps.plan->qual, explain_oids);
+				if (coalesce_hint.active) {
+					const auto coa_name =
+						pgseq_supported_alphabets::name_of_alphabet_code(coalesce_hint.col_alpha);
+					StringInfoData coa_buf;
+					initStringInfo(&coa_buf);
+					appendStringInfo(&coa_buf, "coalesce to seq('%.*s', %u)",
+						static_cast<int>(coa_name.size()), coa_name.data(),
+						static_cast<unsigned>(coalesce_hint.col_byte_width) * 8u);
+					ExplainPropertyText("Bioseq Typmod Coalesce", coa_buf.data, es);
+					pfree(coa_buf.data);
+				}
+			}
 			Oid user_relid = InvalidOid;
 			double rel_tuples = -1.0;
 			if (node->ss.ss_currentRelation != nullptr) {
