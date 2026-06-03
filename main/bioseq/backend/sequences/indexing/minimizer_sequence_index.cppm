@@ -148,13 +148,14 @@ struct MinimizerSequenceMergedIndex {
             const sequence_size_t core_lo = (sequence_size_t)fragment_no * frag_bp;
             const sequence_size_t core_hi = std::min(core_lo + (sequence_size_t)frag_bp, total_bp);
             const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
+            const sequence_size_t coll_hi = std::min(core_hi + (sequence_size_t)W, total_bp);
             collector.clear();
             const std::size_t lo_unit = (std::size_t)(coll_lo / lpu);
-            const std::size_t hi_unit = std::min((std::size_t)((core_hi + lpu - 1) / lpu), size_u);
+            const std::size_t hi_unit = std::min((std::size_t)((coll_hi + lpu - 1) / lpu), size_u);
             auto begin_iter = seq.cbegin(); begin_iter += (sequence_size_t)lo_unit;
             auto end_iter   = seq.cbegin(); end_iter   += (sequence_size_t)hi_unit;
             const sequence_size_t emit_base = (sequence_size_t)lo_unit * lpu;
-            const sequence_size_t collect_bp = core_hi > emit_base ? core_hi - emit_base : 0;
+            const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
             if (collect_bp >= (sequence_size_t)W) {
                 collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(collector, seq, begin_iter, end_iter, w, k);
                 for (const MinimapSketchData& m : collector.extract_sketches_data()) {

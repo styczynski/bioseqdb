@@ -40,6 +40,7 @@ import bioseq_indexing.minimizer_hashmap;
 import bioseq_indexing.minimizer_sequence;
 import bioseq_indexing.symbol_counts;
 import bioseq_storage_indexing_pg;
+export import bioseq_storage_indexing_handles;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 extern "C++" std::uint64_t tid_to_row_number(ItemPointerData tid);
@@ -114,20 +115,6 @@ using pg_supported_indexes = bioseq::indexing::supported_indexes<
 // g_last_index_merge_run_count (§8.8) is defined in bioseq_storage_indexing_pg
 // (same namespace, imported) so merge_runs can set it; referenced unqualified below.
 
-// ---- relation identity ----------------------------------------------------
-struct RelationIdentity { Oid db_oid, tablespace_oid, relfilenode; };
-[[nodiscard]] inline RelationIdentity index_relation_identity(Oid user_relid) {
-    RelationIdentity id{ MyDatabaseId, InvalidOid, InvalidOid };
-    Relation r = try_safe_relation_open(user_relid, AccessShareLock);
-    if (r != nullptr) {
-        id.tablespace_oid = OidIsValid(r->rd_rel->reltablespace) ? r->rd_rel->reltablespace : MyDatabaseTableSpace;
-        id.relfilenode = (Oid)r->rd_locator.relNumber;
-        if (!OidIsValid(id.relfilenode)) id.relfilenode = RelationGetRelid(r);
-        relation_close(r, AccessShareLock);
-    }
-    return id;
-}
-
 // ---- advisory lock (§11.4) ------------------------------------------------
 inline void acquire_index_advisory_xact_lock(Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view name) {
     std::uint64_t h = 14695981039346656037ull;
@@ -135,42 +122,6 @@ inline void acquire_index_advisory_xact_lock(Oid db, Oid spc, Oid relfn, std::in
     h ^= 0xB10D2790u; mix(db); mix(spc); mix(relfn); mix((std::uint64_t)(std::uint16_t)attno);
     for (char c : name) { h ^= (std::uint8_t)c; h *= 1099511628211ull; }
     DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum((std::int64_t)h));
-}
-
-// ---- storage factories (§8.7) ---------------------------------------------
-[[nodiscard]] inline MemoryContext make_handle_ctx(MemoryContext parent, const char* /*tag*/) {
-    return AllocSetContextCreate(parent ? parent : CurrentMemoryContext, "bioseq_index_handle", ALLOCSET_SMALL_SIZES);
-}
-
-[[nodiscard]] inline IndexStorageFragmentPg open_fragment_storage(
-        Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view index_name,
-        const seq_locator& loc, std::uint64_t sequence_rowno, seq_caches* caches, MemoryContext mctx) {
-    IndexStorageFragmentPg s;
-    s.db_oid_=db; s.tablespace_oid_=spc; s.main_relfilenode_=relfn; s.user_relid_=user_relid;
-    s.read_caches_=caches; s.column_attno_=attno; s.index_name_=index_name;
-    s.bucket_idx_=(std::uint8_t)loc.bucket_idx; s.shard_idx_=loc.shard_idx; s.query_key_=sequence_rowno;
-    s.own_mctx_ = make_handle_ctx(mctx, "idx_fragment_handle");
-    s.run_buffer_override_bytes_ = bioseq_index_run_buffer_bytes > 0 ? (std::size_t)bioseq_index_run_buffer_bytes : 0;
-    return s;
-}
-[[nodiscard]] inline IndexStorageSequencePg open_sequence_storage(
-        Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view index_name,
-        const seq_locator& loc, std::uint64_t sequence_rowno, seq_caches* caches, MemoryContext mctx) {
-    IndexStorageSequencePg s;
-    s.db_oid_=db; s.tablespace_oid_=spc; s.main_relfilenode_=relfn; s.user_relid_=user_relid;
-    s.read_caches_=caches; s.column_attno_=attno; s.index_name_=index_name;
-    s.bucket_idx_=(std::uint8_t)loc.bucket_idx; s.shard_idx_=loc.shard_idx; s.query_key_=sequence_rowno;
-    s.own_mctx_ = make_handle_ctx(mctx, "idx_sequence_handle");
-    return s;
-}
-[[nodiscard]] inline IndexStorageTablePg open_table_storage(
-        Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno, std::string_view index_name,
-        seq_caches* caches, MemoryContext mctx) {
-    IndexStorageTablePg s;
-    s.db_oid_=db; s.tablespace_oid_=spc; s.main_relfilenode_=relfn; s.user_relid_=user_relid;
-    s.read_caches_=caches; s.column_attno_=attno; s.index_name_=index_name;
-    s.own_mctx_ = make_handle_ctx(mctx, "idx_table_handle");
-    return s;
 }
 
 // ---- policy catalog (§12.3) ----------------------------------------------
@@ -283,22 +234,6 @@ inline const auto& letter_rank_table() { static const auto t = build_letter_rank
     return (int)detail::letter_rank_table()[alphabet_code][(std::uint8_t)letter];
 }
 
-// ---- resolve_active_read_index (§12.3) -----------------------------------
-[[nodiscard]] inline std::string resolve_active_read_index(Oid user_relid, Oid relfn, std::int16_t attno) {
-    std::string out{ bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX };
-    if (SPI_connect() != SPI_OK_CONNECT) return out;
-    std::string sql = fmt::format(
-        "SELECT index_name FROM bioseq_internal.index_policy "
-        "WHERE user_relid={}::oid AND main_relfilenode={}::oid AND column_attno={} AND is_active_read AND enabled LIMIT 1",
-        (unsigned)user_relid, (unsigned)relfn, (int)attno);
-    if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT && SPI_processed > 0) {
-        char* nm = SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1);
-        if (nm) out = std::string(nm);
-    }
-    SPI_finish();
-    return out;
-}
-
 // ---- per-row index-present probe (§11.3c) --------------------------------
 [[nodiscard]] inline bool index_present(Oid user_relid, Oid db, Oid spc, Oid relfn, std::int16_t attno,
                                         std::string_view index_name, const seq_locator& loc, std::int64_t row_key,
@@ -375,16 +310,6 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         idx.clear_index(f, q, tb, name);
     }
 
-    if (layout == SequenceIndexType::CHUNKED_PER_TABLE) {
-        for (std::int16_t a : seq_attnos) {
-            auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, nullptr, work);
-            idx.rebuild_one_table(name, tb);
-        }
-        MemoryContextDelete(work);
-        return 0;
-    }
-
-    // per-sequence walk: build the index for every SEQ column of every row.
     seq_caches* caches = bioseq::storage::alloc_seq_caches(work);
     caches->side = bioseq::storage::seq_caches::Side::Read;
     caches->lock_mode = AccessShareLock;
@@ -393,6 +318,23 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     caches->main_tablespace_oid = rid.tablespace_oid;
     caches->main_relfilenode = rid.relfilenode;
 
+    if (layout == SequenceIndexType::CHUNKED_PER_TABLE) {
+        std::int64_t written = 0;
+        if (Relation ur = try_safe_relation_open(rel_oid, AccessShareLock); ur != nullptr) {
+            written = static_cast<std::int64_t>(ColumnarTableRowCount(ur));
+            relation_close(ur, AccessShareLock);
+        }
+        for (std::int16_t a : seq_attnos) {
+            auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, caches, work);
+            idx.rebuild_one_table(name, tb);
+        }
+        for (std::int16_t a : seq_attnos) note_successful_write(rel_oid, rid.relfilenode, a, name);
+        bioseq::storage::destroy_seq_caches(caches);
+        MemoryContextDelete(work);
+        return written;
+    }
+
+    // per-sequence walk: build the index for every SEQ column of every row.
     Relation ur = try_safe_relation_open(rel_oid, AccessShareLock);
     TupleDesc utd = RelationGetDescr(ur);
     Snapshot snap = GetActiveSnapshot();

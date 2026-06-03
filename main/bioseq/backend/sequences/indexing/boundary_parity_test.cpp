@@ -84,6 +84,9 @@ constexpr std::size_t kFragBp    = kFragUnits * 32;   // 32768
 // Whole-sequence baseline (kmer -> sorted+unique encoded positions).
 [[nodiscard]] std::map<std::uint64_t, std::vector<std::uint64_t>>
 whole_sequence_map(range_t& range) {
+    if (range.bp_size() < kW + kK) {
+        return {};
+    }
     sketch_collector collector;
     collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
         collector, range, range.begin(), range.end(), kW, kK);
@@ -155,16 +158,22 @@ TEST_CASE("DOC0279 §16.1 — per-fragment assemble_segment parity across bounda
     using none = sequence_scanner_none<std::uint64_t>;
     // 0, < k, k..(w+k-1), exactly w+k, then a multi-fragment length.
     for (std::size_t n : {std::size_t{0}, std::size_t{8}, std::size_t{15}, std::size_t{20},
-                          std::size_t{24}, std::size_t{25}, std::size_t{64}, std::size_t{40000}})
-        check_segment_parity<none>(n, 0xD00D00 + n);
+                          std::size_t{24}, std::size_t{25}, std::size_t{64}, std::size_t{40000}}) {
+        DYNAMIC_SECTION("scanner_none n=" << n) {
+            check_segment_parity<none>(n, 0xD00D00 + n);
+        }
+    }
 }
 
 TEST_CASE("DOC0279 §16.1 — per-fragment assemble_segment parity across boundary lengths (chunked-1024)",
           "[indexing][boundary-parity]") {
     using chunked = sequence_scanner_test_chunked<std::uint64_t, kFragUnits>;
     for (std::size_t n : {std::size_t{0}, std::size_t{8}, std::size_t{15}, std::size_t{20},
-                          std::size_t{24}, std::size_t{25}, std::size_t{64}, std::size_t{40000}})
-        check_segment_parity<chunked>(n, 0xD00D00 + n);
+                          std::size_t{24}, std::size_t{25}, std::size_t{64}, std::size_t{40000}}) {
+        DYNAMIC_SECTION("chunked-1024 n=" << n) {
+            check_segment_parity<chunked>(n, 0xD00D00 + n);
+        }
+    }
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

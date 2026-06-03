@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <map>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -115,6 +116,22 @@ baseline_for_query(const std::vector<MinimapSketchData>& whole,
     return out;
 }
 
+void require_lookup_maps_equal(
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& actual,
+        const std::map<std::uint64_t, std::vector<std::uint64_t>>& expected) {
+    INFO("actual_kmers=" << actual.size() << " expected_kmers=" << expected.size());
+    REQUIRE(actual.size() == expected.size());
+    auto actual_it = actual.begin();
+    auto expected_it = expected.begin();
+    for (; actual_it != actual.end() && expected_it != expected.end(); ++actual_it, ++expected_it) {
+        INFO("actual_kmer=" << actual_it->first << " expected_kmer=" << expected_it->first
+             << " actual_positions=" << actual_it->second.size()
+             << " expected_positions=" << expected_it->second.size());
+        REQUIRE(actual_it->first == expected_it->first);
+        REQUIRE(actual_it->second == expected_it->second);
+    }
+}
+
 }  // namespace
 
 TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restricted to query kmers",
@@ -145,7 +162,9 @@ TEST_CASE("DOC0279 §10 — assemble_for_query equals whole-sequence build restr
     std::vector<std::uint64_t> kmers;
     for (const auto& m : query) kmers.push_back(m.kmer());
 
-    REQUIRE(lookup_map(idx, kmers) == baseline_for_query(query, kmers, (std::size_t)INT32_MAX));
+    require_lookup_maps_equal(
+        lookup_map(idx, kmers),
+        baseline_for_query(query, kmers, (std::size_t)INT32_MAX));
 }
 
 TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer under a tiny max_occ",
@@ -153,7 +172,14 @@ TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer und
     constexpr std::size_t FragUnits = 1024;
     using chunked = sequence_scanner_test_chunked<std::uint64_t, FragUnits>;
 
-    auto data = make_dna4(40000, 0xBEEF02);
+    std::vector<seq::dna4> data;
+    data.reserve(40000);
+    const std::string motif = "ACGTCTAGTCACTGTAGCCTGATCGTAGCTAGT";
+    for (std::size_t i = 0; i < 40000; ++i) {
+        seq::dna4 c;
+        c.assign_char(motif[i % motif.size()]);
+        data.push_back(c);
+    }
     range_t range(data);
     const auto total_bp = range.bp_size();
 

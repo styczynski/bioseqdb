@@ -17,6 +17,8 @@
 #include "common_tests_integration.h"
 
 #include <algorithm>
+#include <set>
+#include <span>
 #include <tuple>
 
 import integration_tests.common;
@@ -130,13 +132,17 @@ struct truth_row {
     long long truth_end       = 0;
     bool      is_reverse      = false;
     long long query_length    = 0;
+    long long rowno           = 0;
 };
 
 inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
                                          std::string_view table) {
     auto rows = query_rows(ctx,
         fmt::format("SELECT id, truth_target_start, truth_target_end, "
-                    "is_reverse, original_query_length FROM {} ORDER BY id;",
+                    "is_reverse, original_query_length, "
+                    "bioseq.columnar_row_number('{}'::regclass, ctid) "
+                    "FROM {} ORDER BY id;",
+                    table,
                     table));
     std::vector<truth_row> out;
     out.reserve(rows.size());
@@ -147,6 +153,7 @@ inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
         tr.truth_end    = std::stoll(*r[2]);
         tr.is_reverse   = (*r[3] == "t");
         tr.query_length = std::stoll(*r[4]);
+        tr.rowno        = std::stoll(*r[5]);
         out.push_back(tr);
     }
     return out;
@@ -166,6 +173,12 @@ struct mmsearch_row {
     long long target_end    = 0;
     long long target_len    = 0;
 };
+
+[[nodiscard]] std::set<long long> result_id_set(std::span<const mmsearch_row> rows) {
+    std::set<long long> out;
+    for (const auto& row : rows) out.insert(row.id);
+    return out;
+}
 
 inline std::vector<mmsearch_row> run_mmsearch(
     const connection_test_context& ctx, std::string_view table)
@@ -381,25 +394,40 @@ TEST_CASE("DOC0275 — 6 Gbp sample table: scanner_pg (test_force_inmemory_scann
                   "6 Gbp reference must exceed UINT32_MAX to exercise the >2^32 position path");
 
     auto ctx = fresh_context({kTable6});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     seed_sample_table(ctx, kTable6, kReferenceBp6);
     const auto truth = read_truth(ctx, kTable6);
     REQUIRE(truth.size() == static_cast<std::size_t>(kFragmentCount));
     for (const auto& tr : truth) {
-        JustLog("[test] 6gbp truth id={} [{},{}) (start_past_uint32={} end_past_uint32={})",
-                tr.id, tr.truth_start, tr.truth_end,
+        JustLog("[test] 6gbp truth id={} rowno={} [{},{}) (start_past_uint32={} end_past_uint32={})",
+                tr.id, tr.rowno, tr.truth_start, tr.truth_end,
                 tr.truth_start > kUint32Max, tr.truth_end > kUint32Max);
     }
 
-    // Production scanner_pg path only.
-    std::vector<mmsearch_row> pg_results;
+    const long long updated_rows = query_scalar_int(ctx,
+        fmt::format("SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_fragment')", kTable6));
+    REQUIRE(updated_rows == static_cast<long long>(truth.size()));
+
+    constexpr long long kFragBp = 1024LL * 32LL;
+    const long long expected_target_fragments = (kReferenceBp6 + kFragBp - 1) / kFragBp;
+    for (const auto& tr : truth) {
+        const long long distinct_sub_keys =
+            index_distinct_sub_keys(ctx, "minimizers_per_fragment", kTable6, tr.rowno);
+        JustLog("[test] 6gbp row id={} rowno={} distinct_sub_keys={} expected_target_fragments={}",
+                tr.id, tr.rowno, distinct_sub_keys, expected_target_fragments);
+        REQUIRE(distinct_sub_keys >= expected_target_fragments);
+    }
+
+    std::vector<mmsearch_row> recompute_results;
     {
         guc_scope inmemory_scope(ctx, "bioseq.test_force_inmemory_scanner", "off");
-        pg_results = run_mmsearch(ctx, kTable6);
+        guc_scope read_scope(ctx, "bioseq.read_sequence_index", "off");
+        recompute_results = run_mmsearch(ctx, kTable6);
     }
-    REQUIRE(pg_results.size() >= truth.size());
+    REQUIRE(recompute_results.size() >= truth.size());
     for (const auto& tr : truth) {
         bool matched = false;
-        for (const auto& obs : pg_results) {
+        for (const auto& obs : recompute_results) {
             if (obs.id != tr.id) continue;
             const long long start_delta =
                 std::abs(obs.target_start - tr.truth_start);
@@ -408,10 +436,43 @@ TEST_CASE("DOC0275 — 6 Gbp sample table: scanner_pg (test_force_inmemory_scann
             if (start_delta <= kPositionTolerance
                 && end_delta <= kPositionTolerance) {
                 matched = true;
-                require_ideal_match(tr, obs, "scanner_pg_6gbp", kReferenceBp6);
+                require_ideal_match(tr, obs, "scanner_pg_6gbp_recompute", kReferenceBp6);
                 break;
             }
         }
         REQUIRE(matched);
     }
+
+    exec_sqlf(ctx,
+        "SELECT bioseq.set_active_read_index('{}'::regclass, 'minimizers_per_fragment');",
+        kTable6);
+    std::vector<mmsearch_row> assemble_results;
+    {
+        guc_scope inmemory_scope(ctx, "bioseq.test_force_inmemory_scanner", "off");
+        guc_scope read_scope(ctx, "bioseq.read_sequence_index", "on");
+        assemble_results = run_mmsearch(ctx, kTable6);
+    }
+    REQUIRE(assemble_results.size() >= truth.size());
+    for (const auto& tr : truth) {
+        bool matched = false;
+        for (const auto& obs : assemble_results) {
+            if (obs.id != tr.id) continue;
+            const long long start_delta =
+                std::abs(obs.target_start - tr.truth_start);
+            const long long end_delta =
+                std::abs(obs.target_end - tr.truth_end);
+            if (start_delta <= kPositionTolerance
+                && end_delta <= kPositionTolerance) {
+                matched = true;
+                require_ideal_match(tr, obs, "scanner_pg_6gbp_assemble", kReferenceBp6);
+                break;
+            }
+        }
+        REQUIRE(matched);
+    }
+
+    const auto recompute_ids = result_id_set(recompute_results);
+    const auto assemble_ids = result_id_set(assemble_results);
+    REQUIRE(std::includes(assemble_ids.begin(), assemble_ids.end(),
+                          recompute_ids.begin(), recompute_ids.end()));
 }
