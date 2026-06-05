@@ -22,7 +22,7 @@
 cmake_minimum_required(VERSION 3.20..3.24)
 
 # Change this:
-set(CMAKE_NAMED_ENV_TYPE "H") # suppported: "W", "H"
+set(CMAKE_NAMED_ENV_TYPE "W") # suppported: "W", "H"
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@22/bin/clang)
@@ -35,9 +35,10 @@ if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   # The @22 opt symlink keeps this version-independent across llvm@22 point bumps.
   set(CMAKE_CXX_STDLIB_MODULES_JSON /opt/homebrew/opt/llvm@22/lib/c++/libc++.modules.json)
 elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "W")
-  set(CMAKE_C_COMPILER /usr/local/opt/llvm@21/bin/clang)
-  set(CMAKE_CXX_COMPILER /usr/local/opt/llvm@21/bin/clang++)
+  set(CMAKE_C_COMPILER /usr/local/opt/llvm/bin/clang)
+  set(CMAKE_CXX_COMPILER /usr/local/opt/llvm/bin/clang++)
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+  set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/local/opt/llvm/lib/c++/libc++.modules.json)
 else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
 endif()
