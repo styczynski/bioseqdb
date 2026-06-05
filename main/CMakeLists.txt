@@ -22,12 +22,18 @@
 cmake_minimum_required(VERSION 3.20..3.24)
 
 # Change this:
-set(CMAKE_NAMED_ENV_TYPE "W") # suppported: "W", "H"
+set(CMAKE_NAMED_ENV_TYPE "H") # suppported: "W", "H"
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
-  set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@20/bin/clang)
-  set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@20/bin/clang++)
+  set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@22/bin/clang)
+  set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm@22/bin/clang++)
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+  # clang >= 22 no longer resolves libc++.modules.json via the compiler's
+  # `-print-file-name` search path (it lives under <toolchain>/lib/c++/ now, not
+  # the clang resource dir), so CMake's import-std / CMAKE_CXX_MODULE_STD support
+  # can fail to locate the `std` module mapping. Point it at the file explicitly.
+  # The @22 opt symlink keeps this version-independent across llvm@22 point bumps.
+  set(CMAKE_CXX_STDLIB_MODULES_JSON /opt/homebrew/opt/llvm@22/lib/c++/libc++.modules.json)
 elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "W")
   set(CMAKE_C_COMPILER /usr/local/opt/llvm@21/bin/clang)
   set(CMAKE_CXX_COMPILER /usr/local/opt/llvm@21/bin/clang++)
@@ -36,8 +42,25 @@ else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
 endif()
 
-set(CMAKE_CXX_FLAGS_DEBUG "-g")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+# Fallback defaults for the per-build-type flag variables. These run AFTER
+# CMake has imported cache values from CMakePresets.json, so they MUST be
+# guarded — an unconditional `set(CMAKE_CXX_FLAGS_DEBUG "-g")` silently
+# clobbers presets that explicitly cleared the variable to drop -g (e.g.
+# bench-opt sets it to "" so DWARF generation is OFF for the -O3 + Debug
+# combo; without the guard, every bench-opt build compiles every TU with
+# -g and pays the DWARF RSS tax that the preset comment warns about
+# — dispatch_buffer.cppm jumps from ~5 GB to >11 GB peak RSS, which is
+# enough to push lower-RAM Apple Silicon hosts into swap and stall single
+# compiles for hours on memory-pressure-driven major page faults; see
+# DOC{NNNN}_BUILD_SPEED_RAM_LIMITED). Using DEFINED CACHE{...} keeps
+# the fallback for non-preset configures while letting any preset value
+# (including the empty string) take precedence.
+if(NOT DEFINED CACHE{CMAKE_CXX_FLAGS_DEBUG})
+  set(CMAKE_CXX_FLAGS_DEBUG "-g")
+endif()
+if(NOT DEFINED CACHE{CMAKE_CXX_FLAGS_RELEASE})
+  set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+endif()
 
 message("CMAKE is ${CMAKE_VERSION}")
 set(CMAKE_CXX_MODULE_STD ON)
@@ -88,6 +111,46 @@ check_cxx_compiler_flag("-fmodules-reduced-bmi" BIOSEQ_HAS_REDUCED_BMI)
 if(BIOSEQ_HAS_REDUCED_BMI)
   string(APPEND CMAKE_CXX_MODULE_MAP_FLAG " -fmodules-reduced-bmi")
   message(STATUS "bioseq: -fmodules-reduced-bmi enabled; CMAKE_CXX_MODULE_MAP_FLAG='${CMAKE_CXX_MODULE_MAP_FLAG}'")
+endif()
+
+# --- Build-speed: optional throttle for memory-hungry module compiles -------
+# Heavy template TUs in this tree (dispatch_buffer.cppm, two_stacks_minimizers
+# .cppm, the columnar_customscan/aggregator units, …) peak at 5+ GB RSS per
+# clang invocation even at -O3 without -g. On a 16 GB Apple Silicon laptop
+# the default `--parallel 32` from build.sh oversubscribes RAM by ~10x and
+# the OS resolves it via compressed-memory + swap, which serializes the
+# heavy compile against a single CPU core servicing major page faults. This
+# is the failure mode that turns a 1-2 second utils.cppm compile on the
+# 64 GB development machine into an hours-long hang on the smaller box.
+#
+# Setting BIOSEQ_HEAVY_JOBS=N at configure time defines a Ninja job pool
+# `heavy_compile=N` that caps the number of concurrent C++ module compiles
+# while leaving the rest of the build at full --parallel concurrency. The
+# pool is attached to the module-heavy targets in bioseq/CMakeLists.txt.
+# Recommended heuristic: 1 heavy compile per ~6 GB of host RAM (so 2 on a
+# 16 GB box, 4 on a 32 GB box, leave empty/unset on >=64 GB).
+set(BIOSEQ_HEAVY_JOBS "" CACHE STRING
+  "Cap on concurrent C++ module compiles for the module-heavy targets. \
+Empty/0 = unlimited; set to e.g. 2 on a 16 GB host.")
+if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS heavy_compile=${BIOSEQ_HEAVY_JOBS})
+  message(STATUS "bioseq: throttling heavy module compiles to ${BIOSEQ_HEAVY_JOBS} concurrent (Ninja JOB_POOL=heavy_compile)")
+endif()
+
+# --- Build-speed: optional -ftime-trace for profiling slow compiles ---------
+# When BIOSEQ_TIME_TRACE=ON every C++ TU emits an .o.json file (chrome
+# tracing format) next to its .o. Drop the files into chrome://tracing or
+# https://ui.perfetto.dev to see exactly where clang is spending its time
+# (header parsing vs. template instantiation vs. constexpr eval vs. backend
+# codegen). The flag has no effect on the emitted .o, so we can keep -O3
+# while profiling. Off by default because the JSON files are ~1-5 MB each
+# and bloat the build tree.
+option(BIOSEQ_TIME_TRACE
+  "Emit clang -ftime-trace JSON per TU into the build tree (profiling only)" OFF)
+if(BIOSEQ_TIME_TRACE)
+  string(APPEND CMAKE_C_FLAGS " -ftime-trace")
+  string(APPEND CMAKE_CXX_FLAGS " -ftime-trace")
+  message(STATUS "bioseq: -ftime-trace enabled; profiling JSON written next to each .o")
 endif()
 
 # set this to "${PROJECT_VERSION}" on release

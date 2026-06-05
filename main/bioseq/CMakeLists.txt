@@ -172,6 +172,18 @@ set_target_properties(bioseq_modules_nopg PROPERTIES
   # is fixed upstream (tracked in DOC0269 §12). `-O3` is preserved.
   INTERPROCEDURAL_OPTIMIZATION FALSE)
 
+# Attach the heavy_compile Ninja pool (defined at top level when
+# BIOSEQ_HEAVY_JOBS is set) so the ~70 module-interface compiles in this
+# OBJECT lib don't race the same RAM as postgresql_bioseq's per-target
+# module compiles. JOB_POOL_COMPILE only takes effect with the Ninja
+# generator; the property is a no-op for Makefile/Xcode builds and the
+# guard keeps the assignment from forcing an empty pool name when the
+# user has not opted in.
+if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
+  set_target_properties(bioseq_modules_nopg PROPERTIES
+    JOB_POOL_COMPILE heavy_compile)
+endif()
+
 # NO_POSTGRES is PRIVATE so the flag governs *this lib's own TU compilation only*
 # — it does NOT propagate into linking consumers. Aligner and the test execs
 # (which also need NO_POSTGRES=1) set the flag on themselves via
@@ -384,6 +396,34 @@ AddCommonTargetX(
 # linkage non-LTO matches that posture.
 set_target_properties(postgresql_bioseq PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE)
+
+# Throttle the per-target heavy module compiles on low-RAM hosts. The
+# postgresql_bioseq target owns the Domain P module fan-out — the modules
+# that import the columnar storage / metadata / table-io stack and feel
+# the most BMI-load + template-instantiation pressure (utils.cppm,
+# access_method.cppm, columnar_customscan.cppm, columnar_aggregator_node
+# .cppm, …). When BIOSEQ_HEAVY_JOBS is set the assignment caps these
+# compiles against the same Ninja pool used by bioseq_modules_nopg, so
+# the worst-case concurrent peak RSS is `heavy_compile × per-TU peak`
+# instead of `min(--parallel, ncpu) × per-TU peak`. Same Ninja-generator
+# caveat as the lib's annotation above; pool is unset (no-op) on other
+# generators or when the user has not opted in.
+if(BIOSEQ_HEAVY_JOBS AND BIOSEQ_HEAVY_JOBS GREATER 0)
+  set_target_properties(postgresql_bioseq PROPERTIES
+    JOB_POOL_COMPILE heavy_compile)
+  if(TARGET bioseq_aligner)
+    set_target_properties(bioseq_aligner PROPERTIES
+      JOB_POOL_COMPILE heavy_compile)
+  endif()
+  if(TARGET bioseq_aligner_tests_exec)
+    set_target_properties(bioseq_aligner_tests_exec PROPERTIES
+      JOB_POOL_COMPILE heavy_compile)
+  endif()
+  if(TARGET bioseq_aligner_int_tests_exec)
+    set_target_properties(bioseq_aligner_int_tests_exec PROPERTIES
+      JOB_POOL_COMPILE heavy_compile)
+  endif()
+endif()
 
 # DOC0279 §11.5/§16.2 — compile the test-only indexing descriptors
 # (TestTableCountIndex, a CHUNKED_PER_TABLE index) into the server-loaded

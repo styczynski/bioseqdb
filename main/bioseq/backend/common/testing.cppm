@@ -4,6 +4,8 @@ module;
 #include <ranges>
 #include <iostream>
 #include <algorithm>
+#include <set>
+#include <vector>
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
