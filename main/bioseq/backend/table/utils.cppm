@@ -22,11 +22,18 @@ module;
 #include "columnar/vectorization/columnar_vector_types.h"
 
 export module bioseq_table:utils;
-import bioseq_table_io;
-import storage_physical;
+// Minimal import set (DOC0283). This TU only references `enable_logging`
+// (mlogging, reached through the JustLog macro) and the PBitmapset / PList /
+// PgReport wrappers (pg_utils, via its re-exported :bitmapset / :lists /
+// :logging partitions). The columnar I/O, physical-storage, metadata and
+// table-types modules it used to import are entirely unreferenced in the body
+// below; dropping them cuts this TU's transitive BMI fan-out from 15 to ~6,
+// which lowers its peak compile RSS on RAM-limited hosts. Every other symbol
+// here (Oid, Relation, safe_relation_open, ScanState, List, Var, Bitmapset,
+// pull_var_clause, the PVC_* / *AttributeNumber / ERRCODE_* macros, …) comes
+// from the Postgres headers included in the global module fragment above, so
+// it is independent of these imports.
 import mlogging;
-import storage_metadata;
-import bioseq_table_types;
 import pg_utils;
 
 const TableAmRoutine * GetColumnarTableAmRoutine(void);
