@@ -36,6 +36,7 @@ extern "C" {
 #include "utils/builtins.h"    // text_to_cstring, cstring_to_text_with_len, regtypein
 #include "utils/rel.h"         // RelationGetDescr
 #include "utils/resowner.h"    // CurrentResourceOwner, TopTransactionResourceOwner
+#include "utils/snapmgr.h"     // PushActiveSnapshot/PopActiveSnapshot/GetTransactionSnapshot, ActiveSnapshotSet
 }
 #include "columnar/columnar.h" // bioseq_update_index_on_insert +
                                // FlushWriteStateForRelfilenode declarations
@@ -360,6 +361,17 @@ struct alphabet_dispatch {
 
 void build_indexes_if_enabled(Oid main_relid) {
     if (!bioseq_update_index_on_insert) return;     // the GUC snapshot (columnar.cppm)
+    // DOC0286 — bioseq.load is one UDF inside ONE SQL command. The batched build
+    // (build_policy_update_on_insert_indexes → SPI `bioseq.update_index`) issues
+    // catalog SPI_execute(read_only=true) calls and columnar reads, both of which
+    // require the executor's active snapshot. run_load calls this AFTER
+    // finish_load_write_states (so the streamed rows are committed to stripes and
+    // read back cleanly) but BEFORE reset_sequence_caches_after_load_storage_alloc
+    // (whose DISCARD-SEQUENCES teardown leaves the snapshot unusable — building
+    // after it SIGSEGV'd inside SPI_execute). At this point the portal snapshot
+    // the SELECT pushed is still on the stack.
+    DEBUG_ASSERT(ActiveSnapshotSet(),
+                 "bioseq.load: index build needs the portal's active snapshot");
     bioseq::storage::indexing::build_policy_update_on_insert_indexes(main_relid);
 }
 
@@ -497,8 +509,13 @@ void cleanup_load_context(LoadContext& ctx, bool commit) {
 
         n = dispatch_and_stream(ctx, path, kind);                         // §4.2
         flush_pending_load_writes(ctx);
+        // Finalize the load's write states FIRST so the streamed rows are
+        // committed to columnar stripes, then build the index through SPI
+        // (executor frame) reading those committed stripes — exactly what a
+        // separate `bioseq.update_index` statement does (residue-free). Build
+        // BEFORE ResetSequenceCaches so the portal's active snapshot is still on
+        // the stack for the in-UDF SPI/columnar reads.
         finish_load_write_states(ctx);
-        reset_sequence_caches_after_load_storage_alloc();
         build_indexes_if_enabled(ctx.main_relid);                          // §4.5
         reset_sequence_caches_after_load_storage_alloc();
     }

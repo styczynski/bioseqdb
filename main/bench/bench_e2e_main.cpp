@@ -381,6 +381,35 @@ void create_e2e_table(it::connection_test_context& c, const std::string& t,
                   t, seq_type);
 }
 
+void configure_bioseq_aligner_session(it::connection_test_context& c,
+                                      int kmer_size,
+                                      int window_size) {
+    it::exec_sql(c, "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner';");
+    it::exec_sql(c, "SET bioseq.aligner.chaining_algorithm       = 'simd_mm2';");
+    it::exec_sql(c, "SET bioseq.aligner.minimizer_algorithm      = 'two_stack_nthash';");
+    it::exec_sqlf(c, "SET bioseq.aligner.kmer_size   = {};", kmer_size);
+    it::exec_sqlf(c, "SET bioseq.aligner.window_size = {};", window_size);
+}
+
+void cleanup_e2e_input(std::string_view,
+                       std::string_view,
+                       simdjson::dom::element,
+                       const E2eInput& in) {
+    if (in.conn != nullptr) {
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.just_index_table);
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.no_index_table);
+    }
+
+    for (const auto& path : {in.target_fasta, in.target_fasta_split,
+                             in.query_fasta, in.mmi_path}) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (ec) {
+            logw("[bench_e2e] cleanup could not remove '{}': {}", path, ec.message());
+        }
+    }
+}
+
 // ---- §10.1 on_estimate ----
 template <sequence_alphabet A>
 [[nodiscard]] RunConstraints e2e_estimate_typed(simdjson::dom::element data) {
@@ -388,10 +417,17 @@ template <sequence_alphabet A>
     using storage_unit_t = typename bench_config<A>::storage_unit;
     const auto ref_bp = static_cast<std::size_t>(
         jint(data, "reference_length", kDefaultReferenceLengthBp));
+    const auto query_bp = static_cast<std::size_t>(
+        jint(data, "fragment_length_mean", 5'000'000));
     const std::size_t packed_units =
         (ref_bp + traits::letters_per_unit - 1) / traits::letters_per_unit;
     const std::size_t packed_bytes = packed_units * sizeof(storage_unit_t);
-    return { .base_memory = ref_bp + packed_bytes, .extra_memory = ref_bp / 2 };
+    const std::size_t unpacked_reference_bytes = ref_bp * sizeof(A);
+    const std::size_t query_bytes = query_bp * sizeof(A);
+    return {
+        .base_memory = packed_bytes + query_bytes,
+        .extra_memory = unpacked_reference_bytes + query_bytes
+    };
 }
 
 [[nodiscard]] RunConstraints e2e_estimate(std::string_view, std::string_view,
@@ -467,11 +503,7 @@ template <sequence_alphabet A>
     preflight_e2e_resources(*in.conn, in.size_label, in.target_bp);
 
     // (4) force the fastest bioseq combo for the whole session.
-    it::exec_sql(*in.conn, "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner';");
-    it::exec_sql(*in.conn, "SET bioseq.aligner.chaining_algorithm       = 'simd_mm2';");
-    it::exec_sql(*in.conn, "SET bioseq.aligner.minimizer_algorithm      = 'two_stack_nthash';");
-    it::exec_sqlf(*in.conn, "SET bioseq.aligner.kmer_size   = {};", in.kmer_size);
-    it::exec_sqlf(*in.conn, "SET bioseq.aligner.window_size = {};", in.window_size);
+    configure_bioseq_aligner_session(*in.conn, in.kmer_size, in.window_size);
 
     // (5) just_index table: create, load (build per-fragment), then build the
     //     per-sequence merged index and make it the active read index.
@@ -539,7 +571,14 @@ template <sequence_alphabet A>
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: load + recompute align
             it::exec_sql(*in.conn, load_sql);
-            parse_bioseq_rows(it::query_rows(*in.conn, align_sql), in, out);
+            // A same-backend custom scan immediately after TRUNCATE + bioseq.load
+            // can observe stale columnar descriptor state. Use a fresh backend for
+            // the measured read; connection setup remains inside the timed region.
+            it::connection_test_context read_conn;
+            configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
+            it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
+            it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
+            parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
         }
         require_mapped(algo, in, out);
 
@@ -589,8 +628,9 @@ int main(int argc, char** argv) {
     auto inp = std::function<E2eInput(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>{e2e_input};
     auto run = std::function<E2eOutput(std::string_view, const ParamMap&, const E2eInput&)>{e2e_run};
     auto evl = std::function<std::map<std::string,double>(std::string_view, const ParamMap&, const E2eInput&, const E2eOutput&)>{e2e_eval};
+    auto cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const E2eInput&)>{cleanup_e2e_input};
     return bioseq::bench_framework::run(argc, argv, rep, data,
         bioseq::bench_framework::create_benchmark<E2eInput, E2eOutput>(
             "End-to-end SQL bioseq.load + mmsearch vs minimap2 (2/6 Gbp dna4/dna5)",
-            "bench_e2e", cfg, est, inp, run, evl));
+            "bench_e2e", cfg, est, inp, run, evl, cln));
 }

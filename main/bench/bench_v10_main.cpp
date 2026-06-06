@@ -130,16 +130,12 @@ struct AlignerOutput {
 /// `main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V12_IMPL_PLAN__DOC0226.md` §3.4).
 ///
 /// We size off the data already in the JSON blob, before any sequence
-/// generation: each test case produces `fragment_count` pairs, with
-/// every pair holding a `~fragment_length_mean`-bp query AND a copy
-/// of the full `reference_length`-bp target.  The per-pair byte cost
-/// is therefore `(fragment_length_mean + reference_length)`.  The
-/// `AlignerInput` struct keeps both the compact 2-bits-per-base
-/// representation and the pre-decoded ACGT string in lock-step (see
-/// the `queries_acgt`/`targets_acgt` fields), so we use a `2 x` factor
-/// to cover both representations + container overhead.  Extra memory
-/// ear-marks the per-iteration scratch space the aligners need (DP
-/// tables, anchor heaps, transient buffers in minimap2/ksw2/RMQ paths).
+/// generation. The cached `AlignerInput` keeps every generated pair in compact
+/// dna4/u32 storage and also keeps pre-decoded ACGT strings for the minimap2
+/// reference path. `generate_test_sequences()` now packs each target from the
+/// single unpacked reference without making a second full-reference temporary,
+/// so the transient generation peak is the unpacked reference plus one compact
+/// target/query pair, not `8 * total_bp`.
 [[nodiscard]] RunConstraints estimate_aligner_resources(
     std::string_view /*data_dir*/,
     std::string_view /*test_case_name*/,
@@ -152,20 +148,30 @@ struct AlignerOutput {
     const auto reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length", 10000));
 
-    // // Total bp generated across the cached `Input`: every pair carries
-    // // a freshly-decoded query and a private copy of the full reference.
-    const std::size_t total_bp =
-        fragment_count * (fragment_length_mean + reference_length);
+    using range_t = compact_sequence_range<
+        sequence_custom_alphabet<seq::dna4, std::uint32_t>>;
+    using traits = typename range_t::traits;
+    const auto packed_bytes_for = [] (std::size_t bp) noexcept -> std::size_t {
+        return ((bp + traits::letters_per_unit - 1) / traits::letters_per_unit)
+             * sizeof(typename traits::storage_unit);
+    };
 
-    // base_memory: bytes that must remain reserved for the lifetime of
-    // the cached `AlignerInput` — i.e. the compact + ACGT pair storage
-    // and ancillary metadata, held until `cleanup` runs.
-    // extra_memory: per-iteration scratch + transient SIMD/DP/RMQ
-    // working sets that live only while `on_run` is in flight.
+    const std::size_t target_packed = packed_bytes_for(reference_length);
+    const std::size_t query_packed  = packed_bytes_for(fragment_length_mean);
+    const std::size_t acgt_bytes_per_pair = reference_length + fragment_length_mean;
+    const std::size_t cached_per_pair =
+        target_packed + query_packed + acgt_bytes_per_pair;
+    const std::size_t cached_input_bytes = fragment_count * cached_per_pair;
+
+    // One unpacked dna4 reference is live while the compact pairs are produced.
+    // Add a modest scratch allowance for DP/anchor vectors used by the timed
+    // alignment call without letting the estimate dominate scheduling.
+    const std::size_t generation_peak_extra = reference_length;
+    const std::size_t aligner_scratch_extra =
+        fragment_count * (fragment_length_mean / 2 + 1024);
     return {
-        // Those are good estimates
-        .base_memory  = total_bp*3,
-        .extra_memory = total_bp*5,
+        .base_memory  = cached_input_bytes,
+        .extra_memory = generation_peak_extra + aligner_scratch_extra,
     };
 }
 

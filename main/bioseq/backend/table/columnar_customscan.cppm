@@ -3094,17 +3094,19 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	// ?????? AYY LMAO
 	//ColumnarScanPath_PlanCustomPath tlist member => [{TARGETENTRY :expr {FUNCEXPR :funcid 535007 :funcresulttype 16 :funcretset false :funcvariadic false :funcformat 0 :funccollid 0 :inputcollid 100 :args ({VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location 24} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 27 :constvalue 5 [ 20 0 0 0 65 ]}) :location 15} :resno 3 :resname mmsearch :ressortgroupref 0 :resorigtbl 0 :resorigcol 0 :resjunk false}]
 
-	const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
-	for(auto n : PList<TargetEntry>(root->processed_tlist)) {
-		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() processed_tlist node=[{}]", nodeStr(n));
-		if(IsA(n->expr, FuncExpr)) {
-			FuncExpr* fe = reinterpret_cast<FuncExpr*>(n->expr);
-			if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
-				|| fe->funcid == plan_stub_oids.symbol_count_oid) {
-				tlist = lappend(tlist, flatCopyTargetEntry(n));
+		const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
+		for(auto n : PList<TargetEntry>(root->processed_tlist)) {
+			JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() processed_tlist node=[{}]", nodeStr(n));
+			if(IsA(n->expr, FuncExpr)) {
+				FuncExpr* fe = reinterpret_cast<FuncExpr*>(n->expr);
+				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
+					|| fe->funcid == plan_stub_oids.symbol_count_oid) {
+					TargetEntry* projected = copyObject(n);
+					projected->resno = static_cast<AttrNumber>(list_length(tlist) + 1);
+					tlist = lappend(tlist, projected);
+				}
 			}
 		}
-	}
 	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist_is_null={}", tlist == nullptr);
 	for(auto n : PList<TargetEntry>(tlist)) {
 		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist node=[{}]", nodeStr(n));

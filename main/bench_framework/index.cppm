@@ -1068,19 +1068,16 @@ inline constexpr std::size_t kMaxStackTraceLines = 30;
 /// guaranteed to show up in at least one frame.
 inline constexpr std::chrono::milliseconds kRetryFailureMinDisplayTime{300};
 
-// ----------------- hwinfo bridge -----------------
+// ----------------- sysinfo bridge -----------------
 
-/// Best-effort `(total, free)` bytes reading the host's physical RAM.
-/// Computed via the cross-platform `hwinfo::Memory` class. The exact
-/// semantics of `Memory::size()` / `Memory::free()` / `Memory::available()`
-/// vary by platform (see hwinfo-main/src/{apple,linux,windows}/ram.cpp);
-/// this helper picks the most-useful values per platform via
-/// compile-time `#ifdef HWINFO_*` from `<hwinfo/platform.h>`. On
-/// totally-broken hwinfo we fall back to "infinite memory" so the
-/// framework over-trusts the host instead of refusing to run.
+/// Best-effort live memory snapshot. The primary source is
+/// `bioseq::instr::detail::sysinfo`, matching the production extension's
+/// MemoryBudget. `hwinfo::Memory` remains a fallback only when the direct
+/// platform probe cannot report total/available memory.
 struct SystemMemorySnapshot {
-    std::uint64_t total_bytes = 0;
-    std::uint64_t free_bytes  = 0;
+    std::uint64_t total_bytes   = 0;
+    std::uint64_t free_bytes    = 0;
+    std::uint64_t process_bytes = 0;
 };
 
 [[nodiscard]] inline SystemMemorySnapshot snapshot_system_memory() noexcept {
@@ -1106,6 +1103,7 @@ struct SystemMemorySnapshot {
     // last-resort fallback when the direct probe is unavailable.
     namespace sysinfo = bioseq::instr::detail::sysinfo;
     snap.total_bytes = sysinfo::system_total_bytes();
+    snap.process_bytes = sysinfo::process_footprint_bytes();
     if (snap.total_bytes == 0) {
         snap.total_bytes = clamp_positive(mem.total_Bytes());
         if (snap.total_bytes == 0) snap.total_bytes = clamp_positive(mem.available_Bytes());
@@ -1142,7 +1140,7 @@ struct SystemMemorySnapshot {
 // Forward declaration kept so the renderer can store a pointer.
 struct ProgressGroup;
 
-/// V16 slim form: hwinfo snapshotter plus the buffered-cap math. All
+/// V16 slim form: sysinfo snapshotter plus the buffered-cap math. All
 /// reservation tracking moved to `BatchScheduler` (§3.7 of
 /// main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md). Removing the per-batch acquire/release
 /// path eliminates the worker-blocking cv-wait loop that was the
@@ -1168,6 +1166,21 @@ public:
     cap_for(std::uint64_t total, double buffer_pct) noexcept {
         return static_cast<std::uint64_t>(
             static_cast<double>(total) * (100.0 - buffer_pct) / 100.0);
+    }
+
+    /// Scheduler admission room under the process-footprint cap. The live
+    /// `free_bytes` value is still surfaced in logs/UI, but admission must not
+    /// subtract every other process and reclaimable page from this benchmark's
+    /// cap: that made a serial 6 Gbp DOC0286 batch unschedulable on macOS even
+    /// when the benchmark process itself stayed below the configured cap.
+    [[nodiscard]] static constexpr std::uint64_t
+    process_room_for(const SystemMemorySnapshot& sys,
+                     double buffer_pct,
+                     std::uint64_t reserved) noexcept {
+        const auto cap = cap_for(sys.total_bytes, buffer_pct);
+        return (cap > sys.process_bytes + reserved)
+            ? (cap - sys.process_bytes - reserved)
+            : std::uint64_t{0};
     }
 
     [[nodiscard]] double memory_buffer_pct() const noexcept { return memory_buffer_pct_; }
@@ -1503,6 +1516,7 @@ public:
         std::uint64_t total_bytes;
         std::uint64_t cap_bytes;
         std::uint64_t used_bytes;
+        std::uint64_t system_available_bytes;
         std::uint64_t reserved_bytes;
         std::uint64_t available_bytes;
         std::size_t   pending_count;
@@ -1512,19 +1526,16 @@ public:
         const auto sys = budget_.current_system_snapshot();
         const auto cap = MemoryBudget::cap_for(sys.total_bytes,
                                                 budget_.memory_buffer_pct());
-        const auto used = (sys.total_bytes > sys.free_bytes)
-                              ? (sys.total_bytes - sys.free_bytes)
-                              : std::uint64_t{0};
         std::lock_guard<std::mutex> guard(mu_);
         const auto reserved = static_cast<std::uint64_t>(
                                   std::max<std::int64_t>(reserved_bytes_, 0));
-        const auto available = (cap > used + reserved)
-                                  ? (cap - used - reserved)
-                                  : std::uint64_t{0};
+        const auto available = MemoryBudget::process_room_for(
+            sys, budget_.memory_buffer_pct(), reserved);
         return LiveSnapshot{
             .total_bytes     = sys.total_bytes,
             .cap_bytes       = cap,
-            .used_bytes      = used,
+            .used_bytes      = sys.process_bytes,
+            .system_available_bytes = sys.free_bytes,
             .reserved_bytes  = reserved,
             .available_bytes = available,
             .pending_count   = pending_.size(),
@@ -1561,15 +1572,10 @@ private:
     void admit_locked(const SystemMemorySnapshot& sys) noexcept {
         if (pending_.empty()) return;
 
-        const auto cap = MemoryBudget::cap_for(sys.total_bytes,
-                                                budget_.memory_buffer_pct());
-        const auto used = (sys.total_bytes > sys.free_bytes)
-                              ? (sys.total_bytes - sys.free_bytes)
-                              : std::uint64_t{0};
-        std::uint64_t available =
-            (cap > used + static_cast<std::uint64_t>(reserved_bytes_))
-                ? (cap - used - static_cast<std::uint64_t>(reserved_bytes_))
-                : std::uint64_t{0};
+        std::uint64_t available = MemoryBudget::process_room_for(
+            sys,
+            budget_.memory_buffer_pct(),
+            static_cast<std::uint64_t>(std::max<std::int64_t>(reserved_bytes_, 0)));
 
         // Smallest-first greedy: a small batch admits even if the next
         // larger one would push us over `available`. With closed-set
@@ -9118,15 +9124,18 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
             const auto snap = progress.scheduler->live_snapshot();
             const auto over_cap = snap.used_bytes >= snap.cap_bytes;
             rows.push_back(hbox({
-                text("[budget free ") | color(Color::GrayLight),
+                text("[budget room ") | color(Color::GrayLight),
                 text(fmt::format("{:.2f}", bytes_to_gib(snap.available_bytes)))
                     | color(snap.available_bytes > 0 ? Color::Green : Color::Red),
-                text(fmt::format(" / cap {:.2f} GiB · sys used ",
+                text(fmt::format(" / cap {:.2f} GiB · process ",
                                  bytes_to_gib(snap.cap_bytes))),
                 text(fmt::format("{:.2f}", bytes_to_gib(snap.used_bytes)))
                     | color(over_cap ? Color::RedLight : Color::Yellow),
-                text(fmt::format(" / {:.2f} GiB · reserved ",
+                text(fmt::format(" / {:.2f} GiB · sys available ",
                                  bytes_to_gib(snap.total_bytes))),
+                text(fmt::format("{:.2f}", bytes_to_gib(snap.system_available_bytes)))
+                    | color(Color::Green),
+                text(" GiB · reserved "),
                 text(fmt::format("{:.2f}", bytes_to_gib(snap.reserved_bytes)))
                     | color(Color::Cyan),
                 text(fmt::format(" GiB · pending {} running {} · buffer {:.0f}%]",
@@ -9358,14 +9367,15 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         const auto sys = snapshot_system_memory();
         const auto cap = MemoryBudget::cap_for(sys.total_bytes,
                                                 cli.memory_buffer_pct);
-        logi("[bench_framework] memory budget: hwinfo total={:.2f} GiB free={:.2f} GiB "
-             "buffer={:.0f}% cap={:.2f} GiB",
+        logi("[bench_framework] memory budget: sysinfo total={:.2f} GiB available={:.2f} GiB "
+             "process={:.2f} GiB buffer={:.0f}% cap={:.2f} GiB",
              bytes_to_gib(sys.total_bytes),
              bytes_to_gib(sys.free_bytes),
+             bytes_to_gib(sys.process_bytes),
              cli.memory_buffer_pct,
              bytes_to_gib(cap));
         if (sys.total_bytes == std::numeric_limits<std::uint64_t>::max()) {
-            logw("[bench_framework] hwinfo returned 0 for total RAM — budget "
+            logw("[bench_framework] sysinfo/hwinfo returned 0 for total RAM — budget "
                  "checks are effectively disabled (treated as infinite memory)");
         }
     }

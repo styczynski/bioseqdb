@@ -109,5 +109,36 @@ TEST_CASE("DOC0263 §11.3.1 — full minimap_port pipeline is bit-identical unde
     check_pipeline_parity<32>(400, 1200, 0xC0DE);
 }
 
+TEST_CASE("DOC0286 — two_stack_nthash minimap_port handles small fragmented targets",
+          "[lazy-fragmented][pipeline-parity][two-stack][doc0286]") {
+    using chunked = bioseq::storage::sequence_scanner_test_chunked<
+        std::uint64_t, bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+
+    constexpr std::size_t query_bp = 5'000;
+    constexpr std::size_t target_bp = 300'000;
+    auto q_data = make_dna4(query_bp, 0x20260286);
+    auto t_data = make_dna4(target_bp, 0x20260286 ^ 0x5555);
+    constexpr std::size_t embed = 123'456;
+    for (std::size_t i = 0; i < q_data.size(); ++i) {
+        t_data[embed + i] = q_data[i];
+    }
+
+    range_t q_range(q_data);
+    range_t t_range(t_data);
+
+    Minimap2Params params{};
+    params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    params.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+    params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+
+    bioseq::storage::lazy_compact_sequence<dna4_u64, chunked> frag_q{
+        chunked::from_range(q_range)};
+    bioseq::storage::lazy_compact_sequence<dna4_u64, chunked> frag_t{
+        chunked::from_range(t_range)};
+    const auto matches = canon(minimap_port(frag_q, frag_t, params));
+
+    REQUIRE_FALSE(matches.empty());
+}
+
 }  // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

@@ -7,7 +7,7 @@
   },
 
   "test_cases": {
-    "E2E_2GBP_DNA4": { "data": {
+    "E2E_2GBP_DNA4": { "concurrency": 1, "data": {
         "alphabet": "dna4", "size_label": "2gbp_dna4", "reference_length": 2000000000,
         "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
@@ -16,7 +16,7 @@
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna4 2 Gbp reference, one 5 Mbp HiFi-error query (DOC0283 seed)" },
 
-    "E2E_2GBP_DNA5": { "data": {
+    "E2E_2GBP_DNA5": { "concurrency": 1, "data": {
         "alphabet": "dna5", "size_label": "2gbp_dna5", "reference_length": 2000000000,
         "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
@@ -25,7 +25,7 @@
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna5 2 Gbp reference with deterministic N bases; same biological parameters as dna4" },
 
-    "E2E_6GBP_DNA4": { "data": {
+    "E2E_6GBP_DNA4": { "concurrency": 1, "data": {
         "alphabet": "dna4", "size_label": "6gbp_dna4", "reference_length": 6000000000,
         "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
@@ -34,7 +34,7 @@
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna4 6 Gbp reference, one 5 Mbp HiFi-error query; minimap2 ref split into three records" },
 
-    "E2E_6GBP_DNA5": { "data": {
+    "E2E_6GBP_DNA5": { "concurrency": 1, "data": {
         "alphabet": "dna5", "size_label": "6gbp_dna5", "reference_length": 6000000000,
         "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,

@@ -30,28 +30,22 @@ namespace it = bioseq_int_tests;
 // Deterministic pseudo-random base generator (splitmix-style) so the loaded
 // data is reproducible and non-degenerate (degenerate runs give too few
 // minimizers for a stable mmsearch hit).
+[[nodiscard]] char gen_base_at(std::size_t i, std::uint64_t seed, bool with_n) {
+    if (with_n && i % 50 == 13) return 'N';
+    static constexpr char kDna4[] = "ACGT";
+    static constexpr std::uint64_t kStep = 0x9E3779B97F4A7C15ull;
+    std::uint64_t z = seed + kStep * (static_cast<std::uint64_t>(i) + 2ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    z = z ^ (z >> 31);
+    return kDna4[z % 4ull];
+}
+
 [[nodiscard]] std::string gen_bases(std::size_t n, std::uint64_t seed, bool with_n) {
     std::string out;
     out.reserve(n);
-    static constexpr char kDna4[] = "ACGT";
-    std::uint64_t x = seed + 0x9E3779B97F4A7C15ull;
     for (std::size_t i = 0; i < n; ++i) {
-        x += 0x9E3779B97F4A7C15ull;
-        std::uint64_t z = x;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        z = z ^ (z >> 31);
-        out.push_back(kDna4[z % 4ull]);
-    }
-    // `with_n` sprinkles SPARSE N's (one every 50 bp): real genomic N marks rare
-    // assembly gaps. A uniform 20% N (the naive "ACGTN") would leave almost no
-    // N-free 15-mer anywhere, so NO minimizer-based mapper (bioseq OR minimap2)
-    // could self-map the sequence — the test would then prove nothing about
-    // mmsearch. Sparse N still exercises the dna5 codec + the minimizer N-reset
-    // while leaving long N-free runs for the seeds. Position 13 mod 50 is a fixed,
-    // deterministic pattern so the decode round-trip stays byte-exact.
-    if (with_n) {
-        for (std::size_t i = 13; i < n; i += 50) out[i] = 'N';
+        out.push_back(gen_base_at(i, seed, with_n));
     }
     return out;
 }
@@ -68,6 +62,26 @@ void write_fasta(const std::string& path,
             f.write(body.data() + i, static_cast<std::streamsize>(n));
             f << '\n';
         }
+    }
+}
+
+void write_generated_fasta(const std::string& path, std::string_view header,
+                           std::size_t n, std::uint64_t seed, bool with_n) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    f << '>' << header << '\n';
+    char line[60];
+    std::size_t used = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        line[used++] = gen_base_at(i, seed, with_n);
+        if (used == sizeof(line)) {
+            f.write(line, static_cast<std::streamsize>(used));
+            f << '\n';
+            used = 0;
+        }
+    }
+    if (used != 0) {
+        f.write(line, static_cast<std::streamsize>(used));
+        f << '\n';
     }
 }
 
@@ -216,9 +230,8 @@ TEST_CASE("bioseq.load: single large record streams without a >MaxAllocSize varl
     const char* env = std::getenv("BIOSEQ_LOAD_MEMBOUND_GBP");
     const double gbp = (env && *env) ? std::atof(env) : 0.1;
     const std::size_t n = static_cast<std::size_t>(gbp * 1e9);
-    const std::string body = gen_bases(n, 4242, /*with_n=*/false);     // one dna4 record
     const std::string path = "/tmp/bioseq_test_load_membound.fasta";
-    write_fasta(path, {{"big", body}});
+    write_generated_fasta(path, "big", n, 4242, /*with_n=*/false);     // one dna4 record
 
     it::connection_test_context ctx;
     it::reset_extension(ctx, { std::string_view{"load_mb"} });

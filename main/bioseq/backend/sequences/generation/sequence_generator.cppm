@@ -241,7 +241,7 @@ generate_test_sequences(const GeneratorParams& params) {
     using range_t = typename pair_t::sequence_t;
     std::mt19937_64 rng(params.seed);
 
-    const std::vector<alphabet_t> reference =
+    std::vector<alphabet_t> reference =
         detail::build_random_reference<alphabet_t>(params.reference_length, rng);
 
     std::vector<pair_t> pairs;
@@ -278,7 +278,7 @@ generate_test_sequences(const GeneratorParams& params) {
 
         pair_t pair;
         pair.query = range_t(std::move(fragment));
-        pair.target = range_t(std::vector<alphabet_t>(reference));
+        pair.target = range_t(reference);
         pair.truth_target_start = fragment_start;
         pair.truth_target_end   = fragment_end;
         pair.is_reverse         = is_reverse;

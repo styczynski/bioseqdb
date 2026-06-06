@@ -130,6 +130,8 @@ void run_smoke(const std::string& alpha_name, const std::string& seq_type,
     for (std::size_t i = 0; i < pairs.size(); ++i) {
         const std::string query = pairs[i].query.to_string();
         const long long truth = static_cast<long long>(pairs[i].truth_target_start);
+        const std::string query_fa = fmt::format("/tmp/e2e_smoke_{}_q{}.fasta", alpha_name, i);
+        write_fasta(query_fa, fmt::format("q{}", i), query);
 
         // bioseq: assemble-on mmsearch must map within tolerance of truth.
         const auto rows = it::query_rows(ctx, fmt::format(
@@ -145,8 +147,6 @@ void run_smoke(const std::string& alpha_name, const std::string& seq_type,
                i);
 
         // minimap2 cross-check: must also map within tolerance, and agree with bioseq.
-        const std::string query_fa = fmt::format("/tmp/e2e_smoke_{}_q{}.fasta", alpha_name, i);
-        write_fasta(query_fa, fmt::format("q{}", i), query);
         const long long mm2_start = run_minimap2_target_start(target_fa, query_fa);
         ASSERT(mm2_start >= 0 && std::llabs(mm2_start - truth) <= kPositionToleranceBp,
                fmt::format("{} query {} minimap2 start {} vs truth {} (> {} tol)",

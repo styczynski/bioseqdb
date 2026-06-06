@@ -460,7 +460,29 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         // Explicit belt: minimizers_per_sequence is UPDATE_MANUALLY (its
         // external-sort build is opt-in via bioseq.update_index(...)).
         if (types[i].first == "minimizers_per_sequence") continue;
-        total += update_index_impl(main_relid, types[i].first);
+        // DOC0286 — invoke the index build through the SQL executor (SPI) rather
+        // than calling update_index_impl() directly. The direct call ran the
+        // builder inside bioseq.load's own executor frame; the relcache/typcache
+        // churn from creating the seqidx sidecar relations (CREATE TABLE ...
+        // bioseq.seq via internal subtransactions) then leaked into the next
+        // command in the same backend (fetch_att "unsupported byval length: -1"
+        // / custom-scan SIGSEGV). Routing through SPI gives the build its own
+        // portal/executor frame with clean snapshot + invalidation handling —
+        // exactly what a separate `bioseq.update_index` statement gets, which is
+        // why the manual reindex never left residue.
+        if (SPI_connect() == SPI_OK_CONNECT) {
+            const std::string sql = fmt::format(
+                "SELECT bioseq.update_index({}::oid::regclass, {})",
+                static_cast<unsigned>(main_relid),
+                quote_literal_cstr(std::string(types[i].first).c_str()));
+            if (SPI_execute(sql.c_str(), false, 0) == SPI_OK_SELECT && SPI_processed > 0) {
+                bool isn = false;
+                const Datum d = SPI_getbinval(SPI_tuptable->vals[0],
+                                              SPI_tuptable->tupdesc, 1, &isn);
+                if (!isn) total += DatumGetInt64(d);
+            }
+            SPI_finish();
+        }
     }
     return total;
 }
