@@ -25,32 +25,32 @@
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
       "description": "dna5 2 Gbp reference with deterministic N bases; same biological parameters as dna4" },
 
-    "E2E_6GBP_DNA4": { "concurrency": 1, "data": {
-        "alphabet": "dna4", "size_label": "6gbp_dna4", "reference_length": 6000000000,
+    "E2E_4GBP_DNA4": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "4gbp_dna4", "reference_length": 4000000000,
         "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
-      "description": "dna4 6 Gbp reference, one 5 Mbp HiFi-error query; minimap2 ref split into three records" },
+      "description": "dna4 4 Gbp reference, one 5 Mbp HiFi-error query; minimap2 ref split into two records" },
 
-    "E2E_6GBP_DNA5": { "concurrency": 1, "data": {
-        "alphabet": "dna5", "size_label": "6gbp_dna5", "reference_length": 6000000000,
+    "E2E_4GBP_DNA5": { "concurrency": 1, "data": {
+        "alphabet": "dna5", "size_label": "4gbp_dna5", "reference_length": 4000000000,
         "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
         "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
         "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
         "minimap2_split_bp": 2000000352, "seed": 3219876 },
-      "description": "dna5 6 Gbp reference with deterministic N bases; same biological parameters as dna4" }
+      "description": "dna5 4 Gbp reference with deterministic N bases; same biological parameters as dna4" }
   },
 
   "bench_e2e": {
-    "description": "End-to-end SQL-driven 2/6 Gbp benchmark. bioseq via bioseq.load + SELECT mmsearch; minimap2 via CLI on the split FASTA. no_index = build counted; just_index = build excluded. Forces block-aligner SIMD + SIMD DP chaining + the selected minimizer GUC on the bioseq path.",
+    "description": "End-to-end SQL-driven 2/4 Gbp benchmark. bioseq via bioseq.load + SELECT mmsearch; minimap2 via CLI on the split FASTA. no_index = build counted; just_index = build excluded. Forces block-aligner SIMD + SIMD DP chaining + the selected minimizer GUC on the bioseq path.",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
       "for": { "E2E_2GBP_DNA4": 3, "E2E_2GBP_DNA5": 3,
-               "E2E_6GBP_DNA4": 3, "E2E_6GBP_DNA5": 3 },
+               "E2E_4GBP_DNA4": 3, "E2E_4GBP_DNA5": 3 },
       "over": {
         "bioseq_no_index": {},
         "bioseq_just_index": {},
