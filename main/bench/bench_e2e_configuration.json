@@ -1,0 +1,76 @@
+{
+  "params": {
+    "bioseq_no_index":      {"_": {"type": "integer", "default": 0, "description": "load(no index)+recompute align, all via SQL, timed end-to-end"}},
+    "bioseq_just_index":    {"_": {"type": "integer", "default": 0, "description": "index prebuilt (untimed); assemble align via SQL, timed"}},
+    "minimap2_no_index":    {"_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"}},
+    "minimap2_just_index":  {"_": {"type": "integer", "default": 0, "description": "minimap2 prebuilt .mmi (map only)"}}
+  },
+
+  "test_cases": {
+    "E2E_2GBP_DNA4": { "data": {
+        "alphabet": "dna4", "size_label": "2gbp_dna4", "reference_length": 2000000000,
+        "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna4 2 Gbp reference, one 5 Mbp HiFi-error query (DOC0283 seed)" },
+
+    "E2E_2GBP_DNA5": { "data": {
+        "alphabet": "dna5", "size_label": "2gbp_dna5", "reference_length": 2000000000,
+        "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna5 2 Gbp reference with deterministic N bases; same biological parameters as dna4" },
+
+    "E2E_6GBP_DNA4": { "data": {
+        "alphabet": "dna4", "size_label": "6gbp_dna4", "reference_length": 6000000000,
+        "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna4 6 Gbp reference, one 5 Mbp HiFi-error query; minimap2 ref split into three records" },
+
+    "E2E_6GBP_DNA5": { "data": {
+        "alphabet": "dna5", "size_label": "6gbp_dna5", "reference_length": 6000000000,
+        "fragment_count": 1, "fragment_length_mean": 5000000, "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000000352, "seed": 3219876 },
+      "description": "dna5 6 Gbp reference with deterministic N bases; same biological parameters as dna4" }
+  },
+
+  "bench_e2e": {
+    "description": "End-to-end SQL-driven 2/6 Gbp benchmark. bioseq via bioseq.load + SELECT mmsearch; minimap2 via CLI on the split FASTA. no_index = build counted; just_index = build excluded. Forces block-aligner SIMD + SIMD DP chaining + the selected minimizer GUC on the bioseq path.",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "E2E_2GBP_DNA4": 3, "E2E_2GBP_DNA5": 3,
+               "E2E_6GBP_DNA4": 3, "E2E_6GBP_DNA5": 3 },
+      "over": {
+        "bioseq_no_index": {},
+        "bioseq_just_index": {},
+        "minimap2_no_index": {},
+        "minimap2_just_index": {}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":   { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "region_visits":   { "type": "region", "rules": [] },
+        "match_count":            { "type": "evaluation" },
+        "mean_position_offset_bp":{ "type": "evaluation", "rules": [] },
+        "found_fraction":         { "type": "evaluation", "rules": [] }
+      }
+    }
+  },
+
+  "regression_rules": [
+    { "name": "e2e_region_p50_no_blowup", "metric": "region_total_ns",
+      "aggregate": "p50", "operator": { "compare": "<", "tolerance%": 30 } }
+  ]
+}

@@ -248,6 +248,70 @@ struct seq_caches {
 
 void destroy_seq_caches(seq_caches* caches) noexcept;
 
+// DOC0286 §4.3 — public alias for the per-fragment storage-unit count
+// (detail::kFragmentStorageUnits below aliases this so the two never drift).
+// `bioseq.load`'s streaming sink uses it to size fragment payloads.
+inline constexpr std::size_t kSequenceFragmentStorageUnits = std::size_t{1024};
+
+// DOC0286 §4.4 — flush every open sub-table write state owned by `caches` so an
+// in-statement index scan (e.g. the batched update_index `bioseq.load` runs
+// after streaming) sees the just-written fragment rows. Unlike `close_all`,
+// this only flushes pending columnar writes (it does NOT pop/close the write
+// state); the central xact-commit teardown still owns lifecycle.
+void flush_seq_cache_write_states(seq_caches* caches,
+                                  SubTransactionId current_sub_xid) noexcept;
+
+/// DOC0286 §4.3 — bounded streaming fragment writer for one sequence. Accepts
+/// column-native packed bytes, writes full fragment rows (each
+/// `kSequenceFragmentStorageUnits` storage units) as its internal buffer fills,
+/// retains only the final partial fragment until `finish`, and returns the
+/// Phase-C `seq_locator`. Peak extra memory is one ≤8 KiB fragment buffer + one
+/// `pgseq_t` fragment row, so a >MaxAllocSize record never materialises as one
+/// buffer. Writes to ONE shard; a single sequence exceeding the sub-table cap
+/// raises ERROR (transaction rollback cleans the partial rows).
+struct sequence_stream_writer {
+    void begin(Oid db_oid, Oid spc_oid, RelFileNumber main_relfilenode,
+               AttrNumber seq_attno, TupleDesc parent_td,
+               std::uint8_t alphabet_code, std::uint8_t byte_width,
+               sequence_size_t cap_bytes, seq_caches* caches);
+    void append_packed_bytes(std::span<const std::uint8_t> bytes,
+                             sequence_size_t bp_count);
+    [[nodiscard]] seq_locator finish(sequence_size_t total_bp,
+                                     std::uint16_t last_pad);
+    void abort();
+
+private:
+    void open_shard();
+    void write_fragment(const std::uint8_t* payload, std::size_t payload_bytes,
+                        sequence_size_t bp, std::uint16_t pad);
+
+    Oid                 db_oid_ = InvalidOid;
+    Oid                 spc_oid_ = InvalidOid;
+    RelFileNumber       main_relfilenode_{};
+    std::int16_t        column_attno_ = 0;
+    TupleDesc           parent_td_ = nullptr;
+    std::uint8_t        alphabet_code_ = 0;
+    std::uint8_t        byte_width_ = 0;
+    sequence_size_t     cap_bytes_ = 0;
+    seq_caches*         caches_ = nullptr;
+
+    std::int16_t        bucket_idx_ = 0;
+    std::int32_t        shard_idx_ = 0;
+    std::uint64_t       cache_key_ = 0;
+    Relation            shard_ = nullptr;
+    ColumnarWriteState* write_state_ = nullptr;
+
+    std::size_t         frag_payload_bytes_ = 0;  // kSequenceFragmentStorageUnits * byte_width
+    std::size_t         frag_varlena_bytes_ = 0;  // header + payload
+    sequence_size_t     frag_bp_ = 0;             // kSequenceFragmentStorageUnits * letters_per_unit
+    std::vector<std::uint8_t> buffer_;            // < frag_payload_bytes_ leftover
+    std::uint64_t       first_sub_row_no_ = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t       last_sub_row_no_  = std::numeric_limits<std::uint64_t>::max();
+    std::uint32_t       num_fragments_ = 0;
+    sequence_size_t     total_varlena_bytes_ = 0;
+    bool                active_ = false;
+};
+
 }  // namespace bioseq::storage
 
 // DOC0260 Phase A — `extern "C++"` shim called from write_state_management
@@ -600,6 +664,21 @@ void seq_caches::close_all(bool commit) noexcept {
     entries.clear();
 }
 
+// DOC0286 §4.4 — flush (but do NOT pop/close) every open sub-table write state
+// so a same-statement index scan sees the just-written fragment rows.
+// `FlushWriteStateForRelfilenode` is keyed on the shard relation's relfilenode.
+void flush_seq_cache_write_states(seq_caches* caches,
+                                  SubTransactionId current_sub_xid) noexcept {
+    if (caches == nullptr || caches->side != seq_caches::Side::Write) return;
+    for (auto& kv : caches->entries) {
+        seq_caches::entry& e = kv.second;
+        if (e.rel != nullptr) {
+            FlushWriteStateForRelfilenode(e.rel->rd_locator.relNumber,
+                                          current_sub_xid);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shard open / create / lookup helpers.
 // ---------------------------------------------------------------------------
@@ -884,7 +963,9 @@ namespace detail {
 
 // DOC0264 §4 — per-fragment storage_unit count. Class member from
 // `sequence_scanner_none<T>::fragment_storage_units` (DOC0263 §3) = 1024.
-inline constexpr std::size_t kFragmentStorageUnits = std::size_t{1024};
+// DOC0286 §4.3 — aliases the exported `kSequenceFragmentStorageUnits` so the
+// public constant and this hot-path detail constant can never drift.
+inline constexpr std::size_t kFragmentStorageUnits = kSequenceFragmentStorageUnits;
 
 // Look-up bits_per_char via the supported-alphabet pack so a future alphabet
 // addition does not silently produce wrong fragment_bp values.
@@ -1229,6 +1310,208 @@ sequence_storage_manager<L, M, X>::insert_payload_as_fragments(
         logical_alphabet_code, logical_byte_width,
         total_bp_size, last_fragment_padding, current_cap_bytes, cache,
         producer);
+}
+
+// ---------------------------------------------------------------------------
+// DOC0286 §4.3 — sequence_stream_writer implementation. Mirrors the per-fragment
+// row write of insert_sequence_streamed, but driven incrementally: the total
+// length is unknown until finish(), so the shard is opened lazily and the cap
+// is checked as the sequence streams. No cross-shard rollover (one shard per
+// sequence); a single sequence over the cap raises ERROR and the transaction
+// rollback cleans the partial fragment rows.
+// ---------------------------------------------------------------------------
+void sequence_stream_writer::begin(
+    Oid db_oid, Oid spc_oid, RelFileNumber main_relfilenode,
+    AttrNumber seq_attno, TupleDesc parent_td,
+    std::uint8_t alphabet_code, std::uint8_t byte_width,
+    sequence_size_t cap_bytes, seq_caches* caches)
+{
+    if (caches == nullptr || caches->side != seq_caches::Side::Write) {
+        pg_log(ERROR, "bioseq.load: sequence_stream_writer requires a write-side seq_caches");
+    }
+    db_oid_ = db_oid; spc_oid_ = spc_oid; main_relfilenode_ = main_relfilenode;
+    column_attno_ = static_cast<std::int16_t>(seq_attno);
+    parent_td_ = parent_td;
+    alphabet_code_ = alphabet_code; byte_width_ = byte_width;
+    cap_bytes_ = cap_bytes; caches_ = caches;
+
+    if (caches_->main_database_oid == InvalidOid) {
+        caches_->main_database_oid   = db_oid;
+        caches_->main_tablespace_oid = spc_oid;
+        caches_->main_relfilenode    = main_relfilenode;
+    }
+
+    const auto alpha = static_cast<pgseq_t::alphabet_code_t>(alphabet_code);
+    const std::size_t lpu = detail::letters_per_unit_for(alpha, byte_width);
+    if (lpu == 0) {
+        pg_log(ERROR, "bioseq.load: could not derive letters_per_unit "
+               "(alphabet_code={}, byte_width={})",
+               static_cast<unsigned>(alpha), static_cast<unsigned>(byte_width));
+    }
+    frag_payload_bytes_ = detail::kFragmentStorageUnits * static_cast<std::size_t>(byte_width);
+    frag_varlena_bytes_ = pgseq_t::header_bytes() + frag_payload_bytes_;
+    frag_bp_ = static_cast<sequence_size_t>(detail::kFragmentStorageUnits) * lpu;
+
+    buffer_.clear();
+    buffer_.reserve(frag_payload_bytes_ + 256);
+    first_sub_row_no_ = std::numeric_limits<std::uint64_t>::max();
+    last_sub_row_no_  = std::numeric_limits<std::uint64_t>::max();
+    num_fragments_ = 0;
+    total_varlena_bytes_ = 0;
+    shard_ = nullptr;
+    write_state_ = nullptr;
+    active_ = true;
+}
+
+void sequence_stream_writer::open_shard() {
+    if (shard_ != nullptr) return;
+    // All streamed sequences land in the top length bucket: the size is unknown
+    // until finish(), the bucket is purely organisational (the locator records
+    // it; reads use the locator), and co-locating a load's fragments keeps
+    // sequential-read locality.
+    bucket_idx_ = static_cast<std::int16_t>(
+        bioseq_default_storage_manager::bucket_index_for_size(
+            std::numeric_limits<sequence_size_t>::max()));
+    shard_ = open_or_create_shard(db_oid_, spc_oid_, main_relfilenode_,
+                                  column_attno_, parent_td_, bucket_idx_,
+                                  RowExclusiveLock, caches_);
+    auto active = LookupActiveSubTableShard(db_oid_, spc_oid_, main_relfilenode_,
+                                            column_attno_, bucket_idx_);
+    if (!active.has_value()) {
+        pg_log(ERROR, "bioseq.load: active shard disappeared mid-load");
+    }
+    shard_idx_ = active->shard_idx;
+    cache_key_ = seq_caches::key_for(column_attno_, bucket_idx_, shard_idx_);
+    seq_caches::entry& entry = caches_->entries[cache_key_];
+    entry.rel = shard_;
+    if (entry.write_state == nullptr) {
+        entry.write_state = bioseq_init_write_state(
+            shard_, RelationGetDescr(shard_), RelationGetRelid(shard_),
+            GetCurrentSubTransactionId());
+    }
+    write_state_ = entry.write_state;
+    // DOC0264 §8.4 — serialise writers on this (parent, column, bucket, shard)
+    // so the row numbers ColumnarWriteRow assigns stay contiguous within one
+    // sequence's fragments (and across the sequences of one load).
+    const std::int64_t row_lock_key =
+          (static_cast<std::int64_t>(db_oid_)            << 48)
+        ^ (static_cast<std::int64_t>(main_relfilenode_)  << 16)
+        ^ (static_cast<std::int64_t>(
+               static_cast<std::uint16_t>(column_attno_)) << 8)
+        ^ (static_cast<std::int64_t>(
+               static_cast<std::uint16_t>(bucket_idx_))   << 4)
+        ^  static_cast<std::int64_t>(shard_idx_);
+    DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(row_lock_key));
+}
+
+void sequence_stream_writer::write_fragment(
+    const std::uint8_t* payload, std::size_t payload_bytes,
+    sequence_size_t bp, std::uint16_t pad)
+{
+    open_shard();
+    if (cap_bytes_ > 0 &&
+        total_varlena_bytes_ + frag_varlena_bytes_ > cap_bytes_) {
+        pg_log(ERROR,
+            "bioseq.load: sequence exceeds shard cap {} bytes ({} GiB) at "
+            "fragment {}. Raise bioseq.storage.max_seq_sub_table_gbs.",
+            total_varlena_bytes_ + frag_varlena_bytes_,
+            cap_bytes_ >> 30, num_fragments_);
+    }
+    pgseq_t* frag;
+    {
+        MemoryContextScope guard{ColumnarWritePerTupleContext(write_state_)};
+        frag = static_cast<pgseq_t*>(palloc0(frag_varlena_bytes_));
+        SET_VARSIZE(frag, frag_varlena_bytes_);
+        frag->alphabet_code           = static_cast<pgseq_t::alphabet_code_t>(alphabet_code_);
+        frag->storage_unit_byte_width = byte_width_;
+        frag->bp_size                 = static_cast<pgseq_t::bp_size_t>(bp);
+        frag->padding_letters         = pad;
+        if (payload_bytes > 0) {
+            std::memcpy(frag->data, payload, payload_bytes);
+        }
+    }
+    Datum values[1] = { PointerGetDatum(frag) };
+    bool  nulls[1]  = { false };
+    const std::uint64_t row_no = ColumnarWriteRow(write_state_, values, nulls);
+    if (num_fragments_ == 0) {
+        first_sub_row_no_ = row_no;
+    } else if (row_no != last_sub_row_no_ + 1) {
+        pg_log(ERROR,
+            "bioseq.load: non-contiguous row numbers during streamed insert "
+            "(expected {}, got {})", last_sub_row_no_ + 1, row_no);
+    }
+    last_sub_row_no_ = row_no;
+    ++num_fragments_;
+    total_varlena_bytes_ += frag_varlena_bytes_;
+}
+
+void sequence_stream_writer::append_packed_bytes(
+    std::span<const std::uint8_t> bytes, sequence_size_t /*bp_count*/)
+{
+    if (!active_) {
+        pg_log(ERROR, "bioseq.load: append_packed_bytes before begin()");
+    }
+    if (bytes.empty()) return;
+    buffer_.insert(buffer_.end(), bytes.begin(), bytes.end());
+    // Write full fragments only while STRICTLY more than one full fragment is
+    // buffered, so the final (possibly padded) fragment is always emitted by
+    // finish() with the caller's last_pad. Non-final fragments are full units
+    // (padding 0, bp = frag_bp_).
+    std::size_t off = 0;
+    while (buffer_.size() - off > frag_payload_bytes_) {
+        write_fragment(buffer_.data() + off, frag_payload_bytes_, frag_bp_, 0);
+        off += frag_payload_bytes_;
+    }
+    if (off > 0) {
+        buffer_.erase(buffer_.begin(),
+                      buffer_.begin() + static_cast<std::ptrdiff_t>(off));
+    }
+}
+
+seq_locator sequence_stream_writer::finish(sequence_size_t total_bp,
+                                           std::uint16_t last_pad)
+{
+    if (!active_) {
+        pg_log(ERROR, "bioseq.load: finish() before begin()");
+    }
+    // Emit the final fragment (the buffered remainder ≤ one fragment). Its bp is
+    // whatever remains after the full fragments already written.
+    const sequence_size_t emitted_bp =
+        static_cast<sequence_size_t>(num_fragments_) * frag_bp_;
+    if (!buffer_.empty()) {
+        const sequence_size_t last_bp = total_bp - emitted_bp;
+        write_fragment(buffer_.data(), buffer_.size(), last_bp, last_pad);
+        buffer_.clear();
+    }
+
+    if (num_fragments_ == 0) {
+        // Empty sequence — no rows written; the scanner short-circuits on
+        // num_fragments == 0 and never reads first_sub_row_no.
+        first_sub_row_no_ = 0;
+    } else {
+        seq_caches::entry& entry = caches_->entries[cache_key_];
+        entry.pending_bytes_delta         += total_varlena_bytes_;
+        entry.pending_total_payload_delta += total_varlena_bytes_;
+    }
+
+    seq_locator out{};
+    out.version          = kLocatorVersion;
+    out.bucket_idx       = static_cast<std::uint8_t>(bucket_idx_);
+    out._pad_2           = 0;
+    out.shard_idx        = static_cast<std::uint32_t>(shard_idx_);
+    out.num_fragments    = num_fragments_;
+    out._pad_4           = 0;
+    out.total_bp_size    = total_bp;
+    out.first_sub_row_no = first_sub_row_no_;
+    active_ = false;
+    return out;
+}
+
+void sequence_stream_writer::abort() {
+    // Transaction rollback reclaims any fragment rows already written; just drop
+    // the in-flight buffer + state so a re-begin starts clean.
+    buffer_.clear();
+    active_ = false;
 }
 
 // ---------------------------------------------------------------------------

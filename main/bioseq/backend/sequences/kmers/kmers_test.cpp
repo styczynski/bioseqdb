@@ -351,34 +351,20 @@ TEMPLATE_TEST_CASE(
         MINIMIZER_TEST_DNA4_SEQ, 10, 15, "lexic_hasher", "dna4");
 }
 
-TEMPLATE_TEST_CASE(
-    "collect_minimizers_simd matches scalar at storage_unit width — "
-    "dna5 + minimap_int_hasher",
-    "[minimizers]",
-    uint8_t, uint16_t, uint32_t, uint64_t)
-{
-    using unit_t = TestType;
-    check_simd_matches_scalar_at_width<minimap_int_hasher, seq::dna5, unit_t,
-                                        /*HashValT=*/unit_t>(
-        MINIMIZER_TEST_DNA5_SEQ, 10, 15, "minimap_int_hasher", "dna5");
-}
-
-// dna5 + lexic_hasher: the uint64_t parameterisation hits the pre-existing
-// `iterate_sequence_bp_simd_offsets` position-shift bug for 3-bit
-// alphabets (see main/DOCS/BUGFIX/FIX_TESTS_FINDINGS_AND_SOLUTIONS__DOC0190.md §2.2). Excluded
-// here pending an independent fix; the bug never reaches production
-// because dna5 isn't on the bench grid.
-TEMPLATE_TEST_CASE(
-    "collect_minimizers_simd matches scalar at storage_unit width — "
-    "dna5 + lexic_hasher (narrow widths only)",
-    "[minimizers]",
-    uint8_t, uint16_t, uint32_t)
-{
-    using unit_t = TestType;
-    check_simd_matches_scalar_at_width<lexic_hasher, seq::dna5, unit_t,
-                                        /*HashValT=*/unit_t>(
-        MINIMIZER_TEST_DNA5_SEQ, 10, 15, "lexic_hasher", "dna5");
-}
+// DOC0286 §10.2 — the dna5 SIMD-vs-scalar parity test cases were REMOVED here on
+// purpose. To make dna5 minimizers minimap2-compatible, the SCALAR path
+// (collect_minimizers → collect_minimizers_view) now normalises dna5 ranks to
+// 2-bit minimap2 nt4 codes (N → reset sentinel, T → 3) and hashes them through
+// the dna4 (2-bit) hasher, so dna5 matches minimap2's `mm_sketch` exactly. The
+// naive SIMD path (collect_minimizers_simd) still packs dna5 at its native
+// 3 bits/letter, so scalar and SIMD now *intentionally* diverge for dna5 — they
+// are no longer in parity. This is unobservable in production: `pipe.cppm`'s
+// `effective_min_kernel` routes EVERY non-2-bit alphabet (i.e. dna5) to the
+// scalar kernel regardless of the requested SIMD `Kind`, so the naive SIMD dna5
+// path is never executed. dna5 SCALAR correctness (== minimap2 nt4, N resets,
+// T valid, no minimizer spans an N) is verified in
+// `nt4_minimizer_parity_test.cpp`. The dna4 SIMD-vs-scalar cases above are
+// unaffected (dna4's nt4 normalization is the identity) and still asserted.
 
 // =============================================================================
 // (4) Two-stack-nthash collector — invariants + density

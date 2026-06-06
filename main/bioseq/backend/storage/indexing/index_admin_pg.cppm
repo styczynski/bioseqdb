@@ -415,6 +415,56 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     return written;
 }
 
+// DOC0286 §4.5 — (re)build every policy-enabled UPDATE_ON_INSERT index for
+// `main_relid` in ONE batched pass (one streaming rebuild per index, no per-row
+// advisory locks). bioseq.load calls this once after its streamed insert when
+// bioseq.update_index_on_insert is on. It loads the same per-table policy as
+// `index_build_on_insert`, skips `minimizers_per_sequence` (UPDATE_MANUALLY) and
+// any non-on-insert index, and drives `update_index_impl`, which rebuilds across
+// every seq column and every row — so the observable index state matches a
+// normal INSERT (only faster: one tuple-lock-free streaming pass).
+[[nodiscard]] inline std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
+    const RelationIdentity rid = index_relation_identity(main_relid);
+    pg_supported_indexes idx;
+    idx.apply_table_defaults();
+
+    // Overlay the persisted per-table policy. set_index_policy_impl stamps every
+    // seq column identically, so the first seq column is a faithful table-level
+    // proxy; if none is found the registry defaults stand.
+    std::int16_t first_seq_attno = 0;
+    if (SPI_connect() == SPI_OK_CONNECT) {
+        const std::string sql = fmt::format(
+            "SELECT a.attnum FROM pg_attribute a JOIN pg_type t ON a.atttypid=t.oid "
+            "JOIN pg_namespace n ON t.typnamespace=n.oid WHERE a.attrelid={}::oid "
+            "AND t.typname='seq' AND n.nspname IN ('bioseq','bioseq_internal') "
+            "AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum LIMIT 1",
+            static_cast<unsigned>(main_relid));
+        if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT && SPI_processed > 0) {
+            bool isn = false;
+            const Datum d = SPI_getbinval(SPI_tuptable->vals[0],
+                                          SPI_tuptable->tupdesc, 1, &isn);
+            if (!isn) first_seq_attno = static_cast<std::int16_t>(DatumGetInt16(d));
+        }
+        SPI_finish();
+    }
+    if (first_seq_attno > 0) {
+        idx.merge_overrides(
+            load_table_policy(main_relid, rid.relfilenode, first_seq_attno));
+    }
+
+    constexpr auto types = pg_supported_indexes::list_types();
+    std::int64_t total = 0;
+    for (std::size_t i = 0; i < types.size(); ++i) {
+        if (!idx.enabled[i]) continue;
+        if (idx.policy[i] != IndexUpdatePolicy::UPDATE_ON_INSERT) continue;
+        // Explicit belt: minimizers_per_sequence is UPDATE_MANUALLY (its
+        // external-sort build is opt-in via bioseq.update_index(...)).
+        if (types[i].first == "minimizers_per_sequence") continue;
+        total += update_index_impl(main_relid, types[i].first);
+    }
+    return total;
+}
+
 // ---- §12.2 SQL helper impls ----------------------------------------------
 
 [[nodiscard]] inline std::vector<std::string> seqidx_prefixes_for(Oid rel_oid, std::string_view name) {

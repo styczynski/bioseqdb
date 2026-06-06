@@ -697,6 +697,21 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
 // ---------------------------------------------------------------------------
 enum class MinKernelKind { Scalar, Simd, TwoStack };
 
+// DOC0286 §10.2 — the SIMD minimizer kernels (single-stack and two-stack
+// nthash) are 2-bit specialisations (dna4 + uint64); a 3-bit alphabet such as
+// dna5 has no SIMD lane layout and the two-stack kernel `DEBUG_ASSERT(false)`s
+// for it. Route any non-2-bit alphabet to the bit-identical, nt4-correct
+// scalar kernel regardless of the requested SIMD `Kind` — this is the
+// "must be routed to the scalar fallback" the two-stack kernel expects, and
+// it makes the forced `minimizer_algorithm=two_stack_nthash` GUC dna5-safe.
+template <MinKernelKind Kind, class Seq>
+inline constexpr MinKernelKind effective_min_kernel() {
+    using seq_traits = typename std::remove_cvref_t<Seq>::traits;
+    return (Kind != MinKernelKind::Scalar && seq_traits::bits_per_char != 2)
+               ? MinKernelKind::Scalar
+               : Kind;
+}
+
 template <MinKernelKind Kind, class MinimizerT, class Seq, class Collector>
 [[gnu::always_inline]] inline void run_minimizer_inram(
     Collector& c, Seq& seq, std::size_t w, std::size_t k)
@@ -704,10 +719,11 @@ template <MinKernelKind Kind, class MinimizerT, class Seq, class Collector>
     // The legacy minimizer kernels take a non-const compact_sequence_range& but
     // only ever read it;  here may be a const& (e.g. lazy.underlying()).
     auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
-    if constexpr (Kind == MinKernelKind::Scalar) {
+    constexpr MinKernelKind EffKind = effective_min_kernel<Kind, Seq>();
+    if constexpr (EffKind == MinKernelKind::Scalar) {
         ::bioseq::simd::HWY_NAMESPACE::collect_minimizers<minimap_int_hasher, MinimizerT>(
             c, m, m.begin(), m.end(), w, k);
-    } else if constexpr (Kind == MinKernelKind::Simd) {
+    } else if constexpr (EffKind == MinKernelKind::Simd) {
         ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd<minimap_int_hasher, MinimizerT>(
             c, m, m.begin(), m.end(), w, k);
     } else {
@@ -720,10 +736,11 @@ template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, cl
 [[gnu::always_inline]] inline void run_minimizer_inram_constexpr(Collector& c, Seq& seq)
 {
     auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
-    if constexpr (Kind == MinKernelKind::Scalar) {
+    constexpr MinKernelKind EffKind = effective_min_kernel<Kind, Seq>();
+    if constexpr (EffKind == MinKernelKind::Scalar) {
         ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_constexpr<W, K, minimap_int_hasher, MinimizerT>(
             c, m, m.begin(), m.end());
-    } else if constexpr (Kind == MinKernelKind::Simd) {
+    } else if constexpr (EffKind == MinKernelKind::Simd) {
         ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd_constexpr<W, K, minimap_int_hasher, MinimizerT>(
             c, m, m.begin(), m.end());
     } else {

@@ -4,6 +4,8 @@ module;
 #include <hwy/aligned_allocator.h>
 
 #include "common.h"
+#include <array>
+#include <cstdint>
 #include <string>
 #include <functional>
 
@@ -140,6 +142,54 @@ struct simd_hasher_base : hasher_base<p_derived_t, p_alphabet_t, p_input_t> {
 		using hasher_return_t = input_vec_t;
     };
 };
+
+// DOC0286 §10.2 — minimap2-compatible nt4 normalization. SeqAn nucleotide
+// ranks are alphabet-specific (dna5: A=0,C=1,G=2,N=3,T=4), but minimap2's
+// `seq_nt4_table` maps A/C/G/T → 0..3 and N/unknown → sentinel 4, and
+// `mm_sketch` resets the rolling k-mer/window on any code ≥ 4. Hashing raw
+// SeqAn dna5 ranks is therefore wrong (it would reset on T and hash N). This
+// helper maps each alphabet rank to its minimap2 nt4 code so the scalar,
+// two-stack-nthash, and persisted-index minimizer paths all agree with
+// minimap2: dna4 is the identity (no N), dna5 swaps T↔3 and sends N→4. The
+// nt4 codes are 2-bit, so callers hash them through the dna4 (2-bit, 3^code
+// complement) hasher, matching minimap2's packing exactly.
+constexpr std::uint8_t kNt4Sentinel = 4;
+
+/// minimap2 seq_nt4_table on a single ASCII base (A/C/G/T → 0..3, else 4).
+[[nodiscard]] constexpr std::uint8_t char_to_nt4(char base) noexcept {
+    switch (base) {
+        case 'A': case 'a': return 0;
+        case 'C': case 'c': return 1;
+        case 'G': case 'g': return 2;
+        case 'T': case 't': return 3;
+        default:            return kNt4Sentinel;  // N / unknown → reset sentinel
+    }
+}
+
+/// Compile-time rank→nt4 table for an alphabet, derived from each rank's
+/// canonical char run through `char_to_nt4`. dna4 → {0,1,2,3}; dna5 →
+/// {0,1,2,4,3}.
+template <sequence_alphabet alphabet_t>
+[[nodiscard]] constexpr auto make_nt4_lut() noexcept {
+    std::array<std::uint8_t, seqan3::alphabet_size<alphabet_t>> lut{};
+    for (std::size_t rank = 0; rank < seqan3::alphabet_size<alphabet_t>; ++rank) {
+        alphabet_t letter{};
+        letter.assign_rank(static_cast<seqan3::alphabet_rank_t<alphabet_t>>(rank));
+        lut[rank] = char_to_nt4(letter.to_char());
+    }
+    return lut;
+}
+
+template <sequence_alphabet alphabet_t>
+inline constexpr auto nt4_lut_v = make_nt4_lut<alphabet_t>();
+
+/// Map a raw alphabet rank to its minimap2 nt4 code (0..3, or `kNt4Sentinel`
+/// for ambiguity). Identity for dna4; T↔3 / N→4 for dna5.
+template <sequence_alphabet alphabet_t>
+[[nodiscard, gnu::always_inline]] constexpr std::uint8_t
+nt4_normalize(std::uint8_t rank) noexcept {
+    return nt4_lut_v<alphabet_t>[rank];
+}
 
 
 }

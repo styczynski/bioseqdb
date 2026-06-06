@@ -707,6 +707,9 @@ build_params_from_gucs()
 	params.base_alignment_algorithm =
 		static_cast<bioseq::simd::N_NEON::BaseAlignmentAlgorithmType>(
 			bioseq_aligner_base_alignment_algorithm);
+	params.minimizer_algorithm =
+		static_cast<bioseq::simd::N_NEON::MinimizerAlgorithmType>(
+			bioseq_aligner_minimizer_algorithm);
 	params.enable_profiling = bioseq_aligner_enable_profiling;
 	return params;
 }

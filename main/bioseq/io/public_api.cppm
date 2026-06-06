@@ -157,6 +157,22 @@ private:
     std::size_t _padding = 0;
 };
 
+/// DOC0286 §4.3 — one bounded, column-unit-packed chunk emitted by
+/// `stream_sequences_file`. `words` is a non-owning view of naturally-aligned
+/// packed storage units valid only for the duration of the `sink.chunk(...)`
+/// call (the consumer must copy out before returning). For all non-final
+/// chunks of a record `bp_count == words.size() * letters_per_unit`; the final
+/// chunk (`end_of_record == true`) may carry fewer valid bases, with the
+/// trailing padding implied by `bp_count` (i.e. `words.size()*letters_per_unit
+/// - bp_count`). This is the surface that lets a 6 Gbp FASTA record be loaded
+/// without ever materialising a whole-record `sequence_batch`.
+template <typename storage_unit_t>
+struct packed_sequence_chunk {
+    std::span<const storage_unit_t> words;          // column-unit-packed, naturally aligned
+    std::uint64_t                   bp_count = 0;    // valid bases in this chunk
+    bool                            end_of_record = false;
+};
+
 /// A batch of records delivered to the user's handler. v2 holds three
 /// shared buffers (`_header_storage`, `_seq_storage`,
 /// `_quality_storage`) and per-record offset / metadata arrays. This
@@ -1112,6 +1128,253 @@ template <
         options);
 }
 
+/// DOC0286 §4.3 — single-threaded streaming read loop. Mirrors
+/// `run_sync_pipeline`'s slab/refill/FSM cycle, but instead of accumulating a
+/// whole `sequence_batch` it drives the per-record FSM with bounded scratch
+/// buffers and emits `packed_sequence_chunk<storage_unit_t>` values to the
+/// caller's `sink`. The FSM is storage-unit-parametric, so the chunk words are
+/// already in the caller's native column layout (no re-pack). Peak memory is
+/// one slab + one record header + one bounded packed window — never a whole
+/// record, so a 6 Gbp FASTA record streams within bounded RSS.
+///
+/// Sink protocol per complete record: `sink.begin_record(header)` once, then
+/// `sink.chunk(...)` for each packed window (non-final windows are full units
+/// with `bp_count == words.size()*letters_per_unit`; the final window has
+/// `end_of_record == true` and `bp_count` ≤ that), then `sink.end_record()`
+/// once. The `words` span is valid ONLY during the `chunk` call.
+template <
+    sequence_alphabet alphabet_t,
+    typename storage_unit_t,
+    sequence_io_file_type file_type,
+    io_source source_t,
+    typename sink_fn_t,
+    typename failure_fn_t>
+[[nodiscard]] std::expected<std::size_t, std::string> run_sync_stream(
+    source_t source,
+    sink_fn_t&& sink,
+    failure_fn_t&& failure_fn,
+    const reader_options& options) {
+
+    using stream_config = sequence_custom_alphabet<alphabet_t, storage_unit_t>;
+    using stream_traits = typename compact_sequence_range<stream_config>::traits;
+    constexpr std::size_t bits_per_char    = stream_traits::bits_per_char;
+    constexpr std::size_t letters_per_unit = stream_traits::letters_per_unit;
+
+    buffer_slab slab(options.io.initial_buffer_size);
+    std::size_t records_emitted = 0;
+    bool aborted = false;
+    std::string captured_error;
+    std::size_t global_offset_base = 0;
+
+    auto failure_capture = [&](std::string&& msg) {
+        if (!aborted) { captured_error = msg; failure_fn(std::move(msg)); }
+        aborted = true;
+    };
+
+    // Per-record bounded scratch — never a whole record. The FSM appends the
+    // header to `header_scratch` and the packed words to `seq_scratch`; the
+    // streaming logic drains and clears `seq_scratch` between FSM calls so its
+    // size stays within ~one slab of body. `record_start_offset` in the
+    // encoder stays 0 because every record starts (and every mid-record drain
+    // leaves) `seq_scratch` empty.
+    std::vector<char>           header_scratch;
+    std::vector<storage_unit_t> seq_scratch;
+    std::vector<std::uint8_t>   quality_scratch;     // FASTQ; content ignored
+
+    bool          record_open      = false;          // begin_record already called
+    std::size_t   completed_header_start = 0;
+    std::size_t   completed_header_size  = 0;
+    std::size_t   completed_padding      = 0;        // padding of the record's last
+                                                     // unit, captured in the emit
+                                                     // callback (fires BEFORE the FSM
+                                                     // resets its per-record counters)
+
+    auto reset_record = [&]() {
+        header_scratch.clear();
+        seq_scratch.clear();
+        quality_scratch.clear();
+        record_open       = false;
+        completed_padding = 0;
+    };
+
+    // Drain the completed words accumulated so far as a non-final chunk. Only
+    // valid mid-record (body started ⇒ header complete). Keeps RSS bounded.
+    auto drain_partial = [&]() {
+        if (seq_scratch.empty()) return;
+        if (!record_open) {
+            sink.begin_record(
+                std::string_view(header_scratch.data(), header_scratch.size()));
+            record_open = true;
+        }
+        // Mid-record drained words are ALWAYS full storage units (the FSM only
+        // flushes a partial unit at record finalize), so the chunk has no padding.
+        const std::uint64_t chunk_bp =
+            static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
+        sink.chunk(packed_sequence_chunk<storage_unit_t>{
+            std::span<const storage_unit_t>(seq_scratch.data(), seq_scratch.size()),
+            chunk_bp, /*end_of_record=*/false});
+        seq_scratch.clear();
+        quality_scratch.clear();
+    };
+
+    // Emit the final chunk + end the record. The final chunk's bp is the words
+    // still in `seq_scratch` (those since the last drain) minus the record's
+    // trailing padding. We CANNOT read the FSM's cumulative `total_letters` here:
+    // `parse_one_*_record` calls `reset_for_next_record()` (which zeroes it)
+    // BEFORE returning COMPLETE, so by this point it is already 0. The padding was
+    // captured in the emit callback, which fires just before that reset.
+    auto complete_record = [&]() {
+        if (!record_open) {
+            sink.begin_record(std::string_view(
+                header_scratch.data() + completed_header_start, completed_header_size));
+            record_open = true;
+        }
+        const std::uint64_t scratch_bp =
+            static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
+        const std::uint64_t final_bp =
+            scratch_bp >= completed_padding ? scratch_bp - completed_padding : 0;
+        sink.chunk(packed_sequence_chunk<storage_unit_t>{
+            std::span<const storage_unit_t>(seq_scratch.data(), seq_scratch.size()),
+            final_bp, /*end_of_record=*/true});
+        sink.end_record();
+        ++records_emitted;
+        reset_record();
+    };
+
+    auto capture_completion = [&](std::size_t header_start, std::size_t header_size,
+                                  std::size_t padding) {
+        completed_header_start = header_start;
+        completed_header_size  = header_size;
+        completed_padding      = padding;
+    };
+
+    if constexpr (file_type == sequence_io_file_type::FASTA) {
+        fasta_parser_state<storage_unit_t, bits_per_char, letters_per_unit> parser_state;
+        auto emit_fasta = [&](std::size_t header_start, std::size_t header_size,
+                              std::size_t, std::size_t, std::size_t padding) {
+            capture_completion(header_start, header_size, padding);
+        };
+        while (!aborted) {
+            if (slab.fill_size == slab.capacity) {
+                if (!slab.make_room()) {
+                    if (!slab.grow(options)) {
+                        emit_failure(failure_capture,
+                                     "buffer_limit reached at {} bytes", slab.capacity);
+                        break;
+                    }
+                }
+            }
+            const std::size_t free_room = slab.capacity - slab.fill_size;
+            if (free_room > 0 && !slab.is_eof) {
+                const auto refill_result =
+                    source.read_into(slab.raw() + slab.fill_size, free_room);
+                if (refill_result.has_error) {
+                    emit_failure(failure_capture, "{}", source.last_error_message());
+                    break;
+                }
+                slab.fill_size += refill_result.bytes_read;
+                slab.is_eof = refill_result.is_eof;
+            }
+            bool need_refill = false;
+            while (!aborted) {
+                parser_state.attach_to_batch(header_scratch, seq_scratch);
+                const auto step = parse_one_fasta_record<alphabet_t, storage_unit_t>(
+                    parser_state, slab.raw(), slab.fill_size, slab.is_eof,
+                    slab.parse_cursor, global_offset_base + slab.parse_cursor,
+                    emit_fasta, failure_capture);
+                slab.parse_cursor = step.cursor;
+                if (step.outcome == parse_outcome::COMPLETE) {
+                    complete_record();
+                    continue;
+                }
+                if (step.outcome == parse_outcome::AT_EOF) {
+                    if (record_open) complete_record();
+                    if (aborted) return std::unexpected(captured_error);
+                    return records_emitted;
+                }
+                if (step.outcome == parse_outcome::ABORT) {
+                    return std::unexpected(captured_error);
+                }
+                drain_partial();          // INCOMPLETE: bound RSS before refill
+                need_refill = true;
+                break;
+            }
+            if (!need_refill) continue;
+            if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
+                if (record_open) complete_record();
+                if (aborted) return std::unexpected(captured_error);
+                return records_emitted;
+            }
+            global_offset_base += slab.parse_cursor;
+            (void)slab.make_room();
+        }
+        return std::unexpected(captured_error);
+
+    } else {
+        fastq_parser_state<storage_unit_t, bits_per_char, letters_per_unit> parser_state;
+        auto emit_fastq = [&](std::size_t header_start, std::size_t header_size,
+                              std::size_t, std::size_t, std::size_t padding,
+                              std::size_t, std::size_t) {
+            capture_completion(header_start, header_size, padding);
+        };
+        while (!aborted) {
+            if (slab.fill_size == slab.capacity) {
+                if (!slab.make_room()) {
+                    if (!slab.grow(options)) {
+                        emit_failure(failure_capture,
+                                     "buffer_limit reached at {} bytes", slab.capacity);
+                        break;
+                    }
+                }
+            }
+            const std::size_t free_room = slab.capacity - slab.fill_size;
+            if (free_room > 0 && !slab.is_eof) {
+                const auto refill_result =
+                    source.read_into(slab.raw() + slab.fill_size, free_room);
+                if (refill_result.has_error) {
+                    emit_failure(failure_capture, "{}", source.last_error_message());
+                    break;
+                }
+                slab.fill_size += refill_result.bytes_read;
+                slab.is_eof = refill_result.is_eof;
+            }
+            bool need_refill = false;
+            while (!aborted) {
+                parser_state.attach_to_batch(header_scratch, seq_scratch, quality_scratch);
+                const auto step = parse_one_fastq_record<alphabet_t, storage_unit_t>(
+                    parser_state, slab.raw(), slab.fill_size, slab.is_eof,
+                    slab.parse_cursor, global_offset_base + slab.parse_cursor,
+                    options.encoder.strict_fastq, emit_fastq, failure_capture);
+                slab.parse_cursor = step.cursor;
+                if (step.outcome == parse_outcome::COMPLETE) {
+                    complete_record();
+                    continue;
+                }
+                if (step.outcome == parse_outcome::AT_EOF) {
+                    if (record_open) complete_record();
+                    if (aborted) return std::unexpected(captured_error);
+                    return records_emitted;
+                }
+                if (step.outcome == parse_outcome::ABORT) {
+                    return std::unexpected(captured_error);
+                }
+                drain_partial();
+                need_refill = true;
+                break;
+            }
+            if (!need_refill) continue;
+            if (slab.is_eof && slab.parse_cursor == slab.fill_size) {
+                if (record_open) complete_record();
+                if (aborted) return std::unexpected(captured_error);
+                return records_emitted;
+            }
+            global_offset_base += slab.parse_cursor;
+            (void)slab.make_room();
+        }
+        return std::unexpected(captured_error);
+    }
+}
+
 }  // namespace detail
 
 /// Public entry point. Reads FASTA / FASTQ from a file path, emits
@@ -1230,6 +1493,76 @@ template <
         std::forward<handler_fn_t>(handler_fn),
         std::forward<failure_fn_t>(failure_fn),
         options);
+}
+
+/// DOC0286 §4.3 — bounded streaming read of a FASTA/FASTQ file into the
+/// caller's `storage_unit_t`-packed column layout. Unlike `read_sequences_file`
+/// (which accumulates whole `sequence_batch`es and is hard-wired to a
+/// `uint64_t` storage unit), this drives the per-record FSM single-threaded and
+/// emits bounded `packed_sequence_chunk<storage_unit_t>` values to `sink`, so a
+/// >MaxAllocSize record (e.g. a 6 Gbp reference) is never materialised as one
+/// buffer. Always single-threaded (the columnar write state + seq_caches are
+/// single-backend); gzip is still magic-byte sniffed by the source. Returns the
+/// record count, or the first terminal diagnostic.
+template <
+    sequence_alphabet alphabet_t,
+    typename storage_unit_t,
+    sequence_io_file_type file_type,
+    typename sink_fn_t,
+    typename failure_fn_t>
+[[nodiscard]] std::expected<std::size_t, std::string> stream_sequences_file(
+    const char* path,
+    sink_fn_t&& sink,
+    failure_fn_t&& failure_fn,
+    reader_options options = default_reader_options) {
+    // Streaming is single-threaded by contract (§6): no async workers, no
+    // mmap-parallel shards.
+    options.concurrency.worker_count = 0;
+    options.concurrency.parser_count = 1;
+    const std::string_view path_view{path};
+
+    if (options.io.prefer_mmap) {
+        auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
+        if (mmap_or_err) {
+            if (mmap_or_err->is_gzipped) {
+                auto gz_or_err = gzip_source::try_open(path_view);
+                if (!gz_or_err) {
+                    failure_fn(std::string{gz_or_err.error()});
+                    return std::unexpected(gz_or_err.error());
+                }
+                return detail::run_sync_stream<
+                    alphabet_t, storage_unit_t, file_type, gzip_source>(
+                    std::move(*gz_or_err), sink,
+                    std::forward<failure_fn_t>(failure_fn), options);
+            }
+            return detail::run_sync_stream<
+                alphabet_t, storage_unit_t, file_type, mmap_source>(
+                std::move(mmap_or_err->source), sink,
+                std::forward<failure_fn_t>(failure_fn), options);
+        }
+        JustLog("[bioseq_io] stream: mmap unavailable for '{}': {}; "
+                "falling back to posix_read_source", path_view, mmap_or_err.error());
+    }
+    if (options.io.gzip_auto_detect) {
+        auto gz_or_err = gzip_source::try_open(path_view);
+        if (!gz_or_err) {
+            failure_fn(std::string{gz_or_err.error()});
+            return std::unexpected(gz_or_err.error());
+        }
+        return detail::run_sync_stream<
+            alphabet_t, storage_unit_t, file_type, gzip_source>(
+            std::move(*gz_or_err), sink,
+            std::forward<failure_fn_t>(failure_fn), options);
+    }
+    auto posix_or_err = posix_read_source::try_open(path_view);
+    if (!posix_or_err) {
+        failure_fn(std::string{posix_or_err.error()});
+        return std::unexpected(posix_or_err.error());
+    }
+    return detail::run_sync_stream<
+        alphabet_t, storage_unit_t, file_type, posix_read_source>(
+        std::move(*posix_or_err), sink,
+        std::forward<failure_fn_t>(failure_fn), options);
 }
 
 /// Plural-API convenience: read a sequence of files in declaration

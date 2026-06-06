@@ -129,6 +129,33 @@ export [[nodiscard]] inline bool sql_fails(
     return !result;
 }
 
+// DOC0286 §13 — server-side error captured for SQLSTATE-sensitive negative
+// tests. Unlike `sql_fails` (bool only), this returns the server error text and
+// ASSERTS (fails the test) if the statement unexpectedly SUCCEEDED — so a
+// silently-accepted bad statement can never pass as "errored as expected". The
+// sqlgen result does not cleanly surface the 5-char SQLSTATE, so `.message`
+// carries the full diagnostic; callers assert on the distinctive bioseq.load
+// error text (more specific than the SQLSTATE alone).
+export struct sql_error_info {
+    std::string message;
+    [[nodiscard]] bool contains(std::string_view needle) const {
+        return message.find(needle) != std::string::npos;
+    }
+};
+
+export [[nodiscard]] inline sql_error_info sql_error(
+    const connection_test_context& ctx, std::string_view sql) {
+    const auto result = sqlgen::postgres::PostgresV2Result::make(
+        std::string(sql), ctx.raw());
+    if (result) {
+        ASSERT(false,
+               fmt::format("sql_error: statement unexpectedly SUCCEEDED "
+                           "(expected a server error): `{}`", sql),
+               sql);
+    }
+    return sql_error_info{ std::string(result.error().what()) };
+}
+
 // Same as `exec_sql`, but accepts a printf-style format string so callers can
 // inline parameters without manual `fmt::format` plumbing.
 export template <typename... Args>
