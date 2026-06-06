@@ -129,6 +129,52 @@ export [[nodiscard]] inline bool sql_fails(
     return !result;
 }
 
+// DOC0286 §13 — server-side error captured for SQLSTATE-sensitive negative
+// tests. Unlike `sql_fails` (bool only), this returns the SQLSTATE and server
+// diagnostic and ASSERTS if the statement unexpectedly SUCCEEDED — so a
+// silently-accepted bad statement can never pass as "errored as expected".
+export struct sql_error_info {
+    std::string sqlstate;
+    std::string message;
+    [[nodiscard]] bool contains(std::string_view needle) const {
+        return message.find(needle) != std::string::npos;
+    }
+};
+
+export [[nodiscard]] inline sql_error_info sql_error(
+    const connection_test_context& ctx, std::string_view sql) {
+    const std::string sql_owned(sql);
+    PGresult* raw = PQexec(ctx.raw().ptr(), sql_owned.c_str());
+    if (raw == nullptr) {
+        return sql_error_info{
+            "",
+            fmt::format("PQexec returned null: {}", PQerrorMessage(ctx.raw().ptr()))};
+    }
+    const auto result = sqlgen::postgres::PostgresV2Result::make(raw);
+    if (!result) {
+        ASSERT(false,
+               fmt::format("sql_error: could not wrap PGresult for `{}`: {}",
+                           sql_owned, result.error().what()),
+               sql_owned);
+    }
+    PGresult* res = result.value().ptr();
+    const ExecStatusType status = PQresultStatus(res);
+    if (status == PGRES_COMMAND_OK || status == PGRES_TUPLES_OK ||
+        status == PGRES_SINGLE_TUPLE) {
+        ASSERT(false,
+               fmt::format("sql_error: statement unexpectedly SUCCEEDED "
+                           "(expected a server error): `{}`", sql_owned),
+               sql_owned);
+    }
+    const char* state = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+    const char* primary = PQresultErrorField(res, PG_DIAG_MESSAGE_PRIMARY);
+    const char* full = PQresultErrorMessage(res);
+    return sql_error_info{
+        state == nullptr ? std::string{} : std::string(state),
+        primary != nullptr ? std::string(primary)
+                            : (full == nullptr ? std::string{} : std::string(full))};
+}
+
 // Same as `exec_sql`, but accepts a printf-style format string so callers can
 // inline parameters without manual `fmt::format` plumbing.
 export template <typename... Args>

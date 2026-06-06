@@ -6,13 +6,16 @@ module;
 #include "common.h"
 
 #include <chrono>
+#include <new>
 #include <ranges>
+#include <type_traits>
 #include <utility>
 
 export module bioseq_sequences.kmers;
 
 import mlogging;
 import context;
+import sequan_compat;            // DOC0286 §10.2 — seq::dna4 for the nt4 (2-bit) hasher
 import bioseq_sequences;
 import bioseq_sequences.simd;
 import bioseq_sequences.kmers.hashers;
@@ -512,7 +515,17 @@ inline void collect_minimizers_view(
     auto _scope = bioseq::instr::region(_desc);
 
 	using seq_traits = typename SeqView::traits;
-	using hasher_t = scalar_hash_t<typename seq_traits::alphabet_type>::template scalar_hash<hash_val_t>;
+	using alphabet_type = typename seq_traits::alphabet_type;
+	// DOC0286 §10.2 — minimizers hash minimap2 nt4 codes (2-bit). For any
+	// nucleotide alphabet the rank is normalised to its nt4 code (dna4 is the
+	// identity; dna5 maps T→3 and routes N to the reset sentinel) and hashed
+	// through the dna4 (2-bit, 3^code complement) hasher so dna4 stays
+	// byte-identical and dna5 matches minimap2's mm_sketch exactly. Non-
+	// nucleotide alphabets keep their native hasher (nt4 is nucleotide-only).
+	static constexpr bool kIsNucleotide = seqan3::nucleotide_alphabet<alphabet_type>;
+	using hash_alphabet =
+		std::conditional_t<kIsNucleotide, seq::dna4, alphabet_type>;
+	using hasher_t = scalar_hash_t<hash_alphabet>::template scalar_hash<hash_val_t>;
 
 	// Compile-time upper bound on the rolling-window radius. The legacy code
 	// derived this from MinimapSketchData's (now removed) `.span` bitfield
@@ -541,19 +554,40 @@ inline void collect_minimizers_view(
 	auto handler = [&]<bool IS_INIT>(std::bool_constant<IS_INIT>) {
 		for(; iter != end && (pos < w + k || !IS_INIT); ++iter, ++seq_pos) {
 			const auto nucl = *iter;
-			// Support ambigious?
-			if(seq_traits::bits_per_char > 2 && nucl >= 4) {
-				// fuck!
+			// DOC0286 §10.2 — normalise to the minimap2 nt4 code. For
+			// nucleotide alphabets an nt4 sentinel (>= kNt4Sentinel) is an
+			// ambiguous base (e.g. dna5 N) and must reset the rolling
+			// k-mer/window, exactly like minimap2's `mm_sketch` (c >= 4). The
+			// non-nucleotide branch keeps the legacy raw-rank ambiguity test.
+			std::uint8_t code;
+			bool is_ambiguous;
+			if constexpr (kIsNucleotide) {
+				code = nt4_normalize<alphabet_type>(static_cast<std::uint8_t>(nucl));
+				is_ambiguous = (code >= kNt4Sentinel);
+			} else {
+				code = static_cast<std::uint8_t>(nucl);
+				is_ambiguous = (seq_traits::bits_per_char > 2 && nucl >= 4);
+			}
+			if(is_ambiguous) {
+				// DOC0286 §10.2 — ambiguous base (dna5 N): reset BOTH the window
+				// position (so the `pos >= k` gate suppresses emission for k bases)
+				// AND the hasher's rolling k-mer (so the post-N k-mer is rebuilt
+				// from clean bases — otherwise a k-mer spanning the N is emitted).
+				// Matches minimap2 mm_sketch's `l = 0` reset semantics.
 				buffer.push_back(MinimizerT::getMax());
 				pos = 0;
+				// hasher_t's copy-assignment is deleted; reset its rolling state
+				// in place (destroy + reconstruct) so the post-N k-mer is clean.
+				hasher.~hasher_t();
+				::new (static_cast<void*>(&hasher)) hasher_t(k);
 			} else {
-				// Reuse the already-dereferenced `nucl`. The previous code did
-				// `*iter` twice more — for non-trivial iterators (the
-				// `proper_container` variant routes through seqan3::to_rank
-				// which is not always inlined at -O2 without LTO) each deref
-				// is a 5-15 ns hit, multiplied by the ~200-2000 outer
-				// iterations per sketch call. See proposal-2 §F2.
-				const auto [c_hash, c_strand] = hasher.next(static_cast<hash_val_t>(nucl), static_cast<hash_val_t>(nucl));
+				// Hash the (nt4-normalised) 2-bit code. The previous code
+				// dereferenced `*iter` three times — for non-trivial iterators
+				// (the `proper_container` variant routes through seqan3::to_rank
+				// which is not always inlined at -O2 without LTO) each deref is a
+				// 5-15 ns hit, multiplied by the ~200-2000 outer iterations per
+				// sketch call. See proposal-2 §F2.
+				const auto [c_hash, c_strand] = hasher.next(static_cast<hash_val_t>(code), static_cast<hash_val_t>(code));
 
 				// NOTE: minimap2 skips "symmetric k-mers" (fwd == rc palindromes) by
 				// `continue`ing past the push/update logic — the iteration disappears from
@@ -570,7 +604,15 @@ inline void collect_minimizers_view(
 
 				if (c_strand == SEQUENCE_STRAND_EQUAL) {
 					buffer.push_back(MinimizerT::getMax());
-				} else if ((pos >= k || !IS_INIT)) {
+				// DOC0286 §10.2 — gate emission on `pos >= k` even in steady
+				// state (NOT `pos >= k || !IS_INIT`). `pos` is the count of valid
+				// bases since the last reset; an ambiguous base (dna5 N) sets it
+				// to 0, and the rolling k-mer must accumulate k fresh bases before
+				// a minimizer can emit — otherwise a k-mer spanning the N would be
+				// emitted, diverging from minimap2's `mm_sketch` (which gates on
+				// `l >= k`). dna4 never resets mid-stream, so `pos` is always >= k
+				// in steady state there and this is a no-op for dna4.
+				} else if (pos >= k) {
 					// Drop the unused (.span, .rid, kmer_span) trio: the
 					// compact MinimizerT is just (kmer, last_pos, strand).
 					// kmer_span and rid are still computed for parity with

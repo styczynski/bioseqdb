@@ -150,6 +150,7 @@ int  bioseq_aligner_block_max_size  = 256;
  */
 int  bioseq_aligner_chaining_algorithm  = 0;  /* matches ChainingAlgorithmType::SCALAR_MM2 */
 int  bioseq_aligner_base_alignment_algorithm = 1;  /* matches BaseAlignmentAlgorithmType::BLOCK_ALIGNER */
+int  bioseq_aligner_minimizer_algorithm = 0;  /* DOC0286: matches MinimizerAlgorithmType::SCALAR */
 /*
  * Runtime profiling toggle. When true, BatchProcessor::process_sequences
  * picks the profiling pipeline (context_args_profiling_full); when false,
@@ -573,6 +574,21 @@ bioseq_guc_init()
 							 "Base alignment algorithm: ksw2, block_aligner.",
 							 NULL, &bioseq_aligner_base_alignment_algorithm, 1,
 							 base_alignment_algorithm_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	/* DOC0286 §10.2 — minimizer kernel selection for the mmsearch seeding
+	 * stage. two_stack_nthash is the SIMD two-stack nthash path the E2E bench
+	 * forces. Maps to MinimizerAlgorithmType (minimap_port.cppm). */
+	static const struct config_enum_entry minimizer_algorithm_options[] = {
+		{ "scalar",             0, false },
+		{ "simd_minimap2_slow", 1, false },
+		{ "two_stack_nthash",   2, false },
+		{ NULL, 0, false }
+	};
+	DefineCustomEnumVariable("bioseq.aligner.minimizer_algorithm",
+							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash.",
+							 NULL, &bioseq_aligner_minimizer_algorithm, 0,
+							 minimizer_algorithm_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

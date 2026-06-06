@@ -253,6 +253,26 @@ MODES: Dict[str, ModeDefinition] = {
         reporting_subdir_name="bioseq_io_bench",
         is_bench_mode=True,
     ),
+    "bench-e2e": ModeDefinition(
+        lock_group="bench",
+        expected_duration_min=45.0,
+        build_only_expected_duration_min=3.0,
+        label="End-to-end SQL benchmark (bioseq.load + mmsearch vs minimap2)",
+        docs=("DOC0286 Part 2 — end-to-end SQL-driven benchmark. Drives postgres "
+              "over libpq (integration_tests/common.cppm): bioseq.load + SELECT "
+              "mmsearch vs minimap2 over the 2/6 Gbp x dna4/dna5 x {no_index, "
+              "just_index} matrix. Like the integration tests it installs the "
+              "freshly-built extension first (the bench's bioseq.load/mmsearch "
+              "must hit current code, not a stale installed copy)."),
+        is_verb_plular=False,
+        # postgresql_bioseq MUST be built + installed first: the bench connects to
+        # the running PostgreSQL and CREATE EXTENSIONs from the *installed* files.
+        targets=["postgresql_bioseq", "bioseq_bench_e2e"],
+        install_extension=True,
+        commands=[["bioseq_bench_e2e"]],
+        reporting_subdir_name="bioseq_bench_e2e",
+        is_bench_mode=True,
+    ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
 

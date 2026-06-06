@@ -276,6 +276,103 @@ public:
         return true;
     }
 
+    /// DOC0286 §10.0c — append one record while bounding peak memory to a
+    /// single `max_body_bp`-letter slice. Unlike `write_record` (which
+    /// decodes the whole body into one ASCII buffer — fine for ≤5 Mbp, but a
+    /// 6 Gbp reference would materialise a >6 GB buffer), this emits the
+    /// header once, then SIMD-decodes storage-unit-aligned slices of the view,
+    /// carrying FASTA line-wrap state across slices, and flushes the producer
+    /// between slices so RSS never exceeds ~one slice + the chunk capacity.
+    /// It flushes mid-record, so — like the multi-thread invariant in
+    /// `write_record` — it must be used single-producer for the record (the
+    /// E2E bench's FASTA emission is single-threaded). Returns false on a
+    /// prior/own flush error.
+    [[nodiscard]] bool write_record_streamed(
+        std::string_view header,
+        const sequence_view_t& seq,
+        std::size_t max_body_bp) {
+        if (_failed.load(std::memory_order_relaxed)) return false;
+
+        auto& producer = acquire_producer_state();
+        const std::size_t total_letters =
+            seq.size() * letters_per_unit - seq.padding();
+
+        // Flush any pending bytes so the header begins a clean chunk (keeps
+        // every flushed chunk record-aligned at the boundary).
+        if (!producer.chunk.empty()) {
+            if (!flush_producer(producer)) return false;
+        }
+        emit_header(producer.chunk, header);
+
+        const std::size_t wrap_width =
+            (file_type == sequence_io_file_type::FASTA)
+                ? _options.fasta_line_width
+                : 0;
+        const std::size_t units_per_slice =
+            std::max<std::size_t>(std::size_t{1}, max_body_bp / letters_per_unit);
+        const std::size_t total_words = seq.size();
+        std::size_t line_position = 0;  // carried FASTA line-wrap state
+
+        for (std::size_t word_cursor = 0; word_cursor < total_words;
+             word_cursor += units_per_slice) {
+            const std::size_t slice_words =
+                std::min(units_per_slice, total_words - word_cursor);
+            const bool is_final = (word_cursor + slice_words == total_words);
+            const std::size_t slice_letters =
+                slice_words * letters_per_unit - (is_final ? seq.padding() : 0);
+            const storage_unit* words_ptr = seq.data() + word_cursor;
+
+            if (wrap_width == 0) {
+                std::uint8_t* dst = producer.chunk.extend(slice_letters);
+                bioseq::simd::HWY_NAMESPACE::decode_words_to_ascii<
+                    alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                        words_ptr, dst, slice_letters);
+            } else {
+                // Exact byte count the wrapped kernel writes for this slice:
+                // slice_letters + one '\n' per completed line.
+                const std::size_t newline_count =
+                    (line_position + slice_letters) / wrap_width;
+                producer.decode_scratch.clear();
+                std::uint8_t* scratch =
+                    producer.decode_scratch.extend(slice_letters);
+                std::uint8_t* dst =
+                    producer.chunk.extend(slice_letters + newline_count);
+                line_position = bioseq::simd::HWY_NAMESPACE::
+                    decode_words_to_ascii_wrapped<
+                        alphabet_t, storage_unit, bits_per_char, letters_per_unit>(
+                            words_ptr, slice_letters, wrap_width, line_position,
+                            scratch, dst);
+            }
+            // Flush this slice to disk before decoding the next — bounded RSS.
+            if (!flush_producer(producer)) return false;
+        }
+
+        if constexpr (file_type == sequence_io_file_type::FASTQ) {
+            // No quality is supplied on the streamed path; emit a Phred-0
+            // ('!') quality of matching length in bounded chunks. (Quality is
+            // dropped on bioseq.load anyway.) Layout: '\n' '+' '\n' <qual> '\n'.
+            std::uint8_t* sep = producer.chunk.extend(3);
+            sep[0] = static_cast<std::uint8_t>('\n');
+            sep[1] = static_cast<std::uint8_t>('+');
+            sep[2] = static_cast<std::uint8_t>('\n');
+            std::size_t remaining = total_letters;
+            const std::size_t qual_chunk =
+                std::max<std::size_t>(std::size_t{1}, max_body_bp);
+            while (remaining > 0) {
+                const std::size_t take = std::min(qual_chunk, remaining);
+                std::uint8_t* q = producer.chunk.extend(take);
+                std::memset(q, static_cast<int>('!'), take);
+                remaining -= take;
+                if (!flush_producer(producer)) return false;
+            }
+            producer.chunk.push_back(static_cast<std::uint8_t>('\n'));
+        } else {
+            producer.chunk.push_back(static_cast<std::uint8_t>('\n'));
+        }
+        if (!flush_producer(producer)) return false;
+        return true;
+    }
+
     /// Append a whole batch in one call. Hot path for the bench: keeps
     /// the per-record metadata accesses tight and the decoder LUT in
     /// registers across many records.

@@ -82,6 +82,7 @@ extern int  bioseq_aligner_block_min_size;
 extern int  bioseq_aligner_block_max_size;
 extern int  bioseq_aligner_chaining_algorithm;
 extern int  bioseq_aligner_base_alignment_algorithm;
+extern int  bioseq_aligner_minimizer_algorithm;
 extern bool bioseq_aligner_enable_profiling;
 
 

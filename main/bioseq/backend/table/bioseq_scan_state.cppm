@@ -25,6 +25,7 @@ module;
 
 #include "common.h"
 
+#include <new>
 #include <type_traits>
 
 #include "columnar/columnar.h"
@@ -113,7 +114,9 @@ export struct BioseqScanState
      * tagged as T_CustomScanState so the executor recognises it.
      */
     [[nodiscard]] static BioseqScanState* allocate() {
-        return reinterpret_cast<BioseqScanState*>(newNode(sizeof(BioseqScanState), T_CustomScanState));
+        auto* state = ::new (palloc0(sizeof(BioseqScanState))) BioseqScanState{};
+        reinterpret_cast<Node*>(&state->custom_scanstate)->type = T_CustomScanState;
+        return state;
     }
 
     /* Reverse direction: hand a Node* back to PostgreSQL. */
@@ -174,7 +177,9 @@ export struct BioseqIndexScanState
     }
 
     [[nodiscard]] static BioseqIndexScanState* allocate() {
-        return reinterpret_cast<BioseqIndexScanState*>(newNode(sizeof(BioseqIndexScanState), T_CustomScanState));
+        auto* state = ::new (palloc0(sizeof(BioseqIndexScanState))) BioseqIndexScanState{};
+        reinterpret_cast<Node*>(&state->css)->type = T_CustomScanState;
+        return state;
     }
 
     [[nodiscard]] Node* as_node() {

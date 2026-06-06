@@ -7,16 +7,18 @@ set(IO_BENCH_V10_DIR    "${CMAKE_CURRENT_LIST_DIR}")
 set(BIOSEQ_DIR          "${CMAKE_CURRENT_LIST_DIR}/..")
 set(BENCH_FRAMEWORK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../bench_framework")
 
-# Module set: ONLY the IO-bench-private modules (io/*.cppm under this dir)
-# + the bench_framework interface unit. Domain N core (common-minus-testing,
-# sequences, instrumentation) comes from `bioseq_modules_nopg` (DOC0269
-# Phase A). The IO bench TU is NOT HWY-bound itself — it imports HWY
-# modules transitively through bioseq_io.public_api but does not call
-# HWY-namespaced functions directly. Highway support is still required at
-# the target level so the IO module's internal SIMD encoders compile.
-file(GLOB_RECURSE IO_BENCH_V10_MOD_FILES
-  "${IO_BENCH_V10_DIR}/*.cppm")
-list(APPEND IO_BENCH_V10_MOD_FILES
+# Module set: ONLY the bench_framework interface unit. DOC0286 §12.1 Edit 3 —
+# the io/*.cppm reader modules MOVED into the shared `bioseq_modules_nopg`
+# OBJECT library (so backend/storage/io/load.cppm can consume them in the pg
+# extension). They are delivered here via `SHARED_MODULE_LIBS bioseq_modules_nopg`
+# (already listed below); globbing them privately too would double-define the
+# BMIs. Domain N core (common-minus-testing, sequences, instrumentation) also
+# comes from `bioseq_modules_nopg` (DOC0269 Phase A). The IO bench TU is NOT
+# HWY-bound itself — it imports HWY modules transitively through
+# bioseq_io.public_api but does not call HWY-namespaced functions directly.
+# Highway support is still required at the target level so the IO module's
+# internal SIMD encoders compile.
+set(IO_BENCH_V10_MOD_FILES
   "${BENCH_FRAMEWORK_DIR}/index.cppm")
 
 AddCommonTargetX(

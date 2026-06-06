@@ -1500,6 +1500,27 @@ CREATE OR REPLACE FUNCTION bioseq.update_index(rel regclass, kind text)
     AS 'MODULE_PATHNAME', 'bioseq_update_index'
     LANGUAGE C VOLATILE STRICT;
 
+-- ============================================================================
+-- DOC0286 §5 — bioseq.load(target_table, file_path): stream a FASTA/FASTQ file
+-- into a USING bioseq table via the postgres-agnostic IO reader. The table must
+-- have exactly one bioseq.seq column (the sequence sink) and at most one
+-- varchar/text column (the header sink). The sequence column's typmod
+-- (alphabet, width) drives the encoding. Extra ignored columns must be nullable
+-- and must not be default/identity/generated. When bioseq.update_index_on_insert
+-- is on, policy-enabled UPDATE_ON_INSERT indexes are built in one batched pass
+-- after the load. Returns the number of records loaded.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION bioseq.load(target_table regclass, file_path text)
+    RETURNS bigint
+    AS 'MODULE_PATHNAME', 'bioseq_load'
+    LANGUAGE C VOLATILE STRICT;
+COMMENT ON FUNCTION bioseq.load(regclass, text) IS
+    'DOC0286: stream a FASTA/FASTQ file into a USING bioseq table via the '
+    'postgres-agnostic IO reader. One bioseq.seq column (required) + one '
+    'varchar header column (optional); other columns must be nullable and not '
+    'default/identity/generated. Builds policy-enabled on-insert indexes in one '
+    'batched pass when bioseq.update_index_on_insert is on. Returns records loaded.';
+
 -- DOC0279 §12.2 — read the backend-local minimizers_per_sequence merge run
 -- counter (test observability for the multi-cursor k-way merge).
 CREATE OR REPLACE FUNCTION bioseq.last_index_merge_run_count()

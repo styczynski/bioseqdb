@@ -16,9 +16,11 @@ module;
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <valarray>
 #include <vector>
+#include <algorithm>
 #include <limits>
 
 #include <boost/integer.hpp>
@@ -1146,6 +1148,32 @@ struct compact_sequence_range_base {
 
     constexpr size_t byte_size() const {
         return super()->size() * sizeof(typename traits::storage_unit); //+ sizeof(derived_range_t);
+    }
+
+    /// DOC0286 §10.0b — zero-copy split of the packed range into records no
+    /// larger than `record_bp` bases. `record_bp` MUST be a multiple of
+    /// `traits::letters_per_unit` (unit-aligned ⇒ each record starts on a
+    /// storage-unit boundary, so this is a pure offset computation — no decode,
+    /// no copy). Returns (unit_offset, unit_count, padding) triples; the final
+    /// record carries the range's trailing padding, the rest carry 0. The
+    /// caller (e.g. the E2E bench FASTA splitter) turns each triple into a
+    /// `compact_sequence_view`. Returning offsets rather than views keeps the
+    /// layering boundary: the view lives in `bioseq_io.public_api`, and
+    /// importing io into `bioseq_sequences` would invert the layering.
+    [[nodiscard]] std::vector<std::tuple<std::size_t, std::size_t, std::size_t>>
+    split_units(std::size_t record_bp) const {
+        DEBUG_ASSERT(record_bp % traits::letters_per_unit == 0,
+            "split_units: record_bp must be a multiple of letters_per_unit");
+        const std::size_t units_per_record = record_bp / traits::letters_per_unit;
+        const std::size_t total_units = super()->size();
+        std::vector<std::tuple<std::size_t, std::size_t, std::size_t>> out;
+        if (total_units == 0) { out.emplace_back(0u, 0u, 0u); return out; }
+        for (std::size_t off = 0; off < total_units; off += units_per_record) {
+            const std::size_t count   = std::min(units_per_record, total_units - off);
+            const bool        is_last = (off + count >= total_units);
+            out.emplace_back(off, count, is_last ? super()->padding() : std::size_t{0});
+        }
+        return out;
     }
 
     /// Advance an iterator by `value` storage_unit steps. Mirrors

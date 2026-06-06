@@ -359,6 +359,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
                                              /*whereClauseList=*/NIL,
                                              payload_mctx, snap,
                                              /*randomAccess=*/true, nullptr);
+        ColumnarReadFlushPendingWrites(entry.read_state);
         attr_needed.free();
     }
 

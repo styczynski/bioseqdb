@@ -74,7 +74,7 @@ struct AlignerInput {
     /// refs even though they don't mutate. `mutable` lets concurrent
     /// `on_run` calls access them through their declared signatures
     /// without forcing a `const_cast` at every call site.
-    mutable std::vector<GeneratedBenchSequencePair> pairs;
+    mutable std::vector<GeneratedBenchSequencePair<seq::dna4, std::uint32_t>> pairs;
     /// Pre-decoded ACGT strings in lock-step with `pairs`. Populated
     /// once in `build_input` so the per-iteration timing window of
     /// `run_aligner` does not include the O(bp_size) compact-to-ACGT
@@ -207,7 +207,7 @@ struct AlignerOutput {
         read_int_field(data, "seed", static_cast<std::int64_t>(params.seed)));
 
     AlignerInput input;
-    input.pairs = generate_test_sequences(params);
+    input.pairs = generate_test_sequences<seq::dna4, std::uint32_t>(params);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
 

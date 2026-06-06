@@ -74,15 +74,15 @@ extern "C++" bool IsColumnarTableAmTable(Oid relationId);
 Bitmapset* ColumnarAttrNeeded(ScanState *ss, List *customList);
 int64_t ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc);
 IndexFetchTableData* bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed);
-TableScanDesc
-bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
+extern "C" TableScanDesc
+bioseq_beginscan_extended_c(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
 							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
 							ParallelColumnarScan parallelColumnarScan,
 							bool returnVectorizedTuple);
-extern "C++" TableScanDesc
-bioseq_beginscan_deferred(Relation relation, Snapshot snapshot,
+extern "C" TableScanDesc
+bioseq_beginscan_deferred_c(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
 							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
@@ -465,9 +465,10 @@ struct BioseqStubOids {
  * Per-backend cache for BioseqStubOids. The prior implementation called
  * LookupStubOids() from every planner path entry (AddColumnarScanPath,
  * CustomExecScan first-call init, ExplainCustomScan) — that is ~22
- * regprocedurein syscache hits per query. The cache is backed by a
- * relcache invalidation callback so DROP/CREATE EXTENSION correctly
- * flushes the resolved OIDs before the next lookup.
+ * regprocedurein syscache hits per query. The cache is backed by syscache
+ * invalidation for pg_proc OIDs, plus relcache invalidation for relation-driven
+ * replans, so DROP/CREATE EXTENSION in one backend flushes the resolved OIDs
+ * before the next lookup.
  */
 struct CachedStubOids {
 	BioseqStubOids oids{};
@@ -479,13 +480,68 @@ static void invalidate_cached_stub_oids(Datum /*arg*/, Oid /*relid*/) {
 	g_cached_stub_oids.initialised = false;
 }
 
+static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
+												 uint32 /*hashvalue*/) {
+	g_cached_stub_oids.initialised = false;
+}
+
+[[nodiscard]] static bool oid_exists_in_syscache(int cache_id, Oid oid) {
+	if (!OidIsValid(oid)) {
+		return false;
+	}
+	HeapTuple tuple = SearchSysCache1(cache_id, ObjectIdGetDatum(oid));
+	if (!HeapTupleIsValid(tuple)) {
+		return false;
+	}
+	ReleaseSysCache(tuple);
+	return true;
+}
+
+[[nodiscard]] static bool cached_stub_oids_are_valid(const BioseqStubOids& o) {
+	const Oid func_oids[] = {
+		o.mmsearch_oid,
+		o.mmsearch_with_opts_oid,
+		o.score_oid,
+		o.dp_score_oid,
+		o.query_len_oid,
+		o.query_start_oid,
+		o.query_end_oid,
+		o.target_len_oid,
+		o.target_start_oid,
+		o.target_end_oid,
+		o.num_matches_oid,
+		o.block_length_oid,
+		o.mapq_oid,
+		o.chain_score_oid,
+		o.dp_max_score_oid,
+		o.seed_count_oid,
+		o.secondary_chain_score_oid,
+		o.is_reverse_oid,
+		o.is_primary_oid,
+		o.has_cigar_oid,
+		o.divergence_oid,
+		o.cigar_oid,
+		o.symbol_count_oid,
+	};
+	for (const Oid oid : func_oids) {
+		if (!oid_exists_in_syscache(PROCOID, oid)) {
+			return false;
+		}
+	}
+	return oid_exists_in_syscache(TYPEOID, o.bioseq_seq_type_oid);
+}
+
 [[nodiscard]] static const BioseqStubOids& get_cached_stub_oids() {
-	if (g_cached_stub_oids.initialised) {
+	if (g_cached_stub_oids.initialised
+		&& cached_stub_oids_are_valid(g_cached_stub_oids.oids)) {
 		return g_cached_stub_oids.oids;
 	}
 	static bool invalidation_registered = false;
 	if (!invalidation_registered) {
 		CacheRegisterRelcacheCallback(invalidate_cached_stub_oids,
+									  PointerGetDatum(NULL));
+		CacheRegisterSyscacheCallback(PROCOID,
+									  invalidate_cached_stub_oids_syscache,
 									  PointerGetDatum(NULL));
 		invalidation_registered = true;
 	}
@@ -508,6 +564,56 @@ static void invalidate_cached_stub_oids(Datum /*arg*/, Oid /*relid*/) {
  */
 [[nodiscard]] static inline bool is_mmsearch_funcid(Oid funcid, const BioseqStubOids& o) {
 	return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
+}
+
+struct MmsearchQualifierWalker {
+	const BioseqStubOids* oids = nullptr;
+};
+
+static bool
+contains_mmsearch_qualifier_walker(Node* node, void* context)
+{
+	if (node == nullptr) {
+		return false;
+	}
+	auto* data = static_cast<MmsearchQualifierWalker*>(context);
+	if (IsA(node, FuncExpr)) {
+		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+		if (is_mmsearch_funcid(fe->funcid, *data->oids)) {
+			return true;
+		}
+	}
+	return expression_tree_walker(node, contains_mmsearch_qualifier_walker, context);
+}
+
+[[nodiscard]] static bool
+contains_mmsearch_qualifier(Node* node, const BioseqStubOids& oids)
+{
+	MmsearchQualifierWalker data{ &oids };
+	return contains_mmsearch_qualifier_walker(node, &data);
+}
+
+/*
+ * mmsearch() must remain in scan.plan.qual so ExecQual and the custom
+ * mmsearch runtime see it, but the columnar reader's qual list is only used
+ * for min/max chunk pruning. The reader cannot prune on mmsearch and deep
+ * copying that FuncExpr during table_beginscan has crashed on same-row
+ * mmsearch(seq, seq) plans, so strip those clauses at the storage boundary.
+ */
+[[nodiscard]] static List*
+storage_prunable_quals_without_mmsearch(List* quals, const BioseqStubOids& oids)
+{
+	PList<Node> filtered;
+	for (auto qual : PList<Node>(quals)) {
+		if (qual == nullptr) {
+			continue;
+		}
+		if (contains_mmsearch_qualifier(qual, oids)) {
+			continue;
+		}
+		filtered.append(qual);
+	}
+	return filtered.release();
 }
 
 [[nodiscard]] static inline bool is_bioseq_projection_funcid(Oid funcid, const BioseqStubOids& o) {
@@ -707,6 +813,9 @@ build_params_from_gucs()
 	params.base_alignment_algorithm =
 		static_cast<bioseq::simd::N_NEON::BaseAlignmentAlgorithmType>(
 			bioseq_aligner_base_alignment_algorithm);
+	params.minimizer_algorithm =
+		static_cast<bioseq::simd::N_NEON::MinimizerAlgorithmType>(
+			bioseq_aligner_minimizer_algorithm);
 	params.enable_profiling = bioseq_aligner_enable_profiling;
 	return params;
 }
@@ -2985,10 +3094,15 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	// ?????? AYY LMAO
 	//ColumnarScanPath_PlanCustomPath tlist member => [{TARGETENTRY :expr {FUNCEXPR :funcid 535007 :funcresulttype 16 :funcretset false :funcvariadic false :funcformat 0 :funccollid 0 :inputcollid 100 :args ({VAR :varno 1 :varattno 1 :vartype 23 :vartypmod -1 :varcollid 0 :varnullingrels (b) :varlevelsup 0 :varnosyn 1 :varattnosyn 1 :location 24} {CONST :consttype 25 :consttypmod -1 :constcollid 100 :constlen -1 :constbyval false :constisnull false :location 27 :constvalue 5 [ 20 0 0 0 65 ]}) :location 15} :resno 3 :resname mmsearch :ressortgroupref 0 :resorigtbl 0 :resorigcol 0 :resjunk false}]
 
+	const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
 	for(auto n : PList<TargetEntry>(root->processed_tlist)) {
 		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() processed_tlist node=[{}]", nodeStr(n));
 		if(IsA(n->expr, FuncExpr)) {
-			tlist = lappend(tlist, flatCopyTargetEntry(n));
+			FuncExpr* fe = reinterpret_cast<FuncExpr*>(n->expr);
+			if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
+				|| fe->funcid == plan_stub_oids.symbol_count_oid) {
+				tlist = lappend(tlist, flatCopyTargetEntry(n));
+			}
 		}
 	}
 	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist_is_null={}", tlist == nullptr);
@@ -3097,6 +3211,7 @@ ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() entered");
 	BioseqScanState* bioseq_scan_state = BioseqScanState::allocate();
 	bioseq_scan_state->as_custom_scan_state()->methods = &ColumnarScanExecuteMethods;
+	bioseq_scan_state->as_custom_scan_state()->ss.ss_currentScanDesc = NULL;
 	/*
 	 * Defer runtime allocation to BeginCustomScan: that's where we
 	 * have the EState (and therefore the per-query MemoryContext we
@@ -3160,6 +3275,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(cscanstate->ss.ps.plan);
 	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(cscanstate);
 	ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
+	cscanstate->ss.ss_currentScanDesc = NULL;
 
 	/*
 	 * Make a new ExprContext just like the existing one, except that we don't
@@ -3172,8 +3288,10 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	ResetExprContext(columnarScanState->css_RuntimeContext);
 	PList<List> custom_exprs(cscan->custom_exprs);
 	List *plainClauses = custom_exprs.first();
+	List *storagePlainClauses = storage_prunable_quals_without_mmsearch(
+		plainClauses, get_cached_stub_oids());
 	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
-		reinterpret_cast<Node *>(plainClauses), columnarScanState->css_RuntimeContext));
+		reinterpret_cast<Node *>(storagePlainClauses), columnarScanState->css_RuntimeContext));
 
 	/*
 	 * Third list in custom_exprs should contain vectorized qual list if not 
@@ -4607,19 +4725,15 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			}
 			else {
 				/*
-				 * No WHERE mmsearch(...) qual installed → there is
-				 * nothing to batch. Behave like a plain scan: project
-				 * the current tuple through newtargetlist and return
-				 * immediately. newtargetlist is still the mutator's
-				 * output, so any unrelated target-list expressions
-				 * (Var refs, arithmetic, …) still resolve correctly;
-				 * any bioseq.<field>(anyelement) call that made it
-				 * into the target list without an accompanying
-				 * mmsearch qual reads from its placeholder Const,
-				 * which stays null in this branch — by design, since
-				 * we have no MatchResult to back it.
+				 * No WHERE mmsearch(...) qual installed -> there is nothing
+				 * to batch. Project the scan tuple to the CustomScan target
+				 * list so the output slot layout matches what an outer Result
+				 * node expects. PlanCustomPath filters this target list to
+				 * plain Vars plus bioseq-owned placeholders; ordinary
+				 * expressions such as seq::text and bioseq.len(seq) remain in
+				 * the outer Result and evaluate against this projected tuple.
 				 */
-				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual — projecting tuple directly");
+				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual");
 
 				/*
 				 * symbol_count fast-path requires the row number; the
@@ -4825,6 +4939,13 @@ ColumnarScanNext(BioseqScanState *columnarScanState)
 	else
 		slot = node->ss.ss_ScanTupleSlot;
 
+	if (scandesc != NULL && scandesc->rs_rd == NULL)
+	{
+		JustLog("[bioseq] pg: ColumnarScanNext() found stale scan descriptor with null relation; reopening");
+		node->ss.ss_currentScanDesc = NULL;
+		scandesc = NULL;
+	}
+
 	if (scandesc == NULL)
 	{
 		/* the columnar access method does not use the flags, they are specific to heap */
@@ -4834,22 +4955,51 @@ ColumnarScanNext(BioseqScanState *columnarScanState)
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
+		BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+		const bool needs_deferred_hydration =
+			(runtime.buffer.mmsearch_active() || runtime.param_rebind.active)
+			&& !runtime.buffer.per_row_self_alignment();
+
 		/*
-		 * DOC0260 §8/§9 — the custom scan defers SEQ-column hydration: the
-		 * TAM returns 40-byte locator stubs and the dispatch buffer hydrates
-		 * them in per-bucket bulk (mmsearch path) or the non-batched branch
-		 * hydrates the projected slot inline. All other scan paths leave the
-		 * flag off and the TAM auto-hydrates each row.
+		 * DOC0260 §8/§9 — deferred hydration is only valid for the batched
+		 * mmsearch path, where the dispatch buffer consumes locator stubs and
+		 * bulk-hydrates them per bucket. Plain scans may be projected by an
+		 * upper Result node, so they must use the ordinary table-AM scan and
+		 * return fully hydrated bioseq.seq varlenas. Same-column self-alignment
+		 * (`mmsearch(seq, seq)`) also stays non-deferred: submit_scan can copy
+		 * the hydrated value once as both target and per-row query, avoiding the
+		 * cold post-load descriptor path while preserving deferred hydration for
+		 * real target/query scans.
 		 */
-		scandesc = bioseq_beginscan_deferred(node->ss.ss_currentRelation,
-											   columnarScanState->snapshot,
-											   0, NULL, NULL, flags,
-											   columnarScanState->attrNeeded,
-											   columnarScanState->qual,
-											   columnarScanState->parallelColumnarScan,
-											   vectorizationEnabled);
+		if (needs_deferred_hydration) {
+			scandesc = bioseq_beginscan_deferred_c(node->ss.ss_currentRelation,
+											 columnarScanState->snapshot,
+											 0, NULL, NULL, flags,
+											 columnarScanState->attrNeeded,
+											 columnarScanState->qual,
+											 columnarScanState->parallelColumnarScan,
+												 vectorizationEnabled);
+		} else {
+			scandesc = bioseq_beginscan_extended_c(node->ss.ss_currentRelation,
+											 columnarScanState->snapshot,
+											 0, NULL, NULL, flags,
+											 columnarScanState->attrNeeded,
+											 columnarScanState->qual,
+											 columnarScanState->parallelColumnarScan,
+												 vectorizationEnabled);
+		}
 
 		node->ss.ss_currentScanDesc = scandesc;
+	}
+
+	if (scandesc == NULL || scandesc->rs_rd == NULL)
+	{
+		ereport(ERROR,
+				(errmsg("bioseq: failed to initialize columnar scan descriptor "
+						"for relation %u",
+						node->ss.ss_currentRelation == nullptr
+							? InvalidOid
+							: RelationGetRelid(node->ss.ss_currentRelation))));
 	}
 
 	/* 
@@ -4979,6 +5129,7 @@ ColumnarScan_EndCustomScan(CustomScanState *node)
 	if (scanDesc != NULL)
 	{
 		table_endscan(scanDesc);
+		node->ss.ss_currentScanDesc = NULL;
 	}
 
 	/* Unregister snapshot */
@@ -4998,8 +5149,10 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 
 	ResetExprContext(columnarScanState->css_RuntimeContext);
 	List *allClauses = PList<List>(cscan->custom_exprs).second();
+	List *storageClauses = storage_prunable_quals_without_mmsearch(
+		allClauses, get_cached_stub_oids());
 	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
-		reinterpret_cast<Node *>(allClauses), columnarScanState->css_RuntimeContext));
+		reinterpret_cast<Node *>(storageClauses), columnarScanState->css_RuntimeContext));
 
 	/*
 	 * Drop every buffered tuple, output cursor and match map left over
@@ -5151,7 +5304,8 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						projectedColumnsStr, es);
 
 	CustomScan *cscan = castNode(CustomScan, node->ss.ps.plan);
-	List *chunkGroupFilter = PList<List>(cscan->custom_exprs).second();
+	List *chunkGroupFilter = storage_prunable_quals_without_mmsearch(
+		PList<List>(cscan->custom_exprs).second(), get_cached_stub_oids());
 	if (chunkGroupFilter != NULL)
 	{
 		const char *pushdownClausesStr = ColumnarPushdownClausesStr(

@@ -151,6 +151,17 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/trace.cppm
 )
 
+# DOC0286 §12.1 Edit 1 — the IO reader (FASTA/FASTQ + gzip) + the new
+# file_utils.cppm are NO_POSTGRES and are now consumed by the pg extension
+# (backend/storage/io/load.cppm imports bioseq_io.public_api), so they join the
+# shared nopg module set instead of the io bench's private glob. The .cppm glob
+# captures the whole reader closure under io/ (including io/compression/*.cppm);
+# the io bench main/tests are .cpp and excluded.
+file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_LIST_DIR}/io/*.cppm")
+list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
+list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
+
 add_library(bioseq_modules_nopg OBJECT)
 set_target_properties(bioseq_modules_nopg PROPERTIES
   CXX_STANDARD 26
@@ -237,7 +248,12 @@ file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/*_test.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp
+  # DOC0286 §13 — NO_POSTGRES file_utils unit test. Listed explicitly (NOT the
+  # whole io/*_test.cpp glob) so the heavyweight io_test.cpp (kseq++) stays out
+  # of the unit exec; file_utils only needs bioseq_io.{file_utils,options}, now
+  # in bioseq_modules_nopg.
+  ${CMAKE_CURRENT_LIST_DIR}/io/file_utils_test.cpp)
 
 file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
@@ -449,3 +465,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/../bench_framework/build.cmake")
 
 # V10 aligner bench target (bioseq_bench), built on top of bench_framework.
 include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_v10.cmake")
+
+# DOC0286 Part 2 — end-to-end SQL bench target (bioseq_bench_e2e), drives
+# postgres over libpq (bioseq.load + mmsearch) vs minimap2.
+include("${CMAKE_CURRENT_LIST_DIR}/../bench/bench_e2e.cmake")

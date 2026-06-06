@@ -443,7 +443,7 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
     // `auto` so the seq::dna4 element type doesn't have to be named at the
     // extern "C" call site (module-visibility avoidance — see comment above).
     std::mt19937_64 rng{params.seed};
-    auto reference = gen_ns::detail::build_random_reference(
+    auto reference = gen_ns::detail::build_random_reference<seq::dna4>(
         params.reference_length, rng);
 
     // Pre-compute target storage metadata — every row's target is the same
