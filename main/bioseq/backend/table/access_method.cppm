@@ -17,6 +17,7 @@ module;
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include <optional>
 #include <vector>
 
@@ -68,7 +69,7 @@ bool ColumnarSupportsIndexAM(char *indexAMName);
 extern "C++" bool IsColumnarTableAmTable(Oid relationId);
 ItemPointerData row_number_to_tid(uint64_t rowNumber);
 
-TableScanDesc
+extern "C++" TableScanDesc
 bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
@@ -190,7 +191,7 @@ bioseq_beginscan(Relation relation, Snapshot snapshot,
 }
 
 
-TableScanDesc
+extern "C++" TableScanDesc
 bioseq_beginscan_extended(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
 							ParallelTableScanDesc parallel_scan,
@@ -224,6 +225,32 @@ bioseq_beginscan_deferred(Relation relation, Snapshot snapshot,
 		returnVectorizedTuple, /*defer_seq_hydration=*/true);
 }
 
+extern "C" TableScanDesc
+bioseq_beginscan_extended_c(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple)
+{
+	return bioseq_beginscan_with_options(relation, snapshot, nkeys, key,
+		parallel_scan, flags, attr_needed, scanQual, parallelColumnarScan,
+		returnVectorizedTuple, /*defer_seq_hydration=*/false);
+}
+
+extern "C" TableScanDesc
+bioseq_beginscan_deferred_c(Relation relation, Snapshot snapshot,
+							int nkeys, ScanKey key,
+							ParallelTableScanDesc parallel_scan,
+							uint32_t flags, Bitmapset *attr_needed, List *scanQual,
+							ParallelColumnarScan parallelColumnarScan,
+							bool returnVectorizedTuple)
+{
+	return bioseq_beginscan_with_options(relation, snapshot, nkeys, key,
+		parallel_scan, flags, attr_needed, scanQual, parallelColumnarScan,
+		returnVectorizedTuple, /*defer_seq_hydration=*/true);
+}
+
 TableScanDesc
 bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 							int nkeys, ScanKey key,
@@ -245,7 +272,7 @@ bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 	{
 		MemoryContextScope ctx_guard{scanContext};
 
-		scan = make0<ColumnarScanDescData>();
+		scan = ::new (palloc0(sizeof(ColumnarScanDescData))) ColumnarScanDescData{};
 		scan->cs_base.rs_rd = relation;
 		scan->cs_base.rs_snapshot = snapshot;
 		scan->cs_base.rs_nkeys = nkeys;
@@ -749,7 +776,7 @@ bioseq_index_fetch_begin(Relation rel)
 	{
 		MemoryContextScope ctx_guard{scanContext};
 
-		scan = make0<IndexFetchColumnarData>();
+		scan = ::new (palloc0(sizeof(IndexFetchColumnarData))) IndexFetchColumnarData{};
 		scan->cs_base.rel = rel;
 		scan->cs_readState = NULL;
 		scan->stripeMetadataList = NIL;
@@ -777,7 +804,7 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 	{
 		MemoryContextScope ctx_guard{scanContext};
 
-		scan = make0<IndexFetchColumnarData>();
+		scan = ::new (palloc0(sizeof(IndexFetchColumnarData))) IndexFetchColumnarData{};
 		scan->cs_base.rel = rel;
 		scan->cs_readState = NULL;
 		scan->stripeMetadataList = NIL;

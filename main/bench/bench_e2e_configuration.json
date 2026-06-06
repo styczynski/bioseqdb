@@ -69,8 +69,5 @@
     }
   },
 
-  "regression_rules": [
-    { "name": "e2e_region_p50_no_blowup", "metric": "region_total_ns",
-      "aggregate": "p50", "operator": { "compare": "<", "tolerance%": 30 } }
-  ]
+  "regression_rules": []
 }

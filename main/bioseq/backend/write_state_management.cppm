@@ -61,6 +61,57 @@ struct WriteStateMapEntry
 
 static TxnScopedHtab<WriteStateMapEntry> WriteStateCache{"column store write state map"};
 
+static void
+PopWriteStateEntryIfCurrent(WriteStateMapEntry* entry,
+							SubTransactionId current_sub_xid,
+							SubTransactionId parent_sub_xid,
+							bool commit)
+{
+	if (entry == nullptr || entry->writeStateStack == nullptr)
+	{
+		return;
+	}
+
+	if (entry->dropped)
+	{
+		if (entry->dropSubXid == current_sub_xid)
+		{
+			if (commit)
+			{
+				entry->dropSubXid = parent_sub_xid;
+			}
+			else
+			{
+				entry->dropped = false;
+			}
+		}
+		return;
+	}
+
+	ColumnarSubXidWriteFrame* stack_head = entry->writeStateStack;
+	if (stack_head->subXid != current_sub_xid)
+	{
+		return;
+	}
+
+	// DOC0260 Phase A — flush per-(parent, column, bucket, shard)
+	// bytes_written deltas via the lazily-allocated seq_caches.
+	// Forward-declared symbols are resolved at link time
+	// (definitions live in bioseq_storage:sequence_storage_manager).
+	if (stack_head->writeState->seq_caches != nullptr)
+	{
+		auto* caches = static_cast<bioseq::storage::seq_caches*>(
+			stack_head->writeState->seq_caches);
+		bioseq_storage_seq_caches_close_all(caches, commit);
+		bioseq::storage::destroy_seq_caches(caches);
+		stack_head->writeState->seq_caches = nullptr;
+	}
+	if (commit)
+	{
+		ColumnarEndWrite(stack_head->writeState);
+	}
+	entry->writeStateStack = stack_head->next;
+}
 
 /*
  * bioseq_init_write_state locates or creates a write state for the given
@@ -160,49 +211,18 @@ ColumnarPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 								bool commit)
 {
 	WriteStateCache.for_each([&](WriteStateMapEntry* entry) {
-		if (entry->writeStateStack == nullptr)
-		{
-			return;
-		}
-
-		if (entry->dropped)
-		{
-			if (entry->dropSubXid == current_sub_xid)
-			{
-				if (commit)
-				{
-					entry->dropSubXid = parent_sub_xid;
-				}
-				else
-				{
-					entry->dropped = false;
-				}
-			}
-			return;
-		}
-
-		ColumnarSubXidWriteFrame* stack_head = entry->writeStateStack;
-		if (stack_head->subXid == current_sub_xid)
-		{
-			// DOC0260 Phase A — flush per-(parent, column, bucket, shard)
-			// bytes_written deltas via the lazily-allocated seq_caches.
-			// Forward-declared symbols are resolved at link time
-			// (definitions live in bioseq_storage:sequence_storage_manager).
-			if (stack_head->writeState->seq_caches != nullptr)
-			{
-				auto* caches = static_cast<bioseq::storage::seq_caches*>(
-					stack_head->writeState->seq_caches);
-				bioseq_storage_seq_caches_close_all(caches, commit);
-				bioseq::storage::destroy_seq_caches(caches);
-				stack_head->writeState->seq_caches = nullptr;
-			}
-			if (commit)
-			{
-				ColumnarEndWrite(stack_head->writeState);
-			}
-			entry->writeStateStack = stack_head->next;
-		}
+		PopWriteStateEntryIfCurrent(entry, current_sub_xid, parent_sub_xid, commit);
 	});
+}
+
+void
+ColumnarPopWriteStateForRelfilenode(Oid relfilenode,
+									SubTransactionId current_sub_xid,
+									SubTransactionId parent_sub_xid,
+									bool commit)
+{
+	WriteStateMapEntry* entry = WriteStateCache.find(&relfilenode);
+	PopWriteStateEntryIfCurrent(entry, current_sub_xid, parent_sub_xid, commit);
 }
 
 

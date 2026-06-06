@@ -60,21 +60,20 @@ namespace bioseq::storage {
         regtypein, CStringGetDatum("bioseq.seq")));
 }
 
-[[nodiscard]] static Oid cached_bioseq_seq_type_oid() {
-    // Cached once per process — the type OID is fixed for the extension's
-    // lifetime. The Oid may legitimately drop on DROP EXTENSION, but the
-    // cache is rebuilt from scratch on CREATE EXTENSION (which always
-    // restarts the relcache too).
-    static Oid resolved = InvalidOid;
-    if (!OidIsValid(resolved)) {
-        resolved = resolve_bioseq_seq_type_oid();
-    }
-    return resolved;
+[[nodiscard]] static Oid current_bioseq_seq_type_oid() {
+    /*
+     * Resolve on each relation-cache population. Extension reset workflows
+     * used by integration tests run DROP EXTENSION; CREATE EXTENSION in one
+     * backend, which assigns a fresh pg_type OID without unloading this dylib.
+     * A process-lifetime static OID would then make every new bioseq.seq
+     * column invisible to the table-AM hydration/rewrite paths.
+     */
+    return resolve_bioseq_seq_type_oid();
 }
 
 static void populate_seq_attnos(BioseqAmCache& cache, Relation rel) {
     cache.seq_attnos.clear();
-    const Oid seq_type_oid = cached_bioseq_seq_type_oid();
+    const Oid seq_type_oid = current_bioseq_seq_type_oid();
     if (!OidIsValid(seq_type_oid)) {
         cache.initialised = true;
         return;

@@ -1578,6 +1578,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
                                              /*whereClauseList=*/NIL,
                                              payload_mctx, snap,
                                              /*randomAccess=*/true, nullptr);
+        ColumnarReadFlushPendingWrites(entry.read_state);
         attr_needed.free();
     }
 

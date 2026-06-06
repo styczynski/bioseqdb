@@ -12,6 +12,7 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <cstdlib>
@@ -63,7 +64,9 @@ void write_fasta(const std::string& path,
     for (const auto& [header, body] : records) {
         f << '>' << header << '\n';
         for (std::size_t i = 0; i < body.size(); i += 60) {
-            f << body.substr(i, 60) << '\n';
+            const std::size_t n = std::min<std::size_t>(60, body.size() - i);
+            f.write(body.data() + i, static_cast<std::streamsize>(n));
+            f << '\n';
         }
     }
 }
@@ -96,7 +99,7 @@ TEST_CASE("bioseq.load: round-trip + non-empty mmsearch (dna4/64, multi-fragment
     // so the assertion is deterministic.
     const auto rows = it::query_rows(
         ctx, "SELECT header, seq::text, bioseq.len(seq) FROM load_rt "
-             "WHERE mmsearch(seq, seq) ORDER BY header");
+             "ORDER BY header");
     REQUIRE(rows.size() == 3);
     // ORDER BY header: rec_big, rec_medium, rec_small.
     REQUIRE(rows[0][0].value() == "rec_big");
@@ -137,8 +140,8 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_w64'::regclass, '" + path + "');") == 1);
 
     // Decode parity: the byte-slice streaming path must be width-correct.
-    REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_w32 WHERE mmsearch(seq, seq)") == body);
-    REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_w64 WHERE mmsearch(seq, seq)") == body);
+    REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_w32") == body);
+    REQUIRE(it::query_scalar(ctx, "SELECT seq::text FROM load_w64") == body);
 
     // §13.2 — mmsearch must return the IDENTICAL position in both widths (the
     // logical sequence + minimizers are width-agnostic), not merely non-empty.
@@ -156,14 +159,13 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
     REQUIRE(pos32 == pos64);   // identical target_start across storage widths
 }
 
-TEST_CASE("bioseq.load: dna5 (A/C/G/T/N) + dna4 round-trip + non-empty mmsearch across widths 8/16/32/64",
+TEST_CASE("bioseq.load: dna5 (A/C/G/T/N) + dna4 round-trip + non-empty literal mmsearch across widths 8/16/32/64",
           "[load][integration]") {
     // §13.3 — the storage-unit-parametric streaming reader must be width-correct.
-    // Each width gets its OWN connection (one bioseq.load per backend): that is the
-    // real-world pattern AND it isolates each width from the pre-existing shared
-    // columnar custom-scan residue that accumulates only when MANY load+mmsearch
-    // cycles reuse ONE backend connection (DOC0288 §4 / deviation #12). The
-    // load-side double-close_all bug is fixed, so per-connection loads are stable.
+    // Each width gets its OWN connection so the DROP/CREATE EXTENSION reset is
+    // isolated per typmod. Decoding is checked with a plain projection; mmsearch
+    // is proved separately with an explicit literal query, matching the SQL E2E
+    // benchmark path.
     const std::string body5 = gen_bases(3000, 99, /*with_n=*/true);   // dna5 + sparse N
     const std::string path5 = "/tmp/bioseq_test_load_dna5.fasta";
     write_fasta(path5, {{"r5", body5}});
@@ -181,12 +183,20 @@ TEST_CASE("bioseq.load: dna5 (A/C/G/T/N) + dna4 round-trip + non-empty mmsearch 
             it::exec_sqlf(ctx, "CREATE TABLE load_w (header text, seq bioseq.seq('{}', {})) USING bioseq;",
                           c->alpha, width);
             REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_w'::regclass, '" + c->path + "');") == 1);
-            // load + decode round-trips byte-exactly (incl. N) and mmsearch is non-empty.
+            // load + decode round-trips byte-exactly (incl. N).
             const auto rows = it::query_rows(ctx,
-                "SELECT seq::text, bioseq.len(seq) FROM load_w WHERE mmsearch(seq, seq)");
+                "SELECT seq::text, bioseq.len(seq) FROM load_w");
             REQUIRE(rows.size() == 1);
             REQUIRE(rows[0][0].value() == c->body);          // width-correct decode, N preserved
             REQUIRE(rows[0][1].value() == std::to_string(c->body.size()));
+
+            // Literal mmsearch is non-empty for every alphabet/width pair.
+            const std::string query = c->body.substr(100, 800);
+            const auto hits = it::query_rows(
+                ctx, fmt::format("SELECT header FROM load_w WHERE "
+                                 "mmsearch(seq, '{}'::bioseq.seq('{}', {}))",
+                                 query, c->alpha, width));
+            REQUIRE_FALSE(hits.empty());
         }
     }
 }
@@ -213,6 +223,7 @@ TEST_CASE("bioseq.load: single large record streams without a >MaxAllocSize varl
     it::connection_test_context ctx;
     it::reset_extension(ctx, { std::string_view{"load_mb"} });
     it::exec_sql(ctx, "CREATE TABLE load_mb (header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
+    it::exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     // A non-streaming load would have palloc'd the whole record (>MaxAllocSize at
     // >=4 Gbp) and ERRORed before returning; success + the exact bp count proves
     // the record streamed through bounded fragments.
@@ -267,33 +278,82 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integratio
     // 0 seq columns.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (header text) USING bioseq;");
-    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');")
-                .contains("no bioseq.seq column"));
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("no bioseq.seq column"));
+    }
 
     // 2 seq columns.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (s1 bioseq.seq('dna4',64), s2 bioseq.seq('dna4',64)) USING bioseq;");
-    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');")
-                .contains("bioseq.seq columns"));
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("bioseq.seq columns"));
+    }
 
     // 2 text columns.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (h1 text, h2 text, seq bioseq.seq('dna4',64)) USING bioseq;");
-    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');")
-                .contains("varchar/text columns"));
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("varchar/text columns"));
+    }
 
-    // Generated/identity ignored column (not nullable-plain).
+    // Defaulted/identity/generated ignored columns are rejected because the
+    // direct ColumnarWriteRow path bypasses executor default evaluation.
+    it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
+    it::exec_sql(ctx, "CREATE TABLE load_e (id bigserial primary key, "
+                      "header text, seq bioseq.seq('dna4',64)) USING bioseq;");
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("defaulted"));
+    }
+
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (id bigint GENERATED ALWAYS AS IDENTITY, "
                       "header text, seq bioseq.seq('dna4',64)) USING bioseq;");
-    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');")
-                .contains("identity"));
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("identity"));
+    }
+
+    it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
+    it::exec_sql(ctx, "CREATE TABLE load_e (header text, seq bioseq.seq('dna4',64), "
+                      "header_len int GENERATED ALWAYS AS (length(header)) STORED) USING bioseq;");
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("generated"));
+    }
 
     // Unrecognised extension (file_utils).
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (header text, seq bioseq.seq('dna4',64)) USING bioseq;");
-    REQUIRE(it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '/tmp/whatever.txt');")
-                .contains("unrecognised sequence file extension"));
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '/tmp/whatever.txt');");
+        REQUIRE(err.sqlstate == "22023");
+        REQUIRE(err.contains("unrecognised sequence file extension"));
+    }
+
+    // Recognised extension, missing file.
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '/tmp/bioseq_missing_file.fasta');");
+        REQUIRE(err.sqlstate == "22000");
+        REQUIRE(err.contains("bioseq.load"));
+    }
 
     // Malformed FASTA -> data exception + rollback (table stays empty).
     const std::string bad_path = "/tmp/bioseq_test_load_bad.fasta";
@@ -301,8 +361,12 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integratio
         std::ofstream f(bad_path, std::ios::binary | std::ios::trunc);
         f << "not a fasta file at all\nrandom bytes\n";
     }
-    REQUIRE(it::sql_fails(ctx, "SELECT bioseq.load('load_e'::regclass, '" + bad_path + "');"));
-    // Rollback: a self-mmsearch would surface any partially-written row; the
-    // table must stay empty (avoid bare count(*), a bioseq gotcha).
-    REQUIRE(it::query_rows(ctx, "SELECT header FROM load_e WHERE mmsearch(seq, seq)").empty());
+    {
+        const auto err =
+            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + bad_path + "');");
+        REQUIRE(err.sqlstate == "22000");
+        REQUIRE(err.contains("bioseq.load"));
+    }
+    // Rollback: no partially-written parent row should be visible.
+    REQUIRE(it::query_rows(ctx, "SELECT header FROM load_e").empty());
 }

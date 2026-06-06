@@ -23,6 +23,7 @@ module;
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 extern "C" {
 #include "postgres.h"
 #include "access/xact.h"       // CommandCounterIncrement
@@ -30,6 +31,7 @@ extern "C" {
 #include "access/table.h"      // table_open / table_close
 #include "catalog/namespace.h" // (parity w/ sample_table_udf; relid arrives as regclass)
 #include "catalog/pg_type_d.h" // TEXTOID, VARCHAROID, BPCHAROID
+#include "commands/sequence.h" // ResetSequenceCaches
 #include "executor/tuptable.h" // TupleTableSlot, MakeTupleTableSlot, TTSOpsVirtual, Exec*Tuple
 #include "utils/builtins.h"    // text_to_cstring, cstring_to_text_with_len, regtypein
 #include "utils/rel.h"         // RelationGetDescr
@@ -56,6 +58,10 @@ import bioseq_storage_indexing_admin;      // build_policy_update_on_insert_inde
 import bioseq_io.options;                  // sequence_io_file_type, reader_options
 import bioseq_io.file_utils;               // infer_sequence_file_kind, sequence_file_kind
 import bioseq_io.public_api;               // stream_sequences_file, packed_sequence_chunk
+
+extern "C++" void ColumnarPopWriteStateForRelfilenode(
+    Oid relfilenode, SubTransactionId current_sub_xid,
+    SubTransactionId parent_sub_xid, bool commit);
 
 namespace {
 
@@ -357,6 +363,19 @@ void build_indexes_if_enabled(Oid main_relid) {
     bioseq::storage::indexing::build_policy_update_on_insert_indexes(main_relid);
 }
 
+void reset_sequence_caches_after_load_storage_alloc() {
+    /*
+     * DOC0286 validation: streamed load can allocate new columnar storage for
+     * sequence sub-table shards through the internal storageid_seq. PostgreSQL
+     * keeps nextval state in a backend-local sequence cache; leaving that cache
+     * warm after the internal shard allocation made the next same-backend
+     * BioseqScan over the loaded relation crash. `DISCARD SEQUENCES` is the
+     * minimal SQL operation that clears the state, so call the same backend
+     * helper here before any same-UDF index scan and again before returning.
+     */
+    ResetSequenceCaches();
+}
+
 // --------------------------------------------------------------------------
 // §4.4 — orchestration (open, stream, flush, close, index)
 // --------------------------------------------------------------------------
@@ -373,23 +392,51 @@ void flush_pending_load_writes(LoadContext& ctx) {
     CommandCounterIncrement();
 }
 
+void finish_load_write_states(LoadContext& ctx) {
+    std::vector<Oid> shard_relfilenodes;
+    shard_relfilenodes.reserve(ctx.caches == nullptr ? 0 : ctx.caches->entries.size());
+    if (ctx.caches != nullptr) {
+        for (const auto& kv : ctx.caches->entries) {
+            const auto& e = kv.second;
+            if (e.rel != nullptr) {
+                shard_relfilenodes.push_back(e.rel->rd_locator.relNumber);
+            }
+        }
+    }
+
+    ResourceOwner saved = CurrentResourceOwner;
+    PG_TRY();
+    {
+        CurrentResourceOwner = TopTransactionResourceOwner;
+        for (Oid relfilenode : shard_relfilenodes) {
+            ColumnarPopWriteStateForRelfilenode(
+                relfilenode, GetCurrentSubTransactionId(), 0, /*commit=*/true);
+        }
+        ColumnarPopWriteStateForRelfilenode(
+            ctx.main_relfilenode, GetCurrentSubTransactionId(), 0, /*commit=*/true);
+        CurrentResourceOwner = saved;
+    }
+    PG_CATCH();
+    {
+        CurrentResourceOwner = saved;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    ctx.write_state = nullptr;
+    ctx.caches = nullptr;
+    CommandCounterIncrement();
+}
+
 void cleanup_load_context(LoadContext& ctx, bool commit) {
     if (ctx.slot != nullptr) {
         ExecDropSingleTupleTableSlot(ctx.slot);
         ctx.slot = nullptr;
     }
-    // DOC0286 — do NOT call seq_caches::close_all here. The columnar xact teardown
-    // (ColumnarPopWriteStateForAllRels, write_state_management.cppm) ALREADY calls
-    // close_all + destroy_seq_caches on this parent write state's seq_caches at
-    // transaction commit/abort, while the shard relations are still pinned by
-    // their own write states. Calling it a SECOND time here (as the sample-table
-    // UDFs do — but they only ever run once per connection) double-runs the shard
-    // relation_close + bytes_written catalog update and accumulates resource-owner
-    // residue across repeated bioseq.load calls in one backend, which SIGSEGVs the
-    // backend after ~4 loads (DOC0286 validation; the macOS crash report pinned it
-    // to close_all). We only release the parent relation + slot here; the
-    // seq_caches and all shard write states are owned and torn down by the xact
-    // write-state pop exactly once.
+    // DOC0286 — write-state teardown is explicit in finish_load_write_states().
+    // cleanup_load_context only releases the slot and parent relation; it must not
+    // touch ctx.caches because that pointer is owned by the parent write state and
+    // may already have been destroyed by the per-relfilenode pop helper.
     (void)commit;
     ctx.caches = nullptr;
     ResourceOwner saved = CurrentResourceOwner;
@@ -450,6 +497,10 @@ void cleanup_load_context(LoadContext& ctx, bool commit) {
 
         n = dispatch_and_stream(ctx, path, kind);                         // §4.2
         flush_pending_load_writes(ctx);
+        finish_load_write_states(ctx);
+        reset_sequence_caches_after_load_storage_alloc();
+        build_indexes_if_enabled(ctx.main_relid);                          // §4.5
+        reset_sequence_caches_after_load_storage_alloc();
     }
     PG_CATCH();
     {
@@ -459,7 +510,6 @@ void cleanup_load_context(LoadContext& ctx, bool commit) {
     PG_END_TRY();
 
     cleanup_load_context(ctx, /*commit=*/true);
-    build_indexes_if_enabled(ctx.main_relid);                              // §4.5
     return n;
 }
 
