@@ -17,6 +17,7 @@ catch2
 chaining
 code-readme
 code-style
+codegen
 columnar
 compile-errors
 engineering-overview
@@ -39,6 +40,7 @@ mm-fast
 mmseqs2
 nthash
 paradedb
+parser
 perf-load-store
 perf-strange-timing
 plotly
