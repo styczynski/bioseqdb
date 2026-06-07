@@ -49,6 +49,8 @@ import bioseq_table_types;
 import bioseq_scan_state;
 import pg_utils;
 import bioseq_scheduler.dispatch_buffer;
+import bioseq_scheduler.supervisor_pg;
+import bioseq_parallelism.mode;
 import bioseq_sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
 import bioseq_sequences.simd;             // stdc_recode_to_type_params
 import bioseq_sequences.minimap_port;  // for MatchResult
@@ -1489,7 +1491,7 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	 * instead of overwriting total cost, we "add" ours to the cost estimated
 	 * by indexAM since we should consider index traversal related costs too.
 	 */
-	
+
 	if (!bioseq_index_scan)
 	{
 		JustLog("[bioseq] pg: CostColumnarIndexPath() bioseq_index_scan disabled, adding columnar cost");
@@ -5647,6 +5649,32 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 										es);
 				}
 			}
+
+			{
+				const auto scheduler =
+					bioseq::parallelism::pg::snapshot();
+				const auto scheduler_mode =
+					bioseq::parallelism::to_string(scheduler.mode);
+				StringInfoData scheduler_buf;
+				initStringInfo(&scheduler_buf);
+				appendStringInfo(&scheduler_buf,
+					"supervisor=%s mode=%.*s workers=%u/%u batches=%llu/%llu awaiting=%llu queries=%llu/%llu qps=%.3f async_persist_waiting=%llu index_memory_reserved=%llu",
+					scheduler.supervisor ? "on" : "local",
+					static_cast<int>(scheduler_mode.size()),
+					scheduler_mode.data(),
+					static_cast<unsigned>(scheduler.current_threads),
+					static_cast<unsigned>(scheduler.max_threads),
+					static_cast<unsigned long long>(scheduler.batches_processed),
+					static_cast<unsigned long long>(scheduler.batches_scheduled),
+					static_cast<unsigned long long>(scheduler.batches_awaiting),
+					static_cast<unsigned long long>(scheduler.queries_processed),
+					static_cast<unsigned long long>(scheduler.queries_waiting),
+					scheduler.queries_per_sec,
+					static_cast<unsigned long long>(scheduler.async_persist_jobs_waiting),
+					static_cast<unsigned long long>(scheduler.index_memory_reserved_bytes));
+				ExplainPropertyText("Bioseq Scheduler", scheduler_buf.data, es);
+				pfree(scheduler_buf.data);
+			}
 		}
 	}
 
@@ -5680,18 +5708,37 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 * `std::nullopt`; in that case we emit a minimal placeholder line so
 		 * EXPLAIN still surfaces the algorithm choice the executor will run.
 		 */
-		const bool has_pipeline_desc =
-			aligner_snapshot->pipeline_desc.has_value();
+			const bool has_pipeline_desc =
+				aligner_snapshot->pipeline_desc.has_value();
+			const auto pipeline_scheduler =
+				bioseq::parallelism::pg::snapshot();
+			const auto pipeline_mode =
+				bioseq::parallelism::to_string(pipeline_scheduler.mode);
+			const std::string pipeline_mode_text{pipeline_mode};
+			const char* pipeline_label =
+				pipeline_scheduler.mode
+					== bioseq::parallelism::PipelineConcurrencyMode::SINGLE
+				? "Single thread"
+				: pipeline_scheduler.mode
+					== bioseq::parallelism::PipelineConcurrencyMode::PARALLEL
+				? "Parallel dispatch"
+				: "Task-parallel";
 
-		if (es->format == EXPLAIN_FORMAT_TEXT) {
-			appendStringInfoSpaces(es->str, es->indent * 2);
-			appendStringInfoString(es->str,
-				"One-to-many alignment:\n");
-			++es->indent;
-			appendStringInfoSpaces(es->str, es->indent * 2);
-			appendStringInfoString(es->str,
-				"Single thread [workers=1]:\n");
-			++es->indent;
+			if (es->format == EXPLAIN_FORMAT_TEXT) {
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfoString(es->str,
+					"One-to-many alignment:\n");
+				++es->indent;
+				appendStringInfoSpaces(es->str, es->indent * 2);
+				appendStringInfo(es->str,
+					"%s [mode=%.*s, workers=%u, index_memory_reserved=%llu bytes]:\n",
+					pipeline_label,
+					static_cast<int>(pipeline_mode.size()),
+					pipeline_mode.data(),
+					static_cast<unsigned>(pipeline_scheduler.max_threads),
+					static_cast<unsigned long long>(
+						pipeline_scheduler.index_memory_reserved_bytes));
+				++es->indent;
 
 			/*
 			 * Sidecar-divergence warning: when the prebuilt-index path is
@@ -5825,6 +5872,13 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 								chaining_algorithm_name(params.chaining_algorithm), es);
 			ExplainPropertyText("Base Alignment Algorithm",
 								base_alignment_algorithm_name(params.base_alignment_algorithm), es);
+			ExplainPropertyText("Pipeline Concurrency Mode",
+				pipeline_mode_text.c_str(), es);
+			ExplainPropertyUInteger("Max Concurrency", NULL,
+				static_cast<uint64_t>(pipeline_scheduler.max_threads), es);
+			ExplainPropertyUInteger("Index Memory Reserved Bytes", NULL,
+				static_cast<uint64_t>(
+					pipeline_scheduler.index_memory_reserved_bytes), es);
 			if (has_pipeline_desc) {
 				ExplainOpenGroup("Pipeline Stages", "Pipeline Stages", false, es);
 				for (const auto& stage :
@@ -5876,7 +5930,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			appendStringInfo(es->str, "->  Cache\n");
 			es->indent += 3;
 		}
-		
+
 		ColumnarCacheStatistics *statistics = ColumnarGetCacheStatistics();
 
 		ExplainPropertyUInteger(

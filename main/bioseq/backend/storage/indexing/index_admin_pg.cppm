@@ -14,6 +14,7 @@ module;
 #include "utils/snapmgr.h"
 #include "utils/memutils.h"
 #include <array>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -273,6 +274,24 @@ inline const auto& letter_rank_table() { static const auto t = build_letter_rank
     return pg_supported_indexes::layout_of(name);
 }
 
+template <class Storage, class BuildFn>
+inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn) {
+    PG_TRY();
+    {
+        build_fn();
+    }
+    PG_CATCH();
+    {
+        if constexpr (requires (Storage& cleanup_storage) {
+                { cleanup_storage.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
+            }) {
+            storage.release_resident_runs_noexcept();
+        }
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
 inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     if (!name_is_registered(name)) pg_log(ERROR, "bioseq.update_index: unknown index '%s'", std::string(name).c_str());
     if (!IsColumnarTableAmTable(rel_oid)) pg_log(ERROR, "bioseq.update_index: relation is not a USING bioseq table");
@@ -327,7 +346,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
         for (std::int16_t a : seq_attnos) {
             auto tb = open_table_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, a, name, caches, work);
-            idx.rebuild_one_table(name, tb);
+            run_pg_index_build_with_cleanup(tb, [&idx, &name, &tb] {
+                idx.rebuild_one_table(name, tb);
+            });
         }
         for (std::int16_t a : seq_attnos) note_successful_write(rel_oid, rid.relfilenode, a, name);
         caches->close_all(/*commit=*/false);   // close cached seq_sub read-state relations (else "resource was not closed" at commit)
@@ -378,10 +399,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         [&](auto& lazy){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                idx.rebuild_one_inline(name, store, lazy);
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
+                                    idx.rebuild_one_inline(name, store, lazy);
+                                });
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                idx.rebuild_one_fragmented(name, store, lazy);
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
+                                    idx.rebuild_one_fragmented(name, store, lazy);
+                                });
                             }
                         });
                 });
@@ -394,10 +419,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     loc.shard_idx = 0;
                     if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                         auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        idx.rebuild_one_inline(name, store, lazy);
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
+                            idx.rebuild_one_inline(name, store, lazy);
+                        });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        idx.rebuild_one_fragmented(name, store, lazy);
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
+                            idx.rebuild_one_fragmented(name, store, lazy);
+                        });
                     }
                 });
             }

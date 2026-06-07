@@ -13,6 +13,7 @@ module;
 #include <span>
 #include <string_view>
 #include <utility>
+#include <vector>
 export module bioseq_indexing.storage;
 import bioseq_indexing.type;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
@@ -58,10 +59,12 @@ constexpr inline bool is_index_chunked_storage_for_v<T, SequenceIndexType::CHUNK
         { s.clear(std::string_view{})             } -> std::same_as<void>;
         // EXTERNAL-SORT SPILL (the §10.4 minimizers_per_sequence build).
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
+        { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.merge_runs([](std::uint64_t, auto&& positions){
               (void)positions.total_count();
               positions.for_each_batch([](std::span<const std::uint64_t>){});
           }) } -> std::same_as<void>;
+        { s.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
         { s.release_runs()                        } -> std::same_as<void>;
         { s.run_buffer_bytes()                    } -> std::convertible_to<std::size_t>;
     };
@@ -119,10 +122,12 @@ template <class T>
 concept is_external_sort_spill_storage =
     requires (T& s) {
         { s.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
+        { s.spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>>{}) } -> std::convertible_to<std::size_t>;
         { s.merge_runs([](std::uint64_t, auto&& positions){
               (void)positions.total_count();
               positions.for_each_batch([](std::span<const std::uint64_t>){});
           }) } -> std::same_as<void>;
+        { s.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
         { s.release_runs()     } -> std::same_as<void>;
         { s.run_buffer_bytes() } -> std::convertible_to<std::size_t>;
     };

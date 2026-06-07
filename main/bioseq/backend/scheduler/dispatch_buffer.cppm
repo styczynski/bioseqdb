@@ -39,7 +39,9 @@ module;
 
 #include <array>
 #include <cstring>
+#include <limits>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <string>
@@ -75,6 +77,8 @@ import bioseq_types.pg_compact_sequence;
 import bioseq_instr;
 import bioseq_storage;                  // DOC0260 §9
 import bioseq_storage_scanner;          // DOC0263 §11.3.2 — chunked test scanner — seq_locator, fetch_payload_bulk, seq_caches
+import bioseq_parallelism.memory_admission;
+import bioseq_scheduler.supervisor_pg;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -813,7 +817,7 @@ public:
      * column resolves the Var to the materialised payload, not the stub.
      */
     void hydrate_one_column(
-            size_t batch_size,
+            std::span<const size_t> rows,
             bioseq::storage::seq_caches* cache,
             std::int16_t column_attno,
             std::array<std::vector<SM::fetch_request>, SM::bucket_count>& per_bucket,
@@ -847,8 +851,14 @@ public:
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.storage_unit_byte_width));
         }
+        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
+            ? kDispatchBatchCapacity
+            : buffered_entries.size();
         bool any = false;
-        for (size_t i = 0; i < batch_size; ++i) {
+        for (const size_t i : rows) {
+            if (i >= batch_size) {
+                continue;
+            }
             const auto& loc = is_query ? buffered_entries[i].per_row_query_loc
                                        : buffered_entries[i].seq_loc;
             if (!loc.has_value()) {
@@ -906,7 +916,10 @@ public:
             explain_bucket_touched_mask |= (std::uint64_t{1} << b);
             ++explain_storage_bulk_fetch_calls;
         }
-        for (size_t i = 0; i < batch_size; ++i) {
+        for (const size_t i : rows) {
+            if (i >= batch_size) {
+                continue;
+            }
             if (out_payloads[i] == nullptr) {
                 continue;
             }
@@ -943,12 +956,15 @@ public:
      * Hydration here also serves output projection (write-back into the
      * buffered slot's tts_values for `SELECT seq` resolution).
      */
-    void hydrate_locators_by_bucket() {
+    void hydrate_locators_by_bucket(std::span<const size_t> rows) {
         const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
             ? kDispatchBatchCapacity
             : buffered_entries.size();
         bool any_locator = false;
-        for (size_t i = 0; i < batch_size; ++i) {
+        for (const size_t i : rows) {
+            if (i >= batch_size) {
+                continue;
+            }
             if (buffered_entries[i].seq_loc.has_value()
                 || buffered_entries[i].per_row_query_loc.has_value()) {
                 any_locator = true;
@@ -975,13 +991,13 @@ public:
         cache->main_tablespace_oid = user_main_tablespace_oid;
         cache->main_relfilenode    = user_main_relfilenode;
 
-        hydrate_one_column(batch_size, cache,
+        hydrate_one_column(rows, cache,
             static_cast<std::int16_t>(mmsearch_context.seq_attno),
             per_bucket_target_requests, hydrated_target_payloads,
             /*is_query=*/false);
 
         if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
-            hydrate_one_column(batch_size, cache,
+            hydrate_one_column(rows, cache,
                 static_cast<std::int16_t>(mmsearch_context.per_row_query_attno),
                 per_bucket_query_requests, hydrated_query_payloads,
                 /*is_query=*/true);
@@ -1001,13 +1017,38 @@ public:
      * inside process_sequences via pgseq_t::dispatch_instance.
      */
     void run_batch_and_build_cursors() {
-        /*
-         * DOC0260 §9.3 — hydrate buffered locators in per-bucket bulk before
-         * any downstream consumer reads seq_hdr() / per_row_query_hdr().
-         */
-        hydrate_locators_by_bucket();
+        bioseq::parallelism::pg::backend_sync();
+        const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
+            ? kDispatchBatchCapacity
+            : buffered_entries.size();
+        const std::int64_t scheduled_queries =
+            static_cast<std::int64_t>(batch_size)
+            * static_cast<std::int64_t>(1 + extra_query_varlenas.size());
+        auto ticket = bioseq::parallelism::pg::begin_batch(scheduled_queries);
+        bool completed = false;
+        PG_TRY();
+        {
+            run_batch_and_build_cursors_impl();
+            completed = true;
+        }
+        PG_CATCH();
+        {
+            bioseq::parallelism::pg::end_batch(ticket, false);
+            PG_RE_THROW();
+        }
+        PG_END_TRY();
+        bioseq::parallelism::pg::end_batch(ticket, completed);
+    }
 
+    void run_batch_and_build_cursors_impl() {
+        /*
+         * DOC0294 — hydrate in row-span waves. A small batch naturally becomes
+         * one wave; larger batches split at the current index-memory cap so
+         * the dispatch phase does not force materialisation of rows that are
+         * not active in the current wave.
+         */
         std::array<const pgseq_t*, kDispatchBatchCapacity> target_hdrs{};
+        std::array<const pgseq_t*, kDispatchBatchCapacity> per_row_query_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
 
         const size_t batch_size = buffered_entries.size() > kDispatchBatchCapacity
@@ -1016,6 +1057,12 @@ public:
         if (buffered_entries.size() > kDispatchBatchCapacity) {
             JustLog("[bioseq] pg: TupleDispatchBuffer batch overflow {} > {}; tail truncated",
                     buffered_entries.size(), kDispatchBatchCapacity);
+        }
+        if (!mmsearch_context.active || batch_size == 0) {
+            match_map.clear();
+            output_cursors.clear();
+            output_position = 0;
+            return;
         }
 
         /*
@@ -1034,10 +1081,112 @@ public:
          * uniquely identifiable inside the batch regardless of
          * targetlist shape.
          */
+        std::vector<size_t> all_rows(batch_size);
+        std::iota(all_rows.begin(), all_rows.end(), size_t{0});
+
+        std::size_t lpu_for_hydration = 0;
+        std::size_t bytes_per_unit_for_hydration = 0;
+        pgseq_t::dispatch_instance(
+            mmsearch_context.alphabet_code,
+            mmsearch_context.storage_unit_byte_width,
+            [&lpu_for_hydration, &bytes_per_unit_for_hydration]<class S>() noexcept {
+                using traits = typename compact_sequence_range<S>::traits;
+                lpu_for_hydration = traits::letters_per_unit;
+                bytes_per_unit_for_hydration =
+                    sizeof(typename traits::storage_unit);
+            });
+        auto estimate_locator_hydration_bytes =
+            [lpu_for_hydration,
+             bytes_per_unit_for_hydration](const bioseq::storage::seq_locator& loc)
+                -> std::uint64_t {
+            if (lpu_for_hydration == 0 || bytes_per_unit_for_hydration == 0) {
+                return 0;
+            }
+            const std::uint64_t total_units =
+                (static_cast<std::uint64_t>(loc.total_bp_size)
+                    + lpu_for_hydration - 1)
+                / lpu_for_hydration;
+            if (total_units
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    / static_cast<std::uint64_t>(bytes_per_unit_for_hydration)) {
+                return 0;
+            }
+            const std::uint64_t payload_bytes =
+                total_units
+                * static_cast<std::uint64_t>(bytes_per_unit_for_hydration);
+            if (payload_bytes
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - static_cast<std::uint64_t>(pgseq_t::header_bytes())) {
+                return 0;
+            }
+            const std::uint64_t varlena_bytes =
+                static_cast<std::uint64_t>(pgseq_t::header_bytes())
+                + payload_bytes;
+            if (varlena_bytes > static_cast<std::uint64_t>(MaxAllocSize)) {
+                return 0;
+            }
+            return varlena_bytes;
+        };
+        auto estimate_hydration_bytes =
+            [this, &estimate_locator_hydration_bytes](size_t row) -> std::uint64_t {
+            if (row >= buffered_entries.size()) {
+                return 0;
+            }
+            const BufferedScanEntry& entry = buffered_entries[row];
+            std::uint64_t bytes = 0;
+            if (entry.seq_loc.has_value()) {
+                bytes += estimate_locator_hydration_bytes(*entry.seq_loc);
+            }
+            if (entry.per_row_query_loc.has_value()) {
+                const std::uint64_t query_bytes =
+                    estimate_locator_hydration_bytes(*entry.per_row_query_loc);
+                if (query_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+                    return (std::numeric_limits<std::uint64_t>::max)();
+                }
+                bytes += query_bytes;
+            }
+            return bytes;
+        };
+        auto refresh_row_arrays =
+            [this, &target_hdrs, &per_row_query_hdrs, &query_ids](std::span<const size_t> rows) {
+            for (const size_t i : rows) {
+                if (i >= buffered_entries.size() || i >= kDispatchBatchCapacity) {
+                    continue;
+                }
+                const BufferedScanEntry& entry = buffered_entries[i];
+                target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
+                per_row_query_hdrs[i] = entry.per_row_query_hdr();
+                query_ids[i] = static_cast<int32_t>(i);
+            }
+        };
+
+        std::vector<std::pair<size_t, size_t>> waves;
+        const std::uint64_t budget =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .allocatable_after_reservations();
+        std::uint64_t wave_bytes = 0;
+        size_t wave_begin = 0;
         for (size_t i = 0; i < batch_size; ++i) {
-            const BufferedScanEntry& entry = buffered_entries[i];
-            target_hdrs[i] = entry.seq_hdr();  // nullptr for NULL seq
-            query_ids[i]   = static_cast<int32_t>(i);
+            const std::uint64_t row_bytes = estimate_hydration_bytes(i);
+            const bool split =
+                budget != (std::numeric_limits<std::uint64_t>::max)()
+                && wave_bytes != 0
+                && row_bytes > 0
+                && row_bytes > budget - std::min(wave_bytes, budget);
+            if (split) {
+                waves.emplace_back(wave_begin, i);
+                wave_begin = i;
+                wave_bytes = 0;
+            }
+            if (row_bytes > (std::numeric_limits<std::uint64_t>::max)() - wave_bytes) {
+                wave_bytes = (std::numeric_limits<std::uint64_t>::max)();
+            } else {
+                wave_bytes += row_bytes;
+            }
+        }
+        if (batch_size > 0) {
+            waves.emplace_back(wave_begin, batch_size);
         }
 
         const pgseq_t* query_hdr = mmsearch_context.query_hdr();
@@ -1103,126 +1252,142 @@ public:
                 user_relid, user_main_relfilenode,
                 static_cast<std::int16_t>(mmsearch_context.seq_attno));
         }
+        auto reset_dispatch_arrays =
+            [&target_hdrs, &per_row_query_hdrs, &query_ids] {
+            target_hdrs.fill(nullptr);
+            per_row_query_hdrs.fill(nullptr);
+            query_ids.fill(-1);
+        };
+        auto reset_scanner_wave =
+            [&scanner_pg_ctx] {
+            scanner_pg_ctx.target_locators.fill(std::nullopt);
+            scanner_pg_ctx.target_rownos.fill(-1);
+        };
+        auto install_scanner_wave =
+            [this, &scanner_pg_ctx](std::span<const size_t> rows) {
+            for (const size_t row : rows) {
+                if (row >= buffered_entries.size() || row >= kDispatchBatchCapacity) {
+                    continue;
+                }
+                const auto& seq_loc_opt = buffered_entries[row].seq_loc;
+                if (seq_loc_opt.has_value()) {
+                    scanner_pg_ctx.target_locators[row] = *seq_loc_opt;
+                }
+                scanner_pg_ctx.target_rownos[row] = buffered_entries[row].sequence_rowno;
+            }
+        };
+        auto wave_estimated_bytes =
+            [&estimate_hydration_bytes](std::span<const size_t> rows) -> std::uint64_t {
+            std::uint64_t bytes = 0;
+            for (const size_t row : rows) {
+                const std::uint64_t row_bytes = estimate_hydration_bytes(row);
+                if (row_bytes > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+                    return (std::numeric_limits<std::uint64_t>::max)();
+                }
+                bytes += row_bytes;
+            }
+            return bytes;
+        };
+        auto merge_stats =
+            [this](const BatchExecutionStats& wave_stats) {
+            last_stats.targets_considered += wave_stats.targets_considered;
+            last_stats.targets_with_prebuilt_index += wave_stats.targets_with_prebuilt_index;
+            last_stats.targets_recomputed_minimizers += wave_stats.targets_recomputed_minimizers;
+            last_stats.last_effective_params = wave_stats.last_effective_params;
+        };
+
+        match_map.clear();
         // Pointer to the context.
         auto* scanner_pg_arg = &scanner_pg_ctx;
 
-        if (per_row_mode()) {
-            /*
-             * Per-row dispatch: each entry aligns against its own
-             * `per_row_query_varlena`. We loop over entries and run
-             * process_sequences with batch_size=1 each. This is O(N)
-             * dispatches instead of O(1) but is the only correct
-             * shape: the BatchProcessor's signature takes a single
-             * shared query_hdr, and we cannot legally broadcast one
-             * row's query to other rows.
-             *
-             * Future optimisation: group entries by query bytes
-             * identity (when many rows share the same arg1 value)
-             * and dispatch one batch per group.
-             */
-            for (size_t i = 0; i < batch_size; ++i) {
-                const BufferedScanEntry& entry = buffered_entries[i];
-                const pgseq_t* per_row_hdr = entry.per_row_query_hdr();
-                const bool target_present_per_row =
-                    target_hdrs[i] != nullptr
-                    || (scanner_pg_arg != nullptr
-                        && scanner_pg_ctx.target_locators[i].has_value());
-                if (per_row_hdr == nullptr || !target_present_per_row) {
-                    continue;
-                }
-                std::array<const pgseq_t*, kDispatchBatchCapacity>
-                    single_targets{};
-                std::array<int32_t, kDispatchBatchCapacity> single_ids{};
-                single_targets[0] = target_hdrs[i];
-                single_ids[0]     = static_cast<int32_t>(i);
-                BatchExecutionStats single_stats{};
-                // DOC0274 — build a single-row scanner_pg context so the
-                // dispatch loop can pick scanner_pg for this row's target.
-                typename BatchProcessor::ScannerPgContext single_pg_ctx = scanner_pg_ctx;
-                for (auto& opt : single_pg_ctx.target_locators) opt.reset();
-                single_pg_ctx.target_locators[0] = scanner_pg_ctx.target_locators[i];
-                single_pg_ctx.target_rownos[0]   = scanner_pg_ctx.target_rownos[i];  // DOC0279 §11.3c
-                auto single_match =
-                    processor.process_sequences(
-                        1,
-                        mmsearch_context.alphabet_code,
-                        mmsearch_context.storage_unit_byte_width,
-                        per_row_hdr,
-                        single_targets, single_ids,
-                        base_params,
-                        single_stats,
-                        &single_pg_ctx);
-                last_stats.targets_considered           += single_stats.targets_considered;
-                last_stats.targets_with_prebuilt_index  += single_stats.targets_with_prebuilt_index;
-                last_stats.targets_recomputed_minimizers += single_stats.targets_recomputed_minimizers;
-                last_stats.last_effective_params         = single_stats.last_effective_params;
-                for (auto& [k, v] : single_match) {
-                    match_map[k] = std::move(v);
-                }
+        for (const auto& wave : waves) {
+            const std::span<const size_t> rows{
+                all_rows.data() + wave.first, wave.second - wave.first};
+            const std::uint64_t estimated_wave_bytes = wave_estimated_bytes(rows);
+            auto wave_permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(estimated_wave_bytes);
+            const bool hydrate_wave = estimated_wave_bytes == 0 || wave_permit.has_value();
+            if (!hydrate_wave) {
+                JustLog("[bioseq] pg: TupleDispatchBuffer wave [{}, {}) was not admitted for {} bytes; target locators stream through scanner_pg",
+                        wave.first, wave.second,
+                        static_cast<unsigned long long>(estimated_wave_bytes));
             }
-        } else {
-            match_map = processor.process_sequences(
-                batch_size,
-                mmsearch_context.alphabet_code,
-                mmsearch_context.storage_unit_byte_width,
-                query_hdr,
-                target_hdrs, query_ids,
-                base_params,
-                last_stats,
-                scanner_pg_arg);
-        }
+            reset_dispatch_arrays();
+            reset_scanner_wave();
+            if (hydrate_wave) {
+                hydrate_locators_by_bucket(rows);
+            }
+            refresh_row_arrays(rows);
+            install_scanner_wave(rows);
 
-        /*
-         * For every extra mmsearch qual the caller registered we run
-         * an independent process_sequences pass over the same
-         * buffered targets, then logically AND the matches into the
-         * primary `match_map`: an entry index that fails to match
-         * any extra query is ERASED from `match_map`, so it never
-         * makes it into output_cursors below. This is the simple
-         * AND semantics the user asked for ("multiple mmsearch
-         * quals filter the row through ALL of them"). We do NOT
-         * carry the extra queries' MatchResults through to
-         * placeholder consts — only the first context drives the
-         * bioseq.* projections. That keeps the output projection
-         * shape single-valued; if a future iteration wants to
-         * surface per-qual cigars we'd need to extend the
-         * placeholder Const inventory.
-         */
-        for (size_t extra_idx = 0; extra_idx < extra_query_varlenas.size();
-             ++extra_idx) {
-            const std::vector<char>& extra_bytes =
-                extra_query_varlenas[extra_idx];
-            if (extra_bytes.empty()) {
-                continue;
-            }
-            const pgseq_t* extra_hdr =
-                reinterpret_cast<const pgseq_t*>(
-                    extra_bytes.data());
-            BatchExecutionStats discarded_stats{};
-            auto extra_match_map =
-                processor.process_sequences(
+            BatchExecutionStats wave_stats{};
+            std::map<int32_t, std::vector<MatchResult>> wave_match_map;
+            if (per_row_mode()) {
+                wave_match_map = processor.process_sequences(
                     batch_size,
                     mmsearch_context.alphabet_code,
                     mmsearch_context.storage_unit_byte_width,
-                    extra_hdr,
+                    nullptr,
+                    &per_row_query_hdrs,
                     target_hdrs, query_ids,
                     base_params,
-                    discarded_stats,
+                    wave_stats,
                     scanner_pg_arg);
-            JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} produced matches for {} entries",
-                    extra_idx, extra_match_map.size());
-            for (auto it = match_map.begin(); it != match_map.end(); ) {
-                if (extra_match_map.find(it->first) == extra_match_map.end()) {
-                    /*
-                     * This entry matched the primary mmsearch but not
-                     * the current extra qual — drop it from the
-                     * primary match_map so the output cursor build
-                     * below skips it.
-                     */
-                    it = match_map.erase(it);
-                } else {
-                    ++it;
+            } else {
+                wave_match_map = processor.process_sequences(
+                    batch_size,
+                    mmsearch_context.alphabet_code,
+                    mmsearch_context.storage_unit_byte_width,
+                    query_hdr,
+                    nullptr,
+                    target_hdrs, query_ids,
+                    base_params,
+                    wave_stats,
+                    scanner_pg_arg);
+            }
+            merge_stats(wave_stats);
+
+            /*
+             * For every extra mmsearch qual the caller registered we run
+             * an independent process_sequences pass over the same active
+             * wave, then logically AND the matches into the wave map.
+             */
+            for (size_t extra_idx = 0; extra_idx < extra_query_varlenas.size();
+                 ++extra_idx) {
+                const std::vector<char>& extra_bytes =
+                    extra_query_varlenas[extra_idx];
+                if (extra_bytes.empty()) {
+                    continue;
                 }
+                const pgseq_t* extra_hdr =
+                    reinterpret_cast<const pgseq_t*>(
+                        extra_bytes.data());
+                BatchExecutionStats discarded_stats{};
+                auto extra_match_map =
+                    processor.process_sequences(
+                        batch_size,
+                        mmsearch_context.alphabet_code,
+                        mmsearch_context.storage_unit_byte_width,
+                        extra_hdr,
+                        nullptr,
+                        target_hdrs, query_ids,
+                        base_params,
+                        discarded_stats,
+                        scanner_pg_arg);
+                JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} wave [{}, {}) produced matches for {} entries",
+                        extra_idx, wave.first, wave.second, extra_match_map.size());
+                for (auto it = wave_match_map.begin(); it != wave_match_map.end(); ) {
+                    if (extra_match_map.find(it->first) == extra_match_map.end()) {
+                        it = wave_match_map.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+
+            for (auto& [entry_id, matches] : wave_match_map) {
+                match_map[entry_id] = std::move(matches);
             }
         }
 

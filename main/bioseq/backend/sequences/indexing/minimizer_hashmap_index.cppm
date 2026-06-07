@@ -11,6 +11,7 @@
 module;
 #include "common.h"                       // DEBUG_ASSERT, JustLog*
 #include <hwy/highway.h>                   // ONLY for the HWY_NAMESPACE macro
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -33,6 +34,10 @@ import bioseq_storage_lazy;                          // lazy_compact_sequence, m
 import bioseq_storage_size;                          // sequence_size_t
 import bioseq_sequences.radix_sort;                  // bioseq::sorting::radix_sort
 import bioseq_instr;                                 // instrumentation region scoping
+import bioseq_parallelism.mode;
+import bioseq_parallelism.pool;
+import bioseq_parallelism.memory_admission;
+import bioseq_parallelism.pipeline_ops;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -324,10 +329,13 @@ struct MinimizersPerFragmentIndex {
         if ((std::size_t)seq.size() != (std::size_t)((total_bp + lpu - 1) / lpu))
             index_corruption_panic("minimizers_per_fragment build: scanner unit-span != ceil(total_bp/lpu) (fragment geometry)");
 
-        sketch_collector collector;
-        std::vector<MinimapSketchData> core;
         const std::size_t size_u = (std::size_t)((total_bp + lpu - 1) / lpu);   // total units
-        for (std::size_t fragment_no = 0; fragment_no < nfrag; ++fragment_no) {
+
+        auto build_fragment_blob =
+            [&seq, total_bp, size_u](std::size_t fragment_no,
+                                     sketch_collector& collector,
+                                     std::vector<MinimapSketchData>& core,
+                                     std::vector<char>& out_blob) {
             const sequence_size_t core_lo = (sequence_size_t)fragment_no * frag_bp;
             const sequence_size_t core_hi = std::min(core_lo + (sequence_size_t)frag_bp, total_bp);
             const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
@@ -351,18 +359,86 @@ struct MinimizersPerFragmentIndex {
             }
             MinimizerHashmapFragmentIndex frag_idx;
             frag_idx.build(core, core_hi - core_lo);   // fragment-local target_len
-            const std::size_t bytes = frag_idx.serialize_binary_size();
+            out_blob.resize(frag_idx.serialize_binary_size());
+            frag_idx.serialize_to_binary(out_blob.data());
+        };
+
+        auto write_fragment_blob =
+            [&storage](std::size_t fragment_no, const std::vector<char>& blob) {
+            const std::size_t bytes = blob.size();
             storage.resize((index_sub_key_t)fragment_no, bytes);
-            storage.template write_to_each<char>((index_sub_key_t)fragment_no, [&](std::size_t chunk_no, char* buf, std::size_t cap_units){
+            storage.template write_to_each<char>((index_sub_key_t)fragment_no,
+                [&blob, bytes](std::size_t chunk_no, char* buf, std::size_t cap_units) {
                 DEBUG_ASSERT(chunk_no == 0 && cap_units >= bytes, "one fragment index fits one chunk");
-                frag_idx.serialize_to_binary(buf);
+                if (bytes > 0) {
+                    std::memcpy(buf, blob.data(), bytes);
+                }
                 return chunk_no;
             });
+        };
+
+        auto build_and_write_serial =
+            [&build_fragment_blob, &write_fragment_blob](std::size_t fragment_no) {
+            sketch_collector collector;
+            std::vector<MinimapSketchData> core;
+            std::vector<char> blob;
+            build_fragment_blob(fragment_no, collector, core, blob);
+            write_fragment_blob(fragment_no, blob);
+        };
+
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        const bool may_parallel_fragments =
+            bioseq::parallelism::task_parallel(pool.mode())
+            && pool.max_concurrency() > 1
+            && bioseq::storage::lazy_is_worker_shareable(seq)
+            && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;
+
+        if (!may_parallel_fragments) {
+            for (std::size_t fragment_no = 0; fragment_no < nfrag; ++fragment_no) {
+                build_and_write_serial(fragment_no);
+            }
+        } else {
+            const std::uint64_t build_peak =
+                bioseq::parallelism::minimizer_index_peak_bytes_for_bp(frag_bp);
+            const std::uint64_t peak_per_fragment =
+                bioseq::parallelism::saturating_mul(2, build_peak);
+
+            for (std::size_t wave_lo = 0; wave_lo < nfrag;) {
+                auto wave = bioseq::parallelism::try_reserve_budgeted_wave(
+                    pool.max_concurrency(), peak_per_fragment);
+                if (!wave.admitted) {
+                    build_and_write_serial(wave_lo);
+                    ++wave_lo;
+                    continue;
+                }
+
+                const std::size_t wave_hi = std::min(
+                    nfrag, wave_lo + static_cast<std::size_t>(wave.fanout));
+                std::vector<std::vector<char>> blobs(wave_hi - wave_lo);
+
+                bioseq::parallelism::parallel_for_pipeline(
+                    0, blobs.size(), 1,
+                    bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT,
+                    bioseq::parallelism::TaskParallelRegion::fragment_build,
+                    [&build_fragment_blob, &blobs, wave_lo](
+                            std::size_t lo, std::size_t hi) {
+                        sketch_collector collector;
+                        std::vector<MinimapSketchData> core;
+                        for (std::size_t rel = lo; rel < hi; ++rel) {
+                            build_fragment_blob(wave_lo + rel, collector, core, blobs[rel]);
+                        }
+                    });
+
+                for (std::size_t rel = 0; rel < blobs.size(); ++rel) {
+                    write_fragment_blob(wave_lo + rel, blobs[rel]);
+                }
+                wave_lo = wave_hi;
+            }
         }
         // COMPLETENESS MANIFEST (written LAST): a tiny chunk at DIRECTORY_SUB_KEY recording nfrag.
         { const std::int64_t manifest = (std::int64_t)nfrag;
           storage.resize(DIRECTORY_SUB_KEY, sizeof(std::int64_t));
-          storage.template write_to_each<std::int64_t>(DIRECTORY_SUB_KEY, [&](std::size_t chunk_no, std::int64_t* manifest_buf, std::size_t){ manifest_buf[0]=manifest; return chunk_no; }); }
+          storage.template write_to_each<std::int64_t>(DIRECTORY_SUB_KEY, [manifest](std::size_t chunk_no, std::int64_t* manifest_buf, std::size_t){ manifest_buf[0]=manifest; return chunk_no; }); }
     }
     template <class R, class Scanner>
     static void rebuild(S& storage, lazy_compact_sequence<R, Scanner>& seq) {

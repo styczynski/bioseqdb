@@ -238,6 +238,7 @@ struct lazy_compact_sequence<R, Scanner> {
     }
     [[nodiscard]] [[gnu::always_inline]]
     std::size_t number_of_fragments() const noexcept { return _scanner.number_of_fragments(); }
+    [[nodiscard]] const Scanner& scanner() const noexcept { return _scanner; }
 
     // ---- unit-level iterator (DOC0263 §6.1) ---------------------------
     // Used by read_cptr and as cbegin()/cend(). Carries the global storage-unit
@@ -625,6 +626,28 @@ inline void with_lazy_in_memory(const compact_sequence_range<R>& range, Fn&& fn)
     lazy_compact_sequence<R, sequence_scanner_none<
         typename compact_sequence_range<R>::traits::storage_unit>> lazy{range};
     std::forward<Fn>(fn)(lazy);
+}
+
+template <class R, class Scanner>
+[[nodiscard]] inline bool lazy_bytes_are_resident(
+        const lazy_compact_sequence<R, Scanner>& sequence) noexcept {
+    if constexpr (Scanner::supports_fragments()) {
+        if constexpr (requires (const Scanner& scanner) {
+                { scanner.is_in_memory_mode() } -> std::convertible_to<bool>;
+            }) {
+            return sequence.scanner().is_in_memory_mode();
+        } else {
+            return true;
+        }
+    } else {
+        return true;
+    }
+}
+
+template <class R, class Scanner>
+[[nodiscard]] inline bool lazy_is_worker_shareable(
+        const lazy_compact_sequence<R, Scanner>&) noexcept {
+    return !Scanner::supports_fragments();
 }
 
 /// Construct a fragmented lazy wrapper from a scanner factory and invoke

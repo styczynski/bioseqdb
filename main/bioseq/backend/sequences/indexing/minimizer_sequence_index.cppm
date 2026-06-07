@@ -167,14 +167,16 @@ struct MinimizerSequenceMergedIndex {
             }
             if (buf_bytes >= run_buffer_bytes && !buf.empty()) {
                 std::sort(buf.begin(), buf.end());                              // composite (kmer, encoded)
-                storage.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>(buf));
-                buf.clear(); buf_bytes = 0;
+                storage.spill_sorted_run_owned(std::move(buf));
+                buf.clear();
+                buf_bytes = 0;
             }
         }
         if (!buf.empty()) {
             std::sort(buf.begin(), buf.end());
-            storage.spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>>(buf));
-            buf.clear(); buf_bytes = 0;
+            storage.spill_sorted_run_owned(std::move(buf));
+            buf.clear();
+            buf_bytes = 0;
         }
 
         // ---- Pass 1: k-way merge -> range-partitioned buckets + directory.

@@ -8,8 +8,11 @@
 #include "common_simd.h"                   // HWY_BEFORE/AFTER_NAMESPACE + HWY_NAMESPACE
 #include "common.h"
 #include <simdjson.h>
+#include <algorithm>
+#include <atomic>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <concepts>
 #include <cstdint>
 #include <cstdio>
@@ -22,6 +25,7 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 import mlogging;
@@ -147,6 +151,12 @@ struct E2eOutput {
     bool is_reverse = false;
     std::int64_t match_count = 0;
     double abs_offset_bp = 0.0;
+    std::uint64_t measured_region_ns = 0;
+    std::uint64_t peak_postgres_rss_kb = 0;
+    std::uint64_t peak_minimap2_rss_kb = 0;
+    std::uint64_t peak_bench_rss_kb = 0;
+    std::uint64_t min_tmp_available_kb = 0;
+    double peak_swap_used_mb = 0.0;
 };
 
 void preflight_e2e_resources(it::connection_test_context& conn,
@@ -291,6 +301,99 @@ inline void run_cmd(const std::string& cmd) {
     return out;
 }
 
+[[nodiscard]] inline std::uint64_t parse_u64_prefix(const std::string& text) {
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const unsigned long long parsed = std::strtoull(begin, &end, 10);
+    return end == begin ? 0 : static_cast<std::uint64_t>(parsed);
+}
+
+[[nodiscard]] inline double parse_double_prefix(const std::string& text) {
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double parsed = std::strtod(begin, &end);
+    return end == begin ? 0.0 : parsed;
+}
+
+struct ResourceSample {
+    std::uint64_t postgres_rss_kb = 0;
+    std::uint64_t minimap2_rss_kb = 0;
+    std::uint64_t bench_rss_kb = 0;
+    std::uint64_t tmp_available_kb = 0;
+    double swap_used_mb = 0.0;
+};
+
+[[nodiscard]] inline ResourceSample sample_resources() {
+    ResourceSample out{};
+
+    const std::string rss = run_cmd_capture(
+        "ps -axo comm=,rss= | awk '"
+        "$1 ~ /postgres/ {pg += $2} "
+        "$1 ~ /minimap2/ {mm += $2} "
+        "$1 ~ /bioseq_bench_e2e/ {bench += $2} "
+        "END {printf \"%llu %llu %llu\\n\", pg, mm, bench}'");
+    unsigned long long pg = 0, mm = 0, bench = 0;
+    if (std::sscanf(rss.c_str(), "%llu %llu %llu", &pg, &mm, &bench) == 3) {
+        out.postgres_rss_kb = static_cast<std::uint64_t>(pg);
+        out.minimap2_rss_kb = static_cast<std::uint64_t>(mm);
+        out.bench_rss_kb = static_cast<std::uint64_t>(bench);
+    }
+
+    out.tmp_available_kb = parse_u64_prefix(
+        run_cmd_capture("df -k /tmp | awk 'NR==2 {print $4}'"));
+    out.swap_used_mb = parse_double_prefix(run_cmd_capture(
+        "sysctl -n vm.swapusage | awk "
+        "'{for (i=1; i<=NF; ++i) if ($i == \"used\") {v=$(i+2); "
+        "gsub(\"M\", \"\", v); print v; exit}}'"));
+    return out;
+}
+
+class ScopedResourceMonitor {
+public:
+    ScopedResourceMonitor() {
+        record(sample_resources());
+        worker_ = std::thread([this]() {
+            while (!stop_.load(std::memory_order_relaxed)) {
+                record(sample_resources());
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+        });
+    }
+
+    ScopedResourceMonitor(const ScopedResourceMonitor&) = delete;
+    ScopedResourceMonitor& operator=(const ScopedResourceMonitor&) = delete;
+
+    ~ScopedResourceMonitor() {
+        (void)stop();
+    }
+
+    [[nodiscard]] ResourceSample stop() {
+        stop_.store(true, std::memory_order_relaxed);
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        record(sample_resources());
+        return peaks_;
+    }
+
+private:
+    void record(const ResourceSample& s) noexcept {
+        peaks_.postgres_rss_kb = std::max(peaks_.postgres_rss_kb, s.postgres_rss_kb);
+        peaks_.minimap2_rss_kb = std::max(peaks_.minimap2_rss_kb, s.minimap2_rss_kb);
+        peaks_.bench_rss_kb = std::max(peaks_.bench_rss_kb, s.bench_rss_kb);
+        peaks_.swap_used_mb = std::max(peaks_.swap_used_mb, s.swap_used_mb);
+        if (s.tmp_available_kb != 0) {
+            peaks_.tmp_available_kb = peaks_.tmp_available_kb == 0
+                ? s.tmp_available_kb
+                : std::min(peaks_.tmp_available_kb, s.tmp_available_kb);
+        }
+    }
+
+    std::atomic<bool> stop_{false};
+    std::thread worker_{};
+    ResourceSample peaks_{};
+};
+
 // Defensive int parse: leaves the result 0 on malformed input.
 [[nodiscard]] inline std::int64_t parse_i64(std::string_view s) {
     std::int64_t v = 0;
@@ -389,6 +492,65 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
     it::exec_sql(c, "SET bioseq.aligner.minimizer_algorithm      = 'two_stack_nthash';");
     it::exec_sqlf(c, "SET bioseq.aligner.kmer_size   = {};", kmer_size);
     it::exec_sqlf(c, "SET bioseq.aligner.window_size = {};", window_size);
+}
+
+[[nodiscard]] std::string param_string(const ParamMap& params,
+                                       std::string_view name,
+                                       std::string_view fallback) {
+    const auto it = params.find(std::string{name});
+    if (it == params.end() || !it->second.is_string()) {
+        return std::string{fallback};
+    }
+    return std::string{it->second.as_string()};
+}
+
+[[nodiscard]] int param_int(const ParamMap& params,
+                            std::string_view name,
+                            int fallback) {
+    const auto it = params.find(std::string{name});
+    if (it == params.end() || !it->second.is_integer()) {
+        return fallback;
+    }
+    return static_cast<int>(it->second.as_integer());
+}
+
+void configure_bioseq_scheduler_session(it::connection_test_context& c,
+                                        std::string_view pipeline_mode) {
+    it::exec_sqlf(c, "SET bioseq.scheduler.pipeline_concurrency_mode = '{}';",
+                  pipeline_mode);
+    it::exec_sql(c, "SET bioseq.index_async_persist = on;");
+}
+
+void attach_resource_metrics(E2eOutput& out,
+                             std::uint64_t start_ns,
+                             std::uint64_t end_ns,
+                             const ResourceSample& resources) {
+    out.measured_region_ns = end_ns - start_ns;
+    out.peak_postgres_rss_kb = resources.postgres_rss_kb;
+    out.peak_minimap2_rss_kb = resources.minimap2_rss_kb;
+    out.peak_bench_rss_kb = resources.bench_rss_kb;
+    out.min_tmp_available_kb = resources.tmp_available_kb;
+    out.peak_swap_used_mb = resources.swap_used_mb;
+}
+
+void log_measured_case(std::string_view algo,
+                       std::string_view pipeline_mode,
+                       int minimap_threads,
+                       const E2eInput& in,
+                       const E2eOutput& out) {
+    JustLog("[bench_e2e] measured algo={} pipeline_mode={} minimap_threads={} size={} measured_ns={} pg_peak_rss_mb={:.2f} minimap2_peak_rss_mb={:.2f} bench_peak_rss_mb={:.2f} tmp_min_free_gib={:.2f} swap_peak_mb={:.2f} found={} offset_bp={}",
+            algo,
+            pipeline_mode,
+            minimap_threads,
+            in.size_label,
+            static_cast<unsigned long long>(out.measured_region_ns),
+            static_cast<double>(out.peak_postgres_rss_kb) / 1024.0,
+            static_cast<double>(out.peak_minimap2_rss_kb) / 1024.0,
+            static_cast<double>(out.peak_bench_rss_kb) / 1024.0,
+            static_cast<double>(out.min_tmp_available_kb) / (1024.0 * 1024.0),
+            out.peak_swap_used_mb,
+            out.found,
+            out.abs_offset_bp);
 }
 
 void cleanup_e2e_input(std::string_view,
@@ -541,25 +703,34 @@ template <sequence_alphabet A>
 }
 
 // ---- §10.3 on_run (the timed region, dispatched by mode) ----
-[[nodiscard]] E2eOutput e2e_run(std::string_view algo, const ParamMap&,
+[[nodiscard]] E2eOutput e2e_run(std::string_view algo, const ParamMap& params,
                                 const E2eInput& in) {
     E2eOutput out;
+    const std::string pipeline_mode = param_string(params, "pipeline_mode", "single");
+    const int minimap_threads = std::max(1, param_int(params, "threads", 1));
     const std::string qlit = fmt::format("'{}'::{}", in.query_bases, in.seq_type);
     const std::string proj =
         "bioseq.target_start(header) AS tstart, bioseq.is_reverse(header) AS rev";
 
     if (algo == "bioseq_just_index") {
+        configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         const std::string sql = fmt::format(
             "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
             proj, in.just_index_table, qlit);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: assemble only
             parse_bioseq_rows(it::query_rows(*in.conn, sql), in, out);
         }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
+        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
 
     } else if (algo == "bioseq_no_index") {
+        configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
         it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");  // load builds NO index
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");   // align recomputes
@@ -568,6 +739,8 @@ template <sequence_alphabet A>
         const std::string align_sql = fmt::format(
             "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
             proj, in.no_index_table, qlit);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: load + recompute align
             it::exec_sql(*in.conn, load_sql);
@@ -576,30 +749,44 @@ template <sequence_alphabet A>
             // the measured read; connection setup remains inside the timed region.
             it::connection_test_context read_conn;
             configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
+            configure_bioseq_scheduler_session(read_conn, pipeline_mode);
             it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
             it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
         }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
+        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
 
     } else if (algo == "minimap2_no_index") {
-        const std::string cmd = fmt::format("{} -c -t1 -k{} -w{} {} {}",
-            BIOSEQ_E2E_MINIMAP2_BIN, in.kmer_size, in.window_size,
+        const std::string cmd = fmt::format("{} -c -t{} -k{} -w{} {} {}",
+            BIOSEQ_E2E_MINIMAP2_BIN, minimap_threads, in.kmer_size, in.window_size,
             in.target_fasta_split, in.query_fasta);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: build + map
             parse_minimap2_paf(run_cmd_capture(cmd), in, out);
         }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
+        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
 
     } else if (algo == "minimap2_just_index") {
-        const std::string cmd = fmt::format("{} -c -t1 {} {}",
-            BIOSEQ_E2E_MINIMAP2_BIN, in.mmi_path, in.query_fasta);
+        const std::string cmd = fmt::format("{} -c -t{} {} {}",
+            BIOSEQ_E2E_MINIMAP2_BIN, minimap_threads, in.mmi_path, in.query_fasta);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: map only
             parse_minimap2_paf(run_cmd_capture(cmd), in, out);
         }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
+        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
 
     } else {
         loge("[bench_e2e] unknown algorithm '{}'", algo);
@@ -614,6 +801,12 @@ template <sequence_alphabet A>
         {"match_count",             static_cast<double>(o.match_count)},
         {"found_fraction",          o.found ? 1.0 : 0.0},
         {"mean_position_offset_bp", o.abs_offset_bp},
+        {"measured_region_ns_manual", static_cast<double>(o.measured_region_ns)},
+        {"peak_postgres_rss_mb",    static_cast<double>(o.peak_postgres_rss_kb) / 1024.0},
+        {"peak_minimap2_rss_mb",    static_cast<double>(o.peak_minimap2_rss_kb) / 1024.0},
+        {"peak_bench_rss_mb",       static_cast<double>(o.peak_bench_rss_kb) / 1024.0},
+        {"min_tmp_available_gib",   static_cast<double>(o.min_tmp_available_kb) / (1024.0 * 1024.0)},
+        {"peak_swap_used_mb",       o.peak_swap_used_mb},
     };
 }
 
@@ -622,7 +815,11 @@ HWY_AFTER_NAMESPACE();    // close the Highway per-target namespace
 
 int main(int argc, char** argv) {
     log_configure(true); fmtlog::setLogLevel(fmtlog::INF);
-    const std::string cfg{BIOSEQ_E2E_CONFIG_PATH}, rep{BIOSEQ_E2E_REPORT_DIR}, data{BIOSEQ_E2E_DATA_DIR};
+    const char* cfg_override = std::getenv("BIOSEQ_E2E_CONFIG_OVERRIDE");
+    const std::string cfg{cfg_override != nullptr && *cfg_override != '\0'
+        ? cfg_override
+        : BIOSEQ_E2E_CONFIG_PATH};
+    const std::string rep{BIOSEQ_E2E_REPORT_DIR}, data{BIOSEQ_E2E_DATA_DIR};
     using bioseq::bench_framework::RunConstraints; using bioseq::bench_framework::ParamMap;
     auto est = std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>{e2e_estimate};
     auto inp = std::function<E2eInput(std::string_view, std::string_view, simdjson::dom::element, const RunConstraints&)>{e2e_input};

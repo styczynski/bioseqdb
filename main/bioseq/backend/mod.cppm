@@ -45,6 +45,8 @@ import bioseq_indexing.type;             // DIRECTORY_SUB_KEY, index_sub_key_t
 import bioseq_indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
 import bioseq_storage_indexing_admin;    // DOC0279 §11.4/§12 — update_index_impl, list helpers, letter_to_rank
 import bioseq_storage_indexing_pg;       // DOC0279 §8.8 — g_last_index_merge_run_count, format_seqidx helpers
+import bioseq_scheduler.supervisor_pg;
+import bioseq_parallelism.mode;
 import sequan_compat;
 
 // DOC0279 §12.2 — reach the columnar AM helpers (the cycle edge) via extern "C++".
@@ -602,6 +604,45 @@ Datum bioseq_update_index(PG_FUNCTION_ARGS) {
 CXX_PG_FUNCTION_INFO_V1(bioseq_last_index_merge_run_count);
 Datum bioseq_last_index_merge_run_count(PG_FUNCTION_ARGS) {
 	PG_RETURN_INT64((std::int64_t)bioseq::storage::indexing::g_last_index_merge_run_count);
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_scheduler_restart);
+Datum bioseq_scheduler_restart(PG_FUNCTION_ARGS) {
+	bioseq::parallelism::pg::restart_cluster();
+	PG_RETURN_VOID();
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_scheduler_stats);
+Datum bioseq_scheduler_stats(PG_FUNCTION_ARGS) {
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {
+		ereport(ERROR, (errmsg("bioseq.scheduler_stats: composite result type expected")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	const auto snap = bioseq::parallelism::pg::snapshot();
+	const std::string mode_string{bioseq::parallelism::to_string(snap.mode)};
+	Datum values[16]{};
+	bool nulls[16]{};
+	values[0] = BoolGetDatum(snap.supervisor);
+	values[1] = Int32GetDatum(static_cast<std::int32_t>(snap.config_generation));
+	values[2] = CStringGetTextDatum(mode_string.c_str());
+	values[3] = Int32GetDatum(static_cast<std::int32_t>(snap.min_threads));
+	values[4] = Int32GetDatum(static_cast<std::int32_t>(snap.max_threads));
+	values[5] = Int32GetDatum(static_cast<std::int32_t>(snap.current_threads));
+	values[6] = Int64GetDatum(static_cast<std::int64_t>(snap.batches_scheduled));
+	values[7] = Int64GetDatum(static_cast<std::int64_t>(snap.batches_awaiting));
+	values[8] = Int64GetDatum(static_cast<std::int64_t>(snap.batches_processed));
+	values[9] = Int64GetDatum(static_cast<std::int64_t>(snap.queries_waiting));
+	values[10] = Int64GetDatum(static_cast<std::int64_t>(snap.queries_processed));
+	values[11] = Float8GetDatum(snap.oldest_waiting_batch_age_secs);
+	values[12] = Float8GetDatum(snap.queries_per_sec);
+	values[13] = Float8GetDatum(snap.uptime_secs);
+	values[14] = Int64GetDatum(static_cast<std::int64_t>(snap.async_persist_jobs_waiting));
+	values[15] = Int64GetDatum(static_cast<std::int64_t>(snap.index_memory_reserved_bytes));
+
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 /* DOC0279 §12.2 — the remaining admin/test SQL helpers. */
