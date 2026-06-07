@@ -2,7 +2,7 @@
  * @file bench_e2e_main.cpp
  * @brief End-to-end SQL-driven benchmark (DOC0286 Part 2). bioseq via
  *        bioseq.load + SELECT mmsearch through libpq; minimap2 via CLI on an
- *        INT32-safe split FASTA. 2/6 Gbp x dna4/dna5 x {no_index, just_index} x 3 reps. The
+ *        INT32-safe split FASTA. 2/4 Gbp x dna4/dna5 x {no_index, just_index} x 3 reps. The
  *        measured region is "e2e_measured"; setup/index-build lives in on_input.
  */
 #include "common_simd.h"                   // HWY_BEFORE/AFTER_NAMESPACE + HWY_NAMESPACE
@@ -106,7 +106,7 @@ constexpr std::size_t kBenchSplitAlignmentBp =
 static_assert(kMinimap2SplitBp % static_cast<std::int64_t>(kBenchSplitAlignmentBp) == 0,
               "split must be unit-aligned for every benchmark alphabet");
 constexpr std::int64_t  kDefaultReferenceLengthBp        = 2'000'000'000;
-constexpr std::int64_t  kPerSeqIndexPreflightThresholdBp = 6'000'000'000LL;
+constexpr std::int64_t  kPerSeqIndexPreflightThresholdBp = 4'000'000'000LL;
 constexpr int           kDefaultKmerSize    = 15;
 constexpr int           kDefaultWindowSize  = 10;
 constexpr std::int64_t  kPositionToleranceBp = 50;   // DOC0283: <=2 bp scanner drift; 50 generous
@@ -125,7 +125,7 @@ struct E2eInput {
     std::shared_ptr<it::connection_test_context> conn;
     std::string alphabet;                        // "dna4" / "dna5"
     std::string seq_type;                        // bioseq.seq('<alphabet>', 64)
-    std::string size_label;                      // "2gbp" / "6gbp"
+    std::string size_label;                      // "2gbp" / "4gbp"
     std::string just_index_table;                // loaded + indexed in on_input
     std::string no_index_table;                  // empty; loaded inside the region
     std::string target_fasta;                    // single-record, for bioseq.load
@@ -631,6 +631,6 @@ int main(int argc, char** argv) {
     auto cln = std::function<void(std::string_view, std::string_view, simdjson::dom::element, const E2eInput&)>{cleanup_e2e_input};
     return bioseq::bench_framework::run(argc, argv, rep, data,
         bioseq::bench_framework::create_benchmark<E2eInput, E2eOutput>(
-            "End-to-end SQL bioseq.load + mmsearch vs minimap2 (2/6 Gbp dna4/dna5)",
+            "End-to-end SQL bioseq.load + mmsearch vs minimap2 (2/4 Gbp dna4/dna5)",
             "bench_e2e", cfg, est, inp, run, evl, cln));
 }
