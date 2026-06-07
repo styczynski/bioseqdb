@@ -102,6 +102,11 @@ import bioseq_storage_lazy;
 import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
 import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
+import bioseq_parallelism.mode;
+import bioseq_parallelism.concepts;
+import bioseq_parallelism.pool;
+import bioseq_parallelism.memory_admission;
+import bioseq_parallelism.pipeline_ops;
 
 export {
 
@@ -854,15 +859,21 @@ static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
 // budget keeps the live index ~one segment, clamped to [kSegmentMinBp,
 // kSegmentCoreMaxBp].
 [[nodiscard]] inline sequence_size_t segment_bp_from_budget() noexcept {
-    constexpr std::uint64_t kBytesPerBp = 6;
     const std::uint64_t budget = bioseq::memory::default_budget().allocatable_bytes();
     // allocatable_bytes() == UINT64_MAX when the mach/POSIX probe is unavailable;
     // dividing keeps it huge so the clamp yields kSegmentCoreMaxBp (the default).
-    const std::uint64_t by_budget = budget / kBytesPerBp;
+    const std::uint64_t by_budget =
+        budget / bioseq::parallelism::kMinimizerIndexPeakBytesPerBp;
     const sequence_size_t want =
         (by_budget > kSegmentCoreMaxBp) ? kSegmentCoreMaxBp
                                         : static_cast<sequence_size_t>(by_budget);
     return want < kSegmentMinBp ? kSegmentMinBp : want;
+}
+
+[[nodiscard]] inline sequence_size_t segment_bp_from_budget_divided(unsigned divisor) noexcept {
+    const sequence_size_t base = segment_bp_from_budget();
+    const sequence_size_t divided = divisor <= 1 ? base : base / divisor;
+    return divided < kSegmentMinBp ? kSegmentMinBp : divided;
 }
 
 // DOC0279 §11.3a — the segment geometry of `minimap_port_segmented`, extracted
@@ -878,14 +889,14 @@ struct SegmentUnitRange {
     sequence_size_t core_hi_bp;    ///< core claim upper bound (bp, clamped to total_bp)
 };
 [[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
-        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu) {
+        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu, unsigned divisor) {
     std::vector<SegmentUnitRange> out;
     if (total_bp == 0 || lpu == 0) return out;
     const sequence_size_t total_units = (total_bp + lpu - 1) / lpu;
     sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
     if (overlap_bp > kSegmentOverlapMaxBp) overlap_bp = kSegmentOverlapMaxBp;
     const sequence_size_t ovl_units = (overlap_bp + lpu - 1) / lpu;
-    sequence_size_t seg_units = segment_bp_from_budget() / lpu;
+    sequence_size_t seg_units = segment_bp_from_budget_divided(divisor) / lpu;
     if (seg_units == 0) seg_units = 1;
     for (sequence_size_t lo_u = 0; lo_u < total_units; lo_u += seg_units) {
         const sequence_size_t hi_u = std::min(lo_u + seg_units, total_units);
@@ -896,6 +907,11 @@ struct SegmentUnitRange {
         out.push_back(SegmentUnitRange{cs_u, ce_u, core_lo_bp, core_hi_bp});
     }
     return out;
+}
+
+[[nodiscard]] inline std::vector<SegmentUnitRange> segment_unit_ranges(
+        sequence_size_t total_bp, sequence_size_t query_len, std::size_t lpu) {
+    return segment_unit_ranges(total_bp, query_len, lpu, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -2082,16 +2098,15 @@ template <is_constexpr_aligner_params Cep,
             static_cast<int>(BAA), static_cast<int>(CA), static_cast<int>(MA),
             static_cast<int>(EP), query_seqs.size(), target_seq.bp_size());
 
-    std::vector<MatchResultCollection> out_per_query;
-    out_per_query.reserve(query_seqs.size());
-
     const sequence_size_t target_len = target_seq.bp_size();
     const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
 
     // Empty proto for the FromSequence path's unused minimizers argument.
     static const std::vector<MinimizerT> empty_minimizers_proto{};
 
-    for (std::size_t qi = 0; qi < query_seqs.size(); ++qi) {
+    auto run_one_query =
+        [target_len, &query_seqs, &query_minimizers_per_query, &target_seq,
+         &target_index, &scoring_matrix, &params](std::size_t qi) {
         const auto&   query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
@@ -2107,8 +2122,7 @@ template <is_constexpr_aligner_params Cep,
         // Short-circuit early-empty cases matching the legacy entry's
         // returns at `minimap_port.cppm:2313` and :2325.
         if (query_len == 0 || target_len == 0) {
-            out_per_query.push_back(std::move(out));
-            continue;
+            return out;
         }
 
         auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
@@ -2125,7 +2139,33 @@ template <is_constexpr_aligner_params Cep,
             pipeline.on_batch(std::span<const std::byte>{});
         }
         pipeline.on_completed();
-        out_per_query.push_back(std::move(out));
+        return out;
+    };
+
+    std::vector<MatchResultCollection> out_per_query;
+    const bool may_parallel_batch =
+        bioseq::parallelism::task_parallel(
+            bioseq::parallelism::GlobalPool::instance().mode())
+        && query_seqs.size()
+            >= bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT
+        && bioseq::storage::lazy_is_worker_shareable(target_seq);
+
+    if (may_parallel_batch) {
+        out_per_query.resize(query_seqs.size());
+        bioseq::parallelism::parallel_for_pipeline(
+            0, query_seqs.size(), 1,
+            bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT,
+            bioseq::parallelism::TaskParallelRegion::query_batch,
+            [&out_per_query, &run_one_query](std::size_t lo, std::size_t hi) {
+                for (std::size_t qi = lo; qi < hi; ++qi) {
+                    out_per_query[qi] = run_one_query(qi);
+                }
+            });
+    } else {
+        out_per_query.reserve(query_seqs.size());
+        for (std::size_t qi = 0; qi < query_seqs.size(); ++qi) {
+            out_per_query.push_back(run_one_query(qi));
+        }
     }
 
     return out_per_query;
@@ -3085,8 +3125,12 @@ template <class MinimizerT,
         bioseq::instr::register_region_static("minimap_port");
     auto _scope = bioseq::instr::region(_desc);
 
-    context::context pipeline_context;
-    context::installed_context_scope context_install(pipeline_context);
+    std::optional<context::context> owned_context;
+    std::optional<context::installed_context_scope> context_install;
+    if (context::current_or_null() == nullptr) {
+        owned_context.emplace();
+        context_install.emplace(*owned_context);
+    }
 
     const std::size_t window_len = static_cast<std::size_t>(params.window_size);
     const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
@@ -3239,73 +3283,186 @@ template <supports_compact_sequence_range QueryRange,
     const std::vector<MinimizerT> query_minimizers =
         std::move(query_collector).extract_sketches_data();
 
-    // (2) Segment the target. Overlap ≥ longest target match span so a match
+    // (2) Segment the target. Overlap >= longest target match span so a match
     //     starting in a segment core is fully indexed within that segment.
     constexpr std::size_t lpu =
         compact_sequence_range<TargetRange>::traits::letters_per_unit;
-    const sequence_size_t total_units = (target_len + lpu - 1) / lpu;
     sequence_size_t overlap_bp = query_len + query_len / 4 + 100'000;
-    if (overlap_bp > pipe::kSegmentOverlapMaxBp) overlap_bp = pipe::kSegmentOverlapMaxBp;  // keep span < 2^28 (static_assert)
-    const sequence_size_t ovl_units = (overlap_bp + lpu - 1) / lpu;
-    sequence_size_t seg_units = pipe::segment_bp_from_budget() / lpu;
-    if (seg_units == 0) seg_units = 1;
-
-    std::vector<MatchResult> merged;
-    // DOC0277 — HOIST the per-segment collector + index out of the loop so the
-    // ~280 MB sketch buffer and the ~0.5–1 GB index (table + positions) are
-    // allocated once and REUSED across all segments (clear() retains capacity;
-    // TargetIndex::build clears, not frees). Previously each of the ~30 segments
-    // of a 6 Gbp target malloc'd/freed ~1 GB, a hidden per-segment allocator tax.
-    sketch_collector_t<MinimizerT> seg_collector;
-    MinimizerHashmapFragmentIndex seg_index;
-    JustLogProgress("[minimap_port_segmented] target_len={} query_len={} seg_bp={} overlap_bp={} "
-                    "segments≈{} | footprint={}MB avail={}MB",
-            target_len, query_len, seg_units * lpu, overlap_bp,
-            (total_units + seg_units - 1) / seg_units,
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-
-    for (sequence_size_t lo_u = 0; lo_u < total_units; lo_u += seg_units) {
-        const sequence_size_t hi_u = std::min(lo_u + seg_units, total_units);
-        const sequence_size_t cs_u = (lo_u > ovl_units) ? (lo_u - ovl_units) : 0;
-        const sequence_size_t ce_u = std::min(hi_u + ovl_units, total_units);
-        const sequence_size_t cs_bp      = cs_u * lpu;
-        const sequence_size_t core_lo_bp = lo_u * lpu;
-        const sequence_size_t core_hi_bp = std::min(hi_u * lpu, target_len);
-
-        // Sketch only [cs_u, ce_u) target units; positions come out LOCAL to cs_bp.
-        // DOC0277 — reuse the hoisted collector/index: clear() keeps the sketch
-        // buffer's capacity; extract via the const& overload (NOT std::move) so the
-        // collector retains its storage; build() copies into its own thread_local
-        // sort scratch, so this const ref stays valid and the collector is reusable.
-        seg_collector.clear();
-        seg_collector.reserve((ce_u - cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
-        pipe::minimizer_dispatch_range<MinimizerT>(seg_collector, target_seq, cs_u, ce_u, w, k);
-        const std::vector<MinimizerT>& seg_minimizers =
-            seg_collector.extract_sketches_data();
-
-        seg_index.build(seg_minimizers, target_len);
-        seg_index.add_position_offset(cs_bp);   // segment-local -> global
-
-        MatchResultCollection seg_res = minimap2_port_with_index(
-            query_seq, target_seq, query_minimizers, seg_index, params);
-
-        // Claim each match by exactly ONE segment (the one whose core contains
-        // its target_start). Overlap guarantees the match was fully indexed here.
-        for (auto& r : seg_res.results) {
-            if (r.target_start >= core_lo_bp && r.target_start < core_hi_bp) {
-                merged.push_back(std::move(r));
-            }
-        }
-        JustLogProgress("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
-                        "(merged {}) | footprint={}MB avail={}MB",
-                core_lo_bp, core_hi_bp,
-                merged.size(), seg_res.results.size(), merged.size(),
-                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-        // seg_index + seg_minimizers freed here.
+    if (overlap_bp > pipe::kSegmentOverlapMaxBp) {
+        overlap_bp = pipe::kSegmentOverlapMaxBp;
     }
 
+    auto run_serial_segmented =
+        [target_len, query_len, lpu, w, k, &target_seq, &query_seq,
+         &query_minimizers, &params]() -> MatchResultCollection {
+        std::vector<MatchResult> merged;
+        sketch_collector_t<MinimizerT> seg_collector;
+        MinimizerHashmapFragmentIndex seg_index;
+        const auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu);
+
+        JustLogProgress("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
+                        "| footprint={}MB avail={}MB",
+                target_len, query_len, ranges.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+
+        for (const pipe::SegmentUnitRange& range : ranges) {
+            seg_collector.clear();
+            seg_collector.reserve(
+                (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+            pipe::minimizer_dispatch_range<MinimizerT>(
+                seg_collector, target_seq, range.cs_u, range.ce_u, w, k);
+            const std::vector<MinimizerT>& seg_minimizers =
+                seg_collector.extract_sketches_data();
+
+            seg_index.build(seg_minimizers, target_len);
+            seg_index.add_position_offset(range.cs_u * lpu);
+
+            MatchResultCollection seg_res = minimap2_port_with_index(
+                query_seq, target_seq, query_minimizers, seg_index, params);
+            for (auto& result : seg_res.results) {
+                if (result.target_start >= range.core_lo_bp
+                    && result.target_start < range.core_hi_bp) {
+                    merged.push_back(std::move(result));
+                }
+            }
+            JustLogProgress("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
+                            "(merged {}) | footprint={}MB avail={}MB",
+                    range.core_lo_bp, range.core_hi_bp,
+                    merged.size(), seg_res.results.size(), merged.size(),
+                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+        }
+        return MatchResultCollection{std::move(merged)};
+    };
+
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    if (!bioseq::parallelism::task_parallel(pool.mode())
+        || pool.max_concurrency() <= 1
+        || !bioseq::storage::lazy_is_worker_shareable(query_seq)
+        || !bioseq::storage::lazy_is_worker_shareable(target_seq)) {
+        return run_serial_segmented();
+    }
+
+    struct SegmentWaveAdmission {
+        unsigned fanout = 1;
+        sequence_size_t segment_bp = 0;
+        std::uint64_t peak_per_segment = 0;
+        bioseq::parallelism::MemoryPermit permit;
+        bool admitted = false;
+    };
+
+    constexpr std::uint64_t context_reserve = std::uint64_t{8} << 20;
+    auto collected_bp_upper_bound =
+        [target_len, overlap_bp](sequence_size_t core_bp) -> std::uint64_t {
+        const std::uint64_t core = static_cast<std::uint64_t>(core_bp);
+        const std::uint64_t overlap = static_cast<std::uint64_t>(overlap_bp);
+        const std::uint64_t expanded =
+            bioseq::parallelism::saturating_mul(2, overlap);
+        const std::uint64_t collected =
+            core > (std::numeric_limits<std::uint64_t>::max)() - expanded
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : core + expanded;
+        return std::min<std::uint64_t>(
+            collected, static_cast<std::uint64_t>(target_len));
+    };
+
+    auto peak_for_segment_core_bp =
+        [&collected_bp_upper_bound](sequence_size_t core_bp) {
+        return bioseq::parallelism::minimizer_index_peak_bytes_for_bp(
+            collected_bp_upper_bound(core_bp)) + context_reserve;
+    };
+
+    auto try_admit_segment_geometry =
+        [&pool, &peak_for_segment_core_bp]() -> SegmentWaveAdmission {
+        for (unsigned fanout = pool.max_concurrency(); fanout > 1; --fanout) {
+            const sequence_size_t bp = pipe::segment_bp_from_budget_divided(fanout);
+            const std::uint64_t peak = peak_for_segment_core_bp(bp);
+            const std::uint64_t bytes = bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(fanout), peak);
+            if (auto permit =
+                    bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(bytes)) {
+                return SegmentWaveAdmission{fanout, bp, peak, std::move(*permit), true};
+            }
+        }
+        return SegmentWaveAdmission{};
+    };
+
+    auto first_wave = try_admit_segment_geometry();
+    if (!first_wave.admitted || first_wave.fanout <= 1) {
+        return run_serial_segmented();
+    }
+
+    const unsigned geometry_divisor = first_wave.fanout;
+    auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu, geometry_divisor);
+    std::vector<MatchResultCollection> seg_out(ranges.size());
+    bioseq::parallelism::TaskParallelScope scope(
+        bioseq::parallelism::TaskParallelRegion::segment_recompute);
+    if (!scope.acquired()) {
+        return run_serial_segmented();
+    }
+
+    bool fallback_to_serial = false;
+    for (std::size_t wave_lo = 0; wave_lo < ranges.size();) {
+        const std::size_t wave_count = std::min<std::size_t>(
+            first_wave.fanout, ranges.size() - wave_lo);
+        bioseq::parallelism::MemoryPermit wave_permit;
+        if (wave_lo == 0) {
+            wave_permit = std::move(first_wave.permit);
+        } else if (auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+                    bioseq::parallelism::saturating_mul(
+                        static_cast<std::uint64_t>(wave_count),
+                        first_wave.peak_per_segment))) {
+            wave_permit = std::move(*permit);
+        }
+        if (!wave_permit) {
+            fallback_to_serial = true;
+            break;
+        }
+
+        const std::size_t wave_hi = wave_lo + wave_count;
+        pool.parallel_for_with_context(
+            wave_lo, wave_hi, 1,
+            bioseq::parallelism::range_body{
+                [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
+                 &params, target_len, w, k, lpu](std::size_t lo, std::size_t hi) {
+                sketch_collector_t<MinimizerT> collector;
+                MinimizerHashmapFragmentIndex index;
+                for (std::size_t segment_index = lo; segment_index < hi; ++segment_index) {
+                    const pipe::SegmentUnitRange& range = ranges[segment_index];
+                    collector.clear();
+                    collector.reserve(
+                        (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+                    pipe::minimizer_dispatch_range<MinimizerT>(
+                        collector, target_seq, range.cs_u, range.ce_u, w, k);
+                    const std::vector<MinimizerT>& minimizers =
+                        collector.extract_sketches_data();
+                    index.build(minimizers, target_len);
+                    index.add_position_offset(range.cs_u * lpu);
+                    seg_out[segment_index] = minimap2_port_with_index(
+                        query_seq, target_seq, query_minimizers, index, params);
+                }
+            }});
+        wave_lo = wave_hi;
+    }
+
+    if (fallback_to_serial) {
+        std::vector<MatchResultCollection>().swap(seg_out);
+        std::vector<pipe::SegmentUnitRange>().swap(ranges);
+        return run_serial_segmented();
+    }
+
+    std::vector<MatchResult> merged;
+    for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {
+        const pipe::SegmentUnitRange& range = ranges[segment_index];
+        for (auto& result : seg_out[segment_index].results) {
+            if (result.target_start >= range.core_lo_bp
+                && result.target_start < range.core_hi_bp) {
+                merged.push_back(std::move(result));
+            }
+        }
+    }
     return MatchResultCollection{std::move(merged)};
 }
 

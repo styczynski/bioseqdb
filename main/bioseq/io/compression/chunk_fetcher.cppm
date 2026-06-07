@@ -58,7 +58,6 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -73,6 +72,9 @@ import bioseq_io.compression.chunk;
 import bioseq_io.compression.deflate;
 import bioseq_io.compression.gzip_format;
 import bioseq_io.compression.huffman;
+import bioseq_parallelism.mode;
+import bioseq_parallelism.concepts;
+import bioseq_parallelism.pool;
 
 export namespace bioseq::io::compression {
 
@@ -376,7 +378,7 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
     // ~30 µs each, ~1500 per chunk in real DEFLATE. Parallelising
     // across the same N threads we'll use for decoding amortises this
     // back into the overall pipeline.
-    const unsigned hw_threads = std::thread::hardware_concurrency();
+    const unsigned hw_threads = bioseq::parallelism::default_concurrency();
     const std::size_t plan_workers =
         std::min<std::size_t>(hw_threads > 2 ? hw_threads - 2 : 1, 8);
 
@@ -418,25 +420,27 @@ plan_chunks(std::span<const std::uint8_t>      compressed_view,
                                                  kBlockfinderSentinel);
         per_chunk_start[0] = member_start_bit;
 
-        std::atomic<std::size_t> next_k{1};
-        std::vector<std::thread> validators;
-        validators.reserve(plan_workers);
-        for (std::size_t w = 0; w < plan_workers; ++w) {
-            validators.emplace_back([&, m]() noexcept {
-                while (true) {
-                    const std::size_t k = next_k.fetch_add(
-                        1, std::memory_order_relaxed);
-                    if (k >= n_chunks) break;
-                    const std::size_t target_bit =
-                        member_start_bit
-                        + (k * member_compressed_bits) / n_chunks;
-                    per_chunk_start[k] = find_validated_block(
-                        target_bit, member_end_bit);
-                }
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        if (!pool.active()) {
+            pool.configure(bioseq::parallelism::PoolConfig{
+                .max_concurrency = static_cast<unsigned>(
+                    std::max<std::size_t>(1, plan_workers)),
+                .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
             });
         }
-        for (auto& t : validators) {
-            if (t.joinable()) t.join();
+        if (n_chunks > 1) {
+            pool.parallel_for(1, n_chunks, 1, bioseq::parallelism::range_body{
+                [&per_chunk_start, &find_validated_block,
+                 member_start_bit, member_compressed_bits, member_end_bit, n_chunks](
+                        std::size_t lo, std::size_t hi) noexcept {
+                    for (std::size_t k = lo; k < hi && k < n_chunks; ++k) {
+                        const std::size_t target_bit =
+                            member_start_bit
+                            + (k * member_compressed_bits) / n_chunks;
+                        per_chunk_start[k] = find_validated_block(
+                            target_bit, member_end_bit);
+                    }
+                }});
         }
         // Merge in chunk-index order, skipping sentinels and duplicates.
         for (std::size_t k = 1; k < n_chunks; ++k) {
@@ -917,13 +921,15 @@ public:
     void start_producer() noexcept {
         if (_producer_started) return;
         _producer_started = true;
-        _producer = std::thread([this]() noexcept {
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        _producer_group = pool.make_task_group();
+        _producer_group.run(bioseq::parallelism::task_body{[this]() noexcept {
             if (_worker_count <= 1) {
                 producer_loop_single_thread();
             } else {
                 producer_loop_parallel();
             }
-        });
+        }});
     }
 
     [[nodiscard]] std::pair<const chunk_data*, bool>
@@ -985,7 +991,7 @@ public:
             std::lock_guard<std::mutex> guard(_state_mutex);
             _state_cv.notify_all();
         }
-        if (_producer.joinable()) _producer.join();
+        _producer_group.wait();
         _producer_started = false;
     }
 
@@ -1132,13 +1138,20 @@ private:
 
         _next_worker_chunk_idx.store(0, std::memory_order_relaxed);
 
-        // Spawn workers.
-        std::vector<std::thread> workers;
-        workers.reserve(_worker_count);
-        for (std::size_t w = 0; w < _worker_count; ++w) {
-            workers.emplace_back([this, &plans, total_chunks]() noexcept {
-                worker_loop(plans, total_chunks);
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        if (!pool.active()) {
+            pool.configure(bioseq::parallelism::PoolConfig{
+                .max_concurrency = static_cast<unsigned>(
+                    std::max<std::size_t>(1, _worker_count)),
+                .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
             });
+        }
+        auto workers = pool.make_task_group();
+        for (std::size_t w = 0; w < _worker_count; ++w) {
+            workers.run(bioseq::parallelism::task_body{
+                [this, &plans, total_chunks]() noexcept {
+                    worker_loop(plans, total_chunks);
+                }});
         }
 
         // Drain in idx order, resolve markers, publish to consumer.
@@ -1253,9 +1266,7 @@ private:
             std::lock_guard<std::mutex> guard(_state_mutex);
             _state_cv.notify_all();
         }
-        for (auto& t : workers) {
-            if (t.joinable()) t.join();
-        }
+        workers.wait();
 
         signal_done();
     }
@@ -1410,7 +1421,7 @@ private:
 
     std::atomic<bool>              _shutdown{false};
     std::atomic<bool>              _producer_done{false};
-    std::thread                    _producer;
+    bioseq::parallelism::ScopedTaskGroup _producer_group;
     bool                           _producer_started = false;
     std::string                    _last_error_message;
 };

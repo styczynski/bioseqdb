@@ -1528,6 +1528,34 @@ CREATE OR REPLACE FUNCTION bioseq.last_index_merge_run_count()
     AS 'MODULE_PATHNAME', 'bioseq_last_index_merge_run_count'
     LANGUAGE C VOLATILE;
 
+-- DOC0294 — scheduler supervision/admin surface.
+CREATE OR REPLACE FUNCTION bioseq.scheduler_restart()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_scheduler_restart'
+    LANGUAGE C VOLATILE;
+
+CREATE OR REPLACE FUNCTION bioseq.scheduler_stats()
+    RETURNS TABLE (
+        supervisor boolean,
+        config_generation integer,
+        pipeline_concurrency_mode text,
+        min_threads integer,
+        max_threads integer,
+        current_threads integer,
+        batches_scheduled bigint,
+        batches_awaiting bigint,
+        batches_processed bigint,
+        queries_waiting bigint,
+        queries_processed bigint,
+        oldest_waiting_batch_age_secs double precision,
+        queries_per_sec double precision,
+        uptime_secs double precision,
+        async_persist_jobs_waiting bigint,
+        index_memory_reserved_bytes bigint
+    )
+    AS 'MODULE_PATHNAME', 'bioseq_scheduler_stats'
+    LANGUAGE C VOLATILE;
+
 -- DOC0279 §12.2 — admin/test SQL surface for the new chunked index storage.
 CREATE OR REPLACE FUNCTION bioseq.set_index_policy(rel regclass, name text, policy text) RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_set_index_policy' LANGUAGE C VOLATILE STRICT;
@@ -1640,4 +1668,3 @@ COMMENT ON FUNCTION bioseq.locator_inspect(bioseq.seq) IS
     'total_bp_size, first_sub_row_no, total_padding). For inline (non-stub) '
     'values returns zeros for the locator-only fields and the inline '
     'bp_size + padding.';
-

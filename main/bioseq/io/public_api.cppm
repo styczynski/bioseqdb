@@ -51,11 +51,11 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -73,6 +73,9 @@ import bioseq_io.simd_kernels;
 import bioseq_io.sources;
 import bioseq_io.pipeline;
 import bioseq_io.compression.parallel_gzip_source;
+import bioseq_parallelism.mode;
+import bioseq_parallelism.concepts;
+import bioseq_parallelism.pool;
 
 export namespace bioseq::io {
 
@@ -851,6 +854,18 @@ run_sync_pipeline_mmap_parallel(
     constexpr bool is_fastq_format = (file_type == sequence_io_file_type::FASTQ);
 
     auto [base_ptr, view_size] = source.direct_view();
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    if (!pool.active()) {
+        const unsigned configured_shards =
+            shard_count > (std::numeric_limits<unsigned>::max)()
+                ? (std::numeric_limits<unsigned>::max)()
+                : static_cast<unsigned>(std::max<std::size_t>(1, shard_count));
+        pool.configure(bioseq::parallelism::PoolConfig{
+            .max_concurrency = configured_shards,
+            .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
+        });
+    }
+    shard_count = std::min<std::size_t>(shard_count, pool.max_concurrency());
     if (view_size == 0 || shard_count <= 1) {
         // Fall back to the sequential direct path.
         return run_sync_pipeline_mmap_direct<alphabet_t, file_type>(
@@ -1052,12 +1067,12 @@ run_sync_pipeline_mmap_parallel(
         total_records.fetch_add(shard_records, std::memory_order_relaxed);
     };
 
-    std::vector<std::thread> threads;
-    threads.reserve(shard_count);
-    for (std::size_t shard_index = 0; shard_index < shard_count; ++shard_index) {
-        threads.emplace_back(run_shard, shard_index);
-    }
-    for (auto& thread : threads) thread.join();
+    pool.parallel_for(0, shard_count, 1, bioseq::parallelism::range_body{
+        [&run_shard](std::size_t lo, std::size_t hi) {
+            for (std::size_t shard_index = lo; shard_index < hi; ++shard_index) {
+                run_shard(shard_index);
+            }
+        }});
 
     if (aborted.load(std::memory_order_acquire)) {
         return std::unexpected(captured_error);
@@ -1089,13 +1104,13 @@ template <
                 std::size_t requested_shards =
                     options.concurrency.parser_count;
                 if (requested_shards == 0) {
-                    const unsigned hw_threads =
-                        std::thread::hardware_concurrency();
-                    requested_shards = (hw_threads == 0)
-                        ? 1
-                        : std::min<std::size_t>(
-                              hw_threads,
-                              options.concurrency.mmap_parallel_max_shards);
+                    auto& pool = bioseq::parallelism::GlobalPool::instance();
+                    const unsigned worker_slots = pool.active()
+                        ? pool.max_concurrency()
+                        : bioseq::parallelism::default_concurrency();
+                    requested_shards = std::min<std::size_t>(
+                        worker_slots,
+                        options.concurrency.mmap_parallel_max_shards);
                 }
                 if (requested_shards > 1 &&
                     source.mapped_size() >=

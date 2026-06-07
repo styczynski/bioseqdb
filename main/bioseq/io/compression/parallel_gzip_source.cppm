@@ -20,7 +20,6 @@ module;
 #include <optional>
 #include <span>
 #include <string>
-#include <thread>
 #include <utility>
 
 export module bioseq_io.compression.parallel_gzip_source;
@@ -29,6 +28,7 @@ import mlogging;
 import bioseq_io.sources;
 import bioseq_io.options;
 import bioseq_io.compression.parallel_gzip_decoder;
+import bioseq_parallelism.pool;
 
 export namespace bioseq::io {
 
@@ -64,7 +64,7 @@ public:
         }
         std::size_t worker_count = options.io.parallel_gzip_thread_count;
         if (worker_count == 0) {
-            const unsigned hardware = std::thread::hardware_concurrency();
+            const unsigned hardware = bioseq::parallelism::default_concurrency();
             worker_count = (hardware > 2) ? std::min<std::size_t>(hardware - 2, 8) : 1;
         }
 

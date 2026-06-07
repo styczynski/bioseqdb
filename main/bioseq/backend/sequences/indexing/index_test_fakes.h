@@ -202,6 +202,12 @@ struct FakeFragmentStorage {
         return runs_.size() - 1;
     }
 
+    std::size_t spill_sorted_run_owned(
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
+        runs_.push_back(std::move(sorted));
+        return runs_.size() - 1;
+    }
+
     struct Cursor {
         const std::vector<std::uint64_t>* v;
         [[nodiscard]] std::uint64_t total_count() const { return v->size(); }
@@ -237,7 +243,8 @@ struct FakeFragmentStorage {
         }
     }
 
-    void release_runs() { runs_.clear(); }
+    void release_resident_runs_noexcept() noexcept { runs_.clear(); }
+    void release_runs() { release_resident_runs_noexcept(); }
     [[nodiscard]] std::size_t run_buffer_bytes() const { return run_buffer_bytes_; }
 };
 

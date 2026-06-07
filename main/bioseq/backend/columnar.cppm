@@ -17,6 +17,7 @@ module;
 #include "columnar/columnar_tableam.h"
 
 extern "C" {
+#include "miscadmin.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "catalog/namespace.h"
@@ -29,6 +30,8 @@ import bioseq_table;
 import config;
 import pg_utils;
 import bioseq_storage;
+import bioseq_scheduler.supervisor_pg;
+import bioseq_storage_indexing_residency_pg;
 
 extern "C++" {
 
@@ -73,6 +76,11 @@ bool bioseq_read_sequence_index = true;
  * sort's run buffer to a raw byte size (bypassing the 64 MiB floor) so a small
  * fixture can be made to spill >=2 runs. 0 => use the computed RUN_BUFFER_BYTES. */
 int bioseq_index_run_buffer_bytes = 0;
+int  bioseq_scheduler_max_concurrency = 0;
+int  bioseq_scheduler_pipeline_concurrency_mode = 0;
+bool bioseq_scheduler_allow_pg_parallel_composition = false;
+bool bioseq_index_async_persist = true;
+int  bioseq_index_memory_cap_mb = 0;
 
 /*
  * DOC0263 §11.3.2 / DOC0264 — test-only knob. When on, the dispatch buffer
@@ -168,6 +176,10 @@ bioseq_init()
 {
 	JustLog("[bioseq] pg: bioseq_init() entered");
 	bioseq_guc_init();
+	if (process_shared_preload_libraries_in_progress) {
+		bioseq::parallelism::pg::install_scheduler_shmem_hooks();
+		bioseq::parallelism::pg::register_scheduler_supervisor();
+	}
 	bioseq_tableam_init();
 	bioseq_planner_init();
 	/* DOC0279 §12.1 — the legacy MetadataKindRegistry / sidecar kind
@@ -181,6 +193,7 @@ bioseq_init()
 	 * spill is freed before the slot is dropped. */
 	CacheRegisterRelcacheCallback(bioseq::storage::bioseq_am_cache_invalidate,
 								  PointerGetDatum(NULL));
+	bioseq::storage::indexing::install_index_residency_callbacks();
 
 	/* DOC0260 §11.3 step 3 — orphan reaper. We deliberately do NOT call
 	 * `ReapOrphanSeqSubTables()` directly from `_PG_init` because there is
@@ -414,6 +427,78 @@ bioseq_guc_init()
 		0, 0, INT_MAX,
 		PGC_SUSET,
 		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+		NULL,
+		NULL,
+		NULL);
+
+	static const struct config_enum_entry pipeline_concurrency_mode_options[] = {
+		{ "single", 0, false },
+		{ "parallel", 1, false },
+		{ "task_parallel", 2, false },
+		{ NULL, 0, false }
+	};
+
+	DefineCustomIntVariable(
+		"bioseq.scheduler.max_concurrency",
+		"Maximum bioseq TBB worker slots per backend (0 = CPU count).",
+		NULL,
+		&bioseq_scheduler_max_concurrency,
+		0,
+		0,
+		1024,
+		PGC_SIGHUP,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomEnumVariable(
+		"bioseq.scheduler.pipeline_concurrency_mode",
+		"Pipeline concurrency: single, parallel, task_parallel.",
+		NULL,
+		&bioseq_scheduler_pipeline_concurrency_mode,
+		0,
+		pipeline_concurrency_mode_options,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.scheduler.allow_pg_parallel_composition",
+		"Allow a PostgreSQL parallel worker process to use more than one bioseq TBB slot.",
+		NULL,
+		&bioseq_scheduler_allow_pg_parallel_composition,
+		false,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.index_async_persist",
+		"Persist opportunistically built in-memory indexes after returning query results.",
+		NULL,
+		&bioseq_index_async_persist,
+		true,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomIntVariable(
+		"bioseq.index_memory_cap_mb",
+		"Maximum RAM budget for resident index runs/chunks/assembled indexes (0 = live MemoryBudget).",
+		NULL,
+		&bioseq_index_memory_cap_mb,
+		0,
+		0,
+		INT_MAX,
+		PGC_USERSET,
+		GUC_UNIT_MB,
 		NULL,
 		NULL,
 		NULL);

@@ -39,9 +39,9 @@ module;
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -56,7 +56,9 @@ import bioseq_io.buffer;
 import bioseq_io.fasta;
 import bioseq_io.fastq;
 import bioseq_io.sources;
-import bioseq_io.concurrency;
+import bioseq_parallelism.mode;
+import bioseq_parallelism.concepts;
+import bioseq_parallelism.pool;
 
 export namespace bioseq::io {
 
@@ -104,42 +106,25 @@ template <
     constexpr std::size_t letters_per_unit = sequence_traits::letters_per_unit;
     constexpr bool is_fastq_format = (file_type == sequence_io_file_type::FASTQ);
 
-    // ---- Worker side: per-worker queue + thread ---- //
-    // Each worker holds a shared_ptr to its queue so the parser can
-    // post batches to it. shared_ptr is acceptable here because the
-    // hot path only does atomic-free `mpsc_queue::push` calls; the
-    // refcount churn is one inc + one dec per pipeline lifetime.
-    const std::size_t worker_count = options.concurrency.worker_count;
-    using batch_queue_t = mpsc_queue<batch_t>;
-    std::vector<std::shared_ptr<batch_queue_t>> worker_queues;
-    std::vector<std::thread> worker_threads;
-    std::atomic<bool> worker_shutdown{false};
-
-    worker_queues.reserve(worker_count);
-    worker_threads.reserve(worker_count);
-    for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
-        worker_queues.emplace_back(std::make_shared<batch_queue_t>());
-    }
-    for (std::size_t worker_index = 0; worker_index < worker_count; ++worker_index) {
-        auto worker_queue = worker_queues[worker_index];
-        worker_threads.emplace_back([&handler_fn, worker_queue, &worker_shutdown]() {
-            while (true) {
-                auto maybe_batch = worker_queue->wait_pop_or(
-                    [&] { return worker_shutdown.load(std::memory_order_acquire); });
-                if (!maybe_batch.has_value()) {
-                    // Shutdown signalled and queue empty.
-                    return;
-                }
-                handler_fn(std::move(*maybe_batch));
-            }
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    if (!pool.active()) {
+        const std::size_t requested_workers = std::max<std::size_t>(
+            1, options.concurrency.worker_count);
+        const unsigned configured_workers =
+            requested_workers > (std::numeric_limits<unsigned>::max)()
+                ? (std::numeric_limits<unsigned>::max)()
+                : static_cast<unsigned>(requested_workers);
+        pool.configure(bioseq::parallelism::PoolConfig{
+            .max_concurrency = configured_workers,
+            .mode = bioseq::parallelism::PipelineConcurrencyMode::PARALLEL,
         });
     }
+    auto task_group = pool.make_task_group();
 
     // ---- Producer/parser side ---- //
     buffer_slab slab(options.io.initial_buffer_size);
     batch_t current_batch;
     std::size_t records_emitted = 0;
-    std::size_t worker_dispatch_index = 0;
     bool aborted = false;
     std::string captured_error;
     std::size_t global_offset_base = 0;
@@ -168,9 +153,11 @@ template <
 
     auto dispatch_batch = [&]() {
         if (current_batch.empty()) return;
-        const std::size_t target_worker = worker_dispatch_index;
-        worker_dispatch_index = (worker_dispatch_index + 1) % worker_count;
-        worker_queues[target_worker]->push(std::move(current_batch));
+        batch_t batch_to_dispatch = std::move(current_batch);
+        task_group.run(bioseq::parallelism::task_body{
+            [&handler_fn, batch = std::move(batch_to_dispatch)]() mutable {
+                handler_fn(std::move(batch));
+            }});
         current_batch = batch_t{};
         prepare_fresh_batch();
     };
@@ -346,14 +333,7 @@ template <
     // Final flush of any partial batch before workers tear down.
     dispatch_batch();
 
-    // Tell workers to exit once their queues empty.
-    worker_shutdown.store(true, std::memory_order_release);
-    for (auto& worker_queue : worker_queues) {
-        worker_queue->notify_all();
-    }
-    for (auto& worker_thread : worker_threads) {
-        worker_thread.join();
-    }
+    task_group.wait();
 
     if (aborted) return std::unexpected(captured_error);
     return records_emitted;

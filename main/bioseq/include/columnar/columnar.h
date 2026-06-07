@@ -36,6 +36,11 @@ extern bool bioseq_index_scan;
 extern bool bioseq_update_index_on_insert;
 extern bool bioseq_read_sequence_index;
 extern int  bioseq_index_run_buffer_bytes;  /* DOC0279 §13 — test-only run buffer override */
+extern int  bioseq_scheduler_max_concurrency;
+extern int  bioseq_scheduler_pipeline_concurrency_mode;
+extern bool bioseq_scheduler_allow_pg_parallel_composition;
+extern bool bioseq_index_async_persist;
+extern int  bioseq_index_memory_cap_mb;
 /*
  * DOC0260 Phase A — controls the per-shard payload cap for the
  * length-bucketed sub-table sharding. Value is in GiB; 0 is a documented

@@ -118,6 +118,11 @@ set(BIOSEQ_NOPG_MODULES
   # backend/pipeline/*
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/memory_admission.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concepts.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pool.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pipeline_ops.cppm
   # instrumentation/*
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/access.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/aggregate.cppm
@@ -229,6 +234,7 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   libassert::assert
   foonathan_memory
   hwy::hwy
+  TBB::tbb
   ${Boost_LIBRARIES})
 
 target_sources(bioseq_modules_nopg
@@ -247,6 +253,7 @@ file(GLOB_RECURSE A_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/*_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/*_test.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/*_test.cpp
   # DOC0286 §13 — NO_POSTGRES file_utils unit test. Listed explicitly (NOT the
@@ -301,6 +308,9 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 #     instead of /tmp/bioseq_loglog.log. Observable but not a correctness
 #     regression — the operator can re-route via BIOSEQ_LOG_FILE if needed.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
+list(APPEND SRC_MOD_FILES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/index_residency_pg.cppm)
+list(REMOVE_DUPLICATES SRC_MOD_FILES)
 
 # Per-target module set for the aligner (and its tests_exec sibling): just
 # testing.cppm; every other Domain N module is delivered via
@@ -343,6 +353,7 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
+    TBB::tbb
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -382,6 +393,7 @@ AddCommonTargetX(
     reflectcpp::reflectcpp
     libassert::assert
     foonathan_memory
+    TBB::tbb
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES

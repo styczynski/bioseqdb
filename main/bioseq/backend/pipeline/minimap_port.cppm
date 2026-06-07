@@ -72,6 +72,9 @@ import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 tru
 import bioseq_instr;
 import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
+import bioseq_parallelism.mode;
+import bioseq_parallelism.pool;
+import bioseq_parallelism.pipeline_ops;
 
 export {
 
@@ -1364,29 +1367,12 @@ void align_regions(
     const AlignOnePhase<base_alignment_algorithm, QueryRange, TargetRange, Scanner> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
-    // DOC0276 — liveness heartbeat. A single big region (many gap-fills over a
-    // multi-Mbp seed span) can dominate wall-clock; the per-phase milestones
-    // alone would show a long silence with no sign of progress. Emit (and flush)
-    // a heartbeat at most ~once/second so `tail -f` of the log shows which
-    // region index is in flight and the live footprint. Gated on enable_logging
-    // so production pays only the loop counter.
-    std::int64_t hb_last_ns = enable_logging ? bioseq::instr::clock::now_ns() : 0;
-    std::size_t  hb_region_idx = 0;
-    for (auto& region : regions) {
-        ++hb_region_idx;
-        if (enable_logging) {
-            const std::int64_t hb_now_ns = bioseq::instr::clock::now_ns();
-            if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
-                hb_last_ns = hb_now_ns;
-                JustLogProgress("[minimap_port] aligning region {}/{} seed_count={}"
-                        " | footprint={}MB avail={}MB",
-                        hb_region_idx, regions.size(), region.seed_count,
-                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-            }
-        }
+    auto align_one_region_by_index =
+        [query_length, target_length, &regions, &anchors, &params, &aligner](
+                std::size_t region_index) {
+        AlignRegion& region = regions[region_index];
         if (region.seed_count <= 0) {
-            continue;
+            return;
         }
 
         const int32_t anchor_begin = region.anchor_start;
@@ -1521,6 +1507,63 @@ void align_regions(
             const int32_t effective_block = (cigar_block_count > 0)
                 ? cigar_block_count : region.block_length;
             region.block_length = effective_block;
+        }
+    };
+
+    const auto& pool = bioseq::parallelism::GlobalPool::instance();
+    const bool task_parallel_candidate =
+        bioseq::parallelism::task_parallel(pool.mode())
+        && pool.max_concurrency() > 1
+        && base_alignment_algorithm != BaseAlignmentAlgorithmType::KSW2_BATCHED
+        && bioseq::storage::lazy_is_worker_shareable(query_seq)
+        && bioseq::storage::lazy_is_worker_shareable(target_seq)
+        && regions.size() >= bioseq::parallelism::TaskParallelMinTriggers::MIN_REGIONS_COUNT;
+    std::size_t total_seed_count = 0;
+    if (task_parallel_candidate) {
+        for (const AlignRegion& region : regions) {
+            if (region.seed_count > 0) {
+                total_seed_count += static_cast<std::size_t>(region.seed_count);
+            }
+        }
+    }
+
+    const bool may_parallel =
+        task_parallel_candidate
+        && total_seed_count >= bioseq::parallelism::TaskParallelMinTriggers::MIN_SEEDS_COUNT;
+
+    if (may_parallel) {
+        bioseq::parallelism::parallel_for_pipeline(
+            0, regions.size(), 1,
+            bioseq::parallelism::TaskParallelMinTriggers::MIN_REGIONS_COUNT,
+            bioseq::parallelism::TaskParallelRegion::align_regions,
+            [&align_one_region_by_index](std::size_t lo, std::size_t hi) {
+                for (std::size_t region_index = lo; region_index < hi; ++region_index) {
+                    align_one_region_by_index(region_index);
+                }
+            });
+    } else {
+        // DOC0276 — liveness heartbeat. A single big region (many gap-fills over a
+        // multi-Mbp seed span) can dominate wall-clock; the per-phase milestones
+        // alone would show a long silence with no sign of progress. Emit (and flush)
+        // a heartbeat at most ~once/second so `tail -f` of the log shows which
+        // region index is in flight and the live footprint. Gated on enable_logging
+        // so production pays only the loop counter.
+        std::int64_t hb_last_ns = enable_logging ? bioseq::instr::clock::now_ns() : 0;
+        std::size_t hb_region_idx = 0;
+        for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
+            ++hb_region_idx;
+            if (enable_logging) {
+                const std::int64_t hb_now_ns = bioseq::instr::clock::now_ns();
+                if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
+                    hb_last_ns = hb_now_ns;
+                    JustLogProgress("[minimap_port] aligning region {}/{} seed_count={}"
+                            " | footprint={}MB avail={}MB",
+                            hb_region_idx, regions.size(), regions[region_index].seed_count,
+                            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                }
+            }
+            align_one_region_by_index(region_index);
         }
     }
 

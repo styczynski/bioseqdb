@@ -20,8 +20,12 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
+#include <functional>
+#include <limits>
 #include <map>
 #include <optional>
+#include <queue>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,6 +45,9 @@ import bioseq_storage_scanner_pg;      // with_lazy_postgres, make_scanner_pg_in
 import bioseq_storage_lazy;            // lazy_compact_sequence
 import bioseq_types.pg_compact_sequence;  // pgseq_t, dispatch_instance
 import bioseq_sequences;               // compact_sequence_range
+import bioseq_parallelism.memory_admission;
+import bioseq_storage_indexing_residency_pg;
+import bioseq_instr;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 // Reached via extern "C++" (the bioseq_table:access_method cycle edge), exactly
@@ -64,7 +71,6 @@ static_assert(bioseq::indexing::kPgMaxAllocSize == MaxAllocSize, "MaxAllocSize m
 // Backend-local merge run-count observability (§8.8). Defined here (storage)
 // so merge_runs can set it; admin zeroes it at build start and mod reads it.
 inline std::uint64_t g_last_index_merge_run_count = 0;
-
 // Pinned attribute numbers (§8.1) for the CHUNKED_PER_FRAGMENT table.
 inline constexpr AttrNumber kAttQueryKey   = 1;
 inline constexpr AttrNumber kAttSubKey     = 2;
@@ -170,6 +176,19 @@ struct IndexStorageFragmentPg {
     mutable std::size_t   decoded_bytes_ = 0;
     mutable index_sub_key_t decoded_sub_ = DIRECTORY_SUB_KEY;
     mutable std::size_t   decoded_chunk_ = std::numeric_limits<std::size_t>::max();
+    struct CachedChunk {
+        index_sub_key_t sub_key = DIRECTORY_SUB_KEY;
+        std::size_t chunk_no = std::numeric_limits<std::size_t>::max();
+        std::size_t payload_bytes = 0;
+        std::uint64_t last_used = 0;
+        std::vector<char> bytes;
+        bioseq::parallelism::MemoryPermit permit;
+    };
+    mutable std::vector<CachedChunk> chunk_cache_;
+    mutable std::uint64_t chunk_cache_clock_ = 0;
+    mutable std::size_t chunk_cache_bytes_ = 0;
+    static constexpr std::size_t kChunkCacheMaxEntries = 8;
+    static constexpr std::size_t kChunkCacheMaxBytes = 256ULL << 20;
     std::int64_t* scratch_ = nullptr;
     std::size_t   scratch_units_ = 0;
     std::size_t   run_buffer_override_bytes_ = 0;
@@ -178,6 +197,26 @@ struct IndexStorageFragmentPg {
     // spill state
     Oid idxsort_rel_oid_ = InvalidOid;
     std::int32_t next_run_id_ = 0;
+    struct MemoryRun {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+        std::uint64_t admitted_bytes = 0;
+        bioseq::parallelism::MemoryPermit permit;
+
+        MemoryRun() = default;
+        MemoryRun(std::vector<std::pair<std::uint64_t, std::uint64_t>>&& run_pairs,
+                  std::uint64_t bytes,
+                  bioseq::parallelism::MemoryPermit&& memory_permit) noexcept
+            : pairs(std::move(run_pairs)),
+              admitted_bytes(bytes),
+              permit(std::move(memory_permit)) {}
+        MemoryRun(MemoryRun&&) noexcept = default;
+        MemoryRun& operator=(MemoryRun&&) noexcept = default;
+        MemoryRun(const MemoryRun&) = delete;
+        MemoryRun& operator=(const MemoryRun&) = delete;
+    };
+    std::vector<MemoryRun> memory_runs_;
+    std::uint64_t memory_run_bytes_ = 0;
+    std::uint64_t memory_run_peak_bytes_ = 0;
 
     IndexStorageFragmentPg() = default;
     IndexStorageFragmentPg(const IndexStorageFragmentPg&) = delete;
@@ -194,14 +233,40 @@ struct IndexStorageFragmentPg {
         own_mctx_=o.own_mctx_; index_relid_=o.index_relid_;
         decoded_=o.decoded_; decoded_units_=o.decoded_units_; decoded_bytes_=o.decoded_bytes_;
         decoded_sub_=o.decoded_sub_; decoded_chunk_=o.decoded_chunk_;
+        chunk_cache_=std::move(o.chunk_cache_);
+        chunk_cache_clock_=o.chunk_cache_clock_;
+        chunk_cache_bytes_=o.chunk_cache_bytes_;
         scratch_=o.scratch_; scratch_units_=o.scratch_units_;
         run_buffer_override_bytes_=o.run_buffer_override_bytes_;
         chunk_payload_bytes_=std::move(o.chunk_payload_bytes_);
         idxsort_rel_oid_=o.idxsort_rel_oid_; next_run_id_=o.next_run_id_;
+        memory_runs_=std::move(o.memory_runs_);
+        memory_run_bytes_=o.memory_run_bytes_;
+        memory_run_peak_bytes_=o.memory_run_peak_bytes_;
         o.own_mctx_=nullptr; o.decoded_=nullptr; o.scratch_=nullptr; o.index_relid_=InvalidOid;
         o.decoded_units_=0; o.decoded_bytes_=0; o.scratch_units_=0; o.idxsort_rel_oid_=InvalidOid;
+        o.chunk_cache_clock_=0; o.chunk_cache_bytes_=0;
+        o.memory_run_bytes_=0; o.memory_run_peak_bytes_=0;
     }
-    void release_() noexcept { if (own_mctx_ != nullptr) { MemoryContextDelete(own_mctx_); own_mctx_=nullptr; decoded_=nullptr; scratch_=nullptr; } }
+	    void release_resident_runs_noexcept() noexcept {
+	        for (auto& run : memory_runs_) {
+	            run.permit.release();
+	        }
+	        memory_runs_.clear();
+	        memory_run_bytes_ = 0;
+	        memory_run_peak_bytes_ = 0;
+	    }
+    void release_() noexcept {
+        release_resident_runs_noexcept();
+        chunk_cache_.clear();
+        chunk_cache_bytes_ = 0;
+        if (own_mctx_ != nullptr) {
+            MemoryContextDelete(own_mctx_);
+            own_mctx_=nullptr;
+            decoded_=nullptr;
+            scratch_=nullptr;
+        }
+    }
 
     [[noreturn]] void index_error(std::string_view msg) const { pg_log(ERROR, "bioseq index: {}", msg); abort(); }
 
@@ -247,6 +312,9 @@ struct IndexStorageFragmentPg {
                 "PRIMARY KEY (query_key, sub_key, chunk_no)) USING heap;",
                 pk, quote_identifier(nm.c_str()));
             run_internal_ddl(ddl.c_str());
+            run_internal_ddl(fmt::format(
+                "ALTER TABLE bioseq_internal.{} ALTER COLUMN blob SET STORAGE EXTERNAL;",
+                quote_identifier(nm.c_str())).c_str());
             rid = get_relname_relid(nm.c_str(), ns);
             if (!OidIsValid(rid)) index_error("failed to create seqidx table");
         }
@@ -282,7 +350,50 @@ struct IndexStorageFragmentPg {
     }
     [[nodiscard]] std::size_t scratch_buffer_bytes_() const { return scratch_units_ * sizeof(std::int64_t); }
 
+    [[nodiscard]] IndexChunkKey chunk_cache_key_(
+            index_sub_key_t sub_key,
+            std::size_t chunk_no) const noexcept {
+        return IndexChunkKey{
+            .db_oid = db_oid_,
+            .user_relid = user_relid_,
+            .tablespace_oid = tablespace_oid_,
+            .main_relfilenode = main_relfilenode_,
+            .column_attno = column_attno_,
+            .index_name_hash = index_name_hash(
+                db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, index_name_),
+            .bucket_idx = bucket_idx_,
+            .shard_idx = shard_idx_,
+            .query_key = query_key_,
+            .sub_key = sub_key,
+            .chunk_no = static_cast<std::uint32_t>(chunk_no),
+        };
+    }
+
+    void admit_cached_chunk_(
+            index_sub_key_t sub_key,
+            std::size_t chunk_no,
+            std::span<const char> payload,
+            bool written_in_current_xact) const {
+        (void)store_cached_chunk(
+            chunk_cache_key_(sub_key, chunk_no),
+            payload,
+            written_in_current_xact);
+    }
+
     void load_chunk_into_buffer_(index_sub_key_t sub_key, std::size_t chunk_no) const {
+        const IndexChunkKey key = chunk_cache_key_(sub_key, chunk_no);
+        if (auto cached = lookup_cached_chunk(key)) {
+            const std::size_t units =
+                (cached->size + sizeof(std::int64_t) - 1) / sizeof(std::int64_t);
+            ensure_buffer_(units == 0 ? 1 : units);
+            if (cached->size > 0) {
+                std::memcpy(decoded_, cached->data, cached->size);
+            }
+            decoded_sub_ = sub_key;
+            decoded_chunk_ = chunk_no;
+            decoded_bytes_ = cached->size;
+            return;
+        }
         Relation rel = open_index_relation_(false, AccessShareLock);
         if (rel == nullptr) pg_log(ERROR, "bioseq index: chunk (%lld,%lld,%zu) relation missing",
                                    (long long)query_key_, (long long)sub_key, chunk_no);
@@ -302,6 +413,11 @@ struct IndexStorageFragmentPg {
         const std::size_t units   = (payload + sizeof(std::int64_t) - 1) / sizeof(std::int64_t);
         ensure_buffer_(units == 0 ? 1 : units);
         if (payload > 0) std::memcpy(decoded_, VARDATA_ANY(raw), payload);
+        admit_cached_chunk_(
+            sub_key,
+            chunk_no,
+            std::span<const char>(reinterpret_cast<const char*>(VARDATA_ANY(raw)), payload),
+            false);
         if (reinterpret_cast<void*>(raw) != reinterpret_cast<void*>(DatumGetPointer(d))) pfree(raw);
         decoded_sub_ = sub_key; decoded_chunk_ = chunk_no; decoded_bytes_ = payload;
         systable_endscan(s);
@@ -373,10 +489,31 @@ struct IndexStorageFragmentPg {
         for (std::size_t b : plan) if (b > MAX_INDEX_CHUNK_SIZE_BYTES) pg_log(ERROR, "bioseq index: chunk payload exceeds MAX");
         chunk_payload_bytes_[sub_key] = std::move(plan);
     }
-    void prefetch_chunk(index_sub_key_t, std::size_t) { /* no-op */ }
+    void prefetch_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
+        if (decoded_sub_ == sub_key && decoded_chunk_ == chunk_no) {
+            return;
+        }
+        load_chunk_into_buffer_(sub_key, chunk_no);
+    }
 
     void upsert_chunk_row_(Relation rel, std::uint64_t query_key, index_sub_key_t sub_key, std::size_t chunk_no,
                            std::size_t chunk_bytes, std::span<const char> payload) {
+        {
+            const Oid pk = find_primary_key_oid(rel);
+            ScanKeyData k[3];
+            ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
+                        Int64GetDatum((int64)query_key));
+            ScanKeyInit(&k[1], kAttSubKey, BTEqualStrategyNumber, F_INT8EQ,
+                        Int64GetDatum((int64)sub_key));
+            ScanKeyInit(&k[2], kAttChunkNo, BTEqualStrategyNumber, F_INT4EQ,
+                        Int32GetDatum((int32)chunk_no));
+            SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 3, k);
+            HeapTuple old_t = systable_getnext(s);
+            if (HeapTupleIsValid(old_t)) {
+                simple_heap_delete(rel, &old_t->t_self);
+            }
+            systable_endscan(s);
+        }
         bytea* blob = reinterpret_cast<bytea*>(palloc(VARHDRSZ + payload.size()));
         SET_VARSIZE(blob, VARHDRSZ + payload.size());
         if (!payload.empty()) std::memcpy(VARDATA(blob), payload.data(), payload.size());
@@ -411,6 +548,9 @@ struct IndexStorageFragmentPg {
             if (next < chunk_no) pg_log(ERROR, "bioseq index: writer moved backwards");
             upsert_chunk_row_(rel, query_key_, sub_key, chunk_no, payload_bytes,
                               std::span<const char>(reinterpret_cast<const char*>(buf), payload_bytes));
+            admit_cached_chunk_(sub_key, chunk_no,
+                std::span<const char>(reinterpret_cast<const char*>(buf), payload_bytes),
+                true);
             chunk_no = (next == chunk_no) ? chunk_no + 1 : next;
         }
         relation_close(rel, RowExclusiveLock);
@@ -433,12 +573,22 @@ struct IndexStorageFragmentPg {
         for (HeapTuple t; (t = systable_getnext_ordered(s, ForwardScanDirection)) != nullptr; ) {
             bool isnull=false;
             const std::int64_t sk = DatumGetInt64(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull));
+            const std::int32_t chunk_no = DatumGetInt32(
+                heap_getattr(t, kAttChunkNo, RelationGetDescr(rel), &isnull));
             Datum d = heap_getattr(t, kAttBlob, RelationGetDescr(rel), &isnull);
             bytea* raw = reinterpret_cast<bytea*>(PG_DETOAST_DATUM_PACKED(d));
             const std::size_t payload = VARSIZE_ANY_EXHDR(raw);
             tmp.resize(payload); if (payload>0) std::memcpy(tmp.data(), VARDATA_ANY(raw), payload);
+            const auto cached = store_cached_chunk(
+                chunk_cache_key_((index_sub_key_t)sk, static_cast<std::size_t>(chunk_no)),
+                std::span<const char>(tmp.data(), tmp.size()),
+                false);
             if (reinterpret_cast<void*>(raw) != reinterpret_cast<void*>(DatumGetPointer(d))) pfree(raw);
-            cb((index_sub_key_t)sk, tmp.data(), payload);
+            if (cached) {
+                cb((index_sub_key_t)sk, cached->data, cached->size);
+            } else {
+                cb((index_sub_key_t)sk, tmp.data(), payload);
+            }
         }
         systable_endscan_ordered(s);
         index_close(idx, AccessShareLock);
@@ -477,17 +627,24 @@ struct IndexStorageFragmentPg {
     void clear(std::string_view name); // index-wide drop across all shards (defined below, uses seq_sub_table enumeration)
 
     [[nodiscard]] std::size_t run_buffer_bytes() const {
-        constexpr std::size_t kRunBufferBudgetDivisor = 8;
-        constexpr std::size_t kRunBufferMinBytes = std::size_t{64}  << 20;
-        constexpr std::size_t kRunBufferMaxBytes = std::size_t{512} << 20;
         if (run_buffer_override_bytes_ > 0) return run_buffer_override_bytes_;
-        // default_budget lives in bioseq_instr; to keep this module light we use a fixed mid value.
-        return std::clamp<std::size_t>(std::size_t{256} << 20, kRunBufferMinBytes, kRunBufferMaxBytes);
+        constexpr std::uint64_t floor = std::uint64_t{64} << 20;
+        constexpr std::uint64_t ceil = std::uint64_t{8} << 30;
+        const std::uint64_t desired = std::uint64_t{2} << 30;
+        std::uint64_t capped =
+            bioseq::memory::default_budget().clamp_working_set(desired, floor, ceil);
+        const std::uint64_t index_cap =
+            bioseq::parallelism::MemoryAdmissionController::instance().index_memory_cap_bytes();
+        if (index_cap != 0) {
+            capped = std::min(capped, index_cap);
+        }
+        return static_cast<std::size_t>(capped);
     }
 
     // ---- external sort spill (temp-table primary path) ----
     void ensure_idxsort_();
     std::size_t spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>> sorted);
+    std::size_t spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>> sorted);
     template <class F> void merge_runs(F&& on_kmer);
     void release_runs();
 };
@@ -552,6 +709,9 @@ struct IndexStorageSequencePg {
                 "query_key BIGINT NOT NULL, chunk_bytes INT NOT NULL, blob BYTEA NOT NULL, "
                 "PRIMARY KEY (query_key)) USING heap;", pk, quote_identifier(nm.c_str()));
             run_internal_ddl(ddl.c_str());
+            run_internal_ddl(fmt::format(
+                "ALTER TABLE bioseq_internal.{} ALTER COLUMN blob SET STORAGE EXTERNAL;",
+                quote_identifier(nm.c_str())).c_str());
             rid = get_relname_relid(nm.c_str(), ns);
             if (!OidIsValid(rid)) index_error("failed to create inline seqidx table");
         }
@@ -676,6 +836,9 @@ struct IndexStorageTablePg {
                 "chunk_no BIGINT NOT NULL, chunk_bytes INT NOT NULL, blob BYTEA NOT NULL, "
                 "PRIMARY KEY (chunk_no)) USING heap;", pk, quote_identifier(nm.c_str()));
             run_internal_ddl(ddl.c_str());
+            run_internal_ddl(fmt::format(
+                "ALTER TABLE bioseq_internal.{} ALTER COLUMN blob SET STORAGE EXTERNAL;",
+                quote_identifier(nm.c_str())).c_str());
             rid = get_relname_relid(nm.c_str(), ns);
         }
         index_relid_ = rid; return rid;
@@ -809,42 +972,150 @@ inline std::size_t IndexStorageFragmentPg::spill_sorted_run(std::span<const std:
     return (std::size_t)run;
 }
 
+inline std::size_t IndexStorageFragmentPg::spill_sorted_run_owned(
+        std::vector<std::pair<std::uint64_t,std::uint64_t>> sorted) {
+    const std::uint64_t bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(sorted.capacity()),
+        static_cast<std::uint64_t>(sizeof(std::pair<std::uint64_t,std::uint64_t>)));
+    if (!bioseq::memory::default_budget().under_pressure()) {
+        if (auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(bytes)) {
+            const std::size_t id = static_cast<std::size_t>(next_run_id_++);
+            memory_run_bytes_ += bytes;
+            memory_run_peak_bytes_ = std::max(memory_run_peak_bytes_, memory_run_bytes_);
+            memory_runs_.emplace_back(std::move(sorted), bytes, std::move(*permit));
+            JustLog("[bioseq] index: kept sorted run {} in RAM (bytes={}, resident={}, peak={})",
+                    id, bytes, memory_run_bytes_, memory_run_peak_bytes_);
+            return id;
+        }
+    }
+    JustLog("[bioseq] index: spilling sorted run to PG temp (pairs={}, capacity_bytes={})",
+            sorted.size(), bytes);
+    return spill_sorted_run(
+        std::span<const std::pair<std::uint64_t,std::uint64_t>>(sorted.data(), sorted.size()));
+}
+
 template <class F>
 inline void IndexStorageFragmentPg::merge_runs(F&& on_kmer) {
     // observability: the number of spilled runs this build merged (§8.8).
     if ((std::uint64_t)next_run_id_ > g_last_index_merge_run_count) g_last_index_merge_run_count = (std::uint64_t)next_run_id_;
-    if (!OidIsValid(idxsort_rel_oid_)) return;   // no spill happened (empty sequence)
-    // Build a (kmer, encoded) index for the ordered scan, then group + dedup.
-    Relation rel0 = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
-    const std::string relname = std::string(RelationGetRelationName(rel0));
-    relation_close(rel0, AccessShareLock);
-    const std::string idxname = fmt::format("{}_ke", relname);
-    std::string mk = fmt::format("CREATE INDEX IF NOT EXISTS {} ON pg_temp.{} (kmer, encoded);",
-                                 quote_identifier(idxname.c_str()), quote_identifier(relname.c_str()));
-    if (SPI_connect()==SPI_OK_CONNECT){ SPI_execute(mk.c_str(), false, 0); SPI_finish(); }
-    const Oid idx_oid = RelnameGetRelid(idxname.c_str());
-    if (!OidIsValid(idx_oid)) index_error("merge_runs: (kmer,encoded) index Oid unresolved");
-    Relation rel = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
-    Relation idx = index_open(idx_oid, AccessShareLock);
-    SysScanDesc s = systable_beginscan_ordered(rel, idx, nullptr, 0, nullptr);
-    TupleDesc td = RelationGetDescr(rel);
-    bool have_prev = false; std::uint64_t prev_kmer = 0;
-    std::vector<std::uint64_t> cur;
-    auto flush_kmer = [&](){ if (have_prev) { PositionBatchCursor cur_cursor{&cur}; on_kmer(prev_kmer, cur_cursor); } };
-    for (HeapTuple t; (t = systable_getnext_ordered(s, ForwardScanDirection)) != nullptr; ) {
-        bool isnull=false;
-        const std::uint64_t kmer    = (std::uint64_t)DatumGetInt64(heap_getattr(t, 3, td, &isnull));
-        const std::uint64_t encoded = (std::uint64_t)DatumGetInt64(heap_getattr(t, 4, td, &isnull));
-        if (!have_prev || kmer != prev_kmer) { flush_kmer(); cur.clear(); prev_kmer = kmer; have_prev = true; }
-        if (cur.empty() || cur.back() != encoded) cur.push_back(encoded);   // dedup adjacent
+    struct MergeHead {
+        std::uint64_t kmer = 0;
+        std::uint64_t encoded = 0;
+        std::size_t run_index = 0;
+        std::size_t pair_index = 0;
+        bool pg = false;
+    };
+    struct MergeHeadGreater {
+        bool operator()(const MergeHead& lhs, const MergeHead& rhs) const noexcept {
+            if (lhs.kmer != rhs.kmer) {
+                return lhs.kmer > rhs.kmer;
+            }
+            return lhs.encoded > rhs.encoded;
+        }
+    };
+
+    std::priority_queue<
+        MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
+    std::size_t resident_pairs = 0;
+    for (std::size_t run_index = 0; run_index < memory_runs_.size(); ++run_index) {
+        const auto& pairs = memory_runs_[run_index].pairs;
+        resident_pairs += pairs.size();
+        if (!pairs.empty()) {
+            heap.push(MergeHead{
+                pairs.front().first, pairs.front().second, run_index, 0, false});
+        }
     }
-    flush_kmer();
-    systable_endscan_ordered(s);
-    index_close(idx, AccessShareLock);
-    relation_close(rel, AccessShareLock);
+
+    Relation rel = nullptr;
+    Relation idx = nullptr;
+    SysScanDesc scan = nullptr;
+    TupleDesc td = nullptr;
+    if (OidIsValid(idxsort_rel_oid_)) {
+        Relation rel0 = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
+        const std::string relname = std::string(RelationGetRelationName(rel0));
+        relation_close(rel0, AccessShareLock);
+        const std::string idxname = fmt::format("{}_ke", relname);
+        std::string mk = fmt::format(
+            "CREATE INDEX IF NOT EXISTS {} ON pg_temp.{} (kmer, encoded);",
+            quote_identifier(idxname.c_str()), quote_identifier(relname.c_str()));
+        if (SPI_connect()==SPI_OK_CONNECT){ SPI_execute(mk.c_str(), false, 0); SPI_finish(); }
+        const Oid idx_oid = RelnameGetRelid(idxname.c_str());
+        if (!OidIsValid(idx_oid)) index_error("merge_runs: (kmer,encoded) index Oid unresolved");
+        rel = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
+        idx = index_open(idx_oid, AccessShareLock);
+        scan = systable_beginscan_ordered(rel, idx, nullptr, 0, nullptr);
+        td = RelationGetDescr(rel);
+    }
+
+    auto push_next_pg = [&heap, scan, td]() {
+        if (scan == nullptr) {
+            return;
+        }
+        HeapTuple t = systable_getnext_ordered(scan, ForwardScanDirection);
+        if (t == nullptr) {
+            return;
+        }
+        bool isnull=false;
+        const std::uint64_t kmer =
+            (std::uint64_t)DatumGetInt64(heap_getattr(t, 3, td, &isnull));
+        const std::uint64_t encoded =
+            (std::uint64_t)DatumGetInt64(heap_getattr(t, 4, td, &isnull));
+        heap.push(MergeHead{kmer, encoded, 0, 0, true});
+    };
+    push_next_pg();
+
+    std::vector<std::uint64_t> positions;
+    while (!heap.empty()) {
+        const std::uint64_t kmer = heap.top().kmer;
+        positions.clear();
+        std::uint64_t last_encoded = 0;
+        bool have_last = false;
+        while (!heap.empty() && heap.top().kmer == kmer) {
+            MergeHead head = heap.top();
+            heap.pop();
+            if (!have_last || head.encoded != last_encoded) {
+                positions.push_back(head.encoded);
+                last_encoded = head.encoded;
+                have_last = true;
+            }
+            if (head.pg) {
+                push_next_pg();
+            } else {
+                const std::size_t next_pair = head.pair_index + 1;
+                const auto& pairs = memory_runs_[head.run_index].pairs;
+                if (next_pair < pairs.size()) {
+                    heap.push(MergeHead{
+                        pairs[next_pair].first,
+                        pairs[next_pair].second,
+                        head.run_index,
+                        next_pair,
+                        false});
+                }
+            }
+        }
+        PositionBatchCursor cursor{&positions};
+        on_kmer(kmer, cursor);
+    }
+
+    if (scan != nullptr) {
+        systable_endscan_ordered(scan);
+    }
+    if (idx != nullptr) {
+        index_close(idx, AccessShareLock);
+    }
+    if (rel != nullptr) {
+        relation_close(rel, AccessShareLock);
+    }
+    if (!memory_runs_.empty()) {
+        JustLog("[bioseq] index: merged {} resident sorted runs without PG temp flush (resident_pairs={}, peak_bytes={}, disk_runs={})",
+                memory_runs_.size(), resident_pairs, memory_run_peak_bytes_,
+                OidIsValid(idxsort_rel_oid_) ? "yes" : "no");
+    }
 }
 
 inline void IndexStorageFragmentPg::release_runs() {
+    release_resident_runs_noexcept();
     if (OidIsValid(idxsort_rel_oid_)) {
         Relation rel = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
         if (rel != nullptr) {
@@ -856,6 +1127,48 @@ inline void IndexStorageFragmentPg::release_runs() {
         idxsort_rel_oid_ = InvalidOid;
     }
     next_run_id_ = 0;
+}
+
+inline void write_serialized_index_chunk_pg(
+        Oid user_relid,
+        Oid db_oid,
+        Oid tablespace_oid,
+        Oid main_relfilenode,
+        std::int16_t column_attno,
+        std::string_view index_name,
+        std::uint8_t bucket_idx,
+        std::uint32_t shard_idx,
+        std::uint64_t sequence_rowno,
+        index_sub_key_t sub_key,
+        std::uint32_t chunk_no,
+        std::span<const char> bytes) {
+    IndexStorageFragmentPg storage;
+    storage.db_oid_ = db_oid;
+    storage.tablespace_oid_ = tablespace_oid;
+    storage.main_relfilenode_ = main_relfilenode;
+    storage.user_relid_ = user_relid;
+    storage.column_attno_ = column_attno;
+    storage.index_name_ = index_name;
+    storage.bucket_idx_ = bucket_idx;
+    storage.shard_idx_ = shard_idx;
+    storage.query_key_ = sequence_rowno;
+    storage.own_mctx_ = AllocSetContextCreate(
+        CurrentMemoryContext,
+        "bioseq_async_index_persist",
+        ALLOCSET_SMALL_SIZES);
+    Relation rel = storage.open_index_relation_(true, RowExclusiveLock);
+    if (rel == nullptr) {
+        storage.index_error("async persist relation missing");
+    }
+    storage.upsert_chunk_row_(
+        rel,
+        sequence_rowno,
+        sub_key,
+        chunk_no,
+        bytes.size(),
+        bytes);
+    storage.admit_cached_chunk_(sub_key, chunk_no, bytes, false);
+    relation_close(rel, RowExclusiveLock);
 }
 
 // ---- IndexStorageTablePg::for_each_sequence (test-only CHUNKED_PER_TABLE) ---
