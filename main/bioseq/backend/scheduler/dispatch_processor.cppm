@@ -17,7 +17,9 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -25,6 +27,7 @@ module;
 #include <string>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 export module bioseq_scheduler.dispatch_processor;
 
@@ -448,6 +451,272 @@ struct OpportunisticFragmentIndexStorage {
         return 0;
     }
 };
+
+struct AsyncPersistFileChunkHeader {
+    std::int64_t sub_key;
+    std::uint32_t chunk_no;
+    std::uint32_t reserved;
+    std::uint64_t size;
+};
+
+static_assert(sizeof(AsyncPersistFileChunkHeader) == 24);
+
+struct AsyncPersistFileFragmentStorage {
+    std::map<bioseq::indexing::index_sub_key_t, std::vector<std::size_t>> plans{};
+    std::string path{};
+    std::ofstream out{};
+    std::uint64_t chunk_count = 0;
+    std::uint64_t file_bytes = 0;
+
+    explicit AsyncPersistFileFragmentStorage(std::string p)
+        : path(std::move(p)),
+          out(path, std::ios::binary | std::ios::trunc) {
+        if (!out) {
+            pg_log(ERROR,
+                   "bioseq async persist: failed to open temp payload file {}",
+                   path);
+        }
+    }
+
+    [[noreturn]] void index_error(std::string_view msg) const {
+        pg_log(ERROR, "bioseq async persist file storage: {}", msg);
+        abort();
+    }
+
+    void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes_count) {
+        const std::size_t n =
+            bytes_count == 0
+                ? 1
+                : (bytes_count + bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES - 1)
+                    / bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES;
+        std::vector<std::size_t> plan(n);
+        std::size_t remaining = bytes_count;
+        for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t bytes =
+                std::min(remaining, bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES);
+            plan[i] = bytes;
+            remaining -= bytes;
+        }
+        plans[sub_key] = std::move(plan);
+    }
+
+    void resize_chunks(
+            bioseq::indexing::index_sub_key_t sub_key,
+            std::span<const std::size_t> per_chunk_bytes) {
+        std::vector<std::size_t> plan(per_chunk_bytes.begin(), per_chunk_bytes.end());
+        for (std::size_t bytes : plan) {
+            if (bytes > bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES) {
+                index_error("chunk payload exceeds MAX_INDEX_CHUNK_SIZE_BYTES");
+            }
+        }
+        plans[sub_key] = std::move(plan);
+    }
+
+    template <class T, class F>
+    void write_to_each(bioseq::indexing::index_sub_key_t sub_key, F&& writer) {
+        auto it = plans.find(sub_key);
+        if (it == plans.end()) {
+            index_error("write_to_each without resize");
+        }
+        const std::vector<std::size_t>& plan = it->second;
+        for (std::size_t chunk_no = 0; chunk_no < plan.size();) {
+            const std::size_t payload_bytes = plan[chunk_no];
+            if (payload_bytes % sizeof(T) != 0) {
+                index_error("chunk payload not a whole number of T");
+            }
+            std::vector<char> payload(payload_bytes, char{0});
+            const std::size_t next =
+                writer(chunk_no, reinterpret_cast<T*>(payload.data()),
+                       payload_bytes / sizeof(T));
+            if (next < chunk_no || next > plan.size()) {
+                index_error("writer produced invalid next chunk");
+            }
+
+            const AsyncPersistFileChunkHeader header{
+                .sub_key = static_cast<std::int64_t>(sub_key),
+                .chunk_no = static_cast<std::uint32_t>(chunk_no),
+                .reserved = 0,
+                .size = static_cast<std::uint64_t>(payload_bytes),
+            };
+            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            if (!payload.empty()) {
+                out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            }
+            if (!out) {
+                index_error("write failed");
+            }
+            ++chunk_count;
+            file_bytes += sizeof(header) + payload_bytes;
+            chunk_no = (next == chunk_no) ? chunk_no + 1 : next;
+        }
+        plans.erase(it);
+    }
+
+    void finish() {
+        out.flush();
+        if (!out) {
+            index_error("flush failed");
+        }
+        out.close();
+    }
+
+    void remove_noexcept() noexcept {
+        try {
+            if (out.is_open()) {
+                out.close();
+            }
+            if (!path.empty()) {
+                std::remove(path.c_str());
+            }
+        } catch (...) {
+        }
+    }
+};
+
+[[nodiscard]] bioseq::parallelism::pg::PersistTarget
+make_fragment_index_persist_target(
+        const BatchProcessor::ScannerPgContext& ctx,
+        const bioseq::storage::seq_locator& loc,
+        std::uint64_t sequence_rowno,
+        std::string_view index_name = "minimizers_per_fragment") {
+    return bioseq::parallelism::pg::PersistTarget{
+        .db_oid = ctx.db_oid,
+        .user_relid = ctx.user_relid,
+        .tablespace_oid = ctx.tablespace_oid,
+        .main_relfilenode = ctx.main_relfilenode,
+        .column_attno = ctx.mmsearch_seq_attno,
+        .bucket_idx = static_cast<std::uint8_t>(loc.bucket_idx),
+        .shard_idx = loc.shard_idx,
+        .sequence_rowno = sequence_rowno,
+        .index_name = index_name,
+    };
+}
+
+template <class R>
+struct ResidentTargetForWorkers {
+    using traits = typename compact_sequence_range<R>::traits;
+    using storage_unit = typename traits::storage_unit;
+    using resident_config = sequence_custom_alphabet<
+        typename traits::alphabet_type,
+        storage_unit,
+        traits::bits_per_char>;
+    using resident_range = compact_sequence_range<resident_config>;
+
+    bioseq::parallelism::MemoryPermit permit;
+    resident_range range;
+};
+
+template <class R, class Scanner>
+[[nodiscard]] std::optional<ResidentTargetForWorkers<R>>
+try_materialize_target_for_segment_workers(
+        const bioseq::storage::lazy_compact_sequence<R, Scanner>& target_seq,
+        std::uint64_t sequence_rowno) {
+    if constexpr (!Scanner::supports_fragments()) {
+        return std::nullopt;
+    } else {
+        using resident_t = ResidentTargetForWorkers<R>;
+        using storage_unit = typename resident_t::storage_unit;
+
+        const std::uint64_t total_units64 =
+            static_cast<std::uint64_t>(target_seq.size());
+        if (total_units64
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+            pg_log(ERROR,
+                   "bioseq resident target: target row {} has too many packed "
+                   "units to materialize in one process",
+                   static_cast<unsigned long long>(sequence_rowno));
+        }
+        const std::size_t total_units =
+            static_cast<std::size_t>(total_units64);
+        const std::uint64_t packed_bytes =
+            bioseq::parallelism::saturating_mul(
+                total_units64,
+                static_cast<std::uint64_t>(sizeof(storage_unit)));
+        constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
+        const std::uint64_t reserve_bytes =
+            packed_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - context_reserve_bytes
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : packed_bytes + context_reserve_bytes;
+
+        auto permit =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .try_reserve(reserve_bytes);
+        if (!permit) {
+            JustLog("[bioseq] resident target: row={} target_bp={} packed_bytes={} "
+                    "not admitted; using scanner_pg serial fallback",
+                    static_cast<unsigned long long>(sequence_rowno),
+                    static_cast<unsigned long long>(target_seq.bp_size()),
+                    static_cast<unsigned long long>(packed_bytes));
+            return std::nullopt;
+        }
+
+        typename resident_t::resident_range::base_container packed(total_units);
+        const std::size_t fragment_units = Scanner::fragment_storage_units;
+        for (std::size_t fragment_no = 0;
+             fragment_no < target_seq.number_of_fragments();
+             ++fragment_no) {
+            if ((fragment_no & std::size_t{0x3ff}) == 0) {
+                CHECK_FOR_INTERRUPTS();
+            }
+            const std::span<const storage_unit> fragment =
+                target_seq.scanner().read_fragment(fragment_no);
+            const std::size_t dst_offset = fragment_no * fragment_units;
+            if (dst_offset >= packed.size()) {
+                target_seq.scanner().release_fragment(fragment_no);
+                break;
+            }
+            const std::size_t copy_units =
+                std::min(fragment.size(), packed.size() - dst_offset);
+            std::copy_n(fragment.data(), copy_units, packed.data() + dst_offset);
+            target_seq.scanner().release_fragment(fragment_no);
+        }
+
+        JustLog("[bioseq] resident target: row={} target_bp={} fragments={} "
+                "packed_bytes={} materialized for segment workers",
+                static_cast<unsigned long long>(sequence_rowno),
+                static_cast<unsigned long long>(target_seq.bp_size()),
+                target_seq.number_of_fragments(),
+                static_cast<unsigned long long>(packed_bytes));
+
+        return resident_t{
+            std::move(*permit),
+            resident_t::resident_range::from_packed(
+                std::move(packed), target_seq.padding())};
+    }
+}
+
+[[nodiscard]] bool stage_opportunistic_fragment_store_for_async_persist(
+        const BatchProcessor::ScannerPgContext& ctx,
+        const bioseq::storage::seq_locator& loc,
+        const OpportunisticFragmentIndexStorage& ram_store,
+        std::uint64_t sequence_rowno,
+        std::string_view index_name = "minimizers_per_fragment") {
+    if (!OidIsValid(ctx.user_relid) || ram_store.chunks.empty()) {
+        return false;
+    }
+
+    std::vector<bioseq::parallelism::pg::PersistChunk> persist_chunks;
+    persist_chunks.reserve(ram_store.chunks.size());
+    for (const OpportunisticIndexChunk& chunk : ram_store.chunks) {
+        persist_chunks.push_back(
+            bioseq::parallelism::pg::PersistChunk{
+                .sub_key = chunk.sub_key,
+                .chunk_no = chunk.chunk_no,
+                .bytes = std::span<const char>(
+                    chunk.bytes.data(), chunk.bytes.size()),
+            });
+    }
+
+    const bioseq::parallelism::pg::PersistTarget persist_target =
+        make_fragment_index_persist_target(ctx, loc, sequence_rowno, index_name);
+    return bioseq::parallelism::pg::stage_async_index_persist(
+        persist_target,
+        std::span<const bioseq::parallelism::pg::PersistChunk>(
+            persist_chunks.data(), persist_chunks.size()));
+}
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> BatchProcessor::process_sequences(
     const size_t batch_size,
@@ -909,35 +1178,13 @@ struct OpportunisticFragmentIndexStorage {
                                             OpportunisticFragmentIndexStorage>::build(
                                                 ram_store, ft_pg);
 
-                                        std::vector<bioseq::parallelism::pg::PersistChunk>
-                                            persist_chunks;
-                                        persist_chunks.reserve(ram_store.chunks.size());
-                                        for (const OpportunisticIndexChunk& chunk : ram_store.chunks) {
-                                            persist_chunks.push_back(
-                                                bioseq::parallelism::pg::PersistChunk{
-                                                    .sub_key = chunk.sub_key,
-                                                    .chunk_no = chunk.chunk_no,
-                                                    .bytes = std::span<const char>(
-                                                        chunk.bytes.data(), chunk.bytes.size()),
-                                                });
-                                        }
-                                        const bioseq::parallelism::pg::PersistTarget persist_target{
-                                            .db_oid = scanner_pg_ctx->db_oid,
-                                            .user_relid = scanner_pg_ctx->user_relid,
-                                            .tablespace_oid = scanner_pg_ctx->tablespace_oid,
-                                            .main_relfilenode = scanner_pg_ctx->main_relfilenode,
-                                            .column_attno = scanner_pg_ctx->mmsearch_seq_attno,
-                                            .bucket_idx = static_cast<std::uint8_t>(loc_opt->bucket_idx),
-                                            .shard_idx = loc_opt->shard_idx,
-                                            .sequence_rowno = static_cast<std::uint64_t>(
-                                                scanner_pg_ctx->target_rownos[i]),
-                                            .index_name = "minimizers_per_fragment",
-                                        };
                                         const bool staged =
-                                            bioseq::parallelism::pg::stage_async_index_persist(
-                                                persist_target,
-                                                std::span<const bioseq::parallelism::pg::PersistChunk>(
-                                                    persist_chunks.data(), persist_chunks.size()));
+                                            stage_opportunistic_fragment_store_for_async_persist(
+                                                *scanner_pg_ctx,
+                                                *loc_opt,
+                                                ram_store,
+                                                static_cast<std::uint64_t>(
+                                                    scanner_pg_ctx->target_rownos[i]));
                                         JustLog("[bioseq] index: opportunistic RAM-first index row={} target_bp={} chunks={} peak_bytes={} async_staged={}",
                                                 static_cast<unsigned long long>(
                                                     scanner_pg_ctx->target_rownos[i]),
@@ -1049,10 +1296,103 @@ struct OpportunisticFragmentIndexStorage {
                                 }
                             }
                             if (!assembled) {
-                                collection =
-                                    (target_bp_size > kSegmentationThresholdBp)
-                                        ? minimap_port_segmented(fq_pg, ft_pg, params)
-                                        : minimap_port(fq_pg, ft_pg, params);
+                                const bool try_resident_segment_workers =
+                                    target_bp_size > kSegmentationThresholdBp
+                                    && !base_params.enable_profiling
+                                    && bioseq::parallelism::task_parallel(pool.mode())
+                                    && pool.max_concurrency() > 1;
+                                if (try_resident_segment_workers) {
+                                    auto resident =
+                                        try_materialize_target_for_segment_workers(
+                                            ft_pg,
+                                            static_cast<std::uint64_t>(
+                                                scanner_pg_ctx->target_rownos[i]));
+                                    if (resident.has_value()) {
+                                        auto resident_target =
+                                            bioseq::storage::make_lazy_in_memory(
+                                                resident->range);
+                                        const bool can_fuse_recompute_persist =
+                                            bioseq_recompute_async_persist
+                                            && bioseq_index_async_persist
+                                            && OidIsValid(scanner_pg_ctx->user_relid)
+                                            && params.kmer_size == 15
+                                            && params.window_size == 10;
+                                        if (can_fuse_recompute_persist) {
+                                            const auto rowno =
+                                                static_cast<std::uint64_t>(
+                                                    scanner_pg_ctx->target_rownos[i]);
+                                            const std::uint64_t nonce =
+                                                static_cast<std::uint64_t>(
+                                                    bioseq::instr::clock::now_ns());
+                                            std::string temp_path = fmt::format(
+                                                "/tmp/bioseq_async_mpf_{}_{}_{}.bin",
+                                                static_cast<long long>(::getpid()),
+                                                static_cast<unsigned long long>(rowno),
+                                                static_cast<unsigned long long>(nonce));
+                                            AsyncPersistFileFragmentStorage file_store{
+                                                std::move(temp_path)};
+                                            bool staged = false;
+                                            PG_TRY();
+                                            {
+                                                collection = minimap_port_segmented(
+                                                    lazy_query,
+                                                    resident_target,
+                                                    params,
+                                                    &file_store);
+                                                file_store.finish();
+                                                const auto persist_target =
+                                                    make_fragment_index_persist_target(
+                                                        *scanner_pg_ctx,
+                                                        *loc_opt,
+                                                        rowno);
+                                                staged =
+                                                    bioseq::parallelism::pg::
+                                                        stage_async_index_persist_file(
+                                                            persist_target,
+                                                            std::move(file_store.path),
+                                                            file_store.file_bytes,
+                                                            file_store.chunk_count);
+                                            }
+                                            PG_CATCH();
+                                            {
+                                                file_store.remove_noexcept();
+                                                PG_RE_THROW();
+                                            }
+                                            PG_END_TRY();
+                                            JustLog("[bioseq] index: recompute fused async-persist row={} target_bp={} chunks={} file_bytes={} async_staged={}",
+                                                    static_cast<unsigned long long>(rowno),
+                                                    static_cast<unsigned long long>(
+                                                        loc_opt->total_bp_size),
+                                                    static_cast<unsigned long long>(
+                                                        file_store.chunk_count),
+                                                    static_cast<unsigned long long>(
+                                                        file_store.file_bytes),
+                                                    staged);
+                                        } else {
+                                            collection = minimap_port_segmented(
+                                                lazy_query, resident_target, params);
+                                            if (bioseq_recompute_async_persist
+                                                && (params.kmer_size != 15
+                                                    || params.window_size != 10)) {
+                                                JustLog("[bioseq] index: recompute async-persist skipped row={} target_bp={} because active params are k={} w={} but persisted minimizers_per_fragment is pinned to k=15 w=10",
+                                                        static_cast<unsigned long long>(
+                                                            scanner_pg_ctx->target_rownos[i]),
+                                                        static_cast<unsigned long long>(
+                                                            loc_opt->total_bp_size),
+                                                        params.kmer_size,
+                                                        params.window_size);
+                                            }
+                                        }
+                                    } else {
+                                        collection = minimap_port_segmented(
+                                            fq_pg, ft_pg, params);
+                                    }
+                                } else {
+                                    collection =
+                                        (target_bp_size > kSegmentationThresholdBp)
+                                            ? minimap_port_segmented(fq_pg, ft_pg, params)
+                                            : minimap_port(fq_pg, ft_pg, params);
+                                }
                             }
                         } else {
                             compact_sequence_range<S> target_seq{*target_hdr};

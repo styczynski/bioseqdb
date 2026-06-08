@@ -79,7 +79,9 @@ int bioseq_index_run_buffer_bytes = 0;
 int  bioseq_scheduler_max_concurrency = 0;
 int  bioseq_scheduler_pipeline_concurrency_mode = 0;
 bool bioseq_scheduler_allow_pg_parallel_composition = false;
+bool bioseq_load_overlap_enabled = false;
 bool bioseq_index_async_persist = true;
+bool bioseq_recompute_async_persist = false;
 int  bioseq_index_memory_cap_mb = 0;
 
 /*
@@ -478,11 +480,35 @@ bioseq_guc_init()
 		NULL);
 
 	DefineCustomBoolVariable(
+		"bioseq.load_overlap",
+		"Overlap bioseq.load parsing/encoding with main-backend columnar writes.",
+		NULL,
+		&bioseq_load_overlap_enabled,
+		false,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomBoolVariable(
 		"bioseq.index_async_persist",
 		"Persist opportunistically built in-memory indexes after returning query results.",
 		NULL,
 		&bioseq_index_async_persist,
 		true,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.recompute_async_persist",
+		"Stage a minimizers_per_fragment index for async persistence after no-index recompute.",
+		NULL,
+		&bioseq_recompute_async_persist,
+		false,
 		PGC_USERSET,
 		0,
 		NULL,

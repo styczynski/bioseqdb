@@ -68,6 +68,7 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #include <algorithm>
 #include <array>
 #include <concepts>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -100,6 +101,7 @@ import bioseq_instr;
 import bioseq_storage_scanner;
 import bioseq_storage_lazy;
 import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
+import bioseq_indexing.type;
 import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
 import bioseq_parallelism.mode;
@@ -3249,14 +3251,184 @@ MatchResultCollection minimap_port(
  * `max_occ`, so anchors match the non-segmented path; a global pre-count would
  * restore exact semantics for highly repetitive references (future work).
  */
+template <class MinimizerT>
+struct SegmentFragmentEmission {
+    std::size_t fragment_no = 0;
+    sequence_size_t fragment_len_bp = 0;
+    std::vector<MinimizerT> minimizers{};
+};
+
+template <class MinimizerT>
+[[nodiscard]] std::vector<SegmentFragmentEmission<MinimizerT>>
+collect_fragment_emissions_for_segment(
+        const pipe::SegmentUnitRange& range,
+        std::span<const MinimizerT> segment_minimizers,
+        sequence_size_t total_bp,
+        sequence_size_t frag_bp,
+        std::size_t lpu) {
+    const sequence_size_t emit_base_bp =
+        static_cast<sequence_size_t>(range.cs_u) * lpu;
+    const std::size_t frag_lo =
+        static_cast<std::size_t>(range.core_lo_bp / frag_bp);
+    const std::size_t frag_hi =
+        static_cast<std::size_t>((range.core_hi_bp + frag_bp - 1) / frag_bp);
+
+    std::vector<SegmentFragmentEmission<MinimizerT>> out;
+    out.reserve(frag_hi > frag_lo ? frag_hi - frag_lo : 0);
+    for (std::size_t fragment_no = frag_lo; fragment_no < frag_hi; ++fragment_no) {
+        const sequence_size_t fragment_lo_bp =
+            static_cast<sequence_size_t>(fragment_no) * frag_bp;
+        const sequence_size_t fragment_hi_bp =
+            std::min(fragment_lo_bp + frag_bp, total_bp);
+        const sequence_size_t claim_lo =
+            std::max(fragment_lo_bp, range.core_lo_bp);
+        const sequence_size_t claim_hi =
+            std::min(fragment_hi_bp, range.core_hi_bp);
+        if (claim_lo >= claim_hi) {
+            continue;
+        }
+
+        SegmentFragmentEmission<MinimizerT> emission{};
+        emission.fragment_no = fragment_no;
+        emission.fragment_len_bp = fragment_hi_bp - fragment_lo_bp;
+        for (const MinimizerT& minimizer : segment_minimizers) {
+            const sequence_size_t global_pos =
+                emit_base_bp
+                + static_cast<sequence_size_t>(minimizer.last_pos());
+            if (global_pos >= claim_lo && global_pos < claim_hi) {
+                emission.minimizers.emplace_back(
+                    minimizer.kmer(),
+                    static_cast<std::uint64_t>(global_pos - fragment_lo_bp),
+                    minimizer.strand());
+            }
+        }
+        out.push_back(std::move(emission));
+    }
+    return out;
+}
+
+template <class MinimizerT>
+struct PendingFragmentBuild {
+    sequence_size_t fragment_len_bp = 0;
+    std::vector<MinimizerT> minimizers{};
+};
+
+template <class FragmentStorage, class MinimizerT>
+class FragmentPersistAccumulator {
+public:
+    FragmentPersistAccumulator(
+            FragmentStorage& storage,
+            sequence_size_t total_bp,
+            sequence_size_t frag_bp)
+        : storage_(storage),
+          total_bp_(total_bp),
+          frag_bp_(frag_bp),
+          nfrag_(static_cast<std::size_t>((total_bp + frag_bp - 1) / frag_bp)) {}
+
+    void ingest(std::span<const SegmentFragmentEmission<MinimizerT>> emissions) {
+        for (const SegmentFragmentEmission<MinimizerT>& emission : emissions) {
+            PendingFragmentBuild<MinimizerT>& pending =
+                pending_[emission.fragment_no];
+            pending.fragment_len_bp = emission.fragment_len_bp;
+            pending.minimizers.insert(
+                pending.minimizers.end(),
+                emission.minimizers.begin(),
+                emission.minimizers.end());
+        }
+    }
+
+    void flush_ready(sequence_size_t processed_core_hi_bp) {
+        while (next_flush_fragment_ < nfrag_) {
+            if (fragment_hi_bp(next_flush_fragment_) > processed_core_hi_bp) {
+                break;
+            }
+            flush_one(next_flush_fragment_++);
+        }
+    }
+
+    void finish() {
+        while (next_flush_fragment_ < nfrag_) {
+            flush_one(next_flush_fragment_++);
+        }
+
+        const std::int64_t manifest = static_cast<std::int64_t>(nfrag_);
+        storage_.resize(
+            bioseq::indexing::DIRECTORY_SUB_KEY,
+            sizeof(std::int64_t));
+        storage_.template write_to_each<std::int64_t>(
+            bioseq::indexing::DIRECTORY_SUB_KEY,
+            [manifest](
+                    std::size_t chunk_no,
+                    std::int64_t* manifest_buf,
+                    std::size_t) {
+                manifest_buf[0] = manifest;
+                return chunk_no;
+            });
+    }
+
+private:
+    [[nodiscard]] sequence_size_t fragment_lo_bp(std::size_t fragment_no) const {
+        return static_cast<sequence_size_t>(fragment_no) * frag_bp_;
+    }
+
+    [[nodiscard]] sequence_size_t fragment_hi_bp(std::size_t fragment_no) const {
+        return std::min(fragment_lo_bp(fragment_no) + frag_bp_, total_bp_);
+    }
+
+    void flush_one(std::size_t fragment_no) {
+        PendingFragmentBuild<MinimizerT> pending{};
+        if (auto it = pending_.find(fragment_no); it != pending_.end()) {
+            pending = std::move(it->second);
+            pending_.erase(it);
+        }
+        if (pending.fragment_len_bp == 0) {
+            pending.fragment_len_bp =
+                fragment_hi_bp(fragment_no) - fragment_lo_bp(fragment_no);
+        }
+
+        MinimizerHashmapFragmentIndex frag_idx;
+        frag_idx.build(pending.minimizers, pending.fragment_len_bp);
+
+        std::vector<char> blob(frag_idx.serialize_binary_size());
+        frag_idx.serialize_to_binary(blob.data());
+
+        const auto sub_key =
+            static_cast<bioseq::indexing::index_sub_key_t>(fragment_no);
+        storage_.resize(sub_key, blob.size());
+        storage_.template write_to_each<char>(
+            sub_key,
+            [&blob](std::size_t chunk_no, char* buf, std::size_t cap_bytes) {
+                const std::size_t offset =
+                    chunk_no * bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES;
+                const std::size_t n =
+                    offset >= blob.size()
+                        ? 0
+                        : std::min(cap_bytes, blob.size() - offset);
+                if (n != 0) {
+                    std::memcpy(buf, blob.data() + offset, n);
+                }
+                return chunk_no;
+            });
+    }
+
+    FragmentStorage& storage_;
+    sequence_size_t total_bp_ = 0;
+    sequence_size_t frag_bp_ = 0;
+    std::size_t nfrag_ = 0;
+    std::size_t next_flush_fragment_ = 0;
+    std::map<std::size_t, PendingFragmentBuild<MinimizerT>> pending_{};
+};
+
 template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>,
+          class FragmentIndexStorage = std::nullptr_t>
 [[nodiscard]] MatchResultCollection minimap_port_segmented(
     bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
     bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
-    const Minimap2Params& params = Minimap2Params{})
+    const Minimap2Params& params = Minimap2Params{},
+    FragmentIndexStorage* fragment_index_out = nullptr)
 {
     using MinimizerT = MinimapSketchData;
     static const auto* _desc =
@@ -3294,17 +3466,62 @@ template <supports_compact_sequence_range QueryRange,
 
     auto run_serial_segmented =
         [target_len, query_len, lpu, w, k, &target_seq, &query_seq,
-         &query_minimizers, &params]() -> MatchResultCollection {
+         &query_minimizers, &params, fragment_index_out]() -> MatchResultCollection {
         std::vector<MatchResult> merged;
         sketch_collector_t<MinimizerT> seg_collector;
         MinimizerHashmapFragmentIndex seg_index;
         const auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu);
+        constexpr std::size_t frag_units = Scanner::fragment_storage_units;
+        const sequence_size_t frag_bp =
+            static_cast<sequence_size_t>(frag_units) * lpu;
 
         JustLogProgress("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
                         "| footprint={}MB avail={}MB",
                 target_len, query_len, ranges.size(),
                 bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                 bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+
+        if constexpr (!std::is_same_v<FragmentIndexStorage, std::nullptr_t>) {
+            if (fragment_index_out != nullptr) {
+                FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
+                    *fragment_index_out, target_len, frag_bp};
+                for (const pipe::SegmentUnitRange& range : ranges) {
+                    seg_collector.clear();
+                    seg_collector.reserve(
+                        (range.ce_u - range.cs_u) * lpu
+                            / std::max<std::size_t>(w, 1) + 64);
+                    pipe::minimizer_dispatch_range<MinimizerT>(
+                        seg_collector, target_seq, range.cs_u, range.ce_u, w, k);
+                    const std::vector<MinimizerT>& seg_minimizers =
+                        seg_collector.extract_sketches_data();
+
+                    auto emissions = collect_fragment_emissions_for_segment(
+                        range,
+                        std::span<const MinimizerT>(
+                            seg_minimizers.data(), seg_minimizers.size()),
+                        target_len,
+                        frag_bp,
+                        lpu);
+                    acc.ingest(std::span<const SegmentFragmentEmission<MinimizerT>>(
+                        emissions.data(), emissions.size()));
+                    acc.flush_ready(range.core_hi_bp);
+
+                    seg_index.build(seg_minimizers, target_len);
+                    seg_index.add_position_offset(range.cs_u * lpu);
+
+                    MatchResultCollection seg_res = minimap2_port_with_index(
+                        query_seq, target_seq, query_minimizers, seg_index, params);
+                    for (auto& result : seg_res.results) {
+                        if (result.target_start >= range.core_lo_bp
+                            && result.target_start < range.core_hi_bp) {
+                            merged.push_back(std::move(result));
+                        }
+                    }
+                }
+                acc.finish();
+                return MatchResultCollection{std::move(merged)};
+            }
+        }
 
         for (const pipe::SegmentUnitRange& range : ranges) {
             seg_collector.clear();
@@ -3400,6 +3617,143 @@ template <supports_compact_sequence_range QueryRange,
         bioseq::parallelism::TaskParallelRegion::segment_recompute);
     if (!scope.acquired()) {
         return run_serial_segmented();
+    }
+
+    if constexpr (!std::is_same_v<FragmentIndexStorage, std::nullptr_t>) {
+        if (fragment_index_out != nullptr) {
+            constexpr std::size_t frag_units = Scanner::fragment_storage_units;
+            const sequence_size_t frag_bp =
+                static_cast<sequence_size_t>(frag_units) * lpu;
+            FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
+                *fragment_index_out, target_len, frag_bp};
+            std::vector<MatchResult> merged;
+
+            auto process_segment_serial =
+                [&ranges, &target_seq, &query_seq, &query_minimizers, &params,
+                 &acc, &merged, target_len, frag_bp, w, k, lpu](
+                        std::size_t segment_index) {
+                sketch_collector_t<MinimizerT> collector;
+                MinimizerHashmapFragmentIndex index;
+                const pipe::SegmentUnitRange& range = ranges[segment_index];
+                collector.reserve(
+                    (range.ce_u - range.cs_u) * lpu
+                        / std::max<std::size_t>(w, 1) + 64);
+                pipe::minimizer_dispatch_range<MinimizerT>(
+                    collector, target_seq, range.cs_u, range.ce_u, w, k);
+                const std::vector<MinimizerT>& minimizers =
+                    collector.extract_sketches_data();
+                auto emissions = collect_fragment_emissions_for_segment(
+                    range,
+                    std::span<const MinimizerT>(minimizers.data(), minimizers.size()),
+                    target_len,
+                    frag_bp,
+                    lpu);
+                acc.ingest(std::span<const SegmentFragmentEmission<MinimizerT>>(
+                    emissions.data(), emissions.size()));
+                acc.flush_ready(range.core_hi_bp);
+
+                index.build(minimizers, target_len);
+                index.add_position_offset(range.cs_u * lpu);
+                MatchResultCollection seg_res = minimap2_port_with_index(
+                    query_seq, target_seq, query_minimizers, index, params);
+                for (auto& result : seg_res.results) {
+                    if (result.target_start >= range.core_lo_bp
+                        && result.target_start < range.core_hi_bp) {
+                        merged.push_back(std::move(result));
+                    }
+                }
+            };
+
+            for (std::size_t wave_lo = 0; wave_lo < ranges.size();) {
+                const std::size_t wave_count = std::min<std::size_t>(
+                    first_wave.fanout, ranges.size() - wave_lo);
+                bioseq::parallelism::MemoryPermit wave_permit;
+                if (wave_lo == 0) {
+                    wave_permit = std::move(first_wave.permit);
+                } else if (auto permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance()
+                            .try_reserve(
+                                bioseq::parallelism::saturating_mul(
+                                    static_cast<std::uint64_t>(wave_count),
+                                    first_wave.peak_per_segment))) {
+                    wave_permit = std::move(*permit);
+                }
+                if (!wave_permit) {
+                    for (std::size_t segment_index = wave_lo;
+                         segment_index < ranges.size();
+                         ++segment_index) {
+                        process_segment_serial(segment_index);
+                    }
+                    wave_lo = ranges.size();
+                    break;
+                }
+
+                const std::size_t current_wave_lo = wave_lo;
+                const std::size_t wave_hi = wave_lo + wave_count;
+                std::vector<MatchResultCollection> wave_seg_out(wave_count);
+                std::vector<std::vector<SegmentFragmentEmission<MinimizerT>>>
+                    wave_frag_out(wave_count);
+                pool.parallel_for_with_context(
+                    wave_lo, wave_hi, 1,
+                    bioseq::parallelism::range_body{
+                        [&ranges, &wave_seg_out, &wave_frag_out,
+                         &target_seq, &query_seq, &query_minimizers, &params,
+                         current_wave_lo, target_len, frag_bp, w, k, lpu](
+                                std::size_t lo, std::size_t hi) {
+                        sketch_collector_t<MinimizerT> collector;
+                        MinimizerHashmapFragmentIndex index;
+                        for (std::size_t segment_index = lo;
+                             segment_index < hi;
+                             ++segment_index) {
+                            const pipe::SegmentUnitRange& range =
+                                ranges[segment_index];
+                            const std::size_t rel = segment_index - current_wave_lo;
+                            collector.clear();
+                            collector.reserve(
+                                (range.ce_u - range.cs_u) * lpu
+                                    / std::max<std::size_t>(w, 1) + 64);
+                            pipe::minimizer_dispatch_range<MinimizerT>(
+                                collector, target_seq, range.cs_u, range.ce_u, w, k);
+                            const std::vector<MinimizerT>& minimizers =
+                                collector.extract_sketches_data();
+                            wave_frag_out[rel] =
+                                collect_fragment_emissions_for_segment(
+                                    range,
+                                    std::span<const MinimizerT>(
+                                        minimizers.data(), minimizers.size()),
+                                    target_len,
+                                    frag_bp,
+                                    lpu);
+                            index.build(minimizers, target_len);
+                            index.add_position_offset(range.cs_u * lpu);
+                            wave_seg_out[rel] = minimap2_port_with_index(
+                                query_seq,
+                                target_seq,
+                                query_minimizers,
+                                index,
+                                params);
+                        }
+                    }});
+
+                for (std::size_t rel = 0; rel < wave_count; ++rel) {
+                    const std::size_t segment_index = current_wave_lo + rel;
+                    const pipe::SegmentUnitRange& range = ranges[segment_index];
+                    acc.ingest(std::span<const SegmentFragmentEmission<MinimizerT>>(
+                        wave_frag_out[rel].data(), wave_frag_out[rel].size()));
+                    acc.flush_ready(range.core_hi_bp);
+                    for (auto& result : wave_seg_out[rel].results) {
+                        if (result.target_start >= range.core_lo_bp
+                            && result.target_start < range.core_hi_bp) {
+                            merged.push_back(std::move(result));
+                        }
+                    }
+                }
+                wave_lo = wave_hi;
+            }
+
+            acc.finish();
+            return MatchResultCollection{std::move(merged)};
+        }
     }
 
     bool fallback_to_serial = false;

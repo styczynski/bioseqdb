@@ -35,6 +35,7 @@ void AbortCurrentTransaction(void);
 #include <csignal>
 #include <cstdio>
 #include <cstdint>
+#include <fstream>
 #include <limits>
 #include <cstring>
 #include <optional>
@@ -103,8 +104,26 @@ struct IndexPersistDsmChunk {
     std::uint64_t size;
 };
 
+struct IndexPersistFileDsmHeader {
+    std::uint32_t magic;
+    std::uint32_t version;
+    std::uint32_t index_name_len;
+    std::uint32_t path_len;
+    std::uint64_t file_bytes;
+    std::uint64_t chunk_count;
+};
+
+struct PersistFileChunkHeader {
+    std::int64_t sub_key;
+    std::uint32_t chunk_no;
+    std::uint32_t reserved;
+    std::uint64_t size;
+};
+
 inline constexpr std::uint32_t kIndexPersistDsmMagic = 0xB1051D58u;
 inline constexpr std::uint32_t kIndexPersistDsmVersion = 1;
+inline constexpr std::uint32_t kIndexPersistFileDsmMagic = 0xB1051D59u;
+inline constexpr std::uint32_t kIndexPersistFileDsmVersion = 1;
 
 struct BioseqSchedulerShared {
     pg_atomic_uint32 cfg_max_concurrency;
@@ -278,9 +297,11 @@ struct PersistChunk {
 struct PendingPersistJob {
     PersistTarget target{};
     std::string index_name{};
+    std::string temp_file_path{};
     dsm_handle dsm = DSM_HANDLE_INVALID;
     std::uint64_t payload_bytes = 0;
     bool published = false;
+    bool file_backed = false;
     bioseq::parallelism::MemoryPermit permit{};
 };
 
@@ -300,6 +321,89 @@ void release_pinned_dsm(dsm_handle handle) noexcept {
         return;
     }
     dsm_unpin_segment(handle);
+}
+
+void remove_temp_file_noexcept(std::string_view path) noexcept {
+    if (path.empty()) {
+        return;
+    }
+    std::string owned{path};
+    std::remove(owned.c_str());
+}
+
+[[nodiscard]] std::string file_path_from_metadata_dsm(dsm_handle handle) {
+    if (handle == DSM_HANDLE_INVALID) {
+        return {};
+    }
+    dsm_segment* seg = dsm_attach(handle);
+    if (seg == nullptr) {
+        return {};
+    }
+    const Size mapped = dsm_segment_map_length(seg);
+    std::string path;
+    if (mapped >= sizeof(IndexPersistFileDsmHeader)) {
+        char* base = static_cast<char*>(dsm_segment_address(seg));
+        IndexPersistFileDsmHeader header{};
+        std::memcpy(&header, base, sizeof(header));
+        if (header.magic == kIndexPersistFileDsmMagic
+            && header.version == kIndexPersistFileDsmVersion
+            && header.index_name_len > 0
+            && header.path_len > 0
+            && sizeof(IndexPersistFileDsmHeader) + header.index_name_len
+                    <= static_cast<std::uint64_t>(mapped)
+            && sizeof(IndexPersistFileDsmHeader) + header.index_name_len
+                    + header.path_len
+                    <= static_cast<std::uint64_t>(mapped)) {
+            const char* path_begin =
+                base + sizeof(IndexPersistFileDsmHeader) + header.index_name_len;
+            path.assign(path_begin, path_begin + header.path_len);
+        }
+    }
+    dsm_detach(seg);
+    return path;
+}
+
+void remove_file_payload_if_present_noexcept(dsm_handle handle) noexcept {
+    try {
+        remove_temp_file_noexcept(file_path_from_metadata_dsm(handle));
+    } catch (...) {
+    }
+}
+
+struct PersistFileMetadata {
+    std::string index_name{};
+    std::string path{};
+    std::uint64_t file_bytes = 0;
+    std::uint64_t chunk_count = 0;
+};
+
+[[nodiscard]] std::optional<PersistFileMetadata>
+parse_persist_file_metadata(const char* base, Size mapped) {
+    if (mapped < sizeof(IndexPersistFileDsmHeader)) {
+        return std::nullopt;
+    }
+    IndexPersistFileDsmHeader header{};
+    std::memcpy(&header, base, sizeof(header));
+    if (header.magic != kIndexPersistFileDsmMagic
+        || header.version != kIndexPersistFileDsmVersion
+        || header.index_name_len == 0
+        || header.path_len == 0) {
+        return std::nullopt;
+    }
+    const std::uint64_t names_offset = sizeof(IndexPersistFileDsmHeader);
+    const std::uint64_t path_offset = names_offset + header.index_name_len;
+    const std::uint64_t path_end = path_offset + header.path_len;
+    if (path_offset < names_offset
+        || path_end < path_offset
+        || path_end > static_cast<std::uint64_t>(mapped)) {
+        return std::nullopt;
+    }
+    PersistFileMetadata meta{};
+    meta.index_name.assign(base + names_offset, base + path_offset);
+    meta.path.assign(base + path_offset, base + path_end);
+    meta.file_bytes = header.file_bytes;
+    meta.chunk_count = header.chunk_count;
+    return meta;
 }
 
 [[nodiscard]] bool publish_persist_job_to_shared_queue(PendingPersistJob& job) noexcept {
@@ -349,6 +453,9 @@ extern "C++" void bioseq_persist_xact_callback(XactEvent event, void*) {
             if (publish_persist_job_to_shared_queue(job)) {
                 job.published = true;
             } else {
+                if (job.file_backed) {
+                    remove_temp_file_noexcept(job.temp_file_path);
+                }
                 release_pinned_dsm(job.dsm);
                 job.dsm = DSM_HANDLE_INVALID;
             }
@@ -357,6 +464,9 @@ extern "C++" void bioseq_persist_xact_callback(XactEvent event, void*) {
     } else {
         for (PendingPersistJob& job : jobs) {
             if (!job.published) {
+                if (job.file_backed) {
+                    remove_temp_file_noexcept(job.temp_file_path);
+                }
                 release_pinned_dsm(job.dsm);
             }
             job.permit.release();
@@ -460,6 +570,82 @@ void ensure_persist_xact_callback_registered() {
             chunks.size(),
             static_cast<unsigned long long>(bytes_total),
             static_cast<unsigned long long>(dsm_ready_ns - stage_start_ns),
+            static_cast<unsigned long long>(queued_ns - stage_start_ns));
+    return true;
+}
+
+[[nodiscard]] bool stage_async_index_persist_file(
+        const PersistTarget& target,
+        std::string temp_file_path,
+        std::uint64_t file_bytes,
+        std::uint64_t chunk_count) {
+    const std::uint64_t stage_start_ns =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    ensure_persist_xact_callback_registered();
+    if (!bioseq_index_async_persist
+        || target.index_name.empty()
+        || temp_file_path.empty()
+        || chunk_count == 0) {
+        remove_temp_file_noexcept(temp_file_path);
+        return false;
+    }
+
+    std::uint64_t bytes_total = sizeof(IndexPersistFileDsmHeader);
+    bytes_total += target.index_name.size();
+    bytes_total += temp_file_path.size();
+    if (bytes_total == 0
+        || bytes_total
+            > static_cast<std::uint64_t>((std::numeric_limits<Size>::max)())) {
+        remove_temp_file_noexcept(temp_file_path);
+        return false;
+    }
+
+    dsm_segment* seg = dsm_create(
+        static_cast<Size>(bytes_total),
+        DSM_CREATE_NULL_IF_MAXSEGMENTS);
+    if (seg == nullptr) {
+        remove_temp_file_noexcept(temp_file_path);
+        return false;
+    }
+    char* base = static_cast<char*>(dsm_segment_address(seg));
+    IndexPersistFileDsmHeader header{
+        kIndexPersistFileDsmMagic,
+        kIndexPersistFileDsmVersion,
+        static_cast<std::uint32_t>(target.index_name.size()),
+        static_cast<std::uint32_t>(temp_file_path.size()),
+        file_bytes,
+        chunk_count,
+    };
+    std::memcpy(base, &header, sizeof(header));
+    std::memcpy(
+        base + sizeof(header),
+        target.index_name.data(),
+        target.index_name.size());
+    std::memcpy(
+        base + sizeof(header) + target.index_name.size(),
+        temp_file_path.data(),
+        temp_file_path.size());
+    dsm_pin_segment(seg);
+    const dsm_handle handle = dsm_segment_handle(seg);
+    dsm_detach(seg);
+
+    PendingPersistJob job{};
+    job.target = target;
+    job.index_name.assign(target.index_name.begin(), target.index_name.end());
+    job.target.index_name = job.index_name;
+    job.temp_file_path = std::move(temp_file_path);
+    job.dsm = handle;
+    job.payload_bytes = file_bytes;
+    job.file_backed = true;
+    pending_persist_jobs().push_back(std::move(job));
+    const std::uint64_t queued_ns =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    JustLog("[bioseq] index: staged file async persist job row={} index={} chunks={} file_bytes={} meta_bytes={} total_stage_ns={}",
+            static_cast<unsigned long long>(target.sequence_rowno),
+            pending_persist_jobs().back().index_name,
+            static_cast<unsigned long long>(chunk_count),
+            static_cast<unsigned long long>(file_bytes),
+            static_cast<unsigned long long>(bytes_total),
             static_cast<unsigned long long>(queued_ns - stage_start_ns));
     return true;
 }
@@ -706,6 +892,7 @@ struct PersistClaim {
 }
 
 void finish_persist_claim(const PersistClaim& claim) noexcept {
+    remove_file_payload_if_present_noexcept(claim.dsm);
     if (g_shared == nullptr || claim.slot_index >= BioseqSchedulerShared::kPersistQueueSize) {
         release_pinned_dsm(claim.dsm);
         return;
@@ -759,6 +946,109 @@ void finish_persist_claim(const PersistClaim& claim) noexcept {
     return active == index_name;
 }
 
+void process_persist_file_claim(
+        const PersistClaim& claim,
+        const char* base,
+        Size mapped) {
+    const std::uint64_t worker_start_ns =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    const std::optional<PersistFileMetadata> meta =
+        parse_persist_file_metadata(base, mapped);
+    if (!meta.has_value()) {
+        JustLog("[bioseq] index: discarded invalid file async persist metadata row={}",
+                static_cast<unsigned long long>(claim.target.sequence_rowno));
+        return;
+    }
+
+    PersistTarget target = claim.target;
+    target.index_name = meta->index_name;
+    if (!worker_target_identity_still_current(target, meta->index_name)) {
+        remove_temp_file_noexcept(meta->path);
+        JustLog("[bioseq] index: discarded stale file async persist job row={} index={}",
+                static_cast<unsigned long long>(target.sequence_rowno),
+                meta->index_name);
+        return;
+    }
+
+    std::ifstream input(meta->path, std::ios::binary);
+    if (!input) {
+        remove_temp_file_noexcept(meta->path);
+        JustLog("[bioseq] index: discarded missing file async persist payload row={} index={} path={}",
+                static_cast<unsigned long long>(target.sequence_rowno),
+                meta->index_name,
+                meta->path);
+        return;
+    }
+
+    std::vector<char> payload;
+    std::uint64_t bytes_read = 0;
+    std::uint64_t chunks_written = 0;
+    for (std::uint64_t i = 0; i < meta->chunk_count; ++i) {
+        PersistFileChunkHeader chunk{};
+        input.read(reinterpret_cast<char*>(&chunk), sizeof(chunk));
+        if (!input) {
+            pg_log(ERROR,
+                   "bioseq async persist: truncated file chunk header at chunk {}",
+                   static_cast<unsigned long long>(i));
+        }
+        bytes_read += sizeof(chunk);
+        if (chunk.size > bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES) {
+            pg_log(ERROR,
+                   "bioseq async persist: file chunk too large (sub_key={} chunk={} bytes={})",
+                   static_cast<long long>(chunk.sub_key),
+                   static_cast<unsigned>(chunk.chunk_no),
+                   static_cast<unsigned long long>(chunk.size));
+        }
+
+        payload.assign(static_cast<std::size_t>(chunk.size), char{0});
+        if (chunk.size != 0) {
+            input.read(payload.data(), static_cast<std::streamsize>(chunk.size));
+            if (!input) {
+                pg_log(ERROR,
+                       "bioseq async persist: truncated file chunk payload at chunk {}",
+                       static_cast<unsigned long long>(i));
+            }
+        }
+        bytes_read += chunk.size;
+        bioseq::storage::indexing::write_serialized_index_chunk_pg(
+            target.user_relid,
+            target.db_oid,
+            target.tablespace_oid,
+            target.main_relfilenode,
+            target.column_attno,
+            meta->index_name,
+            target.bucket_idx,
+            target.shard_idx,
+            target.sequence_rowno,
+            static_cast<bioseq::indexing::index_sub_key_t>(chunk.sub_key),
+            chunk.chunk_no,
+            std::span<const char>(payload.data(), payload.size()));
+        ++chunks_written;
+    }
+    if (bytes_read != meta->file_bytes) {
+        pg_log(ERROR,
+               "bioseq async persist: file byte count mismatch (expected={} actual={})",
+               static_cast<unsigned long long>(meta->file_bytes),
+               static_cast<unsigned long long>(bytes_read));
+    }
+    bioseq::storage::indexing::mark_serialized_index_write_successful_pg(
+        target.user_relid,
+        target.main_relfilenode,
+        target.column_attno,
+        meta->index_name);
+    input.close();
+    remove_temp_file_noexcept(meta->path);
+
+    const std::uint64_t worker_end_ns =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    JustLog("[bioseq] index: async persist file worker wrote row={} index={} chunks={} bytes={} worker_write_ns={}",
+            static_cast<unsigned long long>(target.sequence_rowno),
+            meta->index_name,
+            static_cast<unsigned long long>(chunks_written),
+            static_cast<unsigned long long>(meta->file_bytes),
+            static_cast<unsigned long long>(worker_end_ns - worker_start_ns));
+}
+
 void process_persist_claim(const PersistClaim& claim) {
     const std::uint64_t worker_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
@@ -773,6 +1063,17 @@ void process_persist_claim(const PersistClaim& claim) {
     }
     char* base = static_cast<char*>(dsm_segment_address(seg));
     const Size mapped = dsm_segment_map_length(seg);
+    if (mapped >= sizeof(std::uint32_t)) {
+        std::uint32_t magic = 0;
+        std::memcpy(&magic, base, sizeof(magic));
+        if (magic == kIndexPersistFileDsmMagic) {
+            process_persist_file_claim(claim, base, mapped);
+            dsm_detach(seg);
+            PopActiveSnapshot();
+            CommitTransactionCommand();
+            return;
+        }
+    }
     if (mapped < sizeof(IndexPersistDsmHeader)) {
         dsm_detach(seg);
         PopActiveSnapshot();
@@ -842,6 +1143,11 @@ void process_persist_claim(const PersistClaim& claim) {
             chunk.chunk_no,
             std::span<const char>(base + chunk.offset, static_cast<std::size_t>(chunk.size)));
     }
+    bioseq::storage::indexing::mark_serialized_index_write_successful_pg(
+        target.user_relid,
+        target.main_relfilenode,
+        target.column_attno,
+        index_name);
     dsm_detach(seg);
     PopActiveSnapshot();
     CommitTransactionCommand();

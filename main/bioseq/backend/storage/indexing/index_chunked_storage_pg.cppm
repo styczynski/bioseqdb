@@ -1171,6 +1171,28 @@ inline void write_serialized_index_chunk_pg(
     relation_close(rel, RowExclusiveLock);
 }
 
+inline void mark_serialized_index_write_successful_pg(
+        Oid user_relid,
+        Oid main_relfilenode,
+        std::int16_t column_attno,
+        std::string_view index_name) {
+    if (SPI_connect() != SPI_OK_CONNECT) {
+        return;
+    }
+    const std::string sql = fmt::format(
+        "INSERT INTO bioseq_internal.metadata_age_log "
+        "(user_relid, main_relfilenode, column_attno, index_name, last_updated) "
+        "VALUES ({}::oid, {}::oid, {}, {}, now()) "
+        "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) "
+        "DO UPDATE SET last_updated = now()",
+        static_cast<unsigned>(user_relid),
+        static_cast<unsigned>(main_relfilenode),
+        static_cast<int>(column_attno),
+        quote_literal_cstr(std::string(index_name).c_str()));
+    SPI_execute(sql.c_str(), false, 0);
+    SPI_finish();
+}
+
 // ---- IndexStorageTablePg::for_each_sequence (test-only CHUNKED_PER_TABLE) ---
 template <class F>
 inline void IndexStorageTablePg::for_each_sequence(F&& loader) {

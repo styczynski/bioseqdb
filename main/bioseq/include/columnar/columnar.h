@@ -39,7 +39,9 @@ extern int  bioseq_index_run_buffer_bytes;  /* DOC0279 §13 — test-only run bu
 extern int  bioseq_scheduler_max_concurrency;
 extern int  bioseq_scheduler_pipeline_concurrency_mode;
 extern bool bioseq_scheduler_allow_pg_parallel_composition;
+extern bool bioseq_load_overlap_enabled;
 extern bool bioseq_index_async_persist;
+extern bool bioseq_recompute_async_persist;
 extern int  bioseq_index_memory_cap_mb;
 /*
  * DOC0260 Phase A — controls the per-shard payload cap for the

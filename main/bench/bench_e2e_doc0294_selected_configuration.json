@@ -8,6 +8,28 @@
         "description": "DOC0294 scheduler mode for the bioseq SQL recompute path"
       }
     },
+    "bioseq_load_only": {
+      "pipeline_mode": {
+        "type": "string",
+        "default": "single",
+        "enum": ["single", "parallel", "task_parallel"],
+        "description": "DOC0296 split: timed TRUNCATE + bioseq.load only"
+      }
+    },
+    "bioseq_recompute_only": {
+      "pipeline_mode": {
+        "type": "string",
+        "default": "single",
+        "enum": ["single", "parallel", "task_parallel"],
+        "description": "DOC0296 split: timed mmsearch recompute over an untimed loaded table"
+      },
+      "recompute_async_persist": {
+        "type": "string",
+        "default": "off",
+        "enum": ["off", "on"],
+        "description": "DOC0296: stage a no-index recompute fragment index for async persistence"
+      }
+    },
     "bioseq_just_index": {
       "pipeline_mode": {
         "type": "string",
@@ -65,6 +87,12 @@
       "for": { "E2E_2GBP_DNA4": 1 },
       "over": {
         "bioseq_no_index": {
+          "pipeline_mode": ["single", "parallel", "task_parallel"]
+        },
+        "bioseq_load_only": {
+          "pipeline_mode": ["single", "parallel", "task_parallel"]
+        },
+        "bioseq_recompute_only": {
           "pipeline_mode": ["single", "parallel", "task_parallel"]
         },
         "bioseq_just_index": {

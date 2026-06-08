@@ -1212,6 +1212,29 @@ template <
         completed_padding = 0;
     };
 
+    auto emit_stream_chunk = [&](std::uint64_t chunk_bp, bool end_of_record) {
+        if constexpr (requires (
+                sink_fn_t& sink_ref,
+                std::vector<storage_unit_t>&& owned_words,
+                std::uint64_t bp,
+                bool eof) {
+                sink_ref.chunk_owned(std::move(owned_words), bp, eof);
+            }) {
+            sink.chunk_owned(std::move(seq_scratch), chunk_bp, end_of_record);
+            seq_scratch = {};
+            seq_scratch.reserve(
+                std::max<std::size_t>(
+                    options.io.initial_buffer_size / sizeof(storage_unit_t),
+                    1024));
+        } else {
+            sink.chunk(packed_sequence_chunk<storage_unit_t>{
+                std::span<const storage_unit_t>(seq_scratch.data(), seq_scratch.size()),
+                chunk_bp, end_of_record});
+            seq_scratch.clear();
+        }
+        quality_scratch.clear();
+    };
+
     // Drain the completed words accumulated so far as a non-final chunk. Only
     // valid mid-record (body started ⇒ header complete). Keeps RSS bounded.
     auto drain_partial = [&]() {
@@ -1225,11 +1248,7 @@ template <
         // flushes a partial unit at record finalize), so the chunk has no padding.
         const std::uint64_t chunk_bp =
             static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
-        sink.chunk(packed_sequence_chunk<storage_unit_t>{
-            std::span<const storage_unit_t>(seq_scratch.data(), seq_scratch.size()),
-            chunk_bp, /*end_of_record=*/false});
-        seq_scratch.clear();
-        quality_scratch.clear();
+        emit_stream_chunk(chunk_bp, /*end_of_record=*/false);
     };
 
     // Emit the final chunk + end the record. The final chunk's bp is the words
@@ -1248,9 +1267,7 @@ template <
             static_cast<std::uint64_t>(seq_scratch.size()) * letters_per_unit;
         const std::uint64_t final_bp =
             scratch_bp >= completed_padding ? scratch_bp - completed_padding : 0;
-        sink.chunk(packed_sequence_chunk<storage_unit_t>{
-            std::span<const storage_unit_t>(seq_scratch.data(), seq_scratch.size()),
-            final_bp, /*end_of_record=*/true});
+        emit_stream_chunk(final_bp, /*end_of_record=*/true);
         sink.end_record();
         ++records_emitted;
         reset_record();

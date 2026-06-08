@@ -1,6 +1,11 @@
 {
   "params": {
     "bioseq_no_index":      {"_": {"type": "integer", "default": 0, "description": "load(no index)+recompute align, all via SQL, timed end-to-end"}},
+    "bioseq_load_only":     {"_": {"type": "integer", "default": 0, "description": "DOC0296 split: TRUNCATE + bioseq.load only, timed"}},
+    "bioseq_recompute_only":{
+      "_": {"type": "integer", "default": 0, "description": "DOC0296 split: mmsearch recompute only, after untimed load"},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "DOC0296: stage a no-index recompute fragment index for async persistence"}
+    },
     "bioseq_just_index":    {"_": {"type": "integer", "default": 0, "description": "index prebuilt (untimed); assemble align via SQL, timed"}},
     "minimap2_no_index":    {"_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"}},
     "minimap2_just_index":  {"_": {"type": "integer", "default": 0, "description": "minimap2 prebuilt .mmi (map only)"}}

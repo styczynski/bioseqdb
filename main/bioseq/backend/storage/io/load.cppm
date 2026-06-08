@@ -16,9 +16,14 @@ module;
 #include "common.h"            // DEBUG_ASSERT, JustLog, CXX_PG_FUNCTION_INFO_V1, fmt
 #include <boost/integer.hpp>
 #include <climits>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <exception>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -59,6 +64,10 @@ import bioseq_storage_indexing_admin;      // build_policy_update_on_insert_inde
 import bioseq_io.options;                  // sequence_io_file_type, reader_options
 import bioseq_io.file_utils;               // infer_sequence_file_kind, sequence_file_kind
 import bioseq_io.public_api;               // stream_sequences_file, packed_sequence_chunk
+import bioseq_parallelism.mode;
+import bioseq_parallelism.concepts;
+import bioseq_parallelism.pool;
+import bioseq_scheduler.supervisor_pg;
 
 extern "C++" void ColumnarPopWriteStateForRelfilenode(
     Oid relfilenode, SubTransactionId current_sub_xid,
@@ -244,6 +253,227 @@ struct load_stream_sink {
     }
 };
 
+template <typename Unit>
+struct queued_load_event {
+    enum class kind_t : std::uint8_t {
+        begin_record,
+        chunk,
+        end_record,
+    };
+
+    kind_t kind = kind_t::chunk;
+    std::string header{};
+    std::vector<Unit> words{};
+    std::uint64_t bp_count = 0;
+    bool end_of_record = false;
+};
+
+template <typename Unit>
+class load_event_queue {
+public:
+    explicit load_event_queue(std::size_t capacity) : capacity_(capacity) {}
+
+    bool push(queued_load_event<Unit>&& event) {
+        std::unique_lock<std::mutex> lock(mu_);
+        not_full_.wait(lock, [this] {
+            return closed_ || queue_.size() < capacity_;
+        });
+        if (closed_) {
+            return false;
+        }
+        queue_.push_back(std::move(event));
+        not_empty_.notify_one();
+        return true;
+    }
+
+    bool pop(queued_load_event<Unit>& event) {
+        std::unique_lock<std::mutex> lock(mu_);
+        not_empty_.wait(lock, [this] {
+            return closed_ || !queue_.empty();
+        });
+        if (queue_.empty()) {
+            return false;
+        }
+        event = std::move(queue_.front());
+        queue_.pop_front();
+        not_full_.notify_one();
+        return true;
+    }
+
+    void close() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            closed_ = true;
+        }
+        not_empty_.notify_all();
+        not_full_.notify_all();
+    }
+
+private:
+    const std::size_t capacity_;
+    std::mutex mu_;
+    std::condition_variable not_empty_;
+    std::condition_variable not_full_;
+    std::deque<queued_load_event<Unit>> queue_;
+    bool closed_ = false;
+};
+
+struct load_queue_closed {};
+
+template <sequence_alphabet A, std::size_t ColBW>
+struct queued_load_stream_sink {
+    using col_cfg = sequence_custom_alphabet<A,
+                       typename boost::uint_t<ColBW * 8>::least>;
+    using col_unit_t = typename col_cfg::storage_unit;
+
+    load_event_queue<col_unit_t>& queue;
+
+    void push_or_closed(queued_load_event<col_unit_t>&& event) {
+        if (!queue.push(std::move(event))) {
+            throw load_queue_closed{};
+        }
+    }
+
+    void begin_record(std::string_view h) {
+        queued_load_event<col_unit_t> event;
+        event.kind = queued_load_event<col_unit_t>::kind_t::begin_record;
+        event.header.assign(h);
+        push_or_closed(std::move(event));
+    }
+
+    void chunk(bioseq::io::packed_sequence_chunk<col_unit_t> c) {
+        queued_load_event<col_unit_t> event;
+        event.kind = queued_load_event<col_unit_t>::kind_t::chunk;
+        event.words.assign(c.words.begin(), c.words.end());
+        event.bp_count = c.bp_count;
+        event.end_of_record = c.end_of_record;
+        push_or_closed(std::move(event));
+    }
+
+    void chunk_owned(
+            std::vector<col_unit_t>&& words,
+            std::uint64_t bp_count,
+            bool end_of_record) {
+        queued_load_event<col_unit_t> event;
+        event.kind = queued_load_event<col_unit_t>::kind_t::chunk;
+        event.words = std::move(words);
+        event.bp_count = bp_count;
+        event.end_of_record = end_of_record;
+        push_or_closed(std::move(event));
+    }
+
+    void end_record() {
+        queued_load_event<col_unit_t> event;
+        event.kind = queued_load_event<col_unit_t>::kind_t::end_record;
+        push_or_closed(std::move(event));
+    }
+};
+
+template <sequence_alphabet A, std::size_t ColBW,
+          bioseq::io::sequence_io_file_type FT>
+[[nodiscard]] std::int64_t load_records_overlapped(
+        LoadContext& ctx,
+        const char* file_path) {
+    using col_cfg = sequence_custom_alphabet<A,
+                       typename boost::uint_t<ColBW * 8>::least>;
+    using col_unit_t = typename col_cfg::storage_unit;
+
+    load_event_queue<col_unit_t> queue{/*capacity=*/16};
+    std::string io_error;
+    std::string result_error;
+    std::string producer_exception;
+    std::optional<std::size_t> producer_records;
+
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    auto group = pool.make_task_group();
+    group.run(bioseq::parallelism::task_body{[
+            &queue, &io_error, &result_error, &producer_exception,
+            &producer_records, file_path] {
+        try {
+            queued_load_stream_sink<A, ColBW> sink{queue};
+            auto on_fail = [&io_error](std::string&& msg) {
+                if (io_error.empty()) {
+                    io_error = std::move(msg);
+                }
+            };
+            bioseq::io::reader_options opts = bioseq::io::default_reader_options;
+            opts.concurrency.worker_count = 0;
+            opts.concurrency.parser_count = 1;
+            auto result = bioseq::io::stream_sequences_file<A, col_unit_t, FT>(
+                file_path, sink, on_fail, opts);
+            if (result) {
+                producer_records = *result;
+            } else {
+                result_error = result.error();
+            }
+        } catch (const load_queue_closed&) {
+            // The consumer hit a PostgreSQL ERROR and closed the queue. Leave
+            // producer_exception empty so PG_RE_THROW preserves the original error.
+        } catch (const std::exception& ex) {
+            producer_exception = ex.what();
+        } catch (...) {
+            producer_exception = "unknown C++ exception";
+        }
+        queue.close();
+    }});
+
+    std::int64_t records = 0;
+    load_stream_sink<A, ColBW> sink{ctx, records};
+    queued_load_event<col_unit_t> event;
+    PG_TRY();
+    {
+        while (queue.pop(event)) {
+            switch (event.kind) {
+                case queued_load_event<col_unit_t>::kind_t::begin_record:
+                    sink.begin_record(event.header);
+                    break;
+                case queued_load_event<col_unit_t>::kind_t::chunk:
+                    sink.chunk(bioseq::io::packed_sequence_chunk<col_unit_t>{
+                        std::span<const col_unit_t>(event.words.data(), event.words.size()),
+                        event.bp_count,
+                        event.end_of_record});
+                    break;
+                case queued_load_event<col_unit_t>::kind_t::end_record:
+                    sink.end_record();
+                    break;
+            }
+        }
+    }
+    PG_CATCH();
+    {
+        queue.close();
+        group.wait();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    group.wait();
+
+    if (!producer_exception.empty()) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+            errmsg("bioseq.load: producer failed: %s",
+                   producer_exception.c_str())));
+    }
+    if (!io_error.empty()) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+            errmsg("bioseq.load: %s", io_error.c_str())));
+    }
+    if (!result_error.empty()) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+            errmsg("bioseq.load: %s", result_error.c_str())));
+    }
+    if (producer_records.has_value()
+        && *producer_records != static_cast<std::size_t>(records)) {
+        ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+            errmsg("bioseq.load: producer/consumer record count mismatch "
+                   "(producer=%zu, consumer=%lld)",
+                   *producer_records, static_cast<long long>(records))));
+    }
+
+    JustLog("[bioseq.load] overlapped parser/writer path records={}",
+            static_cast<long long>(records));
+    return records;
+}
+
 template <sequence_alphabet A, std::size_t ColBW,
           bioseq::io::sequence_io_file_type FT>
 [[nodiscard]] std::int64_t load_records(LoadContext& ctx, const char* file_path) {
@@ -255,6 +485,17 @@ template <sequence_alphabet A, std::size_t ColBW,
         bioseq::storage::kSequenceFragmentStorageUnits;
     static_assert(kFragmentUnits * 8 <= 8192,
                   "fragment payload must stay <= 8 KiB");
+
+    if (bioseq_load_overlap_enabled) {
+        bioseq::parallelism::pg::backend_sync();
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        const bool may_overlap =
+            bioseq::parallelism::dispatch_parallel(pool.mode())
+            && pool.max_concurrency() > 1;
+        if (may_overlap) {
+            return load_records_overlapped<A, ColBW, FT>(ctx, file_path);
+        }
+    }
 
     std::int64_t records = 0;
     std::string io_error;
