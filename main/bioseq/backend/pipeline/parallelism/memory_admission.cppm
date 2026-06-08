@@ -59,6 +59,7 @@ public:
     }
 
     void release() noexcept;
+    void shrink_to(std::uint64_t bytes) noexcept;
 
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return bytes_;
@@ -190,6 +191,15 @@ inline void MemoryPermit::release() noexcept {
         owner_ = nullptr;
         bytes_ = 0;
     }
+}
+
+inline void MemoryPermit::shrink_to(std::uint64_t bytes) noexcept {
+    if (owner_ == nullptr || bytes_ <= bytes) {
+        return;
+    }
+    const std::uint64_t delta = bytes_ - bytes;
+    bytes_ = bytes;
+    owner_->release(delta);
 }
 
 [[nodiscard]] inline BudgetedWave try_reserve_budgeted_wave(

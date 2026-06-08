@@ -172,6 +172,10 @@ file(GLOB_RECURSE BIOSEQ_IO_MODULES CONFIGURE_DEPENDS
 list(APPEND BIOSEQ_NOPG_MODULES ${BIOSEQ_IO_MODULES})
 list(REMOVE_DUPLICATES BIOSEQ_NOPG_MODULES)
 
+set(BIOSEQ_NOPG_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_pair_sort_sidecar.cpp)
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_NOPG_SOURCES})
+
 add_library(bioseq_modules_nopg OBJECT)
 set_target_properties(bioseq_modules_nopg PROPERTIES
   CXX_STANDARD 26
@@ -244,6 +248,7 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   ${Boost_LIBRARIES})
 
 target_sources(bioseq_modules_nopg
+  PRIVATE ${BIOSEQ_NOPG_SOURCES}
   PUBLIC FILE_SET CXX_MODULES
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_MODULES})
@@ -315,6 +320,7 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 #     regression — the operator can re-route via BIOSEQ_LOG_FILE if needed.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 list(APPEND SRC_MOD_FILES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/sorted_pair_runs_pg.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/index_residency_pg.cppm)
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
 
@@ -373,6 +379,9 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_LIST_DIR}/sql/bioseq--1.0.sql")
 
 AddCommonTargetX(
   postgresql_bioseq

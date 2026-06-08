@@ -190,7 +190,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
     const RelationIdentity rid = index_relation_identity(user_relid);
     auto policy_rows = load_table_policy(user_relid, rid.relfilenode, attno);
     pg_supported_indexes idx; idx.apply_table_defaults(); idx.merge_overrides(policy_rows);
-    g_last_index_merge_run_count = 0;
+    reset_last_mps_build_stats();
     pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width, [&]<class S>() {
         compact_sequence_range<S> rng{*hdr};
         auto lazy = bioseq::storage::make_lazy_in_memory(rng);
@@ -300,12 +300,26 @@ inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn
     }
     PG_CATCH();
     {
-        if constexpr (requires (Storage& cleanup_storage) {
-                { cleanup_storage.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
-            }) {
-            storage.release_resident_runs_noexcept();
+        ErrorData* volatile saved_error = CopyErrorData();
+        FlushErrorState();
+        PG_TRY();
+        {
+            if constexpr (requires (Storage& cleanup_storage) {
+                    { cleanup_storage.release_runs_noexcept() } noexcept -> std::same_as<void>;
+                }) {
+                storage.release_runs_noexcept();
+            } else if constexpr (requires (Storage& cleanup_storage) {
+                    { cleanup_storage.release_resident_runs_noexcept() } noexcept -> std::same_as<void>;
+                }) {
+                storage.release_resident_runs_noexcept();
+            }
         }
-        PG_RE_THROW();
+        PG_CATCH();
+        {
+            FlushErrorState();
+        }
+        PG_END_TRY();
+        ReThrowError(saved_error);
     }
     PG_END_TRY();
 }
@@ -442,7 +456,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     if (!IsColumnarTableAmTable(rel_oid)) pg_log(ERROR, "bioseq.update_index: relation is not a USING bioseq table");
     const RelationIdentity rid = index_relation_identity(rel_oid);
     const SequenceIndexType layout = layout_of_name(name);
-    g_last_index_merge_run_count = 0;
+    reset_last_mps_build_stats();
 
     // locate EVERY bioseq.seq column (§11.4 builds the index for each SEQ column;
     // mmsearch(target, query) queries the target column, which may not be the first).

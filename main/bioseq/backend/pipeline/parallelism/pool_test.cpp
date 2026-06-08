@@ -108,6 +108,12 @@ TEST_CASE("DOC0294 memory admission reserves and releases", "[parallelism][memor
         auto permit = admission.try_reserve(512);
         REQUIRE(permit.has_value());
         REQUIRE(admission.reserved_bytes() == 512u);
+        permit->shrink_to(128);
+        REQUIRE(permit->bytes() == 128u);
+        REQUIRE(admission.reserved_bytes() == 128u);
+        permit->shrink_to(256);
+        REQUIRE(permit->bytes() == 128u);
+        REQUIRE(admission.reserved_bytes() == 128u);
     }
     REQUIRE(admission.reserved_bytes() == 0u);
 

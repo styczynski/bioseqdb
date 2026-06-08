@@ -1528,6 +1528,34 @@ CREATE OR REPLACE FUNCTION bioseq.last_index_merge_run_count()
     AS 'MODULE_PATHNAME', 'bioseq_last_index_merge_run_count'
     LANGUAGE C VOLATILE;
 
+-- DOC0299/DOC0300 — backend-local snapshot of the most recent
+-- minimizers_per_sequence sorted-run build in this backend. Query from the
+-- same backend that executed mmsearch/update_index; the values intentionally
+-- reset at the start of each build/update path.
+CREATE OR REPLACE FUNCTION bioseq.last_mps_build_stats()
+    RETURNS TABLE (
+        backend_pid bigint,
+        db_oid bigint,
+        relfilenode bigint,
+        sequence_rowno bigint,
+        total_run_count bigint,
+        resident_runs bigint,
+        file_runs bigint,
+        resident_run_bytes bigint,
+        resident_peak_bytes bigint,
+        spilled_run_bytes bigint,
+        postgres_temp_file_bytes bigint,
+        postgres_temp_file_count bigint,
+        merge_reader_buffer_bytes bigint,
+        merge_pass_count bigint,
+        spill_count_from_pressure bigint,
+        resident_demotions bigint,
+        position_spill_bytes bigint,
+        position_spill_count bigint
+    )
+    AS 'MODULE_PATHNAME', 'bioseq_last_mps_build_stats'
+    LANGUAGE C VOLATILE;
+
 -- DOC0294 — scheduler supervision/admin surface.
 CREATE OR REPLACE FUNCTION bioseq.scheduler_restart()
     RETURNS void

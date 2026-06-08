@@ -18,6 +18,18 @@
         "default": "on",
         "enum": ["off", "on"],
         "description": "stage the selected no-index recompute minimizer index for async persistence"
+      },
+      "mps_pair_sort_impl": {
+        "type": "string",
+        "default": "std_sort",
+        "enum": [
+          "std_sort",
+          "simd_u128_vqsort",
+          "simd_u128_vec_stream_1",
+          "simd_u128_vec_stream_2",
+          "simd_u128_vec_stream_4"
+        ],
+        "description": "per-sequence pair-run sort implementation selected via bioseq.mps_pair_sort_impl"
       }
     }
   },
@@ -55,7 +67,8 @@
         "bioseq_no_index": {
           "pipeline_mode": ["task_parallel"],
           "minimizer_index": ["minimizers_per_sequence"],
-          "recompute_async_persist": ["on"]
+          "recompute_async_persist": ["on"],
+          "mps_pair_sort_impl": ["std_sort"]
         }
       },
       "by_regions": true,
@@ -80,7 +93,25 @@
         "audit_mpf_active_read": {"type": "evaluation", "rules": []},
         "audit_mps_active_read": {"type": "evaluation", "rules": []},
         "audit_async_persist_jobs_waiting": {"type": "evaluation", "rules": []},
-        "audit_index_rows_wait_attempts": {"type": "evaluation", "rules": []}
+        "audit_index_rows_wait_attempts": {"type": "evaluation", "rules": []},
+        "mps_build_backend_pid": {"type": "evaluation", "rules": []},
+        "mps_build_db_oid": {"type": "evaluation", "rules": []},
+        "mps_build_relfilenode": {"type": "evaluation", "rules": []},
+        "mps_build_sequence_rowno": {"type": "evaluation", "rules": []},
+        "mps_build_total_run_count": {"type": "evaluation", "rules": []},
+        "mps_build_resident_runs": {"type": "evaluation", "rules": []},
+        "mps_build_file_runs": {"type": "evaluation", "rules": []},
+        "mps_build_resident_run_bytes": {"type": "evaluation", "rules": []},
+        "mps_build_resident_peak_bytes": {"type": "evaluation", "rules": []},
+        "mps_build_spilled_run_bytes": {"type": "evaluation", "rules": []},
+        "mps_build_postgres_temp_file_bytes": {"type": "evaluation", "rules": []},
+        "mps_build_postgres_temp_file_count": {"type": "evaluation", "rules": []},
+        "mps_build_merge_reader_buffer_bytes": {"type": "evaluation", "rules": []},
+        "mps_build_merge_pass_count": {"type": "evaluation", "rules": []},
+        "mps_build_spill_count_from_pressure": {"type": "evaluation", "rules": []},
+        "mps_build_resident_demotions": {"type": "evaluation", "rules": []},
+        "mps_build_position_spill_bytes": {"type": "evaluation", "rules": []},
+        "mps_build_position_spill_count": {"type": "evaluation", "rules": []}
       }
     }
   },

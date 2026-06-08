@@ -173,6 +173,24 @@ struct E2eOutput {
     std::int64_t audit_mps_active_read = -1;
     std::int64_t audit_async_persist_jobs_waiting = -1;
     std::int64_t audit_index_rows_wait_attempts = 0;
+    std::int64_t mps_build_backend_pid = -1;
+    std::int64_t mps_build_db_oid = -1;
+    std::int64_t mps_build_relfilenode = -1;
+    std::int64_t mps_build_sequence_rowno = -1;
+    std::int64_t mps_build_total_run_count = -1;
+    std::int64_t mps_build_resident_runs = -1;
+    std::int64_t mps_build_file_runs = -1;
+    std::int64_t mps_build_resident_run_bytes = -1;
+    std::int64_t mps_build_resident_peak_bytes = -1;
+    std::int64_t mps_build_spilled_run_bytes = -1;
+    std::int64_t mps_build_postgres_temp_file_bytes = -1;
+    std::int64_t mps_build_postgres_temp_file_count = -1;
+    std::int64_t mps_build_merge_reader_buffer_bytes = -1;
+    std::int64_t mps_build_merge_pass_count = -1;
+    std::int64_t mps_build_spill_count_from_pressure = -1;
+    std::int64_t mps_build_resident_demotions = -1;
+    std::int64_t mps_build_position_spill_bytes = -1;
+    std::int64_t mps_build_position_spill_count = -1;
 };
 
 void preflight_e2e_resources(it::connection_test_context& conn,
@@ -541,6 +559,26 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
     return index;
 }
 
+[[nodiscard]] std::string param_mps_pair_sort_impl(const ParamMap& params) {
+    std::string impl = param_string(params, "mps_pair_sort_impl", "std_sort");
+    if (impl != "std_sort"
+        && impl != "simd_u128_vqsort"
+        && impl != "simd_u128_vec_stream_1"
+        && impl != "simd_u128_vec_stream_2"
+        && impl != "simd_u128_vec_stream_4") {
+        loge("[bench_e2e] unsupported mps_pair_sort_impl '{}'", impl);
+        std::abort();
+    }
+    return impl;
+}
+
+void configure_bioseq_pair_sort_session(
+        it::connection_test_context& c,
+        const ParamMap& params) {
+    const std::string impl = param_mps_pair_sort_impl(params);
+    it::exec_sqlf(c, "SET bioseq.mps_pair_sort_impl = '{}';", impl);
+}
+
 void configure_bioseq_scheduler_session(it::connection_test_context& c,
                                         std::string_view pipeline_mode) {
     it::exec_sqlf(c, "SET bioseq.scheduler.pipeline_concurrency_mode = '{}';",
@@ -589,6 +627,49 @@ void configure_bioseq_minimizer_policy(
         return -1;
     }
     return parse_i64(*rows.front().front());
+}
+
+[[nodiscard]] std::int64_t row_i64_or_minus_one(
+        const it::row_t& row,
+        std::size_t col) {
+    if (col >= row.size() || !row[col].has_value()) {
+        return -1;
+    }
+    return parse_i64(*row[col]);
+}
+
+void capture_mps_build_stats(
+        const it::connection_test_context& c,
+        E2eOutput& out) {
+    const auto rows = it::query_rows(c,
+        "SELECT backend_pid, db_oid, relfilenode, sequence_rowno, "
+        "total_run_count, resident_runs, file_runs, resident_run_bytes, "
+        "resident_peak_bytes, spilled_run_bytes, postgres_temp_file_bytes, "
+        "postgres_temp_file_count, merge_reader_buffer_bytes, merge_pass_count, "
+        "spill_count_from_pressure, resident_demotions, position_spill_bytes, "
+        "position_spill_count FROM bioseq.last_mps_build_stats();");
+    if (rows.empty()) {
+        return;
+    }
+    const it::row_t& row = rows.front();
+    out.mps_build_backend_pid = row_i64_or_minus_one(row, 0);
+    out.mps_build_db_oid = row_i64_or_minus_one(row, 1);
+    out.mps_build_relfilenode = row_i64_or_minus_one(row, 2);
+    out.mps_build_sequence_rowno = row_i64_or_minus_one(row, 3);
+    out.mps_build_total_run_count = row_i64_or_minus_one(row, 4);
+    out.mps_build_resident_runs = row_i64_or_minus_one(row, 5);
+    out.mps_build_file_runs = row_i64_or_minus_one(row, 6);
+    out.mps_build_resident_run_bytes = row_i64_or_minus_one(row, 7);
+    out.mps_build_resident_peak_bytes = row_i64_or_minus_one(row, 8);
+    out.mps_build_spilled_run_bytes = row_i64_or_minus_one(row, 9);
+    out.mps_build_postgres_temp_file_bytes = row_i64_or_minus_one(row, 10);
+    out.mps_build_postgres_temp_file_count = row_i64_or_minus_one(row, 11);
+    out.mps_build_merge_reader_buffer_bytes = row_i64_or_minus_one(row, 12);
+    out.mps_build_merge_pass_count = row_i64_or_minus_one(row, 13);
+    out.mps_build_spill_count_from_pressure = row_i64_or_minus_one(row, 14);
+    out.mps_build_resident_demotions = row_i64_or_minus_one(row, 15);
+    out.mps_build_position_spill_bytes = row_i64_or_minus_one(row, 16);
+    out.mps_build_position_spill_count = row_i64_or_minus_one(row, 17);
 }
 
 [[nodiscard]] std::int64_t index_row_count(
@@ -940,6 +1021,7 @@ template <sequence_alphabet A>
 
     if (algo == "bioseq_just_index") {
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
         const std::string& table = just_index_table_for(in, minimizer_index);
         configure_bioseq_minimizer_policy(
             *in.conn, table, minimizer_index);
@@ -956,6 +1038,7 @@ template <sequence_alphabet A>
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
+        capture_mps_build_stats(*in.conn, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
@@ -964,6 +1047,7 @@ template <sequence_alphabet A>
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
         configure_bioseq_minimizer_policy(
             *in.conn, in.no_index_table, minimizer_index);
@@ -985,11 +1069,13 @@ template <sequence_alphabet A>
             it::connection_test_context read_conn;
             configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
             configure_bioseq_scheduler_session(read_conn, pipeline_mode);
+            configure_bioseq_pair_sort_session(read_conn, params);
             it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
             it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
             it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
                           recompute_async_persist ? "on" : "off");
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
+            capture_mps_build_stats(read_conn, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
@@ -1006,6 +1092,7 @@ template <sequence_alphabet A>
 
     } else if (algo == "bioseq_load_only") {
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);
         configure_bioseq_minimizer_policy(
             *in.conn, in.no_index_table, minimizer_index);
@@ -1033,6 +1120,7 @@ template <sequence_alphabet A>
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);
         configure_bioseq_minimizer_policy(
             *in.conn, in.no_index_table, minimizer_index);
@@ -1045,6 +1133,7 @@ template <sequence_alphabet A>
         it::connection_test_context read_conn;
         configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
         configure_bioseq_scheduler_session(read_conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(read_conn, params);
         it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
         it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
         it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
@@ -1058,6 +1147,7 @@ template <sequence_alphabet A>
         {
             auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: recompute align only
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
+            capture_mps_build_stats(read_conn, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
@@ -1129,6 +1219,24 @@ template <sequence_alphabet A>
         {"audit_mps_active_read",   static_cast<double>(o.audit_mps_active_read)},
         {"audit_async_persist_jobs_waiting", static_cast<double>(o.audit_async_persist_jobs_waiting)},
         {"audit_index_rows_wait_attempts", static_cast<double>(o.audit_index_rows_wait_attempts)},
+        {"mps_build_backend_pid", static_cast<double>(o.mps_build_backend_pid)},
+        {"mps_build_db_oid", static_cast<double>(o.mps_build_db_oid)},
+        {"mps_build_relfilenode", static_cast<double>(o.mps_build_relfilenode)},
+        {"mps_build_sequence_rowno", static_cast<double>(o.mps_build_sequence_rowno)},
+        {"mps_build_total_run_count", static_cast<double>(o.mps_build_total_run_count)},
+        {"mps_build_resident_runs", static_cast<double>(o.mps_build_resident_runs)},
+        {"mps_build_file_runs", static_cast<double>(o.mps_build_file_runs)},
+        {"mps_build_resident_run_bytes", static_cast<double>(o.mps_build_resident_run_bytes)},
+        {"mps_build_resident_peak_bytes", static_cast<double>(o.mps_build_resident_peak_bytes)},
+        {"mps_build_spilled_run_bytes", static_cast<double>(o.mps_build_spilled_run_bytes)},
+        {"mps_build_postgres_temp_file_bytes", static_cast<double>(o.mps_build_postgres_temp_file_bytes)},
+        {"mps_build_postgres_temp_file_count", static_cast<double>(o.mps_build_postgres_temp_file_count)},
+        {"mps_build_merge_reader_buffer_bytes", static_cast<double>(o.mps_build_merge_reader_buffer_bytes)},
+        {"mps_build_merge_pass_count", static_cast<double>(o.mps_build_merge_pass_count)},
+        {"mps_build_spill_count_from_pressure", static_cast<double>(o.mps_build_spill_count_from_pressure)},
+        {"mps_build_resident_demotions", static_cast<double>(o.mps_build_resident_demotions)},
+        {"mps_build_position_spill_bytes", static_cast<double>(o.mps_build_position_spill_bytes)},
+        {"mps_build_position_spill_count", static_cast<double>(o.mps_build_position_spill_count)},
     };
 }
 

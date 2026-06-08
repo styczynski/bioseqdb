@@ -612,6 +612,43 @@ Datum bioseq_last_index_merge_run_count(PG_FUNCTION_ARGS) {
 	PG_RETURN_INT64((std::int64_t)bioseq::storage::indexing::g_last_index_merge_run_count);
 }
 
+CXX_PG_FUNCTION_INFO_V1(bioseq_last_mps_build_stats);
+Datum bioseq_last_mps_build_stats(PG_FUNCTION_ARGS) {
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {
+		ereport(ERROR, (errmsg("bioseq.last_mps_build_stats: composite result type expected")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	const auto st = bioseq::storage::indexing::g_last_mps_build_stats;
+	Datum values[18]{};
+	bool nulls[18]{};
+	const auto put_i64 = [&](std::size_t i, std::uint64_t v) {
+		values[i] = Int64GetDatum(static_cast<std::int64_t>(v));
+	};
+	put_i64(0, st.backend_pid);
+	put_i64(1, st.db_oid);
+	put_i64(2, st.relfilenode);
+	put_i64(3, st.sequence_rowno);
+	put_i64(4, st.total_run_count);
+	put_i64(5, st.resident_runs);
+	put_i64(6, st.file_runs);
+	put_i64(7, st.resident_run_bytes);
+	put_i64(8, st.resident_peak_bytes);
+	put_i64(9, st.spilled_run_bytes);
+	put_i64(10, st.postgres_temp_file_bytes);
+	put_i64(11, st.postgres_temp_file_count);
+	put_i64(12, st.merge_reader_buffer_bytes);
+	put_i64(13, st.merge_pass_count);
+	put_i64(14, st.spill_count_from_pressure);
+	put_i64(15, st.resident_demotions);
+	put_i64(16, st.position_spill_bytes);
+	put_i64(17, st.position_spill_count);
+
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
 CXX_PG_FUNCTION_INFO_V1(bioseq_scheduler_restart);
 Datum bioseq_scheduler_restart(PG_FUNCTION_ARGS) {
 	bioseq::parallelism::pg::restart_cluster();

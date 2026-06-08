@@ -20,9 +20,6 @@
  */
 module;
 
-#include <hwy/highway.h>
-#include <hwy/aligned_allocator.h>
-
 #include "common.h"
 
 extern "C" {

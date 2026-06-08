@@ -45,6 +45,7 @@ import bioseq_indexing.minimizer_index;
 import bioseq_indexing.minimizer_hashmap;
 import bioseq_indexing.minimizer_sequence;
 import bioseq_indexing.symbol_counts;
+import bioseq_parallelism.memory_admission;
 import bioseq_indexing.registry;
 
 #include "index_test_fakes.h"

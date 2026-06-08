@@ -12,6 +12,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iterator>
 #include <span>
 #include <string_view>
@@ -31,6 +32,11 @@ import bioseq_parallelism.pool;
 import bioseq_parallelism.memory_admission;
 import bioseq_parallelism.pipeline_ops;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
+
+extern "C" void bioseq_sort_pair_run_u128_keys(
+    hwy::uint128_t* keys,
+    std::size_t key_count,
+    int sort_impl) noexcept;
 
 export namespace bioseq::indexing {
 using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
@@ -101,6 +107,7 @@ struct DirView {
 namespace detail {
 using Header = MinimizerHashmapFragmentIndex::SerializedHeader;
 using BucketRecord = MinimizerHashmapFragmentIndex::SerializedBucket;
+using sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
 constexpr std::size_t HDR = MinimizerHashmapFragmentIndex::kSerializeHeaderBytes;     // 32
 constexpr std::size_t REC = MinimizerHashmapFragmentIndex::kSerializeBucketBytes;     // 16
 
@@ -115,6 +122,107 @@ inline void serialize_v2_blob(char* out, sequence_size_t target_len_val,
     std::memcpy(out, &h, HDR);
     if (!bkts.empty()) std::memcpy(out + HDR, bkts.data(), REC * bkts.size());
     if (!poss.empty()) std::memcpy(out + HDR + REC * bkts.size(), poss.data(), sizeof(std::uint64_t) * poss.size());
+}
+
+enum class PairRunSortImpl : std::uint8_t {
+    std_sort = 0,
+    simd_u128_vqsort = 1,
+    simd_u128_vec_stream_1 = 2,
+    simd_u128_vec_stream_2 = 3,
+    simd_u128_vec_stream_4 = 4,
+};
+
+inline int bioseq_pair_run_sort_impl = static_cast<int>(PairRunSortImpl::std_sort);
+
+[[nodiscard]] inline PairRunSortImpl pair_run_sort_impl() noexcept {
+    switch (bioseq_pair_run_sort_impl) {
+    case static_cast<int>(PairRunSortImpl::simd_u128_vqsort):
+        return PairRunSortImpl::simd_u128_vqsort;
+    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_1):
+        return PairRunSortImpl::simd_u128_vec_stream_1;
+    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_2):
+        return PairRunSortImpl::simd_u128_vec_stream_2;
+    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_4):
+        return PairRunSortImpl::simd_u128_vec_stream_4;
+    default:
+        return PairRunSortImpl::std_sort;
+    }
+}
+
+inline void set_pair_run_sort_impl(PairRunSortImpl impl) noexcept {
+    bioseq_pair_run_sort_impl = static_cast<int>(impl);
+}
+
+[[nodiscard]] inline const char* pair_run_sort_impl_name() noexcept {
+    switch (pair_run_sort_impl()) {
+    case PairRunSortImpl::simd_u128_vqsort:
+        return "simd_u128_vqsort";
+    case PairRunSortImpl::simd_u128_vec_stream_1:
+        return "simd_u128_vec_stream_1";
+    case PairRunSortImpl::simd_u128_vec_stream_2:
+        return "simd_u128_vec_stream_2";
+    case PairRunSortImpl::simd_u128_vec_stream_4:
+        return "simd_u128_vec_stream_4";
+    case PairRunSortImpl::std_sort:
+    default:
+        return "std_sort";
+    }
+}
+
+[[nodiscard]] inline hwy::uint128_t pack_pair(sorted_pair_t p) noexcept {
+    return hwy::uint128_t{.lo = p.second, .hi = p.first};
+}
+
+[[nodiscard]] inline sorted_pair_t unpack_pair(hwy::uint128_t v) noexcept {
+    return sorted_pair_t{v.hi, v.lo};
+}
+
+inline void sort_pair_run_u128(
+        std::vector<sorted_pair_t>& pairs,
+        PairRunSortImpl impl) {
+    const std::uint64_t key_bytes = bioseq::parallelism::saturating_mul(
+        static_cast<std::uint64_t>(pairs.size()),
+        static_cast<std::uint64_t>(sizeof(hwy::uint128_t)));
+    auto permit =
+        bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(key_bytes);
+    if (!permit) {
+        std::sort(pairs.begin(), pairs.end());
+        return;
+    }
+
+    std::vector<hwy::uint128_t> keys;
+    keys.reserve(pairs.size());
+    for (sorted_pair_t p : pairs) {
+        keys.push_back(pack_pair(p));
+    }
+    bioseq_sort_pair_run_u128_keys(
+        keys.data(),
+        keys.size(),
+        static_cast<int>(impl));
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        pairs[i] = unpack_pair(keys[i]);
+    }
+}
+
+inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
+    switch (pair_run_sort_impl()) {
+    case PairRunSortImpl::simd_u128_vqsort:
+        sort_pair_run_u128(pairs, PairRunSortImpl::simd_u128_vqsort);
+        return;
+    case PairRunSortImpl::simd_u128_vec_stream_1:
+        sort_pair_run_u128(pairs, PairRunSortImpl::simd_u128_vec_stream_1);
+        return;
+    case PairRunSortImpl::simd_u128_vec_stream_2:
+        sort_pair_run_u128(pairs, PairRunSortImpl::simd_u128_vec_stream_2);
+        return;
+    case PairRunSortImpl::simd_u128_vec_stream_4:
+        sort_pair_run_u128(pairs, PairRunSortImpl::simd_u128_vec_stream_4);
+        return;
+    case PairRunSortImpl::std_sort:
+    default:
+        std::sort(pairs.begin(), pairs.end());
+        return;
+    }
 }
 }  // namespace detail
 
@@ -147,13 +255,48 @@ struct MinimizerSequenceMergedIndex {
         const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
         const std::size_t size_u = (std::size_t)((total_bp + lpu - 1) / lpu);
 
-        using pair_t = std::pair<std::uint64_t,std::uint64_t>;
-        auto collect_fragment_pairs =
-            [&seq, total_bp, size_u](std::size_t fragment_no,
+        using pair_t = detail::sorted_pair_t;
+        struct CoreRange {
+            sequence_size_t core_lo = 0;
+            sequence_size_t core_hi = 0;
+        };
+        struct AdmittedPairRun {
+            std::vector<pair_t> pairs;
+            std::uint64_t admitted_bytes = 0;
+            bioseq::parallelism::MemoryPermit permit;
+        };
+        struct WorkerRangeResult {
+            std::vector<AdmittedPairRun> runs;
+            std::vector<CoreRange> deferred_for_backend_spill;
+            std::exception_ptr error;
+        };
+
+        auto release_untransferred_results_noexcept =
+            [](std::vector<WorkerRangeResult>& results) noexcept {
+                for (WorkerRangeResult& result : results) {
+                    for (AdmittedPairRun& run : result.runs) {
+                        run.permit.release();
+                        std::vector<pair_t>().swap(run.pairs);
+                        run.admitted_bytes = 0;
+                    }
+                }
+            };
+
+        auto reserve_pairs_or_panic = [](std::vector<pair_t>& out, std::uint64_t count) {
+            if (count > static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)())) {
+                index_corruption_panic("minimizers_per_sequence build: admitted range too large");
+            }
+            out.reserve(static_cast<std::size_t>(count));
+        };
+
+        auto collect_core_range_pairs =
+            [&seq, total_bp, size_u](sequence_size_t core_lo,
+                                     sequence_size_t core_hi,
                                      sketch_collector& collector,
                                      std::vector<pair_t>& out) {
-            const sequence_size_t core_lo = (sequence_size_t)fragment_no * frag_bp;
-            const sequence_size_t core_hi = std::min(core_lo + (sequence_size_t)frag_bp, total_bp);
+            if (core_hi <= core_lo) {
+                return;
+            }
             const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
             const sequence_size_t coll_hi = std::min(core_hi + (sequence_size_t)W, total_bp);
             collector.clear();
@@ -173,27 +316,189 @@ struct MinimizerSequenceMergedIndex {
             }
         };
 
-        auto sort_and_spill_run = [&storage](std::vector<pair_t>&& run) {
-            if (run.empty()) return;
-            std::sort(run.begin(), run.end());                                  // composite (kmer, encoded)
-            storage.spill_sorted_run_owned(std::move(run));
-        };
-
-        auto collect_serial = [&](std::size_t start_fragment) {
-            std::vector<pair_t> buf;
-            std::size_t buf_bytes = 0;
-            sketch_collector collector;
-            for (std::size_t fragment_no = start_fragment; fragment_no < nfrag; ++fragment_no) {
-                const std::size_t before = buf.size();
-                collect_fragment_pairs(fragment_no, collector, buf);
-                buf_bytes += (buf.size() - before) * sizeof(pair_t);
-                if (buf_bytes >= run_buffer_bytes && !buf.empty()) {
-                    sort_and_spill_run(std::move(buf));
-                    buf.clear();
-                    buf_bytes = 0;
+        auto compact_admitted_run_after_sort = [](AdmittedPairRun& run) {
+            const std::uint64_t used_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(run.pairs.size()),
+                    static_cast<std::uint64_t>(sizeof(pair_t)));
+            const std::uint64_t keep_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(run.pairs.capacity()),
+                    static_cast<std::uint64_t>(sizeof(pair_t)));
+            if (used_bytes * 2 < run.admitted_bytes) {
+                const std::uint64_t compact_bytes =
+                    std::max<std::uint64_t>(used_bytes, sizeof(pair_t));
+                if (auto compact_permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance()
+                            .try_reserve(compact_bytes)) {
+                    std::vector<pair_t> compact;
+                    compact.reserve(run.pairs.size());
+                    compact.insert(
+                        compact.end(),
+                        std::make_move_iterator(run.pairs.begin()),
+                        std::make_move_iterator(run.pairs.end()));
+                    run.pairs.swap(compact);
+                    run.permit.release();
+                    run.permit = std::move(*compact_permit);
+                    run.admitted_bytes = compact_bytes;
+                    return;
                 }
             }
-            sort_and_spill_run(std::move(buf));
+            if (run.admitted_bytes > keep_bytes) {
+                run.permit.shrink_to(keep_bytes);
+                run.admitted_bytes = keep_bytes;
+            }
+        };
+
+        auto collect_sort_and_spill_backend_scratch =
+            [&](auto& self, CoreRange range) -> void {
+                const std::uint64_t bp =
+                    static_cast<std::uint64_t>(range.core_hi - range.core_lo);
+                const std::uint64_t reserve_bytes =
+                    bioseq::parallelism::saturating_mul(
+                        bp, static_cast<std::uint64_t>(sizeof(pair_t)));
+                auto permit =
+                    bioseq::parallelism::MemoryAdmissionController::instance()
+                        .try_reserve(reserve_bytes);
+                if (!permit) {
+                    if constexpr (requires (S& s, std::uint64_t bytes) {
+                                      s.demote_resident_runs_until_available(bytes);
+                                  }) {
+                        storage.demote_resident_runs_until_available(reserve_bytes);
+                        permit = bioseq::parallelism::MemoryAdmissionController::instance()
+                            .try_reserve(reserve_bytes);
+                    }
+                }
+                if (!permit) {
+                    constexpr sequence_size_t kEmergencyUnadmittedCoreBp = 4096;
+                    if (range.core_hi - range.core_lo > kEmergencyUnadmittedCoreBp) {
+                        const sequence_size_t mid =
+                            range.core_lo + (range.core_hi - range.core_lo) / 2;
+                        self(self, CoreRange{range.core_lo, mid});
+                        self(self, CoreRange{mid, range.core_hi});
+                        return;
+                    }
+                    std::vector<pair_t> scratch;
+                    reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
+                    sketch_collector collector;
+                    collect_core_range_pairs(
+                        range.core_lo, range.core_hi, collector, scratch);
+                    detail::sort_pair_run(scratch);
+                    storage.spill_sorted_run(
+                        std::span<const pair_t>(scratch.data(), scratch.size()));
+                    return;
+                }
+                std::vector<pair_t> scratch;
+                reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
+                sketch_collector collector;
+                collect_core_range_pairs(
+                    range.core_lo, range.core_hi, collector, scratch);
+                detail::sort_pair_run(scratch);
+                storage.spill_sorted_run(
+                    std::span<const pair_t>(scratch.data(), scratch.size()));
+                permit->release();
+            };
+
+        auto transfer_result_runs = [&](std::vector<WorkerRangeResult>& results) {
+            for (WorkerRangeResult& result : results) {
+                if (result.error) {
+                    try {
+                        std::rethrow_exception(result.error);
+                    } catch (const std::exception& e) {
+                        (void)e;
+                        index_corruption_panic(
+                            "bioseq minimizers_per_sequence worker failed");
+                    } catch (...) {
+                        index_corruption_panic(
+                            "bioseq minimizers_per_sequence worker failed");
+                    }
+                }
+                for (AdmittedPairRun& run : result.runs) {
+                    if (!run.pairs.empty()) {
+                        storage.spill_sorted_run_owned_admitted(
+                            std::move(run.pairs),
+                            run.admitted_bytes,
+                            std::move(run.permit));
+                        run.admitted_bytes = 0;
+                    }
+                }
+                for (CoreRange range : result.deferred_for_backend_spill) {
+                    collect_sort_and_spill_backend_scratch(
+                        collect_sort_and_spill_backend_scratch, range);
+                }
+            }
+            release_untransferred_results_noexcept(results);
+        };
+
+        auto collect_range_admitted =
+            [&](auto& self, CoreRange range, WorkerRangeResult& result) -> void {
+                if (result.error) {
+                    return;
+                }
+                try {
+                    const std::uint64_t bp =
+                        static_cast<std::uint64_t>(range.core_hi - range.core_lo);
+                    const std::uint64_t reserve_bytes =
+                        bioseq::parallelism::saturating_mul(
+                            bp, static_cast<std::uint64_t>(sizeof(pair_t)));
+                    auto permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance()
+                            .try_reserve(reserve_bytes);
+                    if (!permit) {
+                        constexpr sequence_size_t kMinCoreBp = 4096;
+                        if (range.core_hi - range.core_lo <= kMinCoreBp) {
+                            result.deferred_for_backend_spill.push_back(range);
+                            return;
+                        }
+                        const sequence_size_t mid =
+                            range.core_lo + (range.core_hi - range.core_lo) / 2;
+                        self(self, CoreRange{range.core_lo, mid}, result);
+                        self(self, CoreRange{mid, range.core_hi}, result);
+                        return;
+                    }
+
+                    AdmittedPairRun run{};
+                    run.admitted_bytes = reserve_bytes;
+                    run.permit = std::move(*permit);
+                    reserve_pairs_or_panic(run.pairs, reserve_bytes / sizeof(pair_t));
+                    sketch_collector collector;
+                    collect_core_range_pairs(
+                        range.core_lo, range.core_hi, collector, run.pairs);
+                    detail::sort_pair_run(run.pairs);
+                    compact_admitted_run_after_sort(run);
+                    result.runs.push_back(std::move(run));
+                } catch (...) {
+                    result.error = std::current_exception();
+                }
+            };
+
+        const std::uint64_t peak_bytes_per_fragment =
+            bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(frag_bp),
+                static_cast<std::uint64_t>(sizeof(pair_t)));
+        const std::size_t fragments_per_block = std::max<std::size_t>(
+            1,
+            run_buffer_bytes / std::max<std::uint64_t>(1, peak_bytes_per_fragment));
+        std::vector<CoreRange> window_ranges;
+        for (std::size_t frag_lo = 0; frag_lo < nfrag; frag_lo += fragments_per_block) {
+            const std::size_t frag_hi = std::min(nfrag, frag_lo + fragments_per_block);
+            const sequence_size_t core_lo = static_cast<sequence_size_t>(frag_lo) * frag_bp;
+            const sequence_size_t core_hi = std::min(
+                static_cast<sequence_size_t>(frag_hi) * frag_bp, total_bp);
+            if (core_hi > core_lo) {
+                window_ranges.push_back(CoreRange{core_lo, core_hi});
+            }
+        }
+
+        auto collect_serial = [&]() {
+            std::vector<WorkerRangeResult> results(1);
+            sketch_collector collector;
+            (void)collector;
+            for (CoreRange range : window_ranges) {
+                results[0] = WorkerRangeResult{};
+                collect_range_admitted(collect_range_admitted, range, results[0]);
+                transfer_result_runs(results);
+            }
         };
 
         auto& pool = bioseq::parallelism::GlobalPool::instance();
@@ -204,67 +509,27 @@ struct MinimizerSequenceMergedIndex {
             && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;
 
         if (!may_parallel_collect) {
-            collect_serial(0);
+            collect_serial();
         } else {
-            constexpr std::size_t kParallelRunCapBytes = std::size_t{512} << 20;
-            const std::size_t target_run_bytes =
-                std::max<std::size_t>(
-                    std::size_t{8} << 20,
-                    std::min(run_buffer_bytes, kParallelRunCapBytes));
-            const std::size_t estimated_pairs_per_fragment =
-                std::max<std::size_t>(1, frag_bp / w);
-            const std::size_t estimated_bytes_per_fragment =
-                std::max<std::size_t>(
-                    sizeof(pair_t),
-                    estimated_pairs_per_fragment * sizeof(pair_t));
-            const std::size_t min_wave_fragments =
-                static_cast<std::size_t>(pool.max_concurrency());
-            const std::size_t target_wave_fragments =
-                std::max<std::size_t>(
-                    min_wave_fragments,
-                    target_run_bytes / estimated_bytes_per_fragment);
-            const std::uint64_t wave_peak_bytes =
-                bioseq::parallelism::saturating_mul(
-                    static_cast<std::uint64_t>(target_run_bytes), 2);
-
-            for (std::size_t wave_lo = 0; wave_lo < nfrag;) {
-                const std::size_t wave_hi =
-                    std::min(nfrag, wave_lo + target_wave_fragments);
-                auto wave_permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance()
-                        .try_reserve(wave_peak_bytes);
-                if (!wave_permit) {
-                    collect_serial(wave_lo);
-                    break;
-                }
-
-                std::vector<std::vector<pair_t>> local_runs(wave_hi - wave_lo);
+            std::vector<WorkerRangeResult> local_results(window_ranges.size());
+            try {
                 bioseq::parallelism::parallel_for_pipeline(
-                    0, local_runs.size(), 1,
+                    0, local_results.size(), 1,
                     bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT,
                     bioseq::parallelism::TaskParallelRegion::fragment_build,
-                    [&collect_fragment_pairs, &local_runs, wave_lo](
+                    [&collect_range_admitted, &local_results, &window_ranges](
                             std::size_t lo, std::size_t hi) {
-                        sketch_collector collector;
                         for (std::size_t rel = lo; rel < hi; ++rel) {
-                            collect_fragment_pairs(
-                                wave_lo + rel, collector, local_runs[rel]);
+                            collect_range_admitted(
+                                collect_range_admitted,
+                                window_ranges[rel],
+                                local_results[rel]);
                         }
                     });
-
-                std::size_t total_pairs = 0;
-                for (const auto& run : local_runs) total_pairs += run.size();
-                std::vector<pair_t> merged;
-                merged.reserve(total_pairs);
-                for (auto& run : local_runs) {
-                    merged.insert(
-                        merged.end(),
-                        std::make_move_iterator(run.begin()),
-                        std::make_move_iterator(run.end()));
-                    std::vector<pair_t>().swap(run);
-                }
-                sort_and_spill_run(std::move(merged));
-                wave_lo = wave_hi;
+                transfer_result_runs(local_results);
+            } catch (...) {
+                release_untransferred_results_noexcept(local_results);
+                throw;
             }
         }
 
@@ -348,6 +613,9 @@ struct MinimizerSequenceMergedIndex {
         }
 
         // ---- Pass 2: cleanup.
+        if constexpr (requires (S& s) { s.snapshot_sorted_run_stats_before_release(); }) {
+            storage.snapshot_sorted_run_stats_before_release();
+        }
         storage.release_runs();
     }
 

@@ -47,6 +47,7 @@ import bioseq_types.pg_compact_sequence;  // pgseq_t, dispatch_instance
 import bioseq_sequences;               // compact_sequence_range
 import bioseq_parallelism.memory_admission;
 import bioseq_storage_indexing_residency_pg;
+import bioseq_storage_indexing_sorted_runs_pg;
 import bioseq_instr;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
@@ -71,9 +72,38 @@ using bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME;
 static_assert(bioseq::indexing::kVarlenaHeaderBytes == VARHDRSZ, "VARHDRSZ mirror drift");
 static_assert(bioseq::indexing::kPgMaxAllocSize == MaxAllocSize, "MaxAllocSize mirror drift");
 
-// Backend-local merge run-count observability (§8.8). Defined here (storage)
-// so merge_runs can set it; admin zeroes it at build start and mod reads it.
+// Backend-local per-sequence build observability (§8.8/DOC0299). Defined here
+// (storage) so merge/release can set it; admin zeroes it at build start and
+// mod.cppm reads it through SQL in the same backend.
+struct LastMpsBuildStats {
+    std::uint64_t backend_pid = 0;
+    std::uint64_t db_oid = 0;
+    std::uint64_t relfilenode = 0;
+    std::uint64_t sequence_rowno = 0;
+    std::uint64_t total_run_count = 0;
+    std::uint64_t resident_runs = 0;
+    std::uint64_t file_runs = 0;
+    std::uint64_t resident_run_bytes = 0;
+    std::uint64_t resident_peak_bytes = 0;
+    std::uint64_t spilled_run_bytes = 0;
+    std::uint64_t postgres_temp_file_bytes = 0;
+    std::uint64_t postgres_temp_file_count = 0;
+    std::uint64_t merge_reader_buffer_bytes = 0;
+    std::uint64_t merge_pass_count = 0;
+    std::uint64_t spill_count_from_pressure = 0;
+    std::uint64_t resident_demotions = 0;
+    std::uint64_t position_spill_bytes = 0;
+    std::uint64_t position_spill_count = 0;
+};
+
 inline std::uint64_t g_last_index_merge_run_count = 0;
+inline LastMpsBuildStats g_last_mps_build_stats{};
+
+inline void reset_last_mps_build_stats() noexcept {
+    g_last_index_merge_run_count = 0;
+    g_last_mps_build_stats = {};
+}
+
 // Pinned attribute numbers (§8.1) for the CHUNKED_PER_FRAGMENT table.
 inline constexpr AttrNumber kAttQueryKey   = 1;
 inline constexpr AttrNumber kAttSubKey     = 2;
@@ -197,29 +227,7 @@ struct IndexStorageFragmentPg {
     std::size_t   run_buffer_override_bytes_ = 0;
     // per-sub_key byte plan recorded by resize/resize_chunks, consumed by write_to_each.
     std::map<index_sub_key_t, std::vector<std::size_t>> chunk_payload_bytes_;
-    // spill state
-    Oid idxsort_rel_oid_ = InvalidOid;
-    std::int32_t next_run_id_ = 0;
-    struct MemoryRun {
-        std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
-        std::uint64_t admitted_bytes = 0;
-        bioseq::parallelism::MemoryPermit permit;
-
-        MemoryRun() = default;
-        MemoryRun(std::vector<std::pair<std::uint64_t, std::uint64_t>>&& run_pairs,
-                  std::uint64_t bytes,
-                  bioseq::parallelism::MemoryPermit&& memory_permit) noexcept
-            : pairs(std::move(run_pairs)),
-              admitted_bytes(bytes),
-              permit(std::move(memory_permit)) {}
-        MemoryRun(MemoryRun&&) noexcept = default;
-        MemoryRun& operator=(MemoryRun&&) noexcept = default;
-        MemoryRun(const MemoryRun&) = delete;
-        MemoryRun& operator=(const MemoryRun&) = delete;
-    };
-    std::vector<MemoryRun> memory_runs_;
-    std::uint64_t memory_run_bytes_ = 0;
-    std::uint64_t memory_run_peak_bytes_ = 0;
+    std::optional<SortedPairRunStore> sorted_runs_;
 
     IndexStorageFragmentPg() = default;
     IndexStorageFragmentPg(const IndexStorageFragmentPg&) = delete;
@@ -242,25 +250,18 @@ struct IndexStorageFragmentPg {
         scratch_=o.scratch_; scratch_units_=o.scratch_units_;
         run_buffer_override_bytes_=o.run_buffer_override_bytes_;
         chunk_payload_bytes_=std::move(o.chunk_payload_bytes_);
-        idxsort_rel_oid_=o.idxsort_rel_oid_; next_run_id_=o.next_run_id_;
-        memory_runs_=std::move(o.memory_runs_);
-        memory_run_bytes_=o.memory_run_bytes_;
-        memory_run_peak_bytes_=o.memory_run_peak_bytes_;
+        sorted_runs_=std::move(o.sorted_runs_);
         o.own_mctx_=nullptr; o.decoded_=nullptr; o.scratch_=nullptr; o.index_relid_=InvalidOid;
-        o.decoded_units_=0; o.decoded_bytes_=0; o.scratch_units_=0; o.idxsort_rel_oid_=InvalidOid;
+        o.decoded_units_=0; o.decoded_bytes_=0; o.scratch_units_=0;
         o.chunk_cache_clock_=0; o.chunk_cache_bytes_=0;
-        o.memory_run_bytes_=0; o.memory_run_peak_bytes_=0;
     }
-	    void release_resident_runs_noexcept() noexcept {
-	        for (auto& run : memory_runs_) {
-	            run.permit.release();
-	        }
-	        memory_runs_.clear();
-	        memory_run_bytes_ = 0;
-	        memory_run_peak_bytes_ = 0;
-	    }
+    void release_resident_runs_noexcept() noexcept {
+        if (sorted_runs_.has_value()) {
+            sorted_runs_->release_resident_runs_noexcept();
+        }
+    }
     void release_() noexcept {
-        release_resident_runs_noexcept();
+        release_runs_noexcept();
         chunk_cache_.clear();
         chunk_cache_bytes_ = 0;
         if (own_mctx_ != nullptr) {
@@ -644,11 +645,24 @@ struct IndexStorageFragmentPg {
         return static_cast<std::size_t>(capped);
     }
 
-    // ---- external sort spill (temp-table primary path) ----
-    void ensure_idxsort_();
+    // ---- external sort spill (BufFile-backed sorted runs) ----
+    [[nodiscard]] SortedPairRunStore& sorted_runs_ensure_() {
+        if (!sorted_runs_.has_value()) {
+            sorted_runs_.emplace();
+        }
+        return *sorted_runs_;
+    }
     std::size_t spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>> sorted);
     std::size_t spill_sorted_run_owned(std::vector<std::pair<std::uint64_t,std::uint64_t>> sorted);
-    template <class F> void merge_runs(F&& on_kmer);
+	    std::size_t spill_sorted_run_owned_admitted(
+	        std::vector<std::pair<std::uint64_t,std::uint64_t>> sorted,
+	        std::uint64_t admitted_bytes,
+	        bioseq::parallelism::MemoryPermit permit);
+	    void demote_resident_runs_until_available(std::uint64_t bytes_needed);
+	    template <class F> void merge_runs(F&& on_kmer);
+	    [[nodiscard]] SortedRunStoreStats sorted_run_stats() const noexcept;
+	    void snapshot_sorted_run_stats_before_release();
+    void release_runs_noexcept() noexcept;
     void release_runs();
 };
 
@@ -941,195 +955,104 @@ inline void IndexStorageTablePg::clear(std::string_view name) {
     index_relid_ = InvalidOid;
 }
 
-// ---- IndexStorageFragmentPg external-sort spill (temp-table primary) -------
-inline void IndexStorageFragmentPg::ensure_idxsort_() {
-    if (OidIsValid(idxsort_rel_oid_)) return;
-    const std::uint64_t nonce = identity_hash64(db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, index_name_) ^ query_key_;
-    const std::string nm = fmt::format("idxsort_{:016x}_{}", nonce, (unsigned long long)query_key_);
-    std::string ddl = fmt::format(
-        "CREATE TEMP TABLE IF NOT EXISTS {} (run_id int4, ord int8, kmer int8, encoded int8) ON COMMIT DROP;",
-        quote_identifier(nm.c_str()));
-    if (SPI_connect()==SPI_OK_CONNECT){ SPI_execute(ddl.c_str(), false, 0); SPI_finish(); }
-    // Resolve via the search path (the session temp namespace is implicitly first
-    // for temp tables); get_namespace_oid("pg_temp") does NOT resolve the alias.
-    idxsort_rel_oid_ = RelnameGetRelid(nm.c_str());
-    if (!OidIsValid(idxsort_rel_oid_)) index_error("failed to create idxsort temp relation");
-}
-
 inline std::size_t IndexStorageFragmentPg::spill_sorted_run(std::span<const std::pair<std::uint64_t,std::uint64_t>> sorted) {
-    ensure_idxsort_();
-    const std::int32_t run = next_run_id_++;
-    Relation rel = try_safe_relation_open(idxsort_rel_oid_, RowExclusiveLock);
-    if (rel == nullptr) index_error("idxsort temp relation vanished");
-    TupleDesc td = RelationGetDescr(rel);
-    const CommandId cid = GetCurrentCommandId(true);
-    for (std::size_t j = 0; j < sorted.size(); ++j) {
-        Datum v[4] = { Int32GetDatum(run), Int64GetDatum((int64)j),
-                       Int64GetDatum((int64)sorted[j].first), Int64GetDatum((int64)sorted[j].second) };
-        bool n[4] = {false,false,false,false};
-        HeapTuple t = heap_form_tuple(td, v, n);
-        heap_insert(rel, t, cid, HEAP_INSERT_SKIP_FSM, nullptr);
-        heap_freetuple(t);
-    }
-    relation_close(rel, RowExclusiveLock);
-    return (std::size_t)run;
+    return sorted_runs_ensure_().spill_sorted_run(sorted);
 }
 
 inline std::size_t IndexStorageFragmentPg::spill_sorted_run_owned(
         std::vector<std::pair<std::uint64_t,std::uint64_t>> sorted) {
-    const std::uint64_t bytes = bioseq::parallelism::saturating_mul(
-        static_cast<std::uint64_t>(sorted.capacity()),
-        static_cast<std::uint64_t>(sizeof(std::pair<std::uint64_t,std::uint64_t>)));
-    if (!bioseq::memory::default_budget().under_pressure()) {
-        if (auto permit =
-                bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(bytes)) {
-            const std::size_t id = static_cast<std::size_t>(next_run_id_++);
-            memory_run_bytes_ += bytes;
-            memory_run_peak_bytes_ = std::max(memory_run_peak_bytes_, memory_run_bytes_);
-            memory_runs_.emplace_back(std::move(sorted), bytes, std::move(*permit));
-            JustLog("[bioseq] index: kept sorted run {} in RAM (bytes={}, resident={}, peak={})",
-                    id, bytes, memory_run_bytes_, memory_run_peak_bytes_);
-            return id;
-        }
-    }
-    JustLog("[bioseq] index: spilling sorted run to PG temp (pairs={}, capacity_bytes={})",
-            sorted.size(), bytes);
-    return spill_sorted_run(
-        std::span<const std::pair<std::uint64_t,std::uint64_t>>(sorted.data(), sorted.size()));
+    return sorted_runs_ensure_().spill_sorted_run_owned(std::move(sorted));
 }
 
-template <class F>
-inline void IndexStorageFragmentPg::merge_runs(F&& on_kmer) {
-    // observability: the number of spilled runs this build merged (§8.8).
-    if ((std::uint64_t)next_run_id_ > g_last_index_merge_run_count) g_last_index_merge_run_count = (std::uint64_t)next_run_id_;
-    struct MergeHead {
-        std::uint64_t kmer = 0;
-        std::uint64_t encoded = 0;
-        std::size_t run_index = 0;
-        std::size_t pair_index = 0;
-        bool pg = false;
+	inline std::size_t IndexStorageFragmentPg::spill_sorted_run_owned_admitted(
+	        std::vector<std::pair<std::uint64_t,std::uint64_t>> sorted,
+	        std::uint64_t admitted_bytes,
+	        bioseq::parallelism::MemoryPermit permit) {
+	    return sorted_runs_ensure_().spill_sorted_run_owned_admitted(
+	        std::move(sorted), admitted_bytes, std::move(permit));
+	}
+
+	inline void IndexStorageFragmentPg::demote_resident_runs_until_available(
+	        std::uint64_t bytes_needed) {
+	    if (sorted_runs_.has_value()) {
+	        sorted_runs_->demote_resident_runs_until_available(bytes_needed);
+	    }
+	}
+
+	template <class F>
+	inline void IndexStorageFragmentPg::merge_runs(F&& on_kmer) {
+    if (!sorted_runs_.has_value()) {
+        return;
+    }
+    g_last_index_merge_run_count = std::max<std::uint64_t>(
+        g_last_index_merge_run_count, sorted_runs_->run_count());
+    sorted_runs_->merge_runs(std::forward<F>(on_kmer));
+}
+
+inline SortedRunStoreStats IndexStorageFragmentPg::sorted_run_stats() const noexcept {
+    return sorted_runs_.has_value() ? sorted_runs_->stats() : SortedRunStoreStats{};
+}
+
+inline void IndexStorageFragmentPg::snapshot_sorted_run_stats_before_release() {
+    if (!sorted_runs_.has_value()) {
+        return;
+    }
+    const SortedRunStoreStats st = sorted_runs_->stats();
+    const std::uint64_t total_runs = sorted_runs_->run_count();
+    g_last_index_merge_run_count = total_runs;
+    g_last_mps_build_stats = LastMpsBuildStats{
+        .backend_pid = static_cast<std::uint64_t>(MyProcPid),
+        .db_oid = static_cast<std::uint64_t>(db_oid_),
+        .relfilenode = static_cast<std::uint64_t>(main_relfilenode_),
+        .sequence_rowno = static_cast<std::uint64_t>(query_key_),
+        .total_run_count = total_runs,
+        .resident_runs = st.resident_runs,
+        .file_runs = st.file_runs,
+        .resident_run_bytes = st.resident_bytes,
+        .resident_peak_bytes = st.resident_peak_bytes,
+        .spilled_run_bytes = st.spilled_bytes,
+        .postgres_temp_file_bytes = st.postgres_temp_file_bytes,
+        .postgres_temp_file_count = st.postgres_temp_file_count,
+        .merge_reader_buffer_bytes = st.merge_reader_buffer_bytes,
+        .merge_pass_count = st.merge_pass_count,
+        .spill_count_from_pressure = st.spill_count_from_pressure,
+        .resident_demotions = st.resident_demotions,
+        .position_spill_bytes = st.position_spill_bytes,
+        .position_spill_count = st.position_spill_count,
     };
-    struct MergeHeadGreater {
-        bool operator()(const MergeHead& lhs, const MergeHead& rhs) const noexcept {
-            if (lhs.kmer != rhs.kmer) {
-                return lhs.kmer > rhs.kmer;
-            }
-            return lhs.encoded > rhs.encoded;
-        }
-    };
+    JustLog("[bioseq.index.mps_build.row] backend_pid={} db_oid={} relfilenode={} sequence_rowno={} "
+            "resident_runs={} file_runs={} resident_run_bytes={} resident_peak_bytes={} "
+            "spilled_run_bytes={} postgres_temp_file_bytes={} postgres_temp_file_count={} "
+            "merge_reader_buffer_bytes={} merge_pass_count={} spill_count_from_pressure={} "
+            "resident_demotions={} position_spill_bytes={} position_spill_count={}",
+            MyProcPid,
+            static_cast<unsigned long long>(db_oid_),
+            static_cast<unsigned long long>(main_relfilenode_),
+            static_cast<unsigned long long>(query_key_),
+            static_cast<unsigned long long>(st.resident_runs),
+            static_cast<unsigned long long>(st.file_runs),
+            static_cast<unsigned long long>(st.resident_bytes),
+            static_cast<unsigned long long>(st.resident_peak_bytes),
+            static_cast<unsigned long long>(st.spilled_bytes),
+            static_cast<unsigned long long>(st.postgres_temp_file_bytes),
+            static_cast<unsigned long long>(st.postgres_temp_file_count),
+            static_cast<unsigned long long>(st.merge_reader_buffer_bytes),
+            static_cast<unsigned long long>(st.merge_pass_count),
+            static_cast<unsigned long long>(st.spill_count_from_pressure),
+            static_cast<unsigned long long>(st.resident_demotions),
+            static_cast<unsigned long long>(st.position_spill_bytes),
+            static_cast<unsigned long long>(st.position_spill_count));
+}
 
-    std::priority_queue<
-        MergeHead, std::vector<MergeHead>, MergeHeadGreater> heap;
-    std::size_t resident_pairs = 0;
-    for (std::size_t run_index = 0; run_index < memory_runs_.size(); ++run_index) {
-        const auto& pairs = memory_runs_[run_index].pairs;
-        resident_pairs += pairs.size();
-        if (!pairs.empty()) {
-            heap.push(MergeHead{
-                pairs.front().first, pairs.front().second, run_index, 0, false});
-        }
-    }
-
-    Relation rel = nullptr;
-    Relation idx = nullptr;
-    SysScanDesc scan = nullptr;
-    TupleDesc td = nullptr;
-    if (OidIsValid(idxsort_rel_oid_)) {
-        Relation rel0 = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
-        const std::string relname = std::string(RelationGetRelationName(rel0));
-        relation_close(rel0, AccessShareLock);
-        const std::string idxname = fmt::format("{}_ke", relname);
-        std::string mk = fmt::format(
-            "CREATE INDEX IF NOT EXISTS {} ON pg_temp.{} (kmer, encoded);",
-            quote_identifier(idxname.c_str()), quote_identifier(relname.c_str()));
-        if (SPI_connect()==SPI_OK_CONNECT){ SPI_execute(mk.c_str(), false, 0); SPI_finish(); }
-        const Oid idx_oid = RelnameGetRelid(idxname.c_str());
-        if (!OidIsValid(idx_oid)) index_error("merge_runs: (kmer,encoded) index Oid unresolved");
-        rel = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
-        idx = index_open(idx_oid, AccessShareLock);
-        scan = systable_beginscan_ordered(rel, idx, nullptr, 0, nullptr);
-        td = RelationGetDescr(rel);
-    }
-
-    auto push_next_pg = [&heap, scan, td]() {
-        if (scan == nullptr) {
-            return;
-        }
-        HeapTuple t = systable_getnext_ordered(scan, ForwardScanDirection);
-        if (t == nullptr) {
-            return;
-        }
-        bool isnull=false;
-        const std::uint64_t kmer =
-            (std::uint64_t)DatumGetInt64(heap_getattr(t, 3, td, &isnull));
-        const std::uint64_t encoded =
-            (std::uint64_t)DatumGetInt64(heap_getattr(t, 4, td, &isnull));
-        heap.push(MergeHead{kmer, encoded, 0, 0, true});
-    };
-    push_next_pg();
-
-    std::vector<std::uint64_t> positions;
-    while (!heap.empty()) {
-        const std::uint64_t kmer = heap.top().kmer;
-        positions.clear();
-        std::uint64_t last_encoded = 0;
-        bool have_last = false;
-        while (!heap.empty() && heap.top().kmer == kmer) {
-            MergeHead head = heap.top();
-            heap.pop();
-            if (!have_last || head.encoded != last_encoded) {
-                positions.push_back(head.encoded);
-                last_encoded = head.encoded;
-                have_last = true;
-            }
-            if (head.pg) {
-                push_next_pg();
-            } else {
-                const std::size_t next_pair = head.pair_index + 1;
-                const auto& pairs = memory_runs_[head.run_index].pairs;
-                if (next_pair < pairs.size()) {
-                    heap.push(MergeHead{
-                        pairs[next_pair].first,
-                        pairs[next_pair].second,
-                        head.run_index,
-                        next_pair,
-                        false});
-                }
-            }
-        }
-        PositionBatchCursor cursor{&positions};
-        on_kmer(kmer, cursor);
-    }
-
-    if (scan != nullptr) {
-        systable_endscan_ordered(scan);
-    }
-    if (idx != nullptr) {
-        index_close(idx, AccessShareLock);
-    }
-    if (rel != nullptr) {
-        relation_close(rel, AccessShareLock);
-    }
-    if (!memory_runs_.empty()) {
-        JustLog("[bioseq] index: merged {} resident sorted runs without PG temp flush (resident_pairs={}, peak_bytes={}, disk_runs={})",
-                memory_runs_.size(), resident_pairs, memory_run_peak_bytes_,
-                OidIsValid(idxsort_rel_oid_) ? "yes" : "no");
+inline void IndexStorageFragmentPg::release_runs_noexcept() noexcept {
+    if (sorted_runs_.has_value()) {
+        sorted_runs_->release_runs_noexcept();
+        sorted_runs_.reset();
     }
 }
 
 inline void IndexStorageFragmentPg::release_runs() {
-    release_resident_runs_noexcept();
-    if (OidIsValid(idxsort_rel_oid_)) {
-        Relation rel = try_safe_relation_open(idxsort_rel_oid_, AccessShareLock);
-        if (rel != nullptr) {
-            const std::string relname = std::string(RelationGetRelationName(rel));
-            relation_close(rel, AccessShareLock);
-            std::string sql = fmt::format("DROP TABLE IF EXISTS pg_temp.{} CASCADE;", quote_identifier(relname.c_str()));
-            if (SPI_connect()==SPI_OK_CONNECT){ SPI_execute(sql.c_str(), false, 0); SPI_finish(); }
-        }
-        idxsort_rel_oid_ = InvalidOid;
-    }
-    next_run_id_ = 0;
+    release_runs_noexcept();
 }
 
 inline void write_serialized_index_chunk_pg(

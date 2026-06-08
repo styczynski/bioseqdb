@@ -21,6 +21,7 @@
 //   import bioseq_indexing.type;       // SequenceIndexType, index_sub_key_t, DIRECTORY_SUB_KEY, TEMP_RUN_BASE, MAX_INDEX_CHUNK_SIZE_BYTES
 //   import bioseq_indexing.storage;    // is_index_chunked_storage_for, is_external_sort_spill_storage
 //   import bioseq_indexing.minimizer_hashmap;  // MinimizerHashmapFragmentIndex, index_corruption_panic
+//   import bioseq_parallelism.memory_admission; // MemoryPermit for admitted sorted runs
 // (the §16.1 preamble already lists all three.)
 
 #include "common.h"            // DEBUG_ASSERT (unused here but harmless), parity with modules
@@ -208,6 +209,15 @@ struct FakeFragmentStorage {
         return runs_.size() - 1;
     }
 
+    std::size_t spill_sorted_run_owned_admitted(
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
+            std::uint64_t,
+            bioseq::parallelism::MemoryPermit permit) {
+        permit.release();
+        runs_.push_back(std::move(sorted));
+        return runs_.size() - 1;
+    }
+
     struct Cursor {
         const std::vector<std::uint64_t>* v;
         [[nodiscard]] std::uint64_t total_count() const { return v->size(); }
@@ -244,7 +254,8 @@ struct FakeFragmentStorage {
     }
 
     void release_resident_runs_noexcept() noexcept { runs_.clear(); }
-    void release_runs() { release_resident_runs_noexcept(); }
+    void release_runs_noexcept() noexcept { runs_.clear(); }
+    void release_runs() { release_runs_noexcept(); }
     [[nodiscard]] std::size_t run_buffer_bytes() const { return run_buffer_bytes_; }
 };
 

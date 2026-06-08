@@ -33,6 +33,7 @@ import pg_utils;
 import bioseq_storage;
 import bioseq_scheduler.supervisor_pg;
 import bioseq_storage_indexing_residency_pg;
+import bioseq_indexing.minimizer_sequence;
 
 extern "C++" {
 
@@ -532,6 +533,28 @@ bioseq_guc_init()
 		INT_MAX,
 		PGC_USERSET,
 		GUC_UNIT_MB,
+		NULL,
+		NULL,
+		NULL);
+
+	static const struct config_enum_entry mps_pair_sort_impl_options[] = {
+		{ "std_sort", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::std_sort), false },
+		{ "simd_u128_vqsort", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::simd_u128_vqsort), false },
+		{ "simd_u128_vec_stream_1", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::simd_u128_vec_stream_1), false },
+		{ "simd_u128_vec_stream_2", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::simd_u128_vec_stream_2), false },
+		{ "simd_u128_vec_stream_4", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::simd_u128_vec_stream_4), false },
+		{ NULL, 0, false }
+	};
+
+	DefineCustomEnumVariable(
+		"bioseq.mps_pair_sort_impl",
+		"Sort implementation for minimizers_per_sequence pair runs.",
+		NULL,
+		&bioseq::indexing::detail::bioseq_pair_run_sort_impl,
+		static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::std_sort),
+		mps_pair_sort_impl_options,
+		PGC_USERSET,
+		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 		NULL,
 		NULL,
 		NULL);

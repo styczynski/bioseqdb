@@ -11,6 +11,11 @@
 import bioseq_simd.sorting;
 import testing;
 
+extern "C" void bioseq_sort_pair_run_u128_keys(
+    hwy::uint128_t* keys,
+    std::size_t key_count,
+    int sort_impl) noexcept;
+
 namespace {
 
 [[nodiscard]] hwy::uint128_t make_u128(std::uint64_t hi, std::uint64_t lo) {
@@ -106,4 +111,16 @@ TEST_CASE("u128 default sort uses vec_stream ordering", "[sorting][u128]") {
 
     bioseq::simd::sorting::sort_u128_ascending(input.data(), input.size());
     ASSERT(input == expected);
+}
+
+TEST_CASE("per-sequence pair-run sidecar sort matches std::sort",
+          "[sorting][u128][pair-run-sidecar]") {
+    for (int impl : {1, 2, 3, 4}) {
+        auto input = random_u128_case(257);
+        auto expected = input;
+        std::sort(expected.begin(), expected.end(), u128_less);
+
+        bioseq_sort_pair_run_u128_keys(input.data(), input.size(), impl);
+        ASSERT(input == expected);
+    }
 }

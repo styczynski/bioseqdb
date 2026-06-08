@@ -41,6 +41,7 @@ import bioseq_indexing.minimizer_sequence;
 import bioseq_storage_indexing_pg;
 import bioseq_storage_indexing_handles;
 import bioseq_storage_indexing_residency_pg;
+import bioseq_storage_indexing_sorted_runs_pg;
 import bioseq_sequences;
 import bioseq_sequences.kmers;
 import bioseq_sequences.kmers.hashers.minimap_int;
@@ -536,11 +537,21 @@ struct OpportunisticFragmentIndexStorage {
         index_error("external sort spill is not supported by opportunistic storage");
     }
 
+    [[nodiscard]] std::size_t spill_sorted_run_owned_admitted(
+            std::vector<std::pair<std::uint64_t, std::uint64_t>>,
+            std::uint64_t,
+            bioseq::parallelism::MemoryPermit permit) {
+        permit.release();
+        index_error("external sort spill is not supported by opportunistic storage");
+    }
+
     void merge_runs(auto&&) {
         index_error("external sort merge is not supported by opportunistic storage");
     }
 
     void release_resident_runs_noexcept() noexcept {}
+
+    void release_runs_noexcept() noexcept {}
 
     void release_runs() {}
 
@@ -559,32 +570,15 @@ struct AsyncPersistFileChunkHeader {
 static_assert(sizeof(AsyncPersistFileChunkHeader) == 24);
 
 struct AsyncPersistFileFragmentStorage {
-    struct SortRun {
-        std::string path{};
-        std::uint64_t pair_count = 0;
-    };
-    struct PositionCursor {
-        const std::vector<std::uint64_t>* positions = nullptr;
-
-        [[nodiscard]] std::uint64_t total_count() const {
-            return positions == nullptr ? 0 : positions->size();
-        }
-
-        template <class F>
-        void for_each_batch(F&& f) const {
-            if (positions != nullptr && !positions->empty()) {
-                f(std::span<const std::uint64_t>(
-                    positions->data(), positions->size()));
-            }
-        }
-    };
-
     std::map<bioseq::indexing::index_sub_key_t, std::vector<std::size_t>> plans{};
     std::string path{};
     std::ofstream out{};
     std::uint64_t chunk_count = 0;
     std::uint64_t file_bytes = 0;
-    std::vector<SortRun> sort_runs{};
+    Oid db_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    std::uint64_t sequence_rowno = 0;
+    bioseq::storage::indexing::SortedPairRunStore sorted_runs{};
 
     explicit AsyncPersistFileFragmentStorage(std::string p)
         : path(std::move(p)),
@@ -742,149 +736,91 @@ struct AsyncPersistFileFragmentStorage {
 
     [[nodiscard]] std::size_t spill_sorted_run(
             std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
-        const std::uint64_t run_id = sort_runs.size();
-        const std::string run_path = fmt::format(
-            "{}.run_{}",
-            path,
-            static_cast<unsigned long long>(run_id));
-        std::ofstream run_out(run_path, std::ios::binary | std::ios::trunc);
-        if (!run_out) {
-            index_error("failed to open temporary sort run");
-        }
-        const std::uint64_t bytes =
-            static_cast<std::uint64_t>(sorted.size())
-            * sizeof(std::pair<std::uint64_t, std::uint64_t>);
-        if (bytes != 0) {
-            run_out.write(
-                reinterpret_cast<const char*>(sorted.data()),
-                static_cast<std::streamsize>(bytes));
-        }
-        run_out.close();
-        if (!run_out) {
-            index_error("failed to write temporary sort run");
-        }
-        sort_runs.push_back(SortRun{
-            .path = run_path,
-            .pair_count = static_cast<std::uint64_t>(sorted.size()),
-        });
-        return static_cast<std::size_t>(run_id);
+        return sorted_runs.spill_sorted_run(sorted);
     }
 
     [[nodiscard]] std::size_t spill_sorted_run_owned(
             std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
-        return spill_sorted_run(
-            std::span<const std::pair<std::uint64_t, std::uint64_t>>(
-                sorted.data(), sorted.size()));
+        return sorted_runs.spill_sorted_run_owned(std::move(sorted));
+    }
+
+    [[nodiscard]] std::size_t spill_sorted_run_owned_admitted(
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted,
+            std::uint64_t admitted_bytes,
+            bioseq::parallelism::MemoryPermit permit) {
+        return sorted_runs.spill_sorted_run_owned_admitted(
+            std::move(sorted), admitted_bytes, std::move(permit));
     }
 
     template <class F>
     void merge_runs(F&& on_kmer) {
-        struct RunReader {
-            std::ifstream in{};
-            std::uint64_t remaining = 0;
-            std::pair<std::uint64_t, std::uint64_t> current{};
-
-            [[nodiscard]] bool read_next() {
-                if (remaining == 0) {
-                    return false;
-                }
-                in.read(
-                    reinterpret_cast<char*>(&current),
-                    static_cast<std::streamsize>(sizeof(current)));
-                if (!in) {
-                    return false;
-                }
-                --remaining;
-                return true;
-            }
-        };
-        struct MergeHead {
-            std::uint64_t kmer = 0;
-            std::uint64_t encoded = 0;
-            std::size_t run_index = 0;
-        };
-        struct MergeHeadGreater {
-            bool operator()(const MergeHead& lhs, const MergeHead& rhs) const noexcept {
-                if (lhs.kmer != rhs.kmer) {
-                    return lhs.kmer > rhs.kmer;
-                }
-                return lhs.encoded > rhs.encoded;
-            }
-        };
-
-        std::vector<RunReader> readers;
-        readers.reserve(sort_runs.size());
-        std::priority_queue<
-            MergeHead,
-            std::vector<MergeHead>,
-            MergeHeadGreater> heap;
-
-        for (const SortRun& run : sort_runs) {
-            RunReader reader;
-            reader.in.open(run.path, std::ios::binary);
-            if (!reader.in) {
-                index_error("failed to open temporary sort run for merge");
-            }
-            reader.remaining = run.pair_count;
-            if (reader.read_next()) {
-                readers.push_back(std::move(reader));
-                const std::size_t run_index = readers.size() - 1;
-                heap.push(MergeHead{
-                    .kmer = readers.back().current.first,
-                    .encoded = readers.back().current.second,
-                    .run_index = run_index,
-                });
-            }
-        }
-
-        std::vector<std::uint64_t> positions;
-        while (!heap.empty()) {
-            const std::uint64_t kmer = heap.top().kmer;
-            positions.clear();
-            std::uint64_t last_encoded = 0;
-            bool have_last = false;
-            while (!heap.empty() && heap.top().kmer == kmer) {
-                const MergeHead head = heap.top();
-                heap.pop();
-                if (!have_last || head.encoded != last_encoded) {
-                    positions.push_back(head.encoded);
-                    last_encoded = head.encoded;
-                    have_last = true;
-                }
-                RunReader& reader = readers[head.run_index];
-                if (reader.read_next()) {
-                    heap.push(MergeHead{
-                        .kmer = reader.current.first,
-                        .encoded = reader.current.second,
-                        .run_index = head.run_index,
-                    });
-                } else if (reader.remaining != 0) {
-                    index_error("failed while reading temporary sort run");
-                }
-            }
-            PositionCursor cursor{&positions};
-            on_kmer(kmer, cursor);
-        }
-    }
-
-    void release_sort_runs_noexcept() noexcept {
-        try {
-            for (const SortRun& run : sort_runs) {
-                if (!run.path.empty()) {
-                    std::remove(run.path.c_str());
-                }
-            }
-            sort_runs.clear();
-        } catch (...) {
-        }
+        sorted_runs.merge_runs(std::forward<F>(on_kmer));
     }
 
     void release_resident_runs_noexcept() noexcept {
-        release_sort_runs_noexcept();
+        sorted_runs.release_resident_runs_noexcept();
+    }
+
+    void release_runs_noexcept() noexcept {
+        sorted_runs.release_runs_noexcept();
     }
 
     void release_runs() {
-        release_sort_runs_noexcept();
+        release_runs_noexcept();
+    }
+
+    [[nodiscard]] bioseq::storage::indexing::SortedRunStoreStats
+    sorted_run_stats() const noexcept {
+        return sorted_runs.stats();
+    }
+
+    void snapshot_sorted_run_stats_before_release() {
+        const auto st = sorted_runs.stats();
+        const std::uint64_t total_runs = sorted_runs.run_count();
+        bioseq::storage::indexing::g_last_index_merge_run_count = total_runs;
+        bioseq::storage::indexing::g_last_mps_build_stats =
+            bioseq::storage::indexing::LastMpsBuildStats{
+                .backend_pid = static_cast<std::uint64_t>(MyProcPid),
+                .db_oid = static_cast<std::uint64_t>(db_oid),
+                .relfilenode = static_cast<std::uint64_t>(main_relfilenode),
+                .sequence_rowno = sequence_rowno,
+                .total_run_count = total_runs,
+                .resident_runs = st.resident_runs,
+                .file_runs = st.file_runs,
+                .resident_run_bytes = st.resident_bytes,
+                .resident_peak_bytes = st.resident_peak_bytes,
+                .spilled_run_bytes = st.spilled_bytes,
+                .postgres_temp_file_bytes = st.postgres_temp_file_bytes,
+                .postgres_temp_file_count = st.postgres_temp_file_count,
+                .merge_reader_buffer_bytes = st.merge_reader_buffer_bytes,
+                .merge_pass_count = st.merge_pass_count,
+                .spill_count_from_pressure = st.spill_count_from_pressure,
+                .resident_demotions = st.resident_demotions,
+                .position_spill_bytes = st.position_spill_bytes,
+                .position_spill_count = st.position_spill_count,
+            };
+        JustLog("[bioseq.index.mps_build.row] backend_pid={} async_file=1 db_oid={} relfilenode={} sequence_rowno={} "
+                "resident_runs={} file_runs={} resident_run_bytes={} resident_peak_bytes={} "
+                "spilled_run_bytes={} postgres_temp_file_bytes={} postgres_temp_file_count={} "
+                "merge_reader_buffer_bytes={} merge_pass_count={} spill_count_from_pressure={} "
+                "resident_demotions={} position_spill_bytes={} position_spill_count={}",
+                MyProcPid,
+                static_cast<unsigned long long>(db_oid),
+                static_cast<unsigned long long>(main_relfilenode),
+                static_cast<unsigned long long>(sequence_rowno),
+                static_cast<unsigned long long>(st.resident_runs),
+                static_cast<unsigned long long>(st.file_runs),
+                static_cast<unsigned long long>(st.resident_bytes),
+                static_cast<unsigned long long>(st.resident_peak_bytes),
+                static_cast<unsigned long long>(st.spilled_bytes),
+                static_cast<unsigned long long>(st.postgres_temp_file_bytes),
+                static_cast<unsigned long long>(st.postgres_temp_file_count),
+                static_cast<unsigned long long>(st.merge_reader_buffer_bytes),
+                static_cast<unsigned long long>(st.merge_pass_count),
+                static_cast<unsigned long long>(st.spill_count_from_pressure),
+                static_cast<unsigned long long>(st.resident_demotions),
+                static_cast<unsigned long long>(st.position_spill_bytes),
+                static_cast<unsigned long long>(st.position_spill_count));
     }
 
     void finish() {
@@ -903,7 +839,7 @@ struct AsyncPersistFileFragmentStorage {
             if (!path.empty()) {
                 std::remove(path.c_str());
             }
-            release_sort_runs_noexcept();
+            release_runs_noexcept();
         } catch (...) {
         }
     }
@@ -957,6 +893,9 @@ run_recompute_with_deferred_minimizer_persist(
     std::string temp_path =
         make_async_persist_temp_path(choice.index_name, sequence_rowno);
     AsyncPersistFileFragmentStorage file_store{std::move(temp_path)};
+    file_store.db_oid = ctx.db_oid;
+    file_store.main_relfilenode = ctx.main_relfilenode;
+    file_store.sequence_rowno = sequence_rowno;
     MatchResultCollection collection;
     bool staged = false;
     PG_TRY();
