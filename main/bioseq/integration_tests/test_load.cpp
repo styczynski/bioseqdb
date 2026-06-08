@@ -247,7 +247,9 @@ TEST_CASE("bioseq.load: single large record streams without a >MaxAllocSize varl
 TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; off defers)",
           "[load][integration]") {
     it::connection_test_context ctx;
-    it::reset_extension(ctx, { std::string_view{"load_idx_on"}, std::string_view{"load_idx_off"} });
+    it::reset_extension(ctx, { std::string_view{"load_idx_on"},
+                               std::string_view{"load_idx_off"},
+                               std::string_view{"load_idx_mps"} });
 
     const std::string body = gen_bases(5000, 555, false);
     const std::string path = "/tmp/bioseq_test_load_idx.fasta";
@@ -278,6 +280,33 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     REQUIRE(it::index_table_row_count(ctx, "minimizers_per_fragment", "load_idx_off") == 0);
     REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.update_index('load_idx_off'::regclass, 'minimizers_per_fragment');") > 0);
     REQUIRE(it::index_table_row_count(ctx, "minimizers_per_fragment", "load_idx_off") > 0);
+
+    // Per-sequence ON: policy-selected batch load must build
+    // minimizers_per_sequence directly and must not leave a residual
+    // per-fragment index behind as an accidental fallback.
+    it::exec_sql(ctx, "CREATE TABLE load_idx_mps "
+                      "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
+    it::exec_sql(ctx, "SELECT bioseq.set_index_policy("
+                      "'load_idx_mps'::regclass, "
+                      "'minimizers_per_fragment', 'UPDATE_MANUALLY');");
+    it::exec_sql(ctx, "SELECT bioseq.set_index_policy("
+                      "'load_idx_mps'::regclass, "
+                      "'minimizers_per_sequence', 'UPDATE_ON_INSERT');");
+    it::exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_idx_mps'::regclass, '" + path + "');") == 1);
+    REQUIRE(it::index_table_row_count(ctx, "minimizers_per_fragment", "load_idx_mps") == 0);
+    REQUIRE(it::index_table_row_count(ctx, "minimizers_per_sequence", "load_idx_mps") > 0);
+    it::exec_sql(ctx, "SELECT bioseq.set_active_read_index("
+                      "'load_idx_mps'::regclass, 'minimizers_per_sequence');");
+    it::exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+    {
+        const auto cig = it::query_rows(
+            ctx, fmt::format("SELECT bioseq.cigar(header) FROM load_idx_mps "
+                             "WHERE mmsearch(seq, '{}'::bioseq.seq('dna4', 64))", body));
+        REQUIRE(cig.size() == 1);
+        REQUIRE(it::is_exact_match_cigar(cig[0][0].value(),
+                                         static_cast<long long>(body.size())));
+    }
 }
 
 TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integration]") {

@@ -906,7 +906,7 @@ void finish_persist_claim(const PersistClaim& claim) noexcept {
     pg_atomic_write_u32(&slot.state, 0);
 }
 
-[[nodiscard]] bool worker_target_identity_still_current(
+[[nodiscard]] bool worker_target_accepts_index_persist(
         const PersistTarget& target,
         std::string_view index_name) {
     Relation rel = try_safe_relation_open(target.user_relid, AccessShareLock);
@@ -926,24 +926,28 @@ void finish_persist_claim(const PersistClaim& claim) noexcept {
         return false;
     }
 
-    std::string active{bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX};
+    bool enabled = true;
+    bool update_on_insert =
+        bioseq::indexing::default_update_on_insert_contains(index_name);
     if (SPI_connect() == SPI_OK_CONNECT) {
         const std::string sql = fmt::format(
-            "SELECT index_name FROM bioseq_internal.index_policy "
+            "SELECT enabled, update_on_insert FROM bioseq_internal.index_policy "
             "WHERE user_relid={}::oid AND main_relfilenode={}::oid "
-            "AND column_attno={} AND is_active_read AND enabled LIMIT 1",
+            "AND column_attno={} AND index_name={} LIMIT 1",
             static_cast<unsigned>(target.user_relid),
             static_cast<unsigned>(target.main_relfilenode),
-            static_cast<int>(target.column_attno));
+            static_cast<int>(target.column_attno),
+            quote_literal_cstr(std::string(index_name).c_str()));
         if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT && SPI_processed > 0) {
-            char* nm = SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1);
-            if (nm != nullptr) {
-                active = nm;
-            }
+            bool isnull = false;
+            enabled = DatumGetBool(SPI_getbinval(
+                SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1, &isnull));
+            update_on_insert = DatumGetBool(SPI_getbinval(
+                SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull));
         }
         SPI_finish();
     }
-    return active == index_name;
+    return enabled && update_on_insert;
 }
 
 void process_persist_file_claim(
@@ -962,7 +966,7 @@ void process_persist_file_claim(
 
     PersistTarget target = claim.target;
     target.index_name = meta->index_name;
-    if (!worker_target_identity_still_current(target, meta->index_name)) {
+    if (!worker_target_accepts_index_persist(target, meta->index_name)) {
         remove_temp_file_noexcept(meta->path);
         JustLog("[bioseq] index: discarded stale file async persist job row={} index={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
@@ -1108,7 +1112,7 @@ void process_persist_claim(const PersistClaim& claim) {
         base + sizeof(IndexPersistDsmHeader) + header.index_name_len);
     PersistTarget target = claim.target;
     target.index_name = index_name;
-    if (!worker_target_identity_still_current(target, index_name)) {
+    if (!worker_target_accepts_index_persist(target, index_name)) {
         dsm_detach(seg);
         PopActiveSnapshot();
         CommitTransactionCommand();

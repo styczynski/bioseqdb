@@ -23,6 +23,7 @@ module;
 #include <limits>
 #include <map>
 #include <optional>
+#include <queue>
 #include <span>
 #include <string>
 #include <utility>
@@ -34,6 +35,7 @@ export module bioseq_scheduler.dispatch_processor;
 import mlogging;
 import pg_utils;
 import bioseq_indexing.type;
+import bioseq_indexing.traits;
 import bioseq_indexing.minimizer_hashmap;
 import bioseq_indexing.minimizer_sequence;
 import bioseq_storage_indexing_pg;
@@ -62,6 +64,11 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 export constexpr size_t kDispatchBatchCapacity = 1000;
+constexpr std::string_view kMinimizersPerFragmentIndex =
+    bioseq::indexing::MinimizerHashmapFragmentIndex::index_name;
+constexpr std::string_view kMinimizersPerSequenceIndex =
+    bioseq::indexing::index_descriptor<
+        bioseq::indexing::MinimizerSequenceMergedIndex>::index_name;
 
 /*
  * BatchProcessor drives minimap_port across a batch of (query, target)
@@ -178,6 +185,96 @@ public:
         ScannerPgContext* scanner_pg_ctx = nullptr);
 
 };
+
+enum class DeferredMinimizerIndexKind : std::uint8_t {
+    per_fragment,
+    per_sequence,
+};
+
+struct DeferredMinimizerPersistChoice {
+    DeferredMinimizerIndexKind kind = DeferredMinimizerIndexKind::per_fragment;
+    std::string_view index_name = kMinimizersPerFragmentIndex;
+};
+
+[[nodiscard]] DeferredMinimizerIndexKind deferred_kind_for_index(
+        std::string_view index_name) noexcept {
+    return index_name == kMinimizersPerSequenceIndex
+        ? DeferredMinimizerIndexKind::per_sequence
+        : DeferredMinimizerIndexKind::per_fragment;
+}
+
+[[nodiscard]] std::optional<DeferredMinimizerPersistChoice>
+choose_deferred_minimizer_persist_index(
+        const BatchProcessor::ScannerPgContext& ctx) {
+    if (!OidIsValid(ctx.user_relid) || ctx.mmsearch_seq_attno <= 0) {
+        return std::nullopt;
+    }
+
+    constexpr auto minimizers = bioseq::indexing::MINIMIZER_INDICES;
+    std::array<bool, minimizers.size()> enabled{};
+    std::array<bool, minimizers.size()> update_on_insert{};
+    for (std::size_t i = 0; i < minimizers.size(); ++i) {
+        enabled[i] = true;
+        update_on_insert[i] =
+            bioseq::indexing::default_update_on_insert_contains(minimizers[i]);
+    }
+
+    if (SPI_connect() == SPI_OK_CONNECT) {
+        const std::string sql = fmt::format(
+            "SELECT index_name, enabled, update_on_insert "
+            "FROM bioseq_internal.index_policy "
+            "WHERE user_relid={}::oid AND main_relfilenode={}::oid "
+            "AND column_attno={}",
+            static_cast<unsigned>(ctx.user_relid),
+            static_cast<unsigned>(ctx.main_relfilenode),
+            static_cast<int>(ctx.mmsearch_seq_attno));
+        if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT) {
+            for (std::uint64_t row = 0; row < SPI_processed; ++row) {
+                char* nm = SPI_getvalue(
+                    SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1);
+                if (nm == nullptr) {
+                    continue;
+                }
+                bool isnull = false;
+                const bool row_enabled = DatumGetBool(SPI_getbinval(
+                    SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 2, &isnull));
+                const bool row_update = DatumGetBool(SPI_getbinval(
+                    SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 3, &isnull));
+                for (std::size_t i = 0; i < minimizers.size(); ++i) {
+                    if (minimizers[i] == std::string_view{nm}) {
+                        enabled[i] = row_enabled;
+                        update_on_insert[i] = row_update;
+                        break;
+                    }
+                }
+            }
+        }
+        SPI_finish();
+    }
+
+    for (std::size_t i = 0; i < minimizers.size(); ++i) {
+        if (enabled[i] && update_on_insert[i]) {
+            return DeferredMinimizerPersistChoice{
+                .kind = deferred_kind_for_index(minimizers[i]),
+                .index_name = minimizers[i],
+            };
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string make_async_persist_temp_path(
+        std::string_view index_name,
+        std::uint64_t sequence_rowno) {
+    const char* prefix =
+        index_name == kMinimizersPerSequenceIndex ? "mps" : "mpf";
+    return fmt::format(
+        "/tmp/bioseq_async_{}_{}_{}_{}.bin",
+        prefix,
+        static_cast<long long>(::getpid()),
+        static_cast<unsigned long long>(sequence_rowno),
+        static_cast<unsigned long long>(bioseq::instr::clock::now_ns()));
+}
 
 /*
  * Scale k/w for the small-query regime typical inside Postgres — short
@@ -462,11 +559,32 @@ struct AsyncPersistFileChunkHeader {
 static_assert(sizeof(AsyncPersistFileChunkHeader) == 24);
 
 struct AsyncPersistFileFragmentStorage {
+    struct SortRun {
+        std::string path{};
+        std::uint64_t pair_count = 0;
+    };
+    struct PositionCursor {
+        const std::vector<std::uint64_t>* positions = nullptr;
+
+        [[nodiscard]] std::uint64_t total_count() const {
+            return positions == nullptr ? 0 : positions->size();
+        }
+
+        template <class F>
+        void for_each_batch(F&& f) const {
+            if (positions != nullptr && !positions->empty()) {
+                f(std::span<const std::uint64_t>(
+                    positions->data(), positions->size()));
+            }
+        }
+    };
+
     std::map<bioseq::indexing::index_sub_key_t, std::vector<std::size_t>> plans{};
     std::string path{};
     std::ofstream out{};
     std::uint64_t chunk_count = 0;
     std::uint64_t file_bytes = 0;
+    std::vector<SortRun> sort_runs{};
 
     explicit AsyncPersistFileFragmentStorage(std::string p)
         : path(std::move(p)),
@@ -512,6 +630,60 @@ struct AsyncPersistFileFragmentStorage {
         plans[sub_key] = std::move(plan);
     }
 
+    [[nodiscard]] std::size_t number_of_sub_keys() const {
+        return plans.size();
+    }
+
+    [[nodiscard]] std::size_t number_of_chunks(
+            bioseq::indexing::index_sub_key_t sub_key) const {
+        if (auto it = plans.find(sub_key); it != plans.end()) {
+            return it->second.size();
+        }
+        return 0;
+    }
+
+    [[nodiscard]] std::size_t chunk_byte_size(
+            bioseq::indexing::index_sub_key_t sub_key,
+            std::size_t chunk_no) const {
+        if (auto it = plans.find(sub_key);
+            it != plans.end() && chunk_no < it->second.size()) {
+            return it->second[chunk_no];
+        }
+        return 0;
+    }
+
+    template <class T>
+    [[nodiscard]] const T* read_chunk(
+            bioseq::indexing::index_sub_key_t,
+            std::size_t) {
+        index_error("read_chunk is not supported by async write-only storage");
+    }
+
+    void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
+
+    template <class F>
+    void read_chunks_in_range(
+            bioseq::indexing::index_sub_key_t,
+            bioseq::indexing::index_sub_key_t,
+            F&&) {
+        index_error("read_chunks_in_range is not supported by async write-only storage");
+    }
+
+    template <class F>
+    void for_each_sub_key(F&& fn) const {
+        for (const auto& [sub_key, _] : plans) {
+            fn(sub_key);
+        }
+    }
+
+    void clear_entity() {
+        plans.clear();
+    }
+
+    void clear(std::string_view) {
+        clear_entity();
+    }
+
     template <class T, class F>
     void write_to_each(bioseq::indexing::index_sub_key_t sub_key, F&& writer) {
         auto it = plans.find(sub_key);
@@ -552,6 +724,169 @@ struct AsyncPersistFileFragmentStorage {
         plans.erase(it);
     }
 
+    [[nodiscard]] std::size_t run_buffer_bytes() const noexcept {
+        if (bioseq_index_run_buffer_bytes > 0) {
+            return static_cast<std::size_t>(bioseq_index_run_buffer_bytes);
+        }
+        constexpr std::uint64_t desired = std::uint64_t{512} << 20;
+        constexpr std::uint64_t floor = std::uint64_t{64} << 20;
+        const std::uint64_t cap =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .index_memory_cap_bytes();
+        if (cap == 0) {
+            return static_cast<std::size_t>(desired);
+        }
+        return static_cast<std::size_t>(
+            std::max<std::uint64_t>(std::min(desired, cap), floor));
+    }
+
+    [[nodiscard]] std::size_t spill_sorted_run(
+            std::span<const std::pair<std::uint64_t, std::uint64_t>> sorted) {
+        const std::uint64_t run_id = sort_runs.size();
+        const std::string run_path = fmt::format(
+            "{}.run_{}",
+            path,
+            static_cast<unsigned long long>(run_id));
+        std::ofstream run_out(run_path, std::ios::binary | std::ios::trunc);
+        if (!run_out) {
+            index_error("failed to open temporary sort run");
+        }
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(sorted.size())
+            * sizeof(std::pair<std::uint64_t, std::uint64_t>);
+        if (bytes != 0) {
+            run_out.write(
+                reinterpret_cast<const char*>(sorted.data()),
+                static_cast<std::streamsize>(bytes));
+        }
+        run_out.close();
+        if (!run_out) {
+            index_error("failed to write temporary sort run");
+        }
+        sort_runs.push_back(SortRun{
+            .path = run_path,
+            .pair_count = static_cast<std::uint64_t>(sorted.size()),
+        });
+        return static_cast<std::size_t>(run_id);
+    }
+
+    [[nodiscard]] std::size_t spill_sorted_run_owned(
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> sorted) {
+        return spill_sorted_run(
+            std::span<const std::pair<std::uint64_t, std::uint64_t>>(
+                sorted.data(), sorted.size()));
+    }
+
+    template <class F>
+    void merge_runs(F&& on_kmer) {
+        struct RunReader {
+            std::ifstream in{};
+            std::uint64_t remaining = 0;
+            std::pair<std::uint64_t, std::uint64_t> current{};
+
+            [[nodiscard]] bool read_next() {
+                if (remaining == 0) {
+                    return false;
+                }
+                in.read(
+                    reinterpret_cast<char*>(&current),
+                    static_cast<std::streamsize>(sizeof(current)));
+                if (!in) {
+                    return false;
+                }
+                --remaining;
+                return true;
+            }
+        };
+        struct MergeHead {
+            std::uint64_t kmer = 0;
+            std::uint64_t encoded = 0;
+            std::size_t run_index = 0;
+        };
+        struct MergeHeadGreater {
+            bool operator()(const MergeHead& lhs, const MergeHead& rhs) const noexcept {
+                if (lhs.kmer != rhs.kmer) {
+                    return lhs.kmer > rhs.kmer;
+                }
+                return lhs.encoded > rhs.encoded;
+            }
+        };
+
+        std::vector<RunReader> readers;
+        readers.reserve(sort_runs.size());
+        std::priority_queue<
+            MergeHead,
+            std::vector<MergeHead>,
+            MergeHeadGreater> heap;
+
+        for (const SortRun& run : sort_runs) {
+            RunReader reader;
+            reader.in.open(run.path, std::ios::binary);
+            if (!reader.in) {
+                index_error("failed to open temporary sort run for merge");
+            }
+            reader.remaining = run.pair_count;
+            if (reader.read_next()) {
+                readers.push_back(std::move(reader));
+                const std::size_t run_index = readers.size() - 1;
+                heap.push(MergeHead{
+                    .kmer = readers.back().current.first,
+                    .encoded = readers.back().current.second,
+                    .run_index = run_index,
+                });
+            }
+        }
+
+        std::vector<std::uint64_t> positions;
+        while (!heap.empty()) {
+            const std::uint64_t kmer = heap.top().kmer;
+            positions.clear();
+            std::uint64_t last_encoded = 0;
+            bool have_last = false;
+            while (!heap.empty() && heap.top().kmer == kmer) {
+                const MergeHead head = heap.top();
+                heap.pop();
+                if (!have_last || head.encoded != last_encoded) {
+                    positions.push_back(head.encoded);
+                    last_encoded = head.encoded;
+                    have_last = true;
+                }
+                RunReader& reader = readers[head.run_index];
+                if (reader.read_next()) {
+                    heap.push(MergeHead{
+                        .kmer = reader.current.first,
+                        .encoded = reader.current.second,
+                        .run_index = head.run_index,
+                    });
+                } else if (reader.remaining != 0) {
+                    index_error("failed while reading temporary sort run");
+                }
+            }
+            PositionCursor cursor{&positions};
+            on_kmer(kmer, cursor);
+        }
+    }
+
+    void release_sort_runs_noexcept() noexcept {
+        try {
+            for (const SortRun& run : sort_runs) {
+                if (!run.path.empty()) {
+                    std::remove(run.path.c_str());
+                }
+            }
+            sort_runs.clear();
+        } catch (...) {
+        }
+    }
+
+    void release_resident_runs_noexcept() noexcept {
+        release_sort_runs_noexcept();
+    }
+
+    void release_runs() {
+        release_sort_runs_noexcept();
+    }
+
     void finish() {
         out.flush();
         if (!out) {
@@ -568,6 +903,7 @@ struct AsyncPersistFileFragmentStorage {
             if (!path.empty()) {
                 std::remove(path.c_str());
             }
+            release_sort_runs_noexcept();
         } catch (...) {
         }
     }
@@ -578,7 +914,7 @@ make_fragment_index_persist_target(
         const BatchProcessor::ScannerPgContext& ctx,
         const bioseq::storage::seq_locator& loc,
         std::uint64_t sequence_rowno,
-        std::string_view index_name = "minimizers_per_fragment") {
+        std::string_view index_name = kMinimizersPerFragmentIndex) {
     return bioseq::parallelism::pg::PersistTarget{
         .db_oid = ctx.db_oid,
         .user_relid = ctx.user_relid,
@@ -590,6 +926,69 @@ make_fragment_index_persist_target(
         .sequence_rowno = sequence_rowno,
         .index_name = index_name,
     };
+}
+
+[[nodiscard]] bool finish_and_stage_async_index_file(
+        const BatchProcessor::ScannerPgContext& ctx,
+        const bioseq::storage::seq_locator& loc,
+        std::uint64_t sequence_rowno,
+        std::string_view index_name,
+        AsyncPersistFileFragmentStorage& file_store) {
+    file_store.finish();
+    const auto persist_target =
+        make_fragment_index_persist_target(ctx, loc, sequence_rowno, index_name);
+    return bioseq::parallelism::pg::stage_async_index_persist_file(
+        persist_target,
+        std::move(file_store.path),
+        file_store.file_bytes,
+        file_store.chunk_count);
+}
+
+template <class LazyQuery, class ResidentTarget>
+[[nodiscard]] MatchResultCollection
+run_recompute_with_deferred_minimizer_persist(
+        LazyQuery& lazy_query,
+        ResidentTarget& resident_target,
+        const Minimap2Params& params,
+        const BatchProcessor::ScannerPgContext& ctx,
+        const bioseq::storage::seq_locator& loc,
+        std::uint64_t sequence_rowno,
+        const DeferredMinimizerPersistChoice& choice) {
+    std::string temp_path =
+        make_async_persist_temp_path(choice.index_name, sequence_rowno);
+    AsyncPersistFileFragmentStorage file_store{std::move(temp_path)};
+    MatchResultCollection collection;
+    bool staged = false;
+    PG_TRY();
+    {
+        if (choice.kind == DeferredMinimizerIndexKind::per_fragment) {
+            collection = minimap_port_segmented(
+                lazy_query, resident_target, params, &file_store);
+        } else {
+            collection = minimap_port_segmented(
+                lazy_query, resident_target, params);
+            bioseq::indexing::MinimizerSequenceMergedIndex<
+                AsyncPersistFileFragmentStorage>::build(
+                    file_store, resident_target);
+        }
+        staged = finish_and_stage_async_index_file(
+            ctx, loc, sequence_rowno, choice.index_name, file_store);
+    }
+    PG_CATCH();
+    {
+        file_store.remove_noexcept();
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    JustLog("[bioseq] index: recompute async-persist row={} index={} target_bp={} chunks={} file_bytes={} async_staged={}",
+            static_cast<unsigned long long>(sequence_rowno),
+            choice.index_name,
+            static_cast<unsigned long long>(loc.total_bp_size),
+            static_cast<unsigned long long>(file_store.chunk_count),
+            static_cast<unsigned long long>(file_store.file_bytes),
+            staged);
+    return collection;
 }
 
 template <class R>
@@ -693,7 +1092,7 @@ try_materialize_target_for_segment_workers(
         const bioseq::storage::seq_locator& loc,
         const OpportunisticFragmentIndexStorage& ram_store,
         std::uint64_t sequence_rowno,
-        std::string_view index_name = "minimizers_per_fragment") {
+        std::string_view index_name = kMinimizersPerFragmentIndex) {
     if (!OidIsValid(ctx.user_relid) || ram_store.chunks.empty()) {
         return false;
     }
@@ -1007,7 +1406,7 @@ try_materialize_target_for_segment_workers(
                                 && OidIsValid(scanner_pg_ctx->user_relid)) {
                                 using IStore = bioseq::storage::indexing::IndexStorageFragmentPg;
                                 const bool want_seq =
-                                    scanner_pg_ctx->active_index == "minimizers_per_sequence";
+                                    scanner_pg_ctx->active_index == kMinimizersPerSequenceIndex;
                                 // The stored index is ALWAYS w=10,k=15 (pinned at build); the query
                                 // minimizers + the seed pipeline MUST use the same w,k (NOT the size
                                 // heuristic's reduced k), exactly as the legacy prebuilt branch does.
@@ -1071,13 +1470,13 @@ try_materialize_target_for_segment_workers(
                                 auto seq_store = bioseq::storage::indexing::open_fragment_storage(
                                     scanner_pg_ctx->user_relid, scanner_pg_ctx->db_oid,
                                     scanner_pg_ctx->tablespace_oid, scanner_pg_ctx->main_relfilenode,
-                                    scanner_pg_ctx->mmsearch_seq_attno, "minimizers_per_sequence",
+                                    scanner_pg_ctx->mmsearch_seq_attno, kMinimizersPerSequenceIndex,
                                     *loc_opt, (uint64_t)scanner_pg_ctx->target_rownos[i],
                                     scanner_pg_ctx->caches, scanner_pg_ctx->parent_mctx);
                                 if (seq_store.number_of_chunks(bioseq::indexing::DIRECTORY_SUB_KEY) >= 1) {
                                     ensure_q();
                                     const auto cache_key = make_cache_key(
-                                        "minimizers_per_sequence", 0, loc_opt->total_bp_size);
+                                        kMinimizersPerSequenceIndex, 0, loc_opt->total_bp_size);
                                     if (auto hit = bioseq::storage::indexing::lookup_assembled_index(cache_key)) {
                                         collection = minimap2_port_with_index(
                                             fq_pg, ft_pg, *query_minimizers, *hit->index, idx_params);
@@ -1102,7 +1501,7 @@ try_materialize_target_for_segment_workers(
                                 auto frag_store = bioseq::storage::indexing::open_fragment_storage(
                                     scanner_pg_ctx->user_relid, scanner_pg_ctx->db_oid,
                                     scanner_pg_ctx->tablespace_oid, scanner_pg_ctx->main_relfilenode,
-                                    scanner_pg_ctx->mmsearch_seq_attno, "minimizers_per_fragment",
+                                    scanner_pg_ctx->mmsearch_seq_attno, kMinimizersPerFragmentIndex,
                                     *loc_opt, (uint64_t)scanner_pg_ctx->target_rownos[i],
                                     scanner_pg_ctx->caches, scanner_pg_ctx->parent_mctx);
                                 if (frag_store.number_of_chunks(bioseq::indexing::DIRECTORY_SUB_KEY) >= 1) {
@@ -1131,7 +1530,7 @@ try_materialize_target_for_segment_workers(
                                                 std::size_t cs_u,
                                                 std::size_t ce_u) {
                                         const auto cache_key = make_cache_key(
-                                            "minimizers_per_fragment", clip_lo_bp, clip_hi_bp);
+                                            kMinimizersPerFragmentIndex, clip_lo_bp, clip_hi_bp);
                                         if (auto hit = bioseq::storage::indexing::lookup_assembled_index(cache_key)) {
                                             return minimap2_port_with_index(
                                                 fq_pg, ft_pg, *query_minimizers, *hit->index, idx_params);
@@ -1236,7 +1635,7 @@ try_materialize_target_for_segment_workers(
                                                     std::size_t cs_u,
                                                     std::size_t ce_u) {
                                             const auto cache_key = make_cache_key(
-                                                "minimizers_per_fragment",
+                                                kMinimizersPerFragmentIndex,
                                                 clip_lo_bp,
                                                 clip_hi_bp);
                                             if (auto hit =
@@ -1311,76 +1710,49 @@ try_materialize_target_for_segment_workers(
                                         auto resident_target =
                                             bioseq::storage::make_lazy_in_memory(
                                                 resident->range);
-                                        const bool can_fuse_recompute_persist =
+                                        const bool can_defer_recompute_persist =
                                             bioseq_recompute_async_persist
                                             && bioseq_index_async_persist
                                             && OidIsValid(scanner_pg_ctx->user_relid)
                                             && params.kmer_size == 15
                                             && params.window_size == 10;
-                                        if (can_fuse_recompute_persist) {
+                                        const auto deferred_persist_choice =
+                                            can_defer_recompute_persist
+                                                ? choose_deferred_minimizer_persist_index(
+                                                    *scanner_pg_ctx)
+                                                : std::optional<DeferredMinimizerPersistChoice>{};
+                                        if (deferred_persist_choice.has_value()) {
                                             const auto rowno =
                                                 static_cast<std::uint64_t>(
                                                     scanner_pg_ctx->target_rownos[i]);
-                                            const std::uint64_t nonce =
-                                                static_cast<std::uint64_t>(
-                                                    bioseq::instr::clock::now_ns());
-                                            std::string temp_path = fmt::format(
-                                                "/tmp/bioseq_async_mpf_{}_{}_{}.bin",
-                                                static_cast<long long>(::getpid()),
-                                                static_cast<unsigned long long>(rowno),
-                                                static_cast<unsigned long long>(nonce));
-                                            AsyncPersistFileFragmentStorage file_store{
-                                                std::move(temp_path)};
-                                            bool staged = false;
-                                            PG_TRY();
-                                            {
-                                                collection = minimap_port_segmented(
+                                            collection =
+                                                run_recompute_with_deferred_minimizer_persist(
                                                     lazy_query,
                                                     resident_target,
                                                     params,
-                                                    &file_store);
-                                                file_store.finish();
-                                                const auto persist_target =
-                                                    make_fragment_index_persist_target(
-                                                        *scanner_pg_ctx,
-                                                        *loc_opt,
-                                                        rowno);
-                                                staged =
-                                                    bioseq::parallelism::pg::
-                                                        stage_async_index_persist_file(
-                                                            persist_target,
-                                                            std::move(file_store.path),
-                                                            file_store.file_bytes,
-                                                            file_store.chunk_count);
-                                            }
-                                            PG_CATCH();
-                                            {
-                                                file_store.remove_noexcept();
-                                                PG_RE_THROW();
-                                            }
-                                            PG_END_TRY();
-                                            JustLog("[bioseq] index: recompute fused async-persist row={} target_bp={} chunks={} file_bytes={} async_staged={}",
-                                                    static_cast<unsigned long long>(rowno),
-                                                    static_cast<unsigned long long>(
-                                                        loc_opt->total_bp_size),
-                                                    static_cast<unsigned long long>(
-                                                        file_store.chunk_count),
-                                                    static_cast<unsigned long long>(
-                                                        file_store.file_bytes),
-                                                    staged);
+                                                    *scanner_pg_ctx,
+                                                    *loc_opt,
+                                                    rowno,
+                                                    *deferred_persist_choice);
                                         } else {
                                             collection = minimap_port_segmented(
                                                 lazy_query, resident_target, params);
                                             if (bioseq_recompute_async_persist
                                                 && (params.kmer_size != 15
                                                     || params.window_size != 10)) {
-                                                JustLog("[bioseq] index: recompute async-persist skipped row={} target_bp={} because active params are k={} w={} but persisted minimizers_per_fragment is pinned to k=15 w=10",
+                                                JustLog("[bioseq] index: recompute async-persist skipped row={} target_bp={} because active params are k={} w={} but persisted minimizer indexes are pinned to k=15 w=10",
                                                         static_cast<unsigned long long>(
                                                             scanner_pg_ctx->target_rownos[i]),
                                                         static_cast<unsigned long long>(
                                                             loc_opt->total_bp_size),
                                                         params.kmer_size,
                                                         params.window_size);
+                                            } else if (can_defer_recompute_persist) {
+                                                JustLog("[bioseq] index: recompute async-persist skipped row={} target_bp={} because no minimizer index is enabled for UPDATE_ON_INSERT",
+                                                        static_cast<unsigned long long>(
+                                                            scanner_pg_ctx->target_rownos[i]),
+                                                        static_cast<unsigned long long>(
+                                                            loc_opt->total_bp_size));
                                             }
                                         }
                                     } else {

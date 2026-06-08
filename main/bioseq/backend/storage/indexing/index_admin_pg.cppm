@@ -13,10 +13,12 @@ module;
 #include "executor/tuptable.h"
 #include "utils/snapmgr.h"
 #include "utils/memutils.h"
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -41,6 +43,10 @@ import bioseq_indexing.minimizer_hashmap;
 import bioseq_indexing.minimizer_sequence;
 import bioseq_indexing.symbol_counts;
 import bioseq_storage_indexing_pg;
+import bioseq_parallelism.memory_admission;
+import bioseq_parallelism.mode;
+import bioseq_parallelism.pool;
+import bioseq_scheduler.supervisor_pg;
 import bioseq_table_io;                     // ColumnarBeginRead/ColumnarReadNextRow/ColumnarEndRead (raw-stub row walk, §8.6)
 export import bioseq_storage_indexing_handles;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
@@ -106,9 +112,9 @@ using pg_supported_indexes = bioseq::indexing::supported_indexes<
     IndexStorageFragmentPg,
     IndexStorageSequencePg,
     IndexStorageTablePg,
-    bioseq::indexing::MinimizersPerFragmentIndex,     // CHUNKED_PER_FRAGMENT, "minimizers_per_fragment"
-    bioseq::indexing::MinimizerSequenceMergedIndex,   // CHUNKED_PER_FRAGMENT, "minimizers_per_sequence"
-    bioseq::indexing::SymbolCountsIndex               // INLINE_PER_SEQUENCE,  "symbol_counts"
+    bioseq::indexing::MinimizersPerFragmentIndex,     // CHUNKED_PER_FRAGMENT
+    bioseq::indexing::MinimizerSequenceMergedIndex,   // CHUNKED_PER_FRAGMENT
+    bioseq::indexing::SymbolCountsIndex               // INLINE_PER_SEQUENCE
 #ifdef BIOSEQ_TEST_INDEXES
     , TestTableCountIndex                             // CHUNKED_PER_TABLE,    "test_table_rowcount"
 #endif
@@ -161,6 +167,20 @@ inline void note_successful_write(Oid user_relid, Oid relfn, std::int16_t attno,
     SPI_finish();
 }
 
+inline void note_policy_on_insert_writes(
+        Oid user_relid,
+        Oid relfn,
+        std::int16_t attno,
+        const pg_supported_indexes& idx) {
+    constexpr auto types = pg_supported_indexes::list_types();
+    for (std::size_t i = 0; i < types.size(); ++i) {
+        if (idx.enabled[i]
+            && idx.policy[i] == IndexUpdatePolicy::UPDATE_ON_INSERT) {
+            note_successful_write(user_relid, relfn, attno, types[i].first);
+        }
+    }
+}
+
 // ---- INSERT-time build (§11.2) -------------------------------------------
 inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint64_t rowno, const pgseq_t* hdr,
                                   const std::optional<seq_locator>& loc_opt, MemoryContext mctx) {
@@ -189,9 +209,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
         idx.build_fragmented<true>(open_frag, lazy);
         idx.build_sequence<true>(open_inl, lazy);
     });
-    // age-log the default on-insert indexes
-    note_successful_write(user_relid, rid.relfilenode, attno, "minimizers_per_fragment");
-    note_successful_write(user_relid, rid.relfilenode, attno, "symbol_counts");
+    note_policy_on_insert_writes(user_relid, rid.relfilenode, attno, idx);
 }
 
 /// Per-row driver invoked by the TAM insert hooks: builds on-insert indexes for
@@ -290,6 +308,133 @@ inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn
         PG_RE_THROW();
     }
     PG_END_TRY();
+}
+
+template <class R>
+struct ResidentIndexBuildTarget {
+    using traits = typename compact_sequence_range<R>::traits;
+    using storage_unit = typename traits::storage_unit;
+    using resident_config = sequence_custom_alphabet<
+        typename traits::alphabet_type,
+        storage_unit,
+        traits::bits_per_char>;
+    using resident_range = compact_sequence_range<resident_config>;
+
+    bioseq::parallelism::MemoryPermit permit;
+    resident_range range;
+};
+
+template <class R, class Scanner>
+[[nodiscard]] std::optional<ResidentIndexBuildTarget<R>>
+try_materialize_for_parallel_sequence_index_build(
+        const bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        std::uint64_t rowno,
+        std::string_view index_name) {
+    if constexpr (!Scanner::supports_fragments()) {
+        return std::nullopt;
+    } else {
+        bioseq::parallelism::pg::backend_sync();
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        if (!bioseq::parallelism::task_parallel(pool.mode())
+            || pool.max_concurrency() <= 1) {
+            return std::nullopt;
+        }
+
+        using resident_t = ResidentIndexBuildTarget<R>;
+        using storage_unit = typename resident_t::storage_unit;
+        const std::uint64_t total_units64 =
+            static_cast<std::uint64_t>(seq.size());
+        if (total_units64
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+            pg_log(ERROR,
+                   "bioseq.update_index: row {} index {} has too many packed "
+                   "units to materialize for parallel build",
+                   static_cast<unsigned long long>(rowno),
+                   std::string(index_name).c_str());
+        }
+        const std::size_t total_units =
+            static_cast<std::size_t>(total_units64);
+        const std::uint64_t packed_bytes =
+            bioseq::parallelism::saturating_mul(
+                total_units64,
+                static_cast<std::uint64_t>(sizeof(storage_unit)));
+        constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
+        const std::uint64_t reserve_bytes =
+            packed_bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - context_reserve_bytes
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : packed_bytes + context_reserve_bytes;
+
+        auto permit =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .try_reserve(reserve_bytes);
+        if (!permit) {
+            JustLog("[bioseq] index: row={} index={} target_bp={} packed_bytes={} "
+                    "not admitted for resident parallel build; using scanner_pg",
+                    static_cast<unsigned long long>(rowno),
+                    index_name,
+                    static_cast<unsigned long long>(seq.bp_size()),
+                    static_cast<unsigned long long>(packed_bytes));
+            return std::nullopt;
+        }
+
+        typename resident_t::resident_range::base_container packed(total_units);
+        const std::size_t fragment_units = Scanner::fragment_storage_units;
+        for (std::size_t fragment_no = 0;
+             fragment_no < seq.number_of_fragments();
+             ++fragment_no) {
+            if ((fragment_no & std::size_t{0x3ff}) == 0) {
+                CHECK_FOR_INTERRUPTS();
+            }
+            const std::span<const storage_unit> fragment =
+                seq.scanner().read_fragment(fragment_no);
+            const std::size_t dst_offset = fragment_no * fragment_units;
+            if (dst_offset >= packed.size()) {
+                seq.scanner().release_fragment(fragment_no);
+                break;
+            }
+            const std::size_t copy_units =
+                std::min(fragment.size(), packed.size() - dst_offset);
+            std::copy_n(fragment.data(), copy_units, packed.data() + dst_offset);
+            seq.scanner().release_fragment(fragment_no);
+        }
+
+        JustLog("[bioseq] index: row={} index={} target_bp={} fragments={} "
+                "packed_bytes={} materialized for resident parallel build",
+                static_cast<unsigned long long>(rowno),
+                index_name,
+                static_cast<unsigned long long>(seq.bp_size()),
+                seq.number_of_fragments(),
+                static_cast<unsigned long long>(packed_bytes));
+
+        return resident_t{
+            std::move(*permit),
+            resident_t::resident_range::from_packed(
+                std::move(packed), seq.padding())};
+    }
+}
+
+template <class SupportedIndexes, class Storage, class R, class Scanner>
+inline void rebuild_one_fragmented_maybe_resident(
+        SupportedIndexes& idx,
+        std::string_view name,
+        Storage& store,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& lazy,
+        std::uint64_t rowno) {
+    if (name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        if (auto resident =
+                try_materialize_for_parallel_sequence_index_build(
+                    lazy, rowno, name);
+            resident.has_value()) {
+            auto resident_lazy =
+                bioseq::storage::make_lazy_in_memory(resident->range);
+            idx.rebuild_one_fragmented(name, store, resident_lazy);
+            return;
+        }
+    }
+    idx.rebuild_one_fragmented(name, store, lazy);
 }
 
 inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
@@ -404,8 +549,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 });
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
-                                    idx.rebuild_one_fragmented(name, store, lazy);
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno] {
+                                    rebuild_one_fragmented_maybe_resident(
+                                        idx, name, store, lazy, rowno);
                                 });
                             }
                         });
@@ -424,8 +570,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
-                            idx.rebuild_one_fragmented(name, store, lazy);
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno] {
+                            rebuild_one_fragmented_maybe_resident(
+                                idx, name, store, lazy, rowno);
                         });
                     }
                 });
@@ -448,8 +595,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
 // `main_relid` in ONE batched pass (one streaming rebuild per index, no per-row
 // advisory locks). bioseq.load calls this once after its streamed insert when
 // bioseq.update_index_on_insert is on. It loads the same per-table policy as
-// `index_build_on_insert`, skips `minimizers_per_sequence` (UPDATE_MANUALLY) and
-// any non-on-insert index, and drives `update_index_impl`, which rebuilds across
+// `index_build_on_insert`, honors every eligible UPDATE_ON_INSERT index, and
+// drives `update_index_impl`, which rebuilds across
 // every seq column and every row — so the observable index state matches a
 // normal INSERT (only faster: one tuple-lock-free streaming pass).
 [[nodiscard]] inline std::int64_t build_policy_update_on_insert_indexes(Oid main_relid) {
@@ -486,9 +633,6 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     for (std::size_t i = 0; i < types.size(); ++i) {
         if (!idx.enabled[i]) continue;
         if (idx.policy[i] != IndexUpdatePolicy::UPDATE_ON_INSERT) continue;
-        // Explicit belt: minimizers_per_sequence is UPDATE_MANUALLY (its
-        // external-sort build is opt-in via bioseq.update_index(...)).
-        if (types[i].first == "minimizers_per_sequence") continue;
         // DOC0286 — invoke the index build through the SQL executor (SPI) rather
         // than calling update_index_impl() directly. The direct call ran the
         // builder inside bioseq.load's own executor frame; the relcache/typcache

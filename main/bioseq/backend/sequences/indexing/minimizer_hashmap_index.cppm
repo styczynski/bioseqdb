@@ -58,7 +58,7 @@ struct MinimizerHashmapFragmentIndex {
 
     static constexpr std::uint32_t kSerializeMagic   = 0xB1000001u;   // unchanged wire format
     static constexpr std::uint32_t kSerializeVersion = 2u;
-    static constexpr std::string_view index_name     = "minimizers_per_fragment";
+    static constexpr std::string_view index_name     = MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
 
     struct SerializedHeader {
         std::uint32_t magic;
@@ -485,7 +485,7 @@ struct MinimizersPerFragmentIndex {
 export namespace bioseq::indexing {
 template <> struct index_descriptor<MinimizersPerFragmentIndex> {
     static constexpr SequenceIndexType index_type = SequenceIndexType::CHUNKED_PER_FRAGMENT;
-    static constexpr std::string_view  index_name = "minimizers_per_fragment";
+    static constexpr std::string_view  index_name = MinimizerHashmapFragmentIndex::index_name;
     static constexpr bool allows_update_on_insert = true;   // cheap per-fragment build; DEFAULT on-insert
 };
 static_assert(requires { index_descriptor<MinimizersPerFragmentIndex>::index_name; },

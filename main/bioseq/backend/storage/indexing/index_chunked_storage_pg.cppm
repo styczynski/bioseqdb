@@ -63,6 +63,9 @@ using bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES;
 using bioseq::indexing::TEMP_RUN_BASE;
 using bioseq::indexing::DIRECTORY_SUB_KEY;
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
+using bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
+using bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+using bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME;
 
 // pg-side mirror checks (§5): the macros ARE in scope here.
 static_assert(bioseq::indexing::kVarlenaHeaderBytes == VARHDRSZ, "VARHDRSZ mirror drift");
@@ -83,9 +86,9 @@ inline constexpr AttrNumber kAttBlob       = 5;
 /// Compile-time-ish abbreviation for an index name (keeps the physical name
 /// inside NAMEDATALEN). Unknown names fall back to a stable short hash.
 [[nodiscard]] inline std::string short_index_for(std::string_view name) {
-    if (name == "minimizers_per_fragment") return "mpf";
-    if (name == "minimizers_per_sequence") return "mps";
-    if (name == "symbol_counts")           return "sc";
+    if (name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME) return "mpf";
+    if (name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME) return "mps";
+    if (name == SYMBOL_COUNTS_INDEX_NAME)           return "sc";
     if (name == "test_table_rowcount")     return "ttr";
     // generic fallback: first 4 chars + length, still deterministic
     std::string out = "ix";

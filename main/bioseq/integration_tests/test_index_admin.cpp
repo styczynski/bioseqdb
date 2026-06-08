@@ -13,7 +13,7 @@
 //   * update_index accepts the table argument as quoted text or as an
 //     explicit ::regclass cast.
 //   * set_index_policy toggles a kind's update_policy (visible through
-//     list_metadata) and refuses UPDATE_ON_INSERT on the ineligible
+//     list_metadata), including opt-in UPDATE_ON_INSERT for the heavier
 //     minimizers_per_sequence kind.
 //   * update_index is idempotent at the content level (stable chunk row
 //     count across repeated calls) and returns 0 on an empty table while
@@ -158,8 +158,7 @@ TEST_CASE("update_index rejects non-bioseq-AM tables",
                     kHeapTable)));
 }
 
-TEST_CASE("set_index_policy toggles update_policy and persists; UPDATE_ON_INSERT "
-          "on minimizers_per_sequence errors",
+TEST_CASE("set_index_policy toggles update_policy and supports per-sequence on-insert",
           "[index_admin][policy]") {
     auto ctx = fresh_context({kTable});
     seed_small_columnar(ctx, kTable);
@@ -188,13 +187,40 @@ TEST_CASE("set_index_policy toggles update_policy and persists; UPDATE_ON_INSERT
               kTable);
     REQUIRE(policy_of("symbol_counts") == "UPDATE_ON_INSERT");
 
-    // minimizers_per_sequence is INELIGIBLE for UPDATE_ON_INSERT (whole-
-    // sequence external sort) — setting it must error.
-    REQUIRE(sql_fails(
-        ctx,
-        fmt::format("SELECT bioseq.set_index_policy('{}'::regclass, "
-                    "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
-                    kTable)));
+    // minimizers_per_sequence is opt-in UPDATE_ON_INSERT. This must be
+    // accepted so recompute_async_persist and batch load can honor the table
+    // policy instead of hard-wiring minimizers_per_fragment.
+    exec_sqlf(ctx,
+              "SELECT bioseq.set_index_policy('{}'::regclass, "
+              "'minimizers_per_fragment', 'UPDATE_MANUALLY');",
+              kTable);
+    exec_sqlf(ctx,
+              "SELECT bioseq.set_index_policy('{}'::regclass, "
+              "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
+              kTable);
+    REQUIRE(policy_of("minimizers_per_fragment") == "UPDATE_MANUALLY");
+    REQUIRE(policy_of("minimizers_per_sequence") == "UPDATE_ON_INSERT");
+}
+
+TEST_CASE("UPDATE_ON_INSERT can build minimizers_per_sequence without per-fragment fallback",
+          "[index_admin][policy][insert_hook]") {
+    auto ctx = fresh_context({"test_index_admin_mps"});
+    exec_sql(ctx, "CREATE TABLE test_index_admin_mps "
+                  "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;");
+    exec_sql(ctx, "SELECT bioseq.set_index_policy("
+                  "'test_index_admin_mps'::regclass, "
+                  "'minimizers_per_fragment', 'UPDATE_MANUALLY');");
+    exec_sql(ctx, "SELECT bioseq.set_index_policy("
+                  "'test_index_admin_mps'::regclass, "
+                  "'minimizers_per_sequence', 'UPDATE_ON_INSERT');");
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
+    exec_sql(ctx, "INSERT INTO test_index_admin_mps VALUES "
+                  "('mps', repeat('ACGT', 2000)::bioseq.seq('dna4', 64));");
+
+    REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment",
+                                  "test_index_admin_mps") == 0);
+    REQUIRE(index_table_row_count(ctx, "minimizers_per_sequence",
+                                  "test_index_admin_mps") > 0);
 }
 
 TEST_CASE("update_index('minimizers_per_fragment') is idempotent at the content level",

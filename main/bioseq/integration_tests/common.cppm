@@ -428,7 +428,15 @@ export inline void reset_extension(const connection_test_context& ctx,
     exec_sql(ctx, "DROP EXTENSION IF EXISTS bioseq CASCADE;");
     exec_sql(ctx, "DROP SCHEMA IF EXISTS bioseq_internal CASCADE;");
     exec_sql(ctx, "DROP SCHEMA IF EXISTS bioseq CASCADE;");
-    exec_sql(ctx, "CREATE EXTENSION bioseq;");
+    // CREATE EXTENSION loads the C library and runs _PG_init. If this backend
+    // already touched bioseq before the reset, reloading the library in the same
+    // process can trip PostgreSQL's "attempt to redefine parameter" guard for
+    // custom GUCs. Do the create in a fresh backend; the extension objects are
+    // database-global and immediately visible to the caller's connection.
+    {
+        connection_test_context create_ctx;
+        exec_sql(create_ctx, "CREATE EXTENSION bioseq;");
+    }
     // GUC reset: a previous test may have left bioseq.enable_vectorization
     // off etc.; the explicit names cover everything reachable from the
     // option matrix tests. RESET ALL would be cheaper but resets system GUCs

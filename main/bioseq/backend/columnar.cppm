@@ -19,6 +19,7 @@ module;
 extern "C" {
 #include "miscadmin.h"
 #include "utils/inval.h"
+#include "utils/guc_tables.h"
 #include "utils/lsyscache.h"
 #include "catalog/namespace.h"
 }
@@ -215,6 +216,12 @@ static void
 bioseq_guc_init()
 {
 	JustLog("[bioseq] pg: bioseq_guc_init() entered");
+	if (auto* existing = find_option("bioseq.logging", false, true, ERROR);
+	    existing != nullptr && existing->vartype == PGC_BOOL) {
+		JustLog("[bioseq] pg: bioseq_guc_init() skipped; GUCs already registered");
+		return;
+	}
+
 	DefineCustomBoolVariable(
 		"bioseq.logging",
 		"Enable dedicated extension logging",

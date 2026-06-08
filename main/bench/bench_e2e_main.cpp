@@ -39,6 +39,7 @@ import bioseq_sequences.generation;        // GeneratorParams / generate_test_se
 import bioseq_io.writer;                    // sequence_writer<A, FASTA>
 import bioseq_io.public_api;                // compact_sequence_view<R>
 import bioseq_io.options;                   // sequence_io_file_type, writer_options
+import bioseq_indexing.type;                 // canonical minimizer index names
 
 #ifndef BIOSEQ_E2E_REPORT_DIR
 #error "BIOSEQ_E2E_REPORT_DIR must be defined by the build system"
@@ -123,6 +124,10 @@ constexpr std::size_t   kFastaStreamChunkBp = std::size_t{1} << 24;      // boun
 // >MaxAllocSize line would force an unbounded slab. 64 KiB lines are far under the
 // reader's 1 MiB slab and are filtered by the SIMD encoders' newline LUT.
 constexpr std::size_t   kFastaLineWidth     = std::size_t{1} << 16;
+constexpr std::string_view kMinimizersPerFragmentIndex =
+    bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
+constexpr std::string_view kMinimizersPerSequenceIndex =
+    bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
 
 struct E2eInput {
     // Connection is shared (const-usable; SQL mutates the DB, not this struct).
@@ -130,7 +135,9 @@ struct E2eInput {
     std::string alphabet;                        // "dna4" / "dna5"
     std::string seq_type;                        // bioseq.seq('<alphabet>', 64)
     std::string size_label;                      // "2gbp" / "4gbp"
-    std::string just_index_table;                // loaded + indexed in on_input
+    std::string just_index_table;                // legacy alias for the per-sequence table
+    std::string just_index_table_per_fragment;   // loaded + per-fragment indexed in on_input
+    std::string just_index_table_per_sequence;   // loaded + per-sequence indexed in on_input
     std::string no_index_table;                  // empty; loaded inside the region
     std::string target_fasta;                    // single-record, for bioseq.load
     std::string target_fasta_split;              // <=split_bp records, for minimap2
@@ -157,6 +164,15 @@ struct E2eOutput {
     std::uint64_t peak_bench_rss_kb = 0;
     std::uint64_t min_tmp_available_kb = 0;
     double peak_swap_used_mb = 0.0;
+    std::int64_t audit_selected_minimizer_is_sequence = -1;
+    std::int64_t audit_mpf_rows = -1;
+    std::int64_t audit_mps_rows = -1;
+    std::int64_t audit_mpf_update_on_insert = -1;
+    std::int64_t audit_mps_update_on_insert = -1;
+    std::int64_t audit_mpf_active_read = -1;
+    std::int64_t audit_mps_active_read = -1;
+    std::int64_t audit_async_persist_jobs_waiting = -1;
+    std::int64_t audit_index_rows_wait_attempts = 0;
 };
 
 void preflight_e2e_resources(it::connection_test_context& conn,
@@ -514,11 +530,138 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
     return static_cast<int>(it->second.as_integer());
 }
 
+[[nodiscard]] std::string param_minimizer_index(const ParamMap& params) {
+    std::string index =
+        param_string(params, "minimizer_index", kMinimizersPerFragmentIndex);
+    if (index != kMinimizersPerFragmentIndex
+        && index != kMinimizersPerSequenceIndex) {
+        loge("[bench_e2e] unsupported minimizer_index '{}'", index);
+        std::abort();
+    }
+    return index;
+}
+
 void configure_bioseq_scheduler_session(it::connection_test_context& c,
                                         std::string_view pipeline_mode) {
     it::exec_sqlf(c, "SET bioseq.scheduler.pipeline_concurrency_mode = '{}';",
                   pipeline_mode);
     it::exec_sql(c, "SET bioseq.index_async_persist = on;");
+}
+
+void configure_bioseq_minimizer_policy(
+        it::connection_test_context& c,
+        const std::string& table,
+        std::string_view minimizer_index) {
+    if (minimizer_index == kMinimizersPerSequenceIndex) {
+        it::exec_sqlf(c,
+            "SELECT bioseq.set_index_policy('{}'::regclass, '{}', 'UPDATE_MANUALLY');",
+            table, kMinimizersPerFragmentIndex);
+        it::exec_sqlf(c,
+            "SELECT bioseq.set_index_policy('{}'::regclass, '{}', 'UPDATE_ON_INSERT');",
+            table, kMinimizersPerSequenceIndex);
+        it::exec_sqlf(c,
+            "SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+            table, kMinimizersPerSequenceIndex);
+    } else {
+        it::exec_sqlf(c,
+            "SELECT bioseq.set_index_policy('{}'::regclass, '{}', 'UPDATE_ON_INSERT');",
+            table, kMinimizersPerFragmentIndex);
+        it::exec_sqlf(c,
+            "SELECT bioseq.set_index_policy('{}'::regclass, '{}', 'UPDATE_MANUALLY');",
+            table, kMinimizersPerSequenceIndex);
+        it::exec_sqlf(c,
+            "SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+            table, kMinimizersPerFragmentIndex);
+    }
+}
+
+[[nodiscard]] const std::string& just_index_table_for(
+        const E2eInput& in,
+        std::string_view minimizer_index) {
+    if (minimizer_index == kMinimizersPerSequenceIndex) {
+        return in.just_index_table_per_sequence;
+    }
+    return in.just_index_table_per_fragment;
+}
+
+[[nodiscard]] std::int64_t first_i64_or_minus_one(const it::rowset_t& rows) {
+    if (rows.empty() || rows.front().empty() || !rows.front().front().has_value()) {
+        return -1;
+    }
+    return parse_i64(*rows.front().front());
+}
+
+[[nodiscard]] std::int64_t index_row_count(
+        const it::connection_test_context& c,
+        const std::string& table,
+        std::string_view index_name) {
+    const auto rows = it::query_rows(c, fmt::format(
+        "SELECT bioseq.index_table_row_count('{}'::regclass, '{}');",
+        table, index_name));
+    return first_i64_or_minus_one(rows);
+}
+
+void capture_index_audit(
+        const it::connection_test_context& c,
+        const std::string& table,
+        std::string_view minimizer_index,
+        E2eOutput& out) {
+    out.audit_selected_minimizer_is_sequence =
+        minimizer_index == kMinimizersPerSequenceIndex ? 1 : 0;
+    out.audit_mpf_rows =
+        index_row_count(c, table, kMinimizersPerFragmentIndex);
+    out.audit_mps_rows =
+        index_row_count(c, table, kMinimizersPerSequenceIndex);
+
+    out.audit_mpf_update_on_insert = -1;
+    out.audit_mps_update_on_insert = -1;
+    out.audit_mpf_active_read = -1;
+    out.audit_mps_active_read = -1;
+    const auto policy_rows = it::query_rows(c, fmt::format(
+        "SELECT index_name, update_on_insert::int, is_active_read::int "
+        "FROM bioseq_internal.index_policy "
+        "WHERE user_relid='{}'::regclass "
+        "ORDER BY index_name;",
+        table));
+    for (const auto& row : policy_rows) {
+        if (row.size() < 3 || !row[0].has_value()) {
+            continue;
+        }
+        const std::string_view name = *row[0];
+        const std::int64_t uoi = row[1].has_value() ? parse_i64(*row[1]) : -1;
+        const std::int64_t active = row[2].has_value() ? parse_i64(*row[2]) : -1;
+        if (name == kMinimizersPerFragmentIndex) {
+            out.audit_mpf_update_on_insert = uoi;
+            out.audit_mpf_active_read = active;
+        } else if (name == kMinimizersPerSequenceIndex) {
+            out.audit_mps_update_on_insert = uoi;
+            out.audit_mps_active_read = active;
+        }
+    }
+
+    const auto stats = it::query_rows(c,
+        "SELECT async_persist_jobs_waiting FROM bioseq.scheduler_stats();");
+    out.audit_async_persist_jobs_waiting = first_i64_or_minus_one(stats);
+}
+
+void capture_index_audit_after_async_persist(
+        const it::connection_test_context& c,
+        const std::string& table,
+        std::string_view minimizer_index,
+        E2eOutput& out) {
+    constexpr int kMaxAttempts = 180;
+    constexpr auto kSleep = std::chrono::seconds{1};
+    const bool expect_sequence = minimizer_index == kMinimizersPerSequenceIndex;
+    for (int attempt = 0; attempt <= kMaxAttempts; ++attempt) {
+        capture_index_audit(c, table, minimizer_index, out);
+        out.audit_index_rows_wait_attempts = attempt;
+        const std::int64_t target_rows =
+            expect_sequence ? out.audit_mps_rows : out.audit_mpf_rows;
+        if (target_rows > 0 || out.audit_async_persist_jobs_waiting == 0) {
+            return;
+        }
+        std::this_thread::sleep_for(kSleep);
+    }
 }
 
 void attach_resource_metrics(E2eOutput& out,
@@ -537,11 +680,13 @@ void log_measured_case(std::string_view algo,
                        std::string_view pipeline_mode,
                        int minimap_threads,
                        const E2eInput& in,
-                       const E2eOutput& out) {
-    JustLog("[bench_e2e] measured algo={} pipeline_mode={} minimap_threads={} size={} measured_ns={} pg_peak_rss_mb={:.2f} minimap2_peak_rss_mb={:.2f} bench_peak_rss_mb={:.2f} tmp_min_free_gib={:.2f} swap_peak_mb={:.2f} found={} offset_bp={}",
+                       const E2eOutput& out,
+                       std::string_view minimizer_index = "-") {
+    JustLog("[bench_e2e] measured algo={} pipeline_mode={} minimap_threads={} minimizer_index={} size={} measured_ns={} pg_peak_rss_mb={:.2f} minimap2_peak_rss_mb={:.2f} bench_peak_rss_mb={:.2f} tmp_min_free_gib={:.2f} swap_peak_mb={:.2f} found={} offset_bp={}",
             algo,
             pipeline_mode,
             minimap_threads,
+            minimizer_index,
             in.size_label,
             static_cast<unsigned long long>(out.measured_region_ns),
             static_cast<double>(out.peak_postgres_rss_kb) / 1024.0,
@@ -566,7 +711,10 @@ void cleanup_e2e_input(std::string_view,
     }
 
     if (in.conn != nullptr) {
-        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.just_index_table);
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
+                      in.just_index_table_per_fragment);
+        it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;",
+                      in.just_index_table_per_sequence);
         it::exec_sqlf(*in.conn, "DROP TABLE IF EXISTS {} CASCADE;", in.no_index_table);
     }
 
@@ -650,8 +798,12 @@ template <sequence_alphabet A>
     in.target_fasta_split  = fmt::format("{}/e2e_{}_target.split.fasta",  tmp, in.size_label);
     in.query_fasta         = fmt::format("{}/e2e_{}_query.fasta",         tmp, in.size_label);
     in.mmi_path            = fmt::format("{}/e2e_{}_target.mmi",          tmp, in.size_label);
-    in.just_index_table    = fmt::format("e2e_{}_just",                   in.size_label);
-    in.no_index_table      = fmt::format("e2e_{}_noidx",                  in.size_label);
+    in.just_index_table_per_fragment =
+        fmt::format("e2e_{}_just_mpf", in.size_label);
+    in.just_index_table_per_sequence =
+        fmt::format("e2e_{}_just_mps", in.size_label);
+    in.just_index_table = in.just_index_table_per_sequence;
+    in.no_index_table = fmt::format("e2e_{}_noidx", in.size_label);
 
     // (1) generate ONE (query, target) pair (fragment_count is forced to 1).
     auto pairs = generate_test_sequences<A, bench_storage_t>(gp);
@@ -668,7 +820,8 @@ template <sequence_alphabet A>
 
     // (3) connect once; clean slate.
     in.conn = std::make_shared<it::connection_test_context>();
-    it::reset_extension(*in.conn, { std::string_view{in.just_index_table},
+    it::reset_extension(*in.conn, { std::string_view{in.just_index_table_per_fragment},
+                                    std::string_view{in.just_index_table_per_sequence},
                                     std::string_view{in.no_index_table} });
     preflight_e2e_resources(*in.conn, in.size_label, in.target_bp);
 
@@ -680,18 +833,66 @@ template <sequence_alphabet A>
     const bool skip_index_baseline_setup =
         skip_index_setup_env != nullptr
         && std::string_view{skip_index_setup_env} == "1";
+    const char* skip_minimap2_setup_env =
+        std::getenv("BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP");
+    const bool skip_minimap2_baseline_setup =
+        skip_minimap2_setup_env != nullptr
+        && std::string_view{skip_minimap2_setup_env} == "1";
 
-    // (5) just_index table: create, load (build per-fragment), then build the
-    //     per-sequence merged index and make it the active read index.
+    const char* just_index_setup_only_env =
+        std::getenv("BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY");
+    const std::string just_index_setup_only_name =
+        just_index_setup_only_env != nullptr
+            ? std::string{just_index_setup_only_env}
+            : std::string{};
+    if (!just_index_setup_only_name.empty()
+        && just_index_setup_only_name != kMinimizersPerFragmentIndex
+        && just_index_setup_only_name != kMinimizersPerSequenceIndex) {
+        loge("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY='{}'",
+             just_index_setup_only_name);
+        std::abort();
+    }
+    const auto should_setup_just_index =
+        [&](std::string_view index_name) {
+            return just_index_setup_only_name.empty()
+                || just_index_setup_only_name == index_name;
+        };
+    const char* just_index_setup_pipeline_env =
+        std::getenv("BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE");
+    const std::string just_index_setup_pipeline_mode =
+        just_index_setup_pipeline_env != nullptr
+            ? std::string{just_index_setup_pipeline_env}
+            : std::string{"task_parallel"};
+    if (just_index_setup_pipeline_mode != "single"
+        && just_index_setup_pipeline_mode != "parallel"
+        && just_index_setup_pipeline_mode != "task_parallel") {
+        loge("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE='{}'",
+             just_index_setup_pipeline_mode);
+        std::abort();
+    }
+    const auto setup_just_index_table =
+        [&](const std::string& table, std::string_view index_name) {
+            create_e2e_table(*in.conn, table, in.seq_type);
+            configure_bioseq_scheduler_session(
+                *in.conn, just_index_setup_pipeline_mode);
+            configure_bioseq_minimizer_policy(*in.conn, table, index_name);
+            it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = on;");
+            it::exec_sqlf(*in.conn, "SELECT bioseq.load('{}'::regclass, '{}');",
+                          table, in.target_fasta);
+        };
+
+    // (5) just_index tables: each indexed cell gets its own table and policy.
+    // This avoids a per-sequence run accidentally succeeding through a residual
+    // per-fragment index, and keeps the per-fragment cell valid too.
     if (!skip_index_baseline_setup) {
-        create_e2e_table(*in.conn, in.just_index_table, in.seq_type);
-        it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = on;");
-        it::exec_sqlf(*in.conn, "SELECT bioseq.load('{}'::regclass, '{}');",
-                      in.just_index_table, in.target_fasta);
-        it::exec_sqlf(*in.conn, "SELECT bioseq.update_index('{}'::regclass, 'minimizers_per_sequence');",
-                      in.just_index_table);
-        it::exec_sqlf(*in.conn, "SELECT bioseq.set_active_read_index('{}'::regclass, 'minimizers_per_sequence');",
-                      in.just_index_table);
+        if (should_setup_just_index(kMinimizersPerFragmentIndex)) {
+            setup_just_index_table(
+                in.just_index_table_per_fragment, kMinimizersPerFragmentIndex);
+        }
+        if (should_setup_just_index(kMinimizersPerSequenceIndex)) {
+            setup_just_index_table(
+                in.just_index_table_per_sequence, kMinimizersPerSequenceIndex);
+        }
     } else {
         JustLog("[bench_e2e] skipping persisted-index/minimap2 baseline setup "
                 "because BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP=1");
@@ -701,9 +902,12 @@ template <sequence_alphabet A>
     create_e2e_table(*in.conn, in.no_index_table, in.seq_type);
 
     // (7) minimap2 prebuilt .mmi for the just_index baseline (untimed).
-    if (!skip_index_baseline_setup) {
+    if (!skip_index_baseline_setup && !skip_minimap2_baseline_setup) {
         run_cmd(fmt::format("{} -k{} -w{} -d {} {}", BIOSEQ_E2E_MINIMAP2_BIN,
                             in.kmer_size, in.window_size, in.mmi_path, in.target_fasta_split));
+    } else if (skip_minimap2_baseline_setup) {
+        JustLog("[bench_e2e] skipping minimap2 .mmi baseline setup because "
+                "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP=1");
     }
 
     JustLog("[bench_e2e] input '{}' ready (truth_start={}, rev={})",
@@ -729,16 +933,20 @@ template <sequence_alphabet A>
     E2eOutput out;
     const std::string pipeline_mode = param_string(params, "pipeline_mode", "single");
     const int minimap_threads = std::max(1, param_int(params, "threads", 1));
+    const std::string minimizer_index = param_minimizer_index(params);
     const std::string qlit = fmt::format("'{}'::{}", in.query_bases, in.seq_type);
     const std::string proj =
         "bioseq.target_start(header) AS tstart, bioseq.is_reverse(header) AS rev";
 
     if (algo == "bioseq_just_index") {
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        const std::string& table = just_index_table_for(in, minimizer_index);
+        configure_bioseq_minimizer_policy(
+            *in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
         const std::string sql = fmt::format(
             "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
-            proj, in.just_index_table, qlit);
+            proj, table, qlit);
         ScopedResourceMonitor resources;
         const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         {
@@ -748,11 +956,17 @@ template <sequence_alphabet A>
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
-        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        log_measured_case(
+            algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_no_index") {
+        const bool recompute_async_persist =
+            param_string(params, "recompute_async_persist", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
+        configure_bioseq_minimizer_policy(
+            *in.conn, in.no_index_table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");  // load builds NO index
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");   // align recomputes
         const std::string load_sql = fmt::format(
@@ -773,16 +987,28 @@ template <sequence_alphabet A>
             configure_bioseq_scheduler_session(read_conn, pipeline_mode);
             it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
             it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
+            it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
+                          recompute_async_persist ? "on" : "off");
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
-        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
+        if (recompute_async_persist) {
+            capture_index_audit_after_async_persist(
+                *in.conn, in.no_index_table, minimizer_index, out);
+        } else {
+            capture_index_audit(
+                *in.conn, in.no_index_table, minimizer_index, out);
+        }
+        log_measured_case(
+            algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_load_only") {
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);
+        configure_bioseq_minimizer_policy(
+            *in.conn, in.no_index_table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");
         const std::string load_sql = fmt::format(
@@ -799,13 +1025,17 @@ template <sequence_alphabet A>
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         out.found = true;
         out.match_count = 1;
-        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
+        capture_index_audit(*in.conn, in.no_index_table, minimizer_index, out);
+        log_measured_case(
+            algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "bioseq_recompute_only") {
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);
+        configure_bioseq_minimizer_policy(
+            *in.conn, in.no_index_table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");
         it::exec_sqlf(*in.conn,
@@ -832,7 +1062,15 @@ template <sequence_alphabet A>
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         require_mapped(algo, in, out);
-        log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
+        if (recompute_async_persist) {
+            capture_index_audit_after_async_persist(
+                *in.conn, in.no_index_table, minimizer_index, out);
+        } else {
+            capture_index_audit(
+                *in.conn, in.no_index_table, minimizer_index, out);
+        }
+        log_measured_case(
+            algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
     } else if (algo == "minimap2_no_index") {
         const std::string cmd = fmt::format("{} -c -t{} -k{} -w{} {} {}",
@@ -882,6 +1120,15 @@ template <sequence_alphabet A>
         {"peak_bench_rss_mb",       static_cast<double>(o.peak_bench_rss_kb) / 1024.0},
         {"min_tmp_available_gib",   static_cast<double>(o.min_tmp_available_kb) / (1024.0 * 1024.0)},
         {"peak_swap_used_mb",       o.peak_swap_used_mb},
+        {"audit_selected_minimizer_is_sequence", static_cast<double>(o.audit_selected_minimizer_is_sequence)},
+        {"audit_mpf_rows",          static_cast<double>(o.audit_mpf_rows)},
+        {"audit_mps_rows",          static_cast<double>(o.audit_mps_rows)},
+        {"audit_mpf_update_on_insert", static_cast<double>(o.audit_mpf_update_on_insert)},
+        {"audit_mps_update_on_insert", static_cast<double>(o.audit_mps_update_on_insert)},
+        {"audit_mpf_active_read",   static_cast<double>(o.audit_mpf_active_read)},
+        {"audit_mps_active_read",   static_cast<double>(o.audit_mps_active_read)},
+        {"audit_async_persist_jobs_waiting", static_cast<double>(o.audit_async_persist_jobs_waiting)},
+        {"audit_index_rows_wait_attempts", static_cast<double>(o.audit_index_rows_wait_attempts)},
     };
 }
 

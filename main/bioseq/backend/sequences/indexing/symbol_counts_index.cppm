@@ -48,7 +48,7 @@ template <class S>
 struct SymbolCountsIndex {
     static_assert(is_index_chunked_storage_for<S, SequenceIndexType::INLINE_PER_SEQUENCE>);
     static constexpr SequenceIndexType index_type = SequenceIndexType::INLINE_PER_SEQUENCE;
-    static constexpr std::string_view  index_name = "symbol_counts";
+    static constexpr std::string_view  index_name = SYMBOL_COUNTS_INDEX_NAME;
     using storage_type = S;
 
     template <class R, class Scanner>
@@ -80,7 +80,7 @@ struct SymbolCountsIndex {
 export namespace bioseq::indexing {
 template <> struct index_descriptor<SymbolCountsIndex> {
     static constexpr SequenceIndexType index_type = SequenceIndexType::INLINE_PER_SEQUENCE;
-    static constexpr std::string_view  index_name = "symbol_counts";
+    static constexpr std::string_view  index_name = SYMBOL_COUNTS_INDEX_NAME;
     static constexpr bool allows_update_on_insert = true;   // cheap INLINE tally; default on-insert
 };
 static_assert(requires { index_descriptor<SymbolCountsIndex>::index_name; },

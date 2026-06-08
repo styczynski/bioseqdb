@@ -1,0 +1,81 @@
+{
+  "params": {
+    "bioseq_just_index": {
+      "pipeline_mode": {
+        "type": "string",
+        "default": "single",
+        "enum": ["single", "parallel", "task_parallel"],
+        "description": "DOC0294 scheduler mode for the bioseq SQL persisted-index read path"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_sequence",
+        "enum": ["minimizers_per_fragment", "minimizers_per_sequence"],
+        "description": "active read minimizer index selected before the timed query"
+      }
+    }
+  },
+  "test_cases": {
+    "E2E_2GBP_DNA4": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "2gbp_dna4",
+        "reference_length": 2000000000,
+        "fragment_count": 1,
+        "fragment_length_mean": 5000000,
+        "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "minimap2_split_bp": 2000000352,
+        "seed": 3219876
+      },
+      "description": "DOC0296 per-sequence just-index focus: dna4 2 Gbp reference, one 5 Mbp HiFi-error query"
+    }
+  },
+  "bench_e2e": {
+    "description": "DOC0296 focused per-sequence just-index task_parallel 2Gbp dna4 measurement",
+    "fast": false,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "matrix": {
+      "for": {"E2E_2GBP_DNA4": 1},
+      "over": {
+        "bioseq_just_index": {
+          "pipeline_mode": ["task_parallel"],
+          "minimizer_index": ["minimizers_per_sequence"]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "rules": []},
+        "region_visits": {"type": "region", "rules": []},
+        "match_count": {"type": "evaluation"},
+        "mean_position_offset_bp": {"type": "evaluation", "rules": []},
+        "found_fraction": {"type": "evaluation", "rules": []},
+        "measured_region_ns_manual": {"type": "evaluation", "rules": []},
+        "peak_postgres_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_minimap2_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_bench_rss_mb": {"type": "evaluation", "rules": []},
+        "min_tmp_available_gib": {"type": "evaluation", "rules": []},
+        "peak_swap_used_mb": {"type": "evaluation", "rules": []},
+        "audit_selected_minimizer_is_sequence": {"type": "evaluation", "rules": []},
+        "audit_mpf_rows": {"type": "evaluation", "rules": []},
+        "audit_mps_rows": {"type": "evaluation", "rules": []},
+        "audit_mpf_update_on_insert": {"type": "evaluation", "rules": []},
+        "audit_mps_update_on_insert": {"type": "evaluation", "rules": []},
+        "audit_mpf_active_read": {"type": "evaluation", "rules": []},
+        "audit_mps_active_read": {"type": "evaluation", "rules": []},
+        "audit_async_persist_jobs_waiting": {"type": "evaluation", "rules": []},
+        "audit_index_rows_wait_attempts": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
+  "regression_rules": []
+}

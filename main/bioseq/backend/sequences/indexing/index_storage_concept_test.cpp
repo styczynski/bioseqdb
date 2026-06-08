@@ -80,17 +80,17 @@ TEST_CASE("DOC0279 §7.3 — supported_indexes registry lists all three indexes 
     std::map<std::string_view, SequenceIndexType> by_name;
     for (auto& [name, layout] : types) by_name.emplace(name, layout);
 
-    REQUIRE(by_name.count("minimizers_per_fragment") == 1u);
-    REQUIRE(by_name.count("minimizers_per_sequence") == 1u);
-    REQUIRE(by_name.count("symbol_counts") == 1u);
+    REQUIRE(by_name.count(bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME) == 1u);
+    REQUIRE(by_name.count(bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) == 1u);
+    REQUIRE(by_name.count(bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME) == 1u);
 
-    REQUIRE(by_name.at("minimizers_per_fragment") == SequenceIndexType::CHUNKED_PER_FRAGMENT);
-    REQUIRE(by_name.at("minimizers_per_sequence") == SequenceIndexType::CHUNKED_PER_FRAGMENT);
-    REQUIRE(by_name.at("symbol_counts")           == SequenceIndexType::INLINE_PER_SEQUENCE);
+    REQUIRE(by_name.at(bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME) == SequenceIndexType::CHUNKED_PER_FRAGMENT);
+    REQUIRE(by_name.at(bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) == SequenceIndexType::CHUNKED_PER_FRAGMENT);
+    REQUIRE(by_name.at(bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME)           == SequenceIndexType::INLINE_PER_SEQUENCE);
 
     // layout_of resolves the same way the SQL surface routes by name.
-    REQUIRE(reg::layout_of("symbol_counts") == SequenceIndexType::INLINE_PER_SEQUENCE);
-    REQUIRE(reg::layout_of("minimizers_per_fragment") == SequenceIndexType::CHUNKED_PER_FRAGMENT);
+    REQUIRE(reg::layout_of(bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME) == SequenceIndexType::INLINE_PER_SEQUENCE);
+    REQUIRE(reg::layout_of(bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME) == SequenceIndexType::CHUNKED_PER_FRAGMENT);
 }
 
 TEST_CASE("DOC0279 §7.3 — fresh-table defaults set the cheap on-insert indexes",
@@ -103,7 +103,8 @@ TEST_CASE("DOC0279 §7.3 — fresh-table defaults set the cheap on-insert indexe
     for (std::size_t i = 0; i < types.size(); ++i) {
         REQUIRE(r.enabled[i]);   // every index enabled on a fresh table
         const bool is_default_on_insert =
-            (types[i].first == "minimizers_per_fragment" || types[i].first == "symbol_counts");
+            (types[i].first == bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+             || types[i].first == bioseq::indexing::SYMBOL_COUNTS_INDEX_NAME);
         if (is_default_on_insert) {
             REQUIRE(allows[i]);
             REQUIRE(r.policy[i] == bioseq::indexing::IndexUpdatePolicy::UPDATE_ON_INSERT);
@@ -112,9 +113,10 @@ TEST_CASE("DOC0279 §7.3 — fresh-table defaults set the cheap on-insert indexe
         }
     }
 
-    // The whole-sequence external-sort index can never be on-insert.
-    REQUIRE(r.set_policy("minimizers_per_sequence", bioseq::indexing::IndexUpdatePolicy::UPDATE_ON_INSERT)
-            == reg::SetPolicyStatus::Ineligible);
+    // The whole-sequence external-sort index is eligible but remains opt-in.
+    REQUIRE(r.set_policy(bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME,
+                         bioseq::indexing::IndexUpdatePolicy::UPDATE_ON_INSERT)
+            == reg::SetPolicyStatus::Ok);
     // An unknown name is reported as such.
     REQUIRE(r.set_policy("does_not_exist", bioseq::indexing::IndexUpdatePolicy::UPDATE_MANUALLY)
             == reg::SetPolicyStatus::Unknown);

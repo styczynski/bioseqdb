@@ -66,6 +66,12 @@ void _PG_init();
 void
 _PG_init()
 {
+	static bool initialized = false;
+	if (initialized) {
+		JustLog("[bioseq] pg: _PG_init() skipped duplicate call");
+		return;
+	}
+	initialized = true;
 	log_configure();
 	JustLog("[bioseq] pg: _PG_init() entered");
 	bioseq_init();

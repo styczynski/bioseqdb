@@ -2875,10 +2875,11 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		 * reduction still dominates so the custom scan always wins when
 		 * a rewrite is possible — the sidecar coverage just adjusts the
 		 * *margin*, not the *direction*, of the preference.
-		 */
+			 */
 		const float index_presence =
 			bioseq::storage::indexing::estimate_index_presence(
-				rte->relid, rel->tuples, "minimizers_per_fragment");
+				rte->relid, rel->tuples,
+				bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX);
 		const double sidecar_bonus = 10000.0 * static_cast<double>(index_presence);
 
 		JustLog("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={} magic_cnt={} index_presence={:.4f}",
@@ -4483,7 +4484,8 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 		std::optional<std::int64_t> stored;
 		if (bioseq_read_sequence_index && stub) {
 			auto store = bsi::open_sequence_storage(relid, rid.db_oid, rid.tablespace_oid,
-				rid.relfilenode, site.column_attno, "symbol_counts", loc,
+				rid.relfilenode, site.column_attno,
+				bioseq::indexing::SymbolCountsIndex<bsi::IndexStorageSequencePg>::index_name, loc,
 				static_cast<uint64_t>(rowno), caches, scratch);
 			stored = bioseq::indexing::SymbolCountsIndex<bsi::IndexStorageSequencePg>::read_count(
 				store, static_cast<std::size_t>(site.rank));
@@ -5543,7 +5545,8 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				 */
 				const float index_presence =
 					bioseq::storage::indexing::estimate_index_presence(
-						user_relid, rel_tuples, "minimizers_per_fragment");
+						user_relid, rel_tuples,
+						bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX);
 				float fetched_pct    = 0.0f;
 				float recomputed_pct = 100.0f;
 				const bool runtime_alphabet_recompute =

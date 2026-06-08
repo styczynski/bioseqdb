@@ -48,18 +48,37 @@ enum class IndexUpdatePolicy : std::uint8_t {
     return p == IndexUpdatePolicy::UPDATE_ON_INSERT ? "UPDATE_ON_INSERT" : "UPDATE_MANUALLY";
 }
 
+/// SQL-facing index names. Keep these in the low-level type module so registry,
+/// index implementations, scheduler, and SQL glue all share the same spelling
+/// without introducing module cycles.
+constexpr std::string_view MINIMIZERS_PER_FRAGMENT_INDEX_NAME = "minimizers_per_fragment";
+constexpr std::string_view MINIMIZERS_PER_SEQUENCE_INDEX_NAME = "minimizers_per_sequence";
+constexpr std::string_view SYMBOL_COUNTS_INDEX_NAME = "symbol_counts";
+
+/// Supported minimizer index names in persistence preference order. When more
+/// than one minimizer index is enabled for UPDATE_ON_INSERT, deferred persistence
+/// chooses the first matching entry.
+constexpr std::array<std::string_view, 2> MINIMIZER_INDICES = {
+    MINIMIZERS_PER_FRAGMENT_INDEX_NAME,
+    MINIMIZERS_PER_SEQUENCE_INDEX_NAME,
+};
+[[nodiscard]] constexpr bool minimizer_index_contains(std::string_view name) noexcept {
+    for (std::string_view d : MINIMIZER_INDICES) if (d == name) return true;
+    return false;
+}
+
 /// The read path defaults to the per-fragment minimizer index. This is separate
 /// from write policy: `symbol_counts` is also UPDATE_ON_INSERT by default, but it
 /// is not a minimizer lookup structure.
-constexpr std::string_view DEFAULT_ACTIVE_READ_INDEX = "minimizers_per_fragment";
+constexpr std::string_view DEFAULT_ACTIVE_READ_INDEX = MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
 
 /// Cheap per-sequence indexes that default to UPDATE_ON_INSERT on a fresh table.
 /// `symbol_counts` intentionally keeps the legacy "counter sidecar is populated
 /// on insert" behaviour, but with the real tally from §12.5 instead of the old
 /// `49` stub.
 constexpr std::array<std::string_view, 2> DEFAULT_UPDATE_ON_INSERT_INDEXES = {
-    "minimizers_per_fragment",
-    "symbol_counts",
+    MINIMIZERS_PER_FRAGMENT_INDEX_NAME,
+    SYMBOL_COUNTS_INDEX_NAME,
 };
 [[nodiscard]] constexpr bool default_update_on_insert_contains(std::string_view name) noexcept {
     for (std::string_view d : DEFAULT_UPDATE_ON_INSERT_INDEXES) if (d == name) return true;

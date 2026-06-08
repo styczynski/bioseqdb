@@ -1,12 +1,20 @@
 {
   "params": {
-    "bioseq_no_index":      {"_": {"type": "integer", "default": 0, "description": "load(no index)+recompute align, all via SQL, timed end-to-end"}},
+    "bioseq_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "load(no index)+recompute align, all via SQL, timed end-to-end"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before load/recompute; only affects no-index runtime when recompute_async_persist=on"},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "stage the selected no-index recompute minimizer index for async persistence"}
+    },
     "bioseq_load_only":     {"_": {"type": "integer", "default": 0, "description": "DOC0296 split: TRUNCATE + bioseq.load only, timed"}},
     "bioseq_recompute_only":{
       "_": {"type": "integer", "default": 0, "description": "DOC0296 split: mmsearch recompute only, after untimed load"},
-      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "DOC0296: stage a no-index recompute fragment index for async persistence"}
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy minimizer index selected before untimed load/recompute"},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "DOC0296: stage a no-index recompute minimizer index for async persistence"}
     },
-    "bioseq_just_index":    {"_": {"type": "integer", "default": 0, "description": "index prebuilt (untimed); assemble align via SQL, timed"}},
+    "bioseq_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "index prebuilt (untimed); assemble align via SQL, timed"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"}
+    },
     "minimap2_no_index":    {"_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"}},
     "minimap2_just_index":  {"_": {"type": "integer", "default": 0, "description": "minimap2 prebuilt .mmi (map only)"}}
   },
@@ -57,8 +65,8 @@
       "for": { "E2E_2GBP_DNA4": 3, "E2E_2GBP_DNA5": 3,
                "E2E_4GBP_DNA4": 3, "E2E_4GBP_DNA5": 3 },
       "over": {
-        "bioseq_no_index": {},
-        "bioseq_just_index": {},
+        "bioseq_no_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "recompute_async_persist": ["off", "on"]},
+        "bioseq_just_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"]},
         "minimap2_no_index": {},
         "minimap2_just_index": {}
       },
@@ -69,7 +77,22 @@
         "region_visits":   { "type": "region", "rules": [] },
         "match_count":            { "type": "evaluation" },
         "mean_position_offset_bp":{ "type": "evaluation", "rules": [] },
-        "found_fraction":         { "type": "evaluation", "rules": [] }
+        "found_fraction":         { "type": "evaluation", "rules": [] },
+        "measured_region_ns_manual": { "type": "evaluation", "rules": [] },
+        "peak_postgres_rss_mb":   { "type": "evaluation", "rules": [] },
+        "peak_minimap2_rss_mb":   { "type": "evaluation", "rules": [] },
+        "peak_bench_rss_mb":      { "type": "evaluation", "rules": [] },
+        "min_tmp_available_gib":  { "type": "evaluation", "rules": [] },
+        "peak_swap_used_mb":      { "type": "evaluation", "rules": [] },
+        "audit_selected_minimizer_is_sequence": { "type": "evaluation", "rules": [] },
+        "audit_mpf_rows":         { "type": "evaluation", "rules": [] },
+        "audit_mps_rows":         { "type": "evaluation", "rules": [] },
+        "audit_mpf_update_on_insert": { "type": "evaluation", "rules": [] },
+        "audit_mps_update_on_insert": { "type": "evaluation", "rules": [] },
+        "audit_mpf_active_read":  { "type": "evaluation", "rules": [] },
+        "audit_mps_active_read":  { "type": "evaluation", "rules": [] },
+        "audit_async_persist_jobs_waiting": { "type": "evaluation", "rules": [] },
+        "audit_index_rows_wait_attempts": { "type": "evaluation", "rules": [] }
       }
     }
   },

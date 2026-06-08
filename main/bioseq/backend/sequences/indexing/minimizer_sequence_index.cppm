@@ -12,6 +12,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -25,6 +26,10 @@ import bioseq_sequences.kmers;                       // collect_minimizers_view,
 import bioseq_sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq_storage_lazy;                          // lazy_compact_sequence
 import bioseq_storage_size;                          // sequence_size_t
+import bioseq_parallelism.mode;
+import bioseq_parallelism.pool;
+import bioseq_parallelism.memory_admission;
+import bioseq_parallelism.pipeline_ops;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -118,7 +123,7 @@ struct MinimizerSequenceMergedIndex {
     static_assert(is_index_chunked_storage_for<S, SequenceIndexType::CHUNKED_PER_FRAGMENT>);
     static_assert(is_external_sort_spill_storage<S>);
     static constexpr SequenceIndexType index_type = SequenceIndexType::CHUNKED_PER_FRAGMENT;
-    static constexpr std::string_view  index_name = "minimizers_per_sequence";
+    static constexpr std::string_view  index_name = MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
     using storage_type = S;
 
     template <class R, class Scanner>
@@ -140,11 +145,13 @@ struct MinimizerSequenceMergedIndex {
 
         // ---- Pass 0: collect globalised (kmer, encoded) pairs, spill sorted runs.
         const std::size_t run_buffer_bytes = storage.run_buffer_bytes();
-        std::vector<std::pair<std::uint64_t,std::uint64_t>> buf;
-        std::size_t buf_bytes = 0;
-        sketch_collector collector;
         const std::size_t size_u = (std::size_t)((total_bp + lpu - 1) / lpu);
-        for (std::size_t fragment_no = 0; fragment_no < nfrag; ++fragment_no) {
+
+        using pair_t = std::pair<std::uint64_t,std::uint64_t>;
+        auto collect_fragment_pairs =
+            [&seq, total_bp, size_u](std::size_t fragment_no,
+                                     sketch_collector& collector,
+                                     std::vector<pair_t>& out) {
             const sequence_size_t core_lo = (sequence_size_t)fragment_no * frag_bp;
             const sequence_size_t core_hi = std::min(core_lo + (sequence_size_t)frag_bp, total_bp);
             const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
@@ -161,22 +168,104 @@ struct MinimizerSequenceMergedIndex {
                 for (const MinimapSketchData& m : collector.extract_sketches_data()) {
                     const sequence_size_t gpos = (sequence_size_t)m.last_pos() + emit_base;
                     if (gpos < core_lo || gpos >= core_hi) continue;
-                    buf.emplace_back(m.kmer(), ((std::uint64_t)gpos << 1) | (std::uint64_t)m.strand());
-                    buf_bytes += sizeof(std::pair<std::uint64_t,std::uint64_t>);
+                    out.emplace_back(m.kmer(), ((std::uint64_t)gpos << 1) | (std::uint64_t)m.strand());
                 }
             }
-            if (buf_bytes >= run_buffer_bytes && !buf.empty()) {
-                std::sort(buf.begin(), buf.end());                              // composite (kmer, encoded)
-                storage.spill_sorted_run_owned(std::move(buf));
-                buf.clear();
-                buf_bytes = 0;
+        };
+
+        auto sort_and_spill_run = [&storage](std::vector<pair_t>&& run) {
+            if (run.empty()) return;
+            std::sort(run.begin(), run.end());                                  // composite (kmer, encoded)
+            storage.spill_sorted_run_owned(std::move(run));
+        };
+
+        auto collect_serial = [&](std::size_t start_fragment) {
+            std::vector<pair_t> buf;
+            std::size_t buf_bytes = 0;
+            sketch_collector collector;
+            for (std::size_t fragment_no = start_fragment; fragment_no < nfrag; ++fragment_no) {
+                const std::size_t before = buf.size();
+                collect_fragment_pairs(fragment_no, collector, buf);
+                buf_bytes += (buf.size() - before) * sizeof(pair_t);
+                if (buf_bytes >= run_buffer_bytes && !buf.empty()) {
+                    sort_and_spill_run(std::move(buf));
+                    buf.clear();
+                    buf_bytes = 0;
+                }
             }
-        }
-        if (!buf.empty()) {
-            std::sort(buf.begin(), buf.end());
-            storage.spill_sorted_run_owned(std::move(buf));
-            buf.clear();
-            buf_bytes = 0;
+            sort_and_spill_run(std::move(buf));
+        };
+
+        auto& pool = bioseq::parallelism::GlobalPool::instance();
+        const bool may_parallel_collect =
+            bioseq::parallelism::task_parallel(pool.mode())
+            && pool.max_concurrency() > 1
+            && bioseq::storage::lazy_is_worker_shareable(seq)
+            && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;
+
+        if (!may_parallel_collect) {
+            collect_serial(0);
+        } else {
+            constexpr std::size_t kParallelRunCapBytes = std::size_t{512} << 20;
+            const std::size_t target_run_bytes =
+                std::max<std::size_t>(
+                    std::size_t{8} << 20,
+                    std::min(run_buffer_bytes, kParallelRunCapBytes));
+            const std::size_t estimated_pairs_per_fragment =
+                std::max<std::size_t>(1, frag_bp / w);
+            const std::size_t estimated_bytes_per_fragment =
+                std::max<std::size_t>(
+                    sizeof(pair_t),
+                    estimated_pairs_per_fragment * sizeof(pair_t));
+            const std::size_t min_wave_fragments =
+                static_cast<std::size_t>(pool.max_concurrency());
+            const std::size_t target_wave_fragments =
+                std::max<std::size_t>(
+                    min_wave_fragments,
+                    target_run_bytes / estimated_bytes_per_fragment);
+            const std::uint64_t wave_peak_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(target_run_bytes), 2);
+
+            for (std::size_t wave_lo = 0; wave_lo < nfrag;) {
+                const std::size_t wave_hi =
+                    std::min(nfrag, wave_lo + target_wave_fragments);
+                auto wave_permit =
+                    bioseq::parallelism::MemoryAdmissionController::instance()
+                        .try_reserve(wave_peak_bytes);
+                if (!wave_permit) {
+                    collect_serial(wave_lo);
+                    break;
+                }
+
+                std::vector<std::vector<pair_t>> local_runs(wave_hi - wave_lo);
+                bioseq::parallelism::parallel_for_pipeline(
+                    0, local_runs.size(), 1,
+                    bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT,
+                    bioseq::parallelism::TaskParallelRegion::fragment_build,
+                    [&collect_fragment_pairs, &local_runs, wave_lo](
+                            std::size_t lo, std::size_t hi) {
+                        sketch_collector collector;
+                        for (std::size_t rel = lo; rel < hi; ++rel) {
+                            collect_fragment_pairs(
+                                wave_lo + rel, collector, local_runs[rel]);
+                        }
+                    });
+
+                std::size_t total_pairs = 0;
+                for (const auto& run : local_runs) total_pairs += run.size();
+                std::vector<pair_t> merged;
+                merged.reserve(total_pairs);
+                for (auto& run : local_runs) {
+                    merged.insert(
+                        merged.end(),
+                        std::make_move_iterator(run.begin()),
+                        std::make_move_iterator(run.end()));
+                    std::vector<pair_t>().swap(run);
+                }
+                sort_and_spill_run(std::move(merged));
+                wave_lo = wave_hi;
+            }
         }
 
         // ---- Pass 1: k-way merge -> range-partitioned buckets + directory.
@@ -334,8 +423,8 @@ struct MinimizerSequenceMergedIndex {
 export namespace bioseq::indexing {
 template <> struct index_descriptor<MinimizerSequenceMergedIndex> {
     static constexpr SequenceIndexType index_type = SequenceIndexType::CHUNKED_PER_FRAGMENT;
-    static constexpr std::string_view  index_name = "minimizers_per_sequence";
-    static constexpr bool allows_update_on_insert = false;  // whole-sequence external sort — UPDATE_MANUALLY only
+    static constexpr std::string_view  index_name = MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+    static constexpr bool allows_update_on_insert = true;   // opt-in external sort; not a fresh-table default
 };
 static_assert(requires { index_descriptor<MinimizerSequenceMergedIndex>::index_name; },
               "MinimizerSequenceMergedIndex index_descriptor must be exported");
