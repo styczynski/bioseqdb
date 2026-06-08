@@ -350,53 +350,58 @@ struct MinimizerSequenceMergedIndex {
             }
         };
 
+        // Backend spill of a memory-pressured range. DOC0301 iteration 1: emit a
+        // SMALL number of LARGE sorted runs (one BufFile per <= run_buffer_bytes
+        // chunk), never one tiny file per 4096 bp leaf. The DOC0300 E1f path split
+        // pressured windows down to 4096 bp and spilled each leaf as its own
+        // BufFile (~440k temp files), then merge compaction rewrote them ~6x
+        // (33 GiB for a ~5 GiB payload). Chunking at the run buffer caps both the
+        // file count (payload / run_buffer_bytes) and the transient scratch size.
+        const std::uint64_t spill_chunk_bp = std::max<std::uint64_t>(
+            std::uint64_t{1} << 20,
+            static_cast<std::uint64_t>(run_buffer_bytes)
+                / static_cast<std::uint64_t>(sizeof(pair_t)));
         auto collect_sort_and_spill_backend_scratch =
             [&](auto& self, CoreRange range) -> void {
-                const std::uint64_t bp =
-                    static_cast<std::uint64_t>(range.core_hi - range.core_lo);
-                const std::uint64_t reserve_bytes =
-                    bioseq::parallelism::saturating_mul(
-                        bp, static_cast<std::uint64_t>(sizeof(pair_t)));
-                auto permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance()
-                        .try_reserve(reserve_bytes);
-                if (!permit) {
-                    if constexpr (requires (S& s, std::uint64_t bytes) {
-                                      s.demote_resident_runs_until_available(bytes);
-                                  }) {
-                        storage.demote_resident_runs_until_available(reserve_bytes);
-                        permit = bioseq::parallelism::MemoryAdmissionController::instance()
+                (void)self;  // chunked via the loop below; no recursive splitting.
+                for (sequence_size_t lo = range.core_lo; lo < range.core_hi;) {
+                    const sequence_size_t hi = static_cast<sequence_size_t>(
+                        std::min<std::uint64_t>(
+                            static_cast<std::uint64_t>(lo) + spill_chunk_bp,
+                            static_cast<std::uint64_t>(range.core_hi)));
+                    const std::uint64_t bp = static_cast<std::uint64_t>(hi - lo);
+                    const std::uint64_t reserve_bytes =
+                        bioseq::parallelism::saturating_mul(
+                            bp, static_cast<std::uint64_t>(sizeof(pair_t)));
+                    auto permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance()
                             .try_reserve(reserve_bytes);
+                    if (!permit) {
+                        if constexpr (requires (S& s, std::uint64_t bytes) {
+                                          s.demote_resident_runs_until_available(bytes);
+                                      }) {
+                            storage.demote_resident_runs_until_available(reserve_bytes);
+                            permit = bioseq::parallelism::MemoryAdmissionController::instance()
+                                .try_reserve(reserve_bytes);
+                        }
                     }
-                }
-                if (!permit) {
-                    constexpr sequence_size_t kEmergencyUnadmittedCoreBp = 4096;
-                    if (range.core_hi - range.core_lo > kEmergencyUnadmittedCoreBp) {
-                        const sequence_size_t mid =
-                            range.core_lo + (range.core_hi - range.core_lo) / 2;
-                        self(self, CoreRange{range.core_lo, mid});
-                        self(self, CoreRange{mid, range.core_hi});
-                        return;
-                    }
+                    // Spill this whole chunk as ONE sorted run regardless of
+                    // admission. The scratch is transient (freed right after the
+                    // BufFile copy), so an unadmitted scratch here does not gate on
+                    // under_pressure and does not accumulate. permit (if any) is
+                    // released by RAII at the end of this iteration, after the spill.
                     std::vector<pair_t> scratch;
-                    reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
+                    // Reserve by an estimated minimizer count (~bp/4 for w=10)
+                    // instead of the 1-pair-per-bp upper bound, to bound the
+                    // transient RSS spike; the vector grows if the estimate is low.
+                    reserve_pairs_or_panic(scratch, std::max<std::uint64_t>(1, bp / 4));
                     sketch_collector collector;
-                    collect_core_range_pairs(
-                        range.core_lo, range.core_hi, collector, scratch);
+                    collect_core_range_pairs(lo, hi, collector, scratch);
                     detail::sort_pair_run(scratch);
                     storage.spill_sorted_run(
                         std::span<const pair_t>(scratch.data(), scratch.size()));
-                    return;
+                    lo = hi;
                 }
-                std::vector<pair_t> scratch;
-                reserve_pairs_or_panic(scratch, reserve_bytes / sizeof(pair_t));
-                sketch_collector collector;
-                collect_core_range_pairs(
-                    range.core_lo, range.core_hi, collector, scratch);
-                detail::sort_pair_run(scratch);
-                storage.spill_sorted_run(
-                    std::span<const pair_t>(scratch.data(), scratch.size()));
-                permit->release();
             };
 
         auto transfer_result_runs = [&](std::vector<WorkerRangeResult>& results) {
@@ -432,6 +437,7 @@ struct MinimizerSequenceMergedIndex {
 
         auto collect_range_admitted =
             [&](auto& self, CoreRange range, WorkerRangeResult& result) -> void {
+                (void)self;  // DOC0301: no recursive splitting; defer whole ranges.
                 if (result.error) {
                     return;
                 }
@@ -445,15 +451,13 @@ struct MinimizerSequenceMergedIndex {
                         bioseq::parallelism::MemoryAdmissionController::instance()
                             .try_reserve(reserve_bytes);
                     if (!permit) {
-                        constexpr sequence_size_t kMinCoreBp = 4096;
-                        if (range.core_hi - range.core_lo <= kMinCoreBp) {
-                            result.deferred_for_backend_spill.push_back(range);
-                            return;
-                        }
-                        const sequence_size_t mid =
-                            range.core_lo + (range.core_hi - range.core_lo) / 2;
-                        self(self, CoreRange{range.core_lo, mid}, result);
-                        self(self, CoreRange{mid, range.core_hi}, result);
+                        // DOC0301 iteration 1: under memory pressure do NOT split this
+                        // window down to 4096 bp leaves (that produced ~440k one-pair
+                        // BufFiles + 6x merge compaction in DOC0300 E1f). Defer the
+                        // WHOLE range; the backend spills it as a few large sorted
+                        // runs (one BufFile per run_buffer_bytes chunk). Workers
+                        // cannot touch BufFile, so they hand off the range, not data.
+                        result.deferred_for_backend_spill.push_back(range);
                         return;
                     }
 

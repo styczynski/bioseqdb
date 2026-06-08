@@ -9,6 +9,7 @@ module;
 extern "C" {
 #include "access/xact.h"
 #include "access/parallel.h"
+#include "executor/spi.h"
 #include "libpq/pqsignal.h"
 #include "miscadmin.h"
 #include "postmaster/bgworker.h"
@@ -247,6 +248,44 @@ void supervisor_sighup(SIGNAL_ARGS) {
 } // namespace bioseq::parallelism::pg
 
 export namespace bioseq::parallelism::pg {
+
+// DOC0301 iteration 2 — spawn a one-shot dynamic background worker that builds +
+// persists the minimizers_per_sequence index for `relid` off the foreground read
+// backend. Uses a dynamic bgworker (no shared_preload_libraries requirement, no
+// libpq self-connection); the worker connects to `db_oid`, runs the existing
+// `bioseq.update_index(relid, 'minimizers_per_sequence')` driver in its own
+// transaction, and exits. Returns false if registration fails (e.g.
+// max_worker_processes reached) so the caller can fall back to a foreground build.
+[[nodiscard]] inline bool spawn_mps_async_build_worker(Oid db_oid, Oid relid) noexcept {
+    if (!OidIsValid(db_oid) || !OidIsValid(relid)) {
+        return false;
+    }
+    BackgroundWorker worker;
+    std::memset(&worker, 0, sizeof(worker));
+    pg_snprintf(worker.bgw_name, BGW_MAXLEN, "bioseq mps build");
+    pg_snprintf(worker.bgw_type, BGW_MAXLEN, "bioseq mps build");
+    worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+    worker.bgw_start_time = BgWorkerStart_RecoveryFinished;
+    worker.bgw_restart_time = BGW_NEVER_RESTART;
+    pg_snprintf(worker.bgw_library_name, BGW_MAXLEN, "bioseq");
+    pg_snprintf(worker.bgw_function_name, BGW_MAXLEN,
+                "bioseq_mps_async_build_worker_main");
+    const std::uint64_t packed =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(db_oid)) << 32)
+        | static_cast<std::uint64_t>(static_cast<std::uint32_t>(relid));
+    worker.bgw_main_arg = UInt64GetDatum(packed);
+    worker.bgw_notify_pid = 0;
+    BackgroundWorkerHandle* handle = nullptr;
+    if (!RegisterDynamicBackgroundWorker(&worker, &handle)) {
+        JustLog("[bioseq] index: could not register async mps build worker "
+                "(db={} relid={}); max_worker_processes reached?",
+                static_cast<unsigned>(db_oid), static_cast<unsigned>(relid));
+        return false;
+    }
+    JustLog("[bioseq] index: spawned async mps build worker db={} relid={}",
+            static_cast<unsigned>(db_oid), static_cast<unsigned>(relid));
+    return true;
+}
 
 struct BatchTicket {
     bool shared = false;
@@ -1268,5 +1307,66 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
     }
 
     pg_atomic_write_u32(&g_shared->state, 0);
+    proc_exit(0);
+}
+
+// DOC0301 iteration 2 — one-shot dynamic background worker entry. Builds +
+// persists the minimizers_per_sequence index for one user relation off the
+// foreground read backend, then exits. `arg` packs (db_oid << 32 | relid).
+// Routes the build through the SQL executor (SELECT bioseq.update_index(...))
+// rather than calling update_index_impl() directly, which is the proven-clean
+// path (DOC0286: a direct executor-frame call leaks relcache/typcache churn).
+extern "C" PGDLLEXPORT void bioseq_mps_async_build_worker_main(Datum arg) {
+    pqsignal(SIGTERM, die);
+    BackgroundWorkerUnblockSignals();
+
+    const std::uint64_t packed = DatumGetUInt64(arg);
+    const Oid db_oid = static_cast<Oid>(static_cast<std::uint32_t>(packed >> 32));
+    const Oid relid =
+        static_cast<Oid>(static_cast<std::uint32_t>(packed & 0xFFFFFFFFu));
+
+    BackgroundWorkerInitializeConnectionByOid(db_oid, InvalidOid, 0);
+
+    const std::uint64_t t0 =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    bool ok = false;
+    PG_TRY();
+    {
+        StartTransactionCommand();
+        PushActiveSnapshot(GetTransactionSnapshot());
+        if (SPI_connect() != SPI_OK_CONNECT) {
+            elog(ERROR, "bioseq mps build worker: SPI_connect failed");
+        }
+        // DOC0301 iteration 3 — in-flight dedup: take a session advisory lock keyed
+        // by relid; if another build worker already holds it, skip the rebuild
+        // (CASE only evaluates update_index when the try-lock succeeds). This bounds
+        // redundant whole-table rebuilds from repeated/multi-row recompute spawns to
+        // one fast no-op each instead of N serialized full rebuilds. The session
+        // lock auto-releases when this one-shot worker exits.
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+                 "SELECT CASE WHEN pg_try_advisory_lock(%u::bigint) "
+                 "THEN bioseq.update_index(%u::oid::regclass, "
+                 "'minimizers_per_sequence') ELSE -1 END",
+                 static_cast<unsigned>(relid), static_cast<unsigned>(relid));
+        const int rc = SPI_execute(sql, false, 0);
+        SPI_finish();
+        PopActiveSnapshot();
+        CommitTransactionCommand();
+        ok = (rc == SPI_OK_SELECT);
+    }
+    PG_CATCH();
+    {
+        AbortCurrentTransaction();
+        FlushErrorState();
+        ok = false;
+    }
+    PG_END_TRY();
+    const std::uint64_t t1 =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+    JustLog("[bioseq] index: async mps build worker finished db={} relid={} "
+            "ok={} build_ns={}",
+            static_cast<unsigned>(db_oid), static_cast<unsigned>(relid), ok,
+            static_cast<unsigned long long>(t1 - t0));
     proc_exit(0);
 }

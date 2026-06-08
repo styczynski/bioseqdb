@@ -371,7 +371,6 @@ public:
 	    [[nodiscard]] bool try_ensure_write_buffer_(std::size_t requested_bytes);
 	    [[nodiscard]] std::size_t spill_sorted_run_direct_(std::span<const sorted_pair_t> sorted);
 	    [[nodiscard]] bool demote_largest_resident_run_();
-	    [[nodiscard]] std::uint64_t merge_reader_budget_bytes_() const;
 	    void compact_file_runs_until_bounded_();
 	    void compact_file_runs_to_output_count_(std::size_t target_output_runs);
     [[nodiscard]] BufFileRun merge_file_run_group_to_new_buffile_(std::size_t lo, std::size_t hi);
@@ -615,41 +614,26 @@ std::size_t SortedPairRunStore::spill_sorted_run_owned_admitted(
     return run_index;
 }
 
-std::uint64_t SortedPairRunStore::merge_reader_budget_bytes_() const {
-    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
-    const std::uint64_t available = admission.allocatable_after_reservations();
-    if (available == 0) {
-        return std::uint64_t{1} << 20;
-    }
-    if (available == (std::numeric_limits<std::uint64_t>::max)()) {
-        return std::uint64_t{256} << 20;
-    }
-    return std::clamp<std::uint64_t>(
-        available / 8,
-        std::uint64_t{1} << 20,
-        std::uint64_t{256} << 20);
-}
-
 bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
     if (file_runs_.empty()) {
         return true;
     }
-    const std::uint64_t reader_budget = merge_reader_budget_bytes_();
-    const std::uint64_t per_reader = std::clamp<std::uint64_t>(
-        reader_budget / std::max<std::size_t>(1, file_runs_.size()),
-        std::uint64_t{32} << 10,
-        std::uint64_t{4} << 20);
+    // DOC0301 iteration 1: fixed, small per-reader buffer. Fan-in is bounded by
+    // compact_file_runs_until_bounded_ (hard cap), so total reader memory is small
+    // and bounded. We try to ACCOUNT for it via the admission controller, but we
+    // never block/compact when the controller refuses under pressure -- the
+    // buffers are tiny and transient. The DOC0300 E1f path instead failed
+    // admission here and recursively compacted file runs (rewriting ~5 GiB each
+    // pass) just to merge them.
+    constexpr std::uint64_t per_reader = std::uint64_t{256} << 10;  // 256 KiB
     const std::uint64_t total_reader_bytes =
         bioseq::parallelism::saturating_mul(
             per_reader,
             static_cast<std::uint64_t>(file_runs_.size()));
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-        .try_reserve(total_reader_bytes);
-    if (!permit) {
-        return false;
+    if (auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(total_reader_bytes)) {
+        resources.reader_budget_permit = std::move(*permit);
     }
-    resources.reader_budget_permit = std::move(*permit);
-
     for (BufFileRun& run : file_runs_) {
         if (BufFileSeek(run.file, 0, 0, SEEK_SET) != 0) {
             pg_log(ERROR, "bioseq sorted runs: failed to rewind BufFile");
@@ -666,14 +650,9 @@ bool SortedPairRunStore::try_open_file_readers_(MergeResources& resources) {
 }
 
 void SortedPairRunStore::open_file_readers_(MergeResources& resources) {
-    while (!try_open_file_readers_(resources)) {
-        resources.release_noexcept();
-        if (file_runs_.size() <= 1) {
-            pg_log(ERROR, "bioseq sorted runs: could not admit one merge reader");
-        }
-        compact_file_runs_to_output_count_(
-            std::max<std::size_t>(1, file_runs_.size() / 2));
-    }
+    // Always succeeds now: compaction (if any) already happened in
+    // compact_file_runs_until_bounded_, and reader buffers are fixed/small.
+    (void)try_open_file_readers_(resources);
 }
 
 template <class Writer>
@@ -805,11 +784,16 @@ void SortedPairRunStore::compact_file_runs_until_bounded_() {
     if (file_runs_.empty()) {
         return;
     }
-    constexpr std::uint64_t kMinReaderBytes = std::uint64_t{32} << 10;
-    const std::uint64_t reader_budget = merge_reader_budget_bytes_();
-    const std::size_t max_output_runs =
-        std::max<std::size_t>(1, reader_budget / kMinReaderBytes);
-    compact_file_runs_to_output_count_(max_output_runs);
+    // DOC0301 iteration 1: only compact when fan-in is GENUINELY large. With the
+    // disk-frugal spill path (a few large runs) this never triggers, eliminating
+    // the DOC0300 E1f multi-pass rewrite amplification (merge_pass_count=6 over
+    // ~440k tiny runs). The merge uses small fixed reader buffers, so a few
+    // hundred open BufFiles is cheap; a single k-way merge over <= cap runs is
+    // strictly cheaper than compaction passes that re-read+re-write the payload.
+    constexpr std::size_t kMaxMergeFanIn = 256;
+    if (file_runs_.size() > kMaxMergeFanIn) {
+        compact_file_runs_to_output_count_(kMaxMergeFanIn);
+    }
 }
 
 void SortedPairRunStore::merge_runs_erased_impl_(

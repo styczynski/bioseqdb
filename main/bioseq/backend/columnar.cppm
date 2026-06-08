@@ -84,6 +84,7 @@ bool bioseq_scheduler_allow_pg_parallel_composition = false;
 bool bioseq_load_overlap_enabled = false;
 bool bioseq_index_async_persist = true;
 bool bioseq_recompute_async_persist = false;
+bool bioseq_async_mps_build_worker = true;
 int  bioseq_index_memory_cap_mb = 0;
 
 /*
@@ -517,6 +518,18 @@ bioseq_guc_init()
 		NULL,
 		&bioseq_recompute_async_persist,
 		false,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
+	DefineCustomBoolVariable(
+		"bioseq.async_mps_build_worker",
+		"Build minimizers_per_sequence off the foreground via a dynamic background worker (DOC0301 iteration 2) instead of synchronously in the read backend.",
+		NULL,
+		&bioseq_async_mps_build_worker,
+		true,
 		PGC_USERSET,
 		0,
 		NULL,

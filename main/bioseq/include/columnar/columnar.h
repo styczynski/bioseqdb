@@ -42,6 +42,7 @@ extern bool bioseq_scheduler_allow_pg_parallel_composition;
 extern bool bioseq_load_overlap_enabled;
 extern bool bioseq_index_async_persist;
 extern bool bioseq_recompute_async_persist;
+extern bool bioseq_async_mps_build_worker;
 extern int  bioseq_index_memory_cap_mb;
 /*
  * DOC0260 Phase A — controls the per-shard payload cap for the

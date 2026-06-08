@@ -898,20 +898,40 @@ run_recompute_with_deferred_minimizer_persist(
     file_store.sequence_rowno = sequence_rowno;
     MatchResultCollection collection;
     bool staged = false;
+    bool async_worker_spawned = false;
     PG_TRY();
     {
         if (choice.kind == DeferredMinimizerIndexKind::per_fragment) {
             collection = minimap_port_segmented(
                 lazy_query, resident_target, params, &file_store);
+            staged = finish_and_stage_async_index_file(
+                ctx, loc, sequence_rowno, choice.index_name, file_store);
         } else {
+            // DOC0301 iteration 2 — answer the query with the recompute FIRST,
+            // then hand the per-sequence index build to a dynamic background
+            // worker (off the foreground read backend). Spawning AFTER the
+            // recompute is deliberate: the worker's CPU/RAM-heavy collect+sort
+            // must not compete with the timed recompute (an earlier spawn inflated
+            // the measured region from ~29 s to ~48 s). This collapses first-query
+            // latency toward the per-fragment no-index target while the disk-frugal
+            // build (iteration 1) runs in the worker during the post-query window.
             collection = minimap_port_segmented(
                 lazy_query, resident_target, params);
-            bioseq::indexing::MinimizerSequenceMergedIndex<
-                AsyncPersistFileFragmentStorage>::build(
-                    file_store, resident_target);
+            if (bioseq_async_mps_build_worker
+                && OidIsValid(ctx.user_relid)
+                && bioseq::parallelism::pg::spawn_mps_async_build_worker(
+                       ctx.db_oid, ctx.user_relid)) {
+                async_worker_spawned = true;
+            } else {
+                // Fallback (worker disabled / unregisterable / inline non-locator
+                // row): iteration-1 disk-frugal FOREGROUND build + stage.
+                bioseq::indexing::MinimizerSequenceMergedIndex<
+                    AsyncPersistFileFragmentStorage>::build(
+                        file_store, resident_target);
+                staged = finish_and_stage_async_index_file(
+                    ctx, loc, sequence_rowno, choice.index_name, file_store);
+            }
         }
-        staged = finish_and_stage_async_index_file(
-            ctx, loc, sequence_rowno, choice.index_name, file_store);
     }
     PG_CATCH();
     {
@@ -919,6 +939,11 @@ run_recompute_with_deferred_minimizer_persist(
         PG_RE_THROW();
     }
     PG_END_TRY();
+    if (async_worker_spawned) {
+        // No file payload was written; drop the unused temp file handle.
+        file_store.remove_noexcept();
+        staged = true;
+    }
 
     JustLog("[bioseq] index: recompute async-persist row={} index={} target_bp={} chunks={} file_bytes={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
