@@ -68,6 +68,11 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/sequan_compat.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/utils.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/vector_stream.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_uint_64.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_uint_128.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_kv_32_32.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_kv_64_64.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/sorting/radix_sort.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/dispatch_chain.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_for_each.cppm
@@ -219,6 +224,7 @@ target_include_directories(bioseq_modules_nopg PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/include2"
   "${CMAKE_CURRENT_LIST_DIR}/include"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
+  "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/hwy_contrib"
   "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
