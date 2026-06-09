@@ -23,6 +23,7 @@ columnar
 compile-errors
 doc0294
 engineering-overview
+gpu
 gzip-io
 highway-simd
 io-reader

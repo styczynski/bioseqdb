@@ -1,0 +1,6 @@
+{
+    "batch_size": 4000,
+    "num_reads" : 100000,
+    "max_seq_len" : 10000
+  }
+  
