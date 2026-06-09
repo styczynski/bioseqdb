@@ -191,6 +191,12 @@ struct E2eOutput {
     std::int64_t mps_build_resident_demotions = -1;
     std::int64_t mps_build_position_spill_bytes = -1;
     std::int64_t mps_build_position_spill_count = -1;
+    std::int64_t mps_build_shared_generation = -1;
+    std::int64_t mps_build_worker_build_ns = -1;
+    std::int64_t mps_build_pipeline_mode = -1;
+    std::int64_t mps_build_max_concurrency = -1;
+    std::int64_t mps_build_index_memory_cap_mb = -1;
+    std::int64_t mps_build_lazy_worker_shareable = -1;
 };
 
 void preflight_e2e_resources(it::connection_test_context& conn,
@@ -647,7 +653,9 @@ void capture_mps_build_stats(
         "resident_peak_bytes, spilled_run_bytes, postgres_temp_file_bytes, "
         "postgres_temp_file_count, merge_reader_buffer_bytes, merge_pass_count, "
         "spill_count_from_pressure, resident_demotions, position_spill_bytes, "
-        "position_spill_count FROM bioseq.last_mps_build_stats();");
+        "position_spill_count, generation, worker_build_ns, pipeline_mode, "
+        "max_concurrency, index_memory_cap_mb, lazy_worker_shareable "
+        "FROM bioseq.scheduler_mps_build_stats();");
     if (rows.empty()) {
         return;
     }
@@ -670,6 +678,12 @@ void capture_mps_build_stats(
     out.mps_build_resident_demotions = row_i64_or_minus_one(row, 15);
     out.mps_build_position_spill_bytes = row_i64_or_minus_one(row, 16);
     out.mps_build_position_spill_count = row_i64_or_minus_one(row, 17);
+    out.mps_build_shared_generation = row_i64_or_minus_one(row, 18);
+    out.mps_build_worker_build_ns = row_i64_or_minus_one(row, 19);
+    out.mps_build_pipeline_mode = row_i64_or_minus_one(row, 20);
+    out.mps_build_max_concurrency = row_i64_or_minus_one(row, 21);
+    out.mps_build_index_memory_cap_mb = row_i64_or_minus_one(row, 22);
+    out.mps_build_lazy_worker_shareable = row_i64_or_minus_one(row, 23);
 }
 
 [[nodiscard]] std::int64_t index_row_count(
@@ -725,17 +739,32 @@ void capture_index_audit(
     out.audit_async_persist_jobs_waiting = first_i64_or_minus_one(stats);
 }
 
+void capture_async_persist_waiting(
+        const it::connection_test_context& c,
+        E2eOutput& out) {
+    const auto stats = it::query_rows(c,
+        "SELECT async_persist_jobs_waiting FROM bioseq.scheduler_stats();");
+    out.audit_async_persist_jobs_waiting = first_i64_or_minus_one(stats);
+}
+
 void capture_index_audit_after_async_persist(
         const it::connection_test_context& c,
         const std::string& table,
         std::string_view minimizer_index,
         E2eOutput& out) {
-    constexpr int kMaxAttempts = 180;
+    constexpr int kFragmentMaxAttempts = 180;
+    constexpr int kSequenceMaxAttempts = 900;
     constexpr auto kSleep = std::chrono::seconds{1};
     const bool expect_sequence = minimizer_index == kMinimizersPerSequenceIndex;
-    for (int attempt = 0; attempt <= kMaxAttempts; ++attempt) {
-        capture_index_audit(c, table, minimizer_index, out);
+    const int max_attempts = expect_sequence ? kSequenceMaxAttempts : kFragmentMaxAttempts;
+    for (int attempt = 0; attempt <= max_attempts; ++attempt) {
+        capture_async_persist_waiting(c, out);
         out.audit_index_rows_wait_attempts = attempt;
+        if (out.audit_async_persist_jobs_waiting > 0) {
+            std::this_thread::sleep_for(kSleep);
+            continue;
+        }
+        capture_index_audit(c, table, minimizer_index, out);
         const std::int64_t target_rows =
             expect_sequence ? out.audit_mps_rows : out.audit_mpf_rows;
         if (target_rows > 0 || out.audit_async_persist_jobs_waiting == 0) {
@@ -1083,6 +1112,7 @@ template <sequence_alphabet A>
         if (recompute_async_persist) {
             capture_index_audit_after_async_persist(
                 *in.conn, in.no_index_table, minimizer_index, out);
+            capture_mps_build_stats(*in.conn, out);
         } else {
             capture_index_audit(
                 *in.conn, in.no_index_table, minimizer_index, out);
@@ -1155,6 +1185,7 @@ template <sequence_alphabet A>
         if (recompute_async_persist) {
             capture_index_audit_after_async_persist(
                 *in.conn, in.no_index_table, minimizer_index, out);
+            capture_mps_build_stats(*in.conn, out);
         } else {
             capture_index_audit(
                 *in.conn, in.no_index_table, minimizer_index, out);
@@ -1237,6 +1268,12 @@ template <sequence_alphabet A>
         {"mps_build_resident_demotions", static_cast<double>(o.mps_build_resident_demotions)},
         {"mps_build_position_spill_bytes", static_cast<double>(o.mps_build_position_spill_bytes)},
         {"mps_build_position_spill_count", static_cast<double>(o.mps_build_position_spill_count)},
+        {"mps_build_shared_generation", static_cast<double>(o.mps_build_shared_generation)},
+        {"mps_build_worker_build_ns", static_cast<double>(o.mps_build_worker_build_ns)},
+        {"mps_build_pipeline_mode", static_cast<double>(o.mps_build_pipeline_mode)},
+        {"mps_build_max_concurrency", static_cast<double>(o.mps_build_max_concurrency)},
+        {"mps_build_index_memory_cap_mb", static_cast<double>(o.mps_build_index_memory_cap_mb)},
+        {"mps_build_lazy_worker_shareable", static_cast<double>(o.mps_build_lazy_worker_shareable)},
     };
 }
 

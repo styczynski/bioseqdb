@@ -76,6 +76,7 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <boost/unordered/unordered_flat_set.hpp>
 
 export module bioseq_sequences.pipe;
 
@@ -3454,6 +3455,11 @@ template <supports_compact_sequence_range QueryRange,
     pipe::minimizer_dispatch_range<MinimizerT>(query_collector, query_seq, 0, q_units, w, k);
     const std::vector<MinimizerT> query_minimizers =
         std::move(query_collector).extract_sketches_data();
+    boost::unordered_flat_set<std::uint64_t> query_kmer_filter;
+    query_kmer_filter.reserve(query_minimizers.size());
+    for (const MinimizerT& minimizer : query_minimizers) {
+        query_kmer_filter.insert(minimizer.kmer());
+    }
 
     // (2) Segment the target. Overlap >= longest target match span so a match
     //     starting in a segment core is fully indexed within that segment.
@@ -3563,7 +3569,10 @@ template <supports_compact_sequence_range QueryRange,
 
     struct SegmentWaveAdmission {
         unsigned fanout = 1;
+        unsigned geometry_divisor = 1;
         sequence_size_t segment_bp = 0;
+        std::size_t estimated_segments = 0;
+        std::size_t estimated_waves = 0;
         std::uint64_t peak_per_segment = 0;
         bioseq::parallelism::MemoryPermit permit;
         bool admitted = false;
@@ -3590,18 +3599,96 @@ template <supports_compact_sequence_range QueryRange,
             collected_bp_upper_bound(core_bp)) + context_reserve;
     };
 
+    struct SegmentWaveCandidate {
+        unsigned fanout = 1;
+        unsigned geometry_divisor = 1;
+        sequence_size_t segment_bp = 0;
+        std::size_t estimated_segments = 0;
+        std::size_t estimated_waves = 0;
+        std::uint64_t peak_per_segment = 0;
+        std::uint64_t reserve_bytes = 0;
+        std::uint64_t estimated_work_bp = 0;
+    };
+
     auto try_admit_segment_geometry =
-        [&pool, &peak_for_segment_core_bp]() -> SegmentWaveAdmission {
-        for (unsigned fanout = pool.max_concurrency(); fanout > 1; --fanout) {
-            const sequence_size_t bp = pipe::segment_bp_from_budget_divided(fanout);
+        [&pool, target_len, &collected_bp_upper_bound,
+         &peak_for_segment_core_bp]() -> SegmentWaveAdmission {
+        auto& admission =
+            bioseq::parallelism::MemoryAdmissionController::instance();
+        const unsigned max_fanout = pool.max_concurrency();
+        if (max_fanout <= 1) {
+            return SegmentWaveAdmission{};
+        }
+
+        const std::uint64_t allocatable =
+            admission.allocatable_after_reservations();
+        std::vector<SegmentWaveCandidate> candidates;
+        candidates.reserve(static_cast<std::size_t>(max_fanout));
+
+        for (unsigned fanout = max_fanout; fanout > 1; --fanout) {
+            const unsigned geometry_divisor = fanout;
+            const sequence_size_t bp =
+                pipe::segment_bp_from_budget_divided(geometry_divisor);
+            const std::uint64_t collected_bp = collected_bp_upper_bound(bp);
+            const std::size_t estimated_segments =
+                static_cast<std::size_t>(
+                    (target_len + bp - 1) / std::max<sequence_size_t>(bp, 1));
             const std::uint64_t peak = peak_for_segment_core_bp(bp);
-            const std::uint64_t bytes = bioseq::parallelism::saturating_mul(
-                static_cast<std::uint64_t>(fanout), peak);
-            if (auto permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(bytes)) {
-                return SegmentWaveAdmission{fanout, bp, peak, std::move(*permit), true};
+
+            const std::uint64_t reserve_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(fanout), peak);
+            if (reserve_bytes > allocatable) {
+                continue;
+            }
+
+            const std::size_t estimated_waves =
+                (estimated_segments + fanout - 1) / fanout;
+            const std::uint64_t estimated_work =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(estimated_waves),
+                    collected_bp);
+            candidates.push_back(SegmentWaveCandidate{
+                fanout,
+                geometry_divisor,
+                bp,
+                estimated_segments,
+                estimated_waves,
+                peak,
+                reserve_bytes,
+                estimated_work});
+        }
+
+        std::sort(
+            candidates.begin(),
+            candidates.end(),
+            [](const SegmentWaveCandidate& lhs, const SegmentWaveCandidate& rhs) {
+                if (lhs.estimated_work_bp != rhs.estimated_work_bp) {
+                    return lhs.estimated_work_bp < rhs.estimated_work_bp;
+                }
+                if (lhs.estimated_segments != rhs.estimated_segments) {
+                    return lhs.estimated_segments < rhs.estimated_segments;
+                }
+                if (lhs.fanout != rhs.fanout) {
+                    return lhs.fanout > rhs.fanout;
+                }
+                return lhs.geometry_divisor < rhs.geometry_divisor;
+            });
+
+        for (const SegmentWaveCandidate& candidate : candidates) {
+            if (auto permit = admission.try_reserve(candidate.reserve_bytes)) {
+                return SegmentWaveAdmission{
+                    candidate.fanout,
+                    candidate.geometry_divisor,
+                    candidate.segment_bp,
+                    candidate.estimated_segments,
+                    candidate.estimated_waves,
+                    candidate.peak_per_segment,
+                    std::move(*permit),
+                    true};
             }
         }
+
         return SegmentWaveAdmission{};
     };
 
@@ -3610,7 +3697,18 @@ template <supports_compact_sequence_range QueryRange,
         return run_serial_segmented();
     }
 
-    const unsigned geometry_divisor = first_wave.fanout;
+    JustLogProgress("[minimap_port_segmented] admitted parallel geometry fanout={} "
+                    "divisor={} segment_bp={} estimated_segments={} "
+                    "estimated_waves={} peak_per_segment={}MB reserve={}MB "
+                    "| footprint={}MB avail={}MB",
+            first_wave.fanout, first_wave.geometry_divisor,
+            first_wave.segment_bp, first_wave.estimated_segments,
+            first_wave.estimated_waves, first_wave.peak_per_segment >> 20,
+            first_wave.permit.bytes() >> 20,
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+
+    const unsigned geometry_divisor = first_wave.geometry_divisor;
     auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu, geometry_divisor);
     std::vector<MatchResultCollection> seg_out(ranges.size());
     bioseq::parallelism::TaskParallelScope scope(
@@ -3756,23 +3854,111 @@ template <supports_compact_sequence_range QueryRange,
         }
     }
 
-    bool fallback_to_serial = false;
+    using FilteredMinimizerPair = std::pair<std::uint64_t, std::uint64_t>;
+    std::vector<std::size_t> segment_minimizer_counts(ranges.size());
+    std::vector<std::size_t> segment_filtered_counts(ranges.size());
+
+    auto build_query_filtered_segment_index =
+        [&query_kmer_filter, target_len](
+                std::span<const MinimizerT> minimizers,
+                MinimizerHashmapFragmentIndex& index,
+                std::vector<FilteredMinimizerPair>& filtered_pairs) -> std::size_t {
+        filtered_pairs.clear();
+        const std::size_t filter_size = query_kmer_filter.size();
+        const std::size_t reserve_base =
+            filter_size > (std::numeric_limits<std::size_t>::max)() - 64u
+                ? filter_size
+                : filter_size + 64u;
+        const std::size_t reserve_hint = std::min(minimizers.size(), reserve_base);
+        if (filtered_pairs.capacity() < reserve_hint) {
+            filtered_pairs.reserve(reserve_hint);
+        }
+        for (const MinimizerT& minimizer : minimizers) {
+            const std::uint64_t kmer = minimizer.kmer();
+            if (query_kmer_filter.find(kmer) != query_kmer_filter.end()) {
+                filtered_pairs.emplace_back(kmer, minimizer.pos_strand_encoded());
+            }
+        }
+        index.build_from_pairs(
+            std::span<FilteredMinimizerPair>{
+                filtered_pairs.data(), filtered_pairs.size()},
+            target_len);
+        return filtered_pairs.size();
+    };
+
+    auto process_segment_serial =
+        [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
+         &segment_minimizer_counts, &segment_filtered_counts,
+         &build_query_filtered_segment_index, &params, target_len,
+         w, k, lpu](std::size_t segment_index) {
+        sketch_collector_t<MinimizerT> collector;
+        MinimizerHashmapFragmentIndex index;
+        std::vector<FilteredMinimizerPair> filtered_pairs;
+        const pipe::SegmentUnitRange& range = ranges[segment_index];
+        collector.reserve(
+            (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
+        pipe::minimizer_dispatch_range<MinimizerT>(
+            collector, target_seq, range.cs_u, range.ce_u, w, k);
+        const std::vector<MinimizerT>& minimizers =
+            collector.extract_sketches_data();
+        segment_minimizer_counts[segment_index] = minimizers.size();
+        segment_filtered_counts[segment_index] =
+            build_query_filtered_segment_index(
+                std::span<const MinimizerT>{minimizers.data(), minimizers.size()},
+                index,
+                filtered_pairs);
+        index.add_position_offset(range.cs_u * lpu);
+        seg_out[segment_index] = minimap2_port_with_index(
+            query_seq, target_seq, query_minimizers, index, params);
+        JustLogProgress("[minimap_port_segmented] adaptive serial segment core [{},{}) "
+                        "produced {} results | footprint={}MB avail={}MB",
+                range.core_lo_bp, range.core_hi_bp,
+                seg_out[segment_index].results.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    };
+
     for (std::size_t wave_lo = 0; wave_lo < ranges.size();) {
-        const std::size_t wave_count = std::min<std::size_t>(
+        const std::size_t requested_wave_count = std::min<std::size_t>(
             first_wave.fanout, ranges.size() - wave_lo);
+        std::size_t wave_count = requested_wave_count;
         bioseq::parallelism::MemoryPermit wave_permit;
         if (wave_lo == 0) {
             wave_permit = std::move(first_wave.permit);
-        } else if (auto permit =
-                bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
-                    bioseq::parallelism::saturating_mul(
-                        static_cast<std::uint64_t>(wave_count),
-                        first_wave.peak_per_segment))) {
-            wave_permit = std::move(*permit);
+            wave_permit.shrink_to(
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(wave_count),
+                    first_wave.peak_per_segment));
+        } else {
+            for (std::size_t candidate = requested_wave_count; candidate > 1; --candidate) {
+                if (auto permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+                            bioseq::parallelism::saturating_mul(
+                                static_cast<std::uint64_t>(candidate),
+                                first_wave.peak_per_segment))) {
+                    wave_count = candidate;
+                    wave_permit = std::move(*permit);
+                    break;
+                }
+            }
         }
         if (!wave_permit) {
-            fallback_to_serial = true;
-            break;
+            JustLogProgress("[minimap_port_segmented] wave admission failed at segment {} "
+                            "of {}; processing one segment serially | footprint={}MB "
+                            "avail={}MB",
+                    wave_lo, ranges.size(),
+                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            process_segment_serial(wave_lo);
+            ++wave_lo;
+            continue;
+        }
+        if (wave_count != requested_wave_count) {
+            JustLogProgress("[minimap_port_segmented] wave fanout reduced from {} to {} "
+                            "at segment {} of {} | footprint={}MB avail={}MB",
+                    requested_wave_count, wave_count, wave_lo, ranges.size(),
+                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
         }
 
         const std::size_t wave_hi = wave_lo + wave_count;
@@ -3780,9 +3966,12 @@ template <supports_compact_sequence_range QueryRange,
             wave_lo, wave_hi, 1,
             bioseq::parallelism::range_body{
                 [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
-                 &params, target_len, w, k, lpu](std::size_t lo, std::size_t hi) {
+                 &segment_minimizer_counts, &segment_filtered_counts,
+                 &build_query_filtered_segment_index, &params, target_len,
+                 w, k, lpu](std::size_t lo, std::size_t hi) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
+                std::vector<FilteredMinimizerPair> filtered_pairs;
                 for (std::size_t segment_index = lo; segment_index < hi; ++segment_index) {
                     const pipe::SegmentUnitRange& range = ranges[segment_index];
                     collector.clear();
@@ -3792,7 +3981,13 @@ template <supports_compact_sequence_range QueryRange,
                         collector, target_seq, range.cs_u, range.ce_u, w, k);
                     const std::vector<MinimizerT>& minimizers =
                         collector.extract_sketches_data();
-                    index.build(minimizers, target_len);
+                    segment_minimizer_counts[segment_index] = minimizers.size();
+                    segment_filtered_counts[segment_index] =
+                        build_query_filtered_segment_index(
+                            std::span<const MinimizerT>{
+                                minimizers.data(), minimizers.size()},
+                            index,
+                            filtered_pairs);
                     index.add_position_offset(range.cs_u * lpu);
                     seg_out[segment_index] = minimap2_port_with_index(
                         query_seq, target_seq, query_minimizers, index, params);
@@ -3801,11 +3996,18 @@ template <supports_compact_sequence_range QueryRange,
         wave_lo = wave_hi;
     }
 
-    if (fallback_to_serial) {
-        std::vector<MatchResultCollection>().swap(seg_out);
-        std::vector<pipe::SegmentUnitRange>().swap(ranges);
-        return run_serial_segmented();
+    std::size_t total_segment_minimizers = 0;
+    std::size_t total_filtered_minimizers = 0;
+    for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {
+        total_segment_minimizers += segment_minimizer_counts[segment_index];
+        total_filtered_minimizers += segment_filtered_counts[segment_index];
     }
+    JustLogProgress("[minimap_port_segmented] query-filtered transient index kept {} "
+                    "of {} segment minimizers across {} segments | footprint={}MB "
+                    "avail={}MB",
+            total_filtered_minimizers, total_segment_minimizers, ranges.size(),
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
 
     std::vector<MatchResult> merged;
     for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {

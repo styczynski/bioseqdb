@@ -1556,6 +1556,38 @@ CREATE OR REPLACE FUNCTION bioseq.last_mps_build_stats()
     AS 'MODULE_PATHNAME', 'bioseq_last_mps_build_stats'
     LANGUAGE C VOLATILE;
 
+-- DOC0301/A.7 — shared-memory snapshot of the most recent async
+-- minimizers_per_sequence build completed by the static scheduler worker.
+CREATE OR REPLACE FUNCTION bioseq.scheduler_mps_build_stats()
+    RETURNS TABLE (
+        backend_pid bigint,
+        db_oid bigint,
+        relfilenode bigint,
+        sequence_rowno bigint,
+        total_run_count bigint,
+        resident_runs bigint,
+        file_runs bigint,
+        resident_run_bytes bigint,
+        resident_peak_bytes bigint,
+        spilled_run_bytes bigint,
+        postgres_temp_file_bytes bigint,
+        postgres_temp_file_count bigint,
+        merge_reader_buffer_bytes bigint,
+        merge_pass_count bigint,
+        spill_count_from_pressure bigint,
+        resident_demotions bigint,
+        position_spill_bytes bigint,
+        position_spill_count bigint,
+        generation bigint,
+        worker_build_ns bigint,
+        pipeline_mode bigint,
+        max_concurrency bigint,
+        index_memory_cap_mb bigint,
+        lazy_worker_shareable bigint
+    )
+    AS 'MODULE_PATHNAME', 'bioseq_scheduler_mps_build_stats'
+    LANGUAGE C VOLATILE;
+
 -- DOC0294 — scheduler supervision/admin surface.
 CREATE OR REPLACE FUNCTION bioseq.scheduler_restart()
     RETURNS void

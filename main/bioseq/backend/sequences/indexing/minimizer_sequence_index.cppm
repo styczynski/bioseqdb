@@ -321,33 +321,29 @@ struct MinimizerSequenceMergedIndex {
                 bioseq::parallelism::saturating_mul(
                     static_cast<std::uint64_t>(run.pairs.size()),
                     static_cast<std::uint64_t>(sizeof(pair_t)));
-            const std::uint64_t keep_bytes =
-                bioseq::parallelism::saturating_mul(
-                    static_cast<std::uint64_t>(run.pairs.capacity()),
-                    static_cast<std::uint64_t>(sizeof(pair_t)));
-            if (used_bytes * 2 < run.admitted_bytes) {
-                const std::uint64_t compact_bytes =
-                    std::max<std::uint64_t>(used_bytes, sizeof(pair_t));
-                if (auto compact_permit =
-                        bioseq::parallelism::MemoryAdmissionController::instance()
-                            .try_reserve(compact_bytes)) {
-                    std::vector<pair_t> compact;
-                    compact.reserve(run.pairs.size());
-                    compact.insert(
-                        compact.end(),
-                        std::make_move_iterator(run.pairs.begin()),
-                        std::make_move_iterator(run.pairs.end()));
-                    run.pairs.swap(compact);
-                    run.permit.release();
-                    run.permit = std::move(*compact_permit);
-                    run.admitted_bytes = compact_bytes;
-                    return;
+            auto shrink_permit_to_capacity = [&]() {
+                const std::uint64_t keep_bytes =
+                    bioseq::parallelism::saturating_mul(
+                        static_cast<std::uint64_t>(run.pairs.capacity()),
+                        static_cast<std::uint64_t>(sizeof(pair_t)));
+                if (run.admitted_bytes > keep_bytes) {
+                    run.permit.shrink_to(keep_bytes);
+                    run.admitted_bytes = keep_bytes;
                 }
+            };
+
+            if (used_bytes <= run.admitted_bytes / 2) {
+                std::vector<pair_t> compact;
+                compact.reserve(run.pairs.size());
+                compact.insert(
+                    compact.end(),
+                    std::make_move_iterator(run.pairs.begin()),
+                    std::make_move_iterator(run.pairs.end()));
+                run.pairs.swap(compact);
+                shrink_permit_to_capacity();
+                return;
             }
-            if (run.admitted_bytes > keep_bytes) {
-                run.permit.shrink_to(keep_bytes);
-                run.admitted_bytes = keep_bytes;
-            }
+            shrink_permit_to_capacity();
         };
 
         auto collect_sort_and_spill_backend_scratch =

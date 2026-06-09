@@ -36,6 +36,7 @@ module;
 
 #include <hwy/highway.h>
 #include "common.h"
+#include "columnar/columnar.h"
 
 #include <array>
 #include <cstring>
@@ -1242,6 +1243,9 @@ public:
         scanner_pg_ctx.user_relid        = user_relid;
         scanner_pg_ctx.read_index_active = read_sequence_index_active
             && !mmsearch_context.recompute_due_to_alphabet_mismatch;
+        scanner_pg_ctx.index_async_persist_active = bioseq_index_async_persist;
+        scanner_pg_ctx.recompute_async_persist_active =
+            bioseq_recompute_async_persist;
         // DOC0279 §11.3/§12.3 — resolve the target column's ACTIVE read index
         // ONCE per batch (catalog lookup; default minimizers_per_fragment). The
         // assemble loop routes by this and still gates per-row on presence.

@@ -111,7 +111,13 @@
         "mps_build_spill_count_from_pressure": {"type": "evaluation", "rules": []},
         "mps_build_resident_demotions": {"type": "evaluation", "rules": []},
         "mps_build_position_spill_bytes": {"type": "evaluation", "rules": []},
-        "mps_build_position_spill_count": {"type": "evaluation", "rules": []}
+        "mps_build_position_spill_count": {"type": "evaluation", "rules": []},
+        "mps_build_shared_generation": {"type": "evaluation", "rules": []},
+        "mps_build_worker_build_ns": {"type": "evaluation", "rules": []},
+        "mps_build_pipeline_mode": {"type": "evaluation", "rules": []},
+        "mps_build_max_concurrency": {"type": "evaluation", "rules": []},
+        "mps_build_index_memory_cap_mb": {"type": "evaluation", "rules": []},
+        "mps_build_lazy_worker_shareable": {"type": "evaluation", "rules": []}
       }
     }
   },

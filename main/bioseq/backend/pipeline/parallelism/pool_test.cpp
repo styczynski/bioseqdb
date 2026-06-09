@@ -52,22 +52,28 @@ TEST_CASE("DOC0294 pool installs worker contexts", "[parallelism][context]") {
     });
 
     std::atomic<std::uint64_t> seen = 0;
+    std::atomic<bool> missing_context = false;
     pool.parallel_for_with_context(0, 16, 1, bioseq::parallelism::range_body{
-        [&seen](std::size_t lo, std::size_t hi) {
-            REQUIRE(context::current_or_null() != nullptr);
+        [&seen, &missing_context](std::size_t lo, std::size_t hi) {
+            if (context::current_or_null() == nullptr) {
+                missing_context.store(true, std::memory_order_relaxed);
+            }
             for (std::size_t value = lo; value < hi; ++value) {
                 seen.fetch_add(1, std::memory_order_relaxed);
             }
         }});
+    REQUIRE_FALSE(missing_context.load(std::memory_order_relaxed));
     REQUIRE(seen.load(std::memory_order_relaxed) == 16u);
 
     context::context outer_context;
     context::installed_context_scope install(outer_context);
     context::context* installed = context::current_or_null();
+    std::atomic<bool> inherited_context = false;
     pool.parallel_for_with_context(0, 1, 1, bioseq::parallelism::range_body{
-        [installed](std::size_t, std::size_t) {
-            REQUIRE(context::current_or_null() == installed);
+        [installed, &inherited_context](std::size_t, std::size_t) {
+            inherited_context.store(context::current_or_null() == installed, std::memory_order_relaxed);
         }});
+    REQUIRE(inherited_context.load(std::memory_order_relaxed));
 
     pool.shutdown();
 }
