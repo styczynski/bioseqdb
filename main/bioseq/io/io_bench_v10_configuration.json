@@ -22,7 +22,10 @@
     "bioseq_writer_mmap_fasta":      {"_": {"type": "integer", "default": 0}},
     "bioseq_writer_mmap_fastq":      {"_": {"type": "integer", "default": 0}},
     "naive_ofstream_fasta":          {"_": {"type": "integer", "default": 0}},
-    "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}}
+    "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}},
+
+    "bioseq_dumb_header_fasta":             {"_": {"type": "integer", "default": 0}},
+    "bioseq_identifier_parse_uniprot_fasta":{"_": {"type": "integer", "default": 0}}
   },
 
   "test_cases": {
@@ -38,7 +41,49 @@
 
     "FASTA_REAL_HUMAN_GENOME":    { "data": { "format": "fasta", "kind": "real", "real_data_path": "homo_sapiens_GRCh38_dna4.fasta" },                  "description": "Real-data FASTA: ~234 MiB, 24 records (chromosomes + scaffolds)" },
     "FASTQ_REAL_HUMAN_FASTQ_6GB": { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq" }, "description": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful." },
-    "FASTQ_REAL_HUMAN_FASTQ_GZ":  { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true }, "description": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note." }
+    "FASTQ_REAL_HUMAN_FASTQ_GZ":  { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true }, "description": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note." },
+
+    "FASTA_IDENTIFIER_UNIPROT_SHORT": { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200, "seed": 101, "header_shape": "uniprot_metadata" }, "description": "~9 MiB FASTA of ~200 bp records with UniProt-like metadata headers" }
+  },
+
+  "bench_io_identifier_parser": {
+    "description": "Single-case parser overhead check: dumb whole-header copy versus UniProt identifier parsing on the same synthetic FASTA corpus.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "FASTA_IDENTIFIER_UNIPROT_SHORT": 8 },
+      "over": {
+        "bioseq_dumb_header_fasta": {},
+        "bioseq_identifier_parse_uniprot_fasta": {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": { "type": "evaluation" },
+        "record_count": {
+          "type": "evaluation",
+          "rules": [
+            [ "identifier_parser_records_match_dumb",
+              { "key": "bioseq_identifier_parse_uniprot_fasta" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_dumb_header_fasta" } ]
+          ]
+        },
+        "observed_body_bytes": {
+          "type": "evaluation",
+          "rules": [
+            [ "identifier_parser_body_bytes_match_dumb",
+              { "key": "bioseq_identifier_parse_uniprot_fasta" },
+              { "compare": "=", "tolerance%": 0, "aggregate": "p50" },
+              { "key": "bioseq_dumb_header_fasta" } ]
+          ]
+        },
+        "records_nonzero": { "type": "evaluation" },
+        "bytes_on_disk": { "type": "evaluation" },
+        "header_bytes": { "type": "evaluation" },
+        "parsed_field_count": { "type": "evaluation" },
+        "parsed_field_bytes": { "type": "evaluation" }
+      }
+    }
   },
 
   "bench_io_readers_fasta": {

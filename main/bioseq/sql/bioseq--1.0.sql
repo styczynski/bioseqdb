@@ -1501,25 +1501,44 @@ CREATE OR REPLACE FUNCTION bioseq.update_index(rel regclass, kind text)
     LANGUAGE C VOLATILE STRICT;
 
 -- ============================================================================
--- DOC0286 §5 — bioseq.load(target_table, file_path): stream a FASTA/FASTQ file
--- into a USING bioseq table via the postgres-agnostic IO reader. The table must
--- have exactly one bioseq.seq column (the sequence sink) and at most one
--- varchar/text column (the header sink). The sequence column's typmod
--- (alphabet, width) drives the encoding. Extra ignored columns must be nullable
--- and must not be default/identity/generated. When bioseq.update_index_on_insert
--- is on, policy-enabled UPDATE_ON_INSERT indexes are built in one batched pass
--- after the load. Returns the number of records loaded.
+-- DOC0295 §9.4 — bioseq.load(target_table, file_path, header_format, columns):
+-- stream a FASTA/FASTQ file into a USING bioseq table via the postgres-agnostic
+-- IO reader, parsing the sequence identifier (header) line into zero or more
+-- typed destination columns. The table must have exactly one bioseq.seq column
+-- (its typmod drives alphabet/width). header_format selects the dialect parser
+-- ('auto' detects from sampled headers); columns => ARRAY[(column_name,
+-- data_source)] explicitly maps a parsed field / 0-based positional index to a
+-- column. Unmapped NOT NULL columns must have a default (evaluated per row).
+-- When bioseq.update_index_on_insert is on, policy-enabled UPDATE_ON_INSERT
+-- indexes are built in one batched pass after the load. Returns records loaded.
 -- ============================================================================
-CREATE OR REPLACE FUNCTION bioseq.load(target_table regclass, file_path text)
+
+-- New composite type for the columns => ARRAY[...] argument (DOC0295 §9.4).
+CREATE TYPE bioseq.column_mapping AS (
+    column_name  text,    -- target column (matched case/separator-insensitively)
+    data_source  text     -- field name OR 0-based positional index (as text)
+);
+
+-- Replace the 2-arg signature with a 4-arg one (defaults preserve the old call).
+-- Drops STRICT (columns/header_format may be NULL); the C code checks ARGISNULL.
+DROP FUNCTION IF EXISTS bioseq.load(regclass, text);
+CREATE OR REPLACE FUNCTION bioseq.load(
+        target_table  regclass,
+        file_path     text,
+        header_format text                    DEFAULT 'auto',
+        columns       bioseq.column_mapping[] DEFAULT NULL)
     RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_load'
-    LANGUAGE C VOLATILE STRICT;
-COMMENT ON FUNCTION bioseq.load(regclass, text) IS
-    'DOC0286: stream a FASTA/FASTQ file into a USING bioseq table via the '
-    'postgres-agnostic IO reader. One bioseq.seq column (required) + one '
-    'varchar header column (optional); other columns must be nullable and not '
-    'default/identity/generated. Builds policy-enabled on-insert indexes in one '
-    'batched pass when bioseq.update_index_on_insert is on. Returns records loaded.';
+    LANGUAGE C VOLATILE;        -- not STRICT
+COMMENT ON FUNCTION bioseq.load(regclass, text, text, bioseq.column_mapping[]) IS
+    'DOC0295: stream a FASTA/FASTQ file into a USING bioseq table, parsing the '
+    'identifier (header) line into typed destination columns. One bioseq.seq '
+    'column (required, typmod drives alphabet/width). header_format selects the '
+    'dialect (''auto'' detects); columns => ARRAY[(column_name, data_source)] '
+    'maps a parsed field or 0-based positional index to a column. Unmapped NOT '
+    'NULL columns must have a default. Builds policy-enabled on-insert indexes '
+    'in one batched pass when bioseq.update_index_on_insert is on. Returns '
+    'records loaded.';
 
 -- DOC0279 §12.2 — read the backend-local minimizers_per_sequence merge run
 -- counter (test observability for the multi-cursor k-way merge).

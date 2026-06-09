@@ -62,17 +62,24 @@ HWY_INLINE hn::Mask<D> any_needle_match(
     D d,
     const std::array<std::uint8_t, NeedleN>& needles,
     hn::Vec<D> chunk_bytes) noexcept {
-    static_assert(NeedleN >= 1 && NeedleN <= 3,
-                  "scan_bytes supports 1..3 needles");
+    static_assert(NeedleN >= 1 && NeedleN <= 8,
+                  "scan supports 1..8 needles");
     if constexpr (NeedleN == 1) {
         return hn::Eq(chunk_bytes, hn::Set(d, needles[0]));
     } else if constexpr (NeedleN == 2) {
         return hn::Or(hn::Eq(chunk_bytes, hn::Set(d, needles[0])),
                       hn::Eq(chunk_bytes, hn::Set(d, needles[1])));
-    } else {
+    } else if constexpr (NeedleN == 3) {
         return hn::Or(hn::Or(hn::Eq(chunk_bytes, hn::Set(d, needles[0])),
                              hn::Eq(chunk_bytes, hn::Set(d, needles[1]))),
                       hn::Eq(chunk_bytes, hn::Set(d, needles[2])));
+    } else {  // 4..8: new branch only; the 1/2/3 arms above stay codegen-identical
+              // so the FASTA/FASTQ record-scan hot path (scan_for_first /
+              // scan_for_each callers) cannot regress (spec §5.1).
+        hn::Mask<D> m = hn::Eq(chunk_bytes, hn::Set(d, needles[0]));
+        for (std::size_t i = 1; i < NeedleN; ++i)
+            m = hn::Or(m, hn::Eq(chunk_bytes, hn::Set(d, needles[i])));
+        return m;
     }
 }
 
@@ -589,6 +596,18 @@ namespace bioseq::io::simd {
     const std::uint8_t* data,
     std::size_t size) noexcept;
 
+/// Visit every offset in `[data, data+size)` whose byte equals any of the four
+/// structural header delimiters, in ascending order, via the existing
+/// `scan_for_each<4>` SIMD kernel. The `void* ctx + fn-ptr` shim keeps the
+/// wrapper non-templated (one symbol) so the NO_POSTGRES header lexer
+/// (`bioseq_io.identifier_parser`) need not include `<hwy/highway.h>`. Returns
+/// void — the lexer counts delimiters in its own visitor, not here (spec §5.1,
+/// review HIGH-02). Spec §8.4-§8.5.
+void scan_for_each_delim4(
+    std::uint8_t d0, std::uint8_t d1, std::uint8_t d2, std::uint8_t d3,
+    const std::uint8_t* data, std::size_t size,
+    void* ctx, void (*visit)(void* ctx, std::size_t offset)) noexcept;
+
 // ---------------------------------------------------------------------
 // Compression-pipeline wrappers (declarations).
 // ---------------------------------------------------------------------
@@ -686,6 +705,18 @@ std::size_t scan_first_byte_dispatch3(
     const hn::ScalableTag<std::uint8_t> byte_tag;
     const std::array<std::uint8_t, 3> needles{needle_0, needle_1, needle_2};
     return HWY_NAMESPACE::scan_for_first<3>(byte_tag, needles, data, size);
+}
+
+void scan_for_each_delim4(
+    std::uint8_t d0, std::uint8_t d1, std::uint8_t d2, std::uint8_t d3,
+    const std::uint8_t* data, std::size_t size,
+    void* ctx, void (*visit)(void* ctx, std::size_t offset)) noexcept {
+    namespace hn = hwy::HWY_NAMESPACE;
+    const hn::ScalableTag<std::uint8_t> byte_tag;
+    const std::array<std::uint8_t, 4> needles{d0, d1, d2, d3};
+    HWY_NAMESPACE::scan_for_each<4>(
+        byte_tag, needles, data, size,
+        [&](std::size_t offset) { visit(ctx, offset); });
 }
 
 // ---------------------------------------------------------------------

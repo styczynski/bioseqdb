@@ -44,6 +44,8 @@ import bioseq_sequences;
 import bioseq_io.public_api;
 import bioseq_io.options;
 import bioseq_io.writer;
+import bioseq_io.identifier_formats;   // DOC0295 §12.1 — header-parser overhead bench
+import bioseq_io.identifier_parser;
 import bench_framework;
 
 #ifndef BIOSEQ_IO_REPORT_DIR
@@ -121,6 +123,50 @@ struct IoOutput {
     std::size_t roundtrip_record_count = 0;    ///< writer outputs only
 };
 
+// DOC0295 §12.1 — identifier-parser overhead benchmark data model. Measures the
+// parser path (resolve once + parse every header into a capture writer) against
+// the legacy dumb whole-header copy, on the same synthetic FASTA corpus. Neither
+// path touches Postgres, isolating IO/parser overhead from catalog/coercion.
+struct IdentifierBenchInput {
+    ReaderInput reader;
+    bioseq::io::idparse::identifier_mapping_result mapping;
+    bioseq::io::idparse::header_format effective_fmt =
+        bioseq::io::idparse::header_format::UNIPROTKB;
+};
+
+struct IdentifierBenchOutput {
+    std::size_t observed_record_count = 0;
+    std::size_t observed_body_bytes   = 0;
+    std::size_t header_bytes          = 0;
+    std::size_t parsed_field_count    = 0;
+    std::size_t parsed_field_bytes    = 0;
+};
+
+struct bench_identifier_writer {
+    std::size_t dest_n = 0;
+    IdentifierBenchOutput* out = nullptr;
+    std::vector<std::string> scratch;   // simulates per-slot materialisation
+
+    explicit bench_identifier_writer(std::size_t n, IdentifierBenchOutput& o)
+        : dest_n(n), out(&o), scratch(n) {}
+
+    void begin_tuple() { for (auto& s : scratch) s.clear(); }
+    void set_field(bioseq::io::idparse::dest_slot_t slot,
+                   const char* data, std::int32_t len) {
+        auto& s = scratch.at(static_cast<std::size_t>(slot));
+        s.assign(data, static_cast<std::size_t>(len));   // same shape as dumb copy
+        ++out->parsed_field_count;
+        out->parsed_field_bytes += s.size();
+    }
+    void set_null(bioseq::io::idparse::dest_slot_t slot) {
+        scratch.at(static_cast<std::size_t>(slot)).clear();
+    }
+    void end_tuple() {}
+    void finish() {}
+    [[nodiscard]] std::size_t dest_count() const noexcept { return dest_n; }
+};
+static_assert(bioseq::io::idparse::is_identifier_dest_writer<bench_identifier_writer>);
+
 [[nodiscard]] std::int64_t read_int_field(simdjson::dom::element data,
                                             std::string_view name,
                                             std::int64_t fallback) noexcept {
@@ -171,7 +217,8 @@ struct IoOutput {
                                                   bool is_fastq,
                                                   std::size_t record_count,
                                                   std::size_t mean_record_length_bp,
-                                                  std::uint64_t seed) {
+                                                  std::uint64_t seed,
+                                                  std::string_view header_shape = "plain") {
     std::ofstream out(output_path, std::ios::binary);
     if (!out) {
         loge("[io_bench_v10] failed to open '{}' for writing", output_path);
@@ -199,7 +246,16 @@ struct IoOutput {
         const double sample = length_dist(rng);
         const std::size_t record_length = static_cast<std::size_t>(
             std::max(8.0, sample));
-        if (is_fastq) {
+        // DOC0295 §12.1 — `header_shape` defaults to "plain" so every existing IO
+        // benchmark cell is byte-for-byte unchanged unless it opts in. The
+        // "uniprot_metadata" shape exercises positional fields, a multi-word
+        // description, EQUALS tags, alias routing and metadata stripping at once.
+        if (header_shape == "uniprot_metadata" && !is_fastq) {
+            buffer.append(fmt::format(
+                ">tr|P{:06}|P{:06}_BENCH Synthetic parser benchmark protein "
+                "OS=Homo sapiens OX=9606 PE=1 SV={}\n",
+                record_index, record_index, 1 + (record_index % 9)));
+        } else if (is_fastq) {
             buffer.append(fmt::format("@seq_{}\n", record_index));
         } else {
             buffer.append(fmt::format(">seq_{}\n", record_index));
@@ -300,13 +356,15 @@ struct CorpusDescriptor {
         read_int_field(data, "mean_record_length_bp", 200));
     const std::uint64_t seed = static_cast<std::uint64_t>(
         read_int_field(data, "seed", 42));
+    const std::string header_shape =
+        read_string_field(data, "header_shape", "plain");
 
     const std::string path_tag =
         std::string{format_name} + "_" + std::string{test_case_name};
     descriptor.path = allocate_temp_path(path_tag);
     const std::size_t bytes = emit_synthetic_corpus(
         descriptor.path, descriptor.is_fastq,
-        record_count, mean_record_length_bp, seed);
+        record_count, mean_record_length_bp, seed, header_shape);
     if (bytes == 0) {
         loge("[io_bench_v10] synthetic corpus generation failed for '{}'",
               test_case_name);
@@ -654,6 +712,110 @@ void cleanup_reader(std::string_view /*data_dir*/,
     if (!input.is_synthetic || input.corpus_path.empty()) return;
     std::error_code ec;
     fs::remove(input.corpus_path, ec);
+}
+
+// =====================================================================
+//  Identifier-parser overhead benchmark (DOC0295 §12.1)
+// =====================================================================
+
+[[nodiscard]] IdentifierBenchInput build_identifier_input(
+        std::string_view data_dir, std::string_view test_case_name,
+        simdjson::dom::element data, const RunConstraints& constraints) {
+    IdentifierBenchInput input;
+    input.reader = build_reader_input(data_dir, test_case_name, data, constraints);
+    if (input.reader.corpus_path.empty()) return input;
+
+    using namespace bioseq::io::idparse;
+    const std::vector<column_descriptor> columns{
+        {.name="header",              .is_text=true,  .is_primary_key=false, .not_null=false, .has_default=false, .is_identity_or_generated=false},
+        {.name="accession",           .is_text=true,  .is_primary_key=false, .not_null=false, .has_default=false, .is_identity_or_generated=false},
+        {.name="organism_name",       .is_text=true,  .is_primary_key=false, .not_null=false, .has_default=false, .is_identity_or_generated=false},
+        {.name="organism_identifier", .is_text=false, .is_primary_key=false, .not_null=false, .has_default=false, .is_identity_or_generated=false},
+        {.name="protein_existence",   .is_text=false, .is_primary_key=false, .not_null=false, .has_default=false, .is_identity_or_generated=false},
+        {.name="sequence_version",    .is_text=false, .is_primary_key=false, .not_null=false, .has_default=false, .is_identity_or_generated=false},
+    };
+    auto map = resolve_identifier_mapping(
+        header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
+        std::span<const user_column_mapping>{});
+    if (!map) {
+        loge("[io_bench_v10] identifier mapping failed: {}", map.error());
+        input.reader.corpus_path.clear();
+        return input;
+    }
+    input.mapping = std::move(*map);
+    return input;
+}
+
+[[nodiscard]] IdentifierBenchOutput run_identifier_bench(
+        std::string_view algo, const ParamMap& /*params*/,
+        const IdentifierBenchInput& input) {
+    IdentifierBenchOutput out;
+    if (input.reader.corpus_path.empty()) return out;
+
+    using namespace bioseq::io;
+    using namespace bioseq::io::idparse;
+    using alphabet_config = BenchAlphabet;
+    using batch_t = sequence_batch<alphabet_config>;
+
+    std::string dumb_header_copy;
+    identifier_parse_state parse_state;
+    bench_identifier_writer parsed_writer{input.mapping.routing.dest_count, out};
+    const auto writer_ref = make_identifier_writer_ref(parsed_writer);
+
+    auto handler_fn = [&](batch_t&& batch) {
+        for (std::size_t i = 0; i < batch.size(); ++i) {
+            const auto header = batch.header(i);
+            const auto seq_view = batch.sequence(i);
+            using traits = typename decltype(seq_view)::traits;
+            out.observed_body_bytes +=
+                seq_view.size() * traits::letters_per_unit - seq_view.padding();
+            ++out.observed_record_count;
+            out.header_bytes += header.size();
+
+            if (algo == "bioseq_identifier_parse_uniprot_fasta") {
+                parsed_writer.begin_tuple();
+                auto parsed = parse_and_route_header(
+                    header_format::UNIPROTKB, header,
+                    input.mapping.routing, parse_state, writer_ref);
+                if (!parsed)
+                    loge("[io_bench_v10] identifier parse failed: {}", parsed.error());
+                parsed_writer.end_tuple();
+            } else {  // bioseq_dumb_header_fasta
+                dumb_header_copy.assign(header.data(), header.size());
+            }
+        }
+    };
+    auto failure_fn = [](std::string&& msg) {
+        loge("[io_bench_v10] identifier benchmark read failed: {}", msg);
+    };
+    reader_options opts{};
+    opts.io.gzip_auto_detect = false;
+    opts.io.prefer_mmap = false;
+    opts.concurrency.worker_count = 0;
+    (void) read_sequences_file<seq::dna4, sequence_io_file_type::FASTA>(
+        input.reader.corpus_path, handler_fn, failure_fn, opts);
+    return out;
+}
+
+[[nodiscard]] std::map<std::string, double> evaluate_identifier_bench(
+        std::string_view /*algo*/, const ParamMap& /*params*/,
+        const IdentifierBenchInput& input, const IdentifierBenchOutput& out) {
+    return {
+        {"bytes_on_disk", static_cast<double>(input.reader.bytes_on_disk)},
+        {"record_count", static_cast<double>(out.observed_record_count)},
+        {"observed_body_bytes", static_cast<double>(out.observed_body_bytes)},
+        {"records_nonzero", out.observed_record_count > 0 ? 1.0 : 0.0},
+        {"header_bytes", static_cast<double>(out.header_bytes)},
+        {"parsed_field_count", static_cast<double>(out.parsed_field_count)},
+        {"parsed_field_bytes", static_cast<double>(out.parsed_field_bytes)},
+    };
+}
+
+void cleanup_identifier_bench(std::string_view data_dir,
+                              std::string_view test_case_name,
+                              simdjson::dom::element data,
+                              const IdentifierBenchInput& input) {
+    cleanup_reader(data_dir, test_case_name, data, input.reader);
 }
 
 // =====================================================================
@@ -1150,6 +1312,19 @@ int main(int argc, char** argv) {
                                                 simdjson::dom::element,
                                                 const WriterInput&)>;
 
+    // DOC0295 §12.1 — identifier-parser overhead benchmark function types.
+    using IdentifierBuild = std::function<IdentifierBenchInput(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const RunConstraints&)>;
+    using IdentifierRun = std::function<IdentifierBenchOutput(
+        std::string_view, const ParamMap&, const IdentifierBenchInput&)>;
+    using IdentifierEval = std::function<std::map<std::string, double>(
+        std::string_view, const ParamMap&,
+        const IdentifierBenchInput&, const IdentifierBenchOutput&)>;
+    using IdentifierCleanup = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const IdentifierBenchInput&)>;
+
     return bioseq::bench_framework::run(
         argc, argv, report_dir, data_dir,
         create_benchmark<ReaderInput, IoOutput>(
@@ -1191,5 +1366,13 @@ int main(int argc, char** argv) {
             WriterBuild{build_writer_input},
             WriterRun{run_writer},
             WriterEval{evaluate_writer},
-            WriterCleanup{cleanup_writer}));
+            WriterCleanup{cleanup_writer}),
+        create_benchmark<IdentifierBenchInput, IdentifierBenchOutput>(
+            "IO identifier parser — UniProt header overhead",
+            "bench_io_identifier_parser", config_path,
+            Estimate{estimate_reader_resources},
+            IdentifierBuild{build_identifier_input},
+            IdentifierRun{run_identifier_bench},
+            IdentifierEval{evaluate_identifier_bench},
+            IdentifierCleanup{cleanup_identifier_bench}));
 }
