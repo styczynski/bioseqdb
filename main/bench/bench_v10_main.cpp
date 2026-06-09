@@ -272,6 +272,15 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    } else if (algo == "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash") {
+        // DOC0304 Phase A: G3SA-style Vulkan tiled-DP chaining (runtime-falls
+        // back to scalar-mm2 when no usable Vulkan device exists). Identical
+        // minimizer (two-stack nthash) + base aligner (KSW2) to
+        // bioseq_ksw2_simd_dp_two_stack_nthash, so the only varied dimension is
+        // the chaining backend: SIMD_MM2 vs VULKAN_TILED_DP.
+        dispatch.params.chaining_algorithm       = ChainingAlgorithmType::VULKAN_TILED_DP;
+        dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
     } else if (algo == "bioseq_ksw2_batched_simd_dp_two_stack_nthash") {
         // DOC0254 §11.9: KSW2_BATCHED selected via runtime params.
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;

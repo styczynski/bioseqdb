@@ -1387,7 +1387,8 @@ CREATE TYPE bioseq_aligner_options AS (
     block_min_size            integer,
     block_max_size            integer,
     chaining_algorithm        integer,
-    base_alignment_algorithm  integer
+    base_alignment_algorithm  integer,
+    vulkan_enabled            boolean
 );
 
 CREATE OR REPLACE FUNCTION aligner_options(
@@ -1421,7 +1422,8 @@ CREATE OR REPLACE FUNCTION aligner_options(
     block_min_size            integer  DEFAULT NULL,
     block_max_size            integer  DEFAULT NULL,
     chaining_algorithm        integer  DEFAULT NULL,
-    base_alignment_algorithm  integer  DEFAULT NULL
+    base_alignment_algorithm  integer  DEFAULT NULL,
+    vulkan_enabled            boolean  DEFAULT NULL
 ) RETURNS bioseq_aligner_options AS $$
     SELECT ROW(
         kmer_size, window_size, max_gap, max_gap_ref, bandwidth, bandwidth_long,
@@ -1430,7 +1432,7 @@ CREATE OR REPLACE FUNCTION aligner_options(
         best_n, match_score, mismatch_pen, gap_open1, gap_ext1, gap_open2,
         gap_ext2, sc_ambi, zdrop, end_bonus, max_occ, mid_occ,
         block_min_size, block_max_size,
-        chaining_algorithm, base_alignment_algorithm
+        chaining_algorithm, base_alignment_algorithm, vulkan_enabled
     )::bioseq_aligner_options
 $$ LANGUAGE SQL IMMUTABLE;
 

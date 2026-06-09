@@ -217,7 +217,7 @@ TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch
 
     SECTION("ChainingAlgorithmType — every enum value routes correctly") {
         using Reg = algorithm_enum_values<CA>;
-        for (CA v : {CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ}) {
+        for (CA v : {CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ, CA::VULKAN_TILED_DP}) {
             CA captured = static_cast<CA>(0xFF);
             doc0256_test_helpers::value_capture_callable<CA> cb{&captured};
             const CA result = enum_dispatch_pack<CA, CA, Reg::default_value>(
@@ -443,8 +443,8 @@ TEST_CASE("DOC0256 — dispatch_chain pins NTTPs in chain order",
     constexpr std::array<BAA, 3> baas = {
         BAA::KSW2, BAA::BLOCK_ALIGNER, BAA::KSW2_BATCHED,
     };
-    constexpr std::array<CA, 3> cas = {
-        CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ,
+    constexpr std::array<CA, 4> cas = {
+        CA::SCALAR_MM2, CA::SIMD_MM2, CA::RMQ, CA::VULKAN_TILED_DP,
     };
     constexpr std::array<MA, 3> mas = {
         MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH,

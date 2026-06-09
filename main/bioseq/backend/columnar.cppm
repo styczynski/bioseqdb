@@ -169,6 +169,13 @@ int  bioseq_aligner_minimizer_algorithm = 0;  /* DOC0286: matches MinimizerAlgor
  * picks context_args_no_profiling (zero overhead). Defaults to false.
  */
 bool bioseq_aligner_enable_profiling = false;
+/*
+ * Enable Vulkan execution for Vulkan-backed aligner algorithms (currently the
+ * VULKAN_TILED_DP chaining backend). When false, those algorithms fall back to
+ * their CPU equivalent. Defaults to true; the backend still falls back
+ * automatically when no usable Vulkan device exists (DOC0304 §7.4).
+ */
+bool bioseq_aligner_vulkan_enabled = true;
 
 /*
  * bioseq_init is the module's top-level initialiser. It wires up the GUC
@@ -695,15 +702,21 @@ bioseq_guc_init()
 							8, 16384, PGC_USERSET, 0, NULL, NULL, NULL);
 
 	static const struct config_enum_entry chaining_algorithm_options[] = {
-		{ "scalar_mm2",   0, false },
-		{ "simd_mm2",     1, false },
-		{ "rmq",          2, false },
+		{ "scalar_mm2",       0, false },
+		{ "simd_mm2",         1, false },
+		{ "rmq",              2, false },
+		{ "vulkan_tiled_dp",  3, false },
 		{ NULL, 0, false }
 	};
 	DefineCustomEnumVariable("bioseq.aligner.chaining_algorithm",
-							 "Chaining algorithm: scalar_mm2, simd_mm2, rmq.",
+							 "Chaining algorithm: scalar_mm2, simd_mm2, rmq, vulkan_tiled_dp.",
 							 NULL, &bioseq_aligner_chaining_algorithm, 0,
 							 chaining_algorithm_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("bioseq.aligner.vulkan_enabled",
+							 "Enable Vulkan execution for Vulkan-backed algorithms; disabled falls back to CPU.",
+							 NULL, &bioseq_aligner_vulkan_enabled, true,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 
 	static const struct config_enum_entry base_alignment_algorithm_options[] = {

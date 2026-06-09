@@ -96,6 +96,7 @@ import bioseq_sequences.chaining.utils;
 import bioseq_sequences.chaining.scalar;
 import bioseq_sequences.chaining.simd;
 import bioseq_sequences.chaining.rmq;
+import bioseq_sequences.chaining.vulkan;
 import bioseq_sequences.minimap_port;
 import context;
 import bioseq_instr;
@@ -617,7 +618,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SC
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ChainingParams&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -649,7 +650,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SI
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SIMD_MM2);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ChainingParams&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
@@ -681,13 +682,54 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
                 ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RMQ);
         }
         static void populate_runtime_params(
-            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params&,
+            const ChainingParams&,
             std::vector<NamedProperty>&) noexcept {}
         template <is_constexpr_aligner_params Cep>
         [[nodiscard]] static std::vector<NamedProperty> static_properties() {
             return {
                 {"vectorised", "false"},
                 {"complexity", "O(n log n)"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+/// Vulkan tiled-DP chaining (DOC0304 Phase A) — `chain_anchors_vulkan` from
+/// `bioseq_sequences.chaining.vulkan`. G3SA-style tiled DP score generation on
+/// Vulkan + bioseq CPU `backtrack_chains`; runtime-falls-back to scalar-mm2.
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP> {
+    struct kernel_type {
+        [[gnu::always_inline]] static void call(
+            std::span<const Anchor> anchors,
+            const ChainingParams&   params,
+            ArenaSlab<Chain>&       chains_out,
+            ArenaSlab<Anchor>&      reordered_anchors_out)
+        {
+            ::bioseq::chaining::chain_anchors_vulkan(
+                anchors, params, chains_out, reordered_anchors_out);
+        }
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::chaining_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP);
+        }
+        static void populate_runtime_params(
+            const ChainingParams& params,
+            std::vector<NamedProperty>& props) noexcept
+        {
+            props.push_back({"phase", "A"});
+            props.push_back({"fallback", "scalar-mm2"});
+            props.push_back({"uses_max_chain_skip", "false"});
+            props.push_back({"vulkan_enabled", params.vulkan_enabled ? "true" : "false"});
+        }
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"accelerator", "vulkan"},
+                {"score_generation", "g3sa-tiled-dp"},
+                {"backtrack", "bioseq-cpu"},
+                {"uses_max_chain_skip", "false"},
                 {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
             };
         }
@@ -1629,6 +1671,11 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         algo.parameters.push_back({"max_chain_iter",  std::to_string(cp.max_chain_iter)});
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
+        // Let the selected kernel append its own runtime params (e.g. the
+        // Vulkan backend's phase / fallback / vulkan_enabled markers) so the
+        // EXPLAIN metadata is not dead code. No-op for the scalar/SIMD/RMQ
+        // kernels (DOC0304 §7.2).
+        Kernel::populate_runtime_params(cp, algo.parameters);
         algo.computed_properties = Kernel::template static_properties<Cep>();
         desc.algorithm = std::move(algo);
         // Chain stage's two arena slabs are sized from the runtime
@@ -2494,7 +2541,8 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmTyp
     using value_list = value_sequence<target_t,
         target_t::SCALAR_MM2,
         target_t::SIMD_MM2,
-        target_t::RMQ>;
+        target_t::RMQ,
+        target_t::VULKAN_TILED_DP>;
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(

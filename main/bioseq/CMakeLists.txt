@@ -31,6 +31,18 @@ find_package(lfreist-hwinfo REQUIRED)
 find_package(HWY 1.3.0 REQUIRED NO_MODULE)
 find_package(Boost 1.90.0 REQUIRED COMPONENTS program_options regex serialization iterator integer)
 
+# DOC0304 Phase A — Vulkan/MoltenVK + glslang for the G3SA tiled-DP chaining
+# backend. CMake's FindVulkan only materialises Vulkan::glslang when the glslang
+# component is requested, so it is listed explicitly. DXC is intentionally NOT
+# required: the Phase A shader is GLSL compiled through glslang, and hard-
+# requiring DXC would break otherwise-valid MoltenVK / non-Windows configs.
+find_package(Vulkan REQUIRED COMPONENTS glslang)
+
+if(NOT TARGET Vulkan::glslang)
+  message(FATAL_ERROR
+    "vulkan-sdk-components must provide Vulkan::glslang; rerun vcpkg install vulkan-sdk-components")
+endif()
+
 # === bench target wiring lives in main/bench/bench_v10.cmake ===
 # (Old AddCommonTargetX block deleted as part of the V10 migration.
 # `bioseq_bench` is now built on top of `bench_framework`.)
@@ -102,6 +114,10 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_scalar.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_utils.cppm
+  # DOC0304 Phase A — Vulkan/MoltenVK G3SA tiled-DP chaining backend.
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/shader_compiler.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_vulkan.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/mm_sketch_baseline.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
@@ -245,6 +261,8 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   foonathan_memory
   hwy::hwy
   TBB::tbb
+  Vulkan::Vulkan
+  Vulkan::glslang
   ${Boost_LIBRARIES})
 
 target_sources(bioseq_modules_nopg
@@ -370,6 +388,7 @@ AddCommonTargetX(
     libassert::assert
     foonathan_memory
     TBB::tbb
+    Vulkan::glslang
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -413,6 +432,7 @@ AddCommonTargetX(
     libassert::assert
     foonathan_memory
     TBB::tbb
+    Vulkan::glslang
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES

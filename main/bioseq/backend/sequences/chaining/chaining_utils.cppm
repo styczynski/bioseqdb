@@ -318,6 +318,12 @@ struct ChainingParams {
 
     ChainingMode chaining_mode = ChainingMode::SIMD_DP;
 
+    /// Enable Vulkan execution for the VULKAN_TILED_DP chaining backend. When
+    /// false, that backend falls back to chain_anchors_scalar without touching
+    /// the GPU. Derived from Minimap2Params::vulkan_enabled (DOC0304 §7.1); the
+    /// CPU chaining kernels ignore it.
+    bool    vulkan_enabled    = true;
+
     /// Derived penalty values. Call prepare() after setting scale values.
     float   gap_penalty       = 0.0f;   ///< chain_gap_scale * 0.01 * kmer_size
     float   skip_penalty      = 0.0f;   ///< chain_skip_scale * 0.01 * kmer_size

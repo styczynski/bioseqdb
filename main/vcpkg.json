@@ -21,6 +21,7 @@
     },
     "tbb",
     "zlib",
-    "lfreist-hwinfo"
+    "lfreist-hwinfo",
+    "vulkan-sdk-components"
   ]
 }

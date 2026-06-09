@@ -819,6 +819,7 @@ build_params_from_gucs()
 		static_cast<bioseq::simd::N_NEON::MinimizerAlgorithmType>(
 			bioseq_aligner_minimizer_algorithm);
 	params.enable_profiling = bioseq_aligner_enable_profiling;
+	params.vulkan_enabled = bioseq_aligner_vulkan_enabled;
 	return params;
 }
 
@@ -871,13 +872,13 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 
 	const int n_attrs = tupdesc->natts;
 	/*
-	 * Stack-sized buffers sized to the known maximum of 32 fields in the
-	 * bioseq_aligner_options composite (today's count is 31; the +1
-	 * leaves a slot of headroom). Avoids the per-call heap allocation
-	 * that std::vector<Datum> would add and keeps us clear of
+	 * Stack-sized buffers sized above the field count of the
+	 * bioseq_aligner_options composite (today's count is 32 after the DOC0304
+	 * vulkan_enabled field; 40 leaves headroom). Avoids the per-call heap
+	 * allocation that std::vector<Datum> would add and keeps us clear of
 	 * std::vector<bool>'s proxy storage (no .data()).
 	 */
-	constexpr int kMaxOptionAttrs = 32;
+	constexpr int kMaxOptionAttrs = 40; // current bioseq_aligner_options uses 32 fields
 	if (n_attrs > kMaxOptionAttrs) {
 		ReleaseTupleDesc(tupdesc);
 		ereport(ERROR,
@@ -947,16 +948,16 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 		 * (aligner_options(chaining_algorithm => 42)) injects an invalid
 		 * enum value into params.chaining_algorithm, which produces UB
 		 * via the constexpr switch in to_chaining_params(). Known-good
-		 * ordinals: 0=SCALAR_MM2, 1=SIMD_MM2, 2=RMQ.
+		 * ordinals: 0=SCALAR_MM2, 1=SIMD_MM2, 2=RMQ, 3=VULKAN_TILED_DP.
 		 */
 		const int32_t raw = DatumGetInt32(values[idx]);
-		if (raw >= 0 && raw <= 2) {
+		if (raw >= 0 && raw <= 3) {
 			params.chaining_algorithm =
 				static_cast<bioseq::simd::N_NEON::ChainingAlgorithmType>(raw);
 		} else {
 			ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("aligner_options.chaining_algorithm out of range: %d (expected 0..2)", raw)));
+				 errmsg("aligner_options.chaining_algorithm out of range: %d (expected 0..3)", raw)));
 		}
 	}
 	++idx;
@@ -970,6 +971,16 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("aligner_options.base_alignment_algorithm out of range: %d (expected 0..1)", raw)));
 		}
+	}
+	++idx;
+	/*
+	 * Final field: vulkan_enabled (DOC0304 §7.4). Decoded as the trailing
+	 * boolean of bioseq_aligner_options; a NULL leaves the GUC-derived default
+	 * in place. No compatibility branch for the old composite shape — this
+	 * project has no stored-API compatibility requirement.
+	 */
+	if (idx < n_attrs && !nulls[idx]) {
+		params.vulkan_enabled = DatumGetBool(values[idx]);
 	}
 	ReleaseTupleDesc(tupdesc);
 	/* Free the detoasted copy if PG_DETOAST_DATUM actually copied. */

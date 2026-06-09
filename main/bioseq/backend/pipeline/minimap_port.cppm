@@ -114,9 +114,13 @@ using bioseq::indexing::MinimizerIndex;
 /// inside minimap2_port_with_index so the hot loop stays branchless.
 /// Values MUST match the ordinal used in the GUC enum (columnar.cppm).
 enum class ChainingAlgorithmType : uint8_t {
-    SCALAR_MM2 = 0,
-    SIMD_MM2   = 1,
-    RMQ        = 2,
+    SCALAR_MM2      = 0,
+    SIMD_MM2        = 1,
+    RMQ             = 2,
+    /// G3SA-style tiled DP score generation on Vulkan (DOC0304 Phase A). Falls
+    /// back to SCALAR_MM2 at runtime when no usable Vulkan device exists or
+    /// `Minimap2Params::vulkan_enabled` is false.
+    VULKAN_TILED_DP = 3,
 };
 
 /// Base-level alignment algorithm — KSW2 dual-affine DP (minimap2 default)
@@ -164,9 +168,10 @@ enum class MinimizerAlgorithmType : uint8_t {
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
     switch (mode) {
-        case ChainingAlgorithmType::SCALAR_MM2: return "Minimap2 Scalar";
-        case ChainingAlgorithmType::SIMD_MM2:   return "Minimap2 SIMD";
-        case ChainingAlgorithmType::RMQ:        return "Minimap2 RMQ";
+        case ChainingAlgorithmType::SCALAR_MM2:      return "Minimap2 Scalar";
+        case ChainingAlgorithmType::SIMD_MM2:        return "Minimap2 SIMD";
+        case ChainingAlgorithmType::RMQ:             return "Minimap2 RMQ";
+        case ChainingAlgorithmType::VULKAN_TILED_DP: return "Vulkan tiled DP";
     }
     return "unknown";
 }
@@ -307,6 +312,13 @@ struct Minimap2Params {
     /// already saturates the bucket fill for VERY_LONG inputs.
     bool                          cross_query_batched       = false;
 
+    /// Enable Vulkan execution for Vulkan-backed algorithms (currently only the
+    /// VULKAN_TILED_DP chaining backend). When false, those algorithms fall back
+    /// to their CPU equivalent without touching the GPU. Driven by the
+    /// bioseq.aligner.vulkan_enabled GUC / aligner_options override; never a
+    /// magic environment variable (DOC0304 §7.1, §11).
+    bool                          vulkan_enabled            = true;
+
     /// Build ChainingParams from this Minimap2Params.
     ///
     /// Extracts only the chaining-relevant subset and precomputes derived values.
@@ -326,9 +338,17 @@ struct Minimap2Params {
         switch (chaining_algorithm) {
             case ChainingAlgorithmType::SIMD_MM2:   cp.chaining_mode = ChainingMode::SIMD_DP; break;
             case ChainingAlgorithmType::RMQ:        cp.chaining_mode = ChainingMode::RMQ;     break;
+            // VULKAN_TILED_DP maps to SCALAR_DP only because ChainingMode has no
+            // Vulkan value and is not the dispatch selector; ChainStage selects
+            // the kernel from chaining_algorithm. The CPU fallback the Vulkan
+            // backend invokes is chain_anchors_scalar, so SCALAR_DP is the
+            // correct ChainingMode for that fallback (DOC0304 §7.1).
+            case ChainingAlgorithmType::VULKAN_TILED_DP:
+                                                    cp.chaining_mode = ChainingMode::SCALAR_DP; break;
             case ChainingAlgorithmType::SCALAR_MM2:
             default:                                cp.chaining_mode = ChainingMode::SCALAR_DP; break;
         }
+        cp.vulkan_enabled = vulkan_enabled;
         cp.prepare();
         return cp;
     }
