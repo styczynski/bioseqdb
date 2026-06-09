@@ -271,7 +271,11 @@ file(GLOB_RECURSE A_SRC_TESTS
   # whole io/*_test.cpp glob) so the heavyweight io_test.cpp (kseq++) stays out
   # of the unit exec; file_utils only needs bioseq_io.{file_utils,options}, now
   # in bioseq_modules_nopg.
-  ${CMAKE_CURRENT_LIST_DIR}/io/file_utils_test.cpp)
+  ${CMAKE_CURRENT_LIST_DIR}/io/file_utils_test.cpp
+  # DOC0295 §13.7 — NO_POSTGRES identifier-parser unit tests (formats/tables,
+  # lexer, resolver order, FASTQ sampler). Same lightweight pattern.
+  ${CMAKE_CURRENT_LIST_DIR}/io/identifier_parser/identifier_formats_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/io/identifier_parser/identifier_parser_test.cpp)
 
 file(GLOB_RECURSE A_INTEGRATION_SRC_TESTS
   ${CMAKE_CURRENT_LIST_DIR}/backend/common/testing.cppm

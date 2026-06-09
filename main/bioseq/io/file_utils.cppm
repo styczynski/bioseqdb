@@ -27,11 +27,21 @@ struct sequence_file_kind {
 };
 
 namespace detail {
+    /// Single source of truth for ASCII case folding (DOC0295 §4.2): the one
+    /// per-byte rule shared by `ascii_lower` (path sniffing) and the identifier
+    /// parser's `normalise_name` (column/format-name matching). `constexpr` so
+    /// the parser can drive its `consteval` `norm_key` drift guards through the
+    /// exact same lowering, with no locale dependence (column names are ASCII).
+    [[nodiscard]] inline constexpr char to_ascii_lower(char c) noexcept {
+        return (c >= 'A' && c <= 'Z')
+            ? static_cast<char>(c - 'A' + 'a')
+            : c;
+    }
+
     /// Lower-case ASCII copy (paths are short; no SIMD needed).
     [[nodiscard]] inline std::string ascii_lower(std::string_view s) {
         std::string out(s);
-        for (char& c : out) c = static_cast<char>(
-            std::tolower(static_cast<unsigned char>(c)));
+        for (char& c : out) c = to_ascii_lower(c);
         return out;
     }
 

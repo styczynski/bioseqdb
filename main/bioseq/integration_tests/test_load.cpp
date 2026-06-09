@@ -337,26 +337,31 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integratio
         REQUIRE(err.contains("bioseq.seq columns"));
     }
 
-    // 2 text columns.
+    // 2 text columns, neither PK, no mapping -> ambiguous (DOC0295 D8/E5). The
+    // legacy "at most one text column" rule is replaced by the multi-column
+    // identifier-parser resolution, which now asks the user to disambiguate.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (h1 text, h2 text, seq bioseq.seq('dna4',64)) USING bioseq;");
     {
         const auto err =
             it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
         REQUIRE(err.sqlstate == "42P16");
-        REQUIRE(err.contains("varchar/text columns"));
+        REQUIRE(err.contains("text columns"));
+        REQUIRE(err.contains("disambiguate"));
     }
 
-    // Defaulted/identity/generated ignored columns are rejected because the
-    // direct ColumnarWriteRow path bypasses executor default evaluation.
+    // bigserial PK is NOT identity/generated — it carries a DEFAULT nextval(),
+    // which DOC0295 §9.3/D9 now EVALUATES per row (the const-only restriction is
+    // lifted). The load succeeds and the PK auto-increments.
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
     it::exec_sql(ctx, "CREATE TABLE load_e (id bigserial primary key, "
                       "header text, seq bioseq.seq('dna4',64)) USING bioseq;");
+    REQUIRE(it::query_scalar_int(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');") == 1);
     {
-        const auto err =
-            it::sql_error(ctx, "SELECT bioseq.load('load_e'::regclass, '" + path + "');");
-        REQUIRE(err.sqlstate == "42P16");
-        REQUIRE(err.contains("defaulted"));
+        const auto rows = it::query_rows(ctx, "SELECT id, header FROM load_e");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows[0][0].value() == "1");   // nextval default evaluated per row
+        REQUIRE(rows[0][1].value() == "e");   // sole text column = identifier
     }
 
     it::exec_sql(ctx, "DROP TABLE IF EXISTS load_e CASCADE;");
@@ -411,4 +416,150 @@ TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integratio
     }
     // Rollback: no partially-written parent row should be visible.
     REQUIRE(it::query_rows(ctx, "SELECT header FROM load_e").empty());
+}
+
+TEST_CASE("bioseq.load: typed multi-column header parsing + non-empty mmsearch (DOC0295)",
+          "[load][integration]") {
+    it::connection_test_context ctx;
+    it::reset_extension(ctx, { std::string_view{"up"}, std::string_view{"gb"},
+                               std::string_view{"im"}, std::string_view{"e2def"},
+                               std::string_view{"e1nn"}, std::string_view{"e10bad"},
+                               std::string_view{"gis"} });
+    it::exec_sql(ctx, "SET DateStyle = 'ISO, MDY';");   // T10 date assumes MDY (§10)
+
+    const std::string body = gen_bases(2000, 4242, /*with_n=*/false);
+    const std::string query = body.substr(0, 1200);
+
+    // --- A. fixed uni_prot: positional accession + EQUALS tags + typed int,
+    //        proven end-to-end with a NON-EMPTY mmsearch on the loaded seq. ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_up.fasta";
+        write_fasta(path, {{"tr|R9RJF1|R9RJF1_PSEAI Mandelate racemase "
+                            "OS=Pseudomonas aeruginosa PE=4 SV=1", body}});
+        it::exec_sql(ctx, "CREATE TABLE up (accession text, organism_name text, "
+                          "sv int, seq bioseq.seq('dna4',64)) USING bioseq;");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('up'::regclass, '" + path +
+            "', header_format => 'uni_prot');") == 1);
+        const auto rows = it::query_rows(ctx,
+            "SELECT accession, organism_name, sv FROM up");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows[0][0].value() == "R9RJF1");
+        REQUIRE(rows[0][1].value() == "Pseudomonas aeruginosa");
+        REQUIRE(rows[0][2].value() == "1");                 // int4in coerced
+
+        // NON-EMPTY mmsearch proof: a 1200 bp prefix maps back to the loaded row.
+        const auto hits = it::query_rows(ctx, fmt::format(
+            "SELECT accession FROM up WHERE "
+            "mmsearch(seq, '{}'::bioseq.seq('dna4', 64))", query));
+        REQUIRE_FALSE(hits.empty());
+        REQUIRE(hits[0][0].value() == "R9RJF1");
+    }
+
+    // --- B. auto-detected GenBank: bracket tags -> int + text columns (T2). ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_gb.fasta";
+        write_fasta(path, {{"dna_new [organism=Homo sapiens] [chromosome=17] "
+                            "[moltype=mRNA]", body}});
+        it::exec_sql(ctx, "CREATE TABLE gb (id text, organism text, chromosome int, "
+                          "moltype text, seq bioseq.seq('dna4',64)) USING bioseq;");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('gb'::regclass, '" + path + "');") == 1);
+        const auto rows = it::query_rows(ctx,
+            "SELECT id, organism, chromosome, moltype FROM gb");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows[0][0].value() == "dna_new");
+        REQUIRE(rows[0][1].value() == "Homo sapiens");
+        REQUIRE(rows[0][2].value() == "17");                // int4in
+        REQUIRE(rows[0][3].value() == "mRNA");
+    }
+
+    // --- C. IMGT positional 'a..b' -> int4range (T11/D4 range rewrite). ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_im.fasta";
+        write_fasta(path, {{"M99641|IGHV1-18*01|Homo sapiens|F|V-REGION|188..483|"
+                            "296 nt|1| | | | |296+24=320| | ", body}});
+        it::exec_sql(ctx, "CREATE TABLE im (ligm_accession text, species text, "
+                          "positions int4range, seq bioseq.seq('dna4',64)) USING bioseq;");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('im'::regclass, '" + path +
+            "', header_format => 'imgt');") == 1);
+        const auto rows = it::query_rows(ctx,
+            "SELECT ligm_accession, species, lower(positions), upper(positions) FROM im");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows[0][0].value() == "M99641");
+        REQUIRE(rows[0][1].value() == "Homo sapiens");
+        REQUIRE(rows[0][2].value() == "188");
+        REQUIRE(rows[0][3].value() == "484");               // int4range canonical [188,484)
+    }
+
+    // --- E2/E3. unmapped NOT NULL columns with a constant + volatile default. ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_e2.fasta";
+        write_fasta(path, {{"tr|X1|X1_HUMAN p OS=Homo sapiens PE=1 SV=1", body}});
+        it::exec_sql(ctx, "CREATE TABLE e2def (accession text, "
+                          "score int NOT NULL DEFAULT 7, "
+                          "ts timestamptz NOT NULL DEFAULT now(), "
+                          "seq bioseq.seq('dna4',64)) USING bioseq;");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('e2def'::regclass, '" + path +
+            "', header_format => 'uni_prot');") == 1);
+        const auto rows = it::query_rows(ctx,
+            "SELECT accession, score, (ts IS NOT NULL)::text FROM e2def");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows[0][0].value() == "X1");
+        REQUIRE(rows[0][1].value() == "7");                 // constant default evaluated
+        REQUIRE(rows[0][2].value() == "true");              // volatile now() per row
+    }
+
+    // --- E1. unmapped NOT NULL column with NO default -> up-front error (D9). ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_e1.fasta";
+        write_fasta(path, {{"tr|X1|X1_HUMAN p OS=Homo sapiens PE=1 SV=1", body}});
+        it::exec_sql(ctx, "CREATE TABLE e1nn (accession text, foo int NOT NULL, "
+                          "seq bioseq.seq('dna4',64)) USING bioseq;");
+        const auto err = it::sql_error(ctx,
+            "SELECT bioseq.load('e1nn'::regclass, '" + path +
+            "', header_format => 'uni_prot');");
+        REQUIRE(err.sqlstate == "42P16");
+        REQUIRE(err.contains("NOT NULL"));
+        REQUIRE(err.contains("no default"));
+    }
+
+    // --- E10. bad scalar coercion -> input fn error + our record/column errcontext. ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_e10.fasta";
+        write_fasta(path, {{"tr|X1|X1_HUMAN p OS=Homo sapiens PE=1 SV=abc", body}});
+        it::exec_sql(ctx, "CREATE TABLE e10bad (accession text, sv int, "
+                          "seq bioseq.seq('dna4',64)) USING bioseq;");
+        const auto err = it::sql_error(ctx,
+            "SELECT bioseq.load('e10bad'::regclass, '" + path +
+            "', header_format => 'uni_prot');");
+        REQUIRE(err.sqlstate == "22P02");                   // invalid_text_representation
+        REQUIRE(err.contains("invalid input syntax"));      // int4in's own message
+        // The "record N, column \"sv\"" errcontext (§10) lands in libpq's
+        // PG_DIAG_CONTEXT field, which sql_error() does not fold into `message`;
+        // it is shown in psql's CONTEXT line — proven in DOC0301 Appendix E.
+    }
+
+    // --- T10. mixed numeric + name columns => enum + date coercion. ---
+    {
+        const std::string path = "/tmp/bioseq_test_load_gis.fasta";
+        write_fasta(path, {{"A/Canoas/LACENRS_1793/2015|A|H3N2|07/17/2015||Brazil|"
+                            "Human|KY925125", body}});
+        it::exec_sql(ctx, "DROP TYPE IF EXISTS flu_type CASCADE;");
+        it::exec_sql(ctx, "CREATE TYPE flu_type AS ENUM ('A','B');");
+        it::exec_sql(ctx, "CREATE TABLE gis (name text, strain flu_type, dt date, "
+                          "seq bioseq.seq('dna4',64)) USING bioseq;");
+        REQUIRE(it::query_scalar_int(ctx,
+            "SELECT bioseq.load('gis'::regclass, '" + path +
+            "', columns => ARRAY[('name','0'),('strain','1'),('dt','3')]"
+            "::bioseq.column_mapping[]);") == 1);
+        const auto rows = it::query_rows(ctx,
+            "SELECT name, strain::text, dt::text FROM gis");
+        REQUIRE(rows.size() == 1);
+        REQUIRE(rows[0][0].value() == "A/Canoas/LACENRS_1793/2015");
+        REQUIRE(rows[0][1].value() == "A");                 // enum_in label
+        REQUIRE(rows[0][2].value() == "2015-07-17");        // date_in, MDY
+    }
 }

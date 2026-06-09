@@ -56,6 +56,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1407,6 +1408,51 @@ template <
     }
 }
 
+/// DOC0295 §9.5 (F21) — the single source-selection dispatch shared by
+/// `stream_sequences_file` and `read_decompressed_prefix`: with `prefer_mmap`,
+/// magic-sniff for gzip (gzip_source if gzipped, else mmap_source); else with
+/// `gzip_auto_detect`, gzip_source; else posix_read_source. The chosen source is
+/// handed to `on_source(Source&&)`, which returns `std::expected<R,std::string>`;
+/// open failures are reported via `failure_fn` and returned as that same error
+/// type. Factored out so the 3-way selection lives in exactly one place.
+template <typename failure_fn_t, typename on_source_t>
+[[nodiscard]] auto with_selected_source(
+    std::string_view path_view, const reader_options& options,
+    failure_fn_t&& failure_fn, on_source_t&& on_source)
+    -> std::invoke_result_t<on_source_t&, posix_read_source&&> {
+    using result_t = std::invoke_result_t<on_source_t&, posix_read_source&&>;
+    if (options.io.prefer_mmap) {
+        auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
+        if (mmap_or_err) {
+            if (mmap_or_err->is_gzipped) {
+                auto gz_or_err = gzip_source::try_open(path_view);
+                if (!gz_or_err) {
+                    failure_fn(std::string{gz_or_err.error()});
+                    return result_t{std::unexpect, std::string{gz_or_err.error()}};
+                }
+                return on_source(std::move(*gz_or_err));
+            }
+            return on_source(std::move(mmap_or_err->source));
+        }
+        JustLog("[bioseq_io] select: mmap unavailable for '{}': {}; "
+                "falling back to posix_read_source", path_view, mmap_or_err.error());
+    }
+    if (options.io.gzip_auto_detect) {
+        auto gz_or_err = gzip_source::try_open(path_view);
+        if (!gz_or_err) {
+            failure_fn(std::string{gz_or_err.error()});
+            return result_t{std::unexpect, std::string{gz_or_err.error()}};
+        }
+        return on_source(std::move(*gz_or_err));
+    }
+    auto posix_or_err = posix_read_source::try_open(path_view);
+    if (!posix_or_err) {
+        failure_fn(std::string{posix_or_err.error()});
+        return result_t{std::unexpect, std::string{posix_or_err.error()}};
+    }
+    return on_source(std::move(*posix_or_err));
+}
+
 }  // namespace detail
 
 /// Public entry point. Reads FASTA / FASTQ from a file path, emits
@@ -1553,48 +1599,124 @@ template <
     options.concurrency.parser_count = 1;
     const std::string_view path_view{path};
 
-    if (options.io.prefer_mmap) {
-        auto mmap_or_err = mmap_source::try_open_with_magic(path_view, options);
-        if (mmap_or_err) {
-            if (mmap_or_err->is_gzipped) {
-                auto gz_or_err = gzip_source::try_open(path_view);
-                if (!gz_or_err) {
-                    failure_fn(std::string{gz_or_err.error()});
-                    return std::unexpected(gz_or_err.error());
-                }
-                return detail::run_sync_stream<
-                    alphabet_t, storage_unit_t, file_type, gzip_source>(
-                    std::move(*gz_or_err), sink,
-                    std::forward<failure_fn_t>(failure_fn), options);
-            }
+    // DOC0295 §9.5 (F21): the 3-way source selection is shared with
+    // `read_decompressed_prefix` via `detail::with_selected_source`; the chosen
+    // (concrete) source is streamed through `run_sync_stream`.
+    return detail::with_selected_source(
+        path_view, options, failure_fn,
+        [&](auto&& src) {
+            using source_t = std::remove_reference_t<decltype(src)>;
             return detail::run_sync_stream<
-                alphabet_t, storage_unit_t, file_type, mmap_source>(
-                std::move(mmap_or_err->source), sink,
-                std::forward<failure_fn_t>(failure_fn), options);
+                alphabet_t, storage_unit_t, file_type, source_t>(
+                std::move(src), sink, failure_fn, options);
+        });
+}
+
+/// DOC0295 §9.5 — read at most `max_bytes` of DECOMPRESSED bytes from the start
+/// of `path`, using the SAME three-way source selection as
+/// `stream_sequences_file` (`detail::with_selected_source`). Used by auto-mode
+/// header sampling; gzip is transparently decompressed by `gzip_source`.
+[[nodiscard]] inline std::expected<std::string, std::string>
+read_decompressed_prefix(const char* path, std::size_t max_bytes,
+                         const reader_options& options) {
+    const std::string_view path_view{path};
+    std::string open_error;
+    auto on_open_fail = [&](std::string&& msg) {
+        if (open_error.empty()) open_error = std::move(msg);
+    };
+    return detail::with_selected_source(
+        path_view, options, on_open_fail,
+        [&](auto&& src) -> std::expected<std::string, std::string> {
+            std::string out;
+            out.resize(max_bytes);
+            std::size_t total = 0;
+            while (total < max_bytes) {
+                const auto r = src.read_into(
+                    reinterpret_cast<std::uint8_t*>(out.data()) + total,
+                    max_bytes - total);
+                if (r.has_error)
+                    return std::unexpected(std::string{
+                        "bioseq.load: failed to read file prefix for header sampling"});
+                total += r.bytes_read;
+                if (r.is_eof || r.bytes_read == 0) break;
+            }
+            out.resize(total);
+            return out;
+        });
+}
+
+/// DOC0295 §9.5 — sample up to `max_headers` header strings (no leading
+/// '>' / '@', '\r' stripped) from the decompressed prefix of `path`. The FASTQ
+/// path mirrors the loader's logical record rule (sequence lines end at the `+`
+/// line; quality lines end after the same non-newline byte count) so multiline
+/// FASTQ never mistakes a `@` inside a quality line for a header (HIGH-03). Line
+/// ends are found via the existing SIMD `scan_first_byte('\n', …)` kernel.
+[[nodiscard]] inline std::expected<std::vector<std::string>, std::string>
+sample_sequence_headers(const char* path, sequence_io_file_type file_type,
+                        const reader_options& options,
+                        std::size_t max_headers = 16,
+                        std::size_t max_bytes = 256 * 1024) {
+    auto prefix_or = read_decompressed_prefix(path, max_bytes, options);
+    if (!prefix_or) return std::unexpected(prefix_or.error());
+    const std::string& prefix = *prefix_or;
+    const auto* base = reinterpret_cast<const std::uint8_t*>(prefix.data());
+    const std::size_t n = prefix.size();
+
+    std::vector<std::string> headers;
+    headers.reserve(max_headers);
+    auto rstrip_cr = [](std::string_view s) {
+        if (!s.empty() && s.back() == '\r') s.remove_suffix(1);
+        return s;
+    };
+    auto line_end_at = [&](std::size_t cursor) {
+        return cursor + simd::scan_first_byte('\n', base + cursor, n - cursor);
+    };
+
+    std::size_t cursor = 0;
+    if (file_type == sequence_io_file_type::FASTA) {
+        while (headers.size() < max_headers && cursor < n) {
+            if ((cursor == 0 || prefix[cursor - 1] == '\n') && prefix[cursor] == '>') {
+                const std::size_t le = line_end_at(cursor);
+                headers.emplace_back(rstrip_cr(
+                    std::string_view{prefix}.substr(
+                        cursor + 1, le > cursor + 1 ? le - (cursor + 1) : 0)));
+                cursor = le + 1;
+            } else {
+                const std::size_t le = line_end_at(cursor);
+                if (le >= n) break;
+                cursor = le + 1;
+            }
         }
-        JustLog("[bioseq_io] stream: mmap unavailable for '{}': {}; "
-                "falling back to posix_read_source", path_view, mmap_or_err.error());
-    }
-    if (options.io.gzip_auto_detect) {
-        auto gz_or_err = gzip_source::try_open(path_view);
-        if (!gz_or_err) {
-            failure_fn(std::string{gz_or_err.error()});
-            return std::unexpected(gz_or_err.error());
+    } else {  // FASTQ: records may have multiline sequence / quality sections.
+        while (headers.size() < max_headers && cursor < n) {
+            if (prefix[cursor] != '@') break;   // truncated/garbled prefix
+            const std::size_t he = line_end_at(cursor);
+            headers.emplace_back(rstrip_cr(
+                std::string_view{prefix}.substr(
+                    cursor + 1, he > cursor + 1 ? he - (cursor + 1) : 0)));
+            cursor = he + 1;
+
+            std::size_t seq_bytes = 0;
+            while (cursor < n && prefix[cursor] != '+') {
+                const std::size_t le = line_end_at(cursor);
+                for (std::size_t i = cursor; i < le && i < n; ++i)
+                    if (prefix[i] != '\r') ++seq_bytes;
+                cursor = le + 1;
+            }
+            if (cursor >= n || prefix[cursor] != '+') break;
+            cursor = line_end_at(cursor) + 1;  // skip the '+' line
+
+            std::size_t qual_bytes = 0;
+            while (cursor < n && qual_bytes < seq_bytes) {
+                const std::size_t le = line_end_at(cursor);
+                for (std::size_t i = cursor; i < le && i < n; ++i)
+                    if (prefix[i] != '\r') ++qual_bytes;
+                cursor = le + 1;
+            }
+            if (qual_bytes < seq_bytes) break;   // prefix ended mid-record
         }
-        return detail::run_sync_stream<
-            alphabet_t, storage_unit_t, file_type, gzip_source>(
-            std::move(*gz_or_err), sink,
-            std::forward<failure_fn_t>(failure_fn), options);
     }
-    auto posix_or_err = posix_read_source::try_open(path_view);
-    if (!posix_or_err) {
-        failure_fn(std::string{posix_or_err.error()});
-        return std::unexpected(posix_or_err.error());
-    }
-    return detail::run_sync_stream<
-        alphabet_t, storage_unit_t, file_type, posix_read_source>(
-        std::move(*posix_or_err), sink,
-        std::forward<failure_fn_t>(failure_fn), options);
+    return headers;
 }
 
 /// Plural-API convenience: read a sequence of files in declaration
