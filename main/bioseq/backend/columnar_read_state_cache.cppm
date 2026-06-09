@@ -61,7 +61,7 @@ static TxnScopedHtab<ColumnarReadStateMapEntry> ReadStateCache{"columnar read st
 ColumnarReadState**
 InitColumnarReadStateCache(Relation relation, SubTransactionId current_sub_xid)
 {
-	JustLog("[bioseq] pg: InitColumnarReadStateCache() sub_xid={}", current_sub_xid);
+	bioseq_log<DBG>("[bioseq] pg: InitColumnarReadStateCache() sub_xid={}", current_sub_xid);
 
 	bool found_existing = false;
 	ColumnarReadStateMapEntry* hash_entry =
@@ -122,7 +122,7 @@ FindReadStateCache(Relation relation, SubTransactionId current_sub_xid)
 void
 CleanupReadStateCache(SubTransactionId current_sub_xid)
 {
-	JustLog("[bioseq] pg: CleanupReadStateCache() sub_xid={}", current_sub_xid);
+	bioseq_log<DBG>("[bioseq] pg: CleanupReadStateCache() sub_xid={}", current_sub_xid);
 
 	ReadStateCache.for_each([current_sub_xid](ColumnarReadStateMapEntry* entry) {
 		ColumnarSubXidReadFrame* stack_head = entry->readStateStack;

@@ -311,7 +311,7 @@ bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 
 		if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 		{
-			pg_log(ERROR,
+			bioseq_log<ERR, PG>(
 				 "cannot read from table when there is unflushed data in upper transactions");
 		}
 	}
@@ -329,7 +329,7 @@ POSTGRES_FN(bioseq_relation_storageid)
 	Relation relation = safe_relation_open(relationId, AccessShareLock);
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		pg_log(ERROR, "relation \"{}\" is not a columnar table",
+		bioseq_log<ERR, PG>( "relation \"{}\" is not a columnar table",
 			 RelationGetRelationName(relation));
 	}
 
@@ -351,7 +351,7 @@ POSTGRES_FN(create_table_row_mask)
 
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		pg_log(ERROR, "relation \"{}\" is not a columnar table",
+		bioseq_log<ERR, PG>( "relation \"{}\" is not a columnar table",
 			 RelationGetRelationName(relation));
 	}
 
@@ -398,7 +398,7 @@ POSTGRES_FN(create_table_row_mask)
 		if(!SaveEmptyRowMask(storageId, stripeMetadata->id,
 							 stripeMetadata->firstRowNumber, chunkGroupRowCount))
 		{
-			pg_log(WARNING, "relation \"{}\" already has bioseq.row_mask populated.",
+			bioseq_log<WRN, PG>( "relation \"{}\" already has bioseq.row_mask populated.",
 				 RelationGetRelationName(relation));
 			created = false;
 			break;
@@ -537,7 +537,7 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 			static_cast<std::uint64_t>(pgseq_t::header_bytes())
 			+ projected_payload_bytes;
 		if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
-			pg_log(ERROR,
+			bioseq_log<ERR, PG>(
 			       "bioseq storage Phase C: sequence too large ({} bp ⇒ ~{} bytes) "
 			       "to materialise as a single varlena. SELECT seq / pg_dump "
 			       "cannot return this row directly. Use bioseq.substring(seq, …) "
@@ -710,12 +710,12 @@ ErrorIfInvalidRowNumber(uint64_t rowNumber)
 	if (rowNumber == COLUMNAR_INVALID_ROW_NUMBER)
 	{
 		/* not expected but be on the safe side */
-		PgReport(ERROR).code(ERRCODE_INTERNAL_ERROR)
+		bioseq_report<ERR, PG>().code(ERRCODE_INTERNAL_ERROR)
 			.msg("unexpected row number for columnar table");
 	}
 	else if (rowNumber > COLUMNAR_MAX_ROW_NUMBER)
 	{
-		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 			.msg("columnar tables can't have row numbers greater than {}",
 				 static_cast<uint64_t>(COLUMNAR_MAX_ROW_NUMBER))
 			.hint("Consider using VACUUM FULL for your table");
@@ -726,21 +726,21 @@ ErrorIfInvalidRowNumber(uint64_t rowNumber)
 static Size
 bioseq_parallelscan_estimate(Relation rel)
 {
-	pg_log(ERROR, "bioseq_parallelscan_estimate not implemented");
+	bioseq_log<ERR, PG>( "bioseq_parallelscan_estimate not implemented");
 }
 
 
 static Size
 bioseq_parallelscan_initialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	pg_log(ERROR, "bioseq_parallelscan_initialize not implemented");
+	bioseq_log<ERR, PG>( "bioseq_parallelscan_initialize not implemented");
 }
 
 
 static void
 bioseq_parallelscan_reinitialize(Relation rel, ParallelTableScanDesc pscan)
 {
-	pg_log(ERROR, "bioseq_parallelscan_reinitialize not implemented");
+	bioseq_log<ERR, PG>( "bioseq_parallelscan_reinitialize not implemented");
 }
 
 
@@ -767,7 +767,7 @@ bioseq_index_fetch_begin(Relation rel)
 	if (PendingWritesInUpperTransactions(relfilelocator, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
-		pg_log(ERROR, "cannot read from index when there is unflushed data in "
+		bioseq_log<ERR, PG>( "cannot read from index when there is unflushed data in "
 					"upper transactions");
 	}
 
@@ -795,7 +795,7 @@ bioseq_index_fetch_begin_extended(Relation rel, Bitmapset *attr_needed)
 	if (PendingWritesInUpperTransactions(relfilenode, GetCurrentSubTransactionId()))
 	{
 		/* XXX: maybe we can just flush the data and continue */
-		pg_log(ERROR, "cannot read from index when there is unflushed data in "
+		bioseq_log<ERR, PG>( "cannot read from index when there is unflushed data in "
 					"upper transactions");
 	}
 
@@ -1146,14 +1146,14 @@ static void
 bioseq_get_latest_tid(TableScanDesc sscan,
 						ItemPointer tid)
 {
-	pg_log(ERROR, "bioseq_get_latest_tid not implemented");
+	bioseq_log<ERR, PG>( "bioseq_get_latest_tid not implemented");
 }
 
 
 static bool
 bioseq_tuple_tid_valid(TableScanDesc scan, ItemPointer tid)
 {
-	pg_log(ERROR, "bioseq_tuple_tid_valid not implemented");
+	bioseq_log<ERR, PG>( "bioseq_tuple_tid_valid not implemented");
 }
 
 
@@ -1211,7 +1211,7 @@ bioseq_index_delete_tuples(Relation rel,
 		 * simple deletion of index tuples. But let's throw an error to be on
 		 * the safe side.
 		 */
-		pg_log(ERROR, "bioseq_index_delete_tuples not implemented for simple deletion");
+		bioseq_log<ERR, PG>( "bioseq_index_delete_tuples not implemented for simple deletion");
 	}
 }
 
@@ -1301,7 +1301,7 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 {
 	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
@@ -1357,7 +1357,7 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 {
 	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
@@ -1417,7 +1417,7 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 {
 	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
@@ -1587,7 +1587,7 @@ bioseq_relation_set_new_filenode(Relation rel,
 {
 	if (persistence == RELPERSISTENCE_TEMP)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
@@ -1614,9 +1614,9 @@ bioseq_relation_set_new_filenode(Relation rel,
 	*minmulti = GetOldestMultiXactId();
 	SMgrRelation srel = RelationCreateStorage(*newrnode, persistence, true);
 
-	JustLog("[bioseq] pg: bioseq_relation_set_new_filenode() initialising columnar storage");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_relation_set_new_filenode() initialising columnar storage");
 	ColumnarStorageInit(srel, ColumnarMetadataNewStorageId());
-	JustLog("[bioseq] pg: bioseq_relation_set_new_filenode() initialising columnar options");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_relation_set_new_filenode() initialising columnar options");
 	InitColumnarOptions(rel->rd_id);
 
 	smgrclose(srel);
@@ -1643,7 +1643,7 @@ bioseq_relation_nontransactional_truncate(Relation rel)
 	 */
 	RelationTruncate(rel, 0);
 
-	JustLog("[bioseq] pg: bioseq_relation_nontransactional_truncate() initialising columnar storage");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_relation_nontransactional_truncate() initialising columnar storage");
 	uint64_t storageId = ColumnarMetadataNewStorageId();
 
 	ColumnarStorageInit(RelationGetSmgr(rel), storageId);
@@ -1713,7 +1713,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 	if (OldIndex != NULL || use_sort)
 	{
-		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 			.msg("clustering columnar tables using indexes is not supported");
 	}
 
@@ -1891,7 +1891,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 
 	if (tupleDesc->natts == 0)
 	{
-		pg_log(elevel, "\"{}\": stopping vacuum due to zero column table",
+		bioseq_log_pg(elevel, "\"{}\": stopping vacuum due to zero column table",
 			   RelationGetRelationName(rel));
 		return false;
 	}
@@ -1905,7 +1905,7 @@ TruncateAndCombineColumnarStripes(Relation rel, int elevel)
 	/* Empty table nothing to do */
 	if (stripeMetadataList == NIL)
 	{
-		pg_log(elevel, "\"{}\": stopping vacuum due to empty table",
+		bioseq_log_pg(elevel, "\"{}\": stopping vacuum due to empty table",
 			   RelationGetRelationName(rel));
 		return false;
 	}
@@ -2291,7 +2291,7 @@ LogRelationStats(Relation rel, int elevel)
 	}
 	appendStringInfoString(infoBuf, "\n");
 
-	pg_log(elevel, "statistics for \"{}\":\n{}", RelationGetRelationName(rel),
+	bioseq_log_pg(elevel, "statistics for \"{}\":\n{}", RelationGetRelationName(rel),
 		   infoBuf->data);
 }
 
@@ -2334,7 +2334,7 @@ TruncateColumnar(Relation rel, int elevel)
 		 * We failed to establish the lock in the specified number of
 		 * retries. This means we give up truncating.
 		 */
-		pg_log(elevel, "\"{}\": stopping truncate due to conflicting lock request",
+		bioseq_log_pg(elevel, "\"{}\": stopping truncate due to conflicting lock request",
 			   RelationGetRelationName(rel));
 		return;
 	}
@@ -2366,11 +2366,13 @@ TruncateColumnar(Relation rel, int elevel)
 
 		BlockNumber new_rel_pages = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
 
-		PgReport(elevel)
-			.msg("\"{}\": truncated {} to {} pages",
-				 RelationGetRelationName(rel),
-				 old_rel_pages, new_rel_pages)
-			.detail("{}", pg_rusage_show(&ru0));
+		bioseq_report_pg_lazy(elevel, [&] {
+			bioseq_report_pg(elevel)
+				.msg("\"{}\": truncated {} to {} pages",
+					 RelationGetRelationName(rel),
+					 old_rel_pages, new_rel_pages)
+				.detail("{}", pg_rusage_show(&ru0));
+		});
 	}
 
 	/*
@@ -2482,7 +2484,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 		 * Columnar utility hook already errors out for BRIN indexes on columnar
 		 * tables, but be on the safe side.
 		 */
-		pg_log(ERROR, "BRIN indexes on columnar tables are not supported");
+		bioseq_log<ERR, PG>( "BRIN indexes on columnar tables are not supported");
 	}
 
 	if (scan)
@@ -2491,7 +2493,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 		 * Parallel scans on columnar tables are already discardad by
 		 * ColumnarGetRelationInfoHook but be on the safe side.
 		 */
-		pg_log(ERROR, "parallel scans on columnar are not supported");
+		bioseq_log<ERR, PG>( "parallel scans on columnar are not supported");
 	}
 
 	/* Disable the page cache for the duration of the index build. */
@@ -2937,7 +2939,7 @@ bioseq_estimate_rel_size(Relation rel, int32_t *attr_widths,
 static bool
 bioseq_scan_sample_next_block(TableScanDesc scan, SampleScanState *scanstate)
 {
-	pg_log(ERROR, "bioseq_scan_sample_next_block not implemented");
+	bioseq_log<ERR, PG>( "bioseq_scan_sample_next_block not implemented");
 }
 
 
@@ -2945,7 +2947,7 @@ static bool
 bioseq_scan_sample_next_tuple(TableScanDesc scan, SampleScanState *scanstate,
 								TupleTableSlot *slot)
 {
-	pg_log(ERROR, "bioseq_scan_sample_next_tuple not implemented");
+	bioseq_log<ERR, PG>( "bioseq_scan_sample_next_tuple not implemented");
 }
 
 
@@ -3015,7 +3017,7 @@ ColumnarSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 export void
 bioseq_tableam_init()
 {
-	JustLog("[bioseq] pg: bioseq_tableam_init() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_tableam_init() entered");
 	ColumnarTableSetOptions_hook_type **ColumnarTableSetOptions_hook_ptr =
 		reinterpret_cast<ColumnarTableSetOptions_hook_type **>(find_rendezvous_variable(
 			COLUMNAR_SETOPTIONS_HOOK_SYM));
@@ -3065,7 +3067,7 @@ ColumnarScanChunkGroupsFiltered(ColumnarScanDesc columnarScanDesc)
 static HeapTuple
 ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 {
-	JustLog("[bioseq] pg: ColumnarSlotCopyHeapTuple() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarSlotCopyHeapTuple() entered");
 	Assert(!TTS_EMPTY(slot));
 
 	HeapTuple tuple = heap_form_tuple(slot->tts_tupleDescriptor,
@@ -3087,7 +3089,7 @@ ColumnarSlotCopyHeapTuple(TupleTableSlot *slot)
 static void
 ColumnarTableDropHook(Oid relid)
 {
-	JustLog("[bioseq] pg: ColumnarTableDropHook() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarTableDropHook() entered");
 	/*
 	 * Lock relation to prevent it from being dropped and to avoid
 	 * race conditions in the next if block.
@@ -3124,7 +3126,7 @@ ColumnarTableDropHook(Oid relid)
 static void
 ColumnarTriggerCreateHook(Oid tgid)
 {
-	JustLog("[bioseq] pg: ColumnarTriggerCreateHook() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarTriggerCreateHook() entered");
 	/*
 	 * Fetch the pg_trigger tuple by the Oid of the trigger
 	 */
@@ -3158,7 +3160,7 @@ ColumnarTriggerCreateHook(Oid tgid)
 	if (TRIGGER_FOR_ROW(tgtype) && TRIGGER_FOR_AFTER(tgtype) &&
 		IsColumnarTableAmTable(tgrelid))
 	{
-		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 			.msg("Foreign keys and AFTER ROW triggers are not supported for columnar tables")
 			.hint("Consider an AFTER STATEMENT trigger instead.");
 	}
@@ -3221,7 +3223,7 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 		{
 			if (!ColumnarSupportsIndexAM(indexStmt->accessMethod))
 			{
-				PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+				bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 					.msg("unsupported access method for the index on columnar table {} ({})",
 						 RelationGetRelationName(rel), indexStmt->accessMethod);
 			}
@@ -3242,7 +3244,7 @@ ColumnarProcessUtility(PlannedStmt *pstmt,
 bool
 ColumnarSupportsIndexAM(char *indexAMName)
 {
-	JustLog("[bioseq] pg: ColumnarSupportsIndexAM() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarSupportsIndexAM() entered");
 	return strncmp(indexAMName, "btree", NAMEDATALEN) == 0 ||
 				strncmp(indexAMName, "hash", NAMEDATALEN) == 0 ||
 				strncmp(indexAMName, "gin", NAMEDATALEN) == 0 ||
@@ -3259,7 +3261,7 @@ ColumnarSupportsIndexAM(char *indexAMName)
 // bool
 // IsColumnarTableAmTable(Oid relationId)
 // {
-// 	JustLog("[bioseq] pg: IsColumnarTableAmTable() entered");
+// 	bioseq_log<DBG>("[bioseq] pg: IsColumnarTableAmTable() entered");
 // 	if (!OidIsValid(relationId))
 // 	{
 // 		return false;
@@ -3343,13 +3345,13 @@ export const TableAmRoutine bioseq_am_methods = {
 const TableAmRoutine *
 GetColumnarTableAmRoutine(void)
 {
-	JustLog("[bioseq] pg: GetColumnarTableAmRoutine() entered");
+	bioseq_log<DBG>("[bioseq] pg: GetColumnarTableAmRoutine() entered");
 	return &bioseq_am_methods;
 }
 
 POSTGRES_FN(bioseq_handler)
 {
-	JustLog("[bioseq] pg: bioseq_handler() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_handler() entered");
 	PG_RETURN_POINTER(&bioseq_am_methods);
 }
 
@@ -3418,7 +3420,7 @@ ColumnarCheckLogicalReplication(Relation rel)
 
 	if (pubActionInsert)
 	{
-		PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 			.msg("cannot insert into columnar table that is a part of a publication");
 	}
 }
@@ -3451,7 +3453,7 @@ POSTGRES_FN(alter_bioseq_table_set)
 	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		pg_log(ERROR, "table {} is not a columnar table",
+		bioseq_log<ERR, PG>( "table {} is not a columnar table",
 			   quote_identifier(RelationGetRelationName(rel)));
 	}
 	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
@@ -3463,7 +3465,7 @@ POSTGRES_FN(alter_bioseq_table_set)
 	ColumnarOptions options = { 0 };
 	if (!ReadColumnarOptions(relationId, &options))
 	{
-		pg_log(ERROR, "unable to read current options for table");
+		bioseq_log<ERR, PG>( "unable to read current options for table");
 	}
 
 	/* chunk_group_row_limit => not null */
@@ -3473,13 +3475,13 @@ POSTGRES_FN(alter_bioseq_table_set)
 		if (options.chunkRowCount < CHUNK_ROW_COUNT_MINIMUM ||
 			options.chunkRowCount > CHUNK_ROW_COUNT_MAXIMUM)
 		{
-			PgReport(ERROR)
+			bioseq_report<ERR, PG>()
 				.msg("chunk group row count limit out of range")
 				.hint("chunk group row count limit must be between {} and {}",
 					  static_cast<uint64_t>(CHUNK_ROW_COUNT_MINIMUM),
 					  static_cast<uint64_t>(CHUNK_ROW_COUNT_MAXIMUM));
 		}
-		pg_log(DEBUG1, "updating chunk row count to {}", options.chunkRowCount);
+		bioseq_log_pg(DEBUG1, "updating chunk row count to {}", options.chunkRowCount);
 	}
 
 	/* stripe_row_limit => not null */
@@ -3489,13 +3491,13 @@ POSTGRES_FN(alter_bioseq_table_set)
 		if (options.stripeRowCount < STRIPE_ROW_COUNT_MINIMUM ||
 			options.stripeRowCount > STRIPE_ROW_COUNT_MAXIMUM)
 		{
-			PgReport(ERROR)
+			bioseq_report<ERR, PG>()
 				.msg("stripe row count limit out of range")
 				.hint("stripe row count limit must be between {} and {}",
 					  static_cast<uint64_t>(STRIPE_ROW_COUNT_MINIMUM),
 					  static_cast<uint64_t>(STRIPE_ROW_COUNT_MAXIMUM));
 		}
-		pg_log(DEBUG1, "updating stripe row count to {}", options.stripeRowCount);
+		bioseq_log_pg(DEBUG1, "updating stripe row count to {}", options.stripeRowCount);
 	}
 
 	/* compression => not null */
@@ -3505,10 +3507,10 @@ POSTGRES_FN(alter_bioseq_table_set)
 		options.compressionType = ParseCompressionType(NameStr(*compressionName));
 		if (options.compressionType == COMPRESSION_TYPE_INVALID)
 		{
-			pg_log(ERROR, "unknown compression type for columnar table: {}",
+			bioseq_log<ERR, PG>( "unknown compression type for columnar table: {}",
 				   quote_identifier(NameStr(*compressionName)));
 		}
-		pg_log(DEBUG1, "updating compression to {}",
+		bioseq_log_pg(DEBUG1, "updating compression to {}",
 			   CompressionTypeStr(options.compressionType));
 	}
 
@@ -3519,14 +3521,14 @@ POSTGRES_FN(alter_bioseq_table_set)
 		if (options.compressionLevel < COMPRESSION_LEVEL_MIN ||
 			options.compressionLevel > COMPRESSION_LEVEL_MAX)
 		{
-			PgReport(ERROR)
+			bioseq_report<ERR, PG>()
 				.msg("compression level out of range")
 				.hint("compression level must be between {} and {}",
 					  COMPRESSION_LEVEL_MIN,
 					  COMPRESSION_LEVEL_MAX);
 		}
 
-		pg_log(DEBUG1, "updating compression level to {}", options.compressionLevel);
+		bioseq_log_pg(DEBUG1, "updating compression level to {}", options.compressionLevel);
 	}
 
 	if (ColumnarTableSetOptions_hook != NULL)
@@ -3567,7 +3569,7 @@ POSTGRES_FN(alter_bioseq_table_reset)
 	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
 	if (!IsColumnarTableAmTable(relationId))
 	{
-		pg_log(ERROR, "table {} is not a columnar table",
+		bioseq_log<ERR, PG>( "table {} is not a columnar table",
 			   quote_identifier(RelationGetRelationName(rel)));
 	}
 
@@ -3580,28 +3582,28 @@ POSTGRES_FN(alter_bioseq_table_reset)
 	ColumnarOptions options = { 0 };
 	if (!ReadColumnarOptions(relationId, &options))
 	{
-		pg_log(ERROR, "unable to read current options for table");
+		bioseq_log<ERR, PG>( "unable to read current options for table");
 	}
 
 	/* chunk_group_row_limit => true */
 	if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1))
 	{
 		options.chunkRowCount = bioseq_chunk_group_row_limit;
-		pg_log(DEBUG1, "resetting chunk row count to {}", options.chunkRowCount);
+		bioseq_log_pg(DEBUG1, "resetting chunk row count to {}", options.chunkRowCount);
 	}
 
 	/* stripe_row_limit => true */
 	if (!PG_ARGISNULL(2) && PG_GETARG_BOOL(2))
 	{
 		options.stripeRowCount = bioseq_stripe_row_limit;
-		pg_log(DEBUG1, "resetting stripe row count to {}", options.stripeRowCount);
+		bioseq_log_pg(DEBUG1, "resetting stripe row count to {}", options.stripeRowCount);
 	}
 
 	/* compression => true */
 	if (!PG_ARGISNULL(3) && PG_GETARG_BOOL(3))
 	{
 		options.compressionType = static_cast<CompressionType>(bioseq_compression);
-		pg_log(DEBUG1, "resetting compression to {}",
+		bioseq_log_pg(DEBUG1, "resetting compression to {}",
 			   CompressionTypeStr(options.compressionType));
 	}
 
@@ -3609,7 +3611,7 @@ POSTGRES_FN(alter_bioseq_table_reset)
 	if (!PG_ARGISNULL(4) && PG_GETARG_BOOL(4))
 	{
 		options.compressionLevel = bioseq_compression_level;
-		pg_log(DEBUG1, "reseting compression level to {}", bioseq_compression_level);
+		bioseq_log_pg(DEBUG1, "reseting compression level to {}", bioseq_compression_level);
 	}
 
 	if (ColumnarTableSetOptions_hook != NULL)
@@ -3648,7 +3650,7 @@ POSTGRES_FN(upgrade_bioseq_storage)
 	Relation rel = table_open(relid, AccessExclusiveLock);
 	if (!IsColumnarTableAmTable(relid))
 	{
-		pg_log(ERROR, "table {} is not a columnar table",
+		bioseq_log<ERR, PG>( "table {} is not a columnar table",
 			   quote_identifier(RelationGetRelationName(rel)));
 	}
 
@@ -3682,7 +3684,7 @@ POSTGRES_FN(downgrade_bioseq_storage)
 	Relation rel = table_open(relid, AccessExclusiveLock);
 	if (!IsColumnarTableAmTable(relid))
 	{
-		pg_log(ERROR, "table {} is not a columnar table",
+		bioseq_log<ERR, PG>( "table {} is not a columnar table",
 			   quote_identifier(RelationGetRelationName(rel)));
 	}
 
@@ -3742,7 +3744,7 @@ static List *HolesForRelation(Relation rel)
  */
 static void vacuum_signal_handler(int signal)
 {
-	pg_log(DEBUG3, "Received signal {} during a vacuum request", signal);
+	bioseq_log_pg(DEBUG3, "Received signal {} during a vacuum request", signal);
 
 	/* Set up the ability to bail from the vacuum, with needed information. */
 	need_to_bail = true;
@@ -3805,7 +3807,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 
 	if (tupleDesc->natts == 0)
 	{
-		pg_log(INFO, "\"{}\": stopping vacuum due to zero column table",
+		bioseq_log_pg(INFO, "\"{}\": stopping vacuum due to zero column table",
 			   RelationGetRelationName(rel));
 
 		MemoryContextSwitchTo(oldcontext);
@@ -3825,7 +3827,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	/* Empty table nothing to do */
 	if (stripeMetadataList == NIL)
 	{
-		pg_log(INFO, "\"{}\": stopping vacuum due to empty table",
+		bioseq_log_pg(INFO, "\"{}\": stopping vacuum due to empty table",
 			   RelationGetRelationName(rel));
 
 		/* Close the relation as we are done with it */
@@ -3838,7 +3840,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 
 	int stripeMetadataIndex = 0;
 
-	pg_log(DEBUG3, "Beginning combination of stripes");
+	bioseq_log_pg(DEBUG3, "Beginning combination of stripes");
 
 	/*
 	 * Get a list of all stripes that can be combined into larger stripes.
@@ -3979,7 +3981,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	 */
 	ColumnarEndWrite(writeState);
 
-	pg_log(DEBUG3, "Combined {} stripes", progress);
+	bioseq_log_pg(DEBUG3, "Combined {} stripes", progress);
 
 	if (completelyDone)
 	{
@@ -3989,7 +3991,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 		PG_RETURN_UINT32(progress);
 	}
 
-	pg_log(DEBUG3, "Beginning reorganization");
+	bioseq_log_pg(DEBUG3, "Beginning reorganization");
 	/*
 	 * Continually iterate through the holes, finding where we can place
 	 * old stripes.
@@ -4101,7 +4103,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 		MemoryContextDelete(rewriteContext);
 	}
 
-	pg_log(DEBUG3, "Ending reorganization");
+	bioseq_log_pg(DEBUG3, "Ending reorganization");
 
 	relation_close(rel, NoLock);
 
@@ -4160,7 +4162,7 @@ POSTGRES_FN(bioseq_stats)
 		/* Retrieve the stripe metadata. */
 		List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
 		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-				PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+				bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 					.msg("function returning record called in context "
 						 "that cannot accept type record");
 

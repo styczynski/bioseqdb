@@ -1434,7 +1434,7 @@ template <typename failure_fn_t, typename on_source_t>
             }
             return on_source(std::move(mmap_or_err->source));
         }
-        JustLog("[bioseq_io] select: mmap unavailable for '{}': {}; "
+        bioseq_log<DBG>("[bioseq_io] select: mmap unavailable for '{}': {}; "
                 "falling back to posix_read_source", path_view, mmap_or_err.error());
     }
     if (options.io.gzip_auto_detect) {
@@ -1512,7 +1512,7 @@ template <
                             std::forward<failure_fn_t>(failure_fn),
                             options);
                     }
-                    JustLog("[bioseq_io] parallel_gzip_source failed for "
+                    bioseq_log<DBG>("[bioseq_io] parallel_gzip_source failed for "
                             "'{}': {}; falling back to single-thread "
                             "gzip_source",
                             path_view, pgz_or_err.error());
@@ -1541,7 +1541,7 @@ template <
                 std::forward<failure_fn_t>(failure_fn),
                 options);
         }
-        JustLog("[bioseq_io] mmap_source unavailable for '{}': {}; "
+        bioseq_log<DBG>("[bioseq_io] mmap_source unavailable for '{}': {}; "
                 "falling back to posix_read_source",
                 path_view, mmap_or_err.error());
     }

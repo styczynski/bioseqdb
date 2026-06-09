@@ -22,13 +22,14 @@ module;
 
 export module bioseq_table_io:reader;
 
+import mlogging;
 import storage_compression;
 import storage_physical;
 import storage_metadata;
 import pg_utils;
 
 /*
- * fmt-style format string used by pg_log() when a stripe is unflushed
+ * fmt-style format string used by bioseq_log_pg() when a stripe is unflushed
  * yet the read path tries to consume it. Kept as a `const char*` rather
  * than an inline string so call sites use the same wording.
  */
@@ -356,7 +357,7 @@ ColumnarReadRowByRowNumberOrError(ColumnarReadState *readState,
 	if (!ColumnarReadRowByRowNumber(readState, rowNumber,
 									columnValues, columnNulls))
 	{
-		pg_log(ERROR, "cannot read from columnar table {}, tuple with "
+		bioseq_log<ERR, PG>( "cannot read from columnar table {}, tuple with "
 					  "row number {} does not exist",
 					  RelationGetRelationName(readState->relation),
 					  rowNumber);
@@ -393,7 +394,7 @@ ColumnarReadRowByRowNumber(ColumnarReadState *readState,
 			 * disk yet or should wait for the writer xact to commit or abort,
 			 * but let's be on the safe side.
 			 */
-			pg_log(ERROR, UNEXPECTED_STRIPE_READ_ERR_MSG,
+			bioseq_log<ERR, PG>( UNEXPECTED_STRIPE_READ_ERR_MSG,
 				   RelationGetRelationName(columnarRelation),
 				   stripeMetadata->id);
 		}
@@ -447,7 +448,7 @@ ColumnarSetStripeReadState(ColumnarReadState *readState,
 			 * disk yet or should wait for the writer xact to commit or abort,
 			 * but let's be on the safe side.
 			 */
-			pg_log(ERROR, UNEXPECTED_STRIPE_READ_ERR_MSG,
+			bioseq_log<ERR, PG>( UNEXPECTED_STRIPE_READ_ERR_MSG,
 				   RelationGetRelationName(columnarRelation),
 				   stripeMetadata->id);
 		}
@@ -524,7 +525,7 @@ ReadStripeRowByRowNumber(ColumnarReadState *readState,
 	if (rowNumber < stripeMetadata->firstRowNumber)
 	{
 		/* not expected but be on the safe side */
-		pg_log(ERROR, "row offset cannot be negative");
+		bioseq_log<ERR, PG>( "row offset cannot be negative");
 	}
 
 	/* find the exact chunk group to be read */
@@ -812,7 +813,7 @@ AdvanceStripeRead(ColumnarReadState *readState)
 		 * with an un-flushed stripe. Otherwise, we will skip such stripes
 		 * until finding a flushed one.
 		 */
-		pg_log(ERROR, UNEXPECTED_STRIPE_READ_ERR_MSG,
+		bioseq_log<ERR, PG>( UNEXPECTED_STRIPE_READ_ERR_MSG,
 			   RelationGetRelationName(readState->relation),
 			   readState->currentStripeMetadata->id);
 	}
@@ -956,7 +957,7 @@ BeginChunkGroupRead(StripeBuffers *stripeBuffers, int chunkIndex, TupleDesc tupl
 {
 	if (chunkIndex < 0 || static_cast<uint32_t>(chunkIndex) >= stripeBuffers->chunkCount)
 	{
-		pg_log(ERROR, "chunk group index {} is outside selected chunk count {}",
+		bioseq_log<ERR, PG>( "chunk group index {} is outside selected chunk count {}",
 			   chunkIndex, stripeBuffers->chunkCount);
 	}
 
@@ -1282,7 +1283,7 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 		if (column->varattno <= 0 ||
 			static_cast<uint32_t>(column->varattno) > stripeSkipList->columnCount)
 		{
-			pg_log(ERROR, "restriction column {} is outside stripe column count {}",
+			bioseq_log<ERR, PG>( "restriction column {} is outside stripe column count {}",
 				   column->varattno, stripeSkipList->columnCount);
 		}
 
@@ -1620,7 +1621,7 @@ ProjectedColumnMask(uint32_t columnCount, List *projectedColumnList)
 	{
 		if (attno <= 0 || static_cast<uint32_t>(attno) > columnCount)
 		{
-			pg_log(ERROR, "projected column {} is outside column count {}",
+			bioseq_log<ERR, PG>( "projected column {} is outside column count {}",
 				   attno, columnCount);
 		}
 
@@ -1646,7 +1647,7 @@ DeserializeBoolArray(StringInfo boolArrayBuffer, bool *boolArray,
 	uint32_t maximumBoolCount = boolArrayBuffer->len * 8;
 	if (boolArrayLength > maximumBoolCount)
 	{
-		pg_log(ERROR, "insufficient data for reading boolean array");
+		bioseq_log<ERR, PG>( "insufficient data for reading boolean array");
 	}
 
 	for (boolArrayIndex = 0; boolArrayIndex < boolArrayLength; boolArrayIndex++)
@@ -1700,7 +1701,7 @@ DeserializeDatumArray(StringInfo datumBuffer, bool *existsArray, uint32_t datumC
 
 		if (currentDatumDataOffset > datumBuffer->len)
 		{
-			pg_log(ERROR, "insufficient data left in datum buffer: {}, {}", currentDatumDataOffset, datumBuffer->len);
+			bioseq_log<ERR, PG>( "insufficient data left in datum buffer: {}, {}", currentDatumDataOffset, datumBuffer->len);
 		}
 	}
 }
@@ -1882,7 +1883,7 @@ ColumnDefaultValue(TupleConstr *tupleConstraints, Form_pg_attribute attributeFor
 	else
 	{
 		const char *columnName = NameStr(attributeForm->attname);
-		PgReport(ERROR).msg("unsupported default value for column \"{}\"", columnName)
+		bioseq_report<ERR, PG>().msg("unsupported default value for column \"{}\"", columnName)
 					   .hint("Expression is either mutable or "
 							 "does not evaluate to constant value");
 	}

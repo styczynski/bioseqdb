@@ -311,6 +311,7 @@ struct FindColsContext
 
 export module bioseq_aggregator_node;
 
+import mlogging;
 import pg_utils;
 
 extern "C" {
@@ -2955,7 +2956,7 @@ hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
 	if (nread == 0)
 		return NULL;
 	if (nread != sizeof(uint32_t))
-		PgReport(ERROR).code(errcode_for_file_access())
+		bioseq_report<ERR, PG>().code(errcode_for_file_access())
 			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
 				 static_cast<const void*>(tape), sizeof(uint32_t), nread);
 	if (hashp != NULL)
@@ -2963,7 +2964,7 @@ hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
 
 	nread = LogicalTapeRead(tape, &t_len, sizeof(t_len));
 	if (nread != sizeof(uint32_t))
-		PgReport(ERROR).code(errcode_for_file_access())
+		bioseq_report<ERR, PG>().code(errcode_for_file_access())
 			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
 				 static_cast<const void*>(tape), sizeof(uint32_t), nread);
 
@@ -2974,7 +2975,7 @@ hashagg_batch_read(HashAggBatch *batch, uint32_t *hashp)
 							static_cast<void *>(reinterpret_cast<char *>(tuple) + sizeof(uint32_t)),
 							t_len - sizeof(uint32_t));
 	if (nread != t_len - sizeof(uint32_t))
-		PgReport(ERROR).code(errcode_for_file_access())
+		bioseq_report<ERR, PG>().code(errcode_for_file_access())
 			.msg("unexpected EOF for tape {}: requested {} bytes, read {} bytes",
 				 static_cast<const void*>(tape), t_len - sizeof(uint32_t), nread);
 
@@ -3617,7 +3618,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 		aggTuple = SearchSysCache1(AGGFNOID,
 								   ObjectIdGetDatum(aggref->aggfnoid));
 		if (!HeapTupleIsValid(aggTuple))
-			pg_log(ERROR, "cache lookup failed for aggregate {}",
+			bioseq_log<ERR, PG>( "cache lookup failed for aggregate {}",
 				 aggref->aggfnoid);
 		aggform = reinterpret_cast<Form_pg_aggregate>(GETSTRUCT(aggTuple));
 
@@ -3659,7 +3660,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				Assert(DO_AGGSPLIT_SKIPFINAL(aggstate->aggsplit));
 
 				if (!OidIsValid(aggform->aggserialfn))
-					pg_log(ERROR, "serialfunc not provided for serialization aggregation");
+					bioseq_log<ERR, PG>( "serialfunc not provided for serialization aggregation");
 				serialfn_oid = aggform->aggserialfn;
 			}
 
@@ -3670,7 +3671,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				Assert(DO_AGGSPLIT_COMBINE(aggstate->aggsplit));
 
 				if (!OidIsValid(aggform->aggdeserialfn))
-					pg_log(ERROR, "deserialfunc not provided for deserialization aggregation");
+					bioseq_log<ERR, PG>( "deserialfunc not provided for deserialization aggregation");
 				deserialfn_oid = aggform->aggdeserialfn;
 			}
 		}
@@ -3682,7 +3683,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 			procTuple = SearchSysCache1(PROCOID,
 										ObjectIdGetDatum(aggref->aggfnoid));
 			if (!HeapTupleIsValid(procTuple))
-				pg_log(ERROR, "cache lookup failed for function {}",
+				bioseq_log<ERR, PG>( "cache lookup failed for function {}",
 					 aggref->aggfnoid);
 			aggOwner = (reinterpret_cast<Form_pg_proc>(GETSTRUCT(procTuple)))->proowner;
 			ReleaseSysCache(procTuple);
@@ -3781,7 +3782,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 
 				/* If not set then the planner messed up */
 				if (!OidIsValid(transfn_oid))
-					pg_log(ERROR, "combinefn not set for aggregate function");
+					bioseq_log<ERR, PG>( "combinefn not set for aggregate function");
 			}
 			else
 				transfn_oid = aggform->aggtransfn;
@@ -3832,7 +3833,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 				 * since then.
 				 */
 				if (pertrans->transfn.fn_strict && aggtranstype == INTERNALOID)
-					PgReport(ERROR)
+					bioseq_report<ERR, PG>()
 						.code(ERRCODE_INVALID_FUNCTION_DEFINITION)
 						.msg("combine function with transition type {} must not be declared STRICT",
 							 format_type_be(aggtranstype));
@@ -3866,7 +3867,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 					if (numAggTransFnArgs <= numDirectArgs ||
 						!IsBinaryCoercible(aggTransFnInputTypes[numDirectArgs],
 										   aggtranstype))
-						PgReport(ERROR)
+						bioseq_report<ERR, PG>()
 							.code(ERRCODE_INVALID_FUNCTION_DEFINITION)
 							.msg("aggregate {} needs to have compatible input type and transition type",
 								 aggref->aggfnoid);
@@ -3896,7 +3897,7 @@ VExecInitAgg(Agg *node, EState *estate, int eflags)
 	 * here anyway, just to be sure.)
 	 */
 	if (numaggrefs != list_length(aggstate->aggs))
-		PgReport(ERROR)
+		bioseq_report<ERR, PG>()
 			.code(ERRCODE_GROUPING_ERROR)
 			.msg("aggregate function calls cannot be nested");
 

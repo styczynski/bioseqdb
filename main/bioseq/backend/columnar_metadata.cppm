@@ -514,7 +514,7 @@ DeleteColumnarTableOptions(Oid regclass, bool missingOk)
 	}
 	else if (!missingOk)
 	{
-		pg_log(ERROR, "missing options for regclass: {}", regclass);
+		bioseq_log<ERR, PG>( "missing options for regclass: {}", regclass);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
@@ -841,12 +841,12 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 
 		if (attr <= 0 || attr > columnCount)
 		{
-			PgReport(ERROR).msg("invalid columnar chunk entry").detail("Attribute number out of range: {}", attr);
+			bioseq_report<ERR, PG>().msg("invalid columnar chunk entry").detail("Attribute number out of range: {}", attr);
 		}
 
 		if (chunkIndex < 0 || chunkIndex >= chunkCount)
 		{
-			PgReport(ERROR).msg("invalid columnar chunk entry").detail("Chunk number out of range: {}", chunkIndex);
+			bioseq_report<ERR, PG>().msg("invalid columnar chunk entry").detail("Chunk number out of range: {}", chunkIndex);
 		}
 
 		columnIndex = attr - 1;
@@ -1410,7 +1410,7 @@ CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata)
 		return;
 	}
 
-	pg_log(ERROR, "unexpected stripe state, stripe metadata entry for stripe with id={} is not consistent", stripeMetadata->id);
+	bioseq_log<ERR, PG>( "unexpected stripe state, stripe metadata entry for stripe with id={} is not consistent", stripeMetadata->id);
 }
 
 
@@ -1501,7 +1501,7 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 
 		if (tupleChunkGroupIndex >= chunkGroupCount)
 		{
-			pg_log(WARNING, "Tuple chunk group higher than chunk group count: {}, {} (storage_id = {}, stripe_id = {})", tupleChunkGroupIndex, chunkGroupCount, storageId, stripe);
+			bioseq_log<WRN, PG>( "Tuple chunk group higher than chunk group count: {}, {} (storage_id = {}, stripe_id = {})", tupleChunkGroupIndex, chunkGroupCount, storageId, stripe);
 			continue;
 		}
 
@@ -1856,7 +1856,7 @@ UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 	{
 		systable_inplace_update_cancel(state);
 		table_close(columnarStripes, AccessShareLock);
-		pg_log(ERROR, "attempted to modify an unexpected stripe, columnar storage with id={} does not have stripe with id={}", storageId, stripeId);
+		bioseq_log<ERR, PG>( "attempted to modify an unexpected stripe, columnar storage with id={} does not have stripe with id={}", storageId, stripeId);
 	}
 
 	/*
@@ -2389,7 +2389,7 @@ ColumnarOptionsRelationId(void)
 static Oid
 ColumnarOptionsIndexRegclass(void)
 {
-	JustLog("[bioseq] pg: ColumnarOptionsIndexRegclass() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarOptionsIndexRegclass() entered");
 	return safe_get_relname_relid("options_pkey", ColumnarNamespaceId());
 }
 
@@ -2401,7 +2401,7 @@ ColumnarOptionsIndexRegclass(void)
 static Oid
 ColumnarChunkRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarChunkRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarChunkRelationId() entered");
 	return safe_get_relname_relid("chunk", ColumnarNamespaceId());
 }
 
@@ -2413,7 +2413,7 @@ ColumnarChunkRelationId(void)
 static Oid
 ColumnarChunkGroupRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarChunkGroupRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarChunkGroupRelationId() entered");
 	return safe_get_relname_relid("chunk_group", ColumnarNamespaceId());
 }
 
@@ -2424,7 +2424,7 @@ ColumnarChunkGroupRelationId(void)
 static Oid
 ColumnarRowMaskRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarRowMaskRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarRowMaskRelationId() entered");
 	return safe_get_relname_relid("row_mask", ColumnarNamespaceId());
 }
 
@@ -2435,7 +2435,7 @@ ColumnarRowMaskRelationId(void)
 static Oid
 ColumnarRowMaskSeqId(void)
 {
-	JustLog("[bioseq] pg: ColumnarRowMaskSeqId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarRowMaskSeqId() entered");
 	return safe_get_relname_relid("row_mask_seq", ColumnarNamespaceId());
 }
 
@@ -2448,7 +2448,7 @@ ColumnarRowMaskSeqId(void)
 static Oid
 ColumnarChunkIndexRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarChunkIndexRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarChunkIndexRelationId() entered");
 	return safe_get_relname_relid("chunk_pkey", ColumnarNamespaceId());
 }
 
@@ -2460,7 +2460,7 @@ ColumnarChunkIndexRelationId(void)
 static Oid
 ColumnarChunkGroupIndexRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarChunkGroupIndexRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarChunkGroupIndexRelationId() entered");
 	return safe_get_relname_relid("chunk_group_pkey", ColumnarNamespaceId());
 }
 
@@ -2472,7 +2472,7 @@ ColumnarChunkGroupIndexRelationId(void)
 static Oid
 ColumnarRowMaskIndexRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarRowMaskIndexRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarRowMaskIndexRelationId() entered");
 	return safe_get_relname_relid("row_mask_pkey", ColumnarNamespaceId());
 }
 
@@ -2483,7 +2483,7 @@ ColumnarRowMaskIndexRelationId(void)
 static Oid
 ColumnarRowMaskStripeIndexRelationId(void)
 {
-	JustLog("[bioseq] pg: ColumnarRowMaskStripeIndexRelationId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarRowMaskStripeIndexRelationId() entered");
 	return safe_get_relname_relid("row_mask_stripe_unique", ColumnarNamespaceId());
 }
 
@@ -2496,13 +2496,13 @@ static Oid
 ColumnarNamespaceId(void)
 {
 	Oid nspace = get_namespace_oid("bioseq_internal", true);
-	JustLog("[bioseq] pg: ColumnarNamespaceId() looking up bioseq namespace");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarNamespaceId() looking up bioseq namespace");
 	/* if schema is earlier than 11.1-1 */
 	if (!OidIsValid(nspace))
 	{
 		nspace = get_namespace_oid("bioseq", false);
 	}
-	JustLog("[bioseq] pg: ColumnarNamespaceId() returning oid");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarNamespaceId() returning oid");
 	return nspace;
 }
 
@@ -2514,7 +2514,7 @@ ColumnarNamespaceId(void)
 uint64_t
 LookupStorageId(RelFileLocator relfilelocator)
 {
-	JustLog("[bioseq] pg: LookupStorageId() entered");
+	bioseq_log<DBG>("[bioseq] pg: LookupStorageId() entered");
 	Oid relationId = RelidByRelfilenumber(RelationTablespace_compat(relfilelocator),
 										  RelationPhysicalIdentifierNumber_compat(
 											  relfilelocator));
@@ -2534,7 +2534,7 @@ LookupStorageId(RelFileLocator relfilelocator)
 uint64_t
 ColumnarMetadataNewStorageId()
 {
-	JustLog("[bioseq] pg: ColumnarMetadataNewStorageId() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarMetadataNewStorageId() entered");
 	return nextval_internal(ColumnarStorageIdSequenceRelationId(), false);
 }
 
@@ -2546,14 +2546,14 @@ ColumnarMetadataNewStorageId()
 export void
 ColumnarStorageUpdateIfNeeded(Relation rel, bool isUpgrade)
 {
-	JustLog("[bioseq] pg: ColumnarStorageUpdateIfNeeded() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageUpdateIfNeeded() entered");
 	if (ColumnarStorageIsCurrent(rel))
 	{
 		return;
 	}
 
 	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
-	JustLog("[bioseq] pg: ColumnarStorageUpdateIfNeeded() checking nblocks<2");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageUpdateIfNeeded() checking nblocks<2");
 	if (nblocks < 2)
 	{
 		ColumnarStorageInit(rel->rd_smgr, ColumnarMetadataNewStorageId());
@@ -2754,7 +2754,7 @@ InsertSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
 {
 	const Oid relid = SubTableMetadataRelationId();
 	if (!OidIsValid(relid)) {
-		pg_log(ERROR, "bioseq storage: seq_sub_table catalog not present");
+		bioseq_log<ERR, PG>( "bioseq storage: seq_sub_table catalog not present");
 	}
 
 	// Race-loss handling — if the unique partial index already accepted a
@@ -2819,7 +2819,7 @@ UpdateSubTableShardBytesWritten(Oid database_oid, Oid tablespace_oid, Oid main_r
 	const Oid relid = SubTableMetadataRelationId();
 	const Oid idx_oid = SubTableMetadataPKeyIndexRelationId();
 	if (!OidIsValid(relid)) {
-		pg_log(ERROR, "bioseq storage: seq_sub_table catalog not present");
+		bioseq_log<ERR, PG>( "bioseq storage: seq_sub_table catalog not present");
 	}
 
 	Relation rel = safe_relation_open(relid, RowExclusiveLock);
@@ -2845,7 +2845,7 @@ UpdateSubTableShardBytesWritten(Oid database_oid, Oid tablespace_oid, Oid main_r
 	if (!HeapTupleIsValid(oldTuple)) {
 		systable_endscan(scan);
 		table_close(rel, RowExclusiveLock);
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 		       "bioseq storage: cannot update missing sub-table shard "
 		       "(db={}, spc={}, relfilenode={}, attno={}, bucket={}, shard={})",
 		       static_cast<unsigned>(database_oid),

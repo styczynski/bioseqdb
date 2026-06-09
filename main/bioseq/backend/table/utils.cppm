@@ -23,8 +23,8 @@ module;
 
 export module bioseq_table:utils;
 // Minimal import set (DOC0283). This TU only references `enable_logging`
-// (mlogging, reached through the JustLog macro) and the PBitmapset / PList /
-// PgReport wrappers (pg_utils, via its re-exported :bitmapset / :lists /
+// (mlogging, reached through the bioseq_log<DBG> macro) and the PBitmapset / PList /
+// BioseqReport wrappers (pg_utils, via its re-exported :bitmapset / :lists /
 // :logging partitions). The columnar I/O, physical-storage, metadata and
 // table-types modules it used to import are entirely unreferenced in the body
 // below; dropping them cuts this TU's transitive BMI fan-out from 15 to ~6,
@@ -50,7 +50,7 @@ const TableAmRoutine * GetColumnarTableAmRoutine(void);
 export extern "C++" bool
 IsColumnarTableAmTable(Oid relationId)
 {
-	JustLog("[bioseq] pg: IsColumnarTableAmTable() entered");
+	bioseq_log<DBG>("[bioseq] pg: IsColumnarTableAmTable() entered");
 	if (!OidIsValid(relationId))
 	{
 		return false;
@@ -101,7 +101,7 @@ ColumnarAttrNeeded(ScanState *ss, List *customList)
 		}
 		else if (var->varattno < SelfItemPointerAttributeNumber)
 		{
-			PgReport(ERROR)
+			bioseq_report<ERR, PG>()
 				.code(ERRCODE_FEATURE_NOT_SUPPORTED)
 				.msg("MIN / MAX TransactionID or CommandID not supported for BioseqScan");
 		}

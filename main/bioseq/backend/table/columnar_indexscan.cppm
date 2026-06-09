@@ -18,6 +18,7 @@ module;
 
 export module bioseq_table:index_scan;
 
+import mlogging;
 import pg_utils;
 import bioseq_table_types;
 import bioseq_scan_state;
@@ -69,7 +70,7 @@ static HeapTuple reorderqueue_pop(IndexScanState* node);
 #define CHECK_REL_PROCEDURE(pname) \
     do { \
         if (indexRelation->rd_indam->pname == NULL) \
-            pg_log(ERROR, "function \"{}\" is not defined for index \"{}\"", \
+            bioseq_log<ERR, PG>( "function \"{}\" is not defined for index \"{}\"", \
                  CppAsString(pname), RelationGetRelationName(indexRelation)); \
     } while(0)
 
@@ -327,7 +328,7 @@ IndexNextWithReorder(IndexScanState* node)
                                       scandesc->xs_orderbynulls,
                                       node);
             if (cmp < 0)
-                pg_log(ERROR, "index returned tuples in wrong order");
+                bioseq_log<ERR, PG>( "index returned tuples in wrong order");
             else if (cmp == 0)
                 was_exact = true;
             else

@@ -288,7 +288,7 @@ generate_test_sequences(const GeneratorParams& params) {
         pairs.push_back(std::move(pair));
     }
 
-    JustLog("[bioseq.sequences.generation] Generated {} fragment pairs over a {} bp reference "
+    bioseq_log<DBG>("[bioseq.sequences.generation] Generated {} fragment pairs over a {} bp reference "
             "(sub_rate={}, ins_rate={}, del_rate={})",
             pairs.size(), params.reference_length,
             params.substitution_rate, params.insertion_rate, params.deletion_rate);

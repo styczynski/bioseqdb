@@ -1,6 +1,6 @@
 /**
  * @file instrumentation/access.cppm
- * @brief Consumer-side accessors. Summary writer dumps aggregates via JustLog.
+ * @brief Consumer-side accessors. Summary writer dumps aggregates via bioseq_log<DBG>.
  *
  * The summary writer takes a ProfilerBlock<Args>& as input. The non-templated
  * convenience overload `write_summary_to_justlog()` lives in
@@ -9,7 +9,7 @@
  */
 module;
 
-#include "common.h"   // JustLog
+#include "common.h"   // bioseq_log<DBG>
 
 #include <array>
 #include <cstdint>
@@ -17,7 +17,7 @@ module;
 
 export module bioseq_instr.access;
 
-import mlogging;   // brings `enable_logging` and the fmtlog wrapper into scope for JustLog
+import mlogging;   // brings `enable_logging` and the fmtlog wrapper into scope for bioseq_log<DBG>
 
 import bioseq_instr.config;
 import bioseq_instr.descriptor;
@@ -72,7 +72,7 @@ namespace detail {
     return detail::hist_percentile(histogram, p);
 }
 
-/// Dump every region/loop aggregate with non-zero visits to JustLog.
+/// Dump every region/loop aggregate with non-zero visits to bioseq_log<DBG>.
 /// Output format mirrors Part 48.5 of NEW_PROFILING_RESEARCH.md:
 ///   [bioseq] profile <region_name> total=<ns> visits=<n> mean=<ns> p50=<ns> p99=<ns>
 /// Loops add per-iteration fields. ColumnarScan_EndCustomScan calls the
@@ -84,7 +84,7 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
     } else {
         const auto n_regions = descriptor_count();
 
-        JustLog("[bioseq] profile === BEGIN summary ({} descriptors registered) ===",
+        bioseq_log<DBG>("[bioseq] profile === BEGIN summary ({} descriptors registered) ===",
                 n_regions);
 
         for (std::uint32_t id = 1; id <= n_regions; ++id) {
@@ -102,7 +102,7 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                     const auto per_iter_mean_ns = la->total_iterations > 0
                         ? la->total_ns / la->total_iterations
                         : std::uint64_t{0};
-                    JustLog("[bioseq] profile {} total={} ns visits={} mean={} ns "
+                    bioseq_log<DBG>("[bioseq] profile {} total={} ns visits={} mean={} ns "
                             "p50={} ns p99={} ns min={} ns max={} ns "
                             "iters={} mean_per_iter={} ns work={} target={} lanes={} "
                             "cycles={} instructions={} branches={} branch_misses={}",
@@ -124,7 +124,7 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                     const auto mean_ns = ra->total_ns / ra->visits;
                     const auto p50 = detail::hist_percentile(ra->ns_hist, 0.50);
                     const auto p99 = detail::hist_percentile(ra->ns_hist, 0.99);
-                    JustLog("[bioseq] profile {} total={} ns visits={} mean={} ns "
+                    bioseq_log<DBG>("[bioseq] profile {} total={} ns visits={} mean={} ns "
                             "p50={} ns p99={} ns min={} ns max={} ns "
                             "cycles={} instructions={} branches={} branch_misses={}",
                             desc->name,
@@ -150,14 +150,14 @@ void write_summary_to_justlog(ProfilerBlock<Args>& prof) noexcept {
                     case arena_kind::hash:    kind_name = "hash"; break;
                     default:                  kind_name = "?"; break;
                 }
-                JustLog("[bioseq] profile.arena {} live={} bytes total={} bytes "
+                bioseq_log<DBG>("[bioseq] profile.arena {} live={} bytes total={} bytes "
                         "allocs={} largest={} bytes",
                         kind_name, c.bytes_live, c.bytes_total,
                         c.alloc_count, c.largest);
             }
         }
 
-        JustLog("[bioseq] profile === END summary ===");
+        bioseq_log<DBG>("[bioseq] profile === END summary ===");
     }
 }
 

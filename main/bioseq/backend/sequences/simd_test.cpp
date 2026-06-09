@@ -61,7 +61,7 @@ public:
             }
             dbgstr += " ";
         }
-        // JustLog("XDBG --> {}", dbgstr);
+        // bioseq_log<DBG>("XDBG --> {}", dbgstr);
         actual_lanes = hn::Lanes(d);
     }
 
@@ -115,8 +115,8 @@ void assert_integrity_of_indices(const sequence_simd_accumulator<R>& acc, const 
     const auto coverage = acc.to_indices();
     const auto traces = acc.to_strings();
 
-    // JustLog("Y = {}", traces);
-    // JustLog("I = {}", coverage);
+    // bioseq_log<DBG>("Y = {}", traces);
+    // bioseq_log<DBG>("I = {}", coverage);
 
     std::vector<std::pair<size_t, bool>> ends;
     ends.reserve(coverage.size() * 2);
@@ -159,7 +159,7 @@ void assert_integrity_of_indices(const sequence_simd_accumulator<R>& acc, const 
     }
     ASSERT(covered, fmt::format("Entire sequence must be covered, but after position {}, there's no coverage: {}", ends[i].first, description), coverage, ends, traces);
 
-    // JustLog("coverage = {} / {}", coverage, traces);
+    // bioseq_log<DBG>("coverage = {} / {}", coverage, traces);
 };
 
 // void assert_full_sequence_coverage(const int sequence_size, const std::vector<std::optional<std::tuple<size_t, size_t>>>& indices) {
@@ -321,7 +321,7 @@ TEMPLATE_TEST_CASE("Sequence SIMD full itreration for medium sequence DNA4", "[s
 // ATCGTAGCTAGTC\
 // "_dna4};
 //     auto testtest = compact_sequence_range<seq::dna4>(FIXED_TARGET5);
-//     JustLog("heheszke = {}", testtest);
+//     bioseq_log<DBG>("heheszke = {}", testtest);
     
 //     const hn::ScalableTag<typename decltype(testtest)::traits::storage_unit> d;
 //     std::string trails[256];
@@ -336,10 +336,10 @@ TEMPLATE_TEST_CASE("Sequence SIMD full itreration for medium sequence DNA4", "[s
 //                 trails[i] += seq_traits::letter_to_char(lanes_values[i]);
 //             }
 //         }
-//         //JustLog("got vec [{}] test: {} <{}>", is_full, hwy_str_as<seq::dna4>(d, incoming), hwy_str(d, hn::VecFromMask(d, mask))); //hwy_str_as<seq::dna4>(d, outgoing));
+//         //bioseq_log<DBG>("got vec [{}] test: {} <{}>", is_full, hwy_str_as<seq::dna4>(d, incoming), hwy_str(d, hn::VecFromMask(d, mask))); //hwy_str_as<seq::dna4>(d, outgoing));
 //     });
 //     for(size_t i=0;i<hn::Lanes(d);++i) {
-//         JustLog("trace [{}] = {}", i, trails[i]);
+//         bioseq_log<DBG>("trace [{}] = {}", i, trails[i]);
 //     }
 // }
 

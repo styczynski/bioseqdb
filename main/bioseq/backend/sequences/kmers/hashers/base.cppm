@@ -91,7 +91,7 @@ auto run_all_hashers_on_sequence(
     size_t pos = 0;
     for (auto const& nucl : seq.template iterable<BP>()) {
         const auto& [hash_val, _] = h_scalar.next(static_cast<I>(nucl), static_cast<I>(nucl));
-        //JustLog("pos = {} / {}", pos, seq.bp_size());
+        //bioseq_log<DBG>("pos = {} / {}", pos, seq.bp_size());
         if (pos >= kmer_length) {
             ret_scalar.push_back(std::make_pair(pos, hash_val));
         }
@@ -106,7 +106,7 @@ auto run_all_hashers_on_sequence(
             const auto& mask_values = extract_lanes<I>(d, mask);
             size_t index = 0;
             for (auto& value : values) {
-                // JustLog("--> pos={} offsets[{}]={} <{}> -> {}", pos, index, offsets[index] * seq_traits::letters_per_unit, mask_values[index] != 0, offsets[index] * seq_traits::letters_per_unit + pos);
+                // bioseq_log<DBG>("--> pos={} offsets[{}]={} <{}> -> {}", pos, index, offsets[index] * seq_traits::letters_per_unit, mask_values[index] != 0, offsets[index] * seq_traits::letters_per_unit + pos);
                 if (mask_values[index]) {
                     ret_simd.push_back(std::make_pair(offsets[index] * seq_traits::letters_per_unit + pos, value));
                 }
@@ -119,8 +119,8 @@ auto run_all_hashers_on_sequence(
     std::sort(ret_simd.begin(), ret_simd.end());
     //ret_simd.erase(std::unique(ret_simd.begin(), ret_simd.end()), ret_simd.end());
 
-    // JustLog("simd = {}", ret_simd);
-    // JustLog("scalar = {}", ret_scalar);
+    // bioseq_log<DBG>("simd = {}", ret_simd);
+    // bioseq_log<DBG>("scalar = {}", ret_scalar);
 
     return std::make_tuple(
         ret_simd,

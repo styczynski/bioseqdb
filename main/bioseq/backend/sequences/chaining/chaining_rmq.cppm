@@ -917,7 +917,7 @@ void chain_anchors_rmq(
     }
 
     }  // end mg_lchain_rmq_forward scope
-    JustLog("[chaining_rmq] RMQ chaining pass complete for {} anchors", anchor_count);
+    bioseq_log<DBG>("[chaining_rmq] RMQ chaining pass complete for {} anchors", anchor_count);
 
     static const auto* _bt_desc =
         bioseq::instr::register_region_static("backtrack_chains");

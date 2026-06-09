@@ -147,7 +147,7 @@ void check_segment_parity(std::size_t n, std::uint64_t seed) {
     REQUIRE(assembled.target_length() == total_bp);
     const auto got = assembled_map(assembled, baseline);
     if (got != baseline)
-        JustLog("[boundary-parity] n={} nfrag={} baseline_kmers={} got_kmers={}",
+        bioseq_log<DBG>("[boundary-parity] n={} nfrag={} baseline_kmers={} got_kmers={}",
                 n, nfrag, baseline.size(), got.size());
     REQUIRE(got == baseline);
 }

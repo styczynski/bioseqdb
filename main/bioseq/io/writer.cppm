@@ -596,14 +596,14 @@ private:
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
             _first_error_message = std::move(msg);
-            loge("[bioseq_io.writer] write failed: {}", _first_error_message);
+            bioseq_log<ERR>("[bioseq_io.writer] write failed: {}", _first_error_message);
         }
     }
     void stamp_error(const std::string& msg) {
         std::lock_guard guard{*_error_mutex};
         if (!_failed.exchange(true, std::memory_order_acq_rel)) {
             _first_error_message = msg;
-            loge("[bioseq_io.writer] write failed: {}", _first_error_message);
+            bioseq_log<ERR>("[bioseq_io.writer] write failed: {}", _first_error_message);
         }
     }
 

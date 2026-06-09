@@ -448,7 +448,7 @@ struct supported_alphabets {
         alphabet_entries_tuple>;
 
     /// Runtime: map a code to the corresponding pack entry's display
-    /// name. Returns "?" on out-of-band input with a JustLog telemetry
+    /// name. Returns "?" on out-of-band input with a bioseq_log<DBG> telemetry
     /// line so silent corruption is observable.
     [[nodiscard]] static std::string_view name_of_alphabet_code(
         alphabet_code_t code) noexcept
@@ -460,7 +460,7 @@ struct supported_alphabets {
             tpl::type_list<entries_pack...>>(code_to_name_probe{code});
 
         if (!opt.has_value()) [[unlikely]] {
-            JustLog("[bioseq] name_of_alphabet_code: out-of-band code={}",
+            bioseq_log<DBG>("[bioseq] name_of_alphabet_code: out-of-band code={}",
                     static_cast<std::size_t>(code));
             return std::string_view{"?"};
         }
@@ -1114,7 +1114,7 @@ struct compact_sequence_range_base {
         const auto& seq_str = to_string(begin, end);
         const auto& sub_str = symbols_vector_to_string(sub_seq);
         const auto pos = seq_str.find(sub_str, start_symbol_pos);
-        //JustLog("FIND <{}> in <{}> -> {} [skip = start_symbol_pos]", seq_str, sub_str, pos);
+        //bioseq_log<DBG>("FIND <{}> in <{}> -> {} [skip = start_symbol_pos]", seq_str, sub_str, pos);
         if (pos == std::string::npos) {
             return std::nullopt;
         }
@@ -1663,7 +1663,7 @@ public:
         // };
 
         size_t operator-(iterator_impl const& other) const {
-            // JustLog("operator- {} {} = {}", (int64_t)&(*(this->base())), (int64_t)&(*other.base()), static_cast<size_t>(this->base() - other.base()));
+            // bioseq_log<DBG>("operator- {} {} = {}", (int64_t)&(*(this->base())), (int64_t)&(*other.base()), static_cast<size_t>(this->base() - other.base()));
             return static_cast<size_t>(this->base() - other.base());
             //return std::distance(this->base(), other.base());
         };

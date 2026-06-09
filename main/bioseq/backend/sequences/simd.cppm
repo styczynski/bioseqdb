@@ -20,13 +20,6 @@ module;
 export module bioseq_sequences.simd;
 
 import mlogging;
-#ifndef NO_POSTGRES
-// DOC0260 R8: stdc_compare raises pg_log(ERROR) on caller-contract violations
-// under Postgres builds. pg_utils.logging is only part of the extension's
-// module set; the NO_POSTGRES aligner / test execs compile the DEBUG_ASSERT
-// branch in stdc_compare instead and must not import it.
-import pg_utils.logging;
-#endif
 import sequan_compat;
 import bioseq_sequences;
 import algo.circular_append_buffer;
@@ -595,11 +588,11 @@ std::tuple<size_t, std::array<size_t, max_lanes>> calculate_iteration_offsets(
 	while (i>=1) {
 		--i;
 		if (offsets[i+1] < units_per_lane) {
-			// JustLog("offset problematic at {} ({} cmp {})", i, offsets[i+1], units_per_lane);
+			// bioseq_log<DBG>("offset problematic at {} ({} cmp {})", i, offsets[i+1], units_per_lane);
 			break;
 		}
 		offsets[i] = offsets[i+1] - units_per_lane;
-		// JustLog("{} -> {} - {} = {}", i, offsets[i+1], units_per_lane, offsets[i]);
+		// bioseq_log<DBG>("{} -> {} - {} = {}", i, offsets[i+1], units_per_lane, offsets[i]);
 	}
 	for(; i > 0; --i) {
 		offsets[i] = 0;
@@ -737,7 +730,7 @@ inline void iterate_sequence_bp_simd_offsets(
 					// The same
 					all_bp_vecs[delay_no] = hn::And(delayed_buffer, bp_bitmask_vec);
 					delayed_buffer = hn::ShiftRightSame(delayed_buffer, seq_traits::bits_per_char);
-					//JustLog("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
+					//bioseq_log<DBG>("next (-{})bp vec = {}", delay, hwy_str<decltype(d), seq::dna4>(d, delayed_bp));
 				}
 			}
 			if constexpr (mode == ITER_FULL_MATRIX) {
@@ -745,7 +738,7 @@ inline void iterate_sequence_bp_simd_offsets(
 			} else if constexpr (mode == ITER_PARTIAL_MATRIX) {
 				std::apply(handler_fn, std::tuple_cat(std::forward_as_tuple(std::bool_constant<false>{}, offsets, d, main_mask, base_bp_vec), delays_masks, all_bp_vecs));
 			}
-			// JustLog("next (-{})bp vec = {}", 0, hwy_str<decltype(d), seq::dna4>(d, base_bp_vec));
+			// bioseq_log<DBG>("next (-{})bp vec = {}", 0, hwy_str<decltype(d), seq::dna4>(d, base_bp_vec));
 
 			if constexpr (mode == ITER_PARTIAL_MATRIX) {
 				if constexpr (delays_count > 0) {
@@ -775,7 +768,7 @@ inline void iterate_sequence_bp_simd_offsets(
 					main_mask = left_mask;
 				}
 
-				// JustLog("main_counter={} of (left): {} / (none): {}", main_counter, main_counter_only_left, main_counter_none);
+				// bioseq_log<DBG>("main_counter={} of (left): {} / (none): {}", main_counter, main_counter_only_left, main_counter_none);
 			}
 		}
 		return false;
@@ -809,7 +802,7 @@ inline void iterate_sequence_bp_simd_offsets(
 
 	DEBUG_ASSERT(buffer.get_forward_capacity() >= bps_last_chunk / seq_traits::letters_per_unit, "Demand correct capacity in the buffer when loading last (partial) chunk");
 
-	//JustLog("LOAD {} VALUES PARTIAL cap={}", static_cast<uint32_t>(end - iter), buffer.get_forward_capacity());
+	//bioseq_log<DBG>("LOAD {} VALUES PARTIAL cap={}", static_cast<uint32_t>(end - iter), buffer.get_forward_capacity());
 
 	matrix mat(buffer.get_ptr_iter(buffer_write_pos));
 	mat.partial_fill_with_offsets(
@@ -2682,7 +2675,7 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
     // (every test fixture pins a single alphabet).
 #ifndef NO_POSTGRES
     if (a.alphabet_code != b.alphabet_code) {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
             "stdc_compare: callers must pass same-alphabet sequences "
             "(lhs={}, rhs={})",
             static_cast<unsigned>(a.alphabet_code),
@@ -2738,7 +2731,7 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
                 // storage widths that can't bit-cast (e.g. dna5 with
                 // 3-bit leftover). This is a caller-contract
                 // violation, so per DOC0260 R8 raise a load-bearing
-                // pg_log(ERROR, …) — DEBUG_ASSERT would be silent in
+                // bioseq_log<ERR, PG>( …) — DEBUG_ASSERT would be silent in
                 // release builds and return std::strong_ordering::equal
                 // on a value mismatch. NO_POSTGRES build path keeps the
                 // historical DEBUG_ASSERT (aligner exec never hits
@@ -2746,7 +2739,7 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
                 (void)ra;
                 (void)rb;
 #ifndef NO_POSTGRES
-                pg_log(ERROR,
+                bioseq_log<ERR, PG>(
                     "stdc_compare: cross-storage-width same-alphabet pair "
                     "with non-bit-castable layout (alphabet does not satisfy "
                     "is_sequence_custom_alphabet_bit_castable_to)");

@@ -234,7 +234,7 @@ struct AlignerOutput {
             bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.target));
     }
 
-    JustLog("[bench_v10] build_input '{}' produced {} pairs (k_override={})",
+    bioseq_log<DBG>("[bench_v10] build_input '{}' produced {} pairs (k_override={})",
              test_case_name, input.pairs.size(), input.kmer_size_override);
     return input;
 }
@@ -294,7 +294,7 @@ struct AlgorithmDispatch {
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::SCALAR;
     } else {
-        loge("[bench_v10] unknown algorithm '{}'", algo);
+        bioseq_log<ERR>("[bench_v10] unknown algorithm '{}'", algo);
     }
     return dispatch;
 }
@@ -336,7 +336,7 @@ struct AlgorithmDispatch {
                     bench_lazy_query, bench_lazy_target, dispatch.params);
             }
         } catch (const std::exception& exception) {
-            loge("[bench_v10] aligner threw exception (algo='{}', pair_index={}, "
+            bioseq_log<ERR>("[bench_v10] aligner threw exception (algo='{}', pair_index={}, "
                  "query_len={}, target_len={}, k={}): {}",
                  algo, pair_index,
                  input.queries_acgt[pair_index].size(),
@@ -345,7 +345,7 @@ struct AlgorithmDispatch {
                  exception.what());
             continue;
         } catch (...) {
-            loge("[bench_v10] aligner threw non-std exception (algo='{}', pair_index={})",
+            bioseq_log<ERR>("[bench_v10] aligner threw non-std exception (algo='{}', pair_index={})",
                  algo, pair_index);
             continue;
         }

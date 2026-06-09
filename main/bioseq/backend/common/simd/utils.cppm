@@ -109,7 +109,7 @@ inline constexpr std::vector<T> extract_lanes(const D& d, const hn::Mask<D>& inp
 template<typename T, typename B>
 struct simd_array_allocator {
 	static B allocate(const size_t& len) {
-		// JustLog("simd alloc {}", len);
+		// bioseq_log<DBG>("simd alloc {}", len);
 		return hwy::AllocateAligned<T>(len);
 	}
 };
@@ -734,19 +734,12 @@ void dosomething() {
 	vec_in_t v = hn::LoadU(d_in, &(data[0]));
 
 	typename vector_upscaler<D_IN>::rescaled_t<D_OUT> outp = vector_upscaler<D_IN>::upscale(d_in, d_out, v);
-	JustLog("this is innput   => {}", hwy_str<D_IN, void, vec_in_t>(d_in, v));
-	for (auto& heheszki : outp) {
-		JustLog("this is upscaled => {}", hwy_str<D_OUT, void, vec_out_t>(d_out, heheszki));
-	}
-
-	// JustLog("HELLO! :DDDDD dosomething() = {}", hwy_str<D_IN, void, vec_in_t>(d_in, v));
-
-	// vec_in_t zeros = Zero(d_in);
-	// vec_out_t v1 = BitCast(d_out, InterleaveLower(d_in, v, zeros));
-	// vec_out_t v2 = BitCast(d_out, InterleaveUpper(d_in, v, zeros));
-
-	// JustLog("HELLO! :DDDDD dosomething() = {} / {}", hwy_str<D_OUT, void, vec_out_t>(d_out, v1), hwy_str<D_OUT, void, vec_out_t>(d_out, v2));
-	// // BitCast(d, InterleaveLower(dw, BitCast(dw, t0), BitCast(dw, t1)));
+	bioseq_log_lazy<DBG>([&] {
+		bioseq_log<DBG>("this is input    => {}", hwy_str<D_IN, void, vec_in_t>(d_in, v));
+		for (auto& scaled : outp) {
+			bioseq_log<DBG>("this is upscaled => {}", hwy_str<D_OUT, void, vec_out_t>(d_out, scaled));
+		}
+	});
 }
 
 /// Vectorized fast_log2 approximation using IEEE 754 bit tricks.

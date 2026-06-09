@@ -25,15 +25,19 @@ module;
 
 
 //#define FMT_HEADER_ONLY
-#include <type_traits>
-#include <vector>
-#include <chrono>
 #include <atomic>
-#include <thread>
-#include <memory>
-#include <mutex>
+#include <chrono>
+#include <concepts>
 #include <limits>
 #include <ios>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <thread>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 // For generic serialization
 #include <rfl/json.hpp>
@@ -155,6 +159,10 @@ module;
 // define FMTLOG_BLOCK=1 if log statment should be blocked when queue is full, instead of discarding the msg
 #ifndef FMTLOG_BLOCK
 #define FMTLOG_BLOCK 0
+#endif
+
+#ifndef FMTLOG_QUEUE_SIZE
+#define FMTLOG_QUEUE_SIZE (1 << 20)
 #endif
 
 #include "common.h"
@@ -817,7 +825,7 @@ public:
   template<typename... Args>
   inline void log(
     uint32_t& logId, int64_t tsc, const char* location, LogLevel level,
-    fmt::format_string<typename fmtlogdetail::UnrefPtr<fmt::remove_cvref_t<Args>>::type...> format,
+    fmt::format_string<std::type_identity_t<Args>...> format,
     Args&&... args) noexcept {
     if (!logId) {
       auto unnamed_format = unNameFormat<false>(fmt::string_view(format), nullptr, args...);
@@ -1542,24 +1550,840 @@ struct formatter<T>: formatter<std::string> {
 }
 }
 
-//fmt::format(
 export bool enable_logging = false;
+
+export enum class LoggingLevel : std::uint8_t {
+  DBG = 0,
+  INF = 1,
+  WRN = 2,
+  ERR = 3,
+  OFF = 4,
+};
+
+export enum class LoggingTarget : std::uint8_t {
+  FILE = 0,
+  PG = 1,
+};
+
+export inline constexpr LoggingLevel DBG = LoggingLevel::DBG;
+export inline constexpr LoggingLevel INF = LoggingLevel::INF;
+export inline constexpr LoggingLevel WRN = LoggingLevel::WRN;
+export inline constexpr LoggingLevel ERR = LoggingLevel::ERR;
+export inline constexpr LoggingLevel OFF = LoggingLevel::OFF;
+
+export inline constexpr LoggingTarget PG = LoggingTarget::PG;
+
+export inline constexpr LoggingLevel GLOBAL_ENABLED_LOGGING_LEVEL =
+    LoggingLevel::DBG;
+
+export struct BioseqSourceLocation {
+  const char* file_name = "";
+  const char* function_name = "";
+  std::uint_least32_t line = 0;
+  std::uint_least32_t column = 0;
+};
+
+export inline BioseqSourceLocation to_bioseq_source_location(
+    std::source_location loc) noexcept
+{
+  return BioseqSourceLocation{
+      .file_name = loc.file_name(),
+      .function_name = loc.function_name(),
+      .line = loc.line(),
+      .column = loc.column(),
+  };
+}
+
+export struct BioseqReportView {
+  LoggingLevel level = LoggingLevel::ERR;
+  int raw_pg_elevel = 0;
+  bool has_raw_pg_elevel = false;
+  int sqlerrcode = 0;
+  bool has_sqlerrcode = false;
+  std::string_view message;
+  std::string_view detail;
+  std::string_view hint;
+  BioseqSourceLocation location;
+};
+
+export struct BioseqPostgresLoggingSink {
+  bool (*should_log_level)(LoggingLevel level) = nullptr;
+
+  void (*log_level)(
+      LoggingLevel level,
+      BioseqSourceLocation location,
+      std::string_view message) = nullptr;
+
+  bool (*should_log_pg)(int pg_elevel) = nullptr;
+
+  void (*log_pg)(
+      int pg_elevel,
+      BioseqSourceLocation location,
+      std::string_view message) = nullptr;
+
+  void (*report)(const BioseqReportView& report) = nullptr;
+};
+
+export namespace bioseq_logging_detail {
+
+template<typename... Args>
+struct format_with_location {
+  fmt::format_string<Args...> format_string;
+  std::source_location location;
+
+  template<typename SourceFmt>
+      requires std::convertible_to<
+          const SourceFmt&, fmt::format_string<Args...>>
+  consteval format_with_location(
+      const SourceFmt& source_fmt,
+      std::source_location captured =
+          std::source_location::current()) noexcept
+      : format_string(source_fmt), location(captured) {}
+};
+
+template<typename... Args>
+[[gnu::always_inline]] inline void format_into(
+    fmt::memory_buffer& target,
+    fmt::format_string<Args...> fmt_string,
+    Args&&... args)
+{
+  target.clear();
+  fmt::format_to(
+      std::back_inserter(target),
+      fmt_string,
+      std::forward<Args>(args)...);
+  target.push_back('\0');
+}
+
+} // namespace bioseq_logging_detail
+
+namespace bioseq_logging_detail {
+
+struct LogSiteKey {
+  std::string_view file;
+  std::string_view format;
+  std::uint_least32_t line;
+  std::uint_least32_t column;
+  std::uint8_t level;
+};
+
+struct LogSiteKeyHash {
+  std::size_t operator()(const LogSiteKey& key) const noexcept;
+};
+
+struct LogSiteKeyEq {
+  bool operator()(const LogSiteKey& a, const LogSiteKey& b) const noexcept;
+};
+
+struct LogSiteEntry {
+  std::atomic<std::uint32_t> published_fmtlog_id{0};
+  std::uint32_t registration_fmtlog_id = 0;
+  std::mutex registration_mutex;
+  std::string location;
+};
+
+inline std::shared_mutex log_site_table_mutex;
+inline std::unordered_map<
+    LogSiteKey,
+    std::unique_ptr<LogSiteEntry>,
+    LogSiteKeyHash,
+    LogSiteKeyEq> log_site_table;
+
+inline std::mutex postgres_sink_mutex;
+inline BioseqPostgresLoggingSink postgres_sink;
+
+[[nodiscard, gnu::always_inline]]
+inline std::uint64_t fnv1a_64(std::string_view s) noexcept
+{
+  std::uint64_t h = 14695981039346656037ull;
+  for (char c : s) {
+    h ^= static_cast<std::uint8_t>(c);
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+[[nodiscard, gnu::always_inline]]
+inline std::uint64_t hash_combine_64(
+    std::uint64_t seed,
+    std::uint64_t value) noexcept
+{
+  return seed ^ (value + 0x9e3779b97f4a7c15ull +
+                 (seed << 6) + (seed >> 2));
+}
+
+inline std::size_t LogSiteKeyHash::operator()(
+    const LogSiteKey& key) const noexcept
+{
+  std::uint64_t h = fnv1a_64(key.file);
+  h = hash_combine_64(h, fnv1a_64(key.format));
+  h = hash_combine_64(h, key.line);
+  h = hash_combine_64(h, key.column);
+  h = hash_combine_64(h, key.level);
+  return static_cast<std::size_t>(h);
+}
+
+inline bool LogSiteKeyEq::operator()(
+    const LogSiteKey& a,
+    const LogSiteKey& b) const noexcept
+{
+  return a.line == b.line &&
+         a.column == b.column &&
+         a.level == b.level &&
+         a.file == b.file &&
+         a.format == b.format;
+}
+
+[[nodiscard]] inline std::string make_fmtlog_location(
+    BioseqSourceLocation location)
+{
+  return fmt::format(
+      "{}:{}:{}",
+      location.file_name,
+      location.line,
+      location.column);
+}
+
+[[nodiscard]] inline std::string make_fmtlog_location(
+    std::source_location loc)
+{
+  return make_fmtlog_location(to_bioseq_source_location(loc));
+}
+
+inline LogSiteEntry& file_log_site_for(
+    BioseqSourceLocation location,
+    LoggingLevel level,
+    fmt::string_view format_string)
+{
+  const LogSiteKey key{
+      .file = location.file_name,
+      .format = std::string_view(format_string.data(), format_string.size()),
+      .line = location.line,
+      .column = location.column,
+      .level = static_cast<std::uint8_t>(level),
+  };
+
+  {
+    std::shared_lock read_lock(log_site_table_mutex);
+    if (auto it = log_site_table.find(key); it != log_site_table.end()) {
+      return *it->second;
+    }
+  }
+
+  std::unique_lock write_lock(log_site_table_mutex);
+  if (auto it = log_site_table.find(key); it != log_site_table.end()) {
+    return *it->second;
+  }
+
+  auto entry = std::make_unique<LogSiteEntry>();
+  entry->location = make_fmtlog_location(location);
+  auto& ref = *entry;
+  log_site_table.emplace(key, std::move(entry));
+  return ref;
+}
+
+inline LogSiteEntry& file_log_site_for(
+    std::source_location loc,
+    LoggingLevel level,
+    fmt::string_view format_string)
+{
+  return file_log_site_for(
+      to_bioseq_source_location(loc),
+      level,
+      format_string);
+}
+
+constexpr fmtlog::LogLevel to_fmtlog_level(LoggingLevel level) noexcept
+{
+  switch (level) {
+    case LoggingLevel::DBG: return fmtlog::DBG;
+    case LoggingLevel::INF: return fmtlog::INF;
+    case LoggingLevel::WRN: return fmtlog::WRN;
+    case LoggingLevel::ERR: return fmtlog::ERR;
+    case LoggingLevel::OFF: return fmtlog::OFF;
+  }
+  return fmtlog::ERR;
+}
+
+constexpr bool compiled_level_enabled(LoggingLevel level) noexcept
+{
+  return level != LoggingLevel::OFF &&
+         static_cast<std::uint8_t>(level) >=
+             static_cast<std::uint8_t>(GLOBAL_ENABLED_LOGGING_LEVEL);
+}
+
+inline LoggingLevel raw_pg_elevel_to_fallback_level(int /*elevel*/) noexcept
+{
+  return LoggingLevel::DBG;
+}
+
+inline BioseqPostgresLoggingSink current_postgres_sink() noexcept
+{
+  std::lock_guard lock(postgres_sink_mutex);
+  return postgres_sink;
+}
+
+template<typename Emit>
+[[gnu::always_inline]] inline void emit_fmtlog_for_site(
+    LogSiteEntry& site,
+    Emit&& emit)
+{
+  std::uint32_t cached_id =
+      site.published_fmtlog_id.load(std::memory_order_acquire);
+  if (cached_id != 0) {
+    emit(cached_id);
+    return;
+  }
+
+  std::lock_guard register_lock(site.registration_mutex);
+  emit(site.registration_fmtlog_id);
+  if (site.registration_fmtlog_id != 0) {
+    site.published_fmtlog_id.store(
+        site.registration_fmtlog_id,
+        std::memory_order_release);
+  }
+}
+
+template<LoggingLevel level, typename... Args>
+[[gnu::always_inline]] inline void file_log_impl(
+    format_with_location<std::type_identity_t<Args>...> fmt_loc,
+    Args&&... args)
+{
+  const auto fmtlog_level = to_fmtlog_level(level);
+  if (!fmtlog::checkLogLevel(fmtlog_level)) {
+    return;
+  }
+
+  auto& site = file_log_site_for(
+      fmt_loc.location,
+      level,
+      fmt::string_view(fmt_loc.format_string));
+  const auto tsc = fmtlogWrapper<>::impl.tscns.rdtsc();
+  emit_fmtlog_for_site(site, [&](std::uint32_t& log_id) {
+    fmtlogWrapper<>::impl.log(
+        log_id,
+        tsc,
+        site.location.c_str(),
+        fmtlog_level,
+        fmt_loc.format_string,
+        std::forward<Args>(args)...);
+  });
+}
+
+template<LoggingLevel level>
+inline void file_log_preformatted_impl(
+    BioseqSourceLocation location,
+    std::string_view message)
+{
+  const auto fmtlog_level = to_fmtlog_level(level);
+  if (!fmtlog::checkLogLevel(fmtlog_level)) {
+    return;
+  }
+
+  auto& site = file_log_site_for(
+      location,
+      level,
+      fmt::string_view("{}"));
+  const auto tsc = fmtlogWrapper<>::impl.tscns.rdtsc();
+  emit_fmtlog_for_site(site, [&](std::uint32_t& log_id) {
+    fmtlogWrapper<>::impl.log(
+        log_id,
+        tsc,
+        site.location.c_str(),
+        fmtlog_level,
+        "{}",
+        message);
+  });
+}
+
+inline void file_log_preformatted(
+    LoggingLevel level,
+    BioseqSourceLocation location,
+    std::string_view message)
+{
+  switch (level) {
+    case LoggingLevel::ERR:
+      file_log_preformatted_impl<LoggingLevel::ERR>(location, message);
+      break;
+    case LoggingLevel::WRN:
+      file_log_preformatted_impl<LoggingLevel::WRN>(location, message);
+      break;
+    case LoggingLevel::INF:
+      file_log_preformatted_impl<LoggingLevel::INF>(location, message);
+      break;
+    case LoggingLevel::DBG:
+      if (enable_logging) {
+        file_log_preformatted_impl<LoggingLevel::DBG>(location, message);
+      }
+      break;
+    case LoggingLevel::OFF:
+      break;
+  }
+}
+
+inline void format_report_line(
+    fmt::memory_buffer& out,
+    const BioseqReportView& report)
+{
+  out.clear();
+  if (!report.message.empty()) {
+    fmt::format_to(std::back_inserter(out), "{}", report.message);
+  }
+  if (!report.detail.empty()) {
+    fmt::format_to(
+        std::back_inserter(out),
+        "{}DETAIL: {}",
+        out.size() == 0 ? "" : " | ",
+        report.detail);
+  }
+  if (!report.hint.empty()) {
+    fmt::format_to(
+        std::back_inserter(out),
+        "{}HINT: {}",
+        out.size() == 0 ? "" : " | ",
+        report.hint);
+  }
+}
+
+inline void emit_report_to_file(const BioseqReportView& report)
+{
+  fmt::memory_buffer line;
+  format_report_line(line, report);
+  file_log_preformatted(
+      report.level,
+      report.location,
+      std::string_view(line.data(), line.size()));
+}
+
+} // namespace bioseq_logging_detail
+
+export inline void bioseq_register_postgres_logging_sink(
+    BioseqPostgresLoggingSink sink) noexcept
+{
+  std::lock_guard lock(bioseq_logging_detail::postgres_sink_mutex);
+  bioseq_logging_detail::postgres_sink = sink;
+}
+
+export inline void bioseq_clear_postgres_logging_sink() noexcept
+{
+  std::lock_guard lock(bioseq_logging_detail::postgres_sink_mutex);
+  bioseq_logging_detail::postgres_sink = {};
+}
+
+export template<
+    LoggingLevel level = LoggingLevel::DBG,
+    LoggingTarget target = LoggingTarget::FILE>
+[[nodiscard]] inline bool bioseq_log_enabled() noexcept
+{
+  if constexpr (!bioseq_logging_detail::compiled_level_enabled(level)) {
+    return false;
+  }
+
+  if constexpr (level == LoggingLevel::DBG) {
+    if (!enable_logging) {
+      return false;
+    }
+  }
+
+  if constexpr (target == LoggingTarget::PG) {
+    auto sink = bioseq_logging_detail::current_postgres_sink();
+    if (sink.should_log_level != nullptr) {
+      return sink.should_log_level(level);
+    }
+  }
+
+  return fmtlog::checkLogLevel(
+      bioseq_logging_detail::to_fmtlog_level(level));
+}
+
+export template<
+    LoggingLevel level = LoggingLevel::DBG,
+    LoggingTarget target = LoggingTarget::FILE,
+    typename... Args>
+[[gnu::always_inline]] inline void bioseq_log(
+    bioseq_logging_detail::format_with_location<
+        std::type_identity_t<Args>...> fmt_loc,
+    Args&&... args)
+{
+  if constexpr (!bioseq_logging_detail::compiled_level_enabled(level)) {
+    return;
+  }
+
+  if constexpr (level == LoggingLevel::DBG) {
+    if (!enable_logging) {
+      return;
+    }
+  }
+
+  if constexpr (target == LoggingTarget::PG) {
+    auto sink = bioseq_logging_detail::current_postgres_sink();
+    if (sink.log_level != nullptr) {
+      if (sink.should_log_level != nullptr &&
+          !sink.should_log_level(level)) {
+        return;
+      }
+
+      fmt::memory_buffer message;
+      bioseq_logging_detail::format_into(
+          message,
+          fmt_loc.format_string,
+          std::forward<Args>(args)...);
+      sink.log_level(
+          level,
+          to_bioseq_source_location(fmt_loc.location),
+          std::string_view(message.data(), message.size() - 1));
+      return;
+    }
+  }
+
+  bioseq_logging_detail::file_log_impl<level>(
+      fmt_loc,
+      std::forward<Args>(args)...);
+}
+
+export template<typename... Args>
+[[gnu::always_inline]] inline void bioseq_log_pg(
+    int pg_elevel,
+    bioseq_logging_detail::format_with_location<
+        std::type_identity_t<Args>...> fmt_loc,
+    Args&&... args)
+{
+  auto sink = bioseq_logging_detail::current_postgres_sink();
+  if (sink.log_pg != nullptr) {
+    if (sink.should_log_pg != nullptr && !sink.should_log_pg(pg_elevel)) {
+      return;
+    }
+
+    fmt::memory_buffer message;
+    bioseq_logging_detail::format_into(
+        message,
+        fmt_loc.format_string,
+        std::forward<Args>(args)...);
+    sink.log_pg(
+        pg_elevel,
+        to_bioseq_source_location(fmt_loc.location),
+        std::string_view(message.data(), message.size() - 1));
+    return;
+  }
+
+  switch (bioseq_logging_detail::raw_pg_elevel_to_fallback_level(pg_elevel)) {
+    case LoggingLevel::ERR:
+      bioseq_logging_detail::file_log_impl<LoggingLevel::ERR>(
+          fmt_loc, std::forward<Args>(args)...);
+      break;
+    case LoggingLevel::WRN:
+      bioseq_logging_detail::file_log_impl<LoggingLevel::WRN>(
+          fmt_loc, std::forward<Args>(args)...);
+      break;
+    case LoggingLevel::INF:
+      bioseq_logging_detail::file_log_impl<LoggingLevel::INF>(
+          fmt_loc, std::forward<Args>(args)...);
+      break;
+    case LoggingLevel::DBG:
+    case LoggingLevel::OFF:
+      if (enable_logging) {
+        bioseq_logging_detail::file_log_impl<LoggingLevel::DBG>(
+            fmt_loc, std::forward<Args>(args)...);
+      }
+      break;
+  }
+}
+
+export template<
+    LoggingLevel level = LoggingLevel::DBG,
+    LoggingTarget target = LoggingTarget::FILE,
+    typename... Args>
+[[gnu::always_inline]] inline void bioseq_log_progress(
+    bioseq_logging_detail::format_with_location<
+        std::type_identity_t<Args>...> fmt_loc,
+    Args&&... args)
+{
+  if (!bioseq_log_enabled<level, target>()) {
+    return;
+  }
+
+  bioseq_log<level, target>(fmt_loc, std::forward<Args>(args)...);
+
+  if constexpr (target == LoggingTarget::FILE) {
+    fmtlog::poll(true);
+  } else if (bioseq_logging_detail::current_postgres_sink().log_level ==
+             nullptr) {
+    fmtlog::poll(true);
+  }
+}
+
+export template<class Producer>
+concept bioseq_log_lazy_producer =
+    requires (Producer&& producer) {
+      { std::forward<Producer>(producer)() } -> std::same_as<void>;
+    };
+
+export template<
+    LoggingLevel level = LoggingLevel::DBG,
+    LoggingTarget target = LoggingTarget::FILE,
+    bioseq_log_lazy_producer Producer>
+[[gnu::always_inline]] inline void bioseq_log_lazy(Producer&& producer)
+{
+  if (bioseq_log_enabled<level, target>()) {
+    std::forward<Producer>(producer)();
+  }
+}
+
+inline bool bioseq_report_enabled_runtime(
+    LoggingLevel level,
+    LoggingTarget target) noexcept
+{
+  if (level == LoggingLevel::OFF) {
+    return false;
+  }
+  if (level == LoggingLevel::DBG && !enable_logging) {
+    return false;
+  }
+  if (target == LoggingTarget::PG) {
+    auto sink = bioseq_logging_detail::current_postgres_sink();
+    if (sink.should_log_level != nullptr) {
+      return sink.should_log_level(level);
+    }
+  }
+  return fmtlog::checkLogLevel(
+      bioseq_logging_detail::to_fmtlog_level(level));
+}
+
+export template<
+    LoggingLevel level = LoggingLevel::ERR,
+    LoggingTarget target = LoggingTarget::PG>
+[[nodiscard]] inline bool bioseq_report_enabled() noexcept
+{
+  return bioseq_report_enabled_runtime(level, target);
+}
+
+export [[nodiscard]] inline bool bioseq_report_pg_enabled(
+    int pg_elevel) noexcept
+{
+  auto sink = bioseq_logging_detail::current_postgres_sink();
+  if (sink.should_log_pg != nullptr) {
+    return sink.should_log_pg(pg_elevel);
+  }
+  return bioseq_report_enabled_runtime(
+      bioseq_logging_detail::raw_pg_elevel_to_fallback_level(pg_elevel),
+      LoggingTarget::FILE);
+}
+
+export template<
+    LoggingLevel level = LoggingLevel::ERR,
+    LoggingTarget target = LoggingTarget::PG,
+    bioseq_log_lazy_producer Producer>
+[[gnu::always_inline]] inline void bioseq_report_lazy(Producer&& producer)
+{
+  if (bioseq_report_enabled<level, target>()) {
+    std::forward<Producer>(producer)();
+  }
+}
+
+export template<bioseq_log_lazy_producer Producer>
+[[gnu::always_inline]] inline void bioseq_report_pg_lazy(
+    int pg_elevel,
+    Producer&& producer)
+{
+  if (bioseq_report_pg_enabled(pg_elevel)) {
+    std::forward<Producer>(producer)();
+  }
+}
+
+export class BioseqReport {
+public:
+  BioseqReport(
+      LoggingTarget target,
+      LoggingLevel fallback_level,
+      int raw_pg_elevel,
+      bool has_raw_pg_elevel,
+      std::source_location loc) noexcept
+      : target_(target),
+        fallback_level_(fallback_level),
+        raw_pg_elevel_(raw_pg_elevel),
+        has_raw_pg_elevel_(has_raw_pg_elevel),
+        enabled_(has_raw_pg_elevel
+            ? bioseq_report_pg_enabled(raw_pg_elevel)
+            : bioseq_report_enabled_runtime(fallback_level, target)),
+        location_(loc) {}
+
+  BioseqReport(const BioseqReport&) = delete;
+  BioseqReport& operator=(const BioseqReport&) = delete;
+  BioseqReport(BioseqReport&&) = delete;
+  BioseqReport& operator=(BioseqReport&&) = delete;
+
+  BioseqReport& code(int sqlerrcode) noexcept
+  {
+    if (!enabled_) {
+      return *this;
+    }
+    sqlerrcode_ = sqlerrcode;
+    has_sqlerrcode_ = true;
+    return *this;
+  }
+
+  template<typename... Args>
+  BioseqReport& msg(fmt::format_string<Args...> fmt_string, Args&&... args)
+  {
+    if (!enabled_) {
+      return *this;
+    }
+    bioseq_logging_detail::format_into(
+        message_buffer_,
+        fmt_string,
+        std::forward<Args>(args)...);
+    has_message_ = true;
+    return *this;
+  }
+
+  template<typename... Args>
+  BioseqReport& detail(
+      fmt::format_string<Args...> fmt_string,
+      Args&&... args)
+  {
+    if (!enabled_) {
+      return *this;
+    }
+    bioseq_logging_detail::format_into(
+        detail_buffer_,
+        fmt_string,
+        std::forward<Args>(args)...);
+    has_detail_ = true;
+    return *this;
+  }
+
+  template<typename... Args>
+  BioseqReport& hint(fmt::format_string<Args...> fmt_string, Args&&... args)
+  {
+    if (!enabled_) {
+      return *this;
+    }
+    bioseq_logging_detail::format_into(
+        hint_buffer_,
+        fmt_string,
+        std::forward<Args>(args)...);
+    has_hint_ = true;
+    return *this;
+  }
+
+  [[gnu::always_inline]] ~BioseqReport()
+  {
+    if (!enabled_) {
+      return;
+    }
+
+    BioseqReportView view{
+        .level = fallback_level_,
+        .raw_pg_elevel = raw_pg_elevel_,
+        .has_raw_pg_elevel = has_raw_pg_elevel_,
+        .sqlerrcode = sqlerrcode_,
+        .has_sqlerrcode = has_sqlerrcode_,
+        .message = has_message_
+            ? std::string_view(message_buffer_.data(),
+                               message_buffer_.size() - 1)
+            : std::string_view{},
+        .detail = has_detail_
+            ? std::string_view(detail_buffer_.data(),
+                               detail_buffer_.size() - 1)
+            : std::string_view{},
+        .hint = has_hint_
+            ? std::string_view(hint_buffer_.data(),
+                               hint_buffer_.size() - 1)
+            : std::string_view{},
+        .location = to_bioseq_source_location(location_),
+    };
+
+    if (target_ == LoggingTarget::PG) {
+      auto sink = bioseq_logging_detail::current_postgres_sink();
+      if (sink.report != nullptr) {
+        sink.report(view);
+        return;
+      }
+    }
+
+    bioseq_logging_detail::emit_report_to_file(view);
+  }
+
+private:
+  LoggingTarget target_;
+  LoggingLevel fallback_level_;
+  int raw_pg_elevel_;
+  bool has_raw_pg_elevel_;
+  bool enabled_;
+  int sqlerrcode_ = 0;
+  bool has_sqlerrcode_ = false;
+  bool has_message_ = false;
+  bool has_detail_ = false;
+  bool has_hint_ = false;
+  std::source_location location_;
+  fmt::memory_buffer message_buffer_;
+  fmt::memory_buffer detail_buffer_;
+  fmt::memory_buffer hint_buffer_;
+};
+
+export template<
+    LoggingLevel level = LoggingLevel::ERR,
+    LoggingTarget target = LoggingTarget::PG>
+[[nodiscard]] inline BioseqReport bioseq_report(
+    std::source_location loc = std::source_location::current())
+{
+  return BioseqReport{
+      target,
+      level,
+      0,
+      false,
+      loc,
+  };
+}
+
+export [[nodiscard]] inline BioseqReport bioseq_report_pg(
+    int pg_elevel,
+    std::source_location loc = std::source_location::current())
+{
+  return BioseqReport{
+      LoggingTarget::PG,
+      bioseq_logging_detail::raw_pg_elevel_to_fallback_level(pg_elevel),
+      pg_elevel,
+      true,
+      loc,
+  };
+}
+
+export template<
+    LoggingLevel level = LoggingLevel::ERR,
+    LoggingTarget target = LoggingTarget::PG,
+    typename... Args>
+[[gnu::always_inline]] inline void bioseq_report(
+    int sqlerrcode,
+    bioseq_logging_detail::format_with_location<
+        std::type_identity_t<Args>...> fmt_loc,
+    Args&&... args)
+{
+  auto report = bioseq_report<level, target>(fmt_loc.location);
+  report.code(sqlerrcode)
+        .msg(fmt_loc.format_string, std::forward<Args>(args)...);
+}
 
 export inline void log_configure(const bool is_testing_mode = false) {
   if (is_testing_mode) {
+    /*
+     * Test binaries keep logging enabled and write directly to stderr so
+     * caller-location failures are visible without touching extension fallback
+     * files.
+     */
     enable_logging = true;
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("test-main");
     fmtlog::setFlushDelay(0);
     fmtlog::setLogFile(stderr, false);
   } else {
-  #ifndef NO_POSTGRES
     /*
-     * Resolve log path from BIOSEQ_LOG_FILE, falling back to /tmp so the
-     * extension does not abort _PG_init on machines whose layout differs
-     * from the original developer's. If the file cannot be opened, route
-     * logs to stderr (which lands in the postgres server log) instead of
-     * letting fmt::report_error throw and crash the backend.
+     * Extension-mode file fallback resolves BIOSEQ_LOG_FILE, or uses
+     * /tmp/bioseq_loglog.log when unset. PG-target logs are delivered to
+     * PostgreSQL only after _PG_init() registers a sink; before that, and in
+     * NO_POSTGRES consumers of this shared BMI, they fall back to this file
+     * sink. If the file cannot be opened, route logs to stderr instead of
+     * letting fmt::report_error abort startup.
      */
     const char* log_file = std::getenv("BIOSEQ_LOG_FILE");
     if (log_file == nullptr || *log_file == '\0') {
@@ -1571,7 +2395,6 @@ export inline void log_configure(const bool is_testing_mode = false) {
       fmtlog::setLogFile(stderr, false);
     }
     fmtlog::setFlushDelay(0);
-  #endif
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("main");
   }
@@ -1586,4 +2409,3 @@ export inline void log_configure(const bool is_testing_mode = false) {
 // auto format(T obj, FormatContext& ctx) {
 //   return format(&obj);
 // }
-

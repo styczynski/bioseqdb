@@ -340,7 +340,7 @@ private:
         void* raw = nullptr;
         const int rc = ::posix_memalign(&raw, effective_align, bytes);
         if (rc != 0 || raw == nullptr) {
-            JustLog("[context] heap fallback FAILED: bytes={} align={} rc={}",
+            bioseq_log<DBG>("[context] heap fallback FAILED: bytes={} align={} rc={}",
                     bytes, effective_align, rc);
             std::abort();
         }
@@ -396,7 +396,7 @@ inline thread_local context* tls_current = nullptr;
 [[nodiscard]] inline context& current() noexcept {
     context* ctx = detail::tls_current;
     if (ctx == nullptr) {
-        JustLog("[context] FATAL: no context installed; aborting");
+        bioseq_log<DBG>("[context] FATAL: no context installed; aborting");
         std::abort();
     }
     return *ctx;

@@ -170,13 +170,13 @@ static void ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapag
 export void
 ColumnarStorageInit(SMgrRelation srel, uint64_t storageId)
 {
-	JustLog("[bioseq] pg: ColumnarStorageInit() entered storage_id={}", storageId);
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() entered storage_id={}", storageId);
 	BlockNumber nblocks = smgrnblocks(srel, MAIN_FORKNUM);
 
-	JustLog("[bioseq] pg: ColumnarStorageInit() existing_blocks={}", nblocks);
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() existing_blocks={}", nblocks);
 	if (nblocks > 0)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempted to initialize metapage, but {} pages already exist",
 			 nblocks);
 	}
@@ -185,7 +185,7 @@ ColumnarStorageInit(SMgrRelation srel, uint64_t storageId)
 	PGIOAlignedBlock block;
 	Page page = block.data;
 
-	JustLog("[bioseq] pg: ColumnarStorageInit() initialising metapage");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() initialising metapage");
 	PageInit(page, BLCKSZ, 0);
 	PageHeader phdr = reinterpret_cast<PageHeader>(page);
 
@@ -203,17 +203,17 @@ ColumnarStorageInit(SMgrRelation srel, uint64_t storageId)
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
 				COLUMNAR_METAPAGE_BLOCKNO, page, true);
 
-	JustLog("[bioseq] pg: ColumnarStorageInit() flushing metapage to disk");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() flushing metapage to disk");
 	PageSetChecksumInplace(page, COLUMNAR_METAPAGE_BLOCKNO);
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_METAPAGE_BLOCKNO, page, true);
 
-	JustLog("[bioseq] pg: ColumnarStorageInit() initialising empty page");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() initialising empty page");
 	PageInit(page, BLCKSZ, 0);
 
 	log_newpage(&srel->smgr_rlocator.locator, MAIN_FORKNUM,
 				COLUMNAR_EMPTY_BLOCKNO, page, true);
 
-	JustLog("[bioseq] pg: ColumnarStorageInit() flushing empty page to disk");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() flushing empty page to disk");
 	PageSetChecksumInplace(page, COLUMNAR_EMPTY_BLOCKNO);
 	smgrextend(srel, MAIN_FORKNUM, COLUMNAR_EMPTY_BLOCKNO, page, true);
 
@@ -222,7 +222,7 @@ ColumnarStorageInit(SMgrRelation srel, uint64_t storageId)
 	 * write did not go through shared_buffers and therefore a concurrent
 	 * checkpoint may have moved the redo pointer past our xlog record.
 	 */
-	JustLog("[bioseq] pg: ColumnarStorageInit() requesting smgr immediate sync");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarStorageInit() requesting smgr immediate sync");
 	smgrimmedsync(srel, MAIN_FORKNUM);
 }
 
@@ -254,13 +254,13 @@ ColumnarStorageUpdateCurrent(Relation rel, bool upgrade, uint64_t reservedStripe
 	if (upgrade && ColumnarMetapageIsNewer(&metapage))
 	{
 		UnlockRelationForExtension(rel, ExclusiveLock);
-		pg_log(ERROR, "found newer columnar metapage while upgrading");
+		bioseq_log<ERR, PG>( "found newer columnar metapage while upgrading");
 	}
 
 	if (!upgrade && ColumnarMetapageIsOlder(&metapage))
 	{
 		UnlockRelationForExtension(rel, ExclusiveLock);
-		pg_log(ERROR, "found older columnar metapage while downgrading");
+		bioseq_log<ERR, PG>( "found older columnar metapage while downgrading");
 	}
 
 	metapage.versionMajor = COLUMNAR_VERSION_MAJOR;
@@ -490,7 +490,7 @@ ColumnarStorageRead(Relation rel, uint64_t logicalOffset, char *data, uint32_t a
 
 	if (!ColumnarLogicalOffsetIsValid(logicalOffset))
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempted columnar read on relation {} from invalid logical offset: {}",
 			 rel->rd_id, logicalOffset);
 	}
@@ -525,7 +525,7 @@ ColumnarStorageWrite(Relation rel, uint64_t logicalOffset, char *data, uint32_t 
 
 	if (!ColumnarLogicalOffsetIsValid(logicalOffset))
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempted columnar write on relation {} to invalid logical offset: {}",
 			 rel->rd_id, logicalOffset);
 	}
@@ -559,7 +559,7 @@ ColumnarStorageTruncate(Relation rel, uint64_t newDataReservation)
 {
 	if (!ColumnarLogicalOffsetIsValid(newDataReservation))
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempted to truncate relation {} to invalid logical offset: {}",
 			 rel->rd_id, newDataReservation);
 	}
@@ -577,7 +577,7 @@ ColumnarStorageTruncate(Relation rel, uint64_t newDataReservation)
 
 	if (metapage.reservedOffset < newDataReservation)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempted to truncate relation {} to offset {} which is higher than existing offset {}",
 			 rel->rd_id, newDataReservation, metapage.reservedOffset);
 	}
@@ -652,7 +652,7 @@ ColumnarMetapageRead(Relation rel, bool force)
 		 * However in older versions, we were creating metapages lazily, i.e
 		 * when ingesting data to columnar table.
 		 */
-		PgReport(ERROR)
+		bioseq_report<ERR, PG>()
 			.msg("columnar metapage for relation \"{}\" does not exist",
 				RelationGetRelationName(rel))
 			.hint("{}", OLD_METAPAGE_VERSION_HINT);
@@ -693,7 +693,7 @@ ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 
 	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempt to read columnar data of length {} from offset {} of block {} of relation {}",
 			 len, offset, blockno, rel->rd_id);
 	}
@@ -729,7 +729,7 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 
 	if (phdr->pd_lower < offset || phdr->pd_upper - offset < len)
 	{
-		pg_log(ERROR,
+		bioseq_log<ERR, PG>(
 			 "attempt to write columnar data of length {} to offset {} of block {} of relation {}",
 			 len, offset, blockno, rel->rd_id);
 	}
@@ -748,7 +748,7 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 	 */
 	if (phdr->pd_lower > offset)
 	{
-		PgReport(DEBUG4)
+		bioseq_report_pg(DEBUG4)
 			.msg("overwriting page {}", blockno)
 			.detail("This can happen after a roll-back.");
 		phdr->pd_lower = offset;
@@ -833,7 +833,7 @@ ColumnarMetapageCheckVersion(Relation rel, ColumnarMetapage *metapage)
 {
 	if (!ColumnarMetapageIsCurrent(metapage))
 	{
-		PgReport(ERROR)
+		bioseq_report<ERR, PG>()
 			.code(ERRCODE_FEATURE_NOT_SUPPORTED)
 			.msg("attempted to access relation \"{}\", which uses an older columnar format",
 				RelationGetRelationName(rel))

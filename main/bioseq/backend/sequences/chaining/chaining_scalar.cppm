@@ -245,7 +245,7 @@ void chain_anchors_scalar(
     }
 
     }  // end mg_lchain_dp_forward scope
-    JustLog("[chaining_scalar] Forward DP pass complete for {} anchors", anchor_count);
+    bioseq_log<DBG>("[chaining_scalar] Forward DP pass complete for {} anchors", anchor_count);
 
     static const auto* _bt_desc =
         bioseq::instr::register_region_static("backtrack_chains");

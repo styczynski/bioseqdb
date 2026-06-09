@@ -361,7 +361,7 @@ try_materialize_for_parallel_sequence_index_build(
         if (total_units64
             > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                    "bioseq.update_index: row {} index {} has too many packed "
                    "units to materialize for parallel build",
                    static_cast<unsigned long long>(rowno),
@@ -385,7 +385,7 @@ try_materialize_for_parallel_sequence_index_build(
             bioseq::parallelism::MemoryAdmissionController::instance()
                 .try_reserve(reserve_bytes);
         if (!permit) {
-            JustLog("[bioseq] index: row={} index={} target_bp={} packed_bytes={} "
+            bioseq_log<DBG>("[bioseq] index: row={} index={} target_bp={} packed_bytes={} "
                     "not admitted for resident parallel build; using scanner_pg",
                     static_cast<unsigned long long>(rowno),
                     index_name,
@@ -415,7 +415,7 @@ try_materialize_for_parallel_sequence_index_build(
             seq.scanner().release_fragment(fragment_no);
         }
 
-        JustLog("[bioseq] index: row={} index={} target_bp={} fragments={} "
+        bioseq_log<DBG>("[bioseq] index: row={} index={} target_bp={} fragments={} "
                 "packed_bytes={} materialized for resident parallel build",
                 static_cast<unsigned long long>(rowno),
                 index_name,
@@ -452,8 +452,8 @@ inline void rebuild_one_fragmented_maybe_resident(
 }
 
 inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
-    if (!name_is_registered(name)) pg_log(ERROR, "bioseq.update_index: unknown index '%s'", std::string(name).c_str());
-    if (!IsColumnarTableAmTable(rel_oid)) pg_log(ERROR, "bioseq.update_index: relation is not a USING bioseq table");
+    if (!name_is_registered(name)) bioseq_log<ERR, PG>( "bioseq.update_index: unknown index '{}'", std::string(name));
+    if (!IsColumnarTableAmTable(rel_oid)) bioseq_log<ERR, PG>( "bioseq.update_index: relation is not a USING bioseq table");
     const RelationIdentity rid = index_relation_identity(rel_oid);
     const SequenceIndexType layout = layout_of_name(name);
     reset_last_mps_build_stats();
@@ -475,7 +475,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
         SPI_finish();
     }
-    if (seq_attnos.empty()) pg_log(ERROR, "bioseq.update_index: relation has no bioseq.seq column");
+    if (seq_attnos.empty()) bioseq_log<ERR, PG>( "bioseq.update_index: relation has no bioseq.seq column");
 
     MemoryContext work = AllocSetContextCreate(CurrentMemoryContext, "bioseq_update_index", ALLOCSET_DEFAULT_SIZES);
     pg_supported_indexes idx; idx.apply_table_defaults();

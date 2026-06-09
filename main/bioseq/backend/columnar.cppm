@@ -178,7 +178,7 @@ bool bioseq_aligner_enable_profiling = false;
 void
 bioseq_init()
 {
-	JustLog("[bioseq] pg: bioseq_init() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_init() entered");
 	bioseq_guc_init();
 	if (process_shared_preload_libraries_in_progress) {
 		bioseq::parallelism::pg::install_scheduler_shmem_hooks();
@@ -216,10 +216,10 @@ bioseq_init()
 static void
 bioseq_guc_init()
 {
-	JustLog("[bioseq] pg: bioseq_guc_init() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_guc_init() entered");
 	if (auto* existing = find_option("bioseq.logging", false, true, ERROR);
 	    existing != nullptr && existing->vartype == PGC_BOOL) {
-		JustLog("[bioseq] pg: bioseq_guc_init() skipped; GUCs already registered");
+		bioseq_log<DBG>("[bioseq] pg: bioseq_guc_init() skipped; GUCs already registered");
 		return;
 	}
 

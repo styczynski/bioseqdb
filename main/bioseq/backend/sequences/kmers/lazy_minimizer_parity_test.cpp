@@ -82,7 +82,7 @@ void check_parity(std::size_t n, std::uint64_t seed, std::size_t w, std::size_t 
     const auto fragmented = run_scalar(lazy, lazy.begin(), lazy.end(), w, k);
 
     if (baseline != fragmented) {
-        JustLog("[parity] n={} frag_units={} baseline={} fragmented={}",
+        bioseq_log<DBG>("[parity] n={} frag_units={} baseline={} fragmented={}",
                 n, FragUnits, baseline.size(), fragmented.size());
     }
     REQUIRE(baseline.size() == fragmented.size());

@@ -90,7 +90,7 @@ struct SortOutput {
     SortInput input;
     std::int64_t length = 0;
     if (data_element["length"].get(length) != simdjson::SUCCESS || length <= 0) {
-        loge("[example] sort test case '{}' missing 'length'", test_case_name);
+        bioseq_log<ERR>("[example] sort test case '{}' missing 'length'", test_case_name);
         return input;
     }
     std::int64_t random_seed = 42;
@@ -234,7 +234,7 @@ inline int consume_buggy_input_failure(std::string_view test_case_name,
     CountInput input;
     std::int64_t length = 0;
     if (data_element["length"].get(length) != simdjson::SUCCESS || length <= 0) {
-        loge("[example] count test case '{}' missing 'length'", test_case_name);
+        bioseq_log<ERR>("[example] count test case '{}' missing 'length'", test_case_name);
         return input;
     }
     std::int64_t random_seed = 7;
@@ -280,7 +280,7 @@ void cleanup_count_input(std::string_view /*data_dir*/,
                           simdjson::dom::element /*data_element*/,
                           const CountInput& input)
 {
-    logi("[example] cleanup_count_input released test_case='{}' (n={})",
+    bioseq_log<INF>("[example] cleanup_count_input released test_case='{}' (n={})",
          test_case_name, input.values.size());
 }
 

@@ -216,7 +216,7 @@ endif()
 # call for non-POSTGRES_EXTENSION targets, so the private scope here is sufficient
 # to keep the existing aligner/test pipeline intact. postgresql_bioseq, which now
 # also consumes this library (DOC0270), MUST NOT receive NO_POSTGRES — its
-# Domain P modules include <postgres.h> and rely on pg_log, palloc, etc. The
+# Domain P modules include <postgres.h> and rely on palloc, ereport, etc. The
 # POSTGRESQL_VERSION_MAJOR define stays PUBLIC because both Domain N and
 # Domain P consumers care about the major-version-conditional code paths.
 target_compile_definitions(bioseq_modules_nopg PRIVATE NO_POSTGRES=1)
@@ -311,17 +311,17 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 # DEBUG_ASSERT variant in postgresql_bioseq:
 #
 #   - sequences/simd.cppm  ::stdc_compare contract-violation paths use
-#     DEBUG_ASSERT instead of pg_log(ERROR, …). With -DNDEBUG the
+#     DEBUG_ASSERT instead of PostgreSQL ERROR logging. With -DNDEBUG the
 #     DEBUG_ASSERT compiles out, so the violations become silent. These
 #     paths are unreachable in well-formed code (caller passes mixed-alphabet
 #     stdc values, or cross-storage-width non-bit-castable pair); the
-#     follow-up to keep the loud-pg_log behaviour is to extract those calls
-#     into a Domain P wrapper that postgresql_bioseq imports separately —
-#     not done here to keep the diff scoped to the build-time fix.
-#   - common/mlogging.cppm ::log_configure() skips the postgres-specific
-#     fmtlog::setLogFile branch; logs route to stderr (Postgres server log)
-#     instead of /tmp/bioseq_loglog.log. Observable but not a correctness
-#     regression — the operator can re-route via BIOSEQ_LOG_FILE if needed.
+#     follow-up to keep the loud PostgreSQL ERROR behaviour is to extract
+#     those calls into a Domain P wrapper that postgresql_bioseq imports
+#     separately — not done here to keep the diff scoped to the build-time fix.
+#   - common/mlogging.cppm remains PG-header-free. PG-target logging is
+#     delivered through the sink registered by _PG_init(); before registration
+#     or under NO_POSTGRES, it falls back to BIOSEQ_LOG_FILE or
+#     /tmp/bioseq_loglog.log.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
 list(APPEND SRC_MOD_FILES
   ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/sorted_pair_runs_pg.cppm

@@ -258,7 +258,7 @@ Datum pg_compact_sequence_typmod_in(PG_FUNCTION_ARGS)
 		.alphabet_code           = alphabet_code,
 		.storage_unit_byte_width = byte_width,
 	}.encode();
-	JustLog("[bioseq] pg: seq_typmod_in alphabet='{}' width={} -> packed={}",
+	bioseq_log<DBG>("[bioseq] pg: seq_typmod_in alphabet='{}' width={} -> packed={}",
 	        alphabet_name, width_long, packed);
 	PG_RETURN_INT32(packed);
 }
@@ -338,7 +338,7 @@ Datum pg_compact_sequence_in(PG_FUNCTION_ARGS)
 		        (errcode(ERRCODE_OUT_OF_MEMORY),
 		         errmsg("out of memory in bioseq.seq_in")));
 
-	JustLog("[bioseq] pg: seq_in alphabet_code={} byte_width={} length={} -> bp_size={}",
+	bioseq_log<DBG>("[bioseq] pg: seq_in alphabet_code={} byte_width={} length={} -> bp_size={}",
 	        tp.alphabet_code, tp.storage_unit_byte_width, length,
 	        static_cast<unsigned>(hdr->bp_size));
 	PG_RETURN_POINTER(hdr);
@@ -361,7 +361,7 @@ Datum pg_compact_sequence_out(PG_FUNCTION_ARGS)
 	char* out = static_cast<char*>(palloc(decoded.size() + 1));
 	std::memcpy(out, decoded.data(), decoded.size());
 	out[decoded.size()] = '\0';
-	JustLog("[bioseq] pg: seq_out bp_size={} -> '{}'",
+	bioseq_log<DBG>("[bioseq] pg: seq_out bp_size={} -> '{}'",
 	        static_cast<unsigned>(hdr->bp_size), decoded);
 	PG_FREE_IF_COPY(hdr, 0);
 	PG_RETURN_CSTRING(out);
@@ -394,7 +394,7 @@ Datum pg_compact_sequence_cast(PG_FUNCTION_ARGS)
 		        (errcode(ERRCODE_OUT_OF_MEMORY),
 		         errmsg("out of memory in bioseq.seq_cast")));
 
-	JustLog("[bioseq] pg: seq_cast ({},{}) -> ({},{}) bp_size={}",
+	bioseq_log<DBG>("[bioseq] pg: seq_cast ({},{}) -> ({},{}) bp_size={}",
 	        static_cast<unsigned>(src->alphabet_code),
 	        static_cast<unsigned>(src->storage_unit_byte_width),
 	        static_cast<unsigned>(target.alphabet_code),

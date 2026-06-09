@@ -124,7 +124,7 @@ ColumnarWriteState*
 bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 						Oid tuple_slot_relation_id, SubTransactionId current_sub_xid)
 {
-	JustLog("[bioseq] pg: bioseq_init_write_state() sub_xid={} tup_slot_rel={}", current_sub_xid, tuple_slot_relation_id);
+	bioseq_log<DBG>("[bioseq] pg: bioseq_init_write_state() sub_xid={} tup_slot_rel={}", current_sub_xid, tuple_slot_relation_id);
 
 	bool found_existing = false;
 	WriteStateMapEntry* hash_entry =

@@ -80,21 +80,21 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
     using namespace bioseq::sequences::generation::pg;
 
     if (PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2)) {
-        pg_log(ERROR, "bioseq.create_sample_table: table_name, n_sequences, "
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: table_name, n_sequences, "
                "sequence_bp_size are required");
     }
     const char* const table_name_c = TextDatumGetCString(PG_GETARG_DATUM(0));
     const std::int32_t n_sequences = PG_GETARG_INT32(1);
     if (n_sequences < 1) {
-        pg_log(ERROR, "bioseq.create_sample_table: n_sequences must be >= 1");
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: n_sequences must be >= 1");
     }
     if (n_sequences > 100'000'000) {
-        pg_log(ERROR, "bioseq.create_sample_table: n_sequences {} exceeds the "
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: n_sequences {} exceeds the "
                "safety cap (100M)", n_sequences);
     }
     const std::int64_t sequence_bp = PG_GETARG_INT64(2);
     if (sequence_bp < 0) {
-        pg_log(ERROR, "bioseq.create_sample_table: sequence_bp_size must be >= 0");
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: sequence_bp_size must be >= 0");
     }
     std::string alphabet = "dna4";
     if (!PG_ARGISNULL(3)) {
@@ -102,7 +102,7 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
         alphabet.assign(alpha_c);
     }
     if (alphabet != "dna4") {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
             "bioseq.create_sample_table: alphabet '{}' is not supported in Phase C. "
             "Only 'dna4' is shipped. See DOC0267 D-EXTENSIBILITY for the path "
             "to dna5 / aa20 / aa27 / dna_iupac.", alphabet);
@@ -118,12 +118,12 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
         "seq bioseq.seq('dna4', 32)) USING bioseq;",
         quote_identifier(table_name_c));
     if (SPI_connect() != SPI_OK_CONNECT) {
-        pg_log(ERROR, "bioseq.create_sample_table: SPI_connect failed");
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: SPI_connect failed");
     }
     const int rc = SPI_execute(ddl->data, /*read_only=*/false, /*tcount=*/0);
     if (rc != SPI_OK_UTILITY) {
         SPI_finish();
-        pg_log(ERROR, "bioseq.create_sample_table: CREATE TABLE failed for {} (SPI rc={})",
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: CREATE TABLE failed for {} (SPI rc={})",
                table_name_c, rc);
     }
     SPI_finish();
@@ -131,7 +131,7 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
     const Oid public_ns = get_namespace_oid("public", false);
     const Oid parent_relid = get_relname_relid(table_name_c, public_ns);
     if (!OidIsValid(parent_relid)) {
-        pg_log(ERROR, "bioseq.create_sample_table: failed to locate created table {}",
+        bioseq_log<ERR, PG>( "bioseq.create_sample_table: failed to locate created table {}",
                table_name_c);
     }
     // DOC0264 §10.2 — pin parent_rel under TopTransactionResourceOwner so it
@@ -309,7 +309,7 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
     namespace gen_ns = bioseq::sequences::generation::HWY_NAMESPACE;
 
     if (PG_ARGISNULL(0)) {
-        pg_log(ERROR, "bioseq.create_query_target_sample_table: table_name required");
+        bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: table_name required");
     }
     const char* const table_name_c = TextDatumGetCString(PG_GETARG_DATUM(0));
 
@@ -341,10 +341,10 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
         ? params.seed : static_cast<std::uint64_t>(PG_GETARG_INT64(11));
 
     if (params.fragment_count == 0) {
-        pg_log(ERROR, "bioseq.create_query_target_sample_table: fragment_count must be >= 1");
+        bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: fragment_count must be >= 1");
     }
     if (params.reference_length == 0) {
-        pg_log(ERROR, "bioseq.create_query_target_sample_table: reference_length must be >= 1");
+        bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: reference_length must be >= 1");
     }
 
     // (1) CREATE TABLE. The seq columns use typmod ('dna4', 64) so the
@@ -368,12 +368,12 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
         ") USING bioseq;",
         quote_identifier(table_name_c));
     if (SPI_connect() != SPI_OK_CONNECT) {
-        pg_log(ERROR, "bioseq.create_query_target_sample_table: SPI_connect failed");
+        bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: SPI_connect failed");
     }
     const int rc = SPI_execute(ddl->data, /*read_only=*/false, /*tcount=*/0);
     if (rc != SPI_OK_UTILITY) {
         SPI_finish();
-        pg_log(ERROR, "bioseq.create_query_target_sample_table: CREATE TABLE failed "
+        bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: CREATE TABLE failed "
                "for {} (SPI rc={})", table_name_c, rc);
     }
     SPI_finish();
@@ -381,7 +381,7 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
     const Oid public_ns = get_namespace_oid("public", false);
     const Oid parent_relid = get_relname_relid(table_name_c, public_ns);
     if (!OidIsValid(parent_relid)) {
-        pg_log(ERROR, "bioseq.create_query_target_sample_table: failed to locate "
+        bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: failed to locate "
                "created table {}", table_name_c);
     }
     Relation parent_rel = nullptr;
@@ -638,7 +638,7 @@ Datum bioseq_locator_inspect(PG_FUNCTION_ARGS)
     values[3] = Int64GetDatum(static_cast<std::int64_t>(loc.num_fragments));
     if (loc.total_bp_size >
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
-        pg_log(ERROR, "bioseq.locator_inspect: total_bp_size {} exceeds INT64_MAX",
+        bioseq_log<ERR, PG>( "bioseq.locator_inspect: total_bp_size {} exceeds INT64_MAX",
                loc.total_bp_size);
     }
     values[4] = Int64GetDatum(static_cast<std::int64_t>(loc.total_bp_size));

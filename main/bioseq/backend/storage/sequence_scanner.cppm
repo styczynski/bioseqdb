@@ -53,12 +53,12 @@ export namespace bioseq::storage {
 constexpr std::size_t SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT = 1024;
 
 /// Hard-error helper for the fragmented (test / Phase-C) path. DOC0263 R8
-/// calls this `pg_log_panic_throw`: under Postgres it would `pg_log(ERROR)`
+/// calls this `pg_error_panic_throw`: under Postgres it would `bioseq_log<ERR, PG>()`
 /// (longjmp). The Phase-B fragmented path is compiled into the NO_POSTGRES
-/// shared library, so we log via JustLog and abort. Production uses the
+/// shared library, so we log via bioseq_log<DBG> and abort. Production uses the
 /// no-fragment specialisation, which never reaches any panic site.
 [[noreturn]] [[gnu::cold]] inline void lazy_fragment_panic(std::string_view message) {
-    JustLog("[lazy_compact_sequence] PANIC: {}", message);
+    bioseq_log<DBG>("[lazy_compact_sequence] PANIC: {}", message);
     std::abort();
 }
 

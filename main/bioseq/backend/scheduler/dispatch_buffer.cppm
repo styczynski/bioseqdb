@@ -452,7 +452,7 @@ public:
         if (const auto* hdr = mmsearch_context.query_hdr()) {
             query_bp_size = hdr->bp_size;
         }
-        JustLog("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch() seq_attno={} pk_attno={} column='{}' typmod=({},{}) query_bp_size={}",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch() seq_attno={} pk_attno={} column='{}' typmod=({},{}) query_bp_size={}",
                 static_cast<int>(seq_attno),
                 static_cast<int>(primary_key_attno),
                 mmsearch_context.column_name,
@@ -497,7 +497,7 @@ public:
         mmsearch_context.recompute_due_to_alphabet_mismatch = false;
         mmsearch_context.active                 = true;
 
-        JustLog("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} typmod=({},{})",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} typmod=({},{})",
                 static_cast<int>(seq_attno),
                 static_cast<int>(per_row_query_attno),
                 per_row_self_alignment,
@@ -520,7 +520,7 @@ public:
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
         mmsearch_context.coalesced_query_varlena = std::move(coalesced_bytes);
         mmsearch_context.coalesce_active = true;
-        JustLog("[bioseq] pg: TupleDispatchBuffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
                 static_cast<unsigned>(mmsearch_context.raw_query_alphabet_code),
                 static_cast<unsigned>(mmsearch_context.raw_query_storage_unit_byte_width),
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
@@ -540,7 +540,7 @@ public:
      */
     void mark_alphabet_mismatch_recompute() {
         mmsearch_context.recompute_due_to_alphabet_mismatch = true;
-        JustLog("[bioseq] pg: TupleDispatchBuffer::mark_alphabet_mismatch_recompute() set");
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::mark_alphabet_mismatch_recompute() set");
     }
 
     [[nodiscard]] bool per_row_mode() const {
@@ -618,7 +618,7 @@ public:
                 query_varlena_bytes.data());
         const uint32_t bp_size = (query_varlena_bytes.empty() || hdr == nullptr)
             ? 0u : hdr->bp_size;
-        JustLog("[bioseq] pg: TupleDispatchBuffer::add_extra_const_query() bp_size={} (extra index #{})",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::add_extra_const_query() bp_size={} (extra index #{})",
                 bp_size, extra_query_varlenas.size());
         extra_query_varlenas.push_back(std::move(query_varlena_bytes));
     }
@@ -637,11 +637,11 @@ public:
      */
     [[gnu::always_inline]] void submit_scan(TupleTableSlot* scan_slot) {
         if (!mmsearch_context.active) {
-            JustLog("[bioseq] pg: submit_scan called while mmsearch_context inactive; skipping");
+            bioseq_log<DBG>("[bioseq] pg: submit_scan called while mmsearch_context inactive; skipping");
             return;
         }
         if (scan_slot == nullptr) {
-            JustLog("[bioseq] pg: submit_scan received null scan_slot; skipping");
+            bioseq_log<DBG>("[bioseq] pg: submit_scan received null scan_slot; skipping");
             return;
         }
 
@@ -798,7 +798,7 @@ public:
          */
         const uint32_t entry_seq_bp_size = entry.seq_hdr() != nullptr
             ? entry.seq_hdr()->bp_size : 0;
-        JustLog("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
+        bioseq_log<DBG>("[bioseq] pg: submit_scan pk={} rowno={} seq_bp_size={} (null={})",
                 entry.primary_key_is_null ? -1 : entry.primary_key,
                 entry.sequence_rowno,
                 entry_seq_bp_size,
@@ -846,7 +846,7 @@ public:
                 bytes_per_unit_for_col = sizeof(typename traits::storage_unit);
             });
         if (lpu_for_column == 0 || bytes_per_unit_for_col == 0) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                 "hydrate_one_column: dispatch_instance returned zero lpu / "
                 "bytes_per_unit for (alphabet={}, width={})",
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
@@ -869,7 +869,7 @@ public:
             // assembled varlena would exceed MaxAllocSize. The scanner_pg
             // dispatch path reads such sequences fragment-by-fragment without
             // materialising. Projection of `SELECT seq` on these rows raises
-            // pg_log(ERROR) from access_method.cppm — that's the documented
+            // bioseq_log<ERR, PG>() from access_method.cppm — that's the documented
             // Phase C limit until Phase D D-VARLENA lifts it.
             //
             // Size = ceil(total_bp / letters_per_unit) * bytes_per_unit + header,
@@ -886,7 +886,7 @@ public:
                 static_cast<std::uint64_t>(pgseq_t::header_bytes())
                 + projected_payload_bytes;
             if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
-                JustLog("[bioseq] pg: hydrate_one_column row={} attno={} too large "
+                bioseq_log<DBG>("[bioseq] pg: hydrate_one_column row={} attno={} too large "
                         "({} bp, lpu={}, byte_width={} ⇒ {} bytes > MaxAllocSize); "
                         "deferring to scanner_pg",
                         i, static_cast<int>(column_attno),
@@ -1056,7 +1056,7 @@ public:
             ? kDispatchBatchCapacity
             : buffered_entries.size();
         if (buffered_entries.size() > kDispatchBatchCapacity) {
-            JustLog("[bioseq] pg: TupleDispatchBuffer batch overflow {} > {}; tail truncated",
+            bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer batch overflow {} > {}; tail truncated",
                     buffered_entries.size(), kDispatchBatchCapacity);
         }
         if (!mmsearch_context.active || batch_size == 0) {
@@ -1192,7 +1192,7 @@ public:
 
         const pgseq_t* query_hdr = mmsearch_context.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
-        JustLog("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={} alphabet_recompute={}",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={} alphabet_recompute={}",
                 batch_size,
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
@@ -1313,7 +1313,7 @@ public:
                     .try_reserve(estimated_wave_bytes);
             const bool hydrate_wave = estimated_wave_bytes == 0 || wave_permit.has_value();
             if (!hydrate_wave) {
-                JustLog("[bioseq] pg: TupleDispatchBuffer wave [{}, {}) was not admitted for {} bytes; target locators stream through scanner_pg",
+                bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer wave [{}, {}) was not admitted for {} bytes; target locators stream through scanner_pg",
                         wave.first, wave.second,
                         static_cast<unsigned long long>(estimated_wave_bytes));
             }
@@ -1379,7 +1379,7 @@ public:
                         base_params,
                         discarded_stats,
                         scanner_pg_arg);
-                JustLog("[bioseq] pg: TupleDispatchBuffer extra-query #{} wave [{}, {}) produced matches for {} entries",
+                bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer extra-query #{} wave [{}, {}) produced matches for {} entries",
                         extra_idx, wave.first, wave.second, extra_match_map.size());
                 for (auto it = wave_match_map.begin(); it != wave_match_map.end(); ) {
                     if (extra_match_map.find(it->first) == extra_match_map.end()) {
@@ -1415,7 +1415,7 @@ public:
              */
             auto hit = match_map.find(static_cast<int32_t>(i));
             if (hit == match_map.end()) {
-                JustLog("[bioseq] pg: batch miss for entry index={}; WHERE mmsearch evaluates to FALSE",
+                bioseq_log<DBG>("[bioseq] pg: batch miss for entry index={}; WHERE mmsearch evaluates to FALSE",
                         i);
                 continue;
             }
@@ -1448,7 +1448,7 @@ public:
                 if (base_params.do_cigar
                     && (!match_candidate.has_cigar
                         || match_candidate.cigar.empty())) {
-                    JustLog("[bioseq] pg: batch skip: degenerate match for entry index={} cursor m={} (do_cigar=true but cigar empty)",
+                    bioseq_log<DBG>("[bioseq] pg: batch skip: degenerate match for entry index={} cursor m={} (do_cigar=true but cigar empty)",
                             i, m);
                     continue;
                 }
@@ -1456,7 +1456,7 @@ public:
             }
         }
         output_position = 0;
-        JustLog("[bioseq] pg: batch produced {} output tuples from {} scan tuples",
+        bioseq_log<DBG>("[bioseq] pg: batch produced {} output tuples from {} scan tuples",
                 output_cursors.size(), buffered_entries.size());
     }
 
@@ -1473,13 +1473,13 @@ public:
         const OutputCursor& cursor = output_cursors[output_position];
         output_position++;
         if (cursor.scan_entry_index >= buffered_entries.size()) {
-            JustLog("[bioseq] pg: cursor references missing scan entry {}", cursor.scan_entry_index);
+            bioseq_log<DBG>("[bioseq] pg: cursor references missing scan entry {}", cursor.scan_entry_index);
             return std::nullopt;
         }
         BufferedScanEntry& entry = buffered_entries[cursor.scan_entry_index];
         auto hit = match_map.find(static_cast<int32_t>(cursor.scan_entry_index));
         if (hit == match_map.end() || cursor.match_index >= hit->second.size()) {
-            JustLog("[bioseq] pg: cursor references missing match for entry index={}",
+            bioseq_log<DBG>("[bioseq] pg: cursor references missing match for entry index={}",
                     cursor.scan_entry_index);
             return std::nullopt;
         }
@@ -1523,7 +1523,7 @@ public:
      * mmsearch_context untouched so callers can reuse configuration.
      */
     [[gnu::always_inline]] void clear_slots() {
-        JustLog("[bioseq] pg: TupleDispatchBuffer::clear_slots() entered; freeing {} slots, {} outputs",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::clear_slots() entered; freeing {} slots, {} outputs",
                 buffered_entries.size(), output_cursors.size());
         for (auto& entry : buffered_entries) {
             if (entry.scan_slot_copy != nullptr) {

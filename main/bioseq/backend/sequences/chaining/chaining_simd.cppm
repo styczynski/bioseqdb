@@ -598,7 +598,7 @@ void chain_anchors_simd(
             padded_best_scores, predecessors, peak_scores, params);
     }
 
-    JustLog("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
+    bioseq_log<DBG>("[chaining_simd] Forward DP pass complete for {} anchors", anchor_count);
 
     static const auto* _bt_desc =
         bioseq::instr::register_region_static("backtrack_chains");

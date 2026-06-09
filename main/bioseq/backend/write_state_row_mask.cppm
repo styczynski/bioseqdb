@@ -72,7 +72,7 @@ RowMaskInitWriteState(Oid relfilelocator,
 					  SubTransactionId current_sub_xid,
 					  bytea* row_mask)
 {
-	JustLog("[bioseq] pg: RowMaskInitWriteState() relfilelocator={} storage_id={} sub_xid={}", relfilelocator, storage_id, current_sub_xid);
+	bioseq_log<DBG>("[bioseq] pg: RowMaskInitWriteState() relfilelocator={} storage_id={} sub_xid={}", relfilelocator, storage_id, current_sub_xid);
 
 	bool found_existing = false;
 	RowMaskWriteStateMapEntry* hash_entry =

@@ -53,6 +53,97 @@ import sequan_compat;
 extern "C++" std::uint64_t tid_to_row_number(ItemPointerData tid);
 extern "C++" bool IsColumnarTableAmTable(Oid relationId);
 
+namespace {
+
+int bioseq_pg_elevel_for_level(LoggingLevel level) noexcept
+{
+	switch (level) {
+		case LoggingLevel::DBG: return DEBUG1;
+		case LoggingLevel::INF: return LOG;
+		case LoggingLevel::WRN: return WARNING;
+		case LoggingLevel::ERR: return ERROR;
+		case LoggingLevel::OFF: return DEBUG5;
+	}
+	return ERROR;
+}
+
+bool bioseq_pg_should_log_elevel(int elevel) noexcept
+{
+	return elevel >= ERROR || message_level_is_interesting(elevel);
+}
+
+bool bioseq_pg_sink_should_log_level(LoggingLevel level) noexcept
+{
+	return bioseq_pg_should_log_elevel(bioseq_pg_elevel_for_level(level));
+}
+
+void bioseq_pg_sink_log_elevel(
+	int elevel,
+	BioseqSourceLocation location,
+	std::string_view message)
+{
+	if (!errstart(elevel, TEXTDOMAIN)) {
+		return;
+	}
+	errmsg_internal("%.*s",
+					static_cast<int>(message.size()),
+					message.data());
+	errfinish(location.file_name,
+			  static_cast<int>(location.line),
+			  location.function_name);
+	if (elevel >= ERROR) {
+		__builtin_unreachable();
+	}
+}
+
+void bioseq_pg_sink_log_level(
+	LoggingLevel level,
+	BioseqSourceLocation location,
+	std::string_view message)
+{
+	bioseq_pg_sink_log_elevel(
+		bioseq_pg_elevel_for_level(level),
+		location,
+		message);
+}
+
+void bioseq_pg_sink_report(const BioseqReportView& report)
+{
+	const int elevel = report.has_raw_pg_elevel
+		? report.raw_pg_elevel
+		: bioseq_pg_elevel_for_level(report.level);
+
+	if (!errstart(elevel, TEXTDOMAIN)) {
+		return;
+	}
+	if (report.has_sqlerrcode) {
+		errcode(report.sqlerrcode);
+	}
+	if (!report.message.empty()) {
+		errmsg_internal("%.*s",
+						static_cast<int>(report.message.size()),
+						report.message.data());
+	}
+	if (!report.detail.empty()) {
+		errdetail_internal("%.*s",
+						   static_cast<int>(report.detail.size()),
+						   report.detail.data());
+	}
+	if (!report.hint.empty()) {
+		errhint("%.*s",
+				static_cast<int>(report.hint.size()),
+				report.hint.data());
+	}
+	errfinish(report.location.file_name,
+			  static_cast<int>(report.location.line),
+			  report.location.function_name);
+	if (elevel >= ERROR) {
+		__builtin_unreachable();
+	}
+}
+
+} // namespace
+
 extern "C" {
 PG_MODULE_MAGIC;
 
@@ -67,13 +158,20 @@ void
 _PG_init()
 {
 	static bool initialized = false;
+	bioseq_register_postgres_logging_sink({
+		.should_log_level = bioseq_pg_sink_should_log_level,
+		.log_level = bioseq_pg_sink_log_level,
+		.should_log_pg = bioseq_pg_should_log_elevel,
+		.log_pg = bioseq_pg_sink_log_elevel,
+		.report = bioseq_pg_sink_report,
+	});
 	if (initialized) {
-		JustLog("[bioseq] pg: _PG_init() skipped duplicate call");
+		bioseq_log<DBG, PG>("[bioseq] pg: _PG_init() skipped duplicate call");
 		return;
 	}
 	initialized = true;
 	log_configure();
-	JustLog("[bioseq] pg: _PG_init() entered");
+	bioseq_log<DBG, PG>("[bioseq] pg: _PG_init() entered");
 	bioseq_init();
 }
 
@@ -86,7 +184,7 @@ _PG_init()
  */
 CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: mmsearch() stub invoked, always returning true");
+	bioseq_log<DBG>("[bioseq] pg: mmsearch() stub invoked, always returning true");
 	PG_RETURN_BOOL(true);
 }
 
@@ -102,121 +200,121 @@ Datum mmsearch(PG_FUNCTION_ARGS) {
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_score_stub);
 Datum bioseq_score_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_score_stub() UNEXPECTED direct call -- custom scan did not rewrite this call site");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_score_stub() UNEXPECTED direct call -- custom scan did not rewrite this call site");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_dp_score_stub);
 Datum bioseq_dp_score_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_dp_score_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_dp_score_stub() UNEXPECTED direct call");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_query_len_stub);
 Datum bioseq_query_len_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_query_len_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_query_len_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_query_start_stub);
 Datum bioseq_query_start_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_query_start_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_query_start_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_query_end_stub);
 Datum bioseq_query_end_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_query_end_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_query_end_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_target_len_stub);
 Datum bioseq_target_len_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_target_len_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_target_len_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_target_start_stub);
 Datum bioseq_target_start_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_target_start_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_target_start_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_target_end_stub);
 Datum bioseq_target_end_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_target_end_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_target_end_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_num_matches_stub);
 Datum bioseq_num_matches_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_num_matches_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_num_matches_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_block_length_stub);
 Datum bioseq_block_length_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_block_length_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_block_length_stub() UNEXPECTED direct call");
 	PG_RETURN_INT64(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_mapq_stub);
 Datum bioseq_mapq_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_mapq_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_mapq_stub() UNEXPECTED direct call");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_chain_score_stub);
 Datum bioseq_chain_score_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_chain_score_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_chain_score_stub() UNEXPECTED direct call");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_dp_max_score_stub);
 Datum bioseq_dp_max_score_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_dp_max_score_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_dp_max_score_stub() UNEXPECTED direct call");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_seed_count_stub);
 Datum bioseq_seed_count_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_seed_count_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_seed_count_stub() UNEXPECTED direct call");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_secondary_chain_score_stub);
 Datum bioseq_secondary_chain_score_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_secondary_chain_score_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_secondary_chain_score_stub() UNEXPECTED direct call");
 	PG_RETURN_INT32(-1);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_is_reverse_stub);
 Datum bioseq_is_reverse_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_is_reverse_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_is_reverse_stub() UNEXPECTED direct call");
 	PG_RETURN_BOOL(false);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_is_primary_stub);
 Datum bioseq_is_primary_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_is_primary_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_is_primary_stub() UNEXPECTED direct call");
 	PG_RETURN_BOOL(false);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_has_cigar_stub);
 Datum bioseq_has_cigar_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_has_cigar_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_has_cigar_stub() UNEXPECTED direct call");
 	PG_RETURN_BOOL(false);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_divergence_stub);
 Datum bioseq_divergence_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_divergence_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_divergence_stub() UNEXPECTED direct call");
 	PG_RETURN_FLOAT4(-1.0f);
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_cigar_stub);
 Datum bioseq_cigar_stub(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_cigar_stub() UNEXPECTED direct call");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_cigar_stub() UNEXPECTED direct call");
 	PG_RETURN_TEXT_P(cstring_to_text("!UNEXPECTED!"));
 }
 
@@ -349,7 +447,7 @@ static Node* try_wrap_in_placeholder(SupportRequestSimplify* simplify) {
 	FirstVarFinder finder;
 	find_first_var_walker(reinterpret_cast<Node*>(simplify->fcall), &finder);
 	if (finder.result == nullptr) {
-		JustLog("[bioseq] pg: try_wrap_in_placeholder() no Var found in fcall — skipping");
+		bioseq_log<DBG>("[bioseq] pg: try_wrap_in_placeholder() no Var found in fcall — skipping");
 		return nullptr;
 	}
 	Var* arg_var = finder.result;
@@ -358,7 +456,7 @@ static Node* try_wrap_in_placeholder(SupportRequestSimplify* simplify) {
 	PlaceHolderVar* phv = make_placeholder_expr(root, expr_copy, phrels);
 	phv->phlevelsup    = arg_var->varlevelsup;
 	phv->phnullingrels = arg_var->varnullingrels;
-	JustLog("[bioseq] pg: try_wrap_in_placeholder() wrapped funcid={} phid={} phrels={}",
+	bioseq_log<DBG>("[bioseq] pg: try_wrap_in_placeholder() wrapped funcid={} phid={} phrels={}",
 			simplify->fcall->funcid, phv->phid,
 			static_cast<int>(arg_var->varno));
 	return reinterpret_cast<Node*>(phv);
@@ -366,11 +464,11 @@ static Node* try_wrap_in_placeholder(SupportRequestSimplify* simplify) {
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count_support);
 Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_symbol_count_support() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_symbol_count_support() entered");
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
 	if (IsA(request, SupportRequestCost)) {
 		SupportRequestCost* cost_request = reinterpret_cast<SupportRequestCost*>(request);
-		JustLog("[bioseq] pg: bioseq_symbol_count_support() received SupportRequestCost");
+		bioseq_log<DBG>("[bioseq] pg: bioseq_symbol_count_support() received SupportRequestCost");
 		cost_request->startup = 50000;
 		cost_request->per_tuple = 0;
 		PG_RETURN_POINTER(cost_request);
@@ -401,22 +499,21 @@ Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
  */
 CXX_PG_FUNCTION_INFO_V1(mmsearch_support);
 Datum mmsearch_support(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: mmsearch_support() entered");
+	bioseq_log<DBG>("[bioseq] pg: mmsearch_support() entered");
 	Node* response = nullptr;
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
 	if (IsA(request, SupportRequestCost))
 	{
 		SupportRequestCost* cost_request = reinterpret_cast<SupportRequestCost*>(request);
-		JustLog("[bioseq] pg: mmsearch_support() received SupportRequestCost");
+		bioseq_log<DBG>("[bioseq] pg: mmsearch_support() received SupportRequestCost");
 		PlannerInfo* planner_info = cost_request->root;
 		if (planner_info == nullptr) {
-			JustLog("[bioseq] pg: mmsearch_support() planner_info is null");
+			bioseq_log<DBG>("[bioseq] pg: mmsearch_support() planner_info is null");
 		} else {
-			JustLog("[bioseq] pg: mmsearch_support() invoked from node=[{}]", nodeStr(cost_request->node));
 			if (planner_info->non_recursive_path == nullptr) {
-				JustLog("[bioseq] pg: mmsearch_support() non_recursive_path is null");
+				bioseq_log<DBG>("[bioseq] pg: mmsearch_support() non_recursive_path is null");
 			} else {
-				JustLog("[bioseq] pg: mmsearch_support() non_recursive_path pathtype={}", static_cast<int>(planner_info->non_recursive_path->pathtype));
+				bioseq_log<DBG>("[bioseq] pg: mmsearch_support() non_recursive_path pathtype={}", static_cast<int>(planner_info->non_recursive_path->pathtype));
 			}
 		}
 		cost_request->startup = 100000;
@@ -448,7 +545,7 @@ Datum mmsearch_support(PG_FUNCTION_ARGS) {
  */
 CXX_PG_FUNCTION_INFO_V1(bioseq_placeholder_support);
 Datum bioseq_placeholder_support(PG_FUNCTION_ARGS) {
-	JustLog("[bioseq] pg: bioseq_placeholder_support() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_placeholder_support() entered");
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
 	if (!IsA(request, SupportRequestSimplify)) {
 		PG_RETURN_POINTER(nullptr);

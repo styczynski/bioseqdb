@@ -90,10 +90,10 @@ static void base_collect_minimizers(void *km, const mm_mapopt_t *opt, const mm_i
 			mv->a[j].y += sum << 1;
 		if (opt->sdust_thres > 0) // mask low-complexity minimizers
 		{
-			JustLog("Filter mm_dust_minier! {}", opt->sdust_thres);
+			bioseq_log<DBG>("Filter mm_dust_minier! {}", opt->sdust_thres);
 			mv->n = n + mm_dust_minier(km, mv->n - n, mv->a + n, qlens[i], seqs[i], opt->sdust_thres);
 		} else {
-			JustLog("Filter not required.")
+			bioseq_log<DBG>("Filter not required.");
 		}
 		sum += qlens[i], n = mv->n;
 	}
@@ -611,7 +611,7 @@ void mm_map_frag_core(const mm_idx_t *mi, int n_segs, const int *qlens, const ch
 
 	base_collect_minimizers(b->km, opt, mi, n_segs, qlens, seqs, &mv);
 
-	// JustLog("TERMINATE");
+	// bioseq_log<DBG>("TERMINATE");
 	// throw std::exception();
 
 	if (opt->q_occ_frac > 0.0f) mm_seed_mz_flt(b->km, &mv, opt->mid_occ, opt->q_occ_frac);

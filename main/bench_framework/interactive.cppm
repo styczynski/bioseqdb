@@ -1478,7 +1478,7 @@ inline void update_live_banner_state(ReloadState& reload,
     // between ticks) must reset the "detected Ns ago" timestamp.
     if (!was_present || previous_path != path) {
         reload.live_tmp_first_seen_ns.store(steady_now_ns(), std::memory_order_release);
-        logi("[bench_framework] --ui: live run detected at {}", path);
+        bioseq_log<INF>("[bench_framework] --ui: live run detected at {}", path);
     }
 }
 
@@ -1657,7 +1657,7 @@ private:
         reload_.failure_streak[report_id] += 1;
         if (reload_.failure_streak[report_id] >= kFailureStreakThreshold) {
             reload_.failed_indices.insert(report_id);
-            loge("[bench_framework] --ui: report_{}.json failed to parse {} times; "
+            bioseq_log<ERR>("[bench_framework] --ui: report_{}.json failed to parse {} times; "
                  "marking as schema_failed until next mtime advance",
                  report_id, reload_.failure_streak[report_id]);
         }
@@ -1770,7 +1770,7 @@ inline void reload_thread_body(std::filesystem::path dir,
         const auto enumeration = enumerate_report_dir(dir);
         if (!enumeration.ok) {
             if (was_reachable) {
-                loge("[bench_framework] --ui: report_dir '{}' is unreachable; "
+                bioseq_log<ERR>("[bench_framework] --ui: report_dir '{}' is unreachable; "
                      "the cache will keep its last good state until access recovers",
                      dir.string());
                 was_reachable = false;
@@ -1779,7 +1779,7 @@ inline void reload_thread_body(std::filesystem::path dir,
             continue;
         }
         if (!was_reachable) {
-            logi("[bench_framework] --ui: report_dir '{}' is reachable again",
+            bioseq_log<INF>("[bench_framework] --ui: report_dir '{}' is reachable again",
                  dir.string());
             was_reachable = true;
         }
@@ -1821,14 +1821,14 @@ spawn_capture_stdout(std::span<const std::string> argv,
 {
     int pipe_fds[2] = {-1, -1};
     if (::pipe(pipe_fds) != 0) {
-        loge("[bench_framework] --ui: pipe() failed before spawning '{}': {}",
+        bioseq_log<ERR>("[bench_framework] --ui: pipe() failed before spawning '{}': {}",
              argv.empty() ? std::string_view{"<empty>"} : std::string_view{argv.front()},
              std::strerror(errno));
         return {};
     }
     if (::fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC) == -1
         || ::fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC) == -1) {
-        loge("[bench_framework] --ui: fcntl(FD_CLOEXEC) failed: {}",
+        bioseq_log<ERR>("[bench_framework] --ui: fcntl(FD_CLOEXEC) failed: {}",
              std::strerror(errno));
         close_pipe_pair(pipe_fds);
         return {};
@@ -1850,7 +1850,7 @@ spawn_capture_stdout(std::span<const std::string> argv,
     pid_t child = -1;
     if (const int spawn_rc = posix_spawnp(&child, owned.front().c_str(), &actions, nullptr,
                      raw.data(), environ); spawn_rc != 0) {
-        loge("[bench_framework] --ui: posix_spawnp('{}') failed: {}",
+        bioseq_log<ERR>("[bench_framework] --ui: posix_spawnp('{}') failed: {}",
              owned.front(), std::strerror(spawn_rc));
         posix_spawn_file_actions_destroy(&actions);
         close_pipe_pair(pipe_fds);
@@ -1889,7 +1889,7 @@ load_git_log(const std::filesystem::path& cwd)
     };
     const auto raw = spawn_capture_stdout(std::span<const std::string>(argv), cwd);
     if (raw.empty()) {
-        logw("[bench_framework] --ui: 'git log' returned no output for '{}'; "
+        bioseq_log<WRN>("[bench_framework] --ui: 'git log' returned no output for '{}'; "
              "Commits panel will show <unknown commit> (shallow clone or no git binary?)",
              cwd.string());
         return out;
@@ -5307,7 +5307,7 @@ inline void on_sigterm(int) noexcept {
 inline void install_sigterm_pipe() noexcept {
     int fds[2] = {-1, -1};
     if (::pipe(fds) != 0) {
-        loge("[bench_framework] --ui: pipe(SIGTERM watcher) failed: {}",
+        bioseq_log<ERR>("[bench_framework] --ui: pipe(SIGTERM watcher) failed: {}",
              std::strerror(errno));
         return;
     }
@@ -6004,7 +6004,7 @@ namespace bioseq::bench_framework::detail {
 [[nodiscard]] int ui_mode_main(const std::string& report_dir, const ParsedCli& cli) noexcept {
     using namespace bioseq::bench_framework::detail::ui;
     if (::isatty(STDERR_FILENO) == 0 || ::isatty(STDIN_FILENO) == 0) {
-        loge("[bench_framework] --ui requires an interactive terminal; "
+        bioseq_log<ERR>("[bench_framework] --ui requires an interactive terminal; "
              "stdin / stderr is not a TTY. Falling back to one-shot read-only summary.");
         return render_summary_to_stderr_once(report_dir);
     }

@@ -22,6 +22,7 @@
 #include <tuple>
 
 import integration_tests.common;
+import mlogging;
 
 using namespace bioseq_int_tests;
 
@@ -242,7 +243,7 @@ inline void require_ideal_match(
         std::abs(observed.target_start - truth.truth_start);
     const long long end_delta =
         std::abs(observed.target_end - truth.truth_end);
-    JustLog("[test] scanner={} id={} truth=[{},{}) observed=[{},{}) "
+    bioseq_log<DBG>("[test] scanner={} id={} truth=[{},{}) observed=[{},{}) "
             "target_len={} start_delta={} end_delta={} is_reverse={}",
             scanner_label, truth.id, truth.truth_start, truth.truth_end,
             observed.target_start, observed.target_end,
@@ -281,7 +282,7 @@ TEST_CASE("DOC0274 — XXL_HIFI sample table: scanner_pg (test_force_inmemory_sc
     static_assert(kReferenceBp > kInt32Max,
                   "4 Gbp reference must exceed INT32_MAX to exercise the int8 projection fix");
     for (const auto& tr : truth) {
-        JustLog("[test] truth id={} [{},{}) (start_past_int32={} end_past_int32={})",
+        bioseq_log<DBG>("[test] truth id={} [{},{}) (start_past_int32={} end_past_int32={})",
                 tr.id, tr.truth_start, tr.truth_end,
                 tr.truth_start > kInt32Max, tr.truth_end > kInt32Max);
     }
@@ -293,7 +294,7 @@ TEST_CASE("DOC0274 — XXL_HIFI sample table: scanner_pg (test_force_inmemory_sc
     // ~1.0e9 bytes — under `MaxAllocSize` (~1.07 GiB) — so hydration
     // succeeds. (Past ~4.29 Gbp the assembled varlena would exceed
     // `MaxAllocSize`; in that regime this baseline path raises an explicit
-    // `pg_log(ERROR, …)` rather than silently falling through to scanner_pg
+    // `bioseq_log<ERR, PG>( …)` rather than silently falling through to scanner_pg
     // — DOC0274 §1.4.2 — so the GUC toggle keeps its force-baseline meaning.
     // That regime is out of scope here.) Both paths therefore run the same
     // alignment over the same bytes and are expected to produce
@@ -370,7 +371,7 @@ TEST_CASE("DOC0274 — XXL_HIFI sample table: scanner_pg (test_force_inmemory_sc
     for (std::size_t i = 0; i < inmemory_results.size(); ++i) {
         const auto& a = inmemory_results[i];
         const auto& b = pg_results[i];
-        JustLog("[test] parity row {}: in_memory id={} [{},{}) len={} vs scanner_pg id={} [{},{}) len={}",
+        bioseq_log<DBG>("[test] parity row {}: in_memory id={} [{},{}) len={} vs scanner_pg id={} [{},{}) len={}",
                 i, a.id, a.target_start, a.target_end, a.target_len,
                 b.id, b.target_start, b.target_end, b.target_len);
         REQUIRE(a.id           == b.id);
@@ -408,7 +409,7 @@ TEST_CASE("DOC0275 — 6 Gbp sample table: scanner_pg (test_force_inmemory_scann
     const auto truth = read_truth(ctx, kTable6);
     REQUIRE(truth.size() == static_cast<std::size_t>(kFragmentCount));
     for (const auto& tr : truth) {
-        JustLog("[test] 6gbp truth id={} rowno={} [{},{}) (start_past_uint32={} end_past_uint32={})",
+        bioseq_log<DBG>("[test] 6gbp truth id={} rowno={} [{},{}) (start_past_uint32={} end_past_uint32={})",
                 tr.id, tr.rowno, tr.truth_start, tr.truth_end,
                 tr.truth_start > kUint32Max, tr.truth_end > kUint32Max);
     }
@@ -422,7 +423,7 @@ TEST_CASE("DOC0275 — 6 Gbp sample table: scanner_pg (test_force_inmemory_scann
     for (const auto& tr : truth) {
         const long long distinct_sub_keys =
             index_distinct_sub_keys(ctx, "minimizers_per_fragment", kTable6, tr.rowno);
-        JustLog("[test] 6gbp row id={} rowno={} distinct_sub_keys={} expected_target_fragments={}",
+        bioseq_log<DBG>("[test] 6gbp row id={} rowno={} distinct_sub_keys={} expected_target_fragments={}",
                 tr.id, tr.rowno, distinct_sub_keys, expected_target_fragments);
         REQUIRE(distinct_sub_keys >= expected_target_fragments);
     }

@@ -20,6 +20,7 @@ module;
 
 export module bioseq_vector_types_aggregates;
 
+import mlogging;
 import pg_utils;
 
 extern "C" {
@@ -286,7 +287,7 @@ vint2int4avg(PG_FUNCTION_ARGS)
 
 	if (ARR_HASNULL(transition_array) ||
 		ARR_SIZE(transition_array) != ARR_OVERHEAD_NONULLS(1) + sizeof(Int64AggState))
-		pg_log(ERROR, "expected 2-element int8 array");
+		bioseq_log<ERR, PG>( "expected 2-element int8 array");
 
 	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
 
@@ -318,7 +319,7 @@ vint8acc(PG_FUNCTION_ARGS)
 	MemoryContext aggregate_context;
 
 	if (!AggCheckCallContext(fcinfo, &aggregate_context))
-		pg_log(ERROR, "aggregate function called in non-aggregate context");
+		bioseq_log<ERR, PG>( "aggregate function called in non-aggregate context");
 
 	{
 		MemoryContextScope ctx_guard{aggregate_context};

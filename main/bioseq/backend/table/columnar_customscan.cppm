@@ -310,12 +310,12 @@ struct BioseqScanRuntime {
  * call path does, but future hooks could regress) we lazy-allocate
  * without registering a cleanup callback — that allocation WILL
  * leak its std::vector / std::map storage on context teardown
- * because no callback is wired to call the destructor. The JustLog
+ * because no callback is wired to call the destructor. The bioseq_log<DBG>
  * makes the regression loud so a future maintainer notices.
  */
 [[nodiscard]] static BioseqScanRuntime& bioseq_runtime(BioseqScanState* state) {
 	if (state->runtime == nullptr) {
-		JustLog("[bioseq] pg: bioseq_runtime() lazy-allocating runtime — BeginCustomScan did not fire first; this allocation will leak unless a cleanup callback is wired");
+		bioseq_log<DBG>("[bioseq] pg: bioseq_runtime() lazy-allocating runtime — BeginCustomScan did not fire first; this allocation will leak unless a cleanup callback is wired");
 		state->runtime = static_cast<void*>(new BioseqScanRuntime{});
 	}
 	return *static_cast<BioseqScanRuntime*>(state->runtime);
@@ -351,9 +351,9 @@ static void bioseq_runtime_cleanup_callback(void* arg) {
 	}
 	auto* runtime_ptr = static_cast<BioseqScanRuntime*>(state->runtime);
 	if (runtime_ptr->cleanup_done) {
-		JustLog("[bioseq] pg: bioseq_runtime_cleanup_callback() normal-path delete after EndCustomScan");
+		bioseq_log<DBG>("[bioseq] pg: bioseq_runtime_cleanup_callback() normal-path delete after EndCustomScan");
 	} else {
-		JustLog("[bioseq] pg: bioseq_runtime_cleanup_callback() abort-path delete (slots not released)");
+		bioseq_log<DBG>("[bioseq] pg: bioseq_runtime_cleanup_callback() abort-path delete (slots not released)");
 	}
 	state->runtime = nullptr;
 	delete runtime_ptr;
@@ -1286,7 +1286,7 @@ static void
 ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 						   RangeTblEntry *rte)
 {
-	JustLog("[bioseq] pg: ColumnarSetRelPathlistHook() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarSetRelPathlistHook() entered");
 	/* call into previous hook if assigned */
 	if (PreviousSetRelPathlistHook)
 	{
@@ -1309,7 +1309,7 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	{
 		if (rte->tablesample != NULL)
 		{
-			PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 							.msg("sample scans not supported on columnar tables");
 		}
 
@@ -1348,7 +1348,7 @@ ColumnarSetRelPathlistHook(PlannerInfo *root, RelOptInfo *rel, Index rti,
 			AddColumnarScanPaths(root, rel, rte);
 		}
 	}
-	JustLog("[bioseq] pg: ColumnarSetRelPathlistHook() relation_close");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarSetRelPathlistHook() relation_close");
 	RelationClose(relation);
 }
 
@@ -1357,7 +1357,7 @@ static void
 ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 							bool inhparent, RelOptInfo *rel)
 {
-	JustLog("[bioseq] pg: ColumnarGetRelationInfoHook() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarGetRelationInfoHook() entered");
 	if (PreviousGetRelationInfoHook)
 	{
 		PreviousGetRelationInfoHook(root, relationObjectId, inhparent, rel);
@@ -1383,7 +1383,7 @@ ColumnarGetRelationInfoHook(PlannerInfo *root, Oid relationObjectId,
 static void
 RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 {
-	JustLog("[bioseq] pg: RemovePathsByPredicate() entered");
+	bioseq_log<DBG>("[bioseq] pg: RemovePathsByPredicate() entered");
 	PList<Path> filteredPathList;
 	PList<Path> filteredPartialPathList;
 
@@ -1426,7 +1426,7 @@ IsNotIndexPath(Path *path)
 static Path *
 CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
-	JustLog("[bioseq] pg: CreateColumnarSeqScanPath() entered");
+	bioseq_log<DBG>("[bioseq] pg: CreateColumnarSeqScanPath() entered");
 	/* columnar doesn't support parallel scan */
 	int parallelWorkers = 0;
 
@@ -1444,7 +1444,7 @@ CreateColumnarSeqScanPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 static void
 CostColumnarPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 {
-	JustLog("[bioseq] pg: CostColumnarPaths() entered");
+	bioseq_log<DBG>("[bioseq] pg: CostColumnarPaths() entered");
 	for(auto path : PList<Path>(rel->pathlist))
 	{
 		if (IsA(path, IndexPath))
@@ -1476,12 +1476,12 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 {
 	if (!enable_indexscan)
 	{
-		JustLog("[bioseq] pg: CostColumnarIndexPath() skipped (enable_indexscan=false)");
+		bioseq_log<DBG>("[bioseq] pg: CostColumnarIndexPath() skipped (enable_indexscan=false)");
 		/* costs are already set to disable_cost, don't adjust them */
 		return;
 	}
 
-	pg_log(DEBUG4, "columnar table index scan costs estimated by "
+	bioseq_log_pg(DEBUG4, "columnar table index scan costs estimated by "
 				   "indexAM: startup cost = {:.10f}, total cost = "
 				   "{:.10f}", indexPath->path.startup_cost,
 				   indexPath->path.total_cost);
@@ -1494,15 +1494,15 @@ CostColumnarIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 
 	if (!bioseq_index_scan)
 	{
-		JustLog("[bioseq] pg: CostColumnarIndexPath() bioseq_index_scan disabled, adding columnar cost");
+		bioseq_log<DBG>("[bioseq] pg: CostColumnarIndexPath() bioseq_index_scan disabled, adding columnar cost");
 		Cost columnarIndexScanCost = ColumnarIndexScanAdditionalCost(root, rel, relationId,
 																	indexPath);
 		indexPath->path.total_cost += columnarIndexScanCost;
 	}
 
-	JustLog("[bioseq] pg: CostColumnarIndexPath() cost computation complete");
+	bioseq_log<DBG>("[bioseq] pg: CostColumnarIndexPath() cost computation complete");
 
-	pg_log(DEBUG4, "columnar table index scan costs re-estimated "
+	bioseq_log_pg(DEBUG4, "columnar table index scan costs re-estimated "
 				   "by columnarAM (including indexAM costs): "
 				   "startup cost = {:.10f}, total cost = {:.10f}",
 				   indexPath->path.startup_cost,
@@ -1518,7 +1518,7 @@ static Cost
 ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 								Oid relationId, IndexPath *indexPath)
 {
-	JustLog("[bioseq] pg: ColumnarIndexScanAdditionalCost() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarIndexScanAdditionalCost() entered");
 	int numberOfColumnsRead = RelationIdGetNumberOfAttributes(relationId);
 	Cost perStripeCost = ColumnarPerStripeScanCost(rel, relationId, numberOfColumnsRead);
 
@@ -1587,7 +1587,7 @@ ColumnarIndexScanAdditionalCost(PlannerInfo *root, RelOptInfo *rel,
 
 	Cost scanCost = perStripeCost * estimatedStripeReadCount;
 
-	pg_log(DEBUG4, "re-costing index scan for columnar table: "
+	bioseq_log_pg(DEBUG4, "re-costing index scan for columnar table: "
 				   "selectivity = {:.10f}, complement abs "
 				   "correlation = {:.10f}, per stripe cost = {:.10f}, "
 				   "estimated stripe read count = {:.10f}, "
@@ -1650,7 +1650,7 @@ RelationIdGetNumberOfAttributes(Oid relationId)
 static bool
 CheckVarStats(PlannerInfo *root, Var *var, Oid sortop, float *absVarCorrelation)
 {
-	JustLog("[bioseq] pg: CheckVarStats() entered");
+	bioseq_log<DBG>("[bioseq] pg: CheckVarStats() entered");
 	/*
 	 * Collect isunique, ndistinct, and varCorrelation.
 	 */
@@ -1942,7 +1942,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
 		const BioseqStubOids& stub_oids = get_cached_stub_oids();
 		if (IsMmsearchPushdownable(rel, fe, stub_oids)) {
-			JustLog("[bioseq] pg: ExtractPushdownClause() accepting mmsearch funcexpr funcid={} for rel relid={}",
+			bioseq_log<DBG>("[bioseq] pg: ExtractPushdownClause() accepting mmsearch funcexpr funcid={} for rel relid={}",
 					fe->funcid, static_cast<int>(rel->relid));
 			return reinterpret_cast<Expr*>(node);
 		}
@@ -1959,7 +1959,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 			 * here, then it can't be a pushdownable one, such as:
 			 *   WHERE id NOT IN (SELECT id FROM something).
 			 */
-			pg_log(ColumnarPlannerDebugLevel,
+			bioseq_log_pg(ColumnarPlannerDebugLevel,
 				   "columnar planner: cannot push down clause: "
 				   "must not contain a subplan");
 			return NULL;
@@ -1977,7 +1977,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 			}
 			else if (boolExpr->boolop == OR_EXPR)
 			{
-				pg_log(ColumnarPlannerDebugLevel,
+				bioseq_log_pg(ColumnarPlannerDebugLevel,
 					   "columnar planner: cannot push down clause: "
 					   "all arguments of an OR expression must be "
 					   "pushdownable but one of them was not, due "
@@ -1991,7 +1991,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		int npushdownableArgs = pushdownableArgs.length();
 		if (npushdownableArgs == 0)
 		{
-			pg_log(ColumnarPlannerDebugLevel,
+			bioseq_log_pg(ColumnarPlannerDebugLevel,
 				   "columnar planner: cannot push down clause: "
 				   "none of the arguments were pushdownable, "
 				   "due to the reason(s) given above");
@@ -2019,7 +2019,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 
 	if (!IsA(node, OpExpr) || list_length(reinterpret_cast<OpExpr *>(node)->args) != 2)
 	{
-		pg_log(ColumnarPlannerDebugLevel,
+		bioseq_log_pg(ColumnarPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
 			   "must be binary operator expression");
 		return NULL;
@@ -2047,7 +2047,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 	}
 	else
 	{
-		PgReport(ColumnarPlannerDebugLevel)
+		bioseq_report_pg(ColumnarPlannerDebugLevel)
 				.msg("columnar planner: cannot push down clause: "
 					 "must match 'Var <op> Expr' or 'Expr <op> Var'")
 				.hint("Var must only reference this rel, "
@@ -2057,7 +2057,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 
 	if (varSide->varattno <= 0)
 	{
-		pg_log(ColumnarPlannerDebugLevel,
+		bioseq_log_pg(ColumnarPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
 			   "var is whole-row reference or system column");
 		return NULL;
@@ -2065,7 +2065,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 
 	if (contain_volatile_functions(reinterpret_cast<Node *>(exprSide)))
 	{
-		pg_log(ColumnarPlannerDebugLevel,
+		bioseq_log_pg(ColumnarPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
 			   "expr contains volatile functions");
 		return NULL;
@@ -2080,7 +2080,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		!get_opclass_opfamily_and_input_type(varOpClass, &varOpFamily,
 											 &varOpcInType))
 	{
-		pg_log(ColumnarPlannerDebugLevel,
+		bioseq_log_pg(ColumnarPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
 			   "cannot find default btree opclass and opfamily for type: {}",
 			   format_type_be(varSide->vartype));
@@ -2089,7 +2089,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 
 	if (!op_in_opfamily(opExpr->opno, varOpFamily))
 	{
-		pg_log(ColumnarPlannerDebugLevel,
+		bioseq_log_pg(ColumnarPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
 			   "operator {} not a member of opfamily {}",
 			   opExpr->opno, varOpFamily);
@@ -2107,7 +2107,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 	float absVarCorrelation = 0;
 	if (!CheckVarStats(root, varSide, sortop, &absVarCorrelation))
 	{
-		pg_log(ColumnarPlannerDebugLevel,
+		bioseq_log_pg(ColumnarPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
 			   "absolute correlation ({:.3f}) of var attribute {} is "
 			   "smaller than the value configured in "
@@ -2311,7 +2311,7 @@ ChooseDepthLimit(int nCandidates)
 static void
 AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
-	JustLog("[bioseq] pg: AddColumnarScanPaths() entered");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPaths() entered");
 	List *joinClauses = FindPushdownJoinClauses(root, rel);
 	Relids candidateRelids = FindCandidateRelids(root, rel, joinClauses);
 
@@ -2323,7 +2323,7 @@ AddColumnarScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	AddColumnarScanPathsRec(root, rel, rte, paramRelids, candidateRelids,
 							depthLimit);
 
-	JustLog("[bioseq] pg: AddColumnarScanPaths() returning");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPaths() returning");
 }
 
 
@@ -2381,8 +2381,8 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 		if (bioseq_min_parallel_processes > max_parallel_workers)
 		{
-			pg_log(DEBUG1, "bioseq.min_parallel_proceses is set higher than max_parallel_workers.");
-			pg_log(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
+			bioseq_log_pg(DEBUG1, "bioseq.min_parallel_proceses is set higher than max_parallel_workers.");
+			bioseq_log_pg(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
 			bioseq_min_parallel_process_running = 
 				std::min(max_parallel_workers, bioseq_min_parallel_processes);
 		}
@@ -2402,14 +2402,14 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		// FIXME: Fix this!!!
 		const bool force_parallel = true;
 		if (force_parallel) {
-			JustLog("[bioseq] pg: AddColumnarScanPathsRec() force_parallel override active");
+			bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPathsRec() force_parallel override active");
 			bioseq_min_parallel_process_running = bioseq_min_parallel_processes;
 		}
 
 		if (force_parallel || (rel->consider_parallel && rel->lateral_relids == NULL && 
 			bioseq_min_parallel_process_running > 0))
 		{
-			JustLog("[bioseq] pg: AddColumnarScanPathsRec() add_partial_path for parallel scan");
+			bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPathsRec() add_partial_path for parallel scan");
 			/*
 			 * Passing NULL for JOIN quals in parallel execution.
 			 */
@@ -2424,7 +2424,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		}
 	}
 
-	JustLog("[bioseq] pg: AddColumnarScanPathsRec() recursing into candidate relids");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPathsRec() recursing into candidate relids");
 
 	/* recurse for all candidateRelids, unless we hit the depth limit */
 	Assert(depthLimit >= 0);
@@ -2438,7 +2438,7 @@ AddColumnarScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * generate paths of greater parameterization (and hopefully lower
 	 * cost).
 	 */
-	JustLog("[bioseq] pg: AddColumnarScanPathsRec() iterating parameter combinations depth-first");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPathsRec() iterating parameter combinations depth-first");
 	Relids tmpCandidateRelids = bms_copy(candidateRelids);
 	int relid = -1;
 	while ((relid = bms_next_member(candidateRelids, relid)) >= 0)
@@ -2565,7 +2565,7 @@ fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
 		attno = get_attnum(childId, attname);
 		if (attno == InvalidAttrNumber)
 		{
-			pg_log(ERROR, "cache lookup failed for attribute {} of relation {}",
+			bioseq_log<ERR, PG>( "cache lookup failed for attribute {} of relation {}",
 				   attname, childId);
 		}
 
@@ -2580,26 +2580,22 @@ fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
 static bool
 CostTestWalker(Node *node, Query *notUsed)
 {
-	JustLog("[bioseq] pg: CostTestWalker() entered");
-	for (auto target_entry : PList<Node>(notUsed->targetList)) {
-		JustLog("[bioseq] pg: CostTestWalker() targetlist node=[{}]", nodeStr(target_entry));
-	}
+	bioseq_log<DBG>("[bioseq] pg: CostTestWalker() entered");
 	if (node == NULL)
 	{
 		return false;
 	}
-	JustLog("[bioseq] pg: CostTestWalker() walking node=[{}]", nodeStr(node));
 	if (IsA(node, Var)) {
 		Var* var_node = reinterpret_cast<Var*>(node);
 		const auto var_no = var_node->varno;
 		List* range_table = notUsed->rtable;
 		if (range_table == nullptr) {
-			JustLog("[bioseq] pg: CostTestWalker() var rtable is null");
+			bioseq_log<DBG>("[bioseq] pg: CostTestWalker() var rtable is null");
 		} else if (var_no == 0 || var_no > list_length(range_table)) {
-			JustLog("[bioseq] pg: CostTestWalker() var varno out of bounds varno={} rtable_len={}", var_no, list_length(range_table));
+			bioseq_log<DBG>("[bioseq] pg: CostTestWalker() var varno out of bounds varno={} rtable_len={}", var_no, list_length(range_table));
 		} else {
 			RangeTblEntry* rte = rt_fetch(var_no, range_table);
-			JustLog("[bioseq] pg: CostTestWalker() rte_kind={} relid={}", static_cast<int>(rte->rtekind), static_cast<int>(rte->relid));
+			bioseq_log<DBG>("[bioseq] pg: CostTestWalker() rte_kind={} relid={}", static_cast<int>(rte->rtekind), static_cast<int>(rte->relid));
 		}
 	}
 	
@@ -2628,10 +2624,10 @@ bioseq_projection_walker(Node* node, void* ctx)
 	if (IsA(node, FuncExpr)) {
 		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
 		if (is_mmsearch_funcid(fe->funcid, *data->stub_oids)) {
-			JustLog("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr (any depth)");
+			bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() detected mmsearch funcexpr (any depth)");
 			++(*data->count);
 		} else if (is_bioseq_projection_funcid(fe->funcid, *data->stub_oids)) {
-			JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq projection funcid={}",
+			bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() detected bioseq projection funcid={}",
 					fe->funcid);
 			++(*data->count);
 		} else if (fe->funcid == data->stub_oids->symbol_count_oid
@@ -2644,7 +2640,7 @@ bioseq_projection_walker(Node* node, void* ctx)
 			 * site so the negative-cost adjustment scales with the
 			 * number of rewrites VarInjectorMutator will perform.
 			 */
-			JustLog("[bioseq] pg: AddColumnarScanPath() detected bioseq.symbol_count funcexpr");
+			bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() detected bioseq.symbol_count funcexpr");
 			++(*data->count);
 		}
 	}
@@ -2661,7 +2657,7 @@ static Path *
 AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 					Relids paramRelids)
 {
-	JustLog("[bioseq] pg: AddColumnarScanPath() entered");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() entered");
 	/*
 	 * Must return a CustomPath, not a larger structure containing a
 	 * CustomPath as the first field. Otherwise, nodeToString() will fail to
@@ -2685,7 +2681,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	bool wehavemagic = false;
 	int wehavemagic_cnt = 0;
-	JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={} symbol_count_oid={}",
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={} symbol_count_oid={}",
 		stub_oids.mmsearch_oid, stub_oids.score_oid, stub_oids.cigar_oid, stub_oids.query_start_oid,
 		stub_oids.symbol_count_oid);
 	/*
@@ -2708,12 +2704,12 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		reinterpret_cast<Node*>(root->parse->targetList), &walker_data);
 	wehavemagic = wehavemagic_cnt > 0;
 
-	JustLog("[bioseq] pg: AddColumnarScanPath() walking pathtarget expressions");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() walking pathtarget expressions");
 	for (auto expr : PList<Node>(path->pathtarget->exprs)) {
-		JustLog("[bioseq] pg: AddColumnarScanPath() pathtarget expression");
+		bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() pathtarget expression");
 		CostTestWalker(expr, root->parse);
 	}
-	JustLog("[bioseq] pg: AddColumnarScanPath() pathtarget walk complete");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() pathtarget walk complete");
 
 	/* columnar scans are not parallel-aware, but they are parallel-safe */
 	path->parallel_safe = rel->consider_parallel;
@@ -2730,7 +2726,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		allClauses.concat(path->param_info->ppi_clauses);
 	}
 
-	JustLog("[bioseq] pg: AddColumnarScanPath() iterating allClauses (no-op pass for tracing)");
+	bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() iterating allClauses (no-op pass for tracing)");
 	for (auto restrict_info : allClauses)
 	{
 		(void) restrict_info;
@@ -2767,7 +2763,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 				if (is_mmsearch_funcid(fe->funcid, mmsearch_oids)) {
 					wehavemagic = true;
 					++wehavemagic_cnt;
-					JustLog("[bioseq] pg: AddColumnarScanPath() mmsearch in scan quals adds wehavemagic; new cnt={}",
+					bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() mmsearch in scan quals adds wehavemagic; new cnt={}",
 							wehavemagic_cnt);
 				}
 			}
@@ -2882,7 +2878,7 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 				bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX);
 		const double sidecar_bonus = 10000.0 * static_cast<double>(index_presence);
 
-		JustLog("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={} magic_cnt={} index_presence={:.4f}",
+		bioseq_log<DBG>("[bioseq] pg: AddColumnarScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={} magic_cnt={} index_presence={:.4f}",
 			path->total_cost, path->startup_cost, pt->cost.per_tuple, pt->cost.startup,
 			(&cpath->path)->startup_cost, (&cpath->path)->total_cost,
 			wehavemagic_cnt, static_cast<double>(index_presence));
@@ -2897,14 +2893,16 @@ AddColumnarScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	}
 
 
-	StringInfoData buf;
-	initStringInfo(&buf);
-	PgReport(ColumnarPlannerDebugLevel)
-			.msg("columnar planner: adding CustomScan path for {}",
-				 rte->eref->aliasname)
-			.detail("{}; {} clauses pushed down",
-					ParameterizationAsString(root, paramRelids, &buf),
-					numberOfClausesPushed);
+	bioseq_report_pg_lazy(ColumnarPlannerDebugLevel, [&] {
+		StringInfoData buf;
+		initStringInfo(&buf);
+		bioseq_report_pg(ColumnarPlannerDebugLevel)
+				.msg("columnar planner: adding CustomScan path for {}",
+					 rte->eref->aliasname)
+				.detail("{}; {} clauses pushed down",
+						ParameterizationAsString(root, paramRelids, &buf),
+						numberOfClausesPushed);
+	});
 
 	return path;
 }
@@ -2935,7 +2933,7 @@ AdjustColumnarParallelScanCost(Path *path)
 		path->total_cost /= parallel_divisor;
 
 		// FIXME: Remove
-		//JustLog("PARA Set parallel cost to 0");
+		//bioseq_log<DBG>("PARA Set parallel cost to 0");
 		//path->total_cost = 0;
 
 		path->rows = clamp_row_est(path->rows / parallel_divisor);
@@ -3049,7 +3047,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 								List *clauses,
 								List *custom_plans)
 {
-	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScanPath_PlanCustomPath() entered");
 	// PAPIESZ: ADD HERE
 	/*
 	 * Must return a CustomScan, not a larger structure containing a
@@ -3099,7 +3097,6 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 
 		const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
 		for(auto n : PList<TargetEntry>(root->processed_tlist)) {
-			JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() processed_tlist node=[{}]", nodeStr(n));
 			if(IsA(n->expr, FuncExpr)) {
 				FuncExpr* fe = reinterpret_cast<FuncExpr*>(n->expr);
 				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
@@ -3110,12 +3107,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 				}
 			}
 		}
-	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist_is_null={}", tlist == nullptr);
-	for(auto n : PList<TargetEntry>(tlist)) {
-		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist node=[{}]", nodeStr(n));
-	}
-
-
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScanPath_PlanCustomPath() tlist_is_null={}", tlist == nullptr);
 
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
@@ -3130,7 +3122,7 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
 		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);
 
-		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() splitting qual list for vectorization");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarScanPath_PlanCustomPath() splitting qual list for vectorization");
 
 		cscan->custom_exprs = lappend(cscan->custom_exprs, listDifference);
 
@@ -3140,12 +3132,12 @@ ColumnarScanPath_PlanCustomPath(PlannerInfo *root,
 	}
 	else
 	{
-		JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() vectorization disabled, qual not split");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarScanPath_PlanCustomPath() vectorization disabled, qual not split");
 		/* We still need to create third entry in custom_exprs */
 		cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
 	}
 
-	JustLog("[bioseq] pg: ColumnarScanPath_PlanCustomPath() returning");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScanPath_PlanCustomPath() returning");
 	return reinterpret_cast<Plan *>(cscan);
 }
 
@@ -3213,7 +3205,7 @@ ColumnarScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 static Node *
 ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 {
-	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_CreateCustomScanState() entered");
 	BioseqScanState* bioseq_scan_state = BioseqScanState::allocate();
 	bioseq_scan_state->as_custom_scan_state()->methods = &ColumnarScanExecuteMethods;
 	bioseq_scan_state->as_custom_scan_state()->ss.ss_currentScanDesc = NULL;
@@ -3229,7 +3221,7 @@ ColumnarScan_CreateCustomScanState(CustomScan *cscan)
 	 * header stay standard-layout; we re-cast in bioseq_runtime().
 	 */
 	bioseq_scan_state->runtime = nullptr;
-	JustLog("[bioseq] pg: ColumnarScan_CreateCustomScanState() returning");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_CreateCustomScanState() returning");
 	return bioseq_scan_state->as_node();
 }
 
@@ -3276,7 +3268,7 @@ EvalParamsMutator(Node *node, ExprContext *econtext)
 static void
 ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int eflags)
 {
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() entered");
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(cscanstate->ss.ps.plan);
 	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(cscanstate);
 	ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
@@ -3302,27 +3294,23 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	 * Third list in custom_exprs should contain vectorized qual list if not 
 	 * NULL.
 	 */
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() examining custom_exprs for vectorized qual");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() examining custom_exprs for vectorized qual");
 	List* vectorized_qual_list = custom_exprs.third();
 	if (vectorized_qual_list != NIL) {
-		JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() vectorized qual list present");
-		for (auto qual_node : PList<Node>(cscan->custom_exprs)) {
-			JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() vectorized qual=[{}]", nodeStr(qual_node));
-		}
+		bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() vectorized qual list present");
 		columnarScanState->vectorization.vectorizedQualList = vectorized_qual_list;
 	}
 
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() iterating custom_private");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() iterating custom_private");
 	for (auto private_const_node : PList<Const>(cscan->custom_private))
 	{
-		JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() custom_private node=[{}]", nodeStr(reinterpret_cast<Node*>(private_const_node)));
 		if (private_const_node->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
-			JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() setting vectorizationAggregate");
+			bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() setting vectorizationAggregate");
 			columnarScanState->vectorization.vectorizationAggregate = private_const_node->constvalue;
 		}
 	}
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() custom_private iteration complete");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() custom_private iteration complete");
 
 	/*
 	 * Vectorization is enabled if global variable is set and there is at least one
@@ -3333,7 +3321,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		(columnarScanState->vectorization.vectorizedQualList != NULL ||
 		 columnarScanState->vectorization.vectorizationAggregate);
 
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() guc_vec={} has_vec_qual={} vec_aggregate={}",
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() guc_vec={} has_vec_qual={} vec_aggregate={}",
 		bioseq_enable_vectorization,
 		columnarScanState->vectorization.vectorizedQualList != NULL,
 		columnarScanState->vectorization.vectorizationAggregate);
@@ -3362,7 +3350,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	columnarScanState->attrNeeded = 
 		ColumnarAttrNeeded(&cscanstate->ss, columnarScanState->vectorization.vectorizedQualList);
 
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() iterating attrNeeded bitmap members");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() iterating attrNeeded bitmap members");
 	for (int attrIndex : columnarScanState->attrNeeded)
 	{
 		columnarScanState->vectorization.attrNeededList.append(attrIndex);
@@ -3377,7 +3365,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 	columnarScanState->snapshotRegisteredByUs = false;
 	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
 
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() checking parallel mode");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() checking parallel mode");
 	if(!IsInParallelMode())
 	{
 		RowMaskFlushWriteStateForRelfilenode(relationOid, GetCurrentSubTransactionId());
@@ -3409,7 +3397,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		Var* pk_var = reinterpret_cast<Var*>(arg0);
 		if (pk_var->varattno <= 0) continue;
 		primary_key_attno = pk_var->varattno;
-		JustLog("[bioseq] pg: BeginCustomScan() detected primary_key varattno={} from bioseq projection funcid={}",
+		bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() detected primary_key varattno={} from bioseq projection funcid={}",
 				static_cast<int>(primary_key_attno), fe->funcid);
 		break;
 	}
@@ -3527,7 +3515,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			&& reinterpret_cast<Var*>(a1)->varno == v0->varno
 			&& reinterpret_cast<Var*>(a1)->varattno > 0;
 		if (!is_c && !is_p && !is_v) {
-			JustLog("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 nodeTag={} is not Const/Param/same-rel-Var)",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 nodeTag={} is not Const/Param/same-rel-Var)",
 					static_cast<int>(nodeTag(a1)));
 			continue;
 		}
@@ -3566,7 +3554,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			if (query_const->consttype != scan_stub_oids.bioseq_seq_type_oid
 				|| query_const->constisnull)
 			{
-				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null bioseq.seq Const (type={}, null={})",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null bioseq.seq Const (type={}, null={})",
 						query_const->consttype, query_const->constisnull);
 				continue;
 			}
@@ -3576,7 +3564,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			Param* query_param = reinterpret_cast<Param*>(arg1);
 			if (query_param->paramtype != scan_stub_oids.bioseq_seq_type_oid)
 			{
-				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramtype={}, expected bioseq.seq ({})",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramtype={}, expected bioseq.seq ({})",
 						query_param->paramtype, scan_stub_oids.bioseq_seq_type_oid);
 				continue;
 			}
@@ -3594,7 +3582,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			 */
 			if (query_param->paramkind != PARAM_EXEC)
 			{
-				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramkind={}, only PARAM_EXEC supported — bioseq.* projections will be NULL",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 Param has paramkind={}, only PARAM_EXEC supported — bioseq.* projections will be NULL",
 						static_cast<int>(query_param->paramkind));
 				continue;
 			}
@@ -3604,7 +3592,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			Var* query_var = reinterpret_cast<Var*>(arg1);
 			if (query_var->vartype != scan_stub_oids.bioseq_seq_type_oid)
 			{
-				JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 Var vartype={} not bioseq.seq",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 Var vartype={} not bioseq.seq",
 						query_var->vartype);
 				continue;
 			}
@@ -3613,14 +3601,14 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		TupleDesc tuple_descriptor = RelationGetDescr(relation_for_attname);
 		if (col_var->varattno <= 0 || col_var->varattno > tuple_descriptor->natts)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 varattno={} out of range natts={}",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg0 varattno={} out of range natts={}",
 					static_cast<int>(col_var->varattno), tuple_descriptor->natts);
 			continue;
 		}
 		Form_pg_attribute attribute_form = TupleDescAttr(tuple_descriptor, col_var->varattno - 1);
 		if (attribute_form->atttypid != scan_stub_oids.bioseq_seq_type_oid)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 column type is {}, expected bioseq.seq ({})",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg0 column type is {}, expected bioseq.seq ({})",
 					attribute_form->atttypid, scan_stub_oids.bioseq_seq_type_oid);
 			continue;
 		}
@@ -3642,7 +3630,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		 */
 		if (col_var->vartypmod < 0)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; bioseq.seq columns require an explicit (alphabet,width)");
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; bioseq.seq columns require an explicit (alphabet,width)");
 			continue;
 		}
 		int32 arg1_typmod = -1;
@@ -3655,7 +3643,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		}
 		if (arg1_typmod < 0)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
 			continue;
 		}
 		const auto unpacked_typmod      = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
@@ -3675,7 +3663,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		 */
 		if (arg1_is_param && !typmod_match)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch (Param) col=({},{}) arg1=({},{}) — rejecting (Param coalesce not yet supported)",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch (Param) col=({},{}) arg1=({},{}) — rejecting (Param coalesce not yet supported)",
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
 					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width),
 					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
@@ -3690,7 +3678,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		 */
 		if (arg1_is_var_same_rel && !typmod_match)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() unexpected same-rel Var typmod mismatch col=({},{}) arg1=({},{}) — rejecting",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() unexpected same-rel Var typmod mismatch col=({},{}) arg1=({},{}) — rejecting",
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
 					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width),
 					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
@@ -3710,7 +3698,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			Form_pg_attribute pk_attr_form = TupleDescAttr(tuple_descriptor, primary_key_attno - 1);
 			if (pk_attr_form->atttypid != INT4OID)
 			{
-				JustLog("[bioseq] pg: BeginCustomScan() primary key column type is {} not INT4OID; rows will be mis-keyed",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() primary key column type is {} not INT4OID; rows will be mis-keyed",
 						pk_attr_form->atttypid);
 			}
 		}
@@ -3718,7 +3706,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 		char* attname_cstr = get_attname(relation_oid_for_attname, col_var->varattno, /*missing_ok=*/true);
 		if (attname_cstr == nullptr)
 		{
-			JustLog("[bioseq] pg: BeginCustomScan() get_attname returned NULL for attno={}",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() get_attname returned NULL for attno={}",
 					static_cast<int>(col_var->varattno));
 			continue;
 		}
@@ -3792,7 +3780,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				pfree(extra_query_hdr);
 			}
 			runtime.buffer.add_extra_const_query(std::move(extra_varlena_bytes));
-			JustLog("[bioseq] pg: BeginCustomScan() registered additional mmsearch (extra count now {})",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registered additional mmsearch (extra count now {})",
 					runtime.buffer.extra_query_count());
 			pfree(attname_cstr);
 			continue;
@@ -3869,7 +3857,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 					runtime.buffer.apply_typmod_coalesce(std::move(coalesced_bytes));
 					if (!same_alphabet) {
 						runtime.buffer.mark_alphabet_mismatch_recompute();
-						JustLog("[bioseq] pg: BeginCustomScan() cross-alphabet recompute set; col_alphabet={} arg1_alphabet={}",
+						bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() cross-alphabet recompute set; col_alphabet={} arg1_alphabet={}",
 								static_cast<unsigned>(unpacked_typmod.alphabet_code),
 								static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code));
 					}
@@ -3899,7 +3887,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 			runtime.param_rebind.primary_key_attno = primary_key_attno;
 			runtime.param_rebind.mmsearch_fe       = fe;
 			primary_is_const = false;
-			JustLog("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
 					query_param->paramid, static_cast<int>(query_param->paramkind),
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
 					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width));
@@ -3926,7 +3914,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 				unpacked_typmod.storage_unit_byte_width,
 				primary_key_attno);
 			primary_is_const = false;
-			JustLog("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
 					static_cast<int>(col_var->varattno),
 					static_cast<int>(query_var->varattno),
 					self_alignment);
@@ -4016,7 +4004,7 @@ ColumnarScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, int ef
 							resolved_user_relid,
 							scan_db_oid, scan_spc_oid, scan_relfile);
 
-	JustLog("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_BeginCustomScan() scan initialised successfully");
 	/* scan slot is already initialized */
 }
 
@@ -4032,7 +4020,7 @@ ExecScanFetch(ScanState *node,
 			  ExecScanAccessMtd accessMtd,
 			  ExecScanRecheckMtd recheckMtd)
 {
-	JustLog("[bioseq] pg: ExecScanFetch() entered");
+	bioseq_log<DBG>("[bioseq] pg: ExecScanFetch() entered");
 	EState	   *estate = node->ps.state;
 
 	CHECK_FOR_INTERRUPTS();
@@ -4192,7 +4180,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 		return nullptr;
 	}
 	if (!IsA(arg0, Var) || !IsA(arg1, Const)) {
-		JustLog("[bioseq] pg: VarInjectorMutator() leaving symbol_count(...) alone; arg0_tag={} arg1_tag={}",
+		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() leaving symbol_count(...) alone; arg0_tag={} arg1_tag={}",
 				static_cast<int>(nodeTag(arg0)),
 				static_cast<int>(nodeTag(arg1)));
 		return nullptr;
@@ -4201,12 +4189,12 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	Var* col_var = reinterpret_cast<Var*>(arg0);
 	Const* letter_const = reinterpret_cast<Const*>(arg1);
 	if (col_var->vartypmod < 0 || col_var->vartype != ctx->oids->bioseq_seq_type_oid) {
-		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count arg0 has wrong type/typmod (type={}, typmod={})",
+		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() symbol_count arg0 has wrong type/typmod (type={}, typmod={})",
 				col_var->vartype, col_var->vartypmod);
 		return nullptr;
 	}
 	if (letter_const->constisnull) {
-		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count arg1 is NULL; skipping");
+		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() symbol_count arg1 is NULL; skipping");
 		return nullptr;
 	}
 
@@ -4217,7 +4205,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	text* letter_detoasted = reinterpret_cast<text*>(PG_DETOAST_DATUM(letter_const->constvalue));
 	const int32 letter_size = VARSIZE_ANY_EXHDR(letter_detoasted);
 	if (letter_size != 1) {
-		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count arg1 size={} (expected 1)", letter_size);
+		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() symbol_count arg1 size={} (expected 1)", letter_size);
 		if (reinterpret_cast<void*>(letter_detoasted)
 			!= reinterpret_cast<void*>(DatumGetPointer(letter_const->constvalue))) {
 			pfree(letter_detoasted);
@@ -4233,7 +4221,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	const compact_sequence_stdc_type_params typmod = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
 	const int rank = bioseq::storage::indexing::letter_to_rank(typmod.alphabet_code, letter_char);
 	if (rank < 0) {
-		JustLog("[bioseq] pg: VarInjectorMutator() symbol_count letter '{}' not in alphabet_code={}; keeping scalar call",
+		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() symbol_count letter '{}' not in alphabet_code={}; keeping scalar call",
 				letter_char, static_cast<unsigned>(typmod.alphabet_code));
 		return nullptr;
 	}
@@ -4266,7 +4254,7 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 			pfree(attname_cstr);
 		}
 	}
-	JustLog("[bioseq] pg: VarInjectorMutator() installing symbol_count placeholder column='{}' letter='{}' rank={}",
+	bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() installing symbol_count placeholder column='{}' letter='{}' rank={}",
 			site.column_name, letter_char, rank);
 
 	ctx->consts->symbol_count_sites.push_back(std::move(site));
@@ -4285,7 +4273,7 @@ VarInjectorMutator(Node *node, void* context)
 		auto funcExpr = reinterpret_cast<FuncExpr *>(node);
 		Const* replacement = lookup_bioseq_placeholder_const(funcExpr->funcid, injector_context);
 		if (replacement != nullptr) {
-			JustLog("[bioseq] pg: VarInjectorMutator() replacing bioseq funcid={} with placeholder Const",
+			bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() replacing bioseq funcid={} with placeholder Const",
 					funcExpr->funcid);
 			return reinterpret_cast<Node *>(replacement);
 		}
@@ -4316,7 +4304,7 @@ VarInjectorMutator(Node *node, void* context)
 	 */
 	if (IsA(node, PlaceHolderVar)) {
 		PlaceHolderVar* phv = reinterpret_cast<PlaceHolderVar*>(node);
-		JustLog("[bioseq] pg: VarInjectorMutator() encountered PlaceHolderVar phid={} at exec time — passing through",
+		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() encountered PlaceHolderVar phid={} at exec time — passing through",
 				phv->phid);
 		/* fall through to expression_tree_mutator */
 	}
@@ -4530,7 +4518,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
-	JustLog("[bioseq] pg: Inner_CustomExecScan() entered");
+	bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() entered");
 	ExprContext *econtext;
 	ExprState  *qual;
 
@@ -4566,11 +4554,11 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		/* ---- Phase 2: drain buffered output ---- */
 		if (runtime.buffer.has_finished_writing())
 		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
+			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
 			auto next = runtime.buffer.read_next_output();
 			if (!next)
 			{
-				JustLog("[bioseq] pg: Inner_CustomExecScan() output cursor drained; returning empty slot (EOF)");
+				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() output cursor drained; returning empty slot (EOF)");
 				return ExecClearTuple(node->ps.ps_ResultTupleSlot);
 			}
 
@@ -4615,12 +4603,12 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		 */
 		if (!columnarScanState->vectorization.vectorizationEnabled)
 		{
-			JustLog("[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
+			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 			if (TupIsNull(slot))
 			{
-				JustLog("[bioseq] pg: Inner_CustomExecScan() source exhausted; running batch processor");
+				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() source exhausted; running batch processor");
 				runtime.buffer.run_batch_and_build_cursors();
 				continue; /* Next iteration enters Phase 2. */
 			}
@@ -4637,12 +4625,12 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 */
 			if (columnarScanState->vectorization.vectorPendingRowNumber == 0)
 			{
-				JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
+				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
 				slot = ExecScanFetch(node, accessMtd, recheckMtd);
 
 				if (TupIsNull(slot))
 				{
-					JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted; running batch processor");
+					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized source exhausted; running batch processor");
 					runtime.buffer.run_batch_and_build_cursors();
 					continue;
 				}
@@ -4668,7 +4656,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 * Extract one kept row from the vector slot into the scalar
 			 * scan slot. Skip entries where keep[i] is false.
 			 */
-			JustLog("[bioseq] pg: Inner_CustomExecScan() vectorized extraction");
+			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized extraction");
 			VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(
 				columnarScanState->vectorization.scanVectorSlot);
 
@@ -4722,11 +4710,11 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		 */
 		econtext->ecxt_scantuple = slot;
 
-		JustLog("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
+		bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
 			if (runtime.buffer.mmsearch_active()) {
-				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
+				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
 				runtime.buffer.submit_scan(econtext->ecxt_scantuple);
 			}
 			else {
@@ -4739,7 +4727,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 				 * expressions such as seq::text and bioseq.len(seq) remain in
 				 * the outer Result and evaluate against this projected tuple.
 				 */
-				JustLog("[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual");
+				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() qual passed; no mmsearch qual");
 
 				/*
 				 * symbol_count fast-path requires the row number; the
@@ -4780,27 +4768,20 @@ CustomExecScan(BioseqScanState *columnarScanState,
 			   ExecScanRecheckMtd recheckMtd) {
 
 	// Testing custom exec scan
-	JustLog("[bioseq] pg: CustomExecScan() entered");
+	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() entered");
 
 	ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
 	PlanState ps = node->ps;
 	auto context = ps.ps_ExprContext;
 	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
 
-	JustLog("[bioseq] pg: CustomExecScan() reading plan targetlist");
+	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() reading plan targetlist");
 	auto targetlist = ps.plan->targetlist;
-	JustLog("[bioseq] pg: CustomExecScan() targetlist_is_null={}", targetlist == nullptr);
-	for (auto tgt : PList<Node>(targetlist)) {
-		if (tgt == nullptr) {
-			JustLog("[bioseq] pg: CustomExecScan() targetlist contained null node");
-		} else {
-			JustLog("[bioseq] pg: CustomExecScan() targetlist node=[{}]", nodeStr(tgt));
-		}
-	}
-	JustLog("[bioseq] pg: CustomExecScan() targetlist iteration complete");
+	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() targetlist_is_null={}", targetlist == nullptr);
+	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() targetlist iteration complete");
 
 	if (runtime.placeholder_consts.dp_score_node == nullptr) {
-		JustLog("[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
+		bioseq_log<DBG>("[bioseq] pg: CustomExecScan() allocating placeholder const nodes");
 
 		/* INT4: byval, len=4, no collation. Used for the int32_t MatchResult
 		 * fields (dp_score, mapq, chain_score, dp_max_score, seed_count,
@@ -4908,7 +4889,7 @@ CustomExecScan(BioseqScanState *columnarScanState,
 	}
 
 
-	JustLog("[bioseq] pg: CustomExecScan() dispatching to Inner_CustomExecScan");
+	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() dispatching to Inner_CustomExecScan");
 
 	auto tupleSlot = Inner_CustomExecScan(columnarScanState, accessMtd, recheckMtd);
 
@@ -4927,7 +4908,7 @@ CustomExecScan(BioseqScanState *columnarScanState,
 static TupleTableSlot *
 ColumnarScanNext(BioseqScanState *columnarScanState)
 {
-	JustLog("[bioseq] pg: ColumnarScanNext() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScanNext() entered");
 	CustomScanState *node = columnarScanState->as_custom_scan_state();
 
 	/*
@@ -4947,7 +4928,7 @@ ColumnarScanNext(BioseqScanState *columnarScanState)
 
 	if (scandesc != NULL && scandesc->rs_rd == NULL)
 	{
-		JustLog("[bioseq] pg: ColumnarScanNext() found stale scan descriptor with null relation; reopening");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarScanNext() found stale scan descriptor with null relation; reopening");
 		node->ss.ss_currentScanDesc = NULL;
 		scandesc = NULL;
 	}
@@ -5197,7 +5178,7 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 		 * doesn't match what the rebind path supports.
 		 */
 		if (runtime.param_rebind.paramkind != PARAM_EXEC) {
-			JustLog("[bioseq] pg: ReScanCustomScan() refusing rebind for non-PARAM_EXEC kind={}",
+			bioseq_log<DBG>("[bioseq] pg: ReScanCustomScan() refusing rebind for non-PARAM_EXEC kind={}",
 					runtime.param_rebind.paramkind);
 			runtime.buffer.clear_mmsearch_context();
 		} else {
@@ -5254,14 +5235,14 @@ ColumnarScan_ReScanCustomScan(CustomScanState *node)
 							runtime.param_rebind.storage_unit_byte_width,
 							runtime.param_rebind.primary_key_attno);
 						reconfigured = true;
-						JustLog("[bioseq] pg: ReScanCustomScan() rebound mmsearch query bp_size={} extras_count={} from Param paramid={}",
+						bioseq_log<DBG>("[bioseq] pg: ReScanCustomScan() rebound mmsearch query bp_size={} extras_count={} from Param paramid={}",
 								bp_size,
 								runtime.buffer.extra_query_count(),
 								runtime.param_rebind.paramid);
 					}
 					else if (query_const->constisnull)
 					{
-						JustLog("[bioseq] pg: ReScanCustomScan() Param paramid={} resolved to NULL; mmsearch will match no rows",
+						bioseq_log<DBG>("[bioseq] pg: ReScanCustomScan() Param paramid={} resolved to NULL; mmsearch will match no rows",
 								runtime.param_rebind.paramid);
 					}
 				}
@@ -5297,7 +5278,7 @@ static void
 ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							   ExplainState *es)
 {
-	JustLog("[bioseq] pg: ColumnarScan_ExplainCustomScan() entered");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarScan_ExplainCustomScan() entered");
 	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
 
 	List *context = set_deparse_context_planstate(
@@ -5848,7 +5829,7 @@ ColumnarScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				++es->indent;
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				appendStringInfo(es->str,
-					"profiling: enabled (see JustLog for per-stage μs/ns counters)\n");
+					"profiling: enabled (see bioseq_log<DBG> for per-stage μs/ns counters)\n");
 				appendStringInfoSpaces(es->str, es->indent * 2);
 				if (explain_runtime != nullptr) {
 					const auto& stats = explain_runtime->buffer.execution_stats();
@@ -6133,7 +6114,7 @@ ColumnarVarNeeded(BioseqScanState *columnarScanState)
 			TupleDescAttr(RelationGetDescr(columnarRelation), bmsMember);
 		if (columnForm->attisdropped)
 		{
-			PgReport(ERROR).code(ERRCODE_UNDEFINED_COLUMN)
+			bioseq_report<ERR, PG>().code(ERRCODE_UNDEFINED_COLUMN)
 							.msg("cannot explain column with attrNum={} "
 								 "of columnar table {} since it is dropped",
 								 bmsMember + 1,
@@ -6146,7 +6127,7 @@ ColumnarVarNeeded(BioseqScanState *columnarScanState)
 			 * system columns. Similarly, it should have already expanded
 			 * whole-row references to individual attributes.
 			 */
-			PgReport(ERROR).code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
 							.msg("cannot explain column with attrNum={} "
 								 "of columnar table {} since it is either "
 								 "a system column or a whole-row "

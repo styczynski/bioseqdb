@@ -129,13 +129,13 @@ struct sequence_scanner_pg final {
           in_memory_data_{}
     {
         if (caches_ == nullptr) {
-            pg_log(ERROR, "sequence_scanner_pg: caches pointer must be non-null");
+            bioseq_log<ERR, PG>( "sequence_scanner_pg: caches pointer must be non-null");
         }
         if (caches_->side != seq_caches::Side::Read) {
-            pg_log(ERROR, "sequence_scanner_pg: requires read-side seq_caches");
+            bioseq_log<ERR, PG>( "sequence_scanner_pg: requires read-side seq_caches");
         }
         if (parent_mctx == nullptr) {
-            pg_log(ERROR, "sequence_scanner_pg: parent_mctx must be non-null");
+            bioseq_log<ERR, PG>( "sequence_scanner_pg: parent_mctx must be non-null");
         }
         mctx_ = AllocSetContextCreate(parent_mctx,
                                       "bioseq sequence_scanner_pg",
@@ -291,7 +291,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     -> base_container
 {
     if (fragment_no >= num_fragments_) {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
                "sequence_scanner_pg: read_fragment({}) >= num_fragments_({})",
                fragment_no, num_fragments_);
     }
@@ -300,7 +300,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     if (is_in_memory_mode()) {
         const std::size_t start = fragment_no * fragment_storage_units;
         if (start >= in_memory_data_.size()) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                 "sequence_scanner_pg in-memory: fragment {} starts at unit {} but "
                 "backing span only has {} units", fragment_no, start,
                 in_memory_data_.size());
@@ -325,7 +325,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     if (enable_logging) {
         static thread_local std::uint64_t cold_read_count = 0;
         if ((cold_read_count++ % 4000) == 0) {
-            JustLogProgress("[scanner_pg] cold fragment read #{} (fragment {}/{})",
+            bioseq_log_progress<DBG>("[scanner_pg] cold fragment read #{} (fragment {}/{})",
                 cold_read_count, fragment_no, num_fragments_);
         }
     }
@@ -367,7 +367,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     Datum vals[1]  = { 0 };
     bool  nulls[1] = { true };
     if (!ColumnarReadRowByRowNumber(entry.read_state, row_no, vals, nulls)) {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
             "sequence_scanner_pg: sub-table row {} missing (db={}, spc={}, "
             "relfilenode={}, attno={}, bucket={}, shard={}, fragment={}/{})",
             row_no,
@@ -379,13 +379,13 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
             locator_.shard_idx, fragment_no, num_fragments_);
     }
     if (nulls[0]) {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
             "sequence_scanner_pg: sub-table row {} is NULL (fragment {} of {})",
             row_no, fragment_no, num_fragments_);
     }
     pgseq_t* raw = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[0]));
     if (is_locator_stub(raw)) {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
             "sequence_scanner_pg: sub-table fragment row {} is itself a stub "
             "(corruption)", row_no);
     }

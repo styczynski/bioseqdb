@@ -4,12 +4,12 @@
  *        `MinimizerHashmapFragmentIndex`, storage-free, the single pipeline
  *        IndexT) + the storage-bound `MinimizersPerFragmentIndex<S>` builder.
  *
- * NO_POSTGRES. Corruption guards call `index_corruption_panic` (JustLog+abort),
- * never elog/pg_log (no-ops here). Storage-side validation goes through
+ * NO_POSTGRES. Corruption guards call `index_corruption_panic` (bioseq_log<DBG>+abort),
+ * never elog/bioseq_log_pg(no-ops here). Storage-side validation goes through
  * `storage.validate_minimizer_*`/`storage.index_error` (duck-typed on S).
  */
 module;
-#include "common.h"                       // DEBUG_ASSERT, JustLog*
+#include "common.h"                       // DEBUG_ASSERT, bioseq_log<DBG>*
 #include <hwy/highway.h>                   // ONLY for the HWY_NAMESPACE macro
 #include <algorithm>
 #include <array>
@@ -23,7 +23,7 @@ module;
 #include <utility>
 #include <boost/unordered/unordered_flat_map.hpp>
 export module bioseq_indexing.minimizer_hashmap;
-import mlogging;                                     // JustLogProgress (enable_logging)
+import mlogging;                                     // bioseq_log_progress<DBG>(enable_logging)
 import bioseq_indexing.type;
 import bioseq_indexing.storage;
 import bioseq_indexing.traits;
@@ -48,7 +48,7 @@ using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::storage::sequence_size_t;
 using bioseq::storage::lazy_compact_sequence;
 
-[[noreturn]] [[gnu::cold]] void index_corruption_panic(std::string_view msg);  // JustLog+abort (NO_POSTGRES-safe)
+[[noreturn]] [[gnu::cold]] void index_corruption_panic(std::string_view msg);  // bioseq_log<DBG>+abort (NO_POSTGRES-safe)
 
 // (1) the lookup structure — the old TargetIndex, renamed & relocated, storage-free
 struct MinimizerHashmapFragmentIndex {
@@ -239,7 +239,7 @@ static_assert(MinimizerIndex<MinimizerHashmapFragmentIndex>,
               "MinimizerHashmapFragmentIndex must model MinimizerIndex");
 
 inline void index_corruption_panic(std::string_view msg) {
-    JustLogProgress("[bioseq index corruption] {}", msg);
+    bioseq_log_progress<DBG>("[bioseq index corruption] {}", msg);
     std::abort();
 }
 

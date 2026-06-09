@@ -437,7 +437,7 @@ struct OpportunisticFragmentIndexStorage {
     std::vector<OpportunisticIndexChunk> chunks{};
 
     [[noreturn]] void index_error(std::string_view msg) const {
-        pg_log(ERROR, "bioseq opportunistic index: {}", msg);
+        bioseq_log<ERR, PG>( "bioseq opportunistic index: {}", msg);
         abort();
     }
 
@@ -690,14 +690,14 @@ struct AsyncPersistFileFragmentStorage {
         : path(std::move(p)),
           out(path, std::ios::binary | std::ios::trunc) {
         if (!out) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                    "bioseq async persist: failed to open temp payload file {}",
                    path);
         }
     }
 
     [[noreturn]] void index_error(std::string_view msg) const {
-        pg_log(ERROR, "bioseq async persist file storage: {}", msg);
+        bioseq_log<ERR, PG>( "bioseq async persist file storage: {}", msg);
         abort();
     }
 
@@ -905,7 +905,7 @@ struct AsyncPersistFileFragmentStorage {
                 .position_spill_bytes = st.position_spill_bytes,
                 .position_spill_count = st.position_spill_count,
             };
-        JustLog("[bioseq.index.mps_build.row] backend_pid={} async_file=1 db_oid={} relfilenode={} sequence_rowno={} "
+        bioseq_log<DBG>("[bioseq.index.mps_build.row] backend_pid={} async_file=1 db_oid={} relfilenode={} sequence_rowno={} "
                 "resident_runs={} file_runs={} resident_run_bytes={} resident_peak_bytes={} "
                 "spilled_run_bytes={} postgres_temp_file_bytes={} postgres_temp_file_count={} "
                 "merge_reader_buffer_bytes={} merge_pass_count={} spill_count_from_pressure={} "
@@ -1008,7 +1008,7 @@ make_fragment_index_persist_target(
     if (!can_defer_recompute_minimizer_persist(ctx, params)) {
         if (ctx.recompute_async_persist_active
             && (params.kmer_size != 15 || params.window_size != 10)) {
-            JustLog("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because active params are k={} w={} but persisted minimizer indexes are pinned to k=15 w=10",
+            bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because active params are k={} w={} but persisted minimizer indexes are pinned to k=15 w=10",
                     static_cast<unsigned long long>(sequence_rowno),
                     static_cast<unsigned long long>(loc.total_bp_size),
                     reason,
@@ -1017,7 +1017,7 @@ make_fragment_index_persist_target(
         } else if (!ctx.recompute_async_persist_active
                    || !ctx.index_async_persist_active
                    || !OidIsValid(ctx.user_relid)) {
-            JustLog("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} gates recompute_async={} index_async={} user_relid_valid={}",
+            bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} gates recompute_async={} index_async={} user_relid_valid={}",
                     static_cast<unsigned long long>(sequence_rowno),
                     static_cast<unsigned long long>(loc.total_bp_size),
                     reason,
@@ -1030,14 +1030,14 @@ make_fragment_index_persist_target(
 
     const auto choice = choose_deferred_minimizer_persist_index(ctx);
     if (!choice.has_value()) {
-        JustLog("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because no minimizer index is enabled for UPDATE_ON_INSERT",
+        bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} target_bp={} reason={} because no minimizer index is enabled for UPDATE_ON_INSERT",
                 static_cast<unsigned long long>(sequence_rowno),
                 static_cast<unsigned long long>(loc.total_bp_size),
                 reason);
         return false;
     }
     if (choice->kind != DeferredMinimizerIndexKind::per_sequence) {
-        JustLog("[bioseq] index: recompute async-mps-build skipped row={} index={} target_bp={} reason={} because deferred choice is not per-sequence",
+        bioseq_log<DBG>("[bioseq] index: recompute async-mps-build skipped row={} index={} target_bp={} reason={} because deferred choice is not per-sequence",
                 static_cast<unsigned long long>(sequence_rowno),
                 choice->index_name,
                 static_cast<unsigned long long>(loc.total_bp_size),
@@ -1059,7 +1059,7 @@ make_fragment_index_persist_target(
         bioseq_scheduler_pipeline_concurrency_mode,
         bioseq_scheduler_max_concurrency,
         bioseq_index_memory_cap_mb);
-    JustLog("[bioseq] index: recompute async-mps-build row={} index={} target_bp={} reason={} async_staged={}",
+    bioseq_log<DBG>("[bioseq] index: recompute async-mps-build row={} index={} target_bp={} reason={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
             choice->index_name,
             static_cast<unsigned long long>(loc.total_bp_size),
@@ -1137,7 +1137,7 @@ run_recompute_with_deferred_minimizer_persist(
         }
         PG_END_TRY();
 
-        JustLog("[bioseq] index: recompute logical-mps-persist row={} index={} target_bp={} chunks={} chunk_bytes={} async_staged={}",
+        bioseq_log<DBG>("[bioseq] index: recompute logical-mps-persist row={} index={} target_bp={} chunks={} chunk_bytes={} async_staged={}",
                 static_cast<unsigned long long>(sequence_rowno),
                 choice.index_name,
                 static_cast<unsigned long long>(loc.total_bp_size),
@@ -1169,7 +1169,7 @@ run_recompute_with_deferred_minimizer_persist(
     }
     PG_END_TRY();
 
-    JustLog("[bioseq] index: recompute async-persist row={} index={} target_bp={} chunks={} file_bytes={} async_staged={}",
+    bioseq_log<DBG>("[bioseq] index: recompute async-persist row={} index={} target_bp={} chunks={} file_bytes={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
             choice.index_name,
             static_cast<unsigned long long>(loc.total_bp_size),
@@ -1209,7 +1209,7 @@ try_materialize_target_for_segment_workers(
         if (total_units64
             > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                    "bioseq resident target: target row {} has too many packed "
                    "units to materialize in one process",
                    static_cast<unsigned long long>(sequence_rowno));
@@ -1232,7 +1232,7 @@ try_materialize_target_for_segment_workers(
             bioseq::parallelism::MemoryAdmissionController::instance()
                 .try_reserve(reserve_bytes);
         if (!permit) {
-            JustLog("[bioseq] resident target: row={} target_bp={} packed_bytes={} "
+            bioseq_log<DBG>("[bioseq] resident target: row={} target_bp={} packed_bytes={} "
                     "not admitted; using scanner_pg serial fallback",
                     static_cast<unsigned long long>(sequence_rowno),
                     static_cast<unsigned long long>(target_seq.bp_size()),
@@ -1261,7 +1261,7 @@ try_materialize_target_for_segment_workers(
             target_seq.scanner().release_fragment(fragment_no);
         }
 
-        JustLog("[bioseq] resident target: row={} target_bp={} fragments={} "
+        bioseq_log<DBG>("[bioseq] resident target: row={} target_bp={} fragments={} "
                 "packed_bytes={} materialized for segment workers",
                 static_cast<unsigned long long>(sequence_rowno),
                 static_cast<unsigned long long>(target_seq.bp_size()),
@@ -1291,13 +1291,13 @@ try_materialize_target_for_segment_workers(
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
 
     if (!per_row_query_mode && query_hdr == nullptr) {
-        JustLog("[bioseq] pg: BatchProcessor::process_sequences received null query_hdr; returning empty map");
+        bioseq_log<DBG>("[bioseq] pg: BatchProcessor::process_sequences received null query_hdr; returning empty map");
         return results;
     }
     if (!per_row_query_mode
         && (query_hdr->alphabet_code != alphabet_code
             || query_hdr->storage_unit_byte_width != storage_unit_byte_width)) {
-        JustLog("[bioseq] pg: BatchProcessor::process_sequences query_hdr typmod ({},{}) disagrees with context ({},{}); refusing to dispatch",
+        bioseq_log<DBG>("[bioseq] pg: BatchProcessor::process_sequences query_hdr typmod ({},{}) disagrees with context ({},{}); refusing to dispatch",
                 static_cast<unsigned>(query_hdr->alphabet_code),
                 static_cast<unsigned>(query_hdr->storage_unit_byte_width),
                 static_cast<unsigned>(alphabet_code),
@@ -1348,7 +1348,7 @@ try_materialize_target_for_segment_workers(
                 scanner_pg_ctx != nullptr
                 && !inmemory_scanner_forced
                 && !chunked_scanner_forced;
-            JustLog("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={} per_row_query={} use_scanner_pg={} chunked={} inmemory_forced={}",
+            bioseq_log<DBG>("[bioseq] pg: BatchProcessor dispatching ({},{}) query_bp_size={} batch_size={} per_row_query={} use_scanner_pg={} chunked={} inmemory_forced={}",
                     static_cast<unsigned>(alphabet_code),
                     static_cast<unsigned>(storage_unit_byte_width),
                     query_hdr != nullptr ? query_hdr->bp_size : 0,
@@ -1428,11 +1428,6 @@ try_materialize_target_for_segment_workers(
                 // pg_cancel_backend between rows, and (with the storage-layer
                 // check in fetch_payload) bounds how long a cancel waits.
                 CHECK_FOR_INTERRUPTS();
-                JustLogProgress("[dispatch] mmsearch row {}/{} start"
-                        " | footprint={}MB avail={}MB",
-                        i + 1, batch_size,
-                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
                 if (i < parallel_done.size() && parallel_done[i] != 0) {
                     ++stats.targets_considered;
                     ++stats.targets_recomputed_minimizers;
@@ -1440,7 +1435,7 @@ try_materialize_target_for_segment_workers(
                     const sequence_size_t target_bp_size =
                         static_cast<sequence_size_t>(target_hdrs[i]->bp_size);
                     const std::size_t match_count = parallel_collections[i].size();
-                    JustLog("[bioseq] pg: BatchProcessor row query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} prebuilt_index={} produced {} match(es) [dispatch-parallel]",
+                    bioseq_log<DBG>("[bioseq] pg: BatchProcessor row query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} prebuilt_index={} produced {} match(es) [dispatch-parallel]",
                             static_cast<int>(query_ids[i]),
                             target_bp_size,
                             stats.last_effective_params.kmer_size,
@@ -1460,7 +1455,7 @@ try_materialize_target_for_segment_workers(
                 }
                 if (row_query_hdr->alphabet_code != alphabet_code
                     || row_query_hdr->storage_unit_byte_width != storage_unit_byte_width) {
-                    JustLog("[bioseq] pg: query row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
+                    bioseq_log<DBG>("[bioseq] pg: query row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
                             static_cast<int>(query_ids[i]),
                             static_cast<unsigned>(row_query_hdr->alphabet_code),
                             static_cast<unsigned>(row_query_hdr->storage_unit_byte_width),
@@ -1499,7 +1494,7 @@ try_materialize_target_for_segment_workers(
                      * than crash and let the tuple's mmsearch
                      * qualify as FALSE.
                      */
-                    JustLog("[bioseq] pg: target row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
+                    bioseq_log<DBG>("[bioseq] pg: target row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
                             static_cast<int>(query_ids[i]),
                             static_cast<unsigned>(target_hdr->alphabet_code),
                             static_cast<unsigned>(target_hdr->storage_unit_byte_width),
@@ -1745,7 +1740,7 @@ try_materialize_target_for_segment_workers(
 	                                            run_fragment_backed_index(
 	                                                seq_store,
 	                                                kMinimizersPerSequenceIndex);
-	                                            JustLog("[bioseq] index: logical fragment-backed read index=minimizers_per_sequence row={} target_bp={}",
+	                                            bioseq_log<DBG>("[bioseq] index: logical fragment-backed read index=minimizers_per_sequence row={} target_bp={}",
 	                                                    static_cast<unsigned long long>(
 	                                                        scanner_pg_ctx->target_rownos[i]),
 	                                                    static_cast<unsigned long long>(
@@ -1765,7 +1760,7 @@ try_materialize_target_for_segment_workers(
 	                                                    *query_minimizers,
 	                                                    *hit->index,
 	                                                    idx_params);
-	                                                JustLog("[bioseq] index: assembled cache hit index=minimizers_per_sequence row={} target_bp={}",
+	                                                bioseq_log<DBG>("[bioseq] index: assembled cache hit index=minimizers_per_sequence row={} target_bp={}",
 	                                                        static_cast<unsigned long long>(
 	                                                            scanner_pg_ctx->target_rownos[i]),
 	                                                        static_cast<unsigned long long>(
@@ -1842,7 +1837,7 @@ try_materialize_target_for_segment_workers(
 	                                                static_cast<std::uint64_t>(
 	                                                    scanner_pg_ctx->target_rownos[i]),
 	                                                opportunistic_index_name);
-	                                        JustLog("[bioseq] index: opportunistic RAM-first index row={} index={} target_bp={} chunks={} peak_bytes={} async_staged={}",
+	                                        bioseq_log<DBG>("[bioseq] index: opportunistic RAM-first index row={} index={} target_bp={} chunks={} peak_bytes={} async_staged={}",
 	                                                static_cast<unsigned long long>(
 	                                                    scanner_pg_ctx->target_rownos[i]),
 	                                                opportunistic_index_name,
@@ -1945,7 +1940,7 @@ try_materialize_target_for_segment_workers(
                                         }
                                         assembled = true;
                                     } else {
-                                        JustLog("[bioseq] index: opportunistic RAM-first index skipped row={} target_bp={} peak_bytes={} (not admitted)",
+                                        bioseq_log<DBG>("[bioseq] index: opportunistic RAM-first index skipped row={} target_bp={} peak_bytes={} (not admitted)",
                                                 static_cast<unsigned long long>(
                                                     scanner_pg_ctx->target_rownos[i]),
                                                 static_cast<unsigned long long>(
@@ -2000,7 +1995,7 @@ try_materialize_target_for_segment_workers(
                                         collection =
                                             minimap_port(fq_pg, ft_pg, params);
                                     }
-                                    JustLog("[bioseq] index: recompute mps-fast-noindex row={} index={} target_bp={} persist_compatible={} resident_attempted={} resident_parallel={} persisted=false",
+                                    bioseq_log<DBG>("[bioseq] index: recompute mps-fast-noindex row={} index={} target_bp={} persist_compatible={} resident_attempted={} resident_parallel={} persisted=false",
                                             static_cast<unsigned long long>(
                                                 rowno),
                                             fast_mps_choice->index_name,
@@ -2059,7 +2054,7 @@ try_materialize_target_for_segment_workers(
                                             if (scanner_pg_ctx->recompute_async_persist_active
                                                 && (params.kmer_size != 15
                                                     || params.window_size != 10)) {
-                                                JustLog("[bioseq] index: recompute async-persist skipped row={} target_bp={} because active params are k={} w={} but persisted minimizer indexes are pinned to k=15 w=10",
+                                                bioseq_log<DBG>("[bioseq] index: recompute async-persist skipped row={} target_bp={} because active params are k={} w={} but persisted minimizer indexes are pinned to k=15 w=10",
                                                         static_cast<unsigned long long>(
                                                             scanner_pg_ctx->target_rownos[i]),
                                                         static_cast<unsigned long long>(
@@ -2067,7 +2062,7 @@ try_materialize_target_for_segment_workers(
                                                         params.kmer_size,
                                                         params.window_size);
                                             } else if (can_defer_recompute_persist) {
-                                                JustLog("[bioseq] index: recompute async-persist skipped row={} target_bp={} because no minimizer index is enabled for UPDATE_ON_INSERT",
+                                                bioseq_log<DBG>("[bioseq] index: recompute async-persist skipped row={} target_bp={} because no minimizer index is enabled for UPDATE_ON_INSERT",
                                                         static_cast<unsigned long long>(
                                                             scanner_pg_ctx->target_rownos[i]),
                                                         static_cast<unsigned long long>(
@@ -2137,7 +2132,7 @@ try_materialize_target_for_segment_workers(
                                && scanner_pg_ctx->target_locators[i].has_value()) {
                         // DOC0274 (round-2 revert): inmemory_forced=ON cannot satisfy its
                         // force-baseline semantic on > MaxAllocSize stubs; raise.
-                        pg_log(ERROR,
+                        bioseq_log<ERR, PG>(
                             "bioseq.test_force_inmemory_scanner=on: row {} target stub "
                             "({} bp) exceeds MaxAllocSize and cannot be materialised "
                             "for the Phase B baseline. Either set the GUC to off (use "
@@ -2146,14 +2141,14 @@ try_materialize_target_for_segment_workers(
                             static_cast<int>(query_ids[i]),
                             static_cast<unsigned long long>(target_bp_size));
                     } else {
-                        JustLog("[bioseq] pg: row {} has no inline target and no scanner_pg locator; treating as WHERE FALSE",
+                        bioseq_log<DBG>("[bioseq] pg: row {} has no inline target and no scanner_pg locator; treating as WHERE FALSE",
                                 static_cast<int>(query_ids[i]));
                         continue;
                     }
                     stats.last_effective_params = params;
                 }
 
-                JustLog("[bioseq] pg: BatchProcessor row query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} prebuilt_index={} produced {} match(es)",
+                bioseq_log<DBG>("[bioseq] pg: BatchProcessor row query_id={} target_bp_size={} k={} w={} min_chain_score={} min_seed_count={} prebuilt_index={} produced {} match(es)",
                         static_cast<int>(query_ids[i]),
                         target_bp_size,
                         stats.last_effective_params.kmer_size,

@@ -143,6 +143,7 @@ struct NumericVar
 
 export module bioseq_vector_types_numeric;
 
+import mlogging;
 import pg_utils;
 
 namespace {
@@ -247,7 +248,7 @@ make_numeric(const NumericVar* var)
 		if (!(sign == NUMERIC_NAN ||
 			  sign == NUMERIC_PINF ||
 			  sign == NUMERIC_NINF))
-			pg_log(ERROR, "invalid numeric sign value 0x{:x}", sign);
+			bioseq_log<ERR, PG>( "invalid numeric sign value 0x{:x}", sign);
 
 		result = make1<NumericData>(NUMERIC_HDRSZ_SHORT);
 		SET_VARSIZE(result, NUMERIC_HDRSZ_SHORT);
@@ -301,7 +302,7 @@ make_numeric(const NumericVar* var)
 	if (NUMERIC_WEIGHT(result) != weight ||
 		NUMERIC_DSCALE(result) != var->dscale)
 	{
-		PgReport(ERROR).code(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE).msg("value overflows numeric format");
+		bioseq_report<ERR, PG>().code(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE).msg("value overflows numeric format");
 	}
 
 	return result;

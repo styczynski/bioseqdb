@@ -28,8 +28,8 @@ module;
 // primary unit (which re-exports `:sequence_storage_manager`). `bioseq_storage`
 // keeps re-exporting this module so existing `import bioseq_storage` consumers
 // are unaffected. This module is now in BIOSEQ_NOPG_MODULES and compiled with
-// NO_POSTGRES=1; its lone hard-error guard therefore uses JustLog + abort
-// instead of `pg_log(ERROR, …)` (the guard is defensive / has no callers, so
+// NO_POSTGRES=1; its lone hard-error guard therefore uses bioseq_log<DBG> + abort
+// instead of `bioseq_log<ERR, PG>( …)` (the guard is defensive / has no callers, so
 // the change is invisible to Phase A).
 export module bioseq_storage_size;
 
@@ -74,7 +74,7 @@ constexpr sequence_size_t kMinimizerSketchMaxPosition =
 [[gnu::always_inline]]
 inline void check_fits_in_minimizer_sketch_position(sequence_size_t v) {
     if (v > kMinimizerSketchMaxPosition) {
-        JustLog(
+        bioseq_log<DBG>(
             "bioseq storage: sequence position {} exceeds the canonical "
             "minimizer sketch (MinimapSketchData<28,15>) range ({}). "
             "Callers must skip the sidecar build for sequences whose "

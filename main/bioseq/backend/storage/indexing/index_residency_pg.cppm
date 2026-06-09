@@ -329,7 +329,7 @@ void install_index_residency_callbacks() {
         bioseq_index_residency_relcache_callback,
         PointerGetDatum(nullptr));
     state.registered = true;
-    JustLog("[bioseq] index residency: transaction and relcache callbacks registered");
+    bioseq_log<DBG>("[bioseq] index residency: transaction and relcache callbacks registered");
 }
 
 [[nodiscard]] std::optional<CachedChunkView> lookup_cached_chunk(const IndexChunkKey& key) {

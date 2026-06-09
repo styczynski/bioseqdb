@@ -599,7 +599,7 @@ parse_mps_build_metadata(const char* base, Size mapped) {
         slot.dsm = job.dsm;
         pg_atomic_fetch_add_u32(&slot.generation, 1);
         pg_atomic_write_u32(&slot.state, 1);
-        JustLog("[bioseq] index: published async persist job row={} index={} bytes={}",
+        bioseq_log<DBG>("[bioseq] index: published async persist job row={} index={} bytes={}",
                 static_cast<unsigned long long>(job.target.sequence_rowno),
                 job.index_name,
                 static_cast<unsigned long long>(job.payload_bytes));
@@ -625,7 +625,7 @@ extern "C++" void bioseq_persist_xact_callback(XactEvent event, void*) {
             if (publish_persist_job_to_shared_queue(job)) {
                 job.published = true;
             } else {
-                JustLog("[bioseq] index: async persist publish failed row={} index={} dsm={} shared_queue_available={}",
+                bioseq_log<DBG>("[bioseq] index: async persist publish failed row={} index={} dsm={} shared_queue_available={}",
                         static_cast<unsigned long long>(job.target.sequence_rowno),
                         job.index_name,
                         static_cast<unsigned>(job.dsm),
@@ -674,7 +674,7 @@ void ensure_persist_xact_callback_registered() {
         return false;
     }
     if (!async_persist_queue_available()) {
-        JustLog("[bioseq] index: async persist skipped row={} index={} because shared supervisor queue is unavailable",
+        bioseq_log<DBG>("[bioseq] index: async persist skipped row={} index={} because shared supervisor queue is unavailable",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 target.index_name);
         return false;
@@ -699,7 +699,7 @@ void ensure_persist_xact_callback_registered() {
         bioseq::parallelism::MemoryAdmissionController::instance()
             .try_reserve(bytes_total);
     if (!permit) {
-        JustLog("[bioseq] index: async persist staging skipped by memory admission (bytes={})",
+        bioseq_log<DBG>("[bioseq] index: async persist staging skipped by memory admission (bytes={})",
                 static_cast<unsigned long long>(bytes_total));
         return false;
     }
@@ -751,7 +751,7 @@ void ensure_persist_xact_callback_registered() {
     pending_persist_jobs().push_back(std::move(job));
     const std::uint64_t queued_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    JustLog("[bioseq] index: staged async persist job row={} index={} chunks={} bytes={} dsm_copy_ns={} total_stage_ns={}",
+    bioseq_log<DBG>("[bioseq] index: staged async persist job row={} index={} chunks={} bytes={} dsm_copy_ns={} total_stage_ns={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             pending_persist_jobs().back().index_name,
             chunks.size(),
@@ -776,7 +776,7 @@ void ensure_persist_xact_callback_registered() {
         return false;
     }
     if (!async_persist_queue_available()) {
-        JustLog("[bioseq] index: file async persist skipped row={} index={} chunks={} file_bytes={} because shared supervisor queue is unavailable",
+        bioseq_log<DBG>("[bioseq] index: file async persist skipped row={} index={} chunks={} file_bytes={} because shared supervisor queue is unavailable",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 target.index_name,
                 static_cast<unsigned long long>(chunk_count),
@@ -836,7 +836,7 @@ void ensure_persist_xact_callback_registered() {
     pending_persist_jobs().push_back(std::move(job));
     const std::uint64_t queued_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    JustLog("[bioseq] index: staged file async persist job row={} index={} chunks={} file_bytes={} meta_bytes={} total_stage_ns={}",
+    bioseq_log<DBG>("[bioseq] index: staged file async persist job row={} index={} chunks={} file_bytes={} meta_bytes={} total_stage_ns={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             pending_persist_jobs().back().index_name,
             static_cast<unsigned long long>(chunk_count),
@@ -866,7 +866,7 @@ void ensure_persist_xact_callback_registered() {
         return false;
     }
     if (!async_persist_queue_available()) {
-        JustLog("[bioseq] index: async mps build skipped row={} index={} target_bp={} fragments={} because shared supervisor queue is unavailable",
+        bioseq_log<DBG>("[bioseq] index: async mps build skipped row={} index={} target_bp={} fragments={} because shared supervisor queue is unavailable",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 target.index_name,
                 static_cast<unsigned long long>(locator.total_bp_size),
@@ -919,7 +919,7 @@ void ensure_persist_xact_callback_registered() {
     pending_persist_jobs().push_back(std::move(job));
     const std::uint64_t queued_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    JustLog("[bioseq] index: staged async mps build job row={} index={} target_bp={} fragments={} mode={} max_concurrency={} index_memory_cap_mb={} meta_bytes={} total_stage_ns={}",
+    bioseq_log<DBG>("[bioseq] index: staged async mps build job row={} index={} target_bp={} fragments={} mode={} max_concurrency={} index_memory_cap_mb={} meta_bytes={} total_stage_ns={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             pending_persist_jobs().back().index_name,
             static_cast<unsigned long long>(locator.total_bp_size),
@@ -952,7 +952,7 @@ void register_scheduler_supervisor() {
                 "bioseq_scheduler_supervisor_main");
     worker.bgw_main_arg = Datum{0};
     RegisterBackgroundWorker(&worker);
-    JustLog("[bioseq] scheduler: shared supervisor background worker registered");
+    bioseq_log<DBG>("[bioseq] scheduler: shared supervisor background worker registered");
 }
 
 [[nodiscard]] bool supervisor_available() noexcept {
@@ -1303,7 +1303,7 @@ try_materialize_async_mps_worker_target(
         if (total_units64
             > static_cast<std::uint64_t>(
                 (std::numeric_limits<std::size_t>::max)())) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                    "bioseq async mps build: row {} index {} has too many "
                    "packed units to materialize in one worker",
                    static_cast<unsigned long long>(sequence_rowno),
@@ -1327,7 +1327,7 @@ try_materialize_async_mps_worker_target(
             bioseq::parallelism::MemoryAdmissionController::instance()
                 .try_reserve(reserve_bytes);
         if (!permit) {
-            JustLog("[bioseq] index: async mps worker row={} index={} target_bp={} "
+            bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} target_bp={} "
                     "fragments={} packed_bytes={} not admitted for resident "
                     "materialization; using scanner_pg",
                     static_cast<unsigned long long>(sequence_rowno),
@@ -1359,7 +1359,7 @@ try_materialize_async_mps_worker_target(
             seq.scanner().release_fragment(fragment_no);
         }
 
-        JustLog("[bioseq] index: async mps worker row={} index={} target_bp={} "
+        bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} target_bp={} "
                 "fragments={} packed_bytes={} materialized resident target",
                 static_cast<unsigned long long>(sequence_rowno),
                 index_name,
@@ -1384,7 +1384,7 @@ void process_mps_build_claim(
     const std::optional<MpsBuildMetadata> meta =
         parse_mps_build_metadata(base, mapped);
     if (!meta.has_value()) {
-        JustLog("[bioseq] index: discarded invalid async mps build metadata row={}",
+        bioseq_log<DBG>("[bioseq] index: discarded invalid async mps build metadata row={}",
                 static_cast<unsigned long long>(claim.target.sequence_rowno));
         return;
     }
@@ -1392,7 +1392,7 @@ void process_mps_build_claim(
     PersistTarget target = claim.target;
     target.index_name = meta->index_name;
     if (!worker_target_accepts_index_persist(target, meta->index_name)) {
-        JustLog("[bioseq] index: discarded stale async mps build job row={} index={}",
+        bioseq_log<DBG>("[bioseq] index: discarded stale async mps build job row={} index={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 meta->index_name);
         return;
@@ -1433,7 +1433,7 @@ void process_mps_build_claim(
 
     bool built = false;
     bool lazy_worker_shareable = false;
-    JustLog("[bioseq] index: async mps build worker starting row={} index={} target_bp={} mode={} max_concurrency={} index_memory_cap_mb={} sort_impl={}",
+    bioseq_log<DBG>("[bioseq] index: async mps build worker starting row={} index={} target_bp={} mode={} max_concurrency={} index_memory_cap_mb={} sort_impl={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             meta->index_name,
             static_cast<unsigned long long>(meta->locator.total_bp_size),
@@ -1484,7 +1484,7 @@ void process_mps_build_claim(
                                 lazy_worker_shareable =
                                     bioseq::storage::lazy_is_worker_shareable(
                                         resident_lazy);
-                                JustLog("[bioseq] index: async mps worker row={} index={} "
+                                bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} "
                                         "using resident target packed_bytes={} "
                                         "lazy_worker_shareable={}",
                                         static_cast<unsigned long long>(
@@ -1499,7 +1499,7 @@ void process_mps_build_claim(
                                 return;
                             }
                         }
-                        JustLog("[bioseq] index: async mps worker row={} index={} "
+                        bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} "
                                 "using scanner_pg target lazy_worker_shareable={}",
                                 static_cast<unsigned long long>(
                                     target.sequence_rowno),
@@ -1545,7 +1545,7 @@ void process_mps_build_claim(
         static_cast<std::uint64_t>(worker_concurrency),
         static_cast<std::uint64_t>(std::max(0, meta->index_memory_cap_mb)),
         lazy_worker_shareable);
-    JustLog("[bioseq] index: async mps build worker built row={} index={} target_bp={} worker_build_ns={} mode={} max_concurrency={} lazy_worker_shareable={} runs={} resident_runs={} file_runs={} resident_peak_bytes={} spilled_run_bytes={} postgres_temp_file_bytes={} merge_passes={} position_spill_bytes={}",
+    bioseq_log<DBG>("[bioseq] index: async mps build worker built row={} index={} target_bp={} worker_build_ns={} mode={} max_concurrency={} lazy_worker_shareable={} runs={} resident_runs={} file_runs={} resident_peak_bytes={} spilled_run_bytes={} postgres_temp_file_bytes={} merge_passes={} position_spill_bytes={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             meta->index_name,
             static_cast<unsigned long long>(meta->locator.total_bp_size),
@@ -1572,7 +1572,7 @@ void process_persist_file_claim(
     const std::optional<PersistFileMetadata> meta =
         parse_persist_file_metadata(base, mapped);
     if (!meta.has_value()) {
-        JustLog("[bioseq] index: discarded invalid file async persist metadata row={}",
+        bioseq_log<DBG>("[bioseq] index: discarded invalid file async persist metadata row={}",
                 static_cast<unsigned long long>(claim.target.sequence_rowno));
         return;
     }
@@ -1581,7 +1581,7 @@ void process_persist_file_claim(
     target.index_name = meta->index_name;
     if (!worker_target_accepts_index_persist(target, meta->index_name)) {
         remove_temp_file_noexcept(meta->path);
-        JustLog("[bioseq] index: discarded stale file async persist job row={} index={}",
+        bioseq_log<DBG>("[bioseq] index: discarded stale file async persist job row={} index={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 meta->index_name);
         return;
@@ -1590,7 +1590,7 @@ void process_persist_file_claim(
     std::ifstream input(meta->path, std::ios::binary);
     if (!input) {
         remove_temp_file_noexcept(meta->path);
-        JustLog("[bioseq] index: discarded missing file async persist payload row={} index={} path={}",
+        bioseq_log<DBG>("[bioseq] index: discarded missing file async persist payload row={} index={} path={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 meta->index_name,
                 meta->path);
@@ -1604,13 +1604,13 @@ void process_persist_file_claim(
         PersistFileChunkHeader chunk{};
         input.read(reinterpret_cast<char*>(&chunk), sizeof(chunk));
         if (!input) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                    "bioseq async persist: truncated file chunk header at chunk {}",
                    static_cast<unsigned long long>(i));
         }
         bytes_read += sizeof(chunk);
         if (chunk.size > bioseq::indexing::MAX_INDEX_CHUNK_SIZE_BYTES) {
-            pg_log(ERROR,
+            bioseq_log<ERR, PG>(
                    "bioseq async persist: file chunk too large (sub_key={} chunk={} bytes={})",
                    static_cast<long long>(chunk.sub_key),
                    static_cast<unsigned>(chunk.chunk_no),
@@ -1621,7 +1621,7 @@ void process_persist_file_claim(
         if (chunk.size != 0) {
             input.read(payload.data(), static_cast<std::streamsize>(chunk.size));
             if (!input) {
-                pg_log(ERROR,
+                bioseq_log<ERR, PG>(
                        "bioseq async persist: truncated file chunk payload at chunk {}",
                        static_cast<unsigned long long>(i));
             }
@@ -1643,7 +1643,7 @@ void process_persist_file_claim(
         ++chunks_written;
     }
     if (bytes_read != meta->file_bytes) {
-        pg_log(ERROR,
+        bioseq_log<ERR, PG>(
                "bioseq async persist: file byte count mismatch (expected={} actual={})",
                static_cast<unsigned long long>(meta->file_bytes),
                static_cast<unsigned long long>(bytes_read));
@@ -1658,7 +1658,7 @@ void process_persist_file_claim(
 
     const std::uint64_t worker_end_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    JustLog("[bioseq] index: async persist file worker wrote row={} index={} chunks={} bytes={} worker_write_ns={}",
+    bioseq_log<DBG>("[bioseq] index: async persist file worker wrote row={} index={} chunks={} bytes={} worker_write_ns={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             meta->index_name,
             static_cast<unsigned long long>(chunks_written),
@@ -1736,7 +1736,7 @@ void process_persist_claim(const PersistClaim& claim) {
         dsm_detach(seg);
         PopActiveSnapshot();
         CommitTransactionCommand();
-        JustLog("[bioseq] index: discarded stale async persist job row={} index={}",
+        bioseq_log<DBG>("[bioseq] index: discarded stale async persist job row={} index={}",
                 static_cast<unsigned long long>(target.sequence_rowno),
                 index_name);
         return;
@@ -1777,7 +1777,7 @@ void process_persist_claim(const PersistClaim& claim) {
     CommitTransactionCommand();
     const std::uint64_t worker_end_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    JustLog("[bioseq] index: async persist worker wrote row={} index={} chunks={} bytes={} worker_write_ns={}",
+    bioseq_log<DBG>("[bioseq] index: async persist worker wrote row={} index={} chunks={} bytes={} worker_write_ns={}",
             static_cast<unsigned long long>(target.sequence_rowno),
             index_name,
             header.chunk_count,
@@ -1801,7 +1801,7 @@ void process_one_persist_job_if_ready() {
         BackgroundWorkerInitializeConnectionByOid(claim->target.db_oid, InvalidOid, 0);
         g_persist_worker_connected_db = claim->target.db_oid;
     } else if (g_persist_worker_connected_db != claim->target.db_oid) {
-        JustLog("[bioseq] index: discarded async persist job for db={} because worker is connected to db={}",
+        bioseq_log<DBG>("[bioseq] index: discarded async persist job for db={} because worker is connected to db={}",
                 static_cast<unsigned>(claim->target.db_oid),
                 static_cast<unsigned>(g_persist_worker_connected_db));
         finish_persist_claim(*claim);
@@ -1816,7 +1816,7 @@ void process_one_persist_job_if_ready() {
     {
         AbortCurrentTransaction();
         FlushErrorState();
-        JustLog("[bioseq] index: async persist worker dropped failed job row={}",
+        bioseq_log<DBG>("[bioseq] index: async persist worker dropped failed job row={}",
                 static_cast<unsigned long long>(claim->target.sequence_rowno));
     }
     PG_END_TRY();

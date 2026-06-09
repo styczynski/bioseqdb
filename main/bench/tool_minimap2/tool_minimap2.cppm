@@ -257,7 +257,7 @@ struct NativeMinimap2Handles {
     const int32_t query_len  = static_cast<int32_t>(query_acgt.size());
 
     if (query_len == 0 || target_len == 0) {
-        JustLog("[tool_minimap2] Empty input (qlen={}, tlen={}) — no results",
+        bioseq_log<DBG>("[tool_minimap2] Empty input (qlen={}, tlen={}) — no results",
                 query_len, target_len);
         return MatchResultCollection{};
     }
@@ -292,7 +292,7 @@ struct NativeMinimap2Handles {
             &target_name);
     }
     if (handles.index == nullptr) {
-        JustLog("[tool_minimap2] mm_idx_str returned nullptr");
+        bioseq_log<DBG>("[tool_minimap2] mm_idx_str returned nullptr");
         return MatchResultCollection{};
     }
     mm_mapopt_update(&map_opt, handles.index);
@@ -322,7 +322,7 @@ struct NativeMinimap2Handles {
     }
     std::free(native_regions);
 
-    JustLog("[tool_minimap2] Produced {} alignments for qlen={} tlen={}",
+    bioseq_log<DBG>("[tool_minimap2] Produced {} alignments for qlen={} tlen={}",
             results.size(), query_len, target_len);
     return MatchResultCollection(std::move(results));
 }

@@ -610,11 +610,13 @@ void collect_seed_hits(
         AnchorRefBitsKey{});
     }  // end collect_seed_hits_sort scope
 
-    JustLogProgress("[minimap_port] Collected {} seed anchors from {} query minimizers"
-            " | footprint={}MB avail={}MB",
-            anchors_out.size(), query_minimizers.size(),
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    bioseq_log_lazy<DBG>([&] {
+        bioseq_log_progress<DBG>("[minimap_port] Collected {} seed anchors from {} query minimizers"
+                " | footprint={}MB avail={}MB",
+                anchors_out.size(), query_minimizers.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    });
 }
 
 // ============================================================================
@@ -783,10 +785,12 @@ void generate_regions(
         set_region_coordinates(region, anchors, query_len);
     }
 
-    JustLogProgress("[minimap_port] Generated {} alignment regions | footprint={}MB avail={}MB",
-            regions_out.size(),
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    bioseq_log_lazy<DBG>([&] {
+        bioseq_log_progress<DBG>("[minimap_port] Generated {} alignment regions | footprint={}MB avail={}MB",
+                regions_out.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    });
 }
 
 // ============================================================================
@@ -935,7 +939,7 @@ void classify_primary_secondary(
         }
     }
 
-    JustLog("[minimap_port] Classification: {} primary, {} secondary",
+    bioseq_log<DBG>("[minimap_port] Classification: {} primary, {} secondary",
             primary_indices.size(), region_count - primary_indices.size());
 }
 
@@ -1018,7 +1022,7 @@ void classify_primary_secondary(
         regions[region_idx].region_id = static_cast<int32_t>(region_idx);
     }
 
-    JustLog("[minimap_port] After secondary filtering: {} regions remain", write_pos);
+    bioseq_log<DBG>("[minimap_port] After secondary filtering: {} regions remain", write_pos);
     return write_pos;
 }
 
@@ -1556,21 +1560,25 @@ void align_regions(
                 const std::int64_t hb_now_ns = bioseq::instr::clock::now_ns();
                 if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
                     hb_last_ns = hb_now_ns;
-                    JustLogProgress("[minimap_port] aligning region {}/{} seed_count={}"
-                            " | footprint={}MB avail={}MB",
-                            hb_region_idx, regions.size(), regions[region_index].seed_count,
-                            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                    bioseq_log_lazy<DBG>([&] {
+                        bioseq_log_progress<DBG>("[minimap_port] aligning region {}/{} seed_count={}"
+                                " | footprint={}MB avail={}MB",
+                                hb_region_idx, regions.size(), regions[region_index].seed_count,
+                                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+                    });
                 }
             }
             align_one_region_by_index(region_index);
         }
     }
 
-    JustLogProgress("[minimap_port] Aligned {} regions | footprint={}MB avail={}MB",
-            regions.size(),
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    bioseq_log_lazy<DBG>([&] {
+        bioseq_log_progress<DBG>("[minimap_port] Aligned {} regions | footprint={}MB avail={}MB",
+                regions.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    });
 }
 
 // ============================================================================
@@ -1918,7 +1926,7 @@ void compute_mapping_quality(
         }
     }
 
-    JustLog("[minimap_port] Computed MAPQ for {} regions", regions.size());
+    bioseq_log<DBG>("[minimap_port] Computed MAPQ for {} regions", regions.size());
 }
 
 // ============================================================================
@@ -2011,7 +2019,7 @@ struct MatchResultCollection {
                const std::string& target_name = "target") const
     {
         if (results.empty()) {
-            JustLog("{}\t0\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", query_name);
+            bioseq_log<DBG>("{}\t0\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", query_name);
             return;
         }
 
@@ -2062,7 +2070,7 @@ struct MatchResultCollection {
                 line += format_cigar(match.cigar);
             }
 
-            JustLog("{}", line);
+            bioseq_log<DBG>("{}", line);
         }
     }
 };

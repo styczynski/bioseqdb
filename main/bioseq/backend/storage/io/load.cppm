@@ -13,7 +13,7 @@ module;
 // without owning the Highway intrinsics in this TU their arm_neon.h static
 // definitions collide ("duplicate mangled name _ZL...vdupq_n_u8").
 #include "common_simd.h"
-#include "common.h"            // DEBUG_ASSERT, JustLog, CXX_PG_FUNCTION_INFO_V1, fmt
+#include "common.h"            // DEBUG_ASSERT, bioseq_log<DBG>, CXX_PG_FUNCTION_INFO_V1, fmt
 #include <boost/integer.hpp>
 #include <boost/container/flat_map.hpp>   // identifier_routing containers (DOC0295 §4.3)
 #include <boost/container/small_vector.hpp>
@@ -57,7 +57,7 @@ extern "C" {
                                // FlushWriteStateForRelfilenode declarations
 export module bioseq_storage_io_load;
 
-import mlogging;                           // JustLog (enable_logging)
+import mlogging;                           // bioseq_log<DBG>(enable_logging)
 import pg_utils;
 import bioseq_storage_size;                // sequence_size_t
 import bioseq_common.templating;           // enum_dispatch_pack / value_sequence
@@ -664,7 +664,7 @@ template <sequence_alphabet A, std::size_t ColBW,
                    *producer_records, static_cast<long long>(records))));
     }
 
-    JustLog("[bioseq.load] overlapped parser/writer path records={}",
+    bioseq_log<DBG>("[bioseq.load] overlapped parser/writer path records={}",
             static_cast<long long>(records));
     return records;
 }
@@ -1233,7 +1233,7 @@ Datum bioseq_load(PG_FUNCTION_ARGS) {
 
     // 4..14 — open, discover columns, resolve mapping, stream, build index, close.
     const std::int64_t n = run_load(relid, path, kind, requested_fmt, user_maps);
-    JustLog("[bioseq] load: '{}' -> relid={} loaded {} records", path, relid, n);
+    bioseq_log<DBG>("[bioseq] load: '{}' -> relid={} loaded {} records", path, relid, n);
     PG_RETURN_INT64(n);
 }
 

@@ -4,7 +4,6 @@
 
 #include <cstdint>
 
-#include "./headers/logging.h"
 #ifndef NO_POSTGRES
 #include "./headers/pg_compat.h"
 #else

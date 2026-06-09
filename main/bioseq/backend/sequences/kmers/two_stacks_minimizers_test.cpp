@@ -31,7 +31,7 @@
 //
 // EXPECTED_PAIRS literals captured from the OLD impl
 // (commit 59887b0b — "wip: fixing issue with nthash narrow lanes") via the
-// JustLog dump in NTHASH_NARROW_FIX/BASELINE_HARDCODED_OUTPUT.txt. The
+// bioseq_log<DBG> dump in NTHASH_NARROW_FIX/BASELINE_HARDCODED_OUTPUT.txt. The
 // NEW impl is locked to produce a sorted-unique pair set bit-identical to
 // these literals — see main/DOCS/BUGFIX/REPORT_PHASE_1__DOC0221.md for the
 // before/after diff and the validation methodology.
@@ -224,7 +224,7 @@ run_two_stack_pairs(std::vector<Alphabet>& data, size_t w, size_t k) {
 }
 
 // Compare a runtime-collected pair vector against a constexpr EXPECTED_PAIRS
-// array. Logs each mismatch via JustLog before asserting, so a regression
+// array. Logs each mismatch via bioseq_log<DBG> before asserting, so a regression
 // is easy to diagnose from CI logs without re-running locally.
 template <size_t N>
 static void assert_pairs_match(
@@ -234,7 +234,7 @@ static void assert_pairs_match(
 {
     if (got.size() != expected.size()) {
         for (const auto& [last_pos, kmer] : got) {
-            JustLog("[{} GOT] last_pos={} kmer=0x{:x}",
+            bioseq_log<DBG>("[{} GOT] last_pos={} kmer=0x{:x}",
                     fixture_name, last_pos, kmer);
         }
     }
@@ -248,7 +248,7 @@ static void assert_pairs_match(
         const auto& [exp_pos, exp_kmer] = expected[i];
         const auto& [got_pos, got_kmer] = got[i];
         if (got_pos != exp_pos || got_kmer != exp_kmer) {
-            JustLog("[{} MISMATCH at {}] got=({}, 0x{:x}) expected=({}, 0x{:x})",
+            bioseq_log<DBG>("[{} MISMATCH at {}] got=({}, 0x{:x}) expected=({}, 0x{:x})",
                     fixture_name, i, got_pos, got_kmer, exp_pos, exp_kmer);
         }
         ASSERT(

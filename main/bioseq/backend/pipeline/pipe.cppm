@@ -2094,7 +2094,7 @@ template <is_constexpr_aligner_params Cep,
     }
     auto outer_chain_scope = context::current().push<context::Arena::Chain>();
 
-    JustLog("[bioseq] pipe: pipeline_run_impl_batch entry — Cep(L={},K={},W={},fallback={}) "
+    bioseq_log<DBG>("[bioseq] pipe: pipeline_run_impl_batch entry — Cep(L={},K={},W={},fallback={}) "
             "BAA={} CA={} MA={} EP={} queries={} target_bp={}",
             Cep::sequence_len_log2, Cep::kmer_len, Cep::window_len,
             Cep::generic_fallback ? 1 : 0,
@@ -3481,11 +3481,13 @@ template <supports_compact_sequence_range QueryRange,
         const sequence_size_t frag_bp =
             static_cast<sequence_size_t>(frag_units) * lpu;
 
-        JustLogProgress("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
-                        "| footprint={}MB avail={}MB",
-                target_len, query_len, ranges.size(),
-                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+        bioseq_log_lazy<DBG>([&] {
+            bioseq_log_progress<DBG>("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
+                            "| footprint={}MB avail={}MB",
+                    target_len, query_len, ranges.size(),
+                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+        });
 
         if constexpr (!std::is_same_v<FragmentIndexStorage, std::nullptr_t>) {
             if (fragment_index_out != nullptr) {
@@ -3549,12 +3551,14 @@ template <supports_compact_sequence_range QueryRange,
                     merged.push_back(std::move(result));
                 }
             }
-            JustLogProgress("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
-                            "(merged {}) | footprint={}MB avail={}MB",
-                    range.core_lo_bp, range.core_hi_bp,
-                    merged.size(), seg_res.results.size(), merged.size(),
-                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            bioseq_log_lazy<DBG>([&] {
+                bioseq_log_progress<DBG>("[minimap_port_segmented] segment core [{},{}) done, kept {} of {} "
+                                "(merged {}) | footprint={}MB avail={}MB",
+                        range.core_lo_bp, range.core_hi_bp,
+                        merged.size(), seg_res.results.size(), merged.size(),
+                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            });
         }
         return MatchResultCollection{std::move(merged)};
     };
@@ -3697,16 +3701,18 @@ template <supports_compact_sequence_range QueryRange,
         return run_serial_segmented();
     }
 
-    JustLogProgress("[minimap_port_segmented] admitted parallel geometry fanout={} "
-                    "divisor={} segment_bp={} estimated_segments={} "
-                    "estimated_waves={} peak_per_segment={}MB reserve={}MB "
-                    "| footprint={}MB avail={}MB",
-            first_wave.fanout, first_wave.geometry_divisor,
-            first_wave.segment_bp, first_wave.estimated_segments,
-            first_wave.estimated_waves, first_wave.peak_per_segment >> 20,
-            first_wave.permit.bytes() >> 20,
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    bioseq_log_lazy<DBG>([&] {
+        bioseq_log_progress<DBG>("[minimap_port_segmented] admitted parallel geometry fanout={} "
+                        "divisor={} segment_bp={} estimated_segments={} "
+                        "estimated_waves={} peak_per_segment={}MB reserve={}MB "
+                        "| footprint={}MB avail={}MB",
+                first_wave.fanout, first_wave.geometry_divisor,
+                first_wave.segment_bp, first_wave.estimated_segments,
+                first_wave.estimated_waves, first_wave.peak_per_segment >> 20,
+                first_wave.permit.bytes() >> 20,
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    });
 
     const unsigned geometry_divisor = first_wave.geometry_divisor;
     auto ranges = pipe::segment_unit_ranges(target_len, query_len, lpu, geometry_divisor);
@@ -3910,12 +3916,14 @@ template <supports_compact_sequence_range QueryRange,
         index.add_position_offset(range.cs_u * lpu);
         seg_out[segment_index] = minimap2_port_with_index(
             query_seq, target_seq, query_minimizers, index, params);
-        JustLogProgress("[minimap_port_segmented] adaptive serial segment core [{},{}) "
-                        "produced {} results | footprint={}MB avail={}MB",
-                range.core_lo_bp, range.core_hi_bp,
-                seg_out[segment_index].results.size(),
-                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+        bioseq_log_lazy<DBG>([&] {
+            bioseq_log_progress<DBG>("[minimap_port_segmented] adaptive serial segment core [{},{}) "
+                            "produced {} results | footprint={}MB avail={}MB",
+                    range.core_lo_bp, range.core_hi_bp,
+                    seg_out[segment_index].results.size(),
+                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+        });
     };
 
     for (std::size_t wave_lo = 0; wave_lo < ranges.size();) {
@@ -3943,22 +3951,26 @@ template <supports_compact_sequence_range QueryRange,
             }
         }
         if (!wave_permit) {
-            JustLogProgress("[minimap_port_segmented] wave admission failed at segment {} "
-                            "of {}; processing one segment serially | footprint={}MB "
-                            "avail={}MB",
-                    wave_lo, ranges.size(),
-                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            bioseq_log_lazy<DBG>([&] {
+                bioseq_log_progress<DBG>("[minimap_port_segmented] wave admission failed at segment {} "
+                                "of {}; processing one segment serially | footprint={}MB "
+                                "avail={}MB",
+                        wave_lo, ranges.size(),
+                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            });
             process_segment_serial(wave_lo);
             ++wave_lo;
             continue;
         }
         if (wave_count != requested_wave_count) {
-            JustLogProgress("[minimap_port_segmented] wave fanout reduced from {} to {} "
-                            "at segment {} of {} | footprint={}MB avail={}MB",
-                    requested_wave_count, wave_count, wave_lo, ranges.size(),
-                    bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-                    bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            bioseq_log_lazy<DBG>([&] {
+                bioseq_log_progress<DBG>("[minimap_port_segmented] wave fanout reduced from {} to {} "
+                                "at segment {} of {} | footprint={}MB avail={}MB",
+                        requested_wave_count, wave_count, wave_lo, ranges.size(),
+                        bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                        bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+            });
         }
 
         const std::size_t wave_hi = wave_lo + wave_count;
@@ -4002,12 +4014,14 @@ template <supports_compact_sequence_range QueryRange,
         total_segment_minimizers += segment_minimizer_counts[segment_index];
         total_filtered_minimizers += segment_filtered_counts[segment_index];
     }
-    JustLogProgress("[minimap_port_segmented] query-filtered transient index kept {} "
-                    "of {} segment minimizers across {} segments | footprint={}MB "
-                    "avail={}MB",
-            total_filtered_minimizers, total_segment_minimizers, ranges.size(),
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    bioseq_log_lazy<DBG>([&] {
+        bioseq_log_progress<DBG>("[minimap_port_segmented] query-filtered transient index kept {} "
+                        "of {} segment minimizers across {} segments | footprint={}MB "
+                        "avail={}MB",
+                total_filtered_minimizers, total_segment_minimizers, ranges.size(),
+                bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+                bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    });
 
     std::vector<MatchResult> merged;
     for (std::size_t segment_index = 0; segment_index < ranges.size(); ++segment_index) {

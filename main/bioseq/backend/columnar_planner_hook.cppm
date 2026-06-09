@@ -67,12 +67,12 @@ template<typename PlanNode>
 static bool
 bioseq_index_table(Oid index_oid, Oid columnar_tableam_oid)
 {
-	JustLog("[bioseq] pg: bioseq_index_table() index_oid={} columnar_tableam_oid={}", index_oid, columnar_tableam_oid);
+	bioseq_log<DBG>("[bioseq] pg: bioseq_index_table() index_oid={} columnar_tableam_oid={}", index_oid, columnar_tableam_oid);
 
 	HeapTuple index_tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
 	if (!HeapTupleIsValid(index_tuple))
 	{
-		JustLog("[bioseq] pg: bioseq_index_table() index syscache miss for oid={}", index_oid);
+		bioseq_log<DBG>("[bioseq] pg: bioseq_index_table() index syscache miss for oid={}", index_oid);
 		return false;
 	}
 	Form_pg_index index_record = reinterpret_cast<Form_pg_index>(GETSTRUCT(index_tuple));
@@ -81,7 +81,7 @@ bioseq_index_table(Oid index_oid, Oid columnar_tableam_oid)
 	if (!HeapTupleIsValid(table_tuple))
 	{
 		ReleaseSysCache(index_tuple);
-		JustLog("[bioseq] pg: bioseq_index_table() table syscache miss for indrelid={}", index_record->indrelid);
+		bioseq_log<DBG>("[bioseq] pg: bioseq_index_table() table syscache miss for indrelid={}", index_record->indrelid);
 		return false;
 	}
 	Form_pg_class table_record = reinterpret_cast<Form_pg_class>(GETSTRUCT(table_tuple));
@@ -103,7 +103,7 @@ bioseq_index_table(Oid index_oid, Oid columnar_tableam_oid)
 static Node*
 AggRefArgsExpressionMutator(Node* node, void* context)
 {
-	JustLog("[bioseq] pg: AggRefArgsExpressionMutator() entered");
+	bioseq_log<DBG>("[bioseq] pg: AggRefArgsExpressionMutator() entered");
 	if (node == NULL)
 		return NULL;
 
@@ -114,10 +114,10 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 		OpExpr* op_expr_node = reinterpret_cast<OpExpr*>(node);
 
 		if (list_length(op_expr_node->args) != 2)
-			pg_log(ERROR, "Aggregation vectorization works only on two arguments.");
+			bioseq_log<ERR, PG>( "Aggregation vectorization works only on two arguments.");
 
 		if (CheckOpExprArgumentRules(op_expr_node->args))
-			pg_log(ERROR, "Unsupported aggregate argument combination.");
+			bioseq_log<ERR, PG>( "Unsupported aggregate argument combination.");
 
 		HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
 		Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
@@ -126,7 +126,7 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 
 		Oid vectorized_procedure_oid;
 		if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_procedure_oid))
-			pg_log(ERROR, "Vectorized aggregate not found.");
+			bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
 
 		op_expr_node->opfuncid = vectorized_procedure_oid;
 
@@ -135,7 +135,7 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 
 	/* This should handle aggregates that have non var(column) as argument*/
 	if (previous_node != NULL && IsA(previous_node, TargetEntry) && !IsA(node, Var))
-		pg_log(ERROR, "Vectorized Aggregates accept only valid column argument");
+		bioseq_log<ERR, PG>( "Vectorized Aggregates accept only valid column argument");
 
 	return expression_tree_mutator(node, AggRefArgsExpressionMutator, static_cast<void*>(node));
 }
@@ -148,7 +148,7 @@ AggRefArgsExpressionMutator(Node* node, void* context)
 static Node*
 ExpressionMutator(Node* node, void* context)
 {
-	JustLog("[bioseq] pg: ExpressionMutator() entered");
+	bioseq_log<DBG>("[bioseq] pg: ExpressionMutator() entered");
 	if (node == NULL)
 		return NULL;
 
@@ -159,12 +159,12 @@ ExpressionMutator(Node* node, void* context)
 
 		if (old_aggref_node->aggdistinct)
 		{
-			pg_log(ERROR, "Vectorized aggregate with DISTINCT not supported.");
+			bioseq_log<ERR, PG>( "Vectorized aggregate with DISTINCT not supported.");
 		}
 
 		if (old_aggref_node->aggfilter)
 		{
-			pg_log(ERROR, "Vectorized aggregate with FILTER not supported");
+			bioseq_log<ERR, PG>( "Vectorized aggregate with FILTER not supported");
 		}
 
 		new_aggref_node->args = reinterpret_cast<List*>(
@@ -173,7 +173,7 @@ ExpressionMutator(Node* node, void* context)
 		Oid vectorized_procedure_oid = 0;
 		if (!GetVectorizedProcedureOid(new_aggref_node->aggfnoid, &vectorized_procedure_oid))
 		{
-			pg_log(ERROR, "Vectorized aggregate not found.");
+			bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
 		}
 
 		new_aggref_node->aggfnoid = vectorized_procedure_oid;
@@ -204,7 +204,7 @@ PlanTreeMutator(Plan* node, void* context)
 	{
 		case T_CustomScan:
 		{
-			JustLog("[bioseq] pg: PlanTreeMutator() encountered CustomScan");
+			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() encountered CustomScan");
 			CustomScan* custom_scan = reinterpret_cast<CustomScan*>(node);
 
 			if (custom_scan->methods == bioseq_customscan_methods())
@@ -222,7 +222,7 @@ PlanTreeMutator(Plan* node, void* context)
 			}
 			else
 			{
-				pg_log(ERROR, "Custom Scan type is not ColumnarScan.");
+				bioseq_log<ERR, PG>( "Custom Scan type is not ColumnarScan.");
 			}
 
 			break;
@@ -230,7 +230,7 @@ PlanTreeMutator(Plan* node, void* context)
 
 		case T_Agg:
 		{
-			JustLog("[bioseq] pg: PlanTreeMutator() encountered Agg");
+			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() encountered Agg");
 			Agg* agg_node = reinterpret_cast<Agg*>(node);
 
 			if (!bioseq_enable_vectorization)
@@ -238,7 +238,7 @@ PlanTreeMutator(Plan* node, void* context)
 
 			if (agg_node->plan.lefttree->type == T_CustomScan)
 			{
-				JustLog("[bioseq] pg: PlanTreeMutator() Agg has CustomScan child");
+				bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() Agg has CustomScan child");
 				/*
 				 * Skip the vectorised-aggregator rewrite when the Agg
 				 * pulls a value from a bioseq.<projection>(...) call or
@@ -262,12 +262,12 @@ PlanTreeMutator(Plan* node, void* context)
 					|| bioseq_expr_uses_bioseq_projection(
 						reinterpret_cast<Node*>(agg_node->plan.lefttree->qual));
 				if (agg_input_uses_bioseq_projection) {
-					JustLog("[bioseq] pg: PlanTreeMutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
+					bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
 					return node;
 				}
 				if (agg_node->aggstrategy == AGG_PLAIN)
 				{
-					JustLog("[bioseq] pg: PlanTreeMutator() rewriting AGG_PLAIN into vectorized aggregator");
+					bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() rewriting AGG_PLAIN into vectorized aggregator");
 					CustomScan* vectorized_agg_node = bioseq_create_aggregator_node();
 
 					Agg* new_agg = FlatCopyPlan(agg_node);
@@ -314,14 +314,14 @@ PlanTreeMutator(Plan* node, void* context)
 		}
 		case T_IndexScan:
 		{
-			JustLog("[bioseq] pg: PlanTreeMutator() encountered IndexScan; bioseq_index_scan={}", bioseq_index_scan);
+			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() encountered IndexScan; bioseq_index_scan={}", bioseq_index_scan);
 			if (!bioseq_index_scan)
 				return node;
 
 			IndexScan* index_scan_node = reinterpret_cast<IndexScan*>(node);
 
 			if (!bioseq_index_table(index_scan_node->indexid, bioseq_tableam_oid)) {
-				JustLog("[bioseq] pg: PlanTreeMutator() IndexScan not on columnar table; skipping rewrite");
+				bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() IndexScan not on columnar table; skipping rewrite");
 				return node;
 			}
 
@@ -339,7 +339,7 @@ PlanTreeMutator(Plan* node, void* context)
 			Plan* columnar_index_scan_plan = reinterpret_cast<Plan*>(columnar_index_scan);
 			CopyPlanCosts(columnar_index_scan_plan, &index_scan_node->scan.plan);
 
-			JustLog("[bioseq] pg: PlanTreeMutator() IndexScan rewritten to bioseq custom scan");
+			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() IndexScan rewritten to bioseq custom scan");
 			return reinterpret_cast<Plan*>(columnar_index_scan);
 		}
 		default:
@@ -379,11 +379,11 @@ static void ProcessUtilityHook(
 			if (create_statement->accessMethod != nullptr) {
 				std::string access_method(create_statement->accessMethod);
 				if (access_method == "columnar") {
-					JustLog("[bioseq] pg: ProcessUtilityHook() CREATE TABLE USING columnar [{}]", nodeStr(create_statement));
+					bioseq_log<DBG>("[bioseq] pg: ProcessUtilityHook() CREATE TABLE USING columnar");
 					for (auto element : PList<Node>(create_statement->tableElts)) {
 						if (IsA(element, ColumnDef)) {
 							ColumnDef* column_def = reinterpret_cast<ColumnDef*>(element);
-							JustLog("[bioseq] pg: ProcessUtilityHook() column '{}'", column_def->colname);
+							bioseq_log<DBG>("[bioseq] pg: ProcessUtilityHook() column '{}'", column_def->colname);
 						}
 					}
 				}
@@ -414,39 +414,39 @@ ColumnarPlannerHook(Query* parse,
 					int cursor_options,
 					ParamListInfo bound_params)
 {
-	JustLog("[bioseq] pg: ColumnarPlannerHook() entered; parse_tree=[{}]", nodeStr(parse));
+	bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() entered");
 
 	PlannedStmt* stmt;
 	if (PreviousPlannerHook) {
-		JustLog("[bioseq] pg: ColumnarPlannerHook() delegating to previous planner hook");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() delegating to previous planner hook");
 		stmt = PreviousPlannerHook(parse, query_string, cursor_options, bound_params);
 	} else {
-		JustLog("[bioseq] pg: ColumnarPlannerHook() delegating to standard_planner");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() delegating to standard_planner");
 		stmt = standard_planner(parse, query_string, cursor_options, bound_params);
 	}
-	JustLog("[bioseq] pg: ColumnarPlannerHook() upstream planner returned");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() upstream planner returned");
 
 	/*
 	 * In the case of a CREATE TABLE AS query, we are not able to successfully
 	 * drop out of a parallel insert situation. Disable parallelism for those.
 	 */
-	JustLog("[bioseq] pg: ColumnarPlannerHook() checking for CREATE TABLE AS");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() checking for CREATE TABLE AS");
 	if (parse->commandType == CMD_SELECT)
 	{
-		JustLog("[bioseq] pg: ColumnarPlannerHook() query_string_null={}", query_string == nullptr);
+		bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() query_string_null={}", query_string == nullptr);
 		if (query_string != nullptr && IsCreateTableAs(query_string))
 		{
 			stmt->parallelModeNeeded = false;
 		}
 	}
 
-	JustLog("[bioseq] pg: ColumnarPlannerHook() checking vectorization preconditions");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() checking vectorization preconditions");
 	if (!(bioseq_enable_vectorization			/* Vectorization should be enabled */
 			|| bioseq_index_scan)				/* or Columnar Index Scan */
 		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
 		|| list_length(stmt->rtable) != 1)		/* JOINs are not yet supported */
 		{
-			JustLog("[bioseq] pg: ColumnarPlannerHook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
+			bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
 				bioseq_enable_vectorization, bioseq_index_scan,
 				(stmt->commandType != CMD_SELECT), (list_length(stmt->rtable) != 1));
 			return stmt;
@@ -460,7 +460,7 @@ ColumnarPlannerHook(Query* parse,
 
 	MemoryContext saved_context = CurrentMemoryContext;
 
-	JustLog("[bioseq] pg: ColumnarPlannerHook() running plan mutator");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() running plan mutator");
 	PG_TRY();
 	{
 		List* mutated_subplans = NULL;
@@ -470,16 +470,16 @@ ColumnarPlannerHook(Query* parse,
 
 		stmt->planTree = reinterpret_cast<Plan*>(PlanTreeMutator(stmt->planTree, static_cast<void*>(&plan_tree_context)));
 
-		JustLog("[bioseq] pg: ColumnarPlannerHook() iterating subplans");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() iterating subplans");
 		for (auto subplan_node : PList<Plan>(stmt->subplans))
 		{
-			JustLog("[bioseq] pg: ColumnarPlannerHook() processing next subplan");
+			bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() processing next subplan");
 			PlanTreeMutatorContext sub_plan_tree_context;
 			sub_plan_tree_context.vectorizedAggregation = false;
 			Plan* mutated_subplan = static_cast<Plan*>(PlanTreeMutator(subplan_node, static_cast<void*>(&sub_plan_tree_context)));
 			mutated_subplans = lappend(mutated_subplans, mutated_subplan);
 		}
-		JustLog("[bioseq] pg: ColumnarPlannerHook() subplan iteration complete");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() subplan iteration complete");
 
 		stmt->subplans = mutated_subplans;
 	}
@@ -489,17 +489,17 @@ ColumnarPlannerHook(Query* parse,
 
 		ErrorData* error_data = CopyErrorData();
 		FlushErrorState();
-		PgReport(DEBUG1)
+		bioseq_report_pg(DEBUG1)
 			.code(ERRCODE_INTERNAL_ERROR)
 			.msg("Query can't be vectorized. Falling back to original execution.")
 			.detail("{}", error_data->message);
 		stmt->planTree = saved_plan_tree;
 		stmt->subplans = saved_subplans;
-		JustLog("[bioseq] pg: ColumnarPlannerHook() caught PG_TRY exception, reverted plan");
+		bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() caught PG_TRY exception, reverted plan");
 	}
 
 	PG_END_TRY();
-	JustLog("[bioseq] pg: ColumnarPlannerHook() returning");
+	bioseq_log<DBG>("[bioseq] pg: ColumnarPlannerHook() returning");
 
 	return stmt;
 }
@@ -513,7 +513,7 @@ ColumnarPlannerHook(Query* parse,
 static bool
 IsCreateTableAs(const char* query)
 {
-	JustLog("[bioseq] pg: IsCreateTableAs() entered");
+	bioseq_log<DBG>("[bioseq] pg: IsCreateTableAs() entered");
 	const size_t query_length = strlen(query);
 	char* haystack = static_cast<char*>(palloc(query_length + 1));
 
@@ -526,7 +526,7 @@ IsCreateTableAs(const char* query)
 	char* create_ptr = strstr(haystack, "create");
 	if (create_ptr == NULL)
 	{
-		JustLog("[bioseq] pg: IsCreateTableAs() returning false; 'create' not found");
+		bioseq_log<DBG>("[bioseq] pg: IsCreateTableAs() returning false; 'create' not found");
 		pfree(haystack);
 		return false;
 	}
@@ -534,7 +534,7 @@ IsCreateTableAs(const char* query)
 	char* table_ptr = strstr(create_ptr + 6, "table");
 	if (table_ptr == NULL)
 	{
-		JustLog("[bioseq] pg: IsCreateTableAs() returning false; 'table' not found");
+		bioseq_log<DBG>("[bioseq] pg: IsCreateTableAs() returning false; 'table' not found");
 		pfree(haystack);
 		return false;
 	}
@@ -542,14 +542,14 @@ IsCreateTableAs(const char* query)
 	char* as_ptr = strstr(table_ptr + 5, "as");
 	if (as_ptr == NULL)
 	{
-		JustLog("[bioseq] pg: IsCreateTableAs() returning false; 'as' not found");
+		bioseq_log<DBG>("[bioseq] pg: IsCreateTableAs() returning false; 'as' not found");
 		pfree(haystack);
 		return false;
 	}
 
 	pfree(haystack);
 
-	JustLog("[bioseq] pg: IsCreateTableAs() returning true");
+	bioseq_log<DBG>("[bioseq] pg: IsCreateTableAs() returning true");
 	return true;
 }
 
@@ -560,7 +560,7 @@ IsCreateTableAs(const char* query)
  */
 void bioseq_planner_init()
 {
-	JustLog("[bioseq] pg: bioseq_planner_init() entered");
+	bioseq_log<DBG>("[bioseq] pg: bioseq_planner_init() entered");
 
 	PreviousPlannerHook = planner_hook;
 	planner_hook = ColumnarPlannerHook;

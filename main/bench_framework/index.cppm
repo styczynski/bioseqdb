@@ -2783,7 +2783,7 @@ inline void drain_diagnostics_to_context(
 
         simdjson::dom::object param_object;
         if (algorithm_field.value.get(param_object) != simdjson::SUCCESS) {
-            loge("[bench_framework] params.{} is not an object", algorithm_field.key);
+            bioseq_log<ERR>("[bench_framework] params.{} is not an object", algorithm_field.key);
             parse_ok = false;
             continue;
         }
@@ -2795,7 +2795,7 @@ inline void drain_diagnostics_to_context(
 
             simdjson::dom::object schema_obj;
             if (param_field.value.get(schema_obj) != simdjson::SUCCESS) {
-                loge("[bench_framework] params.{}.{} is not an object",
+                bioseq_log<ERR>("[bench_framework] params.{}.{} is not an object",
                              algorithm_schema.algorithm_name, param_field.key);
                 parse_ok = false;
                 continue;
@@ -2803,7 +2803,7 @@ inline void drain_diagnostics_to_context(
 
             std::string_view type_text;
             if (schema_obj["type"].get(type_text) != simdjson::SUCCESS) {
-                loge("[bench_framework] params.{}.{} missing 'type'",
+                bioseq_log<ERR>("[bench_framework] params.{}.{} missing 'type'",
                              algorithm_schema.algorithm_name, param_field.key);
                 parse_ok = false;
                 continue;
@@ -2847,7 +2847,7 @@ inline void drain_diagnostics_to_context(
     for (auto field : test_cases_object) {
         simdjson::dom::object inner_obj;
         if (field.value.get(inner_obj) != simdjson::SUCCESS) {
-            loge("[bench_framework] test_cases.{} is not an object", field.key);
+            bioseq_log<ERR>("[bench_framework] test_cases.{} is not an object", field.key);
             parse_ok = false;
             continue;
         }
@@ -2871,7 +2871,7 @@ inline void drain_diagnostics_to_context(
 
         simdjson::dom::element data_element;
         if (inner_obj["data"].get(data_element) != simdjson::SUCCESS) {
-            loge("[bench_framework] test_cases.{}.data missing", field.key);
+            bioseq_log<ERR>("[bench_framework] test_cases.{}.data missing", field.key);
             parse_ok = false;
             continue;
         }
@@ -2896,7 +2896,7 @@ inline void drain_diagnostics_to_context(
         if (field.key == "key") {
             std::string_view algorithm_name;
             if (field.value.get(algorithm_name) != simdjson::SUCCESS) {
-                loge("[bench_framework] rule selector 'key' is not a string");
+                bioseq_log<ERR>("[bench_framework] rule selector 'key' is not a string");
                 parse_ok = false;
                 return selector;
             }
@@ -2907,7 +2907,7 @@ inline void drain_diagnostics_to_context(
         }
     }
     if (selector.algorithm_key.empty()) {
-        loge("[bench_framework] rule selector missing 'key' field");
+        bioseq_log<ERR>("[bench_framework] rule selector missing 'key' field");
         parse_ok = false;
     }
     return selector;
@@ -2926,13 +2926,13 @@ parse_compare_and_tolerance(
 {
     std::string_view op_text;
     if (op_obj["compare"].get(op_text) != simdjson::SUCCESS) {
-        loge("[bench_framework] {} missing 'compare'", diag_label);
+        bioseq_log<ERR>("[bench_framework] {} missing 'compare'", diag_label);
         parse_ok = false;
         return std::nullopt;
     }
     const auto parsed_op = parse_compare_op(op_text);
     if (!parsed_op.has_value()) {
-        loge("[bench_framework] {}: unknown compare op '{}'", diag_label, op_text);
+        bioseq_log<ERR>("[bench_framework] {}: unknown compare op '{}'", diag_label, op_text);
         parse_ok = false;
         return std::nullopt;
     }
@@ -2964,7 +2964,7 @@ parse_compare_and_tolerance(
     if (cmp_obj["aggregate"].get(aggregate_text) == simdjson::SUCCESS) {
         const auto parsed = parse_aggregate(aggregate_text);
         if (!parsed.has_value()) {
-            loge("[bench_framework] rule comparator: unknown aggregate '{}'",
+            bioseq_log<ERR>("[bench_framework] rule comparator: unknown aggregate '{}'",
                  aggregate_text);
             parse_ok = false;
         } else {
@@ -2986,7 +2986,7 @@ parse_compare_and_tolerance(
     std::vector<simdjson::dom::element> elements;
     for (auto entry : rule_array) elements.push_back(entry);
     if (elements.size() != 4) {
-        loge("[bench_framework] rule array must have 4 elements (name, lhs, cmp, rhs); got {}",
+        bioseq_log<ERR>("[bench_framework] rule array must have 4 elements (name, lhs, cmp, rhs); got {}",
                      elements.size());
         parse_ok = false;
         return std::nullopt;
@@ -2998,7 +2998,7 @@ parse_compare_and_tolerance(
 
     std::string_view rule_name;
     if (elements[0].get(rule_name) != simdjson::SUCCESS) {
-        loge("[bench_framework] rule[0] (name) is not a string");
+        bioseq_log<ERR>("[bench_framework] rule[0] (name) is not a string");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3006,7 +3006,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object lhs_obj;
     if (elements[1].get(lhs_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] rule[1] (lhs selector) is not an object");
+        bioseq_log<ERR>("[bench_framework] rule[1] (lhs selector) is not an object");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3014,7 +3014,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object cmp_obj;
     if (elements[2].get(cmp_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] rule[2] (comparator) is not an object");
+        bioseq_log<ERR>("[bench_framework] rule[2] (comparator) is not an object");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3022,7 +3022,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object rhs_obj;
     if (elements[3].get(rhs_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] rule[3] (rhs selector) is not an object");
+        bioseq_log<ERR>("[bench_framework] rule[3] (rhs selector) is not an object");
         parse_ok = false;
         return std::nullopt;
     }
@@ -3063,7 +3063,7 @@ parse_compare_and_tolerance(
     for (auto entry : rules_array) {
         simdjson::dom::object rule_obj;
         if (entry.get(rule_obj) != simdjson::SUCCESS) {
-            loge("[bench_framework] regression_rules entry is not an object");
+            bioseq_log<ERR>("[bench_framework] regression_rules entry is not an object");
             parse_ok = false;
             continue;
         }
@@ -3073,7 +3073,7 @@ parse_compare_and_tolerance(
 
         std::string_view name_text;
         if (rule_obj["name"].get(name_text) != simdjson::SUCCESS) {
-            loge("[bench_framework] regression rule missing 'name'");
+            bioseq_log<ERR>("[bench_framework] regression rule missing 'name'");
             parse_ok = false;
             continue;
         }
@@ -3084,7 +3084,7 @@ parse_compare_and_tolerance(
             for (auto bench_entry : benchmarks_array) {
                 std::string_view bench_key;
                 if (bench_entry.get(bench_key) != simdjson::SUCCESS) {
-                    loge("[bench_framework] regression rule '{}' benchmarks[*] is not a string",
+                    bioseq_log<ERR>("[bench_framework] regression rule '{}' benchmarks[*] is not a string",
                          rule.name);
                     parse_ok = false;
                     continue;
@@ -3103,7 +3103,7 @@ parse_compare_and_tolerance(
                 for (auto region_entry : regions_array) {
                     std::string_view region_name;
                     if (region_entry.get(region_name) != simdjson::SUCCESS) {
-                        loge("[bench_framework] regression rule '{}' regions[*] is not a string",
+                        bioseq_log<ERR>("[bench_framework] regression rule '{}' regions[*] is not a string",
                              rule.name);
                         parse_ok = false;
                         continue;
@@ -3111,7 +3111,7 @@ parse_compare_and_tolerance(
                     rule.regions.emplace_back(region_name);
                 }
             } else {
-                loge("[bench_framework] regression rule '{}' regions must be a string or array",
+                bioseq_log<ERR>("[bench_framework] regression rule '{}' regions must be a string or array",
                      rule.name);
                 parse_ok = false;
             }
@@ -3125,7 +3125,7 @@ parse_compare_and_tolerance(
 
         std::string_view metric_text;
         if (rule_obj["metric"].get(metric_text) != simdjson::SUCCESS) {
-            loge("[bench_framework] regression rule '{}' missing 'metric'", rule.name);
+            bioseq_log<ERR>("[bench_framework] regression rule '{}' missing 'metric'", rule.name);
             parse_ok = false;
             continue;
         }
@@ -3133,13 +3133,13 @@ parse_compare_and_tolerance(
 
         std::string_view aggregate_text;
         if (rule_obj["aggregate"].get(aggregate_text) != simdjson::SUCCESS) {
-            loge("[bench_framework] regression rule '{}' missing 'aggregate'", rule.name);
+            bioseq_log<ERR>("[bench_framework] regression rule '{}' missing 'aggregate'", rule.name);
             parse_ok = false;
             continue;
         }
         const auto parsed_aggregate = parse_aggregate(aggregate_text);
         if (!parsed_aggregate.has_value()) {
-            loge("[bench_framework] regression rule '{}' has unknown aggregate '{}'",
+            bioseq_log<ERR>("[bench_framework] regression rule '{}' has unknown aggregate '{}'",
                  rule.name, aggregate_text);
             parse_ok = false;
             continue;
@@ -3148,7 +3148,7 @@ parse_compare_and_tolerance(
 
         simdjson::dom::object op_obj;
         if (rule_obj["operator"].get(op_obj) != simdjson::SUCCESS) {
-            loge("[bench_framework] regression rule '{}' missing 'operator'", rule.name);
+            bioseq_log<ERR>("[bench_framework] regression rule '{}' missing 'operator'", rule.name);
             parse_ok = false;
             continue;
         }
@@ -3161,7 +3161,7 @@ parse_compare_and_tolerance(
             for (auto exclude_entry : exclude_array) {
                 std::string_view exclude_name;
                 if (exclude_entry.get(exclude_name) != simdjson::SUCCESS) {
-                    loge("[bench_framework] regression rule '{}' exclude_cases[*] is not a string",
+                    bioseq_log<ERR>("[bench_framework] regression rule '{}' exclude_cases[*] is not a string",
                          rule.name);
                     parse_ok = false;
                     continue;
@@ -3189,7 +3189,7 @@ parse_compare_and_tolerance(
 
         simdjson::dom::object inner_obj;
         if (field.value.get(inner_obj) != simdjson::SUCCESS) {
-            loge("[bench_framework] metrics.{} is not an object", field.key);
+            bioseq_log<ERR>("[bench_framework] metrics.{} is not an object", field.key);
             parse_ok = false;
             continue;
         }
@@ -3201,7 +3201,7 @@ parse_compare_and_tolerance(
         }
         const auto parsed_source = parse_metric_type(type_text);
         if (!parsed_source.has_value()) {
-            loge("[bench_framework] metrics.{}: unknown type '{}'", field.key, type_text);
+            bioseq_log<ERR>("[bench_framework] metrics.{}: unknown type '{}'", field.key, type_text);
             parse_ok = false;
             continue;
         }
@@ -3251,7 +3251,7 @@ parse_compare_and_tolerance(
             for (auto entry : rules_array) {
                 simdjson::dom::array as_array;
                 if (entry.get(as_array) != simdjson::SUCCESS) {
-                    loge("[bench_framework] metric '{}' rule entry is not an array", metric.name);
+                    bioseq_log<ERR>("[bench_framework] metric '{}' rule entry is not an array", metric.name);
                     parse_ok = false;
                     continue;
                 }
@@ -3302,7 +3302,7 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object matrix_obj;
     if (benchmark_obj["matrix"].get(matrix_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] benchmark '{}' missing 'matrix'", benchmark.benchmark_key);
+        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix'", benchmark.benchmark_key);
         return false;
     }
 
@@ -3313,13 +3313,13 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object for_obj;
     if (matrix_obj["for"].get(for_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] benchmark '{}' missing 'matrix.for'", benchmark.benchmark_key);
+        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix.for'", benchmark.benchmark_key);
         return false;
     }
     for (auto field : for_obj) {
         std::int64_t iterations = 0;
         if (field.value.get(iterations) != simdjson::SUCCESS || iterations < 0) {
-            loge("[bench_framework] matrix.for.{} must be a non-negative integer", field.key);
+            bioseq_log<ERR>("[bench_framework] matrix.for.{} must be a non-negative integer", field.key);
             parse_ok = false;
             continue;
         }
@@ -3329,13 +3329,13 @@ parse_compare_and_tolerance(
 
     simdjson::dom::object over_obj;
     if (matrix_obj["over"].get(over_obj) != simdjson::SUCCESS) {
-        loge("[bench_framework] benchmark '{}' missing 'matrix.over'", benchmark.benchmark_key);
+        bioseq_log<ERR>("[bench_framework] benchmark '{}' missing 'matrix.over'", benchmark.benchmark_key);
         return false;
     }
     for (auto algo_field : over_obj) {
         simdjson::dom::object params_for_algo;
         if (algo_field.value.get(params_for_algo) != simdjson::SUCCESS) {
-            loge("[bench_framework] matrix.over.{} is not an object", algo_field.key);
+            bioseq_log<ERR>("[bench_framework] matrix.over.{} is not an object", algo_field.key);
             parse_ok = false;
             continue;
         }
@@ -3343,7 +3343,7 @@ parse_compare_and_tolerance(
         for (auto param_field : params_for_algo) {
             simdjson::dom::array values_array;
             if (param_field.value.get(values_array) != simdjson::SUCCESS) {
-                loge("[bench_framework] matrix.over.{}.{} is not an array",
+                bioseq_log<ERR>("[bench_framework] matrix.over.{}.{} is not an array",
                              algo_field.key, param_field.key);
                 parse_ok = false;
                 continue;
@@ -4082,7 +4082,7 @@ struct ConfigParseOutcome {
     // Cross-product over declared parameters in iteration order.
     for (const auto& [param_name, value_list] : declared) {
         if (value_list.empty()) {
-            loge("[bench_framework] matrix.over.{}.{} has no values", algorithm_name, param_name);
+            bioseq_log<ERR>("[bench_framework] matrix.over.{}.{} has no values", algorithm_name, param_name);
             expansion_ok = false;
             continue;
         }
@@ -4103,7 +4103,7 @@ struct ConfigParseOutcome {
         const bool was_declared = (declared.find(param_schema.param_name) != declared.end());
         if (was_declared) continue;
         if (!param_schema.default_value.has_value()) {
-            loge("[bench_framework] {}.{} not declared in matrix.over and has no default",
+            bioseq_log<ERR>("[bench_framework] {}.{} not declared in matrix.over and has no default",
                          algorithm_name, param_schema.param_name);
             expansion_ok = false;
             continue;
@@ -4212,7 +4212,7 @@ split_iterations(std::size_t iterations, std::size_t groups) {
         const auto found_it = test_case_by_name.find(
             std::string_view{test_case_name});
         if (found_it == test_case_by_name.end()) {
-            loge("[bench_framework] test_case '{}' referenced by matrix.for but not declared",
+            bioseq_log<ERR>("[bench_framework] test_case '{}' referenced by matrix.for but not declared",
                          test_case_name);
             continue;
         }
@@ -7414,7 +7414,7 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
 
     std::string_view payload;
     if (builder.view().get(payload) != simdjson::SUCCESS) {
-        loge("[bench_framework] simdjson string_builder reported allocation failure");
+        bioseq_log<ERR>("[bench_framework] simdjson string_builder reported allocation failure");
         return {};
     }
 
@@ -7423,7 +7423,7 @@ inline void emit_kv_string_or_null(simdjson::builder::string_builder& builder,
     }
     std::ofstream output_file(output_path, std::ios::trunc | std::ios::binary);
     if (!output_file) {
-        loge("[bench_framework] failed to open '{}' for writing", output_path.string());
+        bioseq_log<ERR>("[bench_framework] failed to open '{}' for writing", output_path.string());
         return {};
     }
     output_file.write(payload.data(), static_cast<std::streamsize>(payload.size()));
@@ -7478,7 +7478,7 @@ inline void append_config_value_text(std::string& out, const ConfigValue& value)
 }
 
 /// Pretty-print every violation to stderr at end-of-run. Uses raw stdio
-/// (`std::fprintf`) instead of JustLog because the violation summary is
+/// (`std::fprintf`) instead of bioseq_log<DBG> because the violation summary is
 /// final-pass operator output, not part of the asynchronous log queue —
 /// we want it visible even if the fmtlog background thread has already
 /// drained and exited.
@@ -8433,7 +8433,7 @@ using SummaryGroupKey = std::pair<std::string, std::string>;
 /// issue rows. Trailing legend doubles as the colour key.
 ///
 /// We write the rendered ftxui screen via `std::fputs(stderr)` rather
-/// than `JustLog` — this matches `print_violations` /
+/// than `bioseq_log<DBG>` — this matches `print_violations` /
 /// `print_regressions` / `print_sanity_warnings` (the V5–V7 stderr
 /// printers) which already bypass fmtlog so end-of-run operator output
 /// stays visible after the asynchronous log queue drains.
@@ -8667,7 +8667,7 @@ inline void render_summary(
     const std::filesystem::path report_dir_path{report_dir};
     const auto max_index = max_existing_report_index(report_dir_path).value_or(0);
     if (max_index == 0) {
-        logi("[bench_framework] summary: no reports under '{}'", report_dir);
+        bioseq_log<INF>("[bench_framework] summary: no reports under '{}'", report_dir);
         return 0;
     }
 
@@ -8694,7 +8694,7 @@ inline void render_summary(
     }
 
     if (reports_present_count == 0) {
-        logi("[bench_framework] summary: every report under '{}' failed to parse",
+        bioseq_log<INF>("[bench_framework] summary: every report under '{}' failed to parse",
              report_dir);
         return 0;
     }
@@ -8750,7 +8750,7 @@ inline void render_summary(
             const auto* const end   = text.data() + text.size();
             const auto result = std::from_chars(begin, end, threads);
             if (result.ec != std::errc{} || result.ptr != end || threads <= 0) {
-                loge("[bench_framework] --threads requires a positive integer (got '{}')",
+                bioseq_log<ERR>("[bench_framework] --threads requires a positive integer (got '{}')",
                      text);
             } else {
                 parsed.threads_override = static_cast<unsigned>(threads);
@@ -8771,10 +8771,10 @@ inline void render_summary(
             const auto* const end   = text.data() + text.size();
             const auto result = std::from_chars(begin, end, pct);
             if (result.ec != std::errc{} || result.ptr != end) {
-                loge("[bench_framework] --memory-buffer requires an integer (got '{}')",
+                bioseq_log<ERR>("[bench_framework] --memory-buffer requires an integer (got '{}')",
                      text);
             } else if (pct < 0 || pct > 50) {
-                loge("[bench_framework] --memory-buffer must be in [0, 50] "
+                bioseq_log<ERR>("[bench_framework] --memory-buffer must be in [0, 50] "
                      "(got {}); falling back to default 10", pct);
             } else {
                 parsed.memory_buffer_pct = static_cast<double>(pct);
@@ -8853,7 +8853,7 @@ gauge_palette(float fraction) noexcept {
 /// 1. **TTY**: render an ftxui document to stderr every 200 ms with
 ///    one row per test_case (active groups underneath), a colour-
 ///    shifting gauge per row, and a `[memory X / Y GiB]` header.
-/// 2. **Non-TTY (CI / pipes)**: emit a JustLog info line every 5 s
+/// 2. **Non-TTY (CI / pipes)**: emit a bioseq_log<DBG> info line every 5 s
 ///    with one line per test_case still in flight.
 // ----------------- V12 row classification + glyph table -----------------
 
@@ -9100,7 +9100,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
                     const auto total = tc->tuple_total.load(std::memory_order_relaxed);
                     if (tc->finish_ns.load(std::memory_order_relaxed) != 0) continue;
                     if (tc->start_ns.load(std::memory_order_relaxed) == 0) continue;
-                    logi("[bench_framework] [{}/{}] tuples {}/{}",
+                    bioseq_log<INF>("[bench_framework] [{}/{}] tuples {}/{}",
                          per->benchmark_key, tc->test_case_name,
                          done, total);
                 }
@@ -9302,15 +9302,15 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
     if (cli.ui_mode) {
         if (cli.fast_filter) {
-            logw("[bench_framework] --ui ignores --fast (no benchmarks run)");
+            bioseq_log<WRN>("[bench_framework] --ui ignores --fast (no benchmarks run)");
         }
         if (cli.threads_override.has_value()) {
-            logw("[bench_framework] --ui ignores --threads (no benchmarks run)");
+            bioseq_log<WRN>("[bench_framework] --ui ignores --threads (no benchmarks run)");
         }
         return ui_mode_main(report_dir, cli);
     }
 
-    logi("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
+    bioseq_log<INF>("[bench_framework] starting: report_dir={} data_dir={} benchmarks={}",
                  report_dir, data_dir, benchmarks.size());
 
     const auto thread_count = cli.threads_override.has_value()
@@ -9318,13 +9318,13 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         : std::max<unsigned>(1u, std::thread::hardware_concurrency() == 0
                                   ? 1u
                                   : std::thread::hardware_concurrency() - 1u);
-    logi("[bench_framework] thread_count={}", thread_count);
+    bioseq_log<INF>("[bench_framework] thread_count={}", thread_count);
 
     // Capture the run's identity once, up front. Used both by the
     // report writer (the `meta` block) and surfaced in stderr logs so
     // the operator can correlate a run with a commit.
     const auto run_meta = capture_run_meta(cli.fast_filter);
-    logi("[bench_framework] commit={} dirty={} created={} fast={}",
+    bioseq_log<INF>("[bench_framework] commit={} dirty={} created={} fast={}",
          run_meta.commit.empty() ? std::string_view{"<no-git>"}
                                  : std::string_view{run_meta.commit},
          run_meta.dirty, run_meta.created, run_meta.fast);
@@ -9340,7 +9340,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     for (const auto& erased : selected) {
         const auto inserted = seen_keys.insert(erased.benchmark_key);
         if (!inserted.second) {
-            loge("[bench_framework] duplicate benchmark_key '{}' across create_benchmark calls",
+            bioseq_log<ERR>("[bench_framework] duplicate benchmark_key '{}' across create_benchmark calls",
                          erased.benchmark_key);
             return 1;
         }
@@ -9367,7 +9367,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
         const auto sys = snapshot_system_memory();
         const auto cap = MemoryBudget::cap_for(sys.total_bytes,
                                                 cli.memory_buffer_pct);
-        logi("[bench_framework] memory budget: sysinfo total={:.2f} GiB available={:.2f} GiB "
+        bioseq_log<INF>("[bench_framework] memory budget: sysinfo total={:.2f} GiB available={:.2f} GiB "
              "process={:.2f} GiB buffer={:.0f}% cap={:.2f} GiB",
              bytes_to_gib(sys.total_bytes),
              bytes_to_gib(sys.free_bytes),
@@ -9375,7 +9375,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
              cli.memory_buffer_pct,
              bytes_to_gib(cap));
         if (sys.total_bytes == std::numeric_limits<std::uint64_t>::max()) {
-            logw("[bench_framework] sysinfo/hwinfo returned 0 for total RAM — budget "
+            bioseq_log<WRN>("[bench_framework] sysinfo/hwinfo returned 0 for total RAM — budget "
                  "checks are effectively disabled (treated as infinite memory)");
         }
     }
@@ -9455,7 +9455,7 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     const std::filesystem::path report_dir_path{report_dir};
     const std::size_t current_index =
         max_existing_report_index(report_dir_path).value_or(0) + 1;
-    logi("[bench_framework] writing run as report_{}.json", current_index);
+    bioseq_log<INF>("[bench_framework] writing run as report_{}.json", current_index);
 
     // Single shared parser-cache for every consumer that wants to walk
     // historical reports (regressions + sanity warnings). Each
@@ -9481,12 +9481,12 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
     auto sanity_warnings = evaluate_sanity_warnings(
         reports, run_meta, current_index, history_cache);
 
-    logi("[bench_framework] all benchmarks finished, writing report...");
+    bioseq_log<INF>("[bench_framework] all benchmarks finished, writing report...");
     const auto output_path = report_path_for_index(report_dir_path, current_index);
     const auto report_path = write_report(output_path, run_meta, reports,
                                            violations, regressions, sanity_warnings);
     if (!report_path.empty()) {
-        logi("[bench_framework] wrote {}", report_path);
+        bioseq_log<INF>("[bench_framework] wrote {}", report_path);
     }
 
     // Sanity-check our own report against the output schema. Failures here
@@ -9578,7 +9578,7 @@ template<typename Input, typename Output>
         const bool parse_failed = !parse_outcome.ok;
         detail::drain_diagnostics_to_context(context, parse_outcome.diagnostics);
         if (parse_failed) {
-            loge("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
+            bioseq_log<ERR>("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
                  erased_benchmark_key);
             return;
         }
@@ -9607,7 +9607,7 @@ template<typename Input, typename Output>
             });
         detail::drain_diagnostics_to_context(context, semantic_diagnostics);
         if (semantic_failed) {
-            loge("[bench_framework] benchmark '{}' aborted (semantic validation failure)",
+            bioseq_log<ERR>("[bench_framework] benchmark '{}' aborted (semantic validation failure)",
                  erased_benchmark_key);
             return;
         }
@@ -9615,7 +9615,7 @@ template<typename Input, typename Output>
         // 3. --fast filter: skip if the user requested fast mode but this
         //    benchmark is not flagged fast. Without --fast we run everything.
         if (context.fast_filter && !state.config.fast) {
-            logi("[bench_framework] skipping '{}' under --fast (fast=false)",
+            bioseq_log<INF>("[bench_framework] skipping '{}' under --fast (fast=false)",
                  erased_benchmark_key);
             return;
         }
@@ -9623,7 +9623,7 @@ template<typename Input, typename Output>
         bool expansion_ok = true;
         state.execution_tuples = detail::expand_matrix(state.config, expansion_ok);
         if (!expansion_ok || state.execution_tuples.empty()) {
-            loge("[bench_framework] benchmark '{}' produced no execution tuples",
+            bioseq_log<ERR>("[bench_framework] benchmark '{}' produced no execution tuples",
                  erased_benchmark_key);
             return;
         }

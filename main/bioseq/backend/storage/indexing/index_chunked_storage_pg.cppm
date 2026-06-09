@@ -33,7 +33,7 @@ module;
 #include <vector>
 export module bioseq_storage_indexing_pg;
 import mlogging;
-import pg_utils;                       // try_safe_relation_open, find_primary_key_oid, pg_log
+import pg_utils;                       // try_safe_relation_open, find_primary_key_oid
 import bioseq_storage;                 // seq_caches, seq_locator, format helpers
 import bioseq_bucket_math;             // seq_locator
 import bioseq_storage_size;            // sequence_size_t
@@ -141,14 +141,14 @@ inline constexpr AttrNumber kAttBlob       = 5;
     std::string out = fmt::format("seqidx_{}_{:016x}_{}_{}", short_index_for(name),
                                   identity_hash64(db, spc, relfn, attno, name),
                                   (unsigned)bucket, (unsigned)shard);
-    if (out.size() >= NAMEDATALEN) pg_log(ERROR, "bioseq index: derived name too long ({}): {}", out.size(), out);
+    if (out.size() >= NAMEDATALEN) bioseq_log<ERR, PG>( "bioseq index: derived name too long ({}): {}", out.size(), out);
     return out;
 }
 [[nodiscard]] inline std::string format_seqidxtab_name(std::string_view name, Oid db, Oid spc, Oid relfn,
         std::int16_t attno, std::int32_t shard) {
     std::string out = fmt::format("seqidxtab_{}_{:016x}_{}", short_index_for(name),
                                   identity_hash64(db, spc, relfn, attno, name), shard);
-    if (out.size() >= NAMEDATALEN) pg_log(ERROR, "bioseq index: derived name too long ({}): {}", out.size(), out);
+    if (out.size() >= NAMEDATALEN) bioseq_log<ERR, PG>( "bioseq index: derived name too long ({}): {}", out.size(), out);
     return out;
 }
 
@@ -163,10 +163,10 @@ inline void run_internal_ddl(const char* ddl) {
     MemoryContextSwitchTo(saved_ctx);
     PG_TRY();
     {
-        if (SPI_connect() != SPI_OK_CONNECT) pg_log(ERROR, "bioseq index: SPI_connect failed");
+        if (SPI_connect() != SPI_OK_CONNECT) bioseq_log<ERR, PG>( "bioseq index: SPI_connect failed");
         const int rc = SPI_execute(ddl, /*read_only=*/false, /*tcount=*/0);
         if (rc != SPI_OK_UTILITY && rc != SPI_OK_SELECT)
-            pg_log(ERROR, "bioseq index: DDL failed (SPI rc={})", rc);
+            bioseq_log<ERR, PG>( "bioseq index: DDL failed (SPI rc={})", rc);
         SPI_finish();
         ReleaseCurrentSubTransaction();
         MemoryContextSwitchTo(saved_ctx);
@@ -272,7 +272,7 @@ struct IndexStorageFragmentPg {
         }
     }
 
-    [[noreturn]] void index_error(std::string_view msg) const { pg_log(ERROR, "bioseq index: {}", msg); abort(); }
+    [[noreturn]] void index_error(std::string_view msg) const { bioseq_log<ERR, PG>( "bioseq index: {}", msg); abort(); }
 
     // ---- validators (translate to ereport on the pg side) ----
     [[nodiscard]] MinimizerHashmapFragmentIndex::SerializedHeader validate_minimizer_blob_or_error(
@@ -330,7 +330,7 @@ struct IndexStorageFragmentPg {
         if (!OidIsValid(rid)) return nullptr;
         Relation rel = try_safe_relation_open(rid, lock);
         if (rel != nullptr && rel->rd_rel->relam != HEAP_TABLE_AM_OID)
-            pg_log(ERROR, "bioseq index: %s is not a heap-AM table", this_table_name().c_str());
+            bioseq_log<ERR, PG>( "bioseq index: {} is not a heap-AM table", this_table_name());
         return rel;
     }
 
@@ -399,7 +399,7 @@ struct IndexStorageFragmentPg {
             return;
         }
         Relation rel = open_index_relation_(false, AccessShareLock);
-        if (rel == nullptr) pg_log(ERROR, "bioseq index: chunk (%lld,%lld,%zu) relation missing",
+        if (rel == nullptr) bioseq_log<ERR, PG>( "bioseq index: chunk ({},{},{}) relation missing",
                                    (long long)query_key_, (long long)sub_key, chunk_no);
         const Oid pk = find_primary_key_oid(rel);
         ScanKeyData k[3];
@@ -409,9 +409,9 @@ struct IndexStorageFragmentPg {
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 3, k);
         HeapTuple t = systable_getnext(s);
         if (!HeapTupleIsValid(t)) { systable_endscan(s); relation_close(rel, AccessShareLock);
-            pg_log(ERROR, "bioseq index chunk (%lld,%lld,%zu) missing", (long long)query_key_, (long long)sub_key, chunk_no); }
+            bioseq_log<ERR, PG>( "bioseq index chunk ({},{},{}) missing", (long long)query_key_, (long long)sub_key, chunk_no); }
         bool isnull=false; Datum d = heap_getattr(t, kAttBlob, RelationGetDescr(rel), &isnull);
-        if (isnull) pg_log(ERROR, "bioseq index chunk blob NULL");
+        if (isnull) bioseq_log<ERR, PG>( "bioseq index chunk blob NULL");
         bytea* raw = reinterpret_cast<bytea*>(PG_DETOAST_DATUM_PACKED(d));
         const std::size_t payload = VARSIZE_ANY_EXHDR(raw);
         const std::size_t units   = (payload + sizeof(std::int64_t) - 1) / sizeof(std::int64_t);
@@ -490,7 +490,7 @@ struct IndexStorageFragmentPg {
     }
     void resize_chunks(index_sub_key_t sub_key, std::span<const std::size_t> per_chunk_bytes) {
         std::vector<std::size_t> plan(per_chunk_bytes.begin(), per_chunk_bytes.end());
-        for (std::size_t b : plan) if (b > MAX_INDEX_CHUNK_SIZE_BYTES) pg_log(ERROR, "bioseq index: chunk payload exceeds MAX");
+        for (std::size_t b : plan) if (b > MAX_INDEX_CHUNK_SIZE_BYTES) bioseq_log<ERR, PG>( "bioseq index: chunk payload exceeds MAX");
         chunk_payload_bytes_[sub_key] = std::move(plan);
     }
     void prefetch_chunk(index_sub_key_t sub_key, std::size_t chunk_no) {
@@ -537,19 +537,19 @@ struct IndexStorageFragmentPg {
         Relation rel = open_index_relation_(true, RowExclusiveLock);
         auto it = chunk_payload_bytes_.find(sub_key);
         if (it == chunk_payload_bytes_.end())
-            pg_log(ERROR, "bioseq index: write_to_each(sub_key=%lld) without a preceding resize", (long long)sub_key);
+            bioseq_log<ERR, PG>( "bioseq index: write_to_each(sub_key={}) without a preceding resize", (long long)sub_key);
         const std::vector<std::size_t>& plan = it->second;
         const std::size_t n = plan.size();
         std::size_t max_payload = 0; for (std::size_t c=0;c<n;++c) max_payload = std::max(max_payload, plan[c]);
         std::int64_t* buf = scratch_buffer_((max_payload + sizeof(std::int64_t) - 1) / sizeof(std::int64_t) + 1);
         for (std::size_t chunk_no = 0; chunk_no < n; /* writer may skip */) {
             const std::size_t payload_bytes = plan[chunk_no];
-            if (scratch_buffer_bytes_() < payload_bytes) pg_log(ERROR, "bioseq index: scratch undersized");
-            if (payload_bytes % sizeof(T) != 0) pg_log(ERROR, "bioseq index: chunk payload not a whole number of T");
+            if (scratch_buffer_bytes_() < payload_bytes) bioseq_log<ERR, PG>( "bioseq index: scratch undersized");
+            if (payload_bytes % sizeof(T) != 0) bioseq_log<ERR, PG>( "bioseq index: chunk payload not a whole number of T");
             const std::size_t cap_units = payload_bytes / sizeof(T);
             if (payload_bytes > 0) std::memset(buf, 0, payload_bytes);
             const std::size_t next = writer(chunk_no, reinterpret_cast<T*>(buf), cap_units);
-            if (next < chunk_no) pg_log(ERROR, "bioseq index: writer moved backwards");
+            if (next < chunk_no) bioseq_log<ERR, PG>( "bioseq index: writer moved backwards");
             upsert_chunk_row_(rel, query_key_, sub_key, chunk_no, payload_bytes,
                               std::span<const char>(reinterpret_cast<const char*>(buf), payload_bytes));
             admit_cached_chunk_(sub_key, chunk_no,
@@ -710,7 +710,7 @@ struct IndexStorageSequencePg {
     }
     void release_() noexcept { if (own_mctx_!=nullptr){ MemoryContextDelete(own_mctx_); own_mctx_=nullptr; decoded_=nullptr; } }
 
-    [[noreturn]] void index_error(std::string_view msg) const { pg_log(ERROR, "bioseq index: {}", msg); abort(); }
+    [[noreturn]] void index_error(std::string_view msg) const { bioseq_log<ERR, PG>( "bioseq index: {}", msg); abort(); }
 
     [[nodiscard]] std::string this_table_name() const {
         return format_seqidx_name(index_name_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, bucket_idx_, shard_idx_);
@@ -768,16 +768,16 @@ struct IndexStorageSequencePg {
     [[nodiscard]] std::size_t number_of_chunks() const { return chunk_byte_size() == 0 ? 0 : 1; }
     [[nodiscard]] std::size_t chunk_byte_size() const { if (!decoded_valid_) load_(); return decoded_bytes_; }
     template <class T> [[nodiscard]] const T* read_chunk() { if (!decoded_valid_) load_(); return reinterpret_cast<const T*>(decoded_); }
-    void resize(std::size_t bytes) { if (bytes > MAX_INDEX_CHUNK_SIZE_BYTES) pg_log(ERROR, "bioseq index inline: bytes exceed single-chunk MAX"); planned_bytes_ = bytes; }
+    void resize(std::size_t bytes) { if (bytes > MAX_INDEX_CHUNK_SIZE_BYTES) bioseq_log<ERR, PG>( "bioseq index inline: bytes exceed single-chunk MAX"); planned_bytes_ = bytes; }
     void prefetch_chunk() {}
     template <class T, class F> void write_to_each(F&& writer) {
         static_assert(bioseq::indexing::index_chunk_writer_fn<F, T>, "inline write_to_each writer shape");
-        if (planned_bytes_ == std::numeric_limits<std::size_t>::max()) pg_log(ERROR, "bioseq index inline: write_to_each without resize");
+        if (planned_bytes_ == std::numeric_limits<std::size_t>::max()) bioseq_log<ERR, PG>( "bioseq index inline: write_to_each without resize");
         const std::size_t payload = planned_bytes_;
-        if (payload % sizeof(T) != 0) pg_log(ERROR, "bioseq index inline: payload not whole T");
+        if (payload % sizeof(T) != 0) bioseq_log<ERR, PG>( "bioseq index inline: payload not whole T");
         std::vector<char> buf(payload, 0);
         const std::size_t next = writer(0, reinterpret_cast<T*>(buf.data()), payload / sizeof(T));
-        if (next != 0) pg_log(ERROR, "bioseq index inline: writer emitted >1 chunk");
+        if (next != 0) bioseq_log<ERR, PG>( "bioseq index inline: writer emitted >1 chunk");
         Relation rel = open_(true, RowExclusiveLock);
         // upsert (delete then insert) so rebuild replaces the single row.
         { const Oid pk = find_primary_key_oid(rel);
@@ -837,7 +837,7 @@ struct IndexStorageTablePg {
         o.own_mctx_=nullptr; o.decoded_=nullptr; o.index_relid_=InvalidOid; o.decoded_units_=0;
     }
     void release_() noexcept { if (own_mctx_!=nullptr){ MemoryContextDelete(own_mctx_); own_mctx_=nullptr; decoded_=nullptr; } }
-    [[noreturn]] void index_error(std::string_view msg) const { pg_log(ERROR, "bioseq index: {}", msg); abort(); }
+    [[noreturn]] void index_error(std::string_view msg) const { bioseq_log<ERR, PG>( "bioseq index: {}", msg); abort(); }
 
     [[nodiscard]] std::string this_table_name(std::int32_t shard=0) const {
         return format_seqidxtab_name(index_name_, db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, shard);
@@ -906,7 +906,7 @@ struct IndexStorageTablePg {
     template <class T, class F> void write_to(std::size_t chunk_no, F&& writer) {
         static_assert(bioseq::indexing::index_chunk_writer_fn<F, T>, "table write_to writer shape");
         const std::size_t payload = planned_bytes_for_chunk_;
-        if (payload % sizeof(T) != 0) pg_log(ERROR, "bioseq index table: payload not whole T");
+        if (payload % sizeof(T) != 0) bioseq_log<ERR, PG>( "bioseq index table: payload not whole T");
         std::vector<char> buf(payload, 0);
         writer(chunk_no, reinterpret_cast<T*>(buf.data()), payload / sizeof(T));
         Relation rel = open_(true, RowExclusiveLock);
@@ -1020,7 +1020,7 @@ inline void IndexStorageFragmentPg::snapshot_sorted_run_stats_before_release() {
         .position_spill_bytes = st.position_spill_bytes,
         .position_spill_count = st.position_spill_count,
     };
-    JustLog("[bioseq.index.mps_build.row] backend_pid={} db_oid={} relfilenode={} sequence_rowno={} "
+    bioseq_log<DBG>("[bioseq.index.mps_build.row] backend_pid={} db_oid={} relfilenode={} sequence_rowno={} "
             "resident_runs={} file_runs={} resident_run_bytes={} resident_peak_bytes={} "
             "spilled_run_bytes={} postgres_temp_file_bytes={} postgres_temp_file_count={} "
             "merge_reader_buffer_bytes={} merge_pass_count={} spill_count_from_pressure={} "

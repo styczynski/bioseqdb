@@ -611,7 +611,7 @@ inline void backtrack_chains(
         // (lchain.c:43,55 deliberately leaves t[i]=1)
     }
 
-    JustLog("[chaining] Backtracking: {} chains from {} anchors",
+    bioseq_log<DBG>("[chaining] Backtracking: {} chains from {} anchors",
             chains_out.size(), anchor_count);
 }
 

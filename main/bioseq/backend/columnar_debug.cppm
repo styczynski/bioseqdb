@@ -16,6 +16,7 @@ module;
 
 
 export module storage_debug;
+import mlogging;
 import storage_physical;
 import storage_metadata;
 import bioseq_table;
@@ -112,18 +113,18 @@ POSTGRES_FN(bioseq_storage_info)
 	/* Build a tuple descriptor for our result type */
 	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
 	{
-		pg_log(ERROR, "return type must be a row type");
+		bioseq_log<ERR, PG>( "return type must be a row type");
 	}
 
 	if (tupdesc->natts != STORAGE_INFO_NATTS)
 	{
-		pg_log(ERROR, "return type must have {} columns", STORAGE_INFO_NATTS);
+		bioseq_log<ERR, PG>( "return type must have {} columns", STORAGE_INFO_NATTS);
 	}
 
 	Relation rel = table_open(relid, AccessShareLock);
 	if (!IsColumnarTableAmTable(relid))
 	{
-		pg_log(ERROR, "table \"{}\" is not a columnar table",
+		bioseq_log<ERR, PG>( "table \"{}\" is not a columnar table",
 			   RelationGetRelationName(rel));
 	}
 
@@ -151,4 +152,3 @@ POSTGRES_FN(bioseq_storage_info)
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
-

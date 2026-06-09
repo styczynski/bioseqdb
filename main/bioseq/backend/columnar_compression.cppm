@@ -26,6 +26,7 @@ module;
 
 export module storage_compression;
 
+import mlogging;
 import pg_utils;
 
 /*
@@ -91,13 +92,13 @@ CompressBuffer(StringInfo inputBuffer,
 													  inputBuffer->len, maximumLength);
 			if (compressedSize <= 0)
 			{
-				pg_log(DEBUG1,
+				bioseq_log_pg(DEBUG1,
 					 "failure in LZ4_compress_default, input size={}, output size={}",
 					 inputBuffer->len, maximumLength);
 				return false;
 			}
 
-			pg_log(DEBUG1, "compressed {} bytes to {} bytes", inputBuffer->len,
+			bioseq_log_pg(DEBUG1, "compressed {} bytes to {} bytes", inputBuffer->len,
 				 compressedSize);
 
 			outputBuffer->len = compressedSize;
@@ -121,7 +122,7 @@ CompressBuffer(StringInfo inputBuffer,
 
 			if (ZSTD_isError(compressedSize))
 			{
-				PgReport(WARNING).msg("zstd compression failed").detail("{}", ZSTD_getErrorName(compressedSize));
+				bioseq_report<WRN, PG>().msg("zstd compression failed").detail("{}", ZSTD_getErrorName(compressedSize));
 				return false;
 			}
 
@@ -196,7 +197,7 @@ DecompressBuffer(StringInfo buffer,
 
 			if (lz4DecompressSize != decompressedSize)
 			{
-				PgReport(ERROR).msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", decompressedSize, lz4DecompressSize);
+				bioseq_report<ERR, PG>().msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", decompressedSize, lz4DecompressSize);
 			}
 
 			decompressedBuffer->len = decompressedSize;
@@ -217,12 +218,12 @@ DecompressBuffer(StringInfo buffer,
 														buffer->len);
 			if (ZSTD_isError(zstdDecompressSize))
 			{
-				PgReport(ERROR).msg("zstd decompression failed").detail("{}", ZSTD_getErrorName(zstdDecompressSize));
+				bioseq_report<ERR, PG>().msg("zstd decompression failed").detail("{}", ZSTD_getErrorName(zstdDecompressSize));
 			}
 
 			if (zstdDecompressSize != decompressedSize)
 			{
-				PgReport(ERROR).msg("unexpected decompressed size").detail("Expected {}, received {}", decompressedSize, zstdDecompressSize);
+				bioseq_report<ERR, PG>().msg("unexpected decompressed size").detail("Expected {}, received {}", decompressedSize, zstdDecompressSize);
 			}
 
 			decompressedBuffer->len = decompressedSize;
@@ -238,7 +239,7 @@ DecompressBuffer(StringInfo buffer,
 
 			if (compressedDataSize + columnar_compress_hdrsz() != buffer->len)
 			{
-				PgReport(ERROR).msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", compressedDataSize, buffer->len);
+				bioseq_report<ERR, PG>().msg("cannot decompress the buffer").detail("Expected {} bytes, but received {} bytes", compressedDataSize, buffer->len);
 			}
 
 			char *decompressedData = make1<char>(decompressedDataSize);
@@ -250,7 +251,7 @@ DecompressBuffer(StringInfo buffer,
 
 			if (decompressedByteCount < 0)
 			{
-				PgReport(ERROR).msg("cannot decompress the buffer").detail("compressed data is corrupted");
+				bioseq_report<ERR, PG>().msg("cannot decompress the buffer").detail("compressed data is corrupted");
 			}
 
 			StringInfo decompressedBuffer = make0<StringInfoData>();
@@ -263,7 +264,7 @@ DecompressBuffer(StringInfo buffer,
 
 		default:
 		{
-			pg_log(ERROR, "unexpected compression type: {}", compressionType);
+			bioseq_log<ERR, PG>( "unexpected compression type: {}", compressionType);
 		}
 	}
 }

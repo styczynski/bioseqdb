@@ -221,7 +221,7 @@ static_assert(bioseq::io::idparse::is_identifier_dest_writer<bench_identifier_wr
                                                   std::string_view header_shape = "plain") {
     std::ofstream out(output_path, std::ios::binary);
     if (!out) {
-        loge("[io_bench_v10] failed to open '{}' for writing", output_path);
+        bioseq_log<ERR>("[io_bench_v10] failed to open '{}' for writing", output_path);
         return 0;
     }
     std::mt19937_64 rng(seed);
@@ -321,20 +321,20 @@ struct CorpusDescriptor {
     if (kind == "real") {
         const std::string relative = read_string_field(data, "real_data_path", "");
         if (relative.empty()) {
-            loge("[io_bench_v10] test case '{}' missing real_data_path",
+            bioseq_log<ERR>("[io_bench_v10] test case '{}' missing real_data_path",
                   test_case_name);
             return descriptor;
         }
         fs::path joined = fs::path{std::string{data_dir}} / relative;
         std::error_code ec;
         if (!fs::exists(joined, ec)) {
-            loge("[io_bench_v10] real-data file missing for '{}': {}",
+            bioseq_log<ERR>("[io_bench_v10] real-data file missing for '{}': {}",
                   test_case_name, joined.string());
             return descriptor;
         }
         const auto observed_size = fs::file_size(joined, ec);
         if (ec) {
-            loge("[io_bench_v10] cannot stat '{}': {}",
+            bioseq_log<ERR>("[io_bench_v10] cannot stat '{}': {}",
                   joined.string(), ec.message());
             return descriptor;
         }
@@ -345,7 +345,7 @@ struct CorpusDescriptor {
         return descriptor;
     }
     if (kind != "synthetic") {
-        loge("[io_bench_v10] test case '{}' has unknown kind '{}'",
+        bioseq_log<ERR>("[io_bench_v10] test case '{}' has unknown kind '{}'",
               test_case_name, kind);
         return descriptor;
     }
@@ -366,7 +366,7 @@ struct CorpusDescriptor {
         descriptor.path, descriptor.is_fastq,
         record_count, mean_record_length_bp, seed, header_shape);
     if (bytes == 0) {
-        loge("[io_bench_v10] synthetic corpus generation failed for '{}'",
+        bioseq_log<ERR>("[io_bench_v10] synthetic corpus generation failed for '{}'",
               test_case_name);
         descriptor.path.clear();
         return descriptor;
@@ -492,12 +492,12 @@ template <bool IsFasta>
         body_bytes_atomic.fetch_add(local_body_bytes, std::memory_order_relaxed);
     };
     auto failure_fn = [&path](std::string&& msg) {
-        loge("[io_bench_v10] read failed on '{}': {}", path, msg);
+        bioseq_log<ERR>("[io_bench_v10] read failed on '{}': {}", path, msg);
     };
     auto outcome = read_sequences_file<seq::dna4, file_type>(
         path, handler_fn, failure_fn, options);
     if (!outcome.has_value()) {
-        loge("[io_bench_v10] read_sequences_file error: {}", outcome.error());
+        bioseq_log<ERR>("[io_bench_v10] read_sequences_file error: {}", outcome.error());
     }
     IoOutput out;
     out.observed_record_count = record_count_atomic.load(std::memory_order_relaxed);
@@ -520,7 +520,7 @@ template <bool IsFasta>
     IoOutput out;
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        loge("[io_bench_v10] naive ifstream open failed: '{}'", path);
+        bioseq_log<ERR>("[io_bench_v10] naive ifstream open failed: '{}'", path);
         return out;
     }
     std::string line;
@@ -546,7 +546,7 @@ template <bool IsFasta>
     IoOutput out;
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        loge("[io_bench_v10] naive ifstream open failed: '{}'", path);
+        bioseq_log<ERR>("[io_bench_v10] naive ifstream open failed: '{}'", path);
         return out;
     }
     std::string line;
@@ -640,7 +640,7 @@ template <bool IsFasta>
     if (algo == "naive_ifstream_fastq") {
         return run_naive_ifstream_fastq(input.corpus_path);
     }
-    loge("[io_bench_v10] unknown reader algorithm '{}'", algo);
+    bioseq_log<ERR>("[io_bench_v10] unknown reader algorithm '{}'", algo);
     return {};
 }
 
@@ -667,7 +667,7 @@ template <bool IsFasta>
     input.decompressed_bytes = input.is_compressed
         ? static_cast<std::size_t>(input.bytes_on_disk * 3.2)
         : input.bytes_on_disk;
-    JustLog("[io_bench_v10] reader corpus ready: '{}' (path={}, bytes={})",
+    bioseq_log<DBG>("[io_bench_v10] reader corpus ready: '{}' (path={}, bytes={})",
             test_case_name, input.corpus_path, input.bytes_on_disk);
     return input;
 }
@@ -738,7 +738,7 @@ void cleanup_reader(std::string_view /*data_dir*/,
         header_format::UNIPROTKB, header_format::UNIPROTKB, columns,
         std::span<const user_column_mapping>{});
     if (!map) {
-        loge("[io_bench_v10] identifier mapping failed: {}", map.error());
+        bioseq_log<ERR>("[io_bench_v10] identifier mapping failed: {}", map.error());
         input.reader.corpus_path.clear();
         return input;
     }
@@ -778,7 +778,7 @@ void cleanup_reader(std::string_view /*data_dir*/,
                     header_format::UNIPROTKB, header,
                     input.mapping.routing, parse_state, writer_ref);
                 if (!parsed)
-                    loge("[io_bench_v10] identifier parse failed: {}", parsed.error());
+                    bioseq_log<ERR>("[io_bench_v10] identifier parse failed: {}", parsed.error());
                 parsed_writer.end_tuple();
             } else {  // bioseq_dumb_header_fasta
                 dumb_header_copy.assign(header.data(), header.size());
@@ -786,7 +786,7 @@ void cleanup_reader(std::string_view /*data_dir*/,
         }
     };
     auto failure_fn = [](std::string&& msg) {
-        loge("[io_bench_v10] identifier benchmark read failed: {}", msg);
+        bioseq_log<ERR>("[io_bench_v10] identifier benchmark read failed: {}", msg);
     };
     reader_options opts{};
     opts.io.gzip_auto_detect = false;
@@ -914,7 +914,7 @@ template <bool IsFasta>
         out_batches.push_back(std::move(batch));
     };
     auto failure_fn = [&path](std::string&& msg) {
-        loge("[io_bench_v10] slurp failed on '{}': {}", path, msg);
+        bioseq_log<ERR>("[io_bench_v10] slurp failed on '{}': {}", path, msg);
     };
     reader_options options{};
     options.io.gzip_auto_detect = false;
@@ -924,7 +924,7 @@ template <bool IsFasta>
     auto outcome = read_sequences_file<seq::dna4, file_type>(
         path, handler_fn, failure_fn, options);
     if (!outcome.has_value()) {
-        loge("[io_bench_v10] slurp_corpus read error: {}", outcome.error());
+        bioseq_log<ERR>("[io_bench_v10] slurp_corpus read error: {}", outcome.error());
         return false;
     }
     return !out_batches.empty();
@@ -940,7 +940,7 @@ template <bool IsFasta>
     // path. Skip silently.
     const bool compressed_hint = read_bool_field(data, "compressed", false);
     if (compressed_hint) {
-        JustLog("[io_bench_v10] writer skipping gz cell '{}'", test_case_name);
+        bioseq_log<DBG>("[io_bench_v10] writer skipping gz cell '{}'", test_case_name);
         return input;
     }
     const CorpusDescriptor descriptor =
@@ -961,7 +961,7 @@ template <bool IsFasta>
             input.source_corpus_path, input.batches, input.source_record_count);
     }
     if (!slurp_ok) {
-        loge("[io_bench_v10] writer slurp failed for '{}' — clearing input",
+        bioseq_log<ERR>("[io_bench_v10] writer slurp failed for '{}' — clearing input",
               test_case_name);
         input.batches.clear();
         return input;
@@ -977,7 +977,7 @@ template <bool IsFasta>
     }
     input.output_scratch_path = allocate_temp_path(
         std::string{"writer_out_"} + std::string{test_case_name});
-    JustLog("[io_bench_v10] writer corpus ready: '{}' (records={}, scratch={})",
+    bioseq_log<DBG>("[io_bench_v10] writer corpus ready: '{}' (records={}, scratch={})",
             test_case_name, input.source_record_count, input.output_scratch_path);
     return input;
 }
@@ -1006,7 +1006,7 @@ template <bool IsFasta>
     auto writer_or_err = sequence_writer<seq::dna4, file_type>::open(
         input.output_scratch_path, options);
     if (!writer_or_err) {
-        loge("[io_bench_v10] writer open failed: {}", writer_or_err.error());
+        bioseq_log<ERR>("[io_bench_v10] writer open failed: {}", writer_or_err.error());
         return {};
     }
     auto& writer = *writer_or_err;
@@ -1014,7 +1014,7 @@ template <bool IsFasta>
     if (thread_count <= 1 || batches_total <= 1) {
         for (const auto& batch : input.batches) {
             if (!writer.write_batch(batch)) {
-                loge("[io_bench_v10] writer write_batch failed");
+                bioseq_log<ERR>("[io_bench_v10] writer write_batch failed");
                 (void)writer.close();
                 return {};
             }
@@ -1048,7 +1048,7 @@ template <bool IsFasta>
     }
     auto close_outcome = writer.close();
     if (!close_outcome) {
-        loge("[io_bench_v10] writer close failed: {}", close_outcome.error());
+        bioseq_log<ERR>("[io_bench_v10] writer close failed: {}", close_outcome.error());
         return {};
     }
     IoOutput out;
@@ -1062,7 +1062,7 @@ template <bool IsFasta>
 [[nodiscard]] IoOutput run_naive_ofstream(const WriterInput& input) {
     std::ofstream out(input.output_scratch_path, std::ios::binary);
     if (!out) {
-        loge("[io_bench_v10] naive ofstream open failed: '{}'",
+        bioseq_log<ERR>("[io_bench_v10] naive ofstream open failed: '{}'",
               input.output_scratch_path);
         return {};
     }
@@ -1154,7 +1154,7 @@ template <bool IsFasta>
     if (algo == "bioseq_writer_mmap_fastq")      return run_bioseq_writer<false>(input, 4, /*use_mmap_sink=*/true);
     if (algo == "naive_ofstream_fasta")          return run_naive_ofstream<true>(input);
     if (algo == "naive_ofstream_fastq")          return run_naive_ofstream<false>(input);
-    loge("[io_bench_v10] unknown writer algorithm '{}'", algo);
+    bioseq_log<ERR>("[io_bench_v10] unknown writer algorithm '{}'", algo);
     return {};
 }
 
@@ -1197,7 +1197,7 @@ template <bool IsFasta>
         content_hash.fetch_xor(batch_hash, std::memory_order_relaxed);
     };
     auto failure_fn = [&output_path](std::string&& msg) {
-        loge("[io_bench_v10] roundtrip read failed on '{}': {}",
+        bioseq_log<ERR>("[io_bench_v10] roundtrip read failed on '{}': {}",
               output_path, msg);
     };
     reader_options options{};
@@ -1212,13 +1212,13 @@ template <bool IsFasta>
     const std::uint64_t observed_hash =
         content_hash.load(std::memory_order_relaxed);
     if (observed_records != expected_record_count) {
-        loge("[io_bench_v10] roundtrip record count mismatch on '{}': "
+        bioseq_log<ERR>("[io_bench_v10] roundtrip record count mismatch on '{}': "
              "expected={}, observed={}",
              output_path, expected_record_count, observed_records);
         return 0.0;
     }
     if (observed_hash != expected_content_hash) {
-        loge("[io_bench_v10] roundtrip content hash mismatch on '{}': "
+        bioseq_log<ERR>("[io_bench_v10] roundtrip content hash mismatch on '{}': "
              "expected=0x{:016x}, observed=0x{:016x}",
              output_path, expected_content_hash, observed_hash);
         return 0.0;

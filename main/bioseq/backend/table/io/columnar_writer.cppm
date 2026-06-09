@@ -21,6 +21,7 @@ module;
 
 export module bioseq_table_io:writer;
 
+import mlogging;
 import storage_compression;
 import storage_physical;
 import storage_metadata;
@@ -265,7 +266,7 @@ ColumnarWriteRow(ColumnarWriteState *writeState, Datum *columnValues, bool *colu
 
 			if (datumLengthAligned >= (256UL << 20))
 			{
-				pg_log(ERROR, "Error with insert on column \'{}\'. Inserting {} bytes, exceeding 256MB",
+				bioseq_log<ERR, PG>( "Error with insert on column \'{}\'. Inserting {} bytes, exceeding 256MB",
 							 attributeForm->attname.data, datumLength);
 			}
 
@@ -438,7 +439,7 @@ FlushStripe(ColumnarWriteState *writeState)
 	uint64_t stripeSize = 0;
 	uint64_t stripeRowCount = stripeBuffers->rowCount;
 
-	pg_log(DEBUG1, "Flushing Stripe of size {}", stripeBuffers->rowCount);
+	bioseq_log_pg(DEBUG1, "Flushing Stripe of size {}", stripeBuffers->rowCount);
 
 	Oid relationId = RelidByRelfilenumber(writeState->relfilelocator.spcOid,
 										  writeState->relfilelocator.relNumber);

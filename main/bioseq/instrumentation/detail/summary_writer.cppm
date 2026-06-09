@@ -24,7 +24,7 @@ import bioseq_instr.gauge;
 export namespace bioseq::instr::access {
 
 /// Non-templated entry: dump the persistent process-wide profiler block
-/// for context_args_profiling_full to JustLog. No-op if profiling never
+/// for context_args_profiling_full to bioseq_log<DBG>. No-op if profiling never
 /// ran in this process.
 inline void write_summary_to_justlog() noexcept {
     using Args = bioseq::instr::context_args_profiling_full;

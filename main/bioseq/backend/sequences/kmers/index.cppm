@@ -876,9 +876,9 @@ inline void collect_minimizers_simd(
 	// just finished.
 	hash_mask_t prev_new_min_mask = hn::MaskFalse(dd);
 	iterate_sequence_bp_simd_offsets(seq, seq_begin, seq_end, k+w-1, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
-        //JustLog("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
+        //bioseq_log<DBG>("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
-        //JustLog("  . hash        (<==) = {}", hwy_str(d, hash_vec));
+        //bioseq_log<DBG>("  . hash        (<==) = {}", hwy_str(d, hash_vec));
 
 		// Per-lane strand (1 = reverse-complement chosen, 0 = forward chosen).
 		// Captured BEFORE the palindrome / out-of-range masks rewrite the hash to
@@ -995,11 +995,11 @@ inline void collect_minimizers_simd(
 
 		const bool need_to_push_current_min = (pos >= w + k - 1 || !IS_INIT) && !hn::AllFalse(d, new_min_mask);
 
-		// JustLog("  . val         ({})  = {}", pos, hwy_str(d, buffer.last()));
-		// JustLog("  . current_min (val) = {}", hwy_str(d, current_min));
-		// JustLog("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
-        // JustLog("  . pos         (pos) = {}", hwy_str(d, new_min_pos_val));
-		// JustLog("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
+		// bioseq_log<DBG>("  . val         ({})  = {}", pos, hwy_str(d, buffer.last()));
+		// bioseq_log<DBG>("  . current_min (val) = {}", hwy_str(d, current_min));
+		// bioseq_log<DBG>("  . current_min (pos) = {}", hwy_str(d, current_min_pos));
+        // bioseq_log<DBG>("  . pos         (pos) = {}", hwy_str(d, new_min_pos_val));
+		// bioseq_log<DBG>("  . current_min (m)   = {}", hwy_str(d, hn::VecFromMask(d, new_min_mask)));
 
 		// Check if we need to update min. `has_elapsed_min` must be gated by `mask` —
 		// otherwise a lane that has just transitioned to padding (its hash was replaced by
@@ -1011,8 +1011,8 @@ inline void collect_minimizers_simd(
 		hash_mask_t has_elapsed_min = hn::And(mask, hn::And(hn::Not(new_min_mask), hn::Eq(current_min_pos, last_write_pos_vec)));
 		const bool need_to_rescan = !hn::AllFalse(d, has_elapsed_min);
 
-		// JustLog("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
-		// JustLog("  . need_to_rescan    = {}", need_to_rescan);
+		// bioseq_log<DBG>("  . has_elapsed_min   = {}", hwy_str(d, hn::VecFromMask(d, has_elapsed_min)));
+		// bioseq_log<DBG>("  . need_to_rescan    = {}", need_to_rescan);
 
 		// Push current min
 		if (need_to_push_current_min) [[unlikely]] {
@@ -1113,7 +1113,7 @@ inline void collect_minimizers_simd(
 
 
     // for (auto& pos : temp_positions) {
-    //     JustLog("{} -> {}", pos.first, pos.second);
+    //     bioseq_log<DBG>("{} -> {}", pos.first, pos.second);
     // }
 }
 

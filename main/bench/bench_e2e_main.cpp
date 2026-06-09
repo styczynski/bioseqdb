@@ -212,7 +212,7 @@ void preflight_e2e_resources(it::connection_test_context& conn,
     const auto pg_free = std::filesystem::space(pg_data_dir).available;
     constexpr std::uintmax_t kRequiredFree = 50ull * kGiB;
     if (tmp_free < kRequiredFree || pg_free < kRequiredFree) {
-        loge("[bench_e2e] {} requires >=50 GiB free in /tmp and the PG data "
+        bioseq_log<ERR>("[bench_e2e] {} requires >=50 GiB free in /tmp and the PG data "
              "directory before minimizers_per_sequence external-sort build "
              "(tmp_free={} GiB, pg_free={} GiB)",
              size_label,
@@ -246,7 +246,7 @@ inline void dispatch_bench_alphabet(std::string_view name, HandlerFn&& handler) 
             handler.template operator()<alphabet_t>();
         });
     if (!matched) {
-        loge("[bench_e2e] unsupported alphabet '{}'", name);
+        bioseq_log<ERR>("[bench_e2e] unsupported alphabet '{}'", name);
         std::abort();
     }
 }
@@ -280,7 +280,7 @@ inline void write_fasta(const std::string& path, const bench_sequence_range<A>& 
     wo.fasta_line_width = kFastaLineWidth;
     auto writer_or = bench_writer<A>::open(path, wo);
     if (!writer_or) {
-        loge("[bench_e2e] cannot open '{}': {}", path, writer_or.error()); std::abort();
+        bioseq_log<ERR>("[bench_e2e] cannot open '{}': {}", path, writer_or.error()); std::abort();
     }
     auto& writer = *writer_or;
     const auto emit = [&](std::size_t idx, std::size_t off,
@@ -288,7 +288,7 @@ inline void write_fasta(const std::string& path, const bench_sequence_range<A>& 
         if (!writer.write_record_streamed(fmt::format("{}{}", base_name, idx),
                                           view_slice<A>(seq, off, cnt, pad),
                                           kFastaStreamChunkBp)) {
-            loge("[bench_e2e] write_record_streamed failed for '{}'", path); std::abort();
+            bioseq_log<ERR>("[bench_e2e] write_record_streamed failed for '{}'", path); std::abort();
         }
     };
     if (record_bp == 0) {
@@ -299,7 +299,7 @@ inline void write_fasta(const std::string& path, const bench_sequence_range<A>& 
             emit(idx++, off, cnt, pad);
     }
     if (auto c = writer.close(); !c) {
-        loge("[bench_e2e] close '{}': {}", path, c.error()); std::abort();
+        bioseq_log<ERR>("[bench_e2e] close '{}': {}", path, c.error()); std::abort();
     }
 }
 
@@ -319,7 +319,7 @@ inline void write_split_fasta(const std::string& path, std::string_view base,
 inline void run_cmd(const std::string& cmd) {
     const int rc = std::system(cmd.c_str());
     if (rc != 0) {
-        loge("[bench_e2e] command failed (rc={}): {}", rc, cmd);
+        bioseq_log<ERR>("[bench_e2e] command failed (rc={}): {}", rc, cmd);
         std::abort();
     }
 }
@@ -329,13 +329,13 @@ inline void run_cmd(const std::string& cmd) {
 [[nodiscard]] inline std::string run_cmd_capture(const std::string& cmd) {
     std::string out;
     std::FILE* pipe = ::popen(cmd.c_str(), "r");
-    if (pipe == nullptr) { loge("[bench_e2e] popen failed: {}", cmd); return out; }
+    if (pipe == nullptr) { bioseq_log<ERR>("[bench_e2e] popen failed: {}", cmd); return out; }
     std::array<char, kPopenBufBytes> buf;
     std::size_t n;
     while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
     const int rc = ::pclose(pipe);
     if (rc != 0) {
-        loge("[bench_e2e] command failed (rc={}): {}", rc, cmd);
+        bioseq_log<ERR>("[bench_e2e] command failed (rc={}): {}", rc, cmd);
         return {};
     }
     return out;
@@ -508,7 +508,7 @@ inline void require_mapped(std::string_view algo, const E2eInput& in,
                            const E2eOutput& out) {
     if (out.found && out.abs_offset_bp <= static_cast<double>(kPositionToleranceBp))
         return;
-    loge("[bench_e2e] {} failed to map the query at {} bp (found={}, "
+    bioseq_log<ERR>("[bench_e2e] {} failed to map the query at {} bp (found={}, "
          "target_start={}, truth={}, offset={} bp > {} tol) — the timed result is "
          "invalid; aborting", algo, in.target_bp, out.found, out.target_start,
          in.truth_target_start, out.abs_offset_bp, kPositionToleranceBp);
@@ -559,7 +559,7 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
         param_string(params, "minimizer_index", kMinimizersPerFragmentIndex);
     if (index != kMinimizersPerFragmentIndex
         && index != kMinimizersPerSequenceIndex) {
-        loge("[bench_e2e] unsupported minimizer_index '{}'", index);
+        bioseq_log<ERR>("[bench_e2e] unsupported minimizer_index '{}'", index);
         std::abort();
     }
     return index;
@@ -572,7 +572,7 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
         && impl != "simd_u128_vec_stream_1"
         && impl != "simd_u128_vec_stream_2"
         && impl != "simd_u128_vec_stream_4") {
-        loge("[bench_e2e] unsupported mps_pair_sort_impl '{}'", impl);
+        bioseq_log<ERR>("[bench_e2e] unsupported mps_pair_sort_impl '{}'", impl);
         std::abort();
     }
     return impl;
@@ -792,7 +792,7 @@ void log_measured_case(std::string_view algo,
                        const E2eInput& in,
                        const E2eOutput& out,
                        std::string_view minimizer_index = "-") {
-    JustLog("[bench_e2e] measured algo={} pipeline_mode={} minimap_threads={} minimizer_index={} size={} measured_ns={} pg_peak_rss_mb={:.2f} minimap2_peak_rss_mb={:.2f} bench_peak_rss_mb={:.2f} tmp_min_free_gib={:.2f} swap_peak_mb={:.2f} found={} offset_bp={}",
+    bioseq_log<DBG>("[bench_e2e] measured algo={} pipeline_mode={} minimap_threads={} minimizer_index={} size={} measured_ns={} pg_peak_rss_mb={:.2f} minimap2_peak_rss_mb={:.2f} bench_peak_rss_mb={:.2f} tmp_min_free_gib={:.2f} swap_peak_mb={:.2f} found={} offset_bp={}",
             algo,
             pipeline_mode,
             minimap_threads,
@@ -815,7 +815,7 @@ void cleanup_e2e_input(std::string_view,
     const char* keep_artifacts_env = std::getenv("BIOSEQ_E2E_KEEP_ARTIFACTS");
     if (keep_artifacts_env != nullptr
         && std::string_view{keep_artifacts_env} == "1") {
-        JustLog("[bench_e2e] keeping SQL tables and FASTA/MMI artifacts "
+        bioseq_log<DBG>("[bench_e2e] keeping SQL tables and FASTA/MMI artifacts "
                 "because BIOSEQ_E2E_KEEP_ARTIFACTS=1");
         return;
     }
@@ -833,7 +833,7 @@ void cleanup_e2e_input(std::string_view,
         std::error_code ec;
         std::filesystem::remove(path, ec);
         if (ec) {
-            logw("[bench_e2e] cleanup could not remove '{}': {}", path, ec.message());
+            bioseq_log<WRN>("[bench_e2e] cleanup could not remove '{}': {}", path, ec.message());
         }
     }
 }
@@ -896,7 +896,7 @@ template <sequence_alphabet A>
     using active_traits = typename bench_sequence_range<A>::traits;
     if (split_bp > static_cast<std::size_t>(kMinimap2MaxRecordBp) ||
         split_bp % active_traits::letters_per_unit != 0) {
-        loge("[bench_e2e] minimap2_split_bp={} is invalid for alphabet {} "
+        bioseq_log<ERR>("[bench_e2e] minimap2_split_bp={} is invalid for alphabet {} "
              "(letters_per_unit={}, max={})",
              split_bp, in.alphabet, active_traits::letters_per_unit,
              kMinimap2MaxRecordBp);
@@ -958,7 +958,7 @@ template <sequence_alphabet A>
     if (!just_index_setup_only_name.empty()
         && just_index_setup_only_name != kMinimizersPerFragmentIndex
         && just_index_setup_only_name != kMinimizersPerSequenceIndex) {
-        loge("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY='{}'",
+        bioseq_log<ERR>("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_ONLY='{}'",
              just_index_setup_only_name);
         std::abort();
     }
@@ -976,7 +976,7 @@ template <sequence_alphabet A>
     if (just_index_setup_pipeline_mode != "single"
         && just_index_setup_pipeline_mode != "parallel"
         && just_index_setup_pipeline_mode != "task_parallel") {
-        loge("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE='{}'",
+        bioseq_log<ERR>("[bench_e2e] unsupported BIOSEQ_E2E_JUST_INDEX_SETUP_PIPELINE_MODE='{}'",
              just_index_setup_pipeline_mode);
         std::abort();
     }
@@ -1004,7 +1004,7 @@ template <sequence_alphabet A>
                 in.just_index_table_per_sequence, kMinimizersPerSequenceIndex);
         }
     } else {
-        JustLog("[bench_e2e] skipping persisted-index/minimap2 baseline setup "
+        bioseq_log<DBG>("[bench_e2e] skipping persisted-index/minimap2 baseline setup "
                 "because BIOSEQ_E2E_SKIP_INDEX_BASELINE_SETUP=1");
     }
 
@@ -1016,11 +1016,11 @@ template <sequence_alphabet A>
         run_cmd(fmt::format("{} -k{} -w{} -d {} {}", BIOSEQ_E2E_MINIMAP2_BIN,
                             in.kmer_size, in.window_size, in.mmi_path, in.target_fasta_split));
     } else if (skip_minimap2_baseline_setup) {
-        JustLog("[bench_e2e] skipping minimap2 .mmi baseline setup because "
+        bioseq_log<DBG>("[bench_e2e] skipping minimap2 .mmi baseline setup because "
                 "BIOSEQ_E2E_SKIP_MINIMAP2_BASELINE_SETUP=1");
     }
 
-    JustLog("[bench_e2e] input '{}' ready (truth_start={}, rev={})",
+    bioseq_log<DBG>("[bench_e2e] input '{}' ready (truth_start={}, rev={})",
             test_case_name, in.truth_target_start, in.truth_is_reverse);
     return in;
 }
@@ -1223,7 +1223,7 @@ template <sequence_alphabet A>
         log_measured_case(algo, pipeline_mode, minimap_threads, in, out);
 
     } else {
-        loge("[bench_e2e] unknown algorithm '{}'", algo);
+        bioseq_log<ERR>("[bench_e2e] unknown algorithm '{}'", algo);
     }
     return out;
 }

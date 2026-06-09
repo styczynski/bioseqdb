@@ -4,6 +4,7 @@
 
 import bioseq_simd.utils;
 import bioseq_simd.vector_stream;
+import mlogging;
 import testing;
 
 HWY_BEFORE_NAMESPACE();
@@ -56,7 +57,7 @@ void check_binary_vec_op(D d, Lifted lifted, HnOp hn_op, const char* name) {
             ASSERT(got == want);
         }
     }
-    JustLog("[vec_stream binary] op={} OK", name);
+    bioseq_log<DBG>("[vec_stream binary] op={} OK", name);
 }
 
 // Comparison ops: result is a mask_stream. Compare via VecFromMask round-trip.
@@ -75,7 +76,7 @@ void check_binary_cmp_op(D d, Lifted lifted, HnOp hn_op, const char* name) {
         const auto want = hwy_to_vector<D, ST>(d, hn::VecFromMask(d, hn_op(sa[k], sb[k])));
         ASSERT(got == want);
     }
-    JustLog("[vec_stream cmp] op={} OK", name);
+    bioseq_log<DBG>("[vec_stream cmp] op={} OK", name);
 }
 
 // =============================================================================
@@ -150,7 +151,7 @@ TEMPLATE_TEST_CASE("mask_stream AndNot vs plain mask broadcast — Phase 3 path"
             hn::VecFromMask(d, hn::AndNot(pal_stream[s], live)));
         ASSERT(got == want);
     }
-    JustLog("[mask_stream AndNot+broadcast] OK");
+    bioseq_log<DBG>("[mask_stream AndNot+broadcast] OK");
 }
 
 TEMPLATE_TEST_CASE("vec_stream binary comparisons",
@@ -308,7 +309,7 @@ TEMPLATE_TEST_CASE("vec_stream IfThenElse — every argument shape",
         }
     }
 
-    JustLog("[vec_stream IfThenElse] all 5 shapes OK");
+    bioseq_log<DBG>("[vec_stream IfThenElse] all 5 shapes OK");
 }
 
 TEMPLATE_TEST_CASE("vec_stream static factories",

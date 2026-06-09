@@ -157,7 +157,7 @@ void run_smoke(const std::string& alpha_name, const std::string& seq_type,
                            alpha_name, i, bioseq_start, mm2_start),
                i);
     }
-    JustLog("[e2e_smoke] {} ok: {} queries mapped within {} bp on bioseq + minimap2",
+    bioseq_log<DBG>("[e2e_smoke] {} ok: {} queries mapped within {} bp on bioseq + minimap2",
             alpha_name, pairs.size(), kPositionToleranceBp);
 }
 
