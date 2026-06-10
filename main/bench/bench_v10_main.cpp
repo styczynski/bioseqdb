@@ -298,6 +298,21 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    } else if (algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
+        // DOC0307 Phase B: the full G3SA front-end — Vulkan minimap-int
+        // minimizers + Vulkan tiled-DP chaining + block aligner. The only varied
+        // dimensions versus bioseq_block_simd_dp_two_stack_nthash (SIMD
+        // minimizers + SIMD chaining + block aligner) are the seeding (GPU
+        // sketch + GPU seed-hit lookup) and the chaining backend; the base
+        // aligner stays block (no G3SA extension kernel in Phase B, §0/§10).
+        // All GPU stages runtime-fall back to their CPU equivalents when no
+        // usable Vulkan device exists.
+        dispatch.params.chaining_algorithm        = ChainingAlgorithmType::VULKAN_TILED_DP;
+        dispatch.params.base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        dispatch.params.minimizer_algorithm       = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+        dispatch.params.vulkan_enabled            = true;
+        dispatch.params.vulkan_seed_hits_enabled  = true;
+        dispatch.params.vulkan_index_cache_enabled = true;
     } else if (algo == "bioseq_ksw2_rmq_scalar_mm") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::RMQ;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;

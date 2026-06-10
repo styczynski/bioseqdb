@@ -116,6 +116,8 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_utils.cppm
   # DOC0304 Phase A — Vulkan/MoltenVK G3SA tiled-DP chaining backend.
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/shader_compiler.cppm
+  # DOC0307 Phase B — Vulkan seeding ABI (storage-free; shared by runtime/seeding).
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/phase_b_abi.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_vulkan.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/index.cppm
@@ -125,6 +127,8 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/lexic.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/minimap_int.cppm
+  # DOC0307 Phase B — Vulkan minimizer sketch (reads packed compact_sequence_range).
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm
   # DOC0264 §10.1 — sample-sequence generator moved from main/bench/
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/generation/sequence_generator.cppm
   # DOC0279 — the NO_POSTGRES indexing concept/algorithm modules (§4 table).
@@ -136,6 +140,10 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence_index.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_index.cppm
+  # DOC0307 Phase B — GPU-resident minimizer index view + LRU upload cache.
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_vulkan_index.cppm
+  # DOC0307 Phase B — Vulkan seed-hit lookup (emits sorted bioseq::chaining::Anchor).
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/seeding/seeding_vulkan.cppm
   # backend/pipeline/*
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm

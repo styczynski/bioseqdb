@@ -19,6 +19,7 @@
 module;
 #include "common.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -39,6 +40,7 @@ export module bioseq_gpu.vulkan.runtime;
 import mlogging;
 import bioseq_parallelism.memory_admission;
 import bioseq_gpu.vulkan.shader_compiler;
+import bioseq_gpu.vulkan.phase_b_abi;
 
 export namespace bioseq::gpu::vulkan {
 
@@ -180,6 +182,35 @@ struct SpirvLayoutScan {
 /// stream — no Vulkan device needed (the §10.6 test calls it directly).
 [[nodiscard]] SpirvLayoutScan scan_spirv_layout(std::span<const std::uint32_t> spirv);
 
+/// DOC0307 §4.5 — result of the two-dispatch minimizer sketch roundtrip. The
+/// resident `minimizer_words` device buffer is moved into the caller's
+/// `VulkanDeviceMinimizerStorage` for seed-lookup reuse; `host_minimizer_bytes`
+/// is the packed `count` minimizers downloaded for the arena slab.
+struct RuntimeSketchResult {
+    Buffer minimizer_words;
+    std::vector<std::byte> host_minimizer_bytes;
+    std::uint64_t count = 0;
+    bool overflow = false;
+};
+
+/// DOC0307 §4.5 — inputs to the seed-hit lookup roundtrip. The query minimizers
+/// arrive either as a resident device buffer (`device_minimizer_words`,
+/// all-Vulkan sketch+seed path) or as host bytes to upload once. `slots` and
+/// `positions` are the GPU-resident index buffers owned by
+/// `GpuMinimizerIndexCache`; the runtime never uploads the index itself.
+struct RuntimeSeedLookupInputs {
+    std::span<const std::byte> host_minimizer_bytes{};
+    const Buffer* device_minimizer_words = nullptr;
+    const Buffer* slots = nullptr;
+    const Buffer* positions = nullptr;
+    std::uint32_t slot_mask = 0;
+    std::uint32_t position_count = 0;
+    std::uint32_t minimizer_word_kind = 0;
+    std::uint32_t minimizer_words32_per_record = 0;
+    std::uint32_t hash_shift = 0;
+    std::uint32_t pos_bits = 0;
+};
+
 /// The Phase A chaining runtime. One process-wide instance (`Runtime::instance`)
 /// owns the device and serializes GPU queue access with `mu_`.
 class Runtime {
@@ -224,6 +255,31 @@ public:
         float gap_penalty,
         float skip_penalty);
 
+    // DOC0307 Phase B — two-dispatch minimizer sketch (candidate + exact emit)
+    // and seed-hit lookup (lookup + bitonic sort). Both record every H2D copy,
+    // dispatch, barrier, and D2H copy under one queue lock, mirroring the Phase A
+    // roundtrip discipline. Transient buffers are owned internally; resident
+    // index buffers and memory-budget permits are owned by the caller.
+    RuntimeSketchResult run_minimizer_sketch_roundtrip(
+        std::span<const std::byte> packed_sequence,
+        const VulkanRankLut& rank_lut,
+        const VulkanSketchParams& params,
+        std::uint64_t max_minimizers);
+
+    SeedLookupResult run_seed_lookup_roundtrip(
+        RuntimeSeedLookupInputs inputs,
+        std::span<const std::uint32_t> prefix_counts,
+        std::uint64_t query_len,
+        std::uint32_t kmer_size,
+        std::uint64_t exact_anchor_count);
+
+    /// Largest power-of-two anchor count the GPU bitonic sort can handle in one
+    /// workgroup on this device (bounded by workgroup invocations + shared mem).
+    /// Larger anchor spans take the CPU sort fallback (DOC0307 §7.2).
+    [[nodiscard]] std::uint32_t gpu_anchor_sort_capacity() const noexcept {
+        return gpu_anchor_sort_capacity_;
+    }
+
 private:
     /// One cached compute pipeline plus its shader module, keyed by tile/local.
     struct PipelineEntry {
@@ -231,6 +287,35 @@ private:
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
     };
+
+    /// DOC0307 §4.5 — one cached Phase B compute pipeline with its own
+    /// descriptor-set layout (variable binding count), pipeline layout (variable
+    /// push-constant size), descriptor pool, and a single reusable descriptor
+    /// set. Keyed by (kind, local_size, max_span) — the only fields that change
+    /// the emitted SPIR-V; alphabet/word routing is a runtime push constant.
+    struct PhaseBPipeline {
+        ShaderKind kind{};
+        std::uint32_t local_size = 0;
+        std::uint32_t max_span = 0;
+        std::uint32_t binding_count = 0;
+        std::uint32_t push_size = 0;
+        VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        VkShaderModule module = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+    };
+
+    // Returns by value: the cached entry is trivially copyable (handles only)
+    // and the canonical entry lives in `phase_b_pipelines_`. Returning a
+    // reference would dangle the moment a later `get_*` push_back reallocates
+    // the vector (the descriptor set / pipeline are still owned by the vector).
+    PhaseBPipeline get_phase_b_pipeline_locked(
+        ShaderKind kind, std::uint32_t local_size, std::uint32_t max_span);
+    void bind_phase_b_descriptors_locked(
+        const PhaseBPipeline& entry,
+        std::span<const VkBuffer> buffers);
 
     void init();
     void shutdown() noexcept;
@@ -253,6 +338,8 @@ private:
     VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set_ = VK_NULL_HANDLE;
     std::vector<PipelineEntry> pipeline_cache_;
+    std::vector<PhaseBPipeline> phase_b_pipelines_;
+    std::uint32_t gpu_anchor_sort_capacity_ = 0;
 
     VulkanFeatureSet features_{};
     std::atomic<std::uint64_t> chaining_dispatch_count_{0};
@@ -688,6 +775,24 @@ void Runtime::init() {
     check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &descriptor_set_),
              "vkAllocateDescriptorSets");
 
+    // DOC0307 §7.2 — pick the largest power-of-two anchor count the per-query
+    // bitonic sort can hold in one workgroup: bounded by workgroup invocations
+    // and by shared memory (each lane holds a 24-byte AnchorWire + a 4-byte
+    // original index). Anchor spans above this fall back to the CPU radix sort.
+    {
+        constexpr std::uint32_t per_lane_shared_bytes = 24u + 4u;
+        std::uint32_t capacity = 0;
+        for (std::uint32_t candidate = 1; candidate <= 1024u; candidate <<= 1) {
+            if (candidate > features_.max_workgroup_invocations) break;
+            if (static_cast<std::uint64_t>(candidate) * per_lane_shared_bytes
+                > features_.max_shared_memory_bytes) {
+                break;
+            }
+            capacity = candidate;
+        }
+        gpu_anchor_sort_capacity_ = capacity;
+    }
+
     features_.available = true;
     bioseq_log<DBG>(
         "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
@@ -705,6 +810,14 @@ void Runtime::shutdown() noexcept {
             if (entry.module != VK_NULL_HANDLE) vkDestroyShaderModule(device_, entry.module, nullptr);
         }
         pipeline_cache_.clear();
+        for (auto& entry : phase_b_pipelines_) {
+            if (entry.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(device_, entry.pipeline, nullptr);
+            if (entry.module != VK_NULL_HANDLE) vkDestroyShaderModule(device_, entry.module, nullptr);
+            if (entry.descriptor_pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            if (entry.pipeline_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            if (entry.set_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+        }
+        phase_b_pipelines_.clear();
         if (descriptor_pool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descriptor_pool_, nullptr);
         if (pipeline_layout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, pipeline_layout_, nullptr);
         if (descriptor_set_layout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, descriptor_set_layout_, nullptr);
@@ -1091,6 +1204,571 @@ void Runtime::run_chaining_tiled_dp_roundtrip(
 
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// DOC0307 Phase B — seeding roundtrips
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Push-constant blocks for the Phase B shaders. Each mirrors its GLSL `Params`
+/// uniform byte-for-byte (see `push_constant_size` in shader_compiler.cppm).
+struct SketchCandidatePush {
+    std::uint32_t bp_size;
+    std::uint32_t window_size;
+    std::uint32_t kmer_size;
+    std::uint32_t unit_bits;
+    std::uint32_t bits_per_char;
+    std::uint32_t letters_per_unit;
+    std::uint32_t alphabet_size;
+    std::uint32_t alphabet_kind;
+    std::uint32_t seq_word_offset;
+    std::uint32_t char_mask;
+};
+static_assert(sizeof(SketchCandidatePush) == 40);
+
+struct SketchEmitPush {
+    std::uint32_t bp_size;
+    std::uint32_t window_size;
+    std::uint32_t kmer_size;
+    std::uint32_t pos_bits;
+    std::uint32_t hash_bits;
+    std::uint32_t hash_shift;
+    std::uint32_t word_kind;
+    std::uint32_t words32_per_minimizer;
+    std::uint32_t span_value;
+    std::uint32_t max_minimizers;
+};
+static_assert(sizeof(SketchEmitPush) == 40);
+
+struct SeedLookupPush {
+    std::uint32_t minimizer_count;
+    std::uint32_t words32_per_minimizer;
+    std::uint32_t word_kind;
+    std::uint32_t hash_shift;
+    std::uint32_t pos_bits;
+    std::uint32_t query_len;
+    std::uint32_t kmer_size;
+    std::uint32_t slot_mask;
+    std::uint32_t exact_anchor_count;
+};
+static_assert(sizeof(SeedLookupPush) == 36);
+
+constexpr VkBufferUsageFlags kPhaseBBufferUsage =
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+    VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+/// Device byte footprint for `count` packed minimizers of the given word kind.
+[[nodiscard]] std::uint64_t minimizer_device_bytes(
+    std::uint32_t word_kind, std::uint32_t words32_per_minimizer,
+    std::uint64_t count) noexcept
+{
+    if (word_kind == 0u) {  // u16: two minimizers packed per 32-bit word
+        return ((count + 1u) / 2u) * sizeof(std::uint32_t);
+    }
+    return count * static_cast<std::uint64_t>(words32_per_minimizer)
+         * sizeof(std::uint32_t);
+}
+
+/// Host byte footprint for `count` minimizers (one packed element each).
+[[nodiscard]] std::uint64_t minimizer_host_bytes(
+    std::uint32_t word_kind, std::uint64_t count) noexcept
+{
+    switch (word_kind) {
+        case 0u:  return count * 2u;   // u16
+        case 1u:  return count * 4u;   // u32
+        case 2u:  return count * 8u;   // u64
+        default:  return count * 16u;  // u64x2
+    }
+}
+
+/// `ref_bits()` of a 24-byte Anchor record at `bytes`: ref_position is the
+/// leading u64; is_reverse is the u32 at offset 16.
+[[nodiscard]] std::uint64_t anchor_ref_bits_at(const std::byte* bytes) noexcept {
+    std::uint64_t ref_position = 0;
+    std::uint32_t is_reverse = 0;
+    std::memcpy(&ref_position, bytes, sizeof(ref_position));
+    std::memcpy(&is_reverse, bytes + 16, sizeof(is_reverse));
+    return (static_cast<std::uint64_t>(is_reverse != 0u) << 63)
+         | (ref_position & ((std::uint64_t{1} << 63) - 1u));
+}
+
+/// CPU fallback (DOC0307 §7.2): stable-sort the downloaded 24-byte anchors by
+/// `ref_bits()` when the span exceeds the GPU bitonic sort's workgroup capacity.
+void cpu_sort_anchor_bytes_by_ref_bits(std::span<std::byte> bytes, std::uint64_t count) {
+    constexpr std::size_t kAnchorBytes = 24;
+    if (count < 2) return;
+    std::vector<std::uint32_t> order(static_cast<std::size_t>(count));
+    for (std::uint32_t i = 0; i < count; ++i) order[i] = i;
+    const std::byte* base = bytes.data();
+    std::stable_sort(order.begin(), order.end(),
+        [base](std::uint32_t a, std::uint32_t b) noexcept {
+            return anchor_ref_bits_at(base + a * kAnchorBytes)
+                 < anchor_ref_bits_at(base + b * kAnchorBytes);
+        });
+    std::vector<std::byte> sorted(static_cast<std::size_t>(count) * kAnchorBytes);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        std::memcpy(sorted.data() + i * kAnchorBytes,
+                    base + order[i] * kAnchorBytes, kAnchorBytes);
+    }
+    std::memcpy(bytes.data(), sorted.data(), sorted.size());
+}
+
+}  // namespace
+
+Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
+    ShaderKind kind, std::uint32_t local_size, std::uint32_t max_span)
+{
+    for (auto& entry : phase_b_pipelines_) {
+        if (entry.kind == kind && entry.local_size == local_size
+            && entry.max_span == max_span) {
+            return entry;
+        }
+    }
+    if (local_size == 0 || local_size > features_.max_workgroup_invocations) {
+        throw VulkanRuntimeError(fmt::format(
+            "Phase B local_size {} exceeds maxComputeWorkGroupInvocations {}",
+            local_size, features_.max_workgroup_invocations));
+    }
+
+    const DescriptorLayoutKind layout_kind = descriptor_layout_for(kind);
+    const std::uint32_t binding_count = descriptor_binding_count(layout_kind);
+    const std::uint32_t push_size = push_constant_size(kind);
+
+    PhaseBPipeline entry;
+    entry.kind = kind;
+    entry.local_size = local_size;
+    entry.max_span = max_span;
+    entry.binding_count = binding_count;
+    entry.push_size = push_size;
+
+    std::vector<VkDescriptorSetLayoutBinding> bindings(binding_count);
+    for (std::uint32_t b = 0; b < binding_count; ++b) {
+        bindings[b].binding = b;
+        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[b].descriptorCount = 1;
+        bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo set_layout_info{};
+    set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_layout_info.bindingCount = binding_count;
+    set_layout_info.pBindings = bindings.data();
+    check_vk(vkCreateDescriptorSetLayout(device_, &set_layout_info, nullptr, &entry.set_layout),
+             "vkCreateDescriptorSetLayout(phase_b)");
+
+    VkPushConstantRange push_range{};
+    push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    push_range.offset = 0;
+    push_range.size = push_size;
+    VkPipelineLayoutCreateInfo layout_info{};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &entry.set_layout;
+    layout_info.pushConstantRangeCount = push_size > 0 ? 1u : 0u;
+    layout_info.pPushConstantRanges = push_size > 0 ? &push_range : nullptr;
+    check_vk(vkCreatePipelineLayout(device_, &layout_info, nullptr, &entry.pipeline_layout),
+             "vkCreatePipelineLayout(phase_b)");
+
+    VkDescriptorPoolSize pool_size{};
+    pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    pool_size.descriptorCount = binding_count;
+    VkDescriptorPoolCreateInfo pool_info{};
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pool_info.maxSets = 1;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+    check_vk(vkCreateDescriptorPool(device_, &pool_info, nullptr, &entry.descriptor_pool),
+             "vkCreateDescriptorPool(phase_b)");
+
+    VkDescriptorSetAllocateInfo set_alloc{};
+    set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    set_alloc.descriptorPool = entry.descriptor_pool;
+    set_alloc.descriptorSetCount = 1;
+    set_alloc.pSetLayouts = &entry.set_layout;
+    check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &entry.descriptor_set),
+             "vkAllocateDescriptorSets(phase_b)");
+
+    std::vector<std::uint32_t> spirv;
+    try {
+        ShaderCompileRequest request{};
+        request.kind = kind;
+        request.tile_size = 384;
+        request.local_size = local_size;
+        request.max_span = max_span;
+        spirv = compile_shader_spirv(request);
+    } catch (const std::exception& compile_error) {
+        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+        throw VulkanRuntimeError(fmt::format("phase B shader compile failed: {}",
+                                             compile_error.what()));
+    }
+
+    // Pin the SSBO wire ABI: a candidate-stride / sort-range-stride mismatch
+    // would silently corrupt the direct CandidateWire / SortRangeWire reads.
+    const SpirvLayoutScan scan = scan_spirv_layout(spirv);
+    if (kind == ShaderKind::minimizer_candidates && !scan.has_array_stride(candidate_wire_stride)) {
+        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+        throw VulkanRuntimeError("SPIR-V Candidate array stride != candidate_wire_stride (32)");
+    }
+    if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
+        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+        throw VulkanRuntimeError("SPIR-V SortRange array stride != 8");
+    }
+
+    VkShaderModuleCreateInfo module_info{};
+    module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    module_info.codeSize = spirv.size() * sizeof(std::uint32_t);
+    module_info.pCode = spirv.data();
+    check_vk(vkCreateShaderModule(device_, &module_info, nullptr, &entry.module),
+             "vkCreateShaderModule(phase_b)");
+
+    VkPipelineShaderStageCreateInfo stage{};
+    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stage.module = entry.module;
+    stage.pName = "main";
+    VkComputePipelineCreateInfo pipeline_info{};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeline_info.stage = stage;
+    pipeline_info.layout = entry.pipeline_layout;
+    const VkResult pr = vkCreateComputePipelines(
+        device_, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &entry.pipeline);
+    if (pr != VK_SUCCESS) {
+        vkDestroyShaderModule(device_, entry.module, nullptr);
+        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+        throw VulkanRuntimeError(fmt::format(
+            "vkCreateComputePipelines(phase_b): VkResult {}", static_cast<int>(pr)));
+    }
+
+    bioseq_log<DBG>("[vulkan_runtime] built phase B pipeline kind={} local={} max_span={}",
+                    static_cast<int>(kind), local_size, max_span);
+    phase_b_pipelines_.push_back(entry);
+    return phase_b_pipelines_.back();
+}
+
+void Runtime::bind_phase_b_descriptors_locked(
+    const PhaseBPipeline& entry, std::span<const VkBuffer> buffers)
+{
+    DEBUG_ASSERT(buffers.size() == entry.binding_count,
+                 "phase B descriptor binding count mismatch");
+    std::vector<VkDescriptorBufferInfo> infos(buffers.size());
+    std::vector<VkWriteDescriptorSet> writes(buffers.size());
+    for (std::size_t b = 0; b < buffers.size(); ++b) {
+        infos[b] = VkDescriptorBufferInfo{buffers[b], 0, VK_WHOLE_SIZE};
+        writes[b] = VkWriteDescriptorSet{};
+        writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[b].dstSet = entry.descriptor_set;
+        writes[b].dstBinding = static_cast<std::uint32_t>(b);
+        writes[b].descriptorCount = 1;
+        writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[b].pBufferInfo = &infos[b];
+    }
+    vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(writes.size()),
+                           writes.data(), 0, nullptr);
+}
+
+RuntimeSketchResult Runtime::run_minimizer_sketch_roundtrip(
+    std::span<const std::byte> packed_sequence,
+    const VulkanRankLut& rank_lut,
+    const VulkanSketchParams& params,
+    std::uint64_t max_minimizers)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError("run_minimizer_sketch_roundtrip on unavailable device");
+    }
+
+    const std::uint32_t bp_size = params.bp_size;
+    constexpr std::uint32_t candidate_local = 128u;
+    const std::uint64_t candidate_groups =
+        (static_cast<std::uint64_t>(bp_size) + candidate_local - 1u) / candidate_local;
+    if (candidate_groups > features_.max_workgroup_count_x) {
+        throw VulkanRuntimeError("minimizer sketch dispatch exceeds maxComputeWorkGroupCount[0]");
+    }
+
+    const PhaseBPipeline cand_pipe =
+        get_phase_b_pipeline_locked(ShaderKind::minimizer_candidates, candidate_local, 256u);
+    const PhaseBPipeline emit_pipe =
+        get_phase_b_pipeline_locked(ShaderKind::minimizer_emit_exact, 1u, 256u);
+
+    const std::uint64_t out_bytes = std::max<std::uint64_t>(
+        minimizer_device_bytes(params.minimizer_word_kind, params.minimizer_words32, max_minimizers), 4u);
+    const std::uint64_t cand_bytes = std::max<std::uint64_t>(
+        static_cast<std::uint64_t>(bp_size) * sizeof(CandidateWire), 32u);
+    const std::uint64_t seq_bytes = std::max<std::uint64_t>(packed_sequence.size(), 4u);
+
+    Buffer scratch = create_host_buffer(4u, kPhaseBBufferUsage);
+    Buffer seq_buf = create_device_buffer(seq_bytes, kPhaseBBufferUsage);
+    Buffer cand_buf = create_device_buffer(cand_bytes, kPhaseBBufferUsage);
+    Buffer lut_buf = create_device_buffer(sizeof(VulkanRankLut), kPhaseBBufferUsage);
+    Buffer out_buf = create_device_buffer(out_bytes, kPhaseBBufferUsage);
+    Buffer counter_buf = create_device_buffer(8u, kPhaseBBufferUsage);
+
+    upload_locked(scratch, seq_buf, packed_sequence, VK_ACCESS_SHADER_READ_BIT);
+    upload_locked(scratch, lut_buf,
+        std::span<const std::byte>{reinterpret_cast<const std::byte*>(&rank_lut), sizeof(rank_lut)},
+        VK_ACCESS_SHADER_READ_BIT);
+    {
+        const std::array<std::uint32_t, 2> zero{0u, 0u};
+        upload_locked(scratch, counter_buf,
+            std::as_bytes(std::span<const std::uint32_t>{zero.data(), zero.size()}),
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    }
+
+    {
+        const std::array<VkBuffer, 3> cand_bufs{seq_buf.buffer, cand_buf.buffer, lut_buf.buffer};
+        bind_phase_b_descriptors_locked(cand_pipe, cand_bufs);
+        const std::array<VkBuffer, 3> emit_bufs{cand_buf.buffer, out_buf.buffer, counter_buf.buffer};
+        bind_phase_b_descriptors_locked(emit_pipe, emit_bufs);
+    }
+
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(sketch)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(sketch)");
+
+    VkMemoryBarrier host_to_shader{};
+    host_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    host_to_shader.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    host_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &host_to_shader,
+                         0, nullptr, 0, nullptr);
+
+    const SketchCandidatePush cand_push{
+        bp_size, params.window_size, params.kmer_size, params.unit_bits,
+        params.bits_per_char, params.letters_per_unit, params.alphabet_size,
+        params.alphabet_kind, params.seq_word_offset, params.char_mask};
+    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, cand_pipe.pipeline);
+    vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            cand_pipe.pipeline_layout, 0, 1, &cand_pipe.descriptor_set, 0, nullptr);
+    vkCmdPushConstants(command_buffer_, cand_pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(cand_push), &cand_push);
+    vkCmdDispatch(command_buffer_, static_cast<std::uint32_t>(candidate_groups), 1, 1);
+
+    VkMemoryBarrier shader_to_shader{};
+    shader_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    shader_to_shader.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    shader_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &shader_to_shader,
+                         0, nullptr, 0, nullptr);
+
+    const SketchEmitPush emit_push{
+        bp_size, params.window_size, params.kmer_size, params.pos_bits, params.hash_bits,
+        params.hash_shift, params.minimizer_word_kind, params.minimizer_words32,
+        params.kmer_size, static_cast<std::uint32_t>(max_minimizers)};
+    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, emit_pipe.pipeline);
+    vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            emit_pipe.pipeline_layout, 0, 1, &emit_pipe.descriptor_set, 0, nullptr);
+    vkCmdPushConstants(command_buffer_, emit_pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(emit_push), &emit_push);
+    vkCmdDispatch(command_buffer_, 1, 1, 1);
+
+    VkMemoryBarrier shader_to_host{};
+    shader_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    shader_to_host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    shader_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &shader_to_host,
+                         0, nullptr, 0, nullptr);
+
+    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(sketch)");
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command_buffer_;
+    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(sketch)");
+    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(sketch)");
+    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(sketch)");
+
+    std::array<std::uint32_t, 2> counter{0u, 0u};
+    download_locked(scratch, counter_buf,
+        std::as_writable_bytes(std::span<std::uint32_t>{counter.data(), counter.size()}));
+
+    RuntimeSketchResult result;
+    result.overflow = counter[1] != 0u;
+    if (!result.overflow) {
+        result.count = std::min<std::uint64_t>(counter[0], max_minimizers);
+        const std::uint64_t host_bytes =
+            minimizer_host_bytes(params.minimizer_word_kind, result.count);
+        result.host_minimizer_bytes.resize(static_cast<std::size_t>(host_bytes));
+        if (host_bytes > 0) {
+            download_locked(scratch, out_buf, std::span<std::byte>{
+                result.host_minimizer_bytes.data(), result.host_minimizer_bytes.size()});
+        }
+        result.minimizer_words = std::move(out_buf);
+    }
+
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(sketch-post)");
+    chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return result;
+}
+
+SeedLookupResult Runtime::run_seed_lookup_roundtrip(
+    RuntimeSeedLookupInputs inputs,
+    std::span<const std::uint32_t> prefix_counts,
+    std::uint64_t query_len,
+    std::uint32_t kmer_size,
+    std::uint64_t exact_anchor_count)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError("run_seed_lookup_roundtrip on unavailable device");
+    }
+    if (prefix_counts.size() < 2 || exact_anchor_count == 0) {
+        return SeedLookupResult{};
+    }
+    if (inputs.slots == nullptr || inputs.positions == nullptr) {
+        throw VulkanRuntimeError("seed lookup missing resident index buffers");
+    }
+    const std::uint64_t minimizer_count = prefix_counts.size() - 1u;
+    constexpr std::uint32_t seed_local = 128u;
+    const std::uint64_t seed_groups =
+        (minimizer_count + seed_local - 1u) / seed_local;
+    if (seed_groups > features_.max_workgroup_count_x) {
+        throw VulkanRuntimeError("seed lookup dispatch exceeds maxComputeWorkGroupCount[0]");
+    }
+
+    const PhaseBPipeline seed_pipe =
+        get_phase_b_pipeline_locked(ShaderKind::seed_lookup_anchors, seed_local, 256u);
+
+    Buffer scratch = create_host_buffer(4u, kPhaseBBufferUsage);
+
+    Buffer uploaded_min_words;
+    const Buffer* min_words = inputs.device_minimizer_words;
+    if (min_words == nullptr) {
+        const std::uint64_t min_bytes = std::max<std::uint64_t>(
+            minimizer_device_bytes(inputs.minimizer_word_kind,
+                                   inputs.minimizer_words32_per_record, minimizer_count), 4u);
+        uploaded_min_words = create_device_buffer(min_bytes, kPhaseBBufferUsage);
+        if (uploaded_min_words.mapped != nullptr) {
+            std::memset(uploaded_min_words.mapped, 0,
+                        static_cast<std::size_t>(uploaded_min_words.bytes));
+        }
+        if (!inputs.host_minimizer_bytes.empty()) {
+            upload_locked(scratch, uploaded_min_words, inputs.host_minimizer_bytes,
+                          VK_ACCESS_SHADER_READ_BIT);
+        }
+        min_words = &uploaded_min_words;
+    }
+
+    Buffer prefix_buf = create_device_buffer(
+        std::max<std::uint64_t>(prefix_counts.size() * sizeof(std::uint32_t), 4u),
+        kPhaseBBufferUsage);
+    upload_locked(scratch, prefix_buf, std::as_bytes(prefix_counts), VK_ACCESS_SHADER_READ_BIT);
+
+    const std::uint64_t anchor_bytes = exact_anchor_count * std::uint64_t{24};
+    Buffer anchors_buf = create_device_buffer(
+        std::max<std::uint64_t>(anchor_bytes, 24u), kPhaseBBufferUsage);
+
+    const std::uint32_t sort_capacity = gpu_anchor_sort_capacity_;
+    const bool gpu_sort = sort_capacity > 0 && exact_anchor_count <= sort_capacity;
+    Buffer ranges_buf;
+    std::optional<PhaseBPipeline> sort_pipe;
+    if (gpu_sort) {
+        ranges_buf = create_device_buffer(sizeof(SortRangeWire), kPhaseBBufferUsage);
+        const SortRangeWire range{0u, static_cast<std::uint32_t>(exact_anchor_count)};
+        upload_locked(scratch, ranges_buf,
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(&range), sizeof(range)},
+            VK_ACCESS_SHADER_READ_BIT);
+        sort_pipe = get_phase_b_pipeline_locked(
+            ShaderKind::sort_anchors_bitonic, sort_capacity, 256u);
+    }
+
+    {
+        const std::array<VkBuffer, 5> seed_bufs{
+            min_words->buffer, inputs.slots->buffer, inputs.positions->buffer,
+            prefix_buf.buffer, anchors_buf.buffer};
+        bind_phase_b_descriptors_locked(seed_pipe, seed_bufs);
+        if (gpu_sort) {
+            const std::array<VkBuffer, 2> sort_bufs{anchors_buf.buffer, ranges_buf.buffer};
+            bind_phase_b_descriptors_locked(*sort_pipe, sort_bufs);
+        }
+    }
+
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(seed)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(seed)");
+
+    VkMemoryBarrier host_to_shader{};
+    host_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    host_to_shader.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    host_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &host_to_shader,
+                         0, nullptr, 0, nullptr);
+
+    const SeedLookupPush seed_push{
+        static_cast<std::uint32_t>(minimizer_count), inputs.minimizer_words32_per_record,
+        inputs.minimizer_word_kind, inputs.hash_shift, inputs.pos_bits,
+        static_cast<std::uint32_t>(query_len), kmer_size, inputs.slot_mask,
+        static_cast<std::uint32_t>(exact_anchor_count)};
+    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, seed_pipe.pipeline);
+    vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            seed_pipe.pipeline_layout, 0, 1, &seed_pipe.descriptor_set, 0, nullptr);
+    vkCmdPushConstants(command_buffer_, seed_pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(seed_push), &seed_push);
+    vkCmdDispatch(command_buffer_, static_cast<std::uint32_t>(seed_groups), 1, 1);
+
+    if (gpu_sort) {
+        VkMemoryBarrier shader_to_shader{};
+        shader_to_shader.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        shader_to_shader.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        shader_to_shader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &shader_to_shader,
+                             0, nullptr, 0, nullptr);
+        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, sort_pipe->pipeline);
+        vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                sort_pipe->pipeline_layout, 0, 1, &sort_pipe->descriptor_set, 0, nullptr);
+        vkCmdDispatch(command_buffer_, 1, 1, 1);
+    }
+
+    VkMemoryBarrier shader_to_host{};
+    shader_to_host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    shader_to_host.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    shader_to_host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &shader_to_host,
+                         0, nullptr, 0, nullptr);
+
+    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(seed)");
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command_buffer_;
+    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(seed)");
+    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(seed)");
+    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(seed)");
+
+    SeedLookupResult result;
+    result.count = exact_anchor_count;
+    result.host_bytes.resize(static_cast<std::size_t>(anchor_bytes));
+    download_locked(scratch, anchors_buf, std::span<std::byte>{
+        result.host_bytes.data(), result.host_bytes.size()});
+    if (!gpu_sort) {
+        cpu_sort_anchor_bytes_by_ref_bits(
+            std::span<std::byte>{result.host_bytes.data(), result.host_bytes.size()},
+            exact_anchor_count);
+    }
+
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(seed-post)");
+    chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return result;
 }
 
 }  // namespace bioseq::gpu::vulkan

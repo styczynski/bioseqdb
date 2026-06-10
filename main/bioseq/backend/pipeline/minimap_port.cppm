@@ -164,6 +164,11 @@ enum class MinimizerAlgorithmType : uint8_t {
     /// RESEARCH/ENGINEERING_REPORT_V2.md for the full evolution
     /// history (was TWO_STACK_NTHASH_V3 in the iteration log).
     TWO_STACK_NTHASH = 2,
+    /// DOC0307 Phase B — Vulkan minimizer sketch compatible with the scalar
+    /// `minimap_int` minimizers (reads packed `compact_sequence_range` storage
+    /// directly). Runtime-falls back to scalar when no usable Vulkan device
+    /// exists or `Minimap2Params::vulkan_enabled` is false.
+    VULKAN_MINIMAP_INT = 3,
 };
 
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
@@ -190,6 +195,7 @@ enum class MinimizerAlgorithmType : uint8_t {
         case MinimizerAlgorithmType::SCALAR:             return "Scalar Minimizers";
         case MinimizerAlgorithmType::SIMD_MINIMAP2_SLOW: return "SIMD Minimap2 (slow reference)";
         case MinimizerAlgorithmType::TWO_STACK_NTHASH:   return "Two-Stack nthash SIMD Minimizers";
+        case MinimizerAlgorithmType::VULKAN_MINIMAP_INT: return "Vulkan minimap-int minimizers";
     }
     return "unknown";
 }
@@ -318,6 +324,15 @@ struct Minimap2Params {
     /// bioseq.aligner.vulkan_enabled GUC / aligner_options override; never a
     /// magic environment variable (DOC0304 §7.1, §11).
     bool                          vulkan_enabled            = true;
+
+    /// DOC0307 Phase B — enable the Vulkan seed-hit lookup when Vulkan is on.
+    /// Runtime routing only (never a template parameter). When false (or
+    /// `vulkan_enabled == false`), seed hits use the existing CPU
+    /// `collect_seed_hits`.
+    bool                          vulkan_seed_hits_enabled  = true;
+    /// DOC0307 Phase B — cache GPU-resident minimizer index uploads while their
+    /// memory permit is held (batch/wave scoped). Runtime routing only.
+    bool                          vulkan_index_cache_enabled = true;
 
     /// Build ChainingParams from this Minimap2Params.
     ///

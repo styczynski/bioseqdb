@@ -820,6 +820,8 @@ build_params_from_gucs()
 			bioseq_aligner_minimizer_algorithm);
 	params.enable_profiling = bioseq_aligner_enable_profiling;
 	params.vulkan_enabled = bioseq_aligner_vulkan_enabled;
+	params.vulkan_seed_hits_enabled = bioseq_aligner_vulkan_seed_hits_enabled;
+	params.vulkan_index_cache_enabled = bioseq_aligner_vulkan_index_cache_enabled;
 	return params;
 }
 
@@ -974,13 +976,37 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 	}
 	++idx;
 	/*
-	 * Final field: vulkan_enabled (DOC0304 §7.4). Decoded as the trailing
-	 * boolean of bioseq_aligner_options; a NULL leaves the GUC-derived default
-	 * in place. No compatibility branch for the old composite shape — this
-	 * project has no stored-API compatibility requirement.
+	 * DOC0307 Phase B — minimizer_algorithm. Known-good ordinals:
+	 * 0=SCALAR, 1=SIMD_MINIMAP2_SLOW, 2=TWO_STACK_NTHASH, 3=VULKAN_MINIMAP_INT.
+	 */
+	if (idx < n_attrs && !nulls[idx]) {
+		const int32_t raw = DatumGetInt32(values[idx]);
+		if (raw >= 0 && raw <= 3) {
+			params.minimizer_algorithm =
+				static_cast<bioseq::simd::N_NEON::MinimizerAlgorithmType>(raw);
+		} else {
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("aligner_options.minimizer_algorithm out of range: %d (expected 0..3)", raw)));
+		}
+	}
+	++idx;
+	/*
+	 * vulkan_enabled (DOC0304 §7.4) — decoded as a boolean; a NULL leaves the
+	 * GUC-derived default in place.
 	 */
 	if (idx < n_attrs && !nulls[idx]) {
 		params.vulkan_enabled = DatumGetBool(values[idx]);
+	}
+	++idx;
+	/* DOC0307 Phase B — vulkan_seed_hits_enabled. */
+	if (idx < n_attrs && !nulls[idx]) {
+		params.vulkan_seed_hits_enabled = DatumGetBool(values[idx]);
+	}
+	++idx;
+	/* DOC0307 Phase B — vulkan_index_cache_enabled. */
+	if (idx < n_attrs && !nulls[idx]) {
+		params.vulkan_index_cache_enabled = DatumGetBool(values[idx]);
 	}
 	ReleaseTupleDesc(tupdesc);
 	/* Free the detoasted copy if PG_DETOAST_DATUM actually copied. */

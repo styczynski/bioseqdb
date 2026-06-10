@@ -176,6 +176,13 @@ bool bioseq_aligner_enable_profiling = false;
  * automatically when no usable Vulkan device exists (DOC0304 §7.4).
  */
 bool bioseq_aligner_vulkan_enabled = true;
+/*
+ * DOC0307 Phase B — enable the Vulkan seed-hit lookup and the GPU-resident
+ * minimizer index upload cache when Vulkan is enabled. Both default to true and
+ * fall back to the CPU seed path automatically when no usable device exists.
+ */
+bool bioseq_aligner_vulkan_seed_hits_enabled = true;
+bool bioseq_aligner_vulkan_index_cache_enabled = true;
 
 /*
  * bioseq_init is the module's top-level initialiser. It wires up the GUC
@@ -737,12 +744,23 @@ bioseq_guc_init()
 		{ "scalar",             0, false },
 		{ "simd_minimap2_slow", 1, false },
 		{ "two_stack_nthash",   2, false },
+		{ "vulkan_minimap_int", 3, false },
 		{ NULL, 0, false }
 	};
 	DefineCustomEnumVariable("bioseq.aligner.minimizer_algorithm",
-							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash.",
+							 "Minimizer algorithm: scalar, simd_minimap2_slow, two_stack_nthash, vulkan_minimap_int.",
 							 NULL, &bioseq_aligner_minimizer_algorithm, 0,
 							 minimizer_algorithm_options,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	/* DOC0307 Phase B — Vulkan seed-hit lookup + GPU-resident index upload cache. */
+	DefineCustomBoolVariable("bioseq.aligner.vulkan_seed_hits_enabled",
+							 "Enable Vulkan seed-hit lookup when Vulkan is enabled.",
+							 NULL, &bioseq_aligner_vulkan_seed_hits_enabled, true,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("bioseq.aligner.vulkan_index_cache_enabled",
+							 "Cache GPU-resident minimizer index uploads while their memory permit is held.",
+							 NULL, &bioseq_aligner_vulkan_index_cache_enabled, true,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

@@ -757,6 +757,111 @@ TEST_CASE("DOC0256 — dispatch_chain rejects rvalue args at compile time",
     SUCCEED();
 }
 
+// ============================================================================
+// DOC0307 §13 (tests 11/13) — VULKAN_MINIMAP_INT end-to-end pipe parity.
+// ============================================================================
+//
+// The full Vulkan front-end (GPU minimizers + GPU seed-hit lookup) must produce
+// the same primary match coordinates as the scalar CPU path; with Vulkan
+// disabled it must fall back to scalar with identical rows. On a machine with no
+// usable device the GPU kernels runtime-fall back, so both arms equal the CPU
+// reference (this also exercises the no-device fallback coverage of test 13).
+namespace doc0307_e2e {
+
+using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+using range_t  = compact_sequence_range<dna4_u64>;
+
+[[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed) {
+    std::vector<seq::dna4> v(n);
+    std::uint64_t s = seed;
+    for (std::size_t i = 0; i < n; ++i) {
+        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+        seq::dna4 c;
+        c.assign_rank(static_cast<decltype(c.to_rank())>((s >> 33) & 0x3));
+        v[i] = c;
+    }
+    return v;
+}
+
+[[nodiscard]] MatchResultCollection run(
+    std::vector<seq::dna4> qd, std::vector<seq::dna4> td,
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
+{
+    range_t q_range(qd);
+    range_t t_range(td);
+    auto lazy_q = bioseq::storage::make_lazy_in_memory(q_range);
+    auto lazy_t = bioseq::storage::make_lazy_in_memory(t_range);
+    return ::bioseq::simd::HWY_NAMESPACE::minimap_port(lazy_q, lazy_t, params);
+}
+
+/// Coordinate-only canonicalisation (test 11 compares match coordinates; CIGAR
+/// / mapq tie-breaks are allowed to differ when equal-ref_bits anchors reorder).
+[[nodiscard]] std::vector<std::string> coords(const MatchResultCollection& c) {
+    std::vector<std::string> out;
+    for (const auto& m : c.results) {
+        out.push_back(fmt::format("qs={} qe={} rev={} ts={} te={}",
+                                  m.query_start, m.query_end, m.is_reverse,
+                                  m.target_start, m.target_end));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+}  // namespace doc0307_e2e
+
+TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
+          "[vulkan][phase-b][pipe]") {
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+
+    auto target = doc0307_e2e::make_dna4(4000, 0xC0FFEEu);
+    // Query = a forward sub-region of the target (a guaranteed match).
+    std::vector<seq::dna4> query(target.begin() + 500, target.begin() + 1300);
+
+    Minimap2Params cpu;
+    cpu.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    cpu.chaining_algorithm = ChainingAlgorithmType::SIMD_MM2;
+    cpu.base_alignment_algorithm = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+    const auto cpu_res = doc0307_e2e::run(query, target, cpu);
+
+    Minimap2Params gpu = cpu;
+    gpu.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    gpu.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    gpu.vulkan_enabled = true;
+    gpu.vulkan_seed_hits_enabled = true;
+    const auto gpu_res = doc0307_e2e::run(query, target, gpu);
+
+    REQUIRE_FALSE(cpu_res.results.empty());
+    REQUIRE_FALSE(gpu_res.results.empty());
+    REQUIRE(doc0307_e2e::coords(cpu_res) == doc0307_e2e::coords(gpu_res));
+}
+
+TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false == scalar",
+          "[vulkan][phase-b][pipe]") {
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+
+    auto target = doc0307_e2e::make_dna4(3000, 0x1234567u);
+    std::vector<seq::dna4> query(target.begin() + 200, target.begin() + 900);
+
+    Minimap2Params scalar;
+    scalar.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
+    scalar.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
+    const auto scalar_res = doc0307_e2e::run(query, target, scalar);
+
+    Minimap2Params disabled;
+    disabled.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+    disabled.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
+    disabled.vulkan_enabled = false;   // forces scalar fallback before touching Runtime
+    const auto disabled_res = doc0307_e2e::run(query, target, disabled);
+
+    REQUIRE_FALSE(scalar_res.results.empty());
+    REQUIRE(doc0307_e2e::coords(scalar_res) == doc0307_e2e::coords(disabled_res));
+}
+
 }  // namespace bioseq::simd::HWY_NAMESPACE::pipe
 
 HWY_AFTER_NAMESPACE();

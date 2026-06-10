@@ -106,6 +106,10 @@ import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 tru
 import bioseq_indexing.type;
 import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
 import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
+import bioseq_gpu.vulkan.runtime;           // DOC0307 Phase B — Runtime::instance() for the GPU seed path
+import bioseq_sequences.kmers.vulkan;       // DOC0307 Phase B — Vulkan minimizer sketch + device span
+import bioseq_indexing.minimizer_vulkan;    // DOC0307 Phase B — GPU-resident index view + cache
+import bioseq_sequences.seeding.vulkan;     // DOC0307 Phase B — Vulkan seed-hit lookup
 import bioseq_parallelism.mode;
 import bioseq_parallelism.concepts;
 import bioseq_parallelism.pool;
@@ -246,6 +250,35 @@ struct StageDescription;
 struct PipelineDescription;
 
 // =============================================================================
+// DOC0307 §5.2 — narrow minimizer-batch shape carrying an optional device span.
+// =============================================================================
+//
+// One additional stage-shape on top of the DOC0254 matrix. It borrows the host
+// minimizers from the arena slab and owns the optional GPU device minimizer
+// handle through `VulkanDeviceMinimizerSpan::owner`, so the all-Vulkan
+// sketch+seed path avoids a second query-minimizer upload. CPU minimizer
+// kernels keep using the existing `std::span<const MinimizerT>` path.
+template <class MinimizerT>
+struct MinimizerBatchView {
+    using value_type = MinimizerT;
+
+    std::span<const MinimizerT> host{};
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>> device{};
+
+    [[nodiscard]] const MinimizerT* data() const noexcept { return host.data(); }
+    [[nodiscard]] std::size_t size() const noexcept { return host.size(); }
+    [[nodiscard]] std::span<const MinimizerT> as_span() const noexcept { return host; }
+};
+
+template <class T>
+struct is_minimizer_batch_view : std::false_type {};
+template <class M>
+struct is_minimizer_batch_view<MinimizerBatchView<M>> : std::true_type {};
+template <class T>
+inline constexpr bool is_minimizer_batch_view_v =
+    is_minimizer_batch_view<std::remove_cvref_t<T>>::value;
+
+// =============================================================================
 // DOC0254 §7 — Concept-driven sink validation.
 // =============================================================================
 
@@ -283,9 +316,27 @@ concept PairBatchSink = requires (S& sink, std::span<E1> a, std::span<E2> b) {
  * (const-reference) target index.  SeedHitStage is the canonical consumer.
  */
 template <class S, class E, class IndexT>
-concept IndexedBatchSink = requires (S& sink, std::span<E> a, const IndexT& idx) {
-    { sink.on_batch_with_index(a, idx) } -> std::same_as<void>;
-    { sink.on_completed() }              -> std::same_as<void>;
+concept IndexedBatchSink = requires (S& sink, std::span<E> a, const IndexT& idx,
+                                     bioseq::indexing::GpuIndexCacheIdentity identity) {
+    { sink.on_batch_with_index(a, idx, identity) } -> std::same_as<void>;
+    { sink.on_completed() }                        -> std::same_as<void>;
+};
+
+/// DOC0307 §5.2 — minimizer-batch sink (MinimizerStage → IndexStage hand-off).
+template <class S, class MinimizerT>
+concept MinimizerBatchSink = requires (S& sink, MinimizerBatchView<MinimizerT> batch) {
+    { sink.on_minimizer_batch(batch) } -> std::same_as<void>;
+    { sink.on_completed() }            -> std::same_as<void>;
+};
+
+/// DOC0307 §5.2 — index-decorated minimizer-batch sink (IndexStage →
+/// SeedHitStage hand-off carrying the GPU index cache identity).
+template <class S, class MinimizerT, class IndexT>
+concept IndexedMinimizerBatchSink =
+requires (S& sink, MinimizerBatchView<MinimizerT> batch, const IndexT& idx,
+          bioseq::indexing::GpuIndexCacheIdentity identity) {
+    { sink.on_minimizer_batch_with_index(batch, idx, identity) } -> std::same_as<void>;
+    { sink.on_completed() }                                      -> std::same_as<void>;
 };
 
 // =============================================================================
@@ -356,13 +407,43 @@ public:
 
     template <class E, class IndexT>
     [[nodiscard, gnu::always_inline]]
-    EmittedToken<Sink> emit_batch_with_index(std::span<E>  data,
-                                             const IndexT& index_ref) && {
+    EmittedToken<Sink> emit_batch_with_index(
+        std::span<E>  data,
+        const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) && {
         static_assert(IndexedBatchSink<Sink, E, IndexT>,
             "EmitToken::emit_batch_with_index: downstream sink does not "
-            "implement on_batch_with_index(std::span<E>, IndexT const&).");
+            "implement on_batch_with_index(std::span<E>, IndexT const&, identity).");
         DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
-        sink_ptr_->on_batch_with_index(data, index_ref);
+        sink_ptr_->on_batch_with_index(data, index_ref, identity);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+    // DOC0307 §5.2 — narrow minimizer-batch emit (carries optional device span).
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_minimizer_batch(MinimizerBatchView<MinimizerT> batch) && {
+        static_assert(MinimizerBatchSink<Sink, MinimizerT>,
+            "EmitToken::emit_minimizer_batch: downstream sink does not implement "
+            "on_minimizer_batch.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        sink_ptr_->on_minimizer_batch(batch);
+        sink_ptr_ = nullptr;
+        return EmittedToken<Sink>::make();
+    }
+
+    template <class MinimizerT, class IndexT>
+    [[nodiscard, gnu::always_inline]]
+    EmittedToken<Sink> emit_minimizer_batch_with_index(
+        MinimizerBatchView<MinimizerT> batch,
+        const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) && {
+        static_assert(IndexedMinimizerBatchSink<Sink, MinimizerT, IndexT>,
+            "EmitToken::emit_minimizer_batch_with_index: downstream sink does not "
+            "implement on_minimizer_batch_with_index.");
+        DEBUG_ASSERT(sink_ptr_ != nullptr, "EmitToken consumed twice.");
+        sink_ptr_->on_minimizer_batch_with_index(batch, index_ref, identity);
         sink_ptr_ = nullptr;
         return EmittedToken<Sink>::make();
     }
@@ -492,9 +573,25 @@ struct Stage {
     }
 
     template <class B, class IndexT>
-    [[gnu::always_inline]] void on_batch_with_index(B&& batch, const IndexT& index_ref) {
+    [[gnu::always_inline]] void on_batch_with_index(
+        B&& batch, const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) {
         (void) self_.template process_with_index<Cep>(
-            std::forward<B>(batch), index_ref, EmitToken<Sink>{sink_});
+            std::forward<B>(batch), index_ref, identity, EmitToken<Sink>{sink_});
+    }
+
+    // DOC0307 §5.2 — forwarders for the narrow minimizer-batch shape.
+    template <class MinimizerT>
+    [[gnu::always_inline]] void on_minimizer_batch(MinimizerBatchView<MinimizerT> batch) {
+        (void) self_.template process<Cep>(batch, EmitToken<Sink>{sink_});
+    }
+
+    template <class MinimizerT, class IndexT>
+    [[gnu::always_inline]] void on_minimizer_batch_with_index(
+        MinimizerBatchView<MinimizerT> batch, const IndexT& index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity identity) {
+        (void) self_.template process_with_index<Cep>(
+            batch, index_ref, identity, EmitToken<Sink>{sink_});
     }
 
     [[gnu::always_inline]] void on_completed() noexcept {
@@ -975,6 +1072,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
     struct kernel_type {
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -985,6 +1083,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::Scalar, W, K, MinimizerT>(
@@ -1014,6 +1113,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
     struct kernel_type {
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -1024,6 +1124,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::S
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::Simd, W, K, MinimizerT>(
@@ -1053,6 +1154,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
     struct kernel_type {
         template <class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range,
             std::size_t window_size, std::size_t kmer_size)
         {
@@ -1063,6 +1165,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
         template <std::size_t W, std::size_t K,
                   class MinimizerT, class Collector, class Range>
         [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
             Collector& collector, Range& range)
         {
             minimizer_dispatch_constexpr<MinKernelKind::TwoStack, W, K, MinimizerT>(
@@ -1081,6 +1184,80 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
             return {
                 {"vectorised", "true"},
                 {"two_stack",  "true"},
+                {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
+            };
+        }
+    };
+};
+
+/// DOC0307 Phase B — Vulkan minimap-int minimizer extraction. Reads packed
+/// `compact_sequence_range` storage directly on the GPU and falls back to the
+/// scalar mm-sketch when Vulkan is disabled or the GPU cannot run the shape.
+/// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
+/// sketch+seed path reuses it without a second upload (`may_emit_device_minimizers`).
+template <>
+struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT> {
+    struct kernel_type {
+        static constexpr bool may_emit_device_minimizers = true;
+
+        template <class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Collector& collector, Range& range,
+            std::size_t window_size, std::size_t kmer_size)
+        {
+            if (!params.vulkan_enabled) {
+                minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
+                    collector, range, window_size, kmer_size);
+                return;
+            }
+            if (!bioseq::gpu::vulkan::collect_minimizers_vulkan<MinimizerT>(
+                    collector, range, window_size, kmer_size))
+            {
+                // Generic, behavior-preserving fallback (dna5 N-reset intact).
+                minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
+                    collector, range, window_size, kmer_size);
+            }
+        }
+
+        template <std::size_t W, std::size_t K,
+                  class MinimizerT, class Collector, class Range>
+        [[gnu::always_inline]] static void call_constexpr(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Collector& collector, Range& range)
+        {
+            call<MinimizerT>(params, collector, range, W, K);
+        }
+
+        template <class MinimizerT, class Range>
+        [[nodiscard]] static std::optional<
+            bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT>>
+        call_result(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
+            Range& range, std::size_t window_size, std::size_t kmer_size)
+        {
+            if (!params.vulkan_enabled) return std::nullopt;
+            return bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+                range, window_size, kmer_size);
+        }
+
+        [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
+            return ::bioseq::simd::HWY_NAMESPACE::minimizer_algorithm_name(
+                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT);
+        }
+        static void populate_runtime_params(
+            const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& p,
+            std::vector<NamedProperty>& props) noexcept
+        {
+            props.push_back({"accelerator", "vulkan"});
+            props.push_back({"fallback", "scalar-mm-sketch"});
+            props.push_back({"vulkan_enabled", p.vulkan_enabled ? "true" : "false"});
+        }
+        template <is_constexpr_aligner_params Cep>
+        [[nodiscard]] static std::vector<NamedProperty> static_properties() {
+            return {
+                {"hash", "minimap-int"},
+                {"alphabet_dispatch", "runtime-shader-key"},
                 {"specialised", Cep::generic_fallback ? "fallback" : "specialised"},
             };
         }
@@ -1461,6 +1638,10 @@ struct MinimizerStage
     const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
     int32_t runtime_w;
     int32_t runtime_k;
+    // DOC0307 §5.1 — runtime flags so the Vulkan kernel can gate on
+    // `vulkan_enabled` without touching Runtime when Vulkan is off. CPU kernels
+    // ignore it.
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
 
     // DOC0254 §5.4 / §8.4: the kernel writes directly into the per-query
     // arena slab via `sketch_collector_arena_adapter`, eliminating the
@@ -1478,6 +1659,38 @@ struct MinimizerStage
             ? static_cast<std::size_t>(runtime_k)
             : Cep::kmer_len;
 
+        // DOC0307 §5.1 — device-minimizer path: only the Vulkan kernel exposes
+        // `call_result`. When it returns a result, copy the host minimizers into
+        // the arena slab and forward the resident device span as stage-local
+        // metadata so SeedHitStage can skip a second query-minimizer upload.
+        if constexpr (requires { Kernel::may_emit_device_minimizers; }) {
+            if constexpr (Kernel::may_emit_device_minimizers) {
+                if (auto gpu_result =
+                        Kernel::template call_result<MinimizerT>(
+                            params, *query_seq_, window_size, kmer_size))
+                {
+                    auto device_slab = make_arena_slab<MinimizerT>();
+                    device_slab.reserve(gpu_result->host_minimizers.size());
+                    if (!gpu_result->host_minimizers.empty()) {
+                        std::memcpy(device_slab.data(),
+                                    gpu_result->host_minimizers.data(),
+                                    gpu_result->host_minimizers.size() * sizeof(MinimizerT));
+                    }
+                    device_slab.resize(gpu_result->host_minimizers.size());
+                    MinimizerBatchView<MinimizerT> batch{
+                        .host = device_slab.as_const_span(),
+                        .device = std::optional<
+                            bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>{
+                                gpu_result->device_span()},
+                    };
+                    // Host-result permit released now that the slab owns the
+                    // copy; `batch.device` retains the resident permit (§6.1).
+                    gpu_result->host_permit.reset();
+                    return std::move(token).emit_minimizer_batch(batch);
+                }
+            }
+        }
+
         auto sketches_slab = make_arena_slab<MinimizerT>();
         sketches_slab.reserve(detail::estimated_sketch_count(
             query_seq_->bp_size(), static_cast<int32_t>(window_size)));
@@ -1486,10 +1699,10 @@ struct MinimizerStage
 
         if constexpr (!Cep::generic_fallback) {
             Kernel::template call_constexpr<Cep::window_len, Cep::kmer_len, MinimizerT>(
-                collector, *query_seq_);
+                params, collector, *query_seq_);
         } else {
             Kernel::template call<MinimizerT>(
-                collector, *query_seq_, window_size, kmer_size);
+                params, collector, *query_seq_, window_size, kmer_size);
         }
 
         return std::move(token).emit_batch(std::span<const MinimizerT>{
@@ -1532,10 +1745,21 @@ struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downst
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& sketches, EmitToken<Sink>&& token) {
-        using ElemT = std::remove_const_t<
-            typename std::remove_cvref_t<B>::value_type>;
-        return std::move(token).emit_batch_with_index(
-            std::span<const ElemT>{sketches.data(), sketches.size()}, *index_);
+        // DOC0307 §5.2 — for a stable whole in-memory target the cache key uses
+        // pointer identity (the batch/wave keeps it alive); assembled/segmented
+        // indexes pass a nonzero identity through the dedicated emit path. The
+        // pipe's per-batch in-memory index is stable, so `{}` is the intended
+        // identity for both stage shapes here.
+        const bioseq::indexing::GpuIndexCacheIdentity identity{};
+        if constexpr (is_minimizer_batch_view_v<B>) {
+            return std::move(token).emit_minimizer_batch_with_index(
+                std::forward<B>(sketches), *index_, identity);
+        } else {
+            using ElemT = std::remove_const_t<
+                typename std::remove_cvref_t<B>::value_type>;
+            return std::move(token).emit_batch_with_index(
+                std::span<const ElemT>{sketches.data(), sketches.size()}, *index_, identity);
+        }
     }
 
     template <is_constexpr_aligner_params Cep>
@@ -1562,11 +1786,35 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
 
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
     sequence_size_t                               query_len;
+    // DOC0307 §5.2 — batch/segment-wave-scoped GPU index cache. The outer
+    // wave creates one cache, passes `&cache` here, and clears it at wave end.
+    // Null on single-shot paths (then the GPU seed path uploads uncached).
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr;
+
+    // DOC0307 §5.2 — host/device accessors for both the std::span CPU shape and
+    // the MinimizerBatchView device shape.
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static std::span<const MinimizerT>
+    sketch_span_of(const std::span<const MinimizerT>& s) noexcept { return s; }
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static std::span<const MinimizerT>
+    sketch_span_of(const MinimizerBatchView<MinimizerT>& b) noexcept { return b.host; }
+
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
+    device_span_of(const std::span<const MinimizerT>&) noexcept { return std::nullopt; }
+    template <class MinimizerT>
+    [[nodiscard, gnu::always_inline]] static
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>>
+    device_span_of(const MinimizerBatchView<MinimizerT>& b) noexcept { return b.device; }
 
     template <is_constexpr_aligner_params Cep, class B, class IndexT, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process_with_index(
-        B&& sketches, const IndexT& target_index_ref, EmitToken<Sink>&& token)
+        B&& sketches, const IndexT& target_index_ref,
+        bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
+        EmitToken<Sink>&& token)
     {
         const int32_t kmer_size = Cep::generic_fallback
             ? params.kmer_size
@@ -1575,18 +1823,53 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         using MinimizerT = std::remove_const_t<
             typename std::remove_cvref_t<B>::value_type>;
 
+        auto sketch_span = sketch_span_of<MinimizerT>(sketches);
+        auto device_span = device_span_of<MinimizerT>(sketches);
+
         // Pre-size the slab from the tight per-query estimate
         // (DOC0249 §21.4 `estimated_anchor_count`); growth past the estimate
         // doubles the slab inside the same Arena::Chain scope.
         auto anchors_slab = make_arena_slab<Anchor>();
         anchors_slab.reserve(detail::estimated_anchor_count(
-            sketches.size(),
+            sketch_span.size(),
             static_cast<std::size_t>(query_len),
             static_cast<std::size_t>(target_index_ref.target_length()),
             kmer_size));
 
+        // DOC0307 §5.2 — attempt the GPU seed-hit lookup before the CPU path.
+        // Only the concrete MinimizerHashmapFragmentIndex carries the GPU view.
+        if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+            if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
+                          bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+                auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+                if (runtime.usable()) {
+                    auto key = bioseq::indexing::make_gpu_index_cache_key(
+                        target_index_ref, gpu_index_identity);
+                    auto resident_index = gpu_index_cache == nullptr
+                        ? nullptr
+                        : gpu_index_cache->get_or_upload(
+                              runtime, target_index_ref, key,
+                              params.vulkan_index_cache_enabled);
+                    if (bioseq::gpu::vulkan::collect_seed_hits_vulkan<MinimizerT>(
+                            sketch_span,
+                            device_span,
+                            target_index_ref,
+                            resident_index,
+                            params.vulkan_enabled,
+                            query_len,
+                            params.max_occ,
+                            kmer_size,
+                            anchors_slab))
+                    {
+                        return std::move(token).emit_batch(
+                            std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
+                    }
+                }
+            }
+        }
+
         collect_seed_hits<MinimizerT>(
-            std::span<const MinimizerT>{sketches.data(), sketches.size()},
+            sketch_span,
             target_index_ref,
             query_len, params.max_occ, kmer_size,
             anchors_slab);
@@ -2066,11 +2349,12 @@ template <is_constexpr_aligner_params Cep,
     MatchResultCollection&            output_collection,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     sequence_size_t                   query_len,
-    sequence_size_t                   target_len)
+    sequence_size_t                   target_len,
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr)
 {
     auto tail = make_pipeline<Cep>(
         IndexStage<IndexT>{ {}, &target_index },
-        SeedHitStage{ {}, params, query_len },
+        SeedHitStage{ {}, params, query_len, gpu_index_cache },
         ChainStage<kernel_t<CA>>{ {}, params.to_chaining_params() },
         RegionStage{ {}, query_len },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
@@ -2088,7 +2372,7 @@ template <is_constexpr_aligner_params Cep,
 
     if constexpr (EP == EntryPoint::FromSequence) {
         MinimizerStage<MinimizerT, kernel_t<MA>, QR, Scanner> head{
-            {}, &query_seq, params.window_size, params.kmer_size };
+            {}, &query_seq, params.window_size, params.kmer_size, params };
         return head.template attach<Cep>(std::move(tail));
     } else {
         return tail;
@@ -2151,12 +2435,28 @@ template <is_constexpr_aligner_params Cep,
     const sequence_size_t target_len = target_seq.bp_size();
     const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
 
+    // DOC0307 §4.4/§5.2 — one GPU index cache for the whole batch wave, shared
+    // across queries that look up the same target index. Gated on
+    // `vulkan_enabled` so the disabled path never touches `Runtime::instance()`.
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache> gpu_index_cache;
+    if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+        bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+        std::uint64_t limit = gpu_rt.usable()
+            ? gpu_rt.features().device_local_bytes / 2u
+            : (std::uint64_t{512} << 20);
+        if (limit < (std::uint64_t{512} << 20)) limit = std::uint64_t{512} << 20;
+        if (limit > (std::uint64_t{4} << 30)) limit = std::uint64_t{4} << 30;
+        gpu_index_cache.emplace(limit);
+    }
+    bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
+        gpu_index_cache ? &*gpu_index_cache : nullptr;
+
     // Empty proto for the FromSequence path's unused minimizers argument.
     static const std::vector<MinimizerT> empty_minimizers_proto{};
 
     auto run_one_query =
         [target_len, &query_seqs, &query_minimizers_per_query, &target_seq,
-         &target_index, &scoring_matrix, &params](std::size_t qi) {
+         &target_index, &scoring_matrix, &params, gpu_index_cache_ptr](std::size_t qi) {
         const auto&   query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
@@ -2177,7 +2477,7 @@ template <is_constexpr_aligner_params Cep,
 
         auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
             query_seq, target_seq, mins_for_this_query, target_index,
-            scoring_matrix, out, params, query_len, target_len);
+            scoring_matrix, out, params, query_len, target_len, gpu_index_cache_ptr);
 
         if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
             pipeline.on_batch(std::span<const MinimizerT>{
@@ -2218,6 +2518,10 @@ template <is_constexpr_aligner_params Cep,
         }
     }
 
+    // DOC0307 §4.4 — release the wave's resident GPU index handles.
+    if (gpu_index_cache) {
+        gpu_index_cache->clear();
+    }
     return out_per_query;
 }
 
@@ -2580,7 +2884,8 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
     using value_list = value_sequence<target_t,
         target_t::SCALAR,
         target_t::SIMD_MINIMAP2_SLOW,
-        target_t::TWO_STACK_NTHASH>;
+        target_t::TWO_STACK_NTHASH,
+        target_t::VULKAN_MINIMAP_INT>;
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
@@ -3098,14 +3403,14 @@ struct sketch_leaf {
         "sketch_leaf: MA must be MinimizerAlgorithmType (from ma_step).");
 
     [[gnu::always_inline]] static void call(
-        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& /*params*/,
+        const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
         Collector& collector, Range& range,
         const std::size_t& window_len, const std::size_t& kmer_len)
     {
         using Kernel = typename ::bioseq::simd::HWY_NAMESPACE::pipe::
             algorithm_traits<MA>::kernel_type;
         Kernel::template call<MinimizerT>(
-            collector, range, window_len, kmer_len);
+            params, collector, range, window_len, kmer_len);
     }
 };
 
@@ -3468,6 +3773,59 @@ private:
     std::map<std::size_t, PendingFragmentBuild<MinimizerT>> pending_{};
 };
 
+// =============================================================================
+// DOC0307 §5.3 — query sketch for persistent-index bucket selection.
+// =============================================================================
+//
+// Holds the query minimizers produced for persistent-index bucket filtering,
+// keeping the optional GPU host-result permit and device span alive for the
+// caller's lifetime. The host vector feeds the existing assembly/filter helpers
+// unchanged; the Vulkan branch sketches the query on the GPU so the segmented
+// path's seed lookup consumes byte-identical minimizers.
+template <class MinimizerT>
+struct BudgetedSketchVector {
+    std::vector<MinimizerT> minimizers;
+    std::optional<bioseq::parallelism::MemoryPermit> permit;
+    std::optional<bioseq::gpu::vulkan::VulkanDeviceMinimizerSpan<MinimizerT>> device;
+
+    [[nodiscard]] std::span<const MinimizerT> as_span() const noexcept {
+        return minimizers;
+    }
+};
+
+template <class MinimizerT, class QuerySeq>
+[[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
+    QuerySeq& query_seq, const Minimap2Params& params, std::size_t w, std::size_t k)
+{
+    if (params.vulkan_enabled
+        && params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
+    {
+        if (auto gpu_sketch =
+                bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+                    query_seq, w, k))
+        {
+            return BudgetedSketchVector<MinimizerT>{
+                .minimizers = std::move(gpu_sketch->host_minimizers),
+                .permit = std::move(gpu_sketch->host_permit),
+                .device = gpu_sketch->device_span(),
+            };
+        }
+    }
+
+    sketch_collector_t<MinimizerT> query_collector;
+    query_collector.reserve(query_seq.bp_size() / std::max<std::size_t>(w, 1) + 64);
+    pipe::minimizer_dispatch_range<MinimizerT>(
+        query_collector, query_seq, 0,
+        (query_seq.bp_size() + QuerySeq::traits::letters_per_unit - 1)
+            / QuerySeq::traits::letters_per_unit,
+        w, k);
+    return BudgetedSketchVector<MinimizerT>{
+        .minimizers = std::move(query_collector).extract_sketches_data(),
+        .permit = std::nullopt,
+        .device = std::nullopt,
+    };
+}
+
 template <supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
           class Scanner = bioseq::storage::sequence_scanner_none<
@@ -3494,15 +3852,12 @@ template <supports_compact_sequence_range QueryRange,
 
     // (1) Sketch the query ONCE as MinimapSketchData (query < 2^28 bp; its
     //     positions fit the 28-bit field). Same kmer hashing as the target, so
-    //     `collect_seed_hits` matches identically.
-    constexpr std::size_t q_lpu =
-        compact_sequence_range<QueryRange>::traits::letters_per_unit;
-    const sequence_size_t q_units = (query_len + q_lpu - 1) / q_lpu;
-    sketch_collector_t<MinimizerT> query_collector;
-    query_collector.reserve(query_len / std::max<std::size_t>(w, 1) + 64);
-    pipe::minimizer_dispatch_range<MinimizerT>(query_collector, query_seq, 0, q_units, w, k);
-    const std::vector<MinimizerT> query_minimizers =
-        std::move(query_collector).extract_sketches_data();
+    //     `collect_seed_hits` matches identically. DOC0307 §5.3 — the helper
+    //     sketches on the GPU when VULKAN_MINIMAP_INT is selected (byte-identical
+    //     minimizers) and otherwise uses the scalar CPU sketch.
+    auto query_sketch =
+        sketch_query_for_index_selection<MinimizerT>(query_seq, params, w, k);
+    const std::vector<MinimizerT>& query_minimizers = query_sketch.minimizers;
     boost::unordered_flat_set<std::uint64_t> query_kmer_filter;
     query_kmer_filter.reserve(query_minimizers.size());
     for (const MinimizerT& minimizer : query_minimizers) {
