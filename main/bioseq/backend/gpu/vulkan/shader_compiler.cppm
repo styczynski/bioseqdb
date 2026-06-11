@@ -43,6 +43,26 @@ enum class ShaderKind : std::uint8_t {
     minimizer_emit_exact,
     seed_lookup_anchors,
     sort_anchors_bitonic,
+    // DOC0310 Phase C — resident two-submit frontend kernels. The sketch family
+    // shares one tile-replay body driven by a runtime `emit_mode` push field;
+    // the prefix-scan, radix-sort, GPU-index-build, seed, and chain-range
+    // kernels each have their own body (DOC0310 §8–§15).
+    phase_c_sketch_tile,
+    phase_c_sketch_emit_flags,
+    phase_c_sketch_emit_carry,
+    phase_c_prefix_scan_block,
+    phase_c_prefix_scan_add,
+    phase_c_sketch_emit_words,
+    phase_c_seed_count,
+    phase_c_seed_emit,
+    phase_c_sort_radix_histogram,
+    phase_c_sort_radix_scan,
+    phase_c_sort_radix_scatter,
+    phase_c_index_mark_runs,
+    phase_c_index_emit_buckets,
+    phase_c_index_claim_slots,
+    phase_c_index_emit_slots,
+    phase_c_chain_range_build,
 };
 
 /// The descriptor-set layout each shader needs. Phase A's fixed four-storage-
@@ -54,6 +74,14 @@ enum class DescriptorLayoutKind : std::uint8_t {
     minimizer_emit_exact,
     seed_lookup,
     anchor_sort,
+    // DOC0310 §8 — reusable Phase C layouts. One layout per kernel family;
+    // kernels that bind the same buffers share a layout.
+    phase_c_sketch,
+    phase_c_scan,
+    phase_c_seed,
+    phase_c_sort,
+    phase_c_index,
+    phase_c_chain_range,
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -66,6 +94,13 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::minimizer_emit_exact:  return 3;
         case DescriptorLayoutKind::seed_lookup:           return 5;
         case DescriptorLayoutKind::anchor_sort:           return 2;
+        // DOC0310 Phase C layouts.
+        case DescriptorLayoutKind::phase_c_sketch:        return 8;
+        case DescriptorLayoutKind::phase_c_scan:          return 3;
+        case DescriptorLayoutKind::phase_c_seed:          return 8;
+        case DescriptorLayoutKind::phase_c_sort:          return 5;
+        case DescriptorLayoutKind::phase_c_index:         return 7;
+        case DescriptorLayoutKind::phase_c_chain_range:   return 6;
     }
     return 0;
 }
@@ -80,6 +115,22 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::minimizer_emit_exact:  return DescriptorLayoutKind::minimizer_emit_exact;
         case ShaderKind::seed_lookup_anchors:   return DescriptorLayoutKind::seed_lookup;
         case ShaderKind::sort_anchors_bitonic:  return DescriptorLayoutKind::anchor_sort;
+        case ShaderKind::phase_c_sketch_tile:
+        case ShaderKind::phase_c_sketch_emit_flags:
+        case ShaderKind::phase_c_sketch_emit_carry:
+        case ShaderKind::phase_c_sketch_emit_words:   return DescriptorLayoutKind::phase_c_sketch;
+        case ShaderKind::phase_c_prefix_scan_block:
+        case ShaderKind::phase_c_prefix_scan_add:     return DescriptorLayoutKind::phase_c_scan;
+        case ShaderKind::phase_c_seed_count:
+        case ShaderKind::phase_c_seed_emit:           return DescriptorLayoutKind::phase_c_seed;
+        case ShaderKind::phase_c_sort_radix_histogram:
+        case ShaderKind::phase_c_sort_radix_scan:
+        case ShaderKind::phase_c_sort_radix_scatter:  return DescriptorLayoutKind::phase_c_sort;
+        case ShaderKind::phase_c_index_mark_runs:
+        case ShaderKind::phase_c_index_emit_buckets:
+        case ShaderKind::phase_c_index_claim_slots:
+        case ShaderKind::phase_c_index_emit_slots:    return DescriptorLayoutKind::phase_c_index;
+        case ShaderKind::phase_c_chain_range_build:   return DescriptorLayoutKind::phase_c_chain_range;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -93,6 +144,23 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::minimizer_emit_exact:  return 40;  // 10 × uint32
         case ShaderKind::seed_lookup_anchors:   return 36;  //  9 × uint32
         case ShaderKind::sort_anchors_bitonic:  return 0;
+        // DOC0310 Phase C — per-family push blocks (see runtime.cppm structs).
+        case ShaderKind::phase_c_sketch_tile:
+        case ShaderKind::phase_c_sketch_emit_flags:
+        case ShaderKind::phase_c_sketch_emit_carry:
+        case ShaderKind::phase_c_sketch_emit_words:   return 64;  // SketchPushC (16 × u32)
+        case ShaderKind::phase_c_prefix_scan_block:
+        case ShaderKind::phase_c_prefix_scan_add:     return 16;  // ScanPushC (4 × u32)
+        case ShaderKind::phase_c_seed_count:
+        case ShaderKind::phase_c_seed_emit:           return 40;  // SeedPushC (10 × u32)
+        case ShaderKind::phase_c_sort_radix_histogram:
+        case ShaderKind::phase_c_sort_radix_scan:
+        case ShaderKind::phase_c_sort_radix_scatter:  return 20;  // SortPushC (5 × u32)
+        case ShaderKind::phase_c_index_mark_runs:
+        case ShaderKind::phase_c_index_emit_buckets:
+        case ShaderKind::phase_c_index_claim_slots:
+        case ShaderKind::phase_c_index_emit_slots:    return 24;  // IndexPushC (6 × u32)
+        case ShaderKind::phase_c_chain_range_build:   return 8;   // ChainRangePushC (2 × u32)
     }
     return 0;
 }
@@ -195,6 +263,7 @@ layout(push_constant) uniform Params {
     int max_iter;
     float gap_penalty;
     float skip_penalty;
+    int max_chain_skip;   // DOC0311: nearest-first early-exit (minimap2 max_skip); <=0 disables
 } pc;
 
 shared uint64_t sh_ref_position[TILE_SIZE];
@@ -302,8 +371,16 @@ void main() {
             barrier();
         }
 
-        // Tail update: targets after the tile compare against every shared
-        // predecessor, matching G3SA's register-held target sweep. Each range is
+        // Tail update: targets after the tile compare against the tile's cached
+        // predecessors. We scan NEAREST-FIRST (highest index first; anchors are
+        // ref-sorted, so the highest index is the closest predecessor in ref).
+        // Nearest-first ordering enables two early exits that match the SIMD /
+        // minimap2 chaining (DOC0311): (1) an EXACT ref-distance break — once a
+        // predecessor's ref gap exceeds max_dist_x, chain_score would reject it
+        // and every farther predecessor too, so we stop; (2) minimap2's
+        // max_chain_skip — stop after K consecutive non-improving predecessors.
+        // Without these the tail is O(n*max_iter)=12s on XXL_HIFI; with them it is
+        // the same bounded O(n*max_skip) work the SIMD path does. Each range is
         // owned by exactly one workgroup, so no atomics are needed.
         uint tail_limit = min(end, tile_begin + TILE_SIZE_U + uint(pc.max_iter));
         for (uint target_base = tile_begin + TILE_SIZE_U; target_base < tail_limit;
@@ -314,16 +391,29 @@ void main() {
             int best = max(best_scores[target], int(anchor_span(cur)));
             int64_t parent64 = predecessors[target];
             uint best_parent = parent64 < int64_t(0) ? NO_PARENT : uint(parent64);
-            for (uint step = 0u; step < tile_count; ++step) {
-                uint j = (tid + step) % tile_count;
+            int n_skip = 0;
+            for (uint jj = 0u; jj < tile_count; ++jj) {
+                uint j = tile_count - 1u - jj;            // nearest predecessor first
                 uint pred = tile_begin + j;
-                if (target <= pred || target - pred > uint(pc.max_iter)) continue;
-                int pair = chain_score(cur, shared_anchor(j));
-                if (pair == INVALID_SCORE) continue;
+                if (target - pred > uint(pc.max_iter)) break;
+                AnchorWire pa = shared_anchor(j);
+                if (anchor_reverse(cur) == anchor_reverse(pa)
+                    && cur.ref_position > pa.ref_position
+                    && cur.ref_position - pa.ref_position > uint64_t(pc.max_dist_x)) {
+                    break;  // exact: farther predecessors are all out of ref range
+                }
+                int pair = chain_score(cur, pa);
+                if (pair == INVALID_SCORE) {
+                    if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) break;
+                    continue;
+                }
                 int total = pair + sh_score[j];
-                if (total >= best) {
+                if (total > best) {
                     best = total;
                     best_parent = pred;
+                    if (n_skip > 0) --n_skip;
+                } else if (pc.max_chain_skip > 0 && ++n_skip > pc.max_chain_skip) {
+                    break;
                 }
             }
             write_best(target, best, best_parent);
@@ -944,20 +1034,927 @@ void main() {
 }
 )GLSL";
 
+// ===========================================================================
+// DOC0310 Phase C kernels
+// ===========================================================================
+
+/// DOC0310 §9 — ordered tile-replay minimizer sketch. One workgroup per tile
+/// (1 active invocation) replays the exact `collect_minimizers_view` state
+/// machine over `[replay_lo, loop_hi)`, emitting only minimizers whose trigger
+/// position falls in this tile's owned window interval `[tile_lo, tile_hi)`.
+/// The left-context overlap (`tile_lo - replay_lo`) reconstructs the ring buffer
+/// and the valid-base/init state so the concatenation across tiles in tile
+/// order equals the single serial pass — but it is parallel across tiles (never
+/// a one-workgroup-per-sequence serial emit). `emit_mode==0` counts per tile;
+/// `emit_mode==1` writes raw `MinimizerRepr` words at `out_base + local`.
+constexpr std::string_view kPhaseCSketchBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct TileC {
+    uint seq_word_offset;
+    uint bp_count;
+    uint replay_lo;
+    uint tile_lo;
+    uint tile_hi;
+    uint out_base;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer SeqWords { uint seq_words[]; };
+layout(std430, set = 0, binding = 1) readonly buffer RankLut {
+    uint rank_to_code[256];
+    uint rank_to_rc_code[256];
+};
+layout(std430, set = 0, binding = 2) readonly buffer Tiles { TileC tiles[]; };
+layout(std430, set = 0, binding = 3) buffer TileCounts { uint tile_counts[]; };
+layout(std430, set = 0, binding = 4) buffer OutWords { uint out_words[]; };
+layout(std430, set = 0, binding = 5) buffer Counters { uint counters[]; };
+layout(std430, set = 0, binding = 6) readonly buffer TileOffsets { uint tile_offsets[]; };
+layout(std430, set = 0, binding = 7) buffer OutPairVals { uint64_t out_pair_vals[]; };
+
+layout(push_constant) uniform Params {
+    uint emit_mode;
+    uint window_size;
+    uint kmer_size;
+    uint hash_bits;
+    uint hash_shift;
+    uint pos_bits;
+    uint word_kind;
+    uint words32_per_minimizer;
+    uint span_value;
+    uint alphabet_kind;
+    uint unit_bits;
+    uint bits_per_char;
+    uint letters_per_unit;
+    uint char_mask;
+    uint tile_count;
+    uint emit_pairs;
+} pc;
+
+)GLSL"
+R"GLSL(
+uint read_u32_word(uint word_index) { return seq_words[word_index]; }
+uint read_storage_unit(uint unit_index, uint unit_bits, uint byte_offset_words) {
+    if (unit_bits == 64u) {
+        uint lo = read_u32_word(byte_offset_words + unit_index * 2u);
+        uint hi = read_u32_word(byte_offset_words + unit_index * 2u + 1u);
+        return lo ^ hi;
+    }
+    if (unit_bits == 32u) { return read_u32_word(byte_offset_words + unit_index); }
+    if (unit_bits == 16u) {
+        uint w = read_u32_word(byte_offset_words + (unit_index >> 1u));
+        return (w >> ((unit_index & 1u) * 16u)) & 0xffffu;
+    }
+    uint w = read_u32_word(byte_offset_words + (unit_index >> 2u));
+    return (w >> ((unit_index & 3u) * 8u)) & 0xffu;
+}
+uint64_t read_storage_unit64(uint unit_index, uint unit_bits, uint byte_offset_words) {
+    if (unit_bits == 64u) {
+        uint lo = read_u32_word(byte_offset_words + unit_index * 2u);
+        uint hi = read_u32_word(byte_offset_words + unit_index * 2u + 1u);
+        return (uint64_t(hi) << 32) | uint64_t(lo);
+    }
+    return uint64_t(read_storage_unit(unit_index, unit_bits, byte_offset_words));
+}
+uint read_rank_at_bp(uint bp, uint bits_per_char, uint letters_per_unit,
+                     uint unit_bits, uint byte_offset_words, uint char_mask) {
+    uint unit_index = bp / letters_per_unit;
+    uint in_unit = bp - unit_index * letters_per_unit;
+    uint shift = in_unit * bits_per_char;
+    uint64_t unit = read_storage_unit64(unit_index, unit_bits, byte_offset_words);
+    return uint((unit >> shift) & uint64_t(char_mask));
+}
+uint64_t minimap_scramble(uint64_t key, uint64_t mask) {
+    key = (~key + (key << 21)) & mask;
+    key = key ^ (key >> 24);
+    key = ((key + (key << 3)) + (key << 8)) & mask;
+    key = key ^ (key >> 14);
+    key = ((key + (key << 2)) + (key << 4)) & mask;
+    key = key ^ (key >> 28);
+    key = (key + (key << 31)) & mask;
+    return key;
+}
+uint code_for_rank(uint rank) {
+    if (pc.alphabet_kind == 0u) return rank;
+    return rank_to_code[rank];
+}
+uint rc_code_for_rank(uint rank) {
+    if (pc.alphabet_kind == 0u) return rank ^ 3u;
+    return rank_to_rc_code[rank];
+}
+
+uint64_t hash_field_mask() {
+    return pc.hash_bits >= 64u ? ~uint64_t(0)
+                               : ((uint64_t(1) << pc.hash_bits) - uint64_t(1));
+}
+
+// Sketch element mirrors kMinimizerEmitExactBody's Sketch.
+struct Sketch { uint64_t hash; uint pos; uint strand; uint is_max; };
+Sketch max_sketch() { return Sketch(hash_field_mask(), 0u, 0u, 1u); }
+bool sketch_leq(Sketch a, Sketch b) { return a.hash <= b.hash; }
+bool sketch_geq(Sketch a, Sketch b) { return a.hash >= b.hash; }
+bool sketch_match_diff(Sketch a, Sketch b) {
+    return a.is_max == 0u && b.is_max == 0u && a.hash == b.hash
+        && (a.pos != b.pos || a.strand != b.strand);
+}
+
+uint g_seq_word_offset;
+uint g_local_count;
+uint g_out_base;
+
+void write_minimizer(uint dst, Sketch s) {
+    // dst is tile-local; the global minimizer index is g_out_base + dst.
+    uint gmin = g_out_base + dst;
+    if (pc.word_kind == 0u) {
+        uint raw = uint((s.hash << pc.hash_shift) | (uint64_t(s.pos) << 1) | uint64_t(s.strand));
+        // u16 packs two minimizers per 32-bit word; the boundary word can be
+        // shared by two parallel tiles, so the two half-word writes use 32-bit
+        // atomics (the runtime zero-fills the output word range before emit).
+        uint word = gmin >> 1u;
+        uint shift = (gmin & 1u) * 16u;
+        atomicAnd(out_words[word], ~(0xffffu << shift));
+        atomicOr(out_words[word], (raw & 0xffffu) << shift);
+    } else if (pc.word_kind == 1u) {
+        uint base = gmin * pc.words32_per_minimizer;
+        out_words[base] = uint((s.hash << pc.hash_shift) | (uint64_t(s.pos) << 1) | uint64_t(s.strand));
+    } else if (pc.word_kind == 2u) {
+        uint base = gmin * pc.words32_per_minimizer;
+        uint64_t raw = (s.hash << pc.hash_shift) | (uint64_t(s.pos) << 1) | uint64_t(s.strand);
+        out_words[base + 0u] = uint(raw);
+        out_words[base + 1u] = uint(raw >> 32);
+    } else {
+        uint base = gmin * pc.words32_per_minimizer;
+        uint64_t low = (uint64_t(s.pos) << 1) | uint64_t(s.strand);
+        uint64_t high = (s.hash << 8) | uint64_t(pc.span_value & 0xffu);
+        out_words[base + 0u] = uint(low);
+        out_words[base + 1u] = uint(low >> 32);
+        out_words[base + 2u] = uint(high);
+        out_words[base + 3u] = uint(high >> 32);
+    }
+}
+
+void emit_one(Sketch s, bool owned) {
+    if (s.is_max != 0u || !owned) return;
+    uint dst = g_local_count;
+    g_local_count = g_local_count + 1u;
+    // emit_mode 2 (DOC0311 single-pass): no separate count pass / tile-offset
+    // scan — each minimizer atomically reserves its output slot. The pairs are
+    // radix-sorted by hash afterwards, so the (now arbitrary) emission order is
+    // irrelevant. counters[0] is the running total (= tm); counters[1] is the
+    // output capacity guard so an under-estimate cannot write out of bounds.
+    if (pc.emit_mode == 2u) {
+        uint gmin = atomicAdd(counters[0], 1u);
+        if (gmin >= counters[1]) return;
+        out_words[gmin * 2u + 0u] = uint(s.hash);
+        out_words[gmin * 2u + 1u] = uint(s.hash >> 32);
+        out_pair_vals[gmin] = (uint64_t(s.pos) << 1) | uint64_t(s.strand);
+        return;
+    }
+    if (pc.emit_mode == 1u) {
+        if (pc.emit_pairs == 1u) {
+            // Target index path: write (hash, pos_strand) parallel arrays for the
+            // device radix sort. `out_words` is reinterpreted as uint64 hashes.
+            uint gmin = g_out_base + dst;
+            out_words[gmin * 2u + 0u] = uint(s.hash);
+            out_words[gmin * 2u + 1u] = uint(s.hash >> 32);
+            out_pair_vals[gmin] = (uint64_t(s.pos) << 1) | uint64_t(s.strand);
+        } else {
+            write_minimizer(dst, s);
+        }
+    }
+}
+
+)GLSL"
+R"GLSL(
+// Candidate canonical k-mer ending at base `pos`. Returns a Sketch (max if the
+// window has an ambiguity, a palindrome, or is too short).
+Sketch candidate_at(uint pos) {
+    uint rank_here = read_rank_at_bp(pos, pc.bits_per_char, pc.letters_per_unit,
+                                     pc.unit_bits, g_seq_word_offset, pc.char_mask);
+    bool base_valid = code_for_rank(rank_here) < 4u;
+    if (!base_valid) { Sketch m = max_sketch(); m.pos = 0xffffffffu; return m; } // sentinel: base invalid
+    if (pc.kmer_size == 0u || pos + 1u < pc.kmer_size) return max_sketch();
+
+    uint step_bits = pc.alphabet_kind == 2u ? pc.bits_per_char : 2u;
+    uint roll_bits = pc.kmer_size * step_bits;
+    uint scramble_bits = pc.kmer_size * 2u;
+    if (roll_bits > 64u || scramble_bits > 64u) return max_sketch();
+    uint64_t roll_mask = (roll_bits == 64u) ? ~uint64_t(0) : ((uint64_t(1) << roll_bits) - uint64_t(1));
+    uint64_t scramble_mask = (scramble_bits == 64u) ? ~uint64_t(0) : ((uint64_t(1) << scramble_bits) - uint64_t(1));
+    uint shift_rc = step_bits * (pc.kmer_size - 1u);
+    uint64_t forward = uint64_t(0);
+    uint64_t reverse = uint64_t(0);
+    uint start = pos + 1u - pc.kmer_size;
+    for (uint i = 0u; i < pc.kmer_size; ++i) {
+        uint rank = read_rank_at_bp(start + i, pc.bits_per_char, pc.letters_per_unit,
+                                    pc.unit_bits, g_seq_word_offset, pc.char_mask);
+        uint code = code_for_rank(rank);
+        uint rc = rc_code_for_rank(rank);
+        if (code >= 4u || rc >= 4u) return max_sketch();
+        forward = ((forward << step_bits) | uint64_t(code)) & roll_mask;
+        reverse = (reverse >> step_bits) | (uint64_t(rc) << shift_rc);
+    }
+    if (forward == reverse) return max_sketch();
+    bool fwd_wins = forward < reverse;
+    uint64_t canonical = fwd_wins ? forward : reverse;
+    uint64_t h = minimap_scramble(canonical, scramble_mask) & hash_field_mask();
+    if (h == hash_field_mask()) return max_sketch();
+    return Sketch(h, pos, fwd_wins ? 0u : 1u, 0u);
+}
+
+// Cooperative tile sketch. All workgroup invocations hash the tile's candidate
+// k-mers into shared memory in parallel (the expensive per-base rolling-hash is
+// fully SIMD-parallel), then invocation 0 runs the ordered emit state machine
+// reading the shared candidates — keeping bit-exact `collect_minimizers_view`
+// order without paying the hash cost on a single lane. SKETCH_CAND_MAX bounds
+// the tile span (tile_bp + overlap); the runtime keeps tiles within it.
+const uint SKETCH_CAND_MAX = 384u;            // small shared footprint → high core occupancy
+shared uint64_t sh_cand_hash[SKETCH_CAND_MAX];
+shared uint sh_cand_flags[SKETCH_CAND_MAX];   // bit0 real-minimizer, bit1 base_valid, bit2 strand
+shared Sketch sh_ring[MAX_SPAN];
+
+void main() {
+    uint tile_id = gl_WorkGroupID.x;
+    if (tile_id >= pc.tile_count) return;
+    if (pc.window_size == 0u || pc.window_size > MAX_SPAN || pc.kmer_size == 0u) return;
+
+    TileC t = tiles[tile_id];
+    g_seq_word_offset = t.seq_word_offset;
+    uint loop_hi = (t.tile_hi >= t.bp_count) ? t.bp_count : t.tile_hi;
+    uint span = loop_hi - t.replay_lo;
+    if (span > SKETCH_CAND_MAX) span = SKETCH_CAND_MAX;
+
+    // Phase 1 — parallel candidate hashing into shared memory.
+    for (uint i = gl_LocalInvocationID.x; i < span; i += gl_WorkGroupSize.x) {
+        Sketch c = candidate_at(t.replay_lo + i);
+        bool base_valid = !(c.is_max != 0u && c.pos == 0xffffffffu);
+        uint flags = (c.is_max == 0u ? 1u : 0u) | (base_valid ? 2u : 0u) | (c.strand << 2u);
+        sh_cand_hash[i] = c.hash;
+        sh_cand_flags[i] = flags;
+    }
+    barrier();
+
+    // Phase 2 — ordered emit on a single lane reading shared candidates.
+    if (gl_LocalInvocationID.x != 0u) return;
+    g_local_count = 0u;
+    g_out_base = (pc.emit_mode == 1u) ? tile_offsets[tile_id] : 0u;
+
+    uint buf_pos = 0u;
+    uint valid_since_reset = 0u;
+    bool init_mode = (t.replay_lo == 0u);
+    Sketch current_min = max_sketch();
+    uint current_min_pos = 0u;
+
+    for (uint seq_pos = t.replay_lo; seq_pos < loop_hi; ++seq_pos) {
+        uint ci = seq_pos - t.replay_lo;
+        bool is_init = init_mode;
+        bool owned = seq_pos >= t.tile_lo;
+        uint cf = sh_cand_flags[ci];
+        bool base_valid = (cf & 2u) != 0u;
+        Sketch cand = ((cf & 1u) != 0u)
+            ? Sketch(sh_cand_hash[ci], seq_pos, (cf >> 2u) & 1u, 0u)
+            : max_sketch();
+        Sketch pushed = max_sketch();
+        if (!base_valid) {
+            valid_since_reset = 0u;
+        } else {
+            valid_since_reset = valid_since_reset + 1u;
+            if (valid_since_reset >= pc.kmer_size && cand.is_max == 0u) pushed = cand;
+        }
+        uint prev_pos = buf_pos;
+        sh_ring[buf_pos] = pushed;
+        buf_pos = (buf_pos + 1u) % pc.window_size;
+
+        if ((valid_since_reset == pc.window_size + pc.kmer_size - 1u && is_init)
+            && current_min.is_max == 0u) {
+            for (uint j = buf_pos; j < pc.window_size; ++j) {
+                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+            }
+            for (uint j = 0u; j < buf_pos; ++j) {
+                if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+            }
+        }
+
+        if (sketch_leq(pushed, current_min)) {
+            if ((valid_since_reset >= pc.window_size + pc.kmer_size || !is_init)
+                && current_min.is_max == 0u) {
+                emit_one(current_min, owned);
+            }
+            current_min_pos = prev_pos;
+            current_min = pushed;
+        } else if (prev_pos == current_min_pos) {
+            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
+                && current_min.is_max == 0u) {
+                emit_one(current_min, owned);
+            }
+            current_min = max_sketch();
+            for (uint j = buf_pos; j < pc.window_size; ++j) {
+                if (sketch_geq(current_min, sh_ring[j])) { current_min = sh_ring[j]; current_min_pos = j; }
+            }
+            for (uint j = 0u; j < buf_pos; ++j) {
+                if (sketch_geq(current_min, sh_ring[j])) { current_min = sh_ring[j]; current_min_pos = j; }
+            }
+            if ((valid_since_reset >= pc.window_size + pc.kmer_size - 1u || !is_init)
+                && current_min.is_max == 0u) {
+                for (uint j = buf_pos; j < pc.window_size; ++j) {
+                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+                }
+                for (uint j = 0u; j < buf_pos; ++j) {
+                    if (sketch_match_diff(current_min, sh_ring[j])) emit_one(sh_ring[j], owned);
+                }
+            }
+        }
+
+        if (init_mode && valid_since_reset >= pc.window_size + pc.kmer_size) init_mode = false;
+    }
+
+    // Final emit belongs to the sequence end; only the owning final tile does it.
+    if (loop_hi >= t.bp_count && current_min.is_max == 0u) {
+        bool owned = (t.bp_count > 0u) && ((t.bp_count - 1u) >= t.tile_lo);
+        emit_one(current_min, owned);
+    }
+
+    if (pc.emit_mode == 0u) {
+        tile_counts[tile_id] = g_local_count;
+    }
+}
+)GLSL";
+
+/// DOC0310 §11 — generic exclusive prefix scan over a `uint` array, block phase.
+/// Each workgroup exclusive-scans its block into `out_prefix` and writes the
+/// block total to `block_sums[wg]`. A second `add` pass adds the scanned block
+/// offsets back. Two-level scan (block size = LOCAL_SIZE_X handled serially by
+/// invocation 0 to stay portable on MoltenVK without subgroup ops).
+constexpr std::string_view kPhaseCScanBlockBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer InData { uint in_data[]; };
+layout(std430, set = 0, binding = 1) buffer OutData { uint out_prefix[]; };
+layout(std430, set = 0, binding = 2) buffer BlockSums { uint block_sums[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint block_size;
+    uint num_blocks;
+    uint pass;
+} pc;
+void main() {
+    if (gl_LocalInvocationID.x != 0u) return;
+    uint block = gl_WorkGroupID.x;
+    if (block >= pc.num_blocks) return;
+    uint lo = block * pc.block_size;
+    uint hi = min(lo + pc.block_size, pc.element_count);
+    uint running = 0u;
+    for (uint i = lo; i < hi; ++i) {
+        out_prefix[i] = running;
+        running += in_data[i];
+    }
+    block_sums[block] = running;
+}
+)GLSL";
+
+/// DOC0310 §11 — prefix scan add phase. Invocation 0 of workgroup 0 exclusive-
+/// scans `block_sums` in place, then every element adds its block's offset.
+constexpr std::string_view kPhaseCScanAddBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer InData { uint in_data[]; };
+layout(std430, set = 0, binding = 1) buffer OutData { uint out_prefix[]; };
+layout(std430, set = 0, binding = 2) buffer BlockSums { uint block_sums[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint block_size;
+    uint num_blocks;
+    uint pass;
+} pc;
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    // pass 0: single invocation exclusive-scans block_sums into block offsets.
+    if (pc.pass == 0u) {
+        if (gid != 0u) return;
+        uint running = 0u;
+        for (uint b = 0u; b < pc.num_blocks; ++b) {
+            uint v = block_sums[b];
+            block_sums[b] = running;
+            running += v;
+        }
+        return;
+    }
+    // pass 1: add the scanned block offset to every element.
+    if (gid >= pc.element_count) return;
+    uint block = gid / pc.block_size;
+    out_prefix[gid] += block_sums[block];
+}
+)GLSL";
+
+/// DOC0310 §14 — GPU seed count/emit. One workgroup per query record; local
+/// invocations stride over that record's minimizers. `emit_mode==0` writes the
+/// per-minimizer anchor count (clamped by `max_occ`) to `counts`; `emit_mode==1`
+/// reads the exclusive `prefix` and emits `GpuAnchorWire` records plus their
+/// `ref_bits()` sort key, matching the Phase B seed-lookup formula exactly.
+constexpr std::string_view kPhaseCSeedBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+struct GpuMinimizerSlot { uint64_t hash; uint pos_offset; uint pos_count; };
+struct QRec { uint min_offset; uint min_count; uint anchor_offset; uint query_len; };
+struct AnchorWire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
+
+layout(std430, set = 0, binding = 0) readonly buffer MinWords { uint min_words[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Slots { GpuMinimizerSlot slots[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Positions { uint64_t positions[]; };
+layout(std430, set = 0, binding = 3) readonly buffer QueryRecords { QRec qrecs[]; };
+layout(std430, set = 0, binding = 4) buffer Counts { uint counts[]; };
+layout(std430, set = 0, binding = 5) readonly buffer PrefixCounts { uint prefix[]; };
+layout(std430, set = 0, binding = 6) buffer Anchors { AnchorWire anchors[]; };
+layout(std430, set = 0, binding = 7) buffer AnchorKeys { uint64_t anchor_keys[]; };
+
+layout(push_constant) uniform Params {
+    uint words32_per_minimizer;
+    uint word_kind;
+    uint hash_shift;
+    uint pos_bits;
+    uint kmer_size;
+    uint slot_mask;
+    uint max_occ;
+    uint emit_mode;
+    uint record_count;
+    uint bucket_count;   // >0 ⇒ Slots[] is a hash-sorted dense bucket array (binary search)
+} pc;
+
+uint64_t read_min_hash(uint i) {
+    if (pc.word_kind == 0u) {
+        uint packed = min_words[i >> 1u];
+        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
+        return uint64_t(raw) >> pc.hash_shift;
+    }
+    uint base = i * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) return uint64_t(min_words[base]) >> pc.hash_shift;
+    if (pc.word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base]) | (uint64_t(min_words[base + 1u]) << 32);
+        return raw >> pc.hash_shift;
+    }
+    uint64_t high = uint64_t(min_words[base + 2u]) | (uint64_t(min_words[base + 3u]) << 32);
+    return high >> 8;
+}
+uint64_t read_min_pos_strand(uint i) {
+    if (pc.word_kind == 0u) {
+        uint packed = min_words[i >> 1u];
+        uint raw = (packed >> ((i & 1u) * 16u)) & 0xffffu;
+        uint mask = (pc.pos_bits >= 15u) ? 0xffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        return uint64_t(raw & mask);
+    }
+    uint base = i * pc.words32_per_minimizer;
+    if (pc.word_kind == 1u) {
+        uint raw = min_words[base];
+        uint mask = (pc.pos_bits >= 31u) ? 0xffffffffu : ((1u << (pc.pos_bits + 1u)) - 1u);
+        return uint64_t(raw & mask);
+    }
+    if (pc.word_kind == 2u) {
+        uint64_t raw = uint64_t(min_words[base]) | (uint64_t(min_words[base + 1u]) << 32);
+        uint64_t mask = pc.pos_bits >= 63u ? ~uint64_t(0) : ((uint64_t(1) << (pc.pos_bits + 1u)) - uint64_t(1));
+        return raw & mask;
+    }
+    return uint64_t(min_words[base]) | (uint64_t(min_words[base + 1u]) << 32);
+}
+uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15UL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9UL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebUL;
+    return x ^ (x >> 31);
+}
+uint find_slot(uint64_t hash) {
+    if (pc.bucket_count != 0u) {
+        // GPU-built index: dense buckets sorted by hash → binary search.
+        uint lo = 0u;
+        uint hi = pc.bucket_count;
+        while (lo < hi) {
+            uint mid = (lo + hi) >> 1u;
+            if (slots[mid].hash < hash) lo = mid + 1u; else hi = mid;
+        }
+        if (lo < pc.bucket_count && slots[lo].hash == hash) return lo;
+        return 0xffffffffu;
+    }
+    // CPU-uploaded fallback index: open-addressed linear probe.
+    uint p = uint(splitmix64(hash)) & pc.slot_mask;
+    for (uint step = 0u; step <= pc.slot_mask; ++step) {
+        GpuMinimizerSlot s = slots[p];
+        if (s.pos_count == 0u) return 0xffffffffu;
+        if (s.hash == hash) return p;
+        p = (p + 1u) & pc.slot_mask;
+    }
+    return 0xffffffffu;
+}
+
+void main() {
+    uint rec = gl_WorkGroupID.x;
+    if (rec >= pc.record_count) return;
+    QRec q = qrecs[rec];
+    uint64_t reverse_base = uint64_t(q.query_len - 2u + pc.kmer_size);
+    for (uint local = gl_LocalInvocationID.x; local < q.min_count; local += gl_WorkGroupSize.x) {
+        uint gi = q.min_offset + local;
+        uint64_t hash = read_min_hash(gi);
+        uint slot_idx = find_slot(hash);
+        uint cnt = 0u;
+        if (slot_idx != 0xffffffffu) {
+            GpuMinimizerSlot slot = slots[slot_idx];
+            if (slot.pos_count <= pc.max_occ) cnt = slot.pos_count;
+        }
+        if (pc.emit_mode == 0u) {
+            counts[gi] = cnt;
+            continue;
+        }
+        if (cnt == 0u) continue;
+        GpuMinimizerSlot slot = slots[slot_idx];
+        uint dst = prefix[gi];
+        uint64_t q_encoded = read_min_pos_strand(gi);
+        uint64_t q_pos = q_encoded >> 1;
+        uint q_strand = uint(q_encoded & uint64_t(1));
+        uint span_flags_segment = pc.kmer_size & 0xffu;
+        for (uint j = 0u; j < cnt; ++j) {
+            uint64_t target = positions[slot.pos_offset + j];
+            uint t_strand = uint(target & uint64_t(1));
+            uint rev = t_strand ^ q_strand;
+            uint64_t query_position = rev != 0u ? (reverse_base - q_pos) : q_pos;
+            uint64_t ref_position = target >> 1;
+            anchors[dst + j].ref_position = ref_position;
+            anchors[dst + j].query_position = query_position;
+            anchors[dst + j].is_reverse = rev;
+            anchors[dst + j].span_flags_segment = span_flags_segment;
+            anchor_keys[dst + j] = (uint64_t(rev) << 63) | (ref_position & 0x7fffffffffffffffUL);
+        }
+    }
+}
+)GLSL";
+
+/// DOC0310 §13 — device radix sort over parallel (key:uint64, value:uint64)
+/// arrays. One thread per workgroup processes a contiguous chunk; this keeps the
+/// scatter stable (in-chunk order preserved, chunks ordered by id) without
+/// shared-atomics. Histogram pass: per-chunk 256-bin counts of digit
+/// `(key >> radix_shift) & 0xff`.
+constexpr std::string_view kPhaseCSortHistogramBody = R"GLSL(
+// Cooperative per-workgroup histogram: 256 threads (one per bin) zero and write
+// the shared histogram; all threads count this workgroup's chunk into it with
+// shared atomics. Replaces the 1-thread-per-workgroup version whose serial reads
+// were a large fraction of the GPU index build's sort cost (DOC0311).
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer KeysIn { uint64_t keys_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ValsIn { uint64_t vals_in[]; };
+layout(std430, set = 0, binding = 2) buffer KeysOut { uint64_t keys_out[]; };
+layout(std430, set = 0, binding = 3) buffer ValsOut { uint64_t vals_out[]; };
+layout(std430, set = 0, binding = 4) buffer Histogram { uint histogram[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint radix_shift;
+    uint num_workgroups;
+    uint elems_per_wg;
+    uint value_words;
+} pc;
+shared uint sh_hist[256];
+void main() {
+    uint wg = gl_WorkGroupID.x;
+    if (wg >= pc.num_workgroups) return;
+    uint tid = gl_LocalInvocationID.x;
+    sh_hist[tid] = 0u;
+    barrier();
+    uint lo = wg * pc.elems_per_wg;
+    uint hi = min(lo + pc.elems_per_wg, pc.element_count);
+    for (uint i = lo + tid; i < hi; i += 256u) {
+        uint digit = uint((keys_in[i] >> pc.radix_shift) & uint64_t(0xff));
+        atomicAdd(sh_hist[digit], 1u);
+    }
+    barrier();
+    histogram[wg * 256u + tid] = sh_hist[tid];
+}
+)GLSL";
+
+/// DOC0310 §13 — multi-level histogram scan. One workgroup (1 invocation)
+/// computes, for every (workgroup, bin), its stable global start offset:
+/// `bin_base[bin] + sum_{wg' < wg} hist[wg'][bin]`, where `bin_base` is the
+/// exclusive prefix over bin totals. Writes the offsets back into `histogram`.
+constexpr std::string_view kPhaseCSortScanBody = R"GLSL(
+// One workgroup of 256 threads — one thread per radix bin. Each bin's thread
+// reduces its column of the per-workgroup histograms and then writes that
+// column's per-workgroup global offsets. This keeps the scan O(num_workgroups)
+// per thread (256-way parallel) instead of O(num_workgroups * 256) on a single
+// lane, which was the dominant fixed cost of the GPU index build.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer KeysIn { uint64_t keys_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ValsIn { uint64_t vals_in[]; };
+layout(std430, set = 0, binding = 2) buffer KeysOut { uint64_t keys_out[]; };
+layout(std430, set = 0, binding = 3) buffer ValsOut { uint64_t vals_out[]; };
+layout(std430, set = 0, binding = 4) buffer Histogram { uint histogram[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint radix_shift;
+    uint num_workgroups;
+    uint elems_per_wg;
+    uint value_words;
+} pc;
+shared uint sh_total[256];
+shared uint sh_base[256];
+void main() {
+    uint b = gl_LocalInvocationID.x;          // radix bin (0..255)
+    uint sum = 0u;
+    for (uint wg = 0u; wg < pc.num_workgroups; ++wg) sum += histogram[wg * 256u + b];
+    sh_total[b] = sum;
+    barrier();
+    if (b == 0u) {
+        uint running = 0u;
+        for (uint i = 0u; i < 256u; ++i) { sh_base[i] = running; running += sh_total[i]; }
+    }
+    barrier();
+    uint acc = sh_base[b];
+    for (uint wg = 0u; wg < pc.num_workgroups; ++wg) {
+        uint idx = wg * 256u + b;
+        uint c = histogram[idx];
+        histogram[idx] = acc;
+        acc += c;
+    }
+}
+)GLSL";
+
+/// DOC0310 §13 — stable scatter. Each workgroup (1 invocation) re-walks its
+/// chunk in order, using the per-(wg,bin) global offsets from the scan as a
+/// running cursor.
+constexpr std::string_view kPhaseCSortScatterBody = R"GLSL(
+// Cooperative stable scatter. Lane 0 walks the workgroup's chunk in order to
+// assign each element its destination (= the per-bin global offset, advanced
+// stably), which keeps the radix sort STABLE. All 256 lanes then perform the
+// actual (uncoalesced) key/value writes in parallel — those scattered global
+// writes were the dominant cost of the 1-lane scatter (DOC0311). The chunk is
+// processed in SUB-BLOCKS of 512 so the stable-destination array sh_dst[512] is
+// never overrun even when elems_per_wg > 512 — which occurs once num_workgroups
+// is clamped to the device maxComputeWorkGroupCount[0] (the Vulkan minimum is
+// 65535; Apple Silicon reports ~1e9 so a single block usually suffices, but the
+// loop keeps it correct on any device). The per-bin cursor persists across
+// sub-blocks, so LSD stability holds across the whole chunk.
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 0) readonly buffer KeysIn { uint64_t keys_in[]; };
+layout(std430, set = 0, binding = 1) readonly buffer ValsIn { uint64_t vals_in[]; };
+layout(std430, set = 0, binding = 2) buffer KeysOut { uint64_t keys_out[]; };
+layout(std430, set = 0, binding = 3) buffer ValsOut { uint64_t vals_out[]; };
+layout(std430, set = 0, binding = 4) buffer Histogram { uint histogram[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint radix_shift;
+    uint num_workgroups;
+    uint elems_per_wg;
+    uint value_words;
+} pc;
+shared uint sh_cursor[256];
+shared uint sh_dst[512];
+void main() {
+    uint wg = gl_WorkGroupID.x;
+    if (wg >= pc.num_workgroups) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint lo = wg * pc.elems_per_wg;
+    uint hi = min(lo + pc.elems_per_wg, pc.element_count);
+    sh_cursor[tid] = histogram[wg * 256u + tid];
+    barrier();
+    uint vw = pc.value_words;
+    for (uint block_lo = lo; block_lo < hi; block_lo += 512u) {
+        uint block_hi = min(block_lo + 512u, hi);
+        uint block_n = block_hi - block_lo;
+        if (tid == 0u) {
+            for (uint i = 0u; i < block_n; ++i) {
+                uint digit = uint((keys_in[block_lo + i] >> pc.radix_shift) & uint64_t(0xff));
+                sh_dst[i] = sh_cursor[digit];
+                sh_cursor[digit] = sh_cursor[digit] + 1u;
+            }
+        }
+        barrier();
+        for (uint i = tid; i < block_n; i += 256u) {
+            uint dst = sh_dst[i];
+            keys_out[dst] = keys_in[block_lo + i];
+            for (uint w = 0u; w < vw; ++w) vals_out[dst * vw + w] = vals_in[(block_lo + i) * vw + w];
+        }
+        barrier();  // writes must finish before the next sub-block overwrites sh_dst
+    }
+}
+)GLSL";
+
+/// DOC0310 §12 — GPU target index build, run-marking. `flags[i] = 1` where a
+/// new hash run begins in the sorted key array.
+constexpr std::string_view kPhaseCIndexMarkRunsBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
+struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) buffer Flags { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
+layout(std430, set = 0, binding = 3) buffer Buckets { BucketRec buckets[]; };
+layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
+layout(std430, set = 0, binding = 6) buffer BucketSlot { uint bucket_slot[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint slot_mask;
+    uint slot_capacity;
+    uint num_buckets;
+    uint probe_cap;
+    uint pass;
+} pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.element_count) return;
+    flags[i] = (i == 0u || sorted_keys[i] != sorted_keys[i - 1u]) ? 1u : 0u;
+}
+)GLSL";
+
+/// DOC0310 §12 — dense bucket emit. Each element atomically adds to its bucket's
+/// `pos_count`; run starts set the bucket `hash`/`pos_offset` (the sorted
+/// position index). `bucket_index = inclusive_scan(flags) - 1`.
+constexpr std::string_view kPhaseCIndexEmitBucketsBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
+struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Flags { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
+layout(std430, set = 0, binding = 3) buffer Buckets { BucketRec buckets[]; };
+layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
+layout(std430, set = 0, binding = 6) buffer BucketSlot { uint bucket_slot[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint slot_mask;
+    uint slot_capacity;
+    uint num_buckets;
+    uint probe_cap;
+    uint pass;
+} pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.element_count) return;
+    uint bidx = scanned[i] + flags[i] - 1u;
+    atomicAdd(buckets[bidx].pos_count, 1u);
+    if (flags[i] == 1u) {
+        buckets[bidx].hash = sorted_keys[i];
+        buckets[bidx].pos_offset = i;
+    }
+}
+)GLSL";
+
+/// DOC0310 §12 — race-free slot claim via 32-bit atomicCompSwap linear probe.
+constexpr std::string_view kPhaseCIndexClaimSlotsBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
+struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) buffer Flags { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Buckets { BucketRec buckets[]; };
+layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
+layout(std430, set = 0, binding = 6) buffer BucketSlot { uint bucket_slot[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint slot_mask;
+    uint slot_capacity;
+    uint num_buckets;
+    uint probe_cap;
+    uint pass;
+} pc;
+uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15UL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9UL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebUL;
+    return x ^ (x >> 31);
+}
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b >= pc.num_buckets) return;
+    uint p = uint(splitmix64(buckets[b].hash)) & pc.slot_mask;
+    for (uint step = 0u; step < pc.probe_cap; ++step) {
+        uint old = atomicCompSwap(slot_claims[p], 0xffffffffu, b);
+        if (old == 0xffffffffu) { bucket_slot[b] = p; return; }
+        p = (p + 1u) & pc.slot_mask;
+    }
+    bucket_slot[b] = 0xffffffffu;
+}
+)GLSL";
+
+/// DOC0310 §12 — write the SerializedBucket into its claimed slot.
+constexpr std::string_view kPhaseCIndexEmitSlotsBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+struct BucketRec { uint64_t hash; uint pos_offset; uint pos_count; };
+struct SerializedBucket { uint64_t hash; uint pos_offset; uint pos_count; };
+layout(std430, set = 0, binding = 0) readonly buffer SortedKeys { uint64_t sorted_keys[]; };
+layout(std430, set = 0, binding = 1) buffer Flags { uint flags[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Scanned { uint scanned[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Buckets { BucketRec buckets[]; };
+layout(std430, set = 0, binding = 4) buffer SlotClaims { uint slot_claims[]; };
+layout(std430, set = 0, binding = 5) buffer Slots { SerializedBucket slots[]; };
+layout(std430, set = 0, binding = 6) readonly buffer BucketSlot { uint bucket_slot[]; };
+layout(push_constant) uniform Params {
+    uint element_count;
+    uint slot_mask;
+    uint slot_capacity;
+    uint num_buckets;
+    uint probe_cap;
+    uint pass;
+} pc;
+void main() {
+    uint b = gl_GlobalInvocationID.x;
+    if (b >= pc.num_buckets) return;
+    uint p = bucket_slot[b];
+    if (p == 0xffffffffu) return;
+    slots[p].hash = buckets[b].hash;
+    slots[p].pos_offset = buckets[b].pos_offset;
+    slots[p].pos_count = buckets[b].pos_count;
+}
+)GLSL";
+
+/// DOC0310 §15 — chain range build. One workgroup (1 invocation) per query
+/// serially scans that query's sorted anchor span, emitting `GpuChainRange`
+/// records at strand/chromosome changes and hard reference gaps, matching the
+/// CPU `build_gpu_chain_ranges` predicate. Writes the per-query range count.
+constexpr std::string_view kPhaseCChainRangeBuildBody = R"GLSL(
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+struct AnchorWire { uint64_t ref_position; uint64_t query_position; uint is_reverse; uint span_flags_segment; };
+struct ChainRangeWire { uint begin; uint range_len; };
+struct QuerySpan { uint anchor_lo; uint anchor_hi; uint range_lo; uint range_out; };
+layout(std430, set = 0, binding = 0) readonly buffer Anchors { AnchorWire anchors[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Unused1 { uint unused1[]; };
+layout(std430, set = 0, binding = 2) buffer RangesOut { ChainRangeWire ranges[]; };
+layout(std430, set = 0, binding = 3) buffer RangeCount { uint range_count[]; };
+layout(std430, set = 0, binding = 4) buffer Unused4 { uint unused4[]; };
+layout(std430, set = 0, binding = 5) readonly buffer QuerySpans { QuerySpan spans[]; };
+layout(push_constant) uniform Params {
+    uint query_count;
+    uint max_ref_gap;
+} pc;
+uint chrom_key(AnchorWire a) { return (a.is_reverse != 0u) ? 1u : 0u; }
+void main() {
+    uint qi = gl_WorkGroupID.x;
+    if (qi >= pc.query_count) return;
+    QuerySpan s = spans[qi];
+    uint lo = s.anchor_lo;
+    uint hi = s.anchor_hi;
+    uint out_idx = s.range_lo;
+    uint produced = 0u;
+    if (lo >= hi) { range_count[qi] = 0u; return; }
+    uint begin = lo;
+    for (uint i = lo + 1u; i < hi; ++i) {
+        AnchorWire prev = anchors[i - 1u];
+        AnchorWire cur = anchors[i];
+        bool key_changed = chrom_key(cur) != chrom_key(prev);
+        bool hard_gap = (cur.ref_position > prev.ref_position)
+            && ((cur.ref_position - prev.ref_position) > uint64_t(pc.max_ref_gap));
+        if (key_changed || hard_gap) {
+            ranges[out_idx + produced].begin = begin;
+            ranges[out_idx + produced].range_len = i - begin;
+            produced += 1u;
+            begin = i;
+        }
+    }
+    ranges[out_idx + produced].begin = begin;
+    ranges[out_idx + produced].range_len = hi - begin;
+    produced += 1u;
+    range_count[qi] = produced;
+}
+)GLSL";
+
 /// Resolve a shader kind to its embedded GLSL body (everything after the
 /// `#version`/`#extension`/`#define` prelude the compiler injects).
-[[nodiscard]] std::string_view shader_body_for(ShaderKind kind) {
+[[nodiscard]] std::string shader_body_for(ShaderKind kind) {
     switch (kind) {
         case ShaderKind::chain_tiled_dp_u64:
-            return kChainTiledDpBody;
+            return std::string{kChainTiledDpBody};
         case ShaderKind::minimizer_candidates:
-            return kMinimizerCandidatesBody;
+            return std::string{kMinimizerCandidatesBody};
         case ShaderKind::minimizer_emit_exact:
-            return kMinimizerEmitExactBody;
+            return std::string{kMinimizerEmitExactBody};
         case ShaderKind::seed_lookup_anchors:
-            return kSeedLookupAnchorsBody;
+            return std::string{kSeedLookupAnchorsBody};
         case ShaderKind::sort_anchors_bitonic:
-            return kSortAnchorsBitonicBody;
+            return std::string{kSortAnchorsBitonicBody};
+        // DOC0310 Phase C. The sketch family shares one tile-replay body (the
+        // packed-sequence reader helpers are inlined inside it).
+        case ShaderKind::phase_c_sketch_tile:
+        case ShaderKind::phase_c_sketch_emit_flags:
+        case ShaderKind::phase_c_sketch_emit_carry:
+        case ShaderKind::phase_c_sketch_emit_words:
+            return std::string{kPhaseCSketchBody};
+        case ShaderKind::phase_c_prefix_scan_block:
+            return std::string{kPhaseCScanBlockBody};
+        case ShaderKind::phase_c_prefix_scan_add:
+            return std::string{kPhaseCScanAddBody};
+        case ShaderKind::phase_c_seed_count:
+        case ShaderKind::phase_c_seed_emit:
+            return std::string{kPhaseCSeedBody};
+        case ShaderKind::phase_c_sort_radix_histogram:
+            return std::string{kPhaseCSortHistogramBody};
+        case ShaderKind::phase_c_sort_radix_scan:
+            return std::string{kPhaseCSortScanBody};
+        case ShaderKind::phase_c_sort_radix_scatter:
+            return std::string{kPhaseCSortScatterBody};
+        case ShaderKind::phase_c_index_mark_runs:
+            return std::string{kPhaseCIndexMarkRunsBody};
+        case ShaderKind::phase_c_index_emit_buckets:
+            return std::string{kPhaseCIndexEmitBucketsBody};
+        case ShaderKind::phase_c_index_claim_slots:
+            return std::string{kPhaseCIndexClaimSlotsBody};
+        case ShaderKind::phase_c_index_emit_slots:
+            return std::string{kPhaseCIndexEmitSlotsBody};
+        case ShaderKind::phase_c_chain_range_build:
+            return std::string{kPhaseCChainRangeBuildBody};
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }

@@ -11,6 +11,7 @@
     "bioseq_block_simd_dp_scalar_mm":           {"_": {"type": "integer", "default": 0}},
     "bioseq_block_simd_dp_two_stack_nthash":    {"_": {"type": "integer", "default": 0}},
     "bioseq_block_vulkan_dp_vulkan_minimap_int": {"_": {"type": "integer", "default": 0, "description": "DOC0307 Phase B G3SA front-end: Vulkan minimap-int minimizers + Vulkan tiled-DP chaining + block aligner"}},
+    "bioseq_block_vulkan_phase_c_frontend":     {"_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C resident two-submit Vulkan frontend: parallel ordered sketch + GPU target-index build + GPU seed count/emit + device anchor sort + Vulkan tiled-DP chaining + block aligner"}},
     "bioseq_ksw2_rmq_scalar_mm":                {"_": {"type": "integer", "default": 0}}
   },
 
@@ -71,7 +72,8 @@
         "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash": {},
         "bioseq_ksw2_batched_simd_dp_two_stack_nthash": {},
         "bioseq_block_simd_dp_two_stack_nthash": {},
-        "bioseq_block_vulkan_dp_vulkan_minimap_int": {}
+        "bioseq_block_vulkan_dp_vulkan_minimap_int": {},
+        "bioseq_block_vulkan_phase_c_frontend": {}
       },
       "by_regions": true,
       "metrics": {

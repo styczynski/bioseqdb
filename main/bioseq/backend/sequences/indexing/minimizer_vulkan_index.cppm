@@ -133,6 +133,11 @@ struct GpuResidentMinimizerIndex {
     std::uint64_t target_len = 0;
     std::uint32_t slot_mask = 0;
     std::uint32_t position_count = 0;
+    // DOC0310 §12 — when nonzero, `slots` is a hash-sorted dense bucket array
+    // (GPU-built) that the seed lookup binary-searches; `slot_mask` is then 0.
+    // When zero, `slots` is the open-addressed table (CPU upload) and `slot_mask`
+    // is the power-of-two mask.
+    std::uint32_t bucket_count = 0;
 };
 
 [[nodiscard]] inline std::uint32_t gpu_slot_capacity(std::uint64_t distinct) {
@@ -143,6 +148,33 @@ struct GpuResidentMinimizerIndex {
         throw GpuIndexTooLarge{};
     }
     return static_cast<std::uint32_t>(std::bit_ceil(std::max<std::uint64_t>(2, wanted)));
+}
+
+/// DOC0310 §12 — wrap a runtime GPU-built index (`GpuBuiltIndex`, owns its
+/// slots/positions device buffers) into a `GpuResidentMinimizerIndex`, taking a
+/// resident memory permit. Lives here (indexing layer) so `runtime.cppm` never
+/// imports `bioseq::indexing`.
+[[nodiscard]] inline std::shared_ptr<GpuResidentMinimizerIndex> adopt_gpu_built_index(
+    bioseq::gpu::vulkan::Runtime& runtime,
+    bioseq::gpu::vulkan::GpuBuiltIndex&& built,
+    GpuMinimizerIndexCacheKey key)
+{
+    (void)runtime;
+    if (!built.valid) return nullptr;
+    auto resident = std::make_shared<GpuResidentMinimizerIndex>();
+    const std::uint64_t bytes =
+        bioseq::gpu::vulkan::sat_add(built.slots.bytes, built.positions.bytes);
+    if (auto permit = bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(bytes)) {
+        resident->permit = std::move(*permit);
+    }
+    resident->slots = std::move(built.slots);
+    resident->positions = std::move(built.positions);
+    resident->key = key;
+    resident->target_len = built.target_len;
+    resident->slot_mask = built.slot_mask;          // 0 for the sorted-bucket form
+    resident->position_count = built.position_count;
+    resident->bucket_count = built.occupied_slots;  // dense bucket count for binary search
+    return resident;
 }
 
 [[nodiscard]] inline GpuMinimizerIndexUpload
@@ -248,6 +280,18 @@ public:
             insert_with_eviction_locked(key, handle);
         }
         return handle;
+    }
+
+    /// DOC0310 §12 — insert a GPU-built resident index (adopted from a device
+    /// index build) under `key` so the seed stage finds it instead of uploading
+    /// the CPU `MinimizerHashmapFragmentIndex`.
+    void insert_built(
+        const GpuMinimizerIndexCacheKey& key,
+        std::shared_ptr<const GpuResidentMinimizerIndex> handle)
+    {
+        if (!handle) return;
+        std::lock_guard<std::mutex> guard(mu_);
+        insert_with_eviction_locked(key, handle);
     }
 
     void erase(const GpuMinimizerIndexCacheKey& key) noexcept {

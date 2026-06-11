@@ -118,6 +118,8 @@ set(BIOSEQ_NOPG_MODULES
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/shader_compiler.cppm
   # DOC0307 Phase B — Vulkan seeding ABI (storage-free; shared by runtime/seeding).
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/phase_b_abi.cppm
+  # DOC0310 Phase C — resident two-submit frontend / GPU index-build POD ABI.
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/phase_c_abi.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_vulkan.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/index.cppm

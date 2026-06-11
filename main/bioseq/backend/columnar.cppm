@@ -183,6 +183,17 @@ bool bioseq_aligner_vulkan_enabled = true;
  */
 bool bioseq_aligner_vulkan_seed_hits_enabled = true;
 bool bioseq_aligner_vulkan_index_cache_enabled = true;
+/*
+ * DOC0310 Phase C — resident two-submit Vulkan frontend (parallel ordered
+ * sketch + GPU target-index build + GPU seed count/emit + device anchor sort)
+ * and the optional GPU base-alignment extension. All default to enabled (extend
+ * off) and fall back to the CPU/Phase B path automatically.
+ */
+bool bioseq_aligner_vulkan_fused_frontend_enabled = true;
+bool bioseq_aligner_vulkan_gpu_index_build_enabled = true;
+bool bioseq_aligner_vulkan_extend_enabled = false;
+int  bioseq_aligner_vulkan_phase_c_tile_bp = 2048;
+int  bioseq_aligner_vulkan_phase_c_radix_bits = 8;
 
 /*
  * bioseq_init is the module's top-level initialiser. It wires up the GUC
@@ -762,6 +773,28 @@ bioseq_guc_init()
 							 "Cache GPU-resident minimizer index uploads while their memory permit is held.",
 							 NULL, &bioseq_aligner_vulkan_index_cache_enabled, true,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	/* DOC0310 Phase C — resident two-submit Vulkan frontend + GPU index build. */
+	DefineCustomBoolVariable("bioseq.aligner.vulkan_fused_frontend_enabled",
+							 "Enable the Phase C resident two-submit Vulkan frontend (parallel ordered sketch + GPU seed count/emit + device anchor sort).",
+							 NULL, &bioseq_aligner_vulkan_fused_frontend_enabled, true,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("bioseq.aligner.vulkan_gpu_index_build_enabled",
+							 "Build the target minimizer index entirely on the GPU (device radix sort + race-free slot table).",
+							 NULL, &bioseq_aligner_vulkan_gpu_index_build_enabled, true,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("bioseq.aligner.vulkan_extend_enabled",
+							 "Enable the optional Phase C GPU base-alignment extension under the block aligner.",
+							 NULL, &bioseq_aligner_vulkan_extend_enabled, false,
+							 PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.vulkan_phase_c_tile_bp",
+							 "Phase C ordered-sketch tile size (base pairs per tile).",
+							 NULL, &bioseq_aligner_vulkan_phase_c_tile_bp, 2048,
+							 1, 1 << 24, PGC_USERSET, 0, NULL, NULL, NULL);
+	DefineCustomIntVariable("bioseq.aligner.vulkan_phase_c_radix_bits",
+							 "Phase C device radix sort digit width (bits per pass).",
+							 NULL, &bioseq_aligner_vulkan_phase_c_radix_bits, 8,
+							 1, 16, PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
 		"bioseq.aligner.enable_profiling",

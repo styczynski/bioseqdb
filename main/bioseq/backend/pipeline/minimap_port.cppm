@@ -334,6 +334,22 @@ struct Minimap2Params {
     /// memory permit is held (batch/wave scoped). Runtime routing only.
     bool                          vulkan_index_cache_enabled = true;
 
+    /// DOC0310 Phase C — resident two-submit Vulkan frontend (parallel ordered
+    /// sketch + GPU seed count/emit + device anchor sort). Runtime routing only;
+    /// declines cleanly to the Phase B / CPU path on any unsupported shape.
+    bool                          vulkan_fused_frontend_enabled = true;
+    /// DOC0310 Phase C — build the target minimizer index entirely on the GPU
+    /// (parallel sketch → device radix sort → race-free slot table) instead of
+    /// the CPU `MinimizerHashmapFragmentIndex` build + slot upload.
+    bool                          vulkan_gpu_index_build_enabled = true;
+    /// DOC0310 Phase C — optional GPU base-alignment extension under the block
+    /// aligner. Disabled by default; never gates the Phase C performance path.
+    bool                          vulkan_extend_enabled = false;
+    /// DOC0310 Phase C — ordered-sketch tile size (base pairs per tile).
+    uint32_t                      vulkan_phase_c_tile_bp = 2048;
+    /// DOC0310 Phase C — device radix sort digit width (bits per pass).
+    uint32_t                      vulkan_phase_c_radix_bits = 8;
+
     /// Build ChainingParams from this Minimap2Params.
     ///
     /// Extracts only the chaining-relevant subset and precomputes derived values.

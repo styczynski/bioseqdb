@@ -313,6 +313,29 @@ struct AlgorithmDispatch {
         dispatch.params.vulkan_enabled            = true;
         dispatch.params.vulkan_seed_hits_enabled  = true;
         dispatch.params.vulkan_index_cache_enabled = true;
+        // Phase B parity row: keep the resident two-submit frontend OFF so it
+        // measures the Phase B serial-emit sketch + CPU index build path.
+        dispatch.params.vulkan_fused_frontend_enabled  = false;
+        dispatch.params.vulkan_gpu_index_build_enabled = false;
+    } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {
+        // DOC0310 Phase C — the resident two-submit Vulkan frontend: parallel
+        // ordered tile sketch + GPU target-index build (device radix sort +
+        // race-free slot table) + GPU seed count/emit + device anchor sort +
+        // Vulkan tiled-DP chaining + block aligner. Same aligner as the fastest
+        // CPU row (block aligner); the varied dimensions are the GPU frontend and
+        // the GPU index build. Runtime-falls back to the CPU/SIMD path with no
+        // usable Vulkan device. This row is compared against
+        // `bioseq_block_simd_dp_two_stack_nthash` (SIMD minimizers + SIMD
+        // chaining + block aligner) and `minimap2_dp`.
+        dispatch.params.chaining_algorithm        = ChainingAlgorithmType::VULKAN_TILED_DP;
+        dispatch.params.base_alignment_algorithm  = BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        dispatch.params.minimizer_algorithm       = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+        dispatch.params.vulkan_enabled            = true;
+        dispatch.params.vulkan_seed_hits_enabled  = true;
+        dispatch.params.vulkan_index_cache_enabled = true;
+        dispatch.params.vulkan_fused_frontend_enabled  = true;
+        dispatch.params.vulkan_gpu_index_build_enabled = true;
+        dispatch.params.vulkan_extend_enabled          = false;
     } else if (algo == "bioseq_ksw2_rmq_scalar_mm") {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::RMQ;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;

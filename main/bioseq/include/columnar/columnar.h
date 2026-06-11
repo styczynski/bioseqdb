@@ -94,6 +94,12 @@ extern bool bioseq_aligner_enable_profiling;
 extern bool bioseq_aligner_vulkan_enabled;
 extern bool bioseq_aligner_vulkan_seed_hits_enabled;
 extern bool bioseq_aligner_vulkan_index_cache_enabled;
+/* DOC0310 Phase C — resident two-submit Vulkan frontend + GPU index build. */
+extern bool bioseq_aligner_vulkan_fused_frontend_enabled;
+extern bool bioseq_aligner_vulkan_gpu_index_build_enabled;
+extern bool bioseq_aligner_vulkan_extend_enabled;
+extern int  bioseq_aligner_vulkan_phase_c_tile_bp;
+extern int  bioseq_aligner_vulkan_phase_c_radix_bits;
 
 
 /* called when the user changes options on the given relation */

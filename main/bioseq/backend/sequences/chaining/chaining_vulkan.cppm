@@ -250,7 +250,8 @@ build_gpu_chain_ranges(
         params.bandwidth,
         params.max_chain_iter,
         params.gap_penalty,
-        params.skip_penalty);
+        params.skip_penalty,
+        params.max_chain_skip);
 
     for (std::size_t i = 0; i < n; ++i) {
         const int64_t pred = predecessors[i];

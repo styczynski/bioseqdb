@@ -43,6 +43,7 @@ import bioseq_sequences.kmers.hashers.base;
 import bioseq_gpu.vulkan.phase_b_abi;
 import bioseq_gpu.vulkan.runtime;
 import bioseq_parallelism.memory_admission;
+import bioseq_instr;  // DOC0310 §21 — phase_c_* timing labels
 
 export namespace bioseq::gpu::vulkan {
 
@@ -350,8 +351,13 @@ template <class MinimizerT>
     std::uint64_t bp_size, std::uint64_t window_size) noexcept
 {
     using bioseq::parallelism::saturating_mul;
+    // ~2/(w+1) minimizers per bp in practice; 3·(bp/w) is a safe (>1.5×) upper
+    // bound that keeps the single-pass sketch's capacity buffers and the
+    // admission reservation small enough to avoid spurious memory-pressure CPU
+    // fallbacks at XXL_HIFI. An under-estimate is caught by the emit's capacity
+    // guard (counters[1]) → graceful CPU fallback, never an out-of-bounds write.
     const std::uint64_t base = window_size == 0 ? bp_size : (bp_size / window_size + 64u);
-    return std::max<std::uint64_t>(64u, saturating_mul(base, 4u));
+    return std::max<std::uint64_t>(64u, saturating_mul(base, 3u));
 }
 
 template <class MinimizerT>
@@ -384,6 +390,38 @@ template <class MinimizerT>
 }
 
 // ===========================================================================
+// Phase C memory estimate (DOC0310 §22)
+// ===========================================================================
+
+/// Per-batch Phase C device-memory estimate. Used for initial admission and
+/// batch splitting before the count submit reports exact counts. Every field is
+/// summed with the shared saturating add so the total never wraps.
+struct PhaseCMemoryEstimate {
+    std::uint64_t packed_sequence_bytes = 0;
+    std::uint64_t query_minimizer_bytes = 0;
+    std::uint64_t target_minimizer_bytes = 0;
+    std::uint64_t index_slot_bytes = 0;
+    std::uint64_t index_position_bytes = 0;
+    std::uint64_t anchor_bytes = 0;
+    std::uint64_t sort_scratch_bytes = 0;
+    std::uint64_t chain_bytes = 0;
+
+    [[nodiscard]] std::uint64_t total() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        std::uint64_t sum = 0;
+        sum = saturating_add(sum, packed_sequence_bytes);
+        sum = saturating_add(sum, query_minimizer_bytes);
+        sum = saturating_add(sum, target_minimizer_bytes);
+        sum = saturating_add(sum, index_slot_bytes);
+        sum = saturating_add(sum, index_position_bytes);
+        sum = saturating_add(sum, anchor_bytes);
+        sum = saturating_add(sum, sort_scratch_bytes);
+        sum = saturating_add(sum, chain_bytes);
+        return sum;
+    }
+};
+
+// ===========================================================================
 // Sketch entry points (DOC0307 §6.1)
 // ===========================================================================
 
@@ -395,7 +433,8 @@ template <class MinimizerT>
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>
 collect_minimizers_vulkan_result(
-    const Seq& seq, std::size_t window_size, std::size_t kmer_size)
+    const Seq& seq, std::size_t window_size, std::size_t kmer_size,
+    bool fused_frontend = false)
 {
     using bare = std::remove_cvref_t<Seq>;
     if constexpr (is_fragmented_sequence<bare>() || !vulkan_sketchable_sequence<bare>) {
@@ -487,9 +526,15 @@ collect_minimizers_vulkan_result(
                     .padding_letters = upload.padding_letters,
                 };
 
-                RuntimeSketchResult raw = runtime.run_minimizer_sketch_roundtrip(
-                    std::span<const std::byte>{padded_sequence.data(), padded_sequence.size()},
-                    rank_lut, sketch_params, max_minimizers);
+                // DOC0310 §9 — the fused frontend uses the parallel ordered tile
+                // sketch; otherwise keep the Phase B serial-emit roundtrip.
+                RuntimeSketchResult raw = fused_frontend
+                    ? runtime.run_phase_c_sketch_roundtrip(
+                          std::span<const std::byte>{padded_sequence.data(), padded_sequence.size()},
+                          rank_lut, sketch_params, max_minimizers)
+                    : runtime.run_minimizer_sketch_roundtrip(
+                          std::span<const std::byte>{padded_sequence.data(), padded_sequence.size()},
+                          rank_lut, sketch_params, max_minimizers);
                 if (raw.overflow) {
                     return std::nullopt;
                 }
@@ -523,15 +568,110 @@ collect_minimizers_vulkan_result(
     }
 }
 
+/// DOC0310 §12 — build the target minimizer index entirely on the GPU from the
+/// target sequence (parallel sketch → device radix sort → race-free slot table).
+/// Returns `std::nullopt` (caller falls back to the CPU `MinimizerHashmapFragmentIndex`
+/// build + upload) for any shape the GPU cannot run. Alphabet-generic; only the
+/// shader specialises. The returned `GpuBuiltIndex` owns the resident
+/// slots/positions device buffers — the indexing layer adopts them.
+template <class MinimizerT, class Seq>
+[[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_index_on_device(
+    const Seq& seq, std::size_t window_size, std::size_t kmer_size)
+{
+    static const auto* _pc_idx_desc =
+        bioseq::instr::register_region_static("phase_c_gpu_index_build");
+    auto _pc_idx_scope = bioseq::instr::region(_pc_idx_desc);
+    using bare = std::remove_cvref_t<Seq>;
+    if constexpr (is_fragmented_sequence<bare>() || !vulkan_sketchable_sequence<bare>) {
+        return std::nullopt;
+    } else {
+        using traits = typename bare::traits;
+        using bioseq::parallelism::MemoryAdmissionController;
+        using bioseq::parallelism::saturating_mul;
+        if constexpr (traits::alphabet_size > 256 || traits::bits_per_char == 0 ||
+                      traits::bits_per_char > 32) {
+            return std::nullopt;
+        } else {
+            constexpr std::size_t step_bits =
+                choose_alphabet_kernel<bare>() == AlphabetKernelKind::generic
+                    ? traits::bits_per_char : std::size_t{2};
+            if (kmer_size == 0 || kmer_size > 64 / step_bits || kmer_size > 32) return std::nullopt;
+            if (window_size == 0 || window_size > 256) return std::nullopt;
+
+            const SequenceUploadView upload = make_sequence_upload_view(seq);
+            if (upload.bp_size == 0 ||
+                upload.bp_size > std::numeric_limits<std::uint32_t>::max() ||
+                upload.padded_byte_size == std::numeric_limits<std::uint64_t>::max()) {
+                return std::nullopt;
+            }
+            auto& runtime = Runtime::instance();
+            if (!runtime.usable()) return std::nullopt;
+
+            const std::uint64_t max_minimizers =
+                estimate_vulkan_minimizer_capacity(upload.bp_size, window_size);
+            if (max_minimizers > std::numeric_limits<std::uint32_t>::max()) return std::nullopt;
+
+            // Resident index footprint (~ slots + positions); admitted via the
+            // existing controller. Transient sort scratch is bounded by the arena.
+            const std::uint64_t resident_bytes = saturating_mul(max_minimizers, 24u);
+            auto permit = MemoryAdmissionController::instance().try_reserve(resident_bytes);
+            if (!permit) return std::nullopt;
+
+            try {
+                const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
+                std::vector<std::byte> padded_sequence(
+                    static_cast<std::size_t>(upload.padded_byte_size));
+                if (upload.byte_size != 0u && upload.bytes != nullptr) {
+                    std::memcpy(padded_sequence.data(), upload.bytes,
+                                static_cast<std::size_t>(upload.byte_size));
+                }
+                const VulkanSketchParams sketch_params{
+                    .bp_size = static_cast<std::uint32_t>(upload.bp_size),
+                    .window_size = static_cast<std::uint32_t>(window_size),
+                    .kmer_size = static_cast<std::uint32_t>(kmer_size),
+                    .hash_bits = minimizer_wire_traits<MinimizerT>::hash_bits,
+                    .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
+                    .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
+                    .minimizer_word_kind = static_cast<std::uint32_t>(
+                        minimizer_wire_traits<MinimizerT>::word_kind),
+                    .minimizer_words32 = minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+                    .alphabet_kind = static_cast<std::uint32_t>(choose_alphabet_kernel<bare>()),
+                    .unit_bits = upload.unit_bits,
+                    .bits_per_char = upload.bits_per_char,
+                    .letters_per_unit = upload.letters_per_unit,
+                    .alphabet_size = upload.alphabet_size,
+                    .seq_word_offset = 0u,
+                    .char_mask = upload.char_mask,
+                    .padding_letters = upload.padding_letters,
+                };
+                GpuBuiltIndex built = runtime.run_phase_c_build_target_index(
+                    std::span<const std::byte>{padded_sequence.data(), padded_sequence.size()},
+                    rank_lut, sketch_params, max_minimizers);
+                if (!built.valid) {
+                    bioseq_log<ERR>("[vulkan index] GPU build returned invalid (bp={}, max_min={})",
+                                    upload.bp_size, max_minimizers);
+                    return std::nullopt;
+                }
+                return built;  // permit released here; indexing layer re-reserves.
+            } catch (const VulkanRuntimeError& e) {
+                bioseq_log<ERR>("[vulkan index] GPU build threw; CPU fallback: {}", e.what());
+                return std::nullopt;
+            }
+        }
+    }
+}
+
 /// Collector-compatible wrapper for existing minimizer call sites. Feeds the
 /// GPU sketch into `collector`; returns false (without mutating the collector
 /// past whatever it pushed) to request the caller's scalar fallback.
 template <class MinimizerT, class Collector, class Seq>
 [[nodiscard]] bool collect_minimizers_vulkan(
     Collector& collector, const Seq& seq,
-    std::size_t window_size, std::size_t kmer_size)
+    std::size_t window_size, std::size_t kmer_size,
+    bool fused_frontend = false)
 {
-    auto result = collect_minimizers_vulkan_result<MinimizerT>(seq, window_size, kmer_size);
+    auto result = collect_minimizers_vulkan_result<MinimizerT>(
+        seq, window_size, kmer_size, fused_frontend);
     if (!result) {
         return false;
     }

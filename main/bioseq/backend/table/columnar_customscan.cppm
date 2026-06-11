@@ -822,6 +822,14 @@ build_params_from_gucs()
 	params.vulkan_enabled = bioseq_aligner_vulkan_enabled;
 	params.vulkan_seed_hits_enabled = bioseq_aligner_vulkan_seed_hits_enabled;
 	params.vulkan_index_cache_enabled = bioseq_aligner_vulkan_index_cache_enabled;
+	/* DOC0310 Phase C — resident two-submit frontend + GPU index build. */
+	params.vulkan_fused_frontend_enabled = bioseq_aligner_vulkan_fused_frontend_enabled;
+	params.vulkan_gpu_index_build_enabled = bioseq_aligner_vulkan_gpu_index_build_enabled;
+	params.vulkan_extend_enabled = bioseq_aligner_vulkan_extend_enabled;
+	params.vulkan_phase_c_tile_bp =
+		static_cast<uint32_t>(bioseq_aligner_vulkan_phase_c_tile_bp);
+	params.vulkan_phase_c_radix_bits =
+		static_cast<uint32_t>(bioseq_aligner_vulkan_phase_c_radix_bits);
 	return params;
 }
 

@@ -424,8 +424,9 @@ TEST_CASE("DOC0304 §10.4 — Vulkan chaining preserves ref_position > 2^32",
 
 TEST_CASE("DOC0304 §10.6 — chain_tiled_dp shader compiles with the anchor ABI",
           "[g3sa][vulkan][shader][layout]") {
-    // The push-constant block layout is pinned in C++.
-    static_assert(sizeof(gv::ChainingPushConstants) == 32);
+    // The push-constant block layout is pinned in C++ (36 bytes since DOC0311
+    // added max_chain_skip; the AnchorWire stride/offsets below are unchanged).
+    static_assert(sizeof(gv::ChainingPushConstants) == 36);
 
     // Fixtures spanning the selector's three branches plus the keys
     // choose_vulkan_chaining_pipeline picks for small/medium/large devices.

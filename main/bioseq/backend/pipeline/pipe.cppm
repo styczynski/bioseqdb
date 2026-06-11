@@ -1212,7 +1212,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
                 return;
             }
             if (!bioseq::gpu::vulkan::collect_minimizers_vulkan<MinimizerT>(
-                    collector, range, window_size, kmer_size))
+                    collector, range, window_size, kmer_size,
+                    params.vulkan_fused_frontend_enabled))
             {
                 // Generic, behavior-preserving fallback (dna5 N-reset intact).
                 minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
@@ -1238,7 +1239,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
         {
             if (!params.vulkan_enabled) return std::nullopt;
             return bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
-                range, window_size, kmer_size);
+                range, window_size, kmer_size, params.vulkan_fused_frontend_enabled);
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
@@ -1859,7 +1860,8 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                             query_len,
                             params.max_occ,
                             kmer_size,
-                            anchors_slab))
+                            anchors_slab,
+                            params.vulkan_fused_frontend_enabled))
                     {
                         return std::move(token).emit_batch(
                             std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
@@ -2391,6 +2393,22 @@ template <is_constexpr_aligner_params Cep,
  * iteration's pipeline is built.  Per-query results are appended to
  * `out_per_query` in input order.
  */
+// DOC0310 §16 — the Phase C frontend's GPU target-index build replaces the CPU
+// `MinimizerHashmapFragmentIndex` build for this exact (minimizer, chaining)
+// leaf. Runtime-gated; both flags plus the matching algorithm selectors must be
+// set. The runtime device check is done at the call site.
+[[nodiscard]] inline bool phase_c_index_build_active(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+{
+    return params.vulkan_enabled
+        && params.vulkan_fused_frontend_enabled
+        && params.vulkan_gpu_index_build_enabled
+        && params.minimizer_algorithm ==
+               ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+        && params.chaining_algorithm ==
+               ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP;
+}
+
 // DOC0271 Phase 1 §5.3 — the deferred-align parallel pipeline template
 // (`pipeline_run_impl_batch_deferred_align`) and its supporting types
 // (`PerQueryAlignState`, `AlignCollectStage`, `align_regions_batched_cross_query`)
@@ -2451,12 +2469,69 @@ template <is_constexpr_aligner_params Cep,
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache_ptr =
         gpu_index_cache ? &*gpu_index_cache : nullptr;
 
+    // DOC0310 §12/§16 — build the target minimizer index on the GPU and inject
+    // it into the wave cache under the key the SeedHitStage will compute, so the
+    // CPU `MinimizerHashmapFragmentIndex` build (skipped upstream in
+    // `minimap2_port` for this leaf) is never paid. If the device build declines
+    // we sketch + build a local CPU index so seeding still works (effective
+    // index pointer redirects to it).
+    const IndexT* effective_index_ptr = &target_index;
+    std::optional<bioseq::indexing::MinimizerHashmapFragmentIndex> local_fallback_index;
+    if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
+                  bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+        if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
+            && target_index.table.empty() && target_len > 0) {
+            auto& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
+            bool injected = false;
+            if (gpu_rt.usable()) {
+                auto built = bioseq::gpu::vulkan::build_gpu_index_on_device<MinimizerT>(
+                    target_seq, static_cast<std::size_t>(params.window_size),
+                    static_cast<std::size_t>(params.kmer_size));
+                if (built) {
+                    auto key = bioseq::indexing::make_gpu_index_cache_key(
+                        target_index, bioseq::indexing::GpuIndexCacheIdentity{});
+                    auto resident = bioseq::indexing::adopt_gpu_built_index(
+                        gpu_rt, std::move(*built), key);
+                    if (resident) {
+                        resident->target_len = target_len;
+                        gpu_index_cache_ptr->insert_built(key, resident);
+                        injected = true;
+                        bioseq_log<ERR>("[phase_c] GPU index injected: slot_mask={} pos={} target_len={}",
+                                        resident->slot_mask, resident->position_count, target_len);
+                    }
+                } else {
+                    bioseq_log<ERR>("[phase_c] build_gpu_index_on_device declined (nullopt) for target_len={}", target_len);
+                }
+            } else {
+                bioseq_log<ERR>("[phase_c] runtime not usable for GPU index build");
+            }
+            if (!injected) {
+                bioseq_log<ERR>("[phase_c] FALLING BACK to CPU target index build (target_len={})", target_len);
+                // Device build declined: build a CPU index locally so the seed
+                // stage still has data (rare; only fires if the GPU path failed
+                // after `minimap2_port` skipped the CPU build for this leaf).
+                sketch_collector_t<MinimizerT> target_collector;
+                target_collector.reserve(static_cast<std::size_t>(target_len)
+                    / std::max<std::size_t>(static_cast<std::size_t>(params.window_size), 1u) + 64u);
+                minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
+                    target_collector, target_seq,
+                    static_cast<std::size_t>(params.window_size),
+                    static_cast<std::size_t>(params.kmer_size));
+                auto target_minimizers = std::move(target_collector).extract_sketches_data();
+                local_fallback_index.emplace();
+                local_fallback_index->build(target_minimizers, target_len);
+                effective_index_ptr = &*local_fallback_index;
+            }
+        }
+    }
+    const IndexT& effective_index = *effective_index_ptr;
+
     // Empty proto for the FromSequence path's unused minimizers argument.
     static const std::vector<MinimizerT> empty_minimizers_proto{};
 
     auto run_one_query =
         [target_len, &query_seqs, &query_minimizers_per_query, &target_seq,
-         &target_index, &scoring_matrix, &params, gpu_index_cache_ptr](std::size_t qi) {
+         &effective_index, &scoring_matrix, &params, gpu_index_cache_ptr](std::size_t qi) {
         const auto&   query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
@@ -2476,7 +2551,7 @@ template <is_constexpr_aligner_params Cep,
         }
 
         auto pipeline = make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR>(
-            query_seq, target_seq, mins_for_this_query, target_index,
+            query_seq, target_seq, mins_for_this_query, effective_index,
             scoring_matrix, out, params, query_len, target_len, gpu_index_cache_ptr);
 
         if constexpr (EP == EntryPoint::WithPrebuiltMinimizers) {
@@ -3370,7 +3445,16 @@ template <class MinimizerT,
     auto _scope = bioseq::instr::region(_desc);
     const sequence_size_t target_len = target_seq.bp_size();
     MinimizerHashmapFragmentIndex target_index;
-    target_index.build(target_minimizers, target_len);
+    // DOC0310 §16 — for the Phase C leaf with the GPU index build active, leave
+    // the CPU index empty; `pipeline_run_impl_batch` builds it on the device (or
+    // a local CPU fallback). This is the line that removes the XXL_HIFI
+    // `target_index_build` bottleneck from the GPU row.
+    const bool phase_c_gpu_index =
+        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params)
+        && bioseq::gpu::vulkan::Runtime::instance().usable();
+    if (!phase_c_gpu_index) {
+        target_index.build(target_minimizers, target_len);
+    }
     return minimap2_port_with_index<MinimizerT, QueryRange, TargetRange, MinimizerHashmapFragmentIndex, Scanner>(
         query_seq, target_seq, query_minimizers, target_index, params);
 }
@@ -3491,10 +3575,18 @@ template <class MinimizerT,
     const std::size_t window_len = static_cast<std::size_t>(params.window_size);
     const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
 
-    sketch_collector_t<MinimizerT> target_collector;
-    sketch_into_collector<MinimizerT>(
-        target_collector, target_seq, window_len, kmer_len, params);
-    const auto target_minimizers = std::move(target_collector).extract_sketches_data();
+    // DOC0310 §16 — skip the host target sketch for the Phase C GPU-index leaf;
+    // the device index build sketches the target itself (avoids a double sketch).
+    std::vector<MinimizerT> target_minimizers;
+    const bool phase_c_gpu_index =
+        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params)
+        && bioseq::gpu::vulkan::Runtime::instance().usable();
+    if (!phase_c_gpu_index) {
+        sketch_collector_t<MinimizerT> target_collector;
+        sketch_into_collector<MinimizerT>(
+            target_collector, target_seq, window_len, kmer_len, params);
+        target_minimizers = std::move(target_collector).extract_sketches_data();
+    }
 
     sketch_collector_t<MinimizerT> query_collector;
     sketch_into_collector<MinimizerT>(
