@@ -1,0 +1,9 @@
+{
+  "name": "bioseq-build-mcp-qmd",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local QMD install used by the bioseq build MCP for document search.",
+  "dependencies": {
+    "@tobilu/qmd": "^2.5.3"
+  }
+}

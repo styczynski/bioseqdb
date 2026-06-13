@@ -61,6 +61,11 @@ from inspect_tool import (
     MATCHES_WARN_THRESHOLD,
 )
 
+# Lazy provisioning for the document tools (npm qmd + poetry jsonschema). Imported here only
+# to define functions; ensure_doc_env() is called on first doc-tool use, never at import and
+# never by the detached --run-build worker (which is stdlib-only).
+import bootstrap  # noqa: E402
+
 # --------------------------- configuration ---------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
@@ -1199,6 +1204,100 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+# --------------------------- document tools (Goal C) -----------------------
+# Four QMD-backed document-management tools. Their request bodies are JSON-Schema-validated
+# server-side in docs/schemas.py (the inputSchema dicts below mirror those schemas and are the
+# AI-facing contract). See main/DOCS/README.md.
+TOOL_DEFINITIONS += [
+    {
+        "name": "doc_create",
+        "description": (
+            "Create a new project document under main/DOCS/CURRENT/<TYPE>/ with consistent "
+            "frontmatter and an auto-allocated DOC id (max existing + 1). The file is "
+            "immediately FTS-indexed into QMD (vector embeddings refresh in the background) so "
+            "doc_search finds it. Returns the absolute path — open it with Read and write the "
+            "body. Routing: bench topics -> BENCHMARK_FRAMEWORK, bugfix -> BUGFIX, else by type. "
+            "Topics are validated against main/DOCS/.topics unless allow_new_topic=true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["guidelines", "human_notes", "tech_spec", "research", "report",
+                             "impl_plan", "prompt", "external_doc", "bugfix"],
+                    "description": "Document type (decides directory + frontmatter).",
+                },
+                "title": {"type": "string",
+                          "description": "Human title; becomes the filename slug."},
+                "topics": {"type": "array", "items": {"type": "string"},
+                           "description": "1+ topic tags (closed vocabulary in .topics)."},
+                "summary": {"type": "string", "description": "<=400 char one-line summary."},
+                "origin": {"type": "string",
+                           "enum": ["ai_output", "human_prompt", "external_dump",
+                                    "human_notes", "mixed"], "default": "ai_output"},
+                "supersedes": {"type": "array", "items": {"type": "string"},
+                               "description": "DOC ids this replaces, e.g. [\"DOC0310\"]."},
+                "allow_new_topic": {"type": "boolean", "default": False,
+                                    "description": "Permit topics not yet in .topics."},
+            },
+            "required": ["type", "title", "topics"],
+        },
+    },
+    {
+        "name": "doc_archive",
+        "description": (
+            "Archive a document: move it from main/DOCS/CURRENT/ to main/DOCS/ARCHIVE/ "
+            "(preserving the <TYPE>/ subdir), set `archived: true` (and status: archived unless "
+            "superseded) in its frontmatter, and refresh the QMD index. `doc` accepts a DOC id "
+            "(DOC0123 or 123), an exact filename, or a unique path substring."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"doc": {"type": "string",
+                           "description": "DOC id, filename, or unique path fragment."}},
+            "required": ["doc"],
+        },
+    },
+    {
+        "name": "doc_search",
+        "description": (
+            "Search project documents via QMD hybrid retrieval (BM25 + vector) + LLM reranking "
+            "over a warm local model server. Returns the BEST hit's absolute path + the "
+            "most-relevant text fragment, plus, for the other hits, their metadata (path, "
+            "doc_id, title, context, score). Searches CURRENT by default; set "
+            "include_archived=true to also search ARCHIVE."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "Natural-language or keyword query."},
+                "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50},
+                "min_score": {"type": "number", "default": 0.0, "minimum": 0, "maximum": 1},
+                "include_archived": {"type": "boolean", "default": False},
+                "intent": {"type": "string",
+                           "description": "Optional disambiguation context."},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "doc_read",
+        "description": (
+            "Resolve a document selector (DOC id, filename, or path fragment) to its absolute "
+            "on-disk path plus metadata, so you can open it with the Read tool. Does not return "
+            "the body itself."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"doc": {"type": "string",
+                           "description": "DOC id, filename, or unique path fragment."}},
+            "required": ["doc"],
+        },
+    },
+]
+
 
 def _write_message(msg: dict) -> None:
     sys.stdout.write(json.dumps(msg) + "\n")
@@ -1264,6 +1363,12 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_status(mode)
     elif name == "inspect":
         text = tool_inspect(args)
+    elif name in ("doc_create", "doc_archive", "doc_search", "doc_read"):
+        # Doc-tool requests are JSON-Schema-validated server-side inside operations
+        # (docs/schemas.py). ensure_doc_env() lazily provisions qmd + jsonschema on first use.
+        bootstrap.ensure_doc_env()
+        from docs import operations
+        text = getattr(operations, name)(args)
     else:
         return {
             "content": [{"type": "text", "text": f"unknown tool: {name}"}],
@@ -1346,6 +1451,21 @@ def main() -> int:
         debug: bool = parse_bool("debug", args.debug)
         return _run_build_worker(args.run_build, build_only=build_only,
                                  debug=debug)
+
+    # Non-blocking autostart warm: provision the doc env and bring qmd (collections + HTTP
+    # server + background index) online without blocking the MCP handshake or the stdlib build
+    # tools. This also makes "keep QMD collections up to date periodically" run even in sessions
+    # that never call a doc tool. Disable with BIOSEQ_DOCS_AUTOSTART=0.
+    if os.environ.get("BIOSEQ_DOCS_AUTOSTART", "1") == "1":
+        def _warm() -> None:
+            try:
+                bootstrap.ensure_doc_env()
+                from docs.qmd_manager import get_manager
+                get_manager().ensure_ready()
+            except Exception as e:
+                print(f"[bioseq-build-mcp] autostart warm skipped: {e}",
+                      file=sys.stderr, flush=True)
+        threading.Thread(target=_warm, daemon=True).start()
 
     _serve()
     return 0
