@@ -50,6 +50,7 @@ perf-strange-timing
 plotly
 postgres
 postgres-query
+postgres-ux
 profiling
 seal
 setup
