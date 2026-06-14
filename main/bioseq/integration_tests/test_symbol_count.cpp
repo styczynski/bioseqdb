@@ -24,7 +24,7 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-constexpr std::string_view kColumnar = "test_symcount_cx";
+constexpr std::string_view kBioseqColumn = "test_symcount_cx";
 
 }  // namespace
 
@@ -103,38 +103,38 @@ TEST_CASE("vectorization on/off agree on the scalar tally",
     REQUIRE(std::stoll(rows.front().front().value()) == 4);
 }
 
-// ---- 3. Columnar table (`USING bioseq`) -------------------------------------
+// ---- 3. BioseqColumn table (`USING bioseq`) -------------------------------------
 
 TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fallback",
           "[symbol_count][columnar]") {
-    auto ctx = fresh_context({kColumnar});
+    auto ctx = fresh_context({kBioseqColumn});
 
     SECTION("stored read path (update_index_on_insert = on)") {
         // seed_small_columnar inserts pk=1 'ACGTACGTACGTACGT' (A=4),
         // pk=2 'TTTTAAAAGGGGCCCC' (A=4), pk=3 'AAAAAAAAAAAAAAAA' (A=16),
         // all under bioseq.update_index_on_insert = on so the INLINE
         // symbol_counts chunk is populated.
-        seed_small_columnar(ctx, kColumnar);
+        seed_small_columnar(ctx, kBioseqColumn);
 
         // pk=1 'ACGTACGTACGTACGT' -> A=4.
         REQUIRE(query_scalar_int(
                     ctx,
                     fmt::format("SELECT bioseq.symbol_count(seq0, 'A') FROM {} "
                                 "WHERE pk = 1;",
-                                kColumnar)) == 4);
+                                kBioseqColumn)) == 4);
         // pk=3 'AAAAAAAAAAAAAAAA' -> A=16.
         REQUIRE(query_scalar_int(
                     ctx,
                     fmt::format("SELECT bioseq.symbol_count(seq0, 'A') FROM {} "
                                 "WHERE pk = 3;",
-                                kColumnar)) == 16);
+                                kBioseqColumn)) == 16);
 
         // Every stored row's A-count must be a non-NULL real tally.
         const auto rows = query_rows(
             ctx,
             fmt::format("SELECT pk, bioseq.symbol_count(seq0, 'A') AS ca FROM {} "
                         "ORDER BY pk;",
-                        kColumnar));
+                        kBioseqColumn));
         REQUIRE(rows.size() == 3);
         for (const auto& row : rows) {
             REQUIRE(row.size() == 2);
@@ -145,7 +145,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
 
     SECTION("recompute fallback (update_index_on_insert = off, "
             "read_sequence_index = off)") {
-        seed_small_columnar(ctx, kColumnar);
+        seed_small_columnar(ctx, kBioseqColumn);
 
         // Insert a fourth row WITHOUT populating the stored INLINE index.
         {
@@ -153,7 +153,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
             exec_sqlf(ctx,
                       "INSERT INTO {} VALUES "
                       "(4, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32));",
-                      kColumnar);
+                      kBioseqColumn);
         }
 
         // With the stored read disabled, the unconditional recompute fallback
@@ -164,7 +164,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
                 ctx,
                 fmt::format("SELECT bioseq.symbol_count(seq0, 'A') FROM {} "
                             "WHERE pk = 4;",
-                            kColumnar));
+                            kBioseqColumn));
             REQUIRE(row.size() == 1);
             REQUIRE(row[0].has_value());  // recompute never yields NULL
             REQUIRE(std::stoll(row[0].value()) == 4);

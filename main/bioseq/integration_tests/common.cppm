@@ -497,12 +497,12 @@ export [[nodiscard]] inline long long index_distinct_sub_keys(
         user_table, index_name, query_key));
 }
 
-// Resolve a row's COLUMNAR rowno (== index query_key) from its ctid.
-export [[nodiscard]] inline long long columnar_row_number_for_ctid(
+// Resolve a row's BIOSEQ_COLUMN rowno (== index query_key) from its ctid.
+export [[nodiscard]] inline long long column_row_number_for_ctid(
     const connection_test_context& ctx, std::string_view user_table,
     std::string_view ctid_literal) {
     return query_scalar_int(ctx, fmt::format(
-        "SELECT bioseq.columnar_row_number('{}'::regclass, '{}'::tid)",
+        "SELECT bioseq.column_row_number('{}'::regclass, '{}'::tid)",
         user_table, ctid_literal));
 }
 

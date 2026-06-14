@@ -139,7 +139,7 @@ struct truth_row {
 inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
                                          std::string_view table) {
     // `ctid` is selected as an explicit target-list column (column 6) BEFORE it is
-    // also passed to bioseq.columnar_row_number(...). This is required for the
+    // also passed to bioseq.column_row_number(...). This is required for the
     // bioseq custom scan: a `ctid` system column referenced ONLY inside an upper
     // expression above a Sort (ORDER BY id) is not carried through the sort, so the
     // function would receive an unprojected/garbage ctid. Selecting ctid as a bare
@@ -150,7 +150,7 @@ inline std::vector<truth_row> read_truth(const connection_test_context& ctx,
     auto rows = query_rows(ctx,
         fmt::format("SELECT id, truth_target_start, truth_target_end, "
                     "is_reverse, original_query_length, ctid, "
-                    "bioseq.columnar_row_number('{}'::regclass, ctid) "
+                    "bioseq.column_row_number('{}'::regclass, ctid) "
                     "FROM {} ORDER BY id;",
                     table,
                     table));

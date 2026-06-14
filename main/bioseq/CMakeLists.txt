@@ -7,8 +7,8 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
-file(GLOB_RECURSE SRC_FILES ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp ${CMAKE_CURRENT_LIST_DIR}/include/*.h)
-file(GLOB_RECURSE SRC_MOD_FILES
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
+file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
@@ -64,128 +64,18 @@ endif()
 # per-target module on top of the shared lib.
 # ============================================================================
 
-set(BIOSEQ_NOPG_MODULES
-  # backend/alignment_hwy/* (Highway-bound SIMD aligners)
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/lane_helpers.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/utils.cppm
-  # backend/common/*  (testing.cppm excluded — Catch2 dependency)
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/algo_tracer.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/circular_append_buffer.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/fragment_cache.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/context.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/mlogging.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/sequan_compat.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/utils.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/vector_stream.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_uint_64.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_uint_128.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_kv_32_32.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/sort_kv_64_64.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/sorting/radix_sort.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/dispatch_chain.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_for_each.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/pack_search.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/runtime_dispatch.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/template_str.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/templating.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/common/templating/value_sequence.cppm
-  # backend/config/config.cppm is Domain P (imports pg_utils, uses PG macros);
-  # it stays in postgresql_bioseq's own module set.
-  # backend/storage/* — the PG-free bucket math + seq_locator POD
-  # (DOC0260 §12.1) plus, since DOC0263 §2.2, the standalone sequence_size
-  # module and the new lazy-fragmented-sequence machinery (scanner concept +
-  # lazy_compact_sequence wrapper). All are NO_POSTGRES-safe.
-  # sequence_storage_manager.cppm stays in postgresql_bioseq's own set (it uses
-  # the PG catalog / palloc).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/bucket_math.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_size.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_scanner.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence.cppm
-  # backend/sequences/*
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/cigar.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/sequences.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/simd.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_rmq.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_scalar.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_simd.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_utils.cppm
-  # DOC0304 Phase A — Vulkan/MoltenVK G3SA tiled-DP chaining backend.
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/shader_compiler.cppm
-  # DOC0307 Phase B — Vulkan seeding ABI (storage-free; shared by runtime/seeding).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/phase_b_abi.cppm
-  # DOC0310 Phase C — resident two-submit frontend / GPU index-build POD ABI.
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/phase_c_abi.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/vulkan/runtime.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/chaining/chaining_vulkan.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/mm_sketch_baseline.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/base.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/lexic.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/hashers/minimap_int.cppm
-  # DOC0307 Phase B — Vulkan minimizer sketch (reads packed compact_sequence_range).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm
-  # DOC0264 §10.1 — sample-sequence generator moved from main/bench/
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/generation/sequence_generator.cppm
-  # DOC0279 — the NO_POSTGRES indexing concept/algorithm modules (§4 table).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/sequence_index_type.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/index_chunked_storage.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/index_traits.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/supported_indexes.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence_index.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_index.cppm
-  # DOC0307 Phase B — GPU-resident minimizer index view + LRU upload cache.
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_vulkan_index.cppm
-  # DOC0307 Phase B — Vulkan seed-hit lookup (emits sorted bioseq::chaining::Anchor).
-  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/seeding/seeding_vulkan.cppm
-  # backend/pipeline/*
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concurrency_mode.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/memory_admission.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/concepts.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pool.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/parallelism/pipeline_ops.cppm
-  # instrumentation/*
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/access.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/aggregate.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/arena.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/clock.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/config.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/counter.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/descriptor.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/arch.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/do_not_optimize.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/siglock.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/spinlock.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/summary_writer.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/detail/sysinfo.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/gauge.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/global_state.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/histogram.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/loop.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/mod.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_linux.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_macos.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pmu/pmu_stub.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/pool.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/region.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sample.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler_posix.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/sampler/sampler_stub.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/thread_state.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/trace.cppm
-)
+# DOC0322 Option A — Domain-N membership is now STRUCTURAL: everything under
+# backend/** (and instrumentation/**) EXCEPT the Domain-P column-store set relocated
+# under backend/pg/** is Domain N. Replaces the previously hand-maintained explicit
+# list (and the sorted_pair_runs_pg/index_residency_pg manual appends below).
+# testing.cppm stays per-target (Catch2), so it is excluded here.
+file(GLOB_RECURSE BIOSEQ_NOPG_MODULES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/instrumentation/**/*.cppm)
+list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/backend/pg/")
+list(FILTER BIOSEQ_NOPG_MODULES EXCLUDE REGEX "/common/testing\.cppm$")
 
 # DOC0286 §12.1 Edit 1 — the IO reader (FASTA/FASTQ + gzip) + the new
 # file_utils.cppm are NO_POSTGRES and are now consumed by the pg extension
@@ -351,9 +241,6 @@ list(REMOVE_ITEM SRC_MOD_FILES ${A_SRC_TESTS})
 #     or under NO_POSTGRES, it falls back to BIOSEQ_LOG_FILE or
 #     /tmp/bioseq_loglog.log.
 list(REMOVE_ITEM SRC_MOD_FILES ${BIOSEQ_NOPG_MODULES})
-list(APPEND SRC_MOD_FILES
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/sorted_pair_runs_pg.cppm
-  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/indexing/index_residency_pg.cppm)
 list(REMOVE_DUPLICATES SRC_MOD_FILES)
 
 # Per-target module set for the aligner (and its tests_exec sibling): just
@@ -472,7 +359,15 @@ AddCommonTargetX(
 # that drove the test execs to opt out; keeping the postgresql_bioseq
 # linkage non-LTO matches that posture.
 set_target_properties(postgresql_bioseq PROPERTIES
-  INTERPROCEDURAL_OPTIMIZATION FALSE)
+  INTERPROCEDURAL_OPTIMIZATION FALSE
+  # DOC0322 — the installed extension dylib must resolve @rpath/libvulkan.*.dylib
+  # (vcpkg) at PostgreSQL dlopen() time. install(TARGETS) strips the build-tree
+  # rpath and set no INSTALL_RPATH, so the installed dylib had none and PG failed
+  # to load it ("Library not loaded: @rpath/libvulkan.1.4.341.dylib"). The vcpkg
+  # lib dir lives *inside* the build tree, so INSTALL_RPATH_USE_LINK_PATH skips it
+  # (that flag only adds out-of-build-tree dirs); set the rpath explicitly to the
+  # vcpkg release + debug lib dirs (both ship libvulkan) so CREATE EXTENSION works.
+  INSTALL_RPATH "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib;${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/lib")
 
 # Throttle the per-target heavy module compiles on low-RAM hosts. The
 # postgresql_bioseq target owns the Domain P module fan-out — the modules

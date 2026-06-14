@@ -803,7 +803,7 @@ TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
     // Post-fix:
     //   1. ExtractPushdownClause accepts mmsearch FuncExprs so the
     //      planner generates a parameterised inner-side path.
-    //   2. AddColumnarScanPath counts mmsearch in scan quals as
+    //   2. AddBioseqColumnScanPath counts mmsearch in scan quals as
     //      an additional wehavemagic unit so the parameterised
     //      path's cost beats the unparameterised competitor.
     //   3. run_batch_and_build_cursors filters out matches whose

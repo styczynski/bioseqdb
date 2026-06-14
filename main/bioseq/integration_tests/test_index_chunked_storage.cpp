@@ -39,7 +39,7 @@ TEST_CASE("DOC0279 per-fragment storage is created on insert with the right quer
 
     // Exact-rowno chunk placement: every indexed columnar rowno has >=1 sub_key.
     auto rownos = query_int_column(ctx,
-        "SELECT bioseq.columnar_row_number('doc0279_cs_seed'::regclass, ctid) "
+        "SELECT bioseq.column_row_number('doc0279_cs_seed'::regclass, ctid) "
         "FROM doc0279_cs_seed ORDER BY 1");
     REQUIRE(rownos.size() == 3);
     for (long long rn : rownos)
@@ -93,7 +93,7 @@ TEST_CASE("DOC0279 missing manifest forces recompute; reserved sentinels are ign
     exec_sqlf(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sqlf(ctx, "SELECT bioseq.update_index('doc0279_cs_cor'::regclass, 'minimizers_per_fragment');");
     const long long rn = query_scalar_int(ctx,
-        "SELECT bioseq.columnar_row_number('doc0279_cs_cor'::regclass, ctid) FROM doc0279_cs_cor LIMIT 1");
+        "SELECT bioseq.column_row_number('doc0279_cs_cor'::regclass, ctid) FROM doc0279_cs_cor LIMIT 1");
 
     // A reserved-band tuple (sub_key in the TEMP_RUN reserved range) must NOT be counted as a data fragment.
     const long long distinct_before = index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_cs_cor", rn);
