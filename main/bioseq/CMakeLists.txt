@@ -142,7 +142,6 @@ target_compile_definitions(bioseq_modules_nopg PUBLIC
 target_include_directories(bioseq_modules_nopg PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../config"
   "${CMAKE_CURRENT_LIST_DIR}/include2"
-  "${CMAKE_CURRENT_LIST_DIR}/include"
   "${CMAKE_CURRENT_LIST_DIR}/backend"
   "${CMAKE_CURRENT_LIST_DIR}/backend/common/simd/sorting/hwy_contrib"
   "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
@@ -263,7 +262,6 @@ AddCommonTargetX(
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
     "${CMAKE_CURRENT_LIST_DIR}/include2"
-    "${CMAKE_CURRENT_LIST_DIR}/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
@@ -315,7 +313,6 @@ AddCommonTargetX(
   INCLUDE_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../config"
     "${CMAKE_CURRENT_LIST_DIR}/include2"
-    "${CMAKE_CURRENT_LIST_DIR}/include"
     "${CMAKE_CURRENT_LIST_DIR}/backend"
     "${CMAKE_CURRENT_LIST_DIR}/../safestringlib/include"
     "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"

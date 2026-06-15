@@ -167,19 +167,19 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 		return hash_entry->writeStateStack->writeState;
 	}
 
-	BioseqColumnOptions columnar_options = { 0 };
+	BioseqColumnOptions bioseq_column_options = { 0 };
 	/*
 	 * In case of a table rewrite, we need to fetch table options based on the
 	 * relation id of the source tuple slot. For normal writes this is the
 	 * same as the target relation.
 	 */
-	ReadBioseqColumnOptions(tuple_slot_relation_id, &columnar_options);
+	ReadBioseqColumnOptions(tuple_slot_relation_id, &bioseq_column_options);
 
 	BioseqColumnWriteState* fresh_write_state = nullptr;
 	{
 		MemoryContextScope context_guard(WriteStateCache.context());
 		fresh_write_state = g_begin_write(relation->rd_locator,
-										  columnar_options,
+										  bioseq_column_options,
 										  tuple_descriptor);
 		// DOC0260 Phase A — seq_caches is initialised lazily by the
 		// TAM-side rewrite helper (rewrite_seq_columns_to_stubs in

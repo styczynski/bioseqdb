@@ -41,6 +41,9 @@ import bioseq_am_cache;
 import bioseq_types.pg_compact_sequence;
 import bioseq_column_tam;   // DOC0322 §7.4 — tid_to_row_number / row_number_to_tid /
                             // IsBioseqColumnTableAmTable + register_bioseq_am_routine
+import :access_identity;
+import :access_common;
+import :access_hooks;
 
 /*
  * Timing parameters for truncate locking heuristics (file-local).
@@ -62,9 +65,6 @@ sact abt_action = {};
 sact int_action = {};
 sact trm_action = {};
 sact kil_action = {};
-
-export const TableAmRoutine * GetBioseqColumnTableAmRoutine(void);
-bool BioseqColumnSupportsIndexAM(char *indexAMName);
 
 /*
  * DOC0322 §7.4 — tid_to_row_number / row_number_to_tid / IsBioseqColumnTableAmTable
@@ -107,34 +107,13 @@ typedef void (*BioseqColumnTableSetOptions_hook_type)(Oid relid, BioseqColumnOpt
 /* available to other extensions using find_rendezvous_variable() */
 static BioseqColumnTableSetOptions_hook_type BioseqColumnTableSetOptions_hook = NULL;
 
-static object_access_hook_type PrevObjectAccessHook = NULL;
-static ProcessUtility_hook_type PrevProcessUtilityHook = NULL;
-
 /* forward declaration for static functions */
-static MemoryContext CreateBioseqColumnScanMemoryContext(void);
-static void BioseqColumnTableDropHook(Oid tgid);
-static void BioseqColumnTriggerCreateHook(Oid tgid);
-static void BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
-											Oid objectId, int subId,
-											void *arg);
-static void BioseqColumnProcessUtility(PlannedStmt *pstmt,
-								   const char *queryString,
-								   bool readOnlyTree,
-								   ProcessUtilityContext context,
-								   ParamListInfo params,
-								   QueryEnvironment *queryEnv,
-								   DestReceiver *dest,
-								   QueryCompletionCompat *completionTag);
 static bool ConditionalLockRelationWithTimeout(Relation rel, LOCKMODE lockMode,
 											   int timeout, int retryInterval,
 											   bool acquire);
-[[nodiscard]] static List * NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed);
 static void LogRelationStats(Relation rel, int elevel);
 static void TruncateBioseqColumn(Relation rel, int elevel);
 static bool TruncateAndCombineBioseqColumnStripes(Relation rel, int elevel);
-static HeapTuple BioseqColumnSlotCopyHeapTuple(TupleTableSlot *slot);
-static void BioseqColumnCheckLogicalReplication(Relation rel);
-static Datum * detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull);
 static void BioseqColumnReportTotalVirtualBlocks(Relation relation, Snapshot snapshot,
 											 int progressArrIndex);
 static BlockNumber BioseqColumnGetNumberOfVirtualBlocks(Relation relation, Snapshot snapshot);
@@ -154,10 +133,6 @@ static void BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation in
 static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort,
 														ItemPointer targetItemPointer);
 
-
-/* Custom tuple slot ops used for bioseq. Initialized in bioseq_tableam_init(). */
-static TupleTableSlotOps TTSOpsBioseqColumn;
-
 /*
  * File-static holder for the page-cache flag value captured when a
  * scan/DML callback first disables the cache. Not convertible to a
@@ -171,13 +146,6 @@ static TupleTableSlotOps TTSOpsBioseqColumn;
  * through the per-scan descriptor.
  */
 static bool previousCacheEnabledState = false;
-
-static const TupleTableSlotOps *
-bioseq_slot_callbacks(Relation relation)
-{
-	return &TTSOpsBioseqColumn;
-}
-
 
 static TableScanDesc
 bioseq_beginscan(Relation relation, Snapshot snapshot,
@@ -376,12 +344,12 @@ POSTGRES_FN(create_table_row_mask)
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
-	Relation columnarStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
+	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
 	
 	Relation index = index_open(BioseqColumnStripePKeyIndexRelationId(),
 								AccessShareLock);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
 															SnapshotSelf, 1, scanKey);
 
 	HeapTuple heapTuple = NULL;
@@ -391,7 +359,7 @@ POSTGRES_FN(create_table_row_mask)
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		stripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
+		stripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
 
 		List *chunkGroupRowCount = NIL;
 
@@ -420,23 +388,11 @@ POSTGRES_FN(create_table_row_mask)
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarStripes, AccessShareLock);
+	table_close(bioseqColumnStripes, AccessShareLock);
 	relation_close(relation, AccessShareLock);
 
 	PG_RETURN_BOOL(created);
 }
-
-/*
- * CreateBioseqColumnScanMemoryContext creates a memory context to store
- * BioseqColumnReadStare in it.
- */
-static MemoryContext
-CreateBioseqColumnScanMemoryContext(void)
-{
-	return AllocSetContextCreate(CurrentMemoryContext, "BioseqColumn Scan Context",
-								 ALLOCSET_DEFAULT_SIZES);
-}
-
 
 /*
  * init_bioseq_read_state initializes a column store table read and returns the
@@ -512,94 +468,6 @@ bioseq_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 	}
 }
 
-
-/*
- * DOC0260 Phase A — walk every SEQ column on `slot`, decode the locator
- * stub (if present), and replace tts_values[idx] with the hydrated
- * pgseq_t* fetched from the matching sub-table shard. Skips non-stub
- * values (already-inline payloads) and NULLs. The caller must run with a
- * memory context where the hydrated allocations are legal — for
- * bioseq_getnextslot this is the scan's scanContext; for
- * bioseq_index_fetch_tuple the per-fetch scanContext.
- */
-[[gnu::always_inline]]
-static inline void
-hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
-                            bioseq::storage::seq_caches* cache,
-                            const bioseq::storage::BioseqAmCache& amc,
-                            MemoryContext payload_mctx)
-{
-	if (cache == nullptr || amc.seq_attnos.empty()) {
-		return;
-	}
-	const RelFileLocator& loc = main_rel->rd_locator;
-	for (std::int16_t attno : amc.seq_attnos) {
-		const int idx = attno - 1;
-		if (idx < 0 || idx >= slot->tts_tupleDescriptor->natts) continue;
-		if (slot->tts_isnull[idx]) continue;
-		auto* hdr = reinterpret_cast<const pgseq_t*>(
-			DatumGetPointer(slot->tts_values[idx]));
-		if (!bioseq::storage::is_locator_stub(hdr)) continue;
-		const auto loc_decoded = bioseq::storage::decode_locator_from_stub(hdr);
-		// DOC0264 §9.4 — guard against materialising sequences whose
-		// stitched varlena would exceed MaxAllocSize. Phase D D-VARLENA
-		// will replace this with a streaming SELECT/seq_send path.
-		const std::uint64_t projected_payload_bytes =
-			(loc_decoded.total_bp_size * /*bits_per_letter min=*/2u + 7u) / 8u;
-		const std::uint64_t projected_varlena =
-			static_cast<std::uint64_t>(pgseq_t::header_bytes())
-			+ projected_payload_bytes;
-		if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
-			bioseq_log<ERR, PG>(
-			       "bioseq storage Phase C: sequence too large ({} bp ⇒ ~{} bytes) "
-			       "to materialise as a single varlena. SELECT seq / pg_dump "
-			       "cannot return this row directly. Use bioseq.substring(seq, …) "
-			       "to project a sub-region, or wait for Phase D D-VARLENA. "
-			       "See DOC0267.",
-			       loc_decoded.total_bp_size, projected_varlena);
-		}
-		pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
-			loc.dbOid, loc.spcOid, loc.relNumber,
-			attno, loc_decoded, payload_mctx, cache);
-		slot->tts_values[idx] = PointerGetDatum(real);
-	}
-}
-
-/*
- * DOC0260 Phase A — hydrate SEQ-column stubs on a scalar slot produced by
- * the *vectorized* scan path. The scalar getnextslot path hydrates inline
- * (see bioseq_getnextslot below), but when returnVectorizedTuple is set the
- * TAM fills a vector slot without hydration; the custom scan then extracts
- * scalar tuples via ExtractTupleFromVectorSlot, which carry raw 40-byte
- * locator stubs. This wrapper lets columnar_customscan hydrate that extracted
- * slot using the scan's own per-scan seq_cache / scanContext, so a projected
- * (or join-Param-bound) seq value is the real payload rather than a stub.
- *
- * DOC0322 §7.5 — `export`ed so the custom scan reaches it via
- * `import :access_method` instead of an `extern "C++"` forward decl.
- */
-export void
-bioseq_hydrate_scan_slot(TableScanDesc sscan, TupleTableSlot* slot, bool force)
-{
-	BioseqColumnScanDesc scan = reinterpret_cast<BioseqColumnScanDesc>(sscan);
-	if (scan == nullptr) {
-		return;
-	}
-	/*
-	 * `force` overrides the defer flag: the §9 custom scan runs with
-	 * defer_seq_hydration=true (so the mmsearch batch path can capture
-	 * locators), but its non-batched projecting branch still needs the
-	 * slot hydrated before ExecProject — it passes force=true. Callers on
-	 * the inline path pass force=false and become a no-op when deferring.
-	 */
-	if (!force && scan->defer_seq_hydration) {
-		return;
-	}
-	const auto& amc = bioseq::storage::bioseq_am_cache_for(scan->cs_base.rs_rd);
-	auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
-	hydrate_seq_columns_in_slot(scan->cs_base.rs_rd, slot, caches, amc,
-	                            scan->scanContext);
-}
 
 static bool
 bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
@@ -877,7 +745,7 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 	ExecClearTuple(slot);
 
 	IndexFetchBioseqColumnData *scan = reinterpret_cast<IndexFetchBioseqColumnData *>(sscan);
-	Relation columnarRelation = scan->cs_base.rel;
+	Relation bioseqColumnRelation = scan->cs_base.rel;
 
 	/* initialize read state for the first row */
 	if (scan->cs_readState == NULL)
@@ -888,13 +756,13 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 		if (scan->attr_needed.empty())
 		{
 			/* we need all columns */
-			int natts = columnarRelation->rd_att->natts;
+			int natts = bioseqColumnRelation->rd_att->natts;
 			scan->attr_needed.free();
 			scan->attr_needed = PBitmapset::full_range(natts);
 		}
 
 		bool randomAccess = true;
-		scan->cs_readState = init_bioseq_read_state(columnarRelation,
+		scan->cs_readState = init_bioseq_read_state(bioseqColumnRelation,
 													  slot->tts_tupleDescriptor,
 													  scan->attr_needed, scanQual,
 													  scan->scanContext,
@@ -902,7 +770,7 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 													  NULL);
 		if (scan->is_select_query)
 			scan->stripeMetadataList =
-				StripesForRelfilenode(columnarRelation->rd_locator, ForwardScanDirection);
+				StripesForRelfilenode(bioseqColumnRelation->rd_locator, ForwardScanDirection);
 
 	}
 
@@ -913,7 +781,7 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 	if (scan->is_select_query)
 		stripeMetadata = FindStripeMetadataFromListBinarySearch(scan, rowNumber);
 	else
-		stripeMetadata = FindStripeWithMatchingFirstRowNumber(columnarRelation, rowNumber, snapshot);
+		stripeMetadata = FindStripeWithMatchingFirstRowNumber(bioseqColumnRelation, rowNumber, snapshot);
 	
 	if (!stripeMetadata)
 	{
@@ -1014,7 +882,7 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 
 	if (!scan->is_select_query)
 		pfree(stripeMetadata);
-	slot->tts_tableOid = RelationGetRelid(columnarRelation);
+	slot->tts_tableOid = RelationGetRelid(bioseqColumnRelation);
 	slot->tts_tid = *tid;
 	ExecStoreVirtualTuple(slot);
 
@@ -1026,9 +894,9 @@ bioseq_index_fetch_tuple(IndexFetchTableData *sscan,
 	 */
 	if (!scan->defer_seq_hydration)
 	{
-		const auto& amc = bioseq::storage::bioseq_am_cache_for(columnarRelation);
+		const auto& amc = bioseq::storage::bioseq_am_cache_for(bioseqColumnRelation);
 		auto* caches = static_cast<bioseq::storage::seq_caches*>(scan->seq_cache);
-		hydrate_seq_columns_in_slot(columnarRelation, slot, caches, amc,
+		hydrate_seq_columns_in_slot(bioseqColumnRelation, slot, caches, amc,
 		                            scan->scanContext);
 	}
 
@@ -1684,8 +1552,8 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	Assert(sourceDesc->natts == targetDesc->natts);
 
 	/* read settings from old heap, relfilelocator will be swapped at the end */
-	BioseqColumnOptions columnarOptions = { 0 };
-	ReadBioseqColumnOptions(OldHeap->rd_id, &columnarOptions);
+	BioseqColumnOptions bioseqColumnOptions = { 0 };
+	ReadBioseqColumnOptions(OldHeap->rd_id, &bioseqColumnOptions);
 
 	/*
 	 * DOC0260 Phase A — CLUSTER allocates a new relfilenode for NewHeap.
@@ -1808,33 +1676,6 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 
 
 /*
- * NeededColumnsList returns a list of AttrNumber's for the columns that
- * are not dropped and specified by attr_needed.
- */
-[[nodiscard]] static List *
-NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed)
-{
-	PIntList columnList;
-
-	for (int i = 0; i < tupdesc->natts; i++)
-	{
-		if (TupleDescAttr(tupdesc, i)->attisdropped)
-		{
-			continue;
-		}
-
-		/* attr_needed is 0-indexed but columnList is 1-indexed */
-		if (attr_needed.contains(i))
-		{
-			AttrNumber varattno = i + 1;
-			columnList.append(varattno);
-		}
-	}
-
-	return columnList.release();
-}
-
-/*
  * TruncateAndCombineBioseqColumnStripes will combine last n stripes so they can fit
  * maximum number of rows per stripe. Stripes that are going to be combined are deleted
  * and new stripe will be written at the end of untouched last stripe. We also include
@@ -1856,8 +1697,8 @@ TruncateAndCombineBioseqColumnStripes(Relation rel, int elevel)
 	}
 
 	/* Get current columnar options */
-	BioseqColumnOptions columnarOptions = { 0 };
-	ReadBioseqColumnOptions(rel->rd_id, &columnarOptions);
+	BioseqColumnOptions bioseqColumnOptions = { 0 };
+	ReadBioseqColumnOptions(rel->rd_id, &bioseqColumnOptions);
 
 	/* Get all stripes in reverse order */
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, BackwardScanDirection);
@@ -1890,7 +1731,7 @@ TruncateAndCombineBioseqColumnStripes(Relation rel, int elevel)
 
 		uint64_t stripeRowCount = stripeMetadata->rowCount - lastStripeDeletedRows;
 
-		if ((totalRowNumberCount + stripeRowCount >= columnarOptions.stripeRowCount))
+		if ((totalRowNumberCount + stripeRowCount >= bioseqColumnOptions.stripeRowCount))
 		{
 			break;
 		}
@@ -1948,7 +1789,7 @@ TruncateAndCombineBioseqColumnStripes(Relation rel, int elevel)
 	/* We need to re-assing RecentXmin here */
 	PushActiveSnapshot(GetTransactionSnapshot());
 	BioseqColumnWriteState *writeState = BioseqColumnBeginWrite(rel->rd_locator,
-														columnarOptions,
+														bioseqColumnOptions,
 														tupleDesc);
 
 	/* we need all columns */
@@ -2425,7 +2266,7 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 
 
 static double
-bioseq_index_build_range_scan(Relation columnarRelation,
+bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 								Relation indexRelation,
 								IndexInfo *indexInfo,
 								bool allow_sync,
@@ -2467,7 +2308,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
 	{
 		/* ignore lazy VACUUM's */
-		OldestXmin = GetOldestNonRemovableTransactionId_compat(columnarRelation,
+		OldestXmin = GetOldestNonRemovableTransactionId_compat(bioseqColumnRelation,
 															   PROCARRAY_FLAGS_VACUUM);
 	}
 
@@ -2491,12 +2332,12 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 	int nkeys = 0;
 	ScanKeyData *scanKey = NULL;
 	bool allowAccessStrategy = true;
-	scan = table_beginscan_strat(columnarRelation, snapshot, nkeys, scanKey,
+	scan = table_beginscan_strat(bioseqColumnRelation, snapshot, nkeys, scanKey,
 								 allowAccessStrategy, allow_sync);
 
 	if (progress)
 	{
-		BioseqColumnReportTotalVirtualBlocks(columnarRelation, snapshot,
+		BioseqColumnReportTotalVirtualBlocks(bioseqColumnRelation, snapshot,
 										 PROGRESS_SCAN_BLOCKS_TOTAL);
 	}
 
@@ -2506,7 +2347,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 	 */
 	EState *estate = CreateExecutorState();
 	ExprContext *econtext = GetPerTupleExprContext(estate);
-	econtext->ecxt_scantuple = table_slot_create(columnarRelation, NULL);
+	econtext->ecxt_scantuple = table_slot_create(bioseqColumnRelation, NULL);
 	ExprState *predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 
 	double reltuples = BioseqColumnReadRowsIntoIndex(scan, indexRelation, indexInfo,
@@ -2517,7 +2358,7 @@ bioseq_index_build_range_scan(Relation columnarRelation,
 	if (progress)
 	{
 		/* report the last "virtual" block as "done" */
-		BioseqColumnReportTotalVirtualBlocks(columnarRelation, snapshot,
+		BioseqColumnReportTotalVirtualBlocks(bioseqColumnRelation, snapshot,
 										 PROGRESS_SCAN_BLOCKS_DONE);
 	}
 
@@ -2674,14 +2515,14 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 
 static void
-bioseq_index_validate_scan(Relation columnarRelation,
+bioseq_index_validate_scan(Relation bioseqColumnRelation,
 							 Relation indexRelation,
 							 IndexInfo *indexInfo,
 							 Snapshot snapshot,
 							 ValidateIndexState *
 							 validateIndexState)
 {
-	BioseqColumnReportTotalVirtualBlocks(columnarRelation, snapshot,
+	BioseqColumnReportTotalVirtualBlocks(bioseqColumnRelation, snapshot,
 									 PROGRESS_SCAN_BLOCKS_TOTAL);
 
 	/*
@@ -2690,14 +2531,14 @@ bioseq_index_validate_scan(Relation columnarRelation,
 	 */
 	EState *estate = CreateExecutorState();
 	ExprContext *econtext = GetPerTupleExprContext(estate);
-	econtext->ecxt_scantuple = table_slot_create(columnarRelation, NULL);
+	econtext->ecxt_scantuple = table_slot_create(bioseqColumnRelation, NULL);
 	ExprState *predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 
 	int nkeys = 0;
 	ScanKeyData *scanKey = NULL;
 	bool allowAccessStrategy = true;
 	bool allowSyncScan = false;
-	TableScanDesc scan = table_beginscan_strat(columnarRelation, snapshot, nkeys, scanKey,
+	TableScanDesc scan = table_beginscan_strat(bioseqColumnRelation, snapshot, nkeys, scanKey,
 											   allowAccessStrategy, allowSyncScan);
 
 	BioseqColumnReadMissingRowsIntoIndex(scan, indexRelation, indexInfo, estate,
@@ -2706,7 +2547,7 @@ bioseq_index_validate_scan(Relation columnarRelation,
 	table_endscan(scan);
 
 	/* report the last "virtual" block as "done" */
-	BioseqColumnReportTotalVirtualBlocks(columnarRelation, snapshot,
+	BioseqColumnReportTotalVirtualBlocks(bioseqColumnRelation, snapshot,
 									 PROGRESS_SCAN_BLOCKS_DONE);
 
 	ExecDropSingleTupleTableSlot(econtext->ecxt_scantuple);
@@ -2738,8 +2579,8 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		ItemPointer columnarItemPointer = &slot->tts_tid;
-		BlockNumber currentBlockNumber = ItemPointerGetBlockNumber(columnarItemPointer);
+		ItemPointer bioseqColumnItemPointer = &slot->tts_tid;
+		BlockNumber currentBlockNumber = ItemPointerGetBlockNumber(bioseqColumnItemPointer);
 		if (lastReportedBlockNumber != currentBlockNumber)
 		{
 			/*
@@ -2758,7 +2599,7 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		if (!indexTupleSortEmpty &&
 			(!ItemPointerIsValid(&indexedItemPointerData) ||
-			 ItemPointerCompare(&indexedItemPointerData, columnarItemPointer) < 0))
+			 ItemPointerCompare(&indexedItemPointerData, bioseqColumnItemPointer) < 0))
 		{
 			/*
 			 * Skip indexed item pointers until we find or pass the current
@@ -2766,18 +2607,18 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 			 */
 			indexedItemPointerData =
 				TupleSortSkipSmallerItemPointers(validateIndexState->tuplesort,
-												 columnarItemPointer);
+												 bioseqColumnItemPointer);
 			indexTupleSortEmpty = !ItemPointerIsValid(&indexedItemPointerData);
 		}
 
 		if (!indexTupleSortEmpty &&
-			ItemPointerCompare(&indexedItemPointerData, columnarItemPointer) == 0)
+			ItemPointerCompare(&indexedItemPointerData, bioseqColumnItemPointer) == 0)
 		{
 			/* tuple is already covered by the index, skip */
 			continue;
 		}
 		Assert(indexTupleSortEmpty ||
-			   ItemPointerCompare(&indexedItemPointerData, columnarItemPointer) > 0);
+			   ItemPointerCompare(&indexedItemPointerData, bioseqColumnItemPointer) > 0);
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
 
@@ -2791,11 +2632,11 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 		bool indexNulls[INDEX_MAX_KEYS];
 		FormIndexDatum(indexInfo, slot, estate, indexValues, indexNulls);
 
-		Relation columnarRelation = scan->rs_rd;
+		Relation bioseqColumnRelation = scan->rs_rd;
 		IndexUniqueCheck indexUniqueCheck =
 			indexInfo->ii_Unique ? UNIQUE_CHECK_YES : UNIQUE_CHECK_NO;
-		index_insert_compat(indexRelation, indexValues, indexNulls, columnarItemPointer,
-							columnarRelation, indexUniqueCheck, false, indexInfo);
+		index_insert_compat(indexRelation, indexValues, indexNulls, bioseqColumnItemPointer,
+							bioseqColumnRelation, indexUniqueCheck, false, indexInfo);
 
 		validateIndexState->tups_inserted += 1;
 	}
@@ -2979,52 +2820,8 @@ BioseqColumnSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 static void
 bioseq_seq_caches_close_adapter(void* p, bool commit)
 {
-	auto* c = static_cast<bioseq::storage::seq_caches*>(p);
-	bioseq_storage_seq_caches_close_all(c, commit);   // from bioseq_storage
-	bioseq::storage::destroy_seq_caches(c);           // from bioseq_storage
-}
-
-
-export void
-bioseq_tableam_init()
-{
-	bioseq_log<DBG>("[bioseq] pg: bioseq_tableam_init() entered");
-
-	// DOC0322 §7.4 — publish the bioseq TableAmRoutine identity to the
-	// bioseq_column_tam leaf so IsBioseqColumnTableAmTable can recognise bioseq
-	// tables without depending back on this module (dependency inversion).
-	register_bioseq_am_routine(GetBioseqColumnTableAmRoutine());
-
-	// DOC0322 §7.3 — wire the inverted write/read-state dependencies. The
-	// storage_metadata write/read-state partitions hold function-pointer slots
-	// (default nullptr); register the bioseq_table_io / bioseq_storage callees
-	// here so storage_metadata stays free of those module edges.
-	register_write_state_hooks(&BioseqColumnBeginWrite, &BioseqColumnEndWrite,
-							   &BioseqColumnFlushPendingWrites, &ContainsPendingWrites,
-							   &bioseq_seq_caches_close_adapter);
-	register_read_state_hooks(&BioseqColumnEndRead);
-	BioseqColumnTableSetOptions_hook_type **BioseqColumnTableSetOptions_hook_ptr =
-		reinterpret_cast<BioseqColumnTableSetOptions_hook_type **>(find_rendezvous_variable(
-			BIOSEQ_COLUMN_SETOPTIONS_HOOK_SYM));
-	*BioseqColumnTableSetOptions_hook_ptr = &BioseqColumnTableSetOptions_hook;
-
-	RegisterXactCallback(BioseqColumnXactCallback, NULL);
-	RegisterSubXactCallback(BioseqColumnSubXactCallback, NULL);
-
-	PrevObjectAccessHook = object_access_hook;
-	object_access_hook = BioseqColumnTableAMObjectAccessHook;
-
-	PrevProcessUtilityHook = ProcessUtility_hook ?
-							 ProcessUtility_hook :
-							 standard_ProcessUtility;
-	ProcessUtility_hook = BioseqColumnProcessUtility;
-
-	// DOC0322 §7.5 — bioseq_customscan_init() now runs from bioseq_init (after
-	// bioseq_tableam_init), inverting the former :access_method -> :custom_scan
-	// edge so the two bioseq_table partitions form a DAG.
-
-	TTSOpsBioseqColumn = TTSOpsVirtual;
-	TTSOpsBioseqColumn.copy_heap_tuple = BioseqColumnSlotCopyHeapTuple;
+	bioseq::storage::close_and_destroy_seq_caches(
+		static_cast<bioseq::storage::seq_caches*>(p), commit);
 }
 
 
@@ -3032,9 +2829,9 @@ bioseq_tableam_init()
  * Get the number of chunks filtered out during the given scan.
  */
 export int64_t
-BioseqColumnScanChunkGroupsFiltered(BioseqColumnScanDesc columnarScanDesc)
+BioseqColumnScanChunkGroupsFiltered(BioseqColumnScanDesc bioseqColumnScanDesc)
 {
-	BioseqColumnReadState *readState = columnarScanDesc->cs_readState;
+	BioseqColumnReadState *readState = bioseqColumnScanDesc->cs_readState;
 
 	/* readState is initialized lazily */
 	if (readState != NULL)
@@ -3045,199 +2842,6 @@ BioseqColumnScanChunkGroupsFiltered(BioseqColumnScanDesc columnarScanDesc)
 	{
 		return 0;
 	}
-}
-
-
-/*
- * Implementation of TupleTableSlotOps.copy_heap_tuple for TTSOpsBioseqColumn.
- */
-static HeapTuple
-BioseqColumnSlotCopyHeapTuple(TupleTableSlot *slot)
-{
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnSlotCopyHeapTuple() entered");
-	Assert(!TTS_EMPTY(slot));
-
-	HeapTuple tuple = heap_form_tuple(slot->tts_tupleDescriptor,
-									  slot->tts_values,
-									  slot->tts_isnull);
-
-	/* slot->tts_tid is filled in bioseq_getnextslot */
-	tuple->t_self = slot->tts_tid;
-
-	return tuple;
-}
-
-
-/*
- * BioseqColumnTableDropHook
- *
- * Clean-up resources for columnar tables.
- */
-static void
-BioseqColumnTableDropHook(Oid relid)
-{
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnTableDropHook() entered");
-	/*
-	 * Lock relation to prevent it from being dropped and to avoid
-	 * race conditions in the next if block.
-	 */
-	LockRelationOid(relid, AccessShareLock);
-
-	if (IsBioseqColumnTableAmTable(relid))
-	{
-		/*
-		 * Drop metadata. No need to drop storage here since for
-		 * tableam tables storage is managed by postgres.
-		 */
-		Relation rel = table_open(relid, AccessExclusiveLock);
-		RelFileLocator relfilelocator = rel->rd_locator;
-		DeleteMetadataRows(relfilelocator);
-		DeleteBioseqColumnTableOptions(rel->rd_id, true);
-		MarkRelfilenodeDropped(relfilelocator.relNumber, GetCurrentSubTransactionId());
-
-		/* DOC0260 Phase A — cascade-drop sub-tables and sidecars under
-		 * this relation's (db, spc, relfilenode) triple. */
-		bioseq::storage::bioseq_default_storage_manager::drop_sub_tables_for_main(
-			relfilelocator.dbOid, relfilelocator.spcOid,
-			relfilelocator.relNumber);
-
-		/* keep the lock since we did physical changes to the relation */
-		table_close(rel, NoLock);
-	}
-}
-
-
-/*
- * Reject AFTER ... FOR EACH ROW triggers on columnar tables.
- */
-static void
-BioseqColumnTriggerCreateHook(Oid tgid)
-{
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnTriggerCreateHook() entered");
-	/*
-	 * Fetch the pg_trigger tuple by the Oid of the trigger
-	 */
-	ScanKeyData skey[1];
-	Relation tgrel = table_open(TriggerRelationId, AccessShareLock);
-
-	ScanKeyInit(&skey[0],
-				Anum_pg_trigger_oid,
-				BTEqualStrategyNumber, F_OIDEQ,
-				ObjectIdGetDatum(tgid));
-
-	SysScanDesc tgscan = systable_beginscan(tgrel, TriggerOidIndexId, true,
-											SnapshotSelf, 1, skey);
-
-	HeapTuple tgtup = systable_getnext(tgscan);
-
-	if (!HeapTupleIsValid(tgtup))
-	{
-		table_close(tgrel, AccessShareLock);
-		return;
-	}
-
-	Form_pg_trigger tgrec = reinterpret_cast<Form_pg_trigger>(GETSTRUCT(tgtup));
-
-	Oid tgrelid = tgrec->tgrelid;
-	int16_t tgtype = tgrec->tgtype;
-
-	systable_endscan(tgscan);
-	table_close(tgrel, AccessShareLock);
-
-	if (TRIGGER_FOR_ROW(tgtype) && TRIGGER_FOR_AFTER(tgtype) &&
-		IsBioseqColumnTableAmTable(tgrelid))
-	{
-		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("Foreign keys and AFTER ROW triggers are not supported for columnar tables")
-			.hint("Consider an AFTER STATEMENT trigger instead.");
-	}
-}
-
-
-/*
- * Capture create/drop events and dispatch to the proper action.
- */
-static void
-BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
-								int subId, void *arg)
-{
-	if (PrevObjectAccessHook)
-	{
-		PrevObjectAccessHook(access, classId, objectId, subId, arg);
-	}
-
-	/* dispatch to the proper action */
-	if (access == OAT_DROP && classId == RelationRelationId && !OidIsValid(subId))
-	{
-		BioseqColumnTableDropHook(objectId);
-	}
-	else if (access == OAT_POST_CREATE && classId == TriggerRelationId)
-	{
-		BioseqColumnTriggerCreateHook(objectId);
-	}
-}
-
-
-/*
- * Utility hook for columnar tables.
- */
-static void
-BioseqColumnProcessUtility(PlannedStmt *pstmt,
-					   const char *queryString,
-					   bool readOnlyTree,
-					   ProcessUtilityContext context,
-					   ParamListInfo params,
-					   QueryEnvironment *queryEnv,
-					   DestReceiver *dest,
-					   QueryCompletionCompat *completionTag)
-{
-	if (readOnlyTree)
-	{
-		pstmt = copyObject(pstmt);
-	}
-
-	Node *parsetree = pstmt->utilityStmt;
-
-	if (IsA(parsetree, IndexStmt))
-	{
-		IndexStmt *indexStmt = reinterpret_cast<IndexStmt *>(parsetree);
-
-		Relation rel = relation_openrv(indexStmt->relation,
-									   indexStmt->concurrent ? ShareUpdateExclusiveLock :
-									   ShareLock);
-
-		if (rel->rd_tableam == GetBioseqColumnTableAmRoutine())
-		{
-			if (!BioseqColumnSupportsIndexAM(indexStmt->accessMethod))
-			{
-				bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-					.msg("unsupported access method for the index on columnar table {} ({})",
-						 RelationGetRelationName(rel), indexStmt->accessMethod);
-			}
-		}
-
-		RelationClose(rel);
-	}
-
-	PrevProcessUtilityHook_compat(pstmt, queryString, false, context,
-								  params, queryEnv, dest, completionTag);
-}
-
-
-/*
- * BioseqColumnSupportsIndexAM returns true if indexAM with given name is
- * supported by columnar tables.
- */
-bool
-BioseqColumnSupportsIndexAM(char *indexAMName)
-{
-	bioseq_log<DBG>("[bioseq] pg: BioseqColumnSupportsIndexAM() entered");
-	return strncmp(indexAMName, "btree", NAMEDATALEN) == 0 ||
-				strncmp(indexAMName, "hash", NAMEDATALEN) == 0 ||
-				strncmp(indexAMName, "gin", NAMEDATALEN) == 0 ||
-				strncmp(indexAMName, "gist", NAMEDATALEN) == 0 ||
-				strncmp(indexAMName, "spgist", NAMEDATALEN) == 0 ||
-				strncmp(indexAMName, "rum", NAMEDATALEN) == 0;
 }
 
 
@@ -3343,73 +2947,39 @@ POSTGRES_FN(bioseq_handler)
 }
 
 
-/*
- * detoast_values
- *
- * Detoast and decompress all values. If there's no work to do, return
- * original pointer; otherwise return a newly-allocated values array. Should
- * be called in per-tuple context.
- */
-static Datum *
-detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
+export void
+bioseq_tableam_init()
 {
-	int natts = tupleDesc->natts;
+	bioseq_log<DBG>("[bioseq] pg: bioseq_tableam_init() entered");
 
-	/* copy on write to optimize for case where nothing is toasted */
-	Datum *values = orig_values;
+	// DOC0322 §7.4 — publish the bioseq TableAmRoutine identity to the
+	// bioseq_column_tam leaf so IsBioseqColumnTableAmTable can recognise bioseq
+	// tables without depending back on this module (dependency inversion).
+	register_bioseq_am_routine(GetBioseqColumnTableAmRoutine());
 
-	for (int i = 0; i < tupleDesc->natts; i++)
-	{
-		if (!isnull[i] && TupleDescAttr(tupleDesc, i)->attlen == -1 &&
-			VARATT_IS_EXTENDED(values[i]))
-		{
-			/* make a copy */
-			if (values == orig_values)
-			{
-				values = make_array<Datum>(natts);
-				memcpy(values, orig_values, sizeof(Datum) * natts);
-			}
+	// DOC0322 §7.3 — wire the inverted write/read-state dependencies. The
+	// storage_metadata write/read-state partitions hold function-pointer slots
+	// (default nullptr); register the bioseq_table_io / bioseq_storage callees
+	// here so storage_metadata stays free of those module edges.
+	register_write_state_hooks(&BioseqColumnBeginWrite, &BioseqColumnEndWrite,
+							   &BioseqColumnFlushPendingWrites, &ContainsPendingWrites,
+							   &bioseq_seq_caches_close_adapter);
+	register_read_state_hooks(&BioseqColumnEndRead);
+	BioseqColumnTableSetOptions_hook_type **BioseqColumnTableSetOptions_hook_ptr =
+		reinterpret_cast<BioseqColumnTableSetOptions_hook_type **>(find_rendezvous_variable(
+			BIOSEQ_COLUMN_SETOPTIONS_HOOK_SYM));
+	*BioseqColumnTableSetOptions_hook_ptr = &BioseqColumnTableSetOptions_hook;
 
-			/* will be freed when per-tuple context is reset */
-			varlena *new_value = reinterpret_cast<varlena *>(DatumGetPointer(values[i]));
-			new_value = detoast_attr(new_value);
-			values[i] = PointerGetDatum(new_value);
-		}
-	}
+	RegisterXactCallback(BioseqColumnXactCallback, NULL);
+	RegisterSubXactCallback(BioseqColumnSubXactCallback, NULL);
 
-	return values;
-}
+	InstallBioseqColumnTableHooks();
 
+	// DOC0322 §7.5 — bioseq_customscan_init() now runs from bioseq_init (after
+	// bioseq_tableam_init), inverting the former :access_method -> :custom_scan
+	// edge so the two bioseq_table partitions form a DAG.
 
-/*
- * BioseqColumnCheckLogicalReplication throws an error if the relation is
- * part of any publication. This should be called before any write to
- * a columnar table, because columnar changes are not replicated with
- * logical replication (similar to a row table without a replica
- * identity).
- */
-static void
-BioseqColumnCheckLogicalReplication(Relation rel)
-{
-	bool pubActionInsert = false;
-
-	if (!is_publishable_relation(rel))
-	{
-		return;
-	}
-
-	{
-		PublicationDesc pubdesc;
-
-		RelationBuildPublicationDesc(rel, &pubdesc);
-		pubActionInsert = pubdesc.pubactions.pubinsert;
-	}
-
-	if (pubActionInsert)
-	{
-		bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("cannot insert into columnar table that is a part of a publication");
-	}
+	BioseqColumnInitTupleSlotOps();
 }
 
 
@@ -3696,8 +3266,8 @@ static List *HolesForRelation(Relation rel)
 	List *holes = NIL;
 
 	/* Get current columnar options */
-	BioseqColumnOptions columnarOptions = { 0 };
-	ReadBioseqColumnOptions(rel->rd_id, &columnarOptions);
+	BioseqColumnOptions bioseqColumnOptions = { 0 };
+	ReadBioseqColumnOptions(rel->rd_id, &bioseqColumnOptions);
 
 	ListCell *lc = NULL;
 
@@ -3804,8 +3374,8 @@ POSTGRES_FN(vacuum_bioseq_table)
 	LockRelation(rel, ExclusiveLock);
 
 	/* Get current columnar options */
-	BioseqColumnOptions columnarOptions = { 0 };
-	ReadBioseqColumnOptions(rel->rd_id, &columnarOptions);
+	BioseqColumnOptions bioseqColumnOptions = { 0 };
+	ReadBioseqColumnOptions(rel->rd_id, &bioseqColumnOptions);
 
 	/* Get all stripes in order. */
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
@@ -3851,7 +3421,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 		 * or percentage of deleted rows is less than 20% we will skip this stripe
 		 * for vacuum.
 		*/
-		if ((stripeMetadata->rowCount > columnarOptions.stripeRowCount * 0.5) &&
+		if ((stripeMetadata->rowCount > bioseqColumnOptions.stripeRowCount * 0.5) &&
 			percentageOfDeleteRows <= 0.2f)
 		{
 			continue;
@@ -3880,7 +3450,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	bool randomAccess = true;
 
 	BioseqColumnWriteState *writeState = BioseqColumnBeginWrite(rel->rd_locator,
-											columnarOptions,
+											bioseqColumnOptions,
 											tupleDesc);
 
 	/*

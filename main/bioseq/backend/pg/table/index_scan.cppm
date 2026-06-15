@@ -46,17 +46,6 @@ struct ReorderTuple
  */
 
 
-static TupleTableSlot* IndexNext(IndexScanState* node);
-static TupleTableSlot* IndexNextWithReorder(IndexScanState* node);
-static void EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext);
-static bool IndexRecheck(IndexScanState* node, TupleTableSlot* slot);
-static int cmp_orderbyvals(const Datum* adist, const bool* anulls,
-                           const Datum* bdist, const bool* bnulls,
-                           IndexScanState* node);
-static void reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
-                              Datum* orderbyvals, bool* orderbynulls);
-static HeapTuple reorderqueue_pop(IndexScanState* node);
-
 
 /*
  * relation_checks / check_rel_procedure mirror PostgreSQL's internal
@@ -220,6 +209,114 @@ IndexNext(IndexScanState* node)
 }
 
 /*
+ * Calculate the expressions in the ORDER BY clause, based on the heap tuple.
+ */
+static void
+EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
+{
+    MemoryContextScope ctx_guard{econtext->ecxt_per_tuple_memory};
+
+    int orderby_index = 0;
+    for (auto orderby_state : PList<ExprState>(node->indexorderbyorig))
+    {
+        node->iss_OrderByValues[orderby_index] = ExecEvalExpr(orderby_state,
+                                                              econtext,
+                                                              &node->iss_OrderByNulls[orderby_index]);
+        orderby_index++;
+    }
+}
+
+/* IndexRecheck -- access method routine to recheck a tuple in EvalPlanQual */
+static bool
+IndexRecheck(IndexScanState* node, TupleTableSlot* slot)
+{
+    ExprContext* econtext = node->ss.ps.ps_ExprContext;
+
+    /* Does the tuple meet the indexqual condition? */
+    econtext->ecxt_scantuple = slot;
+    return ExecQualAndReset(node->indexqualorig, econtext);
+}
+
+
+/*
+ * Compare ORDER BY expression values.
+ */
+static int
+cmp_orderbyvals(const Datum* adist, const bool* anulls,
+                const Datum* bdist, const bool* bnulls,
+                IndexScanState* node)
+{
+    for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
+    {
+        SortSupport ssup = &node->iss_SortSupport[orderby_index];
+
+        /*
+         * Handle nulls.  We only need to support NULLS LAST ordering, because
+         * match_pathkeys_to_index() doesn't consider indexorderby
+         * implementation otherwise.
+         */
+        if (anulls[orderby_index] && !bnulls[orderby_index])
+            return 1;
+        if (!anulls[orderby_index] && bnulls[orderby_index])
+            return -1;
+        if (anulls[orderby_index] && bnulls[orderby_index])
+            continue;
+
+        int result = ssup->comparator(adist[orderby_index], bdist[orderby_index], ssup);
+        if (result != 0)
+            return result;
+    }
+    return 0;
+}
+
+
+/* Helper function to push a tuple to the reorder queue. */
+static void
+reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
+                  Datum* orderbyvals, bool* orderbynulls)
+{
+    IndexScanDesc scandesc = node->iss_ScanDesc;
+    EState* estate = node->ss.ps.state;
+    MemoryContextScope ctx_guard{estate->es_query_cxt};
+
+    ReorderTuple* rt = make0<ReorderTuple>();
+    rt->htup = ExecCopySlotHeapTuple(slot);
+    rt->orderbyvals = make_array<Datum>(scandesc->numberOfOrderBys);
+    rt->orderbynulls = make_array<bool>(scandesc->numberOfOrderBys);
+    for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
+    {
+        if (!orderbynulls[orderby_index])
+            rt->orderbyvals[orderby_index] = datumCopy(orderbyvals[orderby_index],
+                                                      node->iss_OrderByTypByVals[orderby_index],
+                                                      node->iss_OrderByTypLens[orderby_index]);
+        else
+            rt->orderbyvals[orderby_index] = static_cast<Datum>(0);
+        rt->orderbynulls[orderby_index] = orderbynulls[orderby_index];
+    }
+    pairingheap_add(node->iss_ReorderQueue, &rt->ph_node);
+}
+
+/* Helper function to pop the next tuple from the reorder queue. */
+static HeapTuple
+reorderqueue_pop(IndexScanState* node)
+{
+    ReorderTuple* topmost = reinterpret_cast<ReorderTuple*>(pairingheap_remove_first(node->iss_ReorderQueue));
+
+    HeapTuple result = topmost->htup;
+    for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
+    {
+        if (!node->iss_OrderByTypByVals[orderby_index] && !topmost->orderbynulls[orderby_index])
+            pfree(DatumGetPointer(topmost->orderbyvals[orderby_index]));
+    }
+    pfree(topmost->orderbyvals);
+    pfree(topmost->orderbynulls);
+    pfree(topmost);
+
+    return result;
+}
+
+
+/*
  * IndexNextWithReorder is like IndexNext but additionally re-checks
  * ORDER BY expressions and reorders tuples through a pairing heap.
  */
@@ -372,114 +469,6 @@ IndexNextWithReorder(IndexScanState* node)
     }
 }
 
-/*
- * Calculate the expressions in the ORDER BY clause, based on the heap tuple.
- */
-static void
-EvalOrderByExpressions(IndexScanState* node, ExprContext* econtext)
-{
-    MemoryContextScope ctx_guard{econtext->ecxt_per_tuple_memory};
-
-    int orderby_index = 0;
-    for (auto orderby_state : PList<ExprState>(node->indexorderbyorig))
-    {
-        node->iss_OrderByValues[orderby_index] = ExecEvalExpr(orderby_state,
-                                                              econtext,
-                                                              &node->iss_OrderByNulls[orderby_index]);
-        orderby_index++;
-    }
-}
-
-/* IndexRecheck -- access method routine to recheck a tuple in EvalPlanQual */
-static bool
-IndexRecheck(IndexScanState* node, TupleTableSlot* slot)
-{
-    ExprContext* econtext = node->ss.ps.ps_ExprContext;
-
-    /* Does the tuple meet the indexqual condition? */
-    econtext->ecxt_scantuple = slot;
-    return ExecQualAndReset(node->indexqualorig, econtext);
-}
-
-
-/*
- * Compare ORDER BY expression values.
- */
-static int
-cmp_orderbyvals(const Datum* adist, const bool* anulls,
-                const Datum* bdist, const bool* bnulls,
-                IndexScanState* node)
-{
-    for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
-    {
-        SortSupport ssup = &node->iss_SortSupport[orderby_index];
-
-        /*
-         * Handle nulls.  We only need to support NULLS LAST ordering, because
-         * match_pathkeys_to_index() doesn't consider indexorderby
-         * implementation otherwise.
-         */
-        if (anulls[orderby_index] && !bnulls[orderby_index])
-            return 1;
-        if (!anulls[orderby_index] && bnulls[orderby_index])
-            return -1;
-        if (anulls[orderby_index] && bnulls[orderby_index])
-            continue;
-
-        int result = ssup->comparator(adist[orderby_index], bdist[orderby_index], ssup);
-        if (result != 0)
-            return result;
-    }
-    return 0;
-}
-
-
-/* Helper function to push a tuple to the reorder queue. */
-static void
-reorderqueue_push(IndexScanState* node, TupleTableSlot* slot,
-                  Datum* orderbyvals, bool* orderbynulls)
-{
-    IndexScanDesc scandesc = node->iss_ScanDesc;
-    EState* estate = node->ss.ps.state;
-    MemoryContextScope ctx_guard{estate->es_query_cxt};
-
-    ReorderTuple* rt = make0<ReorderTuple>();
-    rt->htup = ExecCopySlotHeapTuple(slot);
-    rt->orderbyvals = make_array<Datum>(scandesc->numberOfOrderBys);
-    rt->orderbynulls = make_array<bool>(scandesc->numberOfOrderBys);
-    for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
-    {
-        if (!orderbynulls[orderby_index])
-            rt->orderbyvals[orderby_index] = datumCopy(orderbyvals[orderby_index],
-                                                      node->iss_OrderByTypByVals[orderby_index],
-                                                      node->iss_OrderByTypLens[orderby_index]);
-        else
-            rt->orderbyvals[orderby_index] = static_cast<Datum>(0);
-        rt->orderbynulls[orderby_index] = orderbynulls[orderby_index];
-    }
-    pairingheap_add(node->iss_ReorderQueue, &rt->ph_node);
-}
-
-/* Helper function to pop the next tuple from the reorder queue. */
-static HeapTuple
-reorderqueue_pop(IndexScanState* node)
-{
-    ReorderTuple* topmost = reinterpret_cast<ReorderTuple*>(pairingheap_remove_first(node->iss_ReorderQueue));
-
-    HeapTuple result = topmost->htup;
-    for (int orderby_index = 0; orderby_index < node->iss_NumOrderByKeys; orderby_index++)
-    {
-        if (!node->iss_OrderByTypByVals[orderby_index] && !topmost->orderbynulls[orderby_index])
-            pfree(DatumGetPointer(topmost->orderbyvals[orderby_index]));
-    }
-    pfree(topmost->orderbyvals);
-    pfree(topmost->orderbynulls);
-    pfree(topmost);
-
-    return result;
-}
-
-
 /* ExecIndexScan(node) - executes the index scan, dispatching to the
  * reordering or non-reordering variant based on whether ORDER BY keys are
  * present.
@@ -549,56 +538,6 @@ BioseqColumnIndexScan_ExecIndexScanInitializeWorker(IndexScanState* node, void* 
 
 
 /* CustomScan factory + lifecycle hooks for the bioseq IndexScan node. */
-static Node* CreateBioseqIndexScanState(CustomScan* custom_plan);
-
-static void BioseqIndexScan_BeginCustomScan(CustomScanState* node,
-                                            EState* estate, int eflags);
-static TupleTableSlot* BioseqIndexScan_ExecCustomScan(CustomScanState* node);
-static void BioseqIndexScan_EndCustomScan(CustomScanState* node);
-static void BioseqIndexScan_ExplainCustomScan(CustomScanState* node,
-                                              List* ancestors,
-                                              ExplainState* es);
-static Size BioseqIndexScan_EstimateDSMCustomScan(CustomScanState* node,
-                                                  ParallelContext* pcxt);
-static void BioseqIndexScan_InitializeDSMCustomScan(CustomScanState* node,
-                                                    ParallelContext* pcxt,
-                                                    void* coordinate);
-static void BioseqIndexScan_ReinitializeDSMCustomScan(CustomScanState* node,
-                                                      ParallelContext* pcxt,
-                                                      void* coordinate);
-static void BioseqIndexScan_InitializeWorkerCustomScan(CustomScanState* node,
-                                                       shm_toc* toc,
-                                                       void* coordinate);
-
-static CustomScanMethods BioseqIndexCustomScanMethods = {
-    .CustomName = "BioseqIndexScan",
-    .CreateCustomScanState = CreateBioseqIndexScanState,
-};
-
-static CustomExecMethods BioseqIndexScanExecMethods = {
-    .CustomName = "BioseqIndexScan",
-
-    .BeginCustomScan = BioseqIndexScan_BeginCustomScan,
-    .ExecCustomScan = BioseqIndexScan_ExecCustomScan,
-    .EndCustomScan = BioseqIndexScan_EndCustomScan,
-
-    .ExplainCustomScan = BioseqIndexScan_ExplainCustomScan,
-
-    .EstimateDSMCustomScan = BioseqIndexScan_EstimateDSMCustomScan,
-    .InitializeDSMCustomScan = BioseqIndexScan_InitializeDSMCustomScan,
-    .ReInitializeDSMCustomScan = BioseqIndexScan_ReinitializeDSMCustomScan,
-    .InitializeWorkerCustomScan = BioseqIndexScan_InitializeWorkerCustomScan
-};
-
-
-static Node*
-CreateBioseqIndexScanState(CustomScan* custom_plan)
-{
-    BioseqIndexScanState* index_state = BioseqIndexScanState::allocate();
-    index_state->as_custom_scan_state()->methods = &BioseqIndexScanExecMethods;
-    return index_state->as_node();
-}
-
 
 static void
 BioseqIndexScan_BeginCustomScan(CustomScanState* css, EState* estate, int eflags)
@@ -754,11 +693,49 @@ BioseqIndexScan_InitializeWorkerCustomScan(CustomScanState* node,
 }
 
 
+[[nodiscard]] static const CustomExecMethods&
+bioseq_index_exec_methods() noexcept
+{
+    static const CustomExecMethods methods = {
+        .CustomName = "BioseqIndexScan",
+        .BeginCustomScan = BioseqIndexScan_BeginCustomScan,
+        .ExecCustomScan = BioseqIndexScan_ExecCustomScan,
+        .EndCustomScan = BioseqIndexScan_EndCustomScan,
+        .ExplainCustomScan = BioseqIndexScan_ExplainCustomScan,
+        .EstimateDSMCustomScan = BioseqIndexScan_EstimateDSMCustomScan,
+        .InitializeDSMCustomScan = BioseqIndexScan_InitializeDSMCustomScan,
+        .ReInitializeDSMCustomScan = BioseqIndexScan_ReinitializeDSMCustomScan,
+        .InitializeWorkerCustomScan = BioseqIndexScan_InitializeWorkerCustomScan,
+    };
+    return methods;
+}
+
+
+static Node*
+CreateBioseqIndexScanState(CustomScan* custom_plan)
+{
+    BioseqIndexScanState* index_state = BioseqIndexScanState::allocate();
+    index_state->as_custom_scan_state()->methods = &bioseq_index_exec_methods();
+    return index_state->as_node();
+}
+
+
+[[nodiscard]] static const CustomScanMethods&
+bioseq_index_scan_methods() noexcept
+{
+    static const CustomScanMethods methods = {
+        .CustomName = "BioseqIndexScan",
+        .CreateCustomScanState = CreateBioseqIndexScanState,
+    };
+    return methods;
+}
+
+
 export CustomScan*
 bioseq_create_indexscan_node(void)
 {
     CustomScan* cscan = reinterpret_cast<CustomScan*>(makeNode(CustomScan));
-    cscan->methods = &BioseqIndexCustomScanMethods;
+    cscan->methods = &bioseq_index_scan_methods();
     return cscan;
 }
 
@@ -766,5 +743,5 @@ bioseq_create_indexscan_node(void)
 export void
 bioseq_register_indexscan_node(void)
 {
-    RegisterCustomScanMethods(&BioseqIndexCustomScanMethods);
+    RegisterCustomScanMethods(&bioseq_index_scan_methods());
 }

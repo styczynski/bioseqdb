@@ -47,8 +47,6 @@ import bioseq_sequences;
 import bioseq_sequences.simd;
 import pg_utils;
 
-extern "C++" {
-
 export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
 
 // ----------------------------------------------------------------------------
@@ -179,8 +177,6 @@ export template<class S = pgseq_t>
 [[nodiscard]] inline S* pg_seq_arg(FunctionCallInfo fcinfo, int n) {
     return reinterpret_cast<S*>(PG_DETOAST_DATUM(PG_GETARG_DATUM(n)));
 }
-
-} // extern "C++"
 
 // ============================================================================
 // SQL-callable Datum functions. All use CXX_PG_FUNCTION_INFO_V1 which handles

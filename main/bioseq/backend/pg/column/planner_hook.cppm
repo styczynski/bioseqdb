@@ -70,9 +70,9 @@ template<typename PlanNode>
  * scan.
  */
 static bool
-bioseq_index_table(Oid index_oid, Oid columnar_tableam_oid)
+bioseq_index_table(Oid index_oid, Oid bioseq_column_tableam_oid)
 {
-	bioseq_log<DBG>("[bioseq] pg: bioseq_index_table() index_oid={} columnar_tableam_oid={}", index_oid, columnar_tableam_oid);
+	bioseq_log<DBG>("[bioseq] pg: bioseq_index_table() index_oid={} bioseq_column_tableam_oid={}", index_oid, bioseq_column_tableam_oid);
 
 	HeapTuple index_tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(index_oid));
 	if (!HeapTupleIsValid(index_tuple))
@@ -91,12 +91,12 @@ bioseq_index_table(Oid index_oid, Oid columnar_tableam_oid)
 	}
 	Form_pg_class table_record = reinterpret_cast<Form_pg_class>(GETSTRUCT(table_tuple));
 
-	const bool index_on_columnar = table_record->relam == columnar_tableam_oid;
+	const bool index_on_bioseq_column = table_record->relam == bioseq_column_tableam_oid;
 
 	ReleaseSysCache(index_tuple);
 	ReleaseSysCache(table_tuple);
 
-	return index_on_columnar;
+	return index_on_bioseq_column;
 }
 
 /*
@@ -330,22 +330,22 @@ PlanTreeMutator(Plan* node, void* context)
 				return node;
 			}
 
-			CustomScan* columnar_index_scan = bioseq_create_indexscan_node();
+			CustomScan* bioseq_column_index_scan = bioseq_create_indexscan_node();
 			IndexScan* new_index_scan = FlatCopyPlan(index_scan_node);
 
-			columnar_index_scan->custom_plans =
-						lappend(columnar_index_scan->custom_plans, new_index_scan);
+			bioseq_column_index_scan->custom_plans =
+						lappend(bioseq_column_index_scan->custom_plans, new_index_scan);
 
-			columnar_index_scan->scan.plan.targetlist =
+			bioseq_column_index_scan->scan.plan.targetlist =
 						CustomBuildTargetList(index_scan_node->scan.plan.targetlist, INDEX_VAR);
 
-			columnar_index_scan->custom_scan_tlist = new_index_scan->scan.plan.targetlist;
+			bioseq_column_index_scan->custom_scan_tlist = new_index_scan->scan.plan.targetlist;
 
-			Plan* columnar_index_scan_plan = reinterpret_cast<Plan*>(columnar_index_scan);
-			CopyPlanCosts(columnar_index_scan_plan, &index_scan_node->scan.plan);
+			Plan* bioseq_column_index_scan_plan = reinterpret_cast<Plan*>(bioseq_column_index_scan);
+			CopyPlanCosts(bioseq_column_index_scan_plan, &index_scan_node->scan.plan);
 
 			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() IndexScan rewritten to bioseq custom scan");
-			return reinterpret_cast<Plan*>(columnar_index_scan);
+			return reinterpret_cast<Plan*>(bioseq_column_index_scan);
 		}
 		default:
 		{

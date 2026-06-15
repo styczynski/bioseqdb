@@ -39,413 +39,8 @@ import storage_physical;
 import mlogging;
 import config;
 import pg_utils;
-
-/*-------------------------------------------------------------------------
- * DOC0322 §9.2 — the C-shape column-store data model formerly in the deleted
- * backend/types.h is dissolved into this module (storage_metadata:core), the
- * single shareable home: read_state_cache (a storage_metadata partition) needs
- * BioseqColumnReadState and cannot import bioseq_table_io, and every other consumer
- * already imports storage_metadata (or :core as a sibling partition). Each
- * struct/enum is `export`ed with its field order/types preserved VERBATIM —
- * they are reinterpret_cast'd across modules, so the layout is ABI-shared.
- * (CompressionType moved to `config`; the PG type aliases uint64/Datum/etc. are
- * provided by common.h in the GMF.) The four dead fn-ptr typedefs
- * (BioseqColumnSupportsIndexAM_type, CompressionTypeStr_type, IsBioseqColumnTableAmTable_type,
- * ReadBioseqColumnOptions_type) had no users anywhere and are dropped.
- *-----------------------------------------------------------------------*/
-
-/*
- * BioseqColumnOptions holds the option values to be used when reading or writing
- * a columnar table. To resolve these values, we first check foreign table's
- * options, and if not present, we then fall back to the default values.
- */
-export struct BioseqColumnOptions
-{
-	uint64 stripeRowCount;
-	uint32 chunkRowCount;
-	CompressionType compressionType;
-	int compressionLevel;
-};
-
-/* ColumnChunkSkipNode contains statistics for a ColumnChunkData. */
-export struct ColumnChunkSkipNode
-{
-	/* statistics about values of a column chunk */
-	bool hasMinMax;
-	Datum minimumValue;
-	Datum maximumValue;
-	uint64 rowCount;
-
-	/*
-	 * Offsets and sizes of value and exists streams in the column data.
-	 * These enable us to skip reading suppressed row chunks, and start reading
-	 * a chunk without reading previous chunks.
-	 */
-	uint64 valueChunkOffset;
-	uint64 valueLength;
-	uint64 existsChunkOffset;
-	uint64 existsLength;
-
-	/*
-	 * This is used for (1) determining destination size when decompressing,
-	 * (2) calculating compression rates when logging stats.
-	 */
-	uint64 decompressedValueSize;
-
-	CompressionType valueCompressionType;
-	int valueCompressionLevel;
-};
-
-/*
- * StripeSkipList can be used for skipping row chunks. It contains a column chunk
- * skip node for each chunk of each column. chunkSkipNodeArray[column][chunk]
- * is the entry for the specified column chunk.
- */
-export struct StripeSkipList
-{
-	ColumnChunkSkipNode **chunkSkipNodeArray;
-	uint32 *chunkGroupRowCounts;
-	uint32 *chunkGroupRowOffset;
-	uint32 *chunkGroupDeletedRows;
-	uint32 columnCount;
-	uint32 chunkCount;
-};
-
-export struct cached_StringInfo
-{
-	StringInfoData data;
-	bool cached;
-};
-
-/*
- * ChunkData represents a chunk of data for multiple columns. valueArray stores
- * the values of data, and existsArray stores whether a value is present.
- * valueBuffer is used to store (uncompressed) serialized values referenced by
- * Datum's in valueArray. It is only used for by-reference Datum's. There is a
- * one-to-one correspondence between valueArray and existsArray.
- */
-export struct ChunkData
-{
-	uint32 rowCount;
-	uint32 columnCount;
-
-	/*
-	 * Following are indexed by [column][row]. If a column is not projected,
-	 * then existsArray[column] and valueArray[column] are NULL.
-	 */
-	bool **existsArray;
-	Datum **valueArray;
-
-	/* valueBuffer keeps actual data for type-by-reference datums from valueArray. */
-	StringInfo *valueBufferArray;
-};
-
-/*
- * ColumnChunkBuffers represents a chunk of serialized data in a column.
- * valueBuffer stores the serialized values of data, and existsBuffer stores
- * serialized value of presence information. valueCompressionType contains
- * compression type if valueBuffer is compressed. Finally rowCount has the
- * number of rows in this chunk.
- */
-export struct ColumnChunkBuffers
-{
-	StringInfo existsBuffer;
-	StringInfo valueBuffer;
-	CompressionType valueCompressionType;
-	uint64 decompressedValueSize;
-};
-
-/*
- * ColumnBuffers represents data buffers for a column in a row stripe. Each
- * column is made of multiple column chunks.
- */
-export struct ColumnBuffers
-{
-	ColumnChunkBuffers **chunkBuffersArray;
-};
-
-/* StripeBuffers represents data for a row stripe. */
-export struct StripeBuffers
-{
-	uint32 columnCount;
-	uint32 chunkCount;
-	uint32 rowCount;
-	ColumnBuffers **columnBuffersArray;
-
-	uint32 *selectedChunkGroupRowCounts;
-	uint32 *selectedChunkGroupRowOffset;
-	uint32 *selectedChunkGroupDeletedRows;
-};
-
-/* return value of StripeWriteState to decide stripe write state */
-export enum StripeWriteStateEnum
-{
-	/* stripe write is flushed to disk, so it's readable */
-	STRIPE_WRITE_FLUSHED,
-
-	/*
-	 * Writer transaction did abort either before inserting into
-	 * bioseq.stripe or after.
-	 */
-	STRIPE_WRITE_ABORTED,
-
-	/*
-	 * Writer transaction is still in-progress. Note that it is not certain
-	 * if it is being written by current backend's current transaction or
-	 * another backend.
-	 */
-	STRIPE_WRITE_IN_PROGRESS
-};
-
-/* Parallel Custom Scan shared data */
-export struct ParallelBioseqColumnScanData
-{
-	slock_t mutex;
-	pg_atomic_uint64 nextStripeId;	/* Fetch next stripe id to be read and increment */
-	char snapshotData[FLEXIBLE_ARRAY_MEMBER];
-};
-export typedef struct ParallelBioseqColumnScanData *ParallelBioseqColumnScan;
-
-/* Cache statistics for when caching is enabled and used. */
-export struct BioseqColumnCacheStatistics
-{
-	uint64 hits;
-	uint64 misses;
-	uint64 evictions;
-	uint64 writes;
-	uint64 maximumCacheSize;
-	uint64 endingCacheSize;
-	uint64 entries;
-};
-
-/*
- * StripeMetadata represents information about a stripe. This information is
- * stored in the metadata table "bioseq.stripe".
- */
-export struct StripeMetadata
-{
-	uint64 fileOffset;
-	uint64 dataLength;
-	uint32 columnCount;
-	uint32 chunkCount;
-	uint32 chunkGroupRowCount;
-	uint64 rowCount;
-	uint64 id;
-	uint64 firstRowNumber;
-
-	/* see StripeWriteState */
-	bool aborted;
-
-	/*
-	 * If write operation is in-progress (i.e. StripeWriteState returned
-	 * STRIPE_WRITE_IN_PROGRESS), then insertedByCurrentXact is used to
-	 * distinguish whether it's being written by current transaction or not.
-	 */
-	bool insertedByCurrentXact;
-};
-
-/*
- * EmptyStripeReservation represents information for an empty stripe
- * reservation.
- */
-export struct EmptyStripeReservation
-{
-	uint64 stripeId;
-	uint64 stripeFirstRowNumber;
-};
-
-/* RowMaskWriteStateEntry represents write state entry of bioseq.row_mask row */
-export struct RowMaskWriteStateEntry
-{
-	uint64 id;
-	uint64 storageId;
-	uint64 stripeId;
-	uint32 chunkId;
-	int64 startRowNumber;
-	int64 endRowNumber;
-	int32 deletedRows;
-	bytea *mask;
-};
-
-export struct ChunkGroupReadState
-{
-	int64 currentRow;
-	int64 rowCount;
-	int columnCount;
-	List *projectedColumnList;  /* borrowed reference */
-	ChunkData *chunkGroupData;
-	bytea *rowMask;
-	bool rowMaskCached; /* If rowMask metadata is cached and borrowed */
-	uint32 chunkStripeRowOffset;
-	uint32 chunkGroupDeletedRows;
-};
-
-export struct StripeReadState
-{
-	int columnCount;
-	int64 rowCount;
-	int64 currentRow;
-	TupleDesc tupleDescriptor;
-	Relation relation;
-	int chunkGroupIndex;
-	int64 chunkGroupsFiltered;
-	MemoryContext stripeReadContext;
-	StripeBuffers *stripeBuffers;   /* allocated in stripeReadContext */
-	List *projectedColumnList;      /* borrowed reference */
-	ChunkGroupReadState *chunkGroupReadState; /* owned */
-};
-
-/* BioseqColumnReadState represents state of a columnar scan. */
-export struct BioseqColumnReadState
-{
-	TupleDesc tupleDescriptor;
-	Relation relation;
-
-	StripeMetadata *currentStripeMetadata;
-	StripeReadState *stripeReadState;
-
-	/*
-	 * Integer list of attribute numbers (1-indexed) for columns needed by the
-	 * query.
-	 */
-	List *projectedColumnList;
-
-	List *whereClauseList;
-	List *whereClauseVars;
-
-	MemoryContext stripeReadContext;
-	int64 chunkGroupsFiltered;
-
-	/*
-	 * Memory context guaranteed to be not freed during scan so we can safely
-	 * use for any memory allocations regarding BioseqColumnReadState itself.
-	 */
-	MemoryContext scanContext;
-
-	Snapshot snapshot;
-	bool snapshotRegisteredByUs;
-
-	/* Parallel exeuction */
-	ParallelBioseqColumnScan parallelBioseqColumnScan;
-};
-
-/* BioseqColumnWriteState represents state of a columnar write operation. */
-export struct BioseqColumnWriteState
-{
-	TupleDesc tupleDescriptor;
-	FmgrInfo **comparisonFunctionArray;
-	RelFileLocator relfilelocator;
-
-	MemoryContext stripeWriteContext;
-	MemoryContext perTupleContext;
-	StripeBuffers *stripeBuffers;
-	StripeSkipList *stripeSkipList;
-	EmptyStripeReservation *emptyStripeReservation;
-	BioseqColumnOptions options;
-	ChunkData *chunkData;
-
-	List *chunkGroupRowCounts;
-
-	/*
-	 * compressionBuffer buffer is used as temporary storage during data value
-	 * compression operation. It is kept here to minimize memory allocations.
-	 * It lives in stripeWriteContext and gets deallocated when memory context
-	 * is reset.
-	 */
-	StringInfo compressionBuffer;
-
-	/*
-	 * DOC0260 Phase A — per-write-state seq_caches (sub-table cache used by
-	 * sequence_storage_manager). Opaque void* so this struct stays decoupled
-	 * from bioseq::storage; the actual `bioseq::storage::seq_caches*` is
-	 * placement-new'd into stripeWriteContext by bioseq_init_write_state and
-	 * destroyed by BioseqColumnEndWrite. Holds the per-write-state cap snapshot.
-	 */
-	void *seq_caches;
-};
-
-/*-------------------------------------------------------------------------
- * DOC0322 §9.1/§14.1 — ABI layout guards for the structs reinterpret_cast'd
- * across modules. Each replica mirrors the original C field layout above; the
- * static_assert pins std::is_standard_layout plus sizeof + the offsetof of a
- * key field, so a future field reorder/retype is a hard compile error. (Field
- * order is unchanged here, so they pass today.) ParallelBioseqColumnScanData has a
- * FLEXIBLE_ARRAY_MEMBER, so only is_standard_layout is asserted for it (sizeof
- * of a FAM struct is not meaningful). VectorColumn and the bioseq_table_types
- * scan descriptors carry their own guards in their owning modules.
- *-----------------------------------------------------------------------*/
-namespace {
-struct _BioseqColumnReadState_ref
-{
-	TupleDesc tupleDescriptor;
-	Relation relation;
-	StripeMetadata *currentStripeMetadata;
-	StripeReadState *stripeReadState;
-	List *projectedColumnList;
-	List *whereClauseList;
-	List *whereClauseVars;
-	MemoryContext stripeReadContext;
-	int64 chunkGroupsFiltered;
-	MemoryContext scanContext;
-	Snapshot snapshot;
-	bool snapshotRegisteredByUs;
-	ParallelBioseqColumnScan parallelBioseqColumnScan;
-};
-static_assert(std::is_standard_layout_v<BioseqColumnReadState> &&
-			  sizeof(BioseqColumnReadState) == sizeof(_BioseqColumnReadState_ref) &&
-			  offsetof(BioseqColumnReadState, tupleDescriptor) == offsetof(_BioseqColumnReadState_ref, tupleDescriptor) &&
-			  offsetof(BioseqColumnReadState, parallelBioseqColumnScan) == offsetof(_BioseqColumnReadState_ref, parallelBioseqColumnScan),
-			  "BioseqColumnReadState layout drift (reinterpret_cast'd across modules)");
-
-struct _BioseqColumnWriteState_ref
-{
-	TupleDesc tupleDescriptor;
-	FmgrInfo **comparisonFunctionArray;
-	RelFileLocator relfilelocator;
-	MemoryContext stripeWriteContext;
-	MemoryContext perTupleContext;
-	StripeBuffers *stripeBuffers;
-	StripeSkipList *stripeSkipList;
-	EmptyStripeReservation *emptyStripeReservation;
-	BioseqColumnOptions options;
-	ChunkData *chunkData;
-	List *chunkGroupRowCounts;
-	StringInfo compressionBuffer;
-	void *seq_caches;
-};
-static_assert(std::is_standard_layout_v<BioseqColumnWriteState> &&
-			  sizeof(BioseqColumnWriteState) == sizeof(_BioseqColumnWriteState_ref) &&
-			  offsetof(BioseqColumnWriteState, tupleDescriptor) == offsetof(_BioseqColumnWriteState_ref, tupleDescriptor) &&
-			  offsetof(BioseqColumnWriteState, seq_caches) == offsetof(_BioseqColumnWriteState_ref, seq_caches),
-			  "BioseqColumnWriteState layout drift (reinterpret_cast'd across modules)");
-
-struct _ParallelBioseqColumnScanData_ref
-{
-	slock_t mutex;
-	pg_atomic_uint64 nextStripeId;
-	char snapshotData[FLEXIBLE_ARRAY_MEMBER];
-};
-static_assert(std::is_standard_layout_v<ParallelBioseqColumnScanData>,
-			  "ParallelBioseqColumnScanData must stay standard-layout (FAM struct, reinterpret_cast'd across modules)");
-}  // namespace
-
-/*
- * DOC0322 §9.2 — typed, named-accessor view over a deformed catalog tuple row.
- * One source of truth for the 1-based PG attnum -> 0-based array `- 1` offset,
- * for future replacement of the `datumArray[Anum_bioseq_* - 1]` deform sites.
- * Exported for use across the storage_metadata partitions; the existing
- * `[Anum_* - 1]` call sites are left untouched in this step.
- */
-export template <int Natts>
-struct deformed_row
-{
-	Datum values[Natts] {};
-	bool  nulls [Natts] {};
-	[[nodiscard]] Datum at(int anum) const noexcept { return values[anum - 1]; }   /* 1-based PG attnum */
-	[[nodiscard]] bool  is_null(int anum) const noexcept { return nulls[anum - 1]; }
-	void set(int anum, Datum v) noexcept { values[anum - 1] = v; nulls[anum - 1] = false; }
-	void set_null(int anum) noexcept { nulls[anum - 1] = true; }
-};
+import :types;
+import :tuple_ops;
 
 export void InitBioseqColumnOptions(Oid regclass);
 export void SetBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options);
@@ -498,7 +93,11 @@ export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
 export bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 								MemoryContext ctx,
 								uint64_t stripeFirstRowNumber, int rowCount);
-export EState * create_estate_for_relation(Relation rel);
+export EState *
+create_estate_for_relation(Relation rel)
+{
+	return bioseq::metadata::tuple_ops::create_estate_for_relation(rel);
+}
 
 // ---------------------------------------------------------------------------
 // DOC0260 Phase A — bioseq_internal.seq_sub_table catalog access.
@@ -562,40 +161,6 @@ DeleteSubTableShardsForMain(Oid database_oid, Oid tablespace_oid, Oid main_relfi
 
 
 /*
- * FreeChunkData deallocates data buffers to keep deserialized exist and
- * value arrays for requested columns in columnMask.
- * ColumnChunkData->serializedValueBuffer lives in memory read/write context
- * so it is deallocated automatically when the context is deleted.
- */
-export void
-FreeChunkData(ChunkData *chunkData)
-{
-	uint32_t columnIndex = 0;
-
-	if (chunkData == NULL)
-	{
-		return;
-	}
-
-	for (columnIndex = 0; columnIndex < chunkData->columnCount; columnIndex++)
-	{
-		if (chunkData->existsArray[columnIndex] != NULL)
-		{
-			pfree(chunkData->existsArray[columnIndex]);
-		}
-
-		if (chunkData->valueArray[columnIndex] != NULL)
-		{
-			pfree(chunkData->valueArray[columnIndex]);
-		}
-	}
-
-	pfree(chunkData->existsArray);
-	pfree(chunkData->valueArray);
-	pfree(chunkData);
-}
-
-/*
  * GetFunctionInfoOrNull first resolves the operator for the given data type,
  * access method, and support procedure. The function then uses the resolved
  * operator's identifier to fill in a function manager object, and returns
@@ -647,15 +212,6 @@ Oid safe_get_relname_relid(const char *relname, Oid relnamespace) {
 	return relid;
 }
 
-
-
-struct ModifyState
-{
-	Relation rel;
-	EState *estate;
-	ResultRelInfo *resultRelInfo;
-};
-
 /* RowNumberLookupMode to be used in StripeMetadataLookupRowNumber */
 enum RowNumberLookupMode
 {
@@ -681,7 +237,7 @@ static StripeMetadata * UpdateStripeMetadataRow(uint64_t storageId, uint64_t str
 												bool *update, Datum *newValues);
 static List * ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot,
 									 ScanDirection scanDirection);
-export StripeMetadata * BuildStripeMetadata(Relation columnarStripes,
+export StripeMetadata * BuildStripeMetadata(Relation bioseqColumnStripes,
 											HeapTuple heapTuple);
 static void ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe,
 									uint32_t chunkGroupCount,
@@ -717,13 +273,6 @@ static void DeleteStripeFromBioseqColumnMetadataTable(Oid metadataTableId,
 												  Oid storageIdIndexId,
 												  uint64_t storageId,
 												  uint64_t stripeId);
-static ModifyState * StartModifyRelation(Relation rel);
-static void InsertTupleAndEnforceConstraints(ModifyState *state, Datum *values,
-											 bool *nulls);
-static void DeleteTupleAndEnforceConstraints(ModifyState *state, HeapTuple heapTuple);
-static void FinishModifyRelation(ModifyState *state);
-static bytea * DatumToBytea(Datum value, Form_pg_attribute attrForm);
-static Datum ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm);
 static bool WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwrite);
 static StripeMetadata * StripeMetadataLookupRowNumber(Relation relation, uint64_t rowNumber,
 													  Snapshot snapshot,
@@ -822,9 +371,9 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 	values[Anum_bioseq_options_compression - 1] = NameGetDatum(&compressionName);
 
 	/* create heap tuple and insert into catalog table */
-	Relation columnarOptions = safe_relation_open(BioseqColumnOptionsRelationId(),
+	Relation bioseqColumnOptions = safe_relation_open(BioseqColumnOptionsRelationId(),
 											 RowExclusiveLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(columnarOptions);
+	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnOptions);
 
 	/* find existing item to perform update if exist */
 	ScanKeyData scanKey[1] = { 0 };
@@ -833,7 +382,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 				ObjectIdGetDatum(regclass));
 
 	Relation index = index_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarOptions, index, NULL,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
 															1, scanKey);
 
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
@@ -851,7 +400,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 
 			HeapTuple tuple = heap_modify_tuple(heapTuple, tupleDescriptor,
 												values, nulls, update);
-			CatalogTupleUpdate(columnarOptions, &tuple->t_self, tuple);
+			CatalogTupleUpdate(bioseqColumnOptions, &tuple->t_self, tuple);
 			written = true;
 		}
 	}
@@ -859,7 +408,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 	{
 		/* inserting new record */
 		HeapTuple newTuple = heap_form_tuple(tupleDescriptor, values, nulls);
-		CatalogTupleInsert(columnarOptions, newTuple);
+		CatalogTupleInsert(bioseqColumnOptions, newTuple);
 		written = true;
 	}
 
@@ -870,7 +419,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	relation_close(columnarOptions, RowExclusiveLock);
+	relation_close(bioseqColumnOptions, RowExclusiveLock);
 
 	return written;
 }
@@ -893,9 +442,9 @@ DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
 	 */
 	Assert(!IsBinaryUpgrade);
 
-	Relation columnarOptions = try_safe_relation_open(BioseqColumnOptionsRelationId(),
+	Relation bioseqColumnOptions = try_safe_relation_open(BioseqColumnOptionsRelationId(),
 												 RowExclusiveLock);
-	if (columnarOptions == NULL)
+	if (bioseqColumnOptions == NULL)
 	{
 		/* extension has been dropped */
 		return false;
@@ -908,13 +457,13 @@ DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
 				ObjectIdGetDatum(regclass));
 
 	Relation index = index_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarOptions, index, NULL,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
 															1, scanKey);
 
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
 	if (HeapTupleIsValid(heapTuple))
 	{
-		CatalogTupleDelete(columnarOptions, &heapTuple->t_self);
+		CatalogTupleDelete(bioseqColumnOptions, &heapTuple->t_self);
 		CommandCounterIncrement();
 
 		result = true;
@@ -926,7 +475,7 @@ DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	relation_close(columnarOptions, RowExclusiveLock);
+	relation_close(bioseqColumnOptions, RowExclusiveLock);
 
 	return result;
 }
@@ -941,9 +490,9 @@ ReadBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
 				F_OIDEQ,
 				ObjectIdGetDatum(regclass));
 
-	Oid columnarOptionsOid = BioseqColumnOptionsRelationId();
-	Relation columnarOptions = try_safe_relation_open(columnarOptionsOid, AccessShareLock);
-	if (columnarOptions == NULL)
+	Oid bioseqColumnOptionsOid = BioseqColumnOptionsRelationId();
+	Relation bioseqColumnOptions = try_safe_relation_open(bioseqColumnOptionsOid, AccessShareLock);
+	if (bioseqColumnOptions == NULL)
 	{
 		/*
 		 * Extension has been dropped. This can be called while
@@ -955,13 +504,13 @@ ReadBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
 	Relation index = try_safe_relation_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
 	if (index == NULL)
 	{
-		table_close(columnarOptions, AccessShareLock);
+		table_close(bioseqColumnOptions, AccessShareLock);
 
 		/* extension has been dropped */
 		return false;
 	}
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarOptions, index, NULL,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
 															1, scanKey);
 
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
@@ -985,7 +534,7 @@ ReadBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	relation_close(columnarOptions, AccessShareLock);
+	relation_close(bioseqColumnOptions, AccessShareLock);
 
 	return true;
 }
@@ -1004,9 +553,9 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipLis
 	uint32_t columnCount = chunkList->columnCount;
 
 	uint64_t storageId = LookupStorageId(relfilelocator);
-	Oid columnarChunkOid = BioseqColumnChunkRelationId();
-	Relation columnarChunk = table_open(columnarChunkOid, RowExclusiveLock);
-	ModifyState *modifyState = StartModifyRelation(columnarChunk);
+	Oid bioseqColumnChunkOid = BioseqColumnChunkRelationId();
+	Relation bioseqColumnChunk = table_open(bioseqColumnChunkOid, RowExclusiveLock);
+	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnChunk);
 
 	for (columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
@@ -1037,10 +586,10 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipLis
 			if (chunk->hasMinMax)
 			{
 				values[Anum_bioseq_chunk_minimum_value - 1] =
-					PointerGetDatum(DatumToBytea(chunk->minimumValue,
+					PointerGetDatum(bioseq::metadata::tuple_ops::datum_to_bytea(chunk->minimumValue,
 												 TupleDescAttr(tupleDescriptor, columnIndex)));
 				values[Anum_bioseq_chunk_maximum_value - 1] =
-					PointerGetDatum(DatumToBytea(chunk->maximumValue,
+					PointerGetDatum(bioseq::metadata::tuple_ops::datum_to_bytea(chunk->maximumValue,
 												 TupleDescAttr(tupleDescriptor, columnIndex)));
 			}
 			else
@@ -1049,12 +598,12 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipLis
 				nulls[Anum_bioseq_chunk_maximum_value - 1] = true;
 			}
 
-			InsertTupleAndEnforceConstraints(modifyState, values, nulls);
+			bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
 		}
 	}
 
-	FinishModifyRelation(modifyState);
-	table_close(columnarChunk, RowExclusiveLock);
+	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
+	table_close(bioseqColumnChunk, RowExclusiveLock);
 }
 
 
@@ -1066,9 +615,9 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
 				List *chunkGroupRowCounts)
 {
 	uint64_t storageId = LookupStorageId(relfilelocator);
-	Oid columnarChunkGroupOid = BioseqColumnChunkGroupRelationId();
-	Relation columnarChunkGroup = table_open(columnarChunkGroupOid, RowExclusiveLock);
-	ModifyState *modifyState = StartModifyRelation(columnarChunkGroup);
+	Oid bioseqColumnChunkGroupOid = BioseqColumnChunkGroupRelationId();
+	Relation bioseqColumnChunkGroup = table_open(bioseqColumnChunkGroupOid, RowExclusiveLock);
+	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnChunkGroup);
 
 	int chunkId = 0;
 
@@ -1084,12 +633,12 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
 
 		bool nulls[Natts_bioseq_chunkgroup] = { false };
 
-		InsertTupleAndEnforceConstraints(modifyState, values, nulls);
+		bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
 		chunkId++;
 	}
 
-	FinishModifyRelation(modifyState);
-	table_close(columnarChunkGroup, RowExclusiveLock);
+	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
+	table_close(bioseqColumnChunkGroup, RowExclusiveLock);
 }
 
 
@@ -1100,10 +649,10 @@ bool
 SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 				 uint64_t stripeStartRowNumber, List *chunkGroupRowCounts)
 {
-	Oid columnarRowMaskOid = BioseqColumnRowMaskRelationId();
-	Oid columnarRowMaskSeq = BioseqColumnRowMaskSeqId();
-	Relation columnarRowMask = table_open(columnarRowMaskOid, RowExclusiveLock);
-	ModifyState *modifyState = StartModifyRelation(columnarRowMask);
+	Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
+	Oid bioseqColumnRowMaskSeq = BioseqColumnRowMaskSeqId();
+	Relation bioseqColumnRowMask = table_open(bioseqColumnRowMaskOid, RowExclusiveLock);
+	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnRowMask);
 
 	uint64_t chunkIterationStartRowNumber = stripeStartRowNumber;
 	uint64_t chunkIterationEndRowNumber = stripeStartRowNumber -  1;
@@ -1145,7 +694,7 @@ SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 			bytea *initialLookupRecord = make1<bytea>(maskSize + VARHDRSZ);
 			SET_VARSIZE(initialLookupRecord, maskSize + VARHDRSZ);
 
-			int64_t nextSeqId = nextval_internal(columnarRowMaskSeq, false);
+			int64_t nextSeqId = nextval_internal(bioseqColumnRowMaskSeq, false);
 
 			Datum values[Natts_bioseq_row_mask] = {
 				Int64GetDatum(nextSeqId),
@@ -1170,7 +719,7 @@ SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 			 */
 			PG_TRY();
 			{
-				InsertTupleAndEnforceConstraints(modifyState, values, nulls);
+				bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
 			}
 			
 			PG_CATCH();
@@ -1189,8 +738,8 @@ SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 		chunkId++;
 	}
 
-	FinishModifyRelation(modifyState);
-	table_close(columnarRowMask, RowExclusiveLock);
+	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
+	table_close(bioseqColumnRowMask, RowExclusiveLock);
 
 	return chunkInserted;
 }
@@ -1212,8 +761,8 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 
 	uint64_t storageId = LookupStorageId(relfilelocator);
 
-	Oid columnarChunkOid = BioseqColumnChunkRelationId();
-	Relation columnarChunk = table_open(columnarChunkOid, AccessShareLock);
+	Oid bioseqColumnChunkOid = BioseqColumnChunkRelationId();
+	Relation bioseqColumnChunk = table_open(bioseqColumnChunkOid, AccessShareLock);
 	Relation index = index_open(BioseqColumnChunkIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
@@ -1221,7 +770,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripe));
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnChunk, index,
 															snapshot, 2, scanKey);
 
 	StripeSkipList *chunkList = make0<StripeSkipList>();
@@ -1240,7 +789,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 		Datum datumArray[Natts_bioseq_chunk];
 		bool isNullArray[Natts_bioseq_chunk];
 
-		heap_deform_tuple(heapTuple, RelationGetDescr(columnarChunk), datumArray,
+		heap_deform_tuple(heapTuple, RelationGetDescr(bioseqColumnChunk), datumArray,
 						  isNullArray);
 
 		int32_t attr = DatumGetInt32(datumArray[Anum_bioseq_chunk_attr - 1]);
@@ -1290,9 +839,9 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 				datumArray[Anum_bioseq_chunk_maximum_value - 1]);
 
 			chunk->minimumValue =
-				ByteaToDatum(minValue, TupleDescAttr(tupleDescriptor, columnIndex));
+				bioseq::metadata::tuple_ops::bytea_to_datum(minValue, TupleDescAttr(tupleDescriptor, columnIndex));
 			chunk->maximumValue =
-				ByteaToDatum(maxValue, TupleDescAttr(tupleDescriptor, columnIndex));
+				bioseq::metadata::tuple_ops::bytea_to_datum(maxValue, TupleDescAttr(tupleDescriptor, columnIndex));
 
 			chunk->hasMinMax = true;
 		}
@@ -1300,7 +849,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarChunk, AccessShareLock);
+	table_close(bioseqColumnChunk, AccessShareLock);
 
 	ReadChunkGroupRowCounts(storageId, stripe, chunkCount,
 							&chunkList->chunkGroupRowCounts,
@@ -1332,8 +881,8 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 
 	uint64_t storageId = LookupStorageId(relfilelocator);
 
-	Oid columnarRowMaskOid = BioseqColumnRowMaskRelationId();
-	Relation columnarRowMask = table_open(columnarRowMaskOid, AccessShareLock);
+	Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
+	Relation bioseqColumnRowMask = table_open(bioseqColumnRowMaskOid, AccessShareLock);
 	Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
 
 	bytea *chunkRowMaskBytea = nullptr;
@@ -1356,7 +905,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
 					BTLessEqualStrategyNumber, F_INT8LE, UInt64GetDatum(stripeFirstRowNumber + rowCount - 1));
 
-		scanDescriptor = systable_beginscan_ordered(columnarRowMask,
+		scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
 													index,
 													SnapshotSelf, 3, scanKey);
 
@@ -1367,7 +916,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 			Datum datumArray[Natts_bioseq_row_mask];
 			bool isNullArray[Natts_bioseq_row_mask];
 
-			heap_deform_tuple(heapTuple, RelationGetDescr(columnarRowMask), datumArray, isNullArray);
+			heap_deform_tuple(heapTuple, RelationGetDescr(bioseqColumnRowMask), datumArray, isNullArray);
 			bytea * currentRowMask = DatumGetByteaP(datumArray[Anum_bioseq_row_mask_mask - 1]);
 
 			memcpy(VARDATA(chunkRowMaskBytea) + pos,
@@ -1380,7 +929,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarRowMask, AccessShareLock);
+	table_close(bioseqColumnRowMask, AccessShareLock);
 
 	return chunkRowMaskBytea;
 }
@@ -1392,17 +941,17 @@ void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 
 	ScanKeyData scanKey;
 
-	Oid columnarChunkGroupMaskOid = BioseqColumnRowMaskRelationId();
-	Relation columnarChunkGroupMask =
-		table_open(columnarChunkGroupMaskOid, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(columnarChunkGroupMask);
+	Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
+	Relation bioseqColumnRowMask =
+		table_open(bioseqColumnRowMaskOid, AccessShareLock);
+	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnRowMask);
 
 	Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey, Anum_bioseq_row_mask_id,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(rowMaskEntry->id));
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunkGroupMask,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
 															index,
 															NULL, 1, &scanKey);
 
@@ -1427,13 +976,13 @@ void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
 												   values, nulls, update);
 
-		CatalogTupleUpdate(columnarChunkGroupMask, &oldHeapTuple->t_self, newHeapTuple);
+		CatalogTupleUpdate(bioseqColumnRowMask, &oldHeapTuple->t_self, newHeapTuple);
 
 		heap_freetuple(newHeapTuple);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
-	table_close(columnarChunkGroupMask, AccessShareLock);
+	table_close(bioseqColumnRowMask, AccessShareLock);
 
 	CommandCounterIncrement();
 }
@@ -1518,25 +1067,25 @@ FindNextStripeForParallelWorker(Relation relation,
 	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
 				BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(nextStripeId));
 
-	Relation columnarStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
+	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
 
 	Relation index = index_open(BioseqColumnStripePKeyIndexRelationId(),
 								AccessShareLock);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
 															snapshot, 2,
 															scanKey);
 
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, ForwardScanDirection);
 	if (HeapTupleIsValid(heapTuple))
 	{
-		foundStripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
+		foundStripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
 		*nextHigherStripeId = foundStripeMetadata->id;
 	}
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarStripes, AccessShareLock);
+	table_close(bioseqColumnStripes, AccessShareLock);
 
 	return foundStripeMetadata;
 }
@@ -1610,10 +1159,10 @@ StripeMetadataLookupRowNumber(Relation relation, uint64_t rowNumber, Snapshot sn
 				strategyNumber, procedure, UInt64GetDatum(rowNumber));
 
 
-	Relation columnarStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
+	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
 	Relation index = index_open(BioseqColumnStripeFirstRowNumberIndexRelationId(),
 								AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
 															snapshot, 2,
 															scanKey);
 
@@ -1629,12 +1178,12 @@ StripeMetadataLookupRowNumber(Relation relation, uint64_t rowNumber, Snapshot sn
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, scanDirection);
 	if (HeapTupleIsValid(heapTuple))
 	{
-		foundStripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
+		foundStripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarStripes, AccessShareLock);
+	table_close(bioseqColumnStripes, AccessShareLock);
 
 	return foundStripeMetadata;
 }
@@ -1718,21 +1267,21 @@ FindStripeWithHighestRowNumber(Relation relation, Snapshot snapshot)
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
-	Relation columnarStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
+	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
 	Relation index = index_open(BioseqColumnStripeFirstRowNumberIndexRelationId(),
 								AccessShareLock);
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
 															snapshot, 1, scanKey);
 
 	HeapTuple heapTuple = systable_getnext_ordered(scanDescriptor, BackwardScanDirection);
 	if (HeapTupleIsValid(heapTuple))
 	{
-		stripeWithHighestRowNumber = BuildStripeMetadata(columnarStripes, heapTuple);
+		stripeWithHighestRowNumber = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarStripes, AccessShareLock);
+	table_close(bioseqColumnStripes, AccessShareLock);
 
 	return stripeWithHighestRowNumber;
 }
@@ -1748,8 +1297,8 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 						uint32_t **chunkGroupRowCounts, uint32_t **chunkGroupDeletedRows,
 						Snapshot snapshot)
 {
-	Oid columnarChunkGroupOid = BioseqColumnChunkGroupRelationId();
-	Relation columnarChunkGroup = table_open(columnarChunkGroupOid, AccessShareLock);
+	Oid bioseqColumnChunkGroupOid = BioseqColumnChunkGroupRelationId();
+	Relation bioseqColumnChunkGroup = table_open(bioseqColumnChunkGroupOid, AccessShareLock);
 	Relation index = index_open(BioseqColumnChunkGroupIndexRelationId(), AccessShareLock);
 
 	ScanKeyData scanKey[2];
@@ -1759,7 +1308,7 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripe));
 
 	SysScanDesc scanDescriptor =
-		systable_beginscan_ordered(columnarChunkGroup, index, snapshot, 2, scanKey);
+		systable_beginscan_ordered(bioseqColumnChunkGroup, index, snapshot, 2, scanKey);
 
 	HeapTuple heapTuple = NULL;
 
@@ -1782,7 +1331,7 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 		bool isNullArray[Natts_bioseq_chunkgroup];
 
 		heap_deform_tuple(heapTuple,
-						  RelationGetDescr(columnarChunkGroup),
+						  RelationGetDescr(bioseqColumnChunkGroup),
 						  datumArray, isNullArray);
 
 		uint32_t tupleChunkGroupIndex =
@@ -1803,7 +1352,7 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarChunkGroup, AccessShareLock);
+	table_close(bioseqColumnChunkGroup, AccessShareLock);
 }
 
 
@@ -1817,9 +1366,9 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 
 	HeapTuple oldHeapTuple = NULL;
 
-	Oid columnarChunkGroupOid = BioseqColumnChunkGroupRelationId();
-	Relation columnarChunkGroup = table_open(columnarChunkGroupOid, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(columnarChunkGroup);
+	Oid bioseqColumnChunkGroupOid = BioseqColumnChunkGroupRelationId();
+	Relation bioseqColumnChunkGroup = table_open(bioseqColumnChunkGroupOid, AccessShareLock);
+	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnChunkGroup);
 	Relation index = index_open(BioseqColumnChunkGroupIndexRelationId(), AccessShareLock);
 
 	ScanKeyData scanKey[3];
@@ -1831,7 +1380,7 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 				BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(chunkGroupId));
 
 	SysScanDesc scanDescriptor =
-		systable_beginscan_ordered(columnarChunkGroup, index, NULL, 3, scanKey);
+		systable_beginscan_ordered(bioseqColumnChunkGroup, index, NULL, 3, scanKey);
 
 	oldHeapTuple = systable_getnext_ordered(scanDescriptor, BackwardScanDirection);
 
@@ -1850,13 +1399,13 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
 												   values, nulls, update);
 
-		CatalogTupleUpdate(columnarChunkGroup, &oldHeapTuple->t_self, newHeapTuple);
+		CatalogTupleUpdate(bioseqColumnChunkGroup, &oldHeapTuple->t_self, newHeapTuple);
 
 		heap_freetuple(newHeapTuple);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
-	table_close(columnarChunkGroup, AccessShareLock);
+	table_close(bioseqColumnChunkGroup, AccessShareLock);
 
 	CommandCounterIncrement();
 }
@@ -1894,16 +1443,16 @@ InsertEmptyStripeMetadataRow(uint64_t storageId, uint64_t stripeId, uint32_t col
 	values[Anum_bioseq_stripe_chunk_count - 1] =
 		UInt32GetDatum(0);
 
-	Oid columnarStripesOid = BioseqColumnStripeRelationId();
-	Relation columnarStripes = table_open(columnarStripesOid, RowExclusiveLock);
+	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
+	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, RowExclusiveLock);
 
-	ModifyState *modifyState = StartModifyRelation(columnarStripes);
+	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnStripes);
 
-	InsertTupleAndEnforceConstraints(modifyState, values, nulls);
+	bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
 
-	FinishModifyRelation(modifyState);
+	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
 
-	table_close(columnarStripes, RowExclusiveLock);
+	table_close(bioseqColumnStripes, RowExclusiveLock);
 }
 
 
@@ -1985,8 +1534,8 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 
 	uint64_t storageId = LookupStorageId(relfilelocator);
 
-	Oid columnarChunkOid = BioseqColumnChunkRelationId();
-	Relation columnarChunk = table_open(columnarChunkOid, AccessShareLock);
+	Oid bioseqColumnChunkOid = BioseqColumnChunkRelationId();
+	Relation bioseqColumnChunk = table_open(bioseqColumnChunkOid, AccessShareLock);
 	Relation index = index_open(BioseqColumnChunkIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
@@ -1994,7 +1543,7 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripeId));
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarChunk, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnChunk, index,
 															GetTransactionSnapshot(), 2, scanKey);
 
 	Size decompressedChunkSize = 0;
@@ -2005,7 +1554,7 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 		Datum datumArray[Natts_bioseq_chunk];
 		bool isNullArray[Natts_bioseq_chunk];
 
-		heap_deform_tuple(heapTuple, RelationGetDescr(columnarChunk), datumArray,
+		heap_deform_tuple(heapTuple, RelationGetDescr(bioseqColumnChunk), datumArray,
 						  isNullArray);
 
 		decompressedChunkSize +=
@@ -2014,7 +1563,7 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarChunk, AccessShareLock);
+	table_close(bioseqColumnChunk, AccessShareLock);
 
 	return decompressedChunkSize;
 }
@@ -2151,23 +1700,23 @@ UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripeId));
 
-	Oid columnarStripesOid = BioseqColumnStripeRelationId();
-	Relation columnarStripes = table_open(columnarStripesOid, AccessShareLock);
-	TupleDesc tupleDescriptor = RelationGetDescr(columnarStripes);
+	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
+	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, AccessShareLock);
+	TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnStripes);
 
 	Oid indexId = BioseqColumnStripePKeyIndexRelationId();
 	bool indexOk = OidIsValid(indexId);
 
 	void *state = nullptr;
 	HeapTuple oldTuple = nullptr;
-	systable_inplace_update_begin(columnarStripes, indexId, indexOk,
+	systable_inplace_update_begin(bioseqColumnStripes, indexId, indexOk,
 								  /* snapshot */ nullptr,
 								  2, scanKey, &oldTuple, &state);
 
 	if (!HeapTupleIsValid(oldTuple))
 	{
 		systable_inplace_update_cancel(state);
-		table_close(columnarStripes, AccessShareLock);
+		table_close(bioseqColumnStripes, AccessShareLock);
 		bioseq_log<ERR, PG>( "attempted to modify an unexpected stripe, columnar storage with id={} does not have stripe with id={}", storageId, stripeId);
 	}
 
@@ -2185,13 +1734,13 @@ UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 	 * BuildStripeMetadata expects a real heap tuple with MVCC fields, which
 	 * is what oldTuple is — the in-place update preserved its header.
 	 */
-	StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(columnarStripes,
+	StripeMetadata *modifiedStripeMetadata = BuildStripeMetadata(bioseqColumnStripes,
 																 modifiedTuple);
 
 	CommandCounterIncrement();
 
 	heap_freetuple(modifiedTuple);
-	table_close(columnarStripes, AccessShareLock);
+	table_close(bioseqColumnStripes, AccessShareLock);
 
 	/* return StripeMetadata object built from modified tuple */
 	return modifiedStripeMetadata;
@@ -2212,26 +1761,26 @@ ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot, ScanDirection scan
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
 				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
 
-	Oid columnarStripesOid = BioseqColumnStripeRelationId();
+	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
 
-	Relation columnarStripes = table_open(columnarStripesOid, AccessShareLock);
+	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, AccessShareLock);
 	Relation index = index_open(BioseqColumnStripeFirstRowNumberIndexRelationId(),
 								AccessShareLock);
 
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarStripes, index,
+	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
 															snapshot, 1,
 															scanKey);
 
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 scanDirection)))
 	{
-		StripeMetadata *stripeMetadata = BuildStripeMetadata(columnarStripes, heapTuple);
+		StripeMetadata *stripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
 		stripeMetadataList.append(stripeMetadata);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
 	index_close(index, AccessShareLock);
-	table_close(columnarStripes, AccessShareLock);
+	table_close(bioseqColumnStripes, AccessShareLock);
 
 	return stripeMetadataList;
 }
@@ -2243,13 +1792,13 @@ ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot, ScanDirection scan
  * NB: heapTuple must be a proper heap tuple with MVCC fields.
  */
 StripeMetadata *
-BuildStripeMetadata(Relation columnarStripes, HeapTuple heapTuple)
+BuildStripeMetadata(Relation bioseqColumnStripes, HeapTuple heapTuple)
 {
-	Assert(RelationGetRelid(columnarStripes) == BioseqColumnStripeRelationId());
+	Assert(RelationGetRelid(bioseqColumnStripes) == BioseqColumnStripeRelationId());
 
 	Datum datumArray[Natts_bioseq_stripe];
 	bool isNullArray[Natts_bioseq_stripe];
-	heap_deform_tuple(heapTuple, RelationGetDescr(columnarStripes),
+	heap_deform_tuple(heapTuple, RelationGetDescr(bioseqColumnStripes),
 					  datumArray, isNullArray);
 
 	StripeMetadata *stripeMetadata = make0<StripeMetadata>();
@@ -2395,18 +1944,18 @@ DeleteStorageFromBioseqColumnMetadataTable(Oid metadataTableId,
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(metadataTable, index, NULL,
 															1, scanKey);
 
-	ModifyState *modifyState = StartModifyRelation(metadataTable);
+	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(metadataTable);
 
 	HeapTuple heapTuple;
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		DeleteTupleAndEnforceConstraints(modifyState, heapTuple);
+		bioseq::metadata::tuple_ops::delete_tuple_and_enforce_constraints(modifyState, heapTuple);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
 
-	FinishModifyRelation(modifyState);
+	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
 
 	index_close(index, AccessShareLock);
 	table_close(metadataTable, AccessShareLock);
@@ -2442,200 +1991,21 @@ DeleteStripeFromBioseqColumnMetadataTable(Oid metadataTableId,
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(metadataTable, index, NULL,
 															2, scanKey);
 
-	ModifyState *modifyState = StartModifyRelation(metadataTable);
+	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(metadataTable);
 
 	HeapTuple heapTuple;
 	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																 ForwardScanDirection)))
 	{
-		DeleteTupleAndEnforceConstraints(modifyState, heapTuple);
+		bioseq::metadata::tuple_ops::delete_tuple_and_enforce_constraints(modifyState, heapTuple);
 	}
 
 	systable_endscan_ordered(scanDescriptor);
 
-	FinishModifyRelation(modifyState);
+	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
 
 	index_close(index, RowShareLock);
 	table_close(metadataTable, RowShareLock);
-}
-
-
-/*
- * StartModifyRelation allocates resources for modifications.
- */
-static ModifyState *
-StartModifyRelation(Relation rel)
-{
-	EState *estate = create_estate_for_relation(rel);
-
-	ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
-	InitResultRelInfo(resultRelInfo, rel, 1, NULL, 0);
-
-
-	/* ExecSimpleRelationInsert, ... require caller to open indexes */
-	ExecOpenIndices(resultRelInfo, false);
-
-	ModifyState *modifyState = make0<ModifyState>();
-	modifyState->rel = rel;
-	modifyState->estate = estate;
-	modifyState->resultRelInfo = resultRelInfo;
-
-	return modifyState;
-}
-
-
-/*
- * InsertTupleAndEnforceConstraints inserts a tuple into a relation and makes
- * sure constraints are enforced and indexes are updated.
- */
-static void
-InsertTupleAndEnforceConstraints(ModifyState *state, Datum *values, bool *nulls)
-{
-	TupleDesc tupleDescriptor = RelationGetDescr(state->rel);
-	HeapTuple tuple = heap_form_tuple(tupleDescriptor, values, nulls);
-
-	TupleTableSlot *slot = ExecInitExtraTupleSlot(state->estate, tupleDescriptor,
-												  &TTSOpsHeapTuple);
-
-	/*
-	 * The tuple has no other reference.  Therefore, we can safely set
-	 * shouldFree to true, which can avoid duplicate memory allocation.
-	 *
-	 * When working with low-memory machines, it's important to be mindful
-	 * of duplicate memory allocation for large values.  This can lead to
-	 * out-of-memory errors and cause issues with the performance of the
-	 * machine.
-	 */
-	ExecStoreHeapTuple(tuple, slot, true);
-
-	/* use ExecSimpleRelationInsert to enforce constraints */
-	ExecSimpleRelationInsert_compat(state->resultRelInfo, state->estate, slot);
-}
-
-
-/*
- * DeleteTupleAndEnforceConstraints deletes a tuple from a relation and
- * makes sure constraints (e.g. FK constraints) are enforced.
- */
-static void
-DeleteTupleAndEnforceConstraints(ModifyState *state, HeapTuple heapTuple)
-{
-	EState *estate = state->estate;
-	ResultRelInfo *resultRelInfo = state->resultRelInfo;
-
-	ItemPointer tid = &(heapTuple->t_self);
-	simple_heap_delete(state->rel, tid);
-
-	/* execute AFTER ROW DELETE Triggers to enforce constraints */
-	ExecARDeleteTriggers(estate, resultRelInfo, tid, NULL, NULL, true);
-
-}
-
-
-/*
- * FinishModifyRelation cleans up resources after modifications are done.
- */
-static void
-FinishModifyRelation(ModifyState *state)
-{
-	ExecCloseIndices(state->resultRelInfo);
-
-	AfterTriggerEndQuery(state->estate);
-
-	ExecCloseResultRelations(state->estate);
-	ExecCloseRangeTableRelations(state->estate);
-
-	ExecResetTupleTable(state->estate->es_tupleTable, false);
-	FreeExecutorState(state->estate);
-
-	CommandCounterIncrement();
-}
-
-
-/*
- * Based on a similar function from
- * postgres/src/backend/replication/logical/worker.c.
- *
- * Executor state preparation for evaluation of constraint expressions,
- * indexes and triggers.
- *
- * This is based on similar code in copy.c
- */
-EState *
-create_estate_for_relation(Relation rel)
-{
-	EState *estate = CreateExecutorState();
-
-	RangeTblEntry *rte = makeNode(RangeTblEntry);
-	rte->rtekind = RTE_RELATION;
-	rte->relid = RelationGetRelid(rel);
-	rte->relkind = rel->rd_rel->relkind;
-	rte->rellockmode = AccessShareLock;
-
-	List *perminfos = NIL;
-	addRTEPermissionInfo(&perminfos, rte);
-	ExecInitRangeTable_compat(estate, list_make1(rte), perminfos);
-
-
-
-	estate->es_output_cid = GetCurrentCommandId(true);
-
-	/* Prepare to catch AFTER triggers. */
-	AfterTriggerBeginQuery();
-
-	return estate;
-}
-
-
-/*
- * DatumToBytea serializes a datum into a bytea value.
- */
-static bytea *
-DatumToBytea(Datum value, Form_pg_attribute attrForm)
-{
-	int datumLength = att_addlength_datum(0, attrForm->attlen, value);
-	bytea *result = make1<bytea>(datumLength + VARHDRSZ);
-
-	SET_VARSIZE(result, datumLength + VARHDRSZ);
-
-	if (attrForm->attlen > 0)
-	{
-		if (attrForm->attbyval)
-		{
-			Datum tmp;
-			store_att_byval(&tmp, value, attrForm->attlen);
-			memcpy(VARDATA(result), &tmp, attrForm->attlen);
-		}
-		else
-		{
-			memcpy(VARDATA(result), DatumGetPointer(value), attrForm->attlen);
-		}
-	}
-	else
-	{
-		memcpy(VARDATA(result), DatumGetPointer(value), datumLength);
-	}
-
-	return result;
-}
-
-
-/*
- * ByteaToDatum deserializes a value which was previously serialized using
- * DatumToBytea.
- */
-static Datum
-ByteaToDatum(bytea *bytes, Form_pg_attribute attrForm)
-{
-	/*
-	 * We copy the data so the result of this function lives even
-	 * after the byteaDatum is freed.
-	 */
-	char *binaryDataCopy = make1<char>(VARSIZE_ANY_EXHDR(bytes));
-	memcpy(binaryDataCopy, /*VARSIZE_ANY_EXHDR(bytes),*/
-			 VARDATA_ANY(bytes), VARSIZE_ANY_EXHDR(bytes));
-
-	return fetch_att(binaryDataCopy, attrForm->attbyval, attrForm->attlen);
 }
 
 

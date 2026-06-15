@@ -33,7 +33,7 @@ long long row_count(const connection_test_context& ctx,
 TEST_CASE("bioseq.options carries default settings for a new columnar table",
           "[admin][options]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     const auto row = query_one(
         ctx,
@@ -51,7 +51,7 @@ TEST_CASE("bioseq.options carries default settings for a new columnar table",
 TEST_CASE("bioseq.storage exposes one row per columnar relation",
           "[admin][views]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     REQUIRE(row_count(ctx, "bioseq.storage",
                       fmt::format("relation = '{}'::regclass", kTable)) == 1);
@@ -60,7 +60,7 @@ TEST_CASE("bioseq.storage exposes one row per columnar relation",
 TEST_CASE("bioseq.stripe / chunk_group / chunk surface stripe metadata",
           "[admin][views]") {
     auto ctx = fresh_context({kTable});
-    seed_small_columnar(ctx, kTable);
+    seed_small_bioseq_column(ctx, kTable);
 
     REQUIRE(row_count(ctx, "bioseq.stripe",
                       fmt::format("relation = '{}'::regclass", kTable)) >= 1);

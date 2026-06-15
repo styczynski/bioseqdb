@@ -24,9 +24,6 @@ import config;           // DOC0322 §6.5 — Anum_bioseq_row_mask_* (was config
 import mlogging;
 import pg_utils;
 
-static RowMaskWriteStateEntry* InitRowMaskEntry(uint64_t storage_id, bytea* row_mask);
-static void RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list);
-
 /*
  * Per-subtransaction node. rowMaskWriteStateEntryList accumulates the
  * pending row-mask deltas; lastRowMaskWriteStateEntry is a one-slot cache
@@ -56,6 +53,42 @@ struct RowMaskWriteStateMapEntry
 };
 
 static TxnScopedHtab<RowMaskWriteStateMapEntry> RowMaskStateCache{"row mask cache map"};
+
+
+/*
+ * InitRowMaskEntry allocates a fresh RowMaskWriteStateEntry, copies the
+ * caller-supplied mask (so we own the storage) and zero-initialises the
+ * remaining fields. Caller is responsible for filling
+ * startRowNumber/endRowNumber/chunkId/stripeId/deletedRows.
+ */
+static RowMaskWriteStateEntry*
+InitRowMaskEntry(uint64_t storage_id, bytea* mask)
+{
+	RowMaskWriteStateEntry* row_mask = make0<RowMaskWriteStateEntry>();
+
+	row_mask->storageId = storage_id;
+	row_mask->mask = reinterpret_cast<bytea*>(palloc0(VARSIZE(mask) + VARHDRSZ));
+	memcpy(row_mask->mask, mask, VARSIZE(mask) + VARHDRSZ);
+
+	return row_mask;
+}
+
+/*
+ * RowMaskFlushPendingWriteState iterates a list of accumulated entries and
+ * flushes each one into bioseq.row_mask. Also updates chunk-group deleted
+ * counters so query planning stays in sync.
+ */
+static void
+RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list)
+{
+	for (auto* row_mask_cache : row_mask_write_state_list)
+	{
+		FlushRowMaskCache(row_mask_cache);
+		UpdateChunkGroupDeletedRows(row_mask_cache->storageId, row_mask_cache->stripeId,
+									row_mask_cache->chunkId, row_mask_cache->deletedRows);
+		pfree(row_mask_cache->mask);
+	}
+}
 
 
 /*
@@ -109,42 +142,6 @@ RowMaskInitWriteState(Oid relfilelocator,
 
 	return row_mask_write_state;
 }
-
-/*
- * InitRowMaskEntry allocates a fresh RowMaskWriteStateEntry, copies the
- * caller-supplied mask (so we own the storage) and zero-initialises the
- * remaining fields. Caller is responsible for filling
- * startRowNumber/endRowNumber/chunkId/stripeId/deletedRows.
- */
-static RowMaskWriteStateEntry*
-InitRowMaskEntry(uint64_t storage_id, bytea* mask)
-{
-	RowMaskWriteStateEntry* row_mask = make0<RowMaskWriteStateEntry>();
-
-	row_mask->storageId = storage_id;
-	row_mask->mask = reinterpret_cast<bytea*>(palloc0(VARSIZE(mask) + VARHDRSZ));
-	memcpy(row_mask->mask, mask, VARSIZE(mask) + VARHDRSZ);
-
-	return row_mask;
-}
-
-/*
- * RowMaskFlushPendingWriteState iterates a list of accumulated entries and
- * flushes each one into bioseq.row_mask. Also updates chunk-group deleted
- * counters so query planning stays in sync.
- */
-static void
-RowMaskFlushPendingWriteState(const PList<RowMaskWriteStateEntry>& row_mask_write_state_list)
-{
-	for (auto* row_mask_cache : row_mask_write_state_list)
-	{
-		FlushRowMaskCache(row_mask_cache);
-		UpdateChunkGroupDeletedRows(row_mask_cache->storageId, row_mask_cache->stripeId,
-									row_mask_cache->chunkId, row_mask_cache->deletedRows);
-		pfree(row_mask_cache->mask);
-	}
-}
-
 
 /*
  * RowMaskFlushWriteStateForRelfilenode flushes and clears the accumulated
@@ -341,9 +338,9 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 		HeapTuple rowMaskHeapTuple;
 		ScanKeyData scanKey[3];
 
-		Oid columnarRowMaskOid = BioseqColumnRowMaskRelationId();
-		Relation columnarRowMask = table_open(columnarRowMaskOid, AccessShareLock);
-		TupleDesc tupleDescriptor = RelationGetDescr(columnarRowMask);
+		Oid bioseqColumnRowMaskOid = BioseqColumnRowMaskRelationId();
+		Relation bioseqColumnRowMask = table_open(bioseqColumnRowMaskOid, AccessShareLock);
+		TupleDesc tupleDescriptor = RelationGetDescr(bioseqColumnRowMask);
 
 		Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
 
@@ -354,7 +351,7 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
 					BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(rowNumber));
 
-		SysScanDesc scanDescriptor = systable_beginscan_ordered(columnarRowMask,
+		SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
 																index,
 																NULL, 3, scanKey);
 
@@ -413,13 +410,13 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 			*/
 			systable_endscan_ordered(scanDescriptor);
 			index_close(index, AccessShareLock);
-			table_close(columnarRowMask, AccessShareLock);
+			table_close(bioseqColumnRowMask, AccessShareLock);
 			return false;
 		}
 
 		systable_endscan_ordered(scanDescriptor);
 		index_close(index, AccessShareLock);
-		table_close(columnarRowMask, AccessShareLock);
+		table_close(bioseqColumnRowMask, AccessShareLock);
 	}
 	else
 	{

@@ -23,9 +23,6 @@ import pg_utils;
 import config;                  // DOC0322 §9.3 — bioseq_enable_page_cache, bioseq_page_cache_size GUCs
 import storage_metadata;        // DOC0322 §9.2 — BioseqColumnReadState, BioseqColumnCacheStatistics (was types.h)
 
-void BioseqColumnEndRead(BioseqColumnReadState *readState);
-void BioseqColumnResetRead(BioseqColumnReadState *readState);
-
 
 /*
  * Main caching MemoryContext.
@@ -33,7 +30,7 @@ void BioseqColumnResetRead(BioseqColumnReadState *readState);
  * This MemoryContext is created at initialization, below 
  * TopMemoryContext, where all cache entries are stored.
  */
-static MemoryContext columnarCacheContext = NULL;
+static MemoryContext bioseqColumnCacheContext = NULL;
 
 /*
  * Cache entry. dlist_node must remain the first field because the
@@ -93,9 +90,9 @@ static List * ChunkGroupsInUse = NIL;
 export MemoryContext
 BioseqColumnCacheMemoryContext(void)
 {
-	if (columnarCacheContext == NULL)
+	if (bioseqColumnCacheContext == NULL)
 	{
-		columnarCacheContext =
+		bioseqColumnCacheContext =
 			AllocSetContextCreate(TopMemoryContext,
 								  "Bioseq Decompression Cache",
 								  0, static_cast<uint64_t>(bioseq_page_cache_size * 1024 * 1024 * .1),
@@ -104,7 +101,7 @@ BioseqColumnCacheMemoryContext(void)
 		head = NULL;
 	}
 
-	return columnarCacheContext;
+	return bioseqColumnCacheContext;
 }
 
 /*
@@ -116,10 +113,10 @@ BioseqColumnCacheMemoryContext(void)
 export void
 BioseqColumnResetCache(void)
 {
-	if (columnarCacheContext != NULL)
+	if (bioseqColumnCacheContext != NULL)
 	{
-		MemoryContextDelete(columnarCacheContext);
-		columnarCacheContext = NULL;
+		MemoryContextDelete(bioseqColumnCacheContext);
+		bioseqColumnCacheContext = NULL;
 		ChunkGroupsInUse = NIL;
 	}
 

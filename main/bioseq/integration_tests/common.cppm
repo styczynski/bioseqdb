@@ -781,7 +781,7 @@ export [[nodiscard]] inline std::string hoe_probe_literal() {
 // Seeds a small dna4/32 columnar table with three deterministic 16-bp rows.
 // Used by tests that need a `USING bioseq` table whose meta_sidecar is
 // guaranteed to be populated but whose mmsearch result set is unconstrained.
-export inline void seed_small_columnar(
+export inline void seed_small_bioseq_column(
     const connection_test_context& ctx, std::string_view name) {
     exec_sqlf(ctx, "SET bioseq.update_index_on_insert = on;");
     exec_sqlf(ctx, "SET bioseq.enable_vectorization = on;");

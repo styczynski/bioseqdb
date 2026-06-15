@@ -15,6 +15,11 @@
  */
 export module storage_metadata;
 
+export import :types;
+export import :options;
+export import :stripe;
+export import :row_mask;
+export import :seq_sub_table;
 export import :core;
 export import :write_state;
 export import :write_state_row_mask;

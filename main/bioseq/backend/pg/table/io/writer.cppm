@@ -23,9 +23,8 @@ import storage_physical;
 import storage_metadata;   // DOC0322 §9.2 — the column-store data-model structs (was types.h)
 import config;             // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
 import pg_utils;
+import :buffers;
 
-ChunkData *
-CreateEmptyChunkData(uint32_t columnCount, bool *columnMask, uint32_t chunkGroupRowCount);
 export BioseqColumnWriteState * BioseqColumnBeginWrite(RelFileLocator relfilelocator,
 											   BioseqColumnOptions options,
 											   TupleDesc tupleDescriptor);

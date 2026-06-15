@@ -608,7 +608,7 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     return false;
 }
 
-extern "C++" void bioseq_persist_xact_callback(XactEvent event, void*) {
+void bioseq_persist_xact_callback(XactEvent event, void*) {
     std::vector<PendingPersistJob>& jobs = pending_persist_jobs();
     const bool commit =
         event == XACT_EVENT_COMMIT

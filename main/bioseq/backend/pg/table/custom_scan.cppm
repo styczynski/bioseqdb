@@ -38,7 +38,8 @@ extern "C" {
 export module bioseq_table:custom_scan;
 
 import bioseq_table_io;
-import :access_method;             // DOC0322 §7.5 — GetBioseqColumnTableAmRoutine, BioseqColumnScanChunkGroupsFiltered, bioseq_index_fetch_begin_extended, bioseq_beginscan_*_c, bioseq_hydrate_scan_slot
+import :access_method;             // DOC0322 §7.5 — GetBioseqColumnTableAmRoutine, BioseqColumnScanChunkGroupsFiltered, bioseq_index_fetch_begin_extended, bioseq_beginscan_*_c
+import :access_common;             // DOC0324 — bioseq_hydrate_scan_slot
 import :utils;                     // DOC0322 §7.5 — BioseqColumnAttrNeeded
 import bioseq_column_tam;          // DOC0322 §7.4 — tid_to_row_number, row_number_to_tid, IsBioseqColumnTableAmTable
 import config;                     // DOC0322 §9.3 — bioseq_aligner_*, bioseq_index_scan, bioseq_enable_vectorization, bioseq_read_sequence_index, bioseq_enable_parallel_execution, bioseq_min_parallel_processes, bioseq_enable_page_cache GUCs
@@ -73,8 +74,9 @@ import sequan_compat;                     // seq:: alphabet alias used by sequen
  * DOC0322 §7.5 — the former `extern "C++"` cross-partition reaches are replaced
  * by real module imports:
  *   - GetBioseqColumnTableAmRoutine, BioseqColumnScanChunkGroupsFiltered,
- *     bioseq_index_fetch_begin_extended, the two extern "C" bioseq_beginscan_*_c
- *     and bioseq_hydrate_scan_slot now come from `import :access_method`.
+ *     bioseq_index_fetch_begin_extended, and the two extern "C" bioseq_beginscan_*_c
+ *     now come from `import :access_method`; bioseq_hydrate_scan_slot comes
+ *     from the narrower `import :access_common`.
  *     :custom_scan -> :access_method is one-directional (the former reverse edge,
  *     :access_method calling bioseq_customscan_init, was inverted: the call now
  *     runs from bioseq_init).
@@ -1133,7 +1135,7 @@ static List * set_deparse_context_planstate(List *dpcontext, Node *node,
 											List *ancestors);
 
 /* other helpers */
-static List * BioseqColumnVarNeeded(BioseqScanState *columnarScanState);
+static List * BioseqColumnVarNeeded(BioseqScanState *bioseqScanState);
 
 /* saved hook value in case of unload */
 static set_rel_pathlist_hook_type PreviousSetRelPathlistHook = NULL;
@@ -1533,9 +1535,9 @@ CostBioseqColumnIndexPath(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	if (!bioseq_index_scan)
 	{
 		bioseq_log<DBG>("[bioseq] pg: CostBioseqColumnIndexPath() bioseq_index_scan disabled, adding columnar cost");
-		Cost columnarIndexScanCost = BioseqColumnIndexScanAdditionalCost(root, rel, relationId,
+		Cost bioseqColumnIndexScanCost = BioseqColumnIndexScanAdditionalCost(root, rel, relationId,
 																	indexPath);
-		indexPath->path.total_cost += columnarIndexScanCost;
+		indexPath->path.total_cost += bioseqColumnIndexScanCost;
 	}
 
 	bioseq_log<DBG>("[bioseq] pg: CostBioseqColumnIndexPath() cost computation complete");
@@ -2392,10 +2394,10 @@ AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 
 	Assert(!bms_overlap(paramRelids, candidateRelids));
 
-	Path *columnarScanPath = AddBioseqColumnScanPath(root, rel, rte, paramRelids);
-	add_path(rel, columnarScanPath);
+	Path *bioseqColumnScanPath = AddBioseqColumnScanPath(root, rel, rte, paramRelids);
+	add_path(rel, bioseqColumnScanPath);
 	if (bioseq_enable_parallel_execution)
-		columnarScanPath->total_cost += columnarScanPath->rows * 0.1;
+		bioseqColumnScanPath->total_cost += bioseqColumnScanPath->rows * 0.1;
 
 	/* For columnar custom scan we should also do planning for parallel exeuction
 	 * if it is enabled with GUC.
@@ -3282,7 +3284,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 {
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() entered");
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(cscanstate->ss.ps.plan);
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(cscanstate);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(cscanstate);
 	ExprContext *stdecontext = cscanstate->ss.ps.ps_ExprContext;
 	cscanstate->ss.ss_currentScanDesc = NULL;
 
@@ -3291,16 +3293,16 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * reset it every tuple.
 	 */
 	ExecAssignExprContext(estate, &cscanstate->ss.ps);
-	columnarScanState->css_RuntimeContext = cscanstate->ss.ps.ps_ExprContext;
+	bioseqScanState->css_RuntimeContext = cscanstate->ss.ps.ps_ExprContext;
 	cscanstate->ss.ps.ps_ExprContext = stdecontext;
 
-	ResetExprContext(columnarScanState->css_RuntimeContext);
+	ResetExprContext(bioseqScanState->css_RuntimeContext);
 	PList<List> custom_exprs(cscan->custom_exprs);
 	List *plainClauses = custom_exprs.first();
 	List *storagePlainClauses = storage_prunable_quals_without_mmsearch(
 		plainClauses, get_cached_stub_oids());
-	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
-		reinterpret_cast<Node *>(storagePlainClauses), columnarScanState->css_RuntimeContext));
+	bioseqScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
+		reinterpret_cast<Node *>(storagePlainClauses), bioseqScanState->css_RuntimeContext));
 
 	/*
 	 * Third list in custom_exprs should contain vectorized qual list if not 
@@ -3310,7 +3312,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	List* vectorized_qual_list = custom_exprs.third();
 	if (vectorized_qual_list != NIL) {
 		bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() vectorized qual list present");
-		columnarScanState->vectorization.vectorizedQualList = vectorized_qual_list;
+		bioseqScanState->vectorization.vectorizedQualList = vectorized_qual_list;
 	}
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() iterating custom_private");
@@ -3319,7 +3321,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 		if (private_const_node->consttype == CUSTOM_SCAN_VECTORIZED_AGGREGATE)
 		{
 			bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() setting vectorizationAggregate");
-			columnarScanState->vectorization.vectorizationAggregate = private_const_node->constvalue;
+			bioseqScanState->vectorization.vectorizationAggregate = private_const_node->constvalue;
 		}
 	}
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() custom_private iteration complete");
@@ -3328,44 +3330,44 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * Vectorization is enabled if global variable is set and there is at least one
 	 * filter which can be vectorized.
 	 */
-	columnarScanState->vectorization.vectorizationEnabled =
+	bioseqScanState->vectorization.vectorizationEnabled =
 		bioseq_enable_vectorization &&
-		(columnarScanState->vectorization.vectorizedQualList != NULL ||
-		 columnarScanState->vectorization.vectorizationAggregate);
+		(bioseqScanState->vectorization.vectorizedQualList != NULL ||
+		 bioseqScanState->vectorization.vectorizationAggregate);
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() guc_vec={} has_vec_qual={} vec_aggregate={}",
 		bioseq_enable_vectorization,
-		columnarScanState->vectorization.vectorizedQualList != NULL,
-		columnarScanState->vectorization.vectorizationAggregate);
-	if (columnarScanState->vectorization.vectorizationAggregate)
+		bioseqScanState->vectorization.vectorizedQualList != NULL,
+		bioseqScanState->vectorization.vectorizationAggregate);
+	if (bioseqScanState->vectorization.vectorizationAggregate)
 	{
-		ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
+		ScanState *node = reinterpret_cast<ScanState *>(&bioseqScanState->custom_scanstate.ss);
 
 		if (node->ps.ps_ProjInfo)
 		{
-			columnarScanState->vectorization.resultVectorSlot =
+			bioseqScanState->vectorization.resultVectorSlot =
 				CreateVectorTupleTableSlot(node->ps.ps_ProjInfo->pi_state.resultslot->tts_tupleDescriptor);
 		}
 		else
 		{
-			columnarScanState->vectorization.resultVectorSlot =
+			bioseqScanState->vectorization.resultVectorSlot =
 				CreateVectorTupleTableSlot(node->ps.ps_ResultTupleDesc);
 		}
 	}
 
-	if (columnarScanState->vectorization.vectorizationEnabled)
+	if (bioseqScanState->vectorization.vectorizationEnabled)
 	{
-		columnarScanState->vectorization.scanVectorSlot =
+		bioseqScanState->vectorization.scanVectorSlot =
 			CreateVectorTupleTableSlot(cscanstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor);
 	}
 
-	columnarScanState->attrNeeded = 
-		BioseqColumnAttrNeeded(&cscanstate->ss, columnarScanState->vectorization.vectorizedQualList);
+	bioseqScanState->attrNeeded =
+		BioseqColumnAttrNeeded(&cscanstate->ss, bioseqScanState->vectorization.vectorizedQualList);
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() iterating attrNeeded bitmap members");
-	for (int attrIndex : columnarScanState->attrNeeded)
+	for (int attrIndex : bioseqScanState->attrNeeded)
 	{
-		columnarScanState->vectorization.attrNeededList.append(attrIndex);
+		bioseqScanState->vectorization.attrNeededList.append(attrIndex);
 	}
 
 	/*
@@ -3373,8 +3375,8 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * or new stripe we need to to them here because sequential columnar scan 
 	 * can have parallel execution and updated are not allowed in parallel mode.
 	 */
-	columnarScanState->snapshot = estate->es_snapshot;
-	columnarScanState->snapshotRegisteredByUs = false;
+	bioseqScanState->snapshot = estate->es_snapshot;
+	bioseqScanState->snapshotRegisteredByUs = false;
 	Oid relationOid = cscanstate->ss.ss_currentRelation->rd_locator.relNumber;
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() checking parallel mode");
@@ -3382,8 +3384,8 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	{
 		RowMaskFlushWriteStateForRelfilenode(relationOid, GetCurrentSubTransactionId());
 
-		FlushWriteStateWithNewSnapshot(relationOid, &columnarScanState->snapshot,
-									   &columnarScanState->snapshotRegisteredByUs);
+		FlushWriteStateWithNewSnapshot(relationOid, &bioseqScanState->snapshot,
+									   &bioseqScanState->snapshotRegisteredByUs);
 	}
 
 	/*
@@ -3419,7 +3421,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * the runtime so an ereport(ERROR) further down still triggers
 	 * cleanup on transaction abort. Idempotent across rescans.
 	 */
-	register_runtime_cleanup_callback(columnarScanState, estate);
+	register_runtime_cleanup_callback(bioseqScanState, estate);
 
 	/*
 	 * Walk cscan->scan.plan.qual to discover the WHERE mmsearch(...) call,
@@ -3427,7 +3429,7 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	 * the dispatch buffer so submit_scan has enough context to emit the
 	 * per-tuple log line and buffer the right column values.
 	 */
-	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 	/* Begin is the only place that should drop extras as part of the
 	 * primary reset — every Begin call repopulates them from scratch
 	 * via the qual loop. ReScan / failure paths must NOT drop extras
@@ -4526,7 +4528,7 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 
 
 static TupleTableSlot *
-Inner_CustomExecScan(BioseqScanState *columnarScanState,
+Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
@@ -4534,17 +4536,17 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 	ExprContext *econtext;
 	ExprState  *qual;
 
-	ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
-	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+	ScanState *node = reinterpret_cast<ScanState *>(&bioseqScanState->custom_scanstate.ss);
+	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 
 	qual     = node->ps.qual;
 	econtext = node->ps.ps_ExprContext;
 
-	if (columnarScanState->vectorization.vectorizationAggregate)
+	if (bioseqScanState->vectorization.vectorizationAggregate)
 	{
-		ExecClearTuple(columnarScanState->vectorization.resultVectorSlot);
+		ExecClearTuple(bioseqScanState->vectorization.resultVectorSlot);
 		CleanupVectorSlot(reinterpret_cast<VectorTupleTableSlot *>(
-							columnarScanState->vectorization.resultVectorSlot));
+							bioseqScanState->vectorization.resultVectorSlot));
 	}
 
 	/*
@@ -4613,7 +4615,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 		/*
 		 * Scalar fetch path: pull one scan tuple and run qual on it.
 		 */
-		if (!columnarScanState->vectorization.vectorizationEnabled)
+		if (!bioseqScanState->vectorization.vectorizationEnabled)
 		{
 			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() scalar fetch via ExecScanFetch");
 			slot = ExecScanFetch(node, accessMtd, recheckMtd);
@@ -4635,7 +4637,7 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			/*
 			 * First vector pull or after previous vector drained.
 			 */
-			if (columnarScanState->vectorization.vectorPendingRowNumber == 0)
+			if (bioseqScanState->vectorization.vectorPendingRowNumber == 0)
 			{
 				bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized fetch (initial vector pull)");
 				slot = ExecScanFetch(node, accessMtd, recheckMtd);
@@ -4647,18 +4649,18 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 					continue;
 				}
 
-				if (columnarScanState->vectorization.vectorizedQualList != NULL)
+				if (bioseqScanState->vectorization.vectorizedQualList != NULL)
 				{
-					if (columnarScanState->vectorization.constructedVectorizedQualList == NULL)
+					if (bioseqScanState->vectorization.constructedVectorizedQualList == NULL)
 					{
-						columnarScanState->vectorization.constructedVectorizedQualList =
-							ConstructVectorizedQualList(slot, columnarScanState->vectorization.vectorizedQualList);
+						bioseqScanState->vectorization.constructedVectorizedQualList =
+							ConstructVectorizedQualList(slot, bioseqScanState->vectorization.vectorizedQualList);
 					}
 
 					VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(slot);
 					bool *resultQual = ExecuteVectorizedQual(
 						slot,
-						columnarScanState->vectorization.constructedVectorizedQualList,
+						bioseqScanState->vectorization.constructedVectorizedQualList,
 						AND_EXPR, econtext);
 					memcpy(vectorSlot->keep, resultQual, BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE);
 				}
@@ -4670,26 +4672,26 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 			 */
 			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() vectorized extraction");
 			VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(
-				columnarScanState->vectorization.scanVectorSlot);
+				bioseqScanState->vectorization.scanVectorSlot);
 
 			bool rowFound = false;
-			while (columnarScanState->vectorization.vectorPendingRowNumber != 0 && !rowFound)
+			while (bioseqScanState->vectorization.vectorPendingRowNumber != 0 && !rowFound)
 			{
-				if (vectorSlot->keep[columnarScanState->vectorization.vectorRowIndex])
+				if (vectorSlot->keep[bioseqScanState->vectorization.vectorRowIndex])
 				{
-					slot = columnarScanState->custom_scanstate.ss.ss_ScanTupleSlot;
+					slot = bioseqScanState->custom_scanstate.ss.ss_ScanTupleSlot;
 					ExecClearTuple(slot);
 					ExtractTupleFromVectorSlot(slot,
 											   vectorSlot,
-											   columnarScanState->vectorization.vectorRowIndex,
-											   columnarScanState->vectorization.attrNeededList);
+											   bioseqScanState->vectorization.vectorRowIndex,
+											   bioseqScanState->vectorization.attrNeededList);
 
-					uint64_t rowNumber = vectorSlot->rowNumber[columnarScanState->vectorization.vectorRowIndex];
+					uint64_t rowNumber = vectorSlot->rowNumber[bioseqScanState->vectorization.vectorRowIndex];
 					slot->tts_tid = row_number_to_tid(rowNumber);
 					rowFound = true;
 				}
-				columnarScanState->vectorization.vectorPendingRowNumber--;
-				columnarScanState->vectorization.vectorRowIndex++;
+				bioseqScanState->vectorization.vectorPendingRowNumber--;
+				bioseqScanState->vectorization.vectorRowIndex++;
 			}
 
 			/*
@@ -4775,17 +4777,17 @@ Inner_CustomExecScan(BioseqScanState *columnarScanState,
 
 
 static TupleTableSlot *
-CustomExecScan(BioseqScanState *columnarScanState,
+CustomExecScan(BioseqScanState *bioseqScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd) {
 
 	// Testing custom exec scan
 	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() entered");
 
-	ScanState *node = reinterpret_cast<ScanState *>(&columnarScanState->custom_scanstate.ss);
+	ScanState *node = reinterpret_cast<ScanState *>(&bioseqScanState->custom_scanstate.ss);
 	PlanState ps = node->ps;
 	auto context = ps.ps_ExprContext;
-	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 
 	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() reading plan targetlist");
 	auto targetlist = ps.plan->targetlist;
@@ -4893,7 +4895,7 @@ CustomExecScan(BioseqScanState *columnarScanState,
 		VarInjectorCtx injector_ctx;
 		injector_ctx.consts           = &runtime.placeholder_consts;
 		injector_ctx.oids             = &oids_snapshot;
-		injector_ctx.current_relation = columnarScanState->custom_scanstate.ss.ss_currentRelation;
+		injector_ctx.current_relation = bioseqScanState->custom_scanstate.ss.ss_currentRelation;
 
 		runtime.newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
 			reinterpret_cast<Node *>(targetlist),
@@ -4903,7 +4905,7 @@ CustomExecScan(BioseqScanState *columnarScanState,
 
 	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() dispatching to Inner_CustomExecScan");
 
-	auto tupleSlot = Inner_CustomExecScan(columnarScanState, accessMtd, recheckMtd);
+	auto tupleSlot = Inner_CustomExecScan(bioseqScanState, accessMtd, recheckMtd);
 
 
 
@@ -4918,10 +4920,10 @@ CustomExecScan(BioseqScanState *columnarScanState,
 
 
 static TupleTableSlot *
-BioseqColumnScanNext(BioseqScanState *columnarScanState)
+BioseqColumnScanNext(BioseqScanState *bioseqScanState)
 {
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScanNext() entered");
-	CustomScanState *node = columnarScanState->as_custom_scan_state();
+	CustomScanState *node = bioseqScanState->as_custom_scan_state();
 
 	/*
 	 * get information from the estate and scan state
@@ -4929,12 +4931,12 @@ BioseqColumnScanNext(BioseqScanState *columnarScanState)
 	TableScanDesc scandesc = node->ss.ss_currentScanDesc;
 	EState *estate = node->ss.ps.state;
 	ScanDirection direction = estate->es_direction;
-	bool vectorizationEnabled = columnarScanState->vectorization.vectorizationEnabled;
+	bool vectorizationEnabled = bioseqScanState->vectorization.vectorizationEnabled;
 
 	TupleTableSlot *slot = nullptr;
 
 	if (vectorizationEnabled)
-		slot = columnarScanState->vectorization.scanVectorSlot;
+		slot = bioseqScanState->vectorization.scanVectorSlot;
 	else
 		slot = node->ss.ss_ScanTupleSlot;
 
@@ -4954,7 +4956,7 @@ BioseqColumnScanNext(BioseqScanState *columnarScanState)
 		 * We reach here if the scan is not parallel, or if we're serially
 		 * executing a scan that was planned to be parallel.
 		 */
-		BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+		BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 		const bool needs_deferred_hydration =
 			(runtime.buffer.mmsearch_active() || runtime.param_rebind.active)
 			&& !runtime.buffer.per_row_self_alignment();
@@ -4972,19 +4974,19 @@ BioseqColumnScanNext(BioseqScanState *columnarScanState)
 		 */
 		if (needs_deferred_hydration) {
 			scandesc = bioseq_beginscan_deferred_c(node->ss.ss_currentRelation,
-											 columnarScanState->snapshot,
+											 bioseqScanState->snapshot,
 											 0, NULL, NULL, flags,
-											 columnarScanState->attrNeeded,
-											 columnarScanState->qual,
-											 columnarScanState->parallelBioseqColumnScan,
+											 bioseqScanState->attrNeeded,
+											 bioseqScanState->qual,
+											 bioseqScanState->parallelBioseqColumnScan,
 												 vectorizationEnabled);
 		} else {
 			scandesc = bioseq_beginscan_extended_c(node->ss.ss_currentRelation,
-											 columnarScanState->snapshot,
+											 bioseqScanState->snapshot,
 											 0, NULL, NULL, flags,
-											 columnarScanState->attrNeeded,
-											 columnarScanState->qual,
-											 columnarScanState->parallelBioseqColumnScan,
+											 bioseqScanState->attrNeeded,
+											 bioseqScanState->qual,
+											 bioseqScanState->parallelBioseqColumnScan,
 												 vectorizationEnabled);
 		}
 
@@ -5007,7 +5009,7 @@ BioseqColumnScanNext(BioseqScanState *columnarScanState)
 	if (vectorizationEnabled)
 	{
 		VectorTupleTableSlot *vectorSlot = reinterpret_cast<VectorTupleTableSlot *>(slot);
-		for (int attrIndex : PIntList(columnarScanState->vectorization.attrNeededList))
+		for (int attrIndex : PIntList(bioseqScanState->vectorization.attrNeededList))
 		{
 			VectorColumn *column = reinterpret_cast<VectorColumn *>(vectorSlot->tts.tts_values[attrIndex]);
 			memset(column->isnull, true, BIOSEQ_COLUMN_VECTOR_COLUMN_SIZE);
@@ -5024,9 +5026,9 @@ BioseqColumnScanNext(BioseqScanState *columnarScanState)
 		*/
 		if (vectorizationEnabled)
 		{
-			columnarScanState->vectorization.vectorPendingRowNumber =
+			bioseqScanState->vectorization.vectorPendingRowNumber =
 				reinterpret_cast<VectorTupleTableSlot *>(slot)->dimension;
-			columnarScanState->vectorization.vectorRowIndex = 0;
+			bioseqScanState->vectorization.vectorRowIndex = 0;
 		}
 		return slot;
 	}
@@ -5058,7 +5060,7 @@ static void
 BioseqColumnScan_EndCustomScan(CustomScanState *node)
 {
 	TableScanDesc scanDesc = node->ss.ss_currentScanDesc;
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 
 	/*
 	 * Profiler summary lives here (not inside the per-batch dispatch
@@ -5087,9 +5089,9 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 	 * Postgres MemoryContext) means we have to reach the destructor
 	 * here — Postgres' MemoryContext teardown wouldn't run them.
 	 */
-	if (columnarScanState->runtime != nullptr) {
+	if (bioseqScanState->runtime != nullptr) {
 		BioseqScanRuntime* runtime_ptr =
-			static_cast<BioseqScanRuntime*>(columnarScanState->runtime);
+			static_cast<BioseqScanRuntime*>(bioseqScanState->runtime);
 		/*
 		 * Clear MinimalTuple slots while the per-query ResourceOwner
 		 * is still alive — Postgres tuple-desc refcounts are tracked
@@ -5111,7 +5113,7 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 	/*
 	 * Cleanup BMS of selected scan attributes
 	 */
-	columnarScanState->attrNeeded.free();
+	bioseqScanState->attrNeeded.free();
 
 	/*
 	 * clean out the tuple table
@@ -5132,9 +5134,9 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 	}
 
 	/* Unregister snapshot */
-	if (columnarScanState->snapshotRegisteredByUs)
+	if (bioseqScanState->snapshotRegisteredByUs)
 	{
-		UnregisterSnapshot(columnarScanState->snapshot);
+		UnregisterSnapshot(bioseqScanState->snapshot);
 	}
 }
 
@@ -5143,15 +5145,15 @@ static void
 BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 {
 	CustomScan *cscan = reinterpret_cast<CustomScan *>(node->ss.ps.plan);
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
-	BioseqScanRuntime& runtime = bioseq_runtime(columnarScanState);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 
-	ResetExprContext(columnarScanState->css_RuntimeContext);
+	ResetExprContext(bioseqScanState->css_RuntimeContext);
 	List *allClauses = PList<List>(cscan->custom_exprs).second();
 	List *storageClauses = storage_prunable_quals_without_mmsearch(
 		allClauses, get_cached_stub_oids());
-	columnarScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
-		reinterpret_cast<Node *>(storageClauses), columnarScanState->css_RuntimeContext));
+	bioseqScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
+		reinterpret_cast<Node *>(storageClauses), bioseqScanState->css_RuntimeContext));
 
 	/*
 	 * Drop every buffered tuple, output cursor and match map left over
@@ -5176,7 +5178,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	 *
 	 * We re-walk plan.qual rather than caching the original Param
 	 * pointer because EvalParamsMutator (above) already replaced
-	 * Params in `columnarScanState->qual` with Consts; the originals
+	 * Params in `bioseqScanState->qual` with Consts; the originals
 	 * still live in cscan->scan.plan.qual and are stable across
 	 * rescans.
 	 */
@@ -5279,7 +5281,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	if (scanDesc != NULL)
 	{
 		/* XXX: hack to pass quals as scan keys */
-		ScanKey scanKeys = reinterpret_cast<ScanKey>(columnarScanState->qual.ptr());
+		ScanKey scanKeys = reinterpret_cast<ScanKey>(bioseqScanState->qual.ptr());
 		table_rescan(node->ss.ss_currentScanDesc,
 					 scanKeys);
 	}
@@ -5291,12 +5293,12 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							   ExplainState *es)
 {
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_ExplainCustomScan() entered");
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 
 	List *context = set_deparse_context_planstate(
 		es->deparse_cxt, reinterpret_cast<Node *>(&node->ss.ps), ancestors);
 
-	List *projectedColumns = BioseqColumnVarNeeded(columnarScanState);
+	List *projectedColumns = BioseqColumnVarNeeded(bioseqScanState);
 	const char *projectedColumnsStr = BioseqColumnProjectedColumnsStr(
 		context, projectedColumns);
 	ExplainPropertyText("Bioseq Projected Columns",
@@ -5312,21 +5314,21 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		ExplainPropertyText("Bioseq Chunk Group Filters",
 							pushdownClausesStr, es);
 
-		BioseqColumnScanDesc columnarScanDesc =
+		BioseqColumnScanDesc bioseqColumnScanDesc =
 			reinterpret_cast<BioseqColumnScanDesc>(node->ss.ss_currentScanDesc);
-		if (columnarScanDesc != NULL)
+		if (bioseqColumnScanDesc != NULL)
 		{
 			ExplainPropertyInteger(
 				"Bioseq Chunk Groups Removed by Filter",
-				NULL, BioseqColumnScanChunkGroupsFiltered(columnarScanDesc), es);
+				NULL, BioseqColumnScanChunkGroupsFiltered(bioseqColumnScanDesc), es);
 		}
 	}
 
-	if (columnarScanState->vectorization.vectorizationEnabled &&
-		columnarScanState->vectorization.vectorizedQualList != NULL)
+	if (bioseqScanState->vectorization.vectorizationEnabled &&
+		bioseqScanState->vectorization.vectorizedQualList != NULL)
 	{
 		const char *vectorizedWhereClauses = BioseqColumnPushdownClausesStr(
-					context, columnarScanState->vectorization.vectorizedQualList);
+					context, bioseqScanState->vectorization.vectorizedQualList);
 		ExplainPropertyText("Bioseq Vectorized Filter",
 							vectorizedWhereClauses, es);
 	}
@@ -5988,10 +5990,10 @@ BioseqColumn_EstimateDSMCustomScan(CustomScanState *node,
 {
 	Size nbytes;
 
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 
 	nbytes = offsetof(ParallelBioseqColumnScanData, snapshotData);
-	nbytes = add_size(nbytes, EstimateSnapshotSpace(columnarScanState->snapshot));
+	nbytes = add_size(nbytes, EstimateSnapshotSpace(bioseqScanState->snapshot));
 	nbytes = MAXALIGN(nbytes);
 
 	return nbytes;
@@ -6004,13 +6006,13 @@ BioseqColumn_InitializeDSMCustomScan(CustomScanState *node,
 								 void *coordinate)
 {
 	ParallelBioseqColumnScan pscan = reinterpret_cast<ParallelBioseqColumnScan>(coordinate);
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 	
 	/* 
 	 * Serialize scan snapshot for workers so they see changes
 	 * if we have flushed stripe / row_mask during this scan.
 	 */
-	SerializeSnapshot(columnarScanState->snapshot, pscan->snapshotData);
+	SerializeSnapshot(bioseqScanState->snapshot, pscan->snapshotData);
 
 	/* Initialize parallel scan mutex */
 	SpinLockInit(&pscan->mutex);
@@ -6019,9 +6021,9 @@ BioseqColumn_InitializeDSMCustomScan(CustomScanState *node,
 	pg_atomic_init_u64(&pscan->nextStripeId, 1);
 
 	if(parallel_leader_participation)
-		columnarScanState->parallelBioseqColumnScan = pscan;
+		bioseqScanState->parallelBioseqColumnScan = pscan;
 	else
-		columnarScanState->parallelBioseqColumnScan = NULL;
+		bioseqScanState->parallelBioseqColumnScan = NULL;
 }
 
 
@@ -6031,15 +6033,15 @@ BioseqColumn_ReinitializeDSMCustomScan(CustomScanState *node,
 								   void *coordinate)
 {
 	ParallelBioseqColumnScan pscan = reinterpret_cast<ParallelBioseqColumnScan>(coordinate);
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 
 	/* Reset atomic nextStripeId to initial value */
 	pg_atomic_init_u64(&pscan->nextStripeId, 1);
 
 	if(parallel_leader_participation)
-		columnarScanState->parallelBioseqColumnScan = pscan;
+		bioseqScanState->parallelBioseqColumnScan = pscan;
 	else
-		columnarScanState->parallelBioseqColumnScan = NULL;
+		bioseqScanState->parallelBioseqColumnScan = NULL;
 }
 
 
@@ -6048,10 +6050,10 @@ BioseqColumn_InitializeWorkerCustomScan(CustomScanState *node,
 									shm_toc *toc,
 									void *coordinate)
 {
-	BioseqScanState* columnarScanState = BioseqScanState::from_custom_scan_state(node);
+	BioseqScanState* bioseqScanState = BioseqScanState::from_custom_scan_state(node);
 	ParallelBioseqColumnScan pscan = reinterpret_cast<ParallelBioseqColumnScan>(coordinate);
-	columnarScanState->parallelBioseqColumnScan = pscan;
-	columnarScanState->snapshot = RestoreSnapshot(pscan->snapshotData);
+	bioseqScanState->parallelBioseqColumnScan = pscan;
+	bioseqScanState->snapshot = RestoreSnapshot(pscan->snapshotData);
 }
 
 
@@ -6108,29 +6110,29 @@ BioseqColumnProjectedColumnsStr(List *context, List *projectedColumns)
  * by BioseqColumnScan.
  */
 static List *
-BioseqColumnVarNeeded(BioseqScanState *columnarScanState)
+BioseqColumnVarNeeded(BioseqScanState *bioseqScanState)
 {
-	ScanState *scanState = &columnarScanState->custom_scanstate.ss;
+	ScanState *scanState = &bioseqScanState->custom_scanstate.ss;
 
 	PList<Var> varList;
 
 	PBitmapset neededAttrSet =
-		BioseqColumnAttrNeeded(scanState, columnarScanState->vectorization.vectorizedQualList);
+		BioseqColumnAttrNeeded(scanState, bioseqScanState->vectorization.vectorizedQualList);
 
 	for (int bmsMember : neededAttrSet)
 	{
-		Relation columnarRelation = scanState->ss_currentRelation;
+		Relation bioseqColumnRelation = scanState->ss_currentRelation;
 
 		/* neededAttrSet already represents 0-indexed attribute numbers */
 		Form_pg_attribute columnForm =
-			TupleDescAttr(RelationGetDescr(columnarRelation), bmsMember);
+			TupleDescAttr(RelationGetDescr(bioseqColumnRelation), bmsMember);
 		if (columnForm->attisdropped)
 		{
 			bioseq_report<ERR, PG>().code(ERRCODE_UNDEFINED_COLUMN)
 							.msg("cannot explain column with attrNum={} "
 								 "of columnar table {} since it is dropped",
 								 bmsMember + 1,
-								 RelationGetRelationName(columnarRelation));
+								 RelationGetRelationName(bioseqColumnRelation));
 		}
 		else if (columnForm->attnum <= 0)
 		{
@@ -6144,7 +6146,7 @@ BioseqColumnVarNeeded(BioseqScanState *columnarScanState)
 								 "of columnar table {} since it is either "
 								 "a system column or a whole-row "
 								 "reference", columnForm->attnum,
-								 RelationGetRelationName(columnarRelation));
+								 RelationGetRelationName(bioseqColumnRelation));
 		}
 
 
@@ -6155,7 +6157,7 @@ BioseqColumnVarNeeded(BioseqScanState *columnarScanState)
 		 */
 		Index varlevelsup = 0;
 
-		CustomScan *customScan = reinterpret_cast<CustomScan *>(columnarScanState->plan_state()->plan);
+		CustomScan *customScan = reinterpret_cast<CustomScan *>(bioseqScanState->plan_state()->plan);
 		Index scanrelid = customScan->scan.scanrelid;
 		Var *var = makeVar(scanrelid, columnForm->attnum, columnForm->atttypid,
 						   columnForm->atttypmod, columnForm->attcollation,

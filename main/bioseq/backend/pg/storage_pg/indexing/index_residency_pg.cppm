@@ -285,7 +285,7 @@ void finish_top_xact(bool committed) noexcept {
     }
 }
 
-extern "C++" void bioseq_index_residency_xact_callback(XactEvent event, void*) {
+void bioseq_index_residency_xact_callback(XactEvent event, void*) {
     switch (event) {
         case XACT_EVENT_COMMIT:
         case XACT_EVENT_PARALLEL_COMMIT:
@@ -303,7 +303,7 @@ extern "C++" void bioseq_index_residency_xact_callback(XactEvent event, void*) {
     }
 }
 
-extern "C++" void bioseq_index_residency_subxact_callback(
+void bioseq_index_residency_subxact_callback(
         SubXactEvent event,
         SubTransactionId my_subid,
         SubTransactionId,
@@ -313,7 +313,7 @@ extern "C++" void bioseq_index_residency_subxact_callback(
     }
 }
 
-extern "C++" void bioseq_index_residency_relcache_callback(Datum, Oid relid) {
+void bioseq_index_residency_relcache_callback(Datum, Oid relid) {
     evict_relation_residency(relid);
 }
 

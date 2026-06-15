@@ -248,6 +248,13 @@ struct seq_caches {
 
 void destroy_seq_caches(seq_caches* caches) noexcept;
 
+[[gnu::always_inline]] inline void close_seq_caches(seq_caches& caches,
+                                                    bool commit) noexcept {
+    caches.close_all(commit);
+}
+
+void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept;
+
 // DOC0286 §4.3 — public alias for the per-fragment storage-unit count
 // (detail::kFragmentStorageUnits below aliases this so the two never drift).
 // `bioseq.load`'s streaming sink uses it to size fragment payloads.
@@ -313,15 +320,6 @@ private:
 };
 
 }  // namespace bioseq::storage
-
-// DOC0260 Phase A — `extern "C++"` shim called from write_state_management
-// at write-state teardown. Lives at file scope and is `export`-ed so
-// importers (write_state_management.cppm) can name it directly without
-// forcing a forward declaration that would otherwise be module-attached
-// to the importer (and so wouldn't link against this definition).
-export extern "C++" void
-bioseq_storage_seq_caches_close_all(bioseq::storage::seq_caches* caches,
-                                    bool commit) noexcept;
 
 // DOC0269 — Phase A required exporting this block so importers (notably
 // access_method.cppm) can name `sequence_storage_manager`,
@@ -607,14 +605,6 @@ sequence_size_t read_max_sub_table_cap_bytes() {
 
 }  // namespace bioseq::storage
 
-extern "C++" void
-bioseq_storage_seq_caches_close_all(bioseq::storage::seq_caches* caches,
-                                    bool commit) noexcept {
-    if (caches != nullptr) {
-        caches->close_all(commit);
-    }
-}
-
 namespace bioseq::storage {
 
 void destroy_seq_caches(seq_caches* caches) noexcept {
@@ -623,6 +613,14 @@ void destroy_seq_caches(seq_caches* caches) noexcept {
     }
     caches->~seq_caches();
     pfree(caches);
+}
+
+void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept {
+    if (caches == nullptr) {
+        return;
+    }
+    close_seq_caches(*caches, commit);
+    destroy_seq_caches(caches);
 }
 
 void seq_caches::close_all(bool commit) noexcept {

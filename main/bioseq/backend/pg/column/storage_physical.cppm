@@ -155,19 +155,229 @@ PhysicalToLogical(PhysicalAddr addr)
 	return BIOSEQ_COLUMN_BYTES_PER_PAGE * addr.blockno + addr.offset - SizeOfPageHeaderData;
 }
 
+/*
+ * ReadFromBlock - read bytes from a page at the given offset. If 'force' is
+ * true, don't check pd_lower; useful when reading a metapage of unknown
+ * version.
+ */
+static void
+ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
+			  uint32_t len, bool force)
+{
+	Buffer buffer = ReadBuffer(rel, blockno);
+	LockBuffer(buffer, BUFFER_LOCK_SHARE);
+	Page page = BufferGetPage(buffer);
+	PageHeader phdr = reinterpret_cast<PageHeader>(page);
 
-static void BioseqColumnOverwriteMetapage(Relation relation,
-									  BioseqColumnMetapage columnarMetapage);
-static BioseqColumnMetapage BioseqColumnMetapageRead(Relation rel, bool force);
-static void ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset,
-						  char *buf, uint32_t len, bool force);
-static void WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset,
-						 char *buf, uint32_t len, bool clear);
-static uint64_t AlignReservation(uint64_t prevReservation);
-static bool BioseqColumnMetapageIsCurrent(BioseqColumnMetapage *metapage);
-static bool BioseqColumnMetapageIsOlder(BioseqColumnMetapage *metapage);
-static bool BioseqColumnMetapageIsNewer(BioseqColumnMetapage *metapage);
-static void BioseqColumnMetapageCheckVersion(Relation rel, BioseqColumnMetapage *metapage);
+	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
+	{
+		bioseq_log<ERR, PG>(
+			 "attempt to read columnar data of length {} from offset {} of block {} of relation {}",
+			 len, offset, blockno, rel->rd_id);
+	}
+
+	memcpy_s(buf, len, page + offset, len);
+	UnlockReleaseBuffer(buffer);
+}
+
+/*
+ * WriteToBlock - append data to a block, initializing if necessary, and emit
+ * WAL. If 'clear' is true, always clear the data on the page and reinitialize
+ * it first, and offset must be SizeOfPageHeaderData. Otherwise, offset must
+ * be equal to pd_lower and pd_lower will be set to the end of the written
+ * data.
+ */
+static void
+WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
+			 uint32_t len, bool clear)
+{
+	Buffer buffer = ReadBuffer(rel, blockno);
+	GenericXLogState *state = GenericXLogStart(rel);
+
+	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
+
+	Page page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
+
+	PageHeader phdr = reinterpret_cast<PageHeader>(page);
+	if (PageIsNew(page) || clear)
+	{
+		PageInit(page, BLCKSZ, 0);
+	}
+
+	if (phdr->pd_lower < offset || phdr->pd_upper - offset < len)
+	{
+		bioseq_log<ERR, PG>(
+			 "attempt to write columnar data of length {} to offset {} of block {} of relation {}",
+			 len, offset, blockno, rel->rd_id);
+	}
+
+	/*
+	 * After a transaction has been rolled-back, we might be
+	 * over-writing the rolledback write, so phdr->pd_lower can be
+	 * different from addr.offset.
+	 *
+	 * We reset pd_lower to reset the rolledback write.
+	 *
+	 * Given that we always align page reservation to the next page as of
+	 * 10.2, having such a disk page is only possible if write operaion
+	 * failed in an older version of columnar, but now user attempts writing
+	 * to that table in version >= 10.2.
+	 */
+	if (phdr->pd_lower > offset)
+	{
+		bioseq_report_pg(DEBUG4)
+			.msg("overwriting page {}", blockno)
+			.detail("This can happen after a roll-back.");
+		phdr->pd_lower = offset;
+	}
+
+	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
+	phdr->pd_lower += len;
+
+	GenericXLogFinish(state);
+
+	UnlockReleaseBuffer(buffer);
+}
+
+/*
+ * AlignReservation - given an unused logical byte offset, align it so that it
+ * falls at the start of a page.
+ *
+ * XXX: Reconsider whether we want/need to do this at all.
+ */
+static uint64_t
+AlignReservation(uint64_t prevReservation)
+{
+	PhysicalAddr prevAddr = LogicalToPhysical(prevReservation);
+	uint64_t alignedReservation = prevReservation;
+
+	if (prevAddr.offset != SizeOfPageHeaderData)
+	{
+		/* not aligned; align on beginning of next page */
+		PhysicalAddr initial = { 0 };
+		initial.blockno = prevAddr.blockno + 1;
+		initial.offset = SizeOfPageHeaderData;
+		alignedReservation = PhysicalToLogical(initial);
+	}
+
+	Assert(alignedReservation >= prevReservation);
+	return alignedReservation;
+}
+
+/*
+ * BioseqColumnMetapageIsCurrent - is the metapage at the latest version?
+ */
+static bool
+BioseqColumnMetapageIsCurrent(BioseqColumnMetapage *metapage)
+{
+	return (metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
+			metapage->versionMinor == BIOSEQ_COLUMN_VERSION_MINOR);
+}
+
+/*
+ * BioseqColumnMetapageIsOlder - is the metapage older than the current version?
+ */
+static bool
+BioseqColumnMetapageIsOlder(BioseqColumnMetapage *metapage)
+{
+	return (metapage->versionMajor < BIOSEQ_COLUMN_VERSION_MAJOR ||
+			(metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
+			 static_cast<int>(metapage->versionMinor) < static_cast<int>(BIOSEQ_COLUMN_VERSION_MINOR)));
+}
+
+/*
+ * BioseqColumnMetapageIsNewer - is the metapage newer than the current version?
+ */
+static bool
+BioseqColumnMetapageIsNewer(BioseqColumnMetapage *metapage)
+{
+	return (metapage->versionMajor > BIOSEQ_COLUMN_VERSION_MAJOR ||
+			(metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
+			 metapage->versionMinor > BIOSEQ_COLUMN_VERSION_MINOR));
+}
+
+/*
+ * BioseqColumnMetapageCheckVersion - throw an error if accessing old
+ * version of metapage.
+ */
+static void
+BioseqColumnMetapageCheckVersion(Relation rel, BioseqColumnMetapage *metapage)
+{
+	if (!BioseqColumnMetapageIsCurrent(metapage))
+	{
+		bioseq_report<ERR, PG>()
+			.code(ERRCODE_FEATURE_NOT_SUPPORTED)
+			.msg("attempted to access relation \"{}\", which uses an older columnar format",
+				RelationGetRelationName(rel))
+			.detail("BioseqColumn format version {}.{} is required, \"{}\" has version {}.{}.",
+				BIOSEQ_COLUMN_VERSION_MAJOR, BIOSEQ_COLUMN_VERSION_MINOR,
+				RelationGetRelationName(rel),
+				metapage->versionMajor, metapage->versionMinor)
+			.hint("{}", OLD_METAPAGE_VERSION_HINT);
+	}
+}
+
+/*
+ * BioseqColumnMetapageRead - read the current contents of the metapage. Error if
+ * it does not exist. Throw an error if the metapage is not the current
+ * version, unless 'force' is true.
+ *
+ * NB: it's safe to read a different version of a metapage because we
+ * guarantee that fields will only be added and existing fields will never be
+ * changed. However, it's important that we don't depend on new fields being
+ * set properly when we read an old metapage; an old metapage should only be
+ * read for the purposes of upgrading or error checking.
+ */
+static BioseqColumnMetapage
+BioseqColumnMetapageRead(Relation rel, bool force)
+{
+	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
+	if (nblocks == 0)
+	{
+		/*
+		 * We only expect this to happen when upgrading citus.so. This is because,
+		 * in current version of columnar, we immediately create the metapage
+		 * for columnar tables, i.e right after creating the table.
+		 * However in older versions, we were creating metapages lazily, i.e
+		 * when ingesting data to columnar table.
+		 */
+		bioseq_report<ERR, PG>()
+			.msg("columnar metapage for relation \"{}\" does not exist",
+				RelationGetRelationName(rel))
+			.hint("{}", OLD_METAPAGE_VERSION_HINT);
+	}
+
+	/*
+	 * Regardless of "force" parameter, always force read metapage block.
+	 * We will check metapage version in BioseqColumnMetapageCheckVersion
+	 * depending on "force".
+	 */
+	bool forceReadBlock = true;
+	BioseqColumnMetapage metapage;
+	ReadFromBlock(rel, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
+				  reinterpret_cast<char *>(&metapage), sizeof(BioseqColumnMetapage), forceReadBlock);
+
+	if (!force)
+	{
+		BioseqColumnMetapageCheckVersion(rel, &metapage);
+	}
+
+	return metapage;
+}
+
+/*
+ * BioseqColumnOverwriteMetapage writes given bioseqColumnMetapage back to metapage
+ * for given relation.
+ */
+static void
+BioseqColumnOverwriteMetapage(Relation relation, BioseqColumnMetapage bioseqColumnMetapage)
+{
+	/* clear metapage because we are overwriting */
+	bool clear = true;
+	WriteToBlock(relation, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
+				 reinterpret_cast<char *>(&bioseqColumnMetapage), sizeof(BioseqColumnMetapage), clear);
+}
+
 
 
 /*
@@ -620,238 +830,6 @@ BioseqColumnStorageTruncate(Relation rel, uint64_t newDataReservation)
 	}
 
 	return false;
-}
-
-
-/*
- * BioseqColumnOverwriteMetapage writes given columnarMetapage back to metapage
- * for given relation.
- */
-static void
-BioseqColumnOverwriteMetapage(Relation relation, BioseqColumnMetapage columnarMetapage)
-{
-	/* clear metapage because we are overwriting */
-	bool clear = true;
-	WriteToBlock(relation, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				 reinterpret_cast<char *>(&columnarMetapage), sizeof(BioseqColumnMetapage), clear);
-}
-
-
-/*
- * BioseqColumnMetapageRead - read the current contents of the metapage. Error if
- * it does not exist. Throw an error if the metapage is not the current
- * version, unless 'force' is true.
- *
- * NB: it's safe to read a different version of a metapage because we
- * guarantee that fields will only be added and existing fields will never be
- * changed. However, it's important that we don't depend on new fields being
- * set properly when we read an old metapage; an old metapage should only be
- * read for the purposes of upgrading or error checking.
- */
-static BioseqColumnMetapage
-BioseqColumnMetapageRead(Relation rel, bool force)
-{
-	BlockNumber nblocks = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
-	if (nblocks == 0)
-	{
-		/*
-		 * We only expect this to happen when upgrading citus.so. This is because,
-		 * in current version of columnar, we immediately create the metapage
-		 * for columnar tables, i.e right after creating the table.
-		 * However in older versions, we were creating metapages lazily, i.e
-		 * when ingesting data to columnar table.
-		 */
-		bioseq_report<ERR, PG>()
-			.msg("columnar metapage for relation \"{}\" does not exist",
-				RelationGetRelationName(rel))
-			.hint("{}", OLD_METAPAGE_VERSION_HINT);
-	}
-
-	/*
-	 * Regardless of "force" parameter, always force read metapage block.
-	 * We will check metapage version in BioseqColumnMetapageCheckVersion
-	 * depending on "force".
-	 */
-	bool forceReadBlock = true;
-	BioseqColumnMetapage metapage;
-	ReadFromBlock(rel, BIOSEQ_COLUMN_METAPAGE_BLOCKNO, SizeOfPageHeaderData,
-				  reinterpret_cast<char *>(&metapage), sizeof(BioseqColumnMetapage), forceReadBlock);
-
-	if (!force)
-	{
-		BioseqColumnMetapageCheckVersion(rel, &metapage);
-	}
-
-	return metapage;
-}
-
-
-/*
- * ReadFromBlock - read bytes from a page at the given offset. If 'force' is
- * true, don't check pd_lower; useful when reading a metapage of unknown
- * version.
- */
-static void
-ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
-			  uint32_t len, bool force)
-{
-	Buffer buffer = ReadBuffer(rel, blockno);
-	LockBuffer(buffer, BUFFER_LOCK_SHARE);
-	Page page = BufferGetPage(buffer);
-	PageHeader phdr = reinterpret_cast<PageHeader>(page);
-
-	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
-	{
-		bioseq_log<ERR, PG>(
-			 "attempt to read columnar data of length {} from offset {} of block {} of relation {}",
-			 len, offset, blockno, rel->rd_id);
-	}
-
-	memcpy_s(buf, len, page + offset, len);
-	UnlockReleaseBuffer(buffer);
-}
-
-
-/*
- * WriteToBlock - append data to a block, initializing if necessary, and emit
- * WAL. If 'clear' is true, always clear the data on the page and reinitialize
- * it first, and offset must be SizeOfPageHeaderData. Otherwise, offset must
- * be equal to pd_lower and pd_lower will be set to the end of the written
- * data.
- */
-static void
-WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
-			 uint32_t len, bool clear)
-{
-	Buffer buffer = ReadBuffer(rel, blockno);
-	GenericXLogState *state = GenericXLogStart(rel);
-
-	LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE);
-
-	Page page = GenericXLogRegisterBuffer(state, buffer, GENERIC_XLOG_FULL_IMAGE);
-
-	PageHeader phdr = reinterpret_cast<PageHeader>(page);
-	if (PageIsNew(page) || clear)
-	{
-		PageInit(page, BLCKSZ, 0);
-	}
-
-	if (phdr->pd_lower < offset || phdr->pd_upper - offset < len)
-	{
-		bioseq_log<ERR, PG>(
-			 "attempt to write columnar data of length {} to offset {} of block {} of relation {}",
-			 len, offset, blockno, rel->rd_id);
-	}
-
-	/*
-	 * After a transaction has been rolled-back, we might be
-	 * over-writing the rolledback write, so phdr->pd_lower can be
-	 * different from addr.offset.
-	 *
-	 * We reset pd_lower to reset the rolledback write.
-	 *
-	 * Given that we always align page reservation to the next page as of
-	 * 10.2, having such a disk page is only possible if write operaion
-	 * failed in an older version of columnar, but now user attempts writing
-	 * to that table in version >= 10.2.
-	 */
-	if (phdr->pd_lower > offset)
-	{
-		bioseq_report_pg(DEBUG4)
-			.msg("overwriting page {}", blockno)
-			.detail("This can happen after a roll-back.");
-		phdr->pd_lower = offset;
-	}
-
-	memcpy_s(page + phdr->pd_lower, phdr->pd_upper - phdr->pd_lower, buf, len);
-	phdr->pd_lower += len;
-
-	GenericXLogFinish(state);
-
-	UnlockReleaseBuffer(buffer);
-}
-
-
-/*
- * AlignReservation - given an unused logical byte offset, align it so that it
- * falls at the start of a page.
- *
- * XXX: Reconsider whether we want/need to do this at all.
- */
-static uint64_t
-AlignReservation(uint64_t prevReservation)
-{
-	PhysicalAddr prevAddr = LogicalToPhysical(prevReservation);
-	uint64_t alignedReservation = prevReservation;
-
-	if (prevAddr.offset != SizeOfPageHeaderData)
-	{
-		/* not aligned; align on beginning of next page */
-		PhysicalAddr initial = { 0 };
-		initial.blockno = prevAddr.blockno + 1;
-		initial.offset = SizeOfPageHeaderData;
-		alignedReservation = PhysicalToLogical(initial);
-	}
-
-	Assert(alignedReservation >= prevReservation);
-	return alignedReservation;
-}
-
-
-/*
- * BioseqColumnMetapageIsCurrent - is the metapage at the latest version?
- */
-static bool
-BioseqColumnMetapageIsCurrent(BioseqColumnMetapage *metapage)
-{
-	return (metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
-			metapage->versionMinor == BIOSEQ_COLUMN_VERSION_MINOR);
-}
-
-
-/*
- * BioseqColumnMetapageIsOlder - is the metapage older than the current version?
- */
-static bool
-BioseqColumnMetapageIsOlder(BioseqColumnMetapage *metapage)
-{
-	return (metapage->versionMajor < BIOSEQ_COLUMN_VERSION_MAJOR ||
-			(metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
-			 static_cast<int>(metapage->versionMinor) < static_cast<int>(BIOSEQ_COLUMN_VERSION_MINOR)));
-}
-
-
-/*
- * BioseqColumnMetapageIsNewer - is the metapage newer than the current version?
- */
-static bool
-BioseqColumnMetapageIsNewer(BioseqColumnMetapage *metapage)
-{
-	return (metapage->versionMajor > BIOSEQ_COLUMN_VERSION_MAJOR ||
-			(metapage->versionMajor == BIOSEQ_COLUMN_VERSION_MAJOR &&
-			 metapage->versionMinor > BIOSEQ_COLUMN_VERSION_MINOR));
-}
-
-
-/*
- * BioseqColumnMetapageCheckVersion - throw an error if accessing old
- * version of metapage.
- */
-static void
-BioseqColumnMetapageCheckVersion(Relation rel, BioseqColumnMetapage *metapage)
-{
-	if (!BioseqColumnMetapageIsCurrent(metapage))
-	{
-		bioseq_report<ERR, PG>()
-			.code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("attempted to access relation \"{}\", which uses an older columnar format",
-				RelationGetRelationName(rel))
-			.detail("BioseqColumn format version {}.{} is required, \"{}\" has version {}.{}.",
-				BIOSEQ_COLUMN_VERSION_MAJOR, BIOSEQ_COLUMN_VERSION_MINOR,
-				RelationGetRelationName(rel),
-				metapage->versionMajor, metapage->versionMinor)
-			.hint("{}", OLD_METAPAGE_VERSION_HINT);
-	}
 }
 
 

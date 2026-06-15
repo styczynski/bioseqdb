@@ -39,7 +39,6 @@ AddCommonTargetX(
   INCLUDE_DIRS
     "${BIOSEQ_DIR}/../config"
     "${BIOSEQ_DIR}/include2"
-    "${BIOSEQ_DIR}/include"
     "${BIOSEQ_DIR}/backend"
     "${BENCH_V10_DIR}/tool_minimap2"
     "${BIOSEQ_DIR}/../safestringlib/include"

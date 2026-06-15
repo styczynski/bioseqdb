@@ -434,8 +434,6 @@ extern "C" {
 
 // OLD COMPAT
 
-#define ColumnarProcessUtility_compat(a, b, c, d, e, f, g, h) \
-	ColumnarProcessUtility(a, b, c, d, e, f, g, h)
 #define PrevProcessUtilityHook_compat(a, b, c, d, e, f, g, h) \
 	PrevProcessUtilityHook(a, b, c, d, e, f, g, h)
 #define GetOldestNonRemovableTransactionId_compat(a, b) \

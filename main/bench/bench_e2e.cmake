@@ -32,7 +32,7 @@ AddCommonTargetX(
   COMMENT "BioSeq end-to-end SQL (bioseq.load + mmsearch) benchmark"
   VERSION ${INSTALL_VERSION} COMPONENT ${PROJECT_NAME}
   INCLUDE_DIRS
-    "${BIOSEQ_DIR}/../config" "${BIOSEQ_DIR}/include2" "${BIOSEQ_DIR}/include"
+    "${BIOSEQ_DIR}/../config" "${BIOSEQ_DIR}/include2"
     "${BIOSEQ_DIR}/backend"
     "${BIOSEQ_DIR}/../vendor/fmtlog" "${BIOSEQ_DIR}/../vendor/fmt"
     "${BIOSEQ_DIR}/../vendor/seqan3/include"

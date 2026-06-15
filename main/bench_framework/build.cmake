@@ -55,7 +55,6 @@ AddCommonTargetX(
   INCLUDE_DIRS
     "${BIOSEQ_DIR}/../config"
     "${BIOSEQ_DIR}/include2"
-    "${BIOSEQ_DIR}/include"
     "${BIOSEQ_DIR}/../safestringlib/include"
     "${BIOSEQ_DIR}/../vendor/fmtlog"
     "${BIOSEQ_DIR}/../vendor/fmt"

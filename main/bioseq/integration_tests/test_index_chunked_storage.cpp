@@ -33,7 +33,7 @@ inline std::set<std::tuple<long long, long long, long long>> mmsearch_set(
 TEST_CASE("DOC0279 per-fragment storage is created on insert with the right query_keys",
           "[indexing][per-fragment]") {
     auto ctx = fresh_context({"doc0279_cs_seed"});
-    seed_small_columnar(ctx, "doc0279_cs_seed");   // 3 dna4/32 rows, update_index_on_insert=on
+    seed_small_bioseq_column(ctx, "doc0279_cs_seed");   // 3 dna4/32 rows, update_index_on_insert=on
     REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", "doc0279_cs_seed") > 0);
     REQUIRE(index_table_row_count(ctx, "symbol_counts", "doc0279_cs_seed") == 3);
 
@@ -76,7 +76,7 @@ TEST_CASE("DOC0279 forced-scanner GUC disables stored assembly but results stay 
 
 TEST_CASE("DOC0279 index rows do not survive a ROLLBACK", "[indexing][per-fragment]") {
     auto ctx = fresh_context({"doc0279_cs_rb"});
-    seed_small_columnar(ctx, "doc0279_cs_rb");
+    seed_small_bioseq_column(ctx, "doc0279_cs_rb");
     const long long before = index_table_row_count(ctx, "minimizers_per_fragment", "doc0279_cs_rb");
     exec_sql(ctx, "BEGIN;");
     exec_sql(ctx, "INSERT INTO doc0279_cs_rb VALUES (99, 'GGGGCCCCAAAATTTT'::bioseq.seq('dna4',32));");

@@ -233,8 +233,6 @@ struct default_col { std::int16_t attno; ExprState* state; };
 // §4.4 / §9.1 — load context
 // --------------------------------------------------------------------------
 
-struct pg_identifier_writer;  // fwd (holds LoadContext&; defined below)
-
 struct LoadContext {
     Oid main_relid;                                  // parent table OID (for update_index)
     Oid db_oid, spc_oid; RelFileNumber main_relfilenode;
@@ -255,7 +253,6 @@ struct LoadContext {
     idp::header_format         effective_fmt = idp::header_format::AUTO;
     idp::identifier_routing    routing;
     idp::identifier_parse_state parse_state;
-    pg_identifier_writer*      writer = nullptr;       // borrowed; lives in run_load
     idp::identifier_writer_ref writer_ref;
     std::vector<dest_coercion> dest;                   // index == slot
     std::vector<default_col>   defaults;
@@ -346,7 +343,8 @@ static_assert(idp::is_identifier_dest_writer<pg_identifier_writer>);
 // write_parent_row stays a NON-templated free function (template-explosion
 // invariant, §4.4): it drives the one concrete pg_identifier_writer via the
 // type-erased ref, so the parser is never multiplied by (alphabet,width,file_type).
-void write_parent_row(LoadContext& ctx, std::string_view header,
+void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
+                      std::string_view header,
                       std::uint8_t alphabet_code, std::uint8_t byte_width,
                       std::uint16_t last_pad, sequence_size_t total_bp,
                       const bioseq::storage::seq_locator& locator) {
@@ -363,7 +361,7 @@ void write_parent_row(LoadContext& ctx, std::string_view header,
     errctx.previous = error_context_stack;
     error_context_stack = &errctx;
 
-    ctx.writer->begin_tuple();                              // ExecClearTuple + all-NULL
+    tuple_writer.begin_tuple();                             // ExecClearTuple + all-NULL
     ctx.slot->tts_values[ctx.cols.seq_attno - 1] = PointerGetDatum(stub);
     ctx.slot->tts_isnull[ctx.cols.seq_attno - 1] = false;
 
@@ -385,7 +383,7 @@ void write_parent_row(LoadContext& ctx, std::string_view header,
         ctx.slot->tts_values[ctx.cols.header_attno - 1] = PointerGetDatum(htext);
         ctx.slot->tts_isnull[ctx.cols.header_attno - 1] = false;
     }
-    ctx.writer->end_tuple();   // defaults, ExecConstraints, BioseqColumnWriteRow, ctx reset
+    tuple_writer.end_tuple();  // defaults, ExecConstraints, BioseqColumnWriteRow, ctx reset
     error_context_stack = errctx.previous;
     ctx.current_header = {};
     ctx.current_column_name = nullptr;
@@ -406,6 +404,7 @@ struct load_stream_sink {
         pgseq_supported_alphabets::index_of<A>();
 
     LoadContext& ctx;
+    pg_identifier_writer& tuple_writer;
     std::int64_t& records;
     std::string header;
     sequence_size_t total_bp = 0;
@@ -438,7 +437,7 @@ struct load_stream_sink {
             : static_cast<std::uint16_t>(
                   ((total_bp + col_lpu - 1) / col_lpu) * col_lpu - total_bp);
         const auto locator = writer.finish(total_bp, last_pad);
-        write_parent_row(ctx, header, kColAlphabetCode,
+        write_parent_row(ctx, tuple_writer, header, kColAlphabetCode,
                          static_cast<std::uint8_t>(ColBW), last_pad,
                          total_bp, locator);
         ++records;
@@ -565,6 +564,7 @@ template <sequence_alphabet A, std::size_t ColBW,
           bioseq::io::sequence_io_file_type FT>
 [[nodiscard]] std::int64_t load_records_overlapped(
         LoadContext& ctx,
+        pg_identifier_writer& tuple_writer,
         const char* file_path) {
     using col_cfg = sequence_custom_alphabet<A,
                        typename boost::uint_t<ColBW * 8>::least>;
@@ -610,7 +610,7 @@ template <sequence_alphabet A, std::size_t ColBW,
     }});
 
     std::int64_t records = 0;
-    load_stream_sink<A, ColBW> sink{ctx, records};
+    load_stream_sink<A, ColBW> sink{ctx, tuple_writer, records};
     queued_load_event<col_unit_t> event;
     PG_TRY();
     {
@@ -668,7 +668,10 @@ template <sequence_alphabet A, std::size_t ColBW,
 
 template <sequence_alphabet A, std::size_t ColBW,
           bioseq::io::sequence_io_file_type FT>
-[[nodiscard]] std::int64_t load_records(LoadContext& ctx, const char* file_path) {
+[[nodiscard]] std::int64_t load_records(
+        LoadContext& ctx,
+        pg_identifier_writer& tuple_writer,
+        const char* file_path) {
     using col_cfg    = sequence_custom_alphabet<A,
                            typename boost::uint_t<ColBW * 8>::least>;
     using col_unit_t = typename col_cfg::storage_unit;
@@ -685,13 +688,14 @@ template <sequence_alphabet A, std::size_t ColBW,
             bioseq::parallelism::dispatch_parallel(pool.mode())
             && pool.max_concurrency() > 1;
         if (may_overlap) {
-            return load_records_overlapped<A, ColBW, FT>(ctx, file_path);
+            return load_records_overlapped<A, ColBW, FT>(
+                ctx, tuple_writer, file_path);
         }
     }
 
     std::int64_t records = 0;
     std::string io_error;
-    load_stream_sink<A, ColBW> sink{ctx, records};
+    load_stream_sink<A, ColBW> sink{ctx, tuple_writer, records};
     auto on_fail = [&io_error](std::string&& msg) {
         if (io_error.empty()) io_error = std::move(msg);
     };
@@ -723,14 +727,17 @@ struct file_format_adapter {
     template <bioseq::io::sequence_io_file_type FT>
     [[gnu::always_inline]] std::int64_t operator()(
             std::integral_constant<bioseq::io::sequence_io_file_type, FT>,
-            LoadContext& ctx, const char* file_path) const {
-        return load_records<A, ColBW, FT>(ctx, file_path);
+            LoadContext& ctx,
+            pg_identifier_writer& tuple_writer,
+            const char* file_path) const {
+        return load_records<A, ColBW, FT>(ctx, tuple_writer, file_path);
     }
 };
 
 template <class A, std::size_t ColBW>
 struct format_dispatch {
     LoadContext& ctx;
+    pg_identifier_writer& tuple_writer;
     const char* file_path;
     bioseq::io::sequence_io_file_type format;
     std::int64_t& out;
@@ -745,25 +752,27 @@ struct format_dispatch {
                     bioseq::io::sequence_io_file_type,
                     bioseq::io::sequence_io_file_type::FASTA,
                     bioseq::io::sequence_io_file_type::FASTQ>{},
-                format, adapter, ctx, file_path);
+                format, adapter, ctx, tuple_writer, file_path);
     }
 };
 
 template <class A>
 struct width_dispatch {
     LoadContext& ctx;
+    pg_identifier_writer& tuple_writer;
     const char* file_path;
     bioseq::io::sequence_io_file_type format;
     std::int64_t& out;
 
     template <std::size_t ColBW>
     void operator()() const {
-        format_dispatch<A, ColBW>{ctx, file_path, format, out}.run();
+        format_dispatch<A, ColBW>{ctx, tuple_writer, file_path, format, out}.run();
     }
 };
 
 struct alphabet_dispatch {
     LoadContext& ctx;
+    pg_identifier_writer& tuple_writer;
     const char* file_path;
     bioseq::io::sequence_io_file_type format;
     std::int64_t& out;
@@ -771,7 +780,7 @@ struct alphabet_dispatch {
     template <class A>
     void operator()() const {
         dispatch_storage_unit_byte_width(ctx.cols.byte_width,
-            width_dispatch<A>{ctx, file_path, format, out});
+            width_dispatch<A>{ctx, tuple_writer, file_path, format, out});
     }
 };
 }  // namespace load_dispatch
@@ -779,12 +788,13 @@ struct alphabet_dispatch {
 // The single fan-out. `ctx.cols` from resolve_load_columns; `kind.format`
 // from §3. Returns records loaded.
 [[nodiscard]] std::int64_t dispatch_and_stream(
-        LoadContext& ctx, const char* file_path,
+        LoadContext& ctx, pg_identifier_writer& tuple_writer,
+        const char* file_path,
         bioseq::io::sequence_file_kind kind) {
     std::int64_t records_loaded = 0;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(ctx.cols.alphabet_code,
         load_dispatch::alphabet_dispatch{
-            ctx, file_path, kind.format, records_loaded});
+            ctx, tuple_writer, file_path, kind.format, records_loaded});
     return records_loaded;
 }
 
@@ -1157,15 +1167,13 @@ void cleanup_load_context(LoadContext& ctx, bool commit) {
             ctx.write_state->seq_caches);
         ctx.slot = MakeTupleTableSlot(ctx.parent_td, &TTSOpsVirtual);
 
-        // §7 step 13 — the ONE concrete writer lives on run_load's stack; the
-        // LoadContext holds only a borrowed pointer + erased ref (HIGH-01). Built
+        // §7 step 13 — the ONE concrete writer lives on run_load's stack. Built
         // here (after the write state exists) so set_field's per-tuple palloc and
         // make_cstr land in BioseqColumnWritePerTupleContext.
         pg_identifier_writer writer{ctx, ctx.dest, ctx.defaults};
-        ctx.writer = &writer;
         ctx.writer_ref = idp::make_identifier_writer_ref(writer);
 
-        n = dispatch_and_stream(ctx, path, kind);                         // §4.2
+        n = dispatch_and_stream(ctx, writer, path, kind);                 // §4.2
         teardown_load_executor(ctx);   // constraints done; free estate before index build
         flush_pending_load_writes(ctx);
         // Finalize the load's write states FIRST so the streamed rows are

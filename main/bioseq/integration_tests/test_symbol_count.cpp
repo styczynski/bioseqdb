@@ -110,11 +110,11 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
     auto ctx = fresh_context({kBioseqColumn});
 
     SECTION("stored read path (update_index_on_insert = on)") {
-        // seed_small_columnar inserts pk=1 'ACGTACGTACGTACGT' (A=4),
+        // seed_small_bioseq_column inserts pk=1 'ACGTACGTACGTACGT' (A=4),
         // pk=2 'TTTTAAAAGGGGCCCC' (A=4), pk=3 'AAAAAAAAAAAAAAAA' (A=16),
         // all under bioseq.update_index_on_insert = on so the INLINE
         // symbol_counts chunk is populated.
-        seed_small_columnar(ctx, kBioseqColumn);
+        seed_small_bioseq_column(ctx, kBioseqColumn);
 
         // pk=1 'ACGTACGTACGTACGT' -> A=4.
         REQUIRE(query_scalar_int(
@@ -145,7 +145,7 @@ TEST_CASE("columnar fast-path symbol_count returns the real tally + recompute fa
 
     SECTION("recompute fallback (update_index_on_insert = off, "
             "read_sequence_index = off)") {
-        seed_small_columnar(ctx, kBioseqColumn);
+        seed_small_bioseq_column(ctx, kBioseqColumn);
 
         // Insert a fourth row WITHOUT populating the stored INLINE index.
         {
