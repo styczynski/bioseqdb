@@ -13,7 +13,7 @@ module;
 #include <bit>
 #include <cstdint>
 
-export module bioseq_instr.histogram;
+export module bioseq.instr.histogram;
 
 export namespace bioseq::instr {
 

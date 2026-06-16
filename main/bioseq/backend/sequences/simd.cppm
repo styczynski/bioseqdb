@@ -17,15 +17,15 @@ module;
 
 #include <boost/integer.hpp>
 
-export module bioseq_sequences.simd;
+export module bioseq.sequences.simd;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import algo.circular_append_buffer;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.common.circular_append_buffer;
 
-export import bioseq_simd.utils;
-export import bioseq_simd.vector_stream;
+export import bioseq.simd.utils;
+export import bioseq.simd.vector_stream;
 
 export {
 

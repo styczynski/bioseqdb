@@ -55,11 +55,11 @@ module;
 #define BIOSEQ_DEFLATE_FORCEINLINE inline
 #endif
 
-export module bioseq_io.compression.deflate;
+export module bioseq.io.compression.deflate;
 
-import mlogging;
-import bioseq_io.compression.bit_reader;
-import bioseq_io.compression.huffman;
+import bioseq.common.mlogging;
+import bioseq.io.compression.bit_reader;
+import bioseq.io.compression.huffman;
 
 export namespace bioseq::io::compression {
 

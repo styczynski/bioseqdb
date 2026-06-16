@@ -22,11 +22,11 @@ module;
 #include <zstd.h>
 #endif
 
-export module storage_compression;
+export module bioseq.storage.compression;
 
-import mlogging;
-import config;       // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.config;       // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
+import bioseq.pg_utils;
 
 /*
  * Header prepended to a pglz-compressed buffer; combines the standard

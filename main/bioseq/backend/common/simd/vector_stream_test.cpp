@@ -2,10 +2,10 @@
 #include "common_tests.h"
 #include "common.h"
 
-import bioseq_simd.utils;
-import bioseq_simd.vector_stream;
-import mlogging;
-import testing;
+import bioseq.simd.utils;
+import bioseq.simd.vector_stream;
+import bioseq.common.mlogging;
+import bioseq.common.testing;
 
 HWY_BEFORE_NAMESPACE();
 

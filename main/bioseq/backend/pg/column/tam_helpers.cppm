@@ -27,12 +27,12 @@
 module;
 #include "common.h"
 
-export module bioseq_column_tam;
+export module bioseq.column.tam;
 
-import storage_physical;   // BIOSEQ_COLUMN_INVALID_ROW_NUMBER, BIOSEQ_COLUMN_MAX_ROW_NUMBER,
+import bioseq.storage.physical;   // BIOSEQ_COLUMN_INVALID_ROW_NUMBER, BIOSEQ_COLUMN_MAX_ROW_NUMBER,
                            // BIOSEQ_COLUMN_VALID_ITEMPOINTER_OFFSETS
-import pg_utils;           // safe_relation_open
-import mlogging;           // bioseq_report<ERR, PG> / bioseq_log<DBG>
+import bioseq.pg_utils;           // safe_relation_open
+import bioseq.common.mlogging;           // bioseq_report<ERR, PG> / bioseq_log<DBG>
 
 /*
  * ErrorIfInvalidRowNumber errors out if given rowNumber is invalid. Module

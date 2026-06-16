@@ -9,11 +9,11 @@
 module;
 #include "common.h"
 
-export module bioseq_table_io:pruning;
+export module bioseq.table.io:pruning;
 
-import mlogging;
-import storage_metadata;
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.storage.metadata;
+import bioseq.pg_utils;
 
 static Oid
 GetOperatorByType(Oid typeId, Oid accessMethodId, int16_t strategyNumber)

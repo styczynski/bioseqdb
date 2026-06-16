@@ -1,4 +1,4 @@
-export module bioseq_table;
+export module bioseq.table;
 export import :custom_scan;
 export import :index_scan;
 export import :utils;
@@ -6,6 +6,6 @@ export import :access_identity;
 export import :access_common;
 export import :access_hooks;
 export import :access_method;
-export import bioseq_am_cache;
-export import bioseq_table_types;
-export import bioseq_scan_state;
+export import bioseq.table.am_cache;
+export import bioseq.table.types;
+export import bioseq.table.scan_state;

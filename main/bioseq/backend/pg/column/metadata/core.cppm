@@ -33,66 +33,22 @@ module;
 #include <type_traits>
 #include <vector>
 
-export module storage_metadata:core;
+export module bioseq.storage.metadata:core;
 
-import storage_physical;
-import mlogging;
-import config;
-import pg_utils;
+import bioseq.storage.physical;
+import bioseq.common.mlogging;
+import bioseq.config;
+import bioseq.pg_utils;
 import :types;
 import :tuple_ops;
 
-export void InitBioseqColumnOptions(Oid regclass);
-export void SetBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options);
-export bool DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk);
-export bool ReadBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options);
 
-export FmgrInfo * GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId,
-										int16_t procedureId);
 //export ItemPointerData row_number_to_tid(uint64_t rowNumber);
 export uint64_t LookupStorageId(RelFileLocator relfilelocator);
-export void DeleteMetadataRows(RelFileLocator relfilelocator);
-export void DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64_t stripeId);
-export uint64_t BioseqColumnMetadataNewStorageId(void);
-export uint64_t GetHighestUsedAddress(RelFileLocator relfilelocator);
-export EmptyStripeReservation * ReserveEmptyStripe(Relation rel, uint64_t columnCount,
-												   uint64_t chunkGroupRowCount,
-												   uint64_t stripeRowCount);
-export StripeMetadata * CompleteStripeReservation(Relation rel, uint64_t stripeId,
-												  uint64_t sizeBytes, uint64_t rowCount,
-												  uint64_t chunkCount);
-export void SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe,
-							   StripeSkipList *stripeSkipList,
-							   TupleDesc tupleDescriptor);
-export void SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
-							List *chunkGroupRowCounts);
-export void UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
-										uint32_t chunkGroupId, uint32_t deletedRowNumber);
-export StripeSkipList * ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe,
-										   TupleDesc tupleDescriptor,
-										   uint32_t chunkCount,
-										   Snapshot snapshot);
-export StripeMetadata * FindNextStripeByRowNumber(Relation relation, uint64_t rowNumber,
-												  Snapshot snapshot);
-export StripeMetadata * FindStripeByRowNumber(Relation relation, uint64_t rowNumber,
-											  Snapshot snapshot);
 export StripeMetadata * FindStripeWithMatchingFirstRowNumber(Relation relation,
 															 uint64_t rowNumber,
 															 Snapshot snapshot);
-export StripeMetadata *  FindNextStripeForParallelWorker(Relation relation,
-														 Snapshot snapshot,
-														 uint64_t nextStripeId,
-														 uint64_t * nextHigherStripeId);
-export StripeWriteStateEnum StripeWriteState(StripeMetadata *stripeMetadata);
 export uint64_t StripeGetHighestRowNumber(StripeMetadata *stripeMetadata);
-export StripeMetadata * FindStripeWithHighestRowNumber(Relation relation,
-													   Snapshot snapshot);
-export bool SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
-							 uint64_t stripeStartRowNumber, List *chunkGroupRowCounts);
-export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry);
-export bytea * ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
-								MemoryContext ctx,
-								uint64_t stripeFirstRowNumber, int rowCount);
 export EState *
 create_estate_for_relation(Relation rel)
 {
@@ -130,9 +86,6 @@ export struct SubTableRow {
 	std::uint64_t   total_payload_bytes = 0;
 };
 
-export Oid SubTableMetadataRelationId(void);
-export Oid SubTableMetadataPKeyIndexRelationId(void);
-export Oid SubTableMetadataActiveShardIndexRelationId(void);
 
 export [[nodiscard]] std::optional<SubTableRow>
 LookupActiveSubTableShard(Oid database_oid, Oid tablespace_oid, Oid main_relfilenode,
@@ -166,7 +119,7 @@ DeleteSubTableShardsForMain(Oid database_oid, Oid tablespace_oid, Oid main_relfi
  * operator's identifier to fill in a function manager object, and returns
  * this object. This function is based on a similar function from CitusDB's code.
  */
-FmgrInfo *
+export FmgrInfo *
 GetFunctionInfoOrNull(Oid typeId, Oid accessMethodId, int16_t procedureId)
 {
 	FmgrInfo *functionInfo = NULL;
@@ -303,7 +256,7 @@ using Form_bioseq_options = FormData_bioseq_options *;
  * InitBioseqColumnOptions initialized the columnar table options. Meaning it writes the
  * default options to the options table if not already existing.
  */
-void
+export void
 InitBioseqColumnOptions(Oid regclass)
 {
 	/*
@@ -331,7 +284,7 @@ InitBioseqColumnOptions(Oid regclass)
  * table irregardless of the optiones already existing or not. This can be used to put a
  * table in a certain state.
  */
-void
+export void
 SetBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
 {
 	WriteBioseqColumnOptions(regclass, options, true);
@@ -431,7 +384,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
  *
  * Returns whether a record has been removed.
  */
-bool
+export bool
 DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
 {
 	bool result = false;
@@ -481,7 +434,7 @@ DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
 }
 
 
-bool
+export bool
 ReadBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
 {
 	ScanKeyData scanKey[1];
@@ -544,7 +497,7 @@ ReadBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options)
  * SaveStripeSkipList saves chunkList for a given stripe as rows
  * of bioseq.chunk.
  */
-void
+export void
 SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipList *chunkList,
 				   TupleDesc tupleDescriptor)
 {
@@ -610,7 +563,7 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipLis
 /*
  * SaveChunkGroups saves the metadata for given chunk groups in bioseq.chunk_group.
  */
-void
+export void
 SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
 				List *chunkGroupRowCounts)
 {
@@ -645,7 +598,7 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
 /*
  * SaveEmptyRowMask saves the metadata for inserted rows in bioseq.mask_row
  */
-bool 
+export bool 
 SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 				 uint64_t stripeStartRowNumber, List *chunkGroupRowCounts)
 {
@@ -748,7 +701,7 @@ SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 /*
  * ReadStripeSkipList fetches chunk metadata for a given stripe.
  */
-StripeSkipList *
+export StripeSkipList *
 ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tupleDescriptor,
 				   uint32_t chunkCount, Snapshot snapshot)
 {
@@ -871,7 +824,7 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 /*
  * ReadChunkRowMask fetches chunk row mask for columnar relation.
  */
-bytea *
+export bytea *
 ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 				 MemoryContext cxt,
 				 uint64_t stripeFirstRowNumber, int rowCount)
@@ -935,7 +888,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 }
 
 
-void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
+export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 {
 	HeapTuple oldHeapTuple = NULL;
 
@@ -993,7 +946,7 @@ void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
  * firstRowNumber is greater than given rowNumber. If no such stripe
  * exists, then returns NULL.
  */
-StripeMetadata *
+export StripeMetadata *
 FindNextStripeByRowNumber(Relation relation, uint64_t rowNumber, Snapshot snapshot)
 {
 	return StripeMetadataLookupRowNumber(relation, rowNumber, snapshot, FIND_GREATER);
@@ -1004,7 +957,7 @@ FindNextStripeByRowNumber(Relation relation, uint64_t rowNumber, Snapshot snapsh
  * FindStripeByRowNumber returns StripeMetadata for the stripe that contains
  * the row with rowNumber. If no such stripe exists, then returns NULL.
  */
-StripeMetadata *
+export StripeMetadata *
 FindStripeByRowNumber(Relation relation, uint64_t rowNumber, Snapshot snapshot)
 {
 	StripeMetadata *stripeMetadata =
@@ -1050,7 +1003,7 @@ FindStripeWithMatchingFirstRowNumber(Relation relation, uint64_t rowNumber,
  * of workers that are running for execution. 
  */
 
-StripeMetadata * 
+export StripeMetadata * 
 FindNextStripeForParallelWorker(Relation relation,
 								Snapshot snapshot,
 								uint64_t nextStripeId,
@@ -1094,7 +1047,7 @@ FindNextStripeForParallelWorker(Relation relation,
 /*
  * StripeWriteState returns write state of given stripe.
  */
-StripeWriteStateEnum
+export StripeWriteStateEnum
 StripeWriteState(StripeMetadata *stripeMetadata)
 {
 	if (stripeMetadata->aborted)
@@ -1257,7 +1210,7 @@ CheckStripeMetadataConsistency(StripeMetadata *stripeMetadata)
  * has the row with highest rowNumber by doing backward index scan on
  * stripe_first_row_number_idx. If given relation is empty, then returns NULL.
  */
-StripeMetadata *
+export StripeMetadata *
 FindStripeWithHighestRowNumber(Relation relation, Snapshot snapshot)
 {
 	StripeMetadata *stripeWithHighestRowNumber = NULL;
@@ -1359,7 +1312,7 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 /*
  * UpdateChunkGroupDeletedRows updates `deleted_rows` column for each chunk group.
  */
-void
+export void
 UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe, 
 							uint32_t chunkGroupId, uint32_t deletedRowNumber)
 {
@@ -1577,7 +1530,7 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
  * for empty tables. So this doesn't throw errors for empty tables and
  * returns 0.
  */
-uint64_t
+export uint64_t
 GetHighestUsedAddress(RelFileLocator relfilelocator)
 {
 	uint64_t storageId = LookupStorageId(relfilelocator);
@@ -1626,7 +1579,7 @@ GetHighestUsedAddressAndId(uint64_t storageId,
  * and inserts it into bioseq.stripe. It is guaranteed that concurrent
  * writes won't overwrite the returned stripe.
  */
-EmptyStripeReservation *
+export EmptyStripeReservation *
 ReserveEmptyStripe(Relation rel, uint64_t columnCount, uint64_t chunkGroupRowCount,
 				   uint64_t stripeRowCount)
 {
@@ -1656,7 +1609,7 @@ ReserveEmptyStripe(Relation rel, uint64_t columnCount, uint64_t chunkGroupRowCou
  * stripeId for given size and in-place updates related stripe metadata tuple
  * to complete reservation.
  */
-StripeMetadata *
+export StripeMetadata *
 CompleteStripeReservation(Relation rel, uint64_t stripeId, uint64_t sizeBytes,
 						  uint64_t rowCount, uint64_t chunkCount)
 {
@@ -1841,7 +1794,7 @@ BuildStripeMetadata(Relation bioseqColumnStripes, HeapTuple heapTuple)
  * DeleteMetadataRows removes the rows with given relfilelocator from columnar
  * metadata tables.
  */
-void
+export void
 DeleteMetadataRows(RelFileLocator relfilelocator)
 {
 	/*
@@ -1878,7 +1831,7 @@ DeleteMetadataRows(RelFileLocator relfilelocator)
  * DeleteMetadataRowsForStripeId removes the rows with given relfilelocator and 
  * stripe id from columnar metadata tables.
  */
-void
+export void
 DeleteMetadataRowsForStripeId(RelFileLocator relfilelocator, uint64_t stripeId)
 {
 	/*
@@ -2213,7 +2166,7 @@ LookupStorageId(RelFileLocator relfilelocator)
  * BioseqColumnMetadataNewStorageId - create a new, unique storage id and return
  * it.
  */
-uint64_t
+export uint64_t
 BioseqColumnMetadataNewStorageId()
 {
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnMetadataNewStorageId() entered");
@@ -2316,15 +2269,15 @@ RewriteStripeMetadataRowWithNewValues(Relation rel, uint64_t stripeId,
 // semantics work the same way as for bioseq.stripe.
 // ---------------------------------------------------------------------------
 
-Oid SubTableMetadataRelationId(void) {
+export Oid SubTableMetadataRelationId(void) {
 	return safe_get_relname_relid("seq_sub_table", BioseqColumnNamespaceId());
 }
 
-Oid SubTableMetadataPKeyIndexRelationId(void) {
+export Oid SubTableMetadataPKeyIndexRelationId(void) {
 	return safe_get_relname_relid("seq_sub_table_pkey", BioseqColumnNamespaceId());
 }
 
-Oid SubTableMetadataActiveShardIndexRelationId(void) {
+export Oid SubTableMetadataActiveShardIndexRelationId(void) {
 	return safe_get_relname_relid("seq_sub_table_active_shard_idx", BioseqColumnNamespaceId());
 }
 

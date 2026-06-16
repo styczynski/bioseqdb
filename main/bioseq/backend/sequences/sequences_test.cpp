@@ -8,14 +8,14 @@
 #include <vector>
 
 
-import mlogging;
-import sequan_compat;
-import bioseq_common.templating;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.common.templating;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers;
+import bioseq.common.testing;
 
 using namespace seq::literals;
 

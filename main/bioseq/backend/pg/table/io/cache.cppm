@@ -17,11 +17,11 @@ module;
 #include <time.h>
 #include <unistd.h>
 
-export module bioseq_table_io:cache;
+export module bioseq.table.io:cache;
 
-import pg_utils;
-import config;                  // DOC0322 §9.3 — bioseq_enable_page_cache, bioseq_page_cache_size GUCs
-import storage_metadata;        // DOC0322 §9.2 — BioseqColumnReadState, BioseqColumnCacheStatistics (was types.h)
+import bioseq.pg_utils;
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_enable_page_cache, bioseq_page_cache_size GUCs
+import bioseq.storage.metadata;        // DOC0322 §9.2 — BioseqColumnReadState, BioseqColumnCacheStatistics (was types.h)
 
 
 /*

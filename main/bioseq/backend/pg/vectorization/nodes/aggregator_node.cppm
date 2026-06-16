@@ -294,11 +294,11 @@ struct FindColsContext
 	Bitmapset  *unaggregated;	/* other column references */
 };
 
-export module bioseq_aggregator_node;
+export module bioseq.vector.aggregator_node;
 
-import mlogging;
-import pg_utils;
-import bioseq_vector_types;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.vector.types;
 
 /*
  * VectorAggState is the CustomScanState body for the vectorised aggregate

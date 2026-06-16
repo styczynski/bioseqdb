@@ -22,9 +22,9 @@ module;
 #include <string_view>
 #include <vector>
 
-export module bioseq_instr.descriptor;
+export module bioseq.instr.descriptor;
 
-import bioseq_instr.config;
+import bioseq.instr.config;
 
 export namespace bioseq::instr {
 

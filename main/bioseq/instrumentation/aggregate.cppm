@@ -17,10 +17,10 @@ module;
 #include <limits>
 #include <new>
 
-export module bioseq_instr.aggregate;
+export module bioseq.instr.aggregate;
 
-import bioseq_instr.config;
-import bioseq_instr.descriptor;
+import bioseq.instr.config;
+import bioseq.instr.descriptor;
 
 export namespace bioseq::instr {
 

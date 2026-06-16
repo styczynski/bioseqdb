@@ -33,17 +33,17 @@ module;
 #include <type_traits>
 #include <vector>
 
-export module bioseq_sequences.kmers.vulkan;
+export module bioseq.sequences.kmers.vulkan;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.base;
-import bioseq_gpu.vulkan.phase_b_abi;
-import bioseq_gpu.vulkan.runtime;
-import bioseq_parallelism.memory_admission;
-import bioseq_instr;  // DOC0310 §21 — phase_c_* timing labels
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.base;
+import bioseq.gpu.vulkan.phase_b_abi;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
+import bioseq.instr;  // DOC0310 §21 — phase_c_* timing labels
 
 export namespace bioseq::gpu::vulkan {
 

@@ -10,8 +10,8 @@
 #include <thread>
 #include <vector>
 
-import testing;
-import mlogging;
+import bioseq.common.testing;
+import bioseq.common.mlogging;
 
 namespace {
 

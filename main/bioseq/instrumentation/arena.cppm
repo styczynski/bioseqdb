@@ -13,10 +13,10 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq_instr.arena;
+export module bioseq.instr.arena;
 
-import bioseq_instr.config;
-import bioseq_instr.thread_state;
+import bioseq.instr.config;
+import bioseq.instr.thread_state;
 
 export namespace bioseq::instr {
 

@@ -13,11 +13,11 @@
 #include <string>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.generation;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.generation;
+import bioseq.common.testing;
 
 namespace {
 

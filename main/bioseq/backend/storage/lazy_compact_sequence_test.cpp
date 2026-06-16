@@ -18,13 +18,13 @@
 #include <span>
 #include <vector>
 
-import testing;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import bioseq_common.fragment_cache;
-import bioseq_indexing.symbol_counts;   // DOC0279 §12.5 — tally_symbol_counts (replaces count_symbols)
+import bioseq.common.testing;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
+import bioseq.common.fragment_cache;
+import bioseq.indexing.symbol_counts;   // DOC0279 §12.5 — tally_symbol_counts (replaces count_symbols)
 
 using namespace seq::literals;
 

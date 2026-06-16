@@ -17,9 +17,9 @@ module;
 #include <string>
 #include <algorithm>
 
-export module bioseq_cigar;
+export module bioseq.sequences.cigar;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export {
 

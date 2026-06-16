@@ -28,18 +28,18 @@
 #include <thread>
 #include <vector>
 
-import mlogging;
+import bioseq.common.mlogging;
 import bench_framework;
-import bioseq_common.templating;           // CompTimeStr for alphabet_entry
-import bioseq_instr;                       // region(), register_region_static
-import integration_tests.common;           // connection_test_context, exec_sqlf, query_rows
-import sequan_compat;                      // seq::dna4 / seq::dna5
-import bioseq_sequences;                   // compact_sequence_range, traits, supported_alphabets, to_string()
-import bioseq_sequences.generation;        // GeneratorParams / generate_test_sequences<A,U>
-import bioseq_io.writer;                    // sequence_writer<A, FASTA>
-import bioseq_io.public_api;                // compact_sequence_view<R>
-import bioseq_io.options;                   // sequence_io_file_type, writer_options
-import bioseq_indexing.type;                 // canonical minimizer index names
+import bioseq.common.templating;           // CompTimeStr for alphabet_entry
+import bioseq.instr;                       // region(), register_region_static
+import bioseq.integration_tests.common;           // connection_test_context, exec_sqlf, query_rows
+import bioseq.common.sequan_compat;                      // seq::dna4 / seq::dna5
+import bioseq.sequences;                   // compact_sequence_range, traits, supported_alphabets, to_string()
+import bioseq.sequences.generation;        // GeneratorParams / generate_test_sequences<A,U>
+import bioseq.io.writer;                    // sequence_writer<A, FASTA>
+import bioseq.io.public_api;                // compact_sequence_view<R>
+import bioseq.io.options;                   // sequence_io_file_type, writer_options
+import bioseq.indexing.type;                 // canonical minimizer index names
 
 #ifndef BIOSEQ_E2E_REPORT_DIR
 #error "BIOSEQ_E2E_REPORT_DIR must be defined by the build system"

@@ -26,7 +26,7 @@ module;
 #  include <x86intrin.h>
 #endif
 
-export module bioseq_instr.clock;
+export module bioseq.instr.clock;
 
 export namespace bioseq::instr::clock {
 

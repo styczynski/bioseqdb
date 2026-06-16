@@ -28,9 +28,9 @@ module;
 #include <glslang/Include/ResourceLimits.h>
 #include <glslang/SPIRV/GlslangToSpv.h>
 
-export module bioseq_gpu.vulkan.shader_compiler;
+export module bioseq.gpu.vulkan.shader_compiler;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::gpu::vulkan {
 

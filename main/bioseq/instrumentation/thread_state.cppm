@@ -17,10 +17,10 @@ module;
 #include <array>
 #include <cstdint>
 
-export module bioseq_instr.thread_state;
+export module bioseq.instr.thread_state;
 
-import bioseq_instr.config;
-import bioseq_instr.aggregate;
+import bioseq.instr.config;
+import bioseq.instr.aggregate;
 
 export namespace bioseq::instr {
 

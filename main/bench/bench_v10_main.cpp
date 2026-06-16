@@ -30,16 +30,16 @@
 #include <utility>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.minimap_port;
-import bioseq_sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
-import bioseq_storage_lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.minimap_port;
+import bioseq.sequences.pipe;            // for minimap_port entry point (DOC0249 §9.7)
+import bioseq.storage.lazy;             // DOC0263 — make_lazy_in_memory / lazy wrapper
+import bioseq.instr;
 import bench_framework;
 import bench.tool_minimap2;
-import bioseq_sequences.generation;
+import bioseq.sequences.generation;
 
 #ifndef BIOSEQ_BENCH_REPORT_DIR
 #error "BIOSEQ_BENCH_REPORT_DIR must be defined by the build system"

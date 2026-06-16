@@ -14,9 +14,9 @@ module;
 #include <string_view>
 #include <utility>
 #include <vector>
-export module bioseq_indexing.storage;
-import bioseq_indexing.type;
-import bioseq_parallelism.memory_admission;
+export module bioseq.indexing.storage;
+import bioseq.indexing.type;
+import bioseq.parallelism.memory_admission;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {

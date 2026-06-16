@@ -8,10 +8,10 @@ module;
 #include <tuple>
 
 
-export module algo.algo_tracer;
+export module bioseq.common.algo_tracer;
 
-import mlogging;
-import sequan_compat;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
 
 export {
 

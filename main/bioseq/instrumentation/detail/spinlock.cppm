@@ -10,7 +10,7 @@ module;
 #include <atomic>
 #include <thread>
 
-export module bioseq_instr.detail.spinlock;
+export module bioseq.instr.detail.spinlock;
 
 export namespace bioseq::instr::detail {
 

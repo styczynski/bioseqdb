@@ -23,10 +23,10 @@ module;
 #include <span>
 #include <type_traits>
 
-export module bioseq_vector_types;
+export module bioseq.vector.types;
 
-import pg_utils;
-import bioseq_parallelism.memory_admission;
+import bioseq.pg_utils;
+import bioseq.parallelism.memory_admission;
 
 /*
  * Batch width: how many scalar rows a single VectorColumn / VectorTupleTableSlot

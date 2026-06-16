@@ -6,13 +6,13 @@
 #include <cstdint>
 #include <vector>
 
-import testing;
-import context;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.pipeline_ops;
-import bioseq_parallelism.memory_admission;
+import bioseq.common.testing;
+import bioseq.common.context;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.pipeline_ops;
+import bioseq.parallelism.memory_admission;
 
 TEST_CASE("DOC0294 pool lifecycle and range execution", "[parallelism][pool]") {
     auto& pool = bioseq::parallelism::GlobalPool::instance();

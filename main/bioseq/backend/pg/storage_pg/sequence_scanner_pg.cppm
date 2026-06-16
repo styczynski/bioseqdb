@@ -38,18 +38,18 @@ extern "C" {
 #include <span>
 #include <utility>
 
-export module bioseq_storage_scanner_pg;
+export module bioseq.storage.scanner_pg;
 
-import mlogging;
-import pg_utils;
-import sequan_compat;              // seq::dna4 in static_assert below
-import bioseq_storage;             // DOC0264 §7.9 — seq_caches + open_sub_table_for_locator
-import bioseq_storage_scanner;     // DOC0263 §3.4 — is_valid/active_sequence_scanner concept
-import bioseq_storage_lazy;        // DOC0264 §9.1 — lazy_compact_sequence + with_lazy_postgres
-import bioseq_storage_size;        // sequence_size_t
-import bioseq_sequences;           // compact_sequence_range, compact_sequence_stdc_instance
-import bioseq_types.pg_compact_sequence;
-import bioseq_table_io;            // BioseqColumnBeginRead/BioseqColumnReadRowByRowNumber
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.common.sequan_compat;              // seq::dna4 in static_assert below
+import bioseq.storage.manager;             // DOC0264 §7.9 — seq_caches + open_sub_table_for_locator
+import bioseq.storage.scanner;     // DOC0263 §3.4 — is_valid/active_sequence_scanner concept
+import bioseq.storage.lazy;        // DOC0264 §9.1 — lazy_compact_sequence + with_lazy_postgres
+import bioseq.storage.size;        // sequence_size_t
+import bioseq.sequences;           // compact_sequence_range, compact_sequence_stdc_instance
+import bioseq.types.pg_compact_sequence;
+import bioseq.table.io;            // BioseqColumnBeginRead/BioseqColumnReadRowByRowNumber
 
 static_assert(__cplusplus >= 202302L, "DOC0264 requires C++23-or-later");
 

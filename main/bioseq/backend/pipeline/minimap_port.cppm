@@ -48,33 +48,33 @@ module;
 #include <span>
 #include <string>
 
-export module bioseq_sequences.minimap_port;
+export module bioseq.sequences.minimap_port;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_sequences.kmers.two_stacks;
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import block_aligner_hwy;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.chaining.scalar;
-import bioseq_sequences.chaining.simd;
-import bioseq_sequences.chaining.rmq;
-import bioseq_sequences.radix_sort;
-import context;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import bioseq_storage_size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
-import bioseq_instr;
-import bioseq_indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
-import bioseq_indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
-import bioseq_parallelism.mode;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.pipeline_ops;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.alignment.block_aligner;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.chaining.scalar;
+import bioseq.sequences.chaining.simd;
+import bioseq.sequences.chaining.rmq;
+import bioseq.common.radix_sort;
+import bioseq.common.context;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
+import bioseq.storage.size;   // DOC0263 §10 — sequence_size_t for the C1 truncation audit
+import bioseq.instr;
+import bioseq.indexing.minimizer_hashmap;   // DOC0279 §9 — relocated MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.indexing.minimizer_index;     // DOC0279 §7.1 — relocated MinimizerIndex concept
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.pipeline_ops;
 
 export {
 

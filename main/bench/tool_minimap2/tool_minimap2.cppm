@@ -31,12 +31,12 @@ extern "C" {
 
 export module bench.tool_minimap2;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_cigar;
-import bioseq_sequences.minimap_port;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.cigar;
+import bioseq.sequences.minimap_port;
+import bioseq.instr;
 // Force the C-shim trampolines (extern "C" registration / begin / end)
 // to be linked into this TU. Without an explicit import the build
 // system's module-graph reachability check can drop the shim on hosts

@@ -17,15 +17,15 @@
 #include <tuple>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers;
-import bioseq_sequences.kmers.vulkan;
-import bioseq_gpu.vulkan.runtime;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers;
+import bioseq.sequences.kmers.vulkan;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.common.testing;
 
 using namespace seq::literals;
 

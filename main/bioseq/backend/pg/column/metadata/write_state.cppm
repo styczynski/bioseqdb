@@ -17,11 +17,11 @@ module;
 
 #include "common.h"
 
-export module storage_metadata:write_state;
+export module bioseq.storage.metadata:write_state;
 
 import :core;           // ReadBioseqColumnOptions
-import pg_utils;
-import mlogging;
+import bioseq.pg_utils;
+import bioseq.common.mlogging;
 
 // DOC0322 §7.3 (hook realization) — the writer (BioseqColumnBeginWrite/EndWrite/
 // FlushPendingWrites/ContainsPendingWrites) and the seq_caches teardown

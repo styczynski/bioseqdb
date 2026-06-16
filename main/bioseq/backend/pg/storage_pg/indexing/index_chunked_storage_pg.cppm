@@ -30,26 +30,26 @@ module;
 #include <string_view>
 #include <utility>
 #include <vector>
-export module bioseq_storage_indexing_pg;
-import mlogging;
-import pg_utils;                       // try_safe_relation_open, find_primary_key_oid
-import bioseq_storage;                 // seq_caches, seq_locator, format helpers
-import bioseq_bucket_math;             // seq_locator
-import bioseq_storage_size;            // sequence_size_t
-import bioseq_indexing.type;           // SequenceIndexType, index_sub_key_t, MAX_INDEX_CHUNK_SIZE_BYTES, sentinels
-import bioseq_indexing.storage;        // the concepts
-import bioseq_indexing.minimizer_hashmap;   // SerializedHeader/Bucket validation
-import bioseq_table_io;                // BioseqColumnBeginRead/ReadNextRow/EndRead/ReadState
-import bioseq_storage_scanner_pg;      // with_lazy_postgres, make_scanner_pg_in_memory (for_each_sequence)
-import bioseq_storage_lazy;            // lazy_compact_sequence
-import bioseq_types.pg_compact_sequence;  // pgseq_t, dispatch_instance
-import bioseq_sequences;               // compact_sequence_range
-import bioseq_parallelism.memory_admission;
-import bioseq_storage_indexing_residency_pg;
-import bioseq_storage_indexing_sorted_runs_pg;
-import bioseq_instr;
-import bioseq_column_tam;                    // DOC0322 §7.4 — IsBioseqColumnTableAmTable (leaf)
-import storage_metadata;                     // DOC0322 §7.4 — BioseqColumnTableRowCount (moved to storage_metadata:core)
+export module bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;                       // try_safe_relation_open, find_primary_key_oid
+import bioseq.storage.manager;                 // seq_caches, seq_locator, format helpers
+import bioseq.storage.bucket_math;             // seq_locator
+import bioseq.storage.size;            // sequence_size_t
+import bioseq.indexing.type;           // SequenceIndexType, index_sub_key_t, MAX_INDEX_CHUNK_SIZE_BYTES, sentinels
+import bioseq.indexing.storage;        // the concepts
+import bioseq.indexing.minimizer_hashmap;   // SerializedHeader/Bucket validation
+import bioseq.table.io;                // BioseqColumnBeginRead/ReadNextRow/EndRead/ReadState
+import bioseq.storage.scanner_pg;      // with_lazy_postgres, make_scanner_pg_in_memory (for_each_sequence)
+import bioseq.storage.lazy;            // lazy_compact_sequence
+import bioseq.types.pg_compact_sequence;  // pgseq_t, dispatch_instance
+import bioseq.sequences;               // compact_sequence_range
+import bioseq.parallelism.memory_admission;
+import bioseq.storage.indexing_pg.residency;
+import bioseq.storage.indexing_pg.sorted_runs;
+import bioseq.instr;
+import bioseq.column.tam;                    // DOC0322 §7.4 — IsBioseqColumnTableAmTable (leaf)
+import bioseq.storage.metadata;                     // DOC0322 §7.4 — BioseqColumnTableRowCount (moved to storage_metadata:core)
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {

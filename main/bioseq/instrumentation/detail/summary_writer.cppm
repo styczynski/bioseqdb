@@ -12,14 +12,14 @@
  */
 module;
 
-export module bioseq_instr.detail.summary_writer;
+export module bioseq.instr.detail.summary_writer;
 
-import bioseq_instr.config;
-import bioseq_instr.global_state;
-import bioseq_instr.access;
-import bioseq_instr.thread_state;
-import bioseq_instr.counter;
-import bioseq_instr.gauge;
+import bioseq.instr.config;
+import bioseq.instr.global_state;
+import bioseq.instr.access;
+import bioseq.instr.thread_state;
+import bioseq.instr.counter;
+import bioseq.instr.gauge;
 
 export namespace bioseq::instr::access {
 

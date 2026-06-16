@@ -43,16 +43,16 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_io.fastq;
+export module bioseq.io.fastq;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_io.options;
-import bioseq_io.errors;
-import bioseq_io.simd_kernels;
-import bioseq_io.fasta;  // reuse parse_outcome enum
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.io.options;
+import bioseq.io.errors;
+import bioseq.io.simd_kernels;
+import bioseq.io.fasta;  // reuse parse_outcome enum
 
 export namespace bioseq::io {
 

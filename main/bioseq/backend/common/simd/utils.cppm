@@ -7,9 +7,9 @@ module;
 
 #include <tuple>
 
-export module bioseq_simd.utils;
-import mlogging;
-import bioseq_common.templating;
+export module bioseq.simd.utils;
+import bioseq.common.mlogging;
+import bioseq.common.templating;
 
 export {
 

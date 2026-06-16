@@ -35,7 +35,7 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_sequences.radix_sort;
+export module bioseq.common.radix_sort;
 
 export namespace bioseq::sorting {
 

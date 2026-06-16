@@ -1,4 +1,4 @@
-export module bioseq_table_io;
+export module bioseq.table.io;
 export import :buffers;
 export import :pruning;
 export import :read_chunk;

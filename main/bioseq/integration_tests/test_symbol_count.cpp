@@ -18,7 +18,7 @@
 //   'ACGTN'::dna5            -> A=1, C=1, G=1, T=1, N=1
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

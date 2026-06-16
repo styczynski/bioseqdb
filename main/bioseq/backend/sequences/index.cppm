@@ -1,2 +1,2 @@
-export module bioseq_sequences;
+export module bioseq.sequences;
 export import :sequences;

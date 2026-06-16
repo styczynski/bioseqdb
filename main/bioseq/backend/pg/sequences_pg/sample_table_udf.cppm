@@ -45,18 +45,18 @@ extern "C" {
 #include <random>
 #include <string>
 
-export module bioseq_sequences.sample_table_udf;
+export module bioseq.sequences.sample_table_udf;
 
-import mlogging;
-import pg_utils;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.generation;
-import bioseq_storage;
-import bioseq_storage_size;
-import bioseq_table_io;
-import storage_metadata;                  // DOC0322 §7 — bioseq_init_write_state
-import bioseq_types.pg_compact_sequence;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.generation;
+import bioseq.storage.manager;
+import bioseq.storage.size;
+import bioseq.table.io;
+import bioseq.storage.metadata;                  // DOC0322 §7 — bioseq_init_write_state
+import bioseq.types.pg_compact_sequence;
 
 using bioseq::storage::sequence_size_t;
 

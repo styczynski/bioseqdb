@@ -117,10 +117,10 @@ struct NumericVar
 
 }
 
-export module bioseq_vector_types_numeric;
+export module bioseq.vector.types.numeric;
 
-import mlogging;
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
 
 namespace {
 

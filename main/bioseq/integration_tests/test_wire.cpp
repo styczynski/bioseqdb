@@ -12,7 +12,7 @@
 //     right thing (no crash, just an error).
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 #include <filesystem>
 

@@ -7,7 +7,7 @@
  *
  *-------------------------------------------------------------------------
  */
-export module storage_metadata:stripe;
+export module bioseq.storage.metadata:stripe;
 
 import :core;
 

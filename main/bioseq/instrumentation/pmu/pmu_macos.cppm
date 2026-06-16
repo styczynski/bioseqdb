@@ -27,7 +27,7 @@ module;
 #  include <sys/sysctl.h>
 #endif
 
-export module bioseq_instr.pmu.macos;
+export module bioseq.instr.pmu.macos;
 
 export namespace bioseq::instr::pmu::macos_backend {
 

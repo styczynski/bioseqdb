@@ -6,9 +6,9 @@
  * primary key (`ref_bits`) in the upper 64 bits and the secondary key
  * (`query_bits`) in the lower 64 bits — the convention `Lt128` enforces.
  */
-export module bioseq_simd.sorting.uint128;
+export module bioseq.simd.sorting.uint128;
 
-import bioseq_simd.sorting;
+import bioseq.simd.sorting;
 
 export namespace bioseq::simd::sorting::uint128 {
 

@@ -25,7 +25,7 @@ module;
 #include <limits>
 #include <type_traits>
 
-export module bioseq_bucket_math;
+export module bioseq.storage.bucket_math;
 
 export namespace bioseq::storage {
 

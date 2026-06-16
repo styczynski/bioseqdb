@@ -19,10 +19,10 @@ module;
 
 #include "common.h"
 
-export module bioseq_vector_types_int;
+export module bioseq.vector.types.integer;
 
-import pg_utils;
-import bioseq_column_vector_compare_pg;   // vector_cmp<CmpOp, LT, RT>
+import bioseq.pg_utils;
+import bioseq.column.vector_compare_pg;   // vector_cmp<CmpOp, LT, RT>
 
 using bioseq::column::vec::CmpOp;
 

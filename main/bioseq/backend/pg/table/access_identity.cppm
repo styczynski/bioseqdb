@@ -13,9 +13,9 @@ module;
 
 #include <cstring>
 
-export module bioseq_table:access_identity;
+export module bioseq.table:access_identity;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 /*
  * BioseqColumnSupportsIndexAM returns true if the named index AM is supported

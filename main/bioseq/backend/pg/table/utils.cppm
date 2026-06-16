@@ -18,7 +18,7 @@ module;
 #include <cmath>
 
 
-export module bioseq_table:utils;
+export module bioseq.table:utils;
 // Minimal import set (DOC0283). This TU only references `enable_logging`
 // (mlogging, reached through the bioseq_log<DBG> macro) and the PBitmapset / PList /
 // BioseqReport wrappers (pg_utils, via its re-exported :bitmapset / :lists /
@@ -30,8 +30,8 @@ export module bioseq_table:utils;
 // pull_var_clause, the PVC_* / *AttributeNumber / ERRCODE_* macros, …) comes
 // from the Postgres headers included in the global module fragment above, so
 // it is independent of these imports.
-import mlogging;
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
 
 /*
  * DOC0322 §7.4 — IsBioseqColumnTableAmTable moved to the bioseq_column_tam leaf

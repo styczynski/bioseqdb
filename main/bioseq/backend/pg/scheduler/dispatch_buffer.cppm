@@ -55,24 +55,24 @@ module;
 // `bioseq.test_force_inmemory_scanner` GUC forces the materialise-then-
 // in_memory baseline. Without either GUC the production path runs through
 // `with_lazy_postgres<S>` (DOC0264 §9.1).
-export module bioseq_scheduler.dispatch_buffer;
+export module bioseq.scheduler.dispatch_buffer;
 
-import mlogging;
-import pg_utils;
-import config;                               // DOC0322 §9.3 — bioseq_index_async_persist, bioseq_recompute_async_persist GUCs
-import bioseq_indexing.type;                 // DOC0279 — DIRECTORY_SUB_KEY
-import bioseq_storage_indexing_handles;      // DOC0279 §8.7/§12.3 — lightweight storage handles + active index
-import bioseq_scheduler.dispatch_processor;   // fixed-shape BatchProcessor, heavy pipeline in its own module
-import bioseq_sequences;
-import bioseq_sequences.minimap_port;
-import bioseq_cigar;
-import bioseq_types.pg_compact_sequence;
-import bioseq_instr;
-import bioseq_storage;                  // DOC0260 §9
-import bioseq_storage_scanner;          // DOC0263 §11.3.2 — chunked test scanner — seq_locator, fetch_payload_bulk, seq_caches
-import bioseq_parallelism.memory_admission;
-import bioseq_scheduler.supervisor_pg;
-import bioseq_column_tam;               // DOC0322 §7.4 — tid_to_row_number (leaf; replaces the former extern "C++" reach into the table AM)
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.config;                               // DOC0322 §9.3 — bioseq_index_async_persist, bioseq_recompute_async_persist GUCs
+import bioseq.indexing.type;                 // DOC0279 — DIRECTORY_SUB_KEY
+import bioseq.storage.indexing_pg.handles;      // DOC0279 §8.7/§12.3 — lightweight storage handles + active index
+import bioseq.scheduler.dispatch_processor;   // fixed-shape BatchProcessor, heavy pipeline in its own module
+import bioseq.sequences;
+import bioseq.sequences.minimap_port;
+import bioseq.sequences.cigar;
+import bioseq.types.pg_compact_sequence;
+import bioseq.instr;
+import bioseq.storage.manager;                  // DOC0260 §9
+import bioseq.storage.scanner;          // DOC0263 §11.3.2 — chunked test scanner — seq_locator, fetch_payload_bulk, seq_caches
+import bioseq.parallelism.memory_admission;
+import bioseq.scheduler.supervisor_pg;
+import bioseq.column.tam;               // DOC0322 §7.4 — tid_to_row_number (leaf; replaces the former extern "C++" reach into the table AM)
 
 HWY_BEFORE_NAMESPACE();
 

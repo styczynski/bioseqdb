@@ -25,10 +25,10 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.templating.dispatch_chain;
+export module bioseq.common.templating.dispatch_chain;
 
-import bioseq_common.templating.value_sequence;
-import bioseq_common.templating.runtime_dispatch;
+import bioseq.common.templating.value_sequence;
+import bioseq.common.templating.runtime_dispatch;
 
 export namespace bioseq::common::templating {
 

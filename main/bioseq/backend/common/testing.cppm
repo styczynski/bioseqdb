@@ -10,8 +10,8 @@ module;
 #include <catch2/reporters/catch_reporter_registrars.hpp>
 
 
-export module testing;
-export import mlogging;
+export module bioseq.common.testing;
+export import bioseq.common.mlogging;
 
 export {
 

@@ -54,36 +54,36 @@ extern "C" {
 #include "utils/snapmgr.h"     // PushActiveSnapshot/PopActiveSnapshot/GetTransactionSnapshot, ActiveSnapshotSet
 }
                                // FlushWriteStateForRelfilenode declarations
-export module bioseq_storage_io_load;
+export module bioseq.storage.load_pg;
 
-import mlogging;                           // bioseq_log<DBG>(enable_logging)
-import pg_utils;
-import config;                             // DOC0322 §9.3 — bioseq_load_overlap_enabled, bioseq_update_index_on_insert GUCs
-import bioseq_storage_size;                // sequence_size_t
-import bioseq_common.templating;           // enum_dispatch_pack / value_sequence
-import bioseq_sequences;                   // compact_sequence_stdc_type_params::decode,
+import bioseq.common.mlogging;                           // bioseq_log<DBG>(enable_logging)
+import bioseq.pg_utils;
+import bioseq.config;                             // DOC0322 §9.3 — bioseq_load_overlap_enabled, bioseq_update_index_on_insert GUCs
+import bioseq.storage.size;                // sequence_size_t
+import bioseq.common.templating;           // enum_dispatch_pack / value_sequence
+import bioseq.sequences;                   // compact_sequence_stdc_type_params::decode,
                                            //   dispatch_storage_unit_byte_width, traits
-import bioseq_types.pg_compact_sequence;   // pgseq_t, pgseq_supported_alphabets
-import bioseq_storage;                     // alloc_locator_stub_in, alloc_seq_caches, seq_caches,
+import bioseq.types.pg_compact_sequence;   // pgseq_t, pgseq_supported_alphabets
+import bioseq.storage.manager;                     // alloc_locator_stub_in, alloc_seq_caches, seq_caches,
                                            //   read_max_sub_table_cap_bytes,
                                            //   kSequenceFragmentStorageUnits, sequence_stream_writer,
                                            //   flush_seq_cache_write_states, seq_locator
-import bioseq_table_io;                    // BioseqColumnWriteRow, BioseqColumnWritePerTupleContext
-import bioseq_storage_indexing_admin;      // build_policy_update_on_insert_indexes
-import bioseq_io.options;                  // sequence_io_file_type, reader_options
-import bioseq_io.file_utils;               // infer_sequence_file_kind, sequence_file_kind
-import bioseq_io.public_api;               // stream_sequences_file, packed_sequence_chunk,
+import bioseq.table.io;                    // BioseqColumnWriteRow, BioseqColumnWritePerTupleContext
+import bioseq.storage.indexing_pg.admin;      // build_policy_update_on_insert_indexes
+import bioseq.io.options;                  // sequence_io_file_type, reader_options
+import bioseq.io.file_utils;               // infer_sequence_file_kind, sequence_file_kind
+import bioseq.io.public_api;               // stream_sequences_file, packed_sequence_chunk,
                                            //   sample_sequence_headers
-import bioseq_io.identifier_formats;       // header_format, header_format_from_sql_name (DOC0295)
-import bioseq_io.identifier_parser;        // resolve_identifier_mapping, parse_and_route_header
-import storage_metadata;                   // create_estate_for_relation (DOC0295 §9.3);
+import bioseq.io.identifier_formats;       // header_format, header_format_from_sql_name (DOC0295)
+import bioseq.io.identifier_parser;        // resolve_identifier_mapping, parse_and_route_header
+import bioseq.storage.metadata;                   // create_estate_for_relation (DOC0295 §9.3);
                                            // bioseq_init_write_state +
                                            // BioseqColumnPopWriteStateForRelfilenode (DOC0322 §7)
                                            // (pg_utils already imported above: find_primary_key_oid)
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
-import bioseq_scheduler.supervisor_pg;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.scheduler.supervisor_pg;
 
 namespace {
 

@@ -39,11 +39,11 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_sequences.generation;
+export module bioseq.sequences.generation;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
 
 export {
 

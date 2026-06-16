@@ -25,21 +25,21 @@ module;
 #include <signal.h>
 using sact = struct sigaction;
 
-export module bioseq_table:access_method;
+export module bioseq.table:access_method;
 
-import storage_physical;
-import mlogging;
-import storage_metadata;
-import bioseq_vector_types;
-import bioseq_table_types;
-import config;
-import bioseq_table_io;
-import pg_utils;
-import bioseq_storage_indexing_admin;   // DOC0279 §11.2 — index_build_on_insert
-import bioseq_storage;
-import bioseq_am_cache;
-import bioseq_types.pg_compact_sequence;
-import bioseq_column_tam;   // DOC0322 §7.4 — tid_to_row_number / row_number_to_tid /
+import bioseq.storage.physical;
+import bioseq.common.mlogging;
+import bioseq.storage.metadata;
+import bioseq.vector.types;
+import bioseq.table.types;
+import bioseq.config;
+import bioseq.table.io;
+import bioseq.pg_utils;
+import bioseq.storage.indexing_pg.admin;   // DOC0279 §11.2 — index_build_on_insert
+import bioseq.storage.manager;
+import bioseq.table.am_cache;
+import bioseq.types.pg_compact_sequence;
+import bioseq.column.tam;   // DOC0322 §7.4 — tid_to_row_number / row_number_to_tid /
                             // IsBioseqColumnTableAmTable + register_bioseq_am_routine
 import :access_identity;
 import :access_common;

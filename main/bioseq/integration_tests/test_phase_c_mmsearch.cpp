@@ -6,7 +6,7 @@
 // MaxAllocSize) and dispatches through `with_lazy_in_memory`.
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

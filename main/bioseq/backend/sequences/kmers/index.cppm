@@ -11,16 +11,16 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_sequences.kmers;
+export module bioseq.sequences.kmers;
 
-import mlogging;
-import context;
-import sequan_compat;            // DOC0286 §10.2 — seq::dna4 for the nt4 (2-bit) hasher
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers.hashers;
-import algo.circular_append_buffer;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.context;
+import bioseq.common.sequan_compat;            // DOC0286 §10.2 — seq::dna4 for the nt4 (2-bit) hasher
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers.hashers;
+import bioseq.common.circular_append_buffer;
+import bioseq.instr;
 
 // // remove
 // import sequan_compat;

@@ -22,13 +22,13 @@ module;
 #include <string>
 #include <utility>
 
-export module bioseq_io.compression.parallel_gzip_source;
+export module bioseq.io.compression.parallel_gzip_source;
 
-import mlogging;
-import bioseq_io.sources;
-import bioseq_io.options;
-import bioseq_io.compression.parallel_gzip_decoder;
-import bioseq_parallelism.pool;
+import bioseq.common.mlogging;
+import bioseq.io.sources;
+import bioseq.io.options;
+import bioseq.io.compression.parallel_gzip_decoder;
+import bioseq.parallelism.pool;
 
 export namespace bioseq::io {
 

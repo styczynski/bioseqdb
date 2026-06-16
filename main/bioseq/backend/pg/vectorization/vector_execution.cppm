@@ -20,11 +20,11 @@ module;
 
 #include <span>
 
-export module bioseq_vector_execution;
+export module bioseq.vector.execution;
 
-import pg_utils;
-import bioseq_vector_types;
-import bioseq_column.vector_compare;
+import bioseq.pg_utils;
+import bioseq.vector.types;
+import bioseq.column.vector_compare;
 
 /*
  * CheckOpExprArgumentRules validates that a vectorised OpExpr receives

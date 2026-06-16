@@ -12,14 +12,14 @@ module;
 #include <string>
 #include <string_view>
 
-export module bioseq_storage_indexing_handles;
+export module bioseq.storage.indexing_pg.handles;
 
-import mlogging;
-import pg_utils;
-import config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes GUC
-import bioseq_storage;
-import bioseq_indexing.type;
-import bioseq_storage_indexing_pg;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes GUC
+import bioseq.storage.manager;
+import bioseq.indexing.type;
+import bioseq.storage.indexing_pg.chunked_storage;
 
 export namespace bioseq::storage::indexing {
 

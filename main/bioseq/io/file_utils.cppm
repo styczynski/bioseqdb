@@ -8,10 +8,10 @@ module;
 #include <string>
 #include <string_view>
 #include <utility>
-export module bioseq_io.file_utils;
+export module bioseq.io.file_utils;
 
-import mlogging;                // fmt (DOC0145: common.h + mlogging for fmt::format)
-import bioseq_io.options;       // sequence_io_file_type
+import bioseq.common.mlogging;                // fmt (DOC0145: common.h + mlogging for fmt::format)
+import bioseq.io.options;       // sequence_io_file_type
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 

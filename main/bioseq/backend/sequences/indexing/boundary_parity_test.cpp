@@ -29,24 +29,24 @@
 #include <utility>
 #include <vector>
 
-import testing;
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import bioseq_storage_size;
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_indexing.traits;
-import bioseq_indexing.minimizer_index;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_indexing.minimizer_sequence;
-import bioseq_indexing.symbol_counts;
-import bioseq_parallelism.memory_admission;
-import bioseq_indexing.registry;
+import bioseq.common.testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
+import bioseq.storage.size;
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_index;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.symbol_counts;
+import bioseq.parallelism.memory_admission;
+import bioseq.indexing.registry;
 
 #include "index_test_fakes.h"
 

@@ -14,12 +14,12 @@
 #include <cstdint>
 #include <vector>
 
-import mlogging;
-import bioseq_sequences.kmers;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_indexing.minimizer_vulkan;
-import bioseq_gpu.vulkan.runtime;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.sequences.kmers;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_vulkan;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.common.testing;
 
 namespace {
 

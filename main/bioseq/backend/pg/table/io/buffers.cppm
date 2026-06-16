@@ -11,10 +11,10 @@
 module;
 #include "common.h"
 
-export module bioseq_table_io:buffers;
+export module bioseq.table.io:buffers;
 
-import storage_metadata;
-import pg_utils;
+import bioseq.storage.metadata;
+import bioseq.pg_utils;
 
 /*
  * CreateEmptyChunkData creates data buffers to keep deserialized exist and

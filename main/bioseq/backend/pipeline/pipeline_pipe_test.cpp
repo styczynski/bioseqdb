@@ -13,19 +13,19 @@
 #include "common_tests.h"
 #include "common.h"
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.pipe;
-import bioseq_storage_lazy;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.minimap_port;
-import bioseq_indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
-import bioseq_cigar;
-import alignment_hwy;
-import alignment_hwy_utils;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.pipe;
+import bioseq.storage.lazy;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.minimap_port;
+import bioseq.indexing.minimizer_hashmap;   // DOC0279 — MinimizerHashmapFragmentIndex (was TargetIndex)
+import bioseq.sequences.cigar;
+import bioseq.alignment;
+import bioseq.alignment.utils;
+import bioseq.common.testing;
 
 HWY_BEFORE_NAMESPACE();
 

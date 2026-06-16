@@ -7,7 +7,7 @@ module;
 
 #include <cstdint>
 
-export module bioseq_instr.sampler.stub;
+export module bioseq.instr.sampler.stub;
 
 export namespace bioseq::instr::sampler::stub_backend {
 

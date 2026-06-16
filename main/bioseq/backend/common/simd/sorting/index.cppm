@@ -41,10 +41,10 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_simd.sorting;
+export module bioseq.simd.sorting;
 
-import mlogging;
-import bioseq_simd.vector_stream;
+import bioseq.common.mlogging;
+import bioseq.simd.vector_stream;
 
 export {
 

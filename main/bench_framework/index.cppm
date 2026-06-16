@@ -71,8 +71,8 @@ module;
 
 export module bench_framework;
 
-import mlogging;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.instr;
 
 // ---------------------------------------------------------------------------
 //  Public surface

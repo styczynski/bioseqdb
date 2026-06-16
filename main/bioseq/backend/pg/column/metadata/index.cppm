@@ -13,7 +13,7 @@
  *
  *-------------------------------------------------------------------------
  */
-export module storage_metadata;
+export module bioseq.storage.metadata;
 
 export import :types;
 export import :options;

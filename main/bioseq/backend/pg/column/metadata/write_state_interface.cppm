@@ -14,11 +14,11 @@ module;
 
 #include "common.h"
 
-export module storage_metadata:write_state_interface;
+export module bioseq.storage.metadata:write_state_interface;
 
 import :write_state;            // BioseqColumnPopWriteStateForAllRels, FlushWriteStateForRelfilenode, ...
 import :write_state_row_mask;   // RowMaskPopWriteStateForAllRels, RowMaskMarkRelfilenodeDropped, ...
-import pg_utils;
+import bioseq.pg_utils;
 
 /*
  * FlushWriteStateWithNewSnapshot flushes pending writes for the given

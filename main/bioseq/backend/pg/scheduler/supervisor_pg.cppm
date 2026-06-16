@@ -44,24 +44,24 @@ void AbortCurrentTransaction(void);
 #include <utility>
 #include <vector>
 
-export module bioseq_scheduler.supervisor_pg;
-import mlogging;
-import config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq_index_async_persist, bioseq_index_memory_cap_mb GUCs
-import bioseq_instr;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.memory_admission;
-import pg_utils;
-import bioseq_indexing.type;
-import bioseq_indexing.minimizer_sequence;
-import bioseq_storage;
-import bioseq_storage_lazy;
-import bioseq_storage_scanner_pg;
-import bioseq_types.pg_compact_sequence;
-import bioseq_sequences;
-import bioseq_storage_indexing_pg;
-import bioseq_storage_indexing_handles;
+export module bioseq.scheduler.supervisor_pg;
+import bioseq.common.mlogging;
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq_index_async_persist, bioseq_index_memory_cap_mb GUCs
+import bioseq.instr;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
+import bioseq.pg_utils;
+import bioseq.indexing.type;
+import bioseq.indexing.minimizer_sequence;
+import bioseq.storage.manager;
+import bioseq.storage.lazy;
+import bioseq.storage.scanner_pg;
+import bioseq.types.pg_compact_sequence;
+import bioseq.sequences;
+import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.storage.indexing_pg.handles;
 
 namespace bioseq::parallelism::pg {
 

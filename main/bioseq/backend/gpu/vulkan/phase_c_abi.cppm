@@ -28,9 +28,9 @@ module;
 #include <span>
 #include <type_traits>
 
-export module bioseq_gpu.vulkan.phase_c_abi;
+export module bioseq.gpu.vulkan.phase_c_abi;
 
-import bioseq_gpu.vulkan.phase_b_abi;
+import bioseq.gpu.vulkan.phase_b_abi;
 
 export namespace bioseq::gpu::vulkan {
 

@@ -30,23 +30,23 @@ extern "C" {
 #include <string_view>
 #include <vector>
 
-export module bioseq_mod;
+export module bioseq.mod;
 
-import mlogging;
-import bioseq_column;
-import pg_utils;
-import bioseq_types.pg_compact_sequence;
-import bioseq_sequences;
-import bioseq_storage;                   // is_locator_stub, decode_locator_from_stub
-import bioseq_storage_lazy;              // make_lazy_in_memory
-import bioseq_indexing.type;             // DIRECTORY_SUB_KEY, index_sub_key_t
-import bioseq_indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
-import bioseq_storage_indexing_admin;    // DOC0279 §11.4/§12 — update_index_impl, list helpers, letter_to_rank
-import bioseq_storage_indexing_pg;       // DOC0279 §8.8 — g_last_index_merge_run_count, format_seqidx helpers
-import bioseq_scheduler.supervisor_pg;
-import bioseq_parallelism.mode;
-import sequan_compat;
-import bioseq_column_tam;   // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (the leaf replaces the former extern "C++" reaches)
+import bioseq.common.mlogging;
+import bioseq.column;
+import bioseq.pg_utils;
+import bioseq.types.pg_compact_sequence;
+import bioseq.sequences;
+import bioseq.storage.manager;                   // is_locator_stub, decode_locator_from_stub
+import bioseq.storage.lazy;              // make_lazy_in_memory
+import bioseq.indexing.type;             // DIRECTORY_SUB_KEY, index_sub_key_t
+import bioseq.indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
+import bioseq.storage.indexing_pg.admin;    // DOC0279 §11.4/§12 — update_index_impl, list helpers, letter_to_rank
+import bioseq.storage.indexing_pg.chunked_storage;       // DOC0279 §8.8 — g_last_index_merge_run_count, format_seqidx helpers
+import bioseq.scheduler.supervisor_pg;
+import bioseq.parallelism.mode;
+import bioseq.common.sequan_compat;
+import bioseq.column.tam;   // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (the leaf replaces the former extern "C++" reaches)
 
 namespace {
 

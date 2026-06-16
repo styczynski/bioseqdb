@@ -23,9 +23,9 @@ module;
 #include <cstdint>
 #include <span>
 
-export module bioseq_io.compression.bit_reader;
+export module bioseq.io.compression.bit_reader;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 

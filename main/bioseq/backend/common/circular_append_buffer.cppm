@@ -8,10 +8,10 @@ module;
 #include <utility>
 
 
-export module algo.circular_append_buffer;
+export module bioseq.common.circular_append_buffer;
 
-import mlogging;
-import sequan_compat;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
 
 export {
 

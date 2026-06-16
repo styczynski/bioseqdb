@@ -19,7 +19,7 @@
 // heap table to keep the assertions tight on the type itself.
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

@@ -25,14 +25,14 @@
 #include <utility>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_storage_scanner;
-import bioseq_storage_lazy;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.storage.scanner;
+import bioseq.storage.lazy;
+import bioseq.common.testing;
 
 using namespace seq::literals;
 

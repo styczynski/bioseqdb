@@ -45,20 +45,20 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_io.pipeline;
+export module bioseq.io.pipeline;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_io.options;
-import bioseq_io.errors;
-import bioseq_io.buffer;
-import bioseq_io.fasta;
-import bioseq_io.fastq;
-import bioseq_io.sources;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.io.options;
+import bioseq.io.errors;
+import bioseq.io.buffer;
+import bioseq.io.fasta;
+import bioseq.io.fastq;
+import bioseq.io.sources;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
 
 export namespace bioseq::io {
 

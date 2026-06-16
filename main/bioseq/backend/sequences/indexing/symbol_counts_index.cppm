@@ -15,13 +15,13 @@ module;
 #include <cstdint>
 #include <optional>
 #include <string_view>
-export module bioseq_indexing.symbol_counts;
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_indexing.traits;
-import bioseq_storage_lazy;     // lazy_compact_sequence + make_lazy_in_memory
-import bioseq_storage_size;     // sequence_size_t
-import bioseq_sequences;        // compact_sequence_range, IteratorMode{BP,SYMBOL}
+export module bioseq.indexing.symbol_counts;
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.indexing.traits;
+import bioseq.storage.lazy;     // lazy_compact_sequence + make_lazy_in_memory
+import bioseq.storage.size;     // sequence_size_t
+import bioseq.sequences;        // compact_sequence_range, IteratorMode{BP,SYMBOL}
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {

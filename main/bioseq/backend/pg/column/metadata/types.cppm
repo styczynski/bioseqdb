@@ -15,9 +15,9 @@ module;
 #include <cstddef>
 #include <type_traits>
 
-export module storage_metadata:types;
+export module bioseq.storage.metadata:types;
 
-import config;
+import bioseq.config;
 
 /*-------------------------------------------------------------------------
  * DOC0322 §9.2 — the C-shape column-store data model formerly in the deleted

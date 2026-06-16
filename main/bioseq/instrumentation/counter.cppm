@@ -41,10 +41,10 @@ module;
 #include <thread>
 #include <unordered_map>
 
-export module bioseq_instr.counter;
+export module bioseq.instr.counter;
 
-import bioseq_instr.config;
-import bioseq_instr.descriptor;
+import bioseq.instr.config;
+import bioseq.instr.descriptor;
 
 export namespace bioseq::instr {
 

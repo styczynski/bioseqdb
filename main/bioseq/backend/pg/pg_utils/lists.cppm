@@ -21,7 +21,7 @@ module;
 #include <iterator>
 #include <type_traits>
 
-export module pg_utils.lists;
+export module bioseq.pg_utils.lists;
 
 /*
  * Forward iterator over a PostgreSQL List*, yielding T* for each ListCell.

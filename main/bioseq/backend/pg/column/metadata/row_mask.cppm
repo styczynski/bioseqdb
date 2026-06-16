@@ -6,7 +6,7 @@
  *
  *-------------------------------------------------------------------------
  */
-export module storage_metadata:row_mask;
+export module bioseq.storage.metadata:row_mask;
 
 import :core;
 

@@ -24,11 +24,11 @@ module;
 #include <oneapi/tbb/task_arena.h>
 #include <oneapi/tbb/task_group.h>
 
-export module bioseq_parallelism.pool;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import context;
-import bioseq_instr;
+export module bioseq.parallelism.pool;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.common.context;
+import bioseq.instr;
 
 namespace otbb = oneapi::tbb;
 

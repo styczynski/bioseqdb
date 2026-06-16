@@ -15,11 +15,11 @@ module;
 #include <utility>
 #include <vector>
 
-export module integration_tests.common;
+export module bioseq.integration_tests.common;
 
-export import testing;
-export import mlogging;
-export import bioseq_storage_scanner;  // DOC0263 §11.1 — scanner types for parametrise_scanner_combinations
+export import bioseq.common.testing;
+export import bioseq.common.mlogging;
+export import bioseq.storage.scanner;  // DOC0263 §11.1 — scanner types for parametrise_scanner_combinations
 
 namespace bioseq_int_tests {
 

@@ -35,40 +35,40 @@ extern "C" {
 #include "utils/inval.h"
 }
 
-export module bioseq_table:custom_scan;
+export module bioseq.table:custom_scan;
 
-import bioseq_table_io;
+import bioseq.table.io;
 import :access_method;             // DOC0322 §7.5 — GetBioseqColumnTableAmRoutine, BioseqColumnScanChunkGroupsFiltered, bioseq_index_fetch_begin_extended, bioseq_beginscan_*_c
 import :access_common;             // DOC0324 — bioseq_hydrate_scan_slot
 import :utils;                     // DOC0322 §7.5 — BioseqColumnAttrNeeded
-import bioseq_column_tam;          // DOC0322 §7.4 — tid_to_row_number, row_number_to_tid, IsBioseqColumnTableAmTable
-import config;                     // DOC0322 §9.3 — bioseq_aligner_*, bioseq_index_scan, bioseq_enable_vectorization, bioseq_read_sequence_index, bioseq_enable_parallel_execution, bioseq_min_parallel_processes, bioseq_enable_page_cache GUCs
-import bioseq_vector_types;        // VectorColumn, VectorTupleTableSlot, CreateVectorTupleTableSlot, ...
-import bioseq_vector_execution;    // CreateVectorizedExprList, ConstructVectorizedQualList, ExecuteVectorizedQual
-import mlogging;
-import storage_metadata;
-import bioseq_table_types;
-import bioseq_scan_state;
-import pg_utils;
-import bioseq_scheduler.dispatch_buffer;
-import bioseq_scheduler.supervisor_pg;
-import bioseq_parallelism.mode;
-import bioseq_sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
-import bioseq_sequences.simd;             // stdc_recode_to_type_params
-import bioseq_sequences.minimap_port;  // for MatchResult
-import bioseq_sequences.pipe;            // for PipelineDescription / describe_pipeline_for
-import bioseq_cigar;                    // for format_cigar
-import bioseq_types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
-import bioseq_storage;                   // DOC0279 §12.5 — seq_locator, is_locator_stub, decode_locator_from_stub, seq_caches
-import bioseq_bucket_math;               // bucket_index_for_size (inline-value placement)
-import bioseq_storage_lazy;              // make_lazy_in_memory (inline-value tally)
-import bioseq_storage_scanner_pg;        // with_lazy_postgres (stub-value tally recompute)
-import bioseq_indexing.type;             // DOC0279 §11.5 — SequenceIndexType
-import bioseq_indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
-import bioseq_storage_indexing_pg;       // IndexStorageSequencePg
-import bioseq_storage_indexing_admin;    // estimate_index_presence, open_sequence_storage, letter_to_rank
-import bioseq_instr;                      // runtime profiler — summary at scan end
-import sequan_compat;                     // seq:: alphabet alias used by sequence_custom_alphabet
+import bioseq.column.tam;          // DOC0322 §7.4 — tid_to_row_number, row_number_to_tid, IsBioseqColumnTableAmTable
+import bioseq.config;                     // DOC0322 §9.3 — bioseq_aligner_*, bioseq_index_scan, bioseq_enable_vectorization, bioseq_read_sequence_index, bioseq_enable_parallel_execution, bioseq_min_parallel_processes, bioseq_enable_page_cache GUCs
+import bioseq.vector.types;        // VectorColumn, VectorTupleTableSlot, CreateVectorTupleTableSlot, ...
+import bioseq.vector.execution;    // CreateVectorizedExprList, ConstructVectorizedQualList, ExecuteVectorizedQual
+import bioseq.common.mlogging;
+import bioseq.storage.metadata;
+import bioseq.table.types;
+import bioseq.table.scan_state;
+import bioseq.pg_utils;
+import bioseq.scheduler.dispatch_buffer;
+import bioseq.scheduler.supervisor_pg;
+import bioseq.parallelism.mode;
+import bioseq.sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
+import bioseq.sequences.simd;             // stdc_recode_to_type_params
+import bioseq.sequences.minimap_port;  // for MatchResult
+import bioseq.sequences.pipe;            // for PipelineDescription / describe_pipeline_for
+import bioseq.sequences.cigar;                    // for format_cigar
+import bioseq.types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
+import bioseq.storage.manager;                   // DOC0279 §12.5 — seq_locator, is_locator_stub, decode_locator_from_stub, seq_caches
+import bioseq.storage.bucket_math;               // bucket_index_for_size (inline-value placement)
+import bioseq.storage.lazy;              // make_lazy_in_memory (inline-value tally)
+import bioseq.storage.scanner_pg;        // with_lazy_postgres (stub-value tally recompute)
+import bioseq.indexing.type;             // DOC0279 §11.5 — SequenceIndexType
+import bioseq.indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
+import bioseq.storage.indexing_pg.chunked_storage;       // IndexStorageSequencePg
+import bioseq.storage.indexing_pg.admin;    // estimate_index_presence, open_sequence_storage, letter_to_rank
+import bioseq.instr;                      // runtime profiler — summary at scan end
+import bioseq.common.sequan_compat;                     // seq:: alphabet alias used by sequence_custom_alphabet
 
 /*
  * DOC0322 §7.5 — the former `extern "C++"` cross-partition reaches are replaced

@@ -22,10 +22,10 @@ module;
 
 #include <cstring>
 
-export module pg_utils;
+export module bioseq.pg_utils;
 
-export import pg_utils.lists;
-export import pg_utils.bitmapset;
+export import bioseq.pg_utils.lists;
+export import bioseq.pg_utils.bitmapset;
 
 /*
  * PageCacheDisableScope temporarily forces bioseq_enable_page_cache to

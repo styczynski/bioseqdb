@@ -49,15 +49,15 @@
 #include <vector>
 
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.two_stacks;
-import bioseq_sequences.kmers.hashers;
-import bioseq_sequences.kmers.mm_sketch_baseline;  // NEW: verbatim mm_sketch port
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.two_stacks;
+import bioseq.sequences.kmers.hashers;
+import bioseq.sequences.kmers.mm_sketch_baseline;  // NEW: verbatim mm_sketch port
+import bioseq.common.testing;
 
 using namespace seq::literals;
 

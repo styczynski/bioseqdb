@@ -11,11 +11,11 @@ module;
 #include <ranges>
 #include <string>
 
-export module bioseq_sequences.kmers.mm_sketch_baseline;
+export module bioseq.sequences.kmers.mm_sketch_baseline;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
 
 // =============================================================================
 // `mm_sketch_baseline` — verbatim transcription of `mm_sketch` from

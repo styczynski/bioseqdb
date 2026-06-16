@@ -22,11 +22,11 @@ extern "C" {
 #include <utility>
 #include <vector>
 
-export module bioseq_storage_indexing_sorted_runs_pg;
+export module bioseq.storage.indexing_pg.sorted_runs;
 
-import mlogging;
-import pg_utils;
-import bioseq_parallelism.memory_admission;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::storage::indexing {
 

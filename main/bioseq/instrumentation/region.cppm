@@ -20,15 +20,15 @@ module;
 
 #include <cstdint>
 
-export module bioseq_instr.region;
+export module bioseq.instr.region;
 
-import bioseq_instr.config;
-import bioseq_instr.descriptor;
-import bioseq_instr.aggregate;
-import bioseq_instr.thread_state;
-import bioseq_instr.clock;
-import bioseq_instr.global_state;
-import bioseq_instr.pmu;
+import bioseq.instr.config;
+import bioseq.instr.descriptor;
+import bioseq.instr.aggregate;
+import bioseq.instr.thread_state;
+import bioseq.instr.clock;
+import bioseq.instr.global_state;
+import bioseq.instr.pmu;
 
 export namespace bioseq::instr {
 

@@ -15,17 +15,17 @@ module;
 #include "common.h"
 
 
-export module bioseq_table:index_scan;
+export module bioseq.table:index_scan;
 
-import mlogging;
-import pg_utils;
-import bioseq_table_types;
-import bioseq_scan_state;
-import pg_utils.lists;
-import pg_utils.bitmapset;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.table.types;
+import bioseq.table.scan_state;
+import bioseq.pg_utils.lists;
+import bioseq.pg_utils.bitmapset;
 import :access_method;       // DOC0322 §7.4/§7.5 — bioseq_index_fetch_begin_extended (exported)
 import :utils;               // DOC0322 §7.4 — BioseqColumnAttrNeeded
-import bioseq_column_tam;    // DOC0322 §7.4 — IsBioseqColumnTableAmTable (moved to the leaf)
+import bioseq.column.tam;    // DOC0322 §7.4 — IsBioseqColumnTableAmTable (moved to the leaf)
 
 /*
  * When an ordering operator is used, tuples fetched from the index that

@@ -13,7 +13,7 @@ module;
 
 #include <csignal>
 
-export module bioseq_instr.detail.siglock;
+export module bioseq.instr.detail.siglock;
 
 export namespace bioseq::instr::detail {
 

@@ -33,7 +33,7 @@ module;
 #  include <unistd.h>
 #endif
 
-export module bioseq_instr.pmu.linux;
+export module bioseq.instr.pmu.linux;
 
 export namespace bioseq::instr::pmu::linux_backend {
 

@@ -22,13 +22,13 @@ extern "C" {
 #include <tuple>
 #include <vector>
 
-export module bioseq_storage_indexing_residency_pg;
+export module bioseq.storage.indexing_pg.residency;
 
-import mlogging;
-import bioseq_storage_size;
-import bioseq_indexing.type;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_parallelism.memory_admission;
+import bioseq.common.mlogging;
+import bioseq.storage.size;
+import bioseq.indexing.type;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.parallelism.memory_admission;
 
 namespace bioseq::storage::indexing::residency_detail {
 

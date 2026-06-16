@@ -48,8 +48,8 @@
 #include <utility>
 #include <vector>
 
-import mlogging;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.instr;
 import bench_framework;
 
 namespace {

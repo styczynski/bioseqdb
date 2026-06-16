@@ -15,7 +15,7 @@ module;
 #include <cstdint>
 #include <limits>
 #include <string_view>
-export module bioseq_indexing.type;
+export module bioseq.indexing.type;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {

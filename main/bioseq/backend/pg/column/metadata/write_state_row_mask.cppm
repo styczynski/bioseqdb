@@ -17,12 +17,12 @@ module;
 #include "common.h"
 
 
-export module storage_metadata:write_state_row_mask;
+export module bioseq.storage.metadata:write_state_row_mask;
 
 import :core;            // FlushRowMaskCache, UpdateChunkGroupDeletedRows, BioseqColumnRowMask*RelationId
-import config;           // DOC0322 §6.5 — Anum_bioseq_row_mask_* (was config.h macros via columnar.h)
-import mlogging;
-import pg_utils;
+import bioseq.config;           // DOC0322 §6.5 — Anum_bioseq_row_mask_* (was config.h macros via columnar.h)
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
 
 /*
  * Per-subtransaction node. rowMaskWriteStateEntryList accumulates the

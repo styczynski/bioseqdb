@@ -17,7 +17,7 @@
 //     constraint from SPEC_HOW_TO_CONNECT_ALIGNER_3 §13.1.
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 #include <set>
 

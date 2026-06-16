@@ -12,7 +12,7 @@ module;
 
 #include <cstdint>
 
-export module bioseq_instr.pmu.stub;
+export module bioseq.instr.pmu.stub;
 
 export namespace bioseq::instr::pmu::stub {
 

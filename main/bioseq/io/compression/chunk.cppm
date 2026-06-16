@@ -31,11 +31,11 @@ module;
 #include <string_view>
 #include <utility>
 
-export module bioseq_io.compression.chunk;
+export module bioseq.io.compression.chunk;
 
-import mlogging;
-import bioseq_io.compression.aligned_byte_buffer;
-import bioseq_io.compression.crc32;
+import bioseq.common.mlogging;
+import bioseq.io.compression.aligned_byte_buffer;
+import bioseq.io.compression.crc32;
 
 export namespace bioseq::io::compression {
 

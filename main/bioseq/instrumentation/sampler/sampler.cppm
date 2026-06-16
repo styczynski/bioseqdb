@@ -12,7 +12,7 @@ module;
 
 #include <cstdint>
 
-export module bioseq_instr.sampler;
+export module bioseq.instr.sampler;
 
 export namespace bioseq::instr::sampler {
 

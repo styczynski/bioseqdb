@@ -7,9 +7,9 @@
  * a fallback for sites where the value field could exceed 32 bits
  * (e.g. anchor indices in pathological large-input runs).
  */
-export module bioseq_simd.sorting.kv64v64;
+export module bioseq.simd.sorting.kv64v64;
 
-import bioseq_simd.sorting;
+import bioseq.simd.sorting;
 
 export namespace bioseq::simd::sorting::kv64v64 {
 

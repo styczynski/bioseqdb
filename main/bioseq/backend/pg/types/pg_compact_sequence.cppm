@@ -39,13 +39,13 @@ extern "C" {
 #include <string>
 #include <vector>
 
-export module bioseq_types.pg_compact_sequence;
+export module bioseq.types.pg_compact_sequence;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.pg_utils;
 
 export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
 

@@ -8,7 +8,7 @@ module;
 #include <cstdint>
 #include <string_view>
 
-export module bioseq_parallelism.mode;
+export module bioseq.parallelism.mode;
 
 export namespace bioseq::parallelism {
 

@@ -7,16 +7,16 @@ module;
 #include <string>
 #include <functional>
 
-export module bioseq_sequences.kmers.hashers.minimap_int;
+export module bioseq.sequences.kmers.hashers.minimap_int;
 
-import bioseq_sequences.kmers.hashers.base;
-import bioseq_sequences.kmers.hashers.lexic;
+import bioseq.sequences.kmers.hashers.base;
+import bioseq.sequences.kmers.hashers.lexic;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import algo.circular_append_buffer;
-import bioseq_simd.utils;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.common.circular_append_buffer;
+import bioseq.simd.utils;
 
 export {
 

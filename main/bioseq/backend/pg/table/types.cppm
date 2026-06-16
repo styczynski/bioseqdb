@@ -22,13 +22,13 @@ module;
 #include <math.h>
 #include <type_traits>
 
-export module bioseq_table_types;
+export module bioseq.table.types;
 
-export import bioseq_scan_state;
-import bioseq_vector_types;
-import storage_metadata;   // DOC0322 §9.2 — BioseqColumnReadState, ParallelBioseqColumnScan, StripeMetadata (was types.h)
-import pg_utils.lists;
-import pg_utils.bitmapset;
+export import bioseq.table.scan_state;
+import bioseq.vector.types;
+import bioseq.storage.metadata;   // DOC0322 §9.2 — BioseqColumnReadState, ParallelBioseqColumnScan, StripeMetadata (was types.h)
+import bioseq.pg_utils.lists;
+import bioseq.pg_utils.bitmapset;
 
 /*
  * BioseqColumnScanDescData is the scan descriptor handed back to the executor

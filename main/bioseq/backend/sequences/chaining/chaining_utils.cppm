@@ -28,10 +28,10 @@ module;
 #include <algorithm>
 #include <limits>
 
-export module bioseq_sequences.chaining.utils;
+export module bioseq.sequences.chaining.utils;
 
-import mlogging;
-import context;
+import bioseq.common.mlogging;
+import bioseq.common.context;
 
 export {
 namespace bioseq::chaining {

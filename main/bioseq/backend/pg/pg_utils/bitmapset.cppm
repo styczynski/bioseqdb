@@ -23,7 +23,7 @@ module;
 #include <iterator>
 #include <type_traits>
 
-export module pg_utils.bitmapset;
+export module bioseq.pg_utils.bitmapset;
 
 /*
  * Forward iterator over the members of a PostgreSQL Bitmapset. Yields the

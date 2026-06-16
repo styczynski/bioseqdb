@@ -15,25 +15,17 @@ module;
 
 #include "safe_lib.h"
 
-export module bioseq_table_io:writer;
+export module bioseq.table.io:writer;
 
-import mlogging;
-import storage_compression;
-import storage_physical;
-import storage_metadata;   // DOC0322 §9.2 — the column-store data-model structs (was types.h)
-import config;             // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.storage.compression;
+import bioseq.storage.physical;
+import bioseq.storage.metadata;   // DOC0322 §9.2 — the column-store data-model structs (was types.h)
+import bioseq.config;             // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
+import bioseq.pg_utils;
 import :buffers;
 
-export BioseqColumnWriteState * BioseqColumnBeginWrite(RelFileLocator relfilelocator,
-											   BioseqColumnOptions options,
-											   TupleDesc tupleDescriptor);
-export uint64_t BioseqColumnWriteRow(BioseqColumnWriteState *state, Datum *columnValues,
-							   bool *columnNulls);
 export void BioseqColumnFlushPendingWrites(BioseqColumnWriteState *state);
-export void BioseqColumnEndWrite(BioseqColumnWriteState *state);
-export bool ContainsPendingWrites(BioseqColumnWriteState *state);
-export MemoryContext BioseqColumnWritePerTupleContext(BioseqColumnWriteState *state);
 
 
 static StripeBuffers * CreateEmptyStripeBuffers(uint32_t stripeMaxRowCount,
@@ -61,7 +53,7 @@ static StringInfo CopyStringInfo(StringInfo sourceString);
  * handle. This handle should be used for adding the row values and finishing the
  * data load operation.
  */
-BioseqColumnWriteState *
+export BioseqColumnWriteState *
 BioseqColumnBeginWrite(RelFileLocator relfilelocator,
 				   BioseqColumnOptions options,
 				   TupleDesc tupleDescriptor)
@@ -129,7 +121,7 @@ BioseqColumnBeginWrite(RelFileLocator relfilelocator,
  *
  * Returns the "row number" assigned to written row.
  */
-uint64_t
+export uint64_t
 BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bool *columnNulls)
 {
 	uint32_t columnIndex = 0;
@@ -295,7 +287,7 @@ BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bo
  * BioseqColumnEndWrite finishes a columnar data load operation. If we have an unflushed
  * stripe, we flush it.
  */
-void
+export void
 BioseqColumnEndWrite(BioseqColumnWriteState *writeState)
 {
 	BioseqColumnFlushPendingWrites(writeState);
@@ -330,7 +322,7 @@ BioseqColumnFlushPendingWrites(BioseqColumnWriteState *writeState)
  *
  * Return per-tuple context for columnar write operation.
  */
-MemoryContext
+export MemoryContext
 BioseqColumnWritePerTupleContext(BioseqColumnWriteState *state)
 {
 	return state->perTupleContext;
@@ -791,7 +783,7 @@ CopyStringInfo(StringInfo sourceString)
 }
 
 
-bool
+export bool
 ContainsPendingWrites(BioseqColumnWriteState *state)
 {
 	return state->stripeBuffers != NULL && state->stripeBuffers->rowCount != 0;

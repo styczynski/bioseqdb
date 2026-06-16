@@ -14,8 +14,8 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_parallelism.concepts;
-import bioseq_parallelism.mode;
+export module bioseq.parallelism.concepts;
+import bioseq.parallelism.mode;
 
 export namespace bioseq::parallelism {
 

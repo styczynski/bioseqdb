@@ -60,15 +60,15 @@ module;
 #include <variant>
 #include <vector>
 
-export module bioseq_io.writer;
+export module bioseq.io.writer;
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import bioseq_io.options;
-import bioseq_io.public_api;
-import bioseq_io.sinks;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.io.options;
+import bioseq.io.public_api;
+import bioseq.io.sinks;
 
 export namespace bioseq::io {
 

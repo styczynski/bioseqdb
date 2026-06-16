@@ -18,19 +18,19 @@ module;
 #include <string_view>
 #include <utility>
 #include <vector>
-export module bioseq_indexing.minimizer_sequence;
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_indexing.traits;
-import bioseq_indexing.minimizer_hashmap;            // MinimizerHashmapFragmentIndex, build_from_pairs, wire_for_each_*
-import bioseq_sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData
-import bioseq_sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
-import bioseq_storage_lazy;                          // lazy_compact_sequence
-import bioseq_storage_size;                          // sequence_size_t
-import bioseq_parallelism.mode;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.memory_admission;
-import bioseq_parallelism.pipeline_ops;
+export module bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_hashmap;            // MinimizerHashmapFragmentIndex, build_from_pairs, wire_for_each_*
+import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData
+import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
+import bioseq.storage.lazy;                          // lazy_compact_sequence
+import bioseq.storage.size;                          // sequence_size_t
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.pipeline_ops;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 extern "C" void bioseq_sort_pair_run_u128_keys(

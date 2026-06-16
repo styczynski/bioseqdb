@@ -32,18 +32,18 @@
 #include <string>
 #include <vector>
 
-import mlogging;
-import sequan_compat;
-import context;
-import bioseq_sequences;
-import bioseq_sequences.minimap_port;   // Minimap2Params / MatchResult(Collection)
-import bioseq_sequences.pipe;           // minimap_port entry
-import bioseq_sequences.chaining.utils; // Anchor / Chain / ChainingParams
-import bioseq_sequences.chaining.vulkan;// chain_anchors_vulkan / vulkan_chaining_supported
-import bioseq_gpu.vulkan.runtime;       // Runtime / scan_spirv_layout / pipeline key
-import bioseq_gpu.vulkan.shader_compiler;
-import bioseq_storage_lazy;             // make_lazy_in_memory
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.common.context;
+import bioseq.sequences;
+import bioseq.sequences.minimap_port;   // Minimap2Params / MatchResult(Collection)
+import bioseq.sequences.pipe;           // minimap_port entry
+import bioseq.sequences.chaining.utils; // Anchor / Chain / ChainingParams
+import bioseq.sequences.chaining.vulkan;// chain_anchors_vulkan / vulkan_chaining_supported
+import bioseq.gpu.vulkan.runtime;       // Runtime / scan_spirv_layout / pipeline key
+import bioseq.gpu.vulkan.shader_compiler;
+import bioseq.storage.lazy;             // make_lazy_in_memory
+import bioseq.common.testing;
 
 using namespace seq::literals;
 

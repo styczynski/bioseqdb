@@ -18,17 +18,17 @@
 #include <utility>
 #include <vector>
 
-import mlogging;
-import context;
-import bioseq_sequences.kmers;
-import bioseq_sequences.minimap_port;        // collect_seed_hits
-import bioseq_sequences.chaining.utils;      // Anchor / ArenaSlab / make_arena_slab
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_indexing.minimizer_vulkan;
-import bioseq_sequences.seeding.vulkan;
-import bioseq_gpu.vulkan.runtime;
-import bioseq_storage_size;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.context;
+import bioseq.sequences.kmers;
+import bioseq.sequences.minimap_port;        // collect_seed_hits
+import bioseq.sequences.chaining.utils;      // Anchor / ArenaSlab / make_arena_slab
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_vulkan;
+import bioseq.sequences.seeding.vulkan;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.storage.size;
+import bioseq.common.testing;
 
 namespace {
 

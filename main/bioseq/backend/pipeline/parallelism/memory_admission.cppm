@@ -13,8 +13,8 @@ module;
 #include <optional>
 #include <utility>
 
-export module bioseq_parallelism.memory_admission;
-import bioseq_instr;
+export module bioseq.parallelism.memory_admission;
+import bioseq.instr;
 
 export namespace bioseq::parallelism {
 

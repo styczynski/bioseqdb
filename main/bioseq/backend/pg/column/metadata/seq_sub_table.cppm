@@ -6,7 +6,7 @@
  *
  *-------------------------------------------------------------------------
  */
-export module storage_metadata:seq_sub_table;
+export module bioseq.storage.metadata:seq_sub_table;
 
 import :core;
 

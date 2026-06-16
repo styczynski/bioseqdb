@@ -28,12 +28,12 @@ module;
 
 #include <vulkan/vulkan.h>
 
-export module bioseq_indexing.minimizer_vulkan;
+export module bioseq.indexing.minimizer_vulkan;
 
-import mlogging;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_gpu.vulkan.runtime;
-import bioseq_parallelism.memory_admission;
+import bioseq.common.mlogging;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
 
 export namespace bioseq::indexing {
 

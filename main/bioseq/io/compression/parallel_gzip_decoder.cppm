@@ -16,14 +16,14 @@ module;
 #include <string>
 #include <utility>
 
-export module bioseq_io.compression.parallel_gzip_decoder;
+export module bioseq.io.compression.parallel_gzip_decoder;
 
-import mlogging;
-import bioseq_io.sources;
-import bioseq_io.simd_kernels;
-import bioseq_io.compression.chunk;
-import bioseq_io.compression.chunk_fetcher;
-import bioseq_io.compression.crc32;
+import bioseq.common.mlogging;
+import bioseq.io.sources;
+import bioseq.io.simd_kernels;
+import bioseq.io.compression.chunk;
+import bioseq.io.compression.chunk_fetcher;
+import bioseq.io.compression.crc32;
 
 export namespace bioseq::io::compression {
 

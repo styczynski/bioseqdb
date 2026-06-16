@@ -16,9 +16,9 @@ module;
 #include <cstring>
 #include <new>
 
-export module bioseq_instr.trace;
+export module bioseq.instr.trace;
 
-import bioseq_instr.config;
+import bioseq.instr.config;
 
 export namespace bioseq::instr {
 

@@ -27,7 +27,7 @@ module;
 #include <span>
 #include <utility>
 
-export module bioseq_column.vector_compare;
+export module bioseq.column.vector_compare;
 
 static_assert(__cplusplus >= 202302L, "bioseq_column.vector_compare requires C++23-or-later");
 

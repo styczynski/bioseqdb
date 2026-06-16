@@ -15,12 +15,12 @@ module;
 
 #include <algorithm>
 
-export module bioseq_vector_types_aggregates;
+export module bioseq.vector.types.aggregates;
 
-import mlogging;
-import pg_utils;
-import bioseq_vector_types;           // Int128AggState, Int64AggState
-import bioseq_vector_types_numeric;   // int128_to_numeric
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.vector.types;           // Int128AggState, Int64AggState
+import bioseq.vector.types.numeric;   // int128_to_numeric
 
 extern "C" {
 

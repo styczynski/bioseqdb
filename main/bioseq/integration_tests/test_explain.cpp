@@ -12,7 +12,7 @@
 //     plan tree references "BioseqScan" as the custom plan provider.
 
 #include "common_tests_integration.h"
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

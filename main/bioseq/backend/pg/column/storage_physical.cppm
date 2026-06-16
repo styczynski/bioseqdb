@@ -35,10 +35,10 @@ module;
 
 #include <algorithm>
 
-export module storage_physical;
-import mlogging;
-import config;     // DOC0322 §6.5 — BIOSEQ_COLUMN_BYTES_PER_PAGE, BIOSEQ_COLUMN_VERSION_* (moved from config.h)
-import pg_utils;
+export module bioseq.storage.physical;
+import bioseq.common.mlogging;
+import bioseq.config;     // DOC0322 §6.5 — BIOSEQ_COLUMN_BYTES_PER_PAGE, BIOSEQ_COLUMN_VERSION_* (moved from config.h)
+import bioseq.pg_utils;
 
 export constexpr uint64_t BIOSEQ_COLUMN_INVALID_ROW_NUMBER = static_cast<uint64_t>(0);
 export constexpr uint64_t BIOSEQ_COLUMN_FIRST_ROW_NUMBER = static_cast<uint64_t>(1);

@@ -24,11 +24,11 @@ module;
 #include <span>
 #include <string>
 
-export module bioseq_io.compression.gzip_format;
+export module bioseq.io.compression.gzip_format;
 
-import mlogging;
-import bioseq_io.compression.bit_reader;
-import bioseq_io.simd_kernels;
+import bioseq.common.mlogging;
+import bioseq.io.compression.bit_reader;
+import bioseq.io.simd_kernels;
 
 export namespace bioseq::io::compression {
 

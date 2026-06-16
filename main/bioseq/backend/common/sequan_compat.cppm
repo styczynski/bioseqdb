@@ -23,9 +23,9 @@ module;
 #include <seqan3/contrib/sdsl-lite.hpp>
 
 
-export module sequan_compat;
+export module bioseq.common.sequan_compat;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export {
 #include <seqan3/alphabet/adaptation/all.hpp>

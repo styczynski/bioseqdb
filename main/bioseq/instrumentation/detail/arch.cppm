@@ -22,7 +22,7 @@ module;
 #  include <x86intrin.h>
 #endif
 
-export module bioseq_instr.detail.arch;
+export module bioseq.instr.detail.arch;
 
 export namespace bioseq::instr::detail::arch {
 

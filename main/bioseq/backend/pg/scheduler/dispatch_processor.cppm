@@ -133,35 +133,35 @@ module;
 #include <vector>
 #include <unistd.h>
 
-export module bioseq_scheduler.dispatch_processor;
+export module bioseq.scheduler.dispatch_processor;
 
-import mlogging;
-import pg_utils;
-import config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
-import bioseq_indexing.type;
-import bioseq_indexing.traits;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_indexing.minimizer_sequence;
-import bioseq_storage_indexing_pg;
-import bioseq_storage_indexing_handles;
-import bioseq_storage_indexing_residency_pg;
-import bioseq_storage_indexing_sorted_runs_pg;
-import bioseq_sequences;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_sequences.minimap_port;
-import bioseq_sequences.pipe;
-import bioseq_types.pg_compact_sequence;
-import bioseq_instr;
-import bioseq_storage;
-import bioseq_storage_lazy;
-import bioseq_storage_scanner;
-import bioseq_storage_scanner_pg;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.concepts;
-import bioseq_parallelism.pool;
-import bioseq_parallelism.memory_admission;
-import bioseq_scheduler.supervisor_pg;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
+import bioseq.indexing.type;
+import bioseq.indexing.traits;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_sequence;
+import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.storage.indexing_pg.handles;
+import bioseq.storage.indexing_pg.residency;
+import bioseq.storage.indexing_pg.sorted_runs;
+import bioseq.sequences;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.minimap_port;
+import bioseq.sequences.pipe;
+import bioseq.types.pg_compact_sequence;
+import bioseq.instr;
+import bioseq.storage.manager;
+import bioseq.storage.lazy;
+import bioseq.storage.scanner;
+import bioseq.storage.scanner_pg;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
+import bioseq.parallelism.memory_admission;
+import bioseq.scheduler.supervisor_pg;
 
 HWY_BEFORE_NAMESPACE();
 

@@ -17,11 +17,11 @@ module;
 
 #include "common.h"
 
-export module storage_metadata:read_state_cache;
+export module bioseq.storage.metadata:read_state_cache;
 
 import :core;        // DOC0322 §9.2 — BioseqColumnReadState (was types.h, now defined in :core)
-import mlogging;
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
 
 // DOC0322 §7.2/§7.3 (hook realization) — BioseqColumnEndRead lives in
 // bioseq_table_io:reader, which imports storage_metadata; importing it here

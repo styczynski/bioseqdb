@@ -3,9 +3,9 @@ module;
 
 #include <string_view>
 
-export module config;
+export module bioseq.config;
 
-import pg_utils;
+import bioseq.pg_utils;
 
 /*
  * DOC0322 §6.5/§9.2 — config now OWNS the compression-method enum (moved here

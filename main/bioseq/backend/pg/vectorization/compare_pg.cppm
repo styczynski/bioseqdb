@@ -18,12 +18,12 @@ module;
 #include <span>
 #include <utility>
 
-export module bioseq_column_vector_compare_pg;
+export module bioseq.column.vector_compare_pg;
 
-import bioseq_vector_types;          // VectorColumn, BuildVectorColumn, VectorFnArgument
-export import bioseq_column.vector_compare; // the Domain-N kernel + concept (re-export so the
+import bioseq.vector.types;          // VectorColumn, BuildVectorColumn, VectorFnArgument
+export import bioseq.column.vector_compare; // the Domain-N kernel + concept (re-export so the
                                             // int.cppm/date.cppm wrappers see CmpOp + the kernel)
-import pg_utils;
+import bioseq.pg_utils;
 
 using namespace bioseq::column::vec;
 

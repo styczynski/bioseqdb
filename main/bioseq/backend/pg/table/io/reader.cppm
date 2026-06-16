@@ -15,13 +15,13 @@ module;
 
 #include "safe_lib.h"
 
-export module bioseq_table_io:reader;
+export module bioseq.table.io:reader;
 
-import mlogging;
-import bioseq_vector_types;
-import storage_metadata;
-import pg_utils;
-import config;                  // DOC0322 §9.3 — bioseq_enable_dml, bioseq_enable_page_cache GUCs
+import bioseq.common.mlogging;
+import bioseq.vector.types;
+import bioseq.storage.metadata;
+import bioseq.pg_utils;
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_enable_dml, bioseq_enable_page_cache GUCs
 import :cache;
 import :pruning;
 import :read_chunk;

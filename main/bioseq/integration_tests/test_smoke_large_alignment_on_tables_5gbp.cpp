@@ -21,8 +21,8 @@
 #include <span>
 #include <tuple>
 
-import integration_tests.common;
-import mlogging;
+import bioseq.integration_tests.common;
+import bioseq.common.mlogging;
 
 using namespace bioseq_int_tests;
 

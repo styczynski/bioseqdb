@@ -59,21 +59,21 @@ extern "C" {
 
 #include <boost/container/flat_map.hpp>  // DOC0260 R14 — seq_caches::entries
 
-export module bioseq_storage:sequence_storage_manager;
+export module bioseq.storage.manager:sequence_storage_manager;
 
-import mlogging;
-import pg_utils;
-import config;                  // DOC0322 §9.3 — bioseq_storage_max_seq_sub_table_gbs GUC
-import storage_metadata;
-import bioseq_table_io;
-import bioseq_types.pg_compact_sequence;
-import bioseq_sequences;
-import sequan_compat;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
-import bioseq_storage_size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_storage_max_seq_sub_table_gbs GUC
+import bioseq.storage.metadata;
+import bioseq.table.io;
+import bioseq.types.pg_compact_sequence;
+import bioseq.sequences;
+import bioseq.common.sequan_compat;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
+import bioseq.storage.size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
 // DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
 // module so the unit-test TU can link them without the Postgres backend.
 // Re-exported here so existing `import bioseq_storage` consumers are unchanged.
-export import bioseq_bucket_math;
+export import bioseq.storage.bucket_math;
 
 static_assert(__cplusplus >= 202302L,
               "DOC0260 requires C++23-or-later (project default: C++26)");

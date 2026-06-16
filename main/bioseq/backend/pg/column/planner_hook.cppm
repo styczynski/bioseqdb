@@ -17,14 +17,14 @@ module;
 #include "common.h"
 
 
-export module bioseq_planner_hook;
+export module bioseq.column.planner_hook;
 
-import mlogging;
-import bioseq_table;
-import pg_utils;
-import config;                    // DOC0322 §9.3 — bioseq_enable_vectorization, bioseq_index_scan GUCs
-import bioseq_vector_execution;   // CheckOpExprArgumentRules, GetVectorizedProcedureOid
-import bioseq_aggregator_node;    // bioseq_create_aggregator_node, bioseq_register_aggregator_node
+import bioseq.common.mlogging;
+import bioseq.table;
+import bioseq.pg_utils;
+import bioseq.config;                    // DOC0322 §9.3 — bioseq_enable_vectorization, bioseq_index_scan GUCs
+import bioseq.vector.execution;   // CheckOpExprArgumentRules, GetVectorizedProcedureOid
+import bioseq.vector.aggregator_node;    // bioseq_create_aggregator_node, bioseq_register_aggregator_node
 
 /*
  * DOC0322 §7.7/§9.4 — the file-body `extern "C++"` wrapper is dropped.

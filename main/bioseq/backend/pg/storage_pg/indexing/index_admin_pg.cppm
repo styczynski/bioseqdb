@@ -23,34 +23,34 @@ module;
 #include <string>
 #include <string_view>
 #include <vector>
-export module bioseq_storage_indexing_admin;
-import mlogging;
-import pg_utils;
-import config;                             // DOC0322 §9.3 — bioseq_update_index_on_insert GUC
-import bioseq_storage;                     // seq_caches, seq_locator, is_locator_stub, decode_locator_from_stub
-import bioseq_bucket_math;
-import bioseq_storage_size;
-import bioseq_storage_lazy;                // make_lazy_in_memory
-import bioseq_storage_scanner_pg;          // with_lazy_postgres
-import bioseq_types.pg_compact_sequence;   // pgseq_t, dispatch_instance
-import bioseq_sequences;                   // compact_sequence_range
-import sequan_compat;                      // seqan3::char_is_valid_for
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_indexing.traits;
-import bioseq_indexing.registry;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_indexing.minimizer_sequence;
-import bioseq_indexing.symbol_counts;
-import bioseq_storage_indexing_pg;
-import bioseq_parallelism.memory_admission;
-import bioseq_parallelism.mode;
-import bioseq_parallelism.pool;
-import bioseq_scheduler.supervisor_pg;
-import bioseq_table_io;                     // BioseqColumnBeginRead/BioseqColumnReadNextRow/BioseqColumnEndRead (raw-stub row walk, §8.6)
-export import bioseq_storage_indexing_handles;
-import bioseq_column_tam;                    // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (leaf)
-import storage_metadata;                     // DOC0322 §7.4 — BioseqColumnTableRowCount (moved to storage_metadata:core)
+export module bioseq.storage.indexing_pg.admin;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.config;                             // DOC0322 §9.3 — bioseq_update_index_on_insert GUC
+import bioseq.storage.manager;                     // seq_caches, seq_locator, is_locator_stub, decode_locator_from_stub
+import bioseq.storage.bucket_math;
+import bioseq.storage.size;
+import bioseq.storage.lazy;                // make_lazy_in_memory
+import bioseq.storage.scanner_pg;          // with_lazy_postgres
+import bioseq.types.pg_compact_sequence;   // pgseq_t, dispatch_instance
+import bioseq.sequences;                   // compact_sequence_range
+import bioseq.common.sequan_compat;                      // seqan3::char_is_valid_for
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.indexing.traits;
+import bioseq.indexing.registry;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.symbol_counts;
+import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
+import bioseq.scheduler.supervisor_pg;
+import bioseq.table.io;                     // BioseqColumnBeginRead/BioseqColumnReadNextRow/BioseqColumnEndRead (raw-stub row walk, §8.6)
+export import bioseq.storage.indexing_pg.handles;
+import bioseq.column.tam;                    // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (leaf)
+import bioseq.storage.metadata;                     // DOC0322 §7.4 — BioseqColumnTableRowCount (moved to storage_metadata:core)
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::storage::indexing {

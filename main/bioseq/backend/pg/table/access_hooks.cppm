@@ -11,12 +11,12 @@
 module;
 #include "common.h"
 
-export module bioseq_table:access_hooks;
+export module bioseq.table:access_hooks;
 
-import mlogging;
-import storage_metadata;
-import bioseq_storage;
-import bioseq_column_tam;
+import bioseq.common.mlogging;
+import bioseq.storage.metadata;
+import bioseq.storage.manager;
+import bioseq.column.tam;
 import :access_identity;
 
 namespace {

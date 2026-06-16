@@ -8,9 +8,9 @@
  * sites. Sign-bias signed keys by `+0x80000000` before packing so
  * Highway's unsigned `>>32` comparator matches the desired signed order.
  */
-export module bioseq_simd.sorting.kv32v32;
+export module bioseq.simd.sorting.kv32v32;
 
-import bioseq_simd.sorting;
+import bioseq.simd.sorting;
 
 export namespace bioseq::simd::sorting::kv32v32 {
 

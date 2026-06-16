@@ -18,7 +18,7 @@ module;
 #include <cstdint>
 #include <vector>
 
-export module bioseq_gpu.vulkan.phase_b_abi;
+export module bioseq.gpu.vulkan.phase_b_abi;
 
 export namespace bioseq::gpu::vulkan {
 

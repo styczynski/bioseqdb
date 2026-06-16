@@ -29,12 +29,12 @@ module;
 #include <utility>
 #include <vector>
 
-export module bioseq_io.identifier_parser;
+export module bioseq.io.identifier_parser;
 
-import mlogging;
-import bioseq_io.simd_kernels;      // scan_for_each_delim4 (one SIMD pass per header)
-import bioseq_io.file_utils;        // bioseq::io::detail::to_ascii_lower (shared ASCII fold)
-import bioseq_io.identifier_formats;
+import bioseq.common.mlogging;
+import bioseq.io.simd_kernels;      // scan_for_each_delim4 (one SIMD pass per header)
+import bioseq.io.file_utils;        // bioseq::io::detail::to_ascii_lower (shared ASCII fold)
+import bioseq.io.identifier_formats;
 
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 

@@ -22,17 +22,17 @@ extern "C" {
 #include "catalog/namespace.h"
 }
 
-export module bioseq_column;
+export module bioseq.column;
 
-import mlogging;
-import bioseq_table;
-import config;
-import pg_utils;
-import bioseq_storage;
-import bioseq_scheduler.supervisor_pg;
-import bioseq_storage_indexing_residency_pg;
-import bioseq_indexing.minimizer_sequence;
-import bioseq_planner_hook;        // DOC0322 §9.4 — exported bioseq_planner_init
+import bioseq.common.mlogging;
+import bioseq.table;
+import bioseq.config;
+import bioseq.pg_utils;
+import bioseq.storage.manager;
+import bioseq.scheduler.supervisor_pg;
+import bioseq.storage.indexing_pg.residency;
+import bioseq.indexing.minimizer_sequence;
+import bioseq.column.planner_hook;        // DOC0322 §9.4 — exported bioseq_planner_init
 
 /*
  * DOC0322 §7.7/§9.4 — the file-body `extern "C++"` wrapper is gone. bioseq_init

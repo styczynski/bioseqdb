@@ -6,7 +6,7 @@
  *
  *-------------------------------------------------------------------------
  */
-export module storage_metadata:options;
+export module bioseq.storage.metadata:options;
 
 import :core;
 

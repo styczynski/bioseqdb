@@ -36,7 +36,7 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.fragment_cache;
+export module bioseq.common.fragment_cache;
 
 static_assert(__cplusplus >= 202302L, "DOC0263 requires C++23-or-later");
 

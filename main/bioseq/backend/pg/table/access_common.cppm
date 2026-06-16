@@ -12,14 +12,14 @@ module;
 #include <cstdint>
 #include <cstring>
 
-export module bioseq_table:access_common;
+export module bioseq.table:access_common;
 
-import mlogging;
-import pg_utils;
-import bioseq_table_types;
-import bioseq_storage;
-import bioseq_am_cache;
-import bioseq_types.pg_compact_sequence;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
+import bioseq.table.types;
+import bioseq.storage.manager;
+import bioseq.table.am_cache;
+import bioseq.types.pg_compact_sequence;
 
 namespace {
 

@@ -32,9 +32,9 @@ module;
 #include <optional>
 #include <queue>
 
-export module bioseq_io.concurrency;
+export module bioseq.io.concurrency;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io {
 

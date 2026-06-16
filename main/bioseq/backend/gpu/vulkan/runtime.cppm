@@ -36,14 +36,14 @@ module;
 
 #include <vulkan/vulkan.h>
 
-export module bioseq_gpu.vulkan.runtime;
+export module bioseq.gpu.vulkan.runtime;
 
-import mlogging;
-import bioseq_parallelism.memory_admission;
-import bioseq_gpu.vulkan.shader_compiler;
-import bioseq_gpu.vulkan.phase_b_abi;
-import bioseq_gpu.vulkan.phase_c_abi;
-import bioseq_instr;  // DOC0310 §21 — phase_c_* sub-region timing labels
+import bioseq.common.mlogging;
+import bioseq.parallelism.memory_admission;
+import bioseq.gpu.vulkan.shader_compiler;
+import bioseq.gpu.vulkan.phase_b_abi;
+import bioseq.gpu.vulkan.phase_c_abi;
+import bioseq.instr;  // DOC0310 §21 — phase_c_* sub-region timing labels
 
 export namespace bioseq::gpu::vulkan {
 

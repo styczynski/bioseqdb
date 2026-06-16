@@ -28,12 +28,12 @@ module;
 #include <new>
 #include <type_traits>
 
-export module bioseq_scan_state;
+export module bioseq.table.scan_state;
 
-import bioseq_vector_types;
-import storage_metadata;   // DOC0322 §9.2 — ParallelBioseqColumnScan (was types.h)
-import pg_utils.lists;
-import pg_utils.bitmapset;
+import bioseq.vector.types;
+import bioseq.storage.metadata;   // DOC0322 §9.2 — ParallelBioseqColumnScan (was types.h)
+import bioseq.pg_utils.lists;
+import bioseq.pg_utils.bitmapset;
 
 /*
  * Vectorization-related per-scan state. Kept as a nested struct so that

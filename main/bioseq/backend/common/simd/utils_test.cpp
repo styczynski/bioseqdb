@@ -2,8 +2,8 @@
 #include "common_tests.h"
 #include "common.h"
 
-import bioseq_simd.utils;
-import testing;
+import bioseq.simd.utils;
+import bioseq.common.testing;
 
 HWY_BEFORE_NAMESPACE();
 

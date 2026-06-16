@@ -14,13 +14,13 @@ module;
 
 
 
-export module storage_debug;
-import mlogging;
-import storage_physical;
-import storage_metadata;
-import bioseq_table;
-import bioseq_column_tam;   // IsBioseqColumnTableAmTable (moved out of bioseq_table:utils, DOC0322 §7.4)
-import pg_utils;
+export module bioseq.storage.debug;
+import bioseq.common.mlogging;
+import bioseq.storage.physical;
+import bioseq.storage.metadata;
+import bioseq.table;
+import bioseq.column.tam;   // IsBioseqColumnTableAmTable (moved out of bioseq_table:utils, DOC0322 §7.4)
+import bioseq.pg_utils;
 
 /*
  * MemoryContextTotals adds stats of the given memory context and its

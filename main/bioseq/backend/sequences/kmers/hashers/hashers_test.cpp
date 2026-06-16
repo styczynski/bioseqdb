@@ -3,14 +3,14 @@
 #include "common.h"
 
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import testing;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.common.testing;
 
-import bioseq_sequences.kmers.hashers.base;
-import bioseq_sequences.kmers.hashers.lexic;
-import bioseq_sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.kmers.hashers.base;
+import bioseq.sequences.kmers.hashers.lexic;
+import bioseq.sequences.kmers.hashers.minimap_int;
 
 using namespace seq::literals;
 

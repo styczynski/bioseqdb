@@ -15,11 +15,11 @@ module;
 #include <type_traits>
 #include <utility>
 #include <vector>
-export module bioseq_indexing.registry;
-import bioseq_indexing.type;
-import bioseq_indexing.storage;
-import bioseq_indexing.traits;          // the index_descriptor PRIMARY (declared-undefined)
-import bioseq_storage_lazy;             // lazy_compact_sequence<R,Scanner>
+export module bioseq.indexing.registry;
+import bioseq.indexing.type;
+import bioseq.indexing.storage;
+import bioseq.indexing.traits;          // the index_descriptor PRIMARY (declared-undefined)
+import bioseq.storage.lazy;             // lazy_compact_sequence<R,Scanner>
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {

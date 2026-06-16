@@ -10,15 +10,15 @@
 module;
 #include "common.h"
 
-export module bioseq_table_io:read_chunk;
+export module bioseq.table.io:read_chunk;
 
-import mlogging;
-import bioseq_vector_types;
-import storage_compression;
-import storage_physical;
-import storage_metadata;
-import pg_utils;
-import config;
+import bioseq.common.mlogging;
+import bioseq.vector.types;
+import bioseq.storage.compression;
+import bioseq.storage.physical;
+import bioseq.storage.metadata;
+import bioseq.pg_utils;
+import bioseq.config;
 import :buffers;
 import :cache;
 import :pruning;

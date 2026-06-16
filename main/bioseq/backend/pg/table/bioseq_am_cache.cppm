@@ -24,10 +24,10 @@ extern "C" {
 #include <cstdint>
 #include <vector>
 
-export module bioseq_am_cache;
+export module bioseq.table.am_cache;
 
-import mlogging;
-import pg_utils;
+import bioseq.common.mlogging;
+import bioseq.pg_utils;
 
 export namespace bioseq::storage {
 

@@ -167,7 +167,7 @@ module;
 
 #include "common.h"
 
-export module mlogging;
+export module bioseq.common.mlogging;
 
 // fmt logic
 

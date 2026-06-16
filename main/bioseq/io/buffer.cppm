@@ -9,9 +9,9 @@ module;
 #include <cstdint>
 #include <cstring>
 
-export module bioseq_io.buffer;
+export module bioseq.io.buffer;
 
-import bioseq_io.options;
+import bioseq.io.options;
 
 export namespace bioseq::io {
 

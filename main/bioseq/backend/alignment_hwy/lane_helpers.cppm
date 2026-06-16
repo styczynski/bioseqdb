@@ -22,10 +22,10 @@ module;
 #include <cstdint>
 #include <array>
 
-export module alignment_hwy_lane_helpers;
+export module bioseq.alignment.lane_helpers;
 
-import bioseq_sequences;
-import alignment_hwy_utils;
+import bioseq.sequences;
+import bioseq.alignment.utils;
 
 export {
 

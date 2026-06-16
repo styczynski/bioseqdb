@@ -27,11 +27,11 @@ module;
 #include <boost/iterator/iterator_adaptor.hpp>
 
 
-export module bioseq_sequences:sequences;
+export module bioseq.sequences:sequences;
 
-import mlogging;
-import sequan_compat;
-import bioseq_common.templating;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.common.templating;
 
 export {
 

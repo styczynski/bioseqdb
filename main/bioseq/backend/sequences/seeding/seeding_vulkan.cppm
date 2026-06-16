@@ -25,17 +25,17 @@ module;
 #include <span>
 #include <vector>
 
-export module bioseq_sequences.seeding.vulkan;
+export module bioseq.sequences.seeding.vulkan;
 
-import mlogging;
-import bioseq_sequences.kmers.vulkan;
-import bioseq_indexing.minimizer_hashmap;
-import bioseq_indexing.minimizer_vulkan;
-import bioseq_sequences.chaining.utils;
-import bioseq_gpu.vulkan.phase_b_abi;
-import bioseq_gpu.vulkan.runtime;
-import bioseq_parallelism.memory_admission;
-import bioseq_storage_size;
+import bioseq.common.mlogging;
+import bioseq.sequences.kmers.vulkan;
+import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_vulkan;
+import bioseq.sequences.chaining.utils;
+import bioseq.gpu.vulkan.phase_b_abi;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
+import bioseq.storage.size;
 
 export namespace bioseq::gpu::vulkan {
 

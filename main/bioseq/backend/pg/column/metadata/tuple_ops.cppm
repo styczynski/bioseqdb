@@ -14,9 +14,9 @@ module;
 
 #include <cstring>
 
-export module storage_metadata:tuple_ops;
+export module bioseq.storage.metadata:tuple_ops;
 
-import pg_utils;
+import bioseq.pg_utils;
 
 export namespace bioseq::metadata::tuple_ops {
 

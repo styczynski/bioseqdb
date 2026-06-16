@@ -21,7 +21,7 @@ module;
 #include <type_traits>
 #include <utility>
 
-export module bioseq_common.templating.pack_search;
+export module bioseq.common.templating.pack_search;
 
 export namespace bioseq::common::templating {
 

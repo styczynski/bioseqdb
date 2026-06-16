@@ -4,7 +4,7 @@
 // one int64 chunk. Also pins the table-wide-never-UPDATE_ON_INSERT runtime guard.
 #include "common_tests_integration.h"
 #include <string>
-import integration_tests.common;
+import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
 

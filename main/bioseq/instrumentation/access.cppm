@@ -15,14 +15,14 @@ module;
 #include <cstdint>
 #include <limits>
 
-export module bioseq_instr.access;
+export module bioseq.instr.access;
 
-import mlogging;   // brings `enable_logging` and the fmtlog wrapper into scope for bioseq_log<DBG>
+import bioseq.common.mlogging;   // brings `enable_logging` and the fmtlog wrapper into scope for bioseq_log<DBG>
 
-import bioseq_instr.config;
-import bioseq_instr.descriptor;
-import bioseq_instr.aggregate;
-import bioseq_instr.thread_state;
+import bioseq.instr.config;
+import bioseq.instr.descriptor;
+import bioseq.instr.aggregate;
+import bioseq.instr.thread_state;
 
 export namespace bioseq::instr::access {
 

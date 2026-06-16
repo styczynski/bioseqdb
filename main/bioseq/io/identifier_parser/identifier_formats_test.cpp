@@ -9,8 +9,8 @@
 #include <string>
 #include <string_view>
 
-import mlogging;
-import bioseq_io.identifier_formats;
+import bioseq.common.mlogging;
+import bioseq.io.identifier_formats;
 
 using namespace bioseq::io::idparse;
 

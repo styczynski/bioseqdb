@@ -24,9 +24,9 @@ module;
 #include <cstddef>
 #include <cstdint>
 
-export module bioseq_io.compression.precode_validate;
+export module bioseq.io.compression.precode_validate;
 
-import mlogging;
+import bioseq.common.mlogging;
 
 export namespace bioseq::io::compression {
 

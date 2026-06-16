@@ -32,15 +32,15 @@ module;
 
 #include <vulkan/vulkan.h>
 
-export module bioseq_sequences.chaining.vulkan;
+export module bioseq.sequences.chaining.vulkan;
 
-import mlogging;
-import context;
-import bioseq_sequences.chaining.utils;
-import bioseq_sequences.chaining.scalar;
-import bioseq_gpu.vulkan.runtime;
-import bioseq_parallelism.memory_admission;
-import bioseq_instr;
+import bioseq.common.mlogging;
+import bioseq.common.context;
+import bioseq.sequences.chaining.utils;
+import bioseq.sequences.chaining.scalar;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
+import bioseq.instr;
 
 export namespace bioseq::chaining {
 

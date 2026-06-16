@@ -23,7 +23,7 @@ module;
 #include <cstddef>
 #include <string_view>
 
-export module bioseq_common.templating.template_str;
+export module bioseq.common.templating.template_str;
 
 export namespace bioseq::common::templating {
 
