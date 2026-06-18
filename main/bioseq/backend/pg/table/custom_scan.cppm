@@ -486,7 +486,7 @@ static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
 	if (!OidIsValid(oid)) {
 		return false;
 	}
-	HeapTuple tuple = SearchSysCache1(cache_id, ObjectIdGetDatum(oid));
+	HeapTuple tuple = SearchSysCache1(cache_id, bioseq::pg_utils::pg_datum::from_oid(oid).raw());
 	if (!HeapTupleIsValid(tuple)) {
 		return false;
 	}
@@ -4245,14 +4245,14 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	 * for bigint is 't'), so constbyval=true + constlen=8 is correct. The
 	 * initial value is NULL until the executor populates it per-row.
 	 */
-	Const* placeholder = makeConst(
-		INT8OID,
-		-1,
-		InvalidOid,
-		8,
-		Int64GetDatum(static_cast<int64_t>(0)),
-		/*constisnull=*/ true,
-		/*constbyval=*/ true);
+		Const* placeholder = makeConst(
+			INT8OID,
+			-1,
+			InvalidOid,
+			8,
+			bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(0)).raw(),
+			/*constisnull=*/ true,
+			/*constbyval=*/ true);
 
 	SymbolCountCallSite site;
 	site.placeholder = placeholder;
@@ -4356,30 +4356,30 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 	// 1 Tbp (~2^40), ~23 bits below INT64_MAX, so the uint64→int64 reinterpret
 	// is always value-preserving.
 	auto set_int = [](Const* node, int64_t value) {
-		if (node == nullptr) return;
-		Assert(value >= INT32_MIN && value <= INT32_MAX);
-		node->constvalue = Int32GetDatum(static_cast<int32_t>(value));
-		node->constisnull = false;
-	};
+			if (node == nullptr) return;
+			Assert(value >= INT32_MIN && value <= INT32_MAX);
+			node->constvalue = bioseq::pg_utils::pg_datum::from(static_cast<std::int32_t>(value)).raw();
+			node->constisnull = false;
+		};
 	// Parameter is the underlying type of `sequence_size_t` (std::uint64_t)
 	// spelled directly — this TU does not import bioseq_storage_size, so the
 	// `sequence_size_t` alias is not in scope here.
 	auto set_bigint = [](Const* node, std::uint64_t value) {
-		if (node == nullptr) return;
-		Assert(value <= static_cast<std::uint64_t>(INT64_MAX));
-		node->constvalue = Int64GetDatum(static_cast<int64_t>(value));
-		node->constisnull = false;
-	};
-	auto set_bool = [](Const* node, bool value) {
-		if (node == nullptr) return;
-		node->constvalue = BoolGetDatum(value);
-		node->constisnull = false;
-	};
-	auto set_float = [](Const* node, float value) {
-		if (node == nullptr) return;
-		node->constvalue = Float4GetDatum(value);
-		node->constisnull = false;
-	};
+			if (node == nullptr) return;
+			Assert(value <= static_cast<std::uint64_t>(INT64_MAX));
+			node->constvalue = bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(value)).raw();
+			node->constisnull = false;
+		};
+		auto set_bool = [](Const* node, bool value) {
+			if (node == nullptr) return;
+			node->constvalue = bioseq::pg_utils::pg_datum::from(value).raw();
+			node->constisnull = false;
+		};
+		auto set_float = [](Const* node, float value) {
+			if (node == nullptr) return;
+			node->constvalue = bioseq::pg_utils::pg_datum::from(value).raw();
+			node->constisnull = false;
+		};
 
 	set_int(consts.dp_score_node,              match.dp_score);
 	// The eight sequence_size_t (uint64) coordinates/lengths → BIGINT, no narrow.
@@ -4402,11 +4402,12 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 	set_float(consts.divergence_node,          match.divergence);
 
 	if (consts.cigar_node != nullptr)
-	{
-		std::string cigar_str = format_cigar(match.cigar);
-		consts.cigar_node->constvalue = CStringGetTextDatum(cigar_str.c_str());
-		consts.cigar_node->constisnull = false;
-	}
+		{
+			std::string cigar_str = format_cigar(match.cigar);
+			consts.cigar_node->constvalue =
+				bioseq::pg_utils::pg_datum::from_text_cstring(cigar_str.c_str()).raw();
+			consts.cigar_node->constisnull = false;
+		}
 }
 
 /*
@@ -4493,7 +4494,8 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 				store, static_cast<std::size_t>(site.rank));
 		}
 		if (stored.has_value()) {
-			site.placeholder->constvalue  = Int64GetDatum(*stored);
+			site.placeholder->constvalue =
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(*stored)).raw();
 			site.placeholder->constisnull = false;
 			continue;
 		}
@@ -4520,7 +4522,7 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 					cnt = counts[site.rank];
 			}
 		});
-		site.placeholder->constvalue  = Int64GetDatum(cnt);
+		site.placeholder->constvalue  = bioseq::pg_utils::pg_datum::from(cnt).raw();
 		site.placeholder->constisnull = false;
 	}
 	MemoryContextDelete(scratch);
@@ -4818,50 +4820,50 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 		 * DDL where those eight projections RETURN BIGINT. */
 		const auto bigint_placeholder = []() {
 			return makeConst(
-				INT8OID,
-				-1,
-				InvalidOid,
-				8,
-				Int64GetDatum(static_cast<int64_t>(0)),
-				/*constisnull=*/ true,
-				/*constbyval=*/ true
-			);
+					INT8OID,
+					-1,
+					InvalidOid,
+					8,
+					bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(0)).raw(),
+					/*constisnull=*/ true,
+					/*constbyval=*/ true
+				);
 		};
 		/* BOOL: byval, len=1, no collation. */
 		const auto bool_placeholder = []() {
 			return makeConst(
-				BOOLOID,
-				-1,
-				InvalidOid,
-				1,
-				BoolGetDatum(false),
-				/*constisnull=*/ true,
-				/*constbyval=*/ true
-			);
+					BOOLOID,
+					-1,
+					InvalidOid,
+					1,
+					bioseq::pg_utils::pg_datum::from(false).raw(),
+					/*constisnull=*/ true,
+					/*constbyval=*/ true
+				);
 		};
 		/* FLOAT4: byval, len=4, no collation. */
 		const auto float_placeholder = []() {
 			return makeConst(
-				FLOAT4OID,
-				-1,
-				InvalidOid,
-				4,
-				static_cast<Datum>(static_cast<int32_t>(0)),
-				/*constisnull=*/ true,
-				/*constbyval=*/ true
-			);
+					FLOAT4OID,
+					-1,
+					InvalidOid,
+					4,
+					bioseq::pg_utils::pg_datum::from(0.0F).raw(),
+					/*constisnull=*/ true,
+					/*constbyval=*/ true
+				);
 		};
 		/* TEXT: byref, len=-1 (varlena), default collation. */
 		const auto text_placeholder = []() {
 			return makeConst(
-				TEXTOID,
-				-1,
-				DEFAULT_COLLATION_OID,
-				-1,
-				PointerGetDatum(nullptr),
-				/*constisnull=*/ true,
-				/*constbyval=*/ false
-			);
+					TEXTOID,
+					-1,
+					DEFAULT_COLLATION_OID,
+					-1,
+					bioseq::pg_utils::pg_datum::from_pointer(nullptr).raw(),
+					/*constisnull=*/ true,
+					/*constbyval=*/ false
+				);
 		};
 
 		runtime.placeholder_consts.symbol_count_sites.clear();
@@ -5508,10 +5510,10 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				}
 			}
 
-			if (user_relid != InvalidOid) {
-				if (rel_tuples < 0.0) {
-					HeapTuple cls_tup = SearchSysCache1(RELOID,
-														ObjectIdGetDatum(user_relid));
+				if (user_relid != InvalidOid) {
+					if (rel_tuples < 0.0) {
+						HeapTuple cls_tup = SearchSysCache1(RELOID,
+															bioseq::pg_utils::pg_datum::from_oid(user_relid).raw());
 					if (HeapTupleIsValid(cls_tup)) {
 						Form_pg_class cls = reinterpret_cast<Form_pg_class>(GETSTRUCT(cls_tup));
 						rel_tuples = static_cast<double>(cls->reltuples);

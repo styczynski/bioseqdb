@@ -345,11 +345,14 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 		Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
 
 		ScanKeyInit(&scanKey[0], Anum_bioseq_row_mask_storage_id,
-					BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
+					BTEqualStrategyNumber, F_INT8EQ,
+					bioseq::pg_utils::pg_datum::from_uint64(storageId).raw());
 		ScanKeyInit(&scanKey[1], Anum_bioseq_row_mask_start_row_number,
-					BTLessEqualStrategyNumber, F_INT8LE, UInt64GetDatum(rowNumber));
+					BTLessEqualStrategyNumber, F_INT8LE,
+					bioseq::pg_utils::pg_datum::from_uint64(rowNumber).raw());
 		ScanKeyInit(&scanKey[2], Anum_bioseq_row_mask_end_row_number,
-					BTGreaterEqualStrategyNumber, F_INT8GE, UInt64GetDatum(rowNumber));
+					BTGreaterEqualStrategyNumber, F_INT8GE,
+					bioseq::pg_utils::pg_datum::from_uint64(rowNumber).raw());
 
 		SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
 																index,
@@ -368,37 +371,46 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 			rowMaskEntry = RowMaskInitWriteState(relfilelocator.relNumber,
 												 storageId,
 												 GetCurrentSubTransactionId(),
-												 DatumGetByteaP(mask));
+												 bioseq::pg_utils::pg_datum::from_raw(mask).to_bytea_p());
 			/*
 			 * Populate row mask cache with values from heap table
 			 */
-			rowMaskEntry->id = DatumGetUInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_id,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->id = bioseq::pg_utils::pg_datum::to_uint64(
+				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+					rowMaskHeapTuple, Anum_bioseq_row_mask_id,
+					tupleDescriptor, &isnull)));
 
-			rowMaskEntry->storageId = DatumGetUInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_storage_id,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->storageId = bioseq::pg_utils::pg_datum::to_uint64(
+				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+					rowMaskHeapTuple, Anum_bioseq_row_mask_storage_id,
+					tupleDescriptor, &isnull)));
 
-			rowMaskEntry->stripeId = DatumGetUInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_stripe_id,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->stripeId = bioseq::pg_utils::pg_datum::to_uint64(
+				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+					rowMaskHeapTuple, Anum_bioseq_row_mask_stripe_id,
+					tupleDescriptor, &isnull)));
 
-			rowMaskEntry->chunkId = DatumGetInt32(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_chunk_id,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->chunkId = bioseq::pg_utils::pg_datum::to<std::int32_t>(
+				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+					rowMaskHeapTuple, Anum_bioseq_row_mask_chunk_id,
+					tupleDescriptor, &isnull)));
 
-			rowMaskEntry->startRowNumber = DatumGetInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_start_row_number,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->startRowNumber = static_cast<std::uint64_t>(
+				bioseq::pg_utils::pg_datum::to<std::int64_t>(
+					bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+						rowMaskHeapTuple, Anum_bioseq_row_mask_start_row_number,
+						tupleDescriptor, &isnull))));
 
-			rowMaskEntry->deletedRows = DatumGetInt32(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_deleted_rows,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->deletedRows = bioseq::pg_utils::pg_datum::to<std::int32_t>(
+				bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+					rowMaskHeapTuple, Anum_bioseq_row_mask_deleted_rows,
+					tupleDescriptor, &isnull)));
 
-			rowMaskEntry->endRowNumber = DatumGetInt64(
-					fastgetattr(rowMaskHeapTuple, Anum_bioseq_row_mask_end_row_number,
-								tupleDescriptor, &isnull));
+			rowMaskEntry->endRowNumber = static_cast<std::uint64_t>(
+				bioseq::pg_utils::pg_datum::to<std::int64_t>(
+					bioseq::pg_utils::pg_datum::from_raw(fastgetattr(
+						rowMaskHeapTuple, Anum_bioseq_row_mask_end_row_number,
+						tupleDescriptor, &isnull))));
 
 			rowMask = rowMaskEntry->mask;
 		}

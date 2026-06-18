@@ -94,8 +94,9 @@ using bioseq::storage::sequence_size_t;   // bp counts (uint64 — 6 Gbp safe)
 // --------------------------------------------------------------------------
 
 [[nodiscard]] Oid load_seq_type_oid() {
-    return DatumGetObjectId(DirectFunctionCall1(
-        regtypein, CStringGetDatum("bioseq.seq")));
+    return bioseq::pg_utils::pg_datum::to_oid(bioseq::pg_utils::pg_datum::from_raw(
+        DirectFunctionCall1(regtypein,
+                            bioseq::pg_utils::pg_datum::from_cstring("bioseq.seq").raw())));
 }
 
 struct LoadColumns {
@@ -289,14 +290,12 @@ struct pg_identifier_writer {
     std::span<const dest_coercion> dest;       // index == slot
     std::span<const default_col>   defaults;   // unmapped/unset columns w/ default
 
-    void begin_tuple() {
-        ExecClearTuple(ctx.slot);
-        const int natts = ctx.parent_td->natts;
-        for (int i = 0; i < natts; ++i) ctx.slot->tts_isnull[i] = true;
-    }
-    void set_null(idp::dest_slot_t slot) {
-        ctx.slot->tts_isnull[dest[slot].attno - 1] = true;
-    }
+	void begin_tuple() {
+	    bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.clear_all_to_null();
+	}
+	void set_null(idp::dest_slot_t slot) {
+	    bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.set_null(dest[slot].attno);
+	}
     void set_field(idp::dest_slot_t slot, const char* data, std::int32_t len) {
         const dest_coercion& dc = dest[slot];
         ctx.current_column_name = dc.column_name.c_str();   // errcontext if input fn longjmps
@@ -310,22 +309,26 @@ struct pg_identifier_writer {
             v = OidInputFunctionCall(dc.input_fn, cstr, dc.io_param, dc.typmod);
         }
         MemoryContextSwitchTo(old);
-        ctx.slot->tts_values[dc.attno - 1] = v;
-        ctx.slot->tts_isnull[dc.attno - 1] = false;
-        ctx.current_column_name = nullptr;
-    }
+	    bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.set_raw(
+	        dc.attno, bioseq::pg_utils::pg_datum::from_raw(v));
+	    ctx.current_column_name = nullptr;
+	}
     void end_tuple() {
         // Defaults fill ONLY columns the parser left NULL — a mapped value always
         // wins over a column default (§9.3). by-ref default datums live in the
         // econtext memory and stay valid until BioseqColumnWriteRow copies them.
         for (const default_col& d : defaults) {
             if (!ctx.slot->tts_isnull[d.attno - 1]) continue;
-            bool isnull = false;
-            Datum v = ExecEvalExpr(d.state, ctx.econtext, &isnull);
-            ctx.slot->tts_values[d.attno - 1] = v;
-            ctx.slot->tts_isnull[d.attno - 1] = isnull;
-        }
-        ExecStoreVirtualTuple(ctx.slot);
+	        bool isnull = false;
+	        Datum v = ExecEvalExpr(d.state, ctx.econtext, &isnull);
+	        if (isnull) {
+	            bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.set_null(d.attno);
+	        } else {
+	            bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.set_raw(
+	                d.attno, bioseq::pg_utils::pg_datum::from_raw(v));
+	        }
+	    }
+	    bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.store_virtual();
         if (ctx.result_rel_info && ctx.parent_rel->rd_att->constr)
             ExecConstraints(ctx.result_rel_info, ctx.slot, ctx.estate);
         (void) BioseqColumnWriteRow(ctx.write_state, ctx.slot->tts_values,
@@ -361,9 +364,9 @@ void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
     errctx.previous = error_context_stack;
     error_context_stack = &errctx;
 
-    tuple_writer.begin_tuple();                             // ExecClearTuple + all-NULL
-    ctx.slot->tts_values[ctx.cols.seq_attno - 1] = PointerGetDatum(stub);
-    ctx.slot->tts_isnull[ctx.cols.seq_attno - 1] = false;
+	tuple_writer.begin_tuple();                             // ExecClearTuple + all-NULL
+	bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.set_raw(
+	    ctx.cols.seq_attno, bioseq::pg_utils::pg_datum::from_pointer(stub));
 
     if (ctx.parser_active) {
         auto routed = idp::parse_and_route_header(
@@ -380,9 +383,9 @@ void write_parent_row(LoadContext& ctx, pg_identifier_writer& tuple_writer,
         text* htext = cstring_to_text_with_len(header.data(),
                                                static_cast<int>(header.size()));
         MemoryContextSwitchTo(old);
-        ctx.slot->tts_values[ctx.cols.header_attno - 1] = PointerGetDatum(htext);
-        ctx.slot->tts_isnull[ctx.cols.header_attno - 1] = false;
-    }
+	    bioseq::pg_utils::pg_slot_datums_view{ctx.slot}.set_raw(
+	        ctx.cols.header_attno, bioseq::pg_utils::pg_datum::from_pointer(htext));
+	}
     tuple_writer.end_tuple();  // defaults, ExecConstraints, BioseqColumnWriteRow, ctx reset
     error_context_stack = errctx.previous;
     ctx.current_header = {};
@@ -904,7 +907,8 @@ parse_column_mapping_array(ArrayType* arr) {
         if (nulls[i])
             ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                 errmsg("bioseq.load: columns[] element %d is NULL", i + 1)));
-        HeapTupleHeader th = DatumGetHeapTupleHeader(elems[i]);
+        HeapTupleHeader th = bioseq::pg_utils::pg_datum::to_heap_tuple_header(
+            bioseq::pg_utils::pg_datum::from_raw(elems[i]));
         HeapTupleData tmp{};
         tmp.t_len  = HeapTupleHeaderGetDatumLength(th);
         tmp.t_data = th;
@@ -913,8 +917,10 @@ parse_column_mapping_array(ArrayType* arr) {
         if (isn[0])
             ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                 errmsg("bioseq.load: columns[%d].column_name is NULL", i + 1)));
-        const char* col = text_to_cstring(DatumGetTextPP(vals[0]));
-        const char* ds  = isn[1] ? "" : text_to_cstring(DatumGetTextPP(vals[1]));
+        const char* col = text_to_cstring(bioseq::pg_utils::pg_datum::to_text_pp(
+            bioseq::pg_utils::pg_datum::from_raw(vals[0])));
+        const char* ds  = isn[1] ? "" : text_to_cstring(bioseq::pg_utils::pg_datum::to_text_pp(
+            bioseq::pg_utils::pg_datum::from_raw(vals[1])));
         maps.push_back(idp::user_column_mapping{
             std::string_view{col}, std::string_view{ds}});
     }

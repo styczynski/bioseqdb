@@ -673,8 +673,9 @@ public:
                  * ResetExprContext / per-tuple context cleanup between
                  * calls to ExecScanFetch.
                  */
-                pgseq_t* src_hdr = reinterpret_cast<pgseq_t*>(
-                    PG_DETOAST_DATUM(seq_datum));
+	                auto src = bioseq::pg_utils::detoast_as<pgseq_t>(
+	                    bioseq::pg_utils::pg_datum::from_raw(seq_datum));
+	                pgseq_t* src_hdr = src.ptr;
                 if (bioseq::storage::is_locator_stub(src_hdr)) {
                     /*
                      * DOC0260 §9.2 — defer_seq_hydration path: capture the
@@ -691,14 +692,7 @@ public:
                         reinterpret_cast<const char*>(src_hdr) + total_bytes);
                     entry.seq_is_null = false;
                 }
-                /*
-                 * Free the detoasted copy if it was distinct from the
-                 * original Datum (only the TOAST path actually palloc's).
-                 */
-                if (reinterpret_cast<void*>(src_hdr)
-                    != reinterpret_cast<void*>(DatumGetPointer(seq_datum))) {
-                    pfree(src_hdr);
-                }
+	                src.free_if_copy();
             }
         }
 
@@ -734,9 +728,9 @@ public:
             if (query_null) {
                 entry.per_row_query_is_null = true;
             } else {
-                pgseq_t* src_hdr =
-                    reinterpret_cast<pgseq_t*>(
-                        PG_DETOAST_DATUM(query_datum));
+	                auto src = bioseq::pg_utils::detoast_as<pgseq_t>(
+	                    bioseq::pg_utils::pg_datum::from_raw(query_datum));
+	                pgseq_t* src_hdr = src.ptr;
                 if (bioseq::storage::is_locator_stub(src_hdr)) {
                     /* DOC0260 §9.2 — per-row query locator (bulk-fetched). */
                     entry.per_row_query_loc =
@@ -749,10 +743,7 @@ public:
                         reinterpret_cast<const char*>(src_hdr) + total_bytes);
                     entry.per_row_query_is_null = false;
                 }
-                if (reinterpret_cast<void*>(src_hdr)
-                    != reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
-                    pfree(src_hdr);
-                }
+	                src.free_if_copy();
             }
         }
 
@@ -922,14 +913,15 @@ public:
             } else {
                 buffered_entries[i].hydrated_seq_hdr = out_payloads[i];
             }
-            TupleTableSlot* sslot = buffered_entries[i].scan_slot_copy;
-            if (sslot != nullptr) {
-                const int idx = column_attno - 1;
-                if (idx >= 0 && idx < sslot->tts_tupleDescriptor->natts) {
-                    sslot->tts_values[idx] = PointerGetDatum(out_payloads[i]);
-                    sslot->tts_isnull[idx] = false;
-                }
-            }
+	            TupleTableSlot* sslot = buffered_entries[i].scan_slot_copy;
+	            if (sslot != nullptr) {
+	                const int idx = column_attno - 1;
+	                if (idx >= 0 && idx < sslot->tts_tupleDescriptor->natts) {
+	                    bioseq::pg_utils::pg_slot_datums_view{sslot}.set_raw(
+	                        column_attno,
+	                        bioseq::pg_utils::pg_datum::from_pointer(out_payloads[i]));
+	                }
+	            }
         }
     }
 

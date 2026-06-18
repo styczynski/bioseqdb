@@ -240,11 +240,10 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
             kDna4AlphabetCode, kDna4StorageWidth,
             last_fragment_padding, total_bp, locator);
 
-        slot->tts_values[0] = Int64GetDatum(static_cast<std::int64_t>(seq_no + 1));
-        slot->tts_values[1] = PointerGetDatum(stub);
-        slot->tts_isnull[0] = false;
-        slot->tts_isnull[1] = false;
-        ExecStoreVirtualTuple(slot);
+        bioseq::pg_utils::pg_slot_datums_view slot_values{slot};
+        slot_values.set(1, static_cast<std::int64_t>(seq_no + 1));
+        slot_values.set_raw(2, bioseq::pg_utils::pg_datum::from_pointer(stub));
+        slot_values.store_virtual();
 
         Datum  write_values[2] = { slot->tts_values[0], slot->tts_values[1] };
         bool   write_nulls[2]  = { false, false };
@@ -560,18 +559,16 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
         const double effective_error_rate =
             params.substitution_rate + params.insertion_rate + params.deletion_rate;
 
-        slot->tts_values[0] = Int64GetDatum(static_cast<std::int64_t>(pair_no + 1));
-        slot->tts_values[1] = PointerGetDatum(query_stub);
-        slot->tts_values[2] = PointerGetDatum(target_stub);
-        slot->tts_values[3] = Int64GetDatum(static_cast<std::int64_t>(fragment_start));
-        slot->tts_values[4] = Int64GetDatum(static_cast<std::int64_t>(fragment_end));
-        slot->tts_values[5] = BoolGetDatum(is_reverse);
-        slot->tts_values[6] = Float8GetDatum(effective_error_rate);
-        slot->tts_values[7] = Int64GetDatum(static_cast<std::int64_t>(fragment_length));
-        for (int idx = 0; idx < 8; ++idx) {
-            slot->tts_isnull[idx] = false;
-        }
-        ExecStoreVirtualTuple(slot);
+        bioseq::pg_utils::pg_slot_datums_view slot_values{slot};
+        slot_values.set(1, static_cast<std::int64_t>(pair_no + 1));
+        slot_values.set_raw(2, bioseq::pg_utils::pg_datum::from_pointer(query_stub));
+        slot_values.set_raw(3, bioseq::pg_utils::pg_datum::from_pointer(target_stub));
+        slot_values.set(4, static_cast<std::int64_t>(fragment_start));
+        slot_values.set(5, static_cast<std::int64_t>(fragment_end));
+        slot_values.set(6, is_reverse);
+        slot_values.set(7, effective_error_rate);
+        slot_values.set(8, static_cast<std::int64_t>(fragment_length));
+        slot_values.store_virtual();
 
         Datum  write_values[8];
         bool   write_nulls[8];
@@ -609,8 +606,7 @@ Datum bioseq_locator_inspect(PG_FUNCTION_ARGS)
     }
     BlessTupleDesc(out_td);
 
-    Datum values[7] = { 0, 0, 0, 0, 0, 0, 0 };
-    bool  nulls[7]  = { false, false, false, false, false, false, false };
+    bioseq::pg_utils::pg_datum_list<7> values{};
 
     if (!bioseq::storage::is_locator_stub(hdr)) {
         // For an inline (non-stub) value, return (version=0, bucket_idx=0,
@@ -618,35 +614,35 @@ Datum bioseq_locator_inspect(PG_FUNCTION_ARGS)
         // first_sub_row_no=0, total_padding=hdr->padding_letters) so the
         // function never raises on non-stub inputs — useful for ad-hoc
         // diagnostics on inline literals.
-        values[0] = Int16GetDatum(static_cast<std::int16_t>(0));
-        values[1] = Int16GetDatum(static_cast<std::int16_t>(0));
-        values[2] = Int32GetDatum(static_cast<std::int32_t>(0));
-        values[3] = Int64GetDatum(static_cast<std::int64_t>(0));
-        values[4] = Int64GetDatum(static_cast<std::int64_t>(hdr->bp_size));
-        values[5] = Int64GetDatum(static_cast<std::int64_t>(0));
-        values[6] = Int32GetDatum(static_cast<std::int32_t>(hdr->padding_letters));
-        HeapTuple tup = heap_form_tuple(out_td, values, nulls);
-        Datum result = HeapTupleGetDatum(tup);
+        values.set(1, static_cast<std::int16_t>(0));
+        values.set(2, static_cast<std::int16_t>(0));
+        values.set(3, static_cast<std::int32_t>(0));
+        values.set(4, static_cast<std::int64_t>(0));
+        values.set(5, static_cast<std::int64_t>(hdr->bp_size));
+        values.set(6, static_cast<std::int64_t>(0));
+        values.set(7, static_cast<std::int32_t>(hdr->padding_letters));
+        HeapTuple tup = values.form_tuple(out_td);
+        Datum result = bioseq::pg_utils::pg_datum::from_heap_tuple(tup).raw();
         PG_FREE_IF_COPY(hdr, 0);
         PG_RETURN_DATUM(result);
     }
 
     const auto loc = bioseq::storage::decode_locator_from_stub(hdr);
-    values[0] = Int16GetDatum(static_cast<std::int16_t>(loc.version));
-    values[1] = Int16GetDatum(static_cast<std::int16_t>(loc.bucket_idx));
-    values[2] = Int32GetDatum(static_cast<std::int32_t>(loc.shard_idx));
-    values[3] = Int64GetDatum(static_cast<std::int64_t>(loc.num_fragments));
+    values.set(1, static_cast<std::int16_t>(loc.version));
+    values.set(2, static_cast<std::int16_t>(loc.bucket_idx));
+    values.set(3, static_cast<std::int32_t>(loc.shard_idx));
+    values.set(4, static_cast<std::int64_t>(loc.num_fragments));
     if (loc.total_bp_size >
         static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
         bioseq_log<ERR, PG>( "bioseq.locator_inspect: total_bp_size {} exceeds INT64_MAX",
                loc.total_bp_size);
     }
-    values[4] = Int64GetDatum(static_cast<std::int64_t>(loc.total_bp_size));
-    values[5] = Int64GetDatum(static_cast<std::int64_t>(loc.first_sub_row_no));
-    values[6] = Int32GetDatum(static_cast<std::int32_t>(hdr->padding_letters));
+    values.set(5, static_cast<std::int64_t>(loc.total_bp_size));
+    values.set(6, static_cast<std::int64_t>(loc.first_sub_row_no));
+    values.set(7, static_cast<std::int32_t>(hdr->padding_letters));
 
-    HeapTuple tup = heap_form_tuple(out_td, values, nulls);
-    Datum result = HeapTupleGetDatum(tup);
+    HeapTuple tup = values.form_tuple(out_td);
+    Datum result = bioseq::pg_utils::pg_datum::from_heap_tuple(tup).raw();
     PG_FREE_IF_COPY(hdr, 0);
     PG_RETURN_DATUM(result);
 }

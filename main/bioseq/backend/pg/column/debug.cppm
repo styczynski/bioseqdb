@@ -75,17 +75,15 @@ POSTGRES_FN(bioseq_store_memory_stats)
 	MemoryContextTotals(GetBioseqColumnWriteContextForDebug(), &writeStateCounters);
 	MemoryContextTotals(GetRowMaskWriteStateContextForDebug(), &rowMaskCacheCounters);
 
-	bool nulls[4] = { false };
-	Datum values[4] = {
-		Int64GetDatum(topCounters.totalspace),
-		Int64GetDatum(transactionCounters.totalspace),
-		Int64GetDatum(writeStateCounters.totalspace),
-		Int64GetDatum(rowMaskCacheCounters.totalspace)
-	};
+	bioseq::pg_utils::pg_datum_list<4> values{};
+	values.set(1, static_cast<std::int64_t>(topCounters.totalspace));
+	values.set(2, static_cast<std::int64_t>(transactionCounters.totalspace));
+	values.set(3, static_cast<std::int64_t>(writeStateCounters.totalspace));
+	values.set(4, static_cast<std::int64_t>(rowMaskCacheCounters.totalspace));
 
-	HeapTuple tuple = heap_form_tuple(tupleDescriptor, values, nulls);
+	HeapTuple tuple = values.form_tuple(tupleDescriptor);
 
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+	PG_RETURN_DATUM(bioseq::pg_utils::pg_datum::from_heap_tuple(tuple).raw());
 }
 
 
@@ -128,8 +126,7 @@ POSTGRES_FN(bioseq_storage_info)
 			   RelationGetRelationName(rel));
 	}
 
-	Datum values[STORAGE_INFO_NATTS] = { 0 };
-	bool nulls[STORAGE_INFO_NATTS] = { 0 };
+	bioseq::pg_utils::pg_datum_list<STORAGE_INFO_NATTS> values{};
 
 	/*
 	 * Pass force = true so that we can inspect metapages that are not the
@@ -138,17 +135,17 @@ POSTGRES_FN(bioseq_storage_info)
 	 * NB: ensure the order and number of attributes correspond to DDL
 	 * declaration.
 	 */
-	values[0] = Int32GetDatum(BioseqColumnStorageGetVersionMajor(rel, true));
-	values[1] = Int32GetDatum(BioseqColumnStorageGetVersionMinor(rel, true));
-	values[2] = Int64GetDatum(BioseqColumnStorageGetStorageId(rel, true));
-	values[3] = Int64GetDatum(BioseqColumnStorageGetReservedStripeId(rel, true));
-	values[4] = Int64GetDatum(BioseqColumnStorageGetReservedRowNumber(rel, true));
-	values[5] = Int64GetDatum(BioseqColumnStorageGetReservedOffset(rel, true));
+	values.set(1, static_cast<std::int32_t>(BioseqColumnStorageGetVersionMajor(rel, true)));
+	values.set(2, static_cast<std::int32_t>(BioseqColumnStorageGetVersionMinor(rel, true)));
+	values.set(3, static_cast<std::int64_t>(BioseqColumnStorageGetStorageId(rel, true)));
+	values.set(4, static_cast<std::int64_t>(BioseqColumnStorageGetReservedStripeId(rel, true)));
+	values.set(5, static_cast<std::int64_t>(BioseqColumnStorageGetReservedRowNumber(rel, true)));
+	values.set(6, static_cast<std::int64_t>(BioseqColumnStorageGetReservedOffset(rel, true)));
 
 	/* release lock */
 	table_close(rel, AccessShareLock);
 
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	HeapTuple tuple = values.form_tuple(tupdesc);
 
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+	PG_RETURN_DATUM(bioseq::pg_utils::pg_datum::from_heap_tuple(tuple).raw());
 }

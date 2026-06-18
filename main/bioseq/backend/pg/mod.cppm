@@ -603,9 +603,9 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
 			"AND n.nspname NOT IN ('bioseq_internal','pg_catalog','information_schema') "
 			"AND n.nspname NOT LIKE 'pg\\_temp%'", true, 0) == SPI_OK_SELECT) {
 		for (std::uint64_t r = 0; r < SPI_processed; ++r) {
-			bool isn = false;
-			Oid o = DatumGetObjectId(SPI_getbinval(SPI_tuptable->vals[r], SPI_tuptable->tupdesc, 1, &isn));
-			if (!isn) rels.push_back(o);
+			auto rel_cell = bioseq::pg_utils::pg_spi_cell::get(
+				SPI_tuptable->vals[r], SPI_tuptable->tupdesc, 1);
+			if (auto rel_oid = rel_cell.optional_oid()) rels.push_back(*rel_oid);
 		}
 	}
 
@@ -621,9 +621,9 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
 		if (SPI_execute(colsql.c_str(), true, 0) != SPI_OK_SELECT) continue;
 		std::vector<std::pair<std::int16_t, std::string>> cols;
 		for (std::uint64_t c = 0; c < SPI_processed; ++c) {
-			bool isn = false;
-			std::int16_t a = static_cast<std::int16_t>(DatumGetInt16(
-				SPI_getbinval(SPI_tuptable->vals[c], SPI_tuptable->tupdesc, 1, &isn)));
+			auto att_cell = bioseq::pg_utils::pg_spi_cell::get(
+				SPI_tuptable->vals[c], SPI_tuptable->tupdesc, 1);
+			const std::int16_t a = att_cell.optional<std::int16_t>().value_or(0);
 			char* nm = SPI_getvalue(SPI_tuptable->vals[c], SPI_tuptable->tupdesc, 2);
 			cols.emplace_back(a, nm ? std::string(nm) : std::string());
 		}
@@ -663,15 +663,18 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
 			"  ON p.user_relid=src.rel AND p.column_attno=src.attno AND p.index_name=src.idx_name "
 			"ORDER BY src.rel, src.attno, src.idx_name", values);
 		if (SPI_execute(query.c_str(), true, 0) == SPI_OK_SELECT) {
-			Datum vals[8];
-			bool nulls[8];
 			for (std::uint64_t r = 0; r < SPI_processed; ++r) {
+				bioseq::pg_utils::pg_datum_list<8> row{};
 				for (int c = 0; c < 8; ++c) {
-					bool isn = false;
-					vals[c] = SPI_getbinval(SPI_tuptable->vals[r], SPI_tuptable->tupdesc, c + 1, &isn);
-					nulls[c] = isn;
+					auto cell = bioseq::pg_utils::pg_spi_cell::get(
+						SPI_tuptable->vals[r], SPI_tuptable->tupdesc, c + 1);
+					if (cell.is_null) {
+						row.set_null(c + 1);
+					} else {
+						row.set_raw(c + 1, cell.value);
+					}
 				}
-				tuplestore_putvalues(tupstore, tupdesc, vals, nulls);
+				row.put_values(tupstore, tupdesc);
 			}
 		}
 	}
@@ -713,32 +716,33 @@ Datum bioseq_last_mps_build_stats(PG_FUNCTION_ARGS) {
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	const auto st = bioseq::storage::indexing::g_last_mps_build_stats;
-	Datum values[18]{};
-	bool nulls[18]{};
-	const auto put_i64 = [&](std::size_t i, std::uint64_t v) {
-		values[i] = Int64GetDatum(static_cast<std::int64_t>(v));
+	const std::array<std::uint64_t, 18> fields{
+		st.backend_pid,
+		st.db_oid,
+		st.relfilenode,
+		st.sequence_rowno,
+		st.total_run_count,
+		st.resident_runs,
+		st.file_runs,
+		st.resident_run_bytes,
+		st.resident_peak_bytes,
+		st.spilled_run_bytes,
+		st.postgres_temp_file_bytes,
+		st.postgres_temp_file_count,
+		st.merge_reader_buffer_bytes,
+		st.merge_pass_count,
+		st.spill_count_from_pressure,
+		st.resident_demotions,
+		st.position_spill_bytes,
+		st.position_spill_count,
 	};
-	put_i64(0, st.backend_pid);
-	put_i64(1, st.db_oid);
-	put_i64(2, st.relfilenode);
-	put_i64(3, st.sequence_rowno);
-	put_i64(4, st.total_run_count);
-	put_i64(5, st.resident_runs);
-	put_i64(6, st.file_runs);
-	put_i64(7, st.resident_run_bytes);
-	put_i64(8, st.resident_peak_bytes);
-	put_i64(9, st.spilled_run_bytes);
-	put_i64(10, st.postgres_temp_file_bytes);
-	put_i64(11, st.postgres_temp_file_count);
-	put_i64(12, st.merge_reader_buffer_bytes);
-	put_i64(13, st.merge_pass_count);
-	put_i64(14, st.spill_count_from_pressure);
-	put_i64(15, st.resident_demotions);
-	put_i64(16, st.position_spill_bytes);
-	put_i64(17, st.position_spill_count);
+	bioseq::pg_utils::pg_datum_list<18> values{};
+	for (std::size_t i = 0; i < fields.size(); ++i) {
+		values.set(static_cast<int>(i + 1), static_cast<std::int64_t>(fields[i]));
+	}
 
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+	HeapTuple tuple = values.form_tuple(tupdesc);
+	PG_RETURN_DATUM(bioseq::pg_utils::pg_datum::from_heap_tuple(tuple).raw());
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_scheduler_mps_build_stats);
@@ -751,38 +755,39 @@ Datum bioseq_scheduler_mps_build_stats(PG_FUNCTION_ARGS) {
 
 	const auto snap = bioseq::parallelism::pg::async_mps_build_stats_snapshot();
 	const auto st = snap.stats;
-	Datum values[24]{};
-	bool nulls[24]{};
-	const auto put_i64 = [&](std::size_t i, std::uint64_t v) {
-		values[i] = Int64GetDatum(static_cast<std::int64_t>(v));
+	const std::array<std::uint64_t, 24> fields{
+		st.backend_pid,
+		st.db_oid,
+		st.relfilenode,
+		st.sequence_rowno,
+		st.total_run_count,
+		st.resident_runs,
+		st.file_runs,
+		st.resident_run_bytes,
+		st.resident_peak_bytes,
+		st.spilled_run_bytes,
+		st.postgres_temp_file_bytes,
+		st.postgres_temp_file_count,
+		st.merge_reader_buffer_bytes,
+		st.merge_pass_count,
+		st.spill_count_from_pressure,
+		st.resident_demotions,
+		st.position_spill_bytes,
+		st.position_spill_count,
+		snap.generation,
+		snap.worker_build_ns,
+		snap.pipeline_mode,
+		snap.max_concurrency,
+		snap.index_memory_cap_mb,
+		snap.lazy_worker_shareable,
 	};
-	put_i64(0, st.backend_pid);
-	put_i64(1, st.db_oid);
-	put_i64(2, st.relfilenode);
-	put_i64(3, st.sequence_rowno);
-	put_i64(4, st.total_run_count);
-	put_i64(5, st.resident_runs);
-	put_i64(6, st.file_runs);
-	put_i64(7, st.resident_run_bytes);
-	put_i64(8, st.resident_peak_bytes);
-	put_i64(9, st.spilled_run_bytes);
-	put_i64(10, st.postgres_temp_file_bytes);
-	put_i64(11, st.postgres_temp_file_count);
-	put_i64(12, st.merge_reader_buffer_bytes);
-	put_i64(13, st.merge_pass_count);
-	put_i64(14, st.spill_count_from_pressure);
-	put_i64(15, st.resident_demotions);
-	put_i64(16, st.position_spill_bytes);
-	put_i64(17, st.position_spill_count);
-	put_i64(18, snap.generation);
-	put_i64(19, snap.worker_build_ns);
-	put_i64(20, snap.pipeline_mode);
-	put_i64(21, snap.max_concurrency);
-	put_i64(22, snap.index_memory_cap_mb);
-	put_i64(23, snap.lazy_worker_shareable);
+	bioseq::pg_utils::pg_datum_list<24> values{};
+	for (std::size_t i = 0; i < fields.size(); ++i) {
+		values.set(static_cast<int>(i + 1), static_cast<std::int64_t>(fields[i]));
+	}
 
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+	HeapTuple tuple = values.form_tuple(tupdesc);
+	PG_RETURN_DATUM(bioseq::pg_utils::pg_datum::from_heap_tuple(tuple).raw());
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_scheduler_restart);
@@ -801,27 +806,26 @@ Datum bioseq_scheduler_stats(PG_FUNCTION_ARGS) {
 
 	const auto snap = bioseq::parallelism::pg::snapshot();
 	const std::string mode_string{bioseq::parallelism::to_string(snap.mode)};
-	Datum values[16]{};
-	bool nulls[16]{};
-	values[0] = BoolGetDatum(snap.supervisor);
-	values[1] = Int32GetDatum(static_cast<std::int32_t>(snap.config_generation));
-	values[2] = CStringGetTextDatum(mode_string.c_str());
-	values[3] = Int32GetDatum(static_cast<std::int32_t>(snap.min_threads));
-	values[4] = Int32GetDatum(static_cast<std::int32_t>(snap.max_threads));
-	values[5] = Int32GetDatum(static_cast<std::int32_t>(snap.current_threads));
-	values[6] = Int64GetDatum(static_cast<std::int64_t>(snap.batches_scheduled));
-	values[7] = Int64GetDatum(static_cast<std::int64_t>(snap.batches_awaiting));
-	values[8] = Int64GetDatum(static_cast<std::int64_t>(snap.batches_processed));
-	values[9] = Int64GetDatum(static_cast<std::int64_t>(snap.queries_waiting));
-	values[10] = Int64GetDatum(static_cast<std::int64_t>(snap.queries_processed));
-	values[11] = Float8GetDatum(snap.oldest_waiting_batch_age_secs);
-	values[12] = Float8GetDatum(snap.queries_per_sec);
-	values[13] = Float8GetDatum(snap.uptime_secs);
-	values[14] = Int64GetDatum(static_cast<std::int64_t>(snap.async_persist_jobs_waiting));
-	values[15] = Int64GetDatum(static_cast<std::int64_t>(snap.index_memory_reserved_bytes));
+	bioseq::pg_utils::pg_datum_list<16> values{};
+	values.set(1, snap.supervisor);
+	values.set(2, static_cast<std::int32_t>(snap.config_generation));
+	values.set_raw(3, bioseq::pg_utils::pg_datum::from_text_cstring(mode_string.c_str()));
+	values.set(4, static_cast<std::int32_t>(snap.min_threads));
+	values.set(5, static_cast<std::int32_t>(snap.max_threads));
+	values.set(6, static_cast<std::int32_t>(snap.current_threads));
+	values.set(7, static_cast<std::int64_t>(snap.batches_scheduled));
+	values.set(8, static_cast<std::int64_t>(snap.batches_awaiting));
+	values.set(9, static_cast<std::int64_t>(snap.batches_processed));
+	values.set(10, static_cast<std::int64_t>(snap.queries_waiting));
+	values.set(11, static_cast<std::int64_t>(snap.queries_processed));
+	values.set(12, snap.oldest_waiting_batch_age_secs);
+	values.set(13, snap.queries_per_sec);
+	values.set(14, snap.uptime_secs);
+	values.set(15, static_cast<std::int64_t>(snap.async_persist_jobs_waiting));
+	values.set(16, static_cast<std::int64_t>(snap.index_memory_reserved_bytes));
 
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+	HeapTuple tuple = values.form_tuple(tupdesc);
+	PG_RETURN_DATUM(bioseq::pg_utils::pg_datum::from_heap_tuple(tuple).raw());
 }
 
 /* DOC0279 §12.2 — the remaining admin/test SQL helpers. */
@@ -899,7 +903,7 @@ Datum bioseq_test_write_index_chunk(PG_FUNCTION_ARGS) {
 	const std::int64_t query_key = PG_GETARG_INT64(2);
 	const std::int64_t sub_key   = PG_GETARG_INT64(3);
 	const std::int32_t chunk_no  = PG_GETARG_INT32(4);
-	Datum payload = PointerGetDatum(PG_GETARG_BYTEA_PP(5));   // detoast before SPI
+	Datum payload = bioseq::pg_utils::pg_datum::from_pointer(PG_GETARG_BYTEA_PP(5)).raw();   // detoast before SPI
 	bool wrote = false;
 	for (const std::string& pfx : bioseq::storage::indexing::seqidx_prefixes_for(rel, name)) {
 		auto shards = bioseq::storage::indexing::shard_relnames_with_prefix(pfx);
@@ -920,7 +924,12 @@ Datum bioseq_test_write_index_chunk(PG_FUNCTION_ARGS) {
 			"ON CONFLICT (query_key, sub_key, chunk_no) DO UPDATE SET chunk_bytes=EXCLUDED.chunk_bytes, blob=EXCLUDED.blob",
 			quote_identifier(target.c_str()));
 		Oid argt[4] = { INT8OID, INT8OID, INT4OID, BYTEAOID };
-		Datum argv[4] = { Int64GetDatum(query_key), Int64GetDatum(sub_key), Int32GetDatum(chunk_no), payload };
+		Datum argv[4] = {
+			bioseq::pg_utils::pg_datum::from(query_key).raw(),
+			bioseq::pg_utils::pg_datum::from(sub_key).raw(),
+			bioseq::pg_utils::pg_datum::from(chunk_no).raw(),
+			payload
+		};
 		SPI_execute_with_args(sql.c_str(), 4, argt, argv, nullptr, false, 0);
 		SPI_finish();
 		wrote = true;

@@ -1150,7 +1150,7 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		slot_getallattrs(slot);
 
-		Datum *detoasted_values = detoast_values(slot->tts_tupleDescriptor,
+		Datum *detoasted_values = bioseq::pg_utils::detoast_values(slot->tts_tupleDescriptor,
 									   slot->tts_values, slot->tts_isnull);
 
 		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
@@ -1206,7 +1206,7 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 		slot_getallattrs(slot);
 
-		Datum *detoasted_values = detoast_values(slot->tts_tupleDescriptor,
+		Datum *detoasted_values = bioseq::pg_utils::detoast_values(slot->tts_tupleDescriptor,
 									   slot->tts_values, slot->tts_isnull);
 
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
@@ -1266,7 +1266,7 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			slot_getallattrs(tupleSlot);
 
-			Datum *detoasted_values = detoast_values(tupleSlot->tts_tupleDescriptor,
+			Datum *detoasted_values = bioseq::pg_utils::detoast_values(tupleSlot->tts_tupleDescriptor,
 										   tupleSlot->tts_values, tupleSlot->tts_isnull);
 
 			std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;

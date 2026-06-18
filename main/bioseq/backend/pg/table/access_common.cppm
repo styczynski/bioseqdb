@@ -92,41 +92,6 @@ NeededColumnsList(TupleDesc tupdesc, const PBitmapset& attr_needed)
 }
 
 /*
- * Detoast and decompress all values. If there's no work to do, return
- * original pointer; otherwise return a newly-allocated values array. Should
- * be called in per-tuple context.
- */
-export Datum *
-detoast_values(TupleDesc tupleDesc, Datum *orig_values, bool *isnull)
-{
-	int natts = tupleDesc->natts;
-
-	/* copy on write to optimize for case where nothing is toasted */
-	Datum *values = orig_values;
-
-	for (int i = 0; i < tupleDesc->natts; i++)
-	{
-		if (!isnull[i] && TupleDescAttr(tupleDesc, i)->attlen == -1 &&
-			VARATT_IS_EXTENDED(values[i]))
-		{
-			/* make a copy */
-			if (values == orig_values)
-			{
-				values = make_array<Datum>(natts);
-				memcpy(values, orig_values, sizeof(Datum) * natts);
-			}
-
-			/* will be freed when per-tuple context is reset */
-			varlena *new_value = reinterpret_cast<varlena *>(DatumGetPointer(values[i]));
-			new_value = detoast_attr(new_value);
-			values[i] = PointerGetDatum(new_value);
-		}
-	}
-
-	return values;
-}
-
-/*
  * BioseqColumnCheckLogicalReplication throws an error if the relation is
  * part of any publication. This should be called before any write to a bioseq
  * column table, because column changes are not replicated with logical

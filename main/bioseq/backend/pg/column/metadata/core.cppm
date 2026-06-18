@@ -145,7 +145,7 @@ static void GetHighestUsedAddressAndId(uint64_t storageId,
 									   uint64_t *highestUsedAddress,
 									   uint64_t *highestUsedId);
 static StripeMetadata * UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId,
-												bool *update, Datum *newValues);
+												bioseq::pg_utils::pg_datum_update<Natts_bioseq_stripe> &update);
 static List * ReadDataFileStripeList(uint64_t storageId, Snapshot snapshot,
 									 ScanDirection scanDirection);
 export StripeMetadata * BuildStripeMetadata(Relation bioseqColumnStripes,
@@ -333,18 +333,19 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 
 	bool written = false;
 
-	bool nulls[Natts_bioseq_options] = { 0 };
-	Datum values[Natts_bioseq_options] = {
-		ObjectIdGetDatum(regclass),
-		Int32GetDatum(options->chunkRowCount),
-		Int32GetDatum(options->stripeRowCount),
-		Int32GetDatum(options->compressionLevel),
-		0, /* to be filled below */
-	};
-
 	NameData compressionName = { 0 };
 	namestrcpy(&compressionName, CompressionTypeStr(options->compressionType));
-	values[Anum_bioseq_options_compression - 1] = NameGetDatum(&compressionName);
+
+	bioseq::pg_utils::pg_datum_list<Natts_bioseq_options> values{};
+	values.set_oid(Anum_bioseq_options_regclass, regclass);
+	values.set(Anum_bioseq_options_chunk_group_row_limit,
+			   static_cast<std::int32_t>(options->chunkRowCount));
+	values.set(Anum_bioseq_options_stripe_row_limit,
+			   static_cast<std::int32_t>(options->stripeRowCount));
+	values.set(Anum_bioseq_options_compression_level,
+			   static_cast<std::int32_t>(options->compressionLevel));
+	values.set_raw(Anum_bioseq_options_compression,
+				   bioseq::pg_utils::pg_datum::from_name(&compressionName));
 
 	/* create heap tuple and insert into catalog table */
 	Relation bioseqColumnOptions = safe_relation_open(BioseqColumnOptionsRelationId(),
@@ -355,7 +356,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 	ScanKeyData scanKey[1] = { 0 };
 	ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ,
-				ObjectIdGetDatum(regclass));
+				bioseq::pg_utils::pg_datum::from_oid(regclass).raw());
 
 	Relation index = index_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
@@ -368,14 +369,17 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 		{
 			/* TODO check if the options are actually different, skip if not changed */
 			/* update existing record */
-			bool update[Natts_bioseq_options] = { 0 };
-			update[Anum_bioseq_options_chunk_group_row_limit - 1] = true;
-			update[Anum_bioseq_options_stripe_row_limit - 1] = true;
-			update[Anum_bioseq_options_compression_level - 1] = true;
-			update[Anum_bioseq_options_compression - 1] = true;
+			bioseq::pg_utils::pg_datum_update<Natts_bioseq_options> update{};
+			update.set(Anum_bioseq_options_chunk_group_row_limit,
+					   static_cast<std::int32_t>(options->chunkRowCount));
+			update.set(Anum_bioseq_options_stripe_row_limit,
+					   static_cast<std::int32_t>(options->stripeRowCount));
+			update.set(Anum_bioseq_options_compression_level,
+					   static_cast<std::int32_t>(options->compressionLevel));
+			update.set_raw(Anum_bioseq_options_compression,
+						   bioseq::pg_utils::pg_datum::from_name(&compressionName));
 
-			HeapTuple tuple = heap_modify_tuple(heapTuple, tupleDescriptor,
-												values, nulls, update);
+			HeapTuple tuple = update.modify(heapTuple, tupleDescriptor);
 			CatalogTupleUpdate(bioseqColumnOptions, &tuple->t_self, tuple);
 			written = true;
 		}
@@ -383,7 +387,7 @@ WriteBioseqColumnOptions(Oid regclass, BioseqColumnOptions *options, bool overwr
 	else
 	{
 		/* inserting new record */
-		HeapTuple newTuple = heap_form_tuple(tupleDescriptor, values, nulls);
+		HeapTuple newTuple = values.form_tuple(tupleDescriptor);
 		CatalogTupleInsert(bioseqColumnOptions, newTuple);
 		written = true;
 	}
@@ -430,7 +434,7 @@ DeleteBioseqColumnTableOptions(Oid regclass, bool missingOk)
 	ScanKeyData scanKey[1] = { 0 };
 	ScanKeyInit(&scanKey[0], Anum_bioseq_options_regclass, BTEqualStrategyNumber,
 				F_OIDEQ,
-				ObjectIdGetDatum(regclass));
+				bioseq::pg_utils::pg_datum::from_oid(regclass).raw());
 
 	Relation index = index_open(BioseqColumnOptionsIndexRegclass(), AccessShareLock);
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnOptions, index, NULL,
@@ -481,41 +485,42 @@ SaveStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, StripeSkipLis
 			ColumnChunkSkipNode *chunk =
 				&chunkList->chunkSkipNodeArray[columnIndex][chunkIndex];
 
-			Datum values[Natts_bioseq_chunk] = {
-				UInt64GetDatum(storageId),
-				Int64GetDatum(stripe),
-				Int32GetDatum(columnIndex + 1),
-				Int32GetDatum(chunkIndex),
-				0, /* to be filled below */
-				0, /* to be filled below */
-				Int64GetDatum(chunk->valueChunkOffset),
-				Int64GetDatum(chunk->valueLength),
-				Int64GetDatum(chunk->existsChunkOffset),
-				Int64GetDatum(chunk->existsLength),
-				Int32GetDatum(chunk->valueCompressionType),
-				Int32GetDatum(chunk->valueCompressionLevel),
-				Int64GetDatum(chunk->decompressedValueSize),
-				Int64GetDatum(chunk->rowCount)
-			};
-
-			bool nulls[Natts_bioseq_chunk] = { false };
+			bioseq::pg_utils::pg_datum_list<Natts_bioseq_chunk> values{};
+			values.set_uint64(Anum_bioseq_chunk_storageid, storageId);
+			values.set(Anum_bioseq_chunk_stripe, static_cast<std::int64_t>(stripe));
+			values.set(Anum_bioseq_chunk_attr, static_cast<std::int32_t>(columnIndex + 1));
+			values.set(Anum_bioseq_chunk_chunk, static_cast<std::int32_t>(chunkIndex));
+			values.set(Anum_bioseq_chunk_value_stream_offset,
+					   static_cast<std::int64_t>(chunk->valueChunkOffset));
+			values.set(Anum_bioseq_chunk_value_stream_length,
+					   static_cast<std::int64_t>(chunk->valueLength));
+			values.set(Anum_bioseq_chunk_exists_stream_offset,
+					   static_cast<std::int64_t>(chunk->existsChunkOffset));
+			values.set(Anum_bioseq_chunk_exists_stream_length,
+					   static_cast<std::int64_t>(chunk->existsLength));
+			values.set(Anum_bioseq_chunk_value_compression_type,
+					   static_cast<std::int32_t>(chunk->valueCompressionType));
+			values.set(Anum_bioseq_chunk_value_compression_level,
+					   static_cast<std::int32_t>(chunk->valueCompressionLevel));
+			values.set(Anum_bioseq_chunk_value_decompressed_size,
+					   static_cast<std::int64_t>(chunk->decompressedValueSize));
+			values.set(Anum_bioseq_chunk_value_count,
+					   static_cast<std::int64_t>(chunk->rowCount));
 
 			if (chunk->hasMinMax)
 			{
-				values[Anum_bioseq_chunk_minimum_value - 1] =
-					PointerGetDatum(bioseq::metadata::tuple_ops::datum_to_bytea(chunk->minimumValue,
-												 TupleDescAttr(tupleDescriptor, columnIndex)));
-				values[Anum_bioseq_chunk_maximum_value - 1] =
-					PointerGetDatum(bioseq::metadata::tuple_ops::datum_to_bytea(chunk->maximumValue,
-												 TupleDescAttr(tupleDescriptor, columnIndex)));
-			}
-			else
-			{
-				nulls[Anum_bioseq_chunk_minimum_value - 1] = true;
-				nulls[Anum_bioseq_chunk_maximum_value - 1] = true;
+				bytea *minimum_value = bioseq::pg_utils::pg_datum::from_raw(chunk->minimumValue)
+					.to_bytea(TupleDescAttr(tupleDescriptor, columnIndex));
+				bytea *maximum_value = bioseq::pg_utils::pg_datum::from_raw(chunk->maximumValue)
+					.to_bytea(TupleDescAttr(tupleDescriptor, columnIndex));
+				values.set_raw(Anum_bioseq_chunk_minimum_value,
+							   bioseq::pg_utils::pg_datum::from_pointer(minimum_value));
+				values.set_raw(Anum_bioseq_chunk_maximum_value,
+							   bioseq::pg_utils::pg_datum::from_pointer(maximum_value));
 			}
 
-			bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
+			bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
+				modifyState, values.values_data(), values.nulls_data());
 		}
 	}
 
@@ -540,17 +545,15 @@ SaveChunkGroups(RelFileLocator relfilelocator, uint64_t stripe,
 
 	for (auto rowCount : PIntList{chunkGroupRowCounts})
 	{
-		Datum values[Natts_bioseq_chunkgroup] = {
-			UInt64GetDatum(storageId),
-			Int64GetDatum(stripe),
-			Int32GetDatum(chunkId),
-			Int64GetDatum(rowCount),
-			Int64GetDatum(0)   /* deleted_rows: bigint, read back via DatumGetUInt64 */
-		};
+		bioseq::pg_utils::pg_datum_list<Natts_bioseq_chunkgroup> values{};
+		values.set_uint64(Anum_bioseq_chunkgroup_storageid, storageId);
+		values.set(Anum_bioseq_chunkgroup_stripe, static_cast<std::int64_t>(stripe));
+		values.set(Anum_bioseq_chunkgroup_chunk, static_cast<std::int32_t>(chunkId));
+		values.set(Anum_bioseq_chunkgroup_row_count, static_cast<std::int64_t>(rowCount));
+		values.set(Anum_bioseq_chunkgroup_deleted_rows, static_cast<std::int64_t>(0));
 
-		bool nulls[Natts_bioseq_chunkgroup] = { false };
-
-		bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
+		bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
+			modifyState, values.values_data(), values.nulls_data());
 		chunkId++;
 	}
 
@@ -613,21 +616,20 @@ SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 
 			int64_t nextSeqId = nextval_internal(bioseqColumnRowMaskSeq, false);
 
-			Datum values[Natts_bioseq_row_mask] = {
-				Int64GetDatum(nextSeqId),
-				Int64GetDatum(storageId),
-				Int64GetDatum(stripeId),
-				Int32GetDatum(chunkId),
-				Int64GetDatum(chunkIterationStartRowNumber),
-				Int64GetDatum(chunkIterationEndRowNumber),
-				Int32GetDatum(0), 
-				0, /* to be filled below */
-			};
-
-			values[Anum_bioseq_row_mask_mask - 1] =
-				PointerGetDatum(initialLookupRecord);
-
-			bool nulls[Natts_bioseq_row_mask] = { false };
+			bioseq::pg_utils::pg_datum_list<Natts_bioseq_row_mask> values{};
+			values.set(Anum_bioseq_row_mask_id, static_cast<std::int64_t>(nextSeqId));
+			values.set(Anum_bioseq_row_mask_storage_id,
+					   static_cast<std::int64_t>(storageId));
+			values.set(Anum_bioseq_row_mask_stripe_id,
+					   static_cast<std::int64_t>(stripeId));
+			values.set(Anum_bioseq_row_mask_chunk_id, static_cast<std::int32_t>(chunkId));
+			values.set(Anum_bioseq_row_mask_start_row_number,
+					   static_cast<std::int64_t>(chunkIterationStartRowNumber));
+			values.set(Anum_bioseq_row_mask_end_row_number,
+					   static_cast<std::int64_t>(chunkIterationEndRowNumber));
+			values.set(Anum_bioseq_row_mask_deleted_rows, static_cast<std::int32_t>(0));
+			values.set_raw(Anum_bioseq_row_mask_mask,
+						   bioseq::pg_utils::pg_datum::from_pointer(initialLookupRecord));
 
 			/*
 			 * bioseq.row_mask has UNIQUE constraint which can throw
@@ -636,7 +638,8 @@ SaveEmptyRowMask(uint64_t storageId, uint64_t stripeId,
 			 */
 			PG_TRY();
 			{
-				bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
+				bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
+					modifyState, values.values_data(), values.nulls_data());
 			}
 			
 			PG_CATCH();
@@ -756,9 +759,9 @@ ReadStripeSkipList(RelFileLocator relfilelocator, uint64_t stripe, TupleDesc tup
 				datumArray[Anum_bioseq_chunk_maximum_value - 1]);
 
 			chunk->minimumValue =
-				bioseq::metadata::tuple_ops::bytea_to_datum(minValue, TupleDescAttr(tupleDescriptor, columnIndex));
+				bioseq::pg_utils::pg_datum::from_bytea(minValue, TupleDescAttr(tupleDescriptor, columnIndex)).raw();
 			chunk->maximumValue =
-				bioseq::metadata::tuple_ops::bytea_to_datum(maxValue, TupleDescAttr(tupleDescriptor, columnIndex));
+				bioseq::pg_utils::pg_datum::from_bytea(maxValue, TupleDescAttr(tupleDescriptor, columnIndex)).raw();
 
 			chunk->hasMinMax = true;
 		}
@@ -866,7 +869,8 @@ export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 	Relation index = index_open(BioseqColumnRowMaskIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey, Anum_bioseq_row_mask_id,
-				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(rowMaskEntry->id));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(rowMaskEntry->id)).raw());
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnRowMask,
 															index,
@@ -878,20 +882,12 @@ export void FlushRowMaskCache(RowMaskWriteStateEntry *rowMaskEntry)
 
 	if (HeapTupleIsValid(oldHeapTuple))
 	{
-		bool update[Natts_bioseq_row_mask] = { 0 };
-		bool nulls[Natts_bioseq_row_mask] = { 0 };
-		Datum values[Natts_bioseq_row_mask] = { 0 };
+		bioseq::pg_utils::pg_datum_update<Natts_bioseq_row_mask> update{};
+		update.set(Anum_bioseq_row_mask_deleted_rows, rowMaskEntry->deletedRows);
+		update.set_raw(Anum_bioseq_row_mask_mask,
+					   bioseq::pg_utils::pg_datum::from_pointer(rowMaskEntry->mask));
 
-		// Update deleted row count
-		update[Anum_bioseq_row_mask_deleted_rows - 1] = true;
-		values[Anum_bioseq_row_mask_deleted_rows - 1] = rowMaskEntry->deletedRows;
-
-		// Update mask byte array
-		update[Anum_bioseq_row_mask_mask - 1] = true;
-		values[Anum_bioseq_row_mask_mask - 1] = PointerGetDatum(rowMaskEntry->mask);
-
-		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
-												   values, nulls, update);
+		HeapTuple newHeapTuple = update.modify(oldHeapTuple, tupleDescriptor);
 
 		CatalogTupleUpdate(bioseqColumnRowMask, &oldHeapTuple->t_self, newHeapTuple);
 
@@ -1252,7 +1248,8 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 						  datumArray, isNullArray);
 
 		uint32_t tupleChunkGroupIndex =
-			DatumGetUInt32(datumArray[Anum_bioseq_chunkgroup_chunk - 1]);
+			bioseq::pg_utils::pg_datum::to_uint32(bioseq::pg_utils::pg_datum::from_raw(
+				datumArray[Anum_bioseq_chunkgroup_chunk - 1]));
 
 		if (tupleChunkGroupIndex >= chunkGroupCount)
 		{
@@ -1261,10 +1258,12 @@ ReadChunkGroupRowCounts(uint64_t storageId, uint64_t stripe, uint32_t chunkGroup
 		}
 
 		(*chunkGroupRowCounts)[tupleChunkGroupIndex] =
-			static_cast<uint32_t>(DatumGetUInt64(datumArray[Anum_bioseq_chunkgroup_row_count - 1]));
+			static_cast<uint32_t>(bioseq::pg_utils::pg_datum::to_uint64(
+				bioseq::pg_utils::pg_datum::from_raw(datumArray[Anum_bioseq_chunkgroup_row_count - 1])));
 
 		(*chunkGroupDeletedRows)[tupleChunkGroupIndex] =
-			static_cast<uint32_t>(DatumGetUInt64(datumArray[Anum_bioseq_chunkgroup_deleted_rows - 1]));
+			static_cast<uint32_t>(bioseq::pg_utils::pg_datum::to_uint64(
+				bioseq::pg_utils::pg_datum::from_raw(datumArray[Anum_bioseq_chunkgroup_deleted_rows - 1])));
 	}
 
 	systable_endscan_ordered(scanDescriptor);
@@ -1290,11 +1289,14 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 
 	ScanKeyData scanKey[3];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunkgroup_storageid,
-				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from_uint64(storageId).raw());
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunkgroup_stripe,
-				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripe));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(stripe)).raw());
 	ScanKeyInit(&scanKey[2], Anum_bioseq_chunkgroup_chunk,
-				BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(chunkGroupId));
+				BTEqualStrategyNumber, F_INT4EQ,
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int32_t>(chunkGroupId)).raw());
 
 	SysScanDesc scanDescriptor =
 		systable_beginscan_ordered(bioseqColumnChunkGroup, index, NULL, 3, scanKey);
@@ -1305,16 +1307,11 @@ UpdateChunkGroupDeletedRows(uint64_t storageId, uint64_t stripe,
 
 	if (HeapTupleIsValid(oldHeapTuple))
 	{
-		bool update[Natts_bioseq_chunkgroup] = { 0 };
-		bool nulls[Natts_bioseq_chunkgroup] = { 0 };
-		Datum values[Natts_bioseq_chunkgroup] = { 0 };
+		bioseq::pg_utils::pg_datum_update<Natts_bioseq_chunkgroup> update{};
+		update.set(Anum_bioseq_chunkgroup_deleted_rows,
+				   static_cast<std::int64_t>(deletedRowNumber));
 
-		// Update deleted row count
-		update[Anum_bioseq_chunkgroup_deleted_rows - 1] = true;
-		values[Anum_bioseq_chunkgroup_deleted_rows - 1] = Int64GetDatum(deletedRowNumber);
-
-		HeapTuple newHeapTuple = heap_modify_tuple(oldHeapTuple, tupleDescriptor,
-												   values, nulls, update);
+		HeapTuple newHeapTuple = update.modify(oldHeapTuple, tupleDescriptor);
 
 		CatalogTupleUpdate(bioseqColumnChunkGroup, &oldHeapTuple->t_self, newHeapTuple);
 
@@ -1336,36 +1333,26 @@ static void
 InsertEmptyStripeMetadataRow(uint64_t storageId, uint64_t stripeId, uint32_t columnCount,
 							 uint32_t chunkGroupRowCount, uint64_t firstRowNumber)
 {
-	bool nulls[Natts_bioseq_stripe] = { false };
-
-	Datum values[Natts_bioseq_stripe] = { 0 };
-	values[Anum_bioseq_stripe_storageid - 1] =
-		UInt64GetDatum(storageId);
-	values[Anum_bioseq_stripe_stripe - 1] =
-		UInt64GetDatum(stripeId);
-	values[Anum_bioseq_stripe_column_count - 1] =
-		UInt32GetDatum(columnCount);
-	values[Anum_bioseq_stripe_chunk_row_count - 1] =
-		UInt32GetDatum(chunkGroupRowCount);
-	values[Anum_bioseq_stripe_first_row_number - 1] =
-		UInt64GetDatum(firstRowNumber);
+	bioseq::pg_utils::pg_datum_list<Natts_bioseq_stripe> values{};
+	values.set_uint64(Anum_bioseq_stripe_storageid, storageId);
+	values.set_uint64(Anum_bioseq_stripe_stripe, stripeId);
+	values.set_uint32(Anum_bioseq_stripe_column_count, columnCount);
+	values.set_uint32(Anum_bioseq_stripe_chunk_row_count, chunkGroupRowCount);
+	values.set_uint64(Anum_bioseq_stripe_first_row_number, firstRowNumber);
 
 	/* stripe has no rows yet, so initialize rest of the columns accordingly */
-	values[Anum_bioseq_stripe_row_count - 1] =
-		UInt64GetDatum(0);
-	values[Anum_bioseq_stripe_file_offset - 1] =
-		UInt64GetDatum(BioseqColumnInvalidLogicalOffset);
-	values[Anum_bioseq_stripe_data_length - 1] =
-		UInt64GetDatum(0);
-	values[Anum_bioseq_stripe_chunk_count - 1] =
-		UInt32GetDatum(0);
+	values.set_uint64(Anum_bioseq_stripe_row_count, 0);
+	values.set_uint64(Anum_bioseq_stripe_file_offset, BioseqColumnInvalidLogicalOffset);
+	values.set_uint64(Anum_bioseq_stripe_data_length, 0);
+	values.set_uint32(Anum_bioseq_stripe_chunk_count, 0);
 
 	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
 	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, RowExclusiveLock);
 
 	bioseq::metadata::tuple_ops::ModifyState *modifyState = bioseq::metadata::tuple_ops::start_modify_relation(bioseqColumnStripes);
 
-	bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(modifyState, values, nulls);
+	bioseq::metadata::tuple_ops::insert_tuple_and_enforce_constraints(
+		modifyState, values.values_data(), values.nulls_data());
 
 	bioseq::metadata::tuple_ops::finish_modify_relation(modifyState);
 
@@ -1456,9 +1443,11 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 	Relation index = index_open(BioseqColumnChunkIndexRelationId(), AccessShareLock);
 
 	ScanKeyInit(&scanKey[0], Anum_bioseq_chunk_storageid,
-				BTEqualStrategyNumber, F_INT8EQ, UInt64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from_uint64(storageId).raw());
 	ScanKeyInit(&scanKey[1], Anum_bioseq_chunk_stripe,
-				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripeId));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(stripeId)).raw());
 
 	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnChunk, index,
 															GetTransactionSnapshot(), 2, scanKey);
@@ -1475,7 +1464,8 @@ DecompressedLengthForStripe(RelFileLocator relfilelocator, uint64_t stripeId)
 						  isNullArray);
 
 		decompressedChunkSize +=
-			DatumGetInt64(datumArray[Anum_bioseq_chunk_value_decompressed_size - 1]);
+			bioseq::pg_utils::pg_datum::to<std::int64_t>(bioseq::pg_utils::pg_datum::from_raw(
+				datumArray[Anum_bioseq_chunk_value_decompressed_size - 1]));
 	}
 
 	systable_endscan_ordered(scanDescriptor);
@@ -1580,25 +1570,19 @@ CompleteStripeReservation(Relation rel, uint64_t stripeId, uint64_t sizeBytes,
 	uint64_t resLogicalStart = BioseqColumnStorageReserveData(rel, sizeBytes);
 	uint64_t storageId = BioseqColumnStorageGetStorageId(rel, false);
 
-	bool update[Natts_bioseq_stripe] = { false };
-	update[Anum_bioseq_stripe_file_offset - 1] = true;
-	update[Anum_bioseq_stripe_data_length - 1] = true;
-	update[Anum_bioseq_stripe_row_count - 1] = true;
-	update[Anum_bioseq_stripe_chunk_count - 1] = true;
+	bioseq::pg_utils::pg_datum_update<Natts_bioseq_stripe> update{};
+	update.set(Anum_bioseq_stripe_file_offset, static_cast<std::int64_t>(resLogicalStart));
+	update.set(Anum_bioseq_stripe_data_length, static_cast<std::int64_t>(sizeBytes));
+	update.set_uint64(Anum_bioseq_stripe_row_count, rowCount);
+	update.set(Anum_bioseq_stripe_chunk_count, static_cast<std::int32_t>(chunkCount));
 
-	Datum newValues[Natts_bioseq_stripe] = { 0 };
-	newValues[Anum_bioseq_stripe_file_offset - 1] = Int64GetDatum(resLogicalStart);
-	newValues[Anum_bioseq_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
-	newValues[Anum_bioseq_stripe_row_count - 1] = UInt64GetDatum(rowCount);
-	newValues[Anum_bioseq_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
-
-	return UpdateStripeMetadataRow(storageId, stripeId, update, newValues);
+	return UpdateStripeMetadataRow(storageId, stripeId, update);
 }
 
 
 /*
  * UpdateStripeMetadataRow updates stripe metadata tuple for the stripe with
- * stripeId according to given newValues and update arrays.
+ * stripeId according to the provided update row.
  * Note that this function shouldn't be used for the cases where any indexes
  * of stripe metadata should be updated according to modifications done.
  *
@@ -1608,14 +1592,16 @@ CompleteStripeReservation(Relation rel, uint64_t stripeId, uint64_t sizeBytes,
  * unconditionally rather than maintaining two versions of the function body.
  */
 static StripeMetadata *
-UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
-						Datum *newValues)
+UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId,
+						bioseq::pg_utils::pg_datum_update<Natts_bioseq_stripe> &update)
 {
 	ScanKeyData scanKey[2];
 	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(storageId)).raw());
 	ScanKeyInit(&scanKey[1], Anum_bioseq_stripe_stripe,
-				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(stripeId));
+				BTEqualStrategyNumber, F_INT8EQ,
+				bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(stripeId)).raw());
 
 	Oid bioseqColumnStripesOid = BioseqColumnStripeRelationId();
 	Relation bioseqColumnStripes = table_open(bioseqColumnStripesOid, AccessShareLock);
@@ -1637,13 +1623,7 @@ UpdateStripeMetadataRow(uint64_t storageId, uint64_t stripeId, bool *update,
 		bioseq_log<ERR, PG>( "attempted to modify an unexpected stripe, columnar storage with id={} does not have stripe with id={}", storageId, stripeId);
 	}
 
-	/*
-	 * systable_inplace_update_finish doesn't allow changing the size of the
-	 * original tuple, so we don't allow setting any Datum's to NULL values.
-	 */
-	bool newNulls[Natts_bioseq_stripe] = { false };
-	HeapTuple modifiedTuple = heap_modify_tuple(oldTuple, tupleDescriptor,
-												newValues, newNulls, update);
+	HeapTuple modifiedTuple = update.modify(oldTuple, tupleDescriptor);
 
 	systable_inplace_update_finish(state, modifiedTuple);
 
@@ -2212,19 +2192,13 @@ RewriteStripeMetadataRowWithNewValues(Relation rel, uint64_t stripeId,
 {
 	uint64_t storageId = BioseqColumnStorageGetStorageId(rel, false);
 
-	bool update[Natts_bioseq_stripe] = { false };
-	update[Anum_bioseq_stripe_file_offset - 1] = true;
-	update[Anum_bioseq_stripe_data_length - 1] = true;
-	update[Anum_bioseq_stripe_row_count - 1] = true;
-	update[Anum_bioseq_stripe_chunk_count - 1] = true;
+	bioseq::pg_utils::pg_datum_update<Natts_bioseq_stripe> update{};
+	update.set(Anum_bioseq_stripe_file_offset, static_cast<std::int64_t>(fileOffset));
+	update.set(Anum_bioseq_stripe_data_length, static_cast<std::int64_t>(sizeBytes));
+	update.set_uint64(Anum_bioseq_stripe_row_count, rowCount);
+	update.set(Anum_bioseq_stripe_chunk_count, static_cast<std::int32_t>(chunkCount));
 
-	Datum newValues[Natts_bioseq_stripe] = { 0 };
-	newValues[Anum_bioseq_stripe_file_offset - 1] = Int64GetDatum(fileOffset);
-	newValues[Anum_bioseq_stripe_data_length - 1] = Int64GetDatum(sizeBytes);
-	newValues[Anum_bioseq_stripe_row_count - 1] = UInt64GetDatum(rowCount);
-	newValues[Anum_bioseq_stripe_chunk_count - 1] = Int32GetDatum(chunkCount);
-
-	return UpdateStripeMetadataRow(storageId, stripeId, update, newValues);
+	return UpdateStripeMetadataRow(storageId, stripeId, update);
 }
 
 // ---------------------------------------------------------------------------
@@ -2250,26 +2224,21 @@ export struct SubTableRow {
 
 	SubTableRow() = default;
 
-	// Deform a bioseq_internal.seq_sub_table heap tuple into a row. Replaces the
-	// old static BuildSubTableRowFromTuple. Deforms into the shared
-	// deformed_row<Natts> helper (types.cppm) so the 1-based PG attnum -> 0-based
-	// `- 1` offset lives in one place (dr.at(anum) bakes it in).
 	SubTableRow(HeapTuple heapTuple, TupleDesc td) {
-		deformed_row<anum_seq_sub_table::max_value> dr;
-		heap_deform_tuple(heapTuple, td, dr.values, dr.nulls);
-		database_oid        = DatumGetObjectId(dr.at(anum_seq_sub_table::field<"database_oid">));
-		tablespace_oid      = DatumGetObjectId(dr.at(anum_seq_sub_table::field<"tablespace_oid">));
-		main_relfilenode    = DatumGetObjectId(dr.at(anum_seq_sub_table::field<"main_relfilenode">));
-		column_attno        = DatumGetInt16   (dr.at(anum_seq_sub_table::field<"column_attno">));
-		bucket_idx          = DatumGetInt16   (dr.at(anum_seq_sub_table::field<"bucket_idx">));
-		shard_idx           = DatumGetInt32   (dr.at(anum_seq_sub_table::field<"shard_idx">));
-		sub_table_relid     = DatumGetObjectId(dr.at(anum_seq_sub_table::field<"sub_table_relid">));
-		sidecar_relid       = DatumGetObjectId(dr.at(anum_seq_sub_table::field<"sidecar_relid">));
+		auto row = bioseq::pg_utils::pg_datum_list<anum_seq_sub_table::max_value>::deformed(heapTuple, td);
+		database_oid        = bioseq::pg_utils::pg_datum::to_oid(row.at(anum_seq_sub_table::field<"database_oid">));
+		tablespace_oid      = bioseq::pg_utils::pg_datum::to_oid(row.at(anum_seq_sub_table::field<"tablespace_oid">));
+		main_relfilenode    = bioseq::pg_utils::pg_datum::to_oid(row.at(anum_seq_sub_table::field<"main_relfilenode">));
+		column_attno        = bioseq::pg_utils::pg_datum::to<std::int16_t>(row.at(anum_seq_sub_table::field<"column_attno">));
+		bucket_idx          = bioseq::pg_utils::pg_datum::to<std::int16_t>(row.at(anum_seq_sub_table::field<"bucket_idx">));
+		shard_idx           = bioseq::pg_utils::pg_datum::to<std::int32_t>(row.at(anum_seq_sub_table::field<"shard_idx">));
+		sub_table_relid     = bioseq::pg_utils::pg_datum::to_oid(row.at(anum_seq_sub_table::field<"sub_table_relid">));
+		sidecar_relid       = bioseq::pg_utils::pg_datum::to_oid(row.at(anum_seq_sub_table::field<"sidecar_relid">));
 		bytes_written       = static_cast<std::uint64_t>(
-			DatumGetInt64(dr.at(anum_seq_sub_table::field<"bytes_written">)));
-		is_full             = DatumGetBool    (dr.at(anum_seq_sub_table::field<"is_full">));
+			bioseq::pg_utils::pg_datum::to<std::int64_t>(row.at(anum_seq_sub_table::field<"bytes_written">)));
+		is_full             = bioseq::pg_utils::pg_datum::to<bool>(row.at(anum_seq_sub_table::field<"is_full">));
 		total_payload_bytes = static_cast<std::uint64_t>(
-			DatumGetInt64(dr.at(anum_seq_sub_table::field<"total_payload_bytes">)));
+			bioseq::pg_utils::pg_datum::to<std::int64_t>(row.at(anum_seq_sub_table::field<"total_payload_bytes">)));
 	}
 };
 
@@ -2394,21 +2363,20 @@ export struct SubTableManager {
 		Relation rel = safe_relation_open(rel_oid, RowExclusiveLock);
 		TupleDesc td = RelationGetDescr(rel);
 
-		Datum values[anum_seq_sub_table::max_value] = { 0 };
-		bool  nulls[anum_seq_sub_table::max_value]  = { false };
-		values[anum_seq_sub_table::field<"database_oid"> - 1]        = ObjectIdGetDatum(database_oid);
-		values[anum_seq_sub_table::field<"tablespace_oid"> - 1]      = ObjectIdGetDatum(tablespace_oid);
-		values[anum_seq_sub_table::field<"main_relfilenode"> - 1]    = ObjectIdGetDatum(main_relfilenode);
-		values[anum_seq_sub_table::field<"column_attno"> - 1]        = Int16GetDatum(column_attno);
-		values[anum_seq_sub_table::field<"bucket_idx"> - 1]          = Int16GetDatum(bucket_idx);
-		values[anum_seq_sub_table::field<"shard_idx"> - 1]           = Int32GetDatum(shard_idx);
-		values[anum_seq_sub_table::field<"sub_table_relid"> - 1]     = ObjectIdGetDatum(sub_table_relid);
-		values[anum_seq_sub_table::field<"sidecar_relid"> - 1]       = ObjectIdGetDatum(sidecar_relid);
-		values[anum_seq_sub_table::field<"bytes_written"> - 1]       = Int64GetDatum(0);
-		values[anum_seq_sub_table::field<"is_full"> - 1]             = BoolGetDatum(false);
-		values[anum_seq_sub_table::field<"total_payload_bytes"> - 1] = Int64GetDatum(0);
+		bioseq::pg_utils::pg_datum_list<anum_seq_sub_table::max_value> values{};
+		values.set_oid(anum_seq_sub_table::field<"database_oid">, database_oid);
+		values.set_oid(anum_seq_sub_table::field<"tablespace_oid">, tablespace_oid);
+		values.set_oid(anum_seq_sub_table::field<"main_relfilenode">, main_relfilenode);
+		values.set(anum_seq_sub_table::field<"column_attno">, column_attno);
+		values.set(anum_seq_sub_table::field<"bucket_idx">, bucket_idx);
+		values.set(anum_seq_sub_table::field<"shard_idx">, shard_idx);
+		values.set_oid(anum_seq_sub_table::field<"sub_table_relid">, sub_table_relid);
+		values.set_oid(anum_seq_sub_table::field<"sidecar_relid">, sidecar_relid);
+		values.set(anum_seq_sub_table::field<"bytes_written">, static_cast<std::int64_t>(0));
+		values.set(anum_seq_sub_table::field<"is_full">, false);
+		values.set(anum_seq_sub_table::field<"total_payload_bytes">, static_cast<std::int64_t>(0));
 
-		HeapTuple tup = heap_form_tuple(td, values, nulls);
+		HeapTuple tup = values.form_tuple(td);
 		CatalogTupleInsert(rel, tup);
 		heap_freetuple(tup);
 		table_close(rel, RowExclusiveLock);
@@ -2493,19 +2461,14 @@ export struct SubTableManager {
 		const bool now_full = current.is_full
 			|| (cap_bytes != 0 && new_bytes_written >= cap_bytes);
 
-		Datum newValues[anum_seq_sub_table::max_value] = { 0 };
-		bool  newNulls [anum_seq_sub_table::max_value] = { false };
-		bool  doReplace[anum_seq_sub_table::max_value] = { false };
-		newValues[anum_seq_sub_table::field<"bytes_written"> - 1]       = Int64GetDatum(
-			static_cast<std::int64_t>(new_bytes_written));
-		doReplace[anum_seq_sub_table::field<"bytes_written"> - 1]       = true;
-		newValues[anum_seq_sub_table::field<"total_payload_bytes"> - 1] = Int64GetDatum(
-			static_cast<std::int64_t>(new_total_payload));
-		doReplace[anum_seq_sub_table::field<"total_payload_bytes"> - 1] = true;
-		newValues[anum_seq_sub_table::field<"is_full"> - 1]             = BoolGetDatum(now_full);
-		doReplace[anum_seq_sub_table::field<"is_full"> - 1]             = true;
+		bioseq::pg_utils::pg_datum_update<anum_seq_sub_table::max_value> update{};
+		update.set(anum_seq_sub_table::field<"bytes_written">,
+				   static_cast<std::int64_t>(new_bytes_written));
+		update.set(anum_seq_sub_table::field<"total_payload_bytes">,
+				   static_cast<std::int64_t>(new_total_payload));
+		update.set(anum_seq_sub_table::field<"is_full">, now_full);
 
-		HeapTuple newTuple = heap_modify_tuple(oldTuple, td, newValues, newNulls, doReplace);
+		HeapTuple newTuple = update.modify(oldTuple, td);
 		CatalogTupleUpdate(rel, &oldTuple->t_self, newTuple);
 		systable_endscan(scan);
 		heap_freetuple(newTuple);

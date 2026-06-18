@@ -36,16 +36,12 @@ static StripeSkipList * CreateEmptyStripeSkipList(uint32_t stripeMaxRowCount,
 												  uint32_t columnCount);
 static void FlushStripe(BioseqColumnWriteState *writeState);
 static StringInfo SerializeBoolArray(bool *boolArray, uint32_t boolArrayLength);
-static void SerializeSingleDatum(StringInfo datumBuffer, Datum datum,
-								 bool datumTypeByValue, int datumTypeLength,
-								 char datumTypeAlign);
 static void SerializeChunkData(BioseqColumnWriteState *writeState, uint32_t chunkIndex,
 							   uint32_t rowCount);
 static void UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode,
 									  Datum columnValue, bool columnTypeByValue,
 									  int columnTypeLength, Oid columnCollation,
 									  FmgrInfo *comparisonFunction);
-static Datum DatumCopy(Datum datum, bool datumTypeByValue, int datumTypeLength);
 static StringInfo CopyStringInfo(StringInfo sourceString);
 
 /*
@@ -251,9 +247,10 @@ BioseqColumnWriteRow(BioseqColumnWriteState *writeState, Datum *columnValues, bo
 							 attributeForm->attname.data, datumLength);
 			}
 
-			SerializeSingleDatum(chunkData->valueBufferArray[columnIndex],
-								 columnValues[columnIndex], columnTypeByValue,
-								 columnTypeLength, columnTypeAlign);
+			bioseq::pg_utils::pg_datum::from_raw(columnValues[columnIndex])
+				.append_serialized(chunkData->valueBufferArray[columnIndex],
+								   columnTypeByValue, columnTypeLength,
+								   columnTypeAlign);
 
 			UpdateChunkSkipNodeMinMax(chunkSkipNode, columnValues[columnIndex],
 									  columnTypeByValue, columnTypeLength,
@@ -563,43 +560,6 @@ SerializeBoolArray(bool *boolArray, uint32_t boolArrayLength)
 
 
 /*
- * SerializeSingleDatum serializes the given datum value and appends it to the
- * provided string info buffer.
- */
-static void
-SerializeSingleDatum(StringInfo datumBuffer, Datum datum, bool datumTypeByValue,
-					 int datumTypeLength, char datumTypeAlign)
-{
-	uint32_t datumLength = att_addlength_datum(0, datumTypeLength, datum);
-	uint32_t datumLengthAligned = att_align_nominal(datumLength, datumTypeAlign);
-
-	enlargeStringInfo(datumBuffer, datumLengthAligned);
-
-	char *currentDatumDataPointer = datumBuffer->data + datumBuffer->len;
-	memset(currentDatumDataPointer, 0, datumLengthAligned);
-
-	if (datumTypeLength > 0)
-	{
-		if (datumTypeByValue)
-		{
-			store_att_byval(currentDatumDataPointer, datum, datumTypeLength);
-		}
-		else
-		{
-			memcpy(currentDatumDataPointer, DatumGetPointer(datum), datumTypeLength);
-		}
-	}
-	else
-	{
-		Assert(!datumTypeByValue);
-		memcpy(currentDatumDataPointer, DatumGetPointer(datum), datumLength);
-	}
-
-	datumBuffer->len += datumLengthAligned;
-}
-
-
-/*
  * SerializeChunkData serializes and compresses chunk data at given chunk index with given
  * compression type for every column.
  */
@@ -694,8 +654,10 @@ UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode, Datum columnValue,
 
 	if (!hasMinMax)
 	{
-		currentMinimum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
-		currentMaximum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
+		currentMinimum = bioseq::pg_utils::pg_datum::from_raw(columnValue)
+			.copy(columnTypeByValue, columnTypeLength).raw();
+		currentMaximum = bioseq::pg_utils::pg_datum::from_raw(columnValue)
+			.copy(columnTypeByValue, columnTypeLength).raw();
 	}
 	else
 	{
@@ -713,7 +675,8 @@ UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode, Datum columnValue,
 			if (!columnTypeByValue)
 				pfree(DatumGetPointer(previousMinimum));
 
-			currentMinimum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
+			currentMinimum = bioseq::pg_utils::pg_datum::from_raw(columnValue)
+				.copy(columnTypeByValue, columnTypeLength).raw();
 		}
 		else
 		{
@@ -725,7 +688,8 @@ UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode, Datum columnValue,
 			if (!columnTypeByValue)
 				pfree(DatumGetPointer(previousMaximum));
 
-			currentMaximum = DatumCopy(columnValue, columnTypeByValue, columnTypeLength);
+			currentMaximum = bioseq::pg_utils::pg_datum::from_raw(columnValue)
+				.copy(columnTypeByValue, columnTypeLength).raw();
 		}
 		else
 		{
@@ -736,29 +700,6 @@ UpdateChunkSkipNodeMinMax(ColumnChunkSkipNode *chunkSkipNode, Datum columnValue,
 	chunkSkipNode->hasMinMax = true;
 	chunkSkipNode->minimumValue = currentMinimum;
 	chunkSkipNode->maximumValue = currentMaximum;
-}
-
-
-/* Creates a copy of the given datum. */
-static Datum
-DatumCopy(Datum datum, bool datumTypeByValue, int datumTypeLength)
-{
-	Datum datumCopy = 0;
-
-	if (datumTypeByValue)
-	{
-		datumCopy = datum;
-	}
-	else
-	{
-		uint32_t datumLength = att_addlength_datum(0, datumTypeLength, datum);
-		char *datumData = make1<char>(datumLength);
-		memcpy(datumData, DatumGetPointer(datum), datumLength);
-
-		datumCopy = PointerGetDatum(datumData);
-	}
-
-	return datumCopy;
 }
 
 

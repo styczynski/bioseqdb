@@ -407,21 +407,3 @@ struct _ParallelBioseqColumnScanData_ref
 static_assert(std::is_standard_layout_v<ParallelBioseqColumnScanData>,
 			  "ParallelBioseqColumnScanData must stay standard-layout (FAM struct, reinterpret_cast'd across modules)");
 }  // namespace
-
-/*
- * DOC0322 §9.2 — typed, named-accessor view over a deformed catalog tuple row.
- * One source of truth for the 1-based PG attnum -> 0-based array `- 1` offset,
- * for future replacement of the `datumArray[Anum_bioseq_* - 1]` deform sites.
- * Exported for use across the storage_metadata partitions; the existing
- * `[Anum_* - 1]` call sites are left untouched in this step.
- */
-export template <int Natts>
-struct deformed_row
-{
-	Datum values[Natts] {};
-	bool  nulls [Natts] {};
-	[[nodiscard]] Datum at(int anum) const noexcept { return values[anum - 1]; }   /* 1-based PG attnum */
-	[[nodiscard]] bool  is_null(int anum) const noexcept { return nulls[anum - 1]; }
-	void set(int anum, Datum v) noexcept { values[anum - 1] = v; nulls[anum - 1] = false; }
-	void set_null(int anum) noexcept { nulls[anum - 1] = true; }
-};

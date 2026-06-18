@@ -399,16 +399,21 @@ struct IndexStorageFragmentPg {
                                    (long long)query_key_, (long long)sub_key, chunk_no);
         const Oid pk = find_primary_key_oid(rel);
         ScanKeyData k[3];
-        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)query_key_));
-        ScanKeyInit(&k[1], kAttSubKey,   BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)sub_key));
-        ScanKeyInit(&k[2], kAttChunkNo,  BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum((int32)chunk_no));
+        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
+        ScanKeyInit(&k[1], kAttSubKey,   BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(sub_key)).raw());
+        ScanKeyInit(&k[2], kAttChunkNo,  BTEqualStrategyNumber, F_INT4EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int32_t>(chunk_no)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 3, k);
         HeapTuple t = systable_getnext(s);
         if (!HeapTupleIsValid(t)) { systable_endscan(s); relation_close(rel, AccessShareLock);
             bioseq_log<ERR, PG>( "bioseq index chunk ({},{},{}) missing", (long long)query_key_, (long long)sub_key, chunk_no); }
         bool isnull=false; Datum d = heap_getattr(t, kAttBlob, RelationGetDescr(rel), &isnull);
         if (isnull) bioseq_log<ERR, PG>( "bioseq index chunk blob NULL");
-        bytea* raw = reinterpret_cast<bytea*>(PG_DETOAST_DATUM_PACKED(d));
+        auto raw_detoasted = bioseq::pg_utils::detoast_packed_as<bytea>(
+            bioseq::pg_utils::pg_datum::from_raw(d));
+        bytea* raw = raw_detoasted.ptr;
         const std::size_t payload = VARSIZE_ANY_EXHDR(raw);
         const std::size_t units   = (payload + sizeof(std::int64_t) - 1) / sizeof(std::int64_t);
         ensure_buffer_(units == 0 ? 1 : units);
@@ -418,7 +423,7 @@ struct IndexStorageFragmentPg {
             chunk_no,
             std::span<const char>(reinterpret_cast<const char*>(VARDATA_ANY(raw)), payload),
             false);
-        if (reinterpret_cast<void*>(raw) != reinterpret_cast<void*>(DatumGetPointer(d))) pfree(raw);
+        raw_detoasted.free_if_copy();
         decoded_sub_ = sub_key; decoded_chunk_ = chunk_no; decoded_bytes_ = payload;
         systable_endscan(s);
         relation_close(rel, AccessShareLock);
@@ -430,12 +435,15 @@ struct IndexStorageFragmentPg {
         if (rel == nullptr) return 0;
         const Oid pk = find_primary_key_oid(rel);
         ScanKeyData k[2];
-        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)query_key_));
-        ScanKeyInit(&k[1], kAttSubKey,   BTLessStrategyNumber,  F_INT8LT, Int64GetDatum((int64)TEMP_RUN_BASE));
+        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
+        ScanKeyInit(&k[1], kAttSubKey,   BTLessStrategyNumber,  F_INT8LT,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(TEMP_RUN_BASE)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 2, k);
         std::int64_t last = std::numeric_limits<std::int64_t>::min(); bool have=false; std::size_t count=0;
         for (HeapTuple t; (t = systable_getnext(s)) != nullptr; ) {
-            bool isnull=false; std::int64_t sk = DatumGetInt64(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull));
+            bool isnull=false; std::int64_t sk = bioseq::pg_utils::pg_datum::to<std::int64_t>(
+                bioseq::pg_utils::pg_datum::from_raw(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull)));
             if (!have || sk != last) { ++count; last = sk; have = true; }
         }
         systable_endscan(s); relation_close(rel, AccessShareLock);
@@ -446,8 +454,10 @@ struct IndexStorageFragmentPg {
         if (rel == nullptr) return 0;
         const Oid pk = find_primary_key_oid(rel);
         ScanKeyData k[2];
-        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)query_key_));
-        ScanKeyInit(&k[1], kAttSubKey,   BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)sub_key));
+        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
+        ScanKeyInit(&k[1], kAttSubKey,   BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(sub_key)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 2, k);
         std::size_t n=0; for (; systable_getnext(s) != nullptr; ) ++n;
         systable_endscan(s); relation_close(rel, AccessShareLock);
@@ -458,12 +468,16 @@ struct IndexStorageFragmentPg {
         if (rel == nullptr) return 0;
         const Oid pk = find_primary_key_oid(rel);
         ScanKeyData k[3];
-        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)query_key_));
-        ScanKeyInit(&k[1], kAttSubKey,   BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)sub_key));
-        ScanKeyInit(&k[2], kAttChunkNo,  BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum((int32)chunk_no));
+        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
+        ScanKeyInit(&k[1], kAttSubKey,   BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(sub_key)).raw());
+        ScanKeyInit(&k[2], kAttChunkNo,  BTEqualStrategyNumber, F_INT4EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int32_t>(chunk_no)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 3, k);
         std::size_t out=0; HeapTuple t = systable_getnext(s);
-        if (HeapTupleIsValid(t)) { bool isnull=false; out = (std::size_t)DatumGetInt32(heap_getattr(t, kAttChunkBytes, RelationGetDescr(rel), &isnull)); }
+        if (HeapTupleIsValid(t)) { bool isnull=false; out = static_cast<std::size_t>(bioseq::pg_utils::pg_datum::to<std::int32_t>(
+            bioseq::pg_utils::pg_datum::from_raw(heap_getattr(t, kAttChunkBytes, RelationGetDescr(rel), &isnull)))); }
         systable_endscan(s); relation_close(rel, AccessShareLock);
         return out;
     }
@@ -502,11 +516,11 @@ struct IndexStorageFragmentPg {
             const Oid pk = find_primary_key_oid(rel);
             ScanKeyData k[3];
             ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
-                        Int64GetDatum((int64)query_key));
+                        bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key)).raw());
             ScanKeyInit(&k[1], kAttSubKey, BTEqualStrategyNumber, F_INT8EQ,
-                        Int64GetDatum((int64)sub_key));
+                        bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(sub_key)).raw());
             ScanKeyInit(&k[2], kAttChunkNo, BTEqualStrategyNumber, F_INT4EQ,
-                        Int32GetDatum((int32)chunk_no));
+                        bioseq::pg_utils::pg_datum::from(static_cast<std::int32_t>(chunk_no)).raw());
             SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 3, k);
             HeapTuple old_t = systable_getnext(s);
             if (HeapTupleIsValid(old_t)) {
@@ -518,10 +532,13 @@ struct IndexStorageFragmentPg {
         SET_VARSIZE(blob, VARHDRSZ + payload.size());
         if (!payload.empty()) std::memcpy(VARDATA(blob), payload.data(), payload.size());
         TupleDesc td = RelationGetDescr(rel);
-        Datum values[5] = { Int64GetDatum((int64)query_key), Int64GetDatum((int64)sub_key),
-                            Int32GetDatum((int32)chunk_no), Int32GetDatum((int32)chunk_bytes), PointerGetDatum(blob) };
-        bool nulls[5] = { false,false,false,false,false };
-        HeapTuple tup = heap_form_tuple(td, values, nulls);
+        bioseq::pg_utils::pg_datum_list<5> values{};
+        values.set(1, static_cast<std::int64_t>(query_key));
+        values.set(2, static_cast<std::int64_t>(sub_key));
+        values.set(3, static_cast<std::int32_t>(chunk_no));
+        values.set(4, static_cast<std::int32_t>(chunk_bytes));
+        values.set_raw(5, bioseq::pg_utils::pg_datum::from_pointer(blob));
+        HeapTuple tup = values.form_tuple(td);
         CatalogTupleInsert(rel, tup);
         heap_freetuple(tup); pfree(blob);
     }
@@ -565,25 +582,31 @@ struct IndexStorageFragmentPg {
         if (!OidIsValid(pk)) { relation_close(rel, AccessShareLock); index_error("range scan: no PK index"); }
         Relation idx = index_open(pk, AccessShareLock);
         ScanKeyData k[3];
-        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber,        F_INT8EQ, Int64GetDatum((int64)query_key_));
-        ScanKeyInit(&k[1], kAttSubKey,   BTGreaterEqualStrategyNumber, F_INT8GE, Int64GetDatum((int64)lo));
-        ScanKeyInit(&k[2], kAttSubKey,   BTLessEqualStrategyNumber,    F_INT8LE, Int64GetDatum((int64)(hi - 1)));
+        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber,        F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
+        ScanKeyInit(&k[1], kAttSubKey,   BTGreaterEqualStrategyNumber, F_INT8GE,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(lo)).raw());
+        ScanKeyInit(&k[2], kAttSubKey,   BTLessEqualStrategyNumber,    F_INT8LE,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(hi - 1)).raw());
         SysScanDesc s = systable_beginscan_ordered(rel, idx, nullptr, 3, k);
         std::vector<char> tmp;
         for (HeapTuple t; (t = systable_getnext_ordered(s, ForwardScanDirection)) != nullptr; ) {
             bool isnull=false;
-            const std::int64_t sk = DatumGetInt64(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull));
-            const std::int32_t chunk_no = DatumGetInt32(
-                heap_getattr(t, kAttChunkNo, RelationGetDescr(rel), &isnull));
+            const std::int64_t sk = bioseq::pg_utils::pg_datum::to<std::int64_t>(
+                bioseq::pg_utils::pg_datum::from_raw(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull)));
+            const std::int32_t chunk_no = bioseq::pg_utils::pg_datum::to<std::int32_t>(
+                bioseq::pg_utils::pg_datum::from_raw(heap_getattr(t, kAttChunkNo, RelationGetDescr(rel), &isnull)));
             Datum d = heap_getattr(t, kAttBlob, RelationGetDescr(rel), &isnull);
-            bytea* raw = reinterpret_cast<bytea*>(PG_DETOAST_DATUM_PACKED(d));
+            auto raw_detoasted = bioseq::pg_utils::detoast_packed_as<bytea>(
+                bioseq::pg_utils::pg_datum::from_raw(d));
+            bytea* raw = raw_detoasted.ptr;
             const std::size_t payload = VARSIZE_ANY_EXHDR(raw);
             tmp.resize(payload); if (payload>0) std::memcpy(tmp.data(), VARDATA_ANY(raw), payload);
             const auto cached = store_cached_chunk(
                 chunk_cache_key_((index_sub_key_t)sk, static_cast<std::size_t>(chunk_no)),
                 std::span<const char>(tmp.data(), tmp.size()),
                 false);
-            if (reinterpret_cast<void*>(raw) != reinterpret_cast<void*>(DatumGetPointer(d))) pfree(raw);
+            raw_detoasted.free_if_copy();
             if (cached) {
                 cb((index_sub_key_t)sk, cached->data, cached->size);
             } else {
@@ -600,12 +623,15 @@ struct IndexStorageFragmentPg {
         if (rel == nullptr) return;
         const Oid pk = find_primary_key_oid(rel);
         ScanKeyData k[2];
-        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)query_key_));
-        ScanKeyInit(&k[1], kAttSubKey,   BTLessStrategyNumber,  F_INT8LT, Int64GetDatum((int64)TEMP_RUN_BASE));
+        ScanKeyInit(&k[0], kAttQueryKey, BTEqualStrategyNumber, F_INT8EQ,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
+        ScanKeyInit(&k[1], kAttSubKey,   BTLessStrategyNumber,  F_INT8LT,
+                    bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(TEMP_RUN_BASE)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 2, k);
         std::int64_t last = std::numeric_limits<std::int64_t>::min(); bool have=false;
         for (HeapTuple t; (t = systable_getnext(s)) != nullptr; ) {
-            bool isnull=false; std::int64_t sk = DatumGetInt64(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull));
+            bool isnull=false; std::int64_t sk = bioseq::pg_utils::pg_datum::to<std::int64_t>(
+                bioseq::pg_utils::pg_datum::from_raw(heap_getattr(t, kAttSubKey, RelationGetDescr(rel), &isnull)));
             if (!have || sk != last) { fn((index_sub_key_t)sk); last = sk; have = true; }
         }
         systable_endscan(s); relation_close(rel, AccessShareLock);
@@ -745,17 +771,20 @@ struct IndexStorageSequencePg {
         Relation rel = open_(false, AccessShareLock);
         if (rel == nullptr) { decoded_bytes_=0; decoded_valid_=true; return; }
         const Oid pk = find_primary_key_oid(rel);
-        ScanKeyData k[1]; ScanKeyInit(&k[0], 1, BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum((int64)query_key_));
+        ScanKeyData k[1]; ScanKeyInit(&k[0], 1, BTEqualStrategyNumber, F_INT8EQ,
+            bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 1, k);
         HeapTuple t = systable_getnext(s);
         if (HeapTupleIsValid(t)) {
             bool isnull=false; Datum d = heap_getattr(t, 3, RelationGetDescr(rel), &isnull);
-            bytea* raw = reinterpret_cast<bytea*>(PG_DETOAST_DATUM_PACKED(d));
+            auto raw_detoasted = bioseq::pg_utils::detoast_packed_as<bytea>(
+                bioseq::pg_utils::pg_datum::from_raw(d));
+            bytea* raw = raw_detoasted.ptr;
             const std::size_t payload = VARSIZE_ANY_EXHDR(raw);
             const std::size_t units = (payload + sizeof(std::int64_t) - 1)/sizeof(std::int64_t);
             ensure_buffer_(units==0?1:units);
             if (payload>0) std::memcpy(decoded_, VARDATA_ANY(raw), payload);
-            if (reinterpret_cast<void*>(raw)!=reinterpret_cast<void*>(DatumGetPointer(d))) pfree(raw);
+            raw_detoasted.free_if_copy();
             decoded_bytes_ = payload;
         } else decoded_bytes_ = 0;
         decoded_valid_ = true;
@@ -777,16 +806,19 @@ struct IndexStorageSequencePg {
         Relation rel = open_(true, RowExclusiveLock);
         // upsert (delete then insert) so rebuild replaces the single row.
         { const Oid pk = find_primary_key_oid(rel);
-          ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,Int64GetDatum((int64)query_key_));
+          ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,
+              bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(query_key_)).raw());
           SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 1, k);
           HeapTuple old_t = systable_getnext(s);
           if (HeapTupleIsValid(old_t)) simple_heap_delete(rel, &old_t->t_self);
           systable_endscan(s); }
         bytea* blob = reinterpret_cast<bytea*>(palloc(VARHDRSZ + payload));
         SET_VARSIZE(blob, VARHDRSZ + payload); if (payload>0) std::memcpy(VARDATA(blob), buf.data(), payload);
-        Datum values[3] = { Int64GetDatum((int64)query_key_), Int32GetDatum((int32)payload), PointerGetDatum(blob) };
-        bool nulls[3] = {false,false,false};
-        HeapTuple tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+        bioseq::pg_utils::pg_datum_list<3> values{};
+        values.set(1, static_cast<std::int64_t>(query_key_));
+        values.set(2, static_cast<std::int32_t>(payload));
+        values.set_raw(3, bioseq::pg_utils::pg_datum::from_pointer(blob));
+        HeapTuple tup = values.form_tuple(RelationGetDescr(rel));
         CatalogTupleInsert(rel, tup); heap_freetuple(tup); pfree(blob);
         relation_close(rel, RowExclusiveLock);
         decoded_valid_ = false; planned_bytes_ = std::numeric_limits<std::size_t>::max();
@@ -871,10 +903,12 @@ struct IndexStorageTablePg {
     [[nodiscard]] std::size_t chunk_byte_size(std::size_t chunk_no) const {
         Relation rel = open_(false, AccessShareLock); if (rel==nullptr) return 0;
         const Oid pk = find_primary_key_oid(rel);
-        ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,Int64GetDatum((int64)chunk_no));
+        ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,
+            bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(chunk_no)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 1, k);
         std::size_t out=0; HeapTuple t = systable_getnext(s);
-        if (HeapTupleIsValid(t)){ bool isnull=false; out=(std::size_t)DatumGetInt32(heap_getattr(t,2,RelationGetDescr(rel),&isnull)); }
+        if (HeapTupleIsValid(t)){ bool isnull=false; out=static_cast<std::size_t>(bioseq::pg_utils::pg_datum::to<std::int32_t>(
+            bioseq::pg_utils::pg_datum::from_raw(heap_getattr(t,2,RelationGetDescr(rel),&isnull)))); }
         systable_endscan(s); relation_close(rel, AccessShareLock); return out;
     }
     template <class T> [[nodiscard]] const T* read_chunk(std::size_t chunk_no) {
@@ -882,16 +916,19 @@ struct IndexStorageTablePg {
         Relation rel = open_(false, AccessShareLock);
         if (rel==nullptr) index_error("table index relation missing");
         const Oid pk = find_primary_key_oid(rel);
-        ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,Int64GetDatum((int64)chunk_no));
+        ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,
+            bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(chunk_no)).raw());
         SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 1, k);
         HeapTuple t = systable_getnext(s);
         if (!HeapTupleIsValid(t)){ systable_endscan(s); relation_close(rel,AccessShareLock); index_error("table chunk missing"); }
         bool isnull=false; Datum d = heap_getattr(t,3,RelationGetDescr(rel),&isnull);
-        bytea* raw = reinterpret_cast<bytea*>(PG_DETOAST_DATUM_PACKED(d));
+        auto raw_detoasted = bioseq::pg_utils::detoast_packed_as<bytea>(
+            bioseq::pg_utils::pg_datum::from_raw(d));
+        bytea* raw = raw_detoasted.ptr;
         const std::size_t payload = VARSIZE_ANY_EXHDR(raw);
         const std::size_t units = (payload+sizeof(std::int64_t)-1)/sizeof(std::int64_t);
         ensure_buffer_(units==0?1:units); if (payload>0) std::memcpy(decoded_, VARDATA_ANY(raw), payload);
-        if (reinterpret_cast<void*>(raw)!=reinterpret_cast<void*>(DatumGetPointer(d))) pfree(raw);
+        raw_detoasted.free_if_copy();
         decoded_chunk_=(std::int64_t)chunk_no; decoded_bytes_=payload;
         systable_endscan(s); relation_close(rel, AccessShareLock);
         return reinterpret_cast<const T*>(decoded_);
@@ -907,15 +944,18 @@ struct IndexStorageTablePg {
         writer(chunk_no, reinterpret_cast<T*>(buf.data()), payload / sizeof(T));
         Relation rel = open_(true, RowExclusiveLock);
         { const Oid pk = find_primary_key_oid(rel);
-          ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,Int64GetDatum((int64)chunk_no));
+          ScanKeyData k[1]; ScanKeyInit(&k[0],1,BTEqualStrategyNumber,F_INT8EQ,
+              bioseq::pg_utils::pg_datum::from(static_cast<std::int64_t>(chunk_no)).raw());
           SysScanDesc s = systable_beginscan(rel, pk, OidIsValid(pk), nullptr, 1, k);
           HeapTuple old_t = systable_getnext(s); if (HeapTupleIsValid(old_t)) simple_heap_delete(rel, &old_t->t_self);
           systable_endscan(s); }
         bytea* blob = reinterpret_cast<bytea*>(palloc(VARHDRSZ + payload)); SET_VARSIZE(blob, VARHDRSZ + payload);
         if (payload>0) std::memcpy(VARDATA(blob), buf.data(), payload);
-        Datum values[3] = { Int64GetDatum((int64)chunk_no), Int32GetDatum((int32)payload), PointerGetDatum(blob) };
-        bool nulls[3] = {false,false,false};
-        HeapTuple tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
+        bioseq::pg_utils::pg_datum_list<3> values{};
+        values.set(1, static_cast<std::int64_t>(chunk_no));
+        values.set(2, static_cast<std::int32_t>(payload));
+        values.set_raw(3, bioseq::pg_utils::pg_datum::from_pointer(blob));
+        HeapTuple tup = values.form_tuple(RelationGetDescr(rel));
         CatalogTupleInsert(rel, tup); heap_freetuple(tup); pfree(blob);
         relation_close(rel, RowExclusiveLock); decoded_chunk_ = -1;
     }
@@ -1131,12 +1171,14 @@ inline void IndexStorageTablePg::for_each_sequence(F&& loader) {
     std::vector<char> nullbuf(td->natts);
     bool* nulls = reinterpret_cast<bool*>(nullbuf.data());
     std::uint64_t rowno = 0;
-    while (BioseqColumnReadNextRow(rs, valp, nulls, &rowno)) {
-        if (nulls[column_attno_ - 1]) continue;
-        MemoryContextReset(inner);
-        MemoryContext old = MemoryContextSwitchTo(inner);
-        pgseq_t* hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(valp[column_attno_ - 1]));
-        MemoryContextSwitchTo(old);
+	    while (BioseqColumnReadNextRow(rs, valp, nulls, &rowno)) {
+	        if (nulls[column_attno_ - 1]) continue;
+	        MemoryContextReset(inner);
+	        MemoryContext old = MemoryContextSwitchTo(inner);
+	        auto hdr_detoasted = bioseq::pg_utils::detoast_as<pgseq_t>(
+	            bioseq::pg_utils::pg_datum::from_raw(valp[column_attno_ - 1]));
+	        pgseq_t* hdr = hdr_detoasted.ptr;
+	        MemoryContextSwitchTo(old);
         const std::uint8_t alpha = hdr->alphabet_code;
         const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
         if (!is_locator_stub(hdr)) {
@@ -1151,12 +1193,13 @@ inline void IndexStorageTablePg::for_each_sequence(F&& loader) {
             pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
                 constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
                 const std::size_t pad = (loc.total_bp_size % lpu) == 0 ? 0 : (std::size_t)(lpu - loc.total_bp_size % lpu);
-                bioseq::storage::with_lazy_postgres<S>(
-                    db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, loc, pad, read_caches_, inner,
-                    [&](auto& lazy_seq){ loader(lazy_seq, (std::size_t)rowno, total); });
-            });
-        }
-    }
+	                bioseq::storage::with_lazy_postgres<S>(
+	                    db_oid_, tablespace_oid_, main_relfilenode_, column_attno_, loc, pad, read_caches_, inner,
+	                    [&](auto& lazy_seq){ loader(lazy_seq, (std::size_t)rowno, total); });
+	            });
+	        }
+	        hdr_detoasted.free_if_copy();
+	    }
     BioseqColumnEndRead(rs);
     MemoryContextDelete(inner);
     table_close(main, AccessShareLock);

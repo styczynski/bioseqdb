@@ -26,6 +26,7 @@ export module bioseq.pg_utils;
 
 export import bioseq.pg_utils.lists;
 export import bioseq.pg_utils.bitmapset;
+export import bioseq.pg_utils.datums;
 
 /*
  * PageCacheDisableScope temporarily forces bioseq_enable_page_cache to
