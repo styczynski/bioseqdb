@@ -1,0 +1,89 @@
+name: Build
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  schedule:
+    - cron: '33 13 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  build:
+    continue-on-error: ${{ matrix.pgver == 'master' }}
+    strategy:
+      matrix:
+        pgver: [ 18, 17, 16, 15, 14, 13, master ]
+        os: [ ubuntu-24.04, macos-15 ]
+        build_type: [ Debug, Release ]
+        compiler: [ clang++, g++ ]
+        exclude:
+          - os: macos-15
+            compiler: g++
+          - os: macos-15
+            pgver: 16
+          - os: macos-15
+            pgver: 15
+          - os: macos-15
+            pgver: 14
+          - os: macos-15
+            pgver: 13
+          - os: macos-15
+            pgver: 12
+          - os: macos-15
+            pgver: 11
+      fail-fast: false
+
+    runs-on: ${{ matrix.os }}
+
+    timeout-minutes: 20
+
+    steps:
+
+      - uses: actions/checkout@v3
+
+      - name: Prepare dependencies
+        if: matrix.os != 'macos-15'
+        run: sudo apt-get install -y libreadline-dev
+
+      - name: Prepare dependencies
+        if: matrix.os == 'macos-15'
+        run: brew install readline
+
+      # This is done to address the problem on macOS where .pg built in a directory of one
+      # GitHub Action runner won't work when restored in another one since dylds have install_name pointing
+      # to the original location. We include the hash of their path into the cache name.
+      - name: Get path hash
+        if: matrix.os == 'macos-15'
+        run: |
+          echo "PATH_SUFFIX=-$(pwd | sha256sum | awk '{print $1}')" >> $GITHUB_ENV
+
+      # On other systems, make it explicitly empty
+      - name: Get path hash
+        if: matrix.os != 'macos-15'
+        run: |
+          echo "PATH_SUFFIX=" >> $GITHUB_ENV
+
+      - uses: actions/cache@v4
+        with:
+          path: .pg
+          key: ${{ matrix.os }}-pg-${{ matrix.pgver }}-${{ matrix.build_type }}-${{ matrix.compiler }}-${{ hashFiles('cmake/FindPostgres.cmake') }}${{ env.PATH_SUFFIX }}
+
+      - name: Configure
+        run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{matrix.build_type}} -DPGVER=${{ matrix.pgver }} -DCMAKE_CXX_COMPILER=${{matrix.compiler}} -DCMAKE_BUILD_PARALLEL_LEVEL=1
+
+      - name: Build
+        run: cmake --build ${{github.workspace}}/build --parallel --config ${{matrix.build_type}}
+
+      - name: Test
+        working-directory: ${{github.workspace}}/build
+        run: ctest --timeout 1000 --force-new-ctest-process --repeat until-pass:10 --output-on-failure -j $(nproc) -C ${{matrix.build_type}}
+
+      - name: Ensure demo builds
+        working-directory: ${{github.workspace}}/demo
+        run: find ../.pg/*/*/build/bin -name pg_config -exec make PG_CONFIG={} all \;

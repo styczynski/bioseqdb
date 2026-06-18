@@ -19,7 +19,7 @@ module;
 
 export module bioseq.storage.metadata:write_state;
 
-import :core;           // ReadBioseqColumnOptions
+import :core;           // FormDataBioseqOptions::read_options
 import bioseq.pg_utils;
 import bioseq.common.mlogging;
 
@@ -173,7 +173,7 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 	 * relation id of the source tuple slot. For normal writes this is the
 	 * same as the target relation.
 	 */
-	ReadBioseqColumnOptions(tuple_slot_relation_id, &bioseq_column_options);
+	bioseq_column_options = FormDataBioseqOptions::read_options(tuple_slot_relation_id).value_or(BioseqColumnOptions{});
 
 	BioseqColumnWriteState* fresh_write_state = nullptr;
 	{

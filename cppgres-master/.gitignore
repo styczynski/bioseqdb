@@ -1,0 +1,8 @@
+.pg
+build
+cmake-build-*
+.idea
+.testdb
+doc/html
+*.gch
+*.pch

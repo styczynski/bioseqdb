@@ -635,7 +635,7 @@ void seq_caches::close_all(bool commit) noexcept {
 
         if (side == Side::Write) {
             if (commit && e.pending_bytes_delta != 0) {
-                UpdateSubTableShardBytesWritten(
+                SubTableManager::update_shard_bytes_written(
                     main_database_oid, main_tablespace_oid, main_relfilenode,
                     column_attno, bucket_idx, shard_idx,
                     e.pending_bytes_delta,
@@ -748,7 +748,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
         shard_alloc_lock_key(db_oid, main_relfilenode, column_attno, bucket_idx);
     DirectFunctionCall1(pg_advisory_xact_lock_int8, Int64GetDatum(lock_key));
 
-    if (auto rechecked = LookupActiveSubTableShard(
+    if (auto rechecked = SubTableManager::lookup_active_shard(
             db_oid, spc_oid, main_relfilenode, column_attno, bucket_idx);
         rechecked.has_value() && rechecked->shard_idx >= starting_shard_idx)
     {
@@ -855,7 +855,7 @@ allocate_new_shard_and_open(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     }
     PG_END_TRY();
 
-    SubTableRow row = InsertSubTableShard(db_oid, spc_oid, main_relfilenode,
+    SubTableRow row = SubTableManager::insert_shard(db_oid, spc_oid, main_relfilenode,
                                           column_attno, bucket_idx, starting_shard_idx,
                                           new_sub_relid, new_sidecar_relid);
 
@@ -883,7 +883,7 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                      std::int16_t bucket_idx,
                      LOCKMODE lock_mode, seq_caches* cache)
 {
-    if (auto active = LookupActiveSubTableShard(
+    if (auto active = SubTableManager::lookup_active_shard(
             db_oid, spc_oid, main_relfilenode, column_attno, bucket_idx);
         active.has_value())
     {
@@ -898,7 +898,7 @@ open_or_create_shard(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
     // catalog PK ("duplicate key violates seq_sub_table_pkey"). Allocate the
     // next index after the highest existing shard for this (column, bucket).
     std::int32_t next_shard_idx = 0;
-    for (const auto& r : ListSubTableShardsForMain(
+    for (const auto& r : SubTableManager::list_shards_for_main(
              db_oid, spc_oid, main_relfilenode)) {
         if (r.column_attno == column_attno && r.bucket_idx == bucket_idx
             && r.shard_idx >= next_shard_idx) {
@@ -926,7 +926,7 @@ open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
             return it->second.rel;
         }
     }
-    auto row = LookupSubTableShard(db_oid, spc_oid, main_relfilenode,
+    auto row = SubTableManager::lookup_shard(db_oid, spc_oid, main_relfilenode,
         column_attno, static_cast<std::int16_t>(loc.bucket_idx),
         static_cast<std::int32_t>(loc.shard_idx));
     if (!row.has_value()) {
@@ -1056,7 +1056,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
                                           column_attno, parent_tupdesc, bucket_idx,
                                           RowExclusiveLock, cache);
 
-    auto active = LookupActiveSubTableShard(db_oid, spc_oid, main_relfilenode,
+    auto active = SubTableManager::lookup_active_shard(db_oid, spc_oid, main_relfilenode,
                                             column_attno, bucket_idx);
     if (!active.has_value()) {
         bioseq_log<ERR, PG>( "bioseq storage: active shard disappeared mid-insert");
@@ -1081,7 +1081,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
         if (auto it = cache->entries.find(active_key);
             it != cache->entries.end() && it->second.pending_bytes_delta != 0)
         {
-            UpdateSubTableShardBytesWritten(
+            SubTableManager::update_shard_bytes_written(
                 db_oid, spc_oid, main_relfilenode,
                 column_attno, bucket_idx, active->shard_idx,
                 it->second.pending_bytes_delta,
@@ -1089,7 +1089,7 @@ sequence_storage_manager<L, M, X>::insert_sequence_streamed(
             it->second.pending_bytes_delta = 0;
             it->second.pending_total_payload_delta = 0;
         } else {
-            UpdateSubTableShardBytesWritten(
+            SubTableManager::update_shard_bytes_written(
                 db_oid, spc_oid, main_relfilenode,
                 column_attno, bucket_idx, active->shard_idx,
                 /*delta_bytes=*/0,
@@ -1373,7 +1373,7 @@ void sequence_stream_writer::open_shard() {
     shard_ = open_or_create_shard(db_oid_, spc_oid_, main_relfilenode_,
                                   column_attno_, parent_td_, bucket_idx_,
                                   RowExclusiveLock, caches_);
-    auto active = LookupActiveSubTableShard(db_oid_, spc_oid_, main_relfilenode_,
+    auto active = SubTableManager::lookup_active_shard(db_oid_, spc_oid_, main_relfilenode_,
                                             column_attno_, bucket_idx_);
     if (!active.has_value()) {
         bioseq_log<ERR, PG>( "bioseq.load: active shard disappeared mid-load");
@@ -1765,7 +1765,7 @@ void
 sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
     Oid db_oid, Oid spc_oid, Oid main_relfilenode)
 {
-    const auto rows = ListSubTableShardsForMain(db_oid, spc_oid, main_relfilenode);
+    const auto rows = SubTableManager::list_shards_for_main(db_oid, spc_oid, main_relfilenode);
     if (rows.empty()) {
         return;
     }
@@ -1816,7 +1816,7 @@ sequence_storage_manager<L, M, X>::drop_sub_tables_for_main(
         }
     }
 
-    DeleteSubTableShardsForMain(db_oid, spc_oid, main_relfilenode);
+    SubTableManager::delete_shards_for_main(db_oid, spc_oid, main_relfilenode);
 }
 
 // Explicit instantiation of the default alias so non-template TUs see the
@@ -1831,7 +1831,7 @@ static Oid lookup_sidecar_relid(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                                 std::int16_t column_attno,
                                 std::int16_t bucket_idx, std::int32_t shard_idx)
 {
-    auto row = LookupSubTableShard(db_oid, spc_oid, main_relfilenode,
+    auto row = SubTableManager::lookup_shard(db_oid, spc_oid, main_relfilenode,
                                    column_attno, bucket_idx, shard_idx);
     if (!row.has_value()) {
         return InvalidOid;

@@ -409,7 +409,7 @@ COMMENT ON TABLE bioseq.seq_sub_table IS
 
 -- DOC0260 §6.1 / DOC0268 Appendix — partial index over the ACTIVE (is_full =
 -- FALSE) shard of each (database, tablespace, relfilenode, column, bucket).
--- This accelerates LookupActiveSubTableShard. It is intentionally NOT a UNIQUE
+-- This accelerates SubTableManager::lookup_active_shard. It is intentionally NOT a UNIQUE
 -- index: is_full is a mutable predicate column, and a UNIQUE partial index on a
 -- flipped predicate column trips false "duplicate key" violations during shard
 -- rollover (PostgreSQL's uniqueness check sees the just-updated/deleted old
@@ -418,7 +418,7 @@ COMMENT ON TABLE bioseq.seq_sub_table IS
 -- marked full and a fresh active shard is created in lockstep). The
 -- "one active shard per (parent, column, bucket)" invariant is enforced
 -- instead by the per-bucket transactional advisory lock taken in
--- allocate_new_shard_and_open (§7.3) plus the LookupActiveSubTableShard
+-- allocate_new_shard_and_open (§7.3) plus the SubTableManager::lookup_active_shard
 -- recheck under that lock — exactly the serialization the spec already mandates
 -- for concurrent shard creation.
 CREATE INDEX IF NOT EXISTS seq_sub_table_active_shard_idx

@@ -52,6 +52,7 @@ postgres
 postgres-query
 postgres-ux
 profiling
+refactor
 seal
 setup
 sidecar

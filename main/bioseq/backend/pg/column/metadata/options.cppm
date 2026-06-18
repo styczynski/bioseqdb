@@ -1,6 +1,6 @@
 /*-------------------------------------------------------------------------
  *
- * column/metadata-options.cppm
+ * column/metadata/options.cppm
  *
  * Narrow storage_metadata partition for bioseq column table options.
  *
@@ -13,4 +13,4 @@ import :core;
 export using ::InitBioseqColumnOptions;
 export using ::SetBioseqColumnOptions;
 export using ::DeleteBioseqColumnTableOptions;
-export using ::ReadBioseqColumnOptions;
+export using ::FormDataBioseqOptions;   // DOC0329: read via FormDataBioseqOptions::read_options

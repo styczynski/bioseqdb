@@ -1552,8 +1552,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	Assert(sourceDesc->natts == targetDesc->natts);
 
 	/* read settings from old heap, relfilelocator will be swapped at the end */
-	BioseqColumnOptions bioseqColumnOptions = { 0 };
-	ReadBioseqColumnOptions(OldHeap->rd_id, &bioseqColumnOptions);
+	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(OldHeap->rd_id).value_or(BioseqColumnOptions{});
 
 	/*
 	 * DOC0260 Phase A — CLUSTER allocates a new relfilenode for NewHeap.
@@ -1697,8 +1696,7 @@ TruncateAndCombineBioseqColumnStripes(Relation rel, int elevel)
 	}
 
 	/* Get current columnar options */
-	BioseqColumnOptions bioseqColumnOptions = { 0 };
-	ReadBioseqColumnOptions(rel->rd_id, &bioseqColumnOptions);
+	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(rel->rd_id).value_or(BioseqColumnOptions{});
 
 	/* Get all stripes in reverse order */
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, BackwardScanDirection);
@@ -3019,11 +3017,12 @@ POSTGRES_FN(alter_bioseq_table_set)
 					   get_rel_name(relationId));
 	}
 
-	BioseqColumnOptions options = { 0 };
-	if (!ReadBioseqColumnOptions(relationId, &options))
+	auto maybe_options = FormDataBioseqOptions::read_options(relationId);
+	if (!maybe_options)
 	{
 		bioseq_log<ERR, PG>( "unable to read current options for table");
 	}
+	BioseqColumnOptions options = *maybe_options;
 
 	/* chunk_group_row_limit => not null */
 	if (!PG_ARGISNULL(1))
@@ -3136,11 +3135,12 @@ POSTGRES_FN(alter_bioseq_table_reset)
 					   get_rel_name(relationId));
 	}
 
-	BioseqColumnOptions options = { 0 };
-	if (!ReadBioseqColumnOptions(relationId, &options))
+	auto maybe_options = FormDataBioseqOptions::read_options(relationId);
+	if (!maybe_options)
 	{
 		bioseq_log<ERR, PG>( "unable to read current options for table");
 	}
+	BioseqColumnOptions options = *maybe_options;
 
 	/* chunk_group_row_limit => true */
 	if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1))
@@ -3266,8 +3266,7 @@ static List *HolesForRelation(Relation rel)
 	List *holes = NIL;
 
 	/* Get current columnar options */
-	BioseqColumnOptions bioseqColumnOptions = { 0 };
-	ReadBioseqColumnOptions(rel->rd_id, &bioseqColumnOptions);
+	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(rel->rd_id).value_or(BioseqColumnOptions{});
 
 	ListCell *lc = NULL;
 
@@ -3374,8 +3373,7 @@ POSTGRES_FN(vacuum_bioseq_table)
 	LockRelation(rel, ExclusiveLock);
 
 	/* Get current columnar options */
-	BioseqColumnOptions bioseqColumnOptions = { 0 };
-	ReadBioseqColumnOptions(rel->rd_id, &bioseqColumnOptions);
+	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(rel->rd_id).value_or(BioseqColumnOptions{});
 
 	/* Get all stripes in order. */
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
