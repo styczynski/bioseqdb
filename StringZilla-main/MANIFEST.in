@@ -1,0 +1,15 @@
+include README.md
+include VERSION
+include LICENSE
+include build_backend.py
+include setup.py
+include SZ_TARGET.env
+
+graft include
+graft fork_union/include
+graft c
+graft python
+
+include scripts/test_stringzilla.py
+include scripts/test_stringzillas.py
+include scripts/bench*.py
