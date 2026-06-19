@@ -138,7 +138,7 @@ def _safe_parallel_jobs() -> int:
 
 
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
-HARD_TIMEOUT_MIN = 50.0
+HARD_TIMEOUT_MIN = 90.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 
 @dataclass
@@ -487,6 +487,89 @@ def _stream_subprocess(cmd: list[str], log_handle, deadline: float,
                 pass
 
 
+def _restart_postgresql(active_build_dir: Path, log_handle, deadline: float) -> None:
+    """Restart the PostgreSQL postmaster after installing a new extension dylib.
+
+    On macOS, fork()d backend processes inherit the postmaster's dyld image
+    list.  When the postmaster has an older bioseq.dylib already mapped,
+    dlopen("bioseq.dylib") in every fork'd child returns the old cached handle
+    — dlsym() then fails to find functions added in the new build.  A
+    postmaster restart evicts the stale mapping; the first CREATE EXTENSION
+    after restart loads the freshly installed dylib.
+    """
+    cmake_cache = active_build_dir / "CMakeCache.txt"
+    pg_config: str | None = None
+    if cmake_cache.exists():
+        for line in cmake_cache.read_text(errors="replace").splitlines():
+            if line.startswith("PostgreSQL_CONFIG:FILEPATH="):
+                pg_config = line.split("=", 1)[1].strip()
+                break
+    if not pg_config:
+        _log("WARNING: PostgreSQL_CONFIG not in CMakeCache.txt; skipping PG restart")
+        return
+
+    try:
+        res = subprocess.run([pg_config, "--bindir"],
+                             capture_output=True, text=True, timeout=10)
+        pg_bindir = res.stdout.strip()
+    except Exception as exc:
+        _log(f"WARNING: pg_config --bindir failed ({exc}); skipping PG restart")
+        return
+
+    pg_ctl = os.path.join(pg_bindir, "pg_ctl")
+    psql   = os.path.join(pg_bindir, "psql")
+    if not os.path.isfile(pg_ctl):
+        _log(f"WARNING: pg_ctl not found at {pg_ctl}; skipping PG restart")
+        return
+
+    try:
+        res = subprocess.run([psql, "-t", "-c", "SHOW data_directory;", "postgres"],
+                             capture_output=True, text=True, timeout=10)
+        data_dir = res.stdout.strip()
+    except Exception as exc:
+        _log(f"WARNING: could not query data_directory ({exc}); skipping PG restart")
+        return
+
+    if not data_dir or not os.path.isdir(data_dir):
+        _log(f"WARNING: data_directory '{data_dir}' is not a directory; skipping PG restart")
+        return
+
+    # On macOS use arch -arm64 so pg_ctl (universal binary) runs natively;
+    # Rosetta and dyld interact badly with arm64-only extension dylibs.
+    if sys.platform == "darwin":
+        restart_cmd = ["arch", "-arm64", pg_ctl, "-D", data_dir, "restart"]
+    else:
+        restart_cmd = [pg_ctl, "-D", data_dir, "restart"]
+
+    _log(f"Restarting PostgreSQL (data_dir={data_dir}) to evict stale dylib cache ...")
+    # DON'T use _stream_subprocess here: that function blocks until the pipe
+    # reaches EOF.  pg_ctl restart forks the new postmaster, which inherits
+    # pg_ctl's stdout pipe and keeps it open indefinitely, causing a hang.
+    # Writing stdout directly to log_handle (a file) avoids the pipe: Python
+    # then calls proc.wait() which returns as soon as pg_ctl itself exits
+    # (after the postmaster signals readiness), regardless of what the
+    # postmaster does with the file handle afterwards.
+    pretty = " ".join(restart_cmd)
+    log_handle.write(f"\n+ {pretty}\n")
+    log_handle.flush()
+    sys.stderr.write(f"\n+ {pretty}\n")
+    sys.stderr.flush()
+    try:
+        result = subprocess.run(
+            restart_cmd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            timeout=90,
+        )
+        log_handle.flush()
+        if result.returncode != 0:
+            _log(f"WARNING: pg_ctl restart exited {result.returncode}; tests may load a stale dylib")
+        else:
+            _log("PostgreSQL restarted — new dylib is now live")
+    except subprocess.TimeoutExpired:
+        _log("WARNING: pg_ctl restart timed out after 90s; tests may load a stale dylib")
+
+
 # --------------------------- build worker ----------------------------------
 
 def _report_index(filename: str) -> int:
@@ -626,9 +709,11 @@ def _run_build_worker(mode: str, build_only: bool = False,
         else:
             # Install the freshly-built extension into the running PostgreSQL
             # so integration tests' CREATE EXTENSION picks up current code, not
-            # a stale previously-installed copy. bioseq is not in
-            # shared_preload_libraries, so new backends load the new dylib
-            # without a postmaster restart.
+            # a stale previously-installed copy.  After install, restart the
+            # postmaster: on macOS, fork()d backends inherit the postmaster's
+            # dyld image list, so dlopen() returns the *old* cached handle for
+            # any dylib the postmaster already had loaded.  A postmaster restart
+            # clears that cache so the next CREATE EXTENSION loads the new dylib.
             if mode_details.install_extension:
                 _update_entry(mode, step="installing extension")
                 rc = _stream_subprocess(
@@ -640,6 +725,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     raise RuntimeError(
                         "extension install (cmake --install --component bioseq) "
                         f"exited with code {rc}")
+                _restart_postgresql(active_build_dir, log_handle, deadline)
 
             _update_entry(mode, step="running")
             for cmd in mode_details.commands:
@@ -1299,23 +1385,79 @@ TOOL_DEFINITIONS += [
 ]
 
 
+_OUTPUT_FRAMING = "content-length"
+
+
 def _write_message(msg: dict) -> None:
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    body = json.dumps(msg, separators=(",", ":")).encode("utf-8")
+    if _OUTPUT_FRAMING == "newline":
+        sys.stdout.write(body.decode("utf-8") + "\n")
+        sys.stdout.flush()
+        return
+
+    sys.stdout.buffer.write(
+        f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+    )
+    sys.stdout.buffer.flush()
+
+
+def _parse_jsonrpc_body(body: bytes, source: str) -> dict:
+    try:
+        return json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        _log(f"malformed JSON-RPC {source} dropped: {e}")
+        return {"_dropped": True}
 
 
 def _read_message() -> dict | None:
-    line = sys.stdin.readline()
-    if not line:
+    """Read either standard MCP Content-Length frames or legacy JSON lines."""
+    global _OUTPUT_FRAMING
+
+    stdin = sys.stdin.buffer
+    first = stdin.read(1)
+    while first in (b"\r", b"\n"):
+        first = stdin.read(1)
+    if not first:
         return None
-    line = line.strip()
-    if not line:
-        return None
-    try:
-        return json.loads(line)
-    except json.JSONDecodeError as e:
-        _log(f"malformed JSON-RPC line dropped: {e}")
+
+    if first == b"{":
+        _OUTPUT_FRAMING = "newline"
+        line = first + stdin.readline()
+        return _parse_jsonrpc_body(line.strip(), "line")
+
+    _OUTPUT_FRAMING = "content-length"
+    header_lines = [first + stdin.readline()]
+    while True:
+        line = stdin.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        header_lines.append(line)
+
+    content_length = None
+    for line in header_lines:
+        decoded = line.decode("ascii", errors="replace").strip()
+        name, sep, value = decoded.partition(":")
+        if sep and name.lower() == "content-length":
+            try:
+                content_length = int(value.strip())
+            except ValueError:
+                _log(f"invalid Content-Length dropped: {value.strip()!r}")
+                return {"_dropped": True}
+            break
+
+    if content_length is None:
+        header = b"".join(header_lines).decode("ascii", errors="replace").strip()
+        _log(f"missing Content-Length header dropped: {header!r}")
         return {"_dropped": True}
+
+    body = stdin.read(content_length)
+    if len(body) != content_length:
+        _log(f"short JSON-RPC body dropped: got {len(body)}, expected {content_length}")
+        return None
+
+    return _parse_jsonrpc_body(body, "frame")
 
 
 def _make_response(req_id, *, result=None, error=None) -> dict:

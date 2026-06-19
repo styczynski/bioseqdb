@@ -14,7 +14,7 @@
 
 #include <chrono>
 
-import mlogging;
+import bioseq.common.mlogging;
 
 unsigned char seq_nt4_table[256] = {
 	0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,

@@ -1072,6 +1072,40 @@ template <sequence_alphabet A>
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
+    } else if (algo == "bioseq_block_vulkan_phase_c_frontend_just_index") {
+        // DOC0310 Phase C resident two-submit Vulkan frontend applied to the
+        // just_index e2e path: index is prebuilt (untimed), only the Vulkan-driven
+        // alignment is timed. Same Vulkan settings as bench_v10's
+        // bioseq_block_vulkan_phase_c_frontend row.
+        configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
+        const std::string& table = just_index_table_for(in, minimizer_index);
+        configure_bioseq_minimizer_policy(*in.conn, table, minimizer_index);
+        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.chaining_algorithm            = 'vulkan_tiled_dp';");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.minimizer_algorithm           = 'vulkan_minimap_int';");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_enabled                = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_seed_hits_enabled      = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_index_cache_enabled    = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_fused_frontend_enabled   = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_gpu_index_build_enabled  = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_extend_enabled         = off;");
+        const std::string sql = fmt::format(
+            "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
+            proj, table, qlit);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        {
+            auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: assemble only
+            parse_bioseq_rows(it::query_rows(*in.conn, sql), in, out);
+        }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
+        require_mapped(algo, in, out);
+        capture_mps_build_stats(*in.conn, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        log_measured_case(algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
+
     } else if (algo == "bioseq_no_index") {
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";

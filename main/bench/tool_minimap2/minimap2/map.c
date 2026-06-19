@@ -21,14 +21,14 @@
 #include "bseq.h"
 #include "khash.h"
 
-import mlogging;
-import sequan_compat;
-import bioseq_sequences;
-import bioseq_sequences.simd;
-import algo.circular_append_buffer;
-import bioseq_sequences.kmers;
-import bioseq_sequences.kmers.hashers.minimap_int;
-import bioseq_sequences.kmers.hashers.lexic;
+import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
+import bioseq.sequences;
+import bioseq.sequences.simd;
+import bioseq.common.circular_append_buffer;
+import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
+import bioseq.sequences.kmers.hashers.lexic;
 
 using namespace seq::literals;
 

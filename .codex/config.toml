@@ -1,4 +1,4 @@
 [mcp_servers.bioseq-build]
 args = ["main/build_mcp/server.py"]
 command = "python3"
-cwd = "/Users/styczynski/Code/bioseqdb"
+cwd = "/Users/piotr.styczynski/Code/bioseqdb"

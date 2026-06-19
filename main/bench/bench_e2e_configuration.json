@@ -15,6 +15,10 @@
       "_": {"type": "integer", "default": 0, "description": "index prebuilt (untimed); assemble align via SQL, timed"},
       "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"}
     },
+    "bioseq_block_vulkan_phase_c_frontend_just_index": {
+      "_": {"type": "integer", "default": 0, "description": "DOC0310 Phase C Vulkan frontend: index prebuilt (untimed); Vulkan-driven alignment via SQL, timed — measures GPU seeding + tiled-DP chaining + block aligner e2e impact"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "active read minimizer index selected before the timed query"}
+    },
     "minimap2_no_index":    {"_": {"type": "integer", "default": 0, "description": "minimap2 rebuild-each (build+map) on split FASTA"}},
     "minimap2_just_index":  {"_": {"type": "integer", "default": 0, "description": "minimap2 prebuilt .mmi (map only)"}}
   },
@@ -67,6 +71,7 @@
       "over": {
         "bioseq_no_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "recompute_async_persist": ["off", "on"]},
         "bioseq_just_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"]},
+        "bioseq_block_vulkan_phase_c_frontend_just_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"]},
         "minimap2_no_index": {},
         "minimap2_just_index": {}
       },
