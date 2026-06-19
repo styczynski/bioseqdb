@@ -1038,6 +1038,57 @@ template <sequence_alphabet A>
 }
 
 // ---- §10.3 on_run (the timed region, dispatched by mode) ----
+// Cold-read methodology for the just_index paths. The persisted minimizer index
+// is built (untimed) in on_input(); to measure a *cold* assemble-from-storage —
+// the index exists on disk but is NOT resident in the backend-local assembled
+// index cache nor in shared_buffers — we restart PostgreSQL immediately before
+// the timed region. The restart command is environment-specific, so it is taken
+// from BIOSEQ_E2E_PG_RESTART_CMD (e.g. on macOS / Postgres.app:
+//   arch -arm64 .../pg_ctl -D '<datadir>' restart -m fast -w > /tmp/r.log 2>&1).
+// When the env var is unset the restart is skipped with a loud warning so the
+// harness stays portable and unrelated configs/runs are unaffected.
+// Returns true iff a restart actually happened.
+bool restart_postgres_for_cold_just_index(const E2eInput& in) {
+    const char* cmd = std::getenv("BIOSEQ_E2E_PG_RESTART_CMD");
+    if (cmd == nullptr || *cmd == '\0') {
+        bioseq_log<WRN>("[bench_e2e] BIOSEQ_E2E_PG_RESTART_CMD is unset — skipping "
+            "the pre-just_index PostgreSQL restart; the index may still be "
+            "resident so this just_index timing is NOT guaranteed to be a cold read");
+        return false;
+    }
+    bioseq_log<INF>("[bench_e2e] restarting PostgreSQL before just_index measure "
+        "(evict resident/cached index for a cold assemble-from-storage): {}", cmd);
+    const int rc = std::system(cmd);
+    if (rc != 0) {
+        bioseq_log<ERR>("[bench_e2e] PostgreSQL restart command failed (rc={}): {} "
+            "— the cold just_index measurement would be invalid; aborting", rc, cmd);
+        std::abort();
+    }
+    // The restart terminated the shared session's backend; rebuild it. pg_ctl -w
+    // returns only once the server accepts connections, but retry briefly to
+    // absorb any residual race / supervisor bgworker startup.
+    constexpr int kMaxReconnectAttempts = 40;
+    for (int attempt = 1; ; ++attempt) {
+        try {
+            *in.conn = it::connection_test_context{};
+            break;
+        } catch (const std::exception& e) {
+            if (attempt >= kMaxReconnectAttempts) {
+                bioseq_log<ERR>("[bench_e2e] failed to reconnect after PostgreSQL "
+                    "restart ({} attempts): {} — aborting", attempt, e.what());
+                std::abort();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    }
+    // The fresh session lost the on_input aligner GUCs (block aligner + SIMD-mm2
+    // chaining + two-stack nthash minimizer) that the just_index paths assume.
+    configure_bioseq_aligner_session(*in.conn, in.kmer_size, in.window_size);
+    bioseq_log<INF>("[bench_e2e] PostgreSQL restarted + session reconnected; the "
+        "just_index read will assemble the index cold from storage");
+    return true;
+}
+
 [[nodiscard]] E2eOutput e2e_run(std::string_view algo, const ParamMap& params,
                                 const E2eInput& in) {
     E2eOutput out;
@@ -1048,7 +1099,11 @@ template <sequence_alphabet A>
     const std::string proj =
         "bioseq.target_start(header) AS tstart, bioseq.is_reverse(header) AS rev";
 
-    if (algo == "bioseq_just_index") {
+    if (algo == "bioseq_just_index"
+        || algo == "bioseq_block_simd_dp_two_stack_nthash_just_index") {
+        // Restart PostgreSQL first so the prebuilt index (built untimed in
+        // on_input) is assembled cold from storage rather than served warm.
+        restart_postgres_for_cold_just_index(in);
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
         configure_bioseq_pair_sort_session(*in.conn, params);
         const std::string& table = just_index_table_for(in, minimizer_index);
@@ -1072,7 +1127,46 @@ template <sequence_alphabet A>
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
 
-    } else if (algo == "bioseq_no_index") {
+    } else if (algo == "bioseq_block_vulkan_phase_c_frontend_just_index"
+               || algo == "bioseq_block_gpu_dp_gpu_seed_just_index") {
+        // DOC0310 Phase C resident two-submit Vulkan frontend applied to the
+        // just_index e2e path: index is prebuilt (untimed), only the Vulkan-driven
+        // alignment is timed. Same Vulkan settings as bench_v10's
+        // bioseq_block_vulkan_phase_c_frontend row.
+        // Restart PostgreSQL first so the prebuilt index is assembled cold from
+        // storage (GPU seeding/tiled-DP chaining + block aligner over a cold index).
+        restart_postgres_for_cold_just_index(in);
+        configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
+        const std::string& table = just_index_table_for(in, minimizer_index);
+        configure_bioseq_minimizer_policy(*in.conn, table, minimizer_index);
+        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.chaining_algorithm            = 'vulkan_tiled_dp';");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.minimizer_algorithm           = 'vulkan_minimap_int';");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_enabled                = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_seed_hits_enabled      = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_index_cache_enabled    = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_fused_frontend_enabled   = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_gpu_index_build_enabled  = on;");
+        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_extend_enabled         = off;");
+        const std::string sql = fmt::format(
+            "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
+            proj, table, qlit);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        {
+            auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: assemble only
+            parse_bioseq_rows(it::query_rows(*in.conn, sql), in, out);
+        }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
+        require_mapped(algo, in, out);
+        capture_mps_build_stats(*in.conn, out);
+        capture_index_audit(*in.conn, table, minimizer_index, out);
+        log_measured_case(algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
+
+    } else if (algo == "bioseq_no_index"
+               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index") {
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
@@ -1103,6 +1197,69 @@ template <sequence_alphabet A>
             it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
             it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
                           recompute_async_persist ? "on" : "off");
+            parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
+            capture_mps_build_stats(read_conn, out);
+        }
+        const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        attach_resource_metrics(out, start_ns, end_ns, resources.stop());
+        require_mapped(algo, in, out);
+        if (recompute_async_persist) {
+            capture_index_audit_after_async_persist(
+                *in.conn, in.no_index_table, minimizer_index, out);
+            capture_mps_build_stats(*in.conn, out);
+        } else {
+            capture_index_audit(
+                *in.conn, in.no_index_table, minimizer_index, out);
+        }
+        log_measured_case(
+            algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
+
+    } else if (algo == "bioseq_block_gpu_dp_gpu_seed_no_index") {
+        // GPU (DOC0310 Phase C Vulkan) frontend on the no_index path: no prebuilt
+        // index — the timed region loads the target and recomputes minimizers with
+        // GPU seeding + tiled-DP chaining + block aligner driving the alignment.
+        // Mirrors bioseq_no_index but swaps the chaining/minimizer to the Vulkan
+        // frontend on the fresh read connection (same GUCs as the gpu_dp_gpu_seed
+        // just_index path). No restart: no_index measures the full from-scratch
+        // build+map cost, so there is no prebuilt index to evict.
+        const bool recompute_async_persist =
+            param_string(params, "recompute_async_persist", "off") == "on";
+        configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
+        configure_bioseq_pair_sort_session(*in.conn, params);
+        it::exec_sqlf(*in.conn, "TRUNCATE {};", in.no_index_table);          // reset (untimed)
+        configure_bioseq_minimizer_policy(
+            *in.conn, in.no_index_table, minimizer_index);
+        it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = off;");  // load builds NO index
+        it::exec_sql(*in.conn, "SET bioseq.read_sequence_index   = off;");   // align recomputes
+        const std::string load_sql = fmt::format(
+            "SELECT bioseq.load('{}'::regclass, '{}')", in.no_index_table, in.target_fasta);
+        const std::string align_sql = fmt::format(
+            "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
+            proj, in.no_index_table, qlit);
+        ScopedResourceMonitor resources;
+        const auto start_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+        {
+            auto _scope = bioseq::instr::region(kMeasuredRegion); // TIMED: load + GPU recompute align
+            it::exec_sql(*in.conn, load_sql);
+            // Fresh backend for the measured read (see bioseq_no_index rationale);
+            // connection setup stays inside the timed region.
+            it::connection_test_context read_conn;
+            configure_bioseq_aligner_session(read_conn, in.kmer_size, in.window_size);
+            configure_bioseq_scheduler_session(read_conn, pipeline_mode);
+            configure_bioseq_pair_sort_session(read_conn, params);
+            it::exec_sql(read_conn, "SET bioseq.update_index_on_insert = off;");
+            it::exec_sql(read_conn, "SET bioseq.read_sequence_index   = off;");
+            it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
+                          recompute_async_persist ? "on" : "off");
+            // GPU/Vulkan phase-C frontend (same GUCs as bioseq_block_gpu_dp_gpu_seed_just_index).
+            it::exec_sql(read_conn, "SET bioseq.aligner.chaining_algorithm            = 'vulkan_tiled_dp';");
+            it::exec_sql(read_conn, "SET bioseq.aligner.minimizer_algorithm           = 'vulkan_minimap_int';");
+            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_enabled                = on;");
+            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_seed_hits_enabled      = on;");
+            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_index_cache_enabled    = on;");
+            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_fused_frontend_enabled   = on;");
+            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_gpu_index_build_enabled  = on;");
+            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_extend_enabled         = off;");
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
             capture_mps_build_stats(read_conn, out);
         }
