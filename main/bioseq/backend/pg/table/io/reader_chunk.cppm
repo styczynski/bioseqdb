@@ -22,6 +22,9 @@ import bioseq.config;
 import :buffers;
 import :cache;
 import :pruning;
+import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_try_as<Const>
+
+using namespace bioseq::pg_utils;   // DOC0333 — node view helpers live in bioseq::pg_utils
 
 static void
 DeserializeBoolArray(StringInfo boolArrayBuffer, bool *boolArray,
@@ -106,9 +109,8 @@ ColumnDefaultValue(TupleConstr *tupleConstraints, Form_pg_attribute attributeFor
 
 	/* try reducing the default value node to a const node */
 	defaultValueNode = eval_const_expressions(NULL, defaultValueNode);
-	if (IsA(defaultValueNode, Const))
+	if (Const *constNode = pg_node_try_as<Const>(defaultValueNode))
 	{
-		Const *constNode = reinterpret_cast<Const *>(defaultValueNode);
 		return constNode->constvalue;
 	}
 	else

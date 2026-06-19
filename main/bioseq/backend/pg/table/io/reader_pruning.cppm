@@ -14,6 +14,9 @@ export module bioseq.table.io:pruning;
 import bioseq.common.mlogging;
 import bioseq.storage.metadata;
 import bioseq.pg_utils;
+import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_expect<Const>/<Var>
+
+using namespace bioseq::pg_utils;   // DOC0333 — node view helpers live in bioseq::pg_utils
 
 static Oid
 GetOperatorByType(Oid typeId, Oid accessMethodId, int16_t strategyNumber)
@@ -88,11 +91,8 @@ UpdateConstraint(Node *baseConstraint, Datum minValue, Datum maxValue)
 	Node *minNode = get_rightop(reinterpret_cast<Expr *>(greaterThanExpr));
 	Node *maxNode = get_rightop(reinterpret_cast<Expr *>(lessThanExpr));
 
-	Assert(IsA(minNode, Const));
-	Assert(IsA(maxNode, Const));
-
-	Const *minConstant = reinterpret_cast<Const *>(minNode);
-	Const *maxConstant = reinterpret_cast<Const *>(maxNode);
+	Const *minConstant = pg_node_expect<Const>(minNode);
+	Const *maxConstant = pg_node_expect<Const>(maxNode);
 
 	minConstant->constvalue = minValue;
 	maxConstant->constvalue = maxValue;
@@ -119,9 +119,7 @@ GetClauseVars(List *whereClauseList, int natts)
 
 	for (auto node : PList<Node>(vars))
 	{
-		Assert(IsA(node, Var));
-
-		Var *var = reinterpret_cast<Var *>(node);
+		Var *var = pg_node_expect<Var>(node);
 		int idx = var->varattno - 1;
 
 		if (deduplicate[idx] != NULL)

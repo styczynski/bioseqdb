@@ -3,8 +3,8 @@
  * vectorization/columnar_vector_execution.cppm
  *
  * Walks query expression trees to build vectorised-friendly variants:
- *   - CheckOpExprArgumentRules rejects OpExprs that do not match the
- *     (one Const + one Var) shape the vectorised evaluator supports.
+ *   - pg_is_const_var_binary_args (bioseq.pg_utils.nodes) gates OpExprs to
+ *     the (one Const + one Var) shape the vectorised evaluator supports.
  *   - GetVectorizedProcedureOid looks up the "v"-prefixed vectorised
  *     implementation of a scalar procedure.
  *   - CreateVectorizedExprList / ConstructVectorizedQualList convert
@@ -25,53 +25,9 @@ export module bioseq.vector.execution;
 import bioseq.pg_utils;
 import bioseq.vector.types;
 import bioseq.column.vector_compare;
+import bioseq.pg_utils.nodes;          // DOC0333 — pg_node_try_as_op_expr_family, pg_node_try_as, pg_is_const_var_binary_args
 
-/*
- * CheckOpExprArgumentRules validates that a vectorised OpExpr receives
- * exactly one Const and one Var argument. Any other combination (two
- * Consts, two Vars, non-Const-non-Var nodes) is rejected. Returns true
- * when the combination is invalid.
- */
-export bool
-CheckOpExprArgumentRules(List* args)
-{
-	bool invalid_argument = false;
-
-	bool seen_const_argument = false;
-	bool seen_var_argument = false;
-
-	for (auto arg : PList<Expr>(args))
-	{
-		if (invalid_argument)
-			break;
-
-		if (IsA(arg, Const))
-		{
-			if (seen_const_argument)
-			{
-				invalid_argument = true;
-				break;
-			}
-			seen_const_argument = true;
-		}
-		else if (IsA(arg, Var))
-		{
-			if (seen_var_argument)
-			{
-				invalid_argument = true;
-				break;
-			}
-			seen_var_argument = true;
-		}
-		else
-		{
-			invalid_argument = true;
-			break;
-		}
-	}
-
-	return invalid_argument;
-}
+using namespace bioseq::pg_utils;      // DOC0333 — node view helpers live in bioseq::pg_utils
 
 /*
  * GetVectorizedProcedureOid resolves the vectorised implementation of
@@ -150,80 +106,72 @@ CreateVectorizedExprList(List* expression_list)
 		if (node == NULL)
 			return NULL;
 
-		switch (nodeTag(node))
+		/*
+		 * OpExpr / DistinctExpr / NullIfExpr share OpExpr storage but carry
+		 * distinct tags; pg_node_try_as_op_expr_family groups all three.
+		 */
+		if (OpExpr* op_expr_node = pg_node_try_as_op_expr_family(node))
 		{
-			case T_OpExpr:
-			case T_DistinctExpr:	/* struct-equivalent to OpExpr */
-			case T_NullIfExpr:		/* struct-equivalent to OpExpr */
+			if (list_length(op_expr_node->args) != 2)
 			{
-				OpExpr* op_expr_node = reinterpret_cast<OpExpr*>(node);
-
-				if (list_length(op_expr_node->args) != 2)
-				{
-					new_qual_list = lappend(new_qual_list, op_expr_node);
-					break;
-				}
-
-				if (CheckOpExprArgumentRules(op_expr_node->args))
-				{
-					new_qual_list = lappend(new_qual_list, op_expr_node);
-					break;
-				}
-
-				HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
-				Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
-				Oid procedure_oid = operator_form->oprcode;
-				ReleaseSysCache(operator_tuple);
-
-				Oid vectorized_oid;
-				if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_oid))
-				{
-					new_qual_list = lappend(new_qual_list, op_expr_node);
-					break;
-				}
-
-				OpExpr* vectorized_op_expr_node = reinterpret_cast<OpExpr*>(copyObject(op_expr_node));
-				vectorized_op_expr_node->opfuncid = vectorized_oid;
-				new_qual_list = lappend(new_qual_list, vectorized_op_expr_node);
-
-				break;
+				new_qual_list = lappend(new_qual_list, op_expr_node);
+				continue;
 			}
 
-			case T_BoolExpr:
+			if (!pg_is_const_var_binary_args(op_expr_node->args))
 			{
-				BoolExpr* bool_expr = castNode(BoolExpr, node);
-
-				List* rewritten_bool_expr_args =
-					CreateVectorizedExprList(bool_expr->args);
-
-				if (list_length(list_intersection(rewritten_bool_expr_args, bool_expr->args)) == 0)
-				{
-					Expr* boolean_clause = NULL;
-
-					if (bool_expr->boolop == AND_EXPR)
-					{
-						boolean_clause = make_andclause(rewritten_bool_expr_args);
-					}
-					else if (bool_expr->boolop == OR_EXPR)
-					{
-						boolean_clause = make_orclause(rewritten_bool_expr_args);
-					}
-
-					new_qual_list = lappend(new_qual_list, boolean_clause);
-				}
-				else
-				{
-					new_qual_list = lappend(new_qual_list, bool_expr);
-				}
-
-				break;
+				new_qual_list = lappend(new_qual_list, op_expr_node);
+				continue;
 			}
-			default:
+
+			HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
+			Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
+			Oid procedure_oid = operator_form->oprcode;
+			ReleaseSysCache(operator_tuple);
+
+			Oid vectorized_oid;
+			if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_oid))
 			{
-				new_qual_list = lappend(new_qual_list, node);
-				break;
+				new_qual_list = lappend(new_qual_list, op_expr_node);
+				continue;
 			}
+
+			OpExpr* vectorized_op_expr_node = reinterpret_cast<OpExpr*>(copyObject(op_expr_node));
+			vectorized_op_expr_node->opfuncid = vectorized_oid;
+			new_qual_list = lappend(new_qual_list, vectorized_op_expr_node);
+
+			continue;
 		}
+
+		if (BoolExpr* bool_expr = pg_node_try_as<BoolExpr>(node))
+		{
+			List* rewritten_bool_expr_args =
+				CreateVectorizedExprList(bool_expr->args);
+
+			if (list_length(list_intersection(rewritten_bool_expr_args, bool_expr->args)) == 0)
+			{
+				Expr* boolean_clause = NULL;
+
+				if (bool_expr->boolop == AND_EXPR)
+				{
+					boolean_clause = make_andclause(rewritten_bool_expr_args);
+				}
+				else if (bool_expr->boolop == OR_EXPR)
+				{
+					boolean_clause = make_orclause(rewritten_bool_expr_args);
+				}
+
+				new_qual_list = lappend(new_qual_list, boolean_clause);
+			}
+			else
+			{
+				new_qual_list = lappend(new_qual_list, bool_expr);
+			}
+
+			continue;
+		}
+
+		new_qual_list = lappend(new_qual_list, node);
 	}
 
 	return new_qual_list;
@@ -244,14 +192,9 @@ ConstructVectorizedQualList(TupleTableSlot* slot, List* vectorized_qual)
 	List* vector_qual_list = NIL;
 	for (auto node : PList<Node>(vectorized_qual))
 	{
-		switch (nodeTag(node))
+		if (OpExpr* op_expr_node = pg_node_try_as_op_expr_family(node))
 		{
-			case T_OpExpr:
-			case T_DistinctExpr:
-			case T_NullIfExpr:
 			{
-				OpExpr* op_expr_node = reinterpret_cast<OpExpr*>(node);
-
 				int argument_index = 0;
 				int argument_count = list_length(op_expr_node->args);
 
@@ -276,19 +219,16 @@ ConstructVectorizedQualList(TupleTableSlot* slot, List* vectorized_qual)
 					VectorFnArgument* vector_fn_argument =
 						new_vector_qual->u.expr.vectorFnArguments + argument_index;
 
-					if (IsA(arg, Const))
+					if (Const* const_expr = pg_node_try_as<Const>(pg_as_node(arg)))
 					{
-						Const* const_expr = reinterpret_cast<Const*>(arg);
-
 						vector_fn_argument->type = VECTOR_FN_ARG_CONSTANT;
 						vector_fn_argument->arg = const_expr->constvalue;
 
 						new_vector_qual->u.expr.fcInfo->args[argument_index].value = reinterpret_cast<Datum>(vector_fn_argument);
 						new_vector_qual->u.expr.fcInfo->args[argument_index].isnull = const_expr->constisnull;
 					}
-					else if (IsA(arg, Var))
+					else if (Var* variable_expr = pg_node_try_as<Var>(pg_as_node(arg)))
 					{
-						Var* variable_expr = reinterpret_cast<Var*>(arg);
 						int column_index = variable_expr->varattno - 1;
 
 						vector_fn_argument->type = VECTOR_FN_ARG_VAR;
@@ -302,34 +242,29 @@ ConstructVectorizedQualList(TupleTableSlot* slot, List* vectorized_qual)
 				}
 
 				vector_qual_list = lappend(vector_qual_list, new_vector_qual);
-				break;
+				continue;
 			}
+		}
 
-			case T_BoolExpr:
+		if (BoolExpr* bool_expr = pg_node_try_as<BoolExpr>(node))
+		{
+			VectorQual* new_vector_qual = make0<VectorQual>();
+			new_vector_qual->vectorQualType = VECTOR_QUAL_BOOL_EXPR;
+
+			List* new_qual_expression_args =
+				ConstructVectorizedQualList(slot, bool_expr->args);
+
+			new_vector_qual->u.boolExpr.boolExprType = bool_expr->boolop;
+
+			for (auto qual_child : PList<VectorQual>(new_qual_expression_args))
 			{
-				BoolExpr* bool_expr = castNode(BoolExpr, node);
-
-				VectorQual* new_vector_qual = make0<VectorQual>();
-				new_vector_qual->vectorQualType = VECTOR_QUAL_BOOL_EXPR;
-
-				List* new_qual_expression_args =
-					ConstructVectorizedQualList(slot, bool_expr->args);
-
-				new_vector_qual->u.boolExpr.boolExprType = bool_expr->boolop;
-
-				for (auto qual_child : PList<VectorQual>(new_qual_expression_args))
-				{
-					new_vector_qual->u.boolExpr.vectorQualExprList =
-						lappend(new_vector_qual->u.boolExpr.vectorQualExprList, qual_child);
-				}
-
-				vector_qual_list = lappend(vector_qual_list, new_vector_qual);
-
-				break;
+				new_vector_qual->u.boolExpr.vectorQualExprList =
+					lappend(new_vector_qual->u.boolExpr.vectorQualExprList, qual_child);
 			}
 
-			default:
-				break;
+			vector_qual_list = lappend(vector_qual_list, new_vector_qual);
+
+			continue;
 		}
 	}
 

@@ -23,8 +23,11 @@ import bioseq.common.mlogging;
 import bioseq.table;
 import bioseq.pg_utils;
 import bioseq.config;                    // DOC0322 §9.3 — bioseq_enable_vectorization, bioseq_index_scan GUCs
-import bioseq.vector.execution;   // CheckOpExprArgumentRules, GetVectorizedProcedureOid
+import bioseq.vector.execution;   // GetVectorizedProcedureOid
 import bioseq.vector.aggregator_node;    // bioseq_create_aggregator_node, bioseq_register_aggregator_node
+import bioseq.pg_utils.nodes;            // DOC0333 — node views, expression+plan mutator adapters, op-expr-family helper
+
+using namespace bioseq::pg_utils;        // DOC0333 — node view/mutator helpers live in bioseq::pg_utils
 
 /*
  * DOC0322 §7.7/§9.4 — the file-body `extern "C++"` wrapper is dropped.
@@ -100,127 +103,124 @@ bioseq_index_table(Oid index_oid, Oid bioseq_column_tableam_oid)
 }
 
 /*
- * AggRefArgsExpressionMutator walks the argument expressions of a single
- * Aggref node. OpExpr/DistinctExpr/NullIfExpr nodes are rewritten so that
- * opfuncid points at the vectorised implementation; anything else must be a
- * plain Var or the mutation is rejected.
+ * aggref_args_mutator rewrites the argument expressions of a single Aggref.
+ * OpExpr/DistinctExpr/NullIfExpr nodes (grouped via
+ * pg_node_try_as_op_expr_family) get opfuncid pointed at the vectorised
+ * implementation; any other expression sitting directly under an Aggref-arg
+ * TargetEntry must be a plain Var or the mutation is rejected. The parent
+ * node is threaded through aggref_args_state so the TargetEntry-parent check
+ * still fires exactly where it did when the parent was the walker context.
  */
-static Node*
-AggRefArgsExpressionMutator(Node* node, void* context)
-{
-	bioseq_log<DBG>("[bioseq] pg: AggRefArgsExpressionMutator() entered");
-	if (node == NULL)
-		return NULL;
+struct aggref_args_state {
+	Node* parent = nullptr;
+};
 
-	Node* previous_node = static_cast<Node*>(context);
+struct aggref_args_mutator {
+	[[nodiscard]] pg_node_mutation
+	operator()(pg_expression_mutation_cursor cursor, pg_node_view node, aggref_args_state& state) const {
+		if (OpExpr* op_expr_node = pg_node_try_as_op_expr_family(node.raw()))
+		{
+			if (list_length(op_expr_node->args) != 2)
+				bioseq_log<ERR, PG>( "Aggregation vectorization works only on two arguments.");
 
-	if (IsA(node, OpExpr) || IsA(node, DistinctExpr) || IsA(node, NullIfExpr))
-	{
-		OpExpr* op_expr_node = reinterpret_cast<OpExpr*>(node);
+			if (!pg_is_const_var_binary_args(op_expr_node->args))
+				bioseq_log<ERR, PG>( "Unsupported aggregate argument combination.");
 
-		if (list_length(op_expr_node->args) != 2)
-			bioseq_log<ERR, PG>( "Aggregation vectorization works only on two arguments.");
+			HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
+			Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
+			Oid procedure_oid = operator_form->oprcode;
+			ReleaseSysCache(operator_tuple);
 
-		if (CheckOpExprArgumentRules(op_expr_node->args))
-			bioseq_log<ERR, PG>( "Unsupported aggregate argument combination.");
+			Oid vectorized_procedure_oid;
+			if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_procedure_oid))
+				bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
 
-		HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
-		Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
-		Oid procedure_oid = operator_form->oprcode;
-		ReleaseSysCache(operator_tuple);
+			op_expr_node->opfuncid = vectorized_procedure_oid;
 
-		Oid vectorized_procedure_oid;
-		if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_procedure_oid))
-			bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
+			return pg_node_mutation::with(pg_as_node(op_expr_node));
+		}
 
-		op_expr_node->opfuncid = vectorized_procedure_oid;
+		/* This should handle aggregates that have non var(column) as argument*/
+		if (state.parent != NULL && pg_node_view{state.parent}.is<TargetEntry>() && !node.is<Var>())
+			bioseq_log<ERR, PG>( "Vectorized Aggregates accept only valid column argument");
 
-		return reinterpret_cast<Node*>(op_expr_node);
+		Node* saved_parent = state.parent;
+		state.parent = node.raw();
+		Node* rewritten = cursor.descend(node.raw());
+		state.parent = saved_parent;
+		return pg_node_mutation::with(rewritten);
 	}
-
-	/* This should handle aggregates that have non var(column) as argument*/
-	if (previous_node != NULL && IsA(previous_node, TargetEntry) && !IsA(node, Var))
-		bioseq_log<ERR, PG>( "Vectorized Aggregates accept only valid column argument");
-
-	return expression_tree_mutator(node, AggRefArgsExpressionMutator, static_cast<void*>(node));
-}
+};
 
 /*
- * ExpressionMutator runs over a target-list / qual expression tree and
- * rewrites Aggref nodes so their aggfnoid points at the vectorised variant.
- * DISTINCT / FILTER are unsupported and raise an error up-front.
+ * expr_mutator runs over a target-list / qual expression tree and rewrites
+ * Aggref nodes so their aggfnoid points at the vectorised variant. DISTINCT
+ * / FILTER are unsupported and raise an error up-front. The Aggref is deep
+ * copied (pg_copy_node) before its args are rewritten via aggref_args_mutator.
  */
-static Node*
-ExpressionMutator(Node* node, void* context)
-{
-	bioseq_log<DBG>("[bioseq] pg: ExpressionMutator() entered");
-	if (node == NULL)
-		return NULL;
+struct expr_mutator_state {};
 
-	if (IsA(node, Aggref))
-	{
-		Aggref* old_aggref_node = reinterpret_cast<Aggref*>(node);
-		Aggref* new_aggref_node = reinterpret_cast<Aggref*>(copyObject(old_aggref_node));
-
-		if (old_aggref_node->aggdistinct)
+struct expr_mutator {
+	[[nodiscard]] pg_node_mutation
+	operator()(pg_expression_mutation_cursor, pg_node_view node, expr_mutator_state&) const {
+		if (Aggref* old_aggref_node = node.try_as<Aggref>())
 		{
-			bioseq_log<ERR, PG>( "Vectorized aggregate with DISTINCT not supported.");
+			Aggref* new_aggref_node = pg_copy_node(old_aggref_node);
+
+			if (old_aggref_node->aggdistinct)
+			{
+				bioseq_log<ERR, PG>( "Vectorized aggregate with DISTINCT not supported.");
+			}
+
+			if (old_aggref_node->aggfilter)
+			{
+				bioseq_log<ERR, PG>( "Vectorized aggregate with FILTER not supported");
+			}
+
+			aggref_args_state args_state;
+			aggref_args_mutator args_mutator;
+			new_aggref_node->args = reinterpret_cast<List*>(
+				pg_mutate_expression(pg_as_node(old_aggref_node->args), args_state, args_mutator));
+
+			Oid vectorized_procedure_oid = 0;
+			if (!GetVectorizedProcedureOid(new_aggref_node->aggfnoid, &vectorized_procedure_oid))
+			{
+				bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
+			}
+
+			new_aggref_node->aggfnoid = vectorized_procedure_oid;
+
+			return pg_node_mutation::with(pg_as_node(new_aggref_node));
 		}
 
-		if (old_aggref_node->aggfilter)
-		{
-			bioseq_log<ERR, PG>( "Vectorized aggregate with FILTER not supported");
-		}
-
-		new_aggref_node->args = reinterpret_cast<List*>(
-			expression_tree_mutator(reinterpret_cast<Node*>(old_aggref_node->args), AggRefArgsExpressionMutator, NULL));
-
-		Oid vectorized_procedure_oid = 0;
-		if (!GetVectorizedProcedureOid(new_aggref_node->aggfnoid, &vectorized_procedure_oid))
-		{
-			bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
-		}
-
-		new_aggref_node->aggfnoid = vectorized_procedure_oid;
-
-		return reinterpret_cast<Node*>(new_aggref_node);
+		return pg_node_mutation::descend();
 	}
-
-	return expression_tree_mutator(node, ExpressionMutator, context);
-}
+};
 
 
 /*
- * PlanTreeMutator recursively rewrites the plan tree. CustomScan nodes get
- * a vectorization flag appended; Agg nodes get replaced with the bioseq
- * aggregator custom node; IndexScan nodes on columnar relations get wrapped
- * in the bioseq IndexScan custom node.
+ * plan_tree_mutator rewrites the plan tree (driven by pg_mutate_plan_tree).
+ * CustomScan nodes get a vectorization flag appended; Agg nodes get replaced
+ * with the bioseq aggregator custom node; IndexScan nodes on columnar
+ * relations get wrapped in the bioseq IndexScan custom node. The adapter
+ * calls check_stack_depth() per node and reassigns lefttree/righttree, so
+ * the replacement contract lives in the returned pg_plan_mutation rather
+ * than in ad hoc child recursion.
  */
-static Plan*
-PlanTreeMutator(Plan* node, void* context)
-{
-	if (node == NULL)
-		return NULL;
-
-	/* Guard against stack overflow due to overly complex expressions */
-	check_stack_depth();
-
-	switch (nodeTag(node))
-	{
-		case T_CustomScan:
+struct plan_tree_mutator {
+	[[nodiscard]] pg_plan_mutation
+	operator()(pg_plan_mutation_cursor cursor, pg_node_view node, PlanTreeMutatorContext& plan_tree_context) const {
+		if (CustomScan* custom_scan = node.try_as<CustomScan>())
 		{
-			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() encountered CustomScan");
-			CustomScan* custom_scan = reinterpret_cast<CustomScan*>(node);
+			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered CustomScan");
 
 			if (custom_scan->methods == bioseq_customscan_methods())
 			{
-				PlanTreeMutatorContext* plan_tree_context = static_cast<PlanTreeMutatorContext*>(context);
-
 				Const* vectorized_aggregate_execution = makeNode(Const);
 
 				vectorized_aggregate_execution->constbyval = true;
 				vectorized_aggregate_execution->consttype = CUSTOM_SCAN_VECTORIZED_AGGREGATE;
-				vectorized_aggregate_execution->constvalue = BoolGetDatum(plan_tree_context->vectorizedAggregation);
+				vectorized_aggregate_execution->constvalue = BoolGetDatum(plan_tree_context.vectorizedAggregation);
 				vectorized_aggregate_execution->constlen = sizeof(bool);
 
 				custom_scan->custom_private = lappend(custom_scan->custom_private, vectorized_aggregate_execution);
@@ -230,20 +230,19 @@ PlanTreeMutator(Plan* node, void* context)
 				bioseq_log<ERR, PG>( "Custom Scan type is not BioseqColumnScan.");
 			}
 
-			break;
+			return pg_plan_mutation::descend();
 		}
 
-		case T_Agg:
+		if (Agg* agg_node = node.try_as<Agg>())
 		{
-			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() encountered Agg");
-			Agg* agg_node = reinterpret_cast<Agg*>(node);
+			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered Agg");
 
 			if (!bioseq_enable_vectorization)
-				return node;
+				return pg_plan_mutation::skip();
 
 			if (agg_node->plan.lefttree->type == T_CustomScan)
 			{
-				bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() Agg has CustomScan child");
+				bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg has CustomScan child");
 				/*
 				 * Skip the vectorised-aggregator rewrite when the Agg
 				 * pulls a value from a bioseq.<projection>(...) call or
@@ -267,18 +266,20 @@ PlanTreeMutator(Plan* node, void* context)
 					|| bioseq_expr_uses_bioseq_projection(
 						reinterpret_cast<Node*>(agg_node->plan.lefttree->qual));
 				if (agg_input_uses_bioseq_projection) {
-					bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
-					return node;
+					bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
+					return pg_plan_mutation::skip();
 				}
 				if (agg_node->aggstrategy == AGG_PLAIN)
 				{
-					bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() rewriting AGG_PLAIN into vectorized aggregator");
+					bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() rewriting AGG_PLAIN into vectorized aggregator");
 					CustomScan* vectorized_agg_node = bioseq_create_aggregator_node();
 
 					Agg* new_agg = FlatCopyPlan(agg_node);
 
+					expr_mutator_state targetlist_state;
+					expr_mutator targetlist_mutator;
 					new_agg->plan.targetlist =
-						reinterpret_cast<List*>(expression_tree_mutator(reinterpret_cast<Node*>(new_agg->plan.targetlist), ExpressionMutator, NULL));
+						reinterpret_cast<List*>(pg_mutate_expression(reinterpret_cast<Node*>(new_agg->plan.targetlist), targetlist_state, targetlist_mutator));
 
 
 					vectorized_agg_node->custom_plans =
@@ -292,42 +293,40 @@ PlanTreeMutator(Plan* node, void* context)
 					vectorized_agg_plan->parallel_aware = agg_node->plan.lefttree->parallel_aware;
 
 
-					PlanTreeMutatorContext* plan_tree_context = static_cast<PlanTreeMutatorContext*>(context);
-					plan_tree_context->vectorizedAggregation = true;
+					plan_tree_context.vectorizedAggregation = true;
 
 					/*
-					 * PlanTreeMutator is a *replacing* mutator: when it
+					 * plan_tree_mutator is a *replacing* mutator: when it
 					 * encounters an IndexScan or CustomScan it returns a
-					 * new node that needs to take the place of the input.
-					 * We therefore must reassign lefttree / righttree
-					 * with the result so any nested rewrites land in the
-					 * vectorized aggregator's children.
+					 * new node that takes the place of the input. The
+					 * cursor reassigns lefttree / righttree on the original
+					 * Agg before we graft them onto the vectorized
+					 * aggregator, so any nested rewrites land in its
+					 * children. (&agg_node->plan aliases the input Plan.)
 					 */
-					node->lefttree = PlanTreeMutator(node->lefttree, context);
-					node->righttree = PlanTreeMutator(node->righttree, context);
+					Plan* recursed_agg_plan = cursor.descend_children(&agg_node->plan);
 
-					vectorized_agg_node->scan.plan.lefttree = node->lefttree;
-					vectorized_agg_node->scan.plan.righttree = node->righttree;
+					vectorized_agg_node->scan.plan.lefttree = recursed_agg_plan->lefttree;
+					vectorized_agg_node->scan.plan.righttree = recursed_agg_plan->righttree;
 
-					return reinterpret_cast<Plan*>(vectorized_agg_node);
+					return pg_plan_mutation::with(reinterpret_cast<Plan*>(vectorized_agg_node));
 				}
 
-				return node;
+				return pg_plan_mutation::skip();
 			}
 
-			break;
+			return pg_plan_mutation::descend();
 		}
-		case T_IndexScan:
-		{
-			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() encountered IndexScan; bioseq_index_scan={}", bioseq_index_scan);
-			if (!bioseq_index_scan)
-				return node;
 
-			IndexScan* index_scan_node = reinterpret_cast<IndexScan*>(node);
+		if (IndexScan* index_scan_node = node.try_as<IndexScan>())
+		{
+			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered IndexScan; bioseq_index_scan={}", bioseq_index_scan);
+			if (!bioseq_index_scan)
+				return pg_plan_mutation::skip();
 
 			if (!bioseq_index_table(index_scan_node->indexid, bioseq_tableam_oid)) {
-				bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() IndexScan not on columnar table; skipping rewrite");
-				return node;
+				bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() IndexScan not on columnar table; skipping rewrite");
+				return pg_plan_mutation::skip();
 			}
 
 			CustomScan* bioseq_column_index_scan = bioseq_create_indexscan_node();
@@ -344,20 +343,13 @@ PlanTreeMutator(Plan* node, void* context)
 			Plan* bioseq_column_index_scan_plan = reinterpret_cast<Plan*>(bioseq_column_index_scan);
 			CopyPlanCosts(bioseq_column_index_scan_plan, &index_scan_node->scan.plan);
 
-			bioseq_log<DBG>("[bioseq] pg: PlanTreeMutator() IndexScan rewritten to bioseq custom scan");
-			return reinterpret_cast<Plan*>(bioseq_column_index_scan);
+			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() IndexScan rewritten to bioseq custom scan");
+			return pg_plan_mutation::with(reinterpret_cast<Plan*>(bioseq_column_index_scan));
 		}
-		default:
-		{
-			break;
-		}
+
+		return pg_plan_mutation::descend();
 	}
-
-	node->lefttree = PlanTreeMutator(node->lefttree, context);
-	node->righttree = PlanTreeMutator(node->righttree, context);
-
-	return node;
-}
+};
 
 /*
  * ProcessUtilityHook watches DDL statements for CREATE TABLE ... USING
@@ -379,15 +371,13 @@ static void ProcessUtilityHook(
 
 	if (pstmt->commandType == CMD_UTILITY && GetCommandLogLevel(parse_tree) == LOGSTMT_DDL) {
 		Node* utility_statement = pstmt->utilityStmt;
-		if (IsA(utility_statement, CreateStmt)) {
-			CreateStmt* create_statement = reinterpret_cast<CreateStmt*>(utility_statement);
+		if (CreateStmt* create_statement = pg_node_try_as<CreateStmt>(utility_statement)) {
 			if (create_statement->accessMethod != nullptr) {
 				std::string access_method(create_statement->accessMethod);
 				if (access_method == "bioseq") {
 					bioseq_log<DBG>("[bioseq] pg: ProcessUtilityHook() CREATE TABLE USING columnar");
 					for (auto element : PList<Node>(create_statement->tableElts)) {
-						if (IsA(element, ColumnDef)) {
-							ColumnDef* column_def = reinterpret_cast<ColumnDef*>(element);
+						if (ColumnDef* column_def = pg_node_try_as<ColumnDef>(element)) {
 							bioseq_log<DBG>("[bioseq] pg: ProcessUtilityHook() column '{}'", column_def->colname);
 						}
 					}
@@ -470,10 +460,12 @@ BioseqColumnPlannerHook(Query* parse,
 	{
 		List* mutated_subplans = NULL;
 
+		plan_tree_mutator plan_mutator;
+
 		PlanTreeMutatorContext plan_tree_context;
 		plan_tree_context.vectorizedAggregation = false;
 
-		stmt->planTree = reinterpret_cast<Plan*>(PlanTreeMutator(stmt->planTree, static_cast<void*>(&plan_tree_context)));
+		stmt->planTree = pg_mutate_plan_tree(stmt->planTree, plan_tree_context, plan_mutator);
 
 		bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() iterating subplans");
 		for (auto subplan_node : PList<Plan>(stmt->subplans))
@@ -481,7 +473,7 @@ BioseqColumnPlannerHook(Query* parse,
 			bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() processing next subplan");
 			PlanTreeMutatorContext sub_plan_tree_context;
 			sub_plan_tree_context.vectorizedAggregation = false;
-			Plan* mutated_subplan = static_cast<Plan*>(PlanTreeMutator(subplan_node, static_cast<void*>(&sub_plan_tree_context)));
+			Plan* mutated_subplan = pg_mutate_plan_tree(subplan_node, sub_plan_tree_context, plan_mutator);
 			mutated_subplans = lappend(mutated_subplans, mutated_subplan);
 		}
 		bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() subplan iteration complete");

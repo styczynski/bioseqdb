@@ -47,6 +47,9 @@ import bioseq.scheduler.supervisor_pg;
 import bioseq.parallelism.mode;
 import bioseq.common.sequan_compat;
 import bioseq.column.tam;   // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (the leaf replaces the former extern "C++" reaches)
+import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_try_as (support-request dispatch), expression walker adapter (find_first_var)
+
+using namespace bioseq::pg_utils;   // DOC0333 — node view/walker helpers live in bioseq::pg_utils
 
 namespace {
 
@@ -409,18 +412,19 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 struct FirstVarFinder {
 	Var* result = nullptr;
 };
-static bool find_first_var_walker(Node* node, void* ctx) {
-	if (node == nullptr) return false;
-	auto* finder = static_cast<FirstVarFinder*>(ctx);
-	if (finder->result != nullptr) {
-		return true;  /* abort the walk */
+struct first_var_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, FirstVarFinder& finder) const noexcept {
+		if (finder.result != nullptr) {
+			return pg_walk_step::stop;  /* abort the walk */
+		}
+		if (Var* var = node.try_as<Var>()) {
+			finder.result = var;
+			return pg_walk_step::stop;
+		}
+		return pg_walk_step::descend;
 	}
-	if (IsA(node, Var)) {
-		finder->result = reinterpret_cast<Var*>(node);
-		return true;
-	}
-	return expression_tree_walker(node, find_first_var_walker, ctx);
-}
+};
 
 /*
  * Shared simplify-time PHV wrapping. Used by both bioseq_placeholder_support
@@ -440,7 +444,8 @@ static Node* try_wrap_in_placeholder(SupportRequestSimplify* simplify) {
 		return nullptr;
 	}
 	FirstVarFinder finder;
-	find_first_var_walker(reinterpret_cast<Node*>(simplify->fcall), &finder);
+	first_var_visitor visitor;
+	pg_walk_expression_including_root(pg_as_node(simplify->fcall), finder, visitor);
 	if (finder.result == nullptr) {
 		bioseq_log<DBG>("[bioseq] pg: try_wrap_in_placeholder() no Var found in fcall — skipping");
 		return nullptr;
@@ -461,14 +466,13 @@ CXX_PG_FUNCTION_INFO_V1(bioseq_symbol_count_support);
 Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
 	bioseq_log<DBG>("[bioseq] pg: bioseq_symbol_count_support() entered");
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
-	if (IsA(request, SupportRequestCost)) {
-		SupportRequestCost* cost_request = reinterpret_cast<SupportRequestCost*>(request);
+	if (SupportRequestCost* cost_request = pg_node_try_as<SupportRequestCost>(request)) {
 		bioseq_log<DBG>("[bioseq] pg: bioseq_symbol_count_support() received SupportRequestCost");
 		cost_request->startup = 50000;
 		cost_request->per_tuple = 0;
 		PG_RETURN_POINTER(cost_request);
 	}
-	if (IsA(request, SupportRequestSimplify)) {
+	if (SupportRequestSimplify* simplify = pg_node_try_as<SupportRequestSimplify>(request)) {
 		/*
 		 * symbol_count's projection placeholder is rewritten by the
 		 * VarInjectorMutator just like the bioseq.cigar/score/...
@@ -477,8 +481,6 @@ Datum bioseq_symbol_count_support(PG_FUNCTION_ARGS) {
 		 * LEFT JOIN with WHERE mmsearch + bioseq.symbol_count(...) on
 		 * the projection no longer crashes.
 		 */
-		SupportRequestSimplify* simplify =
-			reinterpret_cast<SupportRequestSimplify*>(request);
 		Node* wrapped = try_wrap_in_placeholder(simplify);
 		if (wrapped != nullptr) {
 			PG_RETURN_POINTER(wrapped);
@@ -497,9 +499,8 @@ Datum mmsearch_support(PG_FUNCTION_ARGS) {
 	bioseq_log<DBG>("[bioseq] pg: mmsearch_support() entered");
 	Node* response = nullptr;
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
-	if (IsA(request, SupportRequestCost))
+	if (SupportRequestCost* cost_request = pg_node_try_as<SupportRequestCost>(request))
 	{
-		SupportRequestCost* cost_request = reinterpret_cast<SupportRequestCost*>(request);
 		bioseq_log<DBG>("[bioseq] pg: mmsearch_support() received SupportRequestCost");
 		PlannerInfo* planner_info = cost_request->root;
 		if (planner_info == nullptr) {
@@ -542,11 +543,10 @@ CXX_PG_FUNCTION_INFO_V1(bioseq_placeholder_support);
 Datum bioseq_placeholder_support(PG_FUNCTION_ARGS) {
 	bioseq_log<DBG>("[bioseq] pg: bioseq_placeholder_support() entered");
 	Node* request = reinterpret_cast<Node*>(PG_GETARG_POINTER(0));
-	if (!IsA(request, SupportRequestSimplify)) {
+	SupportRequestSimplify* simplify = pg_node_try_as<SupportRequestSimplify>(request);
+	if (simplify == nullptr) {
 		PG_RETURN_POINTER(nullptr);
 	}
-	SupportRequestSimplify* simplify =
-		reinterpret_cast<SupportRequestSimplify*>(request);
 	Node* wrapped = try_wrap_in_placeholder(simplify);
 	PG_RETURN_POINTER(wrapped);
 }
@@ -569,7 +569,7 @@ Datum bioseq_list_metadata(PG_FUNCTION_ARGS) {
 	namespace bidx = bioseq::indexing;
 
 	ReturnSetInfo* rsinfo = reinterpret_cast<ReturnSetInfo*>(fcinfo->resultinfo);
-	if (rsinfo == nullptr || !IsA(rsinfo, ReturnSetInfo))
+	if (rsinfo == nullptr || !pg_node_view{pg_as_node(rsinfo)}.is<ReturnSetInfo>())
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			errmsg("bioseq.list_metadata() must be called in a set-returning context")));
 	if ((rsinfo->allowedModes & SFRM_Materialize) == 0)

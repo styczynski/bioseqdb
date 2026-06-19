@@ -299,6 +299,9 @@ export module bioseq.vector.aggregator_node;
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
 import bioseq.vector.types;
+import bioseq.pg_utils.nodes;            // DOC0333 — pg_node_try_as, expression walker adapter (find_cols)
+
+using namespace bioseq::pg_utils;        // DOC0333 — node view/walker helpers live in bioseq::pg_utils
 
 /*
  * VectorAggState is the CustomScanState body for the vectorised aggregate
@@ -365,7 +368,6 @@ static void finalize_aggregates(AggState *aggstate,
 static TupleTableSlot *project_aggregates(AggState *aggstate);
 static void find_cols(AggState *aggstate, Bitmapset **aggregated,
 					  Bitmapset **unaggregated);
-static bool find_cols_walker(Node *node, FindColsContext *context);
 static void build_hash_tables(AggState *aggstate);
 static void build_hash_table(AggState *aggstate, int setno, long nbuckets);
 static void hashagg_recompile_expressions(AggState *aggstate, bool minslot,
@@ -1312,6 +1314,41 @@ project_aggregates(AggState *aggstate)
 }
 
 /*
+ * find_cols_visitor classifies OUTER_VAR column references into the
+ * aggregated vs unaggregated sets. Under an Aggref it flips is_aggref for
+ * the duration of a manual child descent (mirroring setrefs.c's
+ * find_cols_walker), then skips the default descent so the subtree is not
+ * walked twice.
+ */
+struct find_cols_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor cursor, pg_node_view node, FindColsContext &context) const {
+		if (Var *var = node.try_as<Var>())
+		{
+			/* setrefs.c should have set the varno to OUTER_VAR */
+			Assert(var->varno == OUTER_VAR);
+			Assert(var->varlevelsup == 0);
+			if (context.is_aggref)
+				context.aggregated = bms_add_member(context.aggregated,
+													var->varattno);
+			else
+				context.unaggregated = bms_add_member(context.unaggregated,
+													  var->varattno);
+			return pg_walk_step::skip_subtree;
+		}
+		if (node.is<Aggref>())
+		{
+			Assert(!context.is_aggref);
+			context.is_aggref = true;
+			cursor.descend(node.raw());
+			context.is_aggref = false;
+			return pg_walk_step::skip_subtree;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+/*
  * Find input-tuple columns that are needed, dividing them into
  * aggregated and unaggregated sets.
  */
@@ -1326,8 +1363,9 @@ find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 	context.unaggregated = NULL;
 
 	/* Examine tlist and quals */
-	(void) find_cols_walker(reinterpret_cast<Node *>(agg->plan.targetlist), &context);
-	(void) find_cols_walker(reinterpret_cast<Node *>(agg->plan.qual), &context);
+	find_cols_visitor cols_visitor;
+	(void) pg_walk_expression_including_root(reinterpret_cast<Node *>(agg->plan.targetlist), context, cols_visitor);
+	(void) pg_walk_expression_including_root(reinterpret_cast<Node *>(agg->plan.qual), context, cols_visitor);
 
 	/* In some cases, grouping columns will not appear in the tlist */
 	for (int i = 0; i < agg->numCols; i++)
@@ -1336,38 +1374,6 @@ find_cols(AggState *aggstate, Bitmapset **aggregated, Bitmapset **unaggregated)
 
 	*aggregated = context.aggregated;
 	*unaggregated = context.unaggregated;
-}
-
-static bool
-find_cols_walker(Node *node, FindColsContext *context)
-{
-	if (node == NULL)
-		return false;
-	if (IsA(node, Var))
-	{
-		Var		   *var = reinterpret_cast<Var *>(node);
-
-		/* setrefs.c should have set the varno to OUTER_VAR */
-		Assert(var->varno == OUTER_VAR);
-		Assert(var->varlevelsup == 0);
-		if (context->is_aggref)
-			context->aggregated = bms_add_member(context->aggregated,
-												 var->varattno);
-		else
-			context->unaggregated = bms_add_member(context->unaggregated,
-												   var->varattno);
-		return false;
-	}
-	if (IsA(node, Aggref))
-	{
-		Assert(!context->is_aggref);
-		context->is_aggref = true;
-		expression_tree_walker(node, find_cols_walker, static_cast<void *>(context));
-		context->is_aggref = false;
-		return false;
-	}
-	return expression_tree_walker(node, find_cols_walker,
-								  static_cast<void *>(context));
 }
 
 /*
@@ -4447,21 +4453,20 @@ ExecReScanAgg(AggState *node)
 int
 AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 {
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
+	if (AggState *aggstate = pg_node_try_as<AggState>(fcinfo->context))
 	{
 		if (aggcontext)
 		{
-			AggState   *aggstate = reinterpret_cast<AggState *>(fcinfo->context);
 			ExprContext *cxt = aggstate->curaggcontext;
 
 			*aggcontext = cxt->ecxt_per_tuple_memory;
 		}
 		return AGG_CONTEXT_AGGREGATE;
 	}
-	if (fcinfo->context && IsA(fcinfo->context, WindowAggState))
+	if (WindowAggState *window_agg_state = pg_node_try_as<WindowAggState>(fcinfo->context))
 	{
 		if (aggcontext)
-			*aggcontext = reinterpret_cast<WindowAggState *>(fcinfo->context)->curaggcontext;
+			*aggcontext = window_agg_state->curaggcontext;
 		return AGG_CONTEXT_WINDOW;
 	}
 
@@ -4491,9 +4496,8 @@ AggCheckCallContext(FunctionCallInfo fcinfo, MemoryContext *aggcontext)
 Aggref *
 AggGetAggref(FunctionCallInfo fcinfo)
 {
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
+	if (AggState *aggstate = pg_node_try_as<AggState>(fcinfo->context))
 	{
-		AggState   *aggstate = reinterpret_cast<AggState *>(fcinfo->context);
 		AggStatePerAgg curperagg;
 		AggStatePerTrans curpertrans;
 
@@ -4529,9 +4533,8 @@ AggGetAggref(FunctionCallInfo fcinfo)
 bool
 AggStateIsShared(FunctionCallInfo fcinfo)
 {
-	if (fcinfo->context && IsA(fcinfo->context, AggState))
+	if (AggState *aggstate = pg_node_try_as<AggState>(fcinfo->context))
 	{
-		AggState   *aggstate = reinterpret_cast<AggState *>(fcinfo->context);
 		AggStatePerAgg curperagg;
 		AggStatePerTrans curpertrans;
 

@@ -69,6 +69,9 @@ import bioseq.storage.indexing_pg.chunked_storage;       // IndexStorageSequence
 import bioseq.storage.indexing_pg.admin;    // estimate_index_presence, open_sequence_storage, letter_to_rank
 import bioseq.instr;                      // runtime profiler — summary at scan end
 import bioseq.common.sequan_compat;                     // seq:: alphabet alias used by sequence_custom_alphabet
+import bioseq.pg_utils.nodes;             // DOC0333 — pg_node_view/try_as, expression walker+mutator adapters, arg-shape helpers
+
+using namespace bioseq::pg_utils;         // DOC0333 — node view/walker/mutator helpers live in bioseq::pg_utils
 
 /*
  * DOC0322 §7.5 — the former `extern "C++"` cross-partition reaches are replaced
@@ -567,27 +570,24 @@ struct MmsearchQualifierWalker {
 	const BioseqStubOids* oids = nullptr;
 };
 
-static bool
-contains_mmsearch_qualifier_walker(Node* node, void* context)
-{
-	if (node == nullptr) {
-		return false;
-	}
-	auto* data = static_cast<MmsearchQualifierWalker*>(context);
-	if (IsA(node, FuncExpr)) {
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
-		if (is_mmsearch_funcid(fe->funcid, *data->oids)) {
-			return true;
+struct mmsearch_qualifier_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, MmsearchQualifierWalker& data) const {
+		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+			if (is_mmsearch_funcid(fe->funcid, *data.oids)) {
+				return pg_walk_step::stop;
+			}
 		}
+		return pg_walk_step::descend;
 	}
-	return expression_tree_walker(node, contains_mmsearch_qualifier_walker, context);
-}
+};
 
 [[nodiscard]] static bool
 contains_mmsearch_qualifier(Node* node, const BioseqStubOids& oids)
 {
 	MmsearchQualifierWalker data{ &oids };
-	return contains_mmsearch_qualifier_walker(node, &data);
+	mmsearch_qualifier_visitor visitor;
+	return pg_walk_expression_including_root(node, data, visitor);
 }
 
 /*
@@ -648,51 +648,47 @@ struct BioseqFeatureDetector {
 	BioseqScanFeatureFlags flags;
 };
 
-static bool
-collect_bioseq_feature_flags_walker(Node* node, void* context)
-{
-	if (node == nullptr) {
-		return false;
+struct feature_flag_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, BioseqFeatureDetector& detector) const {
+		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+			const BioseqStubOids* o = detector.oids;
+			if (is_mmsearch_funcid(fe->funcid, *o)) {
+				detector.flags.has_mmsearch = true;
+			}
+			if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
+				detector.flags.uses_cigar = true;
+			}
+			if (fe->funcid == o->divergence_oid) {
+				detector.flags.uses_divergence = true;
+			}
+			if (fe->funcid == o->mapq_oid) {
+				detector.flags.uses_mapq = true;
+			}
+			if (is_bioseq_projection_funcid(fe->funcid, *o)) {
+				detector.flags.any_match_projection = true;
+			}
+		}
+		return pg_walk_step::descend;
 	}
-	auto* detector = static_cast<BioseqFeatureDetector*>(context);
-	if (IsA(node, FuncExpr)) {
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
-		const BioseqStubOids* o = detector->oids;
-		if (is_mmsearch_funcid(fe->funcid, *o)) {
-			detector->flags.has_mmsearch = true;
-		}
-		if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
-			detector->flags.uses_cigar = true;
-		}
-		if (fe->funcid == o->divergence_oid) {
-			detector->flags.uses_divergence = true;
-		}
-		if (fe->funcid == o->mapq_oid) {
-			detector->flags.uses_mapq = true;
-		}
-		if (is_bioseq_projection_funcid(fe->funcid, *o)) {
-			detector->flags.any_match_projection = true;
-		}
-	}
-	return expression_tree_walker(node, collect_bioseq_feature_flags_walker, context);
-}
+};
 
 [[nodiscard]] static BioseqScanFeatureFlags
 detect_feature_flags(List* targetlist, List* qual, const BioseqStubOids& oids)
 {
 	BioseqFeatureDetector detector{ &oids, BioseqScanFeatureFlags{} };
+	feature_flag_visitor visitor;
 	for (auto tgt : PList<TargetEntry>(targetlist)) {
 		if (tgt == nullptr) {
 			continue;
 		}
-		collect_bioseq_feature_flags_walker(
-			reinterpret_cast<Node*>(tgt->expr), &detector);
+		pg_walk_expression_including_root(pg_as_node(tgt->expr), detector, visitor);
 	}
 	for (auto q : PList<Node>(qual)) {
 		if (q == nullptr) {
 			continue;
 		}
-		collect_bioseq_feature_flags_walker(q, &detector);
+		pg_walk_expression_including_root(q, detector, visitor);
 	}
 	return detector.flags;
 }
@@ -714,51 +710,50 @@ detect_feature_flags(List* targetlist, List* qual, const BioseqStubOids& oids)
 struct ExplainTypmodCoalesce { bool active = false; uint8_t col_alpha = 0; uint8_t col_byte_width = 0; };
 struct ExplainCoalesceWalkCtx { const BioseqStubOids* oids; ExplainTypmodCoalesce result; };
 
-[[nodiscard]] static bool
-explain_typmod_coalesce_walker(Node* node, void* context)
-{
-	if (node == nullptr) {
-		return false;
-	}
-	auto* ctx = static_cast<ExplainCoalesceWalkCtx*>(context);
-	if (!ctx->result.active && IsA(node, FuncExpr)) {
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
-		if (is_mmsearch_funcid(fe->funcid, *ctx->oids) && list_length(fe->args) >= 2) {
-			Node* arg0 = reinterpret_cast<Node*>(linitial(fe->args));   // bioseq.seq column
-			Node* arg1 = reinterpret_cast<Node*>(lsecond(fe->args));    // query literal / param / var
-			if (arg0 != nullptr && arg1 != nullptr && IsA(arg0, Var)) {
-				const int32 col_typmod = reinterpret_cast<Var*>(arg0)->vartypmod;
-				int32 arg1_typmod = -1;
-				if (IsA(arg1, Const)) {
-					arg1_typmod = reinterpret_cast<Const*>(arg1)->consttypmod;
-				} else if (IsA(arg1, Param)) {
-					arg1_typmod = reinterpret_cast<Param*>(arg1)->paramtypmod;
-				} else if (IsA(arg1, Var)) {
-					arg1_typmod = reinterpret_cast<Var*>(arg1)->vartypmod;
-				}
-				if (col_typmod >= 0 && arg1_typmod >= 0) {
-					const auto col = compact_sequence_stdc_type_params::decode(col_typmod);
-					const auto qry = compact_sequence_stdc_type_params::decode(arg1_typmod);
-					if (col.alphabet_code == qry.alphabet_code
-						&& col.storage_unit_byte_width != qry.storage_unit_byte_width) {
-						ctx->result.active = true;
-						ctx->result.col_alpha = col.alphabet_code;
-						ctx->result.col_byte_width = col.storage_unit_byte_width;
+struct typmod_coalesce_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, ExplainCoalesceWalkCtx& ctx) const {
+		if (!ctx.result.active) {
+			if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+				if (is_mmsearch_funcid(fe->funcid, *ctx.oids) && list_length(fe->args) >= 2) {
+					Node* arg0 = reinterpret_cast<Node*>(linitial(fe->args));   // bioseq.seq column
+					Node* arg1 = reinterpret_cast<Node*>(lsecond(fe->args));    // query literal / param / var
+					if (arg0 != nullptr && arg1 != nullptr && pg_node_view{arg0}.is<Var>()) {
+						const int32 col_typmod = pg_node_expect<Var>(arg0)->vartypmod;
+						int32 arg1_typmod = -1;
+						if (Const* arg1_const = pg_node_try_as<Const>(arg1)) {
+							arg1_typmod = arg1_const->consttypmod;
+						} else if (Param* arg1_param = pg_node_try_as<Param>(arg1)) {
+							arg1_typmod = arg1_param->paramtypmod;
+						} else if (Var* arg1_var = pg_node_try_as<Var>(arg1)) {
+							arg1_typmod = arg1_var->vartypmod;
+						}
+						if (col_typmod >= 0 && arg1_typmod >= 0) {
+							const auto col = compact_sequence_stdc_type_params::decode(col_typmod);
+							const auto qry = compact_sequence_stdc_type_params::decode(arg1_typmod);
+							if (col.alphabet_code == qry.alphabet_code
+								&& col.storage_unit_byte_width != qry.storage_unit_byte_width) {
+								ctx.result.active = true;
+								ctx.result.col_alpha = col.alphabet_code;
+								ctx.result.col_byte_width = col.storage_unit_byte_width;
+							}
+						}
 					}
 				}
 			}
 		}
+		return pg_walk_step::descend;
 	}
-	return expression_tree_walker(node, explain_typmod_coalesce_walker, context);
-}
+};
 
 [[nodiscard]] static ExplainTypmodCoalesce
 explain_detect_typmod_coalesce(List* qual, const BioseqStubOids& oids)
 {
 	ExplainCoalesceWalkCtx ctx{ &oids, ExplainTypmodCoalesce{} };
+	typmod_coalesce_visitor visitor;
 	for (auto q : PList<Node>(qual)) {
 		if (q != nullptr) {
-			explain_typmod_coalesce_walker(q, &ctx);
+			pg_walk_expression_including_root(q, ctx, visitor);
 		}
 	}
 	return ctx.result;
@@ -852,10 +847,10 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 	}
 	PList<Node> args(mmsearch_fe->args);
 	Node* opt_node = args.third();
-	if (opt_node == nullptr || !IsA(opt_node, Const)) {
+	Const* opt_const = pg_node_try_as<Const>(opt_node);
+	if (opt_const == nullptr) {
 		return;
 	}
-	Const* opt_const = reinterpret_cast<Const*>(opt_node);
 	if (opt_const->constisnull) {
 		return;
 	}
@@ -1028,10 +1023,10 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 find_mmsearch_funcexpr(List* qual, const BioseqStubOids& oids)
 {
 	for (auto q : PList<Node>(qual)) {
-		if (q == nullptr || !IsA(q, FuncExpr)) {
+		FuncExpr* fe = pg_node_try_as<FuncExpr>(q);
+		if (fe == nullptr) {
 			continue;
 		}
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(q);
 		if (is_mmsearch_funcid(fe->funcid, oids)) {
 			return fe;
 		}
@@ -1204,23 +1199,21 @@ struct BioseqProjectionPresenceProbe {
 	bool found;
 };
 
-static bool
-bioseq_projection_presence_walker(Node* node, void* ctx)
-{
-	if (node == nullptr) return false;
-	auto* data = static_cast<BioseqProjectionPresenceProbe*>(ctx);
-	if (data->found) return true;
-	if (IsA(node, FuncExpr)) {
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
-		if (is_bioseq_projection_funcid(fe->funcid, *data->stub_oids)
-			|| is_mmsearch_funcid(fe->funcid, *data->stub_oids)
-			|| fe->funcid == data->stub_oids->symbol_count_oid) {
-			data->found = true;
-			return true;
+struct projection_presence_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, BioseqProjectionPresenceProbe& data) const {
+		if (data.found) return pg_walk_step::stop;
+		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+			if (is_bioseq_projection_funcid(fe->funcid, *data.stub_oids)
+				|| is_mmsearch_funcid(fe->funcid, *data.stub_oids)
+				|| fe->funcid == data.stub_oids->symbol_count_oid) {
+				data.found = true;
+				return pg_walk_step::stop;
+			}
 		}
+		return pg_walk_step::descend;
 	}
-	return expression_tree_walker(node, bioseq_projection_presence_walker, ctx);
-}
+};
 
 /*
  * True if any node in the expression tree references a bioseq.<...>
@@ -1241,7 +1234,8 @@ bioseq_expr_uses_bioseq_projection(Node* node)
 	}
 	const BioseqStubOids& stub_oids = get_cached_stub_oids();
 	BioseqProjectionPresenceProbe probe{ &stub_oids, false };
-	bioseq_projection_presence_walker(node, &probe);
+	projection_presence_visitor visitor;
+	pg_walk_expression_including_root(node, probe, visitor);
 	return probe.found;
 }
 
@@ -1455,7 +1449,7 @@ RemovePathsByPredicate(RelOptInfo *rel, PathPredicate removePathPredicate)
 static bool
 IsNotIndexPath(Path *path)
 {
-	return !IsA(path, IndexPath);
+	return !pg_node_view{pg_as_node(path)}.is<IndexPath>();
 }
 
 
@@ -1487,7 +1481,7 @@ CostBioseqColumnPaths(PlannerInfo *root, RelOptInfo *rel, Oid relationId)
 	bioseq_log<DBG>("[bioseq] pg: CostBioseqColumnPaths() entered");
 	for(auto path : PList<Path>(rel->pathlist))
 	{
-		if (IsA(path, IndexPath))
+		if (pg_node_view{pg_as_node(path)}.is<IndexPath>())
 		{
 			/*
 			 * Since we don't provide implementations for scan_bitmap_next_block
@@ -1844,17 +1838,15 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 	if (!is_mmsearch_funcid(fe->funcid, stub_oids)) {
 		return false;
 	}
-	const int argc = list_length(fe->args);
-	if (argc != 2 && argc != 3) {
+	pg_first_two_node_args two_args = pg_first_two_args_if_arity_between(*fe, 2, 3);
+	if (!two_args.present()) {
 		return false;
 	}
-	PList<Node> fe_args(fe->args);
-	Node* arg0 = fe_args.first();
-	Node* arg1 = fe_args.second();
-	if (arg0 == nullptr || arg1 == nullptr || !IsA(arg0, Var)) {
+	Node* arg1 = two_args.second;
+	Var* col_var = pg_node_try_as<Var>(two_args.first);
+	if (col_var == nullptr) {
 		return false;
 	}
-	Var* col_var = reinterpret_cast<Var*>(arg0);
 	/*
 	 * The first argument is the column to align — it MUST belong to
 	 * `rel`. Cross-table mmsearch with the column on the OTHER side
@@ -1879,7 +1871,7 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 	 * projections back to NULL — the very bug §8 of
 	 * REPORT_POSTGRES_QUERY_BUGFIXING_1.md is meant to fix.
 	 */
-	if (!IsA(arg1, Const) && !IsA(arg1, Var) && !IsA(arg1, Param)) {
+	if (!pg_node_view{arg1}.is<Const>() && !pg_node_view{arg1}.is<Var>() && !pg_node_view{arg1}.is<Param>()) {
 		return false;
 	}
 	/*
@@ -1919,16 +1911,13 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 	}
 	int32 arg1_typmod = -1;
 	Oid   arg1_typoid = InvalidOid;
-	if (IsA(arg1, Const)) {
-		Const* c = reinterpret_cast<Const*>(arg1);
+	if (Const* c = pg_node_try_as<Const>(arg1)) {
 		arg1_typmod = c->consttypmod;
 		arg1_typoid = c->consttype;
-	} else if (IsA(arg1, Var)) {
-		Var* v = reinterpret_cast<Var*>(arg1);
+	} else if (Var* v = pg_node_try_as<Var>(arg1)) {
 		arg1_typmod = v->vartypmod;
 		arg1_typoid = v->vartype;
-	} else if (IsA(arg1, Param)) {
-		Param* p = reinterpret_cast<Param*>(arg1);
+	} else if (Param* p = pg_node_try_as<Param>(arg1)) {
 		arg1_typmod = p->paramtypmod;
 		arg1_typoid = p->paramtype;
 	}
@@ -1965,8 +1954,7 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 	 * makes Postgres generate the parameterised inner-side path
 	 * that drives MmsearchParamRebind.
 	 */
-	if (IsA(node, FuncExpr)) {
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
+	if (FuncExpr* fe = pg_node_try_as<FuncExpr>(node)) {
 		const BioseqStubOids& stub_oids = get_cached_stub_oids();
 		if (IsMmsearchPushdownable(rel, fe, stub_oids)) {
 			bioseq_log<DBG>("[bioseq] pg: ExtractPushdownClause() accepting mmsearch funcexpr funcid={} for rel relid={}",
@@ -1975,9 +1963,8 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		}
 	}
 
-	if (IsA(node, BoolExpr))
+	if (BoolExpr *boolExpr = pg_node_try_as<BoolExpr>(node))
 	{
-		BoolExpr *boolExpr = castNode(BoolExpr, node);
 		if (boolExpr->boolop == NOT_EXPR)
 		{
 			/*
@@ -2044,7 +2031,9 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		}
 	}
 
-	if (!IsA(node, OpExpr) || list_length(reinterpret_cast<OpExpr *>(node)->args) != 2)
+	OpExpr *opExpr = pg_node_try_as<OpExpr>(node);
+	pg_binary_node_args op_args = opExpr != nullptr ? pg_binary_args(*opExpr) : pg_binary_node_args{};
+	if (!op_args.present())
 	{
 		bioseq_log_pg(BioseqColumnPlannerDebugLevel,
 			   "columnar planner: cannot push down clause: "
@@ -2052,24 +2041,25 @@ ExtractPushdownClause(PlannerInfo *root, RelOptInfo *rel, Node *node)
 		return NULL;
 	}
 
-	OpExpr *opExpr = castNode(OpExpr, node);
-	PList<Expr> args(opExpr->args);
-	Expr *lhs = args[0];
-	Expr *rhs = args[1];
+	Expr *lhs = reinterpret_cast<Expr *>(op_args.first);
+	Expr *rhs = reinterpret_cast<Expr *>(op_args.second);
 
 	Var *varSide;
 	Expr *exprSide;
 
-	if (IsA(lhs, Var) && reinterpret_cast<Var *>(lhs)->varno == rel->relid &&
-		!ExprReferencesRelid(reinterpret_cast<Expr *>(rhs), rel->relid))
+	Var *lhs_var = pg_node_try_as<Var>(pg_as_node(lhs));
+	Var *rhs_var = pg_node_try_as<Var>(pg_as_node(rhs));
+
+	if (lhs_var != nullptr && lhs_var->varno == rel->relid &&
+		!ExprReferencesRelid(rhs, rel->relid))
 	{
-		varSide = castNode(Var, lhs);
+		varSide = lhs_var;
 		exprSide = rhs;
 	}
-	else if (IsA(rhs, Var) && reinterpret_cast<Var *>(rhs)->varno == rel->relid &&
-			 !ExprReferencesRelid(reinterpret_cast<Expr *>(lhs), rel->relid))
+	else if (rhs_var != nullptr && rhs_var->varno == rel->relid &&
+			 !ExprReferencesRelid(lhs, rel->relid))
 	{
-		varSide = castNode(Var, rhs);
+		varSide = rhs_var;
 		exprSide = lhs;
 	}
 	else
@@ -2531,22 +2521,28 @@ ParameterizationAsString(PlannerInfo *root, Relids paramRelids, StringInfo buf)
  * ContainsExecParams tests whether the node contains any exec params. The
  * signature accepts an extra argument for use with expression_tree_walker.
  */
-static bool
-ContainsExecParams(Node *node, void *notUsed)
-{
-	if (node == NULL)
-	{
-		return false;
-	}
-	else if (IsA(node, Param))
-	{
-		Param *param = castNode(Param, node);
-		if (param->paramkind == PARAM_EXEC)
+struct exec_params_probe_state {};
+
+struct exec_params_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, exec_params_probe_state&) const {
+		if (Param *param = node.try_as<Param>())
 		{
-			return true;
+			if (param->paramkind == PARAM_EXEC)
+			{
+				return pg_walk_step::stop;
+			}
 		}
+		return pg_walk_step::descend;
 	}
-	return expression_tree_walker(node, ContainsExecParams, NULL);
+};
+
+[[nodiscard]] static bool
+ContainsExecParams(Node *node)
+{
+	exec_params_probe_state state;
+	exec_params_visitor visitor;
+	return pg_walk_expression_including_root(node, state, visitor);
 }
 
 /*
@@ -2604,30 +2600,26 @@ fixup_inherited_columns(Oid parentId, Oid childId, Bitmapset *columns)
 	return result.release();
 }
 
-static bool
-CostTestWalker(Node *node, Query *notUsed)
-{
-	bioseq_log<DBG>("[bioseq] pg: CostTestWalker() entered");
-	if (node == NULL)
-	{
-		return false;
-	}
-	if (IsA(node, Var)) {
-		Var* var_node = reinterpret_cast<Var*>(node);
-		const auto var_no = var_node->varno;
-		List* range_table = notUsed->rtable;
-		if (range_table == nullptr) {
-			bioseq_log<DBG>("[bioseq] pg: CostTestWalker() var rtable is null");
-		} else if (var_no == 0 || var_no > list_length(range_table)) {
-			bioseq_log<DBG>("[bioseq] pg: CostTestWalker() var varno out of bounds varno={} rtable_len={}", var_no, list_length(range_table));
-		} else {
-			RangeTblEntry* rte = rt_fetch(var_no, range_table);
-			bioseq_log<DBG>("[bioseq] pg: CostTestWalker() rte_kind={} relid={}", static_cast<int>(rte->rtekind), static_cast<int>(rte->relid));
+struct cost_test_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, Query& parse) const {
+		bioseq_log<DBG>("[bioseq] pg: cost_test_visitor() entered");
+		if (Var* var_node = node.try_as<Var>()) {
+			const auto var_no = var_node->varno;
+			List* range_table = parse.rtable;
+			if (range_table == nullptr) {
+				bioseq_log<DBG>("[bioseq] pg: cost_test_visitor() var rtable is null");
+			} else if (var_no == 0 || var_no > list_length(range_table)) {
+				bioseq_log<DBG>("[bioseq] pg: cost_test_visitor() var varno out of bounds varno={} rtable_len={}", var_no, list_length(range_table));
+			} else {
+				RangeTblEntry* rte = rt_fetch(var_no, range_table);
+				bioseq_log<DBG>("[bioseq] pg: cost_test_visitor() rte_kind={} relid={}", static_cast<int>(rte->rtekind), static_cast<int>(rte->relid));
+			}
 		}
+
+		return pg_walk_step::descend;
 	}
-	
-	return expression_tree_walker(node, CostTestWalker, static_cast<void*>(notUsed));
-}
+};
 
 /*
  * Walker context for bioseq_projection_walker — pairs a stub-OID
@@ -2641,38 +2633,34 @@ struct BioseqProjectionCounter {
 	int* count;
 };
 
-static bool
-bioseq_projection_walker(Node* node, void* ctx)
-{
-	if (node == nullptr) {
-		return false;
-	}
-	auto* data = static_cast<BioseqProjectionCounter*>(ctx);
-	if (IsA(node, FuncExpr)) {
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(node);
-		if (is_mmsearch_funcid(fe->funcid, *data->stub_oids)) {
-			bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected mmsearch funcexpr (any depth)");
-			++(*data->count);
-		} else if (is_bioseq_projection_funcid(fe->funcid, *data->stub_oids)) {
-			bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected bioseq projection funcid={}",
-					fe->funcid);
-			++(*data->count);
-		} else if (fe->funcid == data->stub_oids->symbol_count_oid
-				   && list_length(fe->args) == 2) {
-			/*
-			 * symbol_count(Var, Const) is a cost inflator: the scalar
-			 * Postgres-level function path is O(n) over the varlena,
-			 * but the custom scan resolves it via a single O(1) array
-			 * index into meta_sidecar.counts[]. We count every call
-			 * site so the negative-cost adjustment scales with the
-			 * number of rewrites VarInjectorMutator will perform.
-			 */
-			bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected bioseq.symbol_count funcexpr");
-			++(*data->count);
+struct projection_counter_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node, BioseqProjectionCounter& data) const {
+		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
+			if (is_mmsearch_funcid(fe->funcid, *data.stub_oids)) {
+				bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected mmsearch funcexpr (any depth)");
+				++(*data.count);
+			} else if (is_bioseq_projection_funcid(fe->funcid, *data.stub_oids)) {
+				bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected bioseq projection funcid={}",
+						fe->funcid);
+				++(*data.count);
+			} else if (fe->funcid == data.stub_oids->symbol_count_oid
+					   && list_length(fe->args) == 2) {
+				/*
+				 * symbol_count(Var, Const) is a cost inflator: the scalar
+				 * Postgres-level function path is O(n) over the varlena,
+				 * but the custom scan resolves it via a single O(1) array
+				 * index into meta_sidecar.counts[]. We count every call
+				 * site so the negative-cost adjustment scales with the
+				 * number of rewrites VarInjectorMutator will perform.
+				 */
+				bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected bioseq.symbol_count funcexpr");
+				++(*data.count);
+			}
 		}
+		return pg_walk_step::descend;
 	}
-	return expression_tree_walker(node, bioseq_projection_walker, ctx);
-}
+};
 
 /*
  * Create and add a path with the given parameterization paramRelids.
@@ -2725,14 +2713,16 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * custom scan — observed for the LEFT JOIN regression test.
 	 */
 	BioseqProjectionCounter walker_data{ &stub_oids, &wehavemagic_cnt };
-	bioseq_projection_walker(
-		reinterpret_cast<Node*>(root->parse->targetList), &walker_data);
+	projection_counter_visitor projection_visitor;
+	pg_walk_expression_including_root(
+		reinterpret_cast<Node*>(root->parse->targetList), walker_data, projection_visitor);
 	wehavemagic = wehavemagic_cnt > 0;
 
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() walking pathtarget expressions");
+	cost_test_visitor cost_visitor;
 	for (auto expr : PList<Node>(path->pathtarget->exprs)) {
 		bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() pathtarget expression");
-		CostTestWalker(expr, root->parse);
+		pg_walk_expression_including_root(expr, *root->parse, cost_visitor);
 	}
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() pathtarget walk complete");
 
@@ -2783,8 +2773,7 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		const BioseqStubOids& mmsearch_oids = get_cached_stub_oids();
 		for (auto rinfo : allClauses) {
 			Node* clause_node = reinterpret_cast<Node*>(rinfo->clause);
-			if (clause_node != nullptr && IsA(clause_node, FuncExpr)) {
-				FuncExpr* fe = reinterpret_cast<FuncExpr*>(clause_node);
+			if (FuncExpr* fe = pg_node_try_as<FuncExpr>(clause_node)) {
 				if (is_mmsearch_funcid(fe->funcid, mmsearch_oids)) {
 					wehavemagic = true;
 					++wehavemagic_cnt;
@@ -2809,7 +2798,7 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	for (auto rinfo : allClauses)
 	{
 		if (bms_is_subset(rinfo->required_relids, rel->relids) &&
-			!ContainsExecParams(reinterpret_cast<Node *>(rinfo->clause), nullptr))
+			!ContainsExecParams(reinterpret_cast<Node *>(rinfo->clause)))
 		{
 			plainClauses.append(rinfo);
 		}
@@ -3111,8 +3100,7 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 		const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
 		for(auto n : PList<TargetEntry>(root->processed_tlist)) {
-			if(IsA(n->expr, FuncExpr)) {
-				FuncExpr* fe = reinterpret_cast<FuncExpr*>(n->expr);
+			if (FuncExpr* fe = pg_node_try_as<FuncExpr>(pg_as_node(n->expr))) {
 				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
 					|| fe->funcid == plan_stub_oids.symbol_count_oid) {
 					TargetEntry* projected = copyObject(n);
@@ -3157,38 +3145,35 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 
 /*
- * ReparameterizeMutator changes all varnos referencing the topmost parent of
- * child_rel to instead reference child_rel directly.
+ * reparameterize_mutator changes all varnos referencing the topmost parent
+ * of child_rel to instead reference child_rel directly. Both the Var and the
+ * RestrictInfo are deep copied before being written (copy-before-write), and
+ * a RestrictInfo's clause is recursively rewritten via the cursor.
  */
-static Node *
-ReparameterizeMutator(Node *node, RelOptInfo *child_rel)
-{
-	if (node == NULL)
-	{
-		return NULL;
-	}
-	if (IsA(node, Var))
-	{
-		Var *var = castNode(Var, node);
-		if (bms_is_member(var->varno, child_rel->top_parent_relids))
+struct reparameterize_mutator {
+	[[nodiscard]] pg_node_mutation
+	operator()(pg_expression_mutation_cursor cursor, pg_node_view node, RelOptInfo &child_rel) const {
+		if (Var *var = node.try_as<Var>())
 		{
-			var = copyObject(var);
-			var->varno = child_rel->relid;
+			if (bms_is_member(var->varno, child_rel.top_parent_relids))
+			{
+				var = pg_copy_node(var);
+				var->varno = child_rel.relid;
+			}
+			return pg_node_mutation::with(pg_as_node(var));
 		}
-		return reinterpret_cast<Node *>(var);
-	}
 
-	if (IsA(node, RestrictInfo))
-	{
-		RestrictInfo *rinfo = castNode(RestrictInfo, node);
-		rinfo = copyObject(rinfo);
-		rinfo->clause = reinterpret_cast<Expr *>(expression_tree_mutator(
-			reinterpret_cast<Node *>(rinfo->clause), ReparameterizeMutator, static_cast<void *>(child_rel)));
-		return reinterpret_cast<Node *>(rinfo);
+		if (RestrictInfo *rinfo = node.try_as<RestrictInfo>())
+		{
+			rinfo = pg_copy_node(rinfo);
+			rinfo->clause = reinterpret_cast<Expr *>(cursor.descend(
+				reinterpret_cast<Node *>(rinfo->clause)));
+			return pg_node_mutation::with(pg_as_node(rinfo));
+		}
+
+		return pg_node_mutation::descend();
 	}
-	return expression_tree_mutator(node, ReparameterizeMutator,
-								   static_cast<void *>(child_rel));
-}
+};
 
 
 /*
@@ -3212,7 +3197,8 @@ BioseqColumnScanPath_ReparameterizeCustomPathByChild(PlannerInfo *root,
 												 List *custom_private,
 												 RelOptInfo *child_rel)
 {
-	return reinterpret_cast<List *>(ReparameterizeMutator(reinterpret_cast<Node *>(custom_private), child_rel));
+	reparameterize_mutator mutator;
+	return reinterpret_cast<List *>(pg_mutate_expression(reinterpret_cast<Node *>(custom_private), *child_rel, mutator));
 }
 
 
@@ -3241,41 +3227,48 @@ BioseqColumnScan_CreateCustomScanState(CustomScan *cscan)
 
 
 /*
- * EvalParamsMutator evaluates Params in the expression and replaces them with
- * Consts.
+ * eval_params_mutator evaluates Params in the expression and replaces them
+ * with Consts, preserving the existing ExecInitExprWithParams / ExecEvalExpr
+ * folding path for every Param (not a PARAM_EXEC-only direct lookup).
  */
-static Node *
-EvalParamsMutator(Node *node, ExprContext *econtext)
+struct eval_params_mutator {
+	[[nodiscard]] pg_node_mutation
+	operator()(pg_expression_mutation_cursor, pg_node_view node, ExprContext &econtext) const {
+		if (Param *param = node.try_as<Param>())
+		{
+			int16_t typLen;
+			bool typByVal;
+			bool isnull;
+
+			get_typlenbyval(param->paramtype, &typLen, &typByVal);
+
+			/* XXX: should save ExprState for efficiency */
+			ExprState *exprState = ExecInitExprWithParams(pg_as_expr(node.raw()),
+														  econtext.ecxt_param_list_info);
+			Datum pval = ExecEvalExpr(exprState, &econtext, &isnull);
+
+			return pg_node_mutation::with(reinterpret_cast<Node *>(makeConst(param->paramtype,
+									  param->paramtypmod,
+									  param->paramcollid,
+									  static_cast<int>(typLen),
+									  pval,
+									  isnull,
+									  typByVal)));
+		}
+
+		return pg_node_mutation::descend();
+	}
+};
+
+/*
+ * Thin wrapper for the direct callers (qual folding at Begin/ReScan and the
+ * per-Param rebind fold) so they keep the (node, econtext) call shape.
+ */
+[[nodiscard]] static Node *
+eval_params(Node *node, ExprContext *econtext)
 {
-	if (node == NULL)
-	{
-		return NULL;
-	}
-
-	if (IsA(node, Param))
-	{
-		Param *param = reinterpret_cast<Param *>(node);
-		int16_t typLen;
-		bool typByVal;
-		bool isnull;
-
-		get_typlenbyval(param->paramtype, &typLen, &typByVal);
-
-		/* XXX: should save ExprState for efficiency */
-		ExprState *exprState = ExecInitExprWithParams(reinterpret_cast<Expr *>(node),
-													  econtext->ecxt_param_list_info);
-		Datum pval = ExecEvalExpr(exprState, econtext, &isnull);
-
-		return reinterpret_cast<Node *>(makeConst(param->paramtype,
-								  param->paramtypmod,
-								  param->paramcollid,
-								  static_cast<int>(typLen),
-								  pval,
-								  isnull,
-								  typByVal));
-	}
-
-	return expression_tree_mutator(node, EvalParamsMutator, static_cast<void *>(econtext));
+	eval_params_mutator mutator;
+	return pg_mutate_expression(node, *econtext, mutator);
 }
 
 
@@ -3301,11 +3294,11 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	List *plainClauses = custom_exprs.first();
 	List *storagePlainClauses = storage_prunable_quals_without_mmsearch(
 		plainClauses, get_cached_stub_oids());
-	bioseqScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
+	bioseqScanState->qual = reinterpret_cast<List *>(eval_params(
 		reinterpret_cast<Node *>(storagePlainClauses), bioseqScanState->css_RuntimeContext));
 
 	/*
-	 * Third list in custom_exprs should contain vectorized qual list if not 
+	 * Third list in custom_exprs should contain vectorized qual list if not
 	 * NULL.
 	 */
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScan_BeginCustomScan() examining custom_exprs for vectorized qual");
@@ -3401,14 +3394,15 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	AttrNumber primary_key_attno = InvalidAttrNumber;
 	for (auto tgt : PList<TargetEntry>(cscan->scan.plan.targetlist))
 	{
-		if (tgt == nullptr || !IsA(tgt->expr, FuncExpr)) continue;
-		FuncExpr* fe = reinterpret_cast<FuncExpr*>(tgt->expr);
+		if (tgt == nullptr) continue;
+		FuncExpr* fe = pg_node_try_as<FuncExpr>(pg_as_node(tgt->expr));
+		if (fe == nullptr) continue;
 		if (!is_bioseq_projection_funcid(fe->funcid, scan_stub_oids)) continue;
 		if (list_length(fe->args) < 1) continue;
 		PList<Node> fe_args(fe->args);
 		Node* arg0 = fe_args.first();
-		if (arg0 == nullptr || !IsA(arg0, Var)) continue;
-		Var* pk_var = reinterpret_cast<Var*>(arg0);
+		Var* pk_var = pg_node_try_as<Var>(arg0);
+		if (pk_var == nullptr) continue;
 		if (pk_var->varattno <= 0) continue;
 		primary_key_attno = pk_var->varattno;
 		bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() detected primary_key varattno={} from bioseq projection funcid={}",
@@ -3505,32 +3499,32 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	std::vector<ClassifiedMmsearchQual> classified_quals;
 	for (auto qual_node : PList<Node>(cscan->scan.plan.qual))
 	{
-		if (qual_node == nullptr || !IsA(qual_node, FuncExpr)) {
+		FuncExpr* fe_classify = pg_node_try_as<FuncExpr>(qual_node);
+		if (fe_classify == nullptr) {
 			continue;
 		}
-		FuncExpr* fe_classify = reinterpret_cast<FuncExpr*>(qual_node);
 		if (!is_mmsearch_funcid(fe_classify->funcid, scan_stub_oids)) {
 			continue;
 		}
-		const int argc = list_length(fe_classify->args);
-		if (argc != 2 && argc != 3) {
+		pg_first_two_node_args classify_args = pg_first_two_args_if_arity_between(*fe_classify, 2, 3);
+		if (!classify_args.present()) {
 			continue;
 		}
-		PList<Node> classify_args(fe_classify->args);
-		Node* a0 = classify_args.first();
-		Node* a1 = classify_args.second();
-		if (a0 == nullptr || a1 == nullptr || !IsA(a0, Var)) {
+		Node* a0 = classify_args.first;
+		Node* a1 = classify_args.second;
+		Var* v0 = pg_node_try_as<Var>(a0);
+		if (v0 == nullptr) {
 			continue;
 		}
-		Var* v0 = reinterpret_cast<Var*>(a0);
-		const bool is_c = IsA(a1, Const);
-		const bool is_p = IsA(a1, Param);
-		const bool is_v = IsA(a1, Var)
-			&& reinterpret_cast<Var*>(a1)->varno == v0->varno
-			&& reinterpret_cast<Var*>(a1)->varattno > 0;
+		const bool is_c = pg_node_view{a1}.is<Const>();
+		const bool is_p = pg_node_view{a1}.is<Param>();
+		Var* a1_var = pg_node_try_as<Var>(a1);
+		const bool is_v = a1_var != nullptr
+			&& a1_var->varno == v0->varno
+			&& a1_var->varattno > 0;
 		if (!is_c && !is_p && !is_v) {
-			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 nodeTag={} is not Const/Param/same-rel-Var)",
-					static_cast<int>(nodeTag(a1)));
+			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 tag={} is not Const/Param/same-rel-Var)",
+					pg_node_tag_name(pg_node_tag_or_invalid(a1)));
 			continue;
 		}
 		classified_quals.push_back({fe_classify, a0, a1, is_c, is_p, is_v});
@@ -4193,15 +4187,14 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	if (arg0 == nullptr || arg1 == nullptr) {
 		return nullptr;
 	}
-	if (!IsA(arg0, Var) || !IsA(arg1, Const)) {
-		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() leaving symbol_count(...) alone; arg0_tag={} arg1_tag={}",
+	Var* col_var = pg_node_try_as<Var>(arg0);
+	Const* letter_const = pg_node_try_as<Const>(arg1);
+	if (col_var == nullptr || letter_const == nullptr) {
+		bioseq_log<DBG>("[bioseq] pg: var_injector_mutator() leaving symbol_count(...) alone; arg0_tag={} arg1_tag={}",
 				static_cast<int>(nodeTag(arg0)),
 				static_cast<int>(nodeTag(arg1)));
 		return nullptr;
 	}
-
-	Var* col_var = reinterpret_cast<Var*>(arg0);
-	Const* letter_const = reinterpret_cast<Const*>(arg1);
 	if (col_var->vartypmod < 0 || col_var->vartype != ctx->oids->bioseq_seq_type_oid) {
 		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() symbol_count arg0 has wrong type/typmod (type={}, typmod={})",
 				col_var->vartype, col_var->vartypmod);
@@ -4275,54 +4268,59 @@ try_rewrite_symbol_count(FuncExpr* fe, VarInjectorCtx* ctx)
 	return placeholder;
 }
 
-static Node *
-VarInjectorMutator(Node *node, void* context)
-{
-	if (node == NULL)
-	{
-		return NULL;
-	}
-	auto* injector_context = static_cast<VarInjectorCtx*>(context);
-	if (IsA(node, FuncExpr)) {
-		auto funcExpr = reinterpret_cast<FuncExpr *>(node);
-		Const* replacement = lookup_bioseq_placeholder_const(funcExpr->funcid, injector_context);
-		if (replacement != nullptr) {
-			bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() replacing bioseq funcid={} with placeholder Const",
-					funcExpr->funcid);
-			return reinterpret_cast<Node *>(replacement);
-		}
-		if (funcExpr->funcid == injector_context->oids->symbol_count_oid) {
-			Const* symbol_placeholder =
-				try_rewrite_symbol_count(funcExpr, injector_context);
-			if (symbol_placeholder != nullptr) {
-				return reinterpret_cast<Node *>(symbol_placeholder);
+struct var_injector_mutator {
+	[[nodiscard]] pg_node_mutation
+	operator()(pg_expression_mutation_cursor, pg_node_view node, VarInjectorCtx &injector_context) const {
+		if (FuncExpr* funcExpr = node.try_as<FuncExpr>()) {
+			Const* replacement = lookup_bioseq_placeholder_const(funcExpr->funcid, &injector_context);
+			if (replacement != nullptr) {
+				bioseq_log<DBG>("[bioseq] pg: var_injector_mutator() replacing bioseq funcid={} with placeholder Const",
+						funcExpr->funcid);
+				return pg_node_mutation::with(pg_as_node(replacement));
 			}
-			/* Call shape not supported (literal arg, non-Const letter,
-			 * letter outside alphabet, …) — let the scalar entry point
-			 * in mod.cppm handle it in place. */
+			if (funcExpr->funcid == injector_context.oids->symbol_count_oid) {
+				Const* symbol_placeholder =
+					try_rewrite_symbol_count(funcExpr, &injector_context);
+				if (symbol_placeholder != nullptr) {
+					return pg_node_mutation::with(pg_as_node(symbol_placeholder));
+				}
+				/* Call shape not supported (literal arg, non-Const letter,
+				 * letter outside alphabet, …) — let the scalar entry point
+				 * in mod.cppm handle it in place. */
+			}
+			/* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
 		}
-		/* Fall through to recurse into arg subtrees of unrelated FuncExprs. */
+		/*
+		 * PlaceHolderVar handling. By Postgres convention the planner
+		 * resolves PHVs to Vars / Params by execution time (pathnodes.h:
+		 * "it is not recognized by the parser or executor"), so seeing
+		 * one here is a planner bug. We log loudly and pass the node
+		 * through — unwrapping would silently drop the PHV's
+		 * phnullingrels metadata and could produce wrong results in
+		 * outer-join nullable positions (a plain Const has no nulling
+		 * semantics). Returning descend() does the right thing because
+		 * the cursor recurses into phexpr, giving var_injector_mutator a
+		 * chance to rewrite our FuncExpr in place; the PHV node itself is
+		 * preserved.
+		 */
+		if (PlaceHolderVar* phv = node.try_as<PlaceHolderVar>()) {
+			bioseq_log<DBG>("[bioseq] pg: var_injector_mutator() encountered PlaceHolderVar phid={} at exec time — passing through",
+					phv->phid);
+			/* fall through to descend */
+		}
+		return pg_node_mutation::descend();
 	}
-	/*
-	 * PlaceHolderVar handling. By Postgres convention the planner
-	 * resolves PHVs to Vars / Params by execution time (pathnodes.h:
-	 * "it is not recognized by the parser or executor"), so seeing
-	 * one here is a planner bug. We log loudly and pass the node
-	 * through — unwrapping would silently drop the PHV's
-	 * phnullingrels metadata and could produce wrong results in
-	 * outer-join nullable positions (a plain Const has no nulling
-	 * semantics). Falling through to expression_tree_mutator below
-	 * does the right thing because that walker recurses into phexpr,
-	 * giving VarInjectorMutator a chance to rewrite our FuncExpr in
-	 * place; the PHV node itself is preserved.
-	 */
-	if (IsA(node, PlaceHolderVar)) {
-		PlaceHolderVar* phv = reinterpret_cast<PlaceHolderVar*>(node);
-		bioseq_log<DBG>("[bioseq] pg: VarInjectorMutator() encountered PlaceHolderVar phid={} at exec time — passing through",
-				phv->phid);
-		/* fall through to expression_tree_mutator */
-	}
-	return expression_tree_mutator(node, VarInjectorMutator, context);
+};
+
+/*
+ * Thin wrapper for the direct callers (execution-time targetlist rewrite)
+ * so they keep the (node, ctx) call shape.
+ */
+[[nodiscard]] static Node *
+var_injector(Node *node, VarInjectorCtx *injector_context)
+{
+	var_injector_mutator mutator;
+	return pg_mutate_expression(node, *injector_context, mutator);
 }
 
 /*
@@ -4899,9 +4897,9 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 		injector_ctx.oids             = &oids_snapshot;
 		injector_ctx.current_relation = bioseqScanState->custom_scanstate.ss.ss_currentRelation;
 
-		runtime.newtargetlist = reinterpret_cast<List *>(VarInjectorMutator(
+		runtime.newtargetlist = reinterpret_cast<List *>(var_injector(
 			reinterpret_cast<Node *>(targetlist),
-			static_cast<void*>(&injector_ctx)));
+			&injector_ctx));
 	}
 
 
@@ -5154,7 +5152,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	List *allClauses = PList<List>(cscan->custom_exprs).second();
 	List *storageClauses = storage_prunable_quals_without_mmsearch(
 		allClauses, get_cached_stub_oids());
-	bioseqScanState->qual = reinterpret_cast<List *>(EvalParamsMutator(
+	bioseqScanState->qual = reinterpret_cast<List *>(eval_params(
 		reinterpret_cast<Node *>(storageClauses), bioseqScanState->css_RuntimeContext));
 
 	/*
@@ -5215,7 +5213,7 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 		{
 			PList<Node> fe_args(mmsearch_fe->args);
 			Node* arg1 = fe_args.second();
-			if (arg1 != nullptr && IsA(arg1, Param))
+			if (pg_node_try_as<Param>(arg1) != nullptr)
 			{
 				/*
 				 * EvalParamsMutator is the same helper used to fold
@@ -5223,10 +5221,9 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 				 * holding the current Param value (or constisnull=true
 				 * if the Param resolved to NULL).
 				 */
-				Node* folded = EvalParamsMutator(arg1, econtext);
-				if (folded != nullptr && IsA(folded, Const))
+				Node* folded = eval_params(arg1, econtext);
+				if (Const* query_const = pg_node_try_as<Const>(folded))
 				{
-					Const* query_const = reinterpret_cast<Const*>(folded);
 					if (!query_const->constisnull
 						&& query_const->consttype == scan_stub_oids.bioseq_seq_type_oid)
 					{
@@ -5306,7 +5303,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 	ExplainPropertyText("Bioseq Projected Columns",
 						projectedColumnsStr, es);
 
-	CustomScan *cscan = castNode(CustomScan, node->ss.ps.plan);
+	CustomScan *cscan = pg_node_expect<CustomScan>(pg_as_node(node->ss.ps.plan));
 	List *chunkGroupFilter = storage_prunable_quals_without_mmsearch(
 		PList<List>(cscan->custom_exprs).second(), get_cached_stub_oids());
 	if (chunkGroupFilter != NULL)
@@ -5356,22 +5353,21 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		const BioseqStubOids& oids_snapshot = get_cached_stub_oids();
 		Relation scan_rel = node->ss.ss_currentRelation;
 		for (auto tgt : PList<TargetEntry>(node->ss.ps.plan->targetlist)) {
-			if (tgt == nullptr || !IsA(tgt->expr, FuncExpr)) {
+			if (tgt == nullptr) {
 				continue;
 			}
-			FuncExpr* fe = reinterpret_cast<FuncExpr*>(tgt->expr);
-			if (fe->funcid != oids_snapshot.symbol_count_oid
+			FuncExpr* fe = pg_node_try_as<FuncExpr>(pg_as_node(tgt->expr));
+			if (fe == nullptr
+				|| fe->funcid != oids_snapshot.symbol_count_oid
 				|| list_length(fe->args) != 2) {
 				continue;
 			}
 			PList<Node> args(fe->args);
-			Node* arg0 = args.first();
-			Node* arg1 = args.second();
-			if (!IsA(arg0, Var) || !IsA(arg1, Const)) {
+			Var* col_var = pg_node_try_as<Var>(args.first());
+			Const* letter_const = pg_node_try_as<Const>(args.second());
+			if (col_var == nullptr || letter_const == nullptr) {
 				continue;
 			}
-			Var* col_var = reinterpret_cast<Var*>(arg0);
-			Const* letter_const = reinterpret_cast<Const*>(arg1);
 			if (letter_const->constisnull || col_var->vartypmod < 0) {
 				continue;
 			}
