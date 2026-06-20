@@ -9,12 +9,11 @@
  * H2D copy, the dispatch, and every D2H copy under a single queue lock.
  *
  * Device selection, feature probing, and all per-run failures are runtime-side
- * decisions: init failures degrade to `features_.available == false` (CPU
- * fallback), and per-run failures throw `VulkanRuntimeError` which the chaining
- * backend catches before mutating any output slab. Phase A targets unified
- * memory (Apple Silicon / MoltenVK): device-local buffers come back
- * host-visible+coherent, so the round-trip writes/reads them directly without a
- * staging bounce (DOC0304 §4.1).
+ * decisions: init failures set `features_.available == false` with an
+ * initialization error, and per-run failures throw `VulkanRuntimeError`. Phase A
+ * targets unified memory (Apple Silicon / MoltenVK): device-local buffers come
+ * back host-visible+coherent, so the round-trip writes/reads them directly
+ * without a staging bounce (DOC0304 §4.1).
  */
 module;
 #include "common.h"
@@ -22,6 +21,8 @@ module;
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -51,7 +52,7 @@ export namespace bioseq::gpu::vulkan {
 class Runtime;
 
 /// Capabilities probed once at init. `available == false` means there is no
-/// usable Phase A device and every chaining call must use the CPU backend.
+/// usable Vulkan device and selected GPU algorithms must fail.
 struct VulkanFeatureSet {
     bool available = false;
     bool shader_int64 = false;
@@ -112,8 +113,8 @@ struct GpuChainRange {
     std::uint32_t length = 0;
 };
 
-/// Thrown on any per-run Vulkan failure once the device is usable. The chaining
-/// backend catches this and falls back to `chain_anchors_scalar`.
+/// Thrown on any per-run Vulkan failure once the device is usable. Selected
+/// Vulkan algorithms must propagate this rather than silently using CPU work.
 class VulkanRuntimeError final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -416,6 +417,9 @@ public:
     [[nodiscard]] static Runtime& instance();
     [[nodiscard]] const VulkanFeatureSet& features() const noexcept { return features_; }
     [[nodiscard]] bool usable() const noexcept { return features_.available; }
+    [[nodiscard]] const std::string& initialization_error() const noexcept {
+        return init_error_;
+    }
     [[nodiscard]] std::uint64_t chaining_dispatch_count() const noexcept {
         return chaining_dispatch_count_.load(std::memory_order_relaxed);
     }
@@ -512,7 +516,7 @@ public:
 
     /// Largest power-of-two anchor count the GPU bitonic sort can handle in one
     /// workgroup on this device (bounded by workgroup invocations + shared mem).
-    /// Larger anchor spans take the CPU sort fallback (DOC0307 §7.2).
+    /// Larger anchor spans are rejected by selected Vulkan seed lookup.
     [[nodiscard]] std::uint32_t gpu_anchor_sort_capacity() const noexcept {
         return gpu_anchor_sort_capacity_;
     }
@@ -608,6 +612,7 @@ private:
     VkDescriptorPool phase_c_pool_ = VK_NULL_HANDLE;  // DOC0310 — fresh-set pool.
 
     VulkanFeatureSet features_{};
+    std::string init_error_{};
     std::atomic<std::uint64_t> chaining_dispatch_count_{0};
     std::atomic<std::uint64_t> generate_units_dispatch_count_{0};
     std::mutex mu_;
@@ -709,6 +714,31 @@ constexpr const char* kPortabilitySubset = "VK_KHR_portability_subset";
         return {};
     }
     return props;
+}
+
+/// The vcpkg Vulkan loader used by the bench/test binaries does not search
+/// Homebrew's `/opt/homebrew/etc/vulkan/icd.d` on macOS. If the user has not
+/// provided an explicit ICD override, install the Homebrew MoltenVK ICD path
+/// before the first loader query so `vkCreateInstance` sees the portability ICD.
+void ensure_homebrew_moltenvk_icd_visible() {
+#if defined(__APPLE__)
+    if (std::getenv("VK_ICD_FILENAMES") != nullptr) {
+        return;
+    }
+    constexpr const char* candidates[] = {
+        "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+        "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
+    };
+    for (const char* path : candidates) {
+        if (std::FILE* f = std::fopen(path, "r")) {
+            std::fclose(f);
+            if (::setenv("VK_ICD_FILENAMES", path, 0) == 0) {
+                bioseq_log<DBG>("[vulkan_runtime] using MoltenVK ICD manifest {}", path);
+            }
+            return;
+        }
+    }
+#endif
 }
 
 }  // namespace
@@ -819,11 +849,13 @@ Runtime::Runtime() {
     try {
         init();
     } catch (const std::exception& e) {
-        bioseq_log<DBG>("[vulkan_runtime] init failed; CPU fallback: {}", e.what());
+        init_error_ = e.what();
+        bioseq_log<DBG>("[vulkan_runtime] init failed: {}", e.what());
         shutdown();
         features_ = VulkanFeatureSet{};
     } catch (...) {
-        bioseq_log<DBG>("[vulkan_runtime] init failed (unknown); CPU fallback");
+        init_error_ = "unknown Vulkan initialization failure";
+        bioseq_log<DBG>("[vulkan_runtime] init failed (unknown)");
         shutdown();
         features_ = VulkanFeatureSet{};
     }
@@ -840,6 +872,7 @@ Runtime& Runtime::instance() {
 
 void Runtime::init() {
     // --- Instance ---
+    ensure_homebrew_moltenvk_icd_visible();
     const auto inst_exts = instance_extensions();
     std::vector<const char*> enabled_inst_exts;
     VkInstanceCreateFlags inst_flags = 0;
@@ -1045,7 +1078,8 @@ void Runtime::init() {
     // DOC0307 §7.2 — pick the largest power-of-two anchor count the per-query
     // bitonic sort can hold in one workgroup: bounded by workgroup invocations
     // and by shared memory (each lane holds a 24-byte AnchorWire + a 4-byte
-    // original index). Anchor spans above this fall back to the CPU radix sort.
+    // original index). Anchor spans above this are rejected so selected Vulkan
+    // seed lookup cannot hide a CPU sort.
     {
         constexpr std::uint32_t per_lane_shared_bytes = 24u + 4u;
         std::uint32_t capacity = 0;
@@ -1061,6 +1095,7 @@ void Runtime::init() {
     }
 
     features_.available = true;
+    init_error_.clear();
     bioseq_log<DBG>(
         "[vulkan_runtime] device ready: {} (maxWGInvocations={}, maxWGCountX={}, "
         "maxSharedMem={}B, scalarBlockLayout={})",
@@ -1560,38 +1595,6 @@ constexpr VkBufferUsageFlags kPhaseBBufferUsage =
     }
 }
 
-/// `ref_bits()` of a 24-byte Anchor record at `bytes`: ref_position is the
-/// leading u64; is_reverse is the u32 at offset 16.
-[[nodiscard]] std::uint64_t anchor_ref_bits_at(const std::byte* bytes) noexcept {
-    std::uint64_t ref_position = 0;
-    std::uint32_t is_reverse = 0;
-    std::memcpy(&ref_position, bytes, sizeof(ref_position));
-    std::memcpy(&is_reverse, bytes + 16, sizeof(is_reverse));
-    return (static_cast<std::uint64_t>(is_reverse != 0u) << 63)
-         | (ref_position & ((std::uint64_t{1} << 63) - 1u));
-}
-
-/// CPU fallback (DOC0307 §7.2): stable-sort the downloaded 24-byte anchors by
-/// `ref_bits()` when the span exceeds the GPU bitonic sort's workgroup capacity.
-void cpu_sort_anchor_bytes_by_ref_bits(std::span<std::byte> bytes, std::uint64_t count) {
-    constexpr std::size_t kAnchorBytes = 24;
-    if (count < 2) return;
-    std::vector<std::uint32_t> order(static_cast<std::size_t>(count));
-    for (std::uint32_t i = 0; i < count; ++i) order[i] = i;
-    const std::byte* base = bytes.data();
-    std::stable_sort(order.begin(), order.end(),
-        [base](std::uint32_t a, std::uint32_t b) noexcept {
-            return anchor_ref_bits_at(base + a * kAnchorBytes)
-                 < anchor_ref_bits_at(base + b * kAnchorBytes);
-        });
-    std::vector<std::byte> sorted(static_cast<std::size_t>(count) * kAnchorBytes);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        std::memcpy(sorted.data() + i * kAnchorBytes,
-                    base + order[i] * kAnchorBytes, kAnchorBytes);
-    }
-    std::memcpy(bytes.data(), sorted.data(), sorted.size());
-}
-
 }  // namespace
 
 Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
@@ -1959,17 +1962,20 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
 
     const std::uint32_t sort_capacity = gpu_anchor_sort_capacity_;
     const bool gpu_sort = sort_capacity > 0 && exact_anchor_count <= sort_capacity;
+    if (!gpu_sort) {
+        throw VulkanRuntimeError(fmt::format(
+            "Vulkan seed lookup selected but anchor count {} exceeds GPU sort capacity {}",
+            exact_anchor_count, sort_capacity));
+    }
     Buffer ranges_buf;
     std::optional<PhaseBPipeline> sort_pipe;
-    if (gpu_sort) {
-        ranges_buf = create_device_buffer(sizeof(SortRangeWire), kPhaseBBufferUsage);
-        const SortRangeWire range{0u, static_cast<std::uint32_t>(exact_anchor_count)};
-        upload_locked(scratch, ranges_buf,
-            std::span<const std::byte>{reinterpret_cast<const std::byte*>(&range), sizeof(range)},
-            VK_ACCESS_SHADER_READ_BIT);
-        sort_pipe = get_phase_b_pipeline_locked(
-            ShaderKind::sort_anchors_bitonic, sort_capacity, 256u);
-    }
+    ranges_buf = create_device_buffer(sizeof(SortRangeWire), kPhaseBBufferUsage);
+    const SortRangeWire range{0u, static_cast<std::uint32_t>(exact_anchor_count)};
+    upload_locked(scratch, ranges_buf,
+        std::span<const std::byte>{reinterpret_cast<const std::byte*>(&range), sizeof(range)},
+        VK_ACCESS_SHADER_READ_BIT);
+    sort_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::sort_anchors_bitonic, sort_capacity, 256u);
 
     {
         const std::array<VkBuffer, 5> seed_bufs{
@@ -2044,11 +2050,6 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     result.host_bytes.resize(static_cast<std::size_t>(anchor_bytes));
     download_locked(scratch, anchors_buf, std::span<std::byte>{
         result.host_bytes.data(), result.host_bytes.size()});
-    if (!gpu_sort) {
-        cpu_sort_anchor_bytes_by_ref_bits(
-            std::span<std::byte>{result.host_bytes.data(), result.host_bytes.size()},
-            exact_anchor_count);
-    }
 
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(seed-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
@@ -2676,7 +2677,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     const std::uint32_t k = params.kmer_size;
     out.target_len = bp;
     if (bp == 0u || w == 0u || k == 0u || bp < k || max_target_minimizers == 0u) {
-        return out;  // empty (valid==false; caller falls back to CPU build)
+        return out;  // empty/invalid shape; selected GPU callers throw.
     }
     if (max_target_minimizers > std::numeric_limits<std::uint32_t>::max()) return out;
 
@@ -2969,7 +2970,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     if (!counts_s.valid() || !prefix_s.valid() || !blocks_s.valid() || !qrec_s.valid()
         || (inputs.device_minimizer_words == nullptr && !minw_s.valid())) {
         arena.rewind(mark);
-        throw VulkanRuntimeError("phase_c seed arena oversubscribed");  // → CPU fallback
+        throw VulkanRuntimeError("phase_c seed arena oversubscribed");
     }
     auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
     const VkBuffer min_words_buffer = inputs.device_minimizer_words != nullptr

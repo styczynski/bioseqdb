@@ -588,7 +588,7 @@ bioseq_guc_init()
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("bioseq.aligner.vulkan_enabled",
-							 "Enable Vulkan execution for Vulkan-backed algorithms; disabled falls back to CPU.",
+							 "Enable Vulkan execution for Vulkan-backed algorithms; selected Vulkan algorithms fail when disabled.",
 							 NULL, &bioseq_aligner_vulkan_enabled, true,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 
@@ -621,8 +621,8 @@ bioseq_guc_init()
 
 	/* DOC0307 Phase B — Vulkan seed-hit lookup + GPU-resident index upload cache. */
 	DefineCustomBoolVariable("bioseq.aligner.vulkan_seed_hits_enabled",
-							 "Enable Vulkan seed-hit lookup when Vulkan is enabled.",
-							 NULL, &bioseq_aligner_vulkan_seed_hits_enabled, true,
+							 "Opt into Vulkan seed-hit lookup when Vulkan is enabled; selected Vulkan seed execution fails when unavailable.",
+							 NULL, &bioseq_aligner_vulkan_seed_hits_enabled, false,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("bioseq.aligner.vulkan_index_cache_enabled",
 							 "Cache GPU-resident minimizer index uploads while their memory permit is held.",
@@ -631,12 +631,12 @@ bioseq_guc_init()
 
 	/* DOC0310 Phase C — resident two-submit Vulkan frontend + GPU index build. */
 	DefineCustomBoolVariable("bioseq.aligner.vulkan_fused_frontend_enabled",
-							 "Enable the Phase C resident two-submit Vulkan frontend (parallel ordered sketch + GPU seed count/emit + device anchor sort).",
-							 NULL, &bioseq_aligner_vulkan_fused_frontend_enabled, true,
+							 "Opt into the Phase C resident two-submit Vulkan frontend (parallel ordered sketch + GPU seed count/emit + device anchor sort).",
+							 NULL, &bioseq_aligner_vulkan_fused_frontend_enabled, false,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("bioseq.aligner.vulkan_gpu_index_build_enabled",
-							 "Build the target minimizer index entirely on the GPU (device radix sort + race-free slot table).",
-							 NULL, &bioseq_aligner_vulkan_gpu_index_build_enabled, true,
+							 "Opt into building the target minimizer index entirely on the GPU (device radix sort + race-free slot table).",
+							 NULL, &bioseq_aligner_vulkan_gpu_index_build_enabled, false,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable("bioseq.aligner.vulkan_extend_enabled",
 							 "Enable the optional Phase C GPU base-alignment extension under the block aligner.",

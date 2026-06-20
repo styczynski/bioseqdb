@@ -319,9 +319,8 @@ struct ChainingParams {
     ChainingMode chaining_mode = ChainingMode::SIMD_DP;
 
     /// Enable Vulkan execution for the VULKAN_TILED_DP chaining backend. When
-    /// false, that backend falls back to chain_anchors_scalar without touching
-    /// the GPU. Derived from Minimap2Params::vulkan_enabled (DOC0304 §7.1); the
-    /// CPU chaining kernels ignore it.
+    /// false and the Vulkan backend is selected, the backend raises an error.
+    /// Algorithm fallback must be selected before entering the pipeline.
     bool    vulkan_enabled    = true;
 
     /// Derived penalty values. Call prepare() after setting scale values.

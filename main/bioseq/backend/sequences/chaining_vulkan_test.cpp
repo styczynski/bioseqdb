@@ -3,9 +3,8 @@
 // DOC0304 §10 — validation tests for the Phase A Vulkan (G3SA tiled-DP)
 // chaining backend.
 //
-//   §10.1 Forced-fallback parity  — VULKAN_TILED_DP with vulkan_enabled=false
-//                                    must equal SCALAR_MM2 through the public
-//                                    pipeline (the only exact-equality test).
+//   §10.1 Mandatory Vulkan errors — VULKAN_TILED_DP with vulkan_enabled=false
+//                                    must fail instead of running SCALAR_MM2.
 //   §10.2 GPU chaining invariants  — chain_anchors_vulkan output is structurally
 //                                    valid (chain count, bounds, monotonicity,
 //                                    range boundaries, min-score, span!=15,
@@ -197,76 +196,31 @@ void check_chain_invariants(
 }  // namespace
 
 // ===========================================================================
-// §10.1 — Forced-fallback parity (the only exact-equality test)
+// §10.1 — Mandatory Vulkan errors
 // ===========================================================================
 
-TEST_CASE("DOC0304 §10.1 — VULKAN_TILED_DP forced fallback == SCALAR_MM2",
-          "[g3sa][vulkan][chaining][parity]") {
-    Minimap2Params scalar_params;
-    scalar_params.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
-
+TEST_CASE("DOC0304 §10.1 — VULKAN_TILED_DP with vulkan_enabled=false fails",
+          "[g3sa][vulkan][chaining][mandatory]") {
     Minimap2Params vulkan_params;
     vulkan_params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
-    vulkan_params.vulkan_enabled = false;  // force the CPU fallback path
+    vulkan_params.vulkan_enabled = false;
 
-    SECTION("empty anchor set produces no chains (chaining boundary)") {
-        // minimap_port does not accept empty sequences (pre-existing); the
-        // spec's "empty query/target" parity scenario is meaningful at the
-        // chaining boundary — zero anchors must yield zero chains on the
-        // forced-fallback path, exactly as the scalar backend does.
+    SECTION("direct chaining backend rejects disabled Vulkan") {
         ch::ChainingParams cp;
-        cp.vulkan_enabled = false;  // force the CPU fallback
+        cp.vulkan_enabled = false;
         cp.prepare();
-        const std::vector<ch::Anchor> none;
-        const auto out = run_vulkan_chain(none, cp);
-        REQUIRE(out.chains.empty());
-        REQUIRE(out.reordered.empty());
+        std::vector<ch::Anchor> anchors;
+        for (std::uint64_t i = 0; i < 8; ++i) {
+            anchors.push_back(make_anchor(1000 + i * 12, 500 + i * 12, 0, 15));
+        }
+        REQUIRE_THROWS_AS(run_vulkan_chain(anchors, cp), gv::VulkanRuntimeError);
     }
 
-    SECTION("short forward embedding (few anchors, one diagonal)") {
-        auto qd = make_dna4(80, 0xA11CE);
-        auto td = make_dna4(400, 0xB0B);
-        for (std::size_t i = 0; i < qd.size(); ++i) td[150 + i] = qd[i];
-        const auto a = canon(run_pipeline(qd, td, scalar_params));
-        const auto b = canon(run_pipeline(qd, td, vulkan_params));
-        INFO("scalar matches=" << a.size() << " vulkan-fallback matches=" << b.size());
-        REQUIRE(a == b);
-        REQUIRE_FALSE(a.empty());
-    }
-
-    SECTION("longer forward embedding (many anchors)") {
-        auto qd = make_dna4(300, 0xC0FFEE);
-        auto td = make_dna4(1200, 0xDEAD);
-        for (std::size_t i = 0; i < qd.size(); ++i) td[400 + i] = qd[i];
-        const auto a = canon(run_pipeline(qd, td, scalar_params));
-        const auto b = canon(run_pipeline(qd, td, vulkan_params));
-        REQUIRE(a == b);
-        REQUIRE_FALSE(a.empty());
-    }
-
-    SECTION("reverse-complement embedding (mixed/reverse anchors)") {
-        auto qd = make_dna4(200, 0x5EED);
-        auto td = make_dna4(900, 0xF00D);
-        const auto rc = revcomp(qd);
-        for (std::size_t i = 0; i < rc.size(); ++i) td[350 + i] = rc[i];
-        const auto a = canon(run_pipeline(qd, td, scalar_params));
-        const auto b = canon(run_pipeline(qd, td, vulkan_params));
-        REQUIRE(a == b);
-        REQUIRE_FALSE(a.empty());
-    }
-
-    SECTION("non-default kmer size (query_span != 15, generic-fallback path)") {
-        Minimap2Params s = scalar_params;
-        Minimap2Params v = vulkan_params;
-        s.kmer_size = 13;
-        v.kmer_size = 13;
+    SECTION("public pipeline rejects selected Vulkan backend") {
         auto qd = make_dna4(250, 0x1357);
         auto td = make_dna4(1000, 0x2468);
         for (std::size_t i = 0; i < qd.size(); ++i) td[300 + i] = qd[i];
-        const auto a = canon(run_pipeline(qd, td, s));
-        const auto b = canon(run_pipeline(qd, td, v));
-        REQUIRE(a == b);
-        REQUIRE_FALSE(a.empty());
+        REQUIRE_THROWS_AS(run_pipeline(qd, td, vulkan_params), gv::VulkanRuntimeError);
     }
 }
 
@@ -366,10 +320,8 @@ TEST_CASE("DOC0304 §10.2 — Vulkan chaining output invariants",
 
 TEST_CASE("DOC0304 §10.3 — end-to-end GPU chaining smoke",
           "[g3sa][vulkan][gpu][smoke]") {
-    if (!ch::vulkan_chaining_supported()) {
-        SUCCEED("No usable Vulkan device; GPU smoke test skipped (CPU fallback path).");
-        return;
-    }
+    INFO("Vulkan runtime error: " << gv::Runtime::instance().initialization_error());
+    REQUIRE(ch::vulkan_chaining_supported());
 
     Minimap2Params params;
     params.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;

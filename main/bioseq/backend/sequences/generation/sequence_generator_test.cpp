@@ -8,9 +8,11 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <span>
 #include <string>
@@ -218,17 +220,18 @@ TEST_CASE("generator: GPU == CPU bytes", "[generator][doc0335][gpu]") {
     gp.reference_length = 1'000'003;
     gp.fragment_count = 0;
     gp.seed = 99;
+    gp.use_vulkan = true;
     auto generator = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>(gp);
     const auto before = gv::Runtime::instance().generate_units_dispatch_count();
-    auto gpu_or_fallback = generator.generate_sequences(1);
+    auto gpu_or_cpu = generator.generate_sequences(1);
     const auto after = gv::Runtime::instance().generate_units_dispatch_count();
     if (gv::Runtime::instance().usable()) {
         ASSERT(after > before, "usable Vulkan device but generate_units did not dispatch");
     }
     auto cpu = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>(gp)
                    .debug_generate_sequences_cpu_only(1);
-    ASSERT(gpu_or_fallback.front().to_string() == cpu.front().to_string(),
-           "GPU/fallback and CPU bytes diverge");
+    ASSERT(gpu_or_cpu.front().to_string() == cpu.front().to_string(),
+           "GPU/CPU bytes diverge");
 }
 
 TEST_CASE("generator shader compiles for 32/64-bit packed units", "[generator][doc0335][gpu]") {
@@ -246,6 +249,50 @@ TEST_CASE("generator shader compiles for 32/64-bit packed units", "[generator][d
         ASSERT(scan.has_array_stride(word_bits / 8u),
                "generate_units output array stride mismatch");
     }
+}
+
+TEST_CASE("generator GPU smoke: generate_units dispatch requires Vulkan runtime",
+          "[generator][doc0335][gpu][gpu-smoke]") {
+    auto& runtime = gv::Runtime::instance();
+    ASSERT(runtime.usable(),
+           fmt::format("Vulkan runtime unavailable: {}", runtime.initialization_error()));
+
+    constexpr std::uint32_t symbols = 1024u;
+    constexpr std::uint32_t letters_per_unit = 32u;  // dna4 packed into uint64_t
+    constexpr std::uint32_t units =
+        (symbols + letters_per_unit - 1u) / letters_per_unit;
+    const std::array<std::uint32_t, 4> uniform_cdf{
+        0x40000000u, 0x80000000u, 0xC0000000u, 0xFFFFFFFFu};
+
+    gv::GenerateUnitsPush push{};
+    push.symbols_per_seq = symbols;
+    push.units_per_seq = units;
+    push.chunks_per_seq = 1u;
+    push.chunk_units = units;
+    push.letters_per_unit = letters_per_unit;
+    push.bits_per_char = 2u;
+    push.alphabet_size = 4u;
+    push.total_chunks = 1u;
+    push.seed_lo = 0x51f15eedu;
+    push.seed_hi = 0x9e3779b9u;
+
+    std::vector<std::uint64_t> out(units);
+    const auto before = runtime.generate_units_dispatch_count();
+    auto buffer = runtime.run_generate_units_roundtrip(
+        64u,
+        std::span<const std::uint32_t>{uniform_cdf.data(), uniform_cdf.size()},
+        push,
+        out.size() * sizeof(std::uint64_t));
+    runtime.download_slice(
+        buffer, 0, std::as_writable_bytes(std::span<std::uint64_t>{out.data(), out.size()}));
+    const auto after = runtime.generate_units_dispatch_count();
+
+    ASSERT(after > before, "generate_units smoke kernel did not dispatch");
+    bool any_nonzero = false;
+    for (const std::uint64_t word : out) {
+        any_nonzero = any_nonzero || word != 0u;
+    }
+    ASSERT(any_nonzero, "generate_units smoke kernel produced an all-zero block");
 }
 
 TEST_CASE("generator: dna5 symbol frequencies", "[generator][doc0335]") {
@@ -534,15 +581,17 @@ TEST_CASE("generator: DOC0335 manual 2Gbp validation harness", "[.][generator][d
                "M9 same-seed references differ");
     }
     {
+        gen::generator_params gp_gpu = gp;
+        gp_gpu.use_vulkan = true;
         const auto before = gv::Runtime::instance().generate_units_dispatch_count();
-        auto gpu_or_fallback = generator_t(gp).generate_sequences(1).front();
+        auto gpu_or_cpu = generator_t(gp_gpu).generate_sequences(1).front();
         const auto after = gv::Runtime::instance().generate_units_dispatch_count();
         if (gv::Runtime::instance().usable()) {
             ASSERT(after > before, "M9 usable Vulkan device but dispatch counter did not increase");
         }
-        auto cpu = generator_t(gp).debug_generate_sequences_cpu_only(1).front();
-        ASSERT(gpu_or_fallback._data == cpu._data && gpu_or_fallback.padding() == cpu.padding(),
-               "M9 GPU/fallback and CPU references differ");
+        auto cpu = generator_t(gp_gpu).debug_generate_sequences_cpu_only(1).front();
+        ASSERT(gpu_or_cpu._data == cpu._data && gpu_or_cpu.padding() == cpu.padding(),
+               "M9 GPU/CPU references differ");
         manual_pass("M9", fmt::format("dispatch_delta={} gpu_usable={}", after - before,
                                       gv::Runtime::instance().usable()));
     }
@@ -569,4 +618,72 @@ TEST_CASE("generator: DOC0335 manual 2Gbp validation harness", "[.][generator][d
     }
     ASSERT(saw_high_start, "M10 no fragment start reached the >32-bit coordinate range");
     manual_pass("M10", fmt::format("pairs={} saw_start_ge_2p32={}", m10_pairs.size(), saw_high_start));
+}
+
+// GPU-vs-CPU reference-generation throughput (DOC0335 §15 sign-off measurement). Hidden by the
+// leading [.] so it is opt-in; run it explicitly. dna4/u64 is the GPU-eligible benchmark case.
+// For every size it asserts GPU bytes == CPU bytes and (on a usable device) that a real dispatch
+// occurred, then reports min-of-3 wall-clock for each path.
+TEST_CASE("generator: GPU vs CPU generation throughput", "[.][generator][doc0335][gpubench]") {
+    using gen_t = gen::alphabet_sequence_generator<seq::dna4, std::uint64_t>;
+    auto& runtime = gv::Runtime::instance();
+    const bool usable = runtime.usable();
+    std::cout << fmt::format("[gpubench] gpu_usable={} alphabet=dna4 storage=u64 iters=min-of-3\n",
+                             usable);
+
+    // Warm up: builds the generate_units pipeline + pages memory, so timings exclude one-time setup.
+    {
+        gen::generator_params warm{};
+        warm.reference_length = 1'000'000;
+        warm.fragment_count = 0;
+        warm.seed = 1;
+        const auto warm_seq = gen_t(warm).generate_sequences(1);
+        ASSERT(!warm_seq.empty(), "gpubench warm-up produced no sequence");
+    }
+
+    constexpr int kIters = 3;
+    for (const std::uint64_t n : {1'000'000ull, 10'000'000ull, 100'000'000ull,
+                                  500'000'000ull, 1'000'000'000ull, 2'000'000'000ull}) {
+        gen::generator_params gp{};
+        gp.reference_length = n;
+        gp.fragment_count = 0;
+        gp.seed = 0xBEEFull;
+
+        // Correctness gate: a real dispatch must occur and GPU bytes must equal CPU bytes.
+        const auto before = runtime.generate_units_dispatch_count();
+        const auto gpu_seq = gen_t(gp).generate_sequences(1);
+        const auto after = runtime.generate_units_dispatch_count();
+        {
+            const auto cpu_seq = gen_t(gp).debug_generate_sequences_cpu_only(1);
+            ASSERT(gpu_seq.front()._data == cpu_seq.front()._data &&
+                       gpu_seq.front().padding() == cpu_seq.front().padding(),
+                   fmt::format("gpubench GPU != CPU bytes at n={}", n));
+        }
+        if (usable) {
+            ASSERT(after > before, fmt::format("gpubench no GPU dispatch at n={}", n));
+        }
+
+        double gpu_ms = std::numeric_limits<double>::max();
+        for (int it = 0; it < kIters; ++it) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto seq = gen_t(gp).generate_sequences(1);
+            const auto t1 = std::chrono::steady_clock::now();
+            gpu_ms = std::min(gpu_ms, std::chrono::duration<double, std::milli>(t1 - t0).count());
+            ASSERT(!seq.empty(), "gpubench gpu path empty");
+        }
+        double cpu_ms = std::numeric_limits<double>::max();
+        for (int it = 0; it < kIters; ++it) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto seq = gen_t(gp).debug_generate_sequences_cpu_only(1);
+            const auto t1 = std::chrono::steady_clock::now();
+            cpu_ms = std::min(cpu_ms, std::chrono::duration<double, std::milli>(t1 - t0).count());
+            ASSERT(!seq.empty(), "gpubench cpu path empty");
+        }
+        const double gpu_gbps = (static_cast<double>(n) / 1e9) / (gpu_ms / 1e3);
+        const double cpu_gbps = (static_cast<double>(n) / 1e9) / (cpu_ms / 1e3);
+        std::cout << fmt::format(
+            "[gpubench] n={:>13} bp  GPU={:>9.3f} ms ({:>5.2f} Gbp/s)  "
+            "CPU={:>9.3f} ms ({:>5.2f} Gbp/s)  speedup={:>5.2f}x  dispatch_delta={}\n",
+            n, gpu_ms, gpu_gbps, cpu_ms, cpu_gbps, cpu_ms / gpu_ms, after - before);
+    }
 }

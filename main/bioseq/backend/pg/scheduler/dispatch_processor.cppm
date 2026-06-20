@@ -129,6 +129,7 @@ module;
 #include <queue>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <unistd.h>
@@ -151,6 +152,7 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
+import bioseq.gpu.vulkan.runtime;
 import bioseq.types.pg_compact_sequence;
 import bioseq.instr;
 import bioseq.storage.manager;
@@ -424,6 +426,67 @@ choose_deferred_minimizer_persist_index(
         scaled.min_seed_count  = 2;
     }
     return scaled;
+}
+
+[[nodiscard]] inline bool selected_vulkan_execution(
+        const Minimap2Params& params) noexcept {
+    return params.vulkan_enabled
+        && (params.vulkan_seed_hits_enabled
+            || params.minimizer_algorithm
+                == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+            || params.chaining_algorithm
+                == ChainingAlgorithmType::VULKAN_TILED_DP);
+}
+
+[[noreturn]] inline void raise_vulkan_pg_error(
+        std::string_view stage,
+        const bioseq::gpu::vulkan::VulkanRuntimeError& err) {
+    bioseq_report<ERR, PG>()
+        .code(ERRCODE_INTERNAL_ERROR)
+        .msg("Vulkan aligner execution failed")
+        .detail("{}: {}", stage, err.what())
+        .hint("Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or select a non-Vulkan algorithm before dispatch.");
+    __builtin_unreachable();
+}
+
+template <class Fn>
+[[nodiscard]] MatchResultCollection run_aligner_pg_checked(
+        std::string_view stage,
+        Fn&& fn) {
+    try {
+        return std::forward<Fn>(fn)();
+    } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& err) {
+        raise_vulkan_pg_error(stage, err);
+    }
+}
+
+template <class... Args>
+[[nodiscard]] MatchResultCollection minimap_port_pg_checked(Args&&... args) {
+    return run_aligner_pg_checked(
+        "minimap_port",
+        [&]() -> MatchResultCollection {
+            return minimap_port(std::forward<Args>(args)...);
+        });
+}
+
+template <class... Args>
+[[nodiscard]] MatchResultCollection minimap_port_segmented_pg_checked(
+        Args&&... args) {
+    return run_aligner_pg_checked(
+        "minimap_port_segmented",
+        [&]() -> MatchResultCollection {
+            return minimap_port_segmented(std::forward<Args>(args)...);
+        });
+}
+
+template <class... Args>
+[[nodiscard]] MatchResultCollection minimap2_port_with_index_pg_checked(
+        Args&&... args) {
+    return run_aligner_pg_checked(
+        "minimap2_port_with_index",
+        [&]() -> MatchResultCollection {
+            return minimap2_port_with_index(std::forward<Args>(args)...);
+        });
 }
 
 struct OpportunisticIndexChunk {
@@ -1122,7 +1185,7 @@ run_recompute_with_deferred_minimizer_persist(
             (void)storage_unit_byte_width;
             (void)last_fragment_padding;
             OpportunisticFragmentIndexStorage ram_store;
-            collection = minimap_port_segmented(
+            collection = minimap_port_segmented_pg_checked(
                 lazy_query, resident_target, params, &ram_store);
             for (const OpportunisticIndexChunk& chunk : ram_store.chunks) {
                 chunk_bytes += static_cast<std::uint64_t>(chunk.bytes.size());
@@ -1157,7 +1220,7 @@ run_recompute_with_deferred_minimizer_persist(
     bool staged = false;
     PG_TRY();
     {
-        collection = minimap_port_segmented(
+        collection = minimap_port_segmented_pg_checked(
             lazy_query, resident_target, params, &file_store);
         staged = finish_and_stage_async_index_file(
             ctx, loc, sequence_rowno, choice.index_name, file_store);
@@ -1358,7 +1421,7 @@ try_materialize_target_for_segment_workers(
             /*
              * Query minimizers are computed once per batch for the
              * prebuilt-index path (every row reuses the same query).
-             * Recompute-path rows use minimap_port(), which does its
+             * Recompute-path rows use minimap_port_pg_checked(), which does its
              * own sketching; the extra allocation here is avoided
              * for those rows via the optional nested-scope.
              */
@@ -1373,6 +1436,7 @@ try_materialize_target_for_segment_workers(
             auto& pool = bioseq::parallelism::GlobalPool::instance();
             const bool may_dispatch_parallel =
                 !base_params.enable_profiling
+                && !selected_vulkan_execution(base_params)
                 && !use_scanner_pg
                 && !chunked_scanner_forced
                 && bioseq::parallelism::dispatch_parallel(pool.mode())
@@ -1414,7 +1478,7 @@ try_materialize_target_for_segment_workers(
                             Minimap2Params params = apply_size_heuristic(base_params, min_bp);
                             auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
                             auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-                            parallel_collections[i] = minimap_port(lazy_query, lazy_target, params);
+                            parallel_collections[i] = minimap_port_pg_checked(lazy_query, lazy_target, params);
                             parallel_params[i] = params;
                             parallel_done[i] = 1;
                         }
@@ -1666,7 +1730,7 @@ try_materialize_target_for_segment_workers(
 	                                        if (auto hit =
 	                                                bioseq::storage::indexing::lookup_assembled_index(
 	                                                    cache_key)) {
-	                                            return minimap2_port_with_index(
+	                                            return minimap2_port_with_index_pg_checked(
 	                                                fq_pg,
 	                                                ft_pg,
 	                                                *query_minimizers,
@@ -1675,7 +1739,7 @@ try_materialize_target_for_segment_workers(
 	                                        }
 	                                        auto idx = assemble_one(cs_u, ce_u);
 	                                        MatchResultCollection out =
-	                                            minimap2_port_with_index(
+	                                            minimap2_port_with_index_pg_checked(
 	                                                fq_pg,
 	                                                ft_pg,
 	                                                *query_minimizers,
@@ -1754,7 +1818,7 @@ try_materialize_target_for_segment_workers(
 	                                            if (auto hit =
 	                                                    bioseq::storage::indexing::lookup_assembled_index(
 	                                                        cache_key)) {
-	                                                collection = minimap2_port_with_index(
+	                                                collection = minimap2_port_with_index_pg_checked(
 	                                                    fq_pg,
 	                                                    ft_pg,
 	                                                    *query_minimizers,
@@ -1776,7 +1840,7 @@ try_materialize_target_for_segment_workers(
 	                                                        loc_opt->total_bp_size,
 	                                                        idx_params.max_occ,
 	                                                        sq_scratch);
-	                                                collection = minimap2_port_with_index(
+	                                                collection = minimap2_port_with_index_pg_checked(
 	                                                    fq_pg,
 	                                                    ft_pg,
 	                                                    *query_minimizers,
@@ -1896,7 +1960,7 @@ try_materialize_target_for_segment_workers(
                                             if (auto hit =
                                                     bioseq::storage::indexing::lookup_assembled_index(
                                                         cache_key)) {
-                                                return minimap2_port_with_index(
+                                                return minimap2_port_with_index_pg_checked(
                                                     fq_pg,
                                                     ft_pg,
                                                     *query_minimizers,
@@ -1905,7 +1969,7 @@ try_materialize_target_for_segment_workers(
                                             }
                                             auto idx = assemble_ram_one(cs_u, ce_u);
                                             MatchResultCollection out =
-                                                minimap2_port_with_index(
+                                                minimap2_port_with_index_pg_checked(
                                                     fq_pg,
                                                     ft_pg,
                                                     *query_minimizers,
@@ -1980,7 +2044,7 @@ try_materialize_target_for_segment_workers(
                                                 auto resident_target =
                                                     bioseq::storage::make_lazy_in_memory(
                                                         resident->range);
-                                                collection = minimap_port_segmented(
+                                                collection = minimap_port_segmented_pg_checked(
                                                     lazy_query,
                                                     resident_target,
                                                     params);
@@ -1988,12 +2052,12 @@ try_materialize_target_for_segment_workers(
                                             }
                                         }
                                         if (!resident_parallel) {
-                                            collection = minimap_port_segmented(
+                                            collection = minimap_port_segmented_pg_checked(
                                                 fq_pg, ft_pg, params);
                                         }
                                     } else {
                                         collection =
-                                            minimap_port(fq_pg, ft_pg, params);
+                                            minimap_port_pg_checked(fq_pg, ft_pg, params);
                                     }
                                     bioseq_log<DBG>("[bioseq] index: recompute mps-fast-noindex row={} index={} target_bp={} persist_compatible={} resident_attempted={} resident_parallel={} persisted=false",
                                             static_cast<unsigned long long>(
@@ -2049,7 +2113,7 @@ try_materialize_target_for_segment_workers(
                                                         _padding),
                                                     *deferred_persist_choice);
                                         } else {
-                                            collection = minimap_port_segmented(
+                                            collection = minimap_port_segmented_pg_checked(
                                                 lazy_query, resident_target, params);
                                             if (scanner_pg_ctx->recompute_async_persist_active
                                                 && (params.kmer_size != 15
@@ -2070,7 +2134,7 @@ try_materialize_target_for_segment_workers(
                                             }
                                         }
                                     } else {
-                                        collection = minimap_port_segmented(
+                                        collection = minimap_port_segmented_pg_checked(
                                             fq_pg, ft_pg, params);
                                         stage_recompute_mps_build_if_selected(
                                             *scanner_pg_ctx,
@@ -2086,8 +2150,8 @@ try_materialize_target_for_segment_workers(
                                 } else {
                                     collection =
                                         (target_bp_size > kSegmentationThresholdBp)
-                                            ? minimap_port_segmented(fq_pg, ft_pg, params)
-                                            : minimap_port(fq_pg, ft_pg, params);
+                                            ? minimap_port_segmented_pg_checked(fq_pg, ft_pg, params)
+                                            : minimap_port_pg_checked(fq_pg, ft_pg, params);
                                     stage_recompute_mps_build_if_selected(
                                         *scanner_pg_ctx,
                                         *loc_opt,
@@ -2106,8 +2170,8 @@ try_materialize_target_for_segment_workers(
                                 bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
                             collection =
                                 (target_bp_size > kSegmentationThresholdBp)
-                                    ? minimap_port_segmented(fq_pg, ft_pg, params)
-                                    : minimap_port(fq_pg, ft_pg, params);
+                                    ? minimap_port_segmented_pg_checked(fq_pg, ft_pg, params)
+                                    : minimap_port_pg_checked(fq_pg, ft_pg, params);
                         }
                     } else if (target_hdr != nullptr) {
                         compact_sequence_range<S> target_seq{*target_hdr};
@@ -2120,13 +2184,13 @@ try_materialize_target_for_segment_workers(
                             bioseq::storage::lazy_compact_sequence<S, chunked> ft{chunked::from_range(target_seq)};
                             collection =
                                 (target_bp_size > kSegmentationThresholdBp)
-                                    ? minimap_port_segmented(fq, ft, params)
-                                    : minimap_port(fq, ft, params);
+                                    ? minimap_port_segmented_pg_checked(fq, ft, params)
+                                    : minimap_port_pg_checked(fq, ft, params);
                         } else {
                             collection =
                                 (target_bp_size > kSegmentationThresholdBp)
-                                    ? minimap_port_segmented(lazy_query, lazy_target, params)
-                                    : minimap_port(lazy_query, lazy_target, params);
+                                    ? minimap_port_segmented_pg_checked(lazy_query, lazy_target, params)
+                                    : minimap_port_pg_checked(lazy_query, lazy_target, params);
                         }
                     } else if (scanner_pg_ctx != nullptr
                                && scanner_pg_ctx->target_locators[i].has_value()) {

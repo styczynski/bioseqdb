@@ -226,6 +226,24 @@ TEST_CASE("aligner_options(chaining_algorithm => 0) executes without errors",
     check_aligner_options_partial_override("chaining_algorithm => 0");
 }
 
+TEST_CASE("selected Vulkan minimizer reports a Postgres error when Vulkan is disabled",
+          "[mmsearch][vulkan][error]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+
+    exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'vulkan_minimap_int';");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+
+    const std::string sql = fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0, {}) ORDER BY pk;",
+        kHoe,
+        hoe_probe_literal());
+    const auto err = sql_error(ctx, sql);
+    REQUIRE(err.sqlstate == "XX000");
+    REQUIRE(err.contains("Vulkan aligner execution failed"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
 TEST_CASE(
     "aligner_options(base_alignment_algorithm => 0) executes without errors",
     "[mmsearch][aligner_options][partial]") {

@@ -188,7 +188,7 @@ struct ShaderCompileRequest {
 
 /// Thrown by `compile_shader_spirv` on a rejected request or a glslang
 /// parse/link failure. The Vulkan runtime catches this and re-wraps it as a
-/// `VulkanRuntimeError` so the chaining backend falls back to the CPU kernel.
+/// `VulkanRuntimeError`; selected Vulkan algorithms propagate that error.
 class ShaderCompileError final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;

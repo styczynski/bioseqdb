@@ -326,27 +326,27 @@ export int  bioseq_aligner_minimizer_algorithm = 0;  /* DOC0286: matches Minimiz
  */
 export bool bioseq_aligner_enable_profiling = false;
 /*
- * Enable Vulkan execution for Vulkan-backed aligner algorithms (currently the
- * VULKAN_TILED_DP chaining backend). When false, those algorithms fall back to
- * their CPU equivalent. Defaults to true; the backend still falls back
- * automatically when no usable Vulkan device exists (DOC0304 §7.4).
+ * Enable Vulkan execution for Vulkan-backed aligner algorithms. When a Vulkan
+ * algorithm is selected and this is false, the pipeline fails instead of
+ * running a CPU substitute. Defaults to true.
  */
 export bool bioseq_aligner_vulkan_enabled = true;
 /*
- * DOC0307 Phase B — enable the Vulkan seed-hit lookup and the GPU-resident
- * minimizer index upload cache when Vulkan is enabled. Both default to true and
- * fall back to the CPU seed path automatically when no usable device exists.
+ * DOC0307 Phase B — opt into the Vulkan seed-hit lookup and the GPU-resident
+ * minimizer index upload cache when Vulkan is enabled. Seed GPU execution
+ * defaults to false; selected Vulkan seed execution fails when the runtime
+ * cannot run it.
  */
-export bool bioseq_aligner_vulkan_seed_hits_enabled = true;
+export bool bioseq_aligner_vulkan_seed_hits_enabled = false;
 export bool bioseq_aligner_vulkan_index_cache_enabled = true;
 /*
  * DOC0310 Phase C — resident two-submit Vulkan frontend (parallel ordered
  * sketch + GPU target-index build + GPU seed count/emit + device anchor sort)
- * and the optional GPU base-alignment extension. All default to enabled (extend
- * off) and fall back to the CPU/Phase B path automatically.
+ * and the optional GPU base-alignment extension. Defaults keep the frontend off;
+ * selected Phase C execution fails when the GPU path cannot run.
  */
-export bool bioseq_aligner_vulkan_fused_frontend_enabled = true;
-export bool bioseq_aligner_vulkan_gpu_index_build_enabled = true;
+export bool bioseq_aligner_vulkan_fused_frontend_enabled = false;
+export bool bioseq_aligner_vulkan_gpu_index_build_enabled = false;
 export bool bioseq_aligner_vulkan_extend_enabled = false;
 export int  bioseq_aligner_vulkan_phase_c_tile_bp = 2048;
 export int  bioseq_aligner_vulkan_phase_c_radix_bits = 8;
