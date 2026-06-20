@@ -63,6 +63,7 @@ enum class ShaderKind : std::uint8_t {
     phase_c_index_claim_slots,
     phase_c_index_emit_slots,
     phase_c_chain_range_build,
+    generate_units,
 };
 
 /// The descriptor-set layout each shader needs. Phase A's fixed four-storage-
@@ -82,6 +83,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
     phase_c_sort,
     phase_c_index,
     phase_c_chain_range,
+    generate_units,
 };
 
 /// Number of std430 storage-buffer bindings in each descriptor layout.
@@ -101,6 +103,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case DescriptorLayoutKind::phase_c_sort:          return 5;
         case DescriptorLayoutKind::phase_c_index:         return 7;
         case DescriptorLayoutKind::phase_c_chain_range:   return 6;
+        case DescriptorLayoutKind::generate_units:         return 2;
     }
     return 0;
 }
@@ -131,6 +134,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_index_claim_slots:
         case ShaderKind::phase_c_index_emit_slots:    return DescriptorLayoutKind::phase_c_index;
         case ShaderKind::phase_c_chain_range_build:   return DescriptorLayoutKind::phase_c_chain_range;
+        case ShaderKind::generate_units:              return DescriptorLayoutKind::generate_units;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -161,6 +165,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
         case ShaderKind::phase_c_index_claim_slots:
         case ShaderKind::phase_c_index_emit_slots:    return 24;  // IndexPushC (6 × u32)
         case ShaderKind::phase_c_chain_range_build:   return 8;   // ChainRangePushC (2 × u32)
+        case ShaderKind::generate_units:              return 48;  // GenerateUnitsPush (12 × u32)
     }
     return 0;
 }
@@ -1911,6 +1916,98 @@ void main() {
 }
 )GLSL";
 
+constexpr std::string_view kGenerateUnitsBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+#define UNIT_BITS MAX_SPAN
+#if UNIT_BITS == 64
+  #define UNIT uint64_t
+#else
+  #define UNIT uint
+#endif
+
+layout(std430, set = 0, binding = 0) writeonly buffer OutUnits { UNIT out_units[]; };
+layout(std430, set = 0, binding = 1) readonly  buffer Cdf      { uint cdf[]; };
+
+layout(push_constant) uniform Params {
+    uint symbols_per_seq;
+    uint units_per_seq;
+    uint chunks_per_seq;
+    uint chunk_units;
+    uint letters_per_unit;
+    uint bits_per_char;
+    uint alphabet_size;
+    uint total_chunks;
+    uint chunk_base;
+    uint seed_lo;
+    uint seed_hi;
+    uint _pad;
+} pc;
+
+uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15UL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9UL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebUL;
+    return x ^ (x >> 31);
+}
+
+uint taus_step(uint z, int s1, int s2, int s3, uint m) {
+    uint b = (((z << s1) ^ z) >> s2);
+    return (((z & m) << s3) ^ b);
+}
+
+uint next_u32(inout uvec4 s) {
+    s.x = taus_step(s.x, 13, 19, 12, 4294967294u);
+    s.y = taus_step(s.y,  2, 25,  4, 4294967288u);
+    s.z = taus_step(s.z,  3, 11, 17, 4294967280u);
+    s.w = s.w * 1664525u + 1013904223u;
+    return s.x ^ s.y ^ s.z ^ s.w;
+}
+
+uvec4 seed_stream(uint64_t seed, uint64_t stream_id) {
+    uint64_t a = splitmix64(seed ^ (stream_id * 0x9e3779b97f4a7c15UL));
+    uint64_t b = splitmix64(a);
+    uvec4 s = uvec4(uint(a), uint(a >> 32), uint(b), uint(b >> 32));
+    if (s.x < 129u) s.x += 129u;
+    if (s.y < 129u) s.y += 129u;
+    if (s.z < 129u) s.z += 129u;
+    return s;
+}
+
+uint sample_rank(uint u) {
+    uint rank = 0u;
+    while (rank + 1u < pc.alphabet_size && u >= cdf[rank]) rank += 1u;
+    return rank;
+}
+
+void main() {
+    uint chunk = pc.chunk_base + gl_GlobalInvocationID.x;
+    if (chunk >= pc.total_chunks) return;
+
+    uint seq = chunk / pc.chunks_per_seq;
+    uint local_chunk = chunk - seq * pc.chunks_per_seq;
+    uint seq_unit0 = seq * pc.units_per_seq;
+    uint local_u0 = local_chunk * pc.chunk_units;
+
+    uvec4 st = seed_stream(
+        (uint64_t(pc.seed_hi) << 32) | uint64_t(pc.seed_lo),
+        uint64_t(chunk));
+
+    for (uint u = 0u; u < pc.chunk_units; ++u) {
+        uint local_unit = local_u0 + u;
+        if (local_unit >= pc.units_per_seq) break;
+        uint sym0 = local_unit * pc.letters_per_unit;
+        uint valid = min(pc.letters_per_unit, pc.symbols_per_seq - sym0);
+        UNIT acc = UNIT(0);
+        for (uint slot = 0u; slot < valid; ++slot) {
+            uint r = sample_rank(next_u32(st));
+            acc |= UNIT(r) << (slot * pc.bits_per_char);
+        }
+        out_units[seq_unit0 + local_unit] = acc;
+    }
+}
+)GLSL";
+
 /// Resolve a shader kind to its embedded GLSL body (everything after the
 /// `#version`/`#extension`/`#define` prelude the compiler injects).
 [[nodiscard]] std::string shader_body_for(ShaderKind kind) {
@@ -1955,6 +2052,8 @@ void main() {
             return std::string{kPhaseCIndexEmitSlotsBody};
         case ShaderKind::phase_c_chain_range_build:
             return std::string{kPhaseCChainRangeBuildBody};
+        case ShaderKind::generate_units:
+            return std::string{kGenerateUnitsBody};
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }

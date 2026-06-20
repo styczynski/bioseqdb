@@ -17,8 +17,10 @@
 #include "common_tests_integration.h"
 
 #include <algorithm>
+#include <filesystem>
 #include <set>
 #include <span>
+#include <system_error>
 #include <tuple>
 
 import bioseq.integration_tests.common;
@@ -104,9 +106,25 @@ constexpr long long kInt32Max = 2'147'483'647;  // INT32_MAX
 // 6 Gbp target sorts/chains/aligns without the >2^32 wrap that a uint32 key
 // would introduce.
 constexpr long long kUint32Max = 4'294'967'295;  // UINT32_MAX
+constexpr std::uint64_t kMinDiskBytesFor6GbpIndex =
+    120ull * 1024ull * 1024ull * 1024ull;
 
 constexpr std::string_view kTable = "phase_c_xxl_hifi_sample";
 constexpr std::string_view kTable6 = "phase_c_xxl_hifi_sample_6gbp";
+
+inline void skip_6gbp_if_disk_is_too_low() {
+    std::error_code ec;
+    const auto info = std::filesystem::space(std::filesystem::current_path(), ec);
+    if (ec) {
+        WARN(fmt::format("could not preflight disk space for 6 Gbp test: {}", ec.message()));
+        return;
+    }
+    if (info.available < kMinDiskBytesFor6GbpIndex) {
+        SKIP(fmt::format(
+            "6 Gbp minimizers_per_fragment integration test requires >=120 GiB free; available={:.1f} GiB",
+            static_cast<double>(info.available) / (1024.0 * 1024.0 * 1024.0)));
+    }
+}
 
 inline void seed_sample_table(const connection_test_context& ctx,
                               std::string_view table, long long reference_bp) {
@@ -402,6 +420,7 @@ TEST_CASE("DOC0275 — 6 Gbp sample table: scanner_pg (test_force_inmemory_scann
     // strictly beyond every 32-bit boundary in the stack.
     static_assert(kReferenceBp6 > kUint32Max,
                   "6 Gbp reference must exceed UINT32_MAX to exercise the >2^32 position path");
+    skip_6gbp_if_disk_is_too_low();
 
     auto ctx = fresh_context({kTable6});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");

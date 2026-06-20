@@ -1617,11 +1617,11 @@ private:
                 // inner body lives in the std::list node. Erasing the
                 // node from notify_batch_finished only destroys the
                 // inner body (which has already returned by then).
-                auto& running_ref = running_batches_.back();
-                const auto running_id = running_ref.scheduler_id;
-                arena_.enqueue([this, &running_ref, running_id] {
+                auto* running_ptr = std::addressof(running_batches_.back());
+                const auto running_id = running_ptr->scheduler_id;
+                arena_.enqueue([this, running_ptr, running_id] {
                     ScopedSchedulerFinish finish_guard{this, running_id};
-                    running_ref.body();
+                    running_ptr->body();
                 }, tg_);
             } else {
                 // Update idle clock for the rejected batch. While
@@ -1653,6 +1653,7 @@ private:
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 kMaxIdleWaitingTime).count();
         auto pending_iter = pending_.begin();
+        bool aborted_any = false;
         while (pending_iter != pending_.end()) {
             if (pending_iter->last_idle_start_ns != 0
                 && (now_ns - pending_iter->last_idle_start_ns) > budget_ns) {
@@ -1667,10 +1668,12 @@ private:
                     outstanding_per_benchmark_.erase(outstanding_it);
                 }
                 ++total_finished_;
+                aborted_any = true;
             } else {
                 ++pending_iter;
             }
         }
+        if (aborted_any) cv_.notify_all();
     }
 
     /// Forward declaration: defined out-of-line below the
@@ -9398,31 +9401,72 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
     std::thread progress_thread{[&progress] { render_progress_loop(progress); }};
 
-    bench_arena.execute([&] {
-        oneapi::tbb::parallel_for_each(
-            selected.begin(), selected.end(),
-            [&](ErasedBenchmark& erased) {
-                const std::size_t benchmark_index = static_cast<std::size_t>(
-                    &erased - selected.data());
-                BenchmarkContext context;
-                context.data_dir                  = data_dir;
-                context.report_dir                = report_dir;
-                context.fast_filter               = cli.fast_filter;
-                context.progress                  = &progress;
-                context.benchmark_index           = benchmark_index;
-                context.violations_mu             = &violations_mu;
-                context.violations                = &violations;
-                context.reports_mu                = &reports_mu;
-                context.reports                   = &reports;
-                context.diagnostics_mu            = &diagnostics_mu;
-                context.diagnostics               = &diagnostics;
-                context.regression_rules_mu       = &regression_rules_mu;
-                context.regression_rules_by_config = &regression_rules_by_config;
-                context.scheduler                  = &scheduler;
+    std::vector<std::size_t> benchmark_indices;
+    benchmark_indices.reserve(selected.size());
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+        benchmark_indices.push_back(index);
+    }
+    const unsigned max_driver_concurrency =
+        thread_count > 1 ? std::max(1u, thread_count / 2u) : 1u;
+    const unsigned driver_concurrency = std::max(
+        1u,
+        std::min<unsigned>(
+            static_cast<unsigned>(benchmark_indices.size()),
+            max_driver_concurrency));
+    oneapi::tbb::task_arena driver_arena(static_cast<int>(driver_concurrency));
+    driver_arena.execute(
+        [&benchmark_indices,
+         &selected,
+         &data_dir,
+         &report_dir,
+         &cli,
+         &progress,
+         &violations_mu,
+         &violations,
+         &reports_mu,
+         &reports,
+         &diagnostics_mu,
+         &diagnostics,
+         &regression_rules_mu,
+         &regression_rules_by_config,
+         &scheduler] {
+            oneapi::tbb::parallel_for_each(
+                benchmark_indices.begin(),
+                benchmark_indices.end(),
+                [&selected,
+                 &data_dir,
+                 &report_dir,
+                 &cli,
+                 &progress,
+                 &violations_mu,
+                 &violations,
+                 &reports_mu,
+                 &reports,
+                 &diagnostics_mu,
+                 &diagnostics,
+                 &regression_rules_mu,
+                 &regression_rules_by_config,
+                 &scheduler](std::size_t benchmark_index) {
+                    ErasedBenchmark& erased = selected[benchmark_index];
+                    BenchmarkContext context;
+                    context.data_dir                  = data_dir;
+                    context.report_dir                = report_dir;
+                    context.fast_filter               = cli.fast_filter;
+                    context.progress                  = &progress;
+                    context.benchmark_index           = benchmark_index;
+                    context.violations_mu             = &violations_mu;
+                    context.violations                = &violations;
+                    context.reports_mu                = &reports_mu;
+                    context.reports                   = &reports;
+                    context.diagnostics_mu            = &diagnostics_mu;
+                    context.diagnostics               = &diagnostics;
+                    context.regression_rules_mu       = &regression_rules_mu;
+                    context.regression_rules_by_config = &regression_rules_by_config;
+                    context.scheduler                  = &scheduler;
 
-                erased.execute(context);
-            });
-    });
+                    erased.execute(context);
+                });
+        });
 
     // Defence-in-depth: every closure already drains its own batches
     // via `wait_for_benchmark` before returning. Should be a no-op,

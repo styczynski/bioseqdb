@@ -35,7 +35,7 @@ import bioseq.instr;                       // region(), register_region_static
 import bioseq.integration_tests.common;           // connection_test_context, exec_sqlf, query_rows
 import bioseq.common.sequan_compat;                      // seq::dna4 / seq::dna5
 import bioseq.sequences;                   // compact_sequence_range, traits, supported_alphabets, to_string()
-import bioseq.sequences.generation;        // GeneratorParams / generate_test_sequences<A,U>
+import bioseq.sequences.generation;        // generator_params / alphabet_sequence_generator<A,U>
 import bioseq.io.writer;                    // sequence_writer<A, FASTA>
 import bioseq.io.public_api;                // compact_sequence_view<R>
 import bioseq.io.options;                   // sequence_io_file_type, writer_options
@@ -59,12 +59,7 @@ namespace {
 using bioseq::bench_framework::ParamMap;
 using bioseq::bench_framework::RunConstraints;
 using bioseq::bench_framework::create_benchmark;
-// The generator types live in bioseq::sequences::generation::HWY_NAMESPACE (the
-// generator uses Highway SIMD). The generator is now templated over
-// <alphabet, storage_unit> (§10.0a).
-using bioseq::sequences::generation::HWY_NAMESPACE::GeneratorParams;
-using bioseq::sequences::generation::HWY_NAMESPACE::generate_test_sequences;
-using bioseq::sequences::generation::HWY_NAMESPACE::GeneratedBenchSequencePair;
+namespace gen = bioseq::sequences::generation;
 // The E2E bench fixes only the storage width. Alphabet comes from the JSON
 // test-case data (`dna4` or `dna5`) and is dispatched at compile time. uint64
 // keeps generated ranges byte-identical to `bioseq.seq('<alphabet>', 64)` and to
@@ -75,7 +70,8 @@ using bench_config = sequence_custom_alphabet<A, bench_storage_t>;
 template <sequence_alphabet A>
 using bench_sequence_range = compact_sequence_range<bench_config<A>>;
 template <sequence_alphabet A>
-using bench_pair_t = GeneratedBenchSequencePair<A, bench_storage_t>;
+using bench_pair_t =
+    typename gen::alphabet_sequence_generator<A, bench_storage_t>::query_target_pair;
 
 template <sequence_alphabet A>
 [[nodiscard]] constexpr std::string_view bench_alphabet_name() {
@@ -872,7 +868,7 @@ template <sequence_alphabet A>
                                        std::string_view test_case_name,
                                        simdjson::dom::element data,
                                        const RunConstraints&) {
-    GeneratorParams gp{};
+    gen::generator_params gp{};
     gp.reference_length       = static_cast<std::size_t>(jint(data, "reference_length", kDefaultReferenceLengthBp));
     gp.fragment_count         = static_cast<std::size_t>(jint(data, "fragment_count", 1));
     gp.fragment_length_mean   = static_cast<std::size_t>(jint(data, "fragment_length_mean", 5000000));
@@ -916,15 +912,16 @@ template <sequence_alphabet A>
     in.no_index_table = fmt::format("e2e_{}_noidx", in.size_label);
 
     // (1) generate ONE (query, target) pair (fragment_count is forced to 1).
-    auto pairs = generate_test_sequences<A, bench_storage_t>(gp);
+    auto pairs = gen::alphabet_sequence_generator<A, bench_storage_t>(gp)
+                     .generate_sequences_pairs(gp.fragment_count);
     const bench_pair_t<A>& pair = pairs.front();
     in.truth_target_start = static_cast<std::int64_t>(pair.truth_target_start);
     in.truth_is_reverse   = pair.is_reverse;
     in.target_bp          = static_cast<std::int64_t>(gp.reference_length);
 
     // (2) write FASTA via the bounded IO sequence_writer over zero-copy views.
-    write_single_record_fasta<A>(in.target_fasta, "ref", pair.target);
-    write_split_fasta<A>(in.target_fasta_split, "ref", pair.target, split_bp);
+    write_single_record_fasta<A>(in.target_fasta, "ref", *pair.target);
+    write_split_fasta<A>(in.target_fasta_split, "ref", *pair.target, split_bp);
     in.query_bases = pair.query.to_string();   // generic decode, <=5 MB; may contain N for dna5
     write_single_record_fasta<A>(in.query_fasta, "query", pair.query);
 

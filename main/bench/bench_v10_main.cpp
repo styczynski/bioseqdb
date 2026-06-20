@@ -62,9 +62,8 @@ using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
-using bioseq::sequences::generation::HWY_NAMESPACE::GeneratedBenchSequencePair;
-using bioseq::sequences::generation::HWY_NAMESPACE::GeneratorParams;
-using bioseq::sequences::generation::HWY_NAMESPACE::generate_test_sequences;
+namespace gen = bioseq::sequences::generation;
+using bench_generator_t = gen::alphabet_sequence_generator<seq::dna4, std::uint32_t>;
 
 constexpr std::int32_t kPositionTolerance = 10;
 
@@ -74,7 +73,7 @@ struct AlignerInput {
     /// refs even though they don't mutate. `mutable` lets concurrent
     /// `on_run` calls access them through their declared signatures
     /// without forcing a `const_cast` at every call site.
-    mutable std::vector<GeneratedBenchSequencePair<seq::dna4, std::uint32_t>> pairs;
+    mutable std::vector<typename bench_generator_t::query_target_pair> pairs;
     /// Pre-decoded ACGT strings in lock-step with `pairs`. Populated
     /// once in `build_input` so the per-iteration timing window of
     /// `run_aligner` does not include the O(bp_size) compact-to-ACGT
@@ -132,10 +131,9 @@ struct AlignerOutput {
 /// We size off the data already in the JSON blob, before any sequence
 /// generation. The cached `AlignerInput` keeps every generated pair in compact
 /// dna4/u32 storage and also keeps pre-decoded ACGT strings for the minimap2
-/// reference path. `generate_test_sequences()` now packs each target from the
-/// single unpacked reference without making a second full-reference temporary,
-/// so the transient generation peak is the unpacked reference plus one compact
-/// target/query pair, not `8 * total_bp`.
+/// reference path. DOC0335 generation now shares the compact target across
+/// pairs and fills packed storage directly, so generation no longer carries a
+/// per-pair full-reference copy.
 [[nodiscard]] RunConstraints estimate_aligner_resources(
     std::string_view /*data_dir*/,
     std::string_view /*test_case_name*/,
@@ -185,7 +183,7 @@ struct AlignerOutput {
                                         std::string_view test_case_name,
                                         simdjson::dom::element data,
                                         const RunConstraints& /*constraints*/) {
-    GeneratorParams params{};
+    gen::generator_params params{};
     params.reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length",
                         static_cast<std::int64_t>(params.reference_length)));
@@ -213,7 +211,7 @@ struct AlignerOutput {
         read_int_field(data, "seed", static_cast<std::int64_t>(params.seed)));
 
     AlignerInput input;
-    input.pairs = generate_test_sequences<seq::dna4, std::uint32_t>(params);
+    input.pairs = bench_generator_t(params).generate_sequences_pairs(params.fragment_count);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
 
@@ -231,7 +229,7 @@ struct AlignerOutput {
         input.queries_acgt.push_back(
             bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.query));
         input.targets_acgt.push_back(
-            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(pair.target));
+            bioseq::bench::HWY_NAMESPACE::compact_sequence_to_acgt(*pair.target));
     }
 
     bioseq_log<DBG>("[bench_v10] build_input '{}' produced {} pairs (k_override={})",
@@ -378,7 +376,7 @@ struct AlgorithmDispatch {
                 // DOC0263 — minimap_port now takes lazy_compact_sequence&; wrap the
                 // in-memory ranges in the zero-overhead no-fragment lazy wrapper.
                 auto bench_lazy_query  = bioseq::storage::make_lazy_in_memory(pair.query);
-                auto bench_lazy_target = bioseq::storage::make_lazy_in_memory(pair.target);
+                auto bench_lazy_target = bioseq::storage::make_lazy_in_memory(*pair.target);
                 results = bioseq::simd::HWY_NAMESPACE::minimap_port(
                     bench_lazy_query, bench_lazy_target, dispatch.params);
             }

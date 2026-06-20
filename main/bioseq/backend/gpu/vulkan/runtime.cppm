@@ -31,6 +31,7 @@ module;
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -151,6 +152,24 @@ static_assert(offsetof(ChainingPushConstants, max_iter) == 20);
 static_assert(offsetof(ChainingPushConstants, gap_penalty) == 24);
 static_assert(offsetof(ChainingPushConstants, skip_penalty) == 28);
 static_assert(offsetof(ChainingPushConstants, max_chain_skip) == 32);
+
+/// Push-constant block for the DOC0335 packed sequence generator kernel.
+struct GenerateUnitsPush {
+    std::uint32_t symbols_per_seq = 0;
+    std::uint32_t units_per_seq = 0;
+    std::uint32_t chunks_per_seq = 0;
+    std::uint32_t chunk_units = 0;
+    std::uint32_t letters_per_unit = 0;
+    std::uint32_t bits_per_char = 0;
+    std::uint32_t alphabet_size = 0;
+    std::uint32_t total_chunks = 0;
+    std::uint32_t chunk_base = 0;
+    std::uint32_t seed_lo = 0;
+    std::uint32_t seed_hi = 0;
+    std::uint32_t pad = 0;
+};
+static_assert(sizeof(GenerateUnitsPush) == 48);
+static_assert(std::is_standard_layout_v<GenerateUnitsPush>);
 
 /// Decoded SPIR-V layout decorations, used to validate the direct-anchor ABI
 /// (no CPU-side transcode hides a stride/offset mismatch). Returned by
@@ -400,6 +419,9 @@ public:
     [[nodiscard]] std::uint64_t chaining_dispatch_count() const noexcept {
         return chaining_dispatch_count_.load(std::memory_order_relaxed);
     }
+    [[nodiscard]] std::uint64_t generate_units_dispatch_count() const noexcept {
+        return generate_units_dispatch_count_.load(std::memory_order_relaxed);
+    }
 
     [[nodiscard]] Buffer create_host_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
     [[nodiscard]] Buffer create_device_buffer(std::uint64_t bytes, VkBufferUsageFlags usage);
@@ -440,6 +462,15 @@ public:
         const VulkanRankLut& rank_lut,
         const VulkanSketchParams& params,
         std::uint64_t max_minimizers);
+    Buffer run_generate_units_roundtrip(
+        std::uint32_t word_bits,
+        std::span<const std::uint32_t> cdf,
+        GenerateUnitsPush push,
+        std::uint64_t out_block_bytes);
+    void download_slice(
+        const Buffer& src,
+        std::uint64_t src_byte_offset,
+        std::span<std::byte> dst);
 
     SeedLookupResult run_seed_lookup_roundtrip(
         RuntimeSeedLookupInputs inputs,
@@ -578,6 +609,7 @@ private:
 
     VulkanFeatureSet features_{};
     std::atomic<std::uint64_t> chaining_dispatch_count_{0};
+    std::atomic<std::uint64_t> generate_units_dispatch_count_{0};
     std::mutex mu_;
 };
 
@@ -1666,6 +1698,14 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
         vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
         throw VulkanRuntimeError("SPIR-V SortRange array stride != 8");
     }
+    if (kind == ShaderKind::generate_units &&
+        (!scan.has_binding(0) || !scan.has_binding(1) ||
+         !scan.has_array_stride(max_span / 8u))) {
+        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+        throw VulkanRuntimeError("SPIR-V generate_units layout mismatch");
+    }
 
     VkShaderModuleCreateInfo module_info{};
     module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -2137,6 +2177,93 @@ void record_shader_to_host(VkCommandBuffer cmd) {
 }
 
 }  // namespace
+
+Buffer Runtime::run_generate_units_roundtrip(
+    std::uint32_t word_bits,
+    std::span<const std::uint32_t> cdf,
+    GenerateUnitsPush push,
+    std::uint64_t out_block_bytes) {
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError("run_generate_units_roundtrip on unavailable device");
+    }
+
+    constexpr std::uint32_t local = 256u;
+    const PhaseBPipeline pipe =
+        get_phase_b_pipeline_locked(ShaderKind::generate_units, local, word_bits);
+
+    Buffer out = create_device_buffer(
+        std::max<std::uint64_t>(out_block_bytes, 4u), kPhaseBBufferUsage);
+    Buffer cdf_buf = create_device_buffer(
+        std::max<std::uint64_t>(
+            static_cast<std::uint64_t>(cdf.size()) * sizeof(std::uint32_t), 4u),
+        kPhaseBBufferUsage);
+    Buffer scratch = create_host_buffer(4u, kPhaseBBufferUsage);
+    upload_locked(scratch, cdf_buf, std::as_bytes(cdf), VK_ACCESS_SHADER_READ_BIT);
+
+    const std::array<VkBuffer, 2> buffers{out.buffer, cdf_buf.buffer};
+    bind_phase_b_descriptors_locked(pipe, buffers);
+
+    const std::uint64_t max_groups = features_.max_workgroup_count_x;
+    const std::uint64_t tile_chunks = std::max<std::uint64_t>(1, max_groups * local);
+
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(gen)");
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "vkBeginCommandBuffer(gen)");
+    record_host_to_shader(command_buffer_);
+    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE, pipe.pipeline);
+    vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe.pipeline_layout, 0, 1, &pipe.descriptor_set, 0, nullptr);
+    for (std::uint64_t base = 0; base < push.total_chunks; base += tile_chunks) {
+        push.chunk_base = static_cast<std::uint32_t>(base);
+        const std::uint64_t n =
+            std::min<std::uint64_t>(tile_chunks, push.total_chunks - base);
+        const std::uint32_t groups =
+            static_cast<std::uint32_t>((n + local - 1) / local);
+        vkCmdPushConstants(command_buffer_, pipe.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(push), &push);
+        vkCmdDispatch(command_buffer_, groups, 1, 1);
+    }
+    record_shader_to_host(command_buffer_);
+    check_vk(vkEndCommandBuffer(command_buffer_), "vkEndCommandBuffer(gen)");
+
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command_buffer_;
+    check_vk(vkQueueSubmit(queue_, 1, &submit, fence_), "vkQueueSubmit(gen)");
+    check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX), "vkWaitForFences(gen)");
+    check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(gen)");
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(gen-post)");
+    if (push.total_chunks != 0) {
+        generate_units_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return out;
+}
+
+void Runtime::download_slice(
+    const Buffer& src,
+    std::uint64_t src_byte_offset,
+    std::span<std::byte> dst) {
+    if (dst.empty()) {
+        return;
+    }
+    if (src.mapped == nullptr) {
+        throw VulkanRuntimeError("download_slice: device buffer not host-visible");
+    }
+    if (src_byte_offset > src.bytes ||
+        dst.size() > static_cast<std::size_t>(src.bytes - src_byte_offset)) {
+        throw VulkanRuntimeError("download_slice: out of range");
+    }
+    DEBUG_ASSERT(src_byte_offset <= src.bytes && dst.size() <= src.bytes - src_byte_offset,
+                 "download_slice: out of range");
+    std::memcpy(
+        dst.data(),
+        static_cast<const std::byte*>(src.mapped) + src_byte_offset,
+        dst.size());
+}
 
 // --- Arena -----------------------------------------------------------------
 

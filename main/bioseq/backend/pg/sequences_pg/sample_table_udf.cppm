@@ -50,6 +50,7 @@ export module bioseq.sequences.sample_table_udf;
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
 import bioseq.common.sequan_compat;
+import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
 import bioseq.sequences.generation;
 import bioseq.storage.manager;
@@ -69,6 +70,74 @@ constexpr std::size_t   kDna4LettersPerUnit = 32;
 constexpr std::size_t   kFragmentStorageUnits = 1024;
 constexpr std::size_t   kFragmentBp =
     kFragmentStorageUnits * kDna4LettersPerUnit;  // 32 768
+
+template <bioseq::sequences::generation::packed_sequence_config R>
+[[nodiscard]] bioseq::storage::seq_locator insert_compact_range_streamed(
+    const compact_sequence_range<R>& seq,
+    Relation parent_rel,
+    TupleDesc parent_td,
+    std::int16_t attno,
+    sequence_size_t cap_bytes,
+    bioseq::storage::seq_caches* caches) {
+    using traits = typename compact_sequence_range<R>::traits;
+    using unit_t = typename traits::storage_unit;
+    static_assert(sizeof(unit_t) == kDna4StorageWidth,
+                  "create_query_target_sample_table expects dna4/u64 storage");
+    static_assert(traits::letters_per_unit == kDna4LettersPerUnit,
+                  "create_query_target_sample_table expects dna4/u64 packing");
+
+    const sequence_size_t total_bp = static_cast<sequence_size_t>(seq.bp_size());
+    const std::uint16_t padding = static_cast<std::uint16_t>(seq.padding());
+    auto producer = [&seq, total_bp, padding](
+        std::size_t frag_no,
+        pgseq_t* dst,
+        MemoryContext /*scratch*/,
+        bool is_last) noexcept {
+        const sequence_size_t frag_global_bp_start =
+            static_cast<sequence_size_t>(frag_no) *
+            static_cast<sequence_size_t>(kFragmentBp);
+        const sequence_size_t this_fragment_bp = is_last
+            ? (total_bp - frag_global_bp_start)
+            : static_cast<sequence_size_t>(kFragmentBp);
+        dst->bp_size = static_cast<pgseq_t::bp_size_t>(this_fragment_bp);
+        dst->padding_letters = is_last ? padding : std::uint16_t{0};
+
+        const std::size_t unit0 =
+            static_cast<std::size_t>(frag_global_bp_start / traits::letters_per_unit);
+        const std::size_t units =
+            static_cast<std::size_t>(
+                (this_fragment_bp + traits::letters_per_unit - 1) /
+                traits::letters_per_unit);
+        std::memcpy(dst->data, seq._data.data() + unit0, units * sizeof(unit_t));
+    };
+
+    return bioseq::storage::bioseq_default_storage_manager::insert_sequence_streamed(
+        parent_rel->rd_locator.dbOid,
+        parent_rel->rd_locator.spcOid,
+        parent_rel->rd_locator.relNumber,
+        attno,
+        parent_td,
+        kDna4AlphabetCode,
+        kDna4StorageWidth,
+        total_bp,
+        padding,
+        cap_bytes,
+        caches,
+        producer);
+}
+
+[[nodiscard]] std::uint64_t estimate_query_pair_peak_bytes(
+    const bioseq::sequences::generation::generator_params& params) noexcept {
+    const std::uint64_t mean = static_cast<std::uint64_t>(
+        std::max<std::size_t>(1, params.fragment_length_mean));
+    const std::uint64_t query_units =
+        (mean + kDna4LettersPerUnit - 1) / kDna4LettersPerUnit;
+    const std::uint64_t query_bytes =
+        bioseq::parallelism::saturating_mul(query_units, sizeof(std::uint64_t));
+    const std::uint64_t rank_scratch =
+        bioseq::parallelism::saturating_mul(mean, 2u);
+    return bioseq::parallelism::saturating_add(query_bytes, rank_scratch);
+}
 
 }  // namespace bioseq::sequences::generation::pg
 
@@ -279,13 +348,12 @@ Datum bioseq_create_sample_table(PG_FUNCTION_ARGS)
 
 // DOC0274 — `bioseq.create_query_target_sample_table(...)` UDF.
 //
-// Inlines the same simulation model `generate_test_sequences` uses (uniform
-// substitutions, normally-distributed indel lengths, optional reverse-
-// complement flipping) but emits one pair at a time and streams it straight
-// to the bioseq sub-table via `insert_sequence_streamed`. Peak RSS is
-// `reference_length` bytes (the shared reference vector) + one mutated-
-// fragment vector — independent of `fragment_count`. This keeps the 5 Gbp
-// `OUR_TEST_BASED_ON_XXL_HIFI` config viable in a single backend process.
+// Uses the DOC0335 generic generator's streaming API and writes each compact
+// query/target range straight to the bioseq sub-table via
+// `insert_sequence_streamed`. Peak RSS is the packed shared reference plus a
+// budgeted wave of query fragments — independent of the total fragment count.
+// This keeps the 5 Gbp `OUR_TEST_BASED_ON_XXL_HIFI` config viable in a single
+// backend process.
 //
 // Schema:
 //   id                     BIGSERIAL PRIMARY KEY
@@ -305,17 +373,17 @@ CXX_PG_FUNCTION_INFO_V1(bioseq_create_query_target_sample_table);
 Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
 {
     using namespace bioseq::sequences::generation::pg;
-    namespace gen_ns = bioseq::sequences::generation::HWY_NAMESPACE;
+    namespace gen_ns = bioseq::sequences::generation;
 
     if (PG_ARGISNULL(0)) {
         bioseq_log<ERR, PG>( "bioseq.create_query_target_sample_table: table_name required");
     }
     const char* const table_name_c = TextDatumGetCString(PG_GETARG_DATUM(0));
 
-    // GeneratorParams: positional args mirror the JSON schema in
+    // generator_params: positional args mirror the JSON schema in
     // bench_v10_configuration.json's data block. Defaults match the
     // generator's struct.
-    gen_ns::GeneratorParams params;
+    gen_ns::generator_params params;
     params.fragment_count       = PG_ARGISNULL(1)
         ? params.fragment_count       : static_cast<std::size_t>(PG_GETARG_INT32(1));
     params.fragment_length_mean = PG_ARGISNULL(2)
@@ -411,172 +479,64 @@ Datum bioseq_create_query_target_sample_table(PG_FUNCTION_ARGS)
     constexpr std::int16_t query_attno  = 2;
     constexpr std::int16_t target_attno = 3;
 
-    // Pack `count` dna4 letters from `src` into LSB-first 2-bit packed
-    // uint64_t units at `dst`. Mirrors the bench_alphabet_config layout but
-    // at 32 letters per uint64 (dna4 + uint64 storage). Uses `const auto*` so
-    // the seq::dna4 type doesn't have to be named at the extern "C" call site
-    // — clang's C++26 module visibility rules complain about a named seq::
-    // type in a lambda parameter even with `import sequan_compat;` present.
-    auto pack_letters_to_units =
-        [](const auto* src, std::size_t count, std::uint64_t* dst) noexcept {
-            std::size_t bp = 0;
-            std::size_t unit_idx = 0;
-            while (bp < count) {
-                const std::size_t letters_this_unit =
-                    std::min<std::size_t>(kDna4LettersPerUnit, count - bp);
-                std::uint64_t packed = 0;
-                for (std::size_t i = 0; i < letters_this_unit; ++i) {
-                    const std::uint64_t letter_2bit =
-                        static_cast<std::uint64_t>(src[bp + i].to_rank()) & 0x3ULL;
-                    packed |= letter_2bit << (i * 2);
-                }
-                dst[unit_idx] = packed;
-                ++unit_idx;
-                bp += letters_this_unit;
+    gen_ns::alphabet_sequence_generator<seq::dna4, std::uint64_t> generator(params);
+    auto reference = generator.generate_reference();
+
+    for (std::size_t first = 0; first < params.fragment_count; ) {
+        auto wave = bioseq::parallelism::try_reserve_budgeted_wave(
+            4096u, estimate_query_pair_peak_bytes(params));
+        const std::size_t batch_count = std::min<std::size_t>(
+            wave.admitted ? wave.fanout : 1u,
+            params.fragment_count - first);
+        auto batch = generator.generate_fragment_pairs(reference, first, batch_count);
+
+        for (std::size_t local = 0; local < batch.size(); ++local) {
+            const auto& pair = batch[local];
+            const sequence_size_t query_total_bp =
+                static_cast<sequence_size_t>(pair.query.bp_size());
+            const std::uint16_t query_padding =
+                static_cast<std::uint16_t>(pair.query.padding());
+            const sequence_size_t target_total_bp =
+                static_cast<sequence_size_t>(pair.target->bp_size());
+            const std::uint16_t target_padding =
+                static_cast<std::uint16_t>(pair.target->padding());
+
+            const bioseq::storage::seq_locator query_loc =
+                insert_compact_range_streamed(
+                    pair.query, parent_rel, parent_td, query_attno, cap_bytes, caches);
+            const bioseq::storage::seq_locator target_loc =
+                insert_compact_range_streamed(
+                    *pair.target, parent_rel, parent_td, target_attno, cap_bytes, caches);
+
+            pgseq_t* query_stub = bioseq::storage::alloc_locator_stub_in(
+                BioseqColumnWritePerTupleContext(write_state),
+                kDna4AlphabetCode, kDna4StorageWidth,
+                query_padding, query_total_bp, query_loc);
+            pgseq_t* target_stub = bioseq::storage::alloc_locator_stub_in(
+                BioseqColumnWritePerTupleContext(write_state),
+                kDna4AlphabetCode, kDna4StorageWidth,
+                target_padding, target_total_bp, target_loc);
+
+            bioseq::pg_utils::pg_slot_datums_view slot_values{slot};
+            slot_values.set(1, static_cast<std::int64_t>(first + local + 1));
+            slot_values.set_raw(2, bioseq::pg_utils::pg_datum::from_pointer(query_stub));
+            slot_values.set_raw(3, bioseq::pg_utils::pg_datum::from_pointer(target_stub));
+            slot_values.set(4, static_cast<std::int64_t>(pair.truth_target_start));
+            slot_values.set(5, static_cast<std::int64_t>(pair.truth_target_end));
+            slot_values.set(6, pair.is_reverse);
+            slot_values.set(7, pair.effective_error_rate);
+            slot_values.set(8, static_cast<std::int64_t>(pair.original_query_length));
+            slot_values.store_virtual();
+
+            Datum write_values[8];
+            bool write_nulls[8];
+            for (int idx = 0; idx < 8; ++idx) {
+                write_values[idx] = slot->tts_values[idx];
+                write_nulls[idx] = false;
             }
-        };
-
-    // (2) Build the shared random reference once. Stays alive for the whole
-    // UDF call — every pair's target is the SAME reference (just stored once
-    // per row in the sub-table since Phase C has no cross-row dedup). Uses
-    // `auto` so the seq::dna4 element type doesn't have to be named at the
-    // extern "C" call site (module-visibility avoidance — see comment above).
-    std::mt19937_64 rng{params.seed};
-    auto reference = gen_ns::detail::build_random_reference<seq::dna4>(
-        params.reference_length, rng);
-
-    // Pre-compute target storage metadata — every row's target is the same
-    // reference, so the padding/total_bp/num_fragments are identical too.
-    const sequence_size_t target_total_bp =
-        static_cast<sequence_size_t>(reference.size());
-    const std::uint16_t target_padding = static_cast<std::uint16_t>(
-        target_total_bp == 0
-            ? 0
-            : (((target_total_bp + kDna4LettersPerUnit - 1) / kDna4LettersPerUnit)
-                   * kDna4LettersPerUnit - target_total_bp));
-
-    std::uniform_real_distribution<double> probability(0.0, 1.0);
-
-    for (std::size_t pair_no = 0; pair_no < params.fragment_count; ++pair_no) {
-        const std::size_t fragment_length = gen_ns::detail::sample_fragment_length(
-            params.fragment_length_mean, params.fragment_length_stddev,
-            params.reference_length, rng);
-        std::uniform_int_distribution<std::size_t> start_dist(
-            0, params.reference_length - fragment_length);
-        const std::size_t fragment_start = start_dist(rng);
-        const std::size_t fragment_end = fragment_start + fragment_length;
-        decltype(reference) mutated_fragment(
-            reference.begin() + static_cast<std::ptrdiff_t>(fragment_start),
-            reference.begin() + static_cast<std::ptrdiff_t>(fragment_end));
-        const bool is_reverse = probability(rng) < params.reverse_complement_rate;
-        if (is_reverse) {
-            gen_ns::detail::reverse_complement_in_place(mutated_fragment);
+            (void) BioseqColumnWriteRow(write_state, write_values, write_nulls);
         }
-        gen_ns::detail::apply_uniform_substitutions(
-            mutated_fragment, params.substitution_rate, rng);
-        mutated_fragment = gen_ns::detail::apply_indels(
-            mutated_fragment,
-            params.insertion_rate, params.insertion_length_mean,
-            params.insertion_length_stddev,
-            params.deletion_rate, params.deletion_length_mean,
-            params.deletion_length_stddev,
-            rng);
-
-        const sequence_size_t query_total_bp =
-            static_cast<sequence_size_t>(mutated_fragment.size());
-        const std::uint16_t query_padding = static_cast<std::uint16_t>(
-            query_total_bp == 0
-                ? 0
-                : (((query_total_bp + kDna4LettersPerUnit - 1) / kDna4LettersPerUnit)
-                       * kDna4LettersPerUnit - query_total_bp));
-
-        // (3) Stream the query column.
-        auto query_producer = [&mutated_fragment, query_total_bp, query_padding,
-                               &pack_letters_to_units](
-            std::size_t frag_no, pgseq_t* dst, MemoryContext /*scratch*/, bool is_last) noexcept
-        {
-            const sequence_size_t frag_global_bp_start =
-                static_cast<sequence_size_t>(frag_no)
-                * static_cast<sequence_size_t>(kFragmentBp);
-            const sequence_size_t this_fragment_bp = is_last
-                ? (query_total_bp - frag_global_bp_start)
-                : static_cast<sequence_size_t>(kFragmentBp);
-            dst->bp_size         = static_cast<pgseq_t::bp_size_t>(this_fragment_bp);
-            dst->padding_letters = is_last ? query_padding : std::uint16_t{0};
-            pack_letters_to_units(
-                mutated_fragment.data() + frag_global_bp_start,
-                this_fragment_bp,
-                reinterpret_cast<std::uint64_t*>(dst->data));
-        };
-        const bioseq::storage::seq_locator query_loc =
-            bioseq::storage::bioseq_default_storage_manager::insert_sequence_streamed(
-                parent_rel->rd_locator.dbOid,
-                parent_rel->rd_locator.spcOid,
-                parent_rel->rd_locator.relNumber,
-                query_attno, parent_td,
-                kDna4AlphabetCode, kDna4StorageWidth,
-                query_total_bp, query_padding, cap_bytes,
-                caches, query_producer);
-
-        // (4) Stream the target column — same reference for every pair.
-        auto target_producer = [&reference, target_total_bp, target_padding,
-                                &pack_letters_to_units](
-            std::size_t frag_no, pgseq_t* dst, MemoryContext /*scratch*/, bool is_last) noexcept
-        {
-            const sequence_size_t frag_global_bp_start =
-                static_cast<sequence_size_t>(frag_no)
-                * static_cast<sequence_size_t>(kFragmentBp);
-            const sequence_size_t this_fragment_bp = is_last
-                ? (target_total_bp - frag_global_bp_start)
-                : static_cast<sequence_size_t>(kFragmentBp);
-            dst->bp_size         = static_cast<pgseq_t::bp_size_t>(this_fragment_bp);
-            dst->padding_letters = is_last ? target_padding : std::uint16_t{0};
-            pack_letters_to_units(
-                reference.data() + frag_global_bp_start,
-                this_fragment_bp,
-                reinterpret_cast<std::uint64_t*>(dst->data));
-        };
-        const bioseq::storage::seq_locator target_loc =
-            bioseq::storage::bioseq_default_storage_manager::insert_sequence_streamed(
-                parent_rel->rd_locator.dbOid,
-                parent_rel->rd_locator.spcOid,
-                parent_rel->rd_locator.relNumber,
-                target_attno, parent_td,
-                kDna4AlphabetCode, kDna4StorageWidth,
-                target_total_bp, target_padding, cap_bytes,
-                caches, target_producer);
-
-        // (5) Build stubs + write the parent row tuple.
-        pgseq_t* query_stub = bioseq::storage::alloc_locator_stub_in(
-            BioseqColumnWritePerTupleContext(write_state),
-            kDna4AlphabetCode, kDna4StorageWidth,
-            query_padding, query_total_bp, query_loc);
-        pgseq_t* target_stub = bioseq::storage::alloc_locator_stub_in(
-            BioseqColumnWritePerTupleContext(write_state),
-            kDna4AlphabetCode, kDna4StorageWidth,
-            target_padding, target_total_bp, target_loc);
-
-        const double effective_error_rate =
-            params.substitution_rate + params.insertion_rate + params.deletion_rate;
-
-        bioseq::pg_utils::pg_slot_datums_view slot_values{slot};
-        slot_values.set(1, static_cast<std::int64_t>(pair_no + 1));
-        slot_values.set_raw(2, bioseq::pg_utils::pg_datum::from_pointer(query_stub));
-        slot_values.set_raw(3, bioseq::pg_utils::pg_datum::from_pointer(target_stub));
-        slot_values.set(4, static_cast<std::int64_t>(fragment_start));
-        slot_values.set(5, static_cast<std::int64_t>(fragment_end));
-        slot_values.set(6, is_reverse);
-        slot_values.set(7, effective_error_rate);
-        slot_values.set(8, static_cast<std::int64_t>(fragment_length));
-        slot_values.store_virtual();
-
-        Datum  write_values[8];
-        bool   write_nulls[8];
-        for (int idx = 0; idx < 8; ++idx) {
-            write_values[idx] = slot->tts_values[idx];
-            write_nulls[idx]  = false;
-        }
-        (void) BioseqColumnWriteRow(write_state, write_values, write_nulls);
+        first += batch_count;
     }
 
     ExecDropSingleTupleTableSlot(slot);
