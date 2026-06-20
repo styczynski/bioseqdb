@@ -144,12 +144,12 @@ TEST_CASE("vulkan minimizer: dna5 with N parity (N resets the window)",
     }
 }
 
-TEST_CASE("vulkan minimizer: generic alphabet smoke (no throw / fallback)",
+TEST_CASE("vulkan minimizer: generic alphabet smoke (no throw / pre-dispatch decline)",
           "[vulkan][seeding][phase-b]") {
     // dna5 stored at uint8 (bits_per_char=3) is the generic-ambiguity path;
-    // the public API must either produce GPU output or fall back to scalar
-    // without throwing. We assert the call returns and the result, when
-    // present, equals the scalar reference (byte-identical via nt4).
+    // the low-level capability API must either produce GPU output or decline
+    // before dispatch without throwing. The selected pipeline layer converts
+    // such declines into hard errors.
     using seq_type = sequence_custom_alphabet<seq::dna5, std::uint8_t>;
     std::vector<seq::dna5> data = DNA5_WITH_T;
     auto seq = compact_sequence_range<seq_type>(data);

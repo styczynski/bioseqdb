@@ -13,10 +13,9 @@
  * `query_span` only, never sequence letters, so the same backend serves dna4 /
  * dna5 / any other alphabet (DOC0304 §8).
  *
- * Failure policy (DOC0304 §0, §4.1): `vulkan_enabled == false`, an unusable
- * device, too many anchors/ranges for Phase A, memory-admission failure, or any
- * `VulkanRuntimeError` falls back to `chain_anchors_scalar` BEFORE the output
- * slabs are mutated.
+ * Failure policy: if this backend is selected, Vulkan execution is mandatory.
+ * `vulkan_enabled == false`, an unusable device, unsupported shape,
+ * memory-admission failure, or any runtime error throws `VulkanRuntimeError`.
  */
 module;
 
@@ -140,11 +139,10 @@ build_gpu_chain_ranges(
     return {ranges.data(), range_count};
 }
 
-/// Attempt the Vulkan tiled-DP chaining path. Returns true if it produced the
-/// chains (output slabs written by `backtrack_chains`); returns false to
-/// request CPU fallback; throws `VulkanRuntimeError` on a GPU failure (caught by
-/// `chain_anchors_vulkan` before any output mutation).
-[[nodiscard]] inline bool try_chain_anchors_vulkan_impl(
+/// Run the Vulkan tiled-DP chaining path. Throws `VulkanRuntimeError` on any
+/// selected-GPU decline; algorithm fallback must be chosen by the caller before
+/// entering the pipeline.
+inline void run_chain_anchors_vulkan_impl(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
     ArenaSlab<Chain>& chains_out,
@@ -152,19 +150,21 @@ build_gpu_chain_ranges(
 {
     const std::size_t n = anchors.size();
     const std::uint64_t n64 = static_cast<std::uint64_t>(n);
-    if (n == 0) return true;
+    if (n == 0) return;
     if (!params.vulkan_enabled) {
-        bioseq_log<DBG>("[chaining_vulkan] Minimap2Params disabled Vulkan; CPU fallback");
-        return false;
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(
+            "Vulkan chaining selected but Minimap2Params disabled Vulkan");
     }
     if (n64 > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
-        bioseq_log<DBG>("[chaining_vulkan] too many anchors for Phase A Vulkan path: {}", n64);
-        return false;
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but anchor count {} exceeds uint32_t", n64));
     }
 
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
     if (!runtime.usable()) {
-        return false;
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but runtime is unavailable: {}",
+            runtime.initialization_error()));
     }
 
     int32_t max_dist_x = params.max_gap;
@@ -176,12 +176,11 @@ build_gpu_chain_ranges(
 
     const std::size_t range_count =
         count_gpu_chain_ranges(anchors, static_cast<std::uint64_t>(max_dist_x));
-    if (range_count == 0) return true;
+    if (range_count == 0) return;
     if (range_count > runtime.features().max_workgroup_count_x) {
-        bioseq_log<DBG>(
-            "[chaining_vulkan] {} ranges exceed maxComputeWorkGroupCount[0]={}; CPU fallback",
-            range_count, runtime.features().max_workgroup_count_x);
-        return false;
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but {} ranges exceed maxComputeWorkGroupCount[0]={}",
+            range_count, runtime.features().max_workgroup_count_x));
     }
 
     const std::uint64_t reserved_bytes =
@@ -189,10 +188,9 @@ build_gpu_chain_ranges(
     auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
         .try_reserve(reserved_bytes);
     if (!permit) {
-        bioseq_log<DBG>(
-            "[chaining_vulkan] memory admission failed for {} bytes; CPU fallback",
-            reserved_bytes);
-        return false;
+        throw bioseq::gpu::vulkan::VulkanRuntimeError(fmt::format(
+            "Vulkan chaining selected but memory admission failed for {} bytes",
+            reserved_bytes));
     }
 
     auto dp_scope = context::current().push<context::Arena::Chain>();
@@ -275,15 +273,12 @@ build_gpu_chain_ranges(
         chains_out,
         reordered_anchors_out);
 
-    return true;
 }
 
 }  // namespace detail
 
-/// Public entry point. Pins the `Anchor` ABI with static asserts, runs the
-/// Vulkan tiled-DP path, and falls back to `chain_anchors_scalar` if it returns
-/// false or throws — the fallback runs before `backtrack_chains` mutates the
-/// output slabs, so the public chaining call is always safe.
+/// Public entry point. Pins the `Anchor` ABI and runs the Vulkan tiled-DP path.
+/// If this backend is selected, no scalar fallback is allowed here.
 inline void chain_anchors_vulkan(
     std::span<const Anchor> anchors,
     const ChainingParams& params,
@@ -303,16 +298,8 @@ inline void chain_anchors_vulkan(
         bioseq::instr::register_region_static("chain_anchors_vulkan");
     auto _scope = bioseq::instr::region(_desc);
 
-    try {
-        if (detail::try_chain_anchors_vulkan_impl(
-                anchors, params, chains_out, reordered_anchors_out))
-        {
-            return;
-        }
-    } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& e) {
-        bioseq_log<DBG>("[chaining_vulkan] Vulkan failure; CPU fallback: {}", e.what());
-    }
-    chain_anchors_scalar(anchors, params, chains_out, reordered_anchors_out);
+    detail::run_chain_anchors_vulkan_impl(
+        anchors, params, chains_out, reordered_anchors_out);
 }
 
 }  // namespace bioseq::chaining

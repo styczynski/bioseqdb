@@ -26,6 +26,7 @@ import bioseq.sequences.cigar;
 import bioseq.alignment;
 import bioseq.alignment.utils;
 import bioseq.common.testing;
+import bioseq.gpu.vulkan.runtime;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -762,10 +763,9 @@ TEST_CASE("DOC0256 — dispatch_chain rejects rvalue args at compile time",
 // ============================================================================
 //
 // The full Vulkan front-end (GPU minimizers + GPU seed-hit lookup) must produce
-// the same primary match coordinates as the scalar CPU path; with Vulkan
-// disabled it must fall back to scalar with identical rows. On a machine with no
-// usable device the GPU kernels runtime-fall back, so both arms equal the CPU
-// reference (this also exercises the no-device fallback coverage of test 13).
+// the same primary match coordinates as the scalar CPU path. When a Vulkan
+// algorithm is selected, disabling Vulkan is an error; fallback selection must
+// happen before entering the pipe.
 namespace doc0307_e2e {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -838,7 +838,7 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
     REQUIRE(doc0307_e2e::coords(cpu_res) == doc0307_e2e::coords(gpu_res));
 }
 
-TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false == scalar",
+TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
           "[vulkan][phase-b][pipe]") {
     using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
     using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
@@ -847,19 +847,14 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false == scalar",
     auto target = doc0307_e2e::make_dna4(3000, 0x1234567u);
     std::vector<seq::dna4> query(target.begin() + 200, target.begin() + 900);
 
-    Minimap2Params scalar;
-    scalar.minimizer_algorithm = MinimizerAlgorithmType::SCALAR;
-    scalar.chaining_algorithm = ChainingAlgorithmType::SCALAR_MM2;
-    const auto scalar_res = doc0307_e2e::run(query, target, scalar);
-
     Minimap2Params disabled;
     disabled.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
     disabled.chaining_algorithm = ChainingAlgorithmType::VULKAN_TILED_DP;
-    disabled.vulkan_enabled = false;   // forces scalar fallback before touching Runtime
-    const auto disabled_res = doc0307_e2e::run(query, target, disabled);
+    disabled.vulkan_enabled = false;
 
-    REQUIRE_FALSE(scalar_res.results.empty());
-    REQUIRE(doc0307_e2e::coords(scalar_res) == doc0307_e2e::coords(disabled_res));
+    REQUIRE_THROWS_AS(
+        doc0307_e2e::run(query, target, disabled),
+        bioseq::gpu::vulkan::VulkanRuntimeError);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE::pipe

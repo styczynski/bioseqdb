@@ -186,46 +186,50 @@ template <class MinimizerT>
             : nullptr;
 
     // DOC0310 §14 — fused frontend: count + emit + device anchor sort on the GPU
-    // (no CPU prefix prepass, no CPU anchor sort). Falls back to the Phase B path
-    // (CPU prepass + GPU lookup) on any runtime error.
+    // (no CPU prefix prepass, no CPU anchor sort). If selected, failures are
+    // hard errors; Phase B is used only when fused_frontend is false.
     if (fused_frontend && max_occ >= 0) {
         const std::uint64_t reserve = vulkan_seed_reserved_bytes<MinimizerT>(
             query_minimizers.size(), query_minimizers.size(), fused_device_words != nullptr);
         auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
             .try_reserve(reserve);
-        if (permit) {
-            try {
-                bioseq::gpu::vulkan::PhaseCSeedInputs inputs{
-                    .host_minimizer_bytes = fused_device_words != nullptr
-                        ? std::span<const std::byte>{}
-                        : std::as_bytes(query_minimizers),
-                    .device_minimizer_words = fused_device_words,
-                    .slots = &resident_index->slots,
-                    .positions = &resident_index->positions,
-                    .slot_mask = resident_index->slot_mask,
-                    .position_count = resident_index->position_count,
-                    .minimizer_count = static_cast<std::uint32_t>(query_minimizers.size()),
-                    .minimizer_word_kind =
-                        static_cast<std::uint32_t>(minimizer_wire_traits<MinimizerT>::word_kind),
-                    .minimizer_words32_per_record =
-                        minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
-                    .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
-                    .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
-                    .bucket_count = resident_index->bucket_count,
-                };
-                auto anchors = runtime.run_phase_c_seed_roundtrip(
-                    inputs, query_len, static_cast<std::uint32_t>(kmer_size), max_occ);
-                anchors_out.reserve(anchors.count);
-                anchors_out.resize(anchors.count);
-                if (anchors.count > 0) {
-                    std::memcpy(anchors_out.data(), anchors.host_bytes.data(),
-                                anchors.count * sizeof(bioseq::chaining::Anchor));
-                }
-                return true;
-            } catch (const VulkanRuntimeError& e) {
-                bioseq_log<DBG>("[vulkan seeding] fused seed failed; Phase B fallback: {}", e.what());
-            }
+        if (!permit) {
+            throw VulkanRuntimeError(fmt::format(
+                "Vulkan fused seed lookup memory admission failed for {} bytes",
+                reserve));
         }
+        bioseq::gpu::vulkan::PhaseCSeedInputs inputs{
+            .host_minimizer_bytes = fused_device_words != nullptr
+                ? std::span<const std::byte>{}
+                : std::as_bytes(query_minimizers),
+            .device_minimizer_words = fused_device_words,
+            .slots = &resident_index->slots,
+            .positions = &resident_index->positions,
+            .slot_mask = resident_index->slot_mask,
+            .position_count = resident_index->position_count,
+            .minimizer_count = static_cast<std::uint32_t>(query_minimizers.size()),
+            .minimizer_word_kind =
+                static_cast<std::uint32_t>(minimizer_wire_traits<MinimizerT>::word_kind),
+            .minimizer_words32_per_record =
+                minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+            .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
+            .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
+            .bucket_count = resident_index->bucket_count,
+        };
+        auto anchors = runtime.run_phase_c_seed_roundtrip(
+            inputs, query_len, static_cast<std::uint32_t>(kmer_size), max_occ);
+        anchors_out.reserve(anchors.count);
+        anchors_out.resize(anchors.count);
+        if (anchors.count > 0) {
+            std::memcpy(anchors_out.data(), anchors.host_bytes.data(),
+                        anchors.count * sizeof(bioseq::chaining::Anchor));
+        }
+        return true;
+    }
+
+    if (fused_frontend && max_occ < 0) {
+        throw VulkanRuntimeError(
+            "Vulkan fused seed lookup selected but negative max_occ is unsupported");
     }
 
     SeedPrefixPlan prefix_plan;
@@ -292,9 +296,8 @@ template <class MinimizerT>
             anchors.host_bytes.data(),
             anchors.count * sizeof(bioseq::chaining::Anchor));
         return true;
-    } catch (const VulkanRuntimeError& e) {
-        bioseq_log<DBG>("[vulkan seeding] seed lookup failed; CPU fallback: {}", e.what());
-        return false;
+    } catch (const VulkanRuntimeError&) {
+        throw;
     }
 }
 

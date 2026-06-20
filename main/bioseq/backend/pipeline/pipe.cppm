@@ -129,6 +129,15 @@ using bioseq::indexing::MinimizerIndex;
 // DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
 
+[[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    const std::string detail = runtime.usable()
+        ? "GPU path declined"
+        : fmt::format("runtime unavailable: {}", runtime.initialization_error());
+    throw bioseq::gpu::vulkan::VulkanRuntimeError(
+        fmt::format("{} selected but Vulkan execution did not run ({})", stage, detail));
+}
+
 // DOC0256 §2.1 — the chain primitive is load-bearing on relaxed
 // template-template parameter matching (P0522R0) and C++20 class-type
 // NTTPs (carrying `auto...` packs that interleave enum NTTPs with
@@ -794,7 +803,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::RM
 
 /// Vulkan tiled-DP chaining (DOC0304 Phase A) — `chain_anchors_vulkan` from
 /// `bioseq_sequences.chaining.vulkan`. G3SA-style tiled DP score generation on
-/// Vulkan + bioseq CPU `backtrack_chains`; runtime-falls-back to scalar-mm2.
+/// Vulkan + bioseq CPU `backtrack_chains`; selected Vulkan execution is
+/// mandatory and failures throw `VulkanRuntimeError`.
 template <>
 struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VULKAN_TILED_DP> {
     struct kernel_type {
@@ -816,7 +826,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VU
             std::vector<NamedProperty>& props) noexcept
         {
             props.push_back({"phase", "A"});
-            props.push_back({"fallback", "scalar-mm2"});
+            props.push_back({"fallback", "none"});
             props.push_back({"uses_max_chain_skip", "false"});
             props.push_back({"vulkan_enabled", params.vulkan_enabled ? "true" : "false"});
         }
@@ -1191,8 +1201,8 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::T
 };
 
 /// DOC0307 Phase B — Vulkan minimap-int minimizer extraction. Reads packed
-/// `compact_sequence_range` storage directly on the GPU and falls back to the
-/// scalar mm-sketch when Vulkan is disabled or the GPU cannot run the shape.
+/// `compact_sequence_range` storage directly on the GPU. When this algorithm
+/// is selected, Vulkan execution is mandatory and failures throw.
 /// `call_result` exposes the resident device-minimizer buffer so the all-Vulkan
 /// sketch+seed path reuses it without a second upload (`may_emit_device_minimizers`).
 template <>
@@ -1207,17 +1217,13 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
             std::size_t window_size, std::size_t kmer_size)
         {
             if (!params.vulkan_enabled) {
-                minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
-                    collector, range, window_size, kmer_size);
-                return;
+                throw_vulkan_declined("Vulkan minimizer sketch");
             }
             if (!bioseq::gpu::vulkan::collect_minimizers_vulkan<MinimizerT>(
                     collector, range, window_size, kmer_size,
                     params.vulkan_fused_frontend_enabled))
             {
-                // Generic, behavior-preserving fallback (dna5 N-reset intact).
-                minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
-                    collector, range, window_size, kmer_size);
+                throw_vulkan_declined("Vulkan minimizer sketch");
             }
         }
 
@@ -1237,9 +1243,15 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
             const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
             Range& range, std::size_t window_size, std::size_t kmer_size)
         {
-            if (!params.vulkan_enabled) return std::nullopt;
-            return bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
+            if (!params.vulkan_enabled) {
+                throw_vulkan_declined("Vulkan minimizer sketch");
+            }
+            auto result = bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
                 range, window_size, kmer_size, params.vulkan_fused_frontend_enabled);
+            if (!result) {
+                throw_vulkan_declined("Vulkan minimizer sketch");
+            }
+            return result;
         }
 
         [[nodiscard]] static constexpr std::string_view algorithm_label() noexcept {
@@ -1251,7 +1263,6 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::V
             std::vector<NamedProperty>& props) noexcept
         {
             props.push_back({"accelerator", "vulkan"});
-            props.push_back({"fallback", "scalar-mm-sketch"});
             props.push_back({"vulkan_enabled", p.vulkan_enabled ? "true" : "false"});
         }
         template <is_constexpr_aligner_params Cep>
@@ -1837,9 +1848,11 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             static_cast<std::size_t>(target_index_ref.target_length()),
             kmer_size));
 
-        // DOC0307 §5.2 — attempt the GPU seed-hit lookup before the CPU path.
+        // DOC0307 §5.2 — run the selected GPU seed-hit lookup before the CPU
+        // path. If it declines, the selected Vulkan pipeline fails loudly.
         // Only the concrete MinimizerHashmapFragmentIndex carries the GPU view.
         if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
+            bool seed_gpu_declined = false;
             if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                           bioseq::indexing::MinimizerHashmapFragmentIndex>) {
                 auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
@@ -1866,7 +1879,15 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         return std::move(token).emit_batch(
                             std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
                     }
+                    seed_gpu_declined = true;
+                } else {
+                    seed_gpu_declined = true;
                 }
+            } else {
+                seed_gpu_declined = true;
+            }
+            if (seed_gpu_declined) {
+                throw_vulkan_declined("Vulkan seed lookup");
             }
         }
 
@@ -1957,7 +1978,7 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
         algo.parameters.push_back({"bandwidth",       std::to_string(cp.bandwidth)});
         algo.parameters.push_back({"max_gap",         std::to_string(cp.max_gap)});
         // Let the selected kernel append its own runtime params (e.g. the
-        // Vulkan backend's phase / fallback / vulkan_enabled markers) so the
+        // Vulkan backend's phase / vulkan_enabled markers) so the
         // EXPLAIN metadata is not dead code. No-op for the scalar/SIMD/RMQ
         // kernels (DOC0304 §7.2).
         Kernel::populate_runtime_params(cp, algo.parameters);
@@ -2454,8 +2475,9 @@ template <is_constexpr_aligner_params Cep,
     const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
 
     // DOC0307 §4.4/§5.2 — one GPU index cache for the whole batch wave, shared
-    // across queries that look up the same target index. Gated on
-    // `vulkan_enabled` so the disabled path never touches `Runtime::instance()`.
+    // across queries that look up the same target index. When a Vulkan seed
+    // path is selected, runtime/device failure is reported before scalar work
+    // can masquerade as a GPU row.
     std::optional<bioseq::indexing::GpuMinimizerIndexCache> gpu_index_cache;
     if (params.vulkan_enabled && params.vulkan_seed_hits_enabled) {
         bioseq::gpu::vulkan::Runtime& gpu_rt = bioseq::gpu::vulkan::Runtime::instance();
@@ -2473,10 +2495,8 @@ template <is_constexpr_aligner_params Cep,
     // it into the wave cache under the key the SeedHitStage will compute, so the
     // CPU `MinimizerHashmapFragmentIndex` build (skipped upstream in
     // `minimap2_port` for this leaf) is never paid. If the device build declines
-    // we sketch + build a local CPU index so seeding still works (effective
-    // index pointer redirects to it).
+    // this selected GPU path fails loudly.
     const IndexT* effective_index_ptr = &target_index;
-    std::optional<bioseq::indexing::MinimizerHashmapFragmentIndex> local_fallback_index;
     if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                   bioseq::indexing::MinimizerHashmapFragmentIndex>) {
         if (gpu_index_cache_ptr != nullptr && phase_c_index_build_active(params)
@@ -2506,21 +2526,7 @@ template <is_constexpr_aligner_params Cep,
                 bioseq_log<ERR>("[phase_c] runtime not usable for GPU index build");
             }
             if (!injected) {
-                bioseq_log<ERR>("[phase_c] FALLING BACK to CPU target index build (target_len={})", target_len);
-                // Device build declined: build a CPU index locally so the seed
-                // stage still has data (rare; only fires if the GPU path failed
-                // after `minimap2_port` skipped the CPU build for this leaf).
-                sketch_collector_t<MinimizerT> target_collector;
-                target_collector.reserve(static_cast<std::size_t>(target_len)
-                    / std::max<std::size_t>(static_cast<std::size_t>(params.window_size), 1u) + 64u);
-                minimizer_dispatch<MinKernelKind::Scalar, MinimizerT>(
-                    target_collector, target_seq,
-                    static_cast<std::size_t>(params.window_size),
-                    static_cast<std::size_t>(params.kmer_size));
-                auto target_minimizers = std::move(target_collector).extract_sketches_data();
-                local_fallback_index.emplace();
-                local_fallback_index->build(target_minimizers, target_len);
-                effective_index_ptr = &*local_fallback_index;
+                throw_vulkan_declined("Phase C GPU target-index build");
             }
         }
     }
@@ -3446,12 +3452,11 @@ template <class MinimizerT,
     const sequence_size_t target_len = target_seq.bp_size();
     MinimizerHashmapFragmentIndex target_index;
     // DOC0310 §16 — for the Phase C leaf with the GPU index build active, leave
-    // the CPU index empty; `pipeline_run_impl_batch` builds it on the device (or
-    // a local CPU fallback). This is the line that removes the XXL_HIFI
+    // the CPU index empty; `pipeline_run_impl_batch` must build it on the
+    // device. This is the line that removes the XXL_HIFI
     // `target_index_build` bottleneck from the GPU row.
     const bool phase_c_gpu_index =
-        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params)
-        && bioseq::gpu::vulkan::Runtime::instance().usable();
+        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
     if (!phase_c_gpu_index) {
         target_index.build(target_minimizers, target_len);
     }
@@ -3576,11 +3581,11 @@ template <class MinimizerT,
     const std::size_t kmer_len   = static_cast<std::size_t>(params.kmer_size);
 
     // DOC0310 §16 — skip the host target sketch for the Phase C GPU-index leaf;
-    // the device index build sketches the target itself (avoids a double sketch).
+    // the device index build sketches the target itself. If that selected GPU
+    // path cannot run, the pipeline throws instead of rebuilding on CPU.
     std::vector<MinimizerT> target_minimizers;
     const bool phase_c_gpu_index =
-        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params)
-        && bioseq::gpu::vulkan::Runtime::instance().usable();
+        ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
     if (!phase_c_gpu_index) {
         sketch_collector_t<MinimizerT> target_collector;
         sketch_into_collector<MinimizerT>(
@@ -3889,9 +3894,11 @@ template <class MinimizerT, class QuerySeq>
 [[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
     QuerySeq& query_seq, const Minimap2Params& params, std::size_t w, std::size_t k)
 {
-    if (params.vulkan_enabled
-        && params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
+    if (params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
     {
+        if (!params.vulkan_enabled) {
+            pipe::throw_vulkan_declined("Vulkan query minimizer sketch");
+        }
         if (auto gpu_sketch =
                 bioseq::gpu::vulkan::collect_minimizers_vulkan_result<MinimizerT>(
                     query_seq, w, k))
@@ -3902,6 +3909,7 @@ template <class MinimizerT, class QuerySeq>
                 .device = gpu_sketch->device_span(),
             };
         }
+        pipe::throw_vulkan_declined("Vulkan query minimizer sketch");
     }
 
     sketch_collector_t<MinimizerT> query_collector;

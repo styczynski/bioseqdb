@@ -1,7 +1,7 @@
 /**
  * @file sequence_generator.cppm
- * @brief Generic synthetic sequence generator with Vulkan HybridTaus offload
- *        and bit-identical TBB CPU fallback.
+ * @brief Generic synthetic sequence generator with optional Vulkan HybridTaus
+ *        offload and bit-identical TBB CPU generation.
  */
 module;
 
@@ -17,6 +17,7 @@ module;
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -30,6 +31,7 @@ import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pool;
 import bioseq.sequences;
 import bioseq.sequences.generation.vulkan;
+import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::sequences::generation {
 
@@ -51,6 +53,10 @@ struct generator_params {
 
     double        reverse_complement_rate = 0.5;
     std::uint64_t seed                    = 42;
+
+    /// Explicit selector for the Vulkan HybridTaus generator. When enabled,
+    /// dispatch failure is fatal; ordinary callers stay on the CPU path.
+    bool use_vulkan = false;
 };
 
 template <sequence_alphabet p_alphabet_t>
@@ -426,6 +432,21 @@ struct indel_event_counts {
     std::uint64_t deleted_bp = 0;
 };
 
+[[noreturn]] inline void throw_vulkan_generation_unavailable(const char* operation) {
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    std::string message = "Vulkan sequence generation selected but ";
+    message += operation;
+    message += " cannot run";
+    if (!runtime.usable()) {
+        message += ": runtime unavailable";
+        if (!runtime.initialization_error().empty()) {
+            message += ": ";
+            message += runtime.initialization_error();
+        }
+    }
+    throw bioseq::gpu::vulkan::VulkanRuntimeError(message);
+}
+
 template <typename Traits, typename OutVec>
 void apply_indels(
     std::span<const typename Traits::letter_unit> in_ranks,
@@ -519,45 +540,51 @@ public:
         std::vector<seq_t> out;
         out.reserve(count);
 
-        if constexpr (vulkan::gpu_generatable<seq_traits>) {
-            const std::uint64_t total_units = bioseq::parallelism::saturating_mul(
-                static_cast<std::uint64_t>(count), units);
-            if (total_units != (std::numeric_limits<std::uint64_t>::max)() &&
-                total_units <= static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) &&
-                vulkan::can_generate_units_vulkan<seq_traits>(
-                    symbols,
-                    static_cast<std::uint64_t>(count),
-                    params_.seed,
-                    kChunkUnits)) {
-                const auto cdf_span = std::span<const std::uint32_t>{kCdf.data(), kCdf.size()};
-                const std::uint64_t reserve =
-                    vulkan::estimate_generate_units_peak_bytes<seq_traits>(total_units, cdf_span);
-                auto permit =
-                    bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(reserve);
-                if (permit) {
-                    std::vector<unit_t> block(static_cast<std::size_t>(total_units));
-                    const bool on_gpu = vulkan::try_generate_units_vulkan<seq_traits>(
-                        block,
+        if (params_.use_vulkan) {
+            if constexpr (!vulkan::gpu_generatable<seq_traits>) {
+                throw_vulkan_generation_unavailable("generate_sequences");
+            } else {
+                const std::uint64_t total_units = bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(count), units);
+                if (total_units != (std::numeric_limits<std::uint64_t>::max)() &&
+                    total_units <=
+                        static_cast<std::uint64_t>((std::numeric_limits<std::size_t>::max)()) &&
+                    vulkan::can_generate_units_vulkan<seq_traits>(
                         symbols,
                         static_cast<std::uint64_t>(count),
-                        cdf_span,
                         params_.seed,
-                        kChunkUnits,
-                        true);
-                    if (on_gpu) {
-                        const std::size_t units_size = static_cast<std::size_t>(units);
-                        for (std::size_t seq_index = 0; seq_index < count; ++seq_index) {
-                            std::vector<unit_t> data(units_size);
-                            const std::size_t first = seq_index * units_size;
-                            std::copy(
-                                block.begin() + static_cast<std::ptrdiff_t>(first),
-                                block.begin() + static_cast<std::ptrdiff_t>(first + units_size),
-                                data.begin());
-                            out.push_back(seq_t::from_packed(std::move(data), padding));
+                        kChunkUnits)) {
+                    const auto cdf_span = std::span<const std::uint32_t>{kCdf.data(), kCdf.size()};
+                    const std::uint64_t reserve =
+                        vulkan::estimate_generate_units_peak_bytes<seq_traits>(total_units, cdf_span);
+                    auto permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(reserve);
+                    if (permit) {
+                        std::vector<unit_t> block(static_cast<std::size_t>(total_units));
+                        const bool on_gpu = vulkan::try_generate_units_vulkan<seq_traits>(
+                            block,
+                            symbols,
+                            static_cast<std::uint64_t>(count),
+                            cdf_span,
+                            params_.seed,
+                            kChunkUnits,
+                            true);
+                        if (on_gpu) {
+                            const std::size_t units_size = static_cast<std::size_t>(units);
+                            for (std::size_t seq_index = 0; seq_index < count; ++seq_index) {
+                                std::vector<unit_t> data(units_size);
+                                const std::size_t first = seq_index * units_size;
+                                std::copy(
+                                    block.begin() + static_cast<std::ptrdiff_t>(first),
+                                    block.begin() + static_cast<std::ptrdiff_t>(first + units_size),
+                                    data.begin());
+                                out.push_back(seq_t::from_packed(std::move(data), padding));
+                            }
+                            return out;
                         }
-                        return out;
                     }
                 }
+                throw_vulkan_generation_unavailable("generate_sequences");
             }
         }
 
@@ -583,14 +610,22 @@ public:
         static constexpr auto kCdf = make_integer_cdf(Prob::probability());
 
         std::vector<unit_t> data(static_cast<std::size_t>(units));
-        const bool on_gpu = vulkan::try_generate_units_vulkan<seq_traits>(
-            data,
-            symbols,
-            1,
-            std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
-            params_.seed,
-            kChunkUnits);
-        if (!on_gpu) {
+        if (params_.use_vulkan) {
+            if constexpr (!vulkan::gpu_generatable<seq_traits>) {
+                throw_vulkan_generation_unavailable("generate_reference");
+            } else if (!vulkan::can_generate_units_vulkan<seq_traits>(
+                           symbols, 1, params_.seed, kChunkUnits)) {
+                throw_vulkan_generation_unavailable("generate_reference");
+            } else if (!vulkan::try_generate_units_vulkan<seq_traits>(
+                           data,
+                           symbols,
+                           1,
+                           std::span<const std::uint32_t>{kCdf.data(), kCdf.size()},
+                           params_.seed,
+                           kChunkUnits)) {
+                throw_vulkan_generation_unavailable("generate_reference");
+            }
+        } else {
             generate_units_cpu_for_sequence<seq_traits>(
                 data,
                 symbols,
