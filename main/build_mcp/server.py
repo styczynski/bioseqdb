@@ -141,6 +141,127 @@ CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = 90.0
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
 
+# Prompt template injected into every `subagent` call.
+# Placeholders replaced at call time via str.replace (not f-string so the JSON
+# braces in the response schema don't need escaping):
+#   {requested_outputs_section}  — injected list of named outputs or empty string
+#   {parent_prompt}              — the caller's task prompt
+_SUBAGENT_PROMPT_TEMPLATE = (
+    "# Context\n"
+    "You are subagent spawned from main AI agent. Your task will be stated in prompt "
+    "(from parent AI agent) below.\n\n"
+    "CRITICAL RULES — you must follow these unconditionally:\n"
+    "- This is a NON-INTERACTIVE session. You must NEVER ask questions or request clarification.\n"
+    "- You must complete ALL work described in the prompt in a single run. No deferring, no "
+    "'I will do this later', no partial work. Leaving any part of the task unfinished is a "
+    "CRITICAL FAILURE.\n"
+    "- If anything is ambiguous, make a reasonable decision and proceed. Document your decision "
+    "in task_status.\n\n"
+    "Always follow this workflow no matter what the prompt underneath says:\n"
+    "1. Read main/DOCS/CURRENT/GUIDELINES/0321_BIOSEQ_CODE_AND_WORKFLOW_GUIDELINES.md in full\n"
+    "2. Read prompt content and do ALL tasks specified there in full. Before finishing, spawn a "
+    "subagent that will review your response (this is to ensure the parent AI agent gets the "
+    "highest quality answer possible). Iterate this review subagent until saturation (no further "
+    "feedback). The review subagent must also follow the non-interactive, no-deferral rules.\n"
+    "3. Return response to the parent AI agent in the JSON format. The response format should "
+    "follow this pattern:\n"
+    "{\n"
+    '    "task_status": "Detailed information about completion of this task",\n'
+    '    "bugs": "Any bugs you found that needs to be flagged",\n'
+    '    "risks": "Any risks you found that needs to be flagged",\n'
+    '    "changed_files": [],\n'
+    '    "review_tldr": [],\n'
+    '    "output": []\n'
+    "}\n"
+    "The `output` array must contain one string entry per requested output (see below), "
+    "in the same order they were listed. Each entry is a free-form string — prose, code, "
+    "bullet points, whatever best answers that specific request.\n"
+    "{requested_outputs_section}\n"
+    "# Prompt\n"
+    "PROMPT FROM PARENT AI AGENT PASTED AS-IS BELOW:\n"
+    "{parent_prompt}"
+)
+
+def _build_requested_outputs_section(requested_outputs: list[str]) -> str:
+    """Render the requested_outputs list into the prompt section that tells the
+    subagent exactly what to put in each slot of the `output` array."""
+    if not requested_outputs:
+        return (
+            "No specific outputs were requested by the parent agent. "
+            "Leave the `output` array empty ([]).\n\n"
+        )
+    lines = [
+        "\n# Requested Outputs\n"
+        "The parent agent wants the following items in the `output` array, "
+        "one element per item, in this exact order:\n"
+    ]
+    for i, item in enumerate(requested_outputs, 1):
+        lines.append(f"{i}. {item}")
+    lines.append("\n")
+    return "\n".join(lines)
+
+
+# --------------------------- subagent state --------------------------------
+# Mirrors the build-worker pattern: one detached process, one state file, one
+# lock file.  At most one subagent runs at a time (no lock groups needed).
+
+SUBAGENT_STATE_FILE = Path("/tmp/bioseq_subagent_mcp_state.json")
+SUBAGENT_LOCK_FILE  = Path("/tmp/bioseq_subagent_mcp.lock")
+# Hard ceiling applied inside the worker regardless of the caller's timeout_sec.
+SUBAGENT_HARD_TIMEOUT_SEC = 90 * 60.0
+
+
+@contextlib.contextmanager
+def _subagent_global_lock():
+    SUBAGENT_LOCK_FILE.touch()
+    fd = os.open(str(SUBAGENT_LOCK_FILE), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _load_subagent_state() -> dict:
+    if not SUBAGENT_STATE_FILE.exists():
+        return {}
+    try:
+        with SUBAGENT_STATE_FILE.open("r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_subagent_state(state: dict) -> None:
+    SUBAGENT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SUBAGENT_STATE_FILE.with_suffix(".json.tmp")
+    with tmp.open("w") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    tmp.replace(SUBAGENT_STATE_FILE)
+
+
+def _update_subagent_entry(**fields) -> None:
+    state = _load_subagent_state()
+    state.update(fields)
+    _save_subagent_state(state)
+
+
+def _refresh_subagent(state: dict) -> dict:
+    """Promote a 'running' entry whose worker pid is dead to 'aborted'."""
+    if state.get("status") == "running" and not _is_pid_alive(state.get("pid")):
+        state = dict(state)
+        state["status"] = "aborted"
+        state["step"] = "aborted"
+        if not state.get("completed_at"):
+            state["completed_at"] = time.time()
+        _save_subagent_state(state)
+    return state
+
+
 @dataclass
 class ModeDefinition:
     """
@@ -1056,6 +1177,227 @@ def tool_status(mode: str) -> str:
     return f"{mode_details.label} status: {status}. Log: {log_path}"
 
 
+# --------------------------- subagent worker ----------------------------------
+
+def _run_subagent_worker() -> int:
+    """Detached worker entry point — invoked via --run-subagent.
+
+    Reads the full prompt and config from SUBAGENT_STATE_FILE (written by
+    tool_subagent before spawning this process), runs codex exec, streams
+    its JSONL output to the log file, and captures the final message via
+    --output-last-message.  Updates state on every significant transition so
+    subagent_status always reflects reality.
+    """
+    state = _load_subagent_state()
+    if not state:
+        _log("subagent worker: no state entry, exiting")
+        return 1
+
+    started_at = float(state["started_at"])
+    log_path    = Path(state["log_file"])
+    result_path = Path(state["result_file"])
+    timeout_sec = float(state.get("timeout_sec", 3600))
+    deadline    = started_at + min(timeout_sec, SUBAGENT_HARD_TIMEOUT_SEC)
+
+    prompt            = state.get("prompt", "")
+    requested_outputs = state.get("requested_outputs") or []
+
+    outputs_section = _build_requested_outputs_section(requested_outputs)
+    full_prompt = (
+        _SUBAGENT_PROMPT_TEMPLATE
+        .replace("{requested_outputs_section}", outputs_section)
+        .replace("{parent_prompt}", prompt)
+    )
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("w", buffering=1)
+    log_handle.write(
+        f"# bioseq subagent worker — pid={os.getpid()} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
+        f"# project_root={PROJECT_ROOT}\n"
+        f"# timeout_sec={timeout_sec} (hard ceiling {SUBAGENT_HARD_TIMEOUT_SEC/60:.0f} min)\n"
+        f"# result_file={result_path}\n"
+    )
+    log_handle.flush()
+
+    env = os.environ.copy()
+
+    try:
+        _update_subagent_entry(step="running")
+
+        cmd = [
+            "codex", "exec",
+            "--json",
+            "--output-last-message", str(result_path),
+            "-C", str(PROJECT_ROOT),
+            full_prompt,
+        ]
+        rc = _stream_subprocess(cmd, log_handle, deadline,
+                                cwd=PROJECT_ROOT, env=env)
+
+        completed_at = time.time()
+        _update_subagent_entry(
+            status="completed" if rc == 0 else "failed",
+            step="completed"  if rc == 0 else "failed",
+            completed_at=completed_at,
+            exit_code=rc,
+            notes=None if rc == 0 else f"codex exited with code {rc}",
+        )
+        log_handle.write(
+            f"\n# worker exiting (rc={rc}) at "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
+        )
+        return 0 if rc == 0 else 1
+
+    except TimeoutError as e:
+        completed_at = time.time()
+        _update_subagent_entry(
+            status="killed_timeout",
+            step="killed_timeout",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(e),
+        )
+        log_handle.write(f"\n# killed by hard timeout: {e}\n")
+        return 124
+
+    except Exception as e:
+        completed_at = time.time()
+        _update_subagent_entry(
+            status="failed",
+            step="failed",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(e),
+        )
+        log_handle.write(f"\n# worker failed: {e}\n")
+        return 1
+
+    finally:
+        log_handle.close()
+
+
+def tool_subagent(prompt: str, timeout_sec: int = 3600,
+                  requested_outputs: Optional[List[str]] = None) -> str:
+    """Schedule a Codex cross-model subagent (non-blocking).
+
+    Spawns a detached worker process (identical pattern to start_build) and
+    returns immediately.  Use subagent_status to poll for completion and read
+    the result.  At most one subagent runs at a time; a second call while one
+    is running returns the current status instead of starting a duplicate.
+    """
+    if not prompt or not prompt.strip():
+        return "Error: prompt must be a non-empty string."
+
+    with _subagent_global_lock():
+        state = _refresh_subagent(_load_subagent_state())
+        if state.get("status") == "running":
+            elapsed_min = (time.time() - float(state["started_at"])) / 60.0
+            return (
+                f"A subagent is already running (pid={state.get('pid')}, "
+                f"elapsed={elapsed_min:.1f} min). "
+                f"Use subagent_status to check progress. "
+                f"Log: {state.get('log_file')}"
+            )
+
+        started_at = time.time()
+        timestamp  = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
+        log_path    = LOG_DIR / f"bioseq_subagent_mcp_{timestamp}.log"
+        result_path = LOG_DIR / f"bioseq_subagent_mcp_{timestamp}.result.json"
+
+        server_path = Path(__file__).resolve()
+        proc = subprocess.Popen(
+            [sys.executable, str(server_path), "--run-subagent"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+
+        _save_subagent_state({
+            "status":            "running",
+            "step":              "spawning",
+            "started_at":        started_at,
+            "completed_at":      None,
+            "pid":               proc.pid,
+            "log_file":          str(log_path),
+            "result_file":       str(result_path),
+            "exit_code":         None,
+            "notes":             None,
+            "timeout_sec":       timeout_sec,
+            "prompt":            prompt,
+            "requested_outputs": requested_outputs or [],
+            "prompt_preview":    prompt[:200],
+        })
+        _log(f"started subagent worker pid={proc.pid} log={log_path}")
+
+    return (
+        f"Subagent scheduled (pid={proc.pid}). "
+        f"Use subagent_status to check progress and retrieve the result. "
+        f"Log: {log_path}. Result will be written to: {result_path}"
+    )
+
+
+def tool_subagent_status() -> str:
+    """Return the current status of the most recently scheduled subagent."""
+    state = _load_subagent_state()
+    if not state:
+        return "No subagent has been scheduled yet. Use the subagent tool to spawn one."
+
+    state = _refresh_subagent(state)
+    status   = state.get("status", "unknown")
+    log_path = state.get("log_file", "(no log)")
+    result_path = state.get("result_file", "(no result file)")
+    preview  = state.get("prompt_preview", "")
+
+    if status == "running":
+        elapsed_min = (time.time() - float(state["started_at"])) / 60.0
+        eta_min     = max(0.0, float(state.get("timeout_sec", 3600)) / 60.0 - elapsed_min)
+        step        = state.get("step", "running")
+        return (
+            f"Subagent is running (pid={state.get('pid')}, "
+            f"elapsed={elapsed_min:.1f} min, ETA ≤{eta_min:.0f} min). "
+            f"Step: {step}. Prompt preview: {preview!r}. "
+            f"Log: {log_path}"
+        )
+
+    started_at   = float(state.get("started_at", time.time()))
+    completed_at = float(state.get("completed_at") or time.time())
+    duration_min = (completed_at - started_at) / 60.0
+
+    if status == "completed":
+        msg = (
+            f"Subagent completed in {duration_min:.1f} min. "
+            f"Result: {result_path}. Log: {log_path}"
+        )
+        try:
+            result_text = Path(result_path).read_text(encoding="utf-8", errors="replace")
+            if len(result_text) <= 8000:
+                msg += f"\n\nResult content:\n{result_text}"
+            else:
+                msg += (f"\n\nResult file is large ({len(result_text)} chars); "
+                        f"read {result_path} directly.")
+        except OSError:
+            msg += "\n\n(result file not found or unreadable)"
+        return msg
+
+    if status == "killed_timeout":
+        return (
+            f"Subagent was killed by the hard timeout after {duration_min:.1f} min. "
+            f"Log: {log_path}"
+        )
+
+    if status in ("failed", "aborted"):
+        notes = state.get("notes") or "(no notes)"
+        return (
+            f"Subagent {status} after {duration_min:.1f} min: {notes}. "
+            f"Log: {log_path}"
+        )
+
+    return f"Subagent status: {status}. Log: {log_path}"
+
+
 # --------------------------- MCP protocol layer ----------------------------
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -1288,6 +1630,78 @@ TOOL_DEFINITIONS = [
             "required": ["function_name"],
         },
     },
+    {
+        "name": "subagent",
+        "description": (
+            "CROSS-MODEL SUBAGENT ONLY — this tool is specifically for delegating work to a "
+            "different AI model (Codex). For same-model subtasks use the built-in Agent tool "
+            "instead; reserve this tool for hard tasks that genuinely benefit from an independent "
+            "model's perspective (e.g. deep refactors, second-opinion code reviews, complex "
+            "multi-file edits).\n\n"
+            "Schedules a detached Codex subagent (returns immediately — mirrors the start_build "
+            "pattern). At most one subagent runs at a time; calling while one is already running "
+            "returns the current status instead of starting a duplicate. "
+            "Use subagent_status to poll for completion and read the result.\n\n"
+            "The subagent: (1) reads the project coding guidelines "
+            "(0321_BIOSEQ_CODE_AND_WORKFLOW_GUIDELINES.md), (2) executes the given task in full "
+            "(non-interactive, no deferral), (3) self-reviews via a nested sub-subagent until "
+            "saturation, and (4) writes a structured JSON result file containing:\n"
+            "  task_status  — detailed completion summary\n"
+            "  bugs         — bugs surfaced during the task\n"
+            "  risks        — risks to flag to the parent agent\n"
+            "  changed_files — list of files modified\n"
+            "  review_tldr  — key takeaways from the self-review pass\n"
+            "  output       — one entry per requested_output item, in order"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "The task prompt to send to the Codex subagent. Write it as you "
+                        "would a detailed ticket: include context, goals, acceptance criteria, "
+                        "and any file paths or symbols the subagent should focus on."
+                    ),
+                },
+                "requested_outputs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional list of named outputs you want the subagent to produce "
+                        "in the `output` array of its JSON response. Each string is a "
+                        "free-form request — e.g. 'review feedback summary', "
+                        "'describe the most critical bug found', 'list all changed APIs'. "
+                        "The subagent fills one `output` slot per item, in the same order. "
+                        "Omit or pass [] to leave `output` empty."
+                    ),
+                },
+                "timeout_sec": {
+                    "type": "integer",
+                    "default": 3600,
+                    "minimum": 60,
+                    "maximum": 7200,
+                    "description": "Hard timeout in seconds (default 3600 = 60 min).",
+                },
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "subagent_status",
+        "description": (
+            "Report the status of the most recently scheduled subagent. "
+            "While running, returns current step, elapsed time, and ETA. "
+            "After completion, returns the full result content (if ≤ 8 KB) "
+            "or the path to the result file for larger outputs, plus the "
+            "log file path for detailed JSONL event inspection."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
 ]
 
 # --------------------------- document tools (Goal C) -----------------------
@@ -1505,6 +1919,16 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_status(mode)
     elif name == "inspect":
         text = tool_inspect(args)
+    elif name == "subagent":
+        prompt_text = args.get("prompt", "")
+        timeout_sec = int(args.get("timeout_sec", 3600))
+        requested_outputs = args.get("requested_outputs") or []
+        if not isinstance(requested_outputs, list):
+            requested_outputs = []
+        text = tool_subagent(prompt_text, timeout_sec=timeout_sec,
+                             requested_outputs=requested_outputs)
+    elif name == "subagent_status":
+        text = tool_subagent_status()
     elif name in ("doc_create", "doc_archive", "doc_search", "doc_read"):
         # Doc-tool requests are JSON-Schema-validated server-side inside operations
         # (docs/schemas.py). ensure_doc_env() lazily provisions qmd + jsonschema on first use.
@@ -1587,7 +2011,18 @@ def main() -> int:
             "'false' uses the lean `bench-opt` preset (DOC0270)."
         ),
     )
+    parser.add_argument(
+        "--run-subagent",
+        action="store_true",
+        default=False,
+        help=(
+            "(internal) run as a detached subagent worker; reads prompt and "
+            "config from SUBAGENT_STATE_FILE and invokes codex exec"
+        ),
+    )
     args = parser.parse_args()
+    if args.run_subagent:
+        return _run_subagent_worker()
     if args.run_build is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)

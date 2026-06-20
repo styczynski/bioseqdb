@@ -16,7 +16,6 @@ module;
 
 export module bioseq.sequences.generation.vulkan;
 
-import bioseq.common.mlogging;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
@@ -138,18 +137,13 @@ template <typename Traits>
             }
         }
 
-        try {
-            auto buffer = runtime.run_generate_units_roundtrip(
-                static_cast<std::uint32_t>(sizeof(unit_t) * 8),
-                cdf,
-                *push,
-                out_bytes);
-            runtime.download_slice(buffer, 0, std::as_writable_bytes(out_units));
-            return true;
-        } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& e) {
-            bioseq_log<DBG>("[generation.vulkan] GPU generate failed; CPU fallback: {}", e.what());
-            return false;
-        }
+        auto buffer = runtime.run_generate_units_roundtrip(
+            static_cast<std::uint32_t>(sizeof(unit_t) * 8),
+            cdf,
+            *push,
+            out_bytes);
+        runtime.download_slice(buffer, 0, std::as_writable_bytes(out_units));
+        return true;
     }
 }
 

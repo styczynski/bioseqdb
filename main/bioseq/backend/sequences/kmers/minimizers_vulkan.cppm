@@ -11,7 +11,8 @@
  *     both the host `std::vector<MinimizerT>` and the resident device buffer for
  *     seed-lookup reuse.
  *   - `collect_minimizers_vulkan(...)` is the collector-compatible wrapper for
- *     existing call sites; it returns false to request the scalar fallback.
+ *     existing call sites; null optional results mean the GPU shape was
+ *     ineligible, while runtime failures propagate as `VulkanRuntimeError`.
  *
  * Every C++ entry point is alphabet-generic; only the shader specialises
  * (DOC0307 §0, §9). `params.vulkan_enabled == false` is handled by the caller
@@ -353,9 +354,9 @@ template <class MinimizerT>
     using bioseq::parallelism::saturating_mul;
     // ~2/(w+1) minimizers per bp in practice; 3·(bp/w) is a safe (>1.5×) upper
     // bound that keeps the single-pass sketch's capacity buffers and the
-    // admission reservation small enough to avoid spurious memory-pressure CPU
-    // fallbacks at XXL_HIFI. An under-estimate is caught by the emit's capacity
-    // guard (counters[1]) → graceful CPU fallback, never an out-of-bounds write.
+    // admission reservation small enough to avoid spurious memory pressure at
+    // XXL_HIFI. An under-estimate is caught by the emit's capacity guard
+    // (counters[1]) and reported as a GPU decline, never an out-of-bounds write.
     const std::uint64_t base = window_size == 0 ? bp_size : (bp_size / window_size + 64u);
     return std::max<std::uint64_t>(64u, saturating_mul(base, 3u));
 }
@@ -427,9 +428,10 @@ struct PhaseCMemoryEstimate {
 
 /// GPU minimizer sketch with full memory admission, returning both the host
 /// minimizers (for the arena slab) and the resident device buffer (for
-/// seed-lookup reuse). Returns `std::nullopt` to request the generic scalar
-/// fallback for any shape the GPU cannot run (fragmented, oversized k/alphabet,
-/// no usable device, admission failure, or runtime error).
+/// seed-lookup reuse). Returns `std::nullopt` for pre-dispatch shapes the GPU
+/// cannot run (fragmented, oversized k/alphabet, no usable device, or admission
+/// failure). Selected Vulkan pipeline callers convert that decline into a hard
+/// error; runtime errors propagate directly.
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::optional<VulkanSketchResult<MinimizerT>>
 collect_minimizers_vulkan_result(
@@ -560,9 +562,8 @@ collect_minimizers_vulkan_result(
                     .device = std::move(storage),
                     .overflow = false,
                 };
-            } catch (const VulkanRuntimeError& e) {
-                bioseq_log<DBG>("[vulkan minimizer] sketch failed; CPU fallback: {}", e.what());
-                return std::nullopt;
+            } catch (const VulkanRuntimeError&) {
+                throw;
             }
         }
     }
@@ -570,9 +571,9 @@ collect_minimizers_vulkan_result(
 
 /// DOC0310 §12 — build the target minimizer index entirely on the GPU from the
 /// target sequence (parallel sketch → device radix sort → race-free slot table).
-/// Returns `std::nullopt` (caller falls back to the CPU `MinimizerHashmapFragmentIndex`
-/// build + upload) for any shape the GPU cannot run. Alphabet-generic; only the
-/// shader specialises. The returned `GpuBuiltIndex` owns the resident
+/// Returns `std::nullopt` for shapes the GPU cannot run before dispatch.
+/// Runtime failures propagate. Alphabet-generic; only the shader specialises.
+/// The returned `GpuBuiltIndex` owns the resident
 /// slots/positions device buffers — the indexing layer adopts them.
 template <class MinimizerT, class Seq>
 [[nodiscard]] std::optional<GpuBuiltIndex> build_gpu_index_on_device(
@@ -648,22 +649,21 @@ template <class MinimizerT, class Seq>
                     std::span<const std::byte>{padded_sequence.data(), padded_sequence.size()},
                     rank_lut, sketch_params, max_minimizers);
                 if (!built.valid) {
-                    bioseq_log<ERR>("[vulkan index] GPU build returned invalid (bp={}, max_min={})",
-                                    upload.bp_size, max_minimizers);
-                    return std::nullopt;
+                    throw VulkanRuntimeError(fmt::format(
+                        "Vulkan GPU index build returned invalid (bp={}, max_min={})",
+                        upload.bp_size, max_minimizers));
                 }
                 return built;  // permit released here; indexing layer re-reserves.
-            } catch (const VulkanRuntimeError& e) {
-                bioseq_log<ERR>("[vulkan index] GPU build threw; CPU fallback: {}", e.what());
-                return std::nullopt;
+            } catch (const VulkanRuntimeError&) {
+                throw;
             }
         }
     }
 }
 
 /// Collector-compatible wrapper for existing minimizer call sites. Feeds the
-/// GPU sketch into `collector`; returns false (without mutating the collector
-/// past whatever it pushed) to request the caller's scalar fallback.
+/// GPU sketch into `collector`; returns false only for pre-dispatch ineligible
+/// shapes. Runtime failures propagate.
 template <class MinimizerT, class Collector, class Seq>
 [[nodiscard]] bool collect_minimizers_vulkan(
     Collector& collector, const Seq& seq,

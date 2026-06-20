@@ -7,8 +7,8 @@
  * record; derives an open-addressed slot table + the positions array at upload
  * time. Keeps `minimizer_hashmap_index.cppm` storage-free — all Vulkan/cache
  * code lives here (DOC0307 §4.2, §4.4). The cache is owned by the true outer
- * query-batch/segment wave; a valid index that exceeds the 32-bit device ABI is
- * not corruption — it logs at debug and returns nullptr for the CPU seed path.
+ * query-batch/segment wave; selected Vulkan seed execution treats upload
+ * failures and 32-bit ABI overflow as hard `VulkanRuntimeError`s.
  */
 module;
 
@@ -30,7 +30,6 @@ module;
 
 export module bioseq.indexing.minimizer_vulkan;
 
-import bioseq.common.mlogging;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
@@ -268,11 +267,10 @@ public:
         try {
             handle = upload_locked_index(runtime, idx, key);
         } catch (const GpuIndexTooLarge&) {
-            bioseq_log<DBG>("[vulkan index] index exceeds 32-bit device ABI; CPU seed path");
-            return nullptr;
-        } catch (const bioseq::gpu::vulkan::VulkanRuntimeError& e) {
-            bioseq_log<DBG>("[vulkan index] upload failed; CPU seed path: {}", e.what());
-            return nullptr;
+            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                "Vulkan minimizer index exceeds the 32-bit device ABI");
+        } catch (const bioseq::gpu::vulkan::VulkanRuntimeError&) {
+            throw;
         }
         if (!handle) return nullptr;
 

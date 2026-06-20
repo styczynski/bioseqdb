@@ -117,9 +117,8 @@ enum class ChainingAlgorithmType : uint8_t {
     SCALAR_MM2      = 0,
     SIMD_MM2        = 1,
     RMQ             = 2,
-    /// G3SA-style tiled DP score generation on Vulkan (DOC0304 Phase A). Falls
-    /// back to SCALAR_MM2 at runtime when no usable Vulkan device exists or
-    /// `Minimap2Params::vulkan_enabled` is false.
+    /// G3SA-style tiled DP score generation on Vulkan (DOC0304 Phase A).
+    /// Requires a usable Vulkan runtime when selected by the pipeline.
     VULKAN_TILED_DP = 3,
 };
 
@@ -166,8 +165,7 @@ enum class MinimizerAlgorithmType : uint8_t {
     TWO_STACK_NTHASH = 2,
     /// DOC0307 Phase B — Vulkan minimizer sketch compatible with the scalar
     /// `minimap_int` minimizers (reads packed `compact_sequence_range` storage
-    /// directly). Runtime-falls back to scalar when no usable Vulkan device
-    /// exists or `Minimap2Params::vulkan_enabled` is false.
+    /// directly). Requires a usable Vulkan runtime when selected by the pipeline.
     VULKAN_MINIMAP_INT = 3,
 };
 
@@ -318,30 +316,28 @@ struct Minimap2Params {
     /// already saturates the bucket fill for VERY_LONG inputs.
     bool                          cross_query_batched       = false;
 
-    /// Enable Vulkan execution for Vulkan-backed algorithms (currently only the
-    /// VULKAN_TILED_DP chaining backend). When false, those algorithms fall back
-    /// to their CPU equivalent without touching the GPU. Driven by the
-    /// bioseq.aligner.vulkan_enabled GUC / aligner_options override; never a
-    /// magic environment variable (DOC0304 §7.1, §11).
+    /// Enable Vulkan execution for Vulkan-backed algorithms. If a Vulkan
+    /// algorithm is selected while this is false, the pipeline raises an error;
+    /// algorithm fallback must be chosen before entering the pipeline.
     bool                          vulkan_enabled            = true;
 
     /// DOC0307 Phase B — enable the Vulkan seed-hit lookup when Vulkan is on.
-    /// Runtime routing only (never a template parameter). When false (or
-    /// `vulkan_enabled == false`), seed hits use the existing CPU
-    /// `collect_seed_hits`.
-    bool                          vulkan_seed_hits_enabled  = true;
+    /// Runtime routing only (never a template parameter). When true, selected
+    /// seed-hit GPU execution is mandatory; when false, the CPU seed path is
+    /// selected before entering the GPU backend.
+    bool                          vulkan_seed_hits_enabled  = false;
     /// DOC0307 Phase B — cache GPU-resident minimizer index uploads while their
     /// memory permit is held (batch/wave scoped). Runtime routing only.
     bool                          vulkan_index_cache_enabled = true;
 
     /// DOC0310 Phase C — resident two-submit Vulkan frontend (parallel ordered
     /// sketch + GPU seed count/emit + device anchor sort). Runtime routing only;
-    /// declines cleanly to the Phase B / CPU path on any unsupported shape.
-    bool                          vulkan_fused_frontend_enabled = true;
+    /// unsupported GPU/runtime shapes are hard errors once this path is selected.
+    bool                          vulkan_fused_frontend_enabled = false;
     /// DOC0310 Phase C — build the target minimizer index entirely on the GPU
     /// (parallel sketch → device radix sort → race-free slot table) instead of
     /// the CPU `MinimizerHashmapFragmentIndex` build + slot upload.
-    bool                          vulkan_gpu_index_build_enabled = true;
+    bool                          vulkan_gpu_index_build_enabled = false;
     /// DOC0310 Phase C — optional GPU base-alignment extension under the block
     /// aligner. Disabled by default; never gates the Phase C performance path.
     bool                          vulkan_extend_enabled = false;
@@ -371,9 +367,7 @@ struct Minimap2Params {
             case ChainingAlgorithmType::RMQ:        cp.chaining_mode = ChainingMode::RMQ;     break;
             // VULKAN_TILED_DP maps to SCALAR_DP only because ChainingMode has no
             // Vulkan value and is not the dispatch selector; ChainStage selects
-            // the kernel from chaining_algorithm. The CPU fallback the Vulkan
-            // backend invokes is chain_anchors_scalar, so SCALAR_DP is the
-            // correct ChainingMode for that fallback (DOC0304 §7.1).
+            // the kernel from chaining_algorithm.
             case ChainingAlgorithmType::VULKAN_TILED_DP:
                                                     cp.chaining_mode = ChainingMode::SCALAR_DP; break;
             case ChainingAlgorithmType::SCALAR_MM2:
