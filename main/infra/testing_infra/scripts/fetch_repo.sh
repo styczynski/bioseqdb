@@ -43,6 +43,31 @@ as_user() {
   if [ "$(id -un)" = "$TARGET_USER" ]; then "$@"; else sudo -u "$TARGET_USER" -H "$@"; fi
 }
 
+# Some secret stores flatten a PEM private key to a SINGLE line, replacing the
+# newlines with spaces (e.g. when the key is pasted into the console as one
+# line). OpenSSH/libcrypto then reject it with "error in libcrypto". When we
+# detect that the BEGIN marker is not on its own line, rebuild a well-formed PEM:
+# strip the markers, drop all whitespace from the base64 body, re-wrap at 64, and
+# re-emit header/body/footer on their own lines. Already-valid keys pass through.
+normalize_private_key() {
+  local k="$1"
+  if printf '%s\n' "$k" | grep -qxE '\-{5}BEGIN [A-Z0-9 ]+\-{5}'; then
+    printf '%s\n' "$k"
+    return
+  fi
+  local header footer body
+  header="$(printf '%s' "$k" | grep -oE '\-{5}BEGIN [A-Z0-9 ]+\-{5}' | head -1)"
+  footer="$(printf '%s' "$k" | grep -oE '\-{5}END [A-Z0-9 ]+\-{5}' | head -1)"
+  if [ -z "$header" ] || [ -z "$footer" ]; then
+    printf '%s\n' "$k"
+    return
+  fi
+  body="$(printf '%s' "$k" | sed "s|$header||; s|$footer||" | tr -d ' \t\r\n')"
+  printf '%s\n' "$header"
+  printf '%s' "$body" | fold -w 64
+  printf '\n%s\n' "$footer"
+}
+
 # --- gh CLI (install once; needed to honour the "configure gh" requirement) --
 if ! command -v gh >/dev/null 2>&1; then
   log "installing gh CLI"
@@ -70,7 +95,8 @@ SSH_DIR="$USER_HOME/.ssh"
 KEY_FILE="$SSH_DIR/id_github"
 $SUDO install -d -m 700 -o "$TARGET_USER" -g "$TARGET_USER" "$SSH_DIR"
 # Write key as the target user with a tight umask, so it is never group/other readable.
-printf '%s\n' "$GH_SSH_PRIVATE" | as_user bash -c "umask 077; cat > '$KEY_FILE'"
+# normalize_private_key repairs single-line/space-flattened PEMs before writing.
+normalize_private_key "$GH_SSH_PRIVATE" | as_user bash -c "umask 077; cat > '$KEY_FILE'"
 unset GH_SSH_PRIVATE
 as_user chmod 600 "$KEY_FILE"
 
