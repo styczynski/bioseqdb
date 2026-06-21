@@ -20,15 +20,15 @@ output "region" {
 
 output "ssh_key_path" {
   description = "Local path to the generated private key."
-  value       = local_sensitive_file.ssh_private_key.filename
+  value       = abspath(local_sensitive_file.ssh_private_key.filename)
 }
 
 output "ssh_command" {
   description = "Ready-to-use SSH command."
-  value       = "ssh -i ${local_sensitive_file.ssh_private_key.filename} -o StrictHostKeyChecking=accept-new ubuntu@${aws_instance.bench.public_ip}"
+  value       = "ssh -i ${abspath(local_sensitive_file.ssh_private_key.filename)} -o StrictHostKeyChecking=accept-new ubuntu@${aws_instance.bench.public_ip}"
 }
 
 output "provision_log_hint" {
   description = "How to follow the provisioning log once the box is up."
-  value       = "ssh -i ${local_sensitive_file.ssh_private_key.filename} ubuntu@${aws_instance.bench.public_ip} 'tail -f /var/log/bioseq-provision.log'"
+  value       = "ssh -i ${abspath(local_sensitive_file.ssh_private_key.filename)} ubuntu@${aws_instance.bench.public_ip} 'tail -f /var/log/bioseq-provision.log'"
 }
