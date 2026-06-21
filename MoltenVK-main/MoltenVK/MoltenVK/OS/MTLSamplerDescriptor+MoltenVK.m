@@ -1,0 +1,70 @@
+/*
+ * MTLSamplerDescriptor+MoltenVK.m
+ *
+ * Copyright (c) 2015-2026 The Brenwill Workshop Ltd. (http://www.brenwill.com)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+
+#include "MTLSamplerDescriptor+MoltenVK.h"
+#include "MVKCommonEnvironment.h"
+
+
+#if MVK_USE_METAL_PRIVATE_API
+/** Additional methods not necessarily declared in <Metal/MTLSampler.h>. */
+@interface MTLSamplerDescriptor ()
+
+@property(nonatomic, readwrite) BOOL forceSeamsOnCubemapFiltering;
+
+@end
+#endif
+
+@implementation MTLSamplerDescriptor (MoltenVK)
+
+-(NSUInteger) borderColorMVK {
+	if ( [self respondsToSelector: @selector(borderColor)] ) { return self.borderColor; }
+	return /*MTLSamplerBorderColorTransparentBlack*/ 0;
+}
+
+-(void) setBorderColorMVK: (NSUInteger) color {
+	if ( [self respondsToSelector: @selector(setBorderColor:)] ) { self.borderColor = (MTLSamplerBorderColor) color; }
+}
+
+-(float) lodBiasMVK {
+#if MVK_XCODE_26
+	if ( [self respondsToSelector: @selector(lodBias)] ) { return self.lodBias; }
+#endif
+	return 0.0f;
+}
+
+-(void) setLodBiasMVK: (float) bias {
+#if MVK_XCODE_26
+	if ( [self respondsToSelector: @selector(setLodBias:)] ) { self.lodBias = bias; }
+#endif
+}
+
+-(BOOL) forceSeamsOnCubemapFilteringMVK {
+#if MVK_USE_METAL_PRIVATE_API
+	if ( [self respondsToSelector: @selector(forceSeamsOnCubemapFiltering)] ) { return self.forceSeamsOnCubemapFiltering; }
+#endif
+	return false;
+}
+
+-(void) setForceSeamsOnCubemapFilteringMVK: (BOOL) force {
+#if MVK_USE_METAL_PRIVATE_API
+	if ( [self respondsToSelector: @selector(setForceSeamsOnCubemapFiltering:)] ) { self.forceSeamsOnCubemapFiltering = force; }
+#endif
+}
+
+@end

@@ -150,6 +150,13 @@ TEST_CASE("DOC0341 shader cache meta and MoltenVK header payload are exact",
         gv::cache_metallib_path(temp.path, key),
         std::span<const std::byte>(metallib.data(), metallib.size()));
     REQUIRE(metallib_write);
+
+    // cache_entry_complete also requires a non-empty .metalar binary archive on Apple.
+    const std::vector<std::byte> fake_archive = bytes_of("not-a-real-metalar");
+    auto archive_write = gv::durable_write_file(
+        gv::cache_binary_archive_path(temp.path, key),
+        std::span<const std::byte>(fake_archive.data(), fake_archive.size()));
+    REQUIRE(archive_write);
     REQUIRE(gv::cache_entry_complete(temp.path, key));
 
     std::string decoded_entry;

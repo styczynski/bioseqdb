@@ -19,6 +19,7 @@
  * (pipe trait) before this module is ever reached.
  */
 module;
+#include <cstdio>
 
 #include "common.h"
 #include <hwy/highway.h>  // ONLY for the HWY_NAMESPACE macro (nt4_normalize lives there)
