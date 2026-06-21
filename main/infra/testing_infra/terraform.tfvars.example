@@ -1,0 +1,29 @@
+# Copy to terraform.tfvars and edit, OR (preferred) pass these via
+# ../provisioner.py flags. All values shown are the built-in defaults.
+
+# Where to run the box. m4.4xlarge (16 vCPU / 64 GiB) mirrors the reference dev
+# box; us-east-1 is used because m4.4xlarge is NOT offered in eu-north-1.
+region        = "us-east-1"
+instance_type = "m4.4xlarge"
+
+# Roomy root volume: LLVM + vcpkg buildtrees + the CMake build tree + benchmark
+# temp-file spill all live here.
+root_volume_size_gb = 150
+root_volume_type    = "gp3"
+
+# What to clone. NOTE: the AWS_MACHINE_X64 toolchain support lives on
+# research/aws-machine until merged — set branch accordingly when testing it.
+repo   = "styczynski/bioseqdb"
+branch = "main"
+
+# GitHub credentials secret (read cross-region at runtime by the instance role;
+# only the ARN/name/region appear here, never the secret value).
+secret_arn    = "arn:aws:secretsmanager:eu-north-1:778900739727:secret:github_secrets-DCYSun"
+secret_name   = "github_secrets"
+secret_region = "eu-north-1"
+
+# Lock SSH to your IP (provisioner.py auto-detects this as a /32).
+ssh_ingress_cidr = "0.0.0.0/0"
+
+# Run the build verification at the end of provisioning.
+run_verify = true

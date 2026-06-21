@@ -1,0 +1,16 @@
+# OpenTofu / Terraform working files — never commit these.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Generated SSH private key(s) for the benchmark box.
+.secrets/
+*.pem
+
+# Local variable overrides (may contain machine-specific values).
+*.auto.tfvars
+terraform.tfvars
+!terraform.tfvars.example

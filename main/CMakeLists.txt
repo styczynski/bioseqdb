@@ -21,8 +21,18 @@
 # https://github.com/uber/h3/blob/master/CMakeLists.txt
 cmake_minimum_required(VERSION 3.20..3.24)
 
-# Change this:
-set(CMAKE_NAMED_ENV_TYPE "H") # suppported: "W", "H"
+# Change this (or override it without editing this file):
+# CMAKE_NAMED_ENV_TYPE selects the per-machine toolchain block below. Resolution
+# order: an environment variable (set e.g. by a CMake preset's `environment`
+# field or `export CMAKE_NAMED_ENV_TYPE=...`) wins; then any pre-set cache/normal
+# value; otherwise it defaults to "H" (the arm64 macOS "home" box). This keeps a
+# single checked-in default while letting the AWS x86_64 reference box select its
+# own toolchain via the `aws-x64-linux` preset. Supported: "W", "H", "AWS_MACHINE_X64".
+if(DEFINED ENV{CMAKE_NAMED_ENV_TYPE})
+  set(CMAKE_NAMED_ENV_TYPE "$ENV{CMAKE_NAMED_ENV_TYPE}")
+elseif(NOT DEFINED CMAKE_NAMED_ENV_TYPE)
+  set(CMAKE_NAMED_ENV_TYPE "H")
+endif()
 
 if(${CMAKE_NAMED_ENV_TYPE} STREQUAL "H")
   set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm@22/bin/clang)
@@ -39,6 +49,22 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "W")
   set(CMAKE_CXX_COMPILER /usr/local/opt/llvm/bin/clang++)
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
   set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/local/opt/llvm/lib/c++/libc++.modules.json)
+elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
+  # x86_64 Ubuntu reference box provisioned by main/infra (see
+  # main/infra/testing_infra + main/infra/provisioner.py). clang/libc++ 22 are
+  # installed from apt.llvm.org under /usr/lib/llvm-22; CMake is pinned to 4.2.1,
+  # whose import-std experimental UUID is the same value the "H" box uses. The
+  # libc++ modules.json lives under a multiarch sub-path on Linux, so the
+  # provisioner discovers the exact file and exports BIOSEQ_LIBCXX_MODULES_JSON;
+  # we honour that override and otherwise fall back to the canonical location.
+  set(CMAKE_C_COMPILER /usr/lib/llvm-22/bin/clang)
+  set(CMAKE_CXX_COMPILER /usr/lib/llvm-22/bin/clang++)
+  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+  if(DEFINED ENV{BIOSEQ_LIBCXX_MODULES_JSON})
+    set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}")
+  else()
+    set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/lib/llvm-22/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json)
+  endif()
 else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
 endif()
@@ -78,8 +104,11 @@ if (APPLE)
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${SDKROOT}")
 endif()
 
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isysroot ${SDKROOT}")
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isysroot ${SDKROOT}")
+# NOTE: the macOS -isysroot flags are applied inside the if(APPLE) block above.
+# A duplicate, *unconditional* copy of those two SET()s used to live here; on a
+# non-Apple toolchain (e.g. AWS_MACHINE_X64) SDKROOT is empty there, so it
+# expanded to a bare `-isysroot ` that swallowed the next flag and broke every
+# compile. Removed — Apple still gets its isysroot from the guarded block.
 
 # Native build
 #set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native")
