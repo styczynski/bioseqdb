@@ -44,6 +44,7 @@ import fcntl
 import json
 import os
 import select
+import shlex
 import signal
 import subprocess
 import sys
@@ -88,8 +89,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 # The build dir is selected per-call from `debug`; the state file records
 # which mode each run used so `status` and `inspect` can find the right
 # artifacts.
-DEFAULT_BUILD_PRESET = "bench-opt"
-DEBUG_BUILD_PRESET = "bench-opt-debug"
+# The preset names are overridable via environment so the SAME server.py can
+# drive different toolchains depending on where it runs. This is what lets the
+# remote-run tool reuse this exact build worker on the x86_64 AWS box: there the
+# box-side server.py is invoked with BIOSEQ_BUILD_PRESET=aws-x64-linux, so the
+# worker configures/builds build/aws-x64-linux/ (the Linux/libc++/x64-linux-triplet
+# tree the verify.sh provisioning already populated) instead of the macOS/arm64
+# bench-opt tree. On a normal local checkout the env vars are unset and these
+# fall back to the everyday DOC0270 presets. The build dir always derives from the
+# preset name (every CMakePresets entry uses binaryDir ${sourceDir}/build/${presetName}),
+# so overriding the preset name is sufficient — no separate dir override needed.
+DEFAULT_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET", "bench-opt")
+DEBUG_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET_DEBUG", "bench-opt-debug")
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
@@ -1024,6 +1035,69 @@ def tool_start_build(mode: str, build_only: bool = False,
             f"Predicted finish in {_format_minutes((mode_details.build_only_expected_duration_min if build_only else  mode_details.expected_duration_min), plural_int=True)}.")
 
 
+def _run_build_inline(mode: str, build_only: bool = False,
+                      debug: bool = False) -> int:
+    """Reserve the per-mode state slot and run the build worker INLINE
+    (synchronously, in this very process) instead of detaching it.
+
+    `tool_start_build` reserves the slot and then spawns a *detached* worker;
+    the local MCP server needs that because a 25-min bench must outlive a closed
+    Claude Code window. The remote path is the mirror image: the remote-run tool
+    invokes `server.py --run-build-sync ...` over SSH on the AWS box and wants the
+    build to run in the foreground of that SSH command so its combined output
+    streams straight back over the pipe and the SSH exit status equals the build
+    verdict (0 ok / 1 our-code-fails-as-expected / 124 timeout). Detaching there
+    would make the SSH command return instantly with no result.
+
+    Reserving the slot first means `_run_build_worker` (which requires a
+    pre-existing entry) finds its state, and the same-host lock-group guard still
+    prevents two conflicting builds racing on the box. pid is this process's own
+    pid so `status`/`_refresh` reconcile correctly if we die mid-build.
+
+    Returns the worker's exit code, or a small non-worker code on a pre-flight
+    refusal (2 = invalid mode, 3 = a conflicting build is already running here).
+    """
+    if mode not in VALID_MODES:
+        _log(f"--run-build-sync: invalid mode '{mode}'")
+        return 2
+
+    with _global_lock():
+        state = _load_state()
+        running_mode, running_entry = _running_in_same_group(state, mode)
+        if running_entry:
+            _log(f"--run-build-sync: a conflicting build ({running_mode}) is "
+                 f"already running on this host (pid={running_entry.get('pid')}); "
+                 f"refusing to start {mode}")
+            return 3
+
+        started_at = time.time()
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
+        log_path = LOG_DIR / (
+            f"bioseq_build_mcp_{mode.replace('+', '_')}_"
+            f"{'debug_' if debug else ''}{timestamp}.log"
+        )
+        state[mode] = {
+            "mode": mode,
+            "status": "running",
+            "step": "spawning",
+            "started_at": started_at,
+            "completed_at": None,
+            "pid": os.getpid(),
+            "log_file": str(log_path),
+            "exit_code": None,
+            "report_file": None,
+            "notes": None,
+            "debug": debug,
+            "preset": preset_for(debug),
+            "build_dir": str(build_dir_for(debug)),
+        }
+        _save_state(state)
+        _log(f"--run-build-sync: running {mode} inline (pid={os.getpid()}, "
+             f"preset={preset_for(debug)}, build_only={build_only}, log={log_path})")
+
+    return _run_build_worker(mode, build_only=build_only, debug=debug)
+
+
 def tool_inspect(arguments: dict) -> str:
     """Implement the `inspect` tool. Returns a single string (a JSON
     document) — the MCP tools/call envelope wraps it in a content item.
@@ -1398,6 +1472,725 @@ def tool_subagent_status() -> str:
     return f"Subagent status: {status}. Log: {log_path}"
 
 
+# =========================================================================== #
+# remote operations — AWS benchmark machine (main/infra)
+# =========================================================================== #
+# Five tools — remote-status / remote-manage / remote-ssh / remote-run /
+# remote-git — drive the disposable x86_64 Ubuntu benchmark box defined under
+# main/infra/ (OpenTofu + provisioner.py). See main/infra/README.md.
+#
+# MUTEX: every remote operation EXCEPT remote-ssh shares ONE global slot
+# (REMOTE_STATE_FILE), so at most one remote operation runs at a time across all
+# Claude Code sessions. This is the same anti-footgun guard the local builds have,
+# widened to the remote: it stops an agent from firing `up` ten times and stacking
+# ten paid EC2 instances, or mutating the box's git tree while a remote build is
+# mid-flight. remote-ssh is deliberately OUTSIDE the mutex — it is the read-only
+# escape hatch you use to look around the box while a long remote-run holds the slot.
+#
+# Long operations (provision, build) detach into a worker (`--run-remote <op_id>`)
+# and return immediately; you poll by re-calling any remote tool (a *running* slot
+# reports progress instead of starting anything). Short operations (status, output,
+# git, …) usually finish inside the in-handler grace-wait and return their output
+# inline on the first call. Either way the worker streams everything to a log file
+# whose path is always returned, so the full output is one Read away. When an
+# operation finishes, the NEXT remote tool call returns its result once (and frees
+# the slot); call again to start the next operation. This "deliver-once" rule makes
+# polling a finished long build safe — re-calling never silently launches a rebuild.
+
+INFRA_DIR = PROJECT_ROOT / "infra"
+PROVISIONER = INFRA_DIR / "provisioner.py"
+
+# Layout on the box (set by main/infra/testing_infra/scripts/{fetch_repo,verify}.sh):
+# the repo is cloned to ~/bioseqdb and built with the aws-x64-linux CMake preset
+# (x64-linux vcpkg triplet, clang/libc++ 22), so the box-side build worker must be
+# told to use that preset instead of the local macOS/arm64 bench-opt default. We do
+# that by exporting BIOSEQ_BUILD_PRESET when we invoke the box-side server.py.
+REMOTE_REPO_PATH = "~/bioseqdb"
+REMOTE_BUILD_PRESET = "aws-x64-linux"
+
+REMOTE_STATE_FILE = Path("/tmp/bioseq_remote_mcp_state.json")
+REMOTE_LOCK_FILE = Path("/tmp/bioseq_remote_mcp.lock")
+
+# On-box provisioner.py PROVISION_STATUS markers that mean "toolchain is ready to
+# build" (kept in sync with provisioner.py GOOD_STATUSES).
+REMOTE_GOOD_STATUSES = {"TOOLCHAIN_READY", "VERIFY_OK_FAILS_ON_OUR_CODE",
+                        "VERIFY_BUILD_SUCCEEDED"}
+
+# Per-operation hard ceilings (seconds) enforced inside the detached worker.
+REMOTE_OP_TIMEOUTS = {
+    "status":  6 * 60,
+    "output":  6 * 60,
+    "logs":    6 * 60,
+    "git":    20 * 60,
+    "ssh":     5 * 60,     # remote-ssh is synchronous; this is its subprocess timeout
+    "up":    140 * 60,
+    "down":   30 * 60,
+    "verify": 60 * 60,
+    "wait":  140 * 60,
+    "run":   200 * 60,     # provision (if needed) + git sync + full build/bench
+}
+# In-handler grace-wait (seconds): how long the tool call blocks waiting for the
+# op to finish before returning "in progress". Quick ops get a long-enough grace
+# to return inline; long ops get a short one and are polled by re-calling.
+REMOTE_OP_GRACE = {
+    "status": 30.0, "output": 30.0, "logs": 30.0, "git": 30.0,
+    "up": 6.0, "down": 8.0, "verify": 8.0, "wait": 8.0, "run": 6.0,
+}
+REMOTE_TERMINAL_STATUSES = {"completed", "failed", "killed_timeout", "aborted"}
+REMOTE_MANAGE_OPS = {"up", "down", "status", "logs", "verify", "wait", "output"}
+# How much of the captured log to inline in a tool response (full log via path).
+REMOTE_LOG_INLINE_CAP = 6000
+
+
+# --------------------------- remote state I/O ------------------------------
+
+@contextlib.contextmanager
+def _remote_global_lock():
+    """Cross-process advisory lock around the single remote-operation slot.
+
+    Guards the read-check-spawn-write critical section so two sessions cannot both
+    decide the slot is free and each launch an operation (e.g. each provision a box).
+    """
+    REMOTE_LOCK_FILE.touch()
+    fd = os.open(str(REMOTE_LOCK_FILE), os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _load_remote_state() -> dict:
+    if not REMOTE_STATE_FILE.exists():
+        return {}
+    try:
+        with REMOTE_STATE_FILE.open("r") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_remote_state(state: dict) -> None:
+    REMOTE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = REMOTE_STATE_FILE.with_suffix(".json.tmp")
+    with tmp.open("w") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    tmp.replace(REMOTE_STATE_FILE)
+
+
+def _update_remote_entry(**fields) -> None:
+    state = _load_remote_state()
+    state.update(fields)
+    _save_remote_state(state)
+
+
+def _refresh_remote(state: dict) -> dict:
+    """Promote a 'running' slot whose worker pid is dead to 'aborted' so the
+    mutex frees itself if a worker is SIGKILLed / the machine reboots."""
+    if state.get("status") == "running" and not _is_pid_alive(state.get("pid")):
+        state = dict(state)
+        state["status"] = "aborted"
+        state["step"] = "aborted"
+        if not state.get("completed_at"):
+            state["completed_at"] = time.time()
+        _save_remote_state(state)
+    return state
+
+
+# --------------------------- remote subprocess plumbing --------------------
+
+def _provisioner_cmd(*provisioner_args: str) -> list[str]:
+    """argv to invoke provisioner.py with the current interpreter."""
+    return [sys.executable, str(PROVISIONER), *provisioner_args]
+
+
+def _remote_ssh_argv(remote_command: str) -> list[str]:
+    """provisioner.py path that runs a NON-interactive command on the box.
+
+    CRITICAL: the remote command must be ONE argv element. provisioner's `ssh`
+    subcommand forwards its REMAINDER args to ssh after `ubuntu@<ip>`, and ssh
+    space-JOINS its trailing args into a single string for the remote shell — so
+    passing ('bash', '-lc', script) as three args lets the remote shell re-split
+    `script` and lose its grouping (a `cd x && y` would run `y` back in $HOME).
+    We instead hand ssh a single string, `bash -lc '<script>'` (script shell-quoted),
+    so the remote runs it under a LOGIN shell — which sources /etc/profile.d/bioseq.sh
+    so the cmake/ninja/vcpkg/PG toolchain env is on PATH — with the script intact.
+    ssh_base() requests no tty, so output streams back cleanly to the caller.
+    Workhorse for remote-ssh, remote-git, the logs/verify manage ops, and every
+    box-side step of remote-run. (cmd_ssh/cmd_logs themselves os.execvp an
+    interactive `ssh -t`, which we avoid here.)"""
+    return _provisioner_cmd("ssh", "bash -lc " + shlex.quote(remote_command))
+
+
+def _remote_exec(cmd: list[str], log_handle, deadline: float) -> int:
+    """Run cmd inside the infra dir, streaming combined output to the worker log.
+    Returns the exit code; raises TimeoutError past the deadline."""
+    return _stream_subprocess(cmd, log_handle, deadline,
+                              cwd=INFRA_DIR, env=os.environ.copy())
+
+
+def _provisioner_outputs() -> dict:
+    """provisioner.py output (Terraform outputs) as a dict, or {} if none.
+
+    provisioner prints a dim `$ tofu output -json` line before the JSON body, so
+    we parse from the first '{'."""
+    try:
+        res = subprocess.run(_provisioner_cmd("output"), cwd=str(INFRA_DIR),
+                             text=True, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out = (res.stdout or "")
+    idx = out.find("{")
+    if idx < 0:
+        return {}
+    try:
+        data = json.loads(out[idx:])
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _provisioner_region() -> str | None:
+    return (_provisioner_outputs() or {}).get("region")
+
+
+def _current_local_branch() -> str | None:
+    """The checked-out branch of the local repo, used as the default branch to
+    clone/sync onto the box (so the box builds the same branch you are on)."""
+    try:
+        res = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                             cwd=str(PROJECT_ROOT), text=True,
+                             capture_output=True, timeout=10)
+        b = (res.stdout or "").strip()
+        return b if b and b != "HEAD" else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _remote_provision_status(deadline: float) -> str | None:
+    """ssh `cat /opt/bioseq/PROVISION_STATUS`, bounded by the deadline."""
+    timeout = max(5, min(60, int(deadline - time.time())))
+    try:
+        res = subprocess.run(
+            _remote_ssh_argv("cat /opt/bioseq/PROVISION_STATUS 2>/dev/null"),
+            cwd=str(INFRA_DIR), text=True, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else None
+
+
+# --------------------------- remote-run driver -----------------------------
+
+def _ensure_remote_box(branch: str, auto_provision: bool,
+                       log_handle, deadline: float) -> None:
+    """Make sure a build-ready box exists. Provision + wait if there is none
+    (and auto_provision allows it). Raises on failure."""
+    outs = _provisioner_outputs()
+    ip = outs.get("public_ip")
+    if ip:
+        st = _remote_provision_status(deadline)
+        log_handle.write(f"# existing box {outs.get('instance_id')} @ {ip} "
+                         f"(PROVISION_STATUS={st or 'unknown'})\n")
+        log_handle.flush()
+        if st in REMOTE_GOOD_STATUSES:
+            return
+        log_handle.write("# box present but not yet at a ready status — waiting "
+                         "for on-box provisioning to reach a terminal status...\n")
+        log_handle.flush()
+        _remote_exec(_provisioner_cmd("wait", "--timeout", "120"),
+                     log_handle, deadline)
+        return  # best-effort; the build step will surface any real problem
+
+    if not auto_provision:
+        raise RuntimeError(
+            "no remote box is running and auto_provision=false — start one with "
+            "remote-manage {operation:'up'} first, or pass auto_provision=true")
+
+    log_handle.write(f"# no box found — provisioning a new one (branch={branch})...\n")
+    log_handle.flush()
+    rc = _remote_exec(_provisioner_cmd("up", "--branch", branch, "--wait",
+                                       "--timeout", "120"),
+                      log_handle, deadline)
+    if rc != 0:
+        raise RuntimeError(f"provisioner up failed (exit {rc}) — see log")
+    if not _provisioner_outputs().get("public_ip"):
+        raise RuntimeError("provisioner up finished but no public_ip in outputs")
+
+
+def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
+    """The remote-run sequence: ensure box → optional git sync → run the build
+    or inspect on the box by invoking the box-side server.py over SSH. Returns the
+    box-side command's exit code (0 ok / 1 build fails as expected on ::NEON / 124
+    timeout)."""
+    operation = payload.get("operation")
+    branch = payload.get("branch") or "main"
+    do_sync = bool(payload.get("sync", True))
+    auto_provision = bool(payload.get("auto_provision", True))
+
+    _ensure_remote_box(branch, auto_provision, log_handle, deadline)
+
+    if do_sync:
+        log_handle.write(f"\n# syncing box repo {REMOTE_REPO_PATH} to origin/{branch} "
+                         f"(builds the latest PUSHED commit on that branch)\n")
+        log_handle.flush()
+        # -f force: the box is disposable and we build the PUSHED commit, so
+        # discard any working-tree drift (a half-built tree, a manually-staged
+        # file, etc.) rather than letting `checkout` refuse. Use sync=false to
+        # preserve a hand-arranged box instead.
+        sync_script = (
+            f"set -euo pipefail; cd {REMOTE_REPO_PATH} && "
+            f"git fetch origin {shlex.quote(branch)} && "
+            f"git checkout -f -B {shlex.quote(branch)} origin/{shlex.quote(branch)} && "
+            f"git --no-pager log -1 --oneline"
+        )
+        rc = _remote_exec(_remote_ssh_argv(sync_script), log_handle, deadline)
+        if rc != 0:
+            raise RuntimeError(
+                f"git sync of box to origin/{branch} failed (exit {rc}). Is the "
+                f"branch pushed to origin? Use remote-git / remote-ssh to inspect.")
+
+    env_prefix = f"BIOSEQ_BUILD_PRESET={shlex.quote(REMOTE_BUILD_PRESET)} "
+    server_dir = f"{REMOTE_REPO_PATH}/main/build_mcp"
+    if operation == "build":
+        mode = payload["mode"]
+        build_only = bool(payload.get("build_only", False))
+        debug = bool(payload.get("debug", False))
+        remote_cmd = (
+            f"cd {server_dir} && {env_prefix}python3 server.py "
+            f"--run-build-sync {shlex.quote(mode)} "
+            f"--build-only {'true' if build_only else 'false'} "
+            f"--debug {'true' if debug else 'false'}"
+        )
+    elif operation == "inspect":
+        inspect_args = payload.get("inspect_args") or {}
+        remote_cmd = (
+            f"cd {server_dir} && {env_prefix}python3 server.py "
+            f"--run-inspect {shlex.quote(json.dumps(inspect_args))}"
+        )
+    else:
+        raise RuntimeError(f"unknown remote-run operation '{operation}'")
+
+    log_handle.write(f"\n# running on box: {remote_cmd}\n")
+    log_handle.flush()
+    return _remote_exec(_remote_ssh_argv(remote_cmd), log_handle, deadline)
+
+
+def _classify_remote_run(payload: dict, rc: int, log_path: Path) -> str | None:
+    """Turn a remote build's exit code + log into a human verdict, mirroring
+    verify.sh's classification (3rd-party vs our-code vs the expected ::NEON gap)."""
+    if payload.get("operation") != "build":
+        return None
+    try:
+        text = log_path.read_text(errors="replace")
+    except OSError:
+        text = ""
+    if rc == 0:
+        return ("build_succeeded — the remote build completed with no errors. The "
+                "::NEON / dispatch.h x86_64 gap appears to be closed on this branch.")
+    err_lines = [ln for ln in text.splitlines()
+                 if " error: " in ln or " fatal error: " in ln]
+    our = [ln for ln in err_lines if "/main/bioseq/" in ln]
+    third = [ln for ln in err_lines
+             if any(s in ln for s in ("vcpkg_installed", "/opt/vcpkg", "/vendor/",
+                                      "/usr/lib/llvm", "/usr/include/", "/opt/llvm"))
+             and "/main/bioseq/" not in ln]
+    neon = ("NEON" in text) or ("dispatch/dispatch.h" in text)
+    if third:
+        return (f"UNEXPECTED third-party/toolchain failure — {len(third)} error "
+                f"line(s) outside our code. This is NOT the expected gap; "
+                f"investigate. First: {third[0].strip()[:200]}")
+    if our:
+        tag = "the expected ::NEON / macOS-ism gap" if neon else "our own code"
+        return (f"expected_our_code_failure — configure succeeded and every "
+                f"third-party dependency compiled; the only errors are in {tag} "
+                f"({len(our)} line(s) under /main/bioseq/). This is exactly the "
+                f"VERIFY_OK_FAILS_ON_OUR_CODE outcome: the remote build pipeline is "
+                f"healthy and the failure is the known x86_64 SIMD port gap. "
+                f"First: {our[0].strip()[:200]}")
+    return ("failed_unclassified — non-zero exit but no 'error:' lines matched by "
+            "path. Read the full log to see what happened.")
+
+
+# --------------------------- remote worker ---------------------------------
+
+def _run_remote_worker(op_id: str) -> int:
+    """Detached worker entry point (invoked via `--run-remote <op_id>`). Waits for
+    the slot it owns (matched by op_id, to ignore any stale prior state), runs the
+    recorded command/payload streaming to the log, and records the verdict."""
+    state = {}
+    for _ in range(100):  # ~10s — tolerate the benign spawn→write race
+        state = _load_remote_state()
+        if state.get("op_id") == op_id and state.get("status") == "running":
+            break
+        time.sleep(0.1)
+    else:
+        _log(f"remote worker {op_id}: state slot never became ready, exiting")
+        return 1
+
+    kind = state.get("kind", "")
+    started_at = float(state.get("started_at", time.time()))
+    log_path = Path(state.get("log_file",
+                              str(LOG_DIR / f"bioseq_remote_mcp_{op_id}.log")))
+    timeout_sec = float(state.get("timeout_sec",
+                                  REMOTE_OP_TIMEOUTS.get(kind, 60 * 60)))
+    deadline = started_at + timeout_sec
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("w", buffering=1)
+    log_handle.write(
+        f"# bioseq remote worker — kind={kind} op_id={op_id} pid={os.getpid()} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
+        f"# label={state.get('label')}\n"
+        f"# timeout_sec={timeout_sec}\n"
+    )
+    log_handle.flush()
+
+    classification = None
+    try:
+        _update_remote_entry(step="running")
+        if kind == "run":
+            payload = state.get("payload") or {}
+            rc = _drive_remote_run(payload, log_handle, deadline)
+            classification = _classify_remote_run(payload, rc, log_path)
+        else:
+            argv = state.get("argv") or []
+            if not argv:
+                raise RuntimeError(f"remote worker kind={kind} has no argv")
+            rc = _remote_exec(argv, log_handle, deadline)
+
+        completed_at = time.time()
+        _update_remote_entry(
+            status="completed" if rc == 0 else "failed",
+            step="completed" if rc == 0 else "failed",
+            completed_at=completed_at, exit_code=rc,
+            classification=classification,
+            notes=None if rc == 0 else f"exited with code {rc}",
+        )
+        log_handle.write(f"\n# remote worker exiting (rc={rc}) at "
+                         f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n")
+        return 0 if rc == 0 else 1
+
+    except TimeoutError as e:
+        _update_remote_entry(status="killed_timeout", step="killed_timeout",
+                             completed_at=time.time(), exit_code=None,
+                             notes=str(e), classification=classification)
+        log_handle.write(f"\n# killed by hard timeout: {e}\n")
+        return 124
+    except Exception as e:
+        _update_remote_entry(status="failed", step="failed",
+                             completed_at=time.time(), exit_code=None,
+                             notes=str(e), classification=classification)
+        log_handle.write(f"\n# remote worker failed: {e}\n")
+        return 1
+    finally:
+        log_handle.close()
+
+
+# --------------------------- remote presentation ---------------------------
+
+def _remote_elapsed(started_at, completed_at=None) -> str:
+    end = float(completed_at) if completed_at else time.time()
+    return f"{(end - float(started_at)) / 60.0:.1f} min"
+
+
+def _remote_log_tail(log_file: str | None, cap: int = REMOTE_LOG_INLINE_CAP) -> str:
+    if not log_file:
+        return ""
+    try:
+        text = Path(log_file).read_text(errors="replace")
+    except OSError:
+        return ""
+    if len(text) <= cap:
+        return text
+    return "…(truncated — Read the log for the full output)…\n" + text[-cap:]
+
+
+def _remote_busy_message(state: dict) -> str:
+    kind = state.get("kind", "?")
+    return (
+        "🔒 A remote operation is already in progress — the remote mutex allows "
+        "only ONE at a time (the guard that stops stacking paid EC2 instances or "
+        "mutating the box mid-build).\n"
+        f"  in-flight : {state.get('label', kind)} (kind={kind})\n"
+        f"  step      : {state.get('step', 'running')}, "
+        f"elapsed {_remote_elapsed(state.get('started_at', time.time()))}, "
+        f"pid={state.get('pid')}\n"
+        f"  live log  : {state.get('log_file')}\n"
+        "It frees automatically when its process exits (or is killed). Re-call any "
+        "remote tool to poll, or use remote-ssh (NOT under the mutex) to inspect "
+        "the box meanwhile."
+    )
+
+
+def _remote_running_message(state: dict, poll_hint: str) -> str:
+    kind = state.get("kind", "?")
+    return (
+        f"⏳ Remote operation '{state.get('label', kind)}' (kind={kind}) is in "
+        f"progress (step={state.get('step', 'running')}, "
+        f"elapsed {_remote_elapsed(state.get('started_at', time.time()))}).\n"
+        f"It runs detached and survives this session. {poll_hint}\n"
+        f"Live log (Read to follow): {state.get('log_file')}"
+    )
+
+
+def _remote_finished_message(state: dict) -> str:
+    status = state.get("status")
+    kind = state.get("kind", "?")
+    label = state.get("label", kind)
+    elapsed = _remote_elapsed(state.get("started_at", time.time()),
+                              state.get("completed_at"))
+    head = {
+        "completed": f"✅ Remote operation '{label}' completed in {elapsed} "
+                     f"(exit {state.get('exit_code')}).",
+        "failed": f"❌ Remote operation '{label}' failed in {elapsed} "
+                  f"(exit {state.get('exit_code')}).",
+        "killed_timeout": f"⏱️ Remote operation '{label}' hit its hard timeout "
+                          f"after {elapsed} and was killed.",
+        "aborted": f"⚠️ Remote operation '{label}' aborted after {elapsed} "
+                   f"(worker died unexpectedly).",
+    }.get(status, f"Remote operation '{label}' status: {status}.")
+    parts = [head]
+    if state.get("classification"):
+        parts.append(f"Verdict: {state['classification']}")
+    if state.get("notes"):
+        parts.append(f"Notes: {state['notes']}")
+    parts.append(f"Full log: {state.get('log_file')}")
+    tail = _remote_log_tail(state.get("log_file"))
+    if tail:
+        parts.append(f"\n----- output -----\n{tail}")
+    return "\n".join(parts)
+
+
+def _remote_grace_wait(grace_sec: float) -> dict:
+    """Block up to grace_sec for the running op to reach a terminal status."""
+    deadline = time.time() + grace_sec
+    while time.time() < deadline:
+        st = _refresh_remote(_load_remote_state())
+        if st.get("status") in REMOTE_TERMINAL_STATUSES:
+            return st
+        time.sleep(0.4)
+    return _refresh_remote(_load_remote_state())
+
+
+def _mark_delivered(op_id: str) -> None:
+    with _remote_global_lock():
+        st = _load_remote_state()
+        if st.get("op_id") == op_id and not st.get("delivered"):
+            st["delivered"] = True
+            _save_remote_state(st)
+
+
+def _start_or_poll_remote(kind: str, label: str, *,
+                          argv: list[str] | None = None,
+                          payload: dict | None = None) -> str:
+    """The shared entry for every mutex-guarded remote tool. Either:
+      - reports the in-flight op (mutex busy), or
+      - delivers the previous op's result once and frees the slot, or
+      - starts a fresh detached worker and grace-waits for a quick finish.
+    """
+    timeout_sec = REMOTE_OP_TIMEOUTS.get(kind, 60 * 60)
+    grace_sec = REMOTE_OP_GRACE.get(kind, 10.0)
+    op_id = f"{kind}-{os.getpid()}-{int(time.time() * 1000)}"
+
+    with _remote_global_lock():
+        state = _refresh_remote(_load_remote_state())
+        status = state.get("status")
+        if status == "running":
+            return _remote_busy_message(state)
+        if status in REMOTE_TERMINAL_STATUSES and not state.get("delivered"):
+            # Deliver the previous op's result exactly once, then free the slot.
+            # This makes polling a finished long op safe: re-calling returns the
+            # result instead of silently launching a new operation.
+            state["delivered"] = True
+            _save_remote_state(state)
+            return ("(The previous remote operation has finished — returning its "
+                    "result; the mutex slot is now free. Call this tool again to "
+                    f"start a new '{label}'.)\n\n{_remote_finished_message(state)}")
+
+        started_at = time.time()
+        timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
+        log_path = LOG_DIR / f"bioseq_remote_mcp_{kind}_{timestamp}.log"
+        server_path = str(Path(__file__).resolve())
+        proc = subprocess.Popen(
+            [sys.executable, server_path, "--run-remote", op_id],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        _save_remote_state({
+            "op_id": op_id, "kind": kind, "label": label,
+            "status": "running", "step": "spawning",
+            "started_at": started_at, "completed_at": None, "pid": proc.pid,
+            "log_file": str(log_path), "exit_code": None, "notes": None,
+            "classification": None, "delivered": False,
+            "timeout_sec": timeout_sec, "argv": argv, "payload": payload,
+        })
+        _log(f"remote op started: {label} kind={kind} op_id={op_id} "
+             f"pid={proc.pid} log={log_path}")
+
+    # Grace-wait OUTSIDE the lock so other sessions aren't blocked during it.
+    st = _remote_grace_wait(grace_sec)
+    if st.get("op_id") == op_id and st.get("status") in REMOTE_TERMINAL_STATUSES:
+        _mark_delivered(op_id)
+        return _remote_finished_message(st)
+    poll_hint = ("Poll by re-calling any remote tool (a running slot reports "
+                 "progress; it will NOT start a second operation).")
+    return _remote_running_message(st, poll_hint)
+
+
+# --------------------------- remote tool implementations -------------------
+
+def tool_remote_status() -> str:
+    """remote-status — provisioner.py status (Terraform outputs + live EC2 state +
+    a running-instance count guardrail + the on-box PROVISION_STATUS marker)."""
+    return _start_or_poll_remote(
+        "status",
+        "provisioner status (AWS box state + on-box PROVISION_STATUS)",
+        argv=_provisioner_cmd("status"))
+
+
+def tool_remote_manage(arguments: dict) -> str:
+    """remote-manage — thin wrapper over provisioner.py up/down/status/logs/verify/
+    wait/output, under the remote mutex."""
+    operation = arguments.get("operation")
+    if operation not in REMOTE_MANAGE_OPS:
+        return (f"Invalid operation '{operation}'. remote-manage operations: "
+                f"{', '.join(sorted(REMOTE_MANAGE_OPS))}.")
+
+    if operation == "up":
+        argv = _provisioner_cmd("up")
+        branch = arguments.get("branch") or _current_local_branch()
+        if branch:
+            argv += ["--branch", str(branch)]
+        # Default region to the existing stack's region so the running-instance
+        # guardrail and tofu target the same place (avoids accidentally spinning a
+        # second box in another region).
+        region = arguments.get("region") or _provisioner_region()
+        if region:
+            argv += ["--region", str(region)]
+        if arguments.get("instance_type"):
+            argv += ["--instance-type", str(arguments["instance_type"])]
+        if arguments.get("ami"):
+            argv += ["--ami", str(arguments["ami"])]
+        if arguments.get("volume_size"):
+            argv += ["--volume-size", str(int(arguments["volume_size"]))]
+        if parse_bool("no_verify", arguments.get("no_verify", False)):
+            argv += ["--no-verify"]
+        if parse_bool("wait", arguments.get("wait", True)):
+            argv += ["--wait"]
+        argv += ["--timeout", str(int(arguments.get("timeout", 120)))]
+        if parse_bool("yes", arguments.get("yes", False)):
+            argv += ["--yes"]
+        label = f"provisioner up (branch={branch or 'default'})"
+    elif operation == "down":
+        # provisioner down prompts via input() without --yes; the detached worker
+        # cannot answer, so always pass --yes.
+        argv = _provisioner_cmd("down", "--yes")
+        label = "provisioner down (destroy the box and all its resources)"
+    elif operation == "status":
+        argv = _provisioner_cmd("status")
+        if arguments.get("region"):
+            argv += ["--region", str(arguments["region"])]
+        label = "provisioner status"
+    elif operation == "output":
+        argv = _provisioner_cmd("output")
+        label = "provisioner output (Terraform outputs JSON)"
+    elif operation == "wait":
+        argv = _provisioner_cmd("wait", "--timeout",
+                                str(int(arguments.get("timeout", 120))))
+        label = "provisioner wait (block until on-box provisioning is terminal)"
+    elif operation == "logs":
+        lines = int(arguments.get("lines", 200))
+        argv = _remote_ssh_argv(f"tail -n {lines} /var/log/bioseq-provision.log")
+        label = f"provisioner logs (tail -n {lines})"
+    else:  # verify
+        argv = _remote_ssh_argv(
+            f"{REMOTE_REPO_PATH}/main/infra/testing_infra/scripts/verify.sh")
+        label = "provisioner verify (cmake configure + build; classify failures)"
+
+    return _start_or_poll_remote(operation, label, argv=argv)
+
+
+def tool_remote_ssh(command: str) -> str:
+    """remote-ssh — run a command on the box and return its output. NOT under the
+    remote mutex: the read-only escape hatch for inspecting the box while a long
+    remote-run holds the slot. Synchronous and bounded."""
+    if not isinstance(command, str) or not command.strip():
+        return ("Error: 'command' must be a non-empty shell command to run on the "
+                "box, e.g. 'cat /opt/bioseq/PROVISION_STATUS' or "
+                "'git -C ~/bioseqdb log -1 --oneline'.")
+    timeout = REMOTE_OP_TIMEOUTS["ssh"]
+    try:
+        res = subprocess.run(_remote_ssh_argv(command), cwd=str(INFRA_DIR),
+                             text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return (f"remote-ssh timed out after {timeout}s running: {command}\n"
+                "For long-running work use remote-run / remote-manage instead.")
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"remote-ssh failed to launch: {e}"
+    body = res.stdout or ""
+    if (res.stderr or "").strip():
+        body += "\n----- stderr -----\n" + res.stderr
+    if not body.strip():
+        body = "(no output)"
+    return f"remote-ssh exit={res.returncode}\n{body}"
+
+
+def tool_remote_git(command: str) -> str:
+    """remote-git — proxy a git subcommand to the box's repo (under the mutex)."""
+    if not isinstance(command, str) or not command.strip():
+        return ("Error: 'command' must be a git subcommand, e.g. 'pull', "
+                "'checkout my-branch', or 'merge origin/x -X theirs'.")
+    git_args = command.strip()
+    if git_args.startswith("git "):  # tolerate a leading 'git '
+        git_args = git_args[4:].strip()
+    remote_cmd = f"cd {REMOTE_REPO_PATH} && git {git_args}"
+    return _start_or_poll_remote(
+        "git", f"git {git_args} (on box {REMOTE_REPO_PATH})",
+        argv=_remote_ssh_argv(remote_cmd))
+
+
+def tool_remote_run(arguments: dict) -> str:
+    """remote-run — run a build/test/bench (the start_build modes) or inspect on the
+    box, provisioning + waiting + syncing first if needed. Under the mutex."""
+    operation = arguments.get("operation")
+    branch = arguments.get("branch") or _current_local_branch() or "main"
+    sync = parse_bool("sync", arguments.get("sync", True))
+    auto_provision = parse_bool("auto_provision", arguments.get("auto_provision", True))
+
+    if operation == "build":
+        mode = arguments.get("mode")
+        if mode not in VALID_MODES:
+            return (f"Invalid mode '{mode}'. remote-run build modes: "
+                    f"{', '.join(sorted(VALID_MODES))}.")
+        build_only = parse_bool("build_only", arguments.get("build_only", False))
+        debug = parse_bool("debug", arguments.get("debug", False))
+        payload = {"operation": "build", "mode": mode, "build_only": build_only,
+                   "debug": debug, "branch": branch, "sync": sync,
+                   "auto_provision": auto_provision}
+        label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
+                 f"(branch={branch}, preset={REMOTE_BUILD_PRESET})")
+    elif operation == "inspect":
+        function_name = arguments.get("function_name")
+        if not isinstance(function_name, str) or not function_name:
+            return "Error: remote-run inspect requires a non-empty 'function_name'."
+        inspect_args = {k: arguments[k] for k in
+                        ("function_name", "target", "max_matches", "snippet_lines",
+                         "source_basename", "max_llc_bc_files", "llc_on_bc", "debug")
+                        if k in arguments}
+        payload = {"operation": "inspect", "inspect_args": inspect_args,
+                   "branch": branch, "sync": sync, "auto_provision": auto_provision}
+        label = f"remote inspect '{function_name}' (branch={branch})"
+    else:
+        return ("Invalid 'operation' for remote-run. Use operation='build' (with a "
+                "'mode') or operation='inspect' (with a 'function_name').")
+
+    return _start_or_poll_remote("run", label, payload=payload)
+
+
 # --------------------------- MCP protocol layer ----------------------------
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -1704,6 +2497,262 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+# --------------------------- remote tools (AWS benchmark machine) -----------
+# Five tools that drive the disposable x86_64 Ubuntu benchmark box under
+# main/infra/ (OpenTofu + provisioner.py). See main/infra/README.md.
+_REMOTE_MUTEX_NOTE = (
+    "\n\nMUTEX & POLLING: every remote tool EXCEPT remote-ssh shares ONE global "
+    "lock — at most one remote operation runs at a time (so you can't, e.g., fire "
+    "`up` ten times and stack ten paid EC2 instances, or change the box's branch "
+    "mid-build). Long operations (provision/build) run DETACHED and return "
+    "immediately; poll by re-calling ANY remote tool (a running slot reports "
+    "progress and will NOT start a second op). When an op finishes, the NEXT remote "
+    "tool call returns its result once and frees the slot — so polling a finished "
+    "build never silently launches a rebuild. The full output is always streamed to "
+    "a log file whose path is returned (open it with Read). Use remote-ssh (which is "
+    "NOT under the mutex) to inspect the box while a long op holds the slot."
+)
+_REMOTE_RUN_COMMON_PROPS = {
+    "branch": {
+        "type": "string",
+        "description": (
+            "Branch to build. remote-run builds the latest PUSHED commit: it "
+            "git-fetches and checks out origin/<branch> on the box before building "
+            "(see `sync`). Defaults to your current local branch. The branch MUST be "
+            "pushed to origin, and must contain the build_mcp updates that provide "
+            "the box-side --run-build-sync entry point."
+        ),
+    },
+    "sync": {
+        "type": "boolean",
+        "default": True,
+        "description": (
+            "Before building, fetch origin and `git checkout -B <branch> "
+            "origin/<branch>` on the box so it builds the latest pushed commit "
+            "(force-resets the box's working branch — the box is disposable). Set "
+            "false to build whatever is already checked out on the box (e.g. when "
+            "you arranged it via remote-git, or to avoid clobbering a manual state)."
+        ),
+    },
+    "auto_provision": {
+        "type": "boolean",
+        "default": True,
+        "description": (
+            "If no box is currently running, provision one (provisioner up --wait) "
+            "before building. This launches a PAID EC2 instance. Set false to fail "
+            "fast instead when no box exists."
+        ),
+    },
+}
+TOOL_DEFINITIONS += [
+    {
+        "name": "remote-status",
+        "description": (
+            "Show the AWS benchmark box status — wraps `provisioner.py status`: "
+            "Terraform outputs (instance id / public ip / region), the live EC2 "
+            "state, a count of running benchmark instances (cost guardrail), and the "
+            "on-box PROVISION_STATUS marker (VERIFY_OK_FAILS_ON_OUR_CODE = ready). "
+            "Equivalent to remote-manage with operation='status'." + _REMOTE_MUTEX_NOTE
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "remote-manage",
+        "description": (
+            "Manage the AWS benchmark box — wraps `provisioner.py <operation>` for "
+            "operation in up/down/status/logs/verify/wait/output:\n"
+            "  up     — create/update the box (OpenTofu apply). Provisions a PAID "
+            "instance. Defaults: branch=your current local branch, region=the "
+            "existing stack's region, wait=true (block until on-box provisioning is "
+            "terminal). Refuses if a box is already running unless yes=true.\n"
+            "  down   — destroy the box and all its resources (always non-interactive).\n"
+            "  status — same as remote-status.\n"
+            "  logs   — tail /var/log/bioseq-provision.log (last `lines`).\n"
+            "  verify — re-run verify.sh on the box (cmake configure + build; "
+            "classify failures into the PROVISION_STATUS verdict).\n"
+            "  wait   — block until on-box provisioning reaches a terminal status.\n"
+            "  output — print Terraform outputs as JSON." + _REMOTE_MUTEX_NOTE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": sorted(REMOTE_MANAGE_OPS),
+                    "description": "Which provisioner.py command to run.",
+                },
+                "branch": {"type": "string",
+                           "description": "[up] branch to clone (default: your current local branch)."},
+                "region": {"type": "string",
+                           "description": "[up/status] AWS region (default: the existing stack's region)."},
+                "instance_type": {"type": "string",
+                                  "description": "[up] EC2 instance type (default m4.4xlarge = 16 vCPU/64 GiB)."},
+                "ami": {"type": "string",
+                        "description": "[up] override AMI id (default: latest Ubuntu 24.04 x86_64)."},
+                "volume_size": {"type": "integer", "minimum": 1,
+                                "description": "[up] root volume GiB (default 150)."},
+                "no_verify": {"type": "boolean", "default": False,
+                              "description": "[up] skip the on-box build verification."},
+                "wait": {"type": "boolean", "default": True,
+                         "description": "[up] block until on-box provisioning finishes (default true)."},
+                "timeout": {"type": "integer", "minimum": 1, "default": 120,
+                            "description": "[up/wait] timeout in minutes (default 120)."},
+                "yes": {"type": "boolean", "default": False,
+                        "description": "[up] override the running-instance guardrail and apply anyway."},
+                "lines": {"type": "integer", "minimum": 1, "default": 200,
+                          "description": "[logs] number of trailing log lines to show (default 200)."},
+            },
+            "required": ["operation"],
+        },
+    },
+    {
+        "name": "remote-ssh",
+        "description": (
+            "Run a shell command on the AWS box and return its output (wraps "
+            "`provisioner.py ssh`, non-interactive). This is the ONLY remote tool "
+            "NOT under the remote mutex — use it as the read-only escape hatch to "
+            "inspect the box (e.g. `cat /opt/bioseq/PROVISION_STATUS`, `git -C "
+            "~/bioseqdb log -1`, `nvidia-smi`, `free -h`) while a long remote-run "
+            "holds the slot. Synchronous and bounded (~5 min). For long-running work "
+            "use remote-run / remote-manage, not this."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": ("Shell command to run on the box via `bash -lc`. "
+                                    "The repo is at ~/bioseqdb."),
+                },
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "remote-run",
+        "description": (
+            "Run a build/test/benchmark or an inspect on the AWS box — the remote "
+            "twin of start_build + inspect. Ensures a ready box exists (provisioning "
+            "+ waiting if needed), git-syncs the box to the requested branch's latest "
+            "PUSHED commit (unless sync=false), then runs the operation on the box "
+            "using the box-side server.py with the aws-x64-linux preset.\n\n"
+            "Two operation shapes (oneOf):\n"
+            "  operation='build' — runs one start_build mode (unit+integration, "
+            "bench, bench-fast, bench-io, bench-e2e) with the same build_only/debug "
+            "semantics as the local start_build tool.\n"
+            "  operation='inspect' — runs the inspect tool on a box-side binary, "
+            "same parameters as the local inspect tool.\n\n"
+            "IMPORTANT CAVEATS:\n"
+            "  - The box is x86_64. The build currently fails ON OUR OWN CODE at the "
+            "Highway ::NEON SIMD / macOS dispatch.h (which don't exist on x86_64) — "
+            "this is the EXPECTED outcome (exit non-zero, verdict "
+            "'expected_our_code_failure'); it proves the toolchain + all third-party "
+            "deps build. A 3rd-party/toolchain error would be the real failure.\n"
+            "  - build_only=true is the reliable path today (configure + compile to "
+            "the ::NEON gap). Test/bench modes additionally need a configured "
+            "PostgreSQL + bioseq DB on the box, which the base provisioning does not "
+            "set up; they will only run end-to-end once the ::NEON port lands and the "
+            "DB is prepared.\n"
+            "  - remote inspect needs a successfully-built binary on the box, so it "
+            "won't return useful disassembly until the build succeeds." + _REMOTE_MUTEX_NOTE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "oneOf": [
+                {
+                    "title": "build",
+                    "type": "object",
+                    "required": ["operation", "mode"],
+                    "properties": {
+                        "operation": {"const": "build",
+                                      "description": "Run a build/test/benchmark mode."},
+                        "mode": {
+                            "type": "string",
+                            "enum": sorted(VALID_MODES),
+                            "description": ("Which run to build/execute — same modes "
+                                            "as the local start_build tool."),
+                        },
+                        "build_only": {
+                            "type": "boolean", "default": False,
+                            "description": ("Only compile the targets; do not run the "
+                                            "tests/benches. The reliable path on the "
+                                            "box today (the build stops at the ::NEON "
+                                            "gap regardless)."),
+                        },
+                        "debug": {
+                            "type": "boolean", "default": False,
+                            "description": ("Use the debug build tree (adds -g + "
+                                            "-save-temps for inspect). Rarely needed "
+                                            "on the box."),
+                        },
+                        **_REMOTE_RUN_COMMON_PROPS,
+                    },
+                },
+                {
+                    "title": "inspect",
+                    "type": "object",
+                    "required": ["operation", "function_name"],
+                    "properties": {
+                        "operation": {"const": "inspect",
+                                      "description": "Inspect a function in a box-side binary."},
+                        "function_name": {
+                            "type": "string",
+                            "description": ("Substring matched against demangled C++ "
+                                            "names (prefix-anchored recommended), same "
+                                            "as the local inspect tool."),
+                        },
+                        "target": {
+                            "type": "string",
+                            "enum": ["bioseq_bench", "bioseq_io_bench",
+                                     "bioseq_aligner_tests_exec",
+                                     "bioseq_aligner_int_tests_exec"],
+                            "default": "bioseq_bench",
+                            "description": "Which target binary to inspect on the box.",
+                        },
+                        "max_matches": {"type": "integer", "minimum": 1, "default": 4,
+                                        "description": "Cap on returned symbols."},
+                        "snippet_lines": {"type": "integer", "minimum": 1, "default": 200,
+                                          "description": "Lines of asm/disasm to inline."},
+                        "source_basename": {"type": "string",
+                                            "description": "Source basename for the inline-site sweep."},
+                        "max_llc_bc_files": {"type": "integer", "minimum": 0, "default": 4,
+                                             "description": "Cap on .bc files llc-compiled for the pre-LTO view."},
+                        "llc_on_bc": {"type": "boolean", "default": True,
+                                      "description": "Run the llc-on-.bc fallback when no .s is present."},
+                        "debug": {"type": "boolean",
+                                  "description": "Force the debug/fast build tree (omit to auto-detect)."},
+                        **_REMOTE_RUN_COMMON_PROPS,
+                    },
+                },
+            ],
+        },
+    },
+    {
+        "name": "remote-git",
+        "description": (
+            "Proxy a git command to the box's repo (~/bioseqdb), under the remote "
+            "mutex. Pass just the git subcommand and args in `command` — e.g. "
+            "{\"command\": \"pull\"}, {\"command\": \"checkout my-branch\"}, "
+            "{\"command\": \"fetch origin\"}, {\"command\": \"merge origin/x -X "
+            "theirs\"}, {\"command\": \"reset --hard origin/main\"}. A leading 'git ' "
+            "is tolerated. For read-only git inspection while another remote op is "
+            "running, use remote-ssh instead (it is not under the mutex)." + _REMOTE_MUTEX_NOTE
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": ("git subcommand + args to run in ~/bioseqdb on the "
+                                    "box, e.g. 'checkout research/aws-machine' or "
+                                    "'merge origin/feature -X theirs'."),
+                },
+            },
+            "required": ["command"],
+        },
+    },
+]
+
 # --------------------------- document tools (Goal C) -----------------------
 # Four QMD-backed document-management tools. Their request bodies are JSON-Schema-validated
 # server-side in docs/schemas.py (the inputSchema dicts below mirror those schemas and are the
@@ -1929,6 +2978,16 @@ def _handle_tools_call(params: dict) -> dict:
                              requested_outputs=requested_outputs)
     elif name == "subagent_status":
         text = tool_subagent_status()
+    elif name == "remote-status":
+        text = tool_remote_status()
+    elif name == "remote-manage":
+        text = tool_remote_manage(args)
+    elif name == "remote-ssh":
+        text = tool_remote_ssh(args.get("command", ""))
+    elif name == "remote-run":
+        text = tool_remote_run(args)
+    elif name == "remote-git":
+        text = tool_remote_git(args.get("command", ""))
     elif name in ("doc_create", "doc_archive", "doc_search", "doc_read"):
         # Doc-tool requests are JSON-Schema-validated server-side inside operations
         # (docs/schemas.py). ensure_doc_env() lazily provisions qmd + jsonschema on first use.
@@ -1995,6 +3054,38 @@ def main() -> int:
         help="(internal) run as a detached build worker for the given mode",
     )
     parser.add_argument(
+        "--run-build-sync",
+        choices=VALID_MODES,
+        default=None,
+        help=(
+            "(internal) reserve the state slot and run the build worker INLINE "
+            "(synchronous, not detached) for the given mode. Used by the "
+            "remote-run tool over SSH so the build verdict is the SSH exit "
+            "status and output streams back live. Honours --build-only/--debug "
+            "and BIOSEQ_BUILD_PRESET."
+        ),
+    )
+    parser.add_argument(
+        "--run-inspect",
+        default=None,
+        metavar="JSON",
+        help=(
+            "(internal) run the inspect tool with the given JSON argument object "
+            "and print the JSON result to stdout. Used by remote-run over SSH to "
+            "inspect a binary on the box. Honours BIOSEQ_BUILD_PRESET."
+        ),
+    )
+    parser.add_argument(
+        "--run-remote",
+        default=None,
+        metavar="OP_ID",
+        help=(
+            "(internal) run as a detached remote-operation worker for the given "
+            "op_id; reads the command/payload from the remote state file and drives "
+            "provisioner.py or a remote build/inspect over SSH"
+        ),
+    )
+    parser.add_argument(
         "--build-only",
         choices=['true', 'false'],
         default='false',
@@ -2023,11 +3114,28 @@ def main() -> int:
     args = parser.parse_args()
     if args.run_subagent:
         return _run_subagent_worker()
+    if args.run_remote is not None:
+        return _run_remote_worker(args.run_remote)
     if args.run_build is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)
         return _run_build_worker(args.run_build, build_only=build_only,
                                  debug=debug)
+    if args.run_build_sync is not None:
+        build_only: bool = parse_bool("build_only", args.build_only)
+        debug: bool = parse_bool("debug", args.debug)
+        return _run_build_inline(args.run_build_sync, build_only=build_only,
+                                 debug=debug)
+    if args.run_inspect is not None:
+        try:
+            inspect_args = json.loads(args.run_inspect)
+            if not isinstance(inspect_args, dict):
+                raise ValueError("inspect JSON argument must be a JSON object")
+        except (ValueError, json.JSONDecodeError) as e:
+            print(json.dumps({"error": f"invalid --run-inspect JSON: {e}"}))
+            return 2
+        print(tool_inspect(inspect_args))
+        return 0
 
     # Non-blocking autostart warm: provision the doc env and bring qmd (collections + HTTP
     # server + background index) online without blocking the MCP handshake or the stdlib build
