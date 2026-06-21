@@ -1644,6 +1644,14 @@ CREATE OR REPLACE FUNCTION bioseq.scheduler_stats()
     AS 'MODULE_PATHNAME', 'bioseq_scheduler_stats'
     LANGUAGE C VOLATILE;
 
+-- GPU cache warm-up: pre-builds all static shader .metallib/.metalar files in the
+-- backend-local cache directory, installing the archive interposer env. Returns a
+-- per-variant status transcript; "RESULT: ok variants=N failed=0" on success.
+CREATE OR REPLACE FUNCTION bioseq.gpu_warmup_shader_cache()
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'bioseq_gpu_warmup_shader_cache'
+    LANGUAGE C VOLATILE;
+
 -- DOC0279 §12.2 — admin/test SQL surface for the new chunked index storage.
 CREATE OR REPLACE FUNCTION bioseq.set_index_policy(rel regclass, name text, policy text) RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_set_index_policy' LANGUAGE C VOLATILE STRICT;

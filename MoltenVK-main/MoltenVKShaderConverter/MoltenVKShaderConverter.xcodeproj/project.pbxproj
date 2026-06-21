@@ -1,0 +1,840 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		2FEA0D012490381A00EEF3AD /* SPIRVReflection.h in Headers */ = {isa = PBXBuildFile; fileRef = 450A4F5E220CB180007203D7 /* SPIRVReflection.h */; };
+		2FEA0D022490381A00EEF3AD /* MVKStrings.h in Headers */ = {isa = PBXBuildFile; fileRef = A98149651FB6A98A005F00B4 /* MVKStrings.h */; };
+		2FEA0D042490381A00EEF3AD /* SPIRVConversion.h in Headers */ = {isa = PBXBuildFile; fileRef = A928C9171D0488DC00071B88 /* SPIRVConversion.h */; };
+		2FEA0D052490381A00EEF3AD /* SPIRVToMSLConverter.h in Headers */ = {isa = PBXBuildFile; fileRef = A9093F5B1C58013E0094110D /* SPIRVToMSLConverter.h */; };
+		2FEA0D062490381A00EEF3AD /* MVKCommonEnvironment.h in Headers */ = {isa = PBXBuildFile; fileRef = A9F042AA1FB4D060009FCCB8 /* MVKCommonEnvironment.h */; };
+		2FEA0D082490381A00EEF3AD /* FileSupport.mm in Sources */ = {isa = PBXBuildFile; fileRef = A925B70A1C7754B2006E7ECD /* FileSupport.mm */; };
+		2FEA0D092490381A00EEF3AD /* SPIRVToMSLConverter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9093F5A1C58013E0094110D /* SPIRVToMSLConverter.cpp */; };
+		2FEA0D0B2490381A00EEF3AD /* SPIRVConversion.mm in Sources */ = {isa = PBXBuildFile; fileRef = A928C9181D0488DC00071B88 /* SPIRVConversion.mm */; };
+		450A4F61220CB180007203D7 /* SPIRVReflection.h in Headers */ = {isa = PBXBuildFile; fileRef = 450A4F5E220CB180007203D7 /* SPIRVReflection.h */; };
+		450A4F62220CB180007203D7 /* SPIRVReflection.h in Headers */ = {isa = PBXBuildFile; fileRef = 450A4F5E220CB180007203D7 /* SPIRVReflection.h */; };
+		A909408A1C58013E0094110D /* SPIRVToMSLConverter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9093F5A1C58013E0094110D /* SPIRVToMSLConverter.cpp */; };
+		A909408B1C58013E0094110D /* SPIRVToMSLConverter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9093F5A1C58013E0094110D /* SPIRVToMSLConverter.cpp */; };
+		A909408C1C58013E0094110D /* SPIRVToMSLConverter.h in Headers */ = {isa = PBXBuildFile; fileRef = A9093F5B1C58013E0094110D /* SPIRVToMSLConverter.h */; };
+		A909408D1C58013E0094110D /* SPIRVToMSLConverter.h in Headers */ = {isa = PBXBuildFile; fileRef = A9093F5B1C58013E0094110D /* SPIRVToMSLConverter.h */; };
+		A925B71B1C78DEB2006E7ECD /* libMoltenVKShaderConverter.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A93903C71C57E9ED00FE90DC /* libMoltenVKShaderConverter.a */; };
+		A928C9191D0488DC00071B88 /* SPIRVConversion.h in Headers */ = {isa = PBXBuildFile; fileRef = A928C9171D0488DC00071B88 /* SPIRVConversion.h */; };
+		A928C91A1D0488DC00071B88 /* SPIRVConversion.h in Headers */ = {isa = PBXBuildFile; fileRef = A928C9171D0488DC00071B88 /* SPIRVConversion.h */; };
+		A928C91B1D0488DC00071B88 /* SPIRVConversion.mm in Sources */ = {isa = PBXBuildFile; fileRef = A928C9181D0488DC00071B88 /* SPIRVConversion.mm */; };
+		A928C91C1D0488DC00071B88 /* SPIRVConversion.mm in Sources */ = {isa = PBXBuildFile; fileRef = A928C9181D0488DC00071B88 /* SPIRVConversion.mm */; };
+		A95096BB2003D00300F10950 /* FileSupport.mm in Sources */ = {isa = PBXBuildFile; fileRef = A925B70A1C7754B2006E7ECD /* FileSupport.mm */; };
+		A95096BC2003D00300F10950 /* FileSupport.mm in Sources */ = {isa = PBXBuildFile; fileRef = A925B70A1C7754B2006E7ECD /* FileSupport.mm */; };
+		A95096BF2003D32400F10950 /* OSSupport.mm in Sources */ = {isa = PBXBuildFile; fileRef = A95096BD2003D32400F10950 /* OSSupport.mm */; };
+		A9546B252672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */; };
+		A9546B262672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */; };
+		A9546B272672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */; };
+		A9546B282672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */; };
+		A9546B292672A3B8004BA3E6 /* SPIRVSupport.h in Headers */ = {isa = PBXBuildFile; fileRef = A9546B242672A3B8004BA3E6 /* SPIRVSupport.h */; };
+		A9546B2A2672A3B8004BA3E6 /* SPIRVSupport.h in Headers */ = {isa = PBXBuildFile; fileRef = A9546B242672A3B8004BA3E6 /* SPIRVSupport.h */; };
+		A9546B2B2672A3B8004BA3E6 /* SPIRVSupport.h in Headers */ = {isa = PBXBuildFile; fileRef = A9546B242672A3B8004BA3E6 /* SPIRVSupport.h */; };
+		A97CC7401C7527F3004A5C7E /* main.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A97CC73D1C7527F3004A5C7E /* main.cpp */; };
+		A97CC7411C7527F3004A5C7E /* MoltenVKShaderConverterTool.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A97CC73E1C7527F3004A5C7E /* MoltenVKShaderConverterTool.cpp */; };
+		A98149681FB6A98A005F00B4 /* MVKStrings.h in Headers */ = {isa = PBXBuildFile; fileRef = A98149651FB6A98A005F00B4 /* MVKStrings.h */; };
+		A98149691FB6A98A005F00B4 /* MVKStrings.h in Headers */ = {isa = PBXBuildFile; fileRef = A98149651FB6A98A005F00B4 /* MVKStrings.h */; };
+		A98386FA24EEE91A00199A05 /* SPIRVCross.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A98386F824EEE91A00199A05 /* SPIRVCross.xcframework */; };
+		A98386FB24EEE91A00199A05 /* SPIRVCross.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A98386F824EEE91A00199A05 /* SPIRVCross.xcframework */; };
+		A98386FC24EEE91A00199A05 /* SPIRVCross.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A98386F824EEE91A00199A05 /* SPIRVCross.xcframework */; };
+		A983870724EEE94800199A05 /* SPIRVTools.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A983870224EEE94800199A05 /* SPIRVTools.xcframework */; };
+		A983870824EEE94800199A05 /* SPIRVTools.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A983870224EEE94800199A05 /* SPIRVTools.xcframework */; };
+		A983870924EEE94800199A05 /* SPIRVTools.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A983870224EEE94800199A05 /* SPIRVTools.xcframework */; };
+		A9A14E332244388700C080F3 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A9A14E322244388700C080F3 /* Metal.framework */; };
+		A9B51BDD225E98BB00AC74D2 /* MVKOSExtensions.mm in Sources */ = {isa = PBXBuildFile; fileRef = A9B51BDB225E98BB00AC74D2 /* MVKOSExtensions.mm */; };
+		A9F042B21FB4D060009FCCB8 /* MVKCommonEnvironment.h in Headers */ = {isa = PBXBuildFile; fileRef = A9F042AA1FB4D060009FCCB8 /* MVKCommonEnvironment.h */; };
+		A9F042B31FB4D060009FCCB8 /* MVKCommonEnvironment.h in Headers */ = {isa = PBXBuildFile; fileRef = A9F042AA1FB4D060009FCCB8 /* MVKCommonEnvironment.h */; };
+		DCFD7F712A45BDA0007BBBF7 /* SPIRVReflection.h in Headers */ = {isa = PBXBuildFile; fileRef = 450A4F5E220CB180007203D7 /* SPIRVReflection.h */; };
+		DCFD7F732A45BDA0007BBBF7 /* MVKStrings.h in Headers */ = {isa = PBXBuildFile; fileRef = A98149651FB6A98A005F00B4 /* MVKStrings.h */; };
+		DCFD7F742A45BDA0007BBBF7 /* SPIRVSupport.h in Headers */ = {isa = PBXBuildFile; fileRef = A9546B242672A3B8004BA3E6 /* SPIRVSupport.h */; };
+		DCFD7F752A45BDA0007BBBF7 /* SPIRVConversion.h in Headers */ = {isa = PBXBuildFile; fileRef = A928C9171D0488DC00071B88 /* SPIRVConversion.h */; };
+		DCFD7F772A45BDA0007BBBF7 /* SPIRVToMSLConverter.h in Headers */ = {isa = PBXBuildFile; fileRef = A9093F5B1C58013E0094110D /* SPIRVToMSLConverter.h */; };
+		DCFD7F782A45BDA0007BBBF7 /* MVKCommonEnvironment.h in Headers */ = {isa = PBXBuildFile; fileRef = A9F042AA1FB4D060009FCCB8 /* MVKCommonEnvironment.h */; };
+		DCFD7F7A2A45BDA0007BBBF7 /* FileSupport.mm in Sources */ = {isa = PBXBuildFile; fileRef = A925B70A1C7754B2006E7ECD /* FileSupport.mm */; };
+		DCFD7F7D2A45BDA0007BBBF7 /* SPIRVToMSLConverter.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9093F5A1C58013E0094110D /* SPIRVToMSLConverter.cpp */; };
+		DCFD7F7E2A45BDA0007BBBF7 /* SPIRVConversion.mm in Sources */ = {isa = PBXBuildFile; fileRef = A928C9181D0488DC00071B88 /* SPIRVConversion.mm */; };
+		DCFD7F7F2A45BDA0007BBBF7 /* SPIRVSupport.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */; };
+		DCFD7F812A45BDA0007BBBF7 /* SPIRVTools.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A983870224EEE94800199A05 /* SPIRVTools.xcframework */; };
+		DCFD7F822A45BDA0007BBBF7 /* SPIRVCross.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A98386F824EEE91A00199A05 /* SPIRVCross.xcframework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A925B71C1C78DEBF006E7ECD /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A9F55D25198BE6A7004EC31B /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A93903C01C57E9ED00FE90DC;
+			remoteInfo = "MoltenVKSPIRVToMSLConverter-macOS";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		2FEA0D142490381A00EEF3AD /* libMoltenVKShaderConverter.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libMoltenVKShaderConverter.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		450A4F5E220CB180007203D7 /* SPIRVReflection.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPIRVReflection.h; sourceTree = "<group>"; };
+		A9093F5A1C58013E0094110D /* SPIRVToMSLConverter.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = SPIRVToMSLConverter.cpp; sourceTree = "<group>"; };
+		A9093F5B1C58013E0094110D /* SPIRVToMSLConverter.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPIRVToMSLConverter.h; sourceTree = "<group>"; };
+		A925B70A1C7754B2006E7ECD /* FileSupport.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = FileSupport.mm; sourceTree = "<group>"; };
+		A925B70B1C7754B2006E7ECD /* FileSupport.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = FileSupport.h; sourceTree = "<group>"; };
+		A928C9171D0488DC00071B88 /* SPIRVConversion.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPIRVConversion.h; sourceTree = "<group>"; };
+		A928C9181D0488DC00071B88 /* SPIRVConversion.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = SPIRVConversion.mm; sourceTree = "<group>"; };
+		A93903BF1C57E9D700FE90DC /* libMoltenVKShaderConverter.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libMoltenVKShaderConverter.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		A93903C71C57E9ED00FE90DC /* libMoltenVKShaderConverter.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libMoltenVKShaderConverter.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		A95096BD2003D32400F10950 /* OSSupport.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = OSSupport.mm; sourceTree = "<group>"; };
+		A95096BE2003D32400F10950 /* OSSupport.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = OSSupport.h; sourceTree = "<group>"; };
+		A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = SPIRVSupport.cpp; sourceTree = "<group>"; };
+		A9546B242672A3B8004BA3E6 /* SPIRVSupport.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPIRVSupport.h; sourceTree = "<group>"; };
+		A964BD5F1C57EFBD00D930D8 /* MoltenVKShaderConverter */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = MoltenVKShaderConverter; sourceTree = BUILT_PRODUCTS_DIR; };
+		A979A9412B9A200400F69E67 /* libMoltenVKShaderConverter.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libMoltenVKShaderConverter.a; sourceTree = BUILT_PRODUCTS_DIR; };
+		A97CC73D1C7527F3004A5C7E /* main.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
+		A97CC73E1C7527F3004A5C7E /* MoltenVKShaderConverterTool.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = MoltenVKShaderConverterTool.cpp; sourceTree = "<group>"; };
+		A97CC73F1C7527F3004A5C7E /* MoltenVKShaderConverterTool.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MoltenVKShaderConverterTool.h; sourceTree = "<group>"; };
+		A98149651FB6A98A005F00B4 /* MVKStrings.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKStrings.h; sourceTree = "<group>"; };
+		A98386F824EEE91A00199A05 /* SPIRVCross.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = SPIRVCross.xcframework; sourceTree = "<group>"; };
+		A98386FD24EEE93700199A05 /* glslang.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = glslang.xcframework; sourceTree = "<group>"; };
+		A983870224EEE94800199A05 /* SPIRVTools.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = SPIRVTools.xcframework; sourceTree = "<group>"; };
+		A9A14E322244388700C080F3 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		A9B51BDB225E98BB00AC74D2 /* MVKOSExtensions.mm */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.objcpp; path = MVKOSExtensions.mm; sourceTree = "<group>"; };
+		A9B51BDC225E98BB00AC74D2 /* MVKOSExtensions.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKOSExtensions.h; sourceTree = "<group>"; };
+		A9F042AA1FB4D060009FCCB8 /* MVKCommonEnvironment.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MVKCommonEnvironment.h; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2FEA0D0C2490381A00EEF3AD /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A983870824EEE94800199A05 /* SPIRVTools.xcframework in Frameworks */,
+				A98386FB24EEE91A00199A05 /* SPIRVCross.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A9092A8A1A81717B00051823 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A9A14E332244388700C080F3 /* Metal.framework in Frameworks */,
+				A925B71B1C78DEB2006E7ECD /* libMoltenVKShaderConverter.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A972AD2E21CEE6F50013AB25 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A983870724EEE94800199A05 /* SPIRVTools.xcframework in Frameworks */,
+				A98386FA24EEE91A00199A05 /* SPIRVCross.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A972AD3321CEE7230013AB25 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A983870924EEE94800199A05 /* SPIRVTools.xcframework in Frameworks */,
+				A98386FC24EEE91A00199A05 /* SPIRVCross.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DCFD7F802A45BDA0007BBBF7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DCFD7F812A45BDA0007BBBF7 /* SPIRVTools.xcframework in Frameworks */,
+				DCFD7F822A45BDA0007BBBF7 /* SPIRVCross.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A9093C561C58013D0094110D /* MoltenVKShaderConverter */ = {
+			isa = PBXGroup;
+			children = (
+				A925B70B1C7754B2006E7ECD /* FileSupport.h */,
+				A925B70A1C7754B2006E7ECD /* FileSupport.mm */,
+				A928C9171D0488DC00071B88 /* SPIRVConversion.h */,
+				A928C9181D0488DC00071B88 /* SPIRVConversion.mm */,
+				450A4F5E220CB180007203D7 /* SPIRVReflection.h */,
+				A9546B232672A3B8004BA3E6 /* SPIRVSupport.cpp */,
+				A9546B242672A3B8004BA3E6 /* SPIRVSupport.h */,
+				A9093F5A1C58013E0094110D /* SPIRVToMSLConverter.cpp */,
+				A9093F5B1C58013E0094110D /* SPIRVToMSLConverter.h */,
+			);
+			path = MoltenVKShaderConverter;
+			sourceTree = "<group>";
+		};
+		A964B28D1C57EBC400D930D8 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A93903C71C57E9ED00FE90DC /* libMoltenVKShaderConverter.a */,
+				A93903BF1C57E9D700FE90DC /* libMoltenVKShaderConverter.a */,
+				2FEA0D142490381A00EEF3AD /* libMoltenVKShaderConverter.a */,
+				A964BD5F1C57EFBD00D930D8 /* MoltenVKShaderConverter */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A972AD2921CEE6A80013AB25 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A98386F824EEE91A00199A05 /* SPIRVCross.xcframework */,
+				A98386FD24EEE93700199A05 /* glslang.xcframework */,
+				A983870224EEE94800199A05 /* SPIRVTools.xcframework */,
+				A9A14E322244388700C080F3 /* Metal.framework */,
+			);
+			name = Frameworks;
+			path = ../External/build/Latest;
+			sourceTree = SOURCE_ROOT;
+		};
+		A97CC73C1C7527F3004A5C7E /* MoltenVKShaderConverterTool */ = {
+			isa = PBXGroup;
+			children = (
+				A97CC73D1C7527F3004A5C7E /* main.cpp */,
+				A97CC73E1C7527F3004A5C7E /* MoltenVKShaderConverterTool.cpp */,
+				A97CC73F1C7527F3004A5C7E /* MoltenVKShaderConverterTool.h */,
+				A95096BE2003D32400F10950 /* OSSupport.h */,
+				A95096BD2003D32400F10950 /* OSSupport.mm */,
+			);
+			path = MoltenVKShaderConverterTool;
+			sourceTree = "<group>";
+		};
+		A9F042A81FB4D060009FCCB8 /* Common */ = {
+			isa = PBXGroup;
+			children = (
+				A9F042AA1FB4D060009FCCB8 /* MVKCommonEnvironment.h */,
+				A9B51BDC225E98BB00AC74D2 /* MVKOSExtensions.h */,
+				A9B51BDB225E98BB00AC74D2 /* MVKOSExtensions.mm */,
+				A98149651FB6A98A005F00B4 /* MVKStrings.h */,
+			);
+			name = Common;
+			path = ../Common;
+			sourceTree = "<group>";
+		};
+		A9F55D24198BE6A7004EC31B = {
+			isa = PBXGroup;
+			children = (
+				A9093C561C58013D0094110D /* MoltenVKShaderConverter */,
+				A97CC73C1C7527F3004A5C7E /* MoltenVKShaderConverterTool */,
+				A9F042A81FB4D060009FCCB8 /* Common */,
+				A964B28D1C57EBC400D930D8 /* Products */,
+				A972AD2921CEE6A80013AB25 /* Frameworks */,
+				A979A9412B9A200400F69E67 /* libMoltenVKShaderConverter.a */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		2FEA0D002490381A00EEF3AD /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2FEA0D012490381A00EEF3AD /* SPIRVReflection.h in Headers */,
+				2FEA0D022490381A00EEF3AD /* MVKStrings.h in Headers */,
+				A9546B2A2672A3B8004BA3E6 /* SPIRVSupport.h in Headers */,
+				2FEA0D042490381A00EEF3AD /* SPIRVConversion.h in Headers */,
+				2FEA0D052490381A00EEF3AD /* SPIRVToMSLConverter.h in Headers */,
+				2FEA0D062490381A00EEF3AD /* MVKCommonEnvironment.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A93903B91C57E9D700FE90DC /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				450A4F61220CB180007203D7 /* SPIRVReflection.h in Headers */,
+				A98149681FB6A98A005F00B4 /* MVKStrings.h in Headers */,
+				A9546B292672A3B8004BA3E6 /* SPIRVSupport.h in Headers */,
+				A928C9191D0488DC00071B88 /* SPIRVConversion.h in Headers */,
+				A909408C1C58013E0094110D /* SPIRVToMSLConverter.h in Headers */,
+				A9F042B21FB4D060009FCCB8 /* MVKCommonEnvironment.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A93903C11C57E9ED00FE90DC /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				450A4F62220CB180007203D7 /* SPIRVReflection.h in Headers */,
+				A98149691FB6A98A005F00B4 /* MVKStrings.h in Headers */,
+				A9546B2B2672A3B8004BA3E6 /* SPIRVSupport.h in Headers */,
+				A928C91A1D0488DC00071B88 /* SPIRVConversion.h in Headers */,
+				A909408D1C58013E0094110D /* SPIRVToMSLConverter.h in Headers */,
+				A9F042B31FB4D060009FCCB8 /* MVKCommonEnvironment.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DCFD7F702A45BDA0007BBBF7 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DCFD7F712A45BDA0007BBBF7 /* SPIRVReflection.h in Headers */,
+				DCFD7F732A45BDA0007BBBF7 /* MVKStrings.h in Headers */,
+				DCFD7F742A45BDA0007BBBF7 /* SPIRVSupport.h in Headers */,
+				DCFD7F752A45BDA0007BBBF7 /* SPIRVConversion.h in Headers */,
+				DCFD7F772A45BDA0007BBBF7 /* SPIRVToMSLConverter.h in Headers */,
+				DCFD7F782A45BDA0007BBBF7 /* MVKCommonEnvironment.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		2FEA0CFF2490381A00EEF3AD /* MoltenVKShaderConverter-tvOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2FEA0D112490381A00EEF3AD /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-tvOS" */;
+			buildPhases = (
+				2FEA0D002490381A00EEF3AD /* Headers */,
+				2FEA0D072490381A00EEF3AD /* Sources */,
+				2FEA0D0C2490381A00EEF3AD /* Frameworks */,
+				A93ED4E824F59E1100FEB018 /* Copy to Staging */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "MoltenVKShaderConverter-tvOS";
+			productName = "MetalGLShaderConverter-iOS";
+			productReference = 2FEA0D142490381A00EEF3AD /* libMoltenVKShaderConverter.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		A9092A8C1A81717B00051823 /* MoltenVKShaderConverter */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A9092A931A81717C00051823 /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter" */;
+			buildPhases = (
+				A9092A891A81717B00051823 /* Sources */,
+				A9092A8A1A81717B00051823 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A925B71D1C78DEBF006E7ECD /* PBXTargetDependency */,
+			);
+			name = MoltenVKShaderConverter;
+			productName = MetalGLShaderConverterTool;
+			productReference = A964BD5F1C57EFBD00D930D8 /* MoltenVKShaderConverter */;
+			productType = "com.apple.product-type.tool";
+		};
+		A93903B81C57E9D700FE90DC /* MoltenVKShaderConverter-iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A93903BC1C57E9D700FE90DC /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-iOS" */;
+			buildPhases = (
+				A93903B91C57E9D700FE90DC /* Headers */,
+				A93903BA1C57E9D700FE90DC /* Sources */,
+				A972AD2E21CEE6F50013AB25 /* Frameworks */,
+				A93ED4E724F59E0900FEB018 /* Copy to Staging */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "MoltenVKShaderConverter-iOS";
+			productName = "MetalGLShaderConverter-iOS";
+			productReference = A93903BF1C57E9D700FE90DC /* libMoltenVKShaderConverter.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		A93903C01C57E9ED00FE90DC /* MoltenVKShaderConverter-macOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A93903C41C57E9ED00FE90DC /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-macOS" */;
+			buildPhases = (
+				A93903C11C57E9ED00FE90DC /* Headers */,
+				A93903C21C57E9ED00FE90DC /* Sources */,
+				A972AD3321CEE7230013AB25 /* Frameworks */,
+				A93ED4E924F59E1800FEB018 /* Copy to Staging */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "MoltenVKShaderConverter-macOS";
+			productName = "MetalGLShaderConverter-macOS";
+			productReference = A93903C71C57E9ED00FE90DC /* libMoltenVKShaderConverter.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+		DCFD7F6F2A45BDA0007BBBF7 /* MoltenVKShaderConverter-xrOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DCFD7F852A45BDA0007BBBF7 /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-xrOS" */;
+			buildPhases = (
+				DCFD7F702A45BDA0007BBBF7 /* Headers */,
+				DCFD7F792A45BDA0007BBBF7 /* Sources */,
+				DCFD7F802A45BDA0007BBBF7 /* Frameworks */,
+				DCFD7F842A45BDA0007BBBF7 /* Copy to Staging */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "MoltenVKShaderConverter-xrOS";
+			productName = "MetalGLShaderConverter-macOS";
+			productReference = A979A9412B9A200400F69E67 /* libMoltenVKShaderConverter.a */;
+			productType = "com.apple.product-type.library.static";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A9F55D25198BE6A7004EC31B /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 9999;
+				ORGANIZATIONNAME = "The Brenwill Workshop Ltd.";
+				TargetAttributes = {
+					A9092A8C1A81717B00051823 = {
+						CreatedOnToolsVersion = 6.1.1;
+						DevelopmentTeam = VU3TCKU48B;
+					};
+					A93903B81C57E9D700FE90DC = {
+						DevelopmentTeam = VU3TCKU48B;
+					};
+					A93903C01C57E9ED00FE90DC = {
+						DevelopmentTeam = VU3TCKU48B;
+					};
+				};
+			};
+			buildConfigurationList = A9F55D28198BE6A7004EC31B /* Build configuration list for PBXProject "MoltenVKShaderConverter" */;
+			compatibilityVersion = "Xcode 8.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A9F55D24198BE6A7004EC31B;
+			productRefGroup = A9F55D24198BE6A7004EC31B;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A9092A8C1A81717B00051823 /* MoltenVKShaderConverter */,
+				A93903B81C57E9D700FE90DC /* MoltenVKShaderConverter-iOS */,
+				2FEA0CFF2490381A00EEF3AD /* MoltenVKShaderConverter-tvOS */,
+				A93903C01C57E9ED00FE90DC /* MoltenVKShaderConverter-macOS */,
+				DCFD7F6F2A45BDA0007BBBF7 /* MoltenVKShaderConverter-xrOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A93ED4E724F59E0900FEB018 /* Copy to Staging */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${BUILT_PRODUCTS_DIR}/lib${PRODUCT_NAME}.a",
+			);
+			name = "Copy to Staging";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/$(TARGET_NAME)/CopyPhaseDummyOutputFile",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = ". \"${SRCROOT}/../Scripts/copy_to_staging.sh\" \"lib${PRODUCT_NAME}.a\"\n";
+		};
+		A93ED4E824F59E1100FEB018 /* Copy to Staging */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${BUILT_PRODUCTS_DIR}/lib${PRODUCT_NAME}.a",
+			);
+			name = "Copy to Staging";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/$(TARGET_NAME)/CopyPhaseDummyOutputFile",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = ". \"${SRCROOT}/../Scripts/copy_to_staging.sh\" \"lib${PRODUCT_NAME}.a\"\n";
+		};
+		A93ED4E924F59E1800FEB018 /* Copy to Staging */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${BUILT_PRODUCTS_DIR}/lib${PRODUCT_NAME}.a",
+			);
+			name = "Copy to Staging";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/$(TARGET_NAME)/CopyPhaseDummyOutputFile",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = ". \"${SRCROOT}/../Scripts/copy_to_staging.sh\" \"lib${PRODUCT_NAME}.a\"\n";
+		};
+		DCFD7F842A45BDA0007BBBF7 /* Copy to Staging */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${BUILT_PRODUCTS_DIR}/lib${PRODUCT_NAME}.a",
+			);
+			name = "Copy to Staging";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/$(TARGET_NAME)/CopyPhaseDummyOutputFile",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = ". \"${SRCROOT}/../Scripts/copy_to_staging.sh\" \"lib${PRODUCT_NAME}.a\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2FEA0D072490381A00EEF3AD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2FEA0D082490381A00EEF3AD /* FileSupport.mm in Sources */,
+				2FEA0D092490381A00EEF3AD /* SPIRVToMSLConverter.cpp in Sources */,
+				2FEA0D0B2490381A00EEF3AD /* SPIRVConversion.mm in Sources */,
+				A9546B272672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A9092A891A81717B00051823 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A97CC7411C7527F3004A5C7E /* MoltenVKShaderConverterTool.cpp in Sources */,
+				A95096BF2003D32400F10950 /* OSSupport.mm in Sources */,
+				A9B51BDD225E98BB00AC74D2 /* MVKOSExtensions.mm in Sources */,
+				A9546B252672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */,
+				A97CC7401C7527F3004A5C7E /* main.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A93903BA1C57E9D700FE90DC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A95096BB2003D00300F10950 /* FileSupport.mm in Sources */,
+				A909408A1C58013E0094110D /* SPIRVToMSLConverter.cpp in Sources */,
+				A928C91B1D0488DC00071B88 /* SPIRVConversion.mm in Sources */,
+				A9546B262672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A93903C21C57E9ED00FE90DC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A95096BC2003D00300F10950 /* FileSupport.mm in Sources */,
+				A909408B1C58013E0094110D /* SPIRVToMSLConverter.cpp in Sources */,
+				A928C91C1D0488DC00071B88 /* SPIRVConversion.mm in Sources */,
+				A9546B282672A3B8004BA3E6 /* SPIRVSupport.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DCFD7F792A45BDA0007BBBF7 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DCFD7F7A2A45BDA0007BBBF7 /* FileSupport.mm in Sources */,
+				DCFD7F7D2A45BDA0007BBBF7 /* SPIRVToMSLConverter.cpp in Sources */,
+				DCFD7F7E2A45BDA0007BBBF7 /* SPIRVConversion.mm in Sources */,
+				DCFD7F7F2A45BDA0007BBBF7 /* SPIRVSupport.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A925B71D1C78DEBF006E7ECD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A93903C01C57E9ED00FE90DC /* MoltenVKShaderConverter-macOS */;
+			targetProxy = A925B71C1C78DEBF006E7ECD /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		2FEA0D122490381A00EEF3AD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = appletvos;
+			};
+			name = Debug;
+		};
+		2FEA0D132490381A00EEF3AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = appletvos;
+			};
+			name = Release;
+		};
+		A9092A911A81717C00051823 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACH_O_TYPE = mh_execute;
+				OTHER_LDFLAGS = (
+					"-ObjC",
+					"-w",
+				);
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A9092A921A81717C00051823 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				MACH_O_TYPE = mh_execute;
+				OTHER_LDFLAGS = (
+					"-ObjC",
+					"-w",
+				);
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		A93903BD1C57E9D700FE90DC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		A93903BE1C57E9D700FE90DC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+		A93903C51C57E9ED00FE90DC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A93903C61C57E9ED00FE90DC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		A9F55D3F198BE6A8004EC31B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = "$(ARCHS_STANDARD_64_BIT)";
+				BITCODE_GENERATION_MODE = marker;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_CXX0X_EXTENSIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_INLINES_ARE_PRIVATE_EXTERN = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"SPIRV_CROSS_NAMESPACE_OVERRIDE=MVK_spirv_cross",
+				);
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_CHECK_SWITCH_STATEMENTS = NO;
+				GCC_WARN_HIDDEN_VIRTUAL_FUNCTIONS = YES;
+				GCC_WARN_NON_VIRTUAL_DESTRUCTOR = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)\"",
+					"\"$(SRCROOT)/SPIRV-Cross\"",
+					"\"$(SRCROOT)/SPIRV-Tools/include\"",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				MACH_O_TYPE = staticlib;
+				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				PRODUCT_NAME = MoltenVKShaderConverter;
+				SKIP_INSTALL = YES;
+				TVOS_DEPLOYMENT_TARGET = 14.5;
+				WARNING_CFLAGS = (
+					"-Wreorder",
+					"-Wheader-hygiene",
+					"-Wunused-but-set-variable",
+				);
+			};
+			name = Debug;
+		};
+		A9F55D40198BE6A8004EC31B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = "$(ARCHS_STANDARD_64_BIT)";
+				BITCODE_GENERATION_MODE = bitcode;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_CXX0X_EXTENSIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = NO;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
+				GCC_INLINES_ARE_PRIVATE_EXTERN = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 2;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"NDEBUG=1",
+					"SPIRV_CROSS_NAMESPACE_OVERRIDE=MVK_spirv_cross",
+				);
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_MISSING_PROTOTYPES = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_CHECK_SWITCH_STATEMENTS = NO;
+				GCC_WARN_HIDDEN_VIRTUAL_FUNCTIONS = YES;
+				GCC_WARN_NON_VIRTUAL_DESTRUCTOR = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)\"",
+					"\"$(SRCROOT)/SPIRV-Cross\"",
+					"\"$(SRCROOT)/SPIRV-Tools/include\"",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				MACH_O_TYPE = staticlib;
+				MACOSX_DEPLOYMENT_TARGET = 11.0;
+				PRODUCT_NAME = MoltenVKShaderConverter;
+				SKIP_INSTALL = YES;
+				TVOS_DEPLOYMENT_TARGET = 14.5;
+				VALIDATE_PRODUCT = YES;
+				WARNING_CFLAGS = (
+					"-Wreorder",
+					"-Wheader-hygiene",
+					"-Wunused-but-set-variable",
+				);
+			};
+			name = Release;
+		};
+		DCFD7F862A45BDA0007BBBF7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = xros;
+			};
+			name = Debug;
+		};
+		DCFD7F872A45BDA0007BBBF7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = xros;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2FEA0D112490381A00EEF3AD /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-tvOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2FEA0D122490381A00EEF3AD /* Debug */,
+				2FEA0D132490381A00EEF3AD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A9092A931A81717C00051823 /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A9092A911A81717C00051823 /* Debug */,
+				A9092A921A81717C00051823 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A93903BC1C57E9D700FE90DC /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A93903BD1C57E9D700FE90DC /* Debug */,
+				A93903BE1C57E9D700FE90DC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A93903C41C57E9ED00FE90DC /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-macOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A93903C51C57E9ED00FE90DC /* Debug */,
+				A93903C61C57E9ED00FE90DC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A9F55D28198BE6A7004EC31B /* Build configuration list for PBXProject "MoltenVKShaderConverter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A9F55D3F198BE6A8004EC31B /* Debug */,
+				A9F55D40198BE6A8004EC31B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DCFD7F852A45BDA0007BBBF7 /* Build configuration list for PBXNativeTarget "MoltenVKShaderConverter-xrOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DCFD7F862A45BDA0007BBBF7 /* Debug */,
+				DCFD7F872A45BDA0007BBBF7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A9F55D25198BE6A7004EC31B /* Project object */;
+}

@@ -71,19 +71,15 @@
   },
 
   "bench_e2e": {
-    "description": "End-to-end SQL-driven 2/4 Gbp benchmark. bioseq via bioseq.load + SELECT mmsearch; minimap2 via CLI on the split FASTA. no_index = from-scratch build+map counted; just_index = index prebuilt untimed, then measured COLD after a PostgreSQL restart (both bioseq variants restart per just_index cell). All bioseq paths run in TASK_PARALLEL. Two aligner frontends: block_simd_dp_two_stack_nthash (block aligner + SIMD-mm2 chaining + two-stack nthash minimizer) and gpu_dp_gpu_seed (DOC0310 Phase C Vulkan GPU seeding + tiled-DP chaining). Each bioseq path is swept over per-fragment and per-sequence minimizer indexes.",
+    "description": "GPU benchmark: Vulkan GPU seeding+chaining (DOC0344 production, no XPC fallback) vs minimap2 baseline at 2/4 Gbp. bioseq via bioseq.load + SELECT mmsearch; minimap2 via CLI on the split FASTA. no_index = from-scratch build+map counted; just_index = index prebuilt untimed, then measured COLD after a PostgreSQL restart. SIMD paths excluded (run separately; see SUMMARY.md report 6/7 for SIMD numbers).",
     "fast": false,
     "concurrency": { "bench_lock": true, "concurrency": false },
     "matrix": {
       "for": { "E2E_2GBP_DNA4": 3, "E2E_2GBP_DNA5": 3,
                "E2E_4GBP_DNA4": 3, "E2E_4GBP_DNA5": 3 },
       "over": {
-        "bioseq_block_simd_dp_two_stack_nthash_no_index":   {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "pipeline_mode": ["task_parallel"]},
-        "bioseq_block_simd_dp_two_stack_nthash_just_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "pipeline_mode": ["task_parallel"]},
-        "bioseq_block_gpu_dp_gpu_seed_just_index":          {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "pipeline_mode": ["task_parallel"]},
-        "bioseq_block_gpu_dp_gpu_seed_no_index":            {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "pipeline_mode": ["task_parallel"]},
-        "minimap2_no_index":   {"threads": [10]},
-        "minimap2_just_index": {"threads": [10]}
+        "bioseq_block_gpu_dp_gpu_seed_just_index": {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "pipeline_mode": ["task_parallel"]},
+        "bioseq_block_gpu_dp_gpu_seed_no_index":   {"minimizer_index": ["minimizers_per_fragment", "minimizers_per_sequence"], "pipeline_mode": ["task_parallel"]}
       },
       "by_regions": true,
       "metrics": {

@@ -44,6 +44,10 @@ AddCommonTargetX(
     PostgreSQL::PostgreSQL                     # libpq — the SQL client (NEW vs bench_v10)
     sqlgen::sqlgen                             # sqlgen PostgresV2Connection (find_package imported target)
     Catch2::Catch2                             # common.cppm `export import testing` (ASSERT macro)
+    Vulkan::Vulkan                             # Vulkan loader (bioseq_modules_nopg uses vulkan/shader_compiler)
+    Vulkan::glslang                            # GLSL→SPIR-V compiler (shader_compiler.cppm)
+    spirv-cross-msl                            # SPIR-V → MSL cross-compiler (MoltenVK path)
+    Vulkan::LayerSettings                      # validation-layer settings (Vulkan::Vulkan companion)
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES

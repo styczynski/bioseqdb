@@ -316,8 +316,17 @@ Datum bioseq_cigar_stub(PG_FUNCTION_ARGS) {
 	PG_RETURN_TEXT_P(cstring_to_text("!UNEXPECTED!"));
 }
 
-/*
- * bioseq.symbol_count(el bioseq.seq, sym text) -> bigint.
+CXX_PG_FUNCTION_INFO_V1(bioseq_gpu_warmup_shader_cache);
+Datum bioseq_gpu_warmup_shader_cache(PG_FUNCTION_ARGS) {
+	const std::string report =
+		bioseq::parallelism::pg::warmup_backend_local_shader_cache_report();
+	PG_RETURN_TEXT_P(cstring_to_text_with_len(
+		report.data(),
+		static_cast<int>(report.size())));
+}
+
+	/*
+	 * bioseq.symbol_count(el bioseq.seq, sym text) -> bigint.
  *
  * The Postgres entry point computes the result directly from the passed-in
  * varlena (so it works on literals and outside a scan context). This path is
