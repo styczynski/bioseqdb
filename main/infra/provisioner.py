@@ -204,7 +204,14 @@ def ssh_target() -> tuple[str, str]:
     key = outs.get("ssh_key_path")
     if not ip or not key:
         die("no instance found in Terraform outputs — run `up` first")
-    return ip, key
+    # The output path is relative to the Terraform dir; resolve it to an absolute
+    # path so ssh works regardless of the caller's current working directory.
+    key_path = Path(key)
+    if not key_path.is_absolute():
+        key_path = (TF_DIR / key).resolve()
+    if not key_path.exists():
+        die(f"ssh key not found at {key_path} — was the stack created on this machine?")
+    return ip, str(key_path)
 
 
 def ssh_base(key: str) -> list[str]:
