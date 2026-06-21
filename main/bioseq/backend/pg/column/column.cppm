@@ -33,6 +33,7 @@ import bioseq.scheduler.supervisor_pg;
 import bioseq.storage.indexing_pg.residency;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.column.planner_hook;        // DOC0322 §9.4 — exported bioseq_planner_init
+import bioseq.table.batch_sort_scan;      // exported bioseq_batch_sort_init (sequence ORDER BY)
 
 /*
  * DOC0322 §7.7/§9.4 — the file-body `extern "C++"` wrapper is gone. bioseq_init
@@ -67,6 +68,9 @@ bioseq_init()
 	// :custom_scan, re-exported by bioseq_table (imported above).
 	bioseq_customscan_init();
 	bioseq_planner_init();
+	/* Outer custom scan that sorts sequences for `ORDER BY <bioseq.seq>`,
+	 * replacing PostgreSQL's own Sort via a create_upper_paths_hook. */
+	bioseq_batch_sort_init();
 	/* DOC0279 §12.1 — the legacy MetadataKindRegistry / sidecar kind
 	 * registration is gone; the set of indexes is the compile-time
 	 * pg_supported_indexes::list_types() registry (no runtime init). */
