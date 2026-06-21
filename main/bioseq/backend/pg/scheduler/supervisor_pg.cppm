@@ -14,6 +14,7 @@ extern "C" {
 #include "port/atomics.h"
 #include "storage/dsm.h"
 #include "storage/dsm_impl.h"
+#include "storage/condition_variable.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/proc.h"
@@ -34,15 +35,21 @@ void AbortCurrentTransaction(void);
 #include <csignal>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <expected>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <cstring>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <vulkan/vulkan.h>
 
 export module bioseq.scheduler.supervisor_pg;
 import bioseq.common.mlogging;
@@ -52,6 +59,9 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
+import bioseq.gpu.vulkan.runtime;
+import bioseq.gpu.vulkan.shader_cache;
+import bioseq.gpu.vulkan.shader_variants;
 import bioseq.pg_utils;
 import bioseq.indexing.type;
 import bioseq.indexing.minimizer_sequence;
@@ -94,6 +104,29 @@ struct PgPersistQueueSlot {
     std::uint64_t sequence_rowno;
     std::uint64_t payload_bytes;
     dsm_handle dsm;
+};
+
+enum class RuntimeInitState : std::uint32_t {
+    Pending = 0,
+    Ready = 1,
+    Failed = 2,
+};
+
+enum class CompileSlotState : std::uint32_t {
+    Free = 0,
+    Filling = 1,
+    Requested = 2,
+    Compiling = 3,
+    DoneOk = 4,
+    DoneErr = 5,
+};
+
+struct ShaderCompileSlot {
+    pg_atomic_uint32 state;
+    pg_atomic_uint32 generation;
+    bioseq::gpu::vulkan::ShaderVariantKey key{};
+    std::uint32_t requester_pid = 0;
+    std::uint32_t errc = 0;
 };
 
 struct IndexPersistDsmHeader {
@@ -186,6 +219,16 @@ struct BioseqSchedulerShared {
     PgMpsBuildStats mps_build_stats;
     static constexpr std::size_t kPersistQueueSize = 64;
     PgPersistQueueSlot persist_queue[kPersistQueueSize];
+    pg_atomic_uint32 runtime_init_state;
+    pg_atomic_uint32 runtime_init_generation;
+    ConditionVariable runtime_init_cv;
+    pg_atomic_uint32 runtime_init_errc;
+    char cache_digest_hex[33];
+    pg_atomic_uint32 supervisor_pgprocno;
+    pg_atomic_uint32 supervisor_generation;
+    static constexpr std::size_t kCompileQueueSize = 64;
+    ShaderCompileSlot compile_queue[kCompileQueueSize];
+    ConditionVariable compile_done_cv;
 };
 
 inline BioseqSchedulerShared* g_shared = nullptr;
@@ -290,6 +333,30 @@ void scheduler_shmem_startup() {
             slot.payload_bytes = 0;
             slot.dsm = DSM_HANDLE_INVALID;
         }
+        pg_atomic_init_u32(
+            &g_shared->runtime_init_state,
+            static_cast<std::uint32_t>(RuntimeInitState::Pending));
+        pg_atomic_init_u32(&g_shared->runtime_init_generation, 0);
+        ConditionVariableInit(&g_shared->runtime_init_cv);
+        pg_atomic_init_u32(
+            &g_shared->runtime_init_errc,
+            static_cast<std::uint32_t>(bioseq::gpu::vulkan::ShaderCacheErrc::Ok));
+        g_shared->cache_digest_hex[0] = '\0';
+        pg_atomic_init_u32(
+            &g_shared->supervisor_pgprocno,
+            static_cast<std::uint32_t>(INVALID_PROC_NUMBER));
+        pg_atomic_init_u32(&g_shared->supervisor_generation, 0);
+        for (ShaderCompileSlot& slot : g_shared->compile_queue) {
+            pg_atomic_init_u32(
+                &slot.state,
+                static_cast<std::uint32_t>(CompileSlotState::Free));
+            pg_atomic_init_u32(&slot.generation, 0);
+            slot.key = bioseq::gpu::vulkan::ShaderVariantKey{};
+            slot.requester_pid = 0;
+            slot.errc = static_cast<std::uint32_t>(
+                bioseq::gpu::vulkan::ShaderCacheErrc::Ok);
+        }
+        ConditionVariableInit(&g_shared->compile_done_cv);
         reset_shared_stats(g_shared->stats, static_cast<std::uint64_t>(bioseq::instr::clock::now_ns()));
     }
 }
@@ -955,6 +1022,449 @@ void register_scheduler_supervisor() {
     bioseq_log<DBG>("[bioseq] scheduler: shared supervisor background worker registered");
 }
 
+[[nodiscard]] bioseq::gpu::vulkan::ShaderCacheErrc classify_shader_cache_error(
+        std::string_view error) noexcept {
+    using bioseq::gpu::vulkan::ShaderCacheErrc;
+    if (error.find("metal unavailable") != std::string_view::npos
+        || error.find("No such file") != std::string_view::npos) {
+        return ShaderCacheErrc::NoToolchain;
+    }
+    if (error.find("glslang") != std::string_view::npos
+        || error.find("shader compile") != std::string_view::npos) {
+        return ShaderCacheErrc::Glslang;
+    }
+    if (error.find("SPIR-V to MSL") != std::string_view::npos) {
+        return ShaderCacheErrc::SpirvToMsl;
+    }
+    if (error.find("spawn failed") != std::string_view::npos) {
+        return ShaderCacheErrc::MetalSpawn;
+    }
+    if (error.find("exited with status") != std::string_view::npos
+        || error.find("terminated by signal") != std::string_view::npos) {
+        return ShaderCacheErrc::MetalExit;
+    }
+    if (error.find("ABI") != std::string_view::npos
+        || error.find("layout mismatch") != std::string_view::npos
+        || error.find("stride") != std::string_view::npos) {
+        return ShaderCacheErrc::AbiScan;
+    }
+    return ShaderCacheErrc::MetaIo;
+}
+
+[[nodiscard]] std::filesystem::path runtime_cache_root() {
+    const char* data_dir = DataDir != nullptr ? DataDir : ".";
+    return std::filesystem::path(data_dir) / "bioseq_runtime_cache";
+}
+
+[[nodiscard]] std::filesystem::path runtime_cache_dir_from_digest(
+        std::string_view digest) {
+    return runtime_cache_root() / std::string(digest);
+}
+
+[[nodiscard]] std::string current_runtime_cache_digest() {
+    if (g_shared == nullptr) {
+        return {};
+    }
+    char local[sizeof(g_shared->cache_digest_hex)]{};
+    std::memcpy(local, g_shared->cache_digest_hex, sizeof(local));
+    local[sizeof(local) - 1] = '\0';
+    return std::string(local);
+}
+
+[[nodiscard]] bioseq::gpu::vulkan::ShaderCacheBuildInputs conservative_shader_inputs() {
+    bioseq::gpu::vulkan::ShaderCacheBuildInputs inputs{};
+    inputs.variants.max_workgroup_invocations = 256u;
+    inputs.variants.max_shared_memory_bytes = 32u * 1024u;
+    inputs.variants.default_window_size =
+        static_cast<std::uint32_t>(std::max(1, bioseq_aligner_window_size));
+    inputs.msl = bioseq::gpu::vulkan::MslVersion{3u, 2u, 0u};
+    inputs.moltenvk_build = "conservative-no-device-probe";
+    inputs.device_uuid = "conservative-no-device-probe";
+    return inputs;
+}
+
+[[nodiscard]] std::expected<void, std::string> run_shader_cache_aot_phase() {
+#if !defined(__APPLE__)
+    return {};
+#else
+    const auto inputs = conservative_shader_inputs();
+    const std::string digest = bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
+    const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
+    std::error_code ec;
+    std::filesystem::create_directories(cache_dir, ec);
+    if (ec) {
+        return std::unexpected(fmt::format(
+            "create shader cache dir {} failed: {}",
+            cache_dir.string(), ec.message()));
+    }
+    if (auto command_lib = bioseq::gpu::vulkan::ensure_moltenvk_command_library(
+            cache_dir, inputs.msl);
+        !command_lib) {
+        return std::unexpected(fmt::format(
+            "moltenvk command library: {}", command_lib.error()));
+    }
+
+    if (g_shared != nullptr) {
+        std::snprintf(
+            g_shared->cache_digest_hex, sizeof(g_shared->cache_digest_hex),
+            "%s", digest.c_str());
+    }
+
+    std::vector<bioseq::gpu::vulkan::ShaderVariantKey> keys;
+    bioseq::gpu::vulkan::for_each_static_shader_variant(
+        inputs.variants,
+        [&keys](const bioseq::gpu::vulkan::ShaderVariantKey& key) {
+            keys.push_back(key);
+        });
+
+    bioseq::parallelism::GlobalPool::instance().configure(
+        bioseq::parallelism::PoolConfig{
+            .max_concurrency = effective_max_concurrency(
+                static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency))),
+            .mode = bioseq::parallelism::mode_from_int(
+                bioseq_scheduler_pipeline_concurrency_mode),
+        });
+
+    constexpr std::uint64_t kPeakCompileBytes = 256ull << 20;
+    std::size_t cursor = 0;
+    while (cursor < keys.size()) {
+        const unsigned requested = static_cast<unsigned>(
+            std::min<std::size_t>(4, keys.size() - cursor));
+        auto wave = bioseq::parallelism::try_reserve_budgeted_wave(
+            requested, kPeakCompileBytes);
+        if (!wave.admitted) {
+            return std::unexpected("shader cache AOT memory admission failed");
+        }
+        const std::size_t begin = cursor;
+        const std::size_t end = std::min<std::size_t>(keys.size(), cursor + wave.fanout);
+        std::mutex error_mu;
+        std::string first_error;
+        bioseq::parallelism::GlobalPool::instance().parallel_for(
+            begin, end, 1,
+            [&](std::size_t b, std::size_t e) {
+                for (std::size_t i = b; i < e; ++i) {
+                    auto compiled = bioseq::gpu::vulkan::ensure_compiled(
+                        cache_dir, keys[i], inputs.msl);
+                    if (!compiled) {
+                        std::lock_guard<std::mutex> guard(error_mu);
+                        if (first_error.empty()) {
+                            first_error = fmt::format(
+                                "{}: {}",
+                                bioseq::gpu::vulkan::cache_file_stem(keys[i]),
+                                compiled.error());
+                        }
+                    }
+                }
+            });
+        if (!first_error.empty()) {
+            return std::unexpected(first_error);
+        }
+        cursor = end;
+    }
+    return {};
+#endif
+}
+
+[[nodiscard]] std::expected<void, std::string> load_bioseq_runtime() {
+    return run_shader_cache_aot_phase();
+}
+
+void publish_runtime_init_result(std::expected<void, std::string> result) noexcept {
+    if (g_shared == nullptr) {
+        return;
+    }
+    if (result) {
+        pg_atomic_write_u32(
+            &g_shared->runtime_init_errc,
+            static_cast<std::uint32_t>(bioseq::gpu::vulkan::ShaderCacheErrc::Ok));
+    } else {
+        g_shared->cache_digest_hex[0] = '\0';
+        pg_atomic_write_u32(
+            &g_shared->runtime_init_errc,
+            static_cast<std::uint32_t>(classify_shader_cache_error(result.error())));
+        bioseq_log<WRN, PG>("[bioseq] runtime init failed: {}", result.error());
+    }
+    pg_write_barrier();
+    pg_atomic_write_u32(
+        &g_shared->runtime_init_state,
+        static_cast<std::uint32_t>(
+            result ? RuntimeInitState::Ready : RuntimeInitState::Failed));
+    ConditionVariableBroadcast(&g_shared->runtime_init_cv);
+}
+
+[[nodiscard]] bool procno_in_range(std::uint32_t procno) noexcept {
+    return procno != static_cast<std::uint32_t>(INVALID_PROC_NUMBER)
+        && ProcGlobal != nullptr
+        && procno < static_cast<std::uint32_t>(ProcGlobal->allProcCount);
+}
+
+void wake_supervisor_if_known() noexcept {
+    if (g_shared == nullptr) {
+        return;
+    }
+    const std::uint32_t procno = pg_atomic_read_u32(&g_shared->supervisor_pgprocno);
+    if (procno_in_range(procno)) {
+        SetLatch(&GetPGProcByNumber(static_cast<ProcNumber>(procno))->procLatch);
+    }
+}
+
+[[noreturn]] void report_runtime_init_unavailable(std::string_view detail) {
+    bioseq_report<ERR, PG>()
+        .code(ERRCODE_INTERNAL_ERROR)
+        .msg("Vulkan aligner execution failed")
+        .detail("{}", detail)
+        .hint("Selected PostgreSQL Vulkan execution requires the bioseq shared-preload supervisor and a successful supervisor runtime initialization.");
+    __builtin_unreachable();
+}
+
+void wait_for_runtime_ready() {
+    static bool backend_runtime_ready = false;
+    if (backend_runtime_ready) {
+        return;
+    }
+    if (g_shared == nullptr) {
+        report_runtime_init_unavailable(
+            "load_bioseq_runtime unavailable: bioseq must be loaded via shared_preload_libraries for PostgreSQL GPU execution");
+    }
+
+    constexpr std::uint64_t kDeadlineNs = 120ull * 1'000'000'000ull;
+    const std::uint64_t deadline =
+        static_cast<std::uint64_t>(bioseq::instr::clock::now_ns()) + kDeadlineNs;
+    ConditionVariablePrepareToSleep(&g_shared->runtime_init_cv);
+    for (;;) {
+        CHECK_FOR_INTERRUPTS();
+        const auto state = static_cast<RuntimeInitState>(
+            pg_atomic_read_u32(&g_shared->runtime_init_state));
+        pg_read_barrier();
+        if (state == RuntimeInitState::Ready) {
+            const std::string digest = current_runtime_cache_digest();
+            if (!digest.empty()) {
+                const std::filesystem::path command_lib =
+                    bioseq::gpu::vulkan::moltenvk_command_metallib_path(
+                        runtime_cache_dir_from_digest(digest));
+                (void)::setenv(
+                    "BIOSEQ_MOLTENVK_COMMAND_METALLIB",
+                    command_lib.c_str(),
+                    1);
+            }
+            backend_runtime_ready = true;
+            ConditionVariableCancelSleep();
+            return;
+        }
+        if (state == RuntimeInitState::Failed) {
+            const std::uint32_t errc =
+                pg_atomic_read_u32(&g_shared->runtime_init_errc);
+            ConditionVariableCancelSleep();
+            report_runtime_init_unavailable(fmt::format(
+                "load_bioseq_runtime failed (errc {}); GPU unavailable", errc));
+        }
+        if (static_cast<std::uint64_t>(bioseq::instr::clock::now_ns()) > deadline) {
+            ConditionVariableCancelSleep();
+            report_runtime_init_unavailable(
+                "load_bioseq_runtime unavailable (supervisor down / timeout)");
+        }
+        (void)ConditionVariableTimedSleep(
+            &g_shared->runtime_init_cv, 1000L, PG_WAIT_EXTENSION);
+    }
+}
+
+struct CompileClaim {
+    std::size_t slot_index = 0;
+    std::uint32_t generation = 0;
+    bioseq::gpu::vulkan::ShaderVariantKey key{};
+};
+
+[[nodiscard]] std::optional<CompileClaim> try_claim_shader_compile_slot() noexcept {
+    if (g_shared == nullptr) {
+        return std::nullopt;
+    }
+    for (std::size_t slot_index = 0;
+         slot_index < BioseqSchedulerShared::kCompileQueueSize;
+         ++slot_index) {
+        ShaderCompileSlot& slot = g_shared->compile_queue[slot_index];
+        std::uint32_t expected =
+            static_cast<std::uint32_t>(CompileSlotState::Requested);
+        if (!pg_atomic_compare_exchange_u32(
+                &slot.state, &expected,
+                static_cast<std::uint32_t>(CompileSlotState::Compiling))) {
+            continue;
+        }
+        pg_read_barrier();
+        return CompileClaim{
+            .slot_index = slot_index,
+            .generation = pg_atomic_read_u32(&slot.generation),
+            .key = slot.key,
+        };
+    }
+    return std::nullopt;
+}
+
+void finish_shader_compile_slot(
+        const CompileClaim& claim,
+        bioseq::gpu::vulkan::ShaderCacheErrc errc,
+        bool ok) noexcept {
+    if (g_shared == nullptr
+        || claim.slot_index >= BioseqSchedulerShared::kCompileQueueSize) {
+        return;
+    }
+    ShaderCompileSlot& slot = g_shared->compile_queue[claim.slot_index];
+    slot.errc = static_cast<std::uint32_t>(errc);
+    pg_atomic_fetch_add_u32(&slot.generation, 1);
+    pg_write_barrier();
+    pg_atomic_write_u32(
+        &slot.state,
+        static_cast<std::uint32_t>(
+            ok ? CompileSlotState::DoneOk : CompileSlotState::DoneErr));
+}
+
+void release_shader_compile_slot(std::size_t slot_index) noexcept {
+    if (g_shared == nullptr || slot_index >= BioseqSchedulerShared::kCompileQueueSize) {
+        return;
+    }
+    ShaderCompileSlot& slot = g_shared->compile_queue[slot_index];
+    slot.key = bioseq::gpu::vulkan::ShaderVariantKey{};
+    slot.requester_pid = 0;
+    slot.errc = static_cast<std::uint32_t>(bioseq::gpu::vulkan::ShaderCacheErrc::Ok);
+    pg_atomic_fetch_add_u32(&slot.generation, 1);
+    pg_write_barrier();
+    pg_atomic_write_u32(
+        &slot.state,
+        static_cast<std::uint32_t>(CompileSlotState::Free));
+}
+
+[[nodiscard]] std::expected<std::pair<std::size_t, std::uint32_t>, std::string>
+publish_shader_compile_request(
+        const bioseq::gpu::vulkan::ShaderVariantKey& key) {
+    if (g_shared == nullptr) {
+        return std::unexpected("shader compile queue unavailable");
+    }
+    for (std::size_t slot_index = 0;
+         slot_index < BioseqSchedulerShared::kCompileQueueSize;
+         ++slot_index) {
+        ShaderCompileSlot& slot = g_shared->compile_queue[slot_index];
+        std::uint32_t expected =
+            static_cast<std::uint32_t>(CompileSlotState::Free);
+        if (!pg_atomic_compare_exchange_u32(
+                &slot.state, &expected,
+                static_cast<std::uint32_t>(CompileSlotState::Filling))) {
+            continue;
+        }
+        slot.key = key;
+        slot.requester_pid = static_cast<std::uint32_t>(MyProcPid);
+        slot.errc = static_cast<std::uint32_t>(bioseq::gpu::vulkan::ShaderCacheErrc::Ok);
+        const std::uint32_t generation =
+            pg_atomic_fetch_add_u32(&slot.generation, 1) + 1u;
+        pg_write_barrier();
+        pg_atomic_write_u32(
+            &slot.state,
+            static_cast<std::uint32_t>(CompileSlotState::Requested));
+        wake_supervisor_if_known();
+        return std::pair<std::size_t, std::uint32_t>{slot_index, generation};
+    }
+    return std::unexpected("shader compile queue full");
+}
+
+struct PgSupervisorCompileService {
+    [[nodiscard]] std::expected<void, std::string> ensure_variant_compiled(
+            bioseq::gpu::vulkan::ShaderVariantKey key) {
+        auto published = publish_shader_compile_request(key);
+        if (!published) {
+            return std::unexpected(published.error());
+        }
+        const auto [slot_index, generation] = *published;
+        constexpr std::uint64_t kDeadlineNs = 120ull * 1'000'000'000ull;
+        const std::uint64_t deadline =
+            static_cast<std::uint64_t>(bioseq::instr::clock::now_ns()) + kDeadlineNs;
+        ConditionVariablePrepareToSleep(&g_shared->compile_done_cv);
+        for (;;) {
+            CHECK_FOR_INTERRUPTS();
+            ShaderCompileSlot& slot = g_shared->compile_queue[slot_index];
+            const auto state = static_cast<CompileSlotState>(
+                pg_atomic_read_u32(&slot.state));
+            const std::uint32_t observed_gen =
+                pg_atomic_read_u32(&slot.generation);
+            if ((state == CompileSlotState::DoneOk || state == CompileSlotState::DoneErr)
+                && observed_gen != generation) {
+                pg_read_barrier();
+                const std::uint32_t errc = slot.errc;
+                ConditionVariableCancelSleep();
+                release_shader_compile_slot(slot_index);
+                if (state == CompileSlotState::DoneOk) {
+                    return {};
+                }
+                return std::unexpected(fmt::format(
+                    "shader compile failed for {} (errc {})",
+                    bioseq::gpu::vulkan::cache_file_stem(key), errc));
+            }
+            if (static_cast<std::uint64_t>(bioseq::instr::clock::now_ns()) > deadline) {
+                ConditionVariableCancelSleep();
+                return std::unexpected(fmt::format(
+                    "shader compile timed out for {}",
+                    bioseq::gpu::vulkan::cache_file_stem(key)));
+            }
+            (void)ConditionVariableTimedSleep(
+                &g_shared->compile_done_cv, 1000L, PG_WAIT_EXTENSION);
+        }
+    }
+};
+
+[[nodiscard]] std::expected<bioseq::gpu::vulkan::ShaderModuleLoad, std::string>
+pg_shader_provider_load_module(
+        VkDevice device,
+        const bioseq::gpu::vulkan::ShaderVariantKey& key,
+        PFN_vkCreateShaderModule create_shader_module) {
+    wait_for_runtime_ready();
+    const std::string digest = current_runtime_cache_digest();
+    if (digest.empty()) {
+        return std::unexpected("shader cache digest unavailable");
+    }
+    PgSupervisorCompileService service;
+    return bioseq::gpu::vulkan::load_module(
+        device, runtime_cache_dir_from_digest(digest), key, create_shader_module, service);
+}
+
+void install_pg_shader_provider_if_available() noexcept {
+#if defined(__APPLE__)
+    if (process_shared_preload_libraries_in_progress || g_shared == nullptr) {
+        return;
+    }
+    static bioseq::gpu::vulkan::RuntimeShaderProvider provider{
+        &pg_shader_provider_load_module};
+    bioseq::gpu::vulkan::install_runtime_shader_provider(&provider);
+#endif
+}
+
+void service_pending_shader_compiles() {
+    if (g_shared == nullptr) {
+        return;
+    }
+    const std::string digest = current_runtime_cache_digest();
+    if (digest.empty()) {
+        return;
+    }
+    const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
+    const auto inputs = conservative_shader_inputs();
+    int done = 0;
+    while (done < 4) {
+        auto claim = try_claim_shader_compile_slot();
+        if (!claim) {
+            break;
+        }
+        auto compiled = bioseq::gpu::vulkan::ensure_compiled(
+            cache_dir, claim->key, inputs.msl);
+        finish_shader_compile_slot(
+            *claim,
+            compiled
+                ? bioseq::gpu::vulkan::ShaderCacheErrc::Ok
+                : classify_shader_cache_error(compiled.error()),
+            compiled.has_value());
+        ++done;
+    }
+    if (done > 0) {
+        ConditionVariableBroadcast(&g_shared->compile_done_cv);
+    }
+}
+
 [[nodiscard]] bool supervisor_available() noexcept {
     return g_shared != nullptr;
 }
@@ -991,6 +1501,7 @@ void backend_sync() {
         : 0;
     bioseq::parallelism::MemoryAdmissionController::instance()
         .set_index_memory_cap_bytes(index_cap);
+    install_pg_shader_provider_if_available();
 }
 
 [[nodiscard]] BatchTicket begin_batch(std::int64_t queries) noexcept {
@@ -1844,6 +2355,16 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
     }
 
     pg_atomic_write_u32(
+        &g_shared->supervisor_pgprocno,
+        static_cast<std::uint32_t>(getProcNo_compat(MyProc)));
+    pg_atomic_fetch_add_u32(&g_shared->supervisor_generation, 1);
+    pg_atomic_write_u32(
+        &g_shared->runtime_init_state,
+        static_cast<std::uint32_t>(RuntimeInitState::Pending));
+    pg_atomic_fetch_add_u32(&g_shared->runtime_init_generation, 1);
+    publish_runtime_init_result(load_bioseq_runtime());
+
+    pg_atomic_write_u32(
         &g_shared->cfg_max_concurrency,
         static_cast<std::uint32_t>(std::max(0, bioseq_scheduler_max_concurrency)));
     pg_atomic_write_u32(&g_shared->state, 1);
@@ -1872,6 +2393,7 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
             pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
         }
 
+        service_pending_shader_compiles();
         process_one_persist_job_if_ready();
 
         PgSchedulerStats& stats = g_shared->stats;
@@ -1888,5 +2410,10 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
     }
 
     pg_atomic_write_u32(&g_shared->state, 0);
+    pg_atomic_write_u32(
+        &g_shared->supervisor_pgprocno,
+        static_cast<std::uint32_t>(INVALID_PROC_NUMBER));
+    ConditionVariableBroadcast(&g_shared->runtime_init_cv);
+    ConditionVariableBroadcast(&g_shared->compile_done_cv);
     proc_exit(0);
 }

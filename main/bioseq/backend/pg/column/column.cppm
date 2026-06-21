@@ -59,6 +59,7 @@ bioseq_init()
 		bioseq::parallelism::pg::install_scheduler_shmem_hooks();
 		bioseq::parallelism::pg::register_scheduler_supervisor();
 	}
+	bioseq::parallelism::pg::install_pg_shader_provider_if_available();
 	bioseq_tableam_init();
 	// DOC0322 §7.5 — the customscan init call moved out of bioseq_tableam_init
 	// to here so :access_method no longer imports :custom_scan (the bioseq_table

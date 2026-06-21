@@ -38,6 +38,7 @@ import bioseq.common.context;
 import bioseq.sequences.chaining.utils;
 import bioseq.sequences.chaining.scalar;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.gpu.vulkan.shader_variants;
 import bioseq.parallelism.memory_admission;
 import bioseq.instr;
 
@@ -55,19 +56,12 @@ export namespace bioseq::chaining {
 /// host G3SA's original tile footprint comfortably.
 [[nodiscard]] inline bioseq::gpu::vulkan::ChainingPipelineKey
 choose_vulkan_chaining_pipeline(const bioseq::gpu::vulkan::VulkanFeatureSet& f) noexcept {
-    bioseq::gpu::vulkan::ChainingPipelineKey key;
-
-    if (f.max_workgroup_invocations >= 1024 && f.max_shared_memory_bytes >= 40 * 1024) {
-        key.tile_size = 1024;
-        key.local_size = 256;  // local invocations loop over the tile
-    } else if (f.max_workgroup_invocations >= 256 && f.max_shared_memory_bytes >= 24 * 1024) {
-        key.tile_size = 512;
-        key.local_size = 128;
-    } else {
-        key.tile_size = 384;
-        key.local_size = 128;
-    }
-    return key;
+    return bioseq::gpu::vulkan::choose_chaining_variant(
+        bioseq::gpu::vulkan::VulkanStaticVariantInputs{
+            .max_workgroup_invocations = f.max_workgroup_invocations,
+            .max_shared_memory_bytes = f.max_shared_memory_bytes,
+            .default_window_size = 10u,
+        });
 }
 
 namespace detail {

@@ -3961,6 +3961,26 @@ BioseqColumnScan_BeginCustomScan(CustomScanState *cscanstate, EState *estate, in
 	aligner_params.do_cigar           = features.uses_cigar;
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
+	const bool selected_vulkan =
+		aligner_params.vulkan_seed_hits_enabled
+		|| aligner_params.vulkan_fused_frontend_enabled
+		|| aligner_params.vulkan_gpu_index_build_enabled
+		|| aligner_params.vulkan_extend_enabled
+		|| aligner_params.minimizer_algorithm
+			== bioseq::simd::N_NEON::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+		|| aligner_params.chaining_algorithm
+			== bioseq::simd::N_NEON::ChainingAlgorithmType::VULKAN_TILED_DP;
+	if (features.has_mmsearch && selected_vulkan && !aligner_params.vulkan_enabled) {
+		bioseq_report<ERR, PG>()
+			.code(ERRCODE_INTERNAL_ERROR)
+			.msg("Vulkan aligner execution failed")
+			.detail("selected Vulkan execution requires bioseq.aligner.vulkan_enabled=on")
+			.hint("Set bioseq.aligner.vulkan_enabled=on, or select non-Vulkan minimizer/chaining algorithms before dispatch.");
+	}
+	if (features.has_mmsearch && selected_vulkan && aligner_params.vulkan_enabled) {
+		bioseq::parallelism::pg::install_pg_shader_provider_if_available();
+		bioseq::parallelism::pg::wait_for_runtime_ready();
+	}
 
 	runtime.aligner_state.params          = aligner_params;
 	runtime.aligner_state.features        = features;

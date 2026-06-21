@@ -143,7 +143,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
 /// The anchor sort takes its range from a buffer and has no push constant.
 [[nodiscard]] constexpr std::uint32_t push_constant_size(ShaderKind kind) noexcept {
     switch (kind) {
-        case ShaderKind::chain_tiled_dp_u64:    return 32;  // ChainingPushConstants
+        case ShaderKind::chain_tiled_dp_u64:    return 36;  // ChainingPushConstants
         case ShaderKind::minimizer_candidates:  return 40;  // 10 × uint32
         case ShaderKind::minimizer_emit_exact:  return 40;  // 10 × uint32
         case ShaderKind::seed_lookup_anchors:   return 36;  //  9 × uint32
@@ -208,6 +208,9 @@ public:
  */
 [[nodiscard]] std::vector<std::uint32_t> compile_shader_spirv(
     const ShaderCompileRequest& request);
+
+/// Return the embedded GLSL body for cache digesting.
+[[nodiscard]] std::string shader_body_for_digest(ShaderKind kind);
 
 }  // namespace bioseq::gpu::vulkan
 
@@ -2257,6 +2260,10 @@ std::vector<std::uint32_t> compile_shader_spirv(const ShaderCompileRequest& requ
         static_cast<int>(request.kind), request.tile_size, request.local_size,
         request.max_span, spirv.size());
     return spirv;
+}
+
+std::string shader_body_for_digest(ShaderKind kind) {
+    return shader_body_for(kind);
 }
 
 }  // namespace bioseq::gpu::vulkan

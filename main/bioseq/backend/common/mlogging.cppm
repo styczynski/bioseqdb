@@ -169,6 +169,8 @@ module;
 
 export module bioseq.common.mlogging;
 
+import bioseq.common.hashing;
+
 // fmt logic
 
 #ifdef FMT_IMPORT_STD
@@ -1692,34 +1694,15 @@ inline std::unordered_map<
 inline std::mutex postgres_sink_mutex;
 inline BioseqPostgresLoggingSink postgres_sink;
 
-[[nodiscard, gnu::always_inline]]
-inline std::uint64_t fnv1a_64(std::string_view s) noexcept
-{
-  std::uint64_t h = 14695981039346656037ull;
-  for (char c : s) {
-    h ^= static_cast<std::uint8_t>(c);
-    h *= 1099511628211ull;
-  }
-  return h;
-}
-
-[[nodiscard, gnu::always_inline]]
-inline std::uint64_t hash_combine_64(
-    std::uint64_t seed,
-    std::uint64_t value) noexcept
-{
-  return seed ^ (value + 0x9e3779b97f4a7c15ull +
-                 (seed << 6) + (seed >> 2));
-}
-
 inline std::size_t LogSiteKeyHash::operator()(
     const LogSiteKey& key) const noexcept
 {
-  std::uint64_t h = fnv1a_64(key.file);
-  h = hash_combine_64(h, fnv1a_64(key.format));
-  h = hash_combine_64(h, key.line);
-  h = hash_combine_64(h, key.column);
-  h = hash_combine_64(h, key.level);
+  std::uint64_t h = bioseq::common::fnv1a_64(key.file);
+  h = bioseq::common::hash_combine_64(
+      h, bioseq::common::fnv1a_64(key.format));
+  h = bioseq::common::hash_combine_64(h, key.line);
+  h = bioseq::common::hash_combine_64(h, key.column);
+  h = bioseq::common::hash_combine_64(h, key.level);
   return static_cast<std::size_t>(h);
 }
 

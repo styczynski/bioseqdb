@@ -26,6 +26,8 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <expected>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -36,10 +38,16 @@ module;
 #include <utility>
 #include <vector>
 
+#include <dlfcn.h>
+#include <dispatch/dispatch.h>
+#define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 
 export module bioseq.gpu.vulkan.runtime;
 
+export import bioseq.gpu.vulkan.shader_cache;
+export import bioseq.gpu.vulkan.shader_layout;
+export import bioseq.gpu.vulkan.shader_variants;
 import bioseq.common.mlogging;
 import bioseq.parallelism.memory_admission;
 import bioseq.gpu.vulkan.shader_compiler;
@@ -120,17 +128,25 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-/// Pipeline cache key — only the two workgroup/tile dimensions vary the emitted
-/// SPIR-V (shared-array lengths are compile-time). The descriptor-set + pipeline
-/// layout are key-independent and created once.
-struct ChainingPipelineKey {
-    std::uint32_t tile_size = 384;
-    std::uint32_t local_size = 128;
-
-    [[nodiscard]] bool operator==(const ChainingPipelineKey&) const = default;
+/// Optional supervisor-owned provider for precompiled MoltenVK metallibs.
+/// When installed, runtime pipeline creation asks this hook for a shader module
+/// instead of invoking glslang/spirv-cross on the backend worker thread.
+struct RuntimeShaderProvider {
+    using LoadFn = std::expected<ShaderModuleLoad, std::string> (*)(
+        VkDevice device, const ShaderVariantKey& key, PFN_vkCreateShaderModule create_shader_module);
+    LoadFn load_module = nullptr;
 };
 
-/// The 32-byte push-constant block consumed by the tiled-DP shader. Layout is
+RuntimeShaderProvider*& runtime_shader_provider_slot() noexcept {
+    static RuntimeShaderProvider* provider = nullptr;
+    return provider;
+}
+
+void install_runtime_shader_provider(RuntimeShaderProvider* provider) noexcept {
+    runtime_shader_provider_slot() = provider;
+}
+
+/// The 36-byte push-constant block consumed by the tiled-DP shader. Layout is
 /// pinned to the GLSL `Params` block.
 struct ChainingPushConstants {
     std::uint32_t anchor_count;
@@ -171,41 +187,6 @@ struct GenerateUnitsPush {
 };
 static_assert(sizeof(GenerateUnitsPush) == 48);
 static_assert(std::is_standard_layout_v<GenerateUnitsPush>);
-
-/// Decoded SPIR-V layout decorations, used to validate the direct-anchor ABI
-/// (no CPU-side transcode hides a stride/offset mismatch). Returned by
-/// `scan_spirv_layout` so both the runtime (pipeline creation) and the unit
-/// test (DOC0304 §10.6) can assert the same invariants.
-struct SpirvLayoutScan {
-    std::vector<std::uint32_t> array_strides;          ///< every ArrayStride decoration value
-    std::vector<std::array<std::uint32_t, 4>> structs4; ///< member offsets for every 4-member struct
-    std::vector<std::uint32_t> bindings;               ///< every Binding decoration value
-
-    [[nodiscard]] bool has_array_stride(std::uint32_t stride) const noexcept {
-        for (std::uint32_t s : array_strides) {
-            if (s == stride) return true;
-        }
-        return false;
-    }
-    [[nodiscard]] bool has_struct_offsets(const std::array<std::uint32_t, 4>& offsets) const noexcept {
-        for (const auto& s : structs4) {
-            if (s == offsets) return true;
-        }
-        return false;
-    }
-    [[nodiscard]] bool has_binding(std::uint32_t binding) const noexcept {
-        for (std::uint32_t b : bindings) {
-            if (b == binding) return true;
-        }
-        return false;
-    }
-};
-
-/// Scan a compiled SPIR-V module for the decorations Phase A pins: the 24-byte
-/// `Anchors` runtime-array stride, the `{0,8,16,20}` `AnchorWire` member
-/// offsets, and the four descriptor bindings. Pure function over the word
-/// stream — no Vulkan device needed (the §10.6 test calls it directly).
-[[nodiscard]] SpirvLayoutScan scan_spirv_layout(std::span<const std::uint32_t> spirv);
 
 /// DOC0307 §4.5 — result of the two-dispatch minimizer sketch roundtrip. The
 /// resident `minimizer_words` device buffer is moved into the caller's
@@ -527,6 +508,7 @@ private:
         ChainingPipelineKey key{};
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        std::string entry_name = "main";
     };
 
     /// DOC0307 §4.5 — one cached Phase B compute pipeline with its own
@@ -546,6 +528,7 @@ private:
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         VkShaderModule module = VK_NULL_HANDLE;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        std::string entry_name = "main";
     };
 
     // Returns by value: the cached entry is trivially copyable (handles only)
@@ -587,6 +570,8 @@ private:
 
     void init();
     void shutdown() noexcept;
+    void resolve_moltenvk_private_api() noexcept;
+    [[nodiscard]] bool use_shader_provider_locked() const noexcept;
     std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags flags) const;
     VkPipeline create_pipeline_locked(const ChainingPipelineKey& key);
     void upload_locked(Buffer& transfer_scratch, Buffer& dst, std::span<const std::byte> bytes,
@@ -610,6 +595,10 @@ private:
     std::uint32_t gpu_anchor_sort_capacity_ = 0;
     std::optional<GpuArena> phase_c_arena_;  // DOC0310 §7 — lazily created.
     VkDescriptorPool phase_c_pool_ = VK_NULL_HANDLE;  // DOC0310 — fresh-set pool.
+    using PFN_vkSetWorkgroupSizeMVK_Bioseq =
+        void (VKAPI_PTR*)(VkShaderModule module, std::uint32_t x, std::uint32_t y, std::uint32_t z);
+    PFN_vkSetWorkgroupSizeMVK_Bioseq set_workgroup_size_mvk_ = nullptr;
+    bool metallib_provider_capable_ = false;
 
     VulkanFeatureSet features_{};
     std::string init_error_{};
@@ -679,9 +668,67 @@ inline void check_vk(VkResult result, const char* what) {
     }
 }
 
+#define BIOSEQ_VULKAN_RUNTIME_FUNCTIONS(X) \
+    X(vkAllocateCommandBuffers) \
+    X(vkAllocateDescriptorSets) \
+    X(vkAllocateMemory) \
+    X(vkBeginCommandBuffer) \
+    X(vkBindBufferMemory) \
+    X(vkCmdBindDescriptorSets) \
+    X(vkCmdBindPipeline) \
+    X(vkCmdDispatch) \
+    X(vkCmdPipelineBarrier) \
+    X(vkCmdPushConstants) \
+    X(vkCreateBuffer) \
+    X(vkCreateCommandPool) \
+    X(vkCreateComputePipelines) \
+    X(vkCreateDescriptorPool) \
+    X(vkCreateDescriptorSetLayout) \
+    X(vkCreateDevice) \
+    X(vkCreateFence) \
+    X(vkCreateInstance) \
+    X(vkCreatePipelineLayout) \
+    X(vkCreateShaderModule) \
+    X(vkDestroyBuffer) \
+    X(vkDestroyCommandPool) \
+    X(vkDestroyDescriptorPool) \
+    X(vkDestroyDescriptorSetLayout) \
+    X(vkDestroyDevice) \
+    X(vkDestroyFence) \
+    X(vkDestroyInstance) \
+    X(vkDestroyPipeline) \
+    X(vkDestroyPipelineLayout) \
+    X(vkDestroyShaderModule) \
+    X(vkDeviceWaitIdle) \
+    X(vkEndCommandBuffer) \
+    X(vkEnumerateDeviceExtensionProperties) \
+    X(vkEnumerateInstanceExtensionProperties) \
+    X(vkEnumeratePhysicalDevices) \
+    X(vkFreeMemory) \
+    X(vkGetBufferMemoryRequirements) \
+    X(vkGetDeviceQueue) \
+    X(vkGetPhysicalDeviceFeatures) \
+    X(vkGetPhysicalDeviceFeatures2) \
+    X(vkGetPhysicalDeviceMemoryProperties) \
+    X(vkGetPhysicalDeviceProperties) \
+    X(vkGetPhysicalDeviceQueueFamilyProperties) \
+    X(vkMapMemory) \
+    X(vkQueueSubmit) \
+    X(vkResetCommandBuffer) \
+    X(vkResetDescriptorPool) \
+    X(vkResetFences) \
+    X(vkUnmapMemory) \
+    X(vkUpdateDescriptorSets) \
+    X(vkWaitForFences)
+
+#define BIOSEQ_DECLARE_VULKAN_FUNCTION(name) inline PFN_##name name = nullptr;
+BIOSEQ_VULKAN_RUNTIME_FUNCTIONS(BIOSEQ_DECLARE_VULKAN_FUNCTION)
+#undef BIOSEQ_DECLARE_VULKAN_FUNCTION
+
 constexpr const char* kPortabilityEnumeration = "VK_KHR_portability_enumeration";
 constexpr const char* kGetPhysicalDeviceProperties2 = "VK_KHR_get_physical_device_properties2";
 constexpr const char* kPortabilitySubset = "VK_KHR_portability_subset";
+constexpr const char* kLayerSettings = VK_EXT_LAYER_SETTINGS_EXTENSION_NAME;
 
 /// True if `name` appears in a list of VkExtensionProperties.
 [[nodiscard]] bool has_extension(
@@ -722,6 +769,7 @@ constexpr const char* kPortabilitySubset = "VK_KHR_portability_subset";
 /// before the first loader query so `vkCreateInstance` sees the portability ICD.
 void ensure_homebrew_moltenvk_icd_visible() {
 #if defined(__APPLE__)
+    (void)::setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);
     if (std::getenv("VK_ICD_FILENAMES") != nullptr) {
         return;
     }
@@ -741,90 +789,251 @@ void ensure_homebrew_moltenvk_icd_visible() {
 #endif
 }
 
-}  // namespace
+#if defined(__APPLE__)
+struct ObjcRuntimeFns {
+    void* msg_send = nullptr;
+    void* (*get_class)(const char*) = nullptr;
+    void* (*sel_register_name)(const char*) = nullptr;
+    void* (*object_get_class)(void*) = nullptr;
+    void* (*class_get_superclass)(void*) = nullptr;
+    void* (*class_get_instance_method)(void*, void*) = nullptr;
+    void* (*method_set_implementation)(void*, void*) = nullptr;
+};
 
-// ---------------------------------------------------------------------------
-// SPIR-V decoration scanner
-// ---------------------------------------------------------------------------
+struct MoltenVkCommandLibraryInterpose {
+    ObjcRuntimeFns objc{};
+    std::vector<std::byte> metallib;
+    void* original_new_library_with_source = nullptr;
+    void* sel_utf8_string = nullptr;
+    void* sel_new_library_with_data_error = nullptr;
+    bool installed = false;
+};
 
-SpirvLayoutScan scan_spirv_layout(std::span<const std::uint32_t> spirv) {
-    SpirvLayoutScan scan;
-    // SPIR-V: 5-word header, then a stream of instructions. Each instruction's
-    // first word packs (wordCount << 16) | opcode.
-    constexpr std::uint32_t kMagic = 0x07230203u;
-    constexpr std::uint16_t kOpDecorate = 71;
-    constexpr std::uint16_t kOpMemberDecorate = 72;
-    constexpr std::uint32_t kDecorationArrayStride = 6;
-    constexpr std::uint32_t kDecorationOffset = 35;
-    constexpr std::uint32_t kDecorationBinding = 33;
-
-    if (spirv.size() < 5 || spirv[0] != kMagic) {
-        return scan;
-    }
-
-    // Per-struct accumulation: member index -> byte offset. Bounded to the
-    // 4-member AnchorWire we care about; structs with member index >= 4 are
-    // tracked only enough to know they are not the 4-member ABI struct.
-    struct StructOffsets {
-        std::uint32_t struct_id = 0;
-        std::array<std::uint32_t, 4> offsets{};
-        std::array<bool, 4> seen{};
-        bool overflow = false;  // a member index >= 4 was decorated
-    };
-    std::vector<StructOffsets> struct_offsets;
-
-    std::size_t i = 5;
-    while (i < spirv.size()) {
-        const std::uint32_t word = spirv[i];
-        const std::uint16_t op = static_cast<std::uint16_t>(word & 0xffffu);
-        const std::uint16_t word_count = static_cast<std::uint16_t>(word >> 16);
-        if (word_count == 0 || i + word_count > spirv.size()) {
-            break;  // malformed; stop scanning
-        }
-
-        if (op == kOpDecorate && word_count >= 3) {
-            const std::uint32_t decoration = spirv[i + 2];
-            if (decoration == kDecorationArrayStride && word_count >= 4) {
-                scan.array_strides.push_back(spirv[i + 3]);
-            } else if (decoration == kDecorationBinding && word_count >= 4) {
-                scan.bindings.push_back(spirv[i + 3]);
-            }
-        } else if (op == kOpMemberDecorate && word_count >= 4) {
-            const std::uint32_t struct_id = spirv[i + 1];
-            const std::uint32_t member = spirv[i + 2];
-            const std::uint32_t decoration = spirv[i + 3];
-            if (decoration == kDecorationOffset && word_count >= 5) {
-                const std::uint32_t offset = spirv[i + 4];
-                StructOffsets* entry = nullptr;
-                for (auto& candidate : struct_offsets) {
-                    if (candidate.struct_id == struct_id) {
-                        entry = &candidate;
-                        break;
-                    }
-                }
-                if (entry == nullptr) {
-                    struct_offsets.push_back(StructOffsets{struct_id, {}, {}, false});
-                    entry = &struct_offsets.back();
-                }
-                if (member < 4) {
-                    entry->offsets[member] = offset;
-                    entry->seen[member] = true;
-                } else {
-                    entry->overflow = true;
-                }
-            }
-        }
-        i += word_count;
-    }
-
-    for (const auto& entry : struct_offsets) {
-        if (entry.overflow) continue;
-        if (entry.seen[0] && entry.seen[1] && entry.seen[2] && entry.seen[3]) {
-            scan.structs4.push_back(entry.offsets);
-        }
-    }
-    return scan;
+MoltenVkCommandLibraryInterpose& moltenvk_command_interpose_state() noexcept {
+    static MoltenVkCommandLibraryInterpose state;
+    return state;
 }
+
+template <class Fn>
+[[nodiscard]] Fn objc_msg_cast(void* fn) noexcept {
+    return reinterpret_cast<Fn>(fn);
+}
+
+extern "C" void* bioseq_moltenvk_new_library_with_source(
+    void* self, void* cmd, void* source, void* options, void** error)
+{
+    auto& state = moltenvk_command_interpose_state();
+    using Utf8Fn = const char* (*)(void*, void*);
+    const char* text = nullptr;
+    if (source != nullptr && state.sel_utf8_string != nullptr) {
+        text = objc_msg_cast<Utf8Fn>(state.objc.msg_send)(source, state.sel_utf8_string);
+    }
+    const bool is_moltenvk_command_source =
+        text != nullptr
+        && std::strstr(text, "cmdCopyBufferBytes") != nullptr
+        && std::strstr(text, "vtxCmdBlitImage") != nullptr;
+    if (is_moltenvk_command_source && !state.metallib.empty()) {
+        using LibraryDataFn = void* (*)(void*, void*, void*, void**);
+        dispatch_data_t mtl_data = dispatch_data_create(
+            state.metallib.data(),
+            state.metallib.size(),
+            nullptr,
+            DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        if (mtl_data != nullptr) {
+            if (void* library = objc_msg_cast<LibraryDataFn>(state.objc.msg_send)(
+                    self,
+                    state.sel_new_library_with_data_error,
+                    static_cast<void*>(mtl_data),
+                    error);
+                library != nullptr) {
+                dispatch_release(mtl_data);
+                return library;
+            }
+            dispatch_release(mtl_data);
+        }
+    }
+
+    using SourceFn = void* (*)(void*, void*, void*, void*, void**);
+    return objc_msg_cast<SourceFn>(state.original_new_library_with_source)(
+        self, cmd, source, options, error);
+}
+
+[[nodiscard]] bool read_file_bytes(
+    const char* path, std::vector<std::byte>* out)
+{
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    input.seekg(0, std::ios::beg);
+    if (size <= 0) {
+        return false;
+    }
+    out->resize(static_cast<std::size_t>(size));
+    input.read(reinterpret_cast<char*>(out->data()), size);
+    return static_cast<bool>(input);
+}
+
+void install_moltenvk_command_library_interpose() noexcept {
+    auto& state = moltenvk_command_interpose_state();
+    if (state.installed) {
+        return;
+    }
+    const char* path = std::getenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB");
+    if (path == nullptr || *path == '\0') {
+        return;
+    }
+    std::vector<std::byte> metallib;
+    if (!read_file_bytes(path, &metallib)) {
+        bioseq_log<DBG>("[vulkan_runtime] MoltenVK command metallib unavailable at {}", path);
+        return;
+    }
+
+    void* objc_handle = ::dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    void* metal_handle =
+        ::dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW | RTLD_LOCAL);
+    if (objc_handle == nullptr || metal_handle == nullptr) {
+        return;
+    }
+
+    ObjcRuntimeFns objc{};
+    objc.msg_send = ::dlsym(objc_handle, "objc_msgSend");
+    objc.get_class = reinterpret_cast<decltype(objc.get_class)>(
+        ::dlsym(objc_handle, "objc_getClass"));
+    objc.sel_register_name = reinterpret_cast<decltype(objc.sel_register_name)>(
+        ::dlsym(objc_handle, "sel_registerName"));
+    objc.object_get_class = reinterpret_cast<decltype(objc.object_get_class)>(
+        ::dlsym(objc_handle, "object_getClass"));
+    objc.class_get_superclass = reinterpret_cast<decltype(objc.class_get_superclass)>(
+        ::dlsym(objc_handle, "class_getSuperclass"));
+    objc.class_get_instance_method = reinterpret_cast<decltype(objc.class_get_instance_method)>(
+        ::dlsym(objc_handle, "class_getInstanceMethod"));
+    objc.method_set_implementation = reinterpret_cast<decltype(objc.method_set_implementation)>(
+        ::dlsym(objc_handle, "method_setImplementation"));
+    if (objc.msg_send == nullptr || objc.get_class == nullptr
+        || objc.sel_register_name == nullptr || objc.object_get_class == nullptr
+        || objc.class_get_superclass == nullptr || objc.class_get_instance_method == nullptr
+        || objc.method_set_implementation == nullptr) {
+        return;
+    }
+
+    using CreateDeviceFn = void* (*)();
+    auto create_device = reinterpret_cast<CreateDeviceFn>(
+        ::dlsym(metal_handle, "MTLCreateSystemDefaultDevice"));
+    if (create_device == nullptr) {
+        return;
+    }
+    void* device = create_device();
+    if (device == nullptr) {
+        return;
+    }
+
+    void* sel_source = objc.sel_register_name("newLibraryWithSource:options:error:");
+    state.sel_utf8_string = objc.sel_register_name("UTF8String");
+    state.sel_new_library_with_data_error = objc.sel_register_name("newLibraryWithData:error:");
+    void* cls = objc.object_get_class(device);
+    void* method = nullptr;
+    while (cls != nullptr && method == nullptr) {
+        method = objc.class_get_instance_method(cls, sel_source);
+        cls = objc.class_get_superclass(cls);
+    }
+    if (method == nullptr) {
+        return;
+    }
+
+    state.objc = objc;
+    state.metallib = std::move(metallib);
+    state.original_new_library_with_source =
+        objc.method_set_implementation(
+            method,
+            reinterpret_cast<void*>(&bioseq_moltenvk_new_library_with_source));
+    state.installed = state.original_new_library_with_source != nullptr;
+    if (state.installed) {
+        bioseq_log<DBG>(
+            "[vulkan_runtime] installed MoltenVK command shader metallib interpose {}",
+            path);
+    }
+}
+#else
+void install_moltenvk_command_library_interpose() noexcept {}
+#endif
+
+void load_vulkan_runtime_functions() {
+    std::string missing;
+#define BIOSEQ_LOAD_VULKAN_FUNCTION(name) \
+    do { \
+        if (name == nullptr) { \
+            name = reinterpret_cast<PFN_##name>(::dlsym(RTLD_DEFAULT, #name)); \
+        } \
+        if (name == nullptr) { \
+            if (!missing.empty()) missing += ", "; \
+            missing += #name; \
+        } \
+    } while (false);
+    BIOSEQ_VULKAN_RUNTIME_FUNCTIONS(BIOSEQ_LOAD_VULKAN_FUNCTION)
+#undef BIOSEQ_LOAD_VULKAN_FUNCTION
+    if (!missing.empty()) {
+        throw VulkanRuntimeError(fmt::format(
+            "Vulkan loader is missing required entry points: {}", missing));
+    }
+}
+
+void ensure_vulkan_loader_loaded_for_runtime() {
+    if (::dlsym(RTLD_DEFAULT, "vkCreateInstance") == nullptr) {
+#if defined(__APPLE__)
+    constexpr const char* candidates[] = {
+        "@rpath/libvulkan.1.4.341.dylib",
+        "@rpath/libvulkan.1.dylib",
+        "@rpath/libvulkan.dylib",
+        "/opt/homebrew/lib/libvulkan.dylib",
+        "/usr/local/lib/libvulkan.dylib",
+    };
+#else
+    constexpr const char* candidates[] = {
+        "libvulkan.so.1",
+        "libvulkan.so",
+    };
+#endif
+    std::string errors;
+    bool loaded = false;
+    for (const char* path : candidates) {
+        ::dlerror();
+        if (void* handle = ::dlopen(path, RTLD_NOW | RTLD_GLOBAL); handle != nullptr) {
+            (void)handle;
+            loaded = true;
+            break;
+        }
+        if (const char* err = ::dlerror(); err != nullptr) {
+            if (!errors.empty()) errors += "; ";
+            errors += path;
+            errors += ": ";
+            errors += err;
+        }
+    }
+    if (!loaded && ::dlsym(RTLD_DEFAULT, "vkCreateInstance") == nullptr) {
+        throw VulkanRuntimeError(fmt::format(
+            "Vulkan loader unavailable for backend runtime initialization: {}",
+            errors.empty() ? "no dlopen diagnostics" : errors));
+    }
+    }
+    load_vulkan_runtime_functions();
+}
+
+[[nodiscard]] std::string symbol_image(const void* symbol) {
+#if defined(__APPLE__)
+    Dl_info info{};
+    if (symbol != nullptr && ::dladdr(symbol, &info) != 0 && info.dli_fname != nullptr) {
+        return info.dli_fname;
+    }
+#else
+    (void)symbol;
+#endif
+    return {};
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------------------
 // Buffer cleanup
@@ -870,8 +1079,42 @@ Runtime& Runtime::instance() {
     return runtime;
 }
 
+void Runtime::resolve_moltenvk_private_api() noexcept {
+    set_workgroup_size_mvk_ = nullptr;
+#if defined(__APPLE__)
+    auto resolve_from = [](void* handle) noexcept
+        -> PFN_vkSetWorkgroupSizeMVK_Bioseq {
+        if (handle == nullptr) return nullptr;
+        return reinterpret_cast<PFN_vkSetWorkgroupSizeMVK_Bioseq>(
+            ::dlsym(handle, "vkSetWorkgroupSizeMVK"));
+    };
+
+    if (auto* fn = resolve_from(RTLD_DEFAULT); fn != nullptr) {
+        set_workgroup_size_mvk_ = fn;
+        return;
+    }
+    constexpr const char* candidates[] = {
+        "/opt/homebrew/lib/libMoltenVK.dylib",
+        "/usr/local/lib/libMoltenVK.dylib",
+    };
+    for (const char* path : candidates) {
+        void* handle = ::dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (auto* fn = resolve_from(handle); fn != nullptr) {
+            set_workgroup_size_mvk_ = fn;
+            return;
+        }
+    }
+#endif
+}
+
+bool Runtime::use_shader_provider_locked() const noexcept {
+    RuntimeShaderProvider* provider = runtime_shader_provider_slot();
+    return provider != nullptr && provider->load_module != nullptr;
+}
+
 void Runtime::init() {
     // --- Instance ---
+    ensure_vulkan_loader_loaded_for_runtime();
     ensure_homebrew_moltenvk_icd_visible();
     const auto inst_exts = instance_extensions();
     std::vector<const char*> enabled_inst_exts;
@@ -883,6 +1126,25 @@ void Runtime::init() {
     if (has_extension(inst_exts, kGetPhysicalDeviceProperties2)) {
         enabled_inst_exts.push_back(kGetPhysicalDeviceProperties2);
     }
+
+    VkBool32 mvk_use_metal_argument_buffers = VK_FALSE;
+    VkLayerSettingEXT mvk_settings[] = {{
+        "MoltenVK",
+        "useMetalArgumentBuffers",
+        VK_LAYER_SETTING_TYPE_BOOL32_EXT,
+        1u,
+        &mvk_use_metal_argument_buffers,
+    }};
+    VkLayerSettingsCreateInfoEXT layer_settings{};
+    layer_settings.sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT;
+    layer_settings.settingCount = 1u;
+    layer_settings.pSettings = mvk_settings;
+#if defined(__APPLE__)
+    const bool has_layer_settings = has_extension(inst_exts, kLayerSettings);
+    if (has_layer_settings) {
+        enabled_inst_exts.push_back(kLayerSettings);
+    }
+#endif
 
     VkApplicationInfo app_info{};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -899,8 +1161,14 @@ void Runtime::init() {
     inst_info.enabledExtensionCount = static_cast<std::uint32_t>(enabled_inst_exts.size());
     inst_info.ppEnabledExtensionNames =
         enabled_inst_exts.empty() ? nullptr : enabled_inst_exts.data();
+#if defined(__APPLE__)
+    if (has_layer_settings) {
+        inst_info.pNext = &layer_settings;
+    }
+#endif
 
     check_vk(vkCreateInstance(&inst_info, nullptr, &instance_), "vkCreateInstance");
+    resolve_moltenvk_private_api();
 
     // --- Physical device selection (compute queue + shaderInt64) ---
     std::uint32_t device_count = 0;
@@ -974,8 +1242,10 @@ void Runtime::init() {
         enabled_dev_exts.empty() ? nullptr : enabled_dev_exts.data();
     device_info.pEnabledFeatures = &enabled_features;
 
+    install_moltenvk_command_library_interpose();
     check_vk(vkCreateDevice(physical_, &device_info, nullptr, &device_), "vkCreateDevice");
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
+    metallib_provider_capable_ = set_workgroup_size_mvk_ != nullptr;
 
     // --- Limits + scalar-block-layout probe ---
     VkPhysicalDeviceScalarBlockLayoutFeatures scalar_features{};
@@ -1148,6 +1418,8 @@ void Runtime::shutdown() noexcept {
     device_ = VK_NULL_HANDLE;
     physical_ = VK_NULL_HANDLE;
     instance_ = VK_NULL_HANDLE;
+    set_workgroup_size_mvk_ = nullptr;
+    metallib_provider_capable_ = false;
 }
 
 std::uint32_t Runtime::find_memory_type(
@@ -1309,38 +1581,67 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
             key.local_size, features_.max_workgroup_invocations));
     }
 
-    std::vector<std::uint32_t> spirv;
-    try {
-        spirv = compile_shader_spirv(ShaderCompileRequest{
-            ShaderKind::chain_tiled_dp_u64, key.tile_size, key.local_size});
-    } catch (const std::exception& e) {
-        throw VulkanRuntimeError(fmt::format("shader compile failed: {}", e.what()));
-    }
-
-    // Validate the direct-anchor ABI in the emitted SPIR-V before trusting the
-    // pipeline. A stride/offset mismatch would silently corrupt the DP read of
-    // every anchor; reject rather than hide it behind a conversion buffer.
-    const SpirvLayoutScan scan = scan_spirv_layout(spirv);
-    if (!scan.has_array_stride(24)) {
-        throw VulkanRuntimeError("SPIR-V Anchors array stride != 24");
-    }
-    if (!scan.has_struct_offsets({0u, 8u, 16u, 20u})) {
-        throw VulkanRuntimeError("SPIR-V AnchorWire member offsets != {0,8,16,20}");
-    }
-
-    VkShaderModuleCreateInfo module_info{};
-    module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    module_info.codeSize = spirv.size() * sizeof(std::uint32_t);
-    module_info.pCode = spirv.data();
     VkShaderModule module = VK_NULL_HANDLE;
-    check_vk(vkCreateShaderModule(device_, &module_info, nullptr, &module),
-             "vkCreateShaderModule");
+    std::string entry_name = "main";
+    bool provider_used = false;
+    std::uint32_t provider_wg_x = 0;
+    std::uint32_t provider_wg_y = 0;
+    std::uint32_t provider_wg_z = 0;
+    const ShaderVariantKey shader_key =
+        make_shader_key(ShaderKind::chain_tiled_dp_u64, key.tile_size, key.local_size, 0u);
+    if (use_shader_provider_locked()) {
+        if (!metallib_provider_capable_) {
+            throw VulkanRuntimeError(
+                "runtime shader provider installed but vkSetWorkgroupSizeMVK is unavailable");
+        }
+        RuntimeShaderProvider* provider = runtime_shader_provider_slot();
+        auto loaded = provider->load_module(
+            device_, shader_key, vkCreateShaderModule);
+        if (!loaded) {
+            throw VulkanRuntimeError(fmt::format(
+                "shader provider failed for {}: {}",
+                cache_file_stem(shader_key), loaded.error()));
+        }
+        module = loaded->module;
+        entry_name = loaded->entry_name.empty() ? std::string{"main"} : loaded->entry_name;
+        provider_used = true;
+        provider_wg_x = loaded->wg_x;
+        provider_wg_y = loaded->wg_y;
+        provider_wg_z = loaded->wg_z;
+        set_workgroup_size_mvk_(module, loaded->wg_x, loaded->wg_y, loaded->wg_z);
+    } else {
+        std::vector<std::uint32_t> spirv;
+        try {
+            spirv = compile_shader_spirv(ShaderCompileRequest{
+                ShaderKind::chain_tiled_dp_u64, key.tile_size, key.local_size});
+        } catch (const std::exception& e) {
+            throw VulkanRuntimeError(fmt::format("shader compile failed: {}", e.what()));
+        }
+
+        // Validate the direct-anchor ABI in the emitted SPIR-V before trusting the
+        // pipeline. A stride/offset mismatch would silently corrupt the DP read of
+        // every anchor; reject rather than hide it behind a conversion buffer.
+        const SpirvLayoutScan scan = scan_spirv_layout(spirv);
+        if (!scan.has_array_stride(24)) {
+            throw VulkanRuntimeError("SPIR-V Anchors array stride != 24");
+        }
+        if (!scan.has_struct_offsets({0u, 8u, 16u, 20u})) {
+            throw VulkanRuntimeError("SPIR-V AnchorWire member offsets != {0,8,16,20}");
+        }
+
+        VkShaderModuleCreateInfo module_info{};
+        module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        module_info.codeSize = spirv.size() * sizeof(std::uint32_t);
+        module_info.pCode = spirv.data();
+        check_vk(vkCreateShaderModule(device_, &module_info, nullptr, &module),
+                 "vkCreateShaderModule");
+    }
 
     VkPipelineShaderStageCreateInfo stage{};
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     stage.module = module;
-    stage.pName = "main";
+    stage.pName = entry_name.c_str();
 
     VkComputePipelineCreateInfo pipeline_info{};
     pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -1353,10 +1654,19 @@ VkPipeline Runtime::create_pipeline_locked(const ChainingPipelineKey& key) {
     if (pr != VK_SUCCESS) {
         vkDestroyShaderModule(device_, module, nullptr);
         throw VulkanRuntimeError(
-            fmt::format("vkCreateComputePipelines: VkResult {}", static_cast<int>(pr)));
+            fmt::format(
+                "vkCreateComputePipelines: VkResult {} provider={} entry={} wg={},{},{} vk={} mvk={}",
+                static_cast<int>(pr),
+                provider_used ? "metallib" : "spirv",
+                entry_name,
+                provider_wg_x,
+                provider_wg_y,
+                provider_wg_z,
+                symbol_image(reinterpret_cast<const void*>(vkCreateComputePipelines)),
+                symbol_image(reinterpret_cast<const void*>(set_workgroup_size_mvk_))));
     }
 
-    pipeline_cache_.push_back(PipelineEntry{key, module, pipeline});
+    pipeline_cache_.push_back(PipelineEntry{key, module, pipeline, entry_name});
     bioseq_log<DBG>("[vulkan_runtime] built chaining pipeline tile={} local={}",
                     key.tile_size, key.local_size);
     return pipeline;
@@ -1670,58 +1980,86 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
     check_vk(vkAllocateDescriptorSets(device_, &set_alloc, &entry.descriptor_set),
              "vkAllocateDescriptorSets(phase_b)");
 
-    std::vector<std::uint32_t> spirv;
-    try {
-        ShaderCompileRequest request{};
-        request.kind = kind;
-        request.tile_size = 384;
-        request.local_size = local_size;
-        request.max_span = max_span;
-        spirv = compile_shader_spirv(request);
-    } catch (const std::exception& compile_error) {
-        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-        throw VulkanRuntimeError(fmt::format("phase B shader compile failed: {}",
-                                             compile_error.what()));
-    }
+    const ShaderVariantKey shader_key = make_shader_key(kind, 384u, local_size, max_span);
+    if (use_shader_provider_locked()) {
+        if (!metallib_provider_capable_) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError(
+                "runtime shader provider installed but vkSetWorkgroupSizeMVK is unavailable");
+        }
+        RuntimeShaderProvider* provider = runtime_shader_provider_slot();
+        auto loaded = provider->load_module(
+            device_, shader_key, vkCreateShaderModule);
+        if (!loaded) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError(fmt::format(
+                "shader provider failed for {}: {}",
+                cache_file_stem(shader_key), loaded.error()));
+        }
+        entry.module = loaded->module;
+        entry.entry_name =
+            loaded->entry_name.empty() ? std::string{"main"} : loaded->entry_name;
+        set_workgroup_size_mvk_(
+            entry.module, loaded->wg_x, loaded->wg_y, loaded->wg_z);
+    } else {
+        std::vector<std::uint32_t> spirv;
+        try {
+            ShaderCompileRequest request{};
+            request.kind = kind;
+            request.tile_size = 384;
+            request.local_size = local_size;
+            request.max_span = max_span;
+            spirv = compile_shader_spirv(request);
+        } catch (const std::exception& compile_error) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError(fmt::format("phase B shader compile failed: {}",
+                                                 compile_error.what()));
+        }
 
-    // Pin the SSBO wire ABI: a candidate-stride / sort-range-stride mismatch
-    // would silently corrupt the direct CandidateWire / SortRangeWire reads.
-    const SpirvLayoutScan scan = scan_spirv_layout(spirv);
-    if (kind == ShaderKind::minimizer_candidates && !scan.has_array_stride(candidate_wire_stride)) {
-        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-        throw VulkanRuntimeError("SPIR-V Candidate array stride != candidate_wire_stride (32)");
-    }
-    if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
-        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-        throw VulkanRuntimeError("SPIR-V SortRange array stride != 8");
-    }
-    if (kind == ShaderKind::generate_units &&
-        (!scan.has_binding(0) || !scan.has_binding(1) ||
-         !scan.has_array_stride(max_span / 8u))) {
-        vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
-        vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
-        vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
-        throw VulkanRuntimeError("SPIR-V generate_units layout mismatch");
-    }
+        // Pin the SSBO wire ABI: a candidate-stride / sort-range-stride mismatch
+        // would silently corrupt the direct CandidateWire / SortRangeWire reads.
+        const SpirvLayoutScan scan = scan_spirv_layout(spirv);
+        if (kind == ShaderKind::minimizer_candidates
+            && !scan.has_array_stride(candidate_wire_stride)) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError("SPIR-V Candidate array stride != candidate_wire_stride (32)");
+        }
+        if (kind == ShaderKind::sort_anchors_bitonic && !scan.has_array_stride(8)) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError("SPIR-V SortRange array stride != 8");
+        }
+        if (kind == ShaderKind::generate_units &&
+            (!scan.has_binding(0) || !scan.has_binding(1) ||
+             !scan.has_array_stride(max_span / 8u))) {
+            vkDestroyDescriptorPool(device_, entry.descriptor_pool, nullptr);
+            vkDestroyPipelineLayout(device_, entry.pipeline_layout, nullptr);
+            vkDestroyDescriptorSetLayout(device_, entry.set_layout, nullptr);
+            throw VulkanRuntimeError("SPIR-V generate_units layout mismatch");
+        }
 
-    VkShaderModuleCreateInfo module_info{};
-    module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    module_info.codeSize = spirv.size() * sizeof(std::uint32_t);
-    module_info.pCode = spirv.data();
-    check_vk(vkCreateShaderModule(device_, &module_info, nullptr, &entry.module),
-             "vkCreateShaderModule(phase_b)");
+        VkShaderModuleCreateInfo module_info{};
+        module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        module_info.codeSize = spirv.size() * sizeof(std::uint32_t);
+        module_info.pCode = spirv.data();
+        check_vk(vkCreateShaderModule(device_, &module_info, nullptr, &entry.module),
+                 "vkCreateShaderModule(phase_b)");
+    }
 
     VkPipelineShaderStageCreateInfo stage{};
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     stage.module = entry.module;
-    stage.pName = "main";
+    stage.pName = entry.entry_name.c_str();
     VkComputePipelineCreateInfo pipeline_info{};
     pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     pipeline_info.stage = stage;

@@ -30,6 +30,10 @@ find_package(TBB REQUIRED tbb)
 find_package(lfreist-hwinfo REQUIRED)
 find_package(HWY 1.3.0 REQUIRED NO_MODULE)
 find_package(Boost 1.90.0 REQUIRED COMPONENTS program_options regex serialization iterator integer)
+find_package(spirv_cross_core CONFIG REQUIRED)
+find_package(spirv_cross_glsl CONFIG REQUIRED)
+find_package(spirv_cross_msl CONFIG REQUIRED)
+find_package(VulkanUtilityLibraries CONFIG REQUIRED)
 
 # DOC0304 Phase A — Vulkan/MoltenVK + glslang for the G3SA tiled-DP chaining
 # backend. CMake's FindVulkan only materialises Vulkan::glslang when the glslang
@@ -42,6 +46,20 @@ if(NOT TARGET Vulkan::glslang)
   message(FATAL_ERROR
     "vulkan-sdk-components must provide Vulkan::glslang; rerun vcpkg install vulkan-sdk-components")
 endif()
+
+set(BIOSEQ_GLSLANG_STATIC_LIBS
+  ${Vulkan_glslang_LIBRARY}
+  ${Vulkan_glslang-spirv_LIBRARY}
+  ${Vulkan_glslang-osdependent_LIBRARY}
+  ${Vulkan_glslang-machineindependent_LIBRARY}
+  ${Vulkan_glslang-genericcodegen_LIBRARY})
+
+foreach(_bioseq_glslang_lib IN LISTS BIOSEQ_GLSLANG_STATIC_LIBS)
+  if(NOT _bioseq_glslang_lib OR _bioseq_glslang_lib MATCHES "-NOTFOUND$")
+    message(FATAL_ERROR
+      "vulkan-sdk-components did not expose a required static glslang library; rerun vcpkg install vulkan-sdk-components")
+  endif()
+endforeach()
 
 # === bench target wiring lives in main/bench/bench_v10.cmake ===
 # (Old AddCommonTargetX block deleted as part of the V10 migration.
@@ -148,8 +166,15 @@ target_include_directories(bioseq_modules_nopg PUBLIC
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmtlog"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/fmt"
   "${CMAKE_CURRENT_LIST_DIR}/../vendor/seqan3/include"
+  ${Vulkan_INCLUDE_DIR}
   ${Boost_INCLUDE_DIRS}
   ${HWY_INCLUDE_DIRS})
+
+if(EXISTS "/opt/homebrew/include/MoltenVK/mvk_private_api.h")
+  target_include_directories(bioseq_modules_nopg PUBLIC "/opt/homebrew/include/MoltenVK")
+elseif(EXISTS "/usr/local/include/MoltenVK/mvk_private_api.h")
+  target_include_directories(bioseq_modules_nopg PUBLIC "/usr/local/include/MoltenVK")
+endif()
 
 target_link_libraries(bioseq_modules_nopg PUBLIC
   safestring_static
@@ -160,9 +185,11 @@ target_link_libraries(bioseq_modules_nopg PUBLIC
   foonathan_memory
   hwy::hwy
   TBB::tbb
-  Vulkan::Vulkan
-  Vulkan::glslang
   ${Boost_LIBRARIES})
+
+target_link_libraries(bioseq_modules_nopg PRIVATE
+  spirv-cross-msl
+  Vulkan::LayerSettings)
 
 target_sources(bioseq_modules_nopg
   PRIVATE ${BIOSEQ_NOPG_SOURCES}
@@ -283,7 +310,10 @@ AddCommonTargetX(
     libassert::assert
     foonathan_memory
     TBB::tbb
+    Vulkan::Vulkan
     Vulkan::glslang
+    spirv-cross-msl
+    Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -326,7 +356,9 @@ AddCommonTargetX(
     libassert::assert
     foonathan_memory
     TBB::tbb
-    Vulkan::glslang
+    ${BIOSEQ_GLSLANG_STATIC_LIBS}
+    spirv-cross-msl
+    Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES
@@ -357,13 +389,10 @@ AddCommonTargetX(
 # linkage non-LTO matches that posture.
 set_target_properties(postgresql_bioseq PROPERTIES
   INTERPROCEDURAL_OPTIMIZATION FALSE
-  # DOC0322 — the installed extension dylib must resolve @rpath/libvulkan.*.dylib
-  # (vcpkg) at PostgreSQL dlopen() time. install(TARGETS) strips the build-tree
-  # rpath and set no INSTALL_RPATH, so the installed dylib had none and PG failed
-  # to load it ("Library not loaded: @rpath/libvulkan.1.4.341.dylib"). The vcpkg
-  # lib dir lives *inside* the build tree, so INSTALL_RPATH_USE_LINK_PATH skips it
-  # (that flag only adds out-of-build-tree dirs); set the rpath explicitly to the
-  # vcpkg release + debug lib dirs (both ship libvulkan) so CREATE EXTENSION works.
+  # DOC0341 — the PostgreSQL extension must NOT link-load libvulkan in the
+  # postmaster, because the macOS loader stack maps Metal/IOAccelerator before
+  # backend fork. Keep the vcpkg rpath only so Runtime::init() can later
+  # dlopen("@rpath/libvulkan...") inside the selected-GPU backend process.
   INSTALL_RPATH "${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib;${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/debug/lib")
 
 # Throttle the per-target heavy module compiles on low-RAM hosts. The
