@@ -38,7 +38,7 @@ apt-get install -y --no-install-recommends \
   build-essential g++ gcc make pkg-config ca-certificates curl wget git unzip zip tar \
   gnupg lsb-release software-properties-common \
   python3 python3-pip python3-venv python3-jinja2 python3-setuptools \
-  bison flex autoconf automake autoconf-archive libtool m4 gettext \
+  bison flex autoconf automake autoconf-archive libtool libltdl-dev m4 gettext \
   rsync ninja-build \
   zlib1g-dev libssl-dev \
   xorg-dev libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
