@@ -89,6 +89,29 @@
         }
       },
       {
+        "name": "aws-x64-linux",
+        "displayName": "AWS x86_64 Linux benchmark box (clang-22 + libc++)",
+        "description": "Linux/x86_64 analogue of bench-opt for the disposable AWS reference machine provisioned by main/infra. Selects the AWS_MACHINE_X64 toolchain block in CMakeLists.txt via the environment, builds against clang-22 + libc++ (so it matches the import-std module ABI), and drives vcpkg through the custom x64-linux-libcxx overlay triplet so every dependency is compiled with the same clang/libc++ ABI. -O3 + NDEBUG with DWARF off (CMAKE_CXX_FLAGS_DEBUG empty), mirroring bench-opt.",
+        "generator": "Ninja",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "environment": {
+          "CMAKE_NAMED_ENV_TYPE": "AWS_MACHINE_X64"
+        },
+        "cacheVariables": {
+          "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+          "CMAKE_BUILD_TYPE": "Debug",
+          "CMAKE_CXX_FLAGS": "-O3 -DNDEBUG -fno-omit-frame-pointer -stdlib=libc++",
+          "CMAKE_CXX_FLAGS_DEBUG": "",
+          "CMAKE_C_FLAGS_DEBUG": "",
+          "CMAKE_EXE_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_SHARED_LINKER_FLAGS": "-stdlib=libc++",
+          "CMAKE_MODULE_LINKER_FLAGS": "-stdlib=libc++",
+          "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets",
+          "VCPKG_TARGET_TRIPLET": "x64-linux-libcxx",
+          "VCPKG_TARGET_ARCHITECTURE": "x64"
+        }
+      },
+      {
         "name": "prod",
         "displayName": "Default release config",
          "description": "Default build using Ninja generator",
