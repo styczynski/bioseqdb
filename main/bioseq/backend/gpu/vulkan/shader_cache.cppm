@@ -11,11 +11,13 @@ module;
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 #include <span>
 #include <string>
@@ -24,6 +26,7 @@ module;
 #include <type_traits>
 #include <vector>
 
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/stat.h>
@@ -133,6 +136,13 @@ concept is_runtime_compile_service = requires(Service& service, ShaderVariantKey
     const ShaderVariantKey& key)
 {
     return cache_dir / (cache_file_stem(key) + ".metallib");
+}
+
+[[nodiscard]] inline std::filesystem::path cache_binary_archive_path(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    return cache_dir / (cache_file_stem(key) + ".metalar");
 }
 
 [[nodiscard]] inline std::filesystem::path cache_meta_path(
@@ -259,6 +269,7 @@ kernel void bioseq_moltenvk_command_placeholder() {}
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.minor);
     hash = bioseq::common::hash_combine_64(hash, inputs.msl.patch);
     hash = bioseq::common::hash_combine_64(hash, moltenvk_command_placeholder_msl());
+    hash = bioseq::common::hash_combine_64(hash, "bioseq-metal-binary-archive-v1");
 
     for_each_static_shader_variant(inputs.variants, [&hash](const ShaderVariantKey& key) {
         hash = bioseq::common::hash_combine_64(hash, key.kind);
@@ -511,7 +522,7 @@ struct MslCompileResult {
     return meta;
 }
 
-[[nodiscard]] inline bool cache_entry_complete(
+[[nodiscard]] inline bool cache_metallib_entry_complete(
     const std::filesystem::path& cache_dir,
     const ShaderVariantKey& key)
 {
@@ -521,6 +532,128 @@ struct MslCompileResult {
         return false;
     }
     return std::filesystem::exists(cache_metallib_path(cache_dir, key));
+}
+
+[[nodiscard]] inline bool cache_binary_archive_complete(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+#if !defined(__APPLE__)
+    (void)cache_dir;
+    (void)key;
+    return true;
+#else
+    std::error_code ec;
+    const std::filesystem::path archive = cache_binary_archive_path(cache_dir, key);
+    return std::filesystem::exists(archive, ec) && !ec
+        && std::filesystem::file_size(archive, ec) > 0 && !ec;
+#endif
+}
+
+[[nodiscard]] inline bool cache_entry_complete(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key)
+{
+    return cache_metallib_entry_complete(cache_dir, key)
+        && cache_binary_archive_complete(cache_dir, key);
+}
+
+[[nodiscard]] inline std::expected<std::filesystem::path, std::string>
+metal_archive_helper_path()
+{
+#if !defined(__APPLE__)
+    return std::filesystem::path{};
+#else
+    auto executable_candidate = [](const std::filesystem::path& path)
+        -> std::optional<std::filesystem::path> {
+        if (!path.empty() && ::access(path.c_str(), X_OK) == 0) {
+            return path;
+        }
+        return std::nullopt;
+    };
+
+    if (const char* env = std::getenv("BIOSEQ_GPU_ARCHIVE_HELPER");
+        env != nullptr && *env != '\0') {
+        if (auto path = executable_candidate(env)) {
+            return *path;
+        }
+        return std::unexpected(shader_cache_message(
+            "BIOSEQ_GPU_ARCHIVE_HELPER is not executable: ", env));
+    }
+
+    Dl_info info{};
+    if (::dladdr(reinterpret_cast<const void*>(&metal_archive_helper_path), &info) != 0
+        && info.dli_fname != nullptr) {
+        const std::filesystem::path dylib_path(info.dli_fname);
+        if (auto path = executable_candidate(
+                dylib_path.parent_path() / "bioseq_gpu_pg_probe_helper")) {
+            return *path;
+        }
+    }
+
+    return std::unexpected(
+        "bioseq_gpu_pg_probe_helper not found next to bioseq.dylib; set BIOSEQ_GPU_ARCHIVE_HELPER");
+#endif
+}
+
+[[nodiscard]] inline std::expected<void, std::string> ensure_binary_archive(
+    const std::filesystem::path& cache_dir,
+    const ShaderVariantKey& key,
+    const ShaderCacheMeta& meta,
+    std::string_view entry_name)
+{
+#if !defined(__APPLE__)
+    (void)cache_dir;
+    (void)key;
+    (void)meta;
+    (void)entry_name;
+    return {};
+#else
+    if (cache_binary_archive_complete(cache_dir, key)) {
+        return {};
+    }
+    if (entry_name.empty()) {
+        return std::unexpected(shader_cache_message(
+            "cannot build MTLBinaryArchive for ", cache_file_stem(key),
+            ": empty Metal entry name"));
+    }
+    const auto helper = metal_archive_helper_path();
+    if (!helper) {
+        return std::unexpected(helper.error());
+    }
+
+    const std::filesystem::path final_path = cache_binary_archive_path(cache_dir, key);
+    const std::filesystem::path tmp_path = final_path.string() + ".tmp";
+    std::error_code ec;
+    std::filesystem::remove(tmp_path, ec);
+
+    const std::uint64_t max_threads =
+        static_cast<std::uint64_t>(std::max<std::uint32_t>(meta.wg_x, 1u))
+        * static_cast<std::uint64_t>(std::max<std::uint32_t>(meta.wg_y, 1u))
+        * static_cast<std::uint64_t>(std::max<std::uint32_t>(meta.wg_z, 1u));
+    const std::vector<std::string> args{
+        helper->string(),
+        "archive-create-pso",
+        cache_metallib_path(cache_dir, key).string(),
+        tmp_path.string(),
+        std::string(entry_name),
+        std::to_string(max_threads),
+        "0",
+    };
+    auto result = run_capture(args);
+    if (!result) {
+        return std::unexpected(shader_cache_message(
+            "MTLBinaryArchive helper failed for ", cache_file_stem(key), ": ",
+            result.error()));
+    }
+    if (!std::filesystem::exists(tmp_path, ec) || ec
+        || std::filesystem::file_size(tmp_path, ec) == 0 || ec) {
+        return std::unexpected(shader_cache_message(
+            "MTLBinaryArchive helper produced no archive for ",
+            cache_file_stem(key), ": ", *result));
+    }
+    return durable_rename_existing(tmp_path, final_path);
+#endif
 }
 
 [[nodiscard]] inline constexpr std::size_t moltenvk_msl_spirv_header_size() noexcept
@@ -585,6 +718,14 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (cache_entry_complete(cache_dir, key)) {
         return {};
     }
+    if (cache_metallib_entry_complete(cache_dir, key)) {
+        std::string existing_entry;
+        auto existing_meta = read_meta(cache_meta_path(cache_dir, key), &existing_entry);
+        if (!existing_meta) {
+            return std::unexpected(existing_meta.error());
+        }
+        return ensure_binary_archive(cache_dir, key, *existing_meta, existing_entry);
+    }
 
     std::vector<std::uint32_t> spirv;
     try {
@@ -641,6 +782,10 @@ make_moltenvk_metallib_module_code(const std::filesystem::path& metallib_path)
     if (auto meta_written = durable_write_file(cache_meta_path(cache_dir, key), meta_bytes);
         !meta_written) {
         return meta_written;
+    }
+    if (auto archive_written = ensure_binary_archive(cache_dir, key, meta, entry);
+        !archive_written) {
+        return archive_written;
     }
     std::filesystem::remove(metal_path, ec);
     std::filesystem::remove(air_path, ec);

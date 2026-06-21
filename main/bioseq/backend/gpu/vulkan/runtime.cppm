@@ -27,6 +27,7 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <mutex>
@@ -132,8 +133,10 @@ public:
 /// When installed, runtime pipeline creation asks this hook for a shader module
 /// instead of invoking glslang/spirv-cross on the backend worker thread.
 struct RuntimeShaderProvider {
+    using PrepareFn = std::expected<void, std::string> (*)();
     using LoadFn = std::expected<ShaderModuleLoad, std::string> (*)(
         VkDevice device, const ShaderVariantKey& key, PFN_vkCreateShaderModule create_shader_module);
+    PrepareFn prepare_runtime = nullptr;
     LoadFn load_module = nullptr;
 };
 
@@ -956,8 +959,418 @@ void install_moltenvk_command_library_interpose() noexcept {
             path);
     }
 }
+
+struct MetalPipelineArchiveInterpose {
+    ObjcRuntimeFns objc{};
+    std::string archive_dir;
+    void* device = nullptr;
+    void* archive_array = nullptr;
+    void* original_new_pipeline_async = nullptr;
+    void* original_new_pipeline_sync = nullptr;
+    void* sel_binary_archives = nullptr;
+    void* sel_set_binary_archives = nullptr;
+    void* sel_compute_function = nullptr;
+    void* sel_name = nullptr;
+    void* sel_utf8_string = nullptr;
+    void* sel_count = nullptr;
+    void* sel_max_total_threads = nullptr;
+    void* sel_threadgroup_multiple = nullptr;
+    std::size_t loaded_archive_file_count = 0;
+    bool installed = false;
+    std::mutex mu;
+};
+
+MetalPipelineArchiveInterpose& metal_pipeline_archive_interpose_state() noexcept {
+    static MetalPipelineArchiveInterpose state;
+    return state;
+}
+
+[[nodiscard]] std::string bioseq_ns_string_utf8(
+    ObjcRuntimeFns& objc,
+    void* ns_string,
+    void* sel_utf8_string)
+{
+    if (ns_string == nullptr || sel_utf8_string == nullptr) {
+        return {};
+    }
+    using Utf8Fn = const char* (*)(void*, void*);
+    const char* text = objc_msg_cast<Utf8Fn>(objc.msg_send)(ns_string, sel_utf8_string);
+    return text == nullptr ? std::string{} : std::string(text);
+}
+
+[[nodiscard]] void* bioseq_make_ns_string(ObjcRuntimeFns& objc, std::string_view value)
+{
+    void* ns_string_cls = objc.get_class("NSString");
+    if (ns_string_cls == nullptr) {
+        return nullptr;
+    }
+    std::string owned(value);
+    using StringFn = void* (*)(void*, void*, const char*);
+    return objc_msg_cast<StringFn>(objc.msg_send)(
+        ns_string_cls,
+        objc.sel_register_name("stringWithUTF8String:"),
+        owned.c_str());
+}
+
+[[nodiscard]] void* bioseq_make_file_url(ObjcRuntimeFns& objc, const std::filesystem::path& path)
+{
+    void* url_cls = objc.get_class("NSURL");
+    void* ns_path = bioseq_make_ns_string(objc, path.string());
+    if (url_cls == nullptr || ns_path == nullptr) {
+        return nullptr;
+    }
+    using UrlFn = void* (*)(void*, void*, void*);
+    return objc_msg_cast<UrlFn>(objc.msg_send)(
+        url_cls,
+        objc.sel_register_name("fileURLWithPath:"),
+        ns_path);
+}
+
+[[nodiscard]] std::string bioseq_ns_error_description(ObjcRuntimeFns& objc, void* error)
+{
+    if (error == nullptr) {
+        return {};
+    }
+    using GetObjFn = void* (*)(void*, void*);
+    void* desc = objc_msg_cast<GetObjFn>(objc.msg_send)(
+        error,
+        objc.sel_register_name("localizedDescription"));
+    return bioseq_ns_string_utf8(objc, desc, objc.sel_register_name("UTF8String"));
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> metal_archive_files(std::string_view dir)
+{
+    std::vector<std::filesystem::path> paths;
+    if (dir.empty()) {
+        return paths;
+    }
+    std::error_code ec;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(std::filesystem::path(dir), ec)) {
+        if (ec) {
+            break;
+        }
+        if (!entry.is_regular_file(ec) || ec) {
+            ec.clear();
+            continue;
+        }
+        const std::filesystem::path path = entry.path();
+        if (path.extension() == ".metalar") {
+            paths.push_back(path);
+        }
+    }
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
+[[nodiscard]] void* load_metal_binary_archive(
+    MetalPipelineArchiveInterpose& state,
+    const std::filesystem::path& path)
+{
+    void* desc_cls = state.objc.get_class("MTLBinaryArchiveDescriptor");
+    if (desc_cls == nullptr || state.device == nullptr) {
+        return nullptr;
+    }
+    using NewFn = void* (*)(void*, void*);
+    void* desc = objc_msg_cast<NewFn>(state.objc.msg_send)(
+        desc_cls,
+        state.objc.sel_register_name("new"));
+    void* url = bioseq_make_file_url(state.objc, path);
+    if (desc == nullptr || url == nullptr) {
+        return nullptr;
+    }
+    using SetObjFn = void (*)(void*, void*, void*);
+    objc_msg_cast<SetObjFn>(state.objc.msg_send)(
+        desc,
+        state.objc.sel_register_name("setUrl:"),
+        url);
+    void* error = nullptr;
+    using NewArchiveFn = void* (*)(void*, void*, void*, void**);
+    void* archive = objc_msg_cast<NewArchiveFn>(state.objc.msg_send)(
+        state.device,
+        state.objc.sel_register_name("newBinaryArchiveWithDescriptor:error:"),
+        desc,
+        &error);
+    if (archive == nullptr) {
+        bioseq_log<DBG>(
+            "[vulkan_runtime] failed to load Metal binary archive {}: {}",
+            path.string(),
+            bioseq_ns_error_description(state.objc, error));
+    }
+    return archive;
+}
+
+void refresh_metal_binary_archives_locked(MetalPipelineArchiveInterpose& state)
+{
+    const std::vector<std::filesystem::path> paths = metal_archive_files(state.archive_dir);
+    if (state.archive_array != nullptr
+        && state.loaded_archive_file_count == paths.size()) {
+        return;
+    }
+    void* array_cls = state.objc.get_class("NSMutableArray");
+    if (array_cls == nullptr) {
+        return;
+    }
+    using AllocFn = void* (*)(void*, void*);
+    using InitCapacityFn = void* (*)(void*, void*, unsigned long);
+    void* allocated = objc_msg_cast<AllocFn>(state.objc.msg_send)(
+        array_cls,
+        state.objc.sel_register_name("alloc"));
+    void* array = objc_msg_cast<InitCapacityFn>(state.objc.msg_send)(
+        allocated,
+        state.objc.sel_register_name("initWithCapacity:"),
+        static_cast<unsigned long>(paths.size()));
+    if (array == nullptr) {
+        return;
+    }
+
+    std::size_t loaded = 0;
+    using AddObjectFn = void (*)(void*, void*, void*);
+    for (const std::filesystem::path& path : paths) {
+        if (void* archive = load_metal_binary_archive(state, path); archive != nullptr) {
+            objc_msg_cast<AddObjectFn>(state.objc.msg_send)(
+                array,
+                state.objc.sel_register_name("addObject:"),
+                archive);
+            ++loaded;
+        }
+    }
+    state.archive_array = array;
+    state.loaded_archive_file_count = paths.size();
+    bioseq_log<DBG>(
+        "[vulkan_runtime] loaded {} Metal binary archives from {}",
+        loaded,
+        state.archive_dir);
+}
+
+[[nodiscard]] std::string descriptor_function_name(MetalPipelineArchiveInterpose& state, void* desc)
+{
+    if (desc == nullptr || state.sel_compute_function == nullptr || state.sel_name == nullptr) {
+        return {};
+    }
+    using GetObjFn = void* (*)(void*, void*);
+    void* function = objc_msg_cast<GetObjFn>(state.objc.msg_send)(
+        desc,
+        state.sel_compute_function);
+    void* name = function == nullptr
+        ? nullptr
+        : objc_msg_cast<GetObjFn>(state.objc.msg_send)(function, state.sel_name);
+    return bioseq_ns_string_utf8(state.objc, name, state.sel_utf8_string);
+}
+
+void attach_metal_binary_archives_to_descriptor(void* desc)
+{
+    if (desc == nullptr) {
+        return;
+    }
+    auto& state = metal_pipeline_archive_interpose_state();
+    if (!state.installed) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard(state.mu);
+    refresh_metal_binary_archives_locked(state);
+    if (state.archive_array == nullptr) {
+        return;
+    }
+
+    using GetObjFn = void* (*)(void*, void*);
+    using CountFn = unsigned long (*)(void*, void*);
+    void* existing = objc_msg_cast<GetObjFn>(state.objc.msg_send)(
+        desc,
+        state.sel_binary_archives);
+    if (existing != nullptr) {
+        const unsigned long existing_count =
+            objc_msg_cast<CountFn>(state.objc.msg_send)(existing, state.sel_count);
+        if (existing_count > 0) {
+            return;
+        }
+    }
+
+    const unsigned long archive_count =
+        objc_msg_cast<CountFn>(state.objc.msg_send)(state.archive_array, state.sel_count);
+    if (archive_count == 0) {
+        return;
+    }
+
+    unsigned long max_threads = 0;
+    signed char threadgroup_multiple = 0;
+    if (state.sel_max_total_threads != nullptr) {
+        using GetULongFn = unsigned long (*)(void*, void*);
+        max_threads = objc_msg_cast<GetULongFn>(state.objc.msg_send)(
+            desc,
+            state.sel_max_total_threads);
+    }
+    if (state.sel_threadgroup_multiple != nullptr) {
+        using GetBoolFn = signed char (*)(void*, void*);
+        threadgroup_multiple = objc_msg_cast<GetBoolFn>(state.objc.msg_send)(
+            desc,
+            state.sel_threadgroup_multiple);
+    }
+
+    using SetObjFn = void (*)(void*, void*, void*);
+    objc_msg_cast<SetObjFn>(state.objc.msg_send)(
+        desc,
+        state.sel_set_binary_archives,
+        state.archive_array);
+    bioseq_log<DBG>(
+        "[vulkan_runtime] attached {} Metal binary archives to compute descriptor function={} max_threads={} full_subgroups={}",
+        archive_count,
+        descriptor_function_name(state, desc),
+        max_threads,
+        threadgroup_multiple != 0);
+}
+
+extern "C" void bioseq_metal_new_compute_pipeline_state_async(
+    void* self,
+    void* cmd,
+    void* desc,
+    unsigned long options,
+    void* completion_handler)
+{
+    attach_metal_binary_archives_to_descriptor(desc);
+    auto& state = metal_pipeline_archive_interpose_state();
+    using AsyncFn = void (*)(void*, void*, void*, unsigned long, void*);
+    objc_msg_cast<AsyncFn>(state.original_new_pipeline_async)(
+        self,
+        cmd,
+        desc,
+        options,
+        completion_handler);
+}
+
+extern "C" void* bioseq_metal_new_compute_pipeline_state_sync(
+    void* self,
+    void* cmd,
+    void* desc,
+    unsigned long options,
+    void** reflection,
+    void** error)
+{
+    attach_metal_binary_archives_to_descriptor(desc);
+    auto& state = metal_pipeline_archive_interpose_state();
+    using SyncFn = void* (*)(void*, void*, void*, unsigned long, void**, void**);
+    return objc_msg_cast<SyncFn>(state.original_new_pipeline_sync)(
+        self,
+        cmd,
+        desc,
+        options,
+        reflection,
+        error);
+}
+
+void install_metal_pipeline_archive_interpose() noexcept {
+    auto& state = metal_pipeline_archive_interpose_state();
+    if (state.installed) {
+        return;
+    }
+    const char* archive_dir = std::getenv("BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR");
+    if (archive_dir == nullptr || *archive_dir == '\0') {
+        return;
+    }
+
+    void* objc_handle = ::dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    void* metal_handle =
+        ::dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW | RTLD_LOCAL);
+    if (objc_handle == nullptr || metal_handle == nullptr) {
+        return;
+    }
+
+    ObjcRuntimeFns objc{};
+    objc.msg_send = ::dlsym(objc_handle, "objc_msgSend");
+    objc.get_class = reinterpret_cast<decltype(objc.get_class)>(
+        ::dlsym(objc_handle, "objc_getClass"));
+    objc.sel_register_name = reinterpret_cast<decltype(objc.sel_register_name)>(
+        ::dlsym(objc_handle, "sel_registerName"));
+    objc.object_get_class = reinterpret_cast<decltype(objc.object_get_class)>(
+        ::dlsym(objc_handle, "object_getClass"));
+    objc.class_get_superclass = reinterpret_cast<decltype(objc.class_get_superclass)>(
+        ::dlsym(objc_handle, "class_getSuperclass"));
+    objc.class_get_instance_method = reinterpret_cast<decltype(objc.class_get_instance_method)>(
+        ::dlsym(objc_handle, "class_getInstanceMethod"));
+    objc.method_set_implementation = reinterpret_cast<decltype(objc.method_set_implementation)>(
+        ::dlsym(objc_handle, "method_setImplementation"));
+    if (objc.msg_send == nullptr || objc.get_class == nullptr
+        || objc.sel_register_name == nullptr || objc.object_get_class == nullptr
+        || objc.class_get_superclass == nullptr || objc.class_get_instance_method == nullptr
+        || objc.method_set_implementation == nullptr) {
+        return;
+    }
+
+    using CreateDeviceFn = void* (*)();
+    auto create_device = reinterpret_cast<CreateDeviceFn>(
+        ::dlsym(metal_handle, "MTLCreateSystemDefaultDevice"));
+    if (create_device == nullptr) {
+        return;
+    }
+    void* device = create_device();
+    if (device == nullptr) {
+        return;
+    }
+
+    void* cls = objc.object_get_class(device);
+    void* sel_async =
+        objc.sel_register_name("newComputePipelineStateWithDescriptor:options:completionHandler:");
+    void* sel_sync =
+        objc.sel_register_name("newComputePipelineStateWithDescriptor:options:reflection:error:");
+    void* async_method = nullptr;
+    void* sync_method = nullptr;
+    for (void* cursor = cls; cursor != nullptr && (async_method == nullptr || sync_method == nullptr);
+         cursor = objc.class_get_superclass(cursor)) {
+        if (async_method == nullptr) {
+            async_method = objc.class_get_instance_method(cursor, sel_async);
+        }
+        if (sync_method == nullptr) {
+            sync_method = objc.class_get_instance_method(cursor, sel_sync);
+        }
+    }
+    if (async_method == nullptr && sync_method == nullptr) {
+        return;
+    }
+
+    state.objc = objc;
+    state.archive_dir = archive_dir;
+    state.device = device;
+    state.sel_binary_archives = objc.sel_register_name("binaryArchives");
+    state.sel_set_binary_archives = objc.sel_register_name("setBinaryArchives:");
+    state.sel_compute_function = objc.sel_register_name("computeFunction");
+    state.sel_name = objc.sel_register_name("name");
+    state.sel_utf8_string = objc.sel_register_name("UTF8String");
+    state.sel_count = objc.sel_register_name("count");
+    state.sel_max_total_threads = objc.sel_register_name("maxTotalThreadsPerThreadgroup");
+    state.sel_threadgroup_multiple =
+        objc.sel_register_name("threadGroupSizeIsMultipleOfThreadExecutionWidth");
+
+    if (async_method != nullptr) {
+        state.original_new_pipeline_async =
+            objc.method_set_implementation(
+                async_method,
+                reinterpret_cast<void*>(&bioseq_metal_new_compute_pipeline_state_async));
+    }
+    if (sync_method != nullptr) {
+        state.original_new_pipeline_sync =
+            objc.method_set_implementation(
+                sync_method,
+                reinterpret_cast<void*>(&bioseq_metal_new_compute_pipeline_state_sync));
+    }
+    state.installed = state.original_new_pipeline_async != nullptr
+        || state.original_new_pipeline_sync != nullptr;
+    if (!state.installed) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(state.mu);
+        refresh_metal_binary_archives_locked(state);
+    }
+    bioseq_log<DBG>(
+        "[vulkan_runtime] installed Metal compute pipeline archive interpose dir={} async={} sync={}",
+        state.archive_dir,
+        state.original_new_pipeline_async != nullptr,
+        state.original_new_pipeline_sync != nullptr);
+}
 #else
 void install_moltenvk_command_library_interpose() noexcept {}
+void install_metal_pipeline_archive_interpose() noexcept {}
 #endif
 
 void load_vulkan_runtime_functions() {
@@ -1112,6 +1525,18 @@ bool Runtime::use_shader_provider_locked() const noexcept {
     return provider != nullptr && provider->load_module != nullptr;
 }
 
+void prepare_shader_provider_runtime() {
+    RuntimeShaderProvider* provider = runtime_shader_provider_slot();
+    if (provider == nullptr || provider->prepare_runtime == nullptr) {
+        return;
+    }
+    auto prepared = provider->prepare_runtime();
+    if (!prepared) {
+        throw VulkanRuntimeError(fmt::format(
+            "runtime shader provider prepare failed: {}", prepared.error()));
+    }
+}
+
 void Runtime::init() {
     // --- Instance ---
     ensure_vulkan_loader_loaded_for_runtime();
@@ -1169,6 +1594,7 @@ void Runtime::init() {
 
     check_vk(vkCreateInstance(&inst_info, nullptr, &instance_), "vkCreateInstance");
     resolve_moltenvk_private_api();
+    prepare_shader_provider_runtime();
 
     // --- Physical device selection (compute queue + shaderInt64) ---
     std::uint32_t device_count = 0;
@@ -1243,6 +1669,7 @@ void Runtime::init() {
     device_info.pEnabledFeatures = &enabled_features;
 
     install_moltenvk_command_library_interpose();
+    install_metal_pipeline_archive_interpose();
     check_vk(vkCreateDevice(physical_, &device_info, nullptr, &device_), "vkCreateDevice");
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
     metallib_provider_capable_ = set_workgroup_size_mvk_ != nullptr;

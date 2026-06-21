@@ -8,6 +8,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
+set(BIOSEQ_GPU_PG_PROBE_HELPER_SRC
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe_helper.cpp)
+set(BIOSEQ_GPU_METAL_ARCHIVE_PROBE_SRC
+  ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe.cpp)
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_GPU_PG_PROBE_HELPER_SRC})
 file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
@@ -197,6 +202,18 @@ target_sources(bioseq_modules_nopg
     BASE_DIRS "${CMAKE_CURRENT_LIST_DIR}"
     FILES ${BIOSEQ_NOPG_MODULES})
 
+add_executable(bioseq_gpu_pg_probe_helper
+  ${BIOSEQ_GPU_PG_PROBE_HELPER_SRC}
+  ${BIOSEQ_GPU_METAL_ARCHIVE_PROBE_SRC})
+target_compile_features(bioseq_gpu_pg_probe_helper PRIVATE cxx_std_26)
+target_include_directories(bioseq_gpu_pg_probe_helper PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/backend")
+if(DEFINED PostgreSQL_PKG_LIBRARY_DIR)
+  install(TARGETS bioseq_gpu_pg_probe_helper
+    RUNTIME DESTINATION "${PostgreSQL_PKG_LIBRARY_DIR}"
+    COMPONENT ${EXTENSION_COMPONENT})
+endif()
+
 # ============================================================================
 # Tests/integration-tests module file lists. testing.cppm is per-target
 # because the shared lib excludes Catch2.
@@ -374,6 +391,8 @@ AddCommonTargetX(
     program_options regex serialization iterator integer
   HWY 1.3.0
 )
+
+add_dependencies(postgresql_bioseq bioseq_gpu_pg_probe_helper)
 
 # DOC0270 — disable LTO on the Postgres extension. The default IPO=TRUE set
 # by AddPostgreSQLExtension.cmake doubles the per-build wall-clock for the

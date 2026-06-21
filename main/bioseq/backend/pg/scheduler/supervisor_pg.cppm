@@ -44,6 +44,7 @@ void AbortCurrentTransaction(void);
 #include <mutex>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -1198,6 +1199,9 @@ void publish_runtime_init_result(std::expected<void, std::string> result) noexce
         && procno < static_cast<std::uint32_t>(ProcGlobal->allProcCount);
 }
 
+[[nodiscard]] std::expected<std::filesystem::path, std::string>
+prepare_backend_local_shader_cache_env();
+
 void wake_supervisor_if_known() noexcept {
     if (g_shared == nullptr) {
         return;
@@ -1213,7 +1217,7 @@ void wake_supervisor_if_known() noexcept {
         .code(ERRCODE_INTERNAL_ERROR)
         .msg("Vulkan aligner execution failed")
         .detail("{}", detail)
-        .hint("Selected PostgreSQL Vulkan execution requires the bioseq shared-preload supervisor and a successful supervisor runtime initialization.");
+        .hint("Selected PostgreSQL Vulkan execution requires a successful bioseq GPU runtime initialization; use the backend-local helper path or the shared-preload supervisor.");
     __builtin_unreachable();
 }
 
@@ -1223,8 +1227,14 @@ void wait_for_runtime_ready() {
         return;
     }
     if (g_shared == nullptr) {
-        report_runtime_init_unavailable(
-            "load_bioseq_runtime unavailable: bioseq must be loaded via shared_preload_libraries for PostgreSQL GPU execution");
+        auto prepared = prepare_backend_local_shader_cache_env();
+        if (!prepared) {
+            report_runtime_init_unavailable(fmt::format(
+                "backend-local GPU runtime preparation failed: {}",
+                prepared.error()));
+        }
+        backend_runtime_ready = true;
+        return;
     }
 
     constexpr std::uint64_t kDeadlineNs = 120ull * 1'000'000'000ull;
@@ -1239,12 +1249,17 @@ void wait_for_runtime_ready() {
         if (state == RuntimeInitState::Ready) {
             const std::string digest = current_runtime_cache_digest();
             if (!digest.empty()) {
+                const std::filesystem::path cache_dir =
+                    runtime_cache_dir_from_digest(digest);
                 const std::filesystem::path command_lib =
-                    bioseq::gpu::vulkan::moltenvk_command_metallib_path(
-                        runtime_cache_dir_from_digest(digest));
+                    bioseq::gpu::vulkan::moltenvk_command_metallib_path(cache_dir);
                 (void)::setenv(
                     "BIOSEQ_MOLTENVK_COMMAND_METALLIB",
                     command_lib.c_str(),
+                    1);
+                (void)::setenv(
+                    "BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR",
+                    cache_dir.c_str(),
                     1);
             }
             backend_runtime_ready = true;
@@ -1408,27 +1423,161 @@ struct PgSupervisorCompileService {
     }
 };
 
+[[nodiscard]] std::expected<std::filesystem::path, std::string>
+prepare_backend_local_shader_cache_env() {
+    const auto inputs = conservative_shader_inputs();
+    const std::string digest = bioseq::gpu::vulkan::shader_cache_digest_hex(inputs);
+    const std::filesystem::path cache_dir = runtime_cache_dir_from_digest(digest);
+    if (auto command_lib = bioseq::gpu::vulkan::ensure_moltenvk_command_library(
+            cache_dir, inputs.msl);
+        !command_lib) {
+        return std::unexpected(fmt::format(
+            "moltenvk command library: {}", command_lib.error()));
+    }
+    const std::filesystem::path command_path =
+        bioseq::gpu::vulkan::moltenvk_command_metallib_path(cache_dir);
+    (void)::setenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB", command_path.c_str(), 1);
+    (void)::setenv("BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR", cache_dir.c_str(), 1);
+    return cache_dir;
+}
+
+struct PgBackendLocalCompileService {
+    std::filesystem::path cache_dir;
+    bioseq::gpu::vulkan::MslVersion msl;
+
+    [[nodiscard]] std::expected<void, std::string> ensure_variant_compiled(
+            bioseq::gpu::vulkan::ShaderVariantKey key) {
+        return bioseq::gpu::vulkan::ensure_compiled(cache_dir, key, msl);
+    }
+};
+
+[[nodiscard]] std::string warmup_backend_local_shader_cache_report() {
+    std::ostringstream out;
+#if !defined(__APPLE__)
+    out << "pid=" << static_cast<long>(MyProcPid)
+        << " platform=non-apple\n"
+        << "RESULT: ok variants=0 failed=0\n";
+    return out.str();
+#else
+    const auto inputs = conservative_shader_inputs();
+    auto prepared = prepare_backend_local_shader_cache_env();
+    if (!prepared) {
+        out << "pid=" << static_cast<long>(MyProcPid) << '\n'
+            << "RESULT: failed\n"
+            << "error=" << prepared.error() << '\n';
+        return out.str();
+    }
+
+    const std::filesystem::path& cache_dir = *prepared;
+    out << "pid=" << static_cast<long>(MyProcPid)
+        << " supervisor=" << (g_shared != nullptr ? 1 : 0)
+        << " cache_dir=" << cache_dir.string() << '\n';
+    if (const char* env = std::getenv("BIOSEQ_MOLTENVK_COMMAND_METALLIB");
+        env != nullptr) {
+        out << "env BIOSEQ_MOLTENVK_COMMAND_METALLIB=" << env << '\n';
+    }
+    if (const char* env = std::getenv("BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR");
+        env != nullptr) {
+        out << "env BIOSEQ_MOLTENVK_BINARY_ARCHIVE_DIR=" << env << '\n';
+    }
+
+    std::vector<bioseq::gpu::vulkan::ShaderVariantKey> keys;
+    bioseq::gpu::vulkan::for_each_static_shader_variant(
+        inputs.variants,
+        [&keys](const bioseq::gpu::vulkan::ShaderVariantKey& key) {
+            keys.push_back(key);
+        });
+
+    auto file_size_or_zero = [](const std::filesystem::path& path) -> std::uintmax_t {
+        std::error_code ec;
+        const std::uintmax_t size = std::filesystem::file_size(path, ec);
+        return ec ? 0u : size;
+    };
+
+    std::size_t failed = 0;
+    for (const auto& key : keys) {
+        const std::string stem = bioseq::gpu::vulkan::cache_file_stem(key);
+        auto compiled = bioseq::gpu::vulkan::ensure_compiled(cache_dir, key, inputs.msl);
+        if (!compiled) {
+            ++failed;
+            out << "variant " << stem
+                << " kind=" << key.kind
+                << " tile=" << key.tile_size
+                << " local=" << key.local_size
+                << " max_span=" << key.max_span
+                << " status=failed error=" << compiled.error() << '\n';
+            continue;
+        }
+        const auto metallib = bioseq::gpu::vulkan::cache_metallib_path(cache_dir, key);
+        const auto meta = bioseq::gpu::vulkan::cache_meta_path(cache_dir, key);
+        const auto archive = bioseq::gpu::vulkan::cache_binary_archive_path(cache_dir, key);
+        out << "variant " << stem
+            << " kind=" << key.kind
+            << " tile=" << key.tile_size
+            << " local=" << key.local_size
+            << " max_span=" << key.max_span
+            << " status=ok"
+            << " metallib_bytes=" << file_size_or_zero(metallib)
+            << " meta_bytes=" << file_size_or_zero(meta)
+            << " archive_bytes=" << file_size_or_zero(archive)
+            << '\n';
+    }
+    out << "RESULT: " << (failed == 0 ? "ok" : "failed")
+        << " variants=" << keys.size()
+        << " failed=" << failed << '\n';
+    return out.str();
+#endif
+}
+
+[[nodiscard]] std::expected<void, std::string>
+pg_shader_provider_prepare_runtime() {
+    if (g_shared != nullptr) {
+        wait_for_runtime_ready();
+        return {};
+    }
+    auto prepared = prepare_backend_local_shader_cache_env();
+    if (!prepared) {
+        return std::unexpected(prepared.error());
+    }
+    return {};
+}
+
 [[nodiscard]] std::expected<bioseq::gpu::vulkan::ShaderModuleLoad, std::string>
 pg_shader_provider_load_module(
         VkDevice device,
         const bioseq::gpu::vulkan::ShaderVariantKey& key,
         PFN_vkCreateShaderModule create_shader_module) {
-    wait_for_runtime_ready();
-    const std::string digest = current_runtime_cache_digest();
-    if (digest.empty()) {
-        return std::unexpected("shader cache digest unavailable");
+    if (g_shared != nullptr) {
+        wait_for_runtime_ready();
+        const std::string digest = current_runtime_cache_digest();
+        if (digest.empty()) {
+            return std::unexpected("shader cache digest unavailable");
+        }
+        PgSupervisorCompileService service;
+        return bioseq::gpu::vulkan::load_module(
+            device, runtime_cache_dir_from_digest(digest), key, create_shader_module, service);
     }
-    PgSupervisorCompileService service;
+
+    auto prepared = prepare_backend_local_shader_cache_env();
+    if (!prepared) {
+        return std::unexpected(prepared.error());
+    }
+    const auto inputs = conservative_shader_inputs();
+    PgBackendLocalCompileService service{
+        .cache_dir = *prepared,
+        .msl = inputs.msl,
+    };
     return bioseq::gpu::vulkan::load_module(
-        device, runtime_cache_dir_from_digest(digest), key, create_shader_module, service);
+        device, *prepared, key, create_shader_module, service);
 }
 
 void install_pg_shader_provider_if_available() noexcept {
 #if defined(__APPLE__)
-    if (process_shared_preload_libraries_in_progress || g_shared == nullptr) {
+    if (process_shared_preload_libraries_in_progress) {
         return;
     }
     static bioseq::gpu::vulkan::RuntimeShaderProvider provider{
+        &pg_shader_provider_prepare_runtime,
         &pg_shader_provider_load_module};
     bioseq::gpu::vulkan::install_runtime_shader_provider(&provider);
 #endif

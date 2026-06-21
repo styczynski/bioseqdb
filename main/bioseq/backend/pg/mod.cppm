@@ -12,6 +12,7 @@
 module;
 
 #include "common.h"
+#include "gpu/metal_archive_probe.hpp"
 
 
 extern "C" {
@@ -316,8 +317,59 @@ Datum bioseq_cigar_stub(PG_FUNCTION_ARGS) {
 	PG_RETURN_TEXT_P(cstring_to_text("!UNEXPECTED!"));
 }
 
-/*
- * bioseq.symbol_count(el bioseq.seq, sym text) -> bigint.
+CXX_PG_FUNCTION_INFO_V1(bioseq_gpu_probe_metal_archive);
+Datum bioseq_gpu_probe_metal_archive(PG_FUNCTION_ARGS) {
+	auto get_text_arg = [&](int arg_no) {
+		text* arg_text = PG_GETARG_TEXT_PP(arg_no);
+		char* arg_cstr = text_to_cstring(arg_text);
+		std::string result(arg_cstr);
+		pfree(arg_cstr);
+		return result;
+	};
+
+	const std::string mode = get_text_arg(0);
+	const std::string metallib_path = get_text_arg(1);
+	const std::string archive_path = get_text_arg(2);
+	const std::string report = bioseq::gpu::metal_probe::run_archive_probe(
+		mode,
+		metallib_path,
+		archive_path);
+	PG_RETURN_TEXT_P(cstring_to_text_with_len(report.data(), static_cast<int>(report.size())));
+}
+
+	CXX_PG_FUNCTION_INFO_V1(bioseq_gpu_probe_exec_child);
+	Datum bioseq_gpu_probe_exec_child(PG_FUNCTION_ARGS) {
+		auto get_text_arg = [&](int arg_no) {
+			text* arg_text = PG_GETARG_TEXT_PP(arg_no);
+			char* arg_cstr = text_to_cstring(arg_text);
+			std::string result(arg_cstr);
+			pfree(arg_cstr);
+			return result;
+		};
+
+		const std::string helper_path = get_text_arg(0);
+		const std::string mode = get_text_arg(1);
+		const std::string metallib_path = get_text_arg(2);
+		const std::string archive_path = get_text_arg(3);
+		const std::string report = bioseq::gpu::metal_probe::run_exec_child_probe(
+			helper_path,
+			mode,
+			metallib_path,
+			archive_path);
+		PG_RETURN_TEXT_P(cstring_to_text_with_len(report.data(), static_cast<int>(report.size())));
+	}
+
+	CXX_PG_FUNCTION_INFO_V1(bioseq_gpu_warmup_shader_cache);
+	Datum bioseq_gpu_warmup_shader_cache(PG_FUNCTION_ARGS) {
+		const std::string report =
+			bioseq::parallelism::pg::warmup_backend_local_shader_cache_report();
+		PG_RETURN_TEXT_P(cstring_to_text_with_len(
+			report.data(),
+			static_cast<int>(report.size())));
+	}
+
+	/*
+	 * bioseq.symbol_count(el bioseq.seq, sym text) -> bigint.
  *
  * The Postgres entry point computes the result directly from the passed-in
  * varlena (so it works on literals and outside a scan context). This path is

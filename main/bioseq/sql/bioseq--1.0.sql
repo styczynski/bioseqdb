@@ -1644,6 +1644,31 @@ CREATE OR REPLACE FUNCTION bioseq.scheduler_stats()
     AS 'MODULE_PATHNAME', 'bioseq_scheduler_stats'
     LANGUAGE C VOLATILE;
 
+-- DOC0344 follow-up — diagnostic-only GPU/Metal fork/XPC probes.
+-- These are intentionally VOLATILE and return a text transcript so the exact
+-- backend-local Metal stage results can be pasted into DOC0344.
+CREATE OR REPLACE FUNCTION bioseq.gpu_probe_metal_archive(
+    mode text,
+    metallib_path text,
+    archive_path text)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'bioseq_gpu_probe_metal_archive'
+    LANGUAGE C VOLATILE STRICT;
+
+CREATE OR REPLACE FUNCTION bioseq.gpu_probe_exec_child(
+    helper_path text,
+    mode text,
+    metallib_path text,
+    archive_path text)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'bioseq_gpu_probe_exec_child'
+    LANGUAGE C VOLATILE STRICT;
+
+CREATE OR REPLACE FUNCTION bioseq.gpu_warmup_shader_cache()
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'bioseq_gpu_warmup_shader_cache'
+    LANGUAGE C VOLATILE;
+
 -- DOC0279 §12.2 — admin/test SQL surface for the new chunked index storage.
 CREATE OR REPLACE FUNCTION bioseq.set_index_policy(rel regclass, name text, policy text) RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_set_index_policy' LANGUAGE C VOLATILE STRICT;
