@@ -10,6 +10,9 @@ crash.*.log
 .secrets/
 *.pem
 
+# Sidecar recording the region of the last `up` (read by `down`).
+.last-apply.json
+
 # Local variable overrides (may contain machine-specific values).
 *.auto.tfvars
 terraform.tfvars

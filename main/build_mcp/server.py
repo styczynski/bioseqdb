@@ -2089,6 +2089,13 @@ def tool_remote_manage(arguments: dict) -> str:
         # provisioner down prompts via input() without --yes; the detached worker
         # cannot answer, so always pass --yes.
         argv = _provisioner_cmd("down", "--yes")
+        # Pin the destroy to the stack's actual region. provisioner.down recovers
+        # this itself (persisted apply-state / outputs), but passing it explicitly
+        # keeps MCP and CLI consistent and prevents a region-less destroy from
+        # orphaning a paid instance in another region.
+        region = arguments.get("region") or _provisioner_region()
+        if region:
+            argv += ["--region", str(region)]
         label = "provisioner down (destroy the box and all its resources)"
     elif operation == "status":
         argv = _provisioner_cmd("status")
@@ -2584,7 +2591,7 @@ TOOL_DEFINITIONS += [
                 "branch": {"type": "string",
                            "description": "[up] branch to clone (default: your current local branch)."},
                 "region": {"type": "string",
-                           "description": "[up/status] AWS region (default: the existing stack's region)."},
+                           "description": "[up/status/down] AWS region (default: the existing stack's region)."},
                 "instance_type": {"type": "string",
                                   "description": "[up] EC2 instance type (default m4.4xlarge = 16 vCPU/64 GiB)."},
                 "ami": {"type": "string",

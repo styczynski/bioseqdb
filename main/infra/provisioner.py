@@ -55,6 +55,9 @@ COST / SAFETY
   * m4.4xlarge is an on-demand box and costs real money — run `down` when done.
   * `up` refuses (without --yes) if benchmark instances are already running, so
     you don't accidentally stack several boxes.
+  * `down` destroys against the region the stack was applied in (recorded by `up`)
+    and then sweeps any benchmark instance still tagged-and-running in that region,
+    so a region mismatch can never leave a paid box orphaned.
 
 This script uses only the Python standard library.
 """
@@ -73,6 +76,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TF_DIR = HERE / "testing_infra"
+# Sidecar written by `up` and read by `down`: records the region the stack was
+# applied in so the destroy pins the AWS provider to it. The provider's region is
+# var.region (NOT remembered in state across runs), so a region-less destroy would
+# target the default region and silently orphan everything that lives elsewhere.
+APPLY_STATE_FILE = TF_DIR / ".last-apply.json"
 
 # Terminal on-box statuses written to /opt/bioseq/PROVISION_STATUS.
 TERMINAL_STATUSES = {
@@ -178,14 +186,29 @@ def aws_region(args=None) -> str:
     return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
 
 
-def running_bench_instances(region: str) -> list[dict]:
+def _save_apply_state(region: str) -> None:
+    """Persist the applied region so `down` can destroy against it (see APPLY_STATE_FILE)."""
+    try:
+        APPLY_STATE_FILE.write_text(json.dumps({"region": region}, indent=2) + "\n")
+    except OSError:
+        pass
+
+
+def _load_apply_state() -> dict:
+    try:
+        return json.loads(APPLY_STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def bench_instances(region: str, states: str = "pending,running") -> list[dict]:
     if not shutil.which("aws"):
         return []
     res = run(
         ["aws", "ec2", "describe-instances", "--region", region,
          "--filters", "Name=tag:Project,Values=bioseq",
          "Name=tag:Component,Values=benchmark-machine",
-         "Name=instance-state-name,Values=pending,running",
+         f"Name=instance-state-name,Values={states}",
          "--query", "Reservations[].Instances[].{id:InstanceId,ip:PublicIpAddress,state:State.Name}",
          "--output", "json"],
         capture=True, check=False,
@@ -238,7 +261,7 @@ def remote_status() -> str | None:
 # --------------------------------------------------------------------------- #
 def cmd_up(args):
     region = args.region or "us-east-1"
-    running = running_bench_instances(region)
+    running = bench_instances(region)
     if running and not args.yes:
         print(c(f"warning: {len(running)} benchmark instance(s) already running in {region}:", "yellow"))
         for i in running:
@@ -257,6 +280,9 @@ def cmd_up(args):
     run([tofu_bin(), "apply", "-input=false", "-auto-approve"] + var_args(args, ssh_cidr), cwd=TF_DIR)
 
     outs = tofu_outputs()
+    # Remember the region we applied in so `down` can destroy against the same
+    # provider (var.region is not remembered in state across runs).
+    _save_apply_state(outs.get("region") or region)
     print()
     print(c("instance up:", "green"), outs.get("instance_id"), "@", outs.get("public_ip"))
     print(c("ssh:", "green"), outs.get("ssh_command"))
@@ -265,13 +291,49 @@ def cmd_up(args):
         wait_for_provision(args.timeout)
 
 
+def _terminate_orphans(region: str):
+    """Terminate any benchmark instance still alive in `region` after a destroy.
+
+    Defends against a stack whose Terraform state already lost the instance to a
+    previous mis-regioned `down`: Terraform cannot destroy what is no longer in
+    its state, so we sweep by tag directly and `down` always leaves nothing
+    running. (Any security-group / key-pair orphans are freed by the next
+    region-correct `up`/`down`.)
+    """
+    leftover = bench_instances(region, "pending,running,stopping,stopped")
+    ids = [i["id"] for i in leftover if i.get("id")]
+    if not ids:
+        return
+    print(c(f"sweeping {len(ids)} orphaned benchmark instance(s) in {region}: "
+            + ", ".join(ids), "yellow"))
+    run(["aws", "ec2", "terminate-instances", "--region", region,
+         "--instance-ids", *ids], capture=True, check=False)
+
+
 def cmd_down(args):
     if not args.yes:
         ans = input("Destroy the benchmark instance and all its resources? [y/N] ").strip().lower()
         if ans not in ("y", "yes"):
             die("aborted")
     ensure_init()
-    run([tofu_bin(), "destroy", "-input=false", "-auto-approve"], cwd=TF_DIR)
+    # Terraform's AWS provider region comes from var.region, which is NOT recorded
+    # in state across runs. A bare `destroy` configures the provider for the
+    # DEFAULT region, fails to find resources that live elsewhere, drops them from
+    # state as "already gone", and silently orphans a paid instance. Recover the
+    # region the stack was applied in (explicit flag > persisted apply-state > live
+    # outputs/env) and pin the provider to it.
+    region = (getattr(args, "region", None)
+              or _load_apply_state().get("region")
+              or aws_region(args))
+    print(c(f"destroying stack in region {region}", "blue"))
+    run([tofu_bin(), "destroy", "-input=false", "-auto-approve",
+         "-var", f"region={region}"], cwd=TF_DIR)
+    # Safety net for a stack already orphaned by a past region-less destroy.
+    _terminate_orphans(region)
+    try:
+        APPLY_STATE_FILE.unlink()
+    except OSError:
+        pass
     print(c("destroyed.", "green"))
 
 
@@ -285,7 +347,7 @@ def cmd_status(args):
             if outs.get(k):
                 print(f"  {k:14} {outs[k]}")
     region = aws_region(args)
-    running = running_bench_instances(region)
+    running = bench_instances(region)
     print(c(f"\nRunning benchmark instances in {region}: {len(running)}", "bold"))
     for i in running:
         print(f"  {i.get('id')}  {i.get('ip')}  {i.get('state')}")
@@ -371,6 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     down = sub.add_parser("down", help="destroy the instance and all resources")
     down.add_argument("--yes", action="store_true", help="do not prompt for confirmation")
+    down.add_argument("--region",
+                      help="region the stack was applied in (default: persisted from `up`, else outputs/env)")
     down.set_defaults(func=cmd_down)
 
     st = sub.add_parser("status", help="show outputs, live state, and on-box status")
