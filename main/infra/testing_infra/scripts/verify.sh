@@ -31,6 +31,7 @@ BLD_LOG=/opt/bioseq/verify_build.log
 status() { echo "$1" > /opt/bioseq/PROVISION_STATUS 2>/dev/null || sudo bash -c "echo '$1' > /opt/bioseq/PROVISION_STATUS"; }
 
 cd "$MAIN_DIR" 2>/dev/null || { echo "[verify] repo/main not found at $MAIN_DIR"; status "VERIFY_NO_REPO"; exit 1; }
+status "VERIFY_RUNNING"
 echo "[verify] cmake   : $(command -v cmake) -> $(cmake --version | head -1)"
 echo "[verify] ninja   : $(command -v ninja) -> $(ninja --version 2>/dev/null)"
 echo "[verify] vcpkg   : ${VCPKG_ROOT:-<unset>}"
