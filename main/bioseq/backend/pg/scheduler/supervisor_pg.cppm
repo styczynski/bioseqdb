@@ -65,7 +65,7 @@ import bioseq.gpu.vulkan.shader_cache;
 import bioseq.gpu.vulkan.shader_variants;
 import bioseq.pg_utils;
 import bioseq.indexing.type;
-import bioseq.indexing.minimizer_sequence;
+import bioseq.indexing.minimizer_sequence;   // DOC0345 Patch K — re-exports MinimizerSketchBackend + minimizer_sketch_backend_name (no HWY_NAMESPACE macro needed here)
 import bioseq.storage.manager;
 import bioseq.storage.lazy;
 import bioseq.storage.scanner_pg;
@@ -166,7 +166,7 @@ struct IndexBuildMpsDsmHeader {
     std::int32_t pipeline_mode;
     std::int32_t max_concurrency;
     std::int32_t index_memory_cap_mb;
-    std::uint32_t reserved;
+    std::int32_t index_sketch_backend;  // DOC0345 Patch K — repurposed from `reserved` (keeps 72-byte size)
     bioseq::storage::seq_locator locator;
 };
 static_assert(sizeof(IndexBuildMpsDsmHeader) == 72);
@@ -584,6 +584,7 @@ struct MpsBuildMetadata {
     std::int32_t pipeline_mode = 0;
     std::int32_t max_concurrency = 0;
     std::int32_t index_memory_cap_mb = 0;
+    std::int32_t index_sketch_backend = 0;  // DOC0345 Patch K
 };
 
 [[nodiscard]] std::optional<PersistFileMetadata>
@@ -643,6 +644,7 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     meta.pipeline_mode = header.pipeline_mode;
     meta.max_concurrency = header.max_concurrency;
     meta.index_memory_cap_mb = header.index_memory_cap_mb;
+    meta.index_sketch_backend = header.index_sketch_backend;  // DOC0345 Patch K
     return meta;
 }
 
@@ -923,7 +925,8 @@ void ensure_persist_xact_callback_registered() {
         std::int32_t pair_sort_impl,
         std::int32_t pipeline_mode,
         std::int32_t max_concurrency,
-        std::int32_t index_memory_cap_mb) {
+        std::int32_t index_memory_cap_mb,
+        std::int32_t index_sketch_backend) {  // DOC0345 Patch K
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
     if (!bioseq_index_async_persist
@@ -969,7 +972,7 @@ void ensure_persist_xact_callback_registered() {
         .pipeline_mode = pipeline_mode,
         .max_concurrency = max_concurrency,
         .index_memory_cap_mb = index_memory_cap_mb,
-        .reserved = 0,
+        .index_sketch_backend = index_sketch_backend,  // DOC0345 Patch K
         .locator = locator,
     };
     std::memcpy(base, &header, sizeof(header));
@@ -2101,6 +2104,15 @@ void process_mps_build_claim(
             static_cast<unsigned long long>(worker_concurrency),
             meta->index_memory_cap_mb,
             meta->pair_sort_impl);
+    // DOC0345 Patch K — the foreground recompute path chose the backend; the
+    // async worker's (pre-existing) storage-dispatch carries it into the
+    // per-storage `build`/`rebuild` call below.
+    const auto worker_backend =
+        static_cast<bioseq::indexing::MinimizerSketchBackend>(
+            meta->index_sketch_backend);
+    bioseq_log<DBG>(
+        "[bioseq] index: async mps build worker backend={}",
+        bioseq::indexing::minimizer_sketch_backend_name(worker_backend));
     PG_TRY();
     {
         pgseq_t::dispatch_instance(
@@ -2155,7 +2167,7 @@ void process_mps_build_claim(
                                         lazy_worker_shareable);
                                 bioseq::indexing::MinimizerSequenceMergedIndex<
                                     bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                        store, resident_lazy);
+                                        store, resident_lazy, worker_backend);
                                 return;
                             }
                         }
@@ -2167,7 +2179,7 @@ void process_mps_build_claim(
                                 lazy_worker_shareable);
                         bioseq::indexing::MinimizerSequenceMergedIndex<
                             bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                store, lazy);
+                                store, lazy, worker_backend);
                     });
             });
         built = true;

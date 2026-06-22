@@ -953,40 +953,50 @@ template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, cl
 // what the globalisation (`TargetIndex::add_position_offset`) and the scalar/SIMD
 // parity both rely on. Scalar collection over contiguous memory is cheap (no I/O;
 // alignment dominates the per-segment wall-clock), so this is correct AND fast.
+// DOC0345 Patch D — no default backend. The scalar sub-range body now lives in
+// `collect_minimizers_segment_scalar` (bioseq.sequences.kmers) so pipe and the
+// persisted builders share one (bug-carrying) sub-range contract. Under
+// `VulkanSegment` the GPU segment sketch is called and throws on any decline.
 template <class MinimizerT, class Seq, class Collector>
 [[gnu::always_inline]] inline void minimizer_dispatch_range(
-    Collector& c, Seq& seq, sequence_size_t lo_unit, sequence_size_t hi_unit,
-    std::size_t w, std::size_t k)
+    Collector& collector,
+    Seq& seq,
+    sequence_size_t lo_unit,
+    sequence_size_t hi_unit,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    MinimizerSketchBackend backend)
 {
-    if constexpr (requires { typename Seq::scanner_type; }) {
-        if constexpr (!Seq::scanner_type::supports_fragments()) {
-            // Contiguous: collect over the underlying range's sub-iterators.
-            auto& m = const_cast<std::remove_cvref_t<decltype(seq.underlying())>&>(seq.underlying());
-            auto b = m.begin();
-            auto e = m.begin();
-            std::advance(b, static_cast<typename std::iterator_traits<decltype(b)>::difference_type>(lo_unit));
-            std::advance(e, static_cast<typename std::iterator_traits<decltype(e)>::difference_type>(hi_unit));
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                c, m, b, e, w, k);
-        } else {
-            // Fragmented: stream the scalar view over the lazy sub-range.
-            auto b = seq.begin();
-            auto e = seq.begin();
-            b += lo_unit;
-            e += hi_unit;
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                c, seq, b, e, w, k);
-        }
-    } else {
-        // Raw compact_sequence_range (no lazy wrapper).
-        auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
-        auto b = m.begin();
-        auto e = m.begin();
-        std::advance(b, static_cast<typename std::iterator_traits<decltype(b)>::difference_type>(lo_unit));
-        std::advance(e, static_cast<typename std::iterator_traits<decltype(e)>::difference_type>(hi_unit));
-        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-            c, m, b, e, w, k);
+    if (backend == MinimizerSketchBackend::VulkanSegment) {
+        bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
+            collector,
+            seq,
+            static_cast<std::size_t>(lo_unit),
+            static_cast<std::size_t>(hi_unit),
+            window_size,
+            kmer_size);
+        return;
     }
+
+    collect_minimizers_segment_scalar<MinimizerT>(
+        collector,
+        seq,
+        lo_unit,
+        hi_unit,
+        window_size,
+        kmer_size);
+}
+
+// DOC0345 Patch D — derive the target-index sketch backend from the resolved
+// params. Vulkan only when all three high-level gates are on; otherwise scalar.
+[[nodiscard]] inline MinimizerSketchBackend
+target_index_sketch_backend_from_params(const Minimap2Params& params) noexcept
+{
+    return params.vulkan_enabled
+        && params.vulkan_gpu_index_build_enabled
+        && params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+            ? MinimizerSketchBackend::VulkanSegment
+            : MinimizerSketchBackend::Scalar;
 }
 
 // DOC0276 — segment GEOMETRY. The MinimapSketchData position field is 28 bits
@@ -3914,11 +3924,18 @@ template <class MinimizerT, class QuerySeq>
 
     sketch_collector_t<MinimizerT> query_collector;
     query_collector.reserve(query_seq.bp_size() / std::max<std::size_t>(w, 1) + 64);
+    // DOC0345 Patch D — query sketch is explicitly Scalar; it must never inherit
+    // the target Vulkan backend. (When minimizer_algorithm==VULKAN_MINIMAP_INT the
+    // caller routes the query through the GPU whole-sequence path before reaching here.)
     pipe::minimizer_dispatch_range<MinimizerT>(
-        query_collector, query_seq, 0,
+        query_collector,
+        query_seq,
+        0,
         (query_seq.bp_size() + QuerySeq::traits::letters_per_unit - 1)
             / QuerySeq::traits::letters_per_unit,
-        w, k);
+        w,
+        k,
+        MinimizerSketchBackend::Scalar);
     return BudgetedSketchVector<MinimizerT>{
         .minimizers = std::move(query_collector).extract_sketches_data(),
         .permit = std::nullopt,
@@ -3950,6 +3967,12 @@ template <supports_compact_sequence_range QueryRange,
         return MatchResultCollection{};
     }
 
+    // DOC0345 Patch D — resolve the target-index sketch backend once; every
+    // target `minimizer_dispatch_range` call below passes it explicitly so no
+    // target seam can silently fall back to scalar.
+    const MinimizerSketchBackend target_sketch_backend =
+        pipe::target_index_sketch_backend_from_params(params);
+
     // (1) Sketch the query ONCE as MinimapSketchData (query < 2^28 bp; its
     //     positions fit the 28-bit field). Same kmer hashing as the target, so
     //     `collect_seed_hits` matches identically. DOC0307 §5.3 — the helper
@@ -3975,7 +3998,8 @@ template <supports_compact_sequence_range QueryRange,
 
     auto run_serial_segmented =
         [target_len, query_len, lpu, w, k, &target_seq, &query_seq,
-         &query_minimizers, &params, fragment_index_out]() -> MatchResultCollection {
+         &query_minimizers, &params, fragment_index_out,
+         target_sketch_backend]() -> MatchResultCollection {
         std::vector<MatchResult> merged;
         sketch_collector_t<MinimizerT> seg_collector;
         MinimizerHashmapFragmentIndex seg_index;
@@ -4002,7 +4026,8 @@ template <supports_compact_sequence_range QueryRange,
                         (range.ce_u - range.cs_u) * lpu
                             / std::max<std::size_t>(w, 1) + 64);
                     pipe::minimizer_dispatch_range<MinimizerT>(
-                        seg_collector, target_seq, range.cs_u, range.ce_u, w, k);
+                        seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                        target_sketch_backend);
                     const std::vector<MinimizerT>& seg_minimizers =
                         seg_collector.extract_sketches_data();
 
@@ -4039,7 +4064,8 @@ template <supports_compact_sequence_range QueryRange,
             seg_collector.reserve(
                 (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
             pipe::minimizer_dispatch_range<MinimizerT>(
-                seg_collector, target_seq, range.cs_u, range.ce_u, w, k);
+                seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                target_sketch_backend);
             const std::vector<MinimizerT>& seg_minimizers =
                 seg_collector.extract_sketches_data();
 
@@ -4237,7 +4263,8 @@ template <supports_compact_sequence_range QueryRange,
 
             auto process_segment_serial =
                 [&ranges, &target_seq, &query_seq, &query_minimizers, &params,
-                 &acc, &merged, target_len, frag_bp, w, k, lpu](
+                 &acc, &merged, target_len, frag_bp, w, k, lpu,
+                 target_sketch_backend](
                         std::size_t segment_index) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
@@ -4246,7 +4273,8 @@ template <supports_compact_sequence_range QueryRange,
                     (range.ce_u - range.cs_u) * lpu
                         / std::max<std::size_t>(w, 1) + 64);
                 pipe::minimizer_dispatch_range<MinimizerT>(
-                    collector, target_seq, range.cs_u, range.ce_u, w, k);
+                    collector, target_seq, range.cs_u, range.ce_u, w, k,
+                    target_sketch_backend);
                 const std::vector<MinimizerT>& minimizers =
                     collector.extract_sketches_data();
                 auto emissions = collect_fragment_emissions_for_segment(
@@ -4305,7 +4333,8 @@ template <supports_compact_sequence_range QueryRange,
                     bioseq::parallelism::range_body{
                         [&ranges, &wave_seg_out, &wave_frag_out,
                          &target_seq, &query_seq, &query_minimizers, &params,
-                         current_wave_lo, target_len, frag_bp, w, k, lpu](
+                         current_wave_lo, target_len, frag_bp, w, k, lpu,
+                         target_sketch_backend](
                                 std::size_t lo, std::size_t hi) {
                         sketch_collector_t<MinimizerT> collector;
                         MinimizerHashmapFragmentIndex index;
@@ -4320,7 +4349,8 @@ template <supports_compact_sequence_range QueryRange,
                                 (range.ce_u - range.cs_u) * lpu
                                     / std::max<std::size_t>(w, 1) + 64);
                             pipe::minimizer_dispatch_range<MinimizerT>(
-                                collector, target_seq, range.cs_u, range.ce_u, w, k);
+                                collector, target_seq, range.cs_u, range.ce_u, w, k,
+                                target_sketch_backend);
                             const std::vector<MinimizerT>& minimizers =
                                 collector.extract_sketches_data();
                             wave_frag_out[rel] =
@@ -4399,7 +4429,7 @@ template <supports_compact_sequence_range QueryRange,
         [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
          &segment_minimizer_counts, &segment_filtered_counts,
          &build_query_filtered_segment_index, &params, target_len,
-         w, k, lpu](std::size_t segment_index) {
+         w, k, lpu, target_sketch_backend](std::size_t segment_index) {
         sketch_collector_t<MinimizerT> collector;
         MinimizerHashmapFragmentIndex index;
         std::vector<FilteredMinimizerPair> filtered_pairs;
@@ -4407,7 +4437,8 @@ template <supports_compact_sequence_range QueryRange,
         collector.reserve(
             (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
         pipe::minimizer_dispatch_range<MinimizerT>(
-            collector, target_seq, range.cs_u, range.ce_u, w, k);
+            collector, target_seq, range.cs_u, range.ce_u, w, k,
+            target_sketch_backend);
         const std::vector<MinimizerT>& minimizers =
             collector.extract_sketches_data();
         segment_minimizer_counts[segment_index] = minimizers.size();
@@ -4483,7 +4514,7 @@ template <supports_compact_sequence_range QueryRange,
                 [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
                  &segment_minimizer_counts, &segment_filtered_counts,
                  &build_query_filtered_segment_index, &params, target_len,
-                 w, k, lpu](std::size_t lo, std::size_t hi) {
+                 w, k, lpu, target_sketch_backend](std::size_t lo, std::size_t hi) {
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
                 std::vector<FilteredMinimizerPair> filtered_pairs;
@@ -4493,7 +4524,8 @@ template <supports_compact_sequence_range QueryRange,
                     collector.reserve(
                         (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
                     pipe::minimizer_dispatch_range<MinimizerT>(
-                        collector, target_seq, range.cs_u, range.ce_u, w, k);
+                        collector, target_seq, range.cs_u, range.ce_u, w, k,
+                        target_sketch_backend);
                     const std::vector<MinimizerT>& minimizers =
                         collector.extract_sketches_data();
                     segment_minimizer_counts[segment_index] = minimizers.size();

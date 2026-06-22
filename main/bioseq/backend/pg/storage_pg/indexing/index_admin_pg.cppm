@@ -5,6 +5,7 @@
  *        symbol-count reader glue, and the C++ impls behind the SQL surface.
  */
 module;
+#include <hwy/highway.h>  // DOC0345 Patch I — HWY_NAMESPACE macro names MinimizerAlgorithmType / MinimizerSketchBackend
 #include "common.h"
 #include "access/relation.h"
 #include "access/table.h"
@@ -41,6 +42,8 @@ import bioseq.indexing.traits;
 import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
+import bioseq.sequences.minimap_port;   // DOC0345 Patch I — MinimizerAlgorithmType (spec's bioseq.pipeline.minimap_port name does not exist)
+import bioseq.sequences.kmers;          // DOC0345 Patch I — MinimizerSketchBackend, minimizer_sketch_backend_name
 import bioseq.indexing.symbol_counts;
 import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.parallelism.memory_admission;
@@ -179,6 +182,23 @@ inline void note_policy_on_insert_writes(
     }
 }
 
+// DOC0345 Patch I — select the target index sketch backend from the three
+// high-level GUCs (vulkan enabled, GPU index build enabled, vulkan_minimap_int).
+// Defined before its first caller (index_build_on_insert); the spec placed it
+// near layout_of_name, which is below index_build_on_insert.
+[[nodiscard]] inline bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
+resolve_index_sketch_backend_from_gucs() noexcept
+{
+    using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    return bioseq_aligner_vulkan_enabled
+        && bioseq_aligner_vulkan_gpu_index_build_enabled
+        && bioseq_aligner_minimizer_algorithm
+            == static_cast<int>(MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
+        ? MinimizerSketchBackend::VulkanSegment
+        : MinimizerSketchBackend::Scalar;
+}
+
 // ---- INSERT-time build (§11.2) -------------------------------------------
 inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint64_t rowno, const pgseq_t* hdr,
                                   const std::optional<seq_locator>& loc_opt, MemoryContext mctx) {
@@ -189,6 +209,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
     auto policy_rows = load_table_policy(user_relid, rid.relfilenode, attno);
     pg_supported_indexes idx; idx.apply_table_defaults(); idx.merge_overrides(policy_rows);
     reset_last_mps_build_stats();
+    const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
     pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width, [&]<class S>() {
         compact_sequence_range<S> rng{*hdr};
         auto lazy = bioseq::storage::make_lazy_in_memory(rng);
@@ -204,7 +225,7 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
             acquire_index_advisory_xact_lock(rid.db_oid, rid.tablespace_oid, rid.relfilenode, attno, name);
             return qcache.emplace(name, open_sequence_storage(user_relid, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
                                      attno, name, loc, rowno, nullptr, mctx)).first->second; };
-        idx.build_fragmented<true>(open_frag, lazy);
+        idx.build_fragmented<true>(open_frag, lazy, backend);
         idx.build_sequence<true>(open_inl, lazy);
     });
     note_policy_on_insert_writes(user_relid, rid.relfilenode, attno, idx);
@@ -428,25 +449,28 @@ try_materialize_for_parallel_sequence_index_build(
     }
 }
 
+// DOC0345 Patch I — backend-aware. Whole-target resident materialization is
+// disabled under Vulkan: the goal is streaming fragmented GPU windows, not making
+// the fragmented target contiguous on the host.
 template <class SupportedIndexes, class Storage, class R, class Scanner>
 inline void rebuild_one_fragmented_maybe_resident(
         SupportedIndexes& idx,
         std::string_view name,
         Storage& store,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& lazy,
-        std::uint64_t rowno) {
-    if (name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        std::uint64_t rowno,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+    if (backend == bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar
+        && name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
         if (auto resident =
-                try_materialize_for_parallel_sequence_index_build(
-                    lazy, rowno, name);
+                try_materialize_for_parallel_sequence_index_build(lazy, rowno, name);
             resident.has_value()) {
-            auto resident_lazy =
-                bioseq::storage::make_lazy_in_memory(resident->range);
-            idx.rebuild_one_fragmented(name, store, resident_lazy);
+            auto resident_lazy = bioseq::storage::make_lazy_in_memory(resident->range);
+            idx.rebuild_one_fragmented(name, store, resident_lazy, backend);
             return;
         }
     }
-    idx.rebuild_one_fragmented(name, store, lazy);
+    idx.rebuild_one_fragmented(name, store, lazy, backend);
 }
 
 inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
@@ -455,6 +479,15 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     const RelationIdentity rid = index_relation_identity(rel_oid);
     const SequenceIndexType layout = layout_of_name(name);
     reset_last_mps_build_stats();
+    const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
+    bioseq_log<DBG>(
+        "[bioseq] index: update_index name={} backend={} vulkan_enabled={} "
+        "vulkan_gpu_index_build={} minimizer_algorithm={}",
+        name,
+        bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(backend),
+        bioseq_aligner_vulkan_enabled,
+        bioseq_aligner_vulkan_gpu_index_build_enabled,
+        bioseq_aligner_minimizer_algorithm);
 
     // locate EVERY bioseq.seq column (§11.4 builds the index for each SEQ column;
     // mmsearch(target, query) queries the target column, which may not be the first).
@@ -561,9 +594,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 });
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno] {
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno, backend] {
                                     rebuild_one_fragmented_maybe_resident(
-                                        idx, name, store, lazy, rowno);
+                                        idx, name, store, lazy, rowno, backend);
                                 });
                             }
                         });
@@ -582,9 +615,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno] {
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno, backend] {
                             rebuild_one_fragmented_maybe_resident(
-                                idx, name, store, lazy, rowno);
+                                idx, name, store, lazy, rowno, backend);
                         });
                     }
                 });

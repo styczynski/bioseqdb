@@ -1,0 +1,39 @@
+{
+  "params": {
+    "bioseq_block_gpu_dp_gpu_seed_no_index": {
+      "_": {"type": "integer", "default": 0, "description": "GPU no_index recompute (tiled phase_c build_gpu_index_on_device for contiguous leaf)"},
+      "minimizer_index": {"type": "string", "default": "minimizers_per_fragment", "enum": ["minimizers_per_fragment", "minimizers_per_sequence"], "description": "write-policy index"},
+      "recompute_async_persist": {"type": "string", "default": "off", "enum": ["off", "on"], "description": "off"},
+      "pipeline_mode": {"type": "string", "default": "single", "enum": ["single", "parallel", "task_parallel"], "description": "mode"}
+    }
+  },
+  "test_cases": {
+    "E2E_TINY_DNA4": { "concurrency": 1, "data": {
+        "alphabet": "dna4", "size_label": "tiny_dna4", "reference_length": 2000000,
+        "fragment_count": 1, "fragment_length_mean": 200000, "fragment_length_stddev": 10000,
+        "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0, "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5, "kmer_size": 15, "window_size": 10,
+        "minimap2_split_bp": 2000352, "seed": 3219876 },
+      "description": "dna4 2 Mbp contiguous tiny no_index target (tests tiled phase_c build_gpu_index_on_device in backend)" }
+  },
+  "bench_e2e": {
+    "description": "TINY no_index GPU diag: does tiled phase_c (sh_05 + sort) match its .metalar archives in the PG backend?",
+    "fast": false,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "matrix": {
+      "for": { "E2E_TINY_DNA4": 1 },
+      "over": {
+        "bioseq_block_gpu_dp_gpu_seed_no_index": {"minimizer_index": ["minimizers_per_fragment"], "pipeline_mode": ["single"]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns":   { "rules": [] },
+        "region_total_ns": { "type": "region", "rules": [] },
+        "found_fraction":         { "type": "evaluation", "rules": [] },
+        "match_count":            { "type": "evaluation" }
+      }
+    }
+  },
+  "regression_rules": []
+}

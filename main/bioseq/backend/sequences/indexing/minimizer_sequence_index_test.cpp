@@ -40,6 +40,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
+import bioseq.gpu.vulkan.runtime;   // DOC0345 §16.3 — Runtime::usable() skip guard
 
 #include "index_test_fakes.h"
 
@@ -74,6 +75,52 @@ whole_sequence_minimizers(range_t& range, std::size_t w, std::size_t k) {
     sketch_collector collector;
     collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
         collector, range, range.begin(), range.end(), w, k);
+    return collector.extract_sketches_data();
+}
+
+// DOC0345 §16.3 — generic deterministic range builder + whole-target query
+// minimizers (pinned w=10,k=15 to match the persisted mpf/mps build).
+using TestFragmentStorage = FakeFragmentStorage<>;
+
+template <class Config>
+[[nodiscard]] compact_sequence_range<Config>
+make_deterministic_test_range(std::size_t n) {
+    // DOC0345 §16.3 — draw ranks from the NON-AMBIGUOUS letters only (ACGT,
+    // ranks 0..3) so the GPU-vs-scalar mps comparison is EXACT. The GPU mps build
+    // uses the bit-exact NON-tiled Phase B sketch + a host pair sort (the tiled
+    // emit over-emits ~8% for dna5 and is bypassed — BUGFIX DOC0348). ACGT +
+    // (below) a letters_per_unit-multiple length isolate exact parity from the
+    // separate scalar trailing-padding discrepancy; this validates the dna5
+    // encoding + GPU Phase B sketch + host pair sort + index pipeline exactly.
+    constexpr std::uint8_t kNonAmbiguous =
+        compact_sequence_range<Config>::traits::alphabet_size < 4u
+            ? static_cast<std::uint8_t>(compact_sequence_range<Config>::traits::alphabet_size)
+            : 4u;
+    // Round down to a whole number of storage units so the trailing unit has
+    // ZERO padding — otherwise the scalar unit-iterator sub-range over the final
+    // fragment processes the last unit's padding slots (decoded as A) as
+    // spurious minimizers that the GPU (which honours tail_padding) omits,
+    // breaking exact parity for dna5 (letters_per_unit=21 ∤ 8Mi).
+    constexpr std::size_t kLettersPerUnit =
+        compact_sequence_range<Config>::traits::letters_per_unit;
+    n -= n % kLettersPerUnit;
+    std::vector<typename Config::alphabet_type> letters(n);
+    std::uint64_t s = 0x9e3779b97f4a7c15ULL;
+    for (std::size_t i = 0; i < n; ++i) {
+        s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+        typename Config::alphabet_type c{};
+        c.assign_rank(static_cast<std::uint8_t>((s >> 33) % kNonAmbiguous));
+        letters[i] = c;
+    }
+    return compact_sequence_range<Config>(std::move(letters));
+}
+
+template <class Config>
+[[nodiscard]] std::vector<MinimapSketchData>
+make_deterministic_query_minimizers(compact_sequence_range<Config>& range) {
+    sketch_collector collector;
+    collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+        collector, range, range.begin(), range.end(), 10, 15);
     return collector.extract_sketches_data();
 }
 
@@ -211,6 +258,69 @@ TEST_CASE("DOC0279 §10.5 — assemble_for_query drops an over-frequent kmer und
 
     // Under max_occ=1 the over-frequent kmer is dropped entirely.
     REQUIRE(idx.lookup(over_freq_kmer).empty());
+}
+
+// DOC0345 §16.3 — persisted mpf + mps built with Vulkan must match scalar.
+TEST_CASE("persisted minimizer indexes built with Vulkan match scalar",
+          "[indexing][vulkan][minimizer]") {
+    if (!bioseq::gpu::vulkan::Runtime::instance().usable()) {
+        SUCCEED("no usable Vulkan device; skipped");
+        return;
+    }
+
+    using backend_t = MinimizerSketchBackend;
+    using config_t = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    using cfg_range_t = compact_sequence_range<config_t>;
+    using storage_unit = typename cfg_range_t::traits::storage_unit;
+    using scanner_t =
+        sequence_scanner_test_chunked<
+            storage_unit,
+            bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
+    using lazy_t = lazy_compact_sequence<config_t, scanner_t>;
+
+    cfg_range_t target = make_deterministic_test_range<config_t>(8u << 20);
+    lazy_t lazy_scalar{scanner_t::from_range(target)};
+    lazy_t lazy_gpu{scanner_t::from_range(target)};
+
+    TestFragmentStorage scalar_mpf;
+    TestFragmentStorage gpu_mpf;
+    TestFragmentStorage scalar_mps;
+    TestFragmentStorage gpu_mps;
+
+    bioseq::indexing::MinimizersPerFragmentIndex<TestFragmentStorage>::build(
+        scalar_mpf, lazy_scalar, backend_t::Scalar);
+    bioseq::indexing::MinimizersPerFragmentIndex<TestFragmentStorage>::build(
+        gpu_mpf, lazy_gpu, backend_t::VulkanSegment);
+
+    bioseq::indexing::MinimizerSequenceMergedIndex<TestFragmentStorage>::build(
+        scalar_mps, lazy_scalar, backend_t::Scalar);
+    bioseq::indexing::MinimizerSequenceMergedIndex<TestFragmentStorage>::build(
+        gpu_mps, lazy_gpu, backend_t::VulkanSegment);
+
+    bioseq::indexing::MinimizerAssemblyScratch scratch_scalar;
+    bioseq::indexing::MinimizerAssemblyScratch scratch_gpu;
+    std::vector<MinimapSketchData> query_minimizers =
+        make_deterministic_query_minimizers(target);
+
+    auto scalar_index =
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            TestFragmentStorage>::assemble_for_query(
+                scalar_mps,
+                query_minimizers,
+                target.bp_size(),
+                500,
+                scratch_scalar);
+    auto gpu_index =
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            TestFragmentStorage>::assemble_for_query(
+                gpu_mps,
+                query_minimizers,
+                target.bp_size(),
+                500,
+                scratch_gpu);
+
+    REQUIRE(gpu_index.positions == scalar_index.positions);
+    REQUIRE(gpu_index.table.size() == scalar_index.table.size());
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

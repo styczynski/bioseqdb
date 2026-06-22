@@ -8,6 +8,7 @@
  * forgotten import into a diagnosed error). NO_POSTGRES.
  */
 module;
+#include <hwy/highway.h>  // DOC0345 Patch G — defines the HWY_NAMESPACE macro used to name MinimizerSketchBackend
 #include <array>
 #include <span>
 #include <string>
@@ -20,6 +21,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;          // the index_descriptor PRIMARY (declared-undefined)
 import bioseq.storage.lazy;             // lazy_compact_sequence<R,Scanner>
+import bioseq.sequences.kmers;          // DOC0345 Patch G — MinimizerSketchBackend
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -128,11 +130,17 @@ struct supported_indexes {
     }
 
     // ---- build / rebuild drivers (fold over the index pack) -------------
+    // DOC0345 Patch G — fragmented build/rebuild driver threads an explicit
+    // MinimizerSketchBackend to B::build / B::rebuild (their 3-arg overloads).
     template <bool Rebuild, bool OnlyOnInsert, class OpenFragment, class R, class Scanner>
     [[gnu::always_inline]] void run_fragmented_(OpenFragment&& open_for,
-            bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+            bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
         std::size_t i = 0;
-        ([&]{
+        // DOC0321 — explicit minimal capture (no `[&]` capture-all): `this` for
+        // the enabled[]/policy[] members, the fold counter, the open callback,
+        // the sequence, and the backend enum (by value).
+        ([this, &i, &open_for, &seq, backend]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT &&
                           (!OnlyOnInsert || index_descriptor<Indexes>::allows_update_on_insert)) {
@@ -140,8 +148,15 @@ struct supported_indexes {
                 const std::size_t idx = i;
                 const bool want = enabled[idx] &&
                     (!OnlyOnInsert || policy[idx] == IndexUpdatePolicy::UPDATE_ON_INSERT);
-                if (want) { StorageFragment& s = open_for(index_descriptor<Indexes>::index_name);
-                            if constexpr (Rebuild) B::rebuild(s, seq); else B::build(s, seq); }
+                if (want) {
+                    StorageFragment& storage =
+                        open_for(index_descriptor<Indexes>::index_name);
+                    if constexpr (Rebuild) {
+                        B::rebuild(storage, seq, backend);
+                    } else {
+                        B::build(storage, seq, backend);
+                    }
+                }
             }
             ++i;
         }(), ...);
@@ -178,12 +193,42 @@ struct supported_indexes {
         }(), ...);
     }
 
-    template <bool OnlyOnInsert=false, class OpenFragment, class R, class Scanner>
-    void build_fragmented(OpenFragment&& open_for, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) { run_fragmented_<false, OnlyOnInsert>(open_for, seq); }
+    // DOC0345 Patch G — explicit-backend + scalar-default fragmented drivers.
+    template <bool OnlyOnInsert = false, class OpenFragment, class R, class Scanner>
+    void build_fragmented(
+        OpenFragment&& open_for,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        run_fragmented_<false, OnlyOnInsert>(open_for, seq, backend);
+    }
+    template <bool OnlyOnInsert = false, class OpenFragment, class R, class Scanner>
+    void build_fragmented(
+        OpenFragment&& open_for,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+        run_fragmented_<false, OnlyOnInsert>(
+            open_for,
+            seq,
+            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+    }
     template <bool OnlyOnInsert=false, class OpenInline, class R, class Scanner>
     void build_sequence(OpenInline&& open_for, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) { run_inline_<false, OnlyOnInsert>(open_for, seq); }
     template <class OpenTable> void build_table(OpenTable&& open_for) { run_table_<false, false>(open_for); }
-    template <class OpenFragment, class R, class Scanner> void rebuild_fragmented(OpenFragment&& open_for, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) { run_fragmented_<true, false>(open_for, seq); }
+    template <class OpenFragment, class R, class Scanner>
+    void rebuild_fragmented(
+        OpenFragment&& open_for,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        run_fragmented_<true, false>(open_for, seq, backend);
+    }
+    template <class OpenFragment, class R, class Scanner>
+    void rebuild_fragmented(
+        OpenFragment&& open_for,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+        run_fragmented_<true, false>(
+            open_for,
+            seq,
+            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
+    }
     template <class OpenInline,   class R, class Scanner> void rebuild_sequence  (OpenInline&&   open_for, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) { run_inline_<true, false>(open_for, seq); }
     template <class OpenTable> void rebuild_table(OpenTable&& open_for) { run_table_<true, false>(open_for); }
 
@@ -194,12 +239,33 @@ struct supported_indexes {
         return SequenceIndexType::CHUNKED_PER_FRAGMENT;   // unreachable: caller validated name
     }
     /// Rebuild ONLY the named index for ONE sequence (per-sequence layouts).
+    /// DOC0345 Patch G — explicit-backend + scalar-default forms.
     template <class R, class Scanner>
-    void rebuild_one_fragmented(std::string_view name, StorageFragment& s, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) {
-        ([&]{ using B = bound_t<Indexes>;
-            if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT)
-                if (index_descriptor<Indexes>::index_name == name) B::rebuild(s, seq);
+    void rebuild_one_fragmented(
+        std::string_view name,
+        StorageFragment& storage,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        // DOC0321 — explicit minimal capture (no `[&]` capture-all).
+        ([&storage, &seq, &name, backend]{
+            using B = bound_t<Indexes>;
+            if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT) {
+                if (index_descriptor<Indexes>::index_name == name) {
+                    B::rebuild(storage, seq, backend);
+                }
+            }
         }(), ...);
+    }
+    template <class R, class Scanner>
+    void rebuild_one_fragmented(
+        std::string_view name,
+        StorageFragment& storage,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+        rebuild_one_fragmented(
+            name,
+            storage,
+            seq,
+            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
     }
     template <class R, class Scanner>
     void rebuild_one_inline(std::string_view name, StorageSequence& s, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) {
