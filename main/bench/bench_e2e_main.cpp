@@ -530,6 +530,41 @@ void configure_bioseq_aligner_session(it::connection_test_context& c,
     it::exec_sqlf(c, "SET bioseq.aligner.window_size = {};", window_size);
 }
 
+// DOC0345 Patch L — full Vulkan minimizer + GPU-index session config. Applied
+// BEFORE any persisted index build so the untimed just_index build runs on the
+// GPU (vulkan_minimap_int + vulkan_gpu_index_build_enabled), not CPU/SIMD.
+void configure_bioseq_vulkan_index_session(
+    it::connection_test_context& connection,
+    int kmer_size,
+    int window_size)
+{
+    configure_bioseq_aligner_session(connection, kmer_size, window_size);
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.chaining_algorithm = 'vulkan_tiled_dp';");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.minimizer_algorithm = 'vulkan_minimap_int';");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.vulkan_enabled = on;");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.vulkan_seed_hits_enabled = on;");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.vulkan_index_cache_enabled = on;");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.vulkan_fused_frontend_enabled = on;");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.vulkan_gpu_index_build_enabled = on;");
+    it::exec_sql(
+        connection,
+        "SET bioseq.aligner.vulkan_extend_enabled = off;");
+}
+
 [[nodiscard]] std::string param_string(const ParamMap& params,
                                        std::string_view name,
                                        std::string_view fallback) {
@@ -983,10 +1018,53 @@ template <sequence_alphabet A>
             create_e2e_table(*in.conn, table, in.seq_type);
             configure_bioseq_scheduler_session(
                 *in.conn, just_index_setup_pipeline_mode);
+            // DOC0345 Patch L — Vulkan minimizer + GPU-index GUCs BEFORE the
+            // persisted build so the untimed just_index build runs the GPU
+            // minimizer extraction. (The spec's
+            // configure_bioseq_pair_sort_session(*in.conn, params) is
+            // intentionally omitted: ParamMap `params` is not in scope inside
+            // e2e_input_typed, and the per-window pair sort on the Vulkan path is
+            // host-side, not the CPU pair-sort GUC — see DOC0348.)
+            configure_bioseq_vulkan_index_session(
+                *in.conn,
+                in.kmer_size,
+                in.window_size);
+            it::exec_sql(
+                *in.conn,
+                "DO $$ BEGIN "
+                "PERFORM current_setting('bioseq.aligner.vulkan_enabled'); "
+                "IF current_setting('bioseq.aligner.minimizer_algorithm') "
+                "   <> 'vulkan_minimap_int' THEN "
+                "  RAISE EXCEPTION 'GPU just_index setup did not select Vulkan minimizers'; "
+                "END IF; "
+                "IF current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled') "
+                "   <> 'on' THEN "
+                "  RAISE EXCEPTION 'GPU just_index setup did not enable GPU index build'; "
+                "END IF; "
+                "END $$;");
             configure_bioseq_minimizer_policy(*in.conn, table, index_name);
             it::exec_sql(*in.conn, "SET bioseq.update_index_on_insert = on;");
-            it::exec_sqlf(*in.conn, "SELECT bioseq.load('{}'::regclass, '{}');",
-                          table, in.target_fasta);
+            it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
+            it::exec_sqlf(
+                *in.conn,
+                "SELECT bioseq.load('{}'::regclass, '{}');",
+                table,
+                in.target_fasta);
+            const std::string audit_sql = fmt::format(
+                "SELECT current_setting('bioseq.aligner.minimizer_algorithm'), "
+                "current_setting('bioseq.aligner.vulkan_enabled'), "
+                "current_setting('bioseq.aligner.vulkan_gpu_index_build_enabled'), "
+                "bioseq.index_table_row_count('{}'::regclass, '{}')",
+                table,
+                index_name);
+            const auto audit_rows = it::query_rows(*in.conn, audit_sql);
+            if (audit_rows.empty()) {
+                bioseq_log<ERR>(
+                    "[bench_e2e] missing GPU just_index setup audit for table={} index={}",
+                    table,
+                    index_name);
+                std::abort();
+            }
         };
 
     // (5) just_index tables: each indexed cell gets its own table and policy.
@@ -1139,14 +1217,7 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
         const std::string& table = just_index_table_for(in, minimizer_index);
         configure_bioseq_minimizer_policy(*in.conn, table, minimizer_index);
         it::exec_sql(*in.conn, "SET bioseq.read_sequence_index = on;");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.chaining_algorithm            = 'vulkan_tiled_dp';");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.minimizer_algorithm           = 'vulkan_minimap_int';");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_enabled                = on;");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_seed_hits_enabled      = on;");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_index_cache_enabled    = on;");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_fused_frontend_enabled   = on;");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_gpu_index_build_enabled  = on;");
-        it::exec_sql(*in.conn, "SET bioseq.aligner.vulkan_extend_enabled         = off;");
+        configure_bioseq_vulkan_index_session(*in.conn, in.kmer_size, in.window_size);  // DOC0345 Patch L
         const std::string sql = fmt::format(
             "SELECT header, {} FROM {} WHERE mmsearch(seq, {}) ORDER BY header",
             proj, table, qlit);
@@ -1250,14 +1321,7 @@ bool restart_postgres_for_cold_just_index(const E2eInput& in) {
             it::exec_sqlf(read_conn, "SET bioseq.recompute_async_persist = {};",
                           recompute_async_persist ? "on" : "off");
             // GPU/Vulkan phase-C frontend (same GUCs as bioseq_block_gpu_dp_gpu_seed_just_index).
-            it::exec_sql(read_conn, "SET bioseq.aligner.chaining_algorithm            = 'vulkan_tiled_dp';");
-            it::exec_sql(read_conn, "SET bioseq.aligner.minimizer_algorithm           = 'vulkan_minimap_int';");
-            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_enabled                = on;");
-            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_seed_hits_enabled      = on;");
-            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_index_cache_enabled    = on;");
-            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_fused_frontend_enabled   = on;");
-            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_gpu_index_build_enabled  = on;");
-            it::exec_sql(read_conn, "SET bioseq.aligner.vulkan_extend_enabled         = off;");
+            configure_bioseq_vulkan_index_session(read_conn, in.kmer_size, in.window_size);  // DOC0345 Patch L
             parse_bioseq_rows(it::query_rows(read_conn, align_sql), in, out);
             capture_mps_build_stats(read_conn, out);
         }

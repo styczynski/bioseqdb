@@ -149,6 +149,7 @@ import bioseq.storage.indexing_pg.residency;
 import bioseq.storage.indexing_pg.sorted_runs;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.vulkan;   // DOC0345 Patch J — GPU sorted-pair segment seam (GPU emit + host sort; real no_index mps)
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
@@ -729,6 +730,271 @@ struct OpportunisticFragmentIndexStorage {
     }
 };
 
+// DOC0345 Patch J — transient mps storage backing a real no_index per_sequence
+// build. Unlike OpportunisticFragmentIndexStorage (which refuses external-sort
+// spill), this delegates spill/merge to a real SortedPairRunStore so it satisfies
+// is_external_sort_spill_storage + is_index_chunked_storage_for<CHUNKED_PER_FRAGMENT>
+// that MinimizerSequenceMergedIndex<S> requires. No persisted sidecar rows.
+struct OpportunisticSequenceChunk {
+    bioseq::indexing::index_sub_key_t sub_key = 0;
+    std::size_t chunk_no = 0;
+    std::vector<char> bytes;
+};
+
+struct OpportunisticSequenceIndexStorage {
+    using sorted_pair_t = std::pair<std::uint64_t, std::uint64_t>;
+
+    std::vector<OpportunisticSequenceChunk> chunks;
+    bioseq::storage::indexing::SortedPairRunStore sorted_runs;
+    std::size_t run_buffer_bytes_value = std::size_t{256} << 20;
+
+    [[nodiscard]] std::size_t run_buffer_bytes() const noexcept {
+        return run_buffer_bytes_value;
+    }
+
+    void clear_entity() {
+        chunks.clear();
+        sorted_runs.release_runs();
+    }
+
+    // DOC0345 Patch J — required by is_index_chunked_storage_for<CHUNKED_PER_FRAGMENT>
+    // but unused on the transient path.
+    void clear(std::string_view) {
+        clear_entity();
+    }
+
+    void resize_chunks(
+        bioseq::indexing::index_sub_key_t sub_key,
+        std::span<const std::size_t> plan)
+    {
+        for (std::size_t chunk_no = 0; chunk_no < plan.size(); ++chunk_no) {
+            auto& chunk = ensure_chunk(sub_key, chunk_no);
+            chunk.bytes.resize(plan[chunk_no]);
+        }
+    }
+
+    void resize(bioseq::indexing::index_sub_key_t sub_key, std::size_t bytes) {
+        std::array<std::size_t, 1> plan{bytes};
+        resize_chunks(sub_key, std::span<const std::size_t>{plan.data(), plan.size()});
+    }
+
+    void prefetch_chunk(bioseq::indexing::index_sub_key_t, std::size_t) {}
+
+    template <class T, class F>
+    void write_to_each(bioseq::indexing::index_sub_key_t sub_key, F&& writer) {
+        for (OpportunisticSequenceChunk& chunk : chunks) {
+            if (chunk.sub_key != sub_key) {
+                continue;
+            }
+            const std::size_t cap = chunk.bytes.size() / sizeof(T);
+            writer(
+                chunk.chunk_no,
+                reinterpret_cast<T*>(chunk.bytes.data()),
+                cap);
+        }
+    }
+
+    template <class T, class F>
+    void write_to(bioseq::indexing::index_sub_key_t sub_key, F&& writer) {
+        write_to_each<T>(sub_key, std::forward<F>(writer));
+    }
+
+    [[nodiscard]] const char* read_chunk(
+        bioseq::indexing::index_sub_key_t sub_key,
+        std::size_t chunk_no) const
+    {
+        return chunk_ref(sub_key, chunk_no).bytes.data();
+    }
+
+    template <class T>
+    [[nodiscard]] const T* read_chunk(
+        bioseq::indexing::index_sub_key_t sub_key,
+        std::size_t chunk_no) const
+    {
+        return reinterpret_cast<const T*>(chunk_ref(sub_key, chunk_no).bytes.data());
+    }
+
+    [[nodiscard]] std::size_t chunk_byte_size(
+        bioseq::indexing::index_sub_key_t sub_key,
+        std::size_t chunk_no) const
+    {
+        return chunk_ref(sub_key, chunk_no).bytes.size();
+    }
+
+    [[nodiscard]] std::size_t number_of_chunks(
+        bioseq::indexing::index_sub_key_t sub_key) const
+    {
+        std::size_t count = 0;
+        for (const OpportunisticSequenceChunk& chunk : chunks) {
+            if (chunk.sub_key == sub_key) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    // DOC0345 Patch J — distinct sub_keys present (required by the concept).
+    [[nodiscard]] std::size_t number_of_sub_keys() const {
+        std::size_t count = 0;
+        for_each_sub_key([&count](bioseq::indexing::index_sub_key_t) { ++count; });
+        return count;
+    }
+
+    template <class F>
+    void for_each_sub_key(F&& fn) const {
+        bioseq::indexing::index_sub_key_t last = 0;
+        bool have_last = false;
+        // chunks are appended in build order; emit each distinct sub_key once.
+        std::vector<bioseq::indexing::index_sub_key_t> seen;
+        for (const OpportunisticSequenceChunk& chunk : chunks) {
+            if (have_last && chunk.sub_key == last) {
+                continue;
+            }
+            bool already = false;
+            for (const auto key : seen) {
+                if (key == chunk.sub_key) {
+                    already = true;
+                    break;
+                }
+            }
+            if (!already) {
+                seen.push_back(chunk.sub_key);
+                fn(chunk.sub_key);
+            }
+            last = chunk.sub_key;
+            have_last = true;
+        }
+    }
+
+    [[nodiscard]] std::size_t spill_sorted_run(
+        std::span<const sorted_pair_t> sorted)
+    {
+        return sorted_runs.spill_sorted_run(sorted);
+    }
+
+    [[nodiscard]] std::size_t spill_sorted_run_owned(
+        std::vector<sorted_pair_t> sorted)
+    {
+        return sorted_runs.spill_sorted_run_owned(std::move(sorted));
+    }
+
+    [[nodiscard]] std::size_t spill_sorted_run_owned_admitted(
+        std::vector<sorted_pair_t> sorted,
+        std::uint64_t admitted_bytes,
+        bioseq::parallelism::MemoryPermit permit)
+    {
+        return sorted_runs.spill_sorted_run_owned_admitted(
+            std::move(sorted),
+            admitted_bytes,
+            std::move(permit));
+    }
+
+    template <class F>
+    void merge_runs(F&& on_kmer) {
+        sorted_runs.merge_runs(std::forward<F>(on_kmer));
+    }
+
+    void release_resident_runs_noexcept() noexcept {
+        sorted_runs.release_resident_runs_noexcept();
+    }
+
+    void release_runs() {
+        sorted_runs.release_runs();
+    }
+
+    void release_runs_noexcept() noexcept {
+        sorted_runs.release_runs_noexcept();
+    }
+
+    template <class F>
+    void read_chunks_in_range(
+        bioseq::indexing::index_sub_key_t first,
+        bioseq::indexing::index_sub_key_t last,
+        F&& f) const
+    {
+        for (bioseq::indexing::index_sub_key_t sub_key = first;
+             sub_key < last;
+             ++sub_key) {
+            for (const OpportunisticSequenceChunk& chunk : chunks) {
+                if (chunk.sub_key == sub_key) {
+                    f(sub_key, chunk.bytes.data(), chunk.bytes.size());
+                }
+            }
+        }
+    }
+
+    void validate_minimizer_directory_or_error(
+        const char*,
+        std::size_t) const
+    {
+    }
+
+    void validate_minimizer_chunk_metadata_or_error(
+        bioseq::indexing::index_sub_key_t,
+        std::size_t,
+        std::size_t,
+        std::size_t) const
+    {
+    }
+
+    auto validate_minimizer_blob_or_error(
+        const char* blob,
+        std::size_t bytes,
+        std::uint32_t expected_bucket_count = 0) const
+    {
+        using Header = bioseq::indexing::MinimizerHashmapFragmentIndex::SerializedHeader;
+        if (bytes < sizeof(Header)) {
+            index_error("opportunistic mps: truncated blob");
+        }
+        Header header{};
+        std::memcpy(&header, blob, sizeof(header));
+        if (expected_bucket_count != 0u
+            && header.bucket_count != expected_bucket_count) {
+            index_error("opportunistic mps: unexpected bucket count");
+        }
+        return header;
+    }
+
+    [[noreturn]] void index_error(std::string_view message) const {
+        bioseq_log<ERR, PG>("bioseq opportunistic mps index: {}", message);
+        abort();
+    }
+
+private:
+    OpportunisticSequenceChunk& ensure_chunk(
+        bioseq::indexing::index_sub_key_t sub_key,
+        std::size_t chunk_no)
+    {
+        for (OpportunisticSequenceChunk& chunk : chunks) {
+            if (chunk.sub_key == sub_key && chunk.chunk_no == chunk_no) {
+                return chunk;
+            }
+        }
+        chunks.push_back(OpportunisticSequenceChunk{
+            .sub_key = sub_key,
+            .chunk_no = chunk_no,
+            .bytes = {},
+        });
+        return chunks.back();
+    }
+
+    [[nodiscard]] const OpportunisticSequenceChunk& chunk_ref(
+        bioseq::indexing::index_sub_key_t sub_key,
+        std::size_t chunk_no) const
+    {
+        for (const OpportunisticSequenceChunk& chunk : chunks) {
+            if (chunk.sub_key == sub_key && chunk.chunk_no == chunk_no) {
+                return chunk;
+            }
+        }
+        bioseq_log<ERR, PG>(
+            "bioseq opportunistic mps index: missing chunk sub_key={} chunk_no={}",
+            static_cast<long long>(sub_key),
+            chunk_no);
+        abort();
+    }
+};
+
 struct AsyncPersistFileChunkHeader {
     std::int64_t sub_key;
     std::uint32_t chunk_no;
@@ -1059,6 +1325,79 @@ make_fragment_index_persist_target(
         && params.window_size == 10;
 }
 
+// DOC0345 Patch J — select the target index sketch backend for recompute from
+// the resolved params (Vulkan only when all three high-level gates are on).
+[[nodiscard]] inline bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend
+target_backend_from_params_for_recompute(const Minimap2Params& params) noexcept
+{
+    return params.vulkan_enabled
+        && params.vulkan_gpu_index_build_enabled
+        && params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+            ? bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::VulkanSegment
+            : bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+}
+
+// DOC0345 Patch J — build a REAL transient minimizers_per_sequence index
+// (GPU-backed when Vulkan is selected), assemble it for the query, and run the
+// indexed aligner. Shared by BOTH the fast no_index recompute path and the
+// deferred-persist recompute path, so neither serves a no_index x per_sequence
+// cell as an mpf-shaped segmented relabel (DOC0345 §1.4, §2). Streams from the
+// (lazy PG) target via the GPU sorted-pair seam (GPU Phase B emit on device +
+// host pair sort — see DOC0348) — no whole-target resident materialization, so
+// 2/4 Gbp targets do not OOM.
+template <class LazyQuery, class Target>
+[[nodiscard]] MatchResultCollection build_and_align_transient_mps(
+    LazyQuery& lazy_query,
+    Target& target,
+    const Minimap2Params& params,
+    sequence_size_t total_bp_size)
+{
+    MatchResultCollection collection;
+    PG_TRY();
+    {
+        OpportunisticSequenceIndexStorage mps_store;
+        mps_store.run_buffer_bytes_value =
+            bioseq_index_run_buffer_bytes > 0
+                ? static_cast<std::size_t>(bioseq_index_run_buffer_bytes)
+                : (std::size_t{256} << 20);
+
+        const auto backend = target_backend_from_params_for_recompute(params);
+        bioseq::indexing::MinimizerSequenceMergedIndex<
+            OpportunisticSequenceIndexStorage>::build(
+                mps_store,
+                target,
+                backend);
+
+        auto query_sketch =
+            sketch_query_for_index_selection<MinimapSketchData>(
+                lazy_query,
+                params,
+                static_cast<std::size_t>(params.window_size),
+                static_cast<std::size_t>(params.kmer_size));
+        bioseq::indexing::MinimizerAssemblyScratch scratch;
+        auto index =
+            bioseq::indexing::MinimizerSequenceMergedIndex<
+                OpportunisticSequenceIndexStorage>::assemble_for_query(
+                    mps_store,
+                    query_sketch.as_span(),
+                    total_bp_size,
+                    params.max_occ,
+                    scratch);
+        collection = minimap2_port_with_index_pg_checked(
+            lazy_query,
+            target,
+            query_sketch.minimizers,
+            index,
+            params);
+    }
+    PG_CATCH();
+    {
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    return collection;
+}
+
 [[nodiscard]] bool stage_recompute_mps_build_if_selected(
         const BatchProcessor::ScannerPgContext& ctx,
         const bioseq::storage::seq_locator& loc,
@@ -1121,7 +1460,9 @@ make_fragment_index_persist_target(
             bioseq::indexing::detail::pair_run_sort_impl()),
         bioseq_scheduler_pipeline_concurrency_mode,
         bioseq_scheduler_max_concurrency,
-        bioseq_index_memory_cap_mb);
+        bioseq_index_memory_cap_mb,
+        static_cast<std::int32_t>(  // DOC0345 Patch K — thread backend into the async worker
+            target_backend_from_params_for_recompute(params)));
     bioseq_log<DBG>("[bioseq] index: recompute async-mps-build row={} index={} target_bp={} reason={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
             choice->index_name,
@@ -1175,38 +1516,27 @@ run_recompute_with_deferred_minimizer_persist(
         std::uint16_t last_fragment_padding,
         const DeferredMinimizerPersistChoice& choice) {
     if (choice.kind == DeferredMinimizerIndexKind::per_sequence) {
-        MatchResultCollection collection;
-        bool staged = false;
-        std::uint64_t chunk_bytes = 0;
-        std::size_t chunk_count = 0;
-        PG_TRY();
-        {
-            (void)alphabet_code;
-            (void)storage_unit_byte_width;
-            (void)last_fragment_padding;
-            OpportunisticFragmentIndexStorage ram_store;
-            collection = minimap_port_segmented_pg_checked(
-                lazy_query, resident_target, params, &ram_store);
-            for (const OpportunisticIndexChunk& chunk : ram_store.chunks) {
-                chunk_bytes += static_cast<std::uint64_t>(chunk.bytes.size());
-            }
-            chunk_count = ram_store.chunks.size();
-            staged = stage_opportunistic_fragment_store_for_async_persist(
-                ctx, loc, ram_store, sequence_rowno, choice.index_name);
-        }
-        PG_CATCH();
-        {
-            PG_RE_THROW();
-        }
-        PG_END_TRY();
+        // DOC0345 Patch J — REAL mps no_index: build a transient minimizers_per_sequence
+        // index (GPU-backed when Vulkan is selected), assemble it for the query, and run
+        // the indexed aligner. No mpf relabelling. ctx is unused on this transient path.
+        (void)ctx;
+        (void)alphabet_code;
+        (void)storage_unit_byte_width;
+        (void)last_fragment_padding;
+        MatchResultCollection collection = build_and_align_transient_mps(
+            lazy_query,
+            resident_target,
+            params,
+            static_cast<sequence_size_t>(loc.total_bp_size));
 
-        bioseq_log<DBG>("[bioseq] index: recompute logical-mps-persist row={} index={} target_bp={} chunks={} chunk_bytes={} async_staged={}",
-                static_cast<unsigned long long>(sequence_rowno),
-                choice.index_name,
-                static_cast<unsigned long long>(loc.total_bp_size),
-                static_cast<unsigned long long>(chunk_count),
-                static_cast<unsigned long long>(chunk_bytes),
-                staged);
+        bioseq_log<DBG>(
+            "[bioseq] index: recompute real-mps-noindex row={} index={} "
+            "target_bp={} persisted=false backend={}",
+            static_cast<unsigned long long>(sequence_rowno),
+            choice.index_name,
+            static_cast<unsigned long long>(loc.total_bp_size),
+            bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+                target_backend_from_params_for_recompute(params)));
         return collection;
     }
 
@@ -1887,7 +2217,8 @@ try_materialize_target_for_segment_workers(
                                         OpportunisticFragmentIndexStorage ram_store;
 	                                        bioseq::indexing::MinimizersPerFragmentIndex<
 	                                            OpportunisticFragmentIndexStorage>::build(
-	                                                ram_store, ft_pg);
+	                                                ram_store, ft_pg,
+                                                target_backend_from_params_for_recompute(params));
 	                                        const std::string_view opportunistic_index_name =
 	                                            want_seq
 	                                                ? kMinimizersPerSequenceIndex
@@ -2028,46 +2359,30 @@ try_materialize_target_for_segment_workers(
                                     const auto rowno =
                                         static_cast<std::uint64_t>(
                                             scanner_pg_ctx->target_rownos[i]);
-                                    bool resident_attempted = false;
-                                    bool resident_parallel = false;
-                                    if (target_bp_size > kSegmentationThresholdBp) {
-                                        resident_attempted =
-                                            !base_params.enable_profiling
-                                            && bioseq::parallelism::task_parallel(
-                                                pool.mode())
-                                            && pool.max_concurrency() > 1;
-                                        if (resident_attempted) {
-                                            auto resident =
-                                                try_materialize_target_for_segment_workers(
-                                                    ft_pg, rowno);
-                                            if (resident.has_value()) {
-                                                auto resident_target =
-                                                    bioseq::storage::make_lazy_in_memory(
-                                                        resident->range);
-                                                collection = minimap_port_segmented_pg_checked(
-                                                    lazy_query,
-                                                    resident_target,
-                                                    params);
-                                                resident_parallel = true;
-                                            }
-                                        }
-                                        if (!resident_parallel) {
-                                            collection = minimap_port_segmented_pg_checked(
-                                                fq_pg, ft_pg, params);
-                                        }
-                                    } else {
-                                        collection =
-                                            minimap_port_pg_checked(fq_pg, ft_pg, params);
-                                    }
-                                    bioseq_log<DBG>("[bioseq] index: recompute mps-fast-noindex row={} index={} target_bp={} persist_compatible={} resident_attempted={} resident_parallel={} persisted=false",
+                                    // DOC0345 Patch J — real transient mps for the
+                                    // no_index x per_sequence cell. This fast path
+                                    // previously served per_sequence via the mpf-shaped
+                                    // segmented aligner (minimap_port_segmented_*), i.e.
+                                    // an mpf relabel — prohibited by DOC0345 §2 and the
+                                    // §1.4 acceptance criterion. Build a genuine mps index
+                                    // instead; the GPU sorted-pair seam (GPU emit + host
+                                    // sort — DOC0348) streams from lazy PG (no whole-target
+                                    // resident materialization, so 2/4 Gbp targets do not OOM).
+                                    collection = build_and_align_transient_mps(
+                                        fq_pg,
+                                        ft_pg,
+                                        params,
+                                        static_cast<sequence_size_t>(
+                                            loc_opt->total_bp_size));
+                                    bioseq_log<DBG>("[bioseq] index: recompute real-mps-fast-noindex row={} index={} target_bp={} persist_compatible={} persisted=false backend={}",
                                             static_cast<unsigned long long>(
                                                 rowno),
                                             fast_mps_choice->index_name,
                                             static_cast<unsigned long long>(
                                                 loc_opt->total_bp_size),
                                             can_defer_fast_mps_recompute,
-                                            resident_attempted,
-                                            resident_parallel);
+                                            bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(
+                                                target_backend_from_params_for_recompute(params)));
                                     assembled = true;
                                 }
                             }

@@ -371,6 +371,42 @@ struct GpuBuiltIndex {
     bool valid = false;
 };
 
+/// DOC0345 Patch B — host-visible result of the GPU sketch+two-key-sort roundtrip.
+/// Owns the device buffer holding the final sorted run plus the downloaded
+/// host bytes (host/Postgres-format persistence happens on the CPU side).
+struct GpuSortedPairRun {
+    Buffer keys;
+    Buffer values;
+    std::vector<std::byte> host_key_bytes;
+    std::vector<std::byte> host_value_bytes;
+    std::uint64_t target_len = 0;
+    std::uint32_t pair_count = 0;
+    bool valid = false;
+};
+
+/// DOC0345 Patch B — device-side ping-pong views for the stable two-key pair
+/// sort. Hoisted above `class Runtime` because the private method
+/// `record_stable_pair_sort_by_value_then_key_locked` takes it by reference.
+struct SortedPairDeviceViews {
+    GpuArenaSlice keys;
+    GpuArenaSlice values;
+    GpuArenaSlice keys_scratch;
+    GpuArenaSlice values_scratch;
+    bool keys_in_scratch = false;
+};
+
+[[nodiscard]] inline const GpuArenaSlice& choose_sorted_keys(
+    const SortedPairDeviceViews& views) noexcept
+{
+    return views.keys_in_scratch ? views.keys_scratch : views.keys;
+}
+
+[[nodiscard]] inline const GpuArenaSlice& choose_sorted_values(
+    const SortedPairDeviceViews& views) noexcept
+{
+    return views.keys_in_scratch ? views.values_scratch : views.values;
+}
+
 /// Inputs to the GPU seed count/emit/sort roundtrip (DOC0310 §14). The query
 /// minimizer words arrive resident (`device_minimizer_words`) or as host bytes;
 /// the index slots/positions are the GPU-resident buffers.
@@ -488,6 +524,19 @@ public:
         const VulkanSketchParams& params,
         std::uint64_t max_target_minimizers);
 
+    // DOC0345 Patch B — GPU per-segment sorted-pair seam: tiled `emit_mode=2`
+    // emit of (kmer, encoded_pos) + a GPU two-key stable radix sort (by
+    // encoded_pos then kmer → (kmer, encoded_pos) order). RETAINED but currently
+    // BYPASSED: the tiled emit over-emits ~8% for dna5, so the shipped index
+    // builders emit via the non-tiled Phase B sketch and sort the pairs on the
+    // host instead (see DOC0348). This entry point re-enables once the tiled
+    // emit is fixed.
+    GpuSortedPairRun run_phase_c_sketch_sort_pairs_roundtrip(
+        std::span<const std::byte> packed_sequence,
+        const VulkanRankLut& rank_lut,
+        const VulkanSketchParams& params,
+        std::uint64_t max_target_minimizers);
+
     // DOC0310 Phase C — GPU seed count + emit + device anchor sort (§14, §13).
     // Counts anchors on device (no host prepass), prefix-scans, emits anchors,
     // and stable-radix-sorts them by `Anchor::ref_bits()`. Returns the sorted
@@ -570,6 +619,17 @@ private:
         const GpuSortPlan& plan, std::uint32_t num_workgroups,
         std::uint32_t elems_per_wg, std::uint32_t value_words,
         bool& result_in_scratch);
+    // DOC0345 Patch B — two-key stable sort: radix by value (encoded_pos) then
+    // radix by key (kmer). Because the second sort is stable the result is
+    // (kmer, encoded_pos) ordered.
+    void record_stable_pair_sort_by_value_then_key_locked(
+        VkCommandBuffer command_buffer,
+        SortedPairDeviceViews& views,
+        GpuArenaSlice hist,
+        GpuSortPlan value_sort_plan,
+        GpuSortPlan key_sort_plan,
+        std::uint32_t num_workgroups,
+        std::uint32_t elems_per_workgroup);
 
     void init();
     void shutdown() noexcept;
@@ -3272,6 +3332,61 @@ void Runtime::record_radix_sort_locked(
     result_in_scratch = in_scratch;
 }
 
+void Runtime::record_stable_pair_sort_by_value_then_key_locked(
+    VkCommandBuffer command_buffer,
+    SortedPairDeviceViews& views,
+    GpuArenaSlice hist,
+    GpuSortPlan value_sort_plan,
+    GpuSortPlan key_sort_plan,
+    std::uint32_t num_workgroups,
+    std::uint32_t elems_per_workgroup)
+{
+    bool value_sorted_in_scratch = false;
+    record_radix_sort_locked(
+        command_buffer,
+        views.values,
+        views.keys,
+        views.values_scratch,
+        views.keys_scratch,
+        hist,
+        value_sort_plan,
+        num_workgroups,
+        elems_per_workgroup,
+        1u,
+        value_sorted_in_scratch);
+
+    record_compute_barrier(command_buffer);
+
+    const GpuArenaSlice key_after_value_sort =
+        value_sorted_in_scratch ? views.keys_scratch : views.keys;
+    const GpuArenaSlice value_after_value_sort =
+        value_sorted_in_scratch ? views.values_scratch : views.values;
+    const GpuArenaSlice key_scratch_after_value_sort =
+        value_sorted_in_scratch ? views.keys : views.keys_scratch;
+    const GpuArenaSlice value_scratch_after_value_sort =
+        value_sorted_in_scratch ? views.values : views.values_scratch;
+
+    bool key_sorted_in_scratch = false;
+    record_radix_sort_locked(
+        command_buffer,
+        key_after_value_sort,
+        value_after_value_sort,
+        key_scratch_after_value_sort,
+        value_scratch_after_value_sort,
+        hist,
+        key_sort_plan,
+        num_workgroups,
+        elems_per_workgroup,
+        1u,
+        key_sorted_in_scratch);
+
+    views.keys = key_after_value_sort;
+    views.values = value_after_value_sort;
+    views.keys_scratch = key_scratch_after_value_sort;
+    views.values_scratch = value_scratch_after_value_sort;
+    views.keys_in_scratch = key_sorted_in_scratch;
+}
+
 namespace {
 
 /// Pick (num_workgroups, elems_per_wg) for a device sort/scan over `n` elements,
@@ -3726,6 +3841,276 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     out.valid = true;
     arena.rewind(mark);
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_idx-post)");
+    chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+    return out;
+}
+
+GpuSortedPairRun Runtime::run_phase_c_sketch_sort_pairs_roundtrip(
+    std::span<const std::byte> packed_sequence,
+    const VulkanRankLut& rank_lut,
+    const VulkanSketchParams& params,
+    std::uint64_t max_target_minimizers)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    static const auto* _run_d =
+        bioseq::instr::register_region_static("phase_c_sorted_pair_run");
+    auto _run_s = bioseq::instr::region(_run_d);
+
+    GpuSortedPairRun out;
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "run_phase_c_sketch_sort_pairs_roundtrip on unavailable device");
+    }
+
+    const std::uint32_t bp = params.bp_size;
+    const std::uint32_t window_size = params.window_size;
+    const std::uint32_t kmer_size = params.kmer_size;
+    out.target_len = bp;
+    if (bp == 0u || window_size == 0u || kmer_size == 0u || bp < kmer_size
+        || max_target_minimizers == 0u) {
+        return out;
+    }
+    if (max_target_minimizers
+        > static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())) {
+        return out;
+    }
+
+    const std::uint32_t tile_bp =
+        adaptive_sketch_tile_bp(bp, features_.max_workgroup_count_x, kPhaseCSketchTileBp);
+    const std::uint32_t num_tiles = ceil_div_u32(bp, tile_bp);
+    if (num_tiles == 0u || num_tiles > features_.max_workgroup_count_x) {
+        return out;
+    }
+
+    const std::uint32_t overlap = window_size + kmer_size;
+    std::vector<TileC> tiles(num_tiles);
+    for (std::uint32_t tile = 0; tile < num_tiles; ++tile) {
+        const std::uint32_t lo = tile * tile_bp;
+        const std::uint32_t hi = std::min(bp, (tile + 1u) * tile_bp);
+        tiles[tile] = TileC{
+            params.seq_word_offset,
+            bp,
+            lo > overlap ? lo - overlap : 0u,
+            lo,
+            hi,
+            0u};
+    }
+
+    const std::uint32_t num_blocks = ceil_div_u32(num_tiles, kPhaseCScanBlock);
+    GpuArena& arena = phase_c_arena();
+    const std::uint64_t seq_bytes =
+        std::max<std::uint64_t>(packed_sequence.size(), 4u);
+    const std::uint64_t scaffold =
+        seq_bytes
+        + sizeof(VulkanRankLut)
+        + std::uint64_t{num_tiles} * 24u
+        + std::uint64_t{num_tiles} * 4u * 2u
+        + std::max<std::uint64_t>(num_blocks, 1u) * 4u
+        + 16u
+        + 4096u;
+    if (!arena.ensure_capacity(scaffold, 0u, 0u)) {
+        throw VulkanRuntimeError("phase_c sorted-pair arena grow failed");
+    }
+
+    const GpuArenaMark mark = arena.mark();
+    const GpuArenaSlice seq_s = arena.allocate_device(seq_bytes, 16u);
+    const GpuArenaSlice lut_s = arena.allocate_device(sizeof(VulkanRankLut), 16u);
+    const GpuArenaSlice tiles_s =
+        arena.allocate_device(std::uint64_t{num_tiles} * 24u, 16u);
+    const GpuArenaSlice tcounts_s =
+        arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
+    const GpuArenaSlice toffsets_s =
+        arena.allocate_device(std::uint64_t{num_tiles} * 4u, 16u);
+    const GpuArenaSlice tblocks_s =
+        arena.allocate_device(std::max<std::uint64_t>(num_blocks, 1u) * 4u, 16u);
+    const GpuArenaSlice counters_s = arena.allocate_device(16u, 16u);
+    if (!seq_s.valid() || !lut_s.valid() || !tiles_s.valid()
+        || !tcounts_s.valid() || !toffsets_s.valid() || !tblocks_s.valid()
+        || !counters_s.valid()) {
+        arena.rewind(mark);
+        return out;
+    }
+
+    auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
+    if (!packed_sequence.empty()) {
+        std::memcpy(base + seq_s.offset, packed_sequence.data(), packed_sequence.size());
+    }
+    std::memcpy(base + lut_s.offset, &rank_lut, sizeof(rank_lut));
+    std::memcpy(base + tiles_s.offset, tiles.data(), tiles.size() * sizeof(TileC));
+    std::memset(base + tcounts_s.offset, 0, static_cast<std::size_t>(tcounts_s.size));
+
+    const PhaseBPipeline sketch_pipe = get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sketch_tile,
+        kPhaseCSketchLocal,
+        std::max<std::uint32_t>(window_size, 1u));
+
+    const std::uint64_t capacity = max_target_minimizers;
+    Buffer keys = create_device_buffer(capacity * 8u, kPhaseBBufferUsage);
+    Buffer values = create_device_buffer(capacity * 8u, kPhaseBBufferUsage);
+    if (keys.mapped == nullptr || values.mapped == nullptr) {
+        arena.rewind(mark);
+        return out;
+    }
+
+    const GpuArenaSlice keys_s{&keys, 0u, keys.bytes};
+    const GpuArenaSlice values_s{&values, 0u, values.bytes};
+    {
+        const std::array<std::uint32_t, 4> counters_init{
+            0u,
+            static_cast<std::uint32_t>(capacity),
+            0u,
+            0u};
+        std::memcpy(base + counters_s.offset, counters_init.data(), sizeof(counters_init));
+    }
+
+    {
+        static const auto* _sketch_d =
+            bioseq::instr::register_region_static("phase_c_sorted_pair_sketch");
+        auto _sketch_s = bioseq::instr::region(_sketch_d);
+        reset_phase_c_pool_locked();
+        const std::array<VkDescriptorBufferInfo, 8> infos{{
+            {seq_s.buffer->buffer, seq_s.offset, seq_s.size},
+            {lut_s.buffer->buffer, lut_s.offset, lut_s.size},
+            {tiles_s.buffer->buffer, tiles_s.offset, tiles_s.size},
+            {tcounts_s.buffer->buffer, tcounts_s.offset, tcounts_s.size},
+            {keys_s.buffer->buffer, keys_s.offset, keys_s.size},
+            {counters_s.buffer->buffer, counters_s.offset, counters_s.size},
+            {toffsets_s.buffer->buffer, toffsets_s.offset, toffsets_s.size},
+            {values_s.buffer->buffer, values_s.offset, values_s.size},
+        }};
+        SketchPushC push{
+            2u,
+            window_size,
+            kmer_size,
+            params.hash_bits,
+            params.hash_shift,
+            params.pos_bits,
+            params.minimizer_word_kind,
+            params.minimizer_words32,
+            kmer_size,
+            params.alphabet_kind,
+            params.unit_bits,
+            params.bits_per_char,
+            params.letters_per_unit,
+            params.char_mask,
+            num_tiles,
+            1u};
+        check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_sorted_pair_emit)");
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_sorted_pair_emit)");
+        record_host_to_shader(command_buffer_);
+        record_phase_c_dispatch_locked(
+            command_buffer_, sketch_pipe, infos, &push, sizeof(push), num_tiles);
+        record_shader_to_host(command_buffer_);
+        submit_and_wait(
+            device_, queue_, command_buffer_, fence_, "submit(pc_sorted_pair_emit)");
+    }
+
+    std::uint32_t pair_count32 = 0;
+    std::memcpy(&pair_count32, base + counters_s.offset, sizeof(pair_count32));
+    const std::uint64_t pair_count = pair_count32;
+    // DOC0345 — a window with zero minimizers (e.g. an all-N region) is a
+    // LEGITIMATE empty result, not a GPU failure: return valid + empty so the
+    // caller emits no pairs rather than throwing VulkanRuntimeError. Only an
+    // actual capacity overshoot (count > the worst-case bound) is a real decline.
+    if (pair_count == 0u) {
+        out.pair_count = 0u;
+        out.valid = true;
+        arena.rewind(mark);
+        return out;
+    }
+    if (pair_count > max_target_minimizers) {
+        arena.rewind(mark);
+        return out;
+    }
+
+    const WgPlan sort_wg = plan_workgroups(pair_count, features_.max_workgroup_count_x);
+    Buffer keys_scratch = create_device_buffer(pair_count * 8u, kPhaseBBufferUsage);
+    Buffer values_scratch = create_device_buffer(pair_count * 8u, kPhaseBBufferUsage);
+    Buffer histogram = create_device_buffer(
+        std::uint64_t{sort_wg.num_workgroups} * 256u * 4u,
+        kPhaseBBufferUsage);
+    if (keys_scratch.mapped == nullptr || values_scratch.mapped == nullptr
+        || histogram.mapped == nullptr) {
+        arena.rewind(mark);
+        return out;
+    }
+
+    SortedPairDeviceViews views{
+        .keys = keys_s,
+        .values = values_s,
+        .keys_scratch = GpuArenaSlice{&keys_scratch, 0u, keys_scratch.bytes},
+        .values_scratch = GpuArenaSlice{&values_scratch, 0u, values_scratch.bytes},
+        .keys_in_scratch = false,
+    };
+    const GpuArenaSlice histogram_s{&histogram, 0u, histogram.bytes};
+    const GpuSortPlan value_sort_plan{
+        .element_count = pair_count,
+        .key_bytes = 8u,
+        .value_bytes = 8u,
+        .radix_bits = 8u,
+        .pass_count = 8u,
+    };
+    const std::uint32_t hash_passes = std::clamp<std::uint32_t>(
+        (params.hash_bits + 7u) / 8u,
+        1u,
+        8u);
+    const GpuSortPlan key_sort_plan{
+        .element_count = pair_count,
+        .key_bytes = 8u,
+        .value_bytes = 8u,
+        .radix_bits = 8u,
+        .pass_count = hash_passes,
+    };
+
+    {
+        static const auto* _sort_d =
+            bioseq::instr::register_region_static("phase_c_sorted_pair_sort");
+        auto _sort_s = bioseq::instr::region(_sort_d);
+        reset_phase_c_pool_locked();
+        check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_sorted_pair_sort)");
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        check_vk(vkBeginCommandBuffer(command_buffer_, &begin), "begin(pc_sorted_pair_sort)");
+        record_stable_pair_sort_by_value_then_key_locked(
+            command_buffer_,
+            views,
+            histogram_s,
+            value_sort_plan,
+            key_sort_plan,
+            sort_wg.num_workgroups,
+            sort_wg.elems_per_wg);
+        record_shader_to_host(command_buffer_);
+        submit_and_wait(
+            device_, queue_, command_buffer_, fence_, "submit(pc_sorted_pair_sort)");
+    }
+
+    const GpuArenaSlice& sorted_keys = choose_sorted_keys(views);
+    const GpuArenaSlice& sorted_values = choose_sorted_values(views);
+    const std::uint64_t host_bytes = pair_count * sizeof(std::uint64_t);
+    out.host_key_bytes.resize(static_cast<std::size_t>(host_bytes));
+    out.host_value_bytes.resize(static_cast<std::size_t>(host_bytes));
+    std::memcpy(
+        out.host_key_bytes.data(),
+        static_cast<const std::byte*>(sorted_keys.buffer->mapped) + sorted_keys.offset,
+        static_cast<std::size_t>(host_bytes));
+    std::memcpy(
+        out.host_value_bytes.data(),
+        static_cast<const std::byte*>(sorted_values.buffer->mapped) + sorted_values.offset,
+        static_cast<std::size_t>(host_bytes));
+
+    const bool sorted_keys_are_scratch = sorted_keys.buffer == &keys_scratch;
+    const bool sorted_values_are_scratch = sorted_values.buffer == &values_scratch;
+    out.keys = sorted_keys_are_scratch ? std::move(keys_scratch) : std::move(keys);
+    out.values =
+        sorted_values_are_scratch ? std::move(values_scratch) : std::move(values);
+    out.pair_count = pair_count32;
+    out.valid = true;
+    arena.rewind(mark);
+    check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_sorted_pair_post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return out;
 }
